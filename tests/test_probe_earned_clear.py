@@ -800,3 +800,157 @@ def test_skipped_sources_never_contribute_clear_names(tmp_path: Path, monkeypatc
     assert (d / cg.MARKER).exists(), "two SKIPPED sources contacted nothing; 2 named must not clear"
     assert "probe-cleared" not in _audit_actions(d)
     assert rc != 0
+
+
+# ---------------------------------------------------------------------------------------------
+# Every per-leg probe ATTEMPT must carry the stable source key (#562).
+#
+# `probe-cleared` has been keyed since #346, but the attempt records were not, so a two-key bundle
+# could hold a success and a clear with nothing tying either to an endpoint. That is not a cosmetic
+# gap: any reader strict enough to require "this key was measured, THEN this key was cleared" has
+# to fail closed on every multi-source unit, and a reader lax enough not to require it accepts a
+# clear for a source nobody contacted.
+# ---------------------------------------------------------------------------------------------
+
+PROBE_CONN = {"class": "sqlserver", "server": "probe-a.example", "database": "db", "powerbi_target": "live_source"}
+PROBE_KEY = pf._leg_key({}, 0, PROBE_CONN)
+PROBE_TABLES = [{"name": "Orders"}]
+PROBE_LOCAL = {
+    "self_contained": True,
+    "omissions": [],
+    "neutralized": [],
+    "retained_network": [],
+    "binding": {"state": "unbound"},
+}
+PROBE_SPEC = {
+    "data_sources": [
+        {
+            "name": "ds0",
+            "connection": dict(PROBE_CONN),
+            "tables": PROBE_TABLES,
+            "fields": [{"kind": "column", "internal_name": "[Order ID]"}],
+        }
+    ]
+}
+
+
+def _keyed_root(tmp_path: Path, name: str) -> Path:
+    """A real gate target: its own scope marker, its own spec, and no `--force-scope` escape."""
+    root = tmp_path / name
+    (root / "fabric").mkdir(parents=True)
+    (root / "migration-spec.json").write_text(json.dumps(PROBE_SPEC), encoding="utf-8")
+    return root
+
+
+def _stub_desktop(monkeypatch, *, verdict: str = "DATA_OK", rc: int = 0, catalog: bool = True) -> None:
+    """Replace only the Desktop/network primitives, so the audit-writing path stays REAL."""
+    monkeypatch.setattr(pls, "_host_resolves", lambda _server: True)
+    monkeypatch.setattr(pls, "_open_desktop", lambda _pbip: 4242)
+    monkeypatch.setattr(pls, "_record_desktop_lifecycle", lambda *_a, **_k: {})
+    monkeypatch.setattr(pls, "_wait_for_catalog", lambda *_a, **_k: catalog)
+    monkeypatch.setattr(pls, "_classify_catalog_timeout", lambda _conn: verdict)
+    monkeypatch.setattr(pls, "_refresh_and_classify", lambda *_a, **_k: (rc, verdict))
+    monkeypatch.setattr(pls, "_close", lambda *_a, **_k: True)
+    monkeypatch.setattr(pls, "_network_fault_observed", lambda _conn: False)
+
+
+def _audit_entries(root: Path) -> list[dict]:
+    return [json.loads(line) for line in (root / cg.AUDIT).read_text(encoding="utf-8").splitlines()]
+
+
+def _attempt_entries(root: Path) -> list[dict]:
+    return [
+        entry
+        for entry in _audit_entries(root)
+        if str(entry.get("action", "")).startswith("probe-") and entry.get("action") != "probe-cleared"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("verdict", "rc"),
+    [("DATA_OK", 0), ("NO_CREDENTIAL", 1), ("ACCESS_DENIED", 1), ("UNREACHABLE", 1), ("ERROR", 1), ("BAD_TABLE", 1)],
+)
+def test_every_refresh_verdict_is_recorded_against_its_source_key(
+    tmp_path: Path, monkeypatch, verdict: str, rc: int
+) -> None:
+    """Success and failure alike: the record names the leg, never a table name or an index."""
+    root = _keyed_root(tmp_path, f"attempt-{verdict}")
+    _stub_desktop(monkeypatch, verdict=verdict, rc=rc)
+
+    pls._probe_leg(root, PROBE_KEY, dict(PROBE_CONN), (PROBE_TABLES, "OrderID"), (60, False))
+
+    attempts = _attempt_entries(root)
+    assert attempts, "the probe must leave an attempt record at all"
+    assert [entry["action"] for entry in attempts] == [f"probe-{verdict.lower()}"]
+    assert attempts[0]["sources"] == [PROBE_KEY]
+
+
+def test_a_catalog_timeout_verdict_is_also_keyed(tmp_path: Path, monkeypatch) -> None:
+    """The early-return branch writes its own record; it must not be the one that loses the key."""
+    root = _keyed_root(tmp_path, "no-catalog")
+    _stub_desktop(monkeypatch, verdict="UNREACHABLE", rc=1, catalog=False)
+
+    pls._probe_leg(root, PROBE_KEY, dict(PROBE_CONN), (PROBE_TABLES, "OrderID"), (60, False))
+
+    attempts = _attempt_entries(root)
+    assert [entry["action"] for entry in attempts] == ["probe-unreachable"]
+    assert attempts[0]["sources"] == [PROBE_KEY]
+
+
+def test_the_dns_precheck_records_its_verdict_against_the_leg_it_refused(tmp_path: Path, monkeypatch) -> None:
+    """The DNS branch never reaches Desktop, so it is the easiest place to drop the key."""
+    root = _keyed_root(tmp_path, "dns")
+    monkeypatch.setattr(pls, "_host_resolves", lambda _server: False)
+
+    rc, verdict = pls._probe_leg(root, PROBE_KEY, dict(PROBE_CONN), (PROBE_TABLES, "OrderID"), (60, False))
+
+    assert (rc, verdict) == (1, "UNREACHABLE")
+    attempts = _attempt_entries(root)
+    assert [entry["action"] for entry in attempts] == ["probe-unreachable"]
+    assert attempts[0]["sources"] == [PROBE_KEY]
+
+
+def _assess(root: Path):
+    return cg.assess_data_access(
+        root,
+        package_spec=PROBE_SPEC,
+        package_data_sources=PROBE_LOCAL,
+        fallback_authorization="stop",
+        requested_scope="model_and_report",
+    )
+
+
+def test_a_real_keyed_probe_run_is_what_the_pure_assessor_can_earn_from(tmp_path: Path, monkeypatch) -> None:
+    """End to end through production code, with the mutation control that makes it load-bearing.
+
+    Arm the gate, probe (only the Desktop primitives stubbed), lift it, then ask the pure assessor.
+    Then STRIP the key the producer correction adds - leaving a perfectly well-formed, trusted,
+    same-scope `probe-data_ok` and a keyed `probe-cleared`, exactly the pre-#562 shape - and the
+    verdict must collapse to `blocked/stale-clear`. Without that second half this test would pass
+    just as happily against a producer that never keyed anything.
+    """
+    root = _keyed_root(tmp_path, "earned")
+    cg.apply_block(root, [PROBE_KEY])
+    assert (root / cg.MARKER).exists(), "fixture must start armed"
+    _stub_desktop(monkeypatch)
+
+    rc, verdict = pls._probe_leg(root, PROBE_KEY, dict(PROBE_CONN), (PROBE_TABLES, "OrderID"), (60, False))
+    assert (rc, verdict) == (0, "DATA_OK")
+    assert pls._lift_gate(root, "1 live source leg(s)", [PROBE_KEY])
+    assert not (root / cg.MARKER).exists(), "a fully proved leg must fully lift the gate"
+
+    earned = _assess(root)
+    assert (earned.state, earned.source_keys) == ("live_data_ok", (PROBE_KEY,))
+
+    rewritten = []
+    for entry in _audit_entries(root):
+        if entry.get("action") == "probe-data_ok":
+            entry.pop("sources", None)
+            entry["detail"] = "Orders -> DATA_OK"
+        rewritten.append(json.dumps(entry))
+    (root / cg.AUDIT).write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+
+    regressed = _assess(root)
+    assert (regressed.state, regressed.codes) == ("blocked", ("stale-clear",)), (
+        "an unkeyed success must not be earnable - if this still passes, the key is decorative"
+    )
