@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import inspect
 from dataclasses import fields
 import os
 import socket
@@ -464,6 +465,52 @@ def test_legacy_success_uses_installation_even_when_the_stage_call_raises_afterw
         error = caught
     assert error is None and result[0] is True
     assert "compatibilityLevel: 1606" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
+
+
+def test_interrupt_after_replace_returns_before_installed_flag_preserves_alignment(tmp_path):
+    cache = _model(tmp_path, compat=1604)
+    cache.parent.mkdir()
+    cache.write_bytes(_abf_bytes(seed=1))
+    intended = _abf_bytes(seed=2)
+    observed, interrupted = [], []
+    stage = _abf._staged_image_write
+    lines, first_line = inspect.getsourcelines(stage)
+    flag_line = first_line + next(
+        offset for offset, line in enumerate(lines) if line.strip() == "installation.installed = True"
+    )
+
+    def interrupt(frame, event, _argument):
+        if frame.f_code is stage.__code__ and event == "line" and frame.f_lineno == flag_line and not interrupted:
+            state = frame.f_locals["installation"]
+            interrupted.append(
+                (state.installed, state.ambiguous, cache.read_bytes() == intended, frame.f_locals["staging"].exists())
+            )
+            raise KeyboardInterrupt("returned replace; installed flag not yet recorded")
+        return interrupt
+
+    previous_trace = sys.gettrace()
+    error = None
+    try:
+        sys.settrace(interrupt)
+        refresh_pbip_model._persist_image(
+            cache,
+            cache.parent.parent,
+            1606,
+            lambda path: path.write_bytes(intended),
+            on_observation=observed.append,
+        )
+    except BaseException as caught:
+        error = caught
+    finally:
+        sys.settrace(previous_trace)
+    assert len(interrupted) == 1 and interrupted[0][2:] == (True, False), "must interrupt after a real swap"
+    assert cache.read_bytes() == intended
+    assert "compatibilityLevel: 1606" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
+    assert interrupted[0][:2] == (False, True)
+    assert isinstance(error, refresh_pbip_model.CompatRollbackError) and "unestablished" in str(error)
+    assert observed == []
+    assert not hasattr(_abf, "ImageCommit")
+    assert _no_staging_files(cache)
 
 
 def test_the_builder_reproduces_a_real_cache_abf_header() -> None:

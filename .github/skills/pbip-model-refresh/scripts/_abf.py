@@ -200,6 +200,8 @@ def _staged_image_write(
         intended, reason = _checked_image(staging)
         if reason is None:
             installation.size = len(intended)
+            # Cover an interrupt after replace returns but before its success flag is stored.
+            installation.ambiguous = True
             try:
                 os.replace(staging, cache_path)
             except BaseException:
@@ -207,6 +209,7 @@ def _staged_image_write(
                 installation.ambiguous = not staging.exists()
                 raise
             installation.installed = True
+            installation.ambiguous = False
             if observations is not None:
                 installed = cache_path.read_bytes()
                 if staging.exists() or installed != intended:
