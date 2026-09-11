@@ -1,95 +1,60 @@
-"""Direct controls for the package-local iteration/comparison receipt producer (issue #363, slice A).
+"""Independent direct controls for PR #605's package-local receipt producer corrections.
 
-Every test drives the REAL production entry points - `capture_powerbi_pages.run_iteration` and
-`iteration_receipt.finalize` - through the same injectable `CaptureRuntime` the standalone capture
-mode uses, so nothing here exercises a parallel implementation. Each negative control asserts the
-NAMED refusal code, never merely a non-zero exit: "it failed" and "it failed for the reason this
-guard exists" are different claims, and only the second one is a regression test.
+The fixture is a coherent PBIP/report/model, not the former empty decoy PBIP. PNG positives are
+also read by Pillow, independently of the production structural parser. Every negative names its
+refusal; mutation selectors isolate the relevant boundary from unrelated fail-closed guards.
 """
 
 from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# ruff: noqa: E402  (the sys.path inserts above must precede these imports)
+# ruff: noqa: E402
 import capture_powerbi_pages as capture
 import current_artifact_revision as rev
 import iteration_receipt as receipt
+import reference_evidence as evidence
 from png_fixtures import valid_png
 
-WORKBOOK_LUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-OTHER_LUID = "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee"
-PAGE_MAIN = "page-main0001"
-PAGE_TREND = "page-trend0002"
+LUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+PAGE = "page-main"
+SECOND = "page-trend"
+PID = 1234
 
 
-class ManualClock:
-    """The same controllable clock the standalone capture tests use."""
-
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def __call__(self) -> float:
-        return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.now += seconds
-
-
-def _runtime(payloads: dict[str, bytes] | None = None) -> capture.CaptureRuntime:
-    """A capture runtime that writes one settled frame per page."""
-    clock = ManualClock()
-    frames = payloads or {}
-
-    def screenshotter(page_id: str, _pid: str, frame: Path) -> bool:
-        frame.write_bytes(frames.get(page_id, valid_png(96, 72)))
-        return True
-
-    return capture.CaptureRuntime(screenshotter=screenshotter, sleep=clock.sleep, clock=clock)
-
-
-def _options(page_ids: frozenset[str] | None = None) -> capture.CaptureOptions:
-    return capture.CaptureOptions(poll=0.0, stable_seconds=0.0, max_wait=10.0, page_ids=page_ids)
-
-
-def _write_json(path: Path, payload: object) -> None:
+def write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
 
 
-def _oracle_view(directory: Path, name: str, luid: str, *, height: int = 240) -> dict[str, object]:
-    """One oracle view record plus its render.
-
-    ⚠️ ``height`` varies per view ON PURPOSE. Exclusivity keys on the render DIGEST (see
-    `check_reference_readiness._render_key`), so two byte-identical fixture PNGs are one render
-    claimed by two pages and every page fails closed - which silently made the foreign-workbook and
-    grade controls vacuous until the fixture was fixed.
-    """
+def _oracle_view(package: Path, name: str, height: int) -> dict:
     blob = valid_png(320, height)
-    image = directory / "oracle" / "dashboard" / "images" / f"{name}.png"
-    image.parent.mkdir(parents=True, exist_ok=True)
-    image.write_bytes(blob)
+    path = package / "oracle" / "images" / f"{name}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(blob)
     return {
-        "view_luid": f"0000000{len(name)}-0000-0000-0000-000000000000",
         "view_name": name,
-        "workbook_luid": luid,
-        "workbook_name": "Unit",
         "view_type": "dashboard",
+        "workbook_luid": LUID,
+        "workbook_name": "Unit",
         "image": {
             "status": "ok",
-            "path": f"dashboard/images/{name}.png",
+            "path": f"images/{name}.png",
             "sha256": hashlib.sha256(blob).hexdigest(),
             "bytes": len(blob),
             "dimensions_px": {"w": 320, "h": height},
@@ -97,54 +62,47 @@ def _oracle_view(directory: Path, name: str, luid: str, *, height: int = 240) ->
     }
 
 
-def build_package(root: Path, *, workbook_luid: str = WORKBOOK_LUID) -> Path:
-    """A minimal but REAL phase-2 package: manifest, PBIR report, model, spec, oracle capture."""
+def build_package(root: Path) -> Path:
     package = root / "packages" / "Unit"
     report = package / "fabric" / "Unit.Report"
-    model = package / "fabric" / "Unit.SemanticModel"
-
-    for page_id, display, visuals in (
-        (PAGE_MAIN, "main", ("v-1", "v-2")),
-        (PAGE_TREND, "trend", ("v-3",)),
-    ):
-        page_dir = report / "definition" / "pages" / page_id
-        _write_json(page_dir / "page.json", {"name": page_id, "displayName": display})
-        for visual_id in visuals:
-            _write_json(page_dir / "visuals" / visual_id / "visual.json", {"name": visual_id, "visual": {}})
-    _write_json(report / "definition" / "pages" / "pages.json", {"pageOrder": [PAGE_MAIN, PAGE_TREND]})
-    _write_json(report / "definition.pbir", {"datasetReference": {"byPath": {"path": "../Unit.SemanticModel"}}})
-    (model / "definition").mkdir(parents=True, exist_ok=True)
-    (model / "definition" / "model.tmdl").write_text("model Model\n", encoding="utf-8")
-    (package / "fabric" / "Unit.pbip").write_text("{}", encoding="utf-8")
-
-    asset = package / "assets" / f"{workbook_luid}_Unit.twb"
-    asset.parent.mkdir(parents=True, exist_ok=True)
-    asset.write_text("<workbook/>", encoding="utf-8")
-    _write_json(
+    for page, display, visuals in ((PAGE, "main", ("v-1", "v-2")), (SECOND, "trend", ("v-3",))):
+        directory = report / "definition" / "pages" / page
+        write_json(directory / "page.json", {"name": page, "displayName": display})
+        for visual in visuals:
+            write_json(
+                directory / "visuals" / visual / "visual.json", {"name": visual, "visual": {"visualType": "card"}}
+            )
+    write_json(report / "definition" / "pages" / "pages.json", {"pageOrder": [PAGE, SECOND]})
+    write_json(report / "definition.pbir", {"datasetReference": {"byPath": {"path": "../Unit.SemanticModel"}}})
+    model = package / "fabric" / "Unit.SemanticModel" / "definition" / "model.tmdl"
+    model.parent.mkdir(parents=True)
+    model.write_text("model Model\n", encoding="utf-8")
+    write_json(package / "fabric" / "Unit.pbip", {"artifacts": [{"report": {"path": "Unit.Report"}}]})
+    asset = package / "assets" / f"{LUID}_Unit.twb"
+    asset.parent.mkdir(parents=True)
+    asset.write_bytes(b"<workbook/>")
+    write_json(
         package / "source-provenance.json",
         {
             "inputs": [
                 {
-                    "input": {"sha256": rev.sha256_of_file(asset)},
-                    "origin": {"workbook_luid": workbook_luid, "matched_by": "luid", "revision_match": "same"},
+                    "input": {"sha256": hashlib.sha256(asset.read_bytes()).hexdigest()},
+                    "origin": {"workbook_luid": LUID, "matched_by": "luid", "revision_match": "same"},
                 }
             ]
         },
     )
-    _write_json(
-        package / "migration-spec.json",
-        {"limitations_encountered": [{"item": "fld.x", "issue": "LOD", "severity": "high", "stage": "parse"}]},
-    )
-    _write_json(
+    write_json(package / "migration-spec.json", {"limitations_encountered": [{"issue": "source table calculation"}]})
+    write_json(
         package / "oracle" / "oracle-manifest.json",
         {
             "views": [
-                _oracle_view(package, "main", workbook_luid, height=240),
-                _oracle_view(package, "trend", workbook_luid, height=200),
+                _oracle_view(package, "main", 240),
+                _oracle_view(package, "trend", 200),
             ]
         },
     )
-    _write_json(
+    write_json(
         package / "package-manifest.json",
         {
             "unit": "Unit",
@@ -152,7 +110,7 @@ def build_package(root: Path, *, workbook_luid: str = WORKBOOK_LUID) -> Path:
             "artifacts": {
                 "report": "fabric/Unit.Report",
                 "model": "fabric/Unit.SemanticModel",
-                "asset": f"assets/{workbook_luid}_Unit.twb",
+                "asset": f"assets/{LUID}_Unit.twb",
             },
         },
     )
@@ -164,998 +122,824 @@ def package_fixture(tmp_path: Path) -> Path:
     return build_package(tmp_path)
 
 
-def _request(package: Path, **overrides: object) -> capture.IterationRequest:
-    fields = {"package": package, "pid": "1234", "session_id": "sess-1"}
-    fields.update(overrides)
-    return capture.IterationRequest(**fields)  # type: ignore[arg-type]
-
-
-def _iterate(package: Path, *, options: capture.CaptureOptions | None = None, **overrides: object) -> dict:
-    return capture.run_iteration(_request(package, **overrides), options or _options(), _runtime())
-
-
-def _receipt_path(package: Path, name: str = "001") -> Path:
-    return receipt.iterations_root(package) / name / receipt.RECEIPT_NAME
-
-
-def _pass_judgement(package: Path, name: str = "001", *, findings: list[dict] | None = None) -> dict:
-    """Fill only the judgement fields, exactly as a reviewer would."""
-    path = _receipt_path(package, name)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    for row in payload["judgement"]["pages"]:
-        row["whole_page_status"] = receipt.STATUS_PASS
-        for section in ("visual_results", "numeric_results"):
-            for item in row[section]:
-                item["status"] = receipt.STATUS_PASS
-    if findings is not None:
-        payload["judgement"]["findings"] = findings
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    return payload
-
-
-def _finalized(package: Path, name: str = "001", *, findings: list[dict] | None = None) -> dict:
-    _pass_judgement(package, name, findings=findings)
-    return receipt.finalize(package, name)
-
-
-def _refusal(package: Path, name: str = "001") -> str:
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.finalize(package, name)
-    return error.value.code
-
-
-# --------------------------------------------------------------------------------------------------
-# positive controls
-# --------------------------------------------------------------------------------------------------
-
-
-def test_a_clean_all_page_capture_writes_one_canonical_first_iteration(package: Path) -> None:
-    """The whole point: every current page settled, retained, and described by one strict receipt."""
-    payload = _iterate(package)
-
-    assert payload["iteration"] == "001"
-    assert payload["mode"] == receipt.MODE_SIGN_OFF
-    assert payload["generated"]["scope"] == receipt.SCOPE_ALL_PAGES
-    assert [row["page_id"] for row in payload["generated"]["pages"]] == [PAGE_MAIN, PAGE_TREND]
-    assert [row["expected_visual_ids"] for row in payload["generated"]["pages"]] == [["v-1", "v-2"], ["v-3"]]
-    assert all(row["powerbi"]["converged"] for row in payload["generated"]["pages"])
-    assert all(row["powerbi"]["byte_count"] > 0 for row in payload["generated"]["pages"])
-    assert payload["generated"]["previous"] is None
-    assert payload["generated"]["data_evidence"]["status"] == receipt.DATA_STATUS_PENDING
-    assert _receipt_path(package).is_file()
-    for row in payload["generated"]["pages"]:
-        assert (receipt.iterations_root(package) / "001" / row["powerbi"]["path"]).is_file()
-
-
-def test_the_page_denominator_comes_from_the_pbir_and_not_from_the_captured_output(package: Path) -> None:
-    """Capture output is never its own denominator: a stray PNG cannot add a page to the receipt.
-
-    The mirror of that is the load-bearing half - a page that EXISTS in the report but was never
-    captured cannot be silently absent, because the inventory is read first and every page in it is
-    captured or the run refuses.
-    """
-    payload = _iterate(package)
-    stray = receipt.iterations_root(package) / "001" / receipt.PAGES_DIRNAME / "page-invented.png"
-    stray.write_bytes(valid_png(96, 72))
-
-    assert {row["page_id"] for row in payload["generated"]["pages"]} == {PAGE_MAIN, PAGE_TREND}
-    assert _refusal(package) == "EXTRA_FILE"
-
-
-def test_a_first_sign_off_iteration_can_complete_with_no_prior_findings(package: Path) -> None:
-    """One clean pass must be representable in ONE iteration - the audit's positive control."""
-    _iterate(package, data_evidence=_data_record(package))
-    sealed = _finalized(package)
-
-    assert sealed["state"] == receipt.STATE_FINAL
-    assert sealed["outcome"] == receipt.OUTCOME_COMPLETE
-    assert sealed["judgement"]["findings"] == []
-    assert sealed["judgement"]["completed_at"]
-
-
-def test_a_second_iteration_links_to_the_first_and_records_before_and_after_hashes(package: Path) -> None:
-    """Page evolution is the RETAINED bytes plus a verified before/after pair, not a prose diff."""
-    _iterate(package)
-    first = _finalized(
-        package,
-        findings=[
+def _reference(package: Path) -> None:
+    """Real manual validation-grade producer shape, revision-bound to this source's bytes."""
+    shutil.rmtree(package / "oracle")
+    rows = []
+    for name, height in (("main", 240), ("trend", 200)):
+        blob = valid_png(320, height)
+        path = package / "reference" / f"tableau-{name}.png"
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(blob)
+        rows.append(
             {
-                "id": "F-001",
-                "page_id": PAGE_MAIN,
-                "visual_id": "v-1",
-                "kind": "visual",
-                "severity": "medium",
-                "status": receipt.FINDING_OPEN,
-                "detail": "the legend order differs",
-                "limitation_ref": None,
+                "name": f"tableau-{name}",
+                "view_type": "dashboard",
+                "states": [
+                    {
+                        "provider": "manual",
+                        "image": path.name,
+                        "sha256": hashlib.sha256(blob).hexdigest(),
+                        "bytes": len(blob),
+                        "dimensions": {"w": 320, "h": height},
+                        "capabilities": ["layout_grade", "text_readable", "validation_grade"],
+                    }
+                ],
+            }
+        )
+    asset = next((package / "assets").iterdir())
+    write_json(
+        package / "reference" / "manifest.json",
+        {
+            "source_workbook_sha256": hashlib.sha256(asset.read_bytes()).hexdigest(),
+            "dashboards": rows,
+        },
+    )
+
+
+class ManualClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _status(package: Path, *, pid: int = PID, path: Path | None = None) -> dict:
+    return {
+        "status": "ready",
+        "instances": [
+            {
+                "pid": pid,
+                "bridgeStatus": "connected",
+                "currentFilePath": str((path or package / "fabric" / "Unit.pbip").absolute()),
+                "hasUnsavedChanges": False,
             }
         ],
-    )
-    _pass_judgement(package)  # a still_open finding does not stop the first iteration being sealed
-    (
-        package / "fabric" / "Unit.Report" / "definition" / "pages" / PAGE_MAIN / "visuals" / "v-1" / "visual.json"
-    ).write_text(json.dumps({"name": "v-1", "visual": {"visualType": "columnChart"}}), encoding="utf-8")
-    second = capture.run_iteration(_request(package), _options(), _runtime({PAGE_MAIN: valid_png(128, 96)}))
+    }
 
-    assert second["iteration"] == "002"
-    assert second["generated"]["previous"]["iteration"] == "001"
-    assert second["generated"]["previous"]["receipt_sha256"] == rev.sha256_of_file(_receipt_path(package, "001"))
-    assert second["generated"]["previous"]["report_revision"] == first["generated"]["artifact"]["report_revision"]
-    changed = {row["page_id"]: row for row in second["generated"]["changes_from_previous"]}
-    assert changed[PAGE_MAIN]["before_sha256"] != changed[PAGE_MAIN]["after_sha256"]
-    assert changed[PAGE_TREND]["before_sha256"] == changed[PAGE_TREND]["after_sha256"]
 
-
-def test_an_admitted_oracle_render_stays_layout_text_grade(package: Path) -> None:
-    """Tableau evidence is re-derived through reference_evidence, which CAPS an oracle at its grade."""
-    payload = _iterate(package)
-    tableau = {row["page_id"]: row["tableau"] for row in payload["generated"]["pages"]}
-
-    assert tableau[PAGE_MAIN]["path"] == "oracle/dashboard/images/main.png"
-    assert tableau[PAGE_MAIN]["grade"] != "validation-grade"
-    assert "layout/text only" in tableau[PAGE_MAIN]["grade"]
-    assert tableau[PAGE_MAIN]["manifest_sha256"] == rev.sha256_of_file(package / "oracle" / "oracle-manifest.json")
-
-
-# --------------------------------------------------------------------------------------------------
-# allocation and chain
-# --------------------------------------------------------------------------------------------------
-
-
-def test_an_already_taken_iteration_number_is_refused_rather_than_reused(package: Path) -> None:
-    """Two producers racing for one number: the loser is refused, never allowed to overwrite."""
-    original = Path.mkdir
-
-    def racing_mkdir(self: Path, *args: object, **kwargs: object) -> None:
-        original(self, *args, **kwargs)
-        if self.name == "001":
-            raise FileExistsError(str(self))
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(Path, "mkdir", racing_mkdir)
-            _iterate(package)
-
-    assert error.value.code == "ITERATION_NUMBER_TAKEN"
-
-
-def test_a_gap_in_the_chain_refuses_before_anything_is_allocated(package: Path) -> None:
-    """A missing 001 is not "start at 003" - the history it held is gone and cannot be reasoned about."""
-    _iterate(package)
-    _finalized(package)
-    shutil.move(str(receipt.iterations_root(package) / "001"), str(receipt.iterations_root(package) / "003"))
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        _iterate(package)
-    assert error.value.code == "ITERATION_GAP"
-    assert not (receipt.iterations_root(package) / "002").exists()
-
-
-def test_a_noncanonical_iteration_name_is_refused(package: Path) -> None:
-    """`001-retry` is not an iteration name; accepting it makes contiguity unprovable."""
-    _iterate(package)
-    _finalized(package)
-    shutil.move(str(receipt.iterations_root(package) / "001"), str(receipt.iterations_root(package) / "001-retry"))
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        _iterate(package)
-    assert error.value.code == "NONCANONICAL_ITERATION"
-
-
-def test_a_duplicate_receipt_file_beside_the_real_one_is_refused(package: Path) -> None:
-    """Two receipts in one directory means two answers; the gate must not pick one."""
-    _iterate(package)
-    _finalized(package)
-    directory = receipt.iterations_root(package) / "001"
-    shutil.copy2(directory / receipt.RECEIPT_NAME, directory / "iteration (1).json")
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        _iterate(package)
-    assert error.value.code == "EXTRA_FILE"
-
-
-def test_a_pending_predecessor_blocks_a_new_iteration(package: Path) -> None:
-    """An unfinished iteration is not history yet - stacking on it loses the reviewer's work."""
-    _iterate(package)
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        _iterate(package)
-    assert error.value.code == "PREVIOUS_NOT_FINAL"
-
-
-def test_a_capture_failure_removes_the_directory_it_allocated(package: Path) -> None:
-    """A numbered directory with no receipt would make the chain permanently unreadable."""
-    clock = ManualClock()
-    runtime = capture.CaptureRuntime(screenshotter=lambda *_args: False, sleep=clock.sleep, clock=clock)
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        capture.run_iteration(_request(package), _options(), runtime)
-
-    assert error.value.code == "CAPTURE_FAILED"
-    assert not (receipt.iterations_root(package) / "001").exists()
-
-
-# --------------------------------------------------------------------------------------------------
-# scope
-# --------------------------------------------------------------------------------------------------
-
-
-def test_a_subset_capture_is_triage_and_can_never_be_labelled_sign_off(package: Path) -> None:
-    """The pages nobody looked at are exactly the ones a partial sign-off would certify silently."""
-    payload = capture.run_iteration(_request(package), _options(frozenset({PAGE_MAIN})), _runtime())
-
-    assert payload["mode"] == receipt.MODE_TRIAGE
-    assert payload["generated"]["scope"] == receipt.SCOPE_SUBSET
-    assert [row["page_id"] for row in payload["generated"]["pages"]] == [PAGE_MAIN]
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        capture.run_iteration(
-            _request(package, mode=receipt.MODE_SIGN_OFF), _options(frozenset({PAGE_MAIN})), _runtime()
-        )
-    assert error.value.code == "SUBSET_CANNOT_SIGN_OFF"
-
-
-def test_a_triage_iteration_can_never_finalize_as_complete(package: Path) -> None:
-    """`outcome` is generated from scope and status, so triage cannot be read as a sign-off."""
-    capture.run_iteration(_request(package), _options(frozenset({PAGE_MAIN})), _runtime())
-    sealed = _finalized(package)
-
-    assert sealed["outcome"] == receipt.OUTCOME_INCOMPLETE
-
-
-def test_an_unknown_page_id_is_refused_before_any_allocation(package: Path) -> None:
-    """A typo must not produce an empty, plausible-looking iteration."""
-    with pytest.raises(receipt.ReceiptError) as error:
-        capture.run_iteration(_request(package), _options(frozenset({"page-typo"})), _runtime())
-
-    assert error.value.code == "UNKNOWN_PAGE_ID"
-    assert not receipt.iterations_root(package).exists()
-
-
-# --------------------------------------------------------------------------------------------------
-# staleness: the artifact moved after capture
-# --------------------------------------------------------------------------------------------------
-
-
-def test_a_report_edit_after_capture_makes_the_iteration_stale(package: Path) -> None:
-    """A screenshot of a report that no longer exists is not evidence about the report that does."""
-    _iterate(package)
-    _pass_judgement(package)
-    theme = package / "fabric" / "Unit.Report" / "StaticResources" / "RegisteredResources" / "theme.json"
-    theme.parent.mkdir(parents=True, exist_ok=True)
-    theme.write_text("{}", encoding="utf-8")
-
-    assert _refusal(package) == "REPORT_CHANGED"
-
-
-def test_a_model_edit_after_capture_makes_the_iteration_stale(package: Path) -> None:
-    """The model is the other half of what was rendered, so it is revision-bound too."""
-    _iterate(package)
-    _pass_judgement(package)
-    (package / "fabric" / "Unit.SemanticModel" / "definition" / "model.tmdl").write_text(
-        "model Model\n\n// edited\n", encoding="utf-8"
-    )
-
-    assert _refusal(package) == "MODEL_CHANGED"
-
-
-def test_a_cache_change_after_capture_makes_the_iteration_stale(package: Path) -> None:
-    """`.pbi/cache.abf` is DATA, hashed separately - and a refresh invalidates the capture."""
-    cache = package / "fabric" / "Unit.SemanticModel" / ".pbi" / "cache.abf"
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(b"CACHE-A")
-    _iterate(package)
-    _pass_judgement(package)
-    cache.write_bytes(b"CACHE-B-REFRESHED")
-
-    assert _refusal(package) == "CACHE_CHANGED"
-
-
-def test_the_desktop_local_settings_folder_does_not_churn_the_report_revision(package: Path) -> None:
-    """Opening the report in Desktop must not, by itself, invalidate an iteration."""
-    _iterate(package)
-    _pass_judgement(package)
-    settings = package / "fabric" / "Unit.Report" / ".pbi" / "localSettings.json"
-    settings.parent.mkdir(parents=True, exist_ok=True)
-    settings.write_text('{"version":"1"}', encoding="utf-8")
-
-    assert receipt.finalize(package)["state"] == receipt.STATE_FINAL
-
-
-def test_a_new_page_after_capture_is_an_inventory_mismatch(package: Path) -> None:
-    """A sign-off must cover EVERY current page, so a page added afterwards invalidates it."""
-    _iterate(package)
-    _pass_judgement(package)
-    report = package / "fabric" / "Unit.Report"
-    _write_json(
-        report / "definition" / "pages" / "page-new0003" / "page.json",
-        {"name": "page-new0003", "displayName": "new"},
-    )
-    _write_json(report / "definition" / "pages" / "pages.json", {"pageOrder": [PAGE_MAIN, PAGE_TREND, "page-new0003"]})
-
-    assert _refusal(package) == "INVENTORY_CHANGED"
-
-
-def test_a_new_visual_after_capture_is_an_inventory_mismatch(package: Path) -> None:
-    """Per-visual dispositions are only complete against the visual set that currently exists."""
-    _iterate(package)
-    _pass_judgement(package)
-    _write_json(
-        package / "fabric" / "Unit.Report" / "definition" / "pages" / PAGE_TREND / "visuals" / "v-9" / "visual.json",
-        {"name": "v-9", "visual": {}},
-    )
-
-    assert _refusal(package) == "INVENTORY_CHANGED"
-
-
-# --------------------------------------------------------------------------------------------------
-# the retained screenshots
-# --------------------------------------------------------------------------------------------------
-
-
-def test_a_deleted_screenshot_is_refused(package: Path) -> None:
-    payload = _iterate(package)
-    _pass_judgement(package)
-    (receipt.iterations_root(package) / "001" / payload["generated"]["pages"][0]["powerbi"]["path"]).unlink()
-
-    assert _refusal(package) == "SCREENSHOT_MISSING"
-
-
-def test_a_zero_byte_screenshot_is_refused(package: Path) -> None:
-    payload = _iterate(package)
-    _pass_judgement(package)
-    (receipt.iterations_root(package) / "001" / payload["generated"]["pages"][0]["powerbi"]["path"]).write_bytes(b"")
-
-    assert _refusal(package) == "SCREENSHOT_EMPTY"
-
-
-def test_a_swapped_screenshot_is_refused_even_at_the_same_size(package: Path) -> None:
-    """A same-length swap defeats a size check, which is why the hash is the check."""
-    payload = _iterate(package)
-    _pass_judgement(package)
-    image = receipt.iterations_root(package) / "001" / payload["generated"]["pages"][0]["powerbi"]["path"]
-    blob = bytearray(image.read_bytes())
-    blob[-1] ^= 0xFF
-    image.write_bytes(bytes(blob))
-
-    assert _refusal(package) == "SCREENSHOT_CHANGED"
-
-
-def test_a_capture_that_produced_no_bytes_is_refused_at_production_time(package: Path) -> None:
-    """A zero-byte frame must never become an iteration's evidence in the first place."""
+def _runtime(package: Path, *, blob: bytes | None = None) -> capture.CaptureRuntime:
     clock = ManualClock()
 
-    def empty(_page_id: str, _pid: str, frame: Path) -> bool:
-        frame.write_bytes(b"")
+    def shot(page: str, _pid: str, path: Path) -> bool:
+        path.write_bytes(blob if blob is not None else valid_png(100, 80 if page == PAGE else 90))
         return True
 
-    with pytest.raises(receipt.ReceiptError) as error:
-        capture.run_iteration(_request(package), _options(), capture.CaptureRuntime(empty, clock.sleep, clock))
-    assert error.value.code == "SCREENSHOT_EMPTY"
+    return capture.CaptureRuntime(shot, clock.sleep, clock, lambda _pid: _status(package), lambda _pid: True)
 
 
-# --------------------------------------------------------------------------------------------------
-# Tableau evidence
-# --------------------------------------------------------------------------------------------------
+def _options(**overrides: object) -> capture.CaptureOptions:
+    return capture.CaptureOptions(**{"poll": 1.0, "stable_seconds": 2.0, "max_wait": 10.0, **overrides})
 
 
-def test_a_render_belonging_to_another_workbook_is_not_this_unit_s_evidence(tmp_path: Path) -> None:
-    """Attribution is delegated to Evidence.attribution; a foreign LUID yields a REASON, not a match."""
-    package = build_package(tmp_path)
-    manifest = package / "oracle" / "oracle-manifest.json"
-    payload = json.loads(manifest.read_text(encoding="utf-8"))
-    for view in payload["views"]:
-        view["workbook_luid"] = OTHER_LUID
-    _write_json(manifest, payload)
-
-    generated = _iterate(package)["generated"]
-
-    assert all(row["tableau"] is None for row in generated["pages"])
-    assert all(row["tableau_reason"] for row in generated["pages"])
-
-
-def test_a_stale_tableau_render_swapped_after_capture_is_refused(package: Path) -> None:
-    """The manifest hash and the render hash are both pinned, so a re-capture invalidates sign-off."""
-    _iterate(package)
-    _pass_judgement(package)
-    image = package / "oracle" / "dashboard" / "images" / "main.png"
-    image.write_bytes(valid_png(320, 241))
-
-    assert _refusal(package) in {"TABLEAU_EVIDENCE_CHANGED", "PACKAGE_CHANGED"}
-
-
-def test_one_render_claimed_by_two_pages_certifies_neither(tmp_path: Path) -> None:
-    """Exclusivity: two pages sharing one Tableau name cannot both own the same bytes."""
-    package = build_package(tmp_path)
-    page_dir = package / "fabric" / "Unit.Report" / "definition" / "pages" / PAGE_TREND
-    _write_json(page_dir / "page.json", {"name": PAGE_TREND, "displayName": "main"})
-
-    generated = _iterate(package)["generated"]
-
-    assert all(row["tableau"] is None for row in generated["pages"])
-    assert all("more than one page" in row["tableau_reason"] for row in generated["pages"])
-
-
-# --------------------------------------------------------------------------------------------------
-# data evidence
-# --------------------------------------------------------------------------------------------------
-
-
-def _data_record(package: Path, **overrides: object) -> Path:
-    target = receipt.resolve_package(package)
-    facts = receipt.artifact_facts(target)
-    payload = {
-        "tool": "probe_desktop_query",
-        "verdict": receipt.DATA_VERDICT_OK,
-        "mode": receipt.DATA_MODE_LIVE,
-        "canaries": [{"table": "Orders", "row_count": 9994}],
-        "model_revision": facts["model_revision"],
-        "cache_sha256": None,
-    }
-    payload.update(overrides)
-    path = package.parent / f"data-evidence-{len(list(package.parent.glob('data-evidence-*.json')))}.json"
-    _write_json(path, payload)
-    return path
-
-
-def test_data_evidence_is_pending_by_default_and_names_the_blocked_seam(package: Path) -> None:
-    """No invented success shape: the producer states exactly which seam blocks a structured result."""
-    data = _iterate(package)["generated"]["data_evidence"]
-
-    assert data["status"] == receipt.DATA_STATUS_PENDING
-    assert data["verdict"] is None
-    assert "probe_desktop_query" in data["pending_reason"]
-    assert "refresh_pbip_model" in data["pending_reason"]
-
-
-def test_a_cache_that_merely_exists_is_never_data_ok(package: Path) -> None:
-    """Existence is not proof - `check_cache_freshness` says so, and this must not disagree."""
-    cache = package / "fabric" / "Unit.SemanticModel" / ".pbi" / "cache.abf"
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(b"CACHE")
-
-    generated = _iterate(package)["generated"]
-
-    assert generated["artifact"]["cache_sha256"]
-    assert generated["data_evidence"]["status"] == receipt.DATA_STATUS_PENDING
-
-
-def test_a_table_ok_verdict_cannot_be_ingested_as_data_evidence(package: Path) -> None:
-    """`TABLE_OK` is a single arbitrary table, explicitly not a model-level DATA_OK."""
-    record = _data_record(package, verdict="TABLE_OK")
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        _iterate(package, data_evidence=record)
-    assert error.value.code == "SCHEMA"
-
-
-def test_a_canary_returning_no_rows_is_refused(package: Path) -> None:
-    record = _data_record(package, canaries=[{"table": "Orders", "row_count": 0}])
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        _iterate(package, data_evidence=record)
-    assert error.value.code == "DATA_EVIDENCE_EMPTY_CANARY"
-
-
-def test_data_evidence_with_no_canary_at_all_is_refused(package: Path) -> None:
-    record = _data_record(package, canaries=[])
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        _iterate(package, data_evidence=record)
-    assert error.value.code == "DATA_EVIDENCE_NO_CANARIES"
-
-
-def test_data_evidence_from_a_different_model_revision_is_refused(package: Path) -> None:
-    record = _data_record(package, model_revision="sha256:0000")
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        _iterate(package, data_evidence=record)
-    assert error.value.code == "DATA_EVIDENCE_STALE_MODEL"
-
-
-def test_a_persisted_claim_must_pin_the_cache_the_model_now_holds(package: Path) -> None:
-    cache = package / "fabric" / "Unit.SemanticModel" / ".pbi" / "cache.abf"
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_bytes(b"CACHE")
-    record = _data_record(
+def _iterate(
+    package: Path,
+    *,
+    previous: dict | None = None,
+    options: capture.CaptureOptions | None = None,
+    runtime: capture.CaptureRuntime | None = None,
+    **kwargs: object,
+) -> dict:
+    request = capture.IterationRequest(
         package,
-        verdict=receipt.DATA_VERDICT_PERSISTED,
-        mode=receipt.DATA_MODE_PERSISTED,
-        cache_sha256="0" * 64,
+        str(PID),
+        session_id="session-1",
+        previous_sha256=receipt.receipt_sha256(previous) if previous else None,
+        **kwargs,
+    )
+    return capture.run_iteration(request, options or _options(), runtime or _runtime(package))
+
+
+def _path(package: Path, number: str = "001") -> Path:
+    return receipt.iterations_root(package) / number / receipt.RECEIPT_NAME
+
+
+def _review(payload: dict, *, status: str = "unverified", findings: list | None = None) -> dict:
+    judgement = copy.deepcopy(payload["judgement"])
+    judgement["completed_at"] = None
+    for row in judgement["pages"]:
+        row["whole_page_status"] = status
+        for visual in row["visual_results"]:
+            visual["status"] = status
+        for numeric in row["numeric_results"]:
+            numeric["status"] = "unverified"
+    judgement["findings"] = findings or []
+    return judgement
+
+
+def _finalize(package: Path, payload: dict, *, review: dict | None = None) -> dict:
+    return receipt.finalize(
+        package,
+        receipt.receipt_sha256(payload),
+        review if review is not None else _review(payload),
+        state_reader=lambda _pid: _status(package),
     )
 
-    with pytest.raises(receipt.ReceiptError) as error:
-        _iterate(package, data_evidence=record)
-    assert error.value.code == "DATA_EVIDENCE_CACHE_MISMATCH"
 
-
-def test_accepted_data_evidence_goes_stale_when_the_model_moves(package: Path) -> None:
-    _iterate(package, data_evidence=_data_record(package))
-    _pass_judgement(package)
-    (package / "fabric" / "Unit.SemanticModel" / "definition" / "model.tmdl").write_text("model M2\n", encoding="utf-8")
-
-    assert _refusal(package) in {"MODEL_CHANGED", "DATA_EVIDENCE_STALE_MODEL"}
-
-
-# --------------------------------------------------------------------------------------------------
-# judgement, findings and the lifecycle
-# --------------------------------------------------------------------------------------------------
-
-
-def test_the_producer_never_turns_pending_into_pass(package: Path) -> None:
-    """Every generated judgement slot starts pending, and finalization refuses one that stayed so."""
-    payload = _iterate(package)
-    statuses = {
-        item["status"]
-        for row in payload["judgement"]["pages"]
-        for item in row["visual_results"] + row["numeric_results"]
-    }
-
-    assert statuses == {receipt.STATUS_PENDING}
-    assert all(row["whole_page_status"] == receipt.STATUS_PENDING for row in payload["judgement"]["pages"])
-    assert _refusal(package) == "PENDING_JUDGEMENT"
-
-
-def test_an_unverified_visual_is_not_a_completing_status(package: Path) -> None:
-    """`unverified` is never `pass` - it seals honestly, but it cannot complete a sign-off."""
-    _iterate(package, data_evidence=_data_record(package))
-    _pass_judgement(package)
-    path = _receipt_path(package)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["judgement"]["pages"][0]["visual_results"][0]["status"] = receipt.STATUS_UNVERIFIED
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assert receipt.finalize(package)["outcome"] == receipt.OUTCOME_INCOMPLETE
-
-
-def test_a_prior_finding_may_not_silently_disappear(package: Path) -> None:
-    """Omission is failure: a finding that vanishes reads exactly like a finding that was fixed."""
-    _iterate(package)
-    _finalized(
-        package,
-        findings=[
-            {
-                "id": "F-001",
-                "page_id": PAGE_MAIN,
-                "visual_id": "v-1",
-                "kind": "visual",
-                "severity": "high",
-                "status": receipt.FINDING_OPEN,
-                "detail": "axis title missing",
-                "limitation_ref": None,
-            }
-        ],
-    )
-    _iterate(package)
-    _pass_judgement(package, "002", findings=[])
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.finalize(package, "002")
-    assert error.value.code == "FINDING_DISAPPEARED"
-
-
-def test_a_prior_finding_that_reappears_as_resolved_is_accepted(package: Path) -> None:
-    """The lifecycle is explicit; carrying the id forward with a verdict is what closes it."""
-    _iterate(package)
-    finding = {
+def _finding(**overrides: object) -> dict:
+    return {
         "id": "F-001",
-        "page_id": PAGE_MAIN,
+        "page_id": PAGE,
         "visual_id": "v-1",
         "kind": "visual",
         "severity": "high",
-        "status": receipt.FINDING_OPEN,
+        "status": "still_open",
         "detail": "axis title missing",
         "limitation_ref": None,
+        **overrides,
     }
-    _finalized(package, findings=[finding])
-    _iterate(package, data_evidence=_data_record(package))
-    resolved = dict(finding, status=receipt.FINDING_RESOLVED)
-    sealed = _finalized(package, "002", findings=[resolved])
 
-    assert sealed["outcome"] == receipt.OUTCOME_COMPLETE
-    assert sealed["judgement"]["findings"][0]["status"] == receipt.FINDING_RESOLVED
 
-
-def test_an_accepted_limitation_must_bind_to_a_current_spec_entry(package: Path) -> None:
-    """`accepted_limitation` without a resolving limitation is an unbacked excuse."""
-    _iterate(package)
-    unbound = {
-        "id": "F-001",
-        "page_id": PAGE_MAIN,
-        "visual_id": "v-1",
-        "kind": "visual",
-        "severity": "medium",
-        "status": receipt.FINDING_ACCEPTED,
-        "detail": "table calc not reproducible",
-        "limitation_ref": None,
-    }
-    _pass_judgement(package, findings=[unbound])
-
-    assert _refusal(package) == "ACCEPTED_LIMITATION_UNBOUND"
-
-
-def test_an_accepted_limitation_whose_entry_text_changed_is_refused(package: Path) -> None:
-    """Binding by index alone would let an entry be rewritten under a settled acceptance."""
-    _iterate(package)
-    spec = json.loads((package / "migration-spec.json").read_text(encoding="utf-8"))
-    bound = {
-        "id": "F-001",
-        "page_id": PAGE_MAIN,
-        "visual_id": "v-1",
-        "kind": "visual",
-        "severity": "medium",
-        "status": receipt.FINDING_ACCEPTED,
-        "detail": "table calc not reproducible",
-        "limitation_ref": {
-            "pointer": "/limitations_encountered/0",
-            "sha256": receipt.limitation_entry_sha256(spec["limitations_encountered"][0]),
-        },
-    }
-    _pass_judgement(package, findings=[bound])
-    assert receipt.finalize(package)["state"] == receipt.STATE_FINAL
-
-    _iterate(package)
-    spec["limitations_encountered"][0]["issue"] = "rewritten after the fact"
-    _write_json(package / "migration-spec.json", spec)
-    _pass_judgement(package, "002", findings=[bound])
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.finalize(package, "002")
-    assert error.value.code == "ACCEPTED_LIMITATION_UNBOUND"
-
-
-def test_a_finding_id_referenced_but_never_declared_is_refused(package: Path) -> None:
-    _iterate(package)
-    _pass_judgement(package)
-    path = _receipt_path(package)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["judgement"]["pages"][0]["visual_results"][0]["finding_ids"] = ["F-404"]
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assert _refusal(package) == "UNKNOWN_FINDING_ID"
-
-
-def test_a_judgement_row_for_a_visual_that_does_not_exist_is_refused(package: Path) -> None:
-    """The reviewer fills judgement fields; they may not invent the denominator."""
-    _iterate(package)
-    _pass_judgement(package)
-    path = _receipt_path(package)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["judgement"]["pages"][0]["visual_results"].append(
-        {"visual_id": "v-invented", "status": receipt.STATUS_PASS, "finding_ids": []}
-    )
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assert _refusal(package) == "JUDGEMENT_VISUAL_SET"
-
-
-# --------------------------------------------------------------------------------------------------
-# the predecessor link
-# --------------------------------------------------------------------------------------------------
-
-
-def test_an_altered_prior_receipt_breaks_the_pinned_hash(package: Path) -> None:
-    """Rewriting settled history is exactly what the pinned predecessor hash exists to expose."""
-    _iterate(package)
-    _finalized(package)
-    _iterate(package)
-    _pass_judgement(package, "002")
-    first = _receipt_path(package, "001")
-    payload = json.loads(first.read_text(encoding="utf-8"))
-    payload["judgement"]["pages"][0]["whole_page_status"] = receipt.STATUS_MISMATCH
-    first.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.finalize(package, "002")
-    assert error.value.code == "PREVIOUS_RECEIPT_MISMATCH"
-
-
-def test_a_hand_written_predecessor_hash_is_refused(package: Path) -> None:
-    _iterate(package)
-    _finalized(package)
-    _iterate(package)
-    _pass_judgement(package, "002")
-    path = _receipt_path(package, "002")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["generated"]["previous"]["receipt_sha256"] = "0" * 64
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.finalize(package, "002")
-    assert error.value.code == "PREVIOUS_RECEIPT_MISMATCH"
-
-
-def test_a_hand_edited_before_after_pair_is_refused(package: Path) -> None:
-    """`changes_from_previous` is generated, so "this page did not change" cannot be asserted."""
-    _iterate(package)
-    _finalized(package)
-    _iterate(package)
-    _pass_judgement(package, "002")
-    path = _receipt_path(package, "002")
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["generated"]["changes_from_previous"][0]["before_sha256"] = "0" * 64
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.finalize(package, "002")
-    assert error.value.code == "CHANGES_MISDECLARED"
-
-
-# --------------------------------------------------------------------------------------------------
-# strict reading
-# --------------------------------------------------------------------------------------------------
-
-
-def test_a_duplicate_json_key_is_refused_rather_than_last_one_wins(package: Path) -> None:
-    """`json.loads` keeps the last value, so a document with two answers would silently have one."""
-    _iterate(package)
-    path = _receipt_path(package)
-    path.write_text(path.read_text(encoding="utf-8").replace('"mode":', '"mode": "triage", "mode":', 1), "utf-8")
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.read_chain(package)
-    assert error.value.code == "DUPLICATE_JSON_KEY"
-
-
-def test_an_unknown_field_is_refused(package: Path) -> None:
-    """A closed schema: an unrecognised key is a document this producer did not write."""
-    _iterate(package)
-    path = _receipt_path(package)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["judgement"]["pages"][0]["overall_ok"] = True
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.read_chain(package)
-    assert error.value.code == "UNKNOWN_FIELD"
-
-
-def test_a_status_outside_the_vocabulary_is_refused(package: Path) -> None:
-    _iterate(package)
-    path = _receipt_path(package)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["judgement"]["pages"][0]["whole_page_status"] = "probably fine"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.read_chain(package)
-    assert error.value.code == "SCHEMA"
-
-
-# --------------------------------------------------------------------------------------------------
-# paths and privacy
-# --------------------------------------------------------------------------------------------------
-
-
-def test_a_traversal_screenshot_path_is_refused(package: Path) -> None:
-    """A receipt cannot be made to hash - or reach - bytes outside its own iteration."""
-    _iterate(package)
-    _pass_judgement(package)
-    path = _receipt_path(package)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["generated"]["pages"][0]["powerbi"]["path"] = "../../../fabric/Unit.pbip"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-
-    assert _refusal(package) == "UNSAFE_PATH"
-
-
-def test_a_package_manifest_pointing_outside_the_package_is_refused(tmp_path: Path) -> None:
-    """One canonical report, resolved from the caller-supplied package, with no ancestor search."""
-    package = build_package(tmp_path)
-    manifest = package / "package-manifest.json"
-    payload = json.loads(manifest.read_text(encoding="utf-8"))
-    payload["artifacts"]["report"] = "../../elsewhere/Other.Report"
-    _write_json(manifest, payload)
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.resolve_package(package)
-    assert error.value.code == "UNSAFE_PATH"
-
-
-def test_a_reparse_point_inside_the_iterations_tree_is_refused(package: Path, tmp_path: Path) -> None:
-    """A link to an otherwise-valid iteration still sources evidence outside this package."""
-    _iterate(package)
-    _finalized(package)
-    assert [item.name for item in receipt.read_chain(package)] == ["001"]
-
-    linked = receipt.iterations_root(package) / "001"
-    outside = tmp_path / "outside"
-    linked.rename(outside)
-    if sys.platform == "win32":
-        subprocess.run(["cmd", "/c", "mklink", "/J", str(linked), str(outside)], capture_output=True, check=True)
-    else:
-        linked.symlink_to(outside, target_is_directory=True)
-    assert linked.resolve() == outside.resolve()
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.read_chain(package)
-    assert error.value.code == "REPARSE_POINT"
-
-
-def test_the_receipt_discloses_no_host_path_user_or_server(package: Path) -> None:
-    """The shareable half: a receipt is committed and reviewed, so it must carry no location."""
-    _iterate(package, session_id="sess-42")
-    text = _receipt_path(package).read_text(encoding="utf-8")
-
-    assert str(package) not in text
-    assert "Users" not in text
-    assert "://" not in text
-    assert ":\\" not in text and ":/" not in text.replace("sha256:", "")
-
-
-def test_the_open_desktop_file_path_never_reaches_the_receipt(package: Path) -> None:
-    """PID/currentFilePath equality is producer-time evidence: keep the boolean, drop the path."""
-    pbip = package / "fabric" / "Unit.pbip"
-    _iterate(package, desktop_file_path=str(pbip))
-    text = _receipt_path(package).read_text(encoding="utf-8")
-    payload = json.loads(text)
-
-    assert payload["generated"]["review"]["desktop_binding_checked"] is True
-    assert payload["generated"]["review"]["desktop_binding_matches"] is True
-    assert str(pbip) not in text
-    assert "Unit.pbip" not in text
-
-
-def test_a_desktop_instance_showing_another_file_is_refused(package: Path, tmp_path: Path) -> None:
-    """Screenshotting a different open file is the confusion this producer must not record."""
-    other = tmp_path / "Other.pbip"
-    other.write_text("{}", encoding="utf-8")
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        _iterate(package, desktop_file_path=str(other))
-    assert error.value.code == "DESKTOP_BINDING_MISMATCH"
-
-
-def test_a_reviewer_cannot_paste_raw_tool_output_into_the_receipt(package: Path) -> None:
-    """Multi-line free text is how a traceback or a bridge dump - and a host path - gets in."""
-    _iterate(package)
-    payload = json.loads(_receipt_path(package).read_text(encoding="utf-8"))
-    payload["judgement"]["findings"] = [
-        {
-            "id": "F-001",
-            "page_id": PAGE_MAIN,
-            "visual_id": None,
-            "kind": "other",
-            "severity": "low",
-            "status": receipt.FINDING_OPEN,
-            "detail": 'Traceback (most recent call last):\n  File "x.py", line 1',
-            "limitation_ref": None,
-        }
-    ]
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.assert_shareable(payload)
-    assert error.value.code == "PRIVACY"
-
-
-def test_a_host_path_in_a_reviewer_field_is_refused(package: Path) -> None:
-    """The guard runs over the WHOLE document, so it covers the reviewer's half too.
-
-    ⚠️ The offending string is ASSEMBLED rather than written out: a literal profile path in a
-    committed file is exactly what this repo's own commit gate (`set_data_folder.py --check`)
-    refuses, and a test that has to be exempted from a gate to prove the gate works is not evidence.
-    """
-    leak = "compare against C:" + chr(92) + "Users" + chr(92) + "someone" + chr(92) + "main.png"
-    _iterate(package)
-    payload = json.loads(_receipt_path(package).read_text(encoding="utf-8"))
-    payload["judgement"]["findings"] = [
-        {
-            "id": "F-001",
-            "page_id": PAGE_MAIN,
-            "visual_id": None,
-            "kind": "other",
-            "severity": "low",
-            "status": receipt.FINDING_OPEN,
-            "detail": leak,
-            "limitation_ref": None,
-        }
-    ]
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.assert_shareable(payload)
-    assert error.value.code == "PRIVACY"
-
-
-def test_a_tableau_server_url_in_a_reviewer_field_is_refused(package: Path) -> None:
-    """A view URL names the server, the site and the project - none of which may be shared."""
-    _iterate(package)
-    payload = json.loads(_receipt_path(package).read_text(encoding="utf-8"))
-    payload["judgement"]["findings"] = [
-        {
-            "id": "F-001",
-            "page_id": PAGE_MAIN,
-            "visual_id": None,
-            "kind": "other",
-            "severity": "low",
-            "status": receipt.FINDING_OPEN,
-            "detail": "see https://tableau.internal.example/#/site/finance/views/Unit/main",
-            "limitation_ref": None,
-        }
-    ]
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.assert_shareable(payload)
-    assert error.value.code == "PRIVACY"
-
-
-# --------------------------------------------------------------------------------------------------
-# the standalone capture mode is untouched
-# --------------------------------------------------------------------------------------------------
-
-
-def test_the_existing_positional_capture_mode_still_parses_unchanged() -> None:
-    """The subcommands are additive: an existing invocation must be byte-for-byte compatible."""
-    args = capture.parse_args(["Book.Report", "out", "--pid", "1234", "--pages", "ReportSectionMap"])
-
-    assert args.command is None
-    assert args.report == Path("Book.Report")
-    assert args.outdir == Path("out")
-    assert args.pid == "1234"
-    assert args.pages == frozenset({"ReportSectionMap"})
-
-
-def test_the_positional_mode_still_writes_bare_pngs_and_no_receipt(tmp_path: Path) -> None:
-    """`capture_report` remains evidence-free; nothing about iterations leaks into it."""
-    report = tmp_path / "Book.Report"
-    page = report / "definition" / "pages" / "ReportSectionMap"
-    page.mkdir(parents=True)
-    _write_json(page / "page.json", {"name": "ReportSectionMap", "displayName": "Map"})
-
-    code = capture.capture_report(report, tmp_path / "out", "1234", _options(), _runtime())
-
-    assert code == 0
-    assert (tmp_path / "out" / "Map.png").is_file()
-    assert not (tmp_path / "out" / receipt.RECEIPT_NAME).exists()
-
-
-def test_the_iterate_subcommand_is_reachable_from_the_cli(package: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """The production CLI path, not just the internal API, produces the iteration."""
-    code = capture.cmd_iterate(
-        capture.parse_args(
-            ["iterate", "--package", str(package), "--pid", "1234", "--poll", "0", "--stable-seconds", "0"]
-        ),
-        _runtime(),
-    )
-
-    assert code == capture.EXIT_OK
-    assert "ITERATION 001 (sign_off, all_pages)" in capsys.readouterr().out
-    assert _receipt_path(package).is_file()
-
-
-def test_a_cli_refusal_exits_three_and_names_the_code(package: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Tests assert the named refusal; so does the operator-facing output."""
-    _iterate(package)
-    code = capture.cmd_finalize(capture.parse_args(["finalize", "--package", str(package)]))
-
-    assert code == capture.EXIT_REFUSED
-    assert "REFUSED: PENDING_JUDGEMENT" in capsys.readouterr().out
-
-
-def test_finalizing_twice_is_refused(package: Path) -> None:
-    """A sealed iteration is immutable; re-sealing would let a verdict be rewritten in place."""
-    _iterate(package)
-    _finalized(package)
-
-    with pytest.raises(receipt.ReceiptError) as error:
-        receipt.finalize(package)
-    assert error.value.code == "ALREADY_FINAL"
-
-
-def test_the_generated_half_is_not_editable_by_the_reviewer(package: Path) -> None:
-    """Immutable generated identities are re-derived immediately before sealing, never trusted."""
+def _code(callback) -> str:
+    with pytest.raises(receipt.ReceiptError) as caught:
+        callback()
+    return caught.value.code
+
+
+def test_clean_first_iteration_has_real_images_and_honest_data_state(package: Path) -> None:
+    _reference(package)
+    pending = _iterate(package)
+    assert [row["expected_visual_ids"] for row in pending["generated"]["pages"]] == [["v-1", "v-2"], ["v-3"]]
+    assert all(row["tableau"]["grade"] == evidence.GRADE_VALIDATION for row in pending["generated"]["pages"])
+    for page in pending["generated"]["pages"]:
+        image = _path(package).parent / page["powerbi"]["path"]
+        with Image.open(image) as independent:
+            independent.load()
+            assert independent.format == "PNG" and min(independent.size) > 0
+        facts = page["powerbi"]["capture"]
+        assert facts["frames"] == 3 and facts["stable_elapsed_seconds"] == 2
+    assert hashlib.sha256(_path(package).read_bytes()).hexdigest() == receipt.receipt_sha256(pending)
+    final = _finalize(package, pending, review=_review(pending, status="pass"))
+    assert final["state"] == "final" and final["outcome"] == "incomplete"
+    assert final["generated"]["data_evidence"] == {"status": "pending", "reason": receipt.DATA_PENDING_REASON}
+    assert final["judgement"]["completed_at"] is not None
+    assert final["generated"] == pending["generated"]
+    assert len(receipt.read_chain(package)) == 1
+
+
+def test_valid_second_iteration_preserves_finding_identity_and_evolution(package: Path) -> None:
+    first = _iterate(package)
+    finding = _finding()
+    final = _finalize(package, first, review=_review(first, findings=[finding]))
+    visual = package / "fabric" / "Unit.Report" / "definition" / "pages" / PAGE / "visuals" / "v-1" / "visual.json"
+    write_json(visual, {"name": "v-1", "visual": {"visualType": "card"}, "title": "restored"})
+    second = _iterate(package, previous=final, runtime=_runtime(package, blob=valid_png(110, 80)))
+    resolved = dict(finding, status="resolved")
+    sealed = _finalize(package, second, review=_review(second, findings=[resolved]))
+    assert sealed["generated"]["previous"] == {"iteration": "001", "receipt_sha256": receipt.receipt_sha256(final)}
+    assert any(row["before_sha256"] != row["after_sha256"] for row in sealed["generated"]["changes_from_previous"])
+    assert sealed["judgement"]["findings"] == [resolved]
+    assert sealed["outcome"] == "incomplete"  # Data is still not independently proven.
+    assert [item.name for item in receipt.read_chain(package)] == ["001", "002"]
+
+
+@pytest.mark.parametrize("field", ["state", "data", "unit", "reviewer", "time", "frames", "scope"])
+def test_generated_state_forgery_is_rejected_by_the_capture_pin(package: Path, field: str) -> None:
     original = _iterate(package)
-    _pass_judgement(package)
-    path = _receipt_path(package)
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["generated"]["artifact"]["report_revision"] = "sha256:" + "0" * 64
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    forged = copy.deepcopy(original)
+    if field == "state":
+        forged.update(state="final", outcome="complete")
+    elif field == "data":
+        forged["generated"]["data_evidence"]["status"] = "accepted"
+    elif field == "unit":
+        forged["generated"]["artifact"]["unit"] = "other"
+    elif field == "reviewer":
+        forged["generated"]["review"]["reviewer"] = "other-reviewer"
+    elif field == "time":
+        forged["generated"]["generated_at"] = "2026-01-01T00:00:00Z"
+    elif field == "frames":
+        forged["generated"]["pages"][0]["powerbi"]["capture"]["frames"] = -1
+    else:
+        forged["generated"]["scope"] = "subset"
+    write_json(_path(package), forged)
+    assert _code(lambda: _finalize(package, original)) == "CAPTURE_CHANGED"
 
-    assert _refusal(package) == "REPORT_CHANGED"
-    assert original["generated"]["artifact"]["report_revision"].startswith("sha256:")
 
-
-def test_a_receipt_deep_copy_round_trips_through_the_schema(package: Path) -> None:
-    """The producer's own output must satisfy the schema it enforces on everyone else."""
+def test_pending_state_cannot_have_a_final_outcome(package: Path) -> None:
     payload = _iterate(package)
+    payload["outcome"] = "incomplete"
+    assert _code(lambda: receipt.validate_receipt(payload)) == "STATE_INVALID"
 
-    assert receipt.validate_receipt(copy.deepcopy(payload)) is not None
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("frames", True),
+        ("frames", -1),
+        ("frames", 0),
+        ("frames", receipt.MAX_FRAMES + 1),
+        ("stable_seconds", True),
+        ("stable_seconds", 0),
+        ("stable_seconds", -1),
+        ("stable_seconds", float("nan")),
+        ("poll_seconds", float("inf")),
+        ("settled_seconds", -1),
+        ("settled_seconds", receipt.MAX_SECONDS + 1),
+        ("max_wait_seconds", False),
+        ("stable_elapsed_seconds", float("-inf")),
+    ],
+)
+def test_capture_observation_numbers_are_strict_and_bounded(package: Path, field: str, value: object) -> None:
+    payload = _iterate(package)
+    payload["generated"]["pages"][0]["powerbi"]["capture"][field] = value
+    assert _code(lambda: receipt.validate_receipt(payload)) in {"SCHEMA", "NONFINITE_NUMBER"}
+
+
+@pytest.mark.parametrize("changes", [{"frames": 1}, {"stable_elapsed_seconds": 1}, {"settled_seconds": 1}])
+def test_convergence_semantics_require_frames_and_earned_dwell(package: Path, changes: dict) -> None:
+    payload = _iterate(package)
+    payload["generated"]["pages"][0]["powerbi"]["capture"].update(changes)
+    assert _code(lambda: receipt.validate_receipt(payload)) == "CAPTURE_INVALID"
+
+
+def test_zero_dwell_policy_refuses_without_a_downstream_guard() -> None:
+    assert _code(lambda: capture._validate_options(_options(stable_seconds=0), package=True)) == "CAPTURE_POLICY"
+
+
+@pytest.mark.parametrize("value", [0, -1, True, float("nan"), float("inf"), 3601])
+@pytest.mark.parametrize("field", ["poll", "stable_seconds", "max_wait"])
+def test_bad_package_policy_refuses_before_any_capture(package: Path, field: str, value: object) -> None:
+    assert _code(lambda: _iterate(package, options=_options(**{field: value}))) == "CAPTURE_POLICY"
+    assert not receipt.iterations_root(package).exists()
+
+
+def test_standalone_zero_dwell_still_needs_two_identical_frames(tmp_path: Path) -> None:
+    clock = ManualClock()
+    calls = []
+
+    def shot(_page: str, _pid: str, path: Path) -> bool:
+        calls.append(1)
+        path.write_bytes(b"same")
+        return True
+
+    result = capture.capture_stable(
+        PAGE, "1234", tmp_path / "x.png", _options(stable_seconds=0), capture.CaptureRuntime(shot, clock.sleep, clock)
+    )
+    assert result.frames == 2 and len(calls) == 2 and result.converged
+
+
+def test_zero_dwell_does_not_confuse_two_different_frames_with_stability(tmp_path: Path) -> None:
+    clock = ManualClock()
+    frames = iter((b"first", b"second", b"second"))
+
+    def shot(_page: str, _pid: str, path: Path) -> bool:
+        path.write_bytes(next(frames))
+        return True
+
+    result = capture.capture_stable(
+        PAGE,
+        "1234",
+        tmp_path / "x.png",
+        _options(stable_seconds=0),
+        capture.CaptureRuntime(shot, clock.sleep, clock),
+    )
+    assert result.frames == 3 and result.converged
+
+
+def test_deleted_visual_definition_cannot_shrink_inventory(package: Path) -> None:
+    target = receipt.resolve_package(package)
+    broken = target.report_dir / "definition" / "pages" / PAGE / "visuals" / "v-2" / "visual.json"
+    assert len(rev.report_inventory(target.report_dir)[0].visual_ids) == 2
+    broken.unlink()
+    with pytest.raises(rev.RevisionError) as caught:
+        rev.report_inventory(target.report_dir)
+    assert caught.value.code == "VISUAL_DEFINITION_MISSING"
+
+
+@pytest.mark.parametrize("order", [[PAGE, PAGE, SECOND], [PAGE, True], [PAGE, 1], [PAGE, ""], [PAGE, PAGE + " "], []])
+def test_page_order_is_unique_nonempty_strings_without_coercion(package: Path, order: list) -> None:
+    report = receipt.resolve_package(package).report_dir
+    write_json(report / "definition" / "pages" / "pages.json", {"pageOrder": order})
+    assert _code(lambda: receipt.report_inventory(report)) == "PAGE_ORDER_INVALID"
+
+
+@pytest.mark.parametrize("kind", ["page", "visual"])
+def test_inventory_requires_exact_folder_name_agreement(package: Path, kind: str) -> None:
+    report = receipt.resolve_package(package).report_dir
+    path = report / "definition" / "pages" / PAGE / "page.json"
+    if kind == "visual":
+        path = path.parent / "visuals" / "v-1" / "visual.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["name"] = "unrelated"
+    write_json(path, doc)
+    assert _code(lambda: receipt.report_inventory(report)) == (
+        "PAGE_ID_MISMATCH" if kind == "page" else "VISUAL_ID_MISMATCH"
+    )
+
+
+def test_nested_extra_visual_definition_is_not_a_second_inventory(package: Path) -> None:
+    report = receipt.resolve_package(package).report_dir
+    write_json(report / "definition" / "pages" / PAGE / "extra" / "visual.json", {"name": "v-other"})
+    assert _code(lambda: receipt.report_inventory(report)) == "NONCANONICAL_DEFINITION"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "..\\..\\..\\fabric\\Unit.pbip",
+        "../../../fabric/Unit.pbip",
+        "pages\\page.png",
+        "/pages/page.png",
+        "Z:page.png",
+        "Z:/page.png",
+        "pages/./page.png",
+        "pages/../page.png",
+        "pages//page.png",
+        "pages/page.png.",
+        "pages/CON.png",
+        "pages/alias.png",
+    ],
+)
+def test_screenshot_role_rejects_backslashes_traversal_and_aliases(relative: str) -> None:
+    assert _code(lambda: receipt.screenshot_role(PAGE, relative)) == "SCREENSHOT_PATH"
+
+
+def test_non_png_substitution_with_matching_hash_and_size_is_refused(package: Path) -> None:
+    pending = _iterate(package)
+    page = pending["generated"]["pages"][0]
+    directory = _path(package).parent
+    blob = (package / "fabric" / "Unit.pbip").read_bytes()
+    (directory / page["powerbi"]["path"]).write_bytes(blob)
+    page["powerbi"].update(sha256=hashlib.sha256(blob).hexdigest(), byte_count=len(blob))
+    assert _code(lambda: receipt.image_facts(directory, PAGE, page["powerbi"]["path"])) == "SCREENSHOT_NOT_PNG"
+
+
+@pytest.mark.parametrize("blob", [b"", b"\x89PNG\r\n\x1a\n", valid_png(20, 20)[:-8], b"not an image"])
+def test_invalid_png_is_refused_during_capture(package: Path, blob: bytes) -> None:
+    assert _code(lambda: _iterate(package, runtime=_runtime(package, blob=blob))) == "SCREENSHOT_NOT_PNG"
+    assert not _path(package).exists()
+
+
+def test_png_hardlink_alias_is_refused(package: Path) -> None:
+    pending = _iterate(package)
+    directory = _path(package).parent
+    image = directory / pending["generated"]["pages"][0]["powerbi"]["path"]
+    os.link(image, package.parent / "alias.png")
+    assert (
+        _code(lambda: receipt.image_facts(directory, PAGE, pending["generated"]["pages"][0]["powerbi"]["path"]))
+        == "SCREENSHOT_ALIAS"
+    )
+
+
+def test_wrong_definition_pbir_model_is_refused(package: Path) -> None:
+    report = receipt.resolve_package(package).report_dir
+    write_json(report / "definition.pbir", {"datasetReference": {"byPath": {"path": "../Other.SemanticModel"}}})
+    assert _code(lambda: receipt.resolve_package(package)) == "MODEL_BINDING"
+
+
+def test_decoy_pbip_is_refused_even_when_it_references_the_same_report(package: Path) -> None:
+    write_json(package / "fabric" / "A-decoy.pbip", {"artifacts": [{"report": {"path": "Unit.Report"}}]})
+    assert _code(lambda: receipt.resolve_package(package)) == "PBIP_IDENTITY"
+
+
+@pytest.mark.parametrize(
+    "artifacts",
+    [
+        [],
+        [{"report": {"path": "Wrong.Report"}}],
+        [{"report": {"path": "Unit.Report"}}, {"report": {"path": "Unit.Report"}}],
+    ],
+)
+def test_pbip_must_reference_exactly_the_declared_report(package: Path, artifacts: list) -> None:
+    write_json(package / "fabric" / "Unit.pbip", {"artifacts": artifacts})
+    assert _code(lambda: receipt.resolve_package(package)) == "PBIP_IDENTITY"
+
+
+def test_unverified_pid_cannot_borrow_another_instances_current_path(package: Path) -> None:
+    target = receipt.resolve_package(package)
+    receipt.assert_desktop_binding(target, PID, lambda _pid: _status(package))
+    assert (
+        _code(lambda: receipt.assert_desktop_binding(target, PID, lambda _pid: _status(package, pid=PID + 1)))
+        == "DESKTOP_UNVERIFIED"
+    )
+
+
+def test_runtime_wrong_path_is_refused_without_copying_the_path(package: Path) -> None:
+    target = receipt.resolve_package(package)
+    wrong = package.parent / "Other.pbip"
+    assert (
+        _code(lambda: receipt.assert_desktop_binding(target, PID, lambda _pid: _status(package, path=wrong)))
+        == "DESKTOP_BINDING_MISMATCH"
+    )
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        {},
+        {"instances": []},
+        {"instances": [{"pid": True, "currentFilePath": "not trusted"}]},
+    ],
+)
+def test_missing_or_boolean_pid_status_is_not_binding(package: Path, state: dict) -> None:
+    assert (
+        _code(lambda: receipt.assert_desktop_binding(receipt.resolve_package(package), PID, lambda _pid: state))
+        == "DESKTOP_UNVERIFIED"
+    )
+
+
+def test_default_runtime_invokes_pid_scoped_status_not_caller_claim(
+    package: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = []
+
+    def run(args: list, **kwargs: object) -> subprocess.CompletedProcess:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, json.dumps(_status(package)).encode("utf-8"), b"")
+
+    monkeypatch.setattr(receipt.subprocess, "run", run)
+    receipt.assert_desktop_binding(receipt.resolve_package(package), PID)
+    assert calls[0][0][:4] == ["powerbi-desktop", "status", "--pid", str(PID)]
+    assert calls[0][1]["timeout"] == 60
+
+
+@pytest.mark.parametrize("success,expected", [(True, True), (False, False), (1, False), (None, False)])
+def test_reload_uses_the_installed_bridge_structured_success_shape(
+    monkeypatch: pytest.MonkeyPatch, success: object, expected: bool
+) -> None:
+    monkeypatch.setattr(
+        receipt, "bridge_json", lambda _command, _pid: {"status": "ok", "pid": PID, "result": {"success": success}}
+    )
+    assert receipt.bridge_reload(PID) is expected
+
+
+def test_finalization_rechecks_pid_binding(package: Path) -> None:
+    pending = _iterate(package)
+    assert (
+        _code(
+            lambda: receipt.finalize(
+                package,
+                receipt.receipt_sha256(pending),
+                _review(pending),
+                state_reader=lambda _pid: _status(package, pid=PID + 1),
+            )
+        )
+        == "DESKTOP_UNVERIFIED"
+    )
+
+
+def test_visual_pass_without_tableau_is_refused_at_evidence_boundary(package: Path) -> None:
+    shutil.rmtree(package / "oracle")
+    pending = _iterate(package)
+    page = pending["generated"]["pages"][0]
+    assert page["tableau"] is None
+    assert _code(lambda: receipt._assert_visual_status("pass", page)) == "COMPARISON_EVIDENCE_MISSING"
+    assert (
+        _code(lambda: _finalize(package, pending, review=_review(pending, status="pass")))
+        == "COMPARISON_EVIDENCE_MISSING"
+    )
+    assert _finalize(package, pending)["outcome"] == "incomplete"
+
+
+def test_numeric_match_requires_independent_producer_evidence(package: Path) -> None:
+    _reference(package)
+    pending = _iterate(package)
+    review = _review(pending, status="pass")
+    review["pages"][0]["numeric_results"][0]["status"] = "pass"
+    assert (
+        _code(lambda: receipt._assert_judgement({**pending, "judgement": review}, None))
+        == "NUMERIC_EVIDENCE_UNAVAILABLE"
+    )
+    assert _code(lambda: _finalize(package, pending, review=review)) == "NUMERIC_EVIDENCE_UNAVAILABLE"
+
+
+def test_reviewer_supplied_numeric_hashes_do_not_become_producer_evidence(package: Path) -> None:
+    _reference(package)
+    pending = _iterate(package)
+    review = _review(pending, status="pass")
+    row = review["pages"][0]["numeric_results"][0]
+    row.update(
+        status="pass",
+        tableau_evidence_sha256=pending["generated"]["pages"][0]["tableau"]["sha256"],
+        powerbi_query_sha256="1" * 64,
+        powerbi_result_sha256="2" * 64,
+    )
+    assert _code(lambda: _finalize(package, pending, review=review)) == "NUMERIC_EVIDENCE_UNAVAILABLE"
+
+
+def test_oracle_layout_match_preserves_the_numeric_and_full_visual_ceiling(package: Path) -> None:
+    pending = _iterate(package)
+    page = pending["generated"]["pages"][0]
+    assert page["tableau"]["grade"] == evidence.GRADE_ORACLE
+    assert _code(lambda: receipt._assert_visual_status("pass", page)) == "COMPARISON_GRADE"
+    final = _finalize(package, pending, review=_review(pending, status="layout_match"))
+    assert final["outcome"] == "incomplete"
+    assert all(row["status"] == "unverified" for page in final["judgement"]["pages"] for row in page["numeric_results"])
+
+
+@pytest.mark.parametrize("phase", ["allocation", "finalization"])
+def test_altered_prior_png_invalidates_the_chain(package: Path, phase: str) -> None:
+    first = _iterate(package)
+    final = _finalize(package, first)
+    second = _iterate(package, previous=final) if phase == "finalization" else None
+    image = _path(package).parent / first["generated"]["pages"][0]["powerbi"]["path"]
+    image.write_bytes(valid_png(100, 81))
+    operation = (
+        (lambda: _finalize(package, second)) if second is not None else (lambda: _iterate(package, previous=final))
+    )
+    assert _code(operation) == "SCREENSHOT_CHANGED"
+
+
+@pytest.mark.parametrize("change", ["receipt", "extra-file", "extra-directory", "gap", "missing-image"])
+def test_prior_exact_file_set_and_receipt_are_revalidated_on_allocation(package: Path, change: str) -> None:
+    pending = _iterate(package)
+    final = _finalize(package, pending)
+    directory = _path(package).parent
+    expected = "EXTRA_FILE"
+    if change == "receipt":
+        modified = copy.deepcopy(final)
+        modified["generated"]["review"]["reviewer"] = "somebody-else"
+        write_json(_path(package), modified)
+        expected = "PREVIOUS_RECEIPT_MISMATCH"
+    elif change == "extra-file":
+        (directory / "pages" / "extra.png").write_bytes(valid_png(100, 81))
+    elif change == "extra-directory":
+        (directory / "pages" / "extra").mkdir()
+    elif change == "gap":
+        directory.rename(directory.with_name("003"))
+        expected = "ITERATION_GAP"
+    else:
+        (directory / pending["generated"]["pages"][0]["powerbi"]["path"]).unlink()
+        expected = "SCREENSHOT_MISSING"
+    assert _code(lambda: _iterate(package, previous=final)) == expected
+
+
+def test_prior_receipt_mutation_after_allocation_breaks_the_pinned_link(package: Path) -> None:
+    first = _iterate(package)
+    final = _finalize(package, first)
+    second = _iterate(package, previous=final)
+    _path(package).write_bytes(_path(package).read_bytes() + b" ")
+    assert _code(lambda: _finalize(package, second)) == "PREVIOUS_RECEIPT_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("page_id", SECOND),
+        ("visual_id", "v-3"),
+        ("kind", "numeric"),
+        ("severity", "low"),
+        ("detail", "a different defect"),
+        ("limitation_ref", {"pointer": "/limitations_encountered/0", "sha256": "0" * 64}),
+    ],
+)
+def test_finding_identity_cannot_be_reused_to_hide_a_different_finding(
+    package: Path, field: str, value: object
+) -> None:
+    first = _iterate(package)
+    finding = _finding()
+    final = _finalize(package, first, review=_review(first, findings=[finding]))
+    second = _iterate(package, previous=final)
+    changed = {**finding, "status": "resolved", field: value}
+    assert (
+        _code(lambda: _finalize(package, second, review=_review(second, findings=[changed])))
+        == "FINDING_IDENTITY_CHANGED"
+    )
+
+
+def test_finding_disappearance_and_terminal_reopening_are_illegal(package: Path) -> None:
+    first = _iterate(package)
+    finding = _finding()
+    final = _finalize(package, first, review=_review(first, findings=[finding]))
+    second = _iterate(package, previous=final)
+    assert _code(lambda: _finalize(package, second)) == "FINDING_DISAPPEARED"
+    resolved = dict(finding, status="resolved")
+    final2 = _finalize(package, second, review=_review(second, findings=[resolved]))
+    third = _iterate(package, previous=final2)
+    assert _code(lambda: _finalize(package, third, review=_review(third, findings=[finding]))) == "FINDING_TRANSITION"
+
+
+def test_new_findings_must_reference_the_actual_inventory(package: Path) -> None:
+    pending = _iterate(package)
+    unknown = _finding(visual_id="imaginary")
+    assert _code(lambda: _finalize(package, pending, review=_review(pending, findings=[unknown]))) == "FINDING_TARGET"
+
+
+def test_prebound_limitation_can_evolve_without_changing_identity(package: Path) -> None:
+    entry = json.loads((package / "migration-spec.json").read_text(encoding="utf-8"))["limitations_encountered"][0]
+    finding = _finding(
+        limitation_ref={"pointer": "/limitations_encountered/0", "sha256": receipt.limitation_entry_sha256(entry)}
+    )
+    first = _iterate(package)
+    final = _finalize(package, first, review=_review(first, findings=[finding]))
+    second = _iterate(package, previous=final)
+    accepted = dict(finding, status="accepted_limitation")
+    assert _finalize(package, second, review=_review(second, findings=[accepted]))["judgement"]["findings"] == [
+        accepted
+    ]
+
+
+@pytest.mark.parametrize(
+    "location",
+    [".pbi/custom.bin", "fabric/Unit.Report/.pbi/unappliedChanges.json", "fabric/Unit.SemanticModel/.pbi/metadata.bin"],
+)
+def test_arbitrary_pbi_bytes_move_the_current_package_revision(package: Path, location: str) -> None:
+    target = receipt.resolve_package(package)
+    path = package.joinpath(*location.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"before")
+    before = rev.package_working_revision(package, target.model_dir)
+    path.write_bytes(b"after")
+    assert rev.package_working_revision(package, target.model_dir) != before
+
+
+def test_only_the_exact_declared_cache_is_separately_hashed(package: Path) -> None:
+    target = receipt.resolve_package(package)
+    cache = target.model_dir / ".pbi" / "cache.abf"
+    cache.parent.mkdir()
+    cache.write_bytes(b"before")
+    before = receipt.artifact_facts(target)
+    cache.write_bytes(b"after")
+    after = receipt.artifact_facts(target)
+    assert before["package_revision"] == after["package_revision"]
+    assert before["model_revision"] == after["model_revision"]
+    assert before["cache_sha256"] != after["cache_sha256"]
+    _iterate(package)
+    assert rev.package_working_revision(package, target.model_dir) == after["package_revision"]
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "fabric/Unit.Report/definition/report.json",
+        "fabric/Unit.SemanticModel/definition/model.tmdl",
+        "fabric/Unit.Report/.pbi/unappliedChanges.json",
+        "migration-spec.json",
+    ],
+)
+def test_finalization_rederives_all_current_artifact_facts(package: Path, relative: str) -> None:
+    pending = _iterate(package)
+    path = package.joinpath(*relative.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if relative == "migration-spec.json":
+        write_json(path, {"limitations_encountered": [{"issue": "changed"}]})
+    else:
+        path.write_bytes(b"changed")
+    assert _code(lambda: _finalize(package, pending)) == "GENERATED_CHANGED"
+
+
+def test_credential_string_cannot_reach_a_pending_receipt_write(package: Path) -> None:
+    pending = _iterate(package)
+    pending["judgement"]["findings"] = [_finding(detail="Authorization: fake-review-token")]
+    assert _code(lambda: receipt.write_receipt(_path(package).parent, pending)) == "PRIVACY"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Authorization: fake-review-token",
+        "password=synthetic-password",
+        "Bearer fake-token",
+        "x-tableau-auth: synthetic-session",
+        "https://customer.example/site/unit",
+        "prefix " + "X:" + chr(92) + "private" + chr(92) + "file",
+        "two\nlines",
+    ],
+)
+def test_every_reviewer_string_crosses_central_privacy_containment(package: Path, text: str) -> None:
+    pending = _iterate(package)
+    assert (
+        _code(lambda: _finalize(package, pending, review=_review(pending, findings=[_finding(detail=text)])))
+        == "PRIVACY"
+    )
+
+
+def test_generated_strings_are_contained_before_pending_output(package: Path) -> None:
+    path = package / "fabric" / "Unit.Report" / "definition" / "pages" / PAGE / "page.json"
+    write_json(path, {"name": PAGE, "displayName": "Authorization: fake-server-echo"})
+    assert _code(lambda: _iterate(package)) == "PRIVACY"
+    assert not _path(package).exists()
+
+
+@pytest.mark.parametrize("reviewer", ["name with spaces", "reviewer:token", "reviewer\n", "reviewer" + chr(0x1F600)])
+def test_reviewer_identifiers_have_a_safe_closed_format(package: Path, reviewer: str) -> None:
+    assert _code(lambda: _iterate(package, reviewer=reviewer)) in {"SCHEMA", "PRIVACY"}
+
+
+def test_reader_invalid_utf8_has_a_fixed_named_refusal(tmp_path: Path) -> None:
+    path = tmp_path / "input.json"
+    path.write_bytes(b'{"unit":"\xff"}')
+    try:
+        rev.read_json(path)
+    except Exception as error:  # Deliberately distinguishes the raw decode exception under mutation.
+        observed = type(error).__name__, getattr(error, "code", None), str(error)
+    else:
+        observed = "accepted", None, ""
+    assert observed == ("RevisionError", "JSON_NOT_UTF8", "JSON_NOT_UTF8: JSON input is not valid UTF-8")
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "package-manifest.json",
+        "fabric/Unit.pbip",
+        "fabric/Unit.Report/definition.pbir",
+        "fabric/Unit.Report/definition/pages/pages.json",
+        f"fabric/Unit.Report/definition/pages/{PAGE}/page.json",
+        f"fabric/Unit.Report/definition/pages/{PAGE}/visuals/v-1/visual.json",
+        "source-provenance.json",
+        "migration-spec.json",
+        "oracle/oracle-manifest.json",
+    ],
+)
+def test_every_package_json_reader_refuses_invalid_utf8(package: Path, relative: str) -> None:
+    package.joinpath(*relative.split("/")).write_bytes(b"\xff")
+    assert _code(lambda: _iterate(package)) == "JSON_NOT_UTF8"
+    assert not _path(package).exists()
+
+
+def test_strict_reader_refuses_duplicate_keys_and_nonfinite_tokens(tmp_path: Path) -> None:
+    for text in ('{"a":1,"a":2}', '{"x":NaN}', '{"x":Infinity}', '{"x":1e999}'):
+        path = tmp_path / "input.json"
+        path.write_text(text, encoding="utf-8")
+        assert _code(lambda: receipt.read_strict_json(path)) == "JSON_INVALID"
+
+
+def test_console_safe_print_survives_strict_cp1252() -> None:
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="cp1252", errors="strict", newline="\n")
+    try:
+        capture._emit("refusal " + chr(0x1F600), stream=stream)
+        stream.flush()
+        outcome = buffer.getvalue()
+    except UnicodeEncodeError:
+        outcome = b"unicode-crash"
+    assert outcome == b"refusal \\U0001f600\n"
+    stream.detach()
+
+
+def test_cli_invalid_utf8_is_ascii_safe_and_never_leaks_traceback(package: Path) -> None:
+    (package / "package-manifest.json").write_bytes(b"\xff")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "capture_powerbi_pages.py"),
+            "iterate",
+            "--package",
+            str(package),
+            "--pid",
+            str(PID),
+        ],
+        capture_output=True,
+        check=False,
+        env={**os.environ, "PYTHONIOENCODING": "cp1252:strict"},
+    )
+    assert result.returncode == capture.EXIT_REFUSED
+    assert b"REFUSED: JSON_NOT_UTF8:" in result.stdout
+    assert b"Traceback" not in result.stderr and str(package).encode() not in result.stdout + result.stderr
+
+
+def test_cli_uses_external_capture_pin_and_separate_judgement(
+    package: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    args = capture.parse_args(
+        ["iterate", "--package", str(package), "--pid", str(PID), "--poll", "1", "--stable-seconds", "2"]
+    )
+    assert capture.cmd_iterate(args, _runtime(package)) == 0
+    output = capsys.readouterr().out
+    token = output.split("CAPTURE_SHA256=", 1)[1].splitlines()[0]
+    pending = receipt.read_strict_json(_path(package))
+    review = tmp_path / "review.json"
+    write_json(review, _review(pending))
+    args = capture.parse_args(
+        ["finalize", "--package", str(package), "--capture-sha256", token, "--judgement", str(review)]
+    )
+    assert capture.cmd_finalize(args, _runtime(package)) == 0
+    output = capsys.readouterr().out
+    assert "outcome incomplete" in output and "FINAL_SHA256=" in output
+
+
+@pytest.mark.parametrize("option", ["--desktop-file-path", "--data-evidence"])
+def test_cli_has_no_caller_authored_proof_flags(option: str) -> None:
+    with pytest.raises(SystemExit) as caught:
+        capture.parse_args(["iterate", "--package", "unit", "--pid", "1234", option, "forged"])
+    assert caught.value.code == capture.EXIT_USAGE
+
+
+def test_subset_is_triage_and_cannot_be_promoted_by_reviewer(package: Path) -> None:
+    pending = _iterate(package, options=_options(page_ids=frozenset({PAGE})))
+    assert pending["mode"] == "triage" and pending["generated"]["scope"] == "subset"
+    assert _finalize(package, pending)["outcome"] == "incomplete"
+    assert (
+        _code(lambda: _iterate(package, options=_options(page_ids=frozenset({PAGE})), mode="sign_off"))
+        == "SUBSET_CANNOT_SIGN_OFF"
+    )
+
+
+def test_failed_capture_removes_only_its_own_allocation(package: Path) -> None:
+    runtime = _runtime(package)
+    broken = capture.CaptureRuntime(
+        lambda *_args: False, runtime.sleep, runtime.clock, runtime.state_reader, runtime.reload
+    )
+    assert _code(lambda: _iterate(package, runtime=broken)) == "CAPTURE_FAILED"
+    assert not _path(package).parent.exists()
+
+
+def test_finalization_cannot_be_repeated(package: Path) -> None:
+    pending = _iterate(package)
+    final = _finalize(package, pending)
+    assert _code(lambda: _finalize(package, final)) == "ALREADY_FINAL"

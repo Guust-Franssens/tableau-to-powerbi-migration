@@ -1,129 +1,77 @@
-#!/usr/bin/env python
 """
-purpose: Strict schema, canonical allocation and finalization for a package-local review iteration.
-usage:   library, no CLI. Driven by `scripts/capture_powerbi_pages.py iterate|finalize`.
+purpose: Produce and finalize package-local, revision-bound Phase-2 comparison receipts.
+usage:   capture_powerbi_pages.py iterate|finalize; this module has no CLI.
 
-What one iteration is
----------------------
-``<package>/validation/iterations/<NNN>/`` holding retained stable page PNGs and exactly one
-``iteration.json``. The receipt has two halves that must never be confused:
+The receipt is NOT a reviewer-editable document. Iterate returns its byte checksum; finalize takes
+that producer-returned checksum and separate judgement input. A later allocation likewise takes
+the previous final receipt's returned checksum. These are caller-held compare-and-swap tokens,
+not signatures: computing a replacement checksum from edited disk is not a trusted invocation.
+No signing service, secondary registry, package gate, promotion or completion aggregator is added.
 
-* ``generated`` - produced HERE from the CURRENT package bytes (report/model revisions, PBIR page
-  and visual inventory, screenshot hashes, Tableau evidence re-derived through
-  ``reference_evidence``, predecessor linkage). Capture output is never its own denominator: the
-  page set comes from ``definition/pages``, not from whatever PNGs happen to exist.
-* ``judgement`` - the reviewer's verdicts, generated PENDING and constrained to a closed vocabulary.
-  The producer never turns ``pending`` or ``unverified`` into ``pass``.
-
-Finalization re-derives every generated identity immediately before writing, so an edit to the
-report, the model, the cache, a retained screenshot or a prior receipt makes the iteration stale
-rather than quietly authoritative.
-
-This is EVIDENCE PRODUCTION, not the phase-2 verdict. The aggregator that reads a chain of these and
-decides whether a unit is done is a separate, later slice (issue #363, slice B).
+All filesystem identities, inventory, images, Tableau admission, data state and outcome are rebuilt
+at finalization. Capture-time timing observations cannot be recovered from a PNG; they are immutable
+inputs pinned by the caller's capture checksum and checked for legal finite combinations.
+Until the existing query/refresh tools provide trusted structured results, data and numeric fidelity
+are unverified. A final receipt therefore records an INCOMPLETE review, never COMPLETE.
 """
 
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import math
 import os
+import posixpath
 import re
-from collections.abc import Callable, Iterable, Iterator
+import subprocess
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import jsonschema
+
 import current_artifact_revision as rev
 import host_paths
 import object_identity as oid
-from reference_evidence import (
-    Evidence,
-    UnitIdentity,
-    json_object,
-    oracle_evidence,
-    provenance_origin,
-    reference_evidence,
-    sha256_of,
-)
+import package_filesystem as filesystem
+import reference_evidence as evidence
+from tableau_env import contains_credential
 
-SCHEMA_VERSION = 1
-RECEIPT_NAME = "iteration.json"
-ITERATIONS_RELPATH = ("validation", "iterations")
-PAGES_DIRNAME = "pages"
-PACKAGE_MANIFEST_NAME = "package-manifest.json"
-MIGRATION_SPEC_NAME = "migration-spec.json"
+SCHEMA_VERSION = 2
 TOOL_NAME = "capture_powerbi_pages"
-
-ITERATION_NAME_RE = re.compile(r"^\d{3}$")
-SAFE_STEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
-FINDING_ID_RE = re.compile(r"^F-\d{3,}$")
-
-MODE_SIGN_OFF = "sign_off"
-MODE_TRIAGE = "triage"
-MODES = (MODE_SIGN_OFF, MODE_TRIAGE)
-
-SCOPE_ALL_PAGES = "all_pages"
-SCOPE_SUBSET = "subset"
-
-STATE_PENDING = "pending"
-STATE_FINAL = "final"
-
-STATUS_PENDING = "pending"
-STATUS_PASS = "pass"
-STATUS_MISMATCH = "mismatch"
-STATUS_UNVERIFIED = "unverified"
-STATUS_NOT_APPLICABLE = "not_applicable"
-JUDGEMENT_STATUSES = (STATUS_PENDING, STATUS_PASS, STATUS_MISMATCH, STATUS_UNVERIFIED, STATUS_NOT_APPLICABLE)
-#: A status that COMPLETES a sign-off. `unverified` is deliberately absent - it is not a pass.
-COMPLETING_STATUSES = frozenset({STATUS_PASS, STATUS_NOT_APPLICABLE})
-
-FINDING_OPEN = "still_open"
-FINDING_RESOLVED = "resolved"
-FINDING_ACCEPTED = "accepted_limitation"
-FINDING_STATUSES = (FINDING_OPEN, FINDING_RESOLVED, FINDING_ACCEPTED)
-FINDING_KINDS = ("visual", "numeric", "data", "other")
-FINDING_SEVERITIES = ("low", "medium", "high")
-
-OUTCOME_COMPLETE = "complete"
-OUTCOME_INCOMPLETE = "incomplete"
-
+TOOL_VERSION = "2.0.0"
+RECEIPT_NAME = "iteration.json"
+PAGES_DIRNAME = "pages"
+MODES = ("sign_off", "triage")
+MODE_SIGN_OFF, MODE_TRIAGE = MODES
+STATE_PENDING, STATE_FINAL = "pending", "final"
+OUTCOME_INCOMPLETE, OUTCOME_COMPLETE = "incomplete", "complete"
+STATUS_PENDING, STATUS_PASS, STATUS_UNVERIFIED = "pending", "pass", "unverified"
+FINDING_OPEN, FINDING_RESOLVED, FINDING_ACCEPTED = "still_open", "resolved", "accepted_limitation"
 DATA_STATUS_PENDING = "pending"
-DATA_STATUS_ACCEPTED = "accepted"
-DATA_MODE_LIVE = "live_query"
-DATA_MODE_PERSISTED = "persisted_cache"
-DATA_VERDICT_OK = "DATA_OK"
-DATA_VERDICT_PERSISTED = "DATA_OK + PERSISTED"
-DATA_TOOLS = ("probe_desktop_query", "refresh_pbip_model")
-
-#: Why data evidence is `pending` unless a tool-produced record is handed in. Stated as a SEAM, not
-#: as an excuse: `probe_desktop_query.probe()` emits `PREFLIGHT: DATA_OK` and its per-canary row
-#: counts through `emit` (printed text) and returns an int exit code, and `refresh_pbip_model`
-#: likewise prints `REFRESH: DATA_OK + PERSISTED` with no structured result object. Consuming either
-#: in-process would mean editing those tools, which is outside this producer's closed surface.
 DATA_PENDING_REASON = (
-    "no tool-produced data record was supplied; probe_desktop_query.probe and refresh_pbip_model "
-    "expose their verdict and canary row counts as printed text plus an int exit code only, so "
-    "there is no structured result this producer can consume without editing them"
+    "probe_desktop_query and refresh_pbip_model do not expose trusted structured data evidence; "
+    "data and numeric fidelity remain unverified"
 )
-
-#: Free text a reviewer may write. Single line, bounded, so raw tool output and tracebacks - which
-#: are multi-line and routinely carry host paths - cannot be pasted in.
-MAX_DETAIL_CHARS = 500
-
-#: A remote URL. ⚠️ Deliberately NOT a second copy of the host-path definition - `host_paths` owns
-#: that question and is used for it below. This is the narrower one it cannot answer: a Tableau
-#: Server/Cloud view URL names the SERVER, the SITE and the PROJECT, none of which may travel in a
-#: shareable receipt even though none of them is a location on this host.
-URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://", re.IGNORECASE)
+MAX_SECONDS = 3600
+MAX_FRAMES = 1_000_000
+MAX_COUNT = (1 << 53) - 1
+SHA_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
+ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}", re.ASCII)
+ITERATION_RE = re.compile(r"[0-9]{3}", re.ASCII)
+FINDING_RE = re.compile(r"F-[0-9]{3,8}", re.ASCII)
+URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+StatusReader = Callable[[int], dict[str, Any]]
 
 
 class ReceiptError(RuntimeError):
-    """A named refusal. Tests assert on ``code``; ``detail`` is for the operator."""
+    """A named, ASCII-safe refusal without reflected input or exception text."""
 
-    def __init__(self, code: str, detail: str) -> None:
+    def __init__(self, code: str, detail: str = "iteration input refused") -> None:
         super().__init__(f"{code}: {detail}")
         self.code = code
         self.detail = detail
@@ -131,803 +79,510 @@ class ReceiptError(RuntimeError):
 
 @contextmanager
 def _named_refusals() -> Iterator[None]:
-    """Re-raise a revision refusal as a receipt refusal, KEEPING its code.
-
-    One exception type crosses this module's boundary, so a caller never has to know which helper
-    refused - while the code stays the specific one, because "it failed" and "it failed for this
-    named reason" are different claims and only the second is actionable.
-    """
     try:
         yield
     except rev.RevisionError as error:
         raise ReceiptError(error.code, error.detail) from error
+    except (OSError, UnicodeError, ValueError, RecursionError) as error:
+        raise ReceiptError("INPUT_UNREADABLE", "iteration input could not be read safely") from error
 
 
-def report_inventory(report_dir: Path) -> list[rev.PageInventory]:
-    """The current PBIR page/visual inventory, with revision refusals renamed to receipt ones."""
+def read_strict_json(path: Path) -> dict[str, Any]:
+    """One strict reader for receipts, reviewer input, manifests, PBIR and provenance."""
     with _named_refusals():
-        return rev.report_inventory(report_dir)
+        return rev.read_json(path)
 
 
-# --------------------------------------------------------------------------------------------------
-# strict JSON
-# --------------------------------------------------------------------------------------------------
-
-
-def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """Object hook that REFUSES a duplicate key rather than silently keeping the last one.
-
-    ``json.loads`` keeps the last occurrence, so ``{"status":"pass","status":"pending"}`` reads as a
-    pass with no diagnostic at all. A receipt is read by a gate; a document with two answers to one
-    question has no answer.
-    """
-    seen: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in seen:
-            raise ReceiptError("DUPLICATE_JSON_KEY", f"the key {key!r} appears twice in one object")
-        seen[key] = value
-    return seen
-
-
-def read_strict_json(path: Path) -> Any:
-    """Read JSON, refusing a duplicate key or unreadable bytes with a named error."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as error:
-        raise ReceiptError("RECEIPT_UNREADABLE", f"{path.name} could not be read ({error.strerror})") from error
-    try:
-        return json.loads(text, object_pairs_hook=_no_duplicate_keys)
-    except json.JSONDecodeError as error:
-        raise ReceiptError("RECEIPT_UNREADABLE", f"{path.name} is not valid JSON ({error.msg})") from error
-
-
-# --------------------------------------------------------------------------------------------------
-# closed schema
-# --------------------------------------------------------------------------------------------------
-
-Validator = Callable[[Any, str], None]
-
-
-def _fail(pointer: str, detail: str) -> None:
-    raise ReceiptError("SCHEMA", f"{pointer or '/'}: {detail}")
-
-
-def _string(value: Any, pointer: str) -> None:
-    if not isinstance(value, str) or not value.strip():
-        _fail(pointer, "expected a non-empty string")
-
-
-def _boolean(value: Any, pointer: str) -> None:
-    if not isinstance(value, bool):
-        _fail(pointer, "expected a boolean")
-
-
-def _integer(value: Any, pointer: str) -> None:
-    if not isinstance(value, int) or isinstance(value, bool):
-        _fail(pointer, "expected an integer")
-
-
-def _number(value: Any, pointer: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        _fail(pointer, "expected a number")
-
-
-def _enum(*allowed: str) -> Validator:
-    def check(value: Any, pointer: str) -> None:
-        if value not in allowed:
-            _fail(pointer, f"expected one of {list(allowed)}, got {value!r}")
-
-    return check
-
-
-def _const(expected: Any) -> Validator:
-    def check(value: Any, pointer: str) -> None:
-        if value != expected:
-            _fail(pointer, f"expected {expected!r}, got {value!r}")
-
-    return check
-
-
-def _nullable(inner: Validator) -> Validator:
-    def check(value: Any, pointer: str) -> None:
-        if value is not None:
-            inner(value, pointer)
-
-    return check
-
-
-def _list_of(inner: Validator) -> Validator:
-    def check(value: Any, pointer: str) -> None:
-        if not isinstance(value, list):
-            _fail(pointer, "expected a list")
-        for index, item in enumerate(value):
-            inner(item, f"{pointer}/{index}")
-
-    return check
-
-
-def _obj(fields: dict[str, Validator]) -> Validator:
-    """A CLOSED object: every declared key is required and every undeclared key is refused."""
-
-    def check(value: Any, pointer: str) -> None:
-        if not isinstance(value, dict):
-            _fail(pointer, "expected an object")
-        unknown = sorted(set(value) - set(fields))
-        if unknown:
-            raise ReceiptError("UNKNOWN_FIELD", f"{pointer or '/'}: unknown field(s) {unknown}")
-        missing = sorted(set(fields) - set(value))
-        if missing:
-            _fail(pointer, f"missing field(s) {missing}")
-        for key, validator in fields.items():
-            validator(value[key], f"{pointer}/{key}")
-
-    return check
-
-
-_tableau_schema = _obj(
-    {
-        "manifest_sha256": _string,
-        "path": _string,
-        "sha256": _string,
-        "grade": _string,
-    }
-)
-
-_powerbi_schema = _obj(
-    {
-        "path": _string,
-        "sha256": _string,
-        "byte_count": _integer,
-        "converged": _boolean,
-        "frames": _integer,
-        "stable_seconds": _number,
-        "settled_seconds": _number,
-    }
-)
-
-_generated_page_schema = _obj(
-    {
-        "page_id": _string,
-        "display_name": _string,
-        "expected_visual_ids": _list_of(_string),
-        "tableau": _nullable(_tableau_schema),
-        "tableau_reason": _nullable(_string),
-        "powerbi": _powerbi_schema,
-    }
-)
-
-_data_evidence_schema = _obj(
-    {
-        "status": _enum(DATA_STATUS_PENDING, DATA_STATUS_ACCEPTED),
-        "mode": _nullable(_enum(DATA_MODE_LIVE, DATA_MODE_PERSISTED)),
-        "verdict": _nullable(_enum(DATA_VERDICT_OK, DATA_VERDICT_PERSISTED)),
-        "tool": _nullable(_enum(*DATA_TOOLS)),
-        "canaries": _list_of(_obj({"table": _string, "row_count": _integer})),
-        "model_revision": _nullable(_string),
-        "cache_sha256": _nullable(_string),
-        "pending_reason": _nullable(_string),
-    }
-)
-
-_generated_schema = _obj(
-    {
-        "generated_at": _string,
-        "scope": _enum(SCOPE_ALL_PAGES, SCOPE_SUBSET),
-        "artifact": _obj(
-            {
-                "unit": _string,
-                "kind": _string,
-                "report_path": _string,
-                "model_path": _nullable(_string),
-                "package_revision": _string,
-                "report_revision": _string,
-                "model_revision": _nullable(_string),
-                "cache_sha256": _nullable(_string),
-                "cache_byte_count": _nullable(_integer),
-            }
-        ),
-        "review": _obj(
-            {
-                "reviewer": _string,
-                "session_id": _nullable(_string),
-                "tool": _const(TOOL_NAME),
-                "tool_version": _string,
-                "desktop_binding_checked": _boolean,
-                "desktop_binding_matches": _nullable(_boolean),
-            }
-        ),
-        "previous": _nullable(
-            _obj(
-                {
-                    "iteration": _string,
-                    "receipt_sha256": _string,
-                    "report_revision": _string,
-                    "model_revision": _nullable(_string),
-                }
-            )
-        ),
-        "limitations": _obj({"spec_path": _nullable(_string), "entry_count": _integer}),
-        "data_evidence": _data_evidence_schema,
-        "pages": _list_of(_generated_page_schema),
-        "changes_from_previous": _list_of(
-            _obj(
-                {
-                    "page_id": _string,
-                    "before_sha256": _nullable(_string),
-                    "after_sha256": _nullable(_string),
-                }
-            )
-        ),
-    }
-)
-
-_judgement_schema = _obj(
-    {
-        "completed_at": _nullable(_string),
-        "pages": _list_of(
-            _obj(
-                {
-                    "page_id": _string,
-                    "whole_page_status": _enum(*JUDGEMENT_STATUSES),
-                    "visual_results": _list_of(
-                        _obj(
-                            {
-                                "visual_id": _string,
-                                "status": _enum(*JUDGEMENT_STATUSES),
-                                "finding_ids": _list_of(_string),
-                            }
-                        )
-                    ),
-                    "numeric_results": _list_of(
-                        _obj(
-                            {
-                                "visual_id": _string,
-                                "status": _enum(*JUDGEMENT_STATUSES),
-                                "tableau_evidence_sha256": _nullable(_string),
-                                "powerbi_query_sha256": _nullable(_string),
-                                "powerbi_result_sha256": _nullable(_string),
-                                "finding_ids": _list_of(_string),
-                            }
-                        )
-                    ),
-                }
-            )
-        ),
-        "findings": _list_of(
-            _obj(
-                {
-                    "id": _string,
-                    "page_id": _nullable(_string),
-                    "visual_id": _nullable(_string),
-                    "kind": _enum(*FINDING_KINDS),
-                    "severity": _enum(*FINDING_SEVERITIES),
-                    "status": _enum(*FINDING_STATUSES),
-                    "detail": _string,
-                    "limitation_ref": _nullable(_obj({"pointer": _string, "sha256": _string})),
-                }
-            )
-        ),
-    }
-)
-
-_receipt_schema = _obj(
-    {
-        "schema_version": _const(SCHEMA_VERSION),
-        "iteration": _string,
-        "mode": _enum(*MODES),
-        "state": _enum(STATE_PENDING, STATE_FINAL),
-        "outcome": _nullable(_enum(OUTCOME_COMPLETE, OUTCOME_INCOMPLETE)),
-        "generated": _generated_schema,
-        "judgement": _judgement_schema,
-    }
-)
-
-
-def validate_receipt(payload: Any) -> dict[str, Any]:
-    """Schema-check a receipt document and return it, or raise a named refusal."""
-    _receipt_schema(payload, "")
-    return payload
-
-
-# --------------------------------------------------------------------------------------------------
-# privacy
-# --------------------------------------------------------------------------------------------------
-
-
-def _strings(value: Any, pointer: str = "") -> Iterable[tuple[str, str]]:
+def _strings(value: Any) -> Iterator[str]:
     if isinstance(value, dict):
         for key, item in value.items():
-            yield from _strings(item, f"{pointer}/{key}")
+            if isinstance(key, str):
+                yield key
+            yield from _strings(item)
     elif isinstance(value, list):
-        for index, item in enumerate(value):
-            yield from _strings(item, f"{pointer}/{index}")
+        for item in value:
+            yield from _strings(item)
     elif isinstance(value, str):
-        yield pointer, value
+        yield value
 
 
 def assert_shareable(payload: Any) -> None:
-    """Refuse a receipt carrying anything that must not leave the machine that produced it.
-
-    A receipt is committed and reviewed, so the rule is the SHIPPED one:
-    :func:`host_paths.discloses_host_location` (the single repo definition - drive, UNC and POSIX
-    roots, spelling-normalised) rather than a local regex that any prefix defeats. On top of it:
-
-    * a remote URL, because a Tableau Server/Cloud URL names the server, the site and the project;
-    * a line break, which is how raw bridge output and a traceback arrive;
-    * an over-long free-text field, for the same reason.
-
-    The producer never writes tool output, exception text or a captured path into the receipt at
-    all - this runs over the WHOLE serialized document immediately before every write, so the guard
-    covers the reviewer's fields too, not merely the generated ones.
-    """
-    for pointer, text in _strings(payload):
-        if "\n" in text or "\r" in text:
-            raise ReceiptError("PRIVACY", f"{pointer}: contains a line break, so it may be raw tool output")
-        if len(text) > MAX_DETAIL_CHARS:
-            raise ReceiptError("PRIVACY", f"{pointer}: is longer than {MAX_DETAIL_CHARS} characters")
-        if host_paths.discloses_host_location(text):
-            raise ReceiptError("PRIVACY", f"{pointer}: discloses a location on a host")
-        if URL_RE.search(text):
-            raise ReceiptError("PRIVACY", f"{pointer}: contains a URL, which names a server and site")
+    """Apply central credential and host-location containment to EVERY key and string value."""
+    for text in _strings(payload):
+        if (
+            len(text) > 500
+            or any(ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF for char in text)
+            or host_paths.discloses_host_location(text)
+            or URL_RE.search(text)
+            or contains_credential(text)
+        ):
+            raise ReceiptError("PRIVACY", "a string is not safe for a shared receipt")
 
 
-# --------------------------------------------------------------------------------------------------
-# the package
-# --------------------------------------------------------------------------------------------------
+def _object(**properties: Any) -> dict[str, Any]:
+    return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+
+
+def _array(items: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "array", "items": items}
+
+
+def _nullable(inner: dict[str, Any]) -> dict[str, Any]:
+    return {"anyOf": [inner, {"type": "null"}]}
+
+
+TEXT = {"type": "string", "minLength": 1, "maxLength": 500}
+IDENTITY = {"type": "string", "pattern": r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$"}
+SHA = {"type": "string", "pattern": r"^[0-9a-f]{64}$"}
+REVISION = {"type": "string", "pattern": r"^sha256:[0-9a-f]{64}$"}
+COUNT = {"type": "integer", "minimum": 0, "maximum": MAX_COUNT}
+SECONDS = {"type": "number", "minimum": 0, "maximum": MAX_SECONDS}
+POSITIVE_SECONDS = {**SECONDS, "exclusiveMinimum": 0}
+STATUSES = {"enum": ["pending", "pass", "layout_match", "mismatch", "unverified"]}
+TIME = {"type": "string", "pattern": r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"}
+CAPTURE_SCHEMA = _object(
+    converged={"type": "boolean"},
+    frames={"type": "integer", "minimum": 1, "maximum": MAX_FRAMES},
+    poll_seconds=POSITIVE_SECONDS,
+    stable_seconds=POSITIVE_SECONDS,
+    max_wait_seconds=POSITIVE_SECONDS,
+    settled_seconds=SECONDS,
+    stable_elapsed_seconds=SECONDS,
+)
+PAGE_SCHEMA = _object(
+    page_id=TEXT,
+    display_name=TEXT,
+    expected_visual_ids=_array(TEXT),
+    tableau=_nullable(_object(manifest_sha256=SHA, path=TEXT, sha256=SHA, grade=TEXT)),
+    tableau_reason=_nullable(TEXT),
+    powerbi=_object(path=TEXT, sha256=SHA, byte_count={**COUNT, "minimum": 1}, capture=CAPTURE_SCHEMA),
+)
+FINDING_SCHEMA = _object(
+    id={"type": "string", "pattern": r"^F-[0-9]{3,8}$"},
+    page_id=_nullable(TEXT),
+    visual_id=_nullable(TEXT),
+    kind={"enum": ["visual", "numeric", "data", "other"]},
+    severity={"enum": ["low", "medium", "high"]},
+    status={"enum": [FINDING_OPEN, FINDING_RESOLVED, FINDING_ACCEPTED]},
+    detail=TEXT,
+    limitation_ref=_nullable(_object(pointer=TEXT, sha256=SHA)),
+)
+JUDGEMENT_SCHEMA = _object(
+    completed_at=_nullable(TIME),
+    pages=_array(
+        _object(
+            page_id=TEXT,
+            whole_page_status=STATUSES,
+            visual_results=_array(_object(visual_id=TEXT, status=STATUSES, finding_ids=_array(TEXT))),
+            numeric_results=_array(
+                _object(
+                    visual_id=TEXT,
+                    status=STATUSES,
+                    tableau_evidence_sha256=_nullable(SHA),
+                    powerbi_query_sha256=_nullable(SHA),
+                    powerbi_result_sha256=_nullable(SHA),
+                    finding_ids=_array(TEXT),
+                )
+            ),
+        )
+    ),
+    findings=_array(FINDING_SCHEMA),
+)
+GENERATED_SCHEMA = _object(
+    generated_at=TIME,
+    scope={"enum": ["all_pages", "subset"]},
+    artifact=_object(
+        unit=TEXT,
+        kind={"enum": ["workbook", "datasource"]},
+        report_path=TEXT,
+        model_path=TEXT,
+        pbip_path=TEXT,
+        package_revision=REVISION,
+        report_revision=REVISION,
+        model_revision=REVISION,
+        cache_sha256=_nullable(SHA),
+        cache_byte_count=_nullable(COUNT),
+    ),
+    review=_object(
+        reviewer=IDENTITY,
+        session_id=_nullable(IDENTITY),
+        tool={"const": TOOL_NAME},
+        tool_version={"const": TOOL_VERSION},
+        desktop_pid={"type": "integer", "minimum": 1, "maximum": 2**32 - 1},
+        desktop_binding_matches={"const": True},
+        reload_confirmed={"const": True},
+    ),
+    previous=_nullable(_object(iteration=TEXT, receipt_sha256=SHA)),
+    limitations=_object(spec_path=_nullable(TEXT), entry_count=COUNT),
+    data_evidence=_object(status={"const": DATA_STATUS_PENDING}, reason={"const": DATA_PENDING_REASON}),
+    pages=_array(PAGE_SCHEMA),
+    changes_from_previous=_array(_object(page_id=TEXT, before_sha256=_nullable(SHA), after_sha256=_nullable(SHA))),
+)
+RECEIPT_SCHEMA = _object(
+    schema_version={"type": "integer", "const": SCHEMA_VERSION},
+    iteration={"type": "string", "pattern": r"^[0-9]{3}$"},
+    mode={"enum": list(MODES)},
+    state={"enum": [STATE_PENDING, STATE_FINAL]},
+    outcome={"enum": [None, OUTCOME_INCOMPLETE]},
+    generated=GENERATED_SCHEMA,
+    judgement=JUDGEMENT_SCHEMA,
+)
+
+
+def _validate(schema: dict[str, Any], payload: Any) -> None:
+    assert_shareable(payload)
+    try:
+        jsonschema.Draft202012Validator(schema).validate(payload)
+    except (jsonschema.ValidationError, TypeError, ValueError) as error:
+        raise ReceiptError("SCHEMA", "the document does not satisfy the closed receipt schema") from error
+
+    # In-memory callers do not pass through the strict JSON reader.
+    def finite(value: Any) -> None:
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ReceiptError("NONFINITE_NUMBER", "numeric observations must be finite")
+        if isinstance(value, dict):
+            for item in value.values():
+                finite(item)
+        if isinstance(value, list):
+            for item in value:
+                finite(item)
+
+    finite(payload)
+
+
+def _validate_state(payload: dict[str, Any]) -> None:
+    pending = payload["state"] == STATE_PENDING
+    if payload["outcome"] != (None if pending else OUTCOME_INCOMPLETE):
+        raise ReceiptError("STATE_INVALID", "data pending can never produce a complete outcome")
+    if (payload["judgement"]["completed_at"] is None) != pending:
+        raise ReceiptError("STATE_INVALID", "completion time must agree with producer state")
+    if payload["mode"] == MODE_SIGN_OFF and payload["generated"]["scope"] != "all_pages":
+        raise ReceiptError("STATE_INVALID", "a subset cannot be sign-off")
+
+
+def validate_receipt(payload: Any) -> dict[str, Any]:
+    """Closed shape AND semantic combinations; statuses alone never confer evidence."""
+    _validate(RECEIPT_SCHEMA, payload)
+    _validate_state(payload)
+    generated = payload["generated"]
+    artifact = generated["artifact"]
+    if (artifact["cache_sha256"] is None) != (artifact["cache_byte_count"] is None):
+        raise ReceiptError("STATE_INVALID", "cache hash and size must be present together")
+    ids = [row["page_id"] for row in generated["pages"]]
+    if not ids or len(set(ids)) != len(ids):
+        raise ReceiptError("INVENTORY_INVALID", "captured page identifiers must be unique and nonempty")
+    for row in generated["pages"]:
+        if (row["tableau"] is None) == (row["tableau_reason"] is None):
+            raise ReceiptError("STATE_INVALID", "a page needs either admitted evidence or a reason")
+        capture = row["powerbi"]["capture"]
+        if capture["stable_elapsed_seconds"] > capture["settled_seconds"]:
+            raise ReceiptError("CAPTURE_INVALID", "stable dwell exceeds elapsed capture time")
+        if capture["converged"] and (
+            capture["frames"] < 2 or capture["stable_elapsed_seconds"] < capture["stable_seconds"]
+        ):
+            raise ReceiptError("CAPTURE_INVALID", "convergence requires repeated frames and elapsed stable dwell")
+        visuals = row["expected_visual_ids"]
+        if len(set(visuals)) != len(visuals):
+            raise ReceiptError("INVENTORY_INVALID", "visual identifiers must be unique within a page")
+    return payload
 
 
 @dataclass(frozen=True)
-class PackageTarget:  # pylint: disable=too-many-instance-attributes
-    """The ONE canonical report/model this package declares. Resolved without ancestor search.
-
-    Both the declared package-relative path AND the resolved directory are kept for the report and
-    the model, deliberately: the receipt records the DECLARED one (it is shareable and stable) while
-    every read uses the RESOLVED one, and collapsing the pair would mean either recording a host
-    path or re-deriving a resolution at each call site.
-    """
+class PackageTarget:
+    """One package's coherent, walked report/model/PBIP identity."""
 
     root: Path
     unit: str
     kind: str
     report_path: str
-    report_dir: Path
-    model_path: str | None
-    model_dir: Path | None
+    model_path: str
+    pbip_path: str
     asset: Path | None
 
+    @property
+    def report_dir(self) -> Path:
+        """The walked report location."""
+        return self.root.joinpath(*self.report_path.split("/"))
 
-def _contained(root: Path, declared: str, label: str) -> Path:
-    """A package-relative path resolved INSIDE the package, or a named refusal."""
-    if not isinstance(declared, str) or not declared.strip():
-        raise ReceiptError("PACKAGE_MANIFEST", f"{label} is missing from {PACKAGE_MANIFEST_NAME}")
-    if declared.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", declared) or ".." in declared.split("/"):
-        raise ReceiptError("UNSAFE_PATH", f"{label} is not a safe package-relative path")
-    candidate = root / declared
-    resolved_root = root.resolve()
-    resolved = candidate.resolve()
-    if resolved != resolved_root and resolved_root not in resolved.parents:
-        raise ReceiptError("UNSAFE_PATH", f"{label} resolves outside the package")
-    return candidate
+    @property
+    def model_dir(self) -> Path:
+        """The walked model location."""
+        return self.root.joinpath(*self.model_path.split("/"))
+
+    @property
+    def pbip(self) -> Path:
+        """The unique PBIP referencing that report."""
+        return self.root.joinpath(*self.pbip_path.split("/"))
 
 
-def resolve_package(package: Path) -> PackageTarget:
-    """Read the package's own manifest and resolve its canonical report/model.
+def resolve_package(package: Path) -> PackageTarget:  # pylint: disable=too-many-locals
+    """Cross-check exact role references over one strict no-follow filesystem snapshot.
 
-    NO ancestor search, deliberately. Walking upward to find "a report" is how one command ends up
-    operating on a different artifact from the one the caller named, and a receipt that cannot say
-    which artifact it measured is not evidence.
+    The refresh tool's resolver permits absent-reference heuristics and multiple report artifacts;
+    those are not authorities for this single-report producer. Here references are compared with
+    canonical relative names of already-walked roles, never used to open an untrusted target.
     """
-    if not package.is_dir():
-        raise ReceiptError("NOT_A_PACKAGE", "the supplied package path is not a directory")
     with _named_refusals():
-        rev.assert_no_reparse_points(package)
-    manifest_path = package / PACKAGE_MANIFEST_NAME
-    if not manifest_path.is_file():
-        raise ReceiptError("NOT_A_PACKAGE", f"no {PACKAGE_MANIFEST_NAME} beside the supplied path")
-    manifest = read_strict_json(manifest_path)
-    if not isinstance(manifest, dict):
-        raise ReceiptError("PACKAGE_MANIFEST", f"{PACKAGE_MANIFEST_NAME} is not a JSON object")
-    artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, dict):
-        raise ReceiptError("PACKAGE_MANIFEST", f"{PACKAGE_MANIFEST_NAME} declares no artifacts")
-    unit = manifest.get("unit")
-    kind = manifest.get("kind")
-    if not isinstance(unit, str) or not unit.strip() or not isinstance(kind, str) or not kind.strip():
-        raise ReceiptError("PACKAGE_MANIFEST", f"{PACKAGE_MANIFEST_NAME} declares no unit/kind")
-    report_rel = artifacts.get("report")
-    report_dir = _contained(package, report_rel, "artifacts.report")
-    if not report_dir.is_dir():
-        raise ReceiptError("PACKAGE_MANIFEST", "artifacts.report does not exist in the package")
-    model_rel = artifacts.get("model")
-    model_dir = _contained(package, model_rel, "artifacts.model") if isinstance(model_rel, str) else None
-    if model_dir is not None and not model_dir.is_dir():
-        raise ReceiptError("PACKAGE_MANIFEST", "artifacts.model does not exist in the package")
-    asset_rel = artifacts.get("asset")
-    asset = _contained(package, asset_rel, "artifacts.asset") if isinstance(asset_rel, str) else None
-    return PackageTarget(
-        root=package,
-        unit=unit,
-        kind=kind,
-        report_path=report_rel,
-        report_dir=report_dir,
-        model_path=model_rel if model_dir is not None else None,
-        model_dir=model_dir,
-        asset=asset if asset is not None and asset.is_file() else None,
+        files, directories = rev.tree_files(package)
+    if "package-manifest.json" not in files:
+        raise ReceiptError("NOT_A_PACKAGE", "the supplied directory has no package manifest")
+    manifest = read_strict_json(files["package-manifest.json"])
+    roles = manifest.get("artifacts")
+    if not isinstance(roles, dict):
+        raise ReceiptError("PACKAGE_MANIFEST", "the manifest must declare artifact roles")
+    report, model, asset = (roles.get(key) for key in ("report", "model", "asset"))
+    for role, suffix in ((report, ".Report"), (model, ".SemanticModel")):
+        if not isinstance(role, str) or not filesystem.is_canonical_key(role) or not role.endswith(suffix):
+            raise ReceiptError("UNSAFE_PATH", "artifact roles must be canonical package-relative paths")
+        if role not in directories:
+            raise ReceiptError("PACKAGE_MANIFEST", "a declared artifact directory is missing")
+    pbips = [key for key in files if key.startswith("fabric/") and key.lower().endswith(".pbip")]
+    if len(pbips) != 1:
+        raise ReceiptError("PBIP_IDENTITY", "the package must hold exactly one PBIP, without decoys")
+    pbip = pbips[0]
+    project = read_strict_json(files[pbip])
+    expected_report = posixpath.relpath(report, posixpath.dirname(pbip))
+    if project.get("artifacts") != [{"report": {"path": expected_report}}]:
+        raise ReceiptError("PBIP_IDENTITY", "the unique PBIP must reference exactly the declared report")
+    binding = files.get(report + "/definition.pbir")
+    if binding is None or model + "/definition/model.tmdl" not in files:
+        raise ReceiptError("MODEL_BINDING", "the declared report or model definition is missing")
+    expected_model = posixpath.relpath(model, report)
+    if read_strict_json(binding).get("datasetReference") != {"byPath": {"path": expected_model}}:
+        raise ReceiptError("MODEL_BINDING", "definition.pbir must bind exactly the declared model")
+    unit, kind = manifest.get("unit"), manifest.get("kind")
+    if not isinstance(unit, str) or not unit.strip() or kind not in {"workbook", "datasource"}:
+        raise ReceiptError("PACKAGE_MANIFEST", "unit and kind must be explicitly declared")
+    if asset is not None and (not isinstance(asset, str) or asset not in files):
+        raise ReceiptError("PACKAGE_MANIFEST", "the source asset must be a walked package file")
+    assert_shareable({"unit": unit, "report": report, "model": model, "pbip": pbip})
+    return PackageTarget(package, unit, kind, report, model, pbip, files.get(asset))
+
+
+def bridge_json(command: str, pid: int) -> dict[str, Any]:
+    """Read the installed bridge's structured result; never persist stdout/stderr or error text."""
+    try:
+        result = subprocess.run(
+            ["powerbi-desktop", command, "--pid", str(pid), "--wait-seconds", "30"],
+            capture_output=True,
+            shell=True,
+            check=False,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            raise ReceiptError("DESKTOP_UNVERIFIED", "the PID-scoped bridge operation failed")
+        return filesystem.parse_manifest_text(result.stdout.decode("utf-8"))
+    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError, filesystem._ManifestError) as error:  # pylint: disable=protected-access
+        raise ReceiptError("DESKTOP_UNVERIFIED", "the PID-scoped bridge result was unavailable or invalid") from error
+
+
+def bridge_status(pid: int) -> dict[str, Any]:
+    """Trusted default runtime status, not a caller-supplied path."""
+    return bridge_json("status", pid)
+
+
+def bridge_reload(pid: int) -> bool:
+    """Reload only the selected instance; a fresh status check follows this operation."""
+    # Bridge CLI 0.1.2 emits {status: "ok", pid, result: {success: true}}, not "succeeded".
+    response = bridge_json("reload", pid)
+    result = response.get("result")
+    return (
+        response.get("status") == "ok"
+        and isinstance(response.get("pid"), int)
+        and not isinstance(response["pid"], bool)
+        and response["pid"] == pid
+        and isinstance(result, dict)
+        and result.get("success") is True
     )
 
 
-# --------------------------------------------------------------------------------------------------
-# the iteration chain
-# --------------------------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Iteration:
-    """One already-written iteration, with its receipt verified readable and schema-valid."""
-
-    name: str
-    directory: Path
-    receipt_path: Path
-    receipt_sha256: str
-    payload: dict[str, Any]
-
-
-def iterations_root(package: Path) -> Path:
-    """`<package>/validation/iterations`, without creating it."""
-    return package.joinpath(*ITERATIONS_RELPATH)
-
-
-def _assert_iteration_contents(directory: Path) -> None:
-    """An iteration directory holds exactly one receipt and one `pages/` folder of PNGs."""
-    allowed_files = {RECEIPT_NAME}
-    for entry in sorted(directory.iterdir()):
-        if rev._is_reparse_point(entry):  # pylint: disable=protected-access
-            raise ReceiptError("REPARSE_POINT", f"{directory.name}/{entry.name} is a symlink/junction")
-        if entry.is_dir():
-            if entry.name != PAGES_DIRNAME:
-                raise ReceiptError("EXTRA_FILE", f"{directory.name}/ carries an unexpected folder {entry.name!r}")
-            continue
-        if entry.name not in allowed_files:
-            raise ReceiptError("EXTRA_FILE", f"{directory.name}/ carries an unexpected file {entry.name!r}")
-    pages_dir = directory / PAGES_DIRNAME
-    for entry in sorted(pages_dir.iterdir()) if pages_dir.is_dir() else []:
-        if entry.is_dir() or entry.suffix.lower() != ".png":
-            raise ReceiptError("EXTRA_FILE", f"{directory.name}/{PAGES_DIRNAME}/ carries a non-PNG {entry.name!r}")
-
-
-def read_chain(package: Path) -> list[Iteration]:
-    """Every existing iteration, validated as a canonical contiguous chain.
-
-    Refuses BEFORE anything is allocated: a gap, a non-canonical name, a stray file, a reparse
-    point, an unreadable or schema-invalid receipt, or a link that does not pin its predecessor. A
-    chain that cannot be read is not an empty chain - allocating on top of one would silently drop
-    whatever history it held.
-    """
-    root = iterations_root(package)
-    if not root.exists():
-        return []
-    if not root.is_dir():
-        raise ReceiptError("ITERATIONS_NOT_A_DIRECTORY", "validation/iterations exists but is not a directory")
+def assert_desktop_binding(target: PackageTarget, pid: int, reader: StatusReader = bridge_status) -> None:
+    """Require exactly one PID-scoped currentFilePath equal to the coherent PBIP identity."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or not 1 <= pid <= 2**32 - 1:
+        raise ReceiptError("DESKTOP_UNVERIFIED", "a valid Desktop process identifier is required")
     with _named_refusals():
-        rev.assert_no_reparse_points(root)
-    names: list[str] = []
-    for entry in sorted(root.iterdir()):
-        if not entry.is_dir():
-            raise ReceiptError("EXTRA_FILE", f"validation/iterations carries a stray file {entry.name!r}")
-        if not ITERATION_NAME_RE.match(entry.name):
-            raise ReceiptError("NONCANONICAL_ITERATION", f"{entry.name!r} is not a three-digit iteration name")
-        names.append(entry.name)
-    expected = [f"{index:03d}" for index in range(1, len(names) + 1)]
-    if names != expected:
-        raise ReceiptError("ITERATION_GAP", f"iterations are {names}, expected the contiguous {expected}")
-
-    chain: list[Iteration] = []
-    for name in names:
-        directory = root / name
-        _assert_iteration_contents(directory)
-        receipt_path = directory / RECEIPT_NAME
-        if not receipt_path.is_file():
-            raise ReceiptError("RECEIPT_MISSING", f"iteration {name} has no {RECEIPT_NAME}")
-        payload = validate_receipt(read_strict_json(receipt_path))
-        if payload["iteration"] != name:
-            raise ReceiptError("ITERATION_MISLABELLED", f"iteration {name} calls itself {payload['iteration']!r}")
-        digest = sha256_of(receipt_path) or ""
-        _assert_link(chain, payload, name)
-        chain.append(
-            Iteration(name=name, directory=directory, receipt_path=receipt_path, receipt_sha256=digest, payload=payload)
-        )
-    return chain
+        payload = reader(pid)
+        instances = payload.get("instances") if isinstance(payload, dict) else None
+        if not isinstance(instances, list) or payload.get("status") != "ready":
+            raise ReceiptError("DESKTOP_UNVERIFIED", "the bridge supplied no instance list")
+        matching = [
+            item
+            for item in instances
+            if isinstance(item, dict)
+            and isinstance(item.get("pid"), int)
+            and not isinstance(item["pid"], bool)
+            and item["pid"] == pid
+        ]
+        if len(matching) != 1:
+            raise ReceiptError("DESKTOP_UNVERIFIED", "the bridge did not identify exactly one requested PID")
+        current = matching[0].get("currentFilePath")
+        if not isinstance(current, str) or not Path(current).is_absolute() or Path(current) != target.pbip.absolute():
+            raise ReceiptError("DESKTOP_BINDING_MISMATCH", "the requested PID is not showing the package PBIP")
+        if matching[0].get("bridgeStatus") != "connected" or matching[0].get("hasUnsavedChanges") is not False:
+            raise ReceiptError("DESKTOP_UNVERIFIED", "Desktop must confirm there are no unsaved changes")
 
 
-def _assert_link(chain: list[Iteration], payload: dict[str, Any], name: str) -> None:
-    """Iteration N must pin iteration N-1's receipt hash, and 001 must pin nothing."""
-    previous = payload["generated"]["previous"]
-    if not chain:
-        if previous is not None:
-            raise ReceiptError("BROKEN_CHAIN", f"iteration {name} names a predecessor but is the first")
-        return
-    prior = chain[-1]
-    if previous is None:
-        raise ReceiptError("BROKEN_CHAIN", f"iteration {name} names no predecessor")
-    if previous["iteration"] != prior.name:
-        raise ReceiptError("BROKEN_CHAIN", f"iteration {name} names {previous['iteration']!r}, not {prior.name!r}")
-    if previous["receipt_sha256"] != prior.receipt_sha256:
-        raise ReceiptError(
-            "PREVIOUS_RECEIPT_MISMATCH",
-            f"iteration {name} pins a different {RECEIPT_NAME} than iteration {prior.name} now holds",
-        )
-
-
-def allocate_iteration(package: Path) -> tuple[Path, Iteration | None]:
-    """Create the next canonical iteration directory EXCLUSIVELY, returning it and its predecessor.
-
-    ``mkdir(exist_ok=False)`` is the whole concurrency story: two producers racing for the same
-    number cannot both succeed, and the loser is REFUSED rather than retried into overwriting
-    somebody else's evidence.
-    """
-    chain = read_chain(package)
-    if chain and chain[-1].payload["state"] != STATE_FINAL:
-        raise ReceiptError(
-            "PREVIOUS_NOT_FINAL",
-            f"iteration {chain[-1].name} is still {chain[-1].payload['state']}; finalize it first",
-        )
-    root = iterations_root(package)
-    root.mkdir(parents=True, exist_ok=True)
-    name = f"{len(chain) + 1:03d}"
-    directory = root / name
-    try:
-        directory.mkdir(exist_ok=False)
-    except FileExistsError as error:
-        raise ReceiptError("ITERATION_NUMBER_TAKEN", f"iteration {name} already exists") from error
-    return directory, (chain[-1] if chain else None)
-
-
-# --------------------------------------------------------------------------------------------------
-# Tableau evidence, re-derived through the existing authorities
-# --------------------------------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class TableauMatch:
-    """One page's Tableau render, or the reason there is none. Never both."""
-
-    evidence: dict[str, Any] | None
-    reason: str | None
-
-
-def _unit_identity(target: PackageTarget) -> UnitIdentity | str:
-    """The package's own workbook identity, or the reason it could not be established."""
-    if target.asset is None:
-        return "the package declares no source asset, so no render can be attributed to it"
-    digest = sha256_of(target.asset)
-    if digest is None:
-        return "the package's source asset could not be hashed"
-    try:
-        luid, revision = provenance_origin(target.root, digest, target.asset)
-    except oid.AmbiguousIdentity:
-        return "the package's provenance is stamped for more than one workbook"
-    return UnitIdentity(
-        name=target.unit, source_path=target.asset, source_sha256=digest, workbook_luid=luid, revision=revision
-    )
-
-
-def _evidence_manifests(target: PackageTarget) -> tuple[list[Evidence], dict[str, str]]:
-    """Admissible Tableau renders in this package, plus the manifest sha that declared each."""
-    oracle_dir = target.root / "oracle"
-    reference_dir = target.root / "reference"
-    found: list[Evidence] = []
-    manifest_shas: dict[str, str] = {}
-    if oracle_dir.is_dir():
-        evidence, _ = oracle_evidence([oracle_dir])
-        digest = sha256_of(oracle_dir / "oracle-manifest.json") or ""
-        for item in evidence:
-            manifest_shas[item.render_digest] = digest
-        found.extend(evidence)
-    if reference_dir.is_dir():
-        evidence, _ = reference_evidence([reference_dir])
-        digest = sha256_of(reference_dir / "manifest.json") or ""
-        for item in evidence:
-            manifest_shas[item.render_digest] = digest
-        found.extend(evidence)
-    return found, manifest_shas
-
-
-def _relative_render(target: PackageTarget, evidence: Evidence) -> str | None:
-    """The render's PACKAGE-RELATIVE path, or None when it lies outside the package."""
-    try:
-        return Path(evidence.path).resolve().relative_to(target.root.resolve()).as_posix()
-    except ValueError:
-        return None
-
-
-def tableau_matches(  # pylint: disable=too-many-locals
-    target: PackageTarget, pages: list[rev.PageInventory]
-) -> dict[str, TableauMatch]:
-    """Per current page, the Tableau render that proves what it should look like - or why not.
-
-    Every admission decision is delegated: :func:`reference_evidence.oracle_evidence` /
-    :func:`reference_evidence.reference_evidence` prove the bytes against the producer's recorded
-    hash and CAP the grade at what the producer can physically make, and
-    :meth:`Evidence.attribution` decides whether the render belongs to THIS workbook at THIS
-    revision. An oracle capture stays layout/text grade here exactly as it is there; nothing in this
-    module can raise a grade.
-    """
-    identity = _unit_identity(target)
-    if isinstance(identity, str):
-        return {page.page_id: TableauMatch(None, identity) for page in pages}
-    evidence, manifest_shas = _evidence_manifests(target)
-    index: oid.CandidateIndex[Evidence] = oid.CandidateIndex()
-    for item in evidence:
-        index.add(item.candidate(), item)
-
-    matches: dict[str, TableauMatch] = {}
-    claimed: dict[str, list[str]] = {}
-    for page in pages:
-        resolved = _resolve_one(page, index)
-        if isinstance(resolved, str):
-            matches[page.page_id] = TableauMatch(None, resolved)
-            continue
-        attribution = resolved.attribution(identity)
-        if not attribution.admitted:
-            matches[page.page_id] = TableauMatch(None, f"the only render named for this page is {attribution.route}")
-            continue
-        relative = _relative_render(target, resolved)
-        if relative is None:
-            matches[page.page_id] = TableauMatch(None, "the render for this page lies outside the package")
-            continue
-        claimed.setdefault(resolved.render_digest, []).append(page.page_id)
-        matches[page.page_id] = TableauMatch(
-            {
-                "manifest_sha256": manifest_shas.get(resolved.render_digest, ""),
-                "path": relative,
-                "sha256": resolved.render_digest,
-                "grade": resolved.grade,
-            },
-            None,
-        )
-    contested = {digest for digest, page_ids in claimed.items() if len(page_ids) > 1}
-    for page_id in [page_id for digest in contested for page_id in claimed[digest]]:
-        matches[page_id] = TableauMatch(None, "one render is claimed by more than one page, so no page owns it")
-    return matches
-
-
-def _resolve_one(page: rev.PageInventory, index: oid.CandidateIndex[Evidence]) -> Evidence | str:
-    """One page's render by display name, refusing when both Tableau object kinds could claim it."""
-    hits: list[Evidence] = []
-    for kind in (oid.KIND_DASHBOARD, oid.KIND_WORKSHEET):
-        key = oid.ObjectIdentity.from_engine(kind, page.display_name)
-        if key is None:
-            continue
-        resolution = index.resolve(key)
-        if resolution.outcome == oid.UNIQUE:
-            hits.append(resolution.value())
-        elif resolution.outcome == oid.AMBIGUOUS:
-            return "more than one Tableau render is named for this page"
-    unique = {item.render_digest: item for item in hits}
-    if not unique:
-        return "no Tableau render in this package is named for this page"
-    if len(unique) > 1:
-        return "a dashboard and a worksheet render share this page's name, so neither can prove it"
-    return next(iter(unique.values()))
-
-
-# --------------------------------------------------------------------------------------------------
-# data evidence
-# --------------------------------------------------------------------------------------------------
-
-_data_input_schema = _obj(
-    {
-        "tool": _enum(*DATA_TOOLS),
-        "verdict": _enum(DATA_VERDICT_OK, DATA_VERDICT_PERSISTED),
-        "mode": _enum(DATA_MODE_LIVE, DATA_MODE_PERSISTED),
-        "canaries": _list_of(_obj({"table": _string, "row_count": _integer})),
-        "model_revision": _string,
-        "cache_sha256": _nullable(_string),
-    }
-)
-
-
-def pending_data_evidence() -> dict[str, Any]:
-    """The honest default: no data proof, and the exact seam that blocks producing one."""
-    return {
-        "status": DATA_STATUS_PENDING,
-        "mode": None,
-        "verdict": None,
-        "tool": None,
-        "canaries": [],
-        "model_revision": None,
-        "cache_sha256": None,
-        "pending_reason": DATA_PENDING_REASON,
-    }
-
-
-def ingest_data_evidence(path: Path, model_revision: str | None, cache_sha256: str | None) -> dict[str, Any]:
-    """Accept a TOOL-PRODUCED data record, bound to the current model revision and cache bytes.
-
-    Three states stay distinct and only the third counts (audit "Proving data loaded"): a cache that
-    merely EXISTS proves nothing, an implicit single-table probe earns only ``TABLE_OK`` and is not
-    representable here at all, and a persisted claim must additionally pin the cache bytes it was
-    written against. A canary that returned zero rows is a refusal, not a small pass.
-    """
-    payload = read_strict_json(path)
-    _data_input_schema(payload, "/data_evidence")
-    canaries = payload["canaries"]
-    if not canaries:
-        raise ReceiptError("DATA_EVIDENCE_NO_CANARIES", "a data record with no explicit canary is not DATA_OK")
-    empty = [row["table"] for row in canaries if row["row_count"] < 1]
-    if empty:
-        raise ReceiptError("DATA_EVIDENCE_EMPTY_CANARY", f"canary table(s) {sorted(empty)} returned no rows")
-    if payload["mode"] == DATA_MODE_PERSISTED:
-        if payload["verdict"] != DATA_VERDICT_PERSISTED:
-            raise ReceiptError(
-                "DATA_EVIDENCE_VERDICT", f"a persisted claim needs the literal {DATA_VERDICT_PERSISTED!r}"
-            )
-        if not payload["cache_sha256"]:
-            raise ReceiptError("DATA_EVIDENCE_CACHE_MISMATCH", "a persisted claim names no cache")
-        if payload["cache_sha256"] != cache_sha256:
-            raise ReceiptError(
-                "DATA_EVIDENCE_CACHE_MISMATCH", "the record names a different cache than the model now holds"
-            )
-    if payload["model_revision"] != model_revision:
-        raise ReceiptError("DATA_EVIDENCE_STALE_MODEL", "the record was produced against a different model revision")
-    return {
-        "status": DATA_STATUS_ACCEPTED,
-        "mode": payload["mode"],
-        "verdict": payload["verdict"],
-        "tool": payload["tool"],
-        "canaries": [{"table": row["table"], "row_count": row["row_count"]} for row in canaries],
-        "model_revision": payload["model_revision"],
-        "cache_sha256": payload["cache_sha256"],
-        "pending_reason": None,
-    }
-
-
-# --------------------------------------------------------------------------------------------------
-# building a receipt
-# --------------------------------------------------------------------------------------------------
-
-
-def now_rfc3339() -> str:
-    """The current instant, to the second, in UTC."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def page_image_name(page_id: str) -> str:
-    """A safe, deterministic PNG name for a page id - never the raw id when it is unsafe."""
-    if SAFE_STEM_RE.match(page_id):
-        return f"{page_id}.png"
-    return f"page-{hashlib.sha256(page_id.encode('utf-8')).hexdigest()[:16]}.png"
+def report_inventory(report_dir: Path) -> list[rev.PageInventory]:
+    """Read the single current PBIR denominator."""
+    with _named_refusals():
+        return rev.report_inventory(report_dir)
 
 
 def artifact_facts(target: PackageTarget) -> dict[str, Any]:
-    """The package's CURRENT identity: revisions re-derived from the bytes on disk right now."""
+    """Re-derive the entire artifact identity, including non-cache .pbi bytes."""
     with _named_refusals():
-        cache = rev.cache_facts(target.model_dir) if target.model_dir is not None else None
+        cache = rev.cache_facts(target.model_dir)
         return {
             "unit": target.unit,
             "kind": target.kind,
             "report_path": target.report_path,
             "model_path": target.model_path,
-            "package_revision": rev.package_working_revision(target.root),
+            "pbip_path": target.pbip_path,
+            "package_revision": rev.package_working_revision(target.root, target.model_dir),
             "report_revision": rev.report_revision(target.report_dir),
-            "model_revision": rev.model_revision(target.model_dir) if target.model_dir is not None else None,
+            "model_revision": rev.model_revision(target.model_dir),
             "cache_sha256": cache.sha256 if cache else None,
             "cache_byte_count": cache.byte_count if cache else None,
         }
 
 
+def _admitted_evidence(target: PackageTarget) -> list[tuple[evidence.Evidence, str]]:
+    files, _ = rev.tree_files(target.root)
+    admitted = []
+    for folder, manifest, loader in (
+        ("reference", "manifest.json", evidence.reference_evidence),
+        ("oracle", "oracle-manifest.json", evidence.oracle_evidence),
+    ):
+        key = f"{folder}/{manifest}"
+        if key not in files:
+            continue
+        document = read_strict_json(files[key])
+        # Check all declared render roles before the existing admission helper may open them.
+        for text in _render_paths(document):
+            if not filesystem.is_canonical_key(text) or f"{folder}/{text}" not in files:
+                raise ReceiptError("TABLEAU_PATH", "a Tableau render role is not a walked package file")
+        try:
+            renders, _ = loader([target.root / folder])
+        except (oid.AmbiguousIdentity, TypeError, AttributeError) as error:
+            raise ReceiptError("TABLEAU_INVALID", "Tableau evidence identity is ambiguous or malformed") from error
+        admitted.extend((item, rev.sha256_of_file(files[key])) for item in renders)
+    return admitted
+
+
+def _render_paths(value: Any) -> Iterator[str]:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"image", "path"} and isinstance(item, str):
+                yield item
+            yield from _render_paths(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _render_paths(item)
+
+
+def tableau_matches(  # pylint: disable=too-many-locals
+    target: PackageTarget, pages: list[rev.PageInventory]
+) -> dict[str, dict[str, Any] | None]:
+    """Reuse grade, revision attribution and exact Tableau object matching; never inflate oracle grade."""
+    result: dict[str, dict[str, Any] | None] = {page.page_id: None for page in pages}
+    if target.asset is None:
+        return result
+    source_sha = rev.sha256_of_file(target.asset)
+    provenance = target.root / "source-provenance.json"
+    if provenance.is_file():
+        read_strict_json(provenance)
+    try:
+        luid, revision = evidence.provenance_origin(target.root, source_sha, target.asset)
+    except (oid.AmbiguousIdentity, TypeError, AttributeError) as error:
+        raise ReceiptError("TABLEAU_INVALID", "source provenance cannot establish one workbook") from error
+    identity = evidence.UnitIdentity(target.unit, target.asset, source_sha, luid, revision)
+    index: oid.CandidateIndex[tuple[evidence.Evidence, str]] = oid.CandidateIndex()
+    for item, manifest_sha in _admitted_evidence(target):
+        index.add(item.candidate(), (item, manifest_sha))
+    for page in pages:
+        hits = []
+        ambiguous = False
+        for kind in (oid.KIND_DASHBOARD, oid.KIND_WORKSHEET):
+            key = oid.ObjectIdentity.from_engine(kind, page.display_name)
+            if key is None:
+                continue
+            resolution = index.resolve(key)
+            ambiguous |= resolution.outcome == oid.AMBIGUOUS
+            if resolution.outcome == oid.UNIQUE:
+                hits.append(resolution.value())
+        if ambiguous or len(hits) != 1:
+            continue
+        item, manifest_sha = hits[0]
+        if item.attribution(identity).admitted:
+            result[page.page_id] = {
+                "manifest_sha256": manifest_sha,
+                "path": Path(item.path).relative_to(target.root).as_posix(),
+                "sha256": item.render_digest,
+                "grade": item.grade,
+            }
+    digests = [row["sha256"] for row in result.values() if row]
+    return {key: row if row and digests.count(row["sha256"]) == 1 else None for key, row in result.items()}
+
+
+def page_image_name(page_id: str) -> str:
+    """One generated mapping, never a reviewer path or a raw page identifier."""
+    return "page-" + hashlib.sha256(page_id.encode("utf-8")).hexdigest() + ".png"
+
+
+def screenshot_role(page_id: str, relative: str) -> str:
+    """Validate an exact generated role BEFORE a filesystem path may be constructed."""
+    canonical = f"{PAGES_DIRNAME}/{page_image_name(page_id)}"
+    if relative != canonical or not filesystem.is_canonical_key(relative):
+        raise ReceiptError("SCREENSHOT_PATH", "the screenshot role is not the generated canonical page mapping")
+    return canonical
+
+
+def image_facts(directory: Path, page_id: str, relative: str) -> dict[str, Any]:
+    """Exact role, no-follow containment, no hardlink aliases, valid PNG structure, hash and size."""
+    canonical = screenshot_role(page_id, relative)
+    files, _ = rev.tree_files(directory)
+    image = files.get(canonical)
+    if image is None:
+        raise ReceiptError("SCREENSHOT_MISSING", "a captured page has no retained canonical screenshot")
+    if image.lstat().st_nlink != 1:
+        raise ReceiptError("SCREENSHOT_ALIAS", "a retained screenshot must not be a hardlink alias")
+    blob = image.read_bytes()
+    assert_png(blob)
+    return {"path": canonical, "sha256": hashlib.sha256(blob).hexdigest(), "byte_count": len(blob)}
+
+
+def assert_png(blob: bytes) -> None:
+    """Use the existing Pillow extra for a PNG structure check AND compressed-pixel decode."""
+    if evidence._png_size(blob) is None:  # pylint: disable=protected-access
+        raise ReceiptError("SCREENSHOT_NOT_PNG", "the PNG chunk stream is not structurally complete")
+    try:
+        from PIL import Image  # pylint: disable=import-outside-toplevel
+    except ImportError as error:
+        raise ReceiptError("PNG_VERIFIER_UNAVAILABLE", "PNG verification requires the existing Pillow extra") from error
+    try:
+        with Image.open(io.BytesIO(blob)) as image:
+            if image.format != "PNG":
+                raise ReceiptError("SCREENSHOT_NOT_PNG", "the retained bytes do not declare PNG format")
+            image.verify()
+        with Image.open(io.BytesIO(blob)) as image:
+            image.load()
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as error:
+        raise ReceiptError("SCREENSHOT_NOT_PNG", "the retained bytes are not a complete decodable PNG") from error
+
+
 def limitation_facts(package: Path) -> dict[str, Any]:
-    """How many `limitations_encountered` entries the CURRENT spec has, and where it is."""
-    spec = package / MIGRATION_SPEC_NAME
-    payload = json_object(spec)
-    entries = (payload or {}).get("limitations_encountered")
-    if not spec.is_file() or not isinstance(entries, list):
+    """Strictly read the current limitations list if supplied."""
+    path = package / "migration-spec.json"
+    if not path.is_file():
         return {"spec_path": None, "entry_count": 0}
-    return {"spec_path": MIGRATION_SPEC_NAME, "entry_count": len(entries)}
+    entries = read_strict_json(path).get("limitations_encountered")
+    if not isinstance(entries, list):
+        raise ReceiptError("LIMITATIONS_INVALID", "the current spec must declare a limitations list")
+    return {"spec_path": "migration-spec.json", "entry_count": len(entries)}
 
 
 def pending_judgement(pages: list[rev.PageInventory]) -> dict[str, Any]:
-    """One PENDING judgement row per current page, visual and numeric slot. Never a pass."""
+    """Every slot begins pending; numeric hashes have no reviewer-authored success route."""
     return {
         "completed_at": None,
         "pages": [
@@ -935,19 +590,18 @@ def pending_judgement(pages: list[rev.PageInventory]) -> dict[str, Any]:
                 "page_id": page.page_id,
                 "whole_page_status": STATUS_PENDING,
                 "visual_results": [
-                    {"visual_id": visual_id, "status": STATUS_PENDING, "finding_ids": []}
-                    for visual_id in page.visual_ids
+                    {"visual_id": key, "status": STATUS_PENDING, "finding_ids": []} for key in page.visual_ids
                 ],
                 "numeric_results": [
                     {
-                        "visual_id": visual_id,
+                        "visual_id": key,
                         "status": STATUS_PENDING,
                         "tableau_evidence_sha256": None,
                         "powerbi_query_sha256": None,
                         "powerbi_result_sha256": None,
                         "finding_ids": [],
                     }
-                    for visual_id in page.visual_ids
+                    for key in page.visual_ids
                 ],
             }
             for page in pages
@@ -956,286 +610,333 @@ def pending_judgement(pages: list[rev.PageInventory]) -> dict[str, Any]:
     }
 
 
-def changes_from_previous(previous: Iteration | None, pages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Per page, the screenshot hash BEFORE this iteration and AFTER it. Generated, never claimed."""
-    if previous is None:
-        return []
-    before = {row["page_id"]: row["powerbi"]["sha256"] for row in previous.payload["generated"]["pages"]}
-    rows = [
-        {
-            "page_id": row["page_id"],
-            "before_sha256": before.get(row["page_id"]),
-            "after_sha256": row["powerbi"]["sha256"],
-        }
-        for row in pages
-    ]
-    captured = {row["page_id"] for row in pages}
-    rows.extend(
-        {"page_id": page_id, "before_sha256": digest, "after_sha256": None}
-        for page_id, digest in sorted(before.items())
-        if page_id not in captured
-    )
-    return rows
+def now_rfc3339() -> str:
+    """UTC producer timestamp."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def write_receipt(directory: Path, payload: dict[str, Any]) -> str:
-    """Validate, privacy-scrub and write one receipt atomically; return its sha256."""
-    validate_receipt(payload)
-    assert_shareable(payload)
-    body = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
-    staged = directory / f".{RECEIPT_NAME}.writing"
-    staged.write_text(body, encoding="utf-8")
-    os.replace(staged, directory / RECEIPT_NAME)
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
-
-
-# --------------------------------------------------------------------------------------------------
-# finalization
-# --------------------------------------------------------------------------------------------------
-
-
-def _assert_inventory(target: PackageTarget, payload: dict[str, Any]) -> dict[str, rev.PageInventory]:
-    """The report's CURRENT page/visual inventory must still be the one this iteration measured.
-
-    Checked BEFORE the coarser revision comparison on purpose: an added page and a re-themed report
-    both move ``report_revision``, and an operator can only act on the difference between them.
-    """
-    generated = payload["generated"]
+def generated_facts(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    target: PackageTarget,
+    directory: Path,
+    captured: dict[str, dict[str, Any]],
+    review: dict[str, Any],
+    generated_at: str,
+    previous: Iteration | None,
+) -> dict[str, Any]:
+    """Build every generated field from current artifacts and checksum-pinned capture observations."""
     inventory = report_inventory(target.report_dir)
-    by_id = {page.page_id: page for page in inventory}
-    captured = {row["page_id"]: row for row in generated["pages"]}
-    unknown = sorted(set(captured) - set(by_id))
-    if unknown:
-        raise ReceiptError("INVENTORY_CHANGED", f"the receipt names page(s) {unknown} the report no longer has")
-    if generated["scope"] == SCOPE_ALL_PAGES and set(captured) != set(by_id):
-        raise ReceiptError("INVENTORY_CHANGED", "the report's page set differs from the captured page set")
-    for page_id, row in captured.items():
-        page = by_id[page_id]
-        if row["display_name"] != page.display_name or tuple(row["expected_visual_ids"]) != page.visual_ids:
-            raise ReceiptError("INVENTORY_CHANGED", f"page {page_id!r} no longer has the recorded visual inventory")
-    return by_id
-
-
-def _assert_images(payload: dict[str, Any], directory: Path) -> None:
-    """Every retained screenshot is still the captured bytes, and there are no others."""
-    for row in payload["generated"]["pages"]:
-        _assert_image(directory, row)
-    named = {row["powerbi"]["path"] for row in payload["generated"]["pages"]}
-    pages_dir = directory / PAGES_DIRNAME
-    present = (
-        {f"{PAGES_DIRNAME}/{item.name}" for item in sorted(pages_dir.iterdir()) if item.is_file()}
-        if pages_dir.is_dir()
-        else set()
+    selected = [page for page in inventory if page.page_id in captured]
+    if {page.page_id for page in selected} != set(captured):
+        raise ReceiptError("INVENTORY_CHANGED", "a captured page is no longer in the current inventory")
+    matches = tableau_matches(target, selected)
+    pages = [
+        {
+            "page_id": page.page_id,
+            "display_name": page.display_name,
+            "expected_visual_ids": list(page.visual_ids),
+            "tableau": matches[page.page_id],
+            "tableau_reason": None if matches[page.page_id] else "no unique admitted Tableau render for this page",
+            "powerbi": {
+                **image_facts(directory, page.page_id, f"{PAGES_DIRNAME}/{page_image_name(page.page_id)}"),
+                "capture": captured[page.page_id],
+            },
+        }
+        for page in selected
+    ]
+    before = (
+        {row["page_id"]: row["powerbi"]["sha256"] for row in previous.payload["generated"]["pages"]} if previous else {}
     )
-    extra = sorted(present - named)
-    if extra:
-        raise ReceiptError("EXTRA_FILE", f"the iteration retains screenshot(s) {extra} no current page named")
+    after = {row["page_id"]: row["powerbi"]["sha256"] for row in pages}
+    return {
+        "generated_at": generated_at,
+        "scope": "all_pages" if len(selected) == len(inventory) else "subset",
+        "artifact": artifact_facts(target),
+        "review": review,
+        "previous": {"iteration": previous.name, "receipt_sha256": previous.receipt_sha256} if previous else None,
+        "limitations": limitation_facts(target.root),
+        "data_evidence": {"status": DATA_STATUS_PENDING, "reason": DATA_PENDING_REASON},
+        "pages": pages,
+        "changes_from_previous": [
+            {"page_id": key, "before_sha256": before.get(key), "after_sha256": after.get(key)}
+            for key in sorted(set(before) | set(after))
+        ]
+        if previous
+        else [],
+    }
 
 
-def _assert_changes_from_previous(payload: dict[str, Any], prior: Iteration | None) -> None:
-    """`changes_from_previous` is GENERATED, so it must still equal what the two receipts imply.
+@dataclass(frozen=True)
+class Iteration:
+    """One exact receipt and its verified retained screenshots."""
 
-    Without this the before/after pair is the one immutable field a reviewer could rewrite freely -
-    and "this page did not change" is exactly the claim a stale sign-off wants to make.
-    """
-    expected = changes_from_previous(prior, payload["generated"]["pages"])
-    if payload["generated"]["changes_from_previous"] != expected:
+    name: str
+    directory: Path
+    receipt_sha256: str
+    payload: dict[str, Any]
+
+
+def iterations_root(package: Path) -> Path:
+    """The sole self-referential evidence subtree."""
+    return package / "validation" / "iterations"
+
+
+def _iteration_files(directory: Path, payload: dict[str, Any]) -> None:
+    files, directories = rev.tree_files(directory)
+    named = set()
+    for page in payload["generated"]["pages"]:
+        recorded = page["powerbi"]
+        facts = image_facts(directory, page["page_id"], recorded["path"])
+        if any(value != recorded[key] for key, value in facts.items()):
+            raise ReceiptError("SCREENSHOT_CHANGED", "retained screenshot bytes differ from their receipt")
+        if facts["path"] in named:
+            raise ReceiptError("SCREENSHOT_ALIAS", "two pages cannot claim one screenshot role")
+        named.add(facts["path"])
+    if set(files) != {RECEIPT_NAME, *named} or directories != {PAGES_DIRNAME}:
+        raise ReceiptError("EXTRA_FILE", "an iteration must contain exactly its receipt and canonical page PNGs")
+
+
+def _require_pin(actual: str, expected: str | None, code: str) -> None:
+    if not isinstance(expected, str) or not SHA_RE.fullmatch(expected) or actual != expected:
+        raise ReceiptError(code, "the producer-returned receipt checksum is required and must still match")
+
+
+def read_chain(package: Path) -> list[Iteration]:
+    """Read EVERY prior receipt, allowed file set and PNG; a JSON-only predecessor hash is insufficient."""
+    root = iterations_root(package)
+    with _named_refusals():
+        package_files, package_dirs = rev.tree_files(package)
+        if "validation/iterations" in package_files:
+            raise ReceiptError("EXTRA_FILE", "the iterations root is not a directory")
+        if "validation/iterations" not in package_dirs:
+            return []
+        _, directories = rev.tree_files(root)
+        names = sorted(key for key in directories if "/" not in key)
+        if names != [f"{index:03d}" for index in range(1, len(names) + 1)] or len(names) > 999:
+            raise ReceiptError(
+                "ITERATION_GAP", "iteration directories must be contiguous canonical three-digit numbers"
+            )
+        if any(path.is_file() for path in root.iterdir()):
+            raise ReceiptError("EXTRA_FILE", "the iterations root cannot contain loose files")
+        chain: list[Iteration] = []
+        for name in names:
+            directory = root / name
+            payload = validate_receipt(read_strict_json(directory / RECEIPT_NAME))
+            if payload["iteration"] != name:
+                raise ReceiptError("ITERATION_MISLABELLED", "the receipt name disagrees with its directory")
+            previous = payload["generated"]["previous"]
+            expected = {"iteration": chain[-1].name, "receipt_sha256": chain[-1].receipt_sha256} if chain else None
+            if previous != expected:
+                raise ReceiptError("PREVIOUS_RECEIPT_MISMATCH", "the receipt no longer pins its exact predecessor")
+            _iteration_files(directory, payload)
+            if chain and chain[-1].payload["state"] != STATE_FINAL:
+                raise ReceiptError("PREVIOUS_NOT_FINAL", "only a final receipt may have a successor")
+            if payload["state"] == STATE_FINAL:
+                _assert_judgement(payload, chain[-1] if chain else None)
+            chain.append(Iteration(name, directory, rev.sha256_of_file(directory / RECEIPT_NAME), payload))
+        return chain
+
+
+def allocate_iteration(package: Path, previous_sha256: str | None = None) -> tuple[Path, Iteration | None]:
+    """Validate the caller-pinned entire chain before an exclusive allocation."""
+    with _named_refusals():
+        chain = read_chain(package)
+        if chain:
+            _require_pin(chain[-1].receipt_sha256, previous_sha256, "PREVIOUS_RECEIPT_MISMATCH")
+            if chain[-1].payload["state"] != STATE_FINAL:
+                raise ReceiptError("PREVIOUS_NOT_FINAL", "finalize the current iteration before allocating another")
+        elif previous_sha256 is not None:
+            raise ReceiptError("PREVIOUS_RECEIPT_MISMATCH", "the first iteration cannot name a predecessor")
+        if len(chain) >= 999:
+            raise ReceiptError("ITERATION_LIMIT", "the three-digit iteration range is exhausted")
+        root = iterations_root(package)
+        root.mkdir(parents=True, exist_ok=True)
+        directory = root / f"{len(chain) + 1:03d}"
+        try:
+            directory.mkdir(exist_ok=False)
+        except FileExistsError as error:
+            raise ReceiptError("ITERATION_NUMBER_TAKEN", "another producer allocated this number") from error
+        return directory, chain[-1] if chain else None
+
+
+def _assert_visual_status(status: str, page: dict[str, Any]) -> None:
+    if status not in {"pass", "layout_match"}:
+        return
+    admitted = page["tableau"]
+    if not page["powerbi"]["capture"]["converged"] or admitted is None:
         raise ReceiptError(
-            "CHANGES_MISDECLARED", "changes_from_previous is not the before/after pair these receipts imply"
+            "COMPARISON_EVIDENCE_MISSING", "a positive comparison needs admitted Tableau and stable PBI evidence"
         )
+    if status == "pass" and admitted["grade"] != evidence.GRADE_VALIDATION:
+        raise ReceiptError("COMPARISON_GRADE", "layout or text evidence cannot confer a full visual pass")
+    if status == "layout_match" and admitted["grade"] not in {evidence.GRADE_VALIDATION, evidence.GRADE_ORACLE}:
+        raise ReceiptError("COMPARISON_GRADE", "the admitted evidence does not support this comparison grade")
 
 
-def _assert_tableau(target: PackageTarget, payload: dict[str, Any], by_id: dict[str, rev.PageInventory]) -> None:
-    """Tableau evidence is re-derived through the same authorities that admitted it."""
-    captured = {row["page_id"]: row for row in payload["generated"]["pages"]}
-    for page_id, match in tableau_matches(target, [by_id[page_id] for page_id in captured]).items():
-        if captured[page_id]["tableau"] != match.evidence:
-            raise ReceiptError("TABLEAU_EVIDENCE_CHANGED", f"page {page_id!r}'s Tableau evidence is no longer the same")
-
-
-def _assert_revisions(target: PackageTarget, payload: dict[str, Any]) -> None:
-    """The artifact identities, re-derived from the bytes on disk right now."""
-    generated = payload["generated"]
-    current = artifact_facts(target)
-    recorded = generated["artifact"]
-    for field, code in (
-        ("report_revision", "REPORT_CHANGED"),
-        ("model_revision", "MODEL_CHANGED"),
-        ("cache_sha256", "CACHE_CHANGED"),
-        ("package_revision", "PACKAGE_CHANGED"),
-    ):
-        if current[field] != recorded[field]:
-            raise ReceiptError(code, f"{field} differs from the value this iteration recorded")
-
-    data = generated["data_evidence"]
-    if data["status"] == DATA_STATUS_ACCEPTED:
-        if data["model_revision"] != current["model_revision"]:
-            raise ReceiptError("DATA_EVIDENCE_STALE_MODEL", "the data evidence names a superseded model revision")
-        if data["mode"] == DATA_MODE_PERSISTED and data["cache_sha256"] != current["cache_sha256"]:
-            raise ReceiptError("DATA_EVIDENCE_CACHE_MISMATCH", "the data evidence names a superseded cache")
-
-
-def _assert_image(directory: Path, row: dict[str, Any]) -> None:
-    """A retained screenshot must still be present, non-empty and byte-identical to its record."""
-    relative = row["powerbi"]["path"]
-    if relative.startswith(("/", "\\")) or ".." in relative.split("/"):
-        raise ReceiptError("UNSAFE_PATH", f"page {row['page_id']!r} names an unsafe screenshot path")
-    image = directory / relative
-    if rev._is_reparse_point(image):  # pylint: disable=protected-access
-        raise ReceiptError("REPARSE_POINT", f"page {row['page_id']!r}'s screenshot is a symlink/junction")
-    if not image.is_file():
-        raise ReceiptError("SCREENSHOT_MISSING", f"page {row['page_id']!r} has no retained screenshot")
-    blob = image.read_bytes()
-    if not blob:
-        raise ReceiptError("SCREENSHOT_EMPTY", f"page {row['page_id']!r}'s retained screenshot is zero bytes")
-    if len(blob) != row["powerbi"]["byte_count"] or hashlib.sha256(blob).hexdigest() != row["powerbi"]["sha256"]:
-        raise ReceiptError("SCREENSHOT_CHANGED", f"page {row['page_id']!r}'s screenshot is not the captured bytes")
-
-
-def _assert_previous(chain: list[Iteration], payload: dict[str, Any]) -> Iteration | None:
-    """The predecessor link must still pin the receipt and revisions it was written against."""
-    previous = payload["generated"]["previous"]
-    index = [item.name for item in chain].index(payload["iteration"])
-    prior = chain[index - 1] if index else None
-    if prior is None:
-        if previous is not None:
-            raise ReceiptError("BROKEN_CHAIN", "the first iteration names a predecessor")
-        return None
-    if previous is None:
-        raise ReceiptError("BROKEN_CHAIN", "a later iteration names no predecessor")
-    if previous["iteration"] != prior.name or previous["receipt_sha256"] != prior.receipt_sha256:
-        raise ReceiptError("PREVIOUS_RECEIPT_MISMATCH", "the pinned predecessor receipt is not the one on disk")
-    prior_artifact = prior.payload["generated"]["artifact"]
-    if (
-        previous["report_revision"] != prior_artifact["report_revision"]
-        or previous["model_revision"] != prior_artifact["model_revision"]
-    ):
-        raise ReceiptError(
-            "PREVIOUS_REVISION_MISMATCH", "the pinned predecessor revisions are not the ones it recorded"
-        )
-    return prior
-
-
-def _assert_judgement(  # pylint: disable=too-many-branches
-    target: PackageTarget, payload: dict[str, Any], prior: Iteration | None
-) -> None:
-    """The reviewer's half: complete, in-vocabulary, and losing no prior finding.
-
-    ⚠️ The branches are separate REFUSALS, each naming a different thing a reviewer got wrong -
-    a pending slot, an invented visual, an undeclared finding id, a lost prior finding. Merging them
-    would satisfy the checker by making "which guard refused" unreadable, which is the one thing this
-    receipt exists to keep legible.
-    """
-    generated = payload["generated"]
-    expected = {row["page_id"]: tuple(row["expected_visual_ids"]) for row in generated["pages"]}
-    judged = payload["judgement"]["pages"]
-    if [row["page_id"] for row in judged] != [row["page_id"] for row in generated["pages"]]:
-        raise ReceiptError("JUDGEMENT_PAGE_SET", "the judgement rows do not match the captured pages")
+def _assert_findings(payload: dict[str, Any], previous: Iteration | None) -> None:
     findings = payload["judgement"]["findings"]
-    ids = [finding["id"] for finding in findings]
-    if len(set(ids)) != len(ids):
-        raise ReceiptError("FINDING_ID_DUPLICATE", "two findings share one id")
-    for finding in findings:
-        if not FINDING_ID_RE.match(finding["id"]):
-            raise ReceiptError("FINDING_ID_MALFORMED", f"{finding['id']!r} is not an F-NNN finding id")
-    known = set(ids)
-    for row in judged:
-        if row["whole_page_status"] == STATUS_PENDING:
-            raise ReceiptError("PENDING_JUDGEMENT", f"page {row['page_id']!r} still has a pending verdict")
-        for section in ("visual_results", "numeric_results"):
-            if tuple(item["visual_id"] for item in row[section]) != expected[row["page_id"]]:
-                raise ReceiptError("JUDGEMENT_VISUAL_SET", f"page {row['page_id']!r}'s {section} do not match the PBIR")
-            for item in row[section]:
-                if item["status"] == STATUS_PENDING:
-                    raise ReceiptError("PENDING_JUDGEMENT", f"{item['visual_id']!r} still has a pending verdict")
-                unknown = sorted(set(item["finding_ids"]) - known)
-                if unknown:
-                    raise ReceiptError("UNKNOWN_FINDING_ID", f"finding id(s) {unknown} are referenced but not declared")
-    _assert_accepted_limitations(target.root, findings)
-    if prior is not None:
-        missing = sorted({finding["id"] for finding in prior.payload["judgement"]["findings"]} - known)
-        if missing:
-            raise ReceiptError("FINDING_DISAPPEARED", f"prior finding(s) {missing} do not reappear in this iteration")
-
-
-def _assert_accepted_limitations(package: Path, findings: list[dict[str, Any]]) -> None:
-    """An accepted limitation must bind to a CURRENT spec entry, by index and by entry hash."""
-    entries = (json_object(package / MIGRATION_SPEC_NAME) or {}).get("limitations_encountered")
-    for finding in findings:
-        if finding["status"] != FINDING_ACCEPTED:
-            if finding["limitation_ref"] is not None:
+    current = {finding["id"]: finding for finding in findings}
+    if len(current) != len(findings):
+        raise ReceiptError("FINDING_ID_DUPLICATE", "finding identifiers must be unique")
+    prior = {row["id"]: row for row in previous.payload["judgement"]["findings"]} if previous else {}
+    if set(prior) - set(current):
+        raise ReceiptError("FINDING_DISAPPEARED", "every prior finding must remain in the next iteration")
+    inventory = {page["page_id"]: page["expected_visual_ids"] for page in payload["generated"]["pages"]}
+    transitions = {
+        FINDING_OPEN: {FINDING_OPEN, FINDING_RESOLVED, FINDING_ACCEPTED},
+        FINDING_RESOLVED: {FINDING_RESOLVED},
+        FINDING_ACCEPTED: {FINDING_ACCEPTED},
+    }
+    for key, row in current.items():
+        if key in prior:
+            if {field: value for field, value in row.items() if field != "status"} != {
+                field: value for field, value in prior[key].items() if field != "status"
+            }:
                 raise ReceiptError(
-                    "LIMITATION_REF_UNEXPECTED", f"{finding['id']} names a limitation but is not accepted"
+                    "FINDING_IDENTITY_CHANGED", "a reused finding ID must preserve its complete identity"
                 )
-            continue
-        reference = finding["limitation_ref"]
-        if reference is None:
-            raise ReceiptError("ACCEPTED_LIMITATION_UNBOUND", f"{finding['id']} is accepted but names no limitation")
-        match = re.fullmatch(r"/limitations_encountered/(\d+)", reference["pointer"])
-        if not match or not isinstance(entries, list) or int(match.group(1)) >= len(entries):
+            if row["status"] not in transitions[prior[key]["status"]]:
+                raise ReceiptError("FINDING_TRANSITION", "the finding lifecycle transition is not legal")
+        elif row["status"] == FINDING_RESOLVED:
+            raise ReceiptError("FINDING_TRANSITION", "a new finding cannot arrive already resolved")
+        page, visual = row["page_id"], row["visual_id"]
+        if key not in prior and (
+            (page is not None and page not in inventory)
+            or (visual is not None and visual not in inventory.get(page, []))
+        ):
+            raise ReceiptError("FINDING_TARGET", "a new finding must refer to the captured page and visual inventory")
+        if row["status"] == FINDING_ACCEPTED and row["limitation_ref"] is None:
             raise ReceiptError(
-                "ACCEPTED_LIMITATION_UNBOUND", f"{finding['id']} points at no current limitations_encountered entry"
+                "ACCEPTED_LIMITATION_UNBOUND", "accepted limitations need their immutable spec reference"
             )
-        entry = entries[int(match.group(1))]
-        digest = hashlib.sha256(
-            json.dumps(entry, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
-        if digest != reference["sha256"]:
-            raise ReceiptError(
-                "ACCEPTED_LIMITATION_UNBOUND", f"{finding['id']} names a limitation entry whose text has changed"
-            )
+
+
+def _assert_result_findings(page_id: str, row: dict[str, Any], findings: dict[str, Any]) -> None:
+    if len(set(row["finding_ids"])) != len(row["finding_ids"]):
+        raise ReceiptError("FINDING_REFERENCE", "finding references must be unique")
+    for key in row["finding_ids"]:
+        finding = findings.get(key)
+        if finding is None or finding["page_id"] != page_id or finding["visual_id"] not in (None, row["visual_id"]):
+            raise ReceiptError("FINDING_REFERENCE", "a referenced finding must describe this page and visual")
+
+
+def _assert_judgement(payload: dict[str, Any], previous: Iteration | None) -> None:
+    generated, judgement = payload["generated"], payload["judgement"]
+    if [row["page_id"] for row in judgement["pages"]] != [row["page_id"] for row in generated["pages"]]:
+        raise ReceiptError("JUDGEMENT_PAGE_SET", "judgement must cover exactly the captured pages")
+    _assert_findings(payload, previous)
+    findings = {row["id"]: row for row in judgement["findings"]}
+    for measured, judged in zip(generated["pages"], judgement["pages"]):
+        if judged["whole_page_status"] == STATUS_PENDING:
+            raise ReceiptError("PENDING_JUDGEMENT", "whole-page judgement remains pending")
+        _assert_visual_status(judged["whole_page_status"], measured)
+        for section in ("visual_results", "numeric_results"):
+            if [row["visual_id"] for row in judged[section]] != measured["expected_visual_ids"]:
+                raise ReceiptError("JUDGEMENT_VISUAL_SET", "judgement must cover exactly the captured visual inventory")
+            for row in judged[section]:
+                if row["status"] == STATUS_PENDING:
+                    raise ReceiptError("PENDING_JUDGEMENT", "a visual or numeric judgement remains pending")
+                if section == "numeric_results":
+                    if row["status"] != STATUS_UNVERIFIED or any(
+                        row[key] is not None
+                        for key in ("tableau_evidence_sha256", "powerbi_query_sha256", "powerbi_result_sha256")
+                    ):
+                        raise ReceiptError(
+                            "NUMERIC_EVIDENCE_UNAVAILABLE",
+                            "reviewer-authored hashes are not structured numeric producer evidence",
+                        )
+                else:
+                    _assert_visual_status(row["status"], measured)
+                _assert_result_findings(measured["page_id"], row, findings)
 
 
 def limitation_entry_sha256(entry: Any) -> str:
-    """The canonical hash a finding must record when it accepts a limitation."""
+    """Canonical spec-entry identity, unchanged over a finding's lifetime."""
     return hashlib.sha256(
-        json.dumps(entry, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(entry, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
 
 
-def _outcome(payload: dict[str, Any]) -> str:
-    """`complete` only for an all-page sign-off with no residue. Never inferred from exit codes."""
-    if payload["mode"] != MODE_SIGN_OFF or payload["generated"]["scope"] != SCOPE_ALL_PAGES:
-        return OUTCOME_INCOMPLETE
-    if any(not row["powerbi"]["converged"] for row in payload["generated"]["pages"]):
-        return OUTCOME_INCOMPLETE
-    for row in payload["judgement"]["pages"]:
-        statuses = (
-            [row["whole_page_status"]]
-            + [item["status"] for item in row["visual_results"]]
-            + [item["status"] for item in row["numeric_results"]]
+def _assert_limitations(package: Path, payload: dict[str, Any]) -> None:
+    bound = [row["limitation_ref"] for row in payload["judgement"]["findings"] if row["limitation_ref"] is not None]
+    if not bound:
+        return
+    entries = read_strict_json(package / "migration-spec.json").get("limitations_encountered")
+    for reference in bound:
+        match = re.fullmatch(r"/limitations_encountered/(0|[1-9][0-9]*)", reference["pointer"])
+        if not match or not isinstance(entries, list) or int(match[1]) >= len(entries):
+            raise ReceiptError("ACCEPTED_LIMITATION_UNBOUND", "the finding's immutable spec reference does not resolve")
+        if limitation_entry_sha256(entries[int(match[1])]) != reference["sha256"]:
+            raise ReceiptError("ACCEPTED_LIMITATION_UNBOUND", "the referenced limitation entry changed")
+
+
+def receipt_bytes(payload: dict[str, Any]) -> bytes:
+    """The sole serialization, with finite JSON and ASCII escapes."""
+    return (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True, allow_nan=False) + "\n").encode("ascii")
+
+
+def receipt_sha256(payload: dict[str, Any]) -> str:
+    """The producer-returned checksum to retain outside the mutable package."""
+    return hashlib.sha256(receipt_bytes(payload)).hexdigest()
+
+
+def write_receipt(directory: Path, payload: dict[str, Any]) -> str:
+    """Validate and atomically persist only producer-built output."""
+    validate_receipt(payload)
+    with _named_refusals():
+        staged = directory / ".iteration.writing"
+        try:
+            staged.write_bytes(receipt_bytes(payload))
+            os.replace(staged, directory / RECEIPT_NAME)
+        finally:
+            staged.unlink(missing_ok=True)
+    return receipt_sha256(payload)
+
+
+def finalize(  # pylint: disable=too-many-locals
+    package: Path,
+    expected_sha256: str,
+    judgement: dict[str, Any],
+    iteration: str | None = None,
+    *,
+    state_reader: StatusReader = bridge_status,
+) -> dict[str, Any]:
+    """Finalize separate reviewer input against an immutable capture and every current identity."""
+    with _named_refusals():
+        target = resolve_package(package)
+        root = iterations_root(package)
+        if not root.is_dir():
+            raise ReceiptError("NO_ITERATION", "no capture iteration exists")
+        names = sorted(path.name for path in root.iterdir())
+        name = iteration or (names[-1] if names else "")
+        if not ITERATION_RE.fullmatch(name) or name != (names[-1] if names else None):
+            raise ReceiptError("NO_ITERATION", "only the latest canonical iteration can be finalized")
+        _require_pin(rev.sha256_of_file(root / name / RECEIPT_NAME), expected_sha256, "CAPTURE_CHANGED")
+        chain = read_chain(package)
+        selected, previous = chain[-1], chain[-2] if len(chain) > 1 else None
+        original = selected.payload
+        if original["state"] != STATE_PENDING:
+            raise ReceiptError("ALREADY_FINAL", "a final receipt is immutable")
+        _validate(JUDGEMENT_SCHEMA, judgement)
+        if judgement["completed_at"] is not None:
+            raise ReceiptError("STATE_INVALID", "reviewer input cannot set producer completion time")
+        generated = original["generated"]
+        assert_desktop_binding(target, generated["review"]["desktop_pid"], state_reader)
+        captured = {row["page_id"]: row["powerbi"]["capture"] for row in generated["pages"]}
+        current = generated_facts(
+            target, selected.directory, captured, generated["review"], generated["generated_at"], previous
         )
-        if any(status not in COMPLETING_STATUSES for status in statuses):
-            return OUTCOME_INCOMPLETE
-    if any(finding["status"] == FINDING_OPEN for finding in payload["judgement"]["findings"]):
-        return OUTCOME_INCOMPLETE
-    if payload["generated"]["data_evidence"]["status"] != DATA_STATUS_ACCEPTED:
-        return OUTCOME_INCOMPLETE
-    return OUTCOME_COMPLETE
-
-
-def finalize(package: Path, iteration: str | None = None) -> dict[str, Any]:
-    """Validate a pending iteration against CURRENT truth and seal it. Returns the sealed receipt."""
-    target = resolve_package(package)
-    chain = read_chain(package)
-    if not chain:
-        raise ReceiptError("NO_ITERATION", "this package has no iteration to finalize")
-    name = iteration or chain[-1].name
-    selected = next((item for item in chain if item.name == name), None)
-    if selected is None:
-        raise ReceiptError("NO_ITERATION", f"this package has no iteration {name!r}")
-    payload = selected.payload
-    if payload["state"] == STATE_FINAL:
-        raise ReceiptError("ALREADY_FINAL", f"iteration {name} is already final")
-    prior = _assert_previous(chain, payload)
-    inventory = _assert_inventory(target, payload)
-    _assert_images(payload, selected.directory)
-    _assert_changes_from_previous(payload, prior)
-    _assert_judgement(target, payload, prior)
-    _assert_tableau(target, payload, inventory)
-    _assert_revisions(target, payload)
-    payload["judgement"]["completed_at"] = now_rfc3339()
-    payload["state"] = STATE_FINAL
-    payload["outcome"] = _outcome(payload)
-    write_receipt(selected.directory, payload)
-    return payload
+        if current != generated:
+            raise ReceiptError(
+                "GENERATED_CHANGED", "the complete generated facts no longer match current package truth"
+            )
+        payload = {**original, "generated": current, "judgement": json.loads(json.dumps(judgement, allow_nan=False))}
+        _assert_judgement(payload, previous)
+        _assert_limitations(package, payload)
+        # Recheck mutable reads and the PID after comparison, immediately before the final write.
+        if read_chain(package) != chain or artifact_facts(resolve_package(package)) != current["artifact"]:
+            raise ReceiptError("GENERATED_CHANGED", "the package or iteration chain changed during finalization")
+        assert_desktop_binding(target, generated["review"]["desktop_pid"], state_reader)
+        payload["judgement"]["completed_at"] = now_rfc3339()
+        payload["state"], payload["outcome"] = STATE_FINAL, OUTCOME_INCOMPLETE
+        write_receipt(selected.directory, payload)
+        return payload
