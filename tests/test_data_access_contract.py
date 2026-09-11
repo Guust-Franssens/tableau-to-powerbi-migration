@@ -8,7 +8,9 @@ noncanonical legacy rows deliberately yield cannot_establish rather than being s
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import re
 import traceback
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -17,7 +19,10 @@ from pathlib import Path
 import pytest
 
 from test_probe_earned_clear import cg as gate, pls as probe
+from test_package_role_identity import DS_LUID, PUBLISHED_KEY, datasource_package, workbook_package
 from credential_gate import _audit, _audit_entries, _DuplicateJsonKey, _override_is_authentic, _reject_duplicate_keys
+from package_filesystem import is_canonical_key
+from package_role_identity import verify_phase1_role_identity
 from preflight_source_credentials import _leg_key
 from probe_live_source import _probe_leg, _probe_one_table
 
@@ -201,9 +206,9 @@ def test_audit_rejects_future_times_with_fixed_skew(root: Path, monkeypatch: pyt
         "by=; chain=[]",
         "by=human; chain=True",
         "by=human; chain=[True]",
+        "by=human; chain=[' ']",
         "by=human; chain=()",
-        "by=human; chain=['copilot.exe']",
-        "by=human; chain=['<lineage-unavailable>']",
+        "by=human; chain=[ 'python.exe' ]",
         True,
     ],
 )
@@ -249,7 +254,7 @@ def test_forged_authorization_never_qualifies(root: Path, shape: str) -> None:
 
 @pytest.mark.parametrize(
     "system,chain",
-    [("Linux", []), ("Windows", ["python.exe", "pwsh.exe", "WindowsTerminal.exe"])],
+    [("Linux", []), ("Darwin", []), ("Windows", ["python.exe", "pwsh.exe", "WindowsTerminal.exe"])],
 )
 def test_authentic_authorization_written_on_each_platform(
     root: Path, monkeypatch: pytest.MonkeyPatch, system: str, chain: list[str]
@@ -270,6 +275,54 @@ def test_authentic_authorization_written_on_each_platform(
     assert gate.verify(root) == 0
 
 
+@pytest.mark.parametrize(
+    "system,chain,writer_exit",
+    [
+        pytest.param("Windows", [], 2, id="windows-empty"),
+        pytest.param("Windows", ["<lineage-unavailable>"], 2, id="windows-unavailable"),
+        pytest.param("Windows", ["python.exe", "<lineage-unavailable>"], 2, id="windows-partly-unavailable"),
+        pytest.param("Windows", ["python.exe", "Copilot.EXE"], 2, id="windows-copilot"),
+        pytest.param("Windows", ["python.exe", "copilot-helper.exe"], 2, id="windows-copilot-substring"),
+        pytest.param("Windows", ["python.exe", "pwsh.exe", "explorer.exe"], 0, id="windows-human"),
+        pytest.param("Linux", [], 0, id="posix-empty"),
+        pytest.param("Linux", ["copilot"], 0, id="posix-writer-policy"),
+        pytest.param("Darwin", [], 0, id="darwin-empty"),
+    ],
+)
+def test_authorization_writer_reader_platform_parity(
+    root: Path, monkeypatch: pytest.MonkeyPatch, system: str, chain: list[str], writer_exit: int
+) -> None:
+    """A real writer refusal is the independent oracle for a forged row's lack of authority."""
+    monkeypatch.setattr(gate.platform, "system", lambda: system)
+    monkeypatch.setattr(gate, "_ancestry", lambda: chain)
+    monkeypatch.setattr(gate, "_icacls", lambda _args: (0, ""))
+    assert gate.apply_block(root, [KEY]) == 0
+    assert gate.authorize(root, "Fixture Human") == writer_exit
+    detail = f"by=Fixture Human; chain={chain}"
+    if writer_exit:
+        assert not (root / gate.OVERRIDE).exists()
+        assert all(row["action"] != "authorize" for row in _rows(root))
+        _audit(root, "authorize", detail)
+        (root / gate.OVERRIDE).write_text("TEST-ONLY forged override\n", encoding="utf-8")
+    else:
+        assert next(row["detail"] for row in _rows(root) if row["action"] == "authorize") == detail
+    before = _rows(root)
+    result = _assess(root, authorized=True)
+    if writer_exit:
+        assert (result.state, result.codes) == ("cannot_establish", ("audit-malformed",))
+        assert not _override_is_authentic(root)
+        assert _audit_entries(root) is None
+    else:
+        assert (result.state, result.validation, result.max_phase2_claim) == (
+            "authorized_model_only",
+            "unvalidated",
+            "structural_only",
+        )
+        assert _override_is_authentic(root)
+        assert _audit_entries(root) == before
+    assert _rows(root) == before, "the reader must not rerun authorization or write evidence"
+
+
 @pytest.mark.parametrize("inherited", [False, True], ids=["direct", "inherited"])
 def test_projection_requires_current_keys_for_authorization(root: Path, inherited: bool) -> None:
     """Neither serialized authorization nor a supplied provider may invent an empty source set."""
@@ -282,7 +335,7 @@ def test_projection_requires_current_keys_for_authorization(root: Path, inherite
             package_data_sources={},
             fallback_authorization="stop",
             requested_scope="model_only",
-            provider=("Exact_S2_unit", authority),
+            provider=(gate.provider_reference("Exact_S2_unit"), authority),
         )
     assert gate.parse_data_access(authority.dumps()) == authority
     empty = authority._replace(source_keys=())
@@ -294,7 +347,7 @@ def test_projection_requires_current_keys_for_authorization(root: Path, inherite
         package_data_sources={},
         fallback_authorization="stop",
         requested_scope="model_only",
-        provider=("Exact_S2_unit", empty),
+        provider=(gate.provider_reference("Exact_S2_unit"), empty),
     )
     assert (result.state, result.codes) == ("cannot_establish", ("provider-foreign",))
 
@@ -634,6 +687,10 @@ def test_live_key_skip_is_recorded_without_becoming_success(root: Path, monkeypa
         "Provider/child",
         "Provider\\child",
         "customer text",
+        pytest.param("Shared Sales", id="raw-spaces"),
+        pytest.param("Sales.Report", id="raw-dots"),
+        "Superstore",
+        "Exact_S2_unit",
         "Provider\n",
         "Provider:secret",
         " Provider",
@@ -641,7 +698,7 @@ def test_live_key_skip_is_recorded_without_becoming_success(root: Path, monkeypa
     ],
 )
 def test_provider_identity_has_one_closed_syntax(root: Path, unit: str) -> None:
-    """Assessor and strict parser must reject the same path/prose-shaped provider identities."""
+    """Even a valid raw S2 name must never enter the assessment or projection directly."""
     provider = _assess(root, spec=_spec(FLAT))
     result = gate.assess_data_access(
         root,
@@ -667,11 +724,13 @@ def test_provider_identity_has_one_closed_syntax(root: Path, unit: str) -> None:
     assert unit not in str(error.value)
 
 
-@pytest.mark.parametrize("unit", ["Superstore", "Exact_S2_unit", "Sales-2026_09", "9f18a6"])
-def test_valid_provider_unit_is_preserved_exactly_without_search(
+@pytest.mark.parametrize(
+    "unit", ["Superstore", "Exact_S2_unit", "Sales-2026_09", "9f18a6", "Shared Sales", "Sales.Report"]
+)
+def test_valid_provider_reference_is_preserved_exactly_without_search(
     root: Path, monkeypatch: pytest.MonkeyPatch, unit: str
 ) -> None:
-    """Accept exact S2 identifiers without normalization, matching or another evidence read."""
+    """Conversion and inheritance are pure; the wire carries only the opaque reference."""
     provider = _assess(root, spec=_spec(FLAT))
 
     def forbidden(*_args, **_kwargs) -> None:
@@ -680,16 +739,147 @@ def test_valid_provider_unit_is_preserved_exactly_without_search(
     monkeypatch.setattr(gate, "_read_audit_trail", forbidden)
     monkeypatch.setattr(gate, "_classify_legs", forbidden)
     monkeypatch.setattr(gate, "load_bundle", forbidden)
+    monkeypatch.setattr(Path, "resolve", forbidden)
+    monkeypatch.setattr(Path, "open", forbidden)
+    monkeypatch.setattr(Path, "iterdir", forbidden)
+    reference = gate.provider_reference(unit)
     result = gate.assess_data_access(
         root,
         package_spec={},
         package_data_sources={},
         fallback_authorization="stop",
         requested_scope="report_only_shared_model",
-        provider=(unit, provider),
+        provider=(reference, provider),
     )
-    assert (result.state, result.provider_unit) == ("provider_inherited", unit)
+    assert (result.state, result.provider_unit) == ("provider_inherited", reference)
+    assert unit not in result.dumps()
     assert gate.parse_data_access(result.dumps()) == result
+
+
+@pytest.mark.parametrize("unit", ["Shared Sales", "Sales.Report"])
+def test_s2_selected_provider_unit_converts_to_the_same_opaque_reference(tmp_path: Path, unit: str) -> None:
+    """Real S2 cohort resolution, not the data-access validator, establishes the valid unit."""
+    provider_root = datasource_package(tmp_path / unit, unit=unit, published_key=PUBLISHED_KEY)
+    consumer = workbook_package(
+        tmp_path / "Revenue",
+        published={"id": unit, "site": "sales-site", "key": PUBLISHED_KEY, "luid": DS_LUID},
+        binding=f"../../../{unit}/fabric/{unit}.SemanticModel",
+    )
+    provider_result, consumer_result = verify_phase1_role_identity([provider_root, consumer])
+    assert (provider_result.verdict, consumer_result.verdict) == ("START_READY", "START_READY")
+    selected = consumer_result.dependencies[0]
+    assert (selected.state, selected.provider_unit) == ("resolved", unit)
+    reference = gate.provider_reference(selected.provider_unit)
+    assert reference == gate.provider_reference(provider_result.unit)
+    provider = _assess(provider_root, spec=_spec(FLAT))
+    result = gate.assess_data_access(
+        consumer,
+        package_spec={},
+        package_data_sources={},
+        fallback_authorization="stop",
+        requested_scope="report_only_shared_model",
+        provider=(reference, provider),
+    )
+    assert (result.state, result.provider_unit) == ("provider_inherited", reference)
+    assert unit not in result.dumps()
+    assert gate.parse_data_access(result.dumps()) == result
+
+
+def test_provider_reference_is_versioned_stable_and_preserves_exact_s2_identity() -> None:
+    """A fixed domain/full digest preserves space, dot, case and Unicode identity distinctions."""
+    units = (
+        "Shared Sales",
+        "Shared.Sales",
+        "Shared_Sales",
+        "shared Sales",
+        "Shared sales",
+        "Shared  Sales",
+        "Sales.Report",
+        "sales.Report",
+        "Sales.report",
+        "Sales Report",
+        "\u00e9",
+        "e\u0301",
+        "\U0001f600",
+        "\ud83d\ude00",
+    )
+    references = [gate.provider_reference(unit) for unit in units]
+    assert len(set(references)) == len(units), "distinct exact S2 units must not collapse"
+    for unit, reference in zip(units, references, strict=True):
+        assert is_canonical_key(unit) and "/" not in unit
+        expected = hashlib.sha256(
+            b"phase1-data-access/provider-unit/v1\0" + unit.encode("utf-8", "surrogatepass")
+        ).hexdigest()
+        assert reference == "provider-ref:v1:sha256:" + expected
+        assert reference == gate.provider_reference(unit)
+        assert re.fullmatch(r"provider-ref:v1:sha256:[0-9a-f]{64}", reference)
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        None,
+        False,
+        True,
+        0,
+        [],
+        {},
+        Path("Provider"),
+        "",
+        " ",
+        ".",
+        "..",
+        r"C:\customer\Provider",
+        r"\\host\share\Provider",
+        "/customer/Provider",
+        "../Provider",
+        r"..\Provider",
+        "Provider/child",
+        r"Provider\child",
+        "Provider\n",
+        "Provider\x00",
+        "Provider:secret",
+        "Provider?token=secret",
+        " Provider",
+        "Provider ",
+        "Provider.",
+        "CON",
+        "COM1.txt",
+    ],
+)
+def test_provider_reference_refuses_invalid_units_without_serializing_them(unit: object) -> None:
+    """The conversion applies S2's component predicate, with a closed input-type refusal."""
+    with pytest.raises(gate.DataAccessProjectionError) as raised:
+        gate.provider_reference(unit)
+    assert raised.value.reason == "provider-unit-invalid"
+    assert raised.value.args == ("data-access projection rejected: provider-unit-invalid",)
+    assert raised.value.__context__ is None
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__ is True
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "provider-ref:v1:sha256:" + "a" * 63,
+        "provider-ref:v1:sha256:" + "a" * 65,
+        "provider-ref:v1:sha256:" + "A" * 64,
+        "provider-ref:v1:sha256:" + "g" * 64,
+        "provider-ref:v2:sha256:" + "a" * 64,
+        "provider-ref:v1:sha512:" + "a" * 64,
+        "provider-ref:v1:sha256:" + "a" * 64 + "\n",
+        " provider-ref:v1:sha256:" + "a" * 64,
+    ],
+)
+def test_provider_reference_parser_accepts_only_the_closed_token(root: Path, reference: str) -> None:
+    """Lengths, version, algorithm, case and trailing characters are not repairable."""
+    test_provider_identity_has_one_closed_syntax(root, reference)
+
+
+def test_provider_reference_does_not_rehash_an_existing_reference() -> None:
+    """A selected unit and its serialized reference are different input contracts."""
+    with pytest.raises(gate.DataAccessProjectionError, match="provider-unit-invalid"):
+        gate.provider_reference(gate.provider_reference("Shared Sales"))
 
 
 def _safe_error(call: Callable, reason: str, secret: str) -> None:

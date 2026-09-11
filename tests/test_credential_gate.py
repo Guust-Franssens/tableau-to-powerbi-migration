@@ -2509,7 +2509,11 @@ def _da_root(tmp_path: Path, name: str, *connections: dict) -> Path:
 def _trail(root: Path, *entries: tuple) -> None:
     """Append `(action, sources_or_None)` with the production action's canonical detail shape."""
     for action, sources in entries:
-        detail = "by=test; chain=[]" if action == "authorize" else f"{action} fixture"
+        detail = (
+            "by=test; chain=['python.exe', 'pwsh.exe', 'WindowsTerminal.exe']"
+            if action == "authorize"
+            else f"{action} fixture"
+        )
         if action in cg.BLOCK_ACTIONS and sources is not None:
             detail = "sources_json=" + json.dumps(sources)
         _append_audit(root, action, detail, sources)
@@ -3005,6 +3009,12 @@ def _direct_actions(root: Path) -> list[str]:
     return [json.loads(line)["action"] for line in (root / cg.AUDIT).read_text(encoding="utf-8").splitlines()]
 
 
+UPSTREAM_REF = cg.provider_reference("Upstream")
+OTHER_REF = cg.provider_reference("Other")
+SUPERSTORE_REF = cg.provider_reference("Superstore")
+UP_REF = cg.provider_reference("Up")
+S2_UNIT_REF = cg.provider_reference("Exact_S2_unit")
+
 PROVIDER_LIVE = cg.DataAccessAssessment(
     state="live_data_ok",
     source_keys=(KEY_A,),
@@ -3048,7 +3058,7 @@ PROVIDER_BLOCKED = cg.DataAccessAssessment(
 PROVIDER_RECURSIVE = cg.DataAccessAssessment(
     state="provider_inherited",
     source_keys=(KEY_A,),
-    provider_unit="Upstream",
+    provider_unit=UPSTREAM_REF,
     provider_state="live_data_ok",
     validation="validated",
     effective_scope="model_and_report",
@@ -3071,11 +3081,11 @@ def test_exactly_one_direct_provider_is_inherited_field_for_field(
     root = _da_root(tmp_path, f"consumer-{len(expected_keys)}", FLAT)
 
     result = _assess(
-        root, _da_spec(FLAT), scope="report_only_shared_model", provider=("Superstore", provider_assessment)
+        root, _da_spec(FLAT), scope="report_only_shared_model", provider=(SUPERSTORE_REF, provider_assessment)
     )
 
     assert (result.state, result.codes) == ("provider_inherited", ("provider-exact",))
-    assert (result.provider_unit, result.provider_state) == ("Superstore", provider_assessment.state)
+    assert (result.provider_unit, result.provider_state) == (SUPERSTORE_REF, provider_assessment.state)
     assert result.source_keys == expected_keys
     assert result.validation == provider_assessment.validation
     assert result.max_phase2_claim == provider_assessment.max_phase2_claim
@@ -3089,7 +3099,7 @@ def test_a_model_only_provider_cannot_authorize_a_report_only_consumer(tmp_path:
     refusal is about the topology intersection rather than about the provider being unusable.
     """
     root = _da_root(tmp_path, "model-only-provider", FLAT)
-    provider = ("SharedModel", PROVIDER_AUTHORIZED)
+    provider = (cg.provider_reference("SharedModel"), PROVIDER_AUTHORIZED)
 
     report_consumer = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=provider)
     model_consumer = _assess(root, _da_spec(FLAT), scope="model_only", provider=provider)
@@ -3105,15 +3115,17 @@ def test_a_model_only_provider_cannot_authorize_a_report_only_consumer(tmp_path:
         pytest.param(None, "provider-missing", id="absent"),
         pytest.param([], "provider-missing", id="resolved-nothing"),
         pytest.param(
-            [("Upstream", PROVIDER_LIVE), ("Other", PROVIDER_LOCAL)], "provider-ambiguous", id="two-candidates"
+            [(UPSTREAM_REF, PROVIDER_LIVE), (OTHER_REF, PROVIDER_LOCAL)], "provider-ambiguous", id="two-candidates"
         ),
-        pytest.param([("Upstream", PROVIDER_LIVE), ("Upstream", PROVIDER_LIVE)], "provider-ambiguous", id="two-equal"),
-        pytest.param(("Upstream", PROVIDER_RECURSIVE), "provider-ambiguous", id="recursive"),
-        pytest.param(("Upstream", PROVIDER_BLOCKED), "provider-missing", id="not-an-authority"),
+        pytest.param(
+            [(UPSTREAM_REF, PROVIDER_LIVE), (UPSTREAM_REF, PROVIDER_LIVE)], "provider-ambiguous", id="two-equal"
+        ),
+        pytest.param((UPSTREAM_REF, PROVIDER_RECURSIVE), "provider-ambiguous", id="recursive"),
+        pytest.param((UPSTREAM_REF, PROVIDER_BLOCKED), "provider-missing", id="not-an-authority"),
         pytest.param(("", PROVIDER_LIVE), "provider-foreign", id="empty-unit"),
-        pytest.param(("Upstream", {"state": "live_data_ok"}), "provider-foreign", id="foreign-shape"),
-        pytest.param(("Upstream", PROVIDER_LIVE, "extra"), "provider-foreign", id="wrong-arity"),
-        pytest.param([("Upstream", "not an assessment")], "provider-foreign", id="one-malformed-candidate"),
+        pytest.param((UPSTREAM_REF, {"state": "live_data_ok"}), "provider-foreign", id="foreign-shape"),
+        pytest.param((UPSTREAM_REF, PROVIDER_LIVE, "extra"), "provider-foreign", id="wrong-arity"),
+        pytest.param([(UPSTREAM_REF, "not an assessment")], "provider-foreign", id="one-malformed-candidate"),
         pytest.param("Upstream", "provider-foreign", id="bare-string"),
     ],
 )
@@ -3144,11 +3156,13 @@ def test_a_single_candidate_list_inherits_exactly_like_a_bare_pair(tmp_path: Pat
     """Control for the ambiguity rule: one candidate is not ambiguous, however it was passed."""
     root = _da_root(tmp_path, "one-candidate", FLAT)
 
-    as_list = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=[("Superstore", PROVIDER_LIVE)])
-    as_pair = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=("Superstore", PROVIDER_LIVE))
+    as_list = _assess(
+        root, _da_spec(FLAT), scope="report_only_shared_model", provider=[(SUPERSTORE_REF, PROVIDER_LIVE)]
+    )
+    as_pair = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=(SUPERSTORE_REF, PROVIDER_LIVE))
 
     assert as_list == as_pair
-    assert (as_list.state, as_list.provider_unit) == ("provider_inherited", "Superstore")
+    assert (as_list.state, as_list.provider_unit) == ("provider_inherited", SUPERSTORE_REF)
 
 
 @pytest.mark.parametrize("policy", ["stop", "model_only_unvalidated"])
@@ -3156,7 +3170,7 @@ def test_a_single_candidate_list_inherits_exactly_like_a_bare_pair(tmp_path: Pat
 def test_the_typed_inputs_are_a_closed_vocabulary(tmp_path: Path, policy: str, scope: str) -> None:
     """Accepted members must work; anything else is a CALLER bug and raises rather than degrading."""
     root = _da_root(tmp_path, f"vocab-{policy}-{scope}", FLAT)
-    _assess(root, _da_spec(FLAT), policy=policy, scope=scope, provider=("U", PROVIDER_LOCAL))
+    _assess(root, _da_spec(FLAT), policy=policy, scope=scope, provider=(cg.provider_reference("U"), PROVIDER_LOCAL))
 
     with pytest.raises(ValueError):
         _assess(root, _da_spec(FLAT), policy="whatever")
@@ -3317,7 +3331,7 @@ def test_the_projection_parser_refuses_bad_fields_by_name(payload: dict, reason:
             _projection(
                 state="provider_inherited",
                 codes=["provider-exact"],
-                provider_unit="Upstream",
+                provider_unit=UPSTREAM_REF,
                 provider_state=None,
             ),
             id="inherited-without-a-provider-state",
@@ -3327,7 +3341,7 @@ def test_the_projection_parser_refuses_bad_fields_by_name(payload: dict, reason:
                 state="provider_inherited",
                 source_keys=[],
                 codes=["provider-exact"],
-                provider_unit="Upstream",
+                provider_unit=UPSTREAM_REF,
                 provider_state="live_data_ok",
             ),
             id="inherited-live-provider-with-no-keys",
@@ -3341,7 +3355,7 @@ def test_the_projection_parser_refuses_bad_fields_by_name(payload: dict, reason:
             ),
             id="inherited-without-a-provider-unit",
         ),
-        pytest.param(_projection(provider_unit="Upstream"), id="direct-state-naming-a-provider"),
+        pytest.param(_projection(provider_unit=UPSTREAM_REF), id="direct-state-naming-a-provider"),
     ],
 )
 def test_the_projection_parser_refuses_impossible_state_combinations(payload: dict) -> None:
@@ -3509,7 +3523,7 @@ def test_every_state_the_assessor_actually_produces_survives_the_strict_parser(t
         _assess(authorized, _da_spec(LIVE_A), policy="model_only_unvalidated", scope="model_only"),
         _assess(flat, _da_spec(FLAT)),
         _assess(flat, _da_spec(LIVE_A)),
-        _assess(consumer, _da_spec(FLAT), scope="report_only_shared_model", provider=("Up", PROVIDER_LIVE)),
+        _assess(consumer, _da_spec(FLAT), scope="report_only_shared_model", provider=(UP_REF, PROVIDER_LIVE)),
     ]
 
     assert {result.state for result in produced} == set(cg.DATA_ACCESS_STATES), (
@@ -3712,12 +3726,12 @@ def test_data_access_root_keys_are_not_silently_collapsed(tmp_path: Path) -> Non
         True,
         {},
         (),
-        ("Up", PROVIDER_LIVE, "extra"),
-        ["Up", PROVIDER_LIVE],
-        [("Up", PROVIDER_LIVE), False],
-        [("Up", PROVIDER_LIVE), ("Other", {})],
-        (("Up", PROVIDER_LIVE),),
-        (("Up", PROVIDER_LIVE), ("Other", PROVIDER_LOCAL)),
+        (UP_REF, PROVIDER_LIVE, "extra"),
+        [UP_REF, PROVIDER_LIVE],
+        [(UP_REF, PROVIDER_LIVE), False],
+        [(UP_REF, PROVIDER_LIVE), (OTHER_REF, {})],
+        ((UP_REF, PROVIDER_LIVE),),
+        ((UP_REF, PROVIDER_LIVE), (OTHER_REF, PROVIDER_LOCAL)),
     ],
 )
 def test_data_access_provider_candidate_shapes_are_not_coerced(tmp_path: Path, provider: object) -> None:
@@ -3739,14 +3753,14 @@ def test_data_access_provider_candidate_shapes_are_not_coerced(tmp_path: Path, p
         PROVIDER_LIVE._replace(codes=("probe-cleared",)),
         PROVIDER_LIVE._replace(codes=["probe-cleared", "probe-data-ok"]),
         PROVIDER_LOCAL._replace(source_keys=""),
-        PROVIDER_LIVE._replace(provider_unit="hidden-recursion"),
+        PROVIDER_LIVE._replace(provider_unit=cg.provider_reference("hidden-recursion")),
     ],
 )
 def test_data_access_provider_assessment_must_already_be_strict(tmp_path: Path, provider: object) -> None:
     """Inheritance cannot repair, deduplicate, or amplify an invalid provider projection."""
     root = _da_root(tmp_path, "provider-semantics", FLAT)
 
-    result = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=("Up", provider))
+    result = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=(UP_REF, provider))
 
     assert (result.state, result.codes) == ("cannot_establish", ("provider-foreign",))
 
@@ -3761,14 +3775,12 @@ def test_data_access_provider_resolution_stays_with_the_caller(tmp_path: Path, m
 
     for name in ("_read_audit_trail", "load_bundle", "_classify_legs", "_override_is_authentic", "verify", "_audit"):
         monkeypatch.setattr(cg, name, forbidden)
-    inherited = _assess(
-        root, published_spec, scope="report_only_shared_model", provider=("Exact_S2_unit", PROVIDER_LIVE)
-    )
+    inherited = _assess(root, published_spec, scope="report_only_shared_model", provider=(S2_UNIT_REF, PROVIDER_LIVE))
     missing = _assess(root, published_spec, scope="report_only_shared_model", provider=[])
 
     assert (inherited.state, inherited.provider_unit, inherited.source_keys) == (
         "provider_inherited",
-        "Exact_S2_unit",
+        S2_UNIT_REF,
         PROVIDER_LIVE.source_keys,
     )
     assert (missing.state, missing.codes) == ("cannot_establish", ("provider-missing",))
@@ -3778,7 +3790,7 @@ def test_data_access_provider_resolution_stays_with_the_caller(tmp_path: Path, m
 def test_data_access_inherited_authorization_cannot_expand_to_reports(tmp_path: Path, scope: str) -> None:
     """Structural-only provider authority stays model-only in both producer and strict reader."""
     root = _da_root(tmp_path, "scope-ceiling", FLAT)
-    result = _assess(root, _da_spec(FLAT), scope=scope, provider=("Up", PROVIDER_AUTHORIZED))
+    result = _assess(root, _da_spec(FLAT), scope=scope, provider=(UP_REF, PROVIDER_AUTHORIZED))
     assert (result.state, result.codes) == ("blocked", ("provider-model-only",))
     payload = {
         **PROVIDER_RECURSIVE.to_json(),

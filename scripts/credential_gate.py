@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from migration_bundle import ENGINE_OUTPUT_DIRS, ENGINE_RECEIPT, is_engine_artifact, load_bundle, sha256_file
+from package_filesystem import is_canonical_key
 
 # Imported as a plain NAME, not reached through the module (`preflight_source_credentials._classify_legs`
 # is `protected-access` to pylint, W0212). This is the SAME canonical classifier
@@ -197,7 +199,7 @@ def _valid_audit_sources(value: object, *, diagnostic: bool = False) -> bool:
 
 
 def _valid_authorization_detail(detail: str) -> bool:
-    """Validate authorize()'s by/lineage record, including its non-Windows empty chain."""
+    """Require canonical writer syntax and authorize()'s same pure platform lineage guard."""
     who, separator, lineage = detail.removeprefix("by=").rpartition("; chain=")
     if not detail.startswith("by=") or not separator or not who.strip():
         return False
@@ -208,13 +210,8 @@ def _valid_authorization_detail(detail: str) -> bool:
     return (
         isinstance(chain, list)
         and repr(chain) == lineage
-        and all(
-            isinstance(name, str)
-            and name.strip()
-            and name != "<lineage-unavailable>"
-            and "copilot" not in name.casefold()
-            for name in chain
-        )
+        and all(isinstance(name, str) and name.strip() for name in chain)
+        and not _has_copilot_ancestor(chain)
     )
 
 
@@ -841,23 +838,11 @@ def _ancestry() -> list[str]:
 
 
 def _has_copilot_ancestor(chain: list[str]) -> bool:
-    """Was this process started (directly or indirectly) by a Copilot CLI agent?
+    """Pure platform guard shared by authorize() and its audit reader; never queries processes.
 
-    The guard on `authorize`, because everything softer failed. Measured 2026-08-02: an agent ran
-    `credential_gate.py authorize --who gfranssens` itself, impersonating the user through the
-    sanctioned path - so the audit log then *certified* a forged authorization and `verify` returned
-    a clean exit 0. That is worse than having no audit trail at all.
-
-    A TTY check does not help: the agent's shell reports `stdin.isatty() == True` (measured), and it
-    could pipe a confirmation anyway. Process lineage is the practical boundary - a real chain looks
-    like `python <- pwsh <- copilot.exe <- ...`, and an agent would have to escape its own process
-    tree to defeat it.
-
-    **Fails CLOSED on an empty or unavailable chain**, which is the whole reason this is a separate
-    function. The first version treated "no chain" as "no copilot ancestor" and returned False, so a
-    failed lineage query silently AUTHORIZED - and that is exactly what happened: under four
-    concurrent agents one query came back empty and the forged authorization went through. An
-    unknown answer must never be read as permission.
+    On Windows an empty/unavailable lineage is a refusal, not permission. A failed query once let
+    an agent authorize its own build (2026-08-02); a TTY check also failed because agent shells had
+    one. Only _ancestry() queries the process tree. Non-Windows keeps the writer's existing policy.
     """
     if platform.system() != "Windows":
         return False
@@ -1393,9 +1378,9 @@ CANNOT_CODES = frozenset(
 )
 DATA_ACCESS_CODES = ACCEPTED_CODES | BLOCKING_CODES | CANNOT_CODES
 
-# Closed identities: no endpoint/display text, paths or normalization.
+# Closed projection identities: no endpoint/display text, paths or normalization.
 SOURCE_KEY_RE = re.compile(r"^source-key:[0-9a-f]{16}$")
-PROVIDER_UNIT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+PROVIDER_REFERENCE_RE = re.compile(r"provider-ref:v1:sha256:[0-9a-f]{64}")
 
 # Attempts are not clears. Reserved operator_required/credential_present remain blocking even
 # though today's classifier does not emit them; only probe-data_ok can supply measured success.
@@ -1469,7 +1454,9 @@ class _NonFiniteJsonConstant(Exception):
 
 
 class DataAccessAssessment(NamedTuple):
-    """Immutable authority. NamedTuple also works with the hook's unregistered exec_module loader,
+    """Immutable authority; provider_unit holds only an opaque provider_reference(), never a name.
+
+    NamedTuple also works with the hook's unregistered exec_module loader,
     unlike dataclass/postponed-annotation resolution (covered by the hook-loading control).
     """
 
@@ -1757,12 +1744,24 @@ def _blocked_assessment(
     return _assessment("blocked", codes=codes or ["marker-only"], source_keys=live_keys)
 
 
+def provider_reference(unit: str) -> str:
+    """Hash an exact S2-selected component into a versioned SHA-256 provider_unit reference.
+
+    Reuse S2's pure predicate; no search/normalization. UTF-8 surrogatepass preserves all code points.
+    """
+    _require(isinstance(unit, str) and "/" not in unit and is_canonical_key(unit), "provider-unit-invalid")
+    digest = hashlib.sha256(
+        b"phase1-data-access/provider-unit/v1\0" + unit.encode("utf-8", "surrogatepass")
+    ).hexdigest()
+    return f"provider-ref:v1:sha256:{digest}"
+
+
 def _is_provider_pair(provider: object) -> bool:
     """Validate a caller-supplied pair without normalizing its immutable assessment fields."""
     if not isinstance(provider, tuple) or len(provider) != 2:
         return False
-    unit, assessment = provider
-    if not _valid_provider_unit(unit) or not isinstance(assessment, DataAccessAssessment):
+    reference, assessment = provider
+    if not _valid_provider_reference(reference) or not isinstance(assessment, DataAccessAssessment):
         return False
     if not isinstance(assessment.source_keys, tuple) or not isinstance(assessment.codes, tuple):
         return False
@@ -1772,9 +1771,9 @@ def _is_provider_pair(provider: object) -> bool:
         return False
 
 
-def _valid_provider_unit(unit: object) -> bool:
-    """S2's exact opaque package component, never a path, prose or a normalized name."""
-    return isinstance(unit, str) and PROVIDER_UNIT_RE.fullmatch(unit) is not None
+def _valid_provider_reference(reference: object) -> bool:
+    """Accept only the versioned digest token, never a raw S2 unit or a path."""
+    return isinstance(reference, str) and PROVIDER_REFERENCE_RE.fullmatch(reference) is not None
 
 
 def _provider_candidates(provider: object) -> list | None:
@@ -1806,7 +1805,7 @@ def _inherit_from_provider(provider: object, requested_scope: str) -> DataAccess
     candidate, refusal = _resolve_single_provider(provider)
     if refusal:
         return _cannot_establish(refusal)
-    unit, assessment = candidate
+    reference, assessment = candidate
     if assessment.state == "provider_inherited":
         return _cannot_establish("provider-ambiguous")
     if assessment.state not in DIRECT_ACCEPTED_STATES:
@@ -1817,7 +1816,7 @@ def _inherit_from_provider(provider: object, requested_scope: str) -> DataAccess
         "provider_inherited",
         codes=["provider-exact"],
         source_keys=assessment.source_keys,
-        provider_unit=unit,
+        provider_unit=reference,
         provider_state=assessment.state,
         validation=assessment.validation,
         effective_scope=requested_scope,
@@ -1936,6 +1935,7 @@ def assess_data_access(  # pylint: disable=too-many-arguments
 
     No probe, mutation, ancestor search or second classifier. Invalid policy/scope raises ValueError;
     malformed evidence returns a typed refusal. Published consumer legs are not direct endpoints.
+    Provider pairs must already carry provider_reference(S2's selected unit), not raw unit names.
     """
     if fallback_authorization not in FALLBACK_POLICIES:
         raise ValueError(f"fallback_authorization must be one of {FALLBACK_POLICIES}")
@@ -2066,7 +2066,7 @@ def parse_data_access(text: str) -> DataAccessAssessment:
     _check_enum(payload["provider_state"], DIRECT_ACCEPTED_STATES, nullable=True)
     if payload["provider_unit"] is not None:
         _require(isinstance(payload["provider_unit"], str) and payload["provider_unit"], "bad-type")
-        _require(_valid_provider_unit(payload["provider_unit"]), "provider-unit-invalid")
+        _require(_valid_provider_reference(payload["provider_unit"]), "provider-unit-invalid")
 
     keys = _sorted_unique_strings(payload["source_keys"], "source-keys-unsorted")
     for key in keys:
