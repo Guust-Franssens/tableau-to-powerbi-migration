@@ -15,7 +15,9 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from PIL import Image
@@ -254,7 +256,7 @@ def _finding(**overrides: object) -> dict:
     }
 
 
-def _code(callback) -> str:
+def _code(callback: Callable[[], Any]) -> str:
     with pytest.raises(receipt.ReceiptError) as caught:
         callback()
     return caught.value.code
@@ -510,8 +512,14 @@ def test_wrong_definition_pbir_model_is_refused(package: Path) -> None:
     assert _code(lambda: receipt.resolve_package(package)) == "MODEL_BINDING"
 
 
-def test_decoy_pbip_is_refused_even_when_it_references_the_same_report(package: Path) -> None:
-    write_json(package / "fabric" / "A-decoy.pbip", {"artifacts": [{"report": {"path": "Unit.Report"}}]})
+@pytest.mark.parametrize(
+    "relative,report_path",
+    [("fabric/A-decoy.pbip", "Unit.Report"), ("A-decoy.pbip", "fabric/Unit.Report")],
+)
+def test_decoy_pbip_is_refused_even_when_it_references_the_same_report(
+    package: Path, relative: str, report_path: str
+) -> None:
+    write_json(package.joinpath(*relative.split("/")), {"artifacts": [{"report": {"path": report_path}}]})
     assert _code(lambda: receipt.resolve_package(package)) == "PBIP_IDENTITY"
 
 

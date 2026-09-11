@@ -336,7 +336,7 @@ def resolve_package(package: Path) -> PackageTarget:  # pylint: disable=too-many
             raise ReceiptError("UNSAFE_PATH", "artifact roles must be canonical package-relative paths")
         if role not in directories:
             raise ReceiptError("PACKAGE_MANIFEST", "a declared artifact directory is missing")
-    pbips = [key for key in files if key.startswith("fabric/") and key.lower().endswith(".pbip")]
+    pbips = [key for key in files if key.lower().endswith(".pbip")]
     if len(pbips) != 1:
         raise ReceiptError("PBIP_IDENTITY", "the package must hold exactly one PBIP, without decoys")
     pbip = pbips[0]
