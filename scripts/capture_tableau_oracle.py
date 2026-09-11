@@ -136,6 +136,7 @@ import urllib.request
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
@@ -331,9 +332,13 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
         self._request_context = threading.local()
         self._token_generation = 0
         self._known_tokens: set[str] = set()
+        self._reauth_failure_generation: int | None = None
+        self._reauth_failure: BaseException | None = None
         self._cooldown_until = 0.0
+        self._cooldown_owner: object | None = None
         self._monotonic = time.monotonic
         self._sleep = time.sleep
+        self._wall_time = getattr(time, "time", time.monotonic)
         self.token: str | None = None
         self.site_id: str | None = None
         self.reauth_count = 0
@@ -372,32 +377,54 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
             self.reauth_count += 1
             return self.reauth_count
 
-    def _wait_for_pool_cooldown(self, deadline: float | None = None) -> None:
-        """Delay a later request until the longest observed HTTP 429 cooldown has expired."""
+    def _wait_for_pool_cooldown(self, deadline: float | None = None, owner: object | None = None) -> float:
+        """Wait for pool admission and return time attributable to another export's cooldown."""
+        external_wait = 0.0
         while True:
             now = self._monotonic()
             with self._cooldown_lock:
                 cooldown_until = self._cooldown_until
+                cooldown_owner = self._cooldown_owner
             if now >= cooldown_until or (deadline is not None and now >= deadline):
-                return
+                return external_wait
             wake_at = min(cooldown_until, deadline) if deadline is not None else cooldown_until
             self._sleep(max(wake_at - now, 0.0))
+            waited = max(self._monotonic() - now, 0.0)
+            if owner is not None and cooldown_owner is not owner:
+                external_wait = sum((external_wait, waited))
+
+    def _retry_after_delay(self, headers: dict[str, str]) -> float | None:
+        """Parse Retry-After delay-seconds or HTTP-date into a bounded positive delay."""
+        retry_after = header_value(headers, "Retry-After")
+        if retry_after is None:
+            return None
+        try:
+            delay = float(retry_after)
+        except ValueError:
+            try:
+                parsed = parsedate_to_datetime(retry_after)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if parsed is None or parsed.tzinfo is None:
+                return None
+            delay = parsed.timestamp() - self._wall_time()
+        if not math.isfinite(delay) or delay <= 0:
+            return None
+        return min(delay, BACKOFF_CAP_SEC)
 
     def _observe_rate_limit(self, status: int, headers: dict[str, str]) -> None:
         """Make one worker's Retry-After a pool-wide admission delay for later requests."""
         if status != 429:
             return
-        retry_after = header_value(headers, "Retry-After")
-        try:
-            delay = float(retry_after) if retry_after is not None else None
-        except ValueError:
+        delay = self._retry_after_delay(headers)
+        if delay is None:
             return
-        if delay is None or not math.isfinite(delay) or delay <= 0:
-            return
-        delay = min(delay, BACKOFF_CAP_SEC)
         cooldown_until = sum((self._monotonic(), delay))
+        owner = getattr(self._request_context, "export_id", None)
         with self._cooldown_lock:
-            self._cooldown_until = max(self._cooldown_until, cooldown_until)
+            if cooldown_until > self._cooldown_until:
+                self._cooldown_until = cooldown_until
+                self._cooldown_owner = owner
 
     def _request_with_generation(
         self,
@@ -405,9 +432,10 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
         *,
         api: str | None = None,
         deadline: float | None = None,
-    ) -> tuple[int, bytes, dict[str, str], int]:
-        """Issue one export against an atomic token snapshot and return that token's generation."""
-        self._wait_for_pool_cooldown(deadline)
+        export_id: object,
+    ) -> tuple[int, bytes, dict[str, str], int, float]:
+        """Issue one export against a token snapshot and return its generation plus external pool wait."""
+        external_wait = self._wait_for_pool_cooldown(deadline, export_id)
         with self._auth_lock:
             generation = self._token_generation
             token = self.token
@@ -415,20 +443,31 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
                 self._known_tokens.add(token)
         self._request_context.auth_token = token
         self._request_context.cooldown_waited = True
+        self._request_context.export_id = export_id
         try:
             status, payload, headers = self._request("GET", path, api=api, deadline=deadline)
         finally:
             del self._request_context.auth_token
             del self._request_context.cooldown_waited
-        return status, payload, headers, generation
+            del self._request_context.export_id
+        return status, payload, headers, generation, external_wait
 
     def _reauthenticate_if_current(self, observed_generation: int) -> bool:
-        """Refresh only if no other worker already replaced the token that failed."""
+        """Publish one replacement token or one terminal failure for the observed generation."""
         with self._auth_lock:
+            if observed_generation == self._reauth_failure_generation:
+                if self._reauth_failure is None:
+                    raise RuntimeError("failed reauthentication generation has no recorded outcome")
+                raise self._reauth_failure
             if observed_generation != self._token_generation:
                 return False
             before = self._token_generation
-            self.sign_in()
+            try:
+                self.sign_in()
+            except BaseException as exc:
+                self._reauth_failure_generation = observed_generation
+                self._reauth_failure = exc
+                raise
             # Existing test doubles override sign_in() and assign token/site_id directly. Keep their
             # generation semantics aligned with the real implementation.
             if self._token_generation == before:
@@ -642,7 +681,10 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
         ``retry`` overrides the session policy for THIS export only. The budget is therefore per-leg,
         never a pool the legs draw down: a salvage render after a failed data leg gets one attempt and
         no budget (:data:`SALVAGE_RETRY`), while the data leg that preceded it kept the full session
-        policy.
+        policy. A shared admission wait created by ANOTHER export's ``Retry-After`` is measured and
+        excluded from this deadline; this export's own request time, backoff and rate-limit wait remain
+        charged. With one worker there is no other export to credit, so legacy serial arithmetic is
+        unchanged.
 
         ⚠️ Re-authentication is bounded by ``MAX_REAUTH_PER_VIEW`` and by ``sign_in``'s own attempts
         rather than by the admission deadline -- deliberately, because abandoning a view mid-re-auth
@@ -672,14 +714,17 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
         policy = retry or self.retry
         reauths = 0
         retries: list[str] = []
+        export_id = object()
         deadline = time.monotonic() + policy.budget_sec
         for attempt in range(1, policy.max_attempts + 1):
             started = time.perf_counter()
-            status, payload, headers, generation = self._request_with_generation(
+            status, payload, headers, generation, external_wait = self._request_with_generation(
                 path,
                 api=api,
                 deadline=hard_deadline,
+                export_id=export_id,
             )
+            deadline = sum((deadline, external_wait))
             elapsed = time.perf_counter() - started
             if status == 200:
                 # A SUCCESSFUL body is the one thing this class hands back for PERSISTING -- to
@@ -1391,7 +1436,7 @@ def _capture_selected_views(  # pylint: disable=too-many-arguments,too-many-loca
     max_age: int,
     workers: int,
 ) -> Iterator[dict[str, Any]]:
-    """Capture selected views with deterministic reduction and one in-flight view per workbook."""
+    """Capture selected views with a bounded worker pool and deterministic original-index reduction."""
     if not DEFAULT_WORKERS <= workers <= MAX_WORKERS:
         raise ValueError(f"workers must be from {DEFAULT_WORKERS} through {MAX_WORKERS}, got {workers}")
     context = _CaptureContext(session, out_dir, wants, api_overrides, max_age)
@@ -1410,12 +1455,14 @@ def _capture_selected_views(  # pylint: disable=too-many-arguments,too-many-loca
     def results():
         """Yield selected-index slots in order while a bounded view pool executes concurrently."""
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tableau-oracle")
-        worker_futures = tuple(
-            executor.submit(_capture_worker, context, tasks, slots, failure, result_lock)
-            for _ in range(min(workers, len(views)))
-        )
+        worker_futures: tuple[Future[None], ...] = ()
         completed_normally = False
         try:
+            for _ in range(min(workers, len(views))):
+                worker_futures = (
+                    *worker_futures,
+                    executor.submit(_capture_worker, context, tasks, slots, failure, result_lock),
+                )
             for slot in slots:
                 yield slot.result()
             for future in worker_futures:
@@ -1525,7 +1572,9 @@ def build_parser() -> argparse.ArgumentParser:
             f"operators are surprised by, both by design: at or below ONE request timeout a failure "
             f"that blocks for the full timeout cannot be retried at all, and even at 2x only ONE such "
             f"failure fits -- a second exhausts the budget, so the run gives up well short of "
-            f"--max-attempts. Faster transient failures still retry until it is spent"
+            f"--max-attempts. Faster transient failures still retry until it is spent. A shared "
+            f"Retry-After admission wait caused by another view is excluded; this view's own request "
+            f"time and backoff are still charged"
         ),
     )
     return parser
@@ -1597,8 +1646,9 @@ def main() -> int:  # pylint: disable=too-many-locals
         _ensure_unique_output_identities(views)
         out_dir: Path = args.out
         out_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = out_dir / _MANIFEST_NAME
         # A failed new run must not leave an older success-shaped manifest beside partial new files.
-        (out_dir / _MANIFEST_NAME).unlink(missing_ok=True)
+        manifest_path.unlink(missing_ok=True)
         LOG.info("capturing %d view(s) with %d worker(s) -> %s", len(views), args.workers, out_dir)
 
         max_age = validate_max_age(args.max_age)
@@ -1630,20 +1680,24 @@ def main() -> int:  # pylint: disable=too-many-locals
             named_records.append(record)
             log_progress(index, len(views), record, session.redact_text)
 
-        return write_manifest(
-            named_records,
-            CaptureRun(
-                session,
-                env,
-                out_dir,
-                started,
-                frozenset(wants),
-                bool(args.reference_best),
-                max_age_minutes=max_age,
-            ),
-            capability_report,
-            _advertised_ceiling(session, env, capability_report, wants),
-        )
+        try:
+            return write_manifest(
+                named_records,
+                CaptureRun(
+                    session,
+                    env,
+                    out_dir,
+                    started,
+                    frozenset(wants),
+                    bool(args.reference_best),
+                    max_age_minutes=max_age,
+                ),
+                capability_report,
+                _advertised_ceiling(session, env, capability_report, wants),
+            )
+        except BaseException:
+            manifest_path.unlink(missing_ok=True)
+            raise
     finally:
         session.sign_out()
 
