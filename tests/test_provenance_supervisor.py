@@ -39,7 +39,9 @@ def _checkpoint(index: int = 0, digest: str = "a" * 64) -> dict:
 
 def _fingerprinted(total: int = 1) -> estate._ProvenanceState:
     state = _state()
+    state.accept({"kind": prov.MSG_OPERATION, "operation": "collect-inputs", "completed": 0, "total": 1})
     state.accept(_discovery(total))
+    state.accept({"kind": prov.MSG_OPERATION, "operation": "collect-inputs", "completed": 1, "total": 1})
     state.accept({"kind": prov.MSG_OPERATION, "operation": "fingerprint", "completed": 1, "total": total})
     state.accept(_checkpoint())
     return state
@@ -230,9 +232,12 @@ def _receive(raw: bytes) -> tuple[str | None, estate._ProvenanceState]:
 def test_complete_protocol_is_accepted_only_after_eof() -> None:
     """The positive wire control; refusing every message would not satisfy this test."""
     messages = [
+        {"kind": prov.MSG_OPERATION, "operation": "collect-inputs", "completed": 0, "total": 1},
         _discovery(),
+        {"kind": prov.MSG_OPERATION, "operation": "collect-inputs", "completed": 1, "total": 1},
         {"kind": prov.MSG_OPERATION, "operation": "fingerprint", "completed": 1, "total": 1},
         _checkpoint(),
+        {"kind": prov.MSG_LOOKUP_INTENT, "requested": False},
         {"kind": prov.MSG_TERMINAL, "result": _result()},
     ]
     code, state = _receive(b"".join(_wire(message) for message in messages))
@@ -243,9 +248,12 @@ def test_complete_protocol_is_accepted_only_after_eof() -> None:
 def test_terminal_is_final_even_when_a_trailer_follows_in_the_same_buffer(trailer: bytes) -> None:
     """Returning at terminal instead of reading through EOF falsely passes both of these."""
     messages = [
+        {"kind": prov.MSG_OPERATION, "operation": "collect-inputs", "completed": 0, "total": 1},
         _discovery(),
+        {"kind": prov.MSG_OPERATION, "operation": "collect-inputs", "completed": 1, "total": 1},
         {"kind": prov.MSG_OPERATION, "operation": "fingerprint", "completed": 1, "total": 1},
         _checkpoint(),
+        {"kind": prov.MSG_LOOKUP_INTENT, "requested": False},
         {"kind": prov.MSG_TERMINAL, "result": _result()},
     ]
     code, state = _receive(b"".join(_wire(message) for message in messages) + trailer)
@@ -302,6 +310,7 @@ def test_physical_multiplicity_is_preserved_even_for_identical_fingerprints() ->
     state = _fingerprinted(2)
     state.accept({"kind": prov.MSG_OPERATION, "operation": "fingerprint", "completed": 2, "total": 2})
     state.accept(_checkpoint(index=1))
+    state.accept({"kind": prov.MSG_LOOKUP_INTENT, "requested": False})
     state.accept({"kind": prov.MSG_TERMINAL, "result": _result(2)})
     assert state.terminal["input_count"] == len(state.terminal["inputs"]) == 2
 
@@ -379,6 +388,7 @@ def test_operations_cannot_regress_or_run_ahead_of_local_checkpoints() -> None:
     with pytest.raises(estate.ProvenanceProtocolError):
         state.accept({"kind": prov.MSG_OPERATION, "operation": "sign-in", "completed": 0, "total": 1})
     state = _fingerprinted()
+    state.accept({"kind": prov.MSG_LOOKUP_INTENT, "requested": True})
     state.accept({"kind": prov.MSG_OPERATION, "operation": "sign-in", "completed": 0, "total": 1})
     state.accept({"kind": prov.MSG_OPERATION, "operation": "sign-in", "completed": 1, "total": 1})
     with pytest.raises(estate.ProvenanceProtocolError):
@@ -622,6 +632,7 @@ def test_cleanup_exceptions_never_certify_an_accepted_success(broken: str) -> No
     process = _Process(resists_terminate=True, broken=broken)
     stopped = estate._stop_worker(process)
     state = _fingerprinted()
+    state.accept({"kind": prov.MSG_LOOKUP_INTENT, "requested": False})
     state.accept({"kind": prov.MSG_TERMINAL, "result": _result()})
     result = estate._worker_document(state, None, stopped)
     assert not stopped.reaped, "REAP_AFFIRMATIVE: cleanup exceptions were treated as success"
@@ -644,6 +655,7 @@ def test_cleanup_exceptions_never_certify_an_accepted_success(broken: str) -> No
 def test_unknown_cleanup_never_certifies_an_accepted_result(stopped: estate._WorkerStop) -> None:
     """False liveness alone is not affirmative reap, and an exit code alone is not either."""
     state = _fingerprinted()
+    state.accept({"kind": prov.MSG_LOOKUP_INTENT, "requested": False})
     state.accept({"kind": prov.MSG_TERMINAL, "result": _result()})
     result = estate._worker_document(state, None, stopped)
     assert result["phase"]["status"] == "partial", "REAP_AFFIRMATIVE: unknown cleanup certified success"
@@ -662,3 +674,110 @@ def test_cleanup_failure_cannot_leave_an_unbounded_automatic_exit_join() -> None
         )
     finally:
         multiprocessing.process._children.discard(process)
+
+
+@pytest.mark.parametrize("requested", [0, 1, None, "false", {}, []])
+def test_lookup_intent_is_a_boolean_not_a_coercible_payload(requested: object) -> None:
+    """The privacy-safe intent has one exact scalar type."""
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_message({"kind": prov.MSG_LOOKUP_INTENT, "requested": requested})
+
+
+def test_lookup_intent_is_unique_and_precedes_live_work() -> None:
+    """No worker can retract or change intent after starting a live operation."""
+    state = _fingerprinted()
+    state.accept({"kind": prov.MSG_LOOKUP_INTENT, "requested": True})
+    with pytest.raises(estate.ProvenanceProtocolError):
+        state.accept({"kind": prov.MSG_LOOKUP_INTENT, "requested": False})
+    state.accept({"kind": prov.MSG_OPERATION, "operation": "sign-in", "completed": 0, "total": 1})
+    with pytest.raises(estate.ProvenanceProtocolError):
+        state.accept({"kind": prov.MSG_LOOKUP_INTENT, "requested": False})
+    assert state.live_requested is True
+
+
+@pytest.mark.parametrize("stage", ["sign-in", "inventory", "content", "scrub", "sign-out"])
+def test_local_intent_cannot_start_any_live_operation(stage: str) -> None:
+    """Absence of live intent is not retroactively repaired by a terminal label."""
+    state = _fingerprinted()
+    state.accept({"kind": prov.MSG_LOOKUP_INTENT, "requested": False})
+    with pytest.raises(estate.ProvenanceProtocolError):
+        state.accept(
+            {"kind": prov.MSG_OPERATION, "operation": stage, "completed": 0, "total": None if stage == "content" else 1}
+        )
+    assert stage not in state.counters
+
+
+@pytest.mark.parametrize(
+    "basename",
+    ["Sales:Q3.twb", r"Sales\Q3.twb", "unit.twb.", "unit.twb ", "CON.twb", "COM¹.twb", "unit\x01.twb"],
+)
+def test_posix_basename_rules_do_not_inherit_windows_restrictions(monkeypatch, basename: str) -> None:
+    """POSIX rejects NUL and slash, not Windows punctuation, device stems, controls or trailing rules."""
+    monkeypatch.setattr(estate, "_BASENAME_PLATFORM", "posix")
+    try:
+        estate._validated_basename(basename)
+    except estate.ProvenanceProtocolError:
+        pytest.fail("POSIX_PLATFORM_RULE: a bounded legal POSIX basename was rejected")
+
+
+@pytest.mark.parametrize("platform", ["nt", "posix"])
+@pytest.mark.parametrize("basename", ["", ".", "..", "dir/unit.twb", "/unit.twb", "unit\0.twb", "x" * 256, True])
+def test_basename_common_rejections_are_lexical_and_bounded(monkeypatch, platform: str, basename: object) -> None:
+    """Every flavour refuses paths, dot segments, NUL, non-text and over-bound names."""
+    monkeypatch.setattr(estate, "_BASENAME_PLATFORM", platform)
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_basename(basename)
+
+
+@pytest.mark.parametrize(
+    "basename",
+    [
+        "CON",
+        "con.twb",
+        "CON .twb",
+        "AUX.twb",
+        "PRN.twb",
+        "NUL.tar.twb",
+        "CONIN$",
+        "CONOUT$",
+        "COM9.twb",
+        "LPT1.twb",
+        "LPT².twb",
+        "unit.twb.",
+        "unit.twb ",
+        "unit\x01.twb",
+        "Sales:Q3.twb",
+        r"Sales\Q3.twb",
+        "unit?.twb",
+        "unit*.twb",
+        "unit<.twb",
+        "unit>.twb",
+        'unit".twb',
+        "unit|.twb",
+    ],
+)
+def test_windows_basename_rules_reject_reserved_forms(monkeypatch, basename: str) -> None:
+    """The deterministic Windows seam covers devices, punctuation, controls and trailing rules."""
+    monkeypatch.setattr(estate, "_BASENAME_PLATFORM", "nt")
+    try:
+        estate._validated_basename(basename)
+    except estate.ProvenanceProtocolError:
+        return
+    pytest.fail("WINDOWS_PLATFORM_RULE: a reserved Windows basename was accepted")
+
+
+@pytest.mark.parametrize("platform", ["nt", "posix"])
+@pytest.mark.parametrize(
+    "basename", ["unit.twb", ".hidden.twb", "COM0.twb", "COM10.twb", "Revenue 2026.twb", "x" * 255]
+)
+def test_legal_basenames_are_accepted_without_filesystem_access(monkeypatch, platform: str, basename: str) -> None:
+    """Validate syntax only: even a legal name must never become an existence, resolve or open request."""
+    monkeypatch.setattr(estate, "_BASENAME_PLATFORM", platform)
+
+    def no_io(*_args, **_kwargs) -> None:
+        pytest.fail("BASENAME_NO_IO: a worker basename became a filesystem lookup")
+
+    with monkeypatch.context() as lexical:
+        for name in ("stat", "resolve", "open"):
+            lexical.setattr(Path, name, no_io)
+        estate._validated_basename(basename)

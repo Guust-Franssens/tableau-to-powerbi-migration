@@ -3516,3 +3516,240 @@ def test_the_real_worker_speaks_exactly_the_protocol_the_parent_accepts(tmp_path
     assert set(checkpoints[0]["record"]["input"]) <= {"size_bytes", "sha256", "revision_key", "members", "status"}
     assert "unit.twb" not in json.dumps(checkpoints), "a checkpoint carried a filename"
     assert "unit.twb" in json.dumps(state.terminal), "the terminal result is the one that names files"
+
+
+def _protocol_main(tmp_path: Path, monkeypatch, messages: list[dict]) -> tuple[int, dict, Path]:
+    """Replay a spawned worker through the actual coordinator and its one publication attempt."""
+    _without_pbir_validator(monkeypatch)
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    src, out = tmp_path / "src", tmp_path / "bundle"
+    src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
+    collect, publish = run_estate.collect_provenance, run_estate.write_source_provenance
+    outcomes, publications = [], []
+
+    def replay(input_dir: Path, timeout_sec: float) -> run_estate.ProvenanceOutcome:
+        outcome = collect(input_dir, timeout_sec, entry=functools.partial(provenance_workers.sends_messages, messages))
+        outcomes.append(outcome)
+        return outcome
+
+    def write(directory: Path, result: dict) -> Path | None:
+        publications.append(result)
+        return publish(directory, result)
+
+    monkeypatch.setattr(run_estate, "collect_provenance", replay)
+    monkeypatch.setattr(run_estate, "write_source_provenance", write)
+    code = run_estate.main([*_landing_argv(engine, src, out), "--provenance-timeout-sec", str(WORKER_TIMEOUT_SEC)])
+    assert len(publications) == 1, "PUBLISH_COUNT: protocol outcomes must publish exactly once"
+    assert len(outcomes) == 1 and outcomes[0].worker_pid is not None, "the control never spawned its worker"
+    assert not outcomes[0].expired and outcomes[0].worker_alive is False, "not a protocol verdict"
+    return code, _provenance_artifact(out), out
+
+
+def _assert_protocol_refused(run: tuple[int, dict, Path], total: int) -> None:
+    code, artifact, out = run
+    assert (
+        artifact["phase"]["errors"] and artifact["phase"]["errors"][-1]["code"] == run_estate.PROVENANCE_PROTOCOL_CODE
+    ), "STATUS_HISTORY: an invalid worker history did not produce the protocol fault"
+    assert code == run_estate.EXIT_PROVENANCE_FAILED == 11, "STATUS_HISTORY: invalid history continued"
+    assert artifact["phase"]["status"] not in {"success", "local_only"}
+    assert artifact["input_count"] == len(artifact["inputs"]) == total
+    assert not {"adjudicate", "slice_handovers"} & set(_phase_names(out))
+    assert not (out / "handover").exists()
+
+
+def test_spawned_success_without_any_live_history_is_protocol_invalid(tmp_path: Path, monkeypatch) -> None:
+    """Exact re-review reproduction: fingerprint -> success, with no live intent or operation."""
+    messages = provenance_workers.protocol_messages(live=False)
+    messages = [message for message in messages if message["kind"] != "lookup-intent"]
+    messages[-1]["result"]["phase"]["status"] = "success"
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.parametrize(
+    "stage", ["lookup-intent", "sign-in", "inventory", "content", "scrub", "safe-snapshot", "sign-out"]
+)
+def test_spawned_success_cannot_skip_an_applicable_stage(tmp_path: Path, monkeypatch, stage: str) -> None:
+    """Each missing stage is refused independently, not hidden inside the all-stages-missing case."""
+    messages = provenance_workers.protocol_messages(("first.twb", "second.twb"))
+    messages = [message for message in messages if message["kind"] != stage and message.get("operation") != stage]
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 2)
+
+
+@pytest.mark.parametrize("stage", ["sign-in", "inventory", "content", "scrub", "sign-out"])
+@pytest.mark.parametrize("completed", [0, 1], ids=["missing-start", "missing-completion"])
+def test_spawned_success_requires_both_ends_of_each_live_operation(
+    tmp_path: Path, monkeypatch, stage: str, completed: int
+) -> None:
+    """Removing only a start or completion must not be covered by the whole-stage control alone."""
+    messages = provenance_workers.protocol_messages()
+    messages = [
+        message for message in messages if not (message.get("operation") == stage and message["completed"] == completed)
+    ]
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.parametrize(
+    ("stage", "before"),
+    [("inventory", "sign-in"), ("content", "inventory"), ("scrub", "content"), ("sign-out", "scrub")],
+)
+def test_spawned_live_operations_cannot_run_out_of_order(tmp_path: Path, monkeypatch, stage: str, before: str) -> None:
+    """All stages still exist; only their legal order is broken."""
+    messages = provenance_workers.protocol_messages()
+    moved = [message for message in messages if message.get("operation") == stage]
+    messages = [message for message in messages if message.get("operation") != stage]
+    index = next(index for index, message in enumerate(messages) if message.get("operation") == before)
+    messages[index:index] = moved
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.parametrize("stage", ["sign-in", "inventory", "content"])
+@pytest.mark.parametrize("completed", [0, 1], ids=["started", "completed"])
+def test_spawned_local_only_after_live_work_is_protocol_invalid(
+    tmp_path: Path, monkeypatch, stage: str, completed: int
+) -> None:
+    """The terminal is independently local-shaped; the accepted live history is what contradicts it."""
+    messages = provenance_workers.protocol_messages()
+    index = next(
+        index
+        for index, message in enumerate(messages)
+        if message.get("operation") == stage and message["completed"] == completed
+    )
+    messages = [*messages[: index + 1], provenance_workers.protocol_messages(live=False)[-1]]
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.parametrize("requested", [None, True], ids=["missing-intent", "live-requested"])
+def test_spawned_local_only_requires_explicit_local_intent(tmp_path: Path, monkeypatch, requested: bool | None) -> None:
+    """No observed network operation is insufficient when live intent is absent or contradicts local-only."""
+    messages = provenance_workers.protocol_messages(live=False)
+    if requested is None:
+        messages = [message for message in messages if message["kind"] != "lookup-intent"]
+    else:
+        next(message for message in messages if message["kind"] == "lookup-intent")["requested"] = requested
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+def test_spawned_local_only_cannot_carry_live_result_semantics(tmp_path: Path, monkeypatch) -> None:
+    """A false live-intent flag cannot license an origin-bearing local-only terminal."""
+    messages = provenance_workers.protocol_messages(live=False)
+    origin = provenance_workers.protocol_messages()[-1]["result"]["inputs"][0]["origin"]
+    messages[-1]["result"]["inputs"][0]["origin"] = origin
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.parametrize(
+    ("matches", "counts"),
+    [
+        ((0, 1), [0, 2, 2, 2]),
+        ((0, 1), [0, 1, 1, 1]),
+        ((0, 0), [0, 1, 1, 2]),
+        ((None, None), [0, 0, 0, 1]),
+    ],
+    ids=["skipped-attempt-count", "missing-distinct-attempt", "cache-hit-counted-twice", "invented-download"],
+)
+def test_spawned_content_counts_reconcile_to_distinct_live_results(
+    tmp_path: Path, monkeypatch, matches: tuple[int | None, ...], counts: list[int]
+) -> None:
+    """Physical inputs are not content attempts; a finished count must agree with distinct matched LUIDs."""
+    messages = provenance_workers.protocol_messages(("first.twb", "second.twb"), matches=matches)
+    content = [message for message in messages if message.get("operation") == "content"]
+    for message, completed in zip(content, counts):
+        message["completed"] = completed
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 2)
+
+
+def test_spawned_success_cannot_omit_one_inputs_content_pair(tmp_path: Path, monkeypatch) -> None:
+    """Even a cache hit needs its input's start/completion pair; a matching final count cannot hide it."""
+    messages = provenance_workers.protocol_messages(("first.twb", "second.twb"), matches=(0, 0))
+    content_indexes = [index for index, message in enumerate(messages) if message.get("operation") == "content"]
+    messages = [message for index, message in enumerate(messages) if index not in content_indexes[-2:]]
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 2)
+
+
+@pytest.mark.parametrize(
+    "matches", [(0, 1), (0, 0), (None, None), (0, None)], ids=["distinct", "cached", "misses", "mixed"]
+)
+def test_spawned_full_live_success_is_accepted(tmp_path: Path, monkeypatch, matches: tuple[int | None, ...]) -> None:
+    """Positive controls preserve #582: inventory once, zero/one/two distinct content attempts, two inputs."""
+    messages = provenance_workers.protocol_messages(("first.twb", "second.twb"), matches=matches)
+    code, artifact, _out = _protocol_main(tmp_path, monkeypatch, messages)
+    assert artifact == messages[-1]["result"], "FULL_LIVE_SUCCESS: a complete legal live history was refused"
+    assert code == 0
+    assert artifact["input_count"] == 2
+
+
+def test_spawned_true_local_only_is_accepted(tmp_path: Path, monkeypatch) -> None:
+    """Positive control: no live intent, no live operations and a genuinely local result."""
+    messages = provenance_workers.protocol_messages(live=False)
+    code, artifact, _out = _protocol_main(tmp_path, monkeypatch, messages)
+    assert artifact == messages[-1]["result"], "TRUE_LOCAL_ONLY: an independently local run was refused"
+    assert code == 0
+
+
+@pytest.mark.parametrize("basename", ["Sales:Q3.twb", r"Sales\Q3.twb"])
+def test_spawned_posix_scrubbed_basename_is_accepted(tmp_path: Path, monkeypatch, capsys, basename: str) -> None:
+    """POSIX punctuation crosses the real worker boundary without ever being used as a path."""
+    monkeypatch.setattr(run_estate, "_BASENAME_PLATFORM", "posix")
+    messages = provenance_workers.protocol_messages((basename,))
+    code, artifact, _out = _protocol_main(tmp_path, monkeypatch, messages)
+    assert artifact == messages[-1]["result"], "POSIX_BASENAME: a legal scrubbed basename was refused"
+    assert code == 0
+    printed = capsys.readouterr()
+    assert basename not in printed.out + printed.err
+    assert str(tmp_path) not in "".join(
+        line for line in printed.out.splitlines() if line.startswith(run_estate.PROVENANCE_PROGRESS_PREFIX)
+    )
+
+
+@pytest.mark.parametrize(
+    "basename",
+    [
+        "Sales:Q3.twb",
+        r"Sales\Q3.twb",
+        r"C:unit.twb",
+        r"C:\private\unit.twb",
+        r"\\private-host\share\unit.twb",
+        ".",
+        "..",
+        "CON.twb",
+        "COM¹.twb",
+        "unit.twb.",
+        "unit.twb ",
+        "unit|part.twb",
+        "unit\x00part.twb",
+    ],
+    ids=[
+        "colon",
+        "separator",
+        "drive-relative",
+        "absolute",
+        "unc",
+        "dot",
+        "dotdot",
+        "device",
+        "superscript-device",
+        "trailing-dot",
+        "trailing-space",
+        "punctuation",
+        "nul",
+    ],
+)
+def test_spawned_windows_invalid_scrubbed_basename_is_refused(tmp_path: Path, monkeypatch, basename: str) -> None:
+    """The deterministic Windows seam runs on both OSes; none of these strings is opened or stat'ed."""
+    monkeypatch.setattr(run_estate, "_BASENAME_PLATFORM", "nt")
+    messages = provenance_workers.protocol_messages((basename,))
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX native filename control; both flavours also run through a seam")
+@pytest.mark.parametrize("basename", ["Sales:Q3.twb", r"Sales\Q3.twb"])
+def test_native_posix_worker_preserves_legal_punctuation(tmp_path: Path, monkeypatch, basename: str) -> None:
+    """The shipping worker, not a wire fixture, fingerprints and publishes the actual POSIX filename."""
+    monkeypatch.delenv("TABLEAU_SERVER_URL", raising=False)
+    monkeypatch.delenv("TABLEAU_PAT_NAME", raising=False)
+    (tmp_path / basename).write_text("<workbook />", encoding="utf-8")
+    outcome = run_estate.collect_provenance(tmp_path, WORKER_TIMEOUT_SEC, env_path=tmp_path / "absent.env")
+    assert outcome.result["phase"] == {"status": "local_only", "errors": []}, "NATIVE_POSIX_BASENAME"
+    assert outcome.result["inputs"][0]["input"]["file"] == basename

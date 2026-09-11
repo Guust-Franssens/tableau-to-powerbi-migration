@@ -1147,6 +1147,9 @@ class RecordingReporter(prov.NullReporter):
     def checkpoint(self, index, record):
         self.messages.append({"kind": prov.MSG_CHECKPOINT, "index": index, "record": prov.checkpoint_record(record)})
 
+    def lookup_intent(self, requested):
+        self.messages.append({"kind": prov.MSG_LOOKUP_INTENT, "requested": requested})
+
     def safe_snapshot(self, result):
         self.messages.append({"kind": prov.MSG_SAFE_SNAPSHOT, "result": result})
 
@@ -1523,3 +1526,71 @@ def test_dynamic_exception_class_names_are_not_a_diagnostic_escape(tmp_path: Pat
     rendered = json.dumps(result) + "\n".join(record.getMessage() for record in caplog.records)
     assert "private" not in rendered
     assert result["phase"]["errors"][-1]["exception_class"] == "Exception"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "physical", "downloads"),
+    [("distinct", 66, 66), ("cached", 2, 1), ("unmatched", 2, 0)],
+)
+def test_production_live_wire_reconciles_with_independent_transport_counts(
+    tmp_path: Path, monkeypatch, scenario: str, physical: int, downloads: int
+) -> None:
+    """The real reporter and parent agree; the transport, not either validator, is the #582 oracle."""
+    from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
+
+    import run_estate as estate  # pylint: disable=import-outside-toplevel
+
+    if scenario == "cached":
+        luid = _fixture_luid(7)
+        _twbx(tmp_path, f"{luid}_Copy_A")
+        _twbx(tmp_path, f"{luid}_Copy_B")
+        inventory = [{"id": luid, "name": "Copy A"}]
+    else:
+        inventory = _harvested(tmp_path, physical)
+        if scenario == "unmatched":
+            inventory = []
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=inventory))
+    messages = []
+    reporter = prov.WorkerReporter(
+        SimpleNamespace(send=lambda message: messages.append(json.loads(json.dumps(message))))
+    )
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+    reporter.terminal(result)
+    state = estate._ProvenanceState(emit=lambda *_args: None)  # pylint: disable=protected-access
+    for message in messages:
+        state.accept(message)
+    assert state.terminal == result and result["phase"]["status"] == "success", "PRODUCTION_LIVE_PROTOCOL"
+    assert result["input_count"] == len(result["inputs"]) == physical
+    assert (site.count("signin"), site.count("inventory"), site.count("content"), site.count("signout")) == (
+        1,
+        1,
+        downloads,
+        1,
+    ), "TRANSPORT_COUNTS_582: operation reconciliation changed the call budget"
+    assert len(site.calls) == downloads + 3
+    assert [message for message in messages if message["kind"] == prov.MSG_LOOKUP_INTENT] == [
+        {"kind": prov.MSG_LOOKUP_INTENT, "requested": True}
+    ]
+
+
+def test_production_sign_in_refusal_needs_no_inapplicable_inventory_or_cleanup(tmp_path: Path, monkeypatch) -> None:
+    """A typed live failure may stop after sign-in, but must never become local_only or a protocol fault."""
+    import run_estate as estate  # pylint: disable=import-outside-toplevel
+
+    _harvested(tmp_path, 1)
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV))
+
+    def refused() -> None:
+        raise RuntimeError("fixture sign-in refusal")
+
+    monkeypatch.setattr(site, "sign_in", refused)
+    reporter = RecordingReporter()
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+    reporter.terminal(result)
+    state = estate._ProvenanceState(emit=lambda *_args: None)  # pylint: disable=protected-access
+    for message in reporter.messages:
+        state.accept(message)
+    assert state.terminal == result
+    assert result["phase"]["status"] == "partial"
+    assert [error["code"] for error in result["phase"]["errors"]] == ["live-lookup-refused"]
+    assert not reporter.operations("inventory") and not reporter.operations("sign-out")

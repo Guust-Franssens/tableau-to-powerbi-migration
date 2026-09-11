@@ -160,7 +160,7 @@ import uuid
 import zipfile
 from collections import defaultdict
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import NamedTuple
 
 from check_empty_model import REPORT_NAME as EMPTY_MODEL_REPORT
@@ -346,6 +346,8 @@ _WORKER_ERROR_CODES = frozenset(
 )
 _ERROR_OPERATIONS = prov.WORKER_OPERATIONS | {"lookup-origin", "download-workbook", "build", "scrub-local-fields"}
 _REVISION_ALGORITHMS = frozenset({"twbx-content-v3", "tableau-xml-v1", "raw-sha256-v1"})
+_BASENAME_PLATFORM = os.name
+_LIVE_OPERATIONS = frozenset({prov.OP_SIGN_IN, prov.OP_INVENTORY, prov.OP_CONTENT, prov.OP_SCRUB, prov.OP_SIGN_OUT})
 _OPERATION_ORDER = {
     prov.OP_COLLECT_INPUTS: 0,
     prov.OP_FINGERPRINT: 1,
@@ -951,6 +953,20 @@ def _validated_origin(origin: object) -> None:
     _require(_is_count(origin["same_name_count"]))
 
 
+def _validated_basename(value: object) -> None:
+    """Bounded platform-native basename syntax only; pure paths never perform filesystem I/O."""
+    _require(type(value) is str and 0 < len(value) <= 255 and "\0" not in value)
+    _require(value not in {".", ".."})
+    windows = _BASENAME_PLATFORM == "nt"
+    path = (PureWindowsPath if windows else PurePosixPath)(value)
+    _require(not path.anchor and path.name == value)
+    if windows:
+        _require(all(ord(char) >= 32 and char not in '<>:"|?*' for char in value))
+        _require(value[-1] not in " .")
+        stem = value.partition(".")[0].rstrip(" ").upper()
+        _require(re.fullmatch(r"CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³]", stem) is None)
+
+
 def _validated_result_record(record: object) -> dict:
     """Validate a scrubbed record, returning its bounded derived projection for reconciliation."""
     allowed = {"input", "origin", "origin_note", "fingerprint_error", "lookup_error"}
@@ -958,8 +974,7 @@ def _validated_result_record(record: object) -> dict:
     local = record["input"]
     _require(type(local) is dict and local.keys() <= _CHECKPOINT_INPUT_KEYS | {"file"})
     if "file" in local:
-        _text(local["file"], 255)
-        _require(bool(local["file"]) and not any(char in local["file"] for char in "/\\:"))
+        _validated_basename(local["file"])
     if "members" in local:
         _require(type(local["members"]) is list and len(local["members"]) <= PROVENANCE_MAX_MEMBERS)
         for member in local["members"]:
@@ -977,7 +992,7 @@ def _validated_result_record(record: object) -> dict:
     if "origin_note" in record:
         _text(record["origin_note"])
         origin = record.get("origin")
-        notes = {prov.WITHHELD_NOTE, "no workbook of this LUID or name on the site - local-only input"}
+        notes = {prov.WITHHELD_NOTE, prov.NO_ORIGIN_NOTE}
         if origin:
             notes.add(
                 f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "
@@ -1050,6 +1065,8 @@ def _validated_message(message: object) -> dict:
     elif kind == prov.MSG_CHECKPOINT:
         _require(keys == {"kind", "index", "record"} and _is_count(message["index"]))
         _validated_checkpoint(message["record"])
+    elif kind == prov.MSG_LOOKUP_INTENT:
+        _require(keys == {"kind", "requested"} and type(message["requested"]) is bool)
     elif kind in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
         _require(keys == {"kind", "result"} and type(message["result"]) is dict)
     else:
@@ -1070,6 +1087,9 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
         self.checkpoints: dict[int, dict] = {}
         self.snapshot: dict | None = None
         self.terminal: dict | None = None
+        self.live_requested: bool | None = None
+        self.content_inputs = 0
+        self.content_open = False
         #: What the worker was last known to be DOING - the operation a deadline error names.
         self.operation: str = prov.OP_COLLECT_INPUTS
         self.counters: dict[str, int] = {}
@@ -1093,13 +1113,21 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
                 self.operation == prov.OP_FINGERPRINT and self.counters.get(prov.OP_FINGERPRINT) == message["index"] + 1
             )
             candidate.checkpoints = {**self.checkpoints, message["index"]: message["record"]}
+        elif kind == prov.MSG_LOOKUP_INTENT:
+            _require(self.live_requested is None and self.total is not None and self.total > 0)
+            _require(self.operation == prov.OP_FINGERPRINT and len(self.checkpoints) == self.total)
+            _require(self.counters.get(prov.OP_COLLECT_INPUTS) == 1)
+            _require(self.counters.get(prov.OP_FINGERPRINT) == self.total)
+            candidate.live_requested = message["requested"]
         elif kind == prov.MSG_SAFE_SNAPSHOT:
             _require(self.total is not None and self.snapshot is None)
             _require(self.operation == prov.OP_SCRUB and self.counters.get(prov.OP_SCRUB) == 1)
             candidate.snapshot = _validated_result(message["result"], self.total, self.checkpoints)
+            self.validate_result_history(candidate.snapshot, terminal=False)
         else:
             _require(self.total is not None)
             candidate.terminal = _validated_result(message["result"], self.total, self.checkpoints)
+            self.validate_result_history(candidate.terminal, terminal=True)
             if self.snapshot is not None:
                 _require(candidate.terminal["inputs"] == self.snapshot["inputs"])
                 prior = self.snapshot["phase"]
@@ -1109,6 +1137,37 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
                     or candidate.terminal["phase"]["status"] == prior["status"]
                 )
         return candidate
+
+    def validate_result_history(self, result: dict, *, terminal: bool) -> None:
+        """Success must describe the applicable observed path, not just a complete fingerprint list."""
+        status = result["phase"]["status"]
+        if status not in prov.SUCCESS_STATUSES:
+            return
+        _require(self.counters.get(prov.OP_COLLECT_INPUTS) == 1)
+        _require(self.counters.get(prov.OP_FINGERPRINT) == self.total)
+        if status == "local_only":
+            _require(terminal and self.live_requested is False and _LIVE_OPERATIONS.isdisjoint(self.counters))
+            _require(all(record.get("origin") is None and "origin_note" not in record for record in result["inputs"]))
+            return
+        _require(self.live_requested is True)
+        _require(
+            all(self.counters.get(operation) == 1 for operation in (prov.OP_SIGN_IN, prov.OP_INVENTORY, prov.OP_SCRUB))
+        )
+        _require(not self.content_open and self.content_inputs == self.total)
+        matched = set()
+        for record in result["inputs"]:
+            _require("origin" in record)
+            origin = record["origin"]
+            if origin is None:
+                _require(record.get("origin_note") == prov.NO_ORIGIN_NOTE)
+            else:
+                _require(type(origin["workbook_luid"]) is str and bool(origin["workbook_luid"]))
+                _require(origin["remote_sha256"] is not None and origin["content_unavailable"] is None)
+                _require(origin["match"] in {"sha256", "name_only"})
+                matched.add(origin["workbook_luid"])
+        _require(self.counters.get(prov.OP_CONTENT) == len(matched))
+        if terminal:
+            _require(self.snapshot is not None and self.counters.get(prov.OP_SIGN_OUT) == 1)
 
     def prepare_operation(self, message: dict) -> None:
         """Check operation order and counters on the temporary candidate, not the accepted state."""
@@ -1122,23 +1181,39 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
         else:
             _require(self.total is not None)
             if operation == prov.OP_FINGERPRINT:
+                _require(self.live_requested is None)
                 _require(
                     total == self.total and len(self.checkpoints) <= completed <= min(len(self.checkpoints) + 1, total)
                 )
             else:
-                _require(len(self.checkpoints) == self.total)
+                _require(self.live_requested is True and len(self.checkpoints) == self.total)
                 if operation == prov.OP_CONTENT:
                     _require(total is None and completed <= self.total)
                     _require(self.counters.get(prov.OP_INVENTORY) == 1)
+                    self.prepare_content(completed)
                 else:
                     _require(total == 1 and completed in (0, 1))
                     _require(completed == (0 if operation not in self.counters else self.counters[operation] + 1))
                 if operation == prov.OP_INVENTORY:
                     _require(self.counters.get(prov.OP_SIGN_IN) == 1)
+                if operation == prov.OP_SCRUB:
+                    _require(self.counters.get(prov.OP_INVENTORY) == 1 and not self.content_open)
+                    usable = sum(record["input"].get("status") != "unavailable" for record in self.checkpoints.values())
+                    _require(self.content_inputs == usable)
                 if operation == prov.OP_SIGN_OUT:
                     _require(self.snapshot is not None)
         self.operation = operation
         self.counters = {**self.counters, operation: completed}
+
+    def prepare_content(self, completed: int) -> None:
+        """Pair each usable input's lookup, counting only new distinct download attempts (#582)."""
+        prior = self.counters.get(prov.OP_CONTENT, 0)
+        if self.content_open:
+            _require(prior <= completed <= prior + 1)
+            self.content_inputs += 1
+        else:
+            _require(completed == prior and self.content_inputs < self.total)
+        self.content_open = not self.content_open
 
     def commit(self, candidate: _ProvenanceState) -> None:
         """An O(1) state swap, performed ONLY by the supervising thread after its clock check."""

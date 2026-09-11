@@ -15,6 +15,7 @@ operation that never returns, a worker that dies mid-flight, a result that arriv
 
 from __future__ import annotations
 
+import copy
 import os
 import struct
 import time
@@ -24,6 +25,7 @@ from typing import Any
 MESSAGE_INPUTS_DISCOVERED = "inputs-discovered"
 MESSAGE_OPERATION = "operation"
 MESSAGE_CHECKPOINT = "checkpoint"
+MESSAGE_LOOKUP_INTENT = "lookup-intent"
 MESSAGE_SAFE_SNAPSHOT = "safe-snapshot"
 MESSAGE_TERMINAL = "terminal"
 
@@ -65,6 +67,72 @@ def _scrubbed_result(files: tuple[str, ...] = ("unit.twb",)) -> dict[str, Any]:
     }
 
 
+def protocol_messages(
+    files: tuple[str, ...] = ("unit.twb",),
+    *,
+    live: bool = True,
+    matches: tuple[int | None, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """Independent wire fixture: all applicable stages, including cache hits and inventory misses."""
+    result = _scrubbed_result(files)
+    messages = [
+        _operation("collect-inputs", 0, 1),
+        {"kind": MESSAGE_INPUTS_DISCOVERED, "total": len(files)},
+        _operation("collect-inputs", 1, 1),
+    ]
+    for index, record in enumerate(result["inputs"]):
+        messages.extend(
+            [
+                _operation("fingerprint", index, len(files)),
+                _operation("fingerprint", index + 1, len(files)),
+                _checkpoint(index, record["input"]["sha256"]),
+            ]
+        )
+    messages.append({"kind": MESSAGE_LOOKUP_INTENT, "requested": live})
+    if live:
+        result["phase"]["status"] = "success"
+        for operation in ("sign-in", "inventory"):
+            messages.extend([_operation(operation, 0, 1), _operation(operation, 1, 1)])
+        attempted = set()
+        for record, match in zip(result["inputs"], matches if matches is not None else range(len(files))):
+            messages.append(_operation("content", len(attempted)))
+            if match is None:
+                record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"
+            else:
+                attempted.add(match)
+                record["origin"] = {
+                    "server": "https://tableau.invalid",
+                    "site": "fixture",
+                    "workbook_luid": f"00000000-0000-0000-0000-{match:012d}",
+                    "workbook_name": "Fixture",
+                    "project": None,
+                    "owner_luid": None,
+                    "created_at": None,
+                    "updated_at": None,
+                    "tableau_product_version": None,
+                    "rest_api_version": "3.21",
+                    "matched_by": "luid",
+                    "match": "sha256" if record["input"]["sha256"] == CHECKPOINT_SHA else "name_only",
+                    "content_unavailable": None,
+                    "revision_match": None,
+                    "remote_revision_key": None,
+                    "remote_sha256": CHECKPOINT_SHA,
+                    "same_name_count": 1,
+                }
+            messages.append(_operation("content", len(attempted)))
+        messages.extend(
+            [
+                _operation("scrub", 0, 1),
+                _operation("scrub", 1, 1),
+                {"kind": MESSAGE_SAFE_SNAPSHOT, "result": copy.deepcopy(result)},
+                _operation("sign-out", 0, 1),
+                _operation("sign-out", 1, 1),
+            ]
+        )
+    messages.append({"kind": MESSAGE_TERMINAL, "result": result})
+    return messages
+
+
 def _block_forever() -> None:
     """Stand in for an operation with no bound: a trickled read, a hung scrub, a dead sign-out.
 
@@ -77,24 +145,10 @@ def _block_forever() -> None:
 
 def blocks_in(operation: str, conn, _cancel_event, _payload) -> None:
     """Reach an operation in the production order, then never return."""
-    conn.send(_operation("collect-inputs", 0, 1))
-    if operation == "collect-inputs":
-        _block_forever()
-    conn.send({"kind": MESSAGE_INPUTS_DISCOVERED, "total": 2})
-    conn.send(_operation("collect-inputs", 1, 1))
-    conn.send(_operation("fingerprint", 0, 2))
-    if operation == "fingerprint":
-        _block_forever()
-    for index, digest in enumerate((CHECKPOINT_SHA, SECOND_CHECKPOINT_SHA)):
-        conn.send(_operation("fingerprint", index + 1, 2))
-        conn.send(_checkpoint(index, digest))
-    for current in ("sign-in", "inventory", "content", "scrub", "sign-out"):
-        conn.send(_operation(current, 0, None if current == "content" else 1))
-        if operation == current:
+    for message in protocol_messages(("first.twb", "second.twb")):
+        conn.send(message)
+        if message.get("operation") == operation and message["completed"] == 0:
             _block_forever()
-        conn.send(_operation(current, 1, None if current == "content" else 1))
-        if current == "scrub":
-            conn.send({"kind": MESSAGE_SAFE_SNAPSHOT, "result": _scrubbed_result(("first.twb", "second.twb"))})
 
 
 def blocks_in_with_evidence(operation: str, conn, _cancel_event, _payload) -> None:
@@ -108,14 +162,10 @@ def blocks_in_with_evidence(operation: str, conn, _cancel_event, _payload) -> No
 
 def blocks_after_safe_snapshot(conn, _cancel_event, _payload) -> None:
     """Everything finished and scrubbed, then a sign-out that never answers."""
-    conn.send({"kind": MESSAGE_INPUTS_DISCOVERED, "total": 1})
-    conn.send(_operation("fingerprint", 1, 1))
-    conn.send(_checkpoint(0))
-    conn.send(_operation("scrub", 0, 1))
-    conn.send(_operation("scrub", 1, 1))
-    conn.send({"kind": MESSAGE_SAFE_SNAPSHOT, "result": _scrubbed_result()})
-    conn.send(_operation("sign-out", 0, 1))
-    _block_forever()
+    for message in protocol_messages():
+        conn.send(message)
+        if message.get("operation") == "sign-out" and message["completed"] == 0:
+            _block_forever()
 
 
 def sends_a_late_terminal(conn, _cancel_event, _payload) -> None:
@@ -154,23 +204,15 @@ def sends_an_unsafe_checkpoint(secret: str, conn, _cancel_event, _payload) -> No
 
 def sends_a_secret_bearing_snapshot(secret: str, conn, _cancel_event, _payload) -> None:
     """A legitimately scrubbed snapshot that still holds copied strings; it must never be RENDERED."""
-    conn.send({"kind": MESSAGE_INPUTS_DISCOVERED, "total": 1})
-    conn.send(_operation("fingerprint", 1, 1))
-    conn.send(_checkpoint(0))
-    conn.send(_operation("scrub", 0, 1))
-    conn.send(_operation("scrub", 1, 1))
-    conn.send({"kind": MESSAGE_SAFE_SNAPSHOT, "result": _scrubbed_result((secret,))})
-    conn.send(_operation("sign-out", 0, 1))
-    _block_forever()
+    for message in protocol_messages((secret,)):
+        conn.send(message)
+        if message.get("operation") == "sign-out" and message["completed"] == 0:
+            _block_forever()
 
 
 def succeeds(conn, _cancel_event, _payload) -> None:
-    """The ordinary path: discovery, one fingerprint, one terminal result, then exit."""
-    conn.send({"kind": MESSAGE_INPUTS_DISCOVERED, "total": 1})
-    conn.send(_operation("fingerprint", 1, 1))
-    conn.send(_checkpoint(0))
-    conn.send({"kind": MESSAGE_TERMINAL, "result": _scrubbed_result()})
-    conn.close()
+    """A true local-only run: complete local evidence and an explicit no-live intent."""
+    sends_messages(protocol_messages(live=False), conn, _cancel_event, _payload)
 
 
 def sends_an_unknown_message(conn, _cancel_event, _payload) -> None:

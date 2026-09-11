@@ -92,9 +92,23 @@ The closed protocol allows at most **4,096 physical inputs**, **4,096 members pe
 frame**, **16 MiB of frames per phase**, and **32,800 messages**. Over-limit or malformed data is refused,
 not truncated into a success. Discovery is unique; checkpoints are contiguous; operation counters and
 order are checked; snapshots and terminal results reconcile to discovery and accepted fingerprints.
+After the local pass, a single boolean `lookup-intent` establishes whether live work was requested.
+`success` requires sign-in, inventory, paired content progress for every usable input, completed scrub,
+an accepted safe snapshot, and completed sign-out before terminal, in that order. Content counters
+advance only for distinct attempts and reconcile to distinct matched workbook LUIDs; cache hits and
+inventory misses do not invent downloads (#582). `local_only` requires explicit local intent, no live
+operation even started, and an independently local-only result. Missing or reordered applicable stages,
+unsupported success, and live-to-local relabelling are `worker-protocol-invalid`, published fail-closed
+with exit 11.
 Terminal is final: the parent requires EOF and refuses trailing messages. Missing fingerprints become
 ordinal placeholders. Early checkpoints contain derived data only; copied identity fields are admitted
 only in the scrubbed result, never in progress or error diagnostics.
+
+Scrubbed input names are bounded to 255 characters and validated as basenames for the executing
+platform, using lexical pure paths only: no open, stat, resolve or other filesystem lookup. POSIX
+permits `:` and literal backslash; Windows alone applies its punctuation, device-name and trailing
+space/period restrictions. Both reject paths, NUL, empty names and dot segments. Names remain in the
+artifact, never in protocol diagnostics or progress.
 
 Spawn/setup is charged to the computation budget; start failures are typed failures. Cooperative
 cancellation uses a **lock-free, single-writer shared byte** and is checked before expensive work.

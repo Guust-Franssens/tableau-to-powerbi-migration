@@ -85,12 +85,13 @@ UNASSESSABLE_STATUS = "failed"
 # not a connect timeout, and neither a local `read_bytes` nor a recursive scrub has one at all. The
 # only mechanism measured to preempt all of them on Windows AND POSIX is a separate process the
 # supervisor can terminate, so `build()` is instrumented to report progress and completed evidence
-# to a parent that owns the deadline. The channel is deliberately TINY and closed: four numeric or
-# already-safe message kinds, nothing free-form, and no credential ever travels back over it.
+# to a parent that owns the deadline. The channel is deliberately TINY and closed: numeric, boolean
+# or already-safe messages, nothing free-form, and no credential ever travels back over it.
 
 MSG_INPUTS_DISCOVERED = "inputs-discovered"
 MSG_OPERATION = "operation"
 MSG_CHECKPOINT = "checkpoint"
+MSG_LOOKUP_INTENT = "lookup-intent"
 MSG_SAFE_SNAPSHOT = "safe-snapshot"
 MSG_TERMINAL = "terminal"
 
@@ -112,6 +113,7 @@ WORKER_OPERATIONS = frozenset(
 DEADLINE_CODE = "deadline-expired"
 CANCELLED_CODE = "cancelled"
 RESULT_STATUSES = SUCCESS_STATUSES | {"partial", "failed", "empty"}
+NO_ORIGIN_NOTE = "no workbook of this LUID or name on the site - local-only input"
 
 # Only these labels, never an exception's dynamically supplied name or text, cross the channel.
 ERROR_CLASSES = frozenset(
@@ -362,6 +364,9 @@ class NullReporter:
     def checkpoint(self, index: int, record: dict[str, Any]) -> None:
         """Ignore a completed-input checkpoint."""
 
+    def lookup_intent(self, requested: bool) -> None:
+        """Ignore whether the completed local pass is followed by live work."""
+
     def safe_snapshot(self, result: dict[str, Any]) -> None:
         """Ignore the scrubbed snapshot."""
 
@@ -420,6 +425,10 @@ class WorkerReporter(NullReporter):
     def checkpoint(self, index: int, record: dict[str, Any]) -> None:
         """Derived-only evidence for one completed input, addressed by ordinal."""
         self._send({"kind": MSG_CHECKPOINT, "index": int(index), "record": checkpoint_record(record)})
+
+    def lookup_intent(self, requested: bool) -> None:
+        """Declare live intent before sign-in without sending any credential or host identity."""
+        self._send({"kind": MSG_LOOKUP_INTENT, "requested": bool(requested)})
 
     def safe_snapshot(self, result: dict[str, Any]) -> None:
         """The whole result once it is scrubbed - sent BEFORE sign-out, which can hang."""
@@ -864,6 +873,7 @@ def _complete_provenance(
     """Only after local evidence has been checkpointed may a live lookup begin."""
     lookup: TableauLookup | None = None
     live_requested = bool(env.get("TABLEAU_SERVER_URL") and env.get("TABLEAU_PAT_NAME"))
+    reporter.lookup_intent(live_requested)
     if live_requested and not reporter.cancelled:
         lookup = _open_lookup(env, errors, reporter)
     if reporter.cancelled:
@@ -965,7 +975,7 @@ def _attach_origin(record: dict[str, Any], lookup: TableauLookup, stem: str, err
         errors.append(record["lookup_error"])
     record["origin"] = origin
     if origin is None:
-        record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"
+        record["origin_note"] = NO_ORIGIN_NOTE
     elif origin["match"] == "name_only":
         record["origin_note"] = (
             f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "
