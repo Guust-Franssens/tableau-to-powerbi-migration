@@ -16,9 +16,13 @@ the rest of the bundle, only on ``os``/``struct``/``pathlib``.
 from __future__ import annotations
 
 import os
+import hashlib
+import io
 import struct
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 # THE FORMAT, MEASURED - not assumed. An earlier round asserted a cache.abf was a Microsoft Compound
 # File Binary (OLE2/CFBF, magic `D0 CF 11 E0 ...`). It is NOT, and the cost of that guess was total:
@@ -42,6 +46,37 @@ _ABF_BLOCK_HEADER_BYTES = 8 + len(_ABF_BLOCK_MAGIC)  # uint32 uncompressed + uin
 _ABF_MAX_BLOCK_BYTES = 2 * 1024 * 1024
 
 
+@dataclass(frozen=True, slots=True)
+class ImageObservation:
+    """Checked stage/readback facts, without a proven native durable-write barrier."""
+
+    intended_sha256: str
+    intended_size: int
+    installed_sha256: str
+    installed_size: int
+    commitment: Literal["UNESTABLISHED"] = field(default="UNESTABLISHED", init=False)
+
+
+@dataclass
+class _ImageInstallation:
+    """Transaction control only: a returned replace is independent of its optional observation."""
+
+    installed: bool = False
+    size: int = 0
+    ambiguous: bool = False
+
+
+def _checked_image(path: Path) -> tuple[bytes | None, str | None]:
+    try:
+        blob = path.read_bytes()
+        preamble = blob[: len(_ABF_PREAMBLE)]
+        if preamble != _ABF_PREAMBLE:
+            return None, f"not an AS backup preamble (first {len(preamble)} byte(s): {preamble[:16].hex(' ')})"
+        return blob, _walk_abf_blocks(io.BytesIO(blob), len(blob))
+    except OSError as exc:
+        return None, f"unreadable ({type(exc).__name__})"
+
+
 def _abf_rejection_reason(path: Path) -> str | None:
     """Why `path` is not a complete cache.abf, or ``None`` when it is one.
 
@@ -59,15 +94,7 @@ def _abf_rejection_reason(path: Path) -> str | None:
     multiple of 2 MiB, whose final block would then be full-sized; none of the 13 measured files is
     such a file, and the cost if one appears is the fallback, not data loss.
     """
-    try:
-        size = path.stat().st_size
-        with path.open("rb") as handle:
-            preamble = handle.read(len(_ABF_PREAMBLE))
-            if preamble != _ABF_PREAMBLE:
-                return f"not an AS backup preamble (first {len(preamble)} byte(s): {preamble[:16].hex(' ')})"
-            return _walk_abf_blocks(handle, size)
-    except OSError as exc:
-        return f"unreadable ({type(exc).__name__})"
+    return _checked_image(path)[1]
 
 
 def _abf_block_header_problem(header: bytes, ordinal: int, offset: int, size: int) -> str | None:
@@ -133,7 +160,14 @@ def _staging_path(cache_path: Path) -> Path:
     return cache_path.with_name(f"{cache_path.name}.{os.getpid()}-{uuid.uuid4().hex}.tmp")
 
 
-def _staged_image_write(cache_path: Path, write_image, staging: Path | None = None) -> bool:
+def _staged_image_write(
+    cache_path: Path,
+    write_image,
+    staging: Path | None = None,
+    *,
+    observations: list[ImageObservation] | None = None,
+    installation: _ImageInstallation | None = None,
+) -> bool:
     """Write the cache to a staging file and swap it in atomically. Returns True only on a COMPLETE write.
 
     `FileMode.Create` on the live `cache.abf` truncates a good cache the instant the write begins, so
@@ -147,9 +181,10 @@ def _staged_image_write(cache_path: Path, write_image, staging: Path | None = No
     staging file is removed, letting the caller roll the compatibility bump back; and even on a clean
     return the staged file must look like a backup (`_is_complete_abf`) before it is swapped in.
 
-    `_persist_image` generates the unique `staging` once and passes it in, so the same path is used
-    for the write, the filesystem-based commit check, and cleanup; a direct caller may omit it and a
-    private one is generated.
+    A normal replace return establishes installation, not durability. Its private state is set BEFORE
+    optional readback/hash/list work. A raised replace never produces an observation; if its stage
+    vanished, the outcome is ambiguous and the caller must not roll compatibility back underneath a
+    possibly installed image. No durable commitment is inferred from close/replace/readback.
 
     A staged file that is REJECTED is announced, not swallowed. A silent "did not swap" is how a
     wrong acceptance predicate hid for a whole review round while persist-by-default was dead.
@@ -159,52 +194,51 @@ def _staged_image_write(cache_path: Path, write_image, staging: Path | None = No
         staging = _staging_path(cache_path)
     if staging.exists():
         staging.unlink()
-    swapped = False
+    installation = installation if installation is not None else _ImageInstallation()
     try:
         write_image(staging)
-        reason = _abf_rejection_reason(staging)
+        intended, reason = _checked_image(staging)
         if reason is None:
-            os.replace(staging, cache_path)
-            swapped = True
+            installation.size = len(intended)
+            # Cover an interrupt after replace returns but before its success flag is stored.
+            installation.ambiguous = True
+            try:
+                os.replace(staging, cache_path)
+            except BaseException:
+                installation.ambiguous = True
+                installation.ambiguous = not staging.exists()
+                raise
+            installation.installed = True
+            installation.ambiguous = False
+            if observations is not None:
+                installed = cache_path.read_bytes()
+                if staging.exists() or installed != intended:
+                    raise CompatRollbackError(
+                        "installed cache differs from the intended image; observation unavailable"
+                    )
+                observations.append(
+                    ImageObservation(
+                        hashlib.sha256(intended).hexdigest(),
+                        len(intended),
+                        hashlib.sha256(installed).hexdigest(),
+                        len(installed),
+                    )
+                )
         else:
             print(f"  save   : staged cache REJECTED - {reason}")
     finally:
-        # Never leave a partial cache.abf.tmp behind. `finally` does not suppress the exception, so a
-        # real write/replace error still propagates to _persist_image, which rolls the compat back.
-        if not swapped and staging.exists():
+        # Cleanup cannot establish installation: the caller retains the pre-cleanup outcome.
+        if not installation.installed and staging.exists():
             staging.unlink()
-    return swapped
+    return installation.installed
 
 
 class CompatRollbackError(RuntimeError):
-    """The cache write failed AND the provisional compatibility alignment could not be undone.
+    """The cache/compatibility state cannot safely be reconciled automatically.
 
-    A FATAL, distinct condition (round-3 blocker 2): ``database.tmdl`` now declares a level no cache
-    was written at, so the caller MUST NOT fall through to the UI Save (which would persist the
-    mismatch) - it must stop and have the level restored from source control.
+    A failed rollback or an ambiguous replacement must not fall through to UI Save. Observation
+    failure after an established installation also uses this refusal without undoing the alignment.
     """
-
-
-def _cache_fingerprint(path: Path) -> tuple[int, int] | None:
-    """A cheap identity for a cache file - ``(size, mtime_ns)`` - or ``None`` if it does not exist."""
-    try:
-        stat = path.stat()
-    except OSError:
-        return None
-    return (stat.st_size, stat.st_mtime_ns)
-
-
-def _cache_committed(cache_path: Path, staging: Path, before: tuple[int, int] | None) -> bool:
-    """Did the staged write actually replace the cache? Judged by the FILESYSTEM, not a return flag.
-
-    ``os.replace`` is atomic, but a crash could move the file yet still surface an exception
-    ("commit-then-raise"). So commit is decided by OBSERVING the result: staging is gone, the cache is
-    now a complete ABF, and its fingerprint changed. Trusting only the writer's boolean return
-    misclassified that case and rolled compat back UNDER a freshly installed cache (round-3 blocker 2).
-    """
-    if staging.exists() or not _is_complete_abf(cache_path):
-        return False
-    return _cache_fingerprint(cache_path) != before
 
 
 def _cleanup_staging(staging: Path) -> None:
