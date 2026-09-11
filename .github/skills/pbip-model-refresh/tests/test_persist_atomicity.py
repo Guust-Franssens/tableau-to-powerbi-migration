@@ -37,6 +37,9 @@ the code persisted by default).
 from __future__ import annotations
 
 import json
+import hashlib
+import inspect
+from dataclasses import fields
 import os
 import socket
 import struct
@@ -44,12 +47,15 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 # `conftest.py` next to this file puts the skill's own `scripts/` on `sys.path`.
 # ruff: noqa: E402  (the conftest-provided path must be in place before these imports)
 import refresh_pbip_model
+import _abf
+from probe_desktop_query import DesktopIdentity
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 
@@ -188,6 +194,323 @@ def _no_staging_files(cache: Path) -> bool:
     unique-named staging file leaked.
     """
     return not list(cache.parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("mode", ["normal", "commit-raise", "wrong-image", "failed-replace", "truncated"])
+def test_image_observation_does_not_infer_commitment_from_replacement_bytes(tmp_path, monkeypatch, mode):
+    cache = _model(tmp_path, compat=1604)
+    content = _abf_bytes()
+    cache.parent.mkdir()
+    cache.write_bytes(content)  # An old identical image cannot stand in for this operation.
+    stamp = cache.stat().st_mtime_ns
+    native_replace = os.replace
+    observed = []
+
+    def replace_cache(source, destination):
+        if Path(destination) == cache:
+            if mode == "failed-replace":
+                raise OSError("replace failed")
+            native_replace(source, destination)
+            if mode == "wrong-image":
+                Path(destination).write_bytes(_abf_bytes(seed=1))
+            os.utime(destination, ns=(stamp, stamp))  # Successful writes need not change mtime.
+            if mode == "commit-raise":
+                raise OSError("moved, then raised")
+        else:
+            native_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", replace_cache)
+
+    def persist():
+        return refresh_pbip_model._persist_image(
+            cache,
+            cache.parent.parent,
+            1606,
+            lambda path: path.write_bytes(content[:-1] if mode == "truncated" else content),
+            on_observation=observed.append,
+        )[0]
+
+    if mode == "wrong-image":
+        with pytest.raises(refresh_pbip_model.CompatRollbackError, match="intended image"):
+            persist()
+    elif mode == "commit-raise":
+        with pytest.raises(refresh_pbip_model.CompatRollbackError, match="unestablished"):
+            persist()
+    elif mode == "failed-replace":
+        with pytest.raises(OSError, match="replace failed"):
+            persist()
+    else:
+        assert persist() is (mode != "truncated")
+    if mode == "normal":
+        digest = hashlib.sha256(content).hexdigest()
+        assert observed == [refresh_pbip_model.ImageObservation(digest, len(content), digest, len(content))]
+        assert observed[0].commitment == "UNESTABLISHED"
+        assert cache.read_bytes() == content
+    else:
+        assert observed == []
+    level = "1606" if mode in ("normal", "commit-raise", "wrong-image") else "1604"
+    assert f"compatibilityLevel: {level}" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
+    assert _no_staging_files(cache)
+
+
+@pytest.mark.parametrize("catalogues", ["one", "missing", "ambiguous", "wrong"])
+def test_imagesave_observation_is_bound_and_exports_only_native_facts(tmp_path, monkeypatch, catalogues):
+    cache = _model(tmp_path, compat=1604)
+    identity = refresh_pbip_model.BoundDesktop(
+        DesktopIdentity(111, "100", 222, "101", 52001),
+        "11111111-2222-3333-4444-555555555555",
+    )
+    database = SimpleNamespace(ID=identity.catalogue, CompatibilityLevel=1606)
+    databases = {
+        "one": [database],
+        "missing": [],
+        "ambiguous": [database, database],
+        "wrong": [SimpleNamespace(ID="other", CompatibilityLevel=1606)],
+    }[catalogues]
+    writes, observed = [], []
+
+    def write(catalogue, stream):
+        writes.append(catalogue)
+        stream.path.write_bytes(_abf_bytes())
+        database.ID = identity.catalogue
+
+    def file_stream(path, *_):
+        database.ID = "22222222-2222-3333-4444-555555555555"
+        return SimpleNamespace(path=Path(path), Close=lambda: None)
+
+    server = SimpleNamespace(Databases=databases, Connect=lambda _: None, Disconnect=lambda: None, ImageSave=write)
+    monkeypatch.setattr(refresh_pbip_model, "_load_amo", lambda: lambda: server)
+    monkeypatch.setattr(refresh_pbip_model, "desktop_identity", lambda _: identity.identity)
+    monkeypatch.setitem(
+        sys.modules,
+        "System.IO",
+        SimpleNamespace(
+            FileAccess=SimpleNamespace(Write=1),
+            FileMode=SimpleNamespace(Create=2),
+            FileStream=file_stream,
+        ),
+    )
+
+    def record(observation):
+        assert cache.with_name("cache.abf.lock").exists()
+        observed.append(observation)
+
+    if catalogues != "one":
+        code = "CATALOGUE_CHANGED" if catalogues == "wrong" else "CATALOGUE_UNESTABLISHED"
+        with pytest.raises(refresh_pbip_model.ObservationUnavailable, match=f"^{code}$"):
+            refresh_pbip_model.image_save(52001, cache, cache.parent.parent, bound=identity, on_persist=record)
+        assert writes == observed == []
+        return
+    assert (
+        refresh_pbip_model.image_save(52001, cache, cache.parent.parent, bound=identity, on_persist=record)[0] is True
+    )
+    assert writes == [identity.catalogue] and len(observed) == 1
+    assert observed[0].catalogue == identity.catalogue and observed[0].method == "AMO_ImageSave"
+    assert observed[0].compatibility_level == 1606
+    assert {item.name for item in fields(observed[0])} == {"catalogue", "compatibility_level", "image", "method"}
+    assert observed[0].image.commitment == "UNESTABLISHED"
+    assert not cache.with_name("cache.abf.lock").exists()
+    with pytest.raises(refresh_pbip_model.ObservationUnavailable, match="^WRONG_PID_PORT$"):
+        refresh_pbip_model.image_save(52002, cache, bound=identity, on_persist=record)
+    with pytest.raises(refresh_pbip_model.ObservationUnavailable, match="^IDENTITY_UNESTABLISHED$"):
+        refresh_pbip_model.image_save(52001, cache, on_persist=record)
+
+
+def test_a_missing_or_failing_flush_barrier_never_becomes_durable_evidence(tmp_path, monkeypatch):
+    cache = _model(tmp_path, compat=1604)
+    observed, flushes = [], []
+
+    def failing_flush(_descriptor):
+        flushes.append(1)
+        raise OSError("durable flush failed")
+
+    monkeypatch.setattr(os, "fsync", failing_flush)
+    assert (
+        refresh_pbip_model._persist_image(
+            cache,
+            cache.parent.parent,
+            1606,
+            lambda path: path.write_bytes(_abf_bytes()),
+            on_observation=observed.append,
+        )[0]
+        is True
+    )
+    assert observed[0].commitment == "UNESTABLISHED"
+    assert flushes == []  # Exact review control: close/replace/readback did not exercise a barrier.
+    assert not hasattr(_abf, "ImageCommit")
+
+    old = cache.read_bytes()
+    observed.clear()
+
+    def writer_with_barrier(path):
+        with path.open("wb") as handle:
+            handle.write(_abf_bytes(seed=2))
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    with pytest.raises(OSError, match="durable flush failed"):
+        refresh_pbip_model._persist_image(
+            cache, cache.parent.parent, 1702, writer_with_barrier, on_observation=observed.append
+        )
+    assert flushes == [1] and observed == [] and cache.read_bytes() == old
+    assert "compatibilityLevel: 1606" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
+
+
+def test_removed_stage_and_raised_replace_cannot_reuse_identical_old_target(tmp_path, monkeypatch):
+    cache = _model(tmp_path, compat=1604)
+    cache.parent.mkdir()
+    content = _abf_bytes()
+    cache.write_bytes(content)
+    observed = []
+    replace_file = os.replace
+
+    def failed_replace(source, destination):
+        if Path(destination) == cache:
+            Path(source).unlink()
+            raise OSError("stage removed but target untouched")
+        return replace_file(source, destination)
+
+    monkeypatch.setattr(os, "replace", failed_replace)
+    with pytest.raises(refresh_pbip_model.CompatRollbackError, match="unestablished"):
+        refresh_pbip_model._persist_image(
+            cache, cache.parent.parent, 1606, lambda path: path.write_bytes(content), on_observation=observed.append
+        )
+    assert observed == [] and cache.read_bytes() == content
+    assert "compatibilityLevel: 1606" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
+
+
+@pytest.mark.parametrize("fault", ["read", "hash", "list", "interrupt"])
+@pytest.mark.parametrize("observe", [False, True], ids=["legacy", "observing"])
+def test_post_swap_observation_faults_never_roll_compatibility_back(tmp_path, monkeypatch, fault, observe):
+    cache = _model(tmp_path, compat=1604)
+    cache.parent.mkdir()
+    cache.write_bytes(_abf_bytes(seed=1))
+    intended = _abf_bytes(seed=2)
+    observed, attempted = [], []
+    swapped = False
+    replace_file, read_bytes, digest, stage = os.replace, Path.read_bytes, hashlib.sha256, _abf._staged_image_write
+
+    def install(source, destination):
+        nonlocal swapped
+        result = replace_file(source, destination)
+        if Path(destination) == cache:
+            swapped = True
+        return result
+
+    def fail():
+        attempted.append(fault)
+        raise KeyboardInterrupt() if fault == "interrupt" else OSError(f"post-swap {fault}")
+
+    def read(path):
+        if swapped and path == cache and fault in ("read", "interrupt"):
+            fail()
+        return read_bytes(path)
+
+    def hash_bytes(*args, **kwargs):
+        if swapped and fault == "hash":
+            fail()
+        return digest(*args, **kwargs)
+
+    class FailingList(list):
+        def append(self, _item):
+            fail()
+
+    def write_stage(*args, **kwargs):
+        if fault == "list" and kwargs["observations"] is not None:
+            kwargs["observations"] = FailingList()
+        return stage(*args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", install)
+    monkeypatch.setattr(Path, "read_bytes", read)
+    monkeypatch.setattr(hashlib, "sha256", hash_bytes)
+    monkeypatch.setattr(refresh_pbip_model, "_staged_image_write", write_stage)
+    result, error = None, None
+    try:
+        result = refresh_pbip_model._persist_image(
+            cache,
+            cache.parent.parent,
+            1606,
+            lambda path: path.write_bytes(intended),
+            on_observation=observed.append if observe else None,
+        )
+    except BaseException as caught:
+        error = caught
+    assert swapped and read_bytes(cache) == intended
+    assert "compatibilityLevel: 1606" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
+    assert observed == []
+    if observe:
+        assert isinstance(error, KeyboardInterrupt if fault == "interrupt" else OSError)
+        assert attempted == [fault]
+    else:
+        assert error is None and result[0] is True
+        assert attempted == []
+
+
+@pytest.mark.parametrize("error_type", [OSError, KeyboardInterrupt])
+def test_legacy_success_uses_installation_even_when_the_stage_call_raises_afterwards(tmp_path, monkeypatch, error_type):
+    cache = _model(tmp_path, compat=1604)
+    stage = _abf._staged_image_write
+
+    def installed_then_error(*args, **kwargs):
+        assert stage(*args, **kwargs) is True
+        raise error_type("after returned replace")
+
+    monkeypatch.setattr(refresh_pbip_model, "_staged_image_write", installed_then_error)
+    result, error = None, None
+    try:
+        result = refresh_pbip_model._persist_image(
+            cache, cache.parent.parent, 1606, lambda path: path.write_bytes(_abf_bytes())
+        )
+    except BaseException as caught:
+        error = caught
+    assert error is None and result[0] is True
+    assert "compatibilityLevel: 1606" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
+
+
+def test_interrupt_after_replace_returns_before_installed_flag_preserves_alignment(tmp_path):
+    cache = _model(tmp_path, compat=1604)
+    cache.parent.mkdir()
+    cache.write_bytes(_abf_bytes(seed=1))
+    intended = _abf_bytes(seed=2)
+    observed, interrupted = [], []
+    stage = _abf._staged_image_write
+    lines, first_line = inspect.getsourcelines(stage)
+    flag_line = first_line + next(
+        offset for offset, line in enumerate(lines) if line.strip() == "installation.installed = True"
+    )
+
+    def interrupt(frame, event, _argument):
+        if frame.f_code is stage.__code__ and event == "line" and frame.f_lineno == flag_line and not interrupted:
+            state = frame.f_locals["installation"]
+            interrupted.append(
+                (state.installed, state.ambiguous, cache.read_bytes() == intended, frame.f_locals["staging"].exists())
+            )
+            raise KeyboardInterrupt("returned replace; installed flag not yet recorded")
+        return interrupt
+
+    previous_trace = sys.gettrace()
+    error = None
+    try:
+        sys.settrace(interrupt)
+        refresh_pbip_model._persist_image(
+            cache,
+            cache.parent.parent,
+            1606,
+            lambda path: path.write_bytes(intended),
+            on_observation=observed.append,
+        )
+    except BaseException as caught:
+        error = caught
+    finally:
+        sys.settrace(previous_trace)
+    assert len(interrupted) == 1 and interrupted[0][2:] == (True, False), "must interrupt after a real swap"
+    assert cache.read_bytes() == intended
+    assert "compatibilityLevel: 1606" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
+    assert interrupted[0][:2] == (False, True)
+    assert isinstance(error, refresh_pbip_model.CompatRollbackError) and "unestablished" in str(error)
+    assert observed == []
+    assert not hasattr(_abf, "ImageCommit")
+    assert _no_staging_files(cache)
 
 
 def test_the_builder_reproduces_a_real_cache_abf_header() -> None:
@@ -566,15 +889,10 @@ def test_persist_rolls_back_the_compat_bump_when_os_replace_raises(tmp_path: Pat
     assert _no_staging_files(cache), "the staging file must be cleaned up"
 
 
-def test_a_commit_then_raise_keeps_the_new_cache_and_the_aligned_compat(tmp_path: Path, monkeypatch) -> None:
-    """If `os.replace` MOVED the cache but still raised, that is a COMMIT - keep the aligned compat.
-
-    Commit is judged by the filesystem, not the writer's return flag (round-3 blocker 2). Here the
-    replace installs the new cache and then raises; the round-2 code saw the exception, treated the
-    write as "not committed", and rolled the compatibility level back UNDER the freshly installed
-    cache - a 1702 image in a project re-declared 1604, the downgrade crash on reopen. The alignment
-    must STAY at 1702 and no exception may escape.
-    """
+def test_a_raised_replace_refuses_success_without_rolling_alignment_under_a_possible_install(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A raised replace is unestablished, not success; preserve alignment for a possibly installed image."""
     cache = _model(tmp_path, compat=1604)
     model_dir = cache.parent.parent
     database_tmdl = model_dir / "definition" / "database.tmdl"
@@ -593,9 +911,8 @@ def test_a_commit_then_raise_keeps_the_new_cache_and_the_aligned_compat(tmp_path
 
     monkeypatch.setattr(refresh_pbip_model.os, "replace", commit_then_raise)
 
-    ok, message = refresh_pbip_model._persist_image(cache, model_dir, 1702, good_write)
-    assert ok is True, "a moved-then-raised replace is a commit, judged by the filesystem"
-    assert "1702" in message
+    with pytest.raises(refresh_pbip_model.CompatRollbackError, match="unestablished"):
+        refresh_pbip_model._persist_image(cache, model_dir, 1702, good_write)
     assert cache.read_bytes() == new_bytes, "the installed cache must be kept"
     assert "compatibilityLevel: 1702" in database_tmdl.read_text(encoding="utf-8"), (
         "compat must NOT be rolled back under a committed cache"
