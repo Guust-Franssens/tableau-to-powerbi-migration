@@ -98,18 +98,14 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
 
 ## Workflow
 
-0. **Before any PS1 invocation, follow the [preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start)
-   bootstrap route:** check policy precedence and the exact `Zone.Identifier` stream. Managed
-   `AllSigned`: **stop for IT / an approved signed distribution**. Unknown: **CANNOT_ESTABLISH**,
-   not permission to retry. Only after that check allows it, run the direct/internal preflight —
-   the **plain** form, **never `-Update`**:
+0. **Before any PS1 invocation: [preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start).**
+   Check policy precedence and `Zone.Identifier`; managed `AllSigned`: **stop for IT / signed distribution**.
+   Unknown: **CANNOT_ESTABLISH**. If allowed, run direct/internal preflight — **plain**, **never `-Update`**:
    ```
    powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1
    ```
-   `-Update` belongs to *session start* only (`AGENTS.md`): upgrading the bridge CLIs mid-migration
-   swaps the validator underneath a half-built report. Preflight's output is **the** environment
-   inventory. Non-zero exit, or a CLI **below the correctness floor**: stop, surface the install hints
-   it printed, and ask for a session-start `-Update`.
+   `-Update` belongs to *session start* only (`AGENTS.md`). Non-zero exit or a CLI
+   **below the correctness floor**: stop; surface preflight's hints and request session-start repair.
 1. **Read the brief, then confirm inputs.** `migrations/workbooks/<name>/migration-brief.md` carries
    scope, **autonomy** (`guided`/`standard`/`autopilot`), **fidelity bar** (faithful vs modernise) and
    the **wall policy** (stop, or degrade under `credential_gate.py authorize`). Obey it and pass the

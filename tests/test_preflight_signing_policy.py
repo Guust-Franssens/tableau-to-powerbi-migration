@@ -208,26 +208,53 @@ def test_startup_and_runtime_security_errors_share_exit_and_error_identifiers(co
 
 
 @WINDOWS
+def test_an_executed_script_can_reproduce_the_entire_startup_output(control: Path) -> None:
+    """A plaintext stream cannot authenticate whether the script started, even with more regex."""
+    blocked = _ps("-ExecutionPolicy", "AllSigned", "-File", str(control))
+    assert blocked.returncode == 1 and "UnauthorizedAccess" in blocked.stderr
+    error_file = control.parent / "startup-error.txt"
+    error_file.write_text(blocked.stderr, encoding="utf-8")
+    marker = control.parent / "executed.txt"
+    control.write_text(
+        "Set-Content -LiteralPath (Join-Path $PSScriptRoot 'executed.txt') -Value 'CONTROL_STARTED'\n"
+        "[Console]::Error.Write((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'startup-error.txt') -Raw))\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    executed = _ps("-ExecutionPolicy", "Bypass", "-File", str(control))
+    assert marker.read_text(encoding="utf-8").strip() == "CONTROL_STARTED"
+    assert (executed.returncode, executed.stdout, executed.stderr) == (
+        blocked.returncode,
+        blocked.stdout,
+        blocked.stderr,
+    )
+
+
+@WINDOWS
 def test_readonly_diagnostics_work_under_process_allsigned_without_exposing_stream_urls(control: Path) -> None:
     """Inline built-in inspection remains possible when an unsigned PS1 is refused."""
     stream = Path(str(control) + ":Zone.Identifier")
     stream.write_text("[ZoneTransfer]\nZoneId=3\nHostUrl=CONTROL_SECRET_URL\n", encoding="ascii")
-    inspect = (
-        "Get-ExecutionPolicy -List; "
-        "Get-Item -LiteralPath $env:CONTROL_FILE -Stream Zone.Identifier | Select-Object Stream; "
+    commands = (
+        "Get-ExecutionPolicy -List",
+        "Get-Item -LiteralPath $env:CONTROL_FILE -Stream Zone.Identifier | Select-Object Stream",
         "Get-Content -LiteralPath $env:CONTROL_FILE -Stream Zone.Identifier "
-        "| Select-String -Pattern '^ZoneId=[34]$' | Select-Object -ExpandProperty Line"
+        "| Select-String -Pattern '^ZoneId=[34]$' | Select-Object -ExpandProperty Line",
     )
-    result = subprocess.run(
-        [PS, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "AllSigned", "-Command", inspect],
-        env={**_native_env(), "CONTROL_FILE": str(control)},
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-    )
-    assert result.returncode == 0
-    assert "MachinePolicy" in result.stdout and "AllSigned" in result.stdout
-    assert "Zone.Identifier" in result.stdout and "ZoneId=3" in result.stdout
-    assert "CONTROL_SECRET_URL" not in result.stdout + result.stderr
-    assert str(control) not in result.stdout + result.stderr
+    outputs = []
+    for command in commands:
+        result = subprocess.run(
+            [PS, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "AllSigned", "-Command", command],
+            env={**_native_env(), "CONTROL_FILE": str(control)},
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 0
+        outputs.append(result.stdout + result.stderr)
+    output = "".join(outputs)
+    assert "MachinePolicy" in output and "AllSigned" in output
+    assert "Zone.Identifier" in output and "ZoneId=3" in output
+    assert "CONTROL_SECRET_URL" not in output
+    assert str(control) not in output

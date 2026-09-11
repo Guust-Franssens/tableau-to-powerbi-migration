@@ -211,7 +211,9 @@ on September 11, 2026 (`tests/test_preflight_signing_policy.py`) show a thin `%~
 preserves quoted arguments, spaces, output and exit codes; a marked unsigned file fails under
 process `RemoteSigned` and runs under process `Bypass`. They also show that a script which **did
 start** can return the same `UnauthorizedAccess` / `SecurityError` / exit `1` as a startup refusal.
-A post-failure test of those fields is not a reliable start detector. Forwarding arbitrary startup
+A further control reproduces the **entire** startup stdout/stderr/exit tuple from a script whose
+execution is independently witnessed by a file it writes. A post-failure stream classifier is not
+a reliable start detector. Forwarding arbitrary startup
 stderr exposes local paths; suppressing it can hide a genuine in-script failure. Rather than add
 an entry protocol to preflight, reinterpret its output, execute its contents, or add a second
 implementation, this change uses the manual bootstrap above and leaves `preflight.ps1` unchanged.
