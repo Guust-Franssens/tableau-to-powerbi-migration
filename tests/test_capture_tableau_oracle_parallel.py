@@ -175,7 +175,7 @@ def test_workers_one_is_serial(monkeypatch, tmp_path):
 
 
 def test_different_workbooks_overlap_with_two_workers(monkeypatch, tmp_path):
-    """Two independent workbook lanes reach a barrier together when workers=2."""
+    """Two independent selected views reach a barrier together when workers=2."""
     entered = threading.Barrier(3)
     release = threading.Event()
     views = [_view(LUID_1, WB_1), _view(LUID_2, WB_2)]
@@ -197,19 +197,15 @@ def test_different_workbooks_overlap_with_two_workers(monkeypatch, tmp_path):
     assert [record["view_luid"] for record in records] == [LUID_1, LUID_2]
 
 
-def test_same_workbook_views_never_overlap(monkeypatch, tmp_path):
-    """The scheduler admits only one task for an active workbook, even with spare workers."""
-    first_started = threading.Event()
-    release_first = threading.Event()
-    second_started = threading.Event()
+def test_same_workbook_views_overlap_without_affinity(monkeypatch, tmp_path):
+    """The minimal pool does not serialize views merely because they share a workbook."""
+    entered = threading.Barrier(3)
+    release = threading.Event()
     views = [_view(LUID_1, WB_1), _view(LUID_2, WB_1)]
 
     def capture(_session, view, *_args, **_kwargs):
-        if view["id"] == LUID_1:
-            first_started.set()
-            assert release_first.wait(2)
-        else:
-            second_started.set()
+        entered.wait(timeout=2)
+        assert release.wait(2)
         return _record(view)
 
     monkeypatch.setattr(oracle, "capture_view", capture)
@@ -217,12 +213,10 @@ def test_same_workbook_views_never_overlap(monkeypatch, tmp_path):
 
     with ThreadPoolExecutor(max_workers=1) as harness:
         future = harness.submit(_capture_selected, _session(), views, tmp_path, 2)
-        assert first_started.wait(2)
-        assert not second_started.is_set(), "a second view from the active workbook was admitted"
-        release_first.set()
+        entered.wait(timeout=2)
+        release.set()
         records = future.result(timeout=2)
 
-    assert second_started.is_set()
     assert [record["view_luid"] for record in records] == [LUID_1, LUID_2]
 
 
@@ -282,6 +276,60 @@ def test_main_keeps_setup_serial_and_uses_one_initial_signin(monkeypatch, tmp_pa
     assert calls == {"factory": 1, "inventory": 1, "probe": 1, "metadata": 1, "manifest": 1}
     assert session.signins == 1
     assert session.signouts == 1
+
+
+def test_one_signin_precedes_overlapping_authenticated_requests(monkeypatch, tmp_path):
+    """A barrier proves request overlap on one token, while the sign-in path runs exactly once."""
+    signin_count = 0
+    active_signins = 0
+    max_active_signins = 0
+    state_lock = threading.Lock()
+    request_barrier = threading.Barrier(2)
+    authenticated_tokens: list[str | None] = []
+    views = [_view(LUID_1, WB_1), _view(LUID_2, WB_1)]
+
+    def transport(  # pylint: disable=unused-argument
+        req, *, timeout, redactor, deadline=None
+    ):
+        nonlocal signin_count, active_signins, max_active_signins
+        if req.full_url.endswith("/auth/signin"):
+            with state_lock:
+                signin_count += 1
+                active_signins += 1
+                max_active_signins = max(max_active_signins, active_signins)
+            payload = json.dumps({"credentials": {"token": "one-pool-token", "site": {"id": "site-id"}}}).encode()
+            with state_lock:
+                active_signins -= 1
+            return 200, payload, {}
+        if "/data?" in req.full_url:
+            with state_lock:
+                assert signin_count == 1
+                assert active_signins == 0
+                authenticated_tokens.append(req.get_header("X-tableau-auth"))
+            request_barrier.wait(timeout=2)
+            return 200, b"value\n1\n", {"Content-Type": "text/csv", "Content-Length": "8"}
+        if req.full_url.endswith("/auth/signout"):
+            return 204, b"", {}
+        raise AssertionError(f"unexpected request: {req.full_url}")
+
+    monkeypatch.setattr(oracle, "_request", transport)
+    monkeypatch.setattr(oracle, "resolve_env", lambda _path: _main_env())
+    monkeypatch.setattr(
+        oracle,
+        "select_views",
+        lambda *_args, **_kwargs: (views, {WB_1: "One Workbook"}),
+    )
+    monkeypatch.setattr(oracle.tableau_view_types, "resolve_and_stamp", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["capture_tableau_oracle.py", "--out", str(tmp_path / "oracle"), "--workers", "2"],
+    )
+
+    assert oracle.main() == 0
+    assert signin_count == 1
+    assert max_active_signins == 1
+    assert authenticated_tokens == ["one-pool-token", "one-pool-token"]
 
 
 def test_two_workers_losing_one_token_generation_reauthenticate_once(monkeypatch):
@@ -374,6 +422,11 @@ class _VirtualClock:
             self.sleeps.append(seconds)
             self.value += seconds
 
+    def advance(self, seconds: float) -> None:
+        """Move an already-in-flight response later on the monotonic timeline."""
+        with self.lock:
+            self.value += seconds
+
 
 def test_retry_after_stops_later_pool_requests_until_shared_cooldown(monkeypatch):
     """A 429 observed by one request delays a later worker at the session boundary."""
@@ -401,6 +454,66 @@ def test_retry_after_stops_later_pool_requests_until_shared_cooldown(monkeypatch
     assert request_times[0][1] == 0.0
     assert request_times[1][1] == 7.0
     assert clock.sleeps == [7.0]
+
+
+def test_valid_retry_after_extends_but_never_shortens_the_monotonic_cooldown(monkeypatch):
+    """Later valid 429s may move the shared deadline out, never pull it in."""
+    clock = _VirtualClock()
+    request_times: list[float] = []
+
+    def transport(  # pylint: disable=unused-argument
+        req, *, timeout, redactor, deadline=None
+    ):
+        request_times.append(clock.monotonic())
+        return 200, b"ok", {}
+
+    monkeypatch.setattr(oracle, "_request", transport)
+    session = _session()
+    session._monotonic = clock.monotonic
+    session._sleep = clock.sleep
+
+    session._observe_rate_limit(429, {"Retry-After": "7"})
+    clock.advance(1)
+    session._observe_rate_limit(429, {"Retry-After": "10"})
+    clock.advance(1)
+    session._observe_rate_limit(429, {"Retry-After": "2"})
+    session._request("GET", "/after-extensions")
+
+    assert request_times == [11.0]
+    assert clock.sleeps == [9.0]
+
+
+@pytest.mark.parametrize(
+    ("status", "headers"),
+    [
+        (429, {}),
+        (429, {"Retry-After": "not-a-number"}),
+        (429, {"Retry-After": "-1"}),
+        (429, {"Retry-After": "nan"}),
+        (503, {"Retry-After": "7"}),
+    ],
+)
+def test_missing_invalid_or_non_429_retry_after_creates_no_shared_cooldown(monkeypatch, status, headers):
+    """Only a valid Retry-After carried by HTTP 429 can delay another pool request."""
+    clock = _VirtualClock()
+    request_times: list[float] = []
+
+    def transport(  # pylint: disable=unused-argument
+        req, *, timeout, redactor, deadline=None
+    ):
+        request_times.append(clock.monotonic())
+        return 200, b"ok", {}
+
+    monkeypatch.setattr(oracle, "_request", transport)
+    session = _session()
+    session._monotonic = clock.monotonic
+    session._sleep = clock.sleep
+
+    session._observe_rate_limit(status, headers)
+    session._request("GET", "/no-shared-cooldown")
+
+    assert request_times == [0.0]
+    assert not clock.sleeps
 
 
 class _FixtureSession(oracle.TableauSession):
@@ -523,32 +636,87 @@ def test_out_of_order_completion_reduces_to_original_records_progress_and_verdic
 
 
 def test_duplicate_luids_refuse_before_artifact_writes(monkeypatch, tmp_path):
-    """Case variants collide at the LUID-keyed path and are refused before output creation."""
+    """Case variants refuse before capability/Metadata requests, capture calls or output creation."""
     session = _MainSession()
     duplicate = _view(LUID_1.upper(), WB_2)
     views = [_view(LUID_1, WB_1), duplicate]
-    capture_called = False
+    after_selection_called = False
 
-    def capture(*_args, **_kwargs):
-        nonlocal capture_called
-        capture_called = True
-        raise AssertionError("capture must not start for duplicate artifact identities")
+    def after_selection(*_args, **_kwargs):
+        nonlocal after_selection_called
+        after_selection_called = True
+        raise AssertionError("no post-selection request or capture may start for duplicate identities")
 
     monkeypatch.setattr(oracle, "resolve_env", lambda _path: _main_env())
     monkeypatch.setattr(oracle, "TableauSession", lambda *_args, **_kwargs: session)
     monkeypatch.setattr(oracle, "select_views", lambda *_args, **_kwargs: (views, {}))
-    monkeypatch.setattr(oracle, "capture_view", capture)
+    monkeypatch.setattr(oracle.capability, "probe_render_capability", after_selection)
+    monkeypatch.setattr(oracle.tableau_view_types, "resolve_and_stamp", after_selection)
+    monkeypatch.setattr(oracle, "capture_view", after_selection)
     out_dir = tmp_path / "oracle"
     monkeypatch.setattr(
         sys,
         "argv",
-        ["capture_tableau_oracle.py", "--out", str(out_dir), "--workers", "2"],
+        [
+            "capture_tableau_oracle.py",
+            "--out",
+            str(out_dir),
+            "--reference-best",
+            "--workers",
+            "2",
+        ],
     )
 
     with pytest.raises(RuntimeError, match="duplicate selected view LUID"):
         oracle.main()
 
-    assert not capture_called
+    assert not after_selection_called
+    assert not out_dir.exists()
+    assert session.signouts == 1
+
+
+def test_duplicate_derived_output_identity_refuses_before_requests_or_writes(monkeypatch, tmp_path):
+    """Distinct selected LUIDs cannot collapse onto one derived artifact identity."""
+    session = _MainSession()
+    views = [_view(LUID_1, WB_1), _view(LUID_2, WB_2)]
+    after_selection_called = False
+    real_artifact_stem = oracle.artifact_stem
+
+    def colliding_stem(view_luid):
+        if view_luid in {LUID_1, LUID_2}:
+            return "same-output-identity"
+        return real_artifact_stem(view_luid)
+
+    def after_selection(*_args, **_kwargs):
+        nonlocal after_selection_called
+        after_selection_called = True
+        raise AssertionError("capture must not start for colliding output identities")
+
+    monkeypatch.setattr(oracle, "resolve_env", lambda _path: _main_env())
+    monkeypatch.setattr(oracle, "TableauSession", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(oracle, "select_views", lambda *_args, **_kwargs: (views, {}))
+    monkeypatch.setattr(oracle, "artifact_stem", colliding_stem)
+    monkeypatch.setattr(oracle.capability, "probe_render_capability", after_selection)
+    monkeypatch.setattr(oracle.tableau_view_types, "resolve_and_stamp", after_selection)
+    monkeypatch.setattr(oracle, "capture_view", after_selection)
+    out_dir = tmp_path / "oracle"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "capture_tableau_oracle.py",
+            "--out",
+            str(out_dir),
+            "--reference-best",
+            "--workers",
+            "2",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="duplicate derived output identities"):
+        oracle.main()
+
+    assert not after_selection_called
     assert not out_dir.exists()
     assert session.signouts == 1
 
@@ -624,11 +792,11 @@ def test_unexpected_worker_exception_signs_out_cancels_pending_and_writes_no_man
     def manifest(*_args, **_kwargs):
         raise AssertionError("an unexpected worker exception must not publish a normal manifest")
 
-    real_capture_lane = oracle._capture_lane
+    real_capture_worker = oracle._capture_worker
 
-    def observed_capture_lane(*args, **kwargs):
+    def observed_capture_worker(*args, **kwargs):
         try:
-            return real_capture_lane(*args, **kwargs)
+            return real_capture_worker(*args, **kwargs)
         except RuntimeError:
             failure_published.set()
             raise
@@ -645,7 +813,7 @@ def test_unexpected_worker_exception_signs_out_cancels_pending_and_writes_no_man
         lambda *_args, **_kwargs: (views, {WB_1: "One", WB_2: "Two", WB_3: "Three"}),
     )
     monkeypatch.setattr(oracle.tableau_view_types, "resolve_and_stamp", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(oracle, "_capture_lane", observed_capture_lane)
+    monkeypatch.setattr(oracle, "_capture_worker", observed_capture_worker)
     monkeypatch.setattr(oracle, "capture_view", capture)
     monkeypatch.setattr(oracle, "log_progress", lambda *_args: None)
     monkeypatch.setattr(oracle, "write_manifest", manifest)

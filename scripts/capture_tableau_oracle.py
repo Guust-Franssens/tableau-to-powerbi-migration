@@ -127,6 +127,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import re
 import sys
 import threading
@@ -135,8 +136,8 @@ import urllib.request
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from itertools import groupby
 from pathlib import Path
+from queue import Empty, Queue
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -386,7 +387,14 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
         """Make one worker's Retry-After a pool-wide admission delay for later requests."""
         if status != 429:
             return
-        delay = backoff_delay(1, header_value(headers, "Retry-After"), jitter=False)
+        retry_after = header_value(headers, "Retry-After")
+        try:
+            delay = float(retry_after) if retry_after is not None else None
+        except ValueError:
+            return
+        if delay is None or not math.isfinite(delay) or delay <= 0:
+            return
+        delay = min(delay, BACKOFF_CAP_SEC)
         cooldown_until = sum((self._monotonic(), delay))
         with self._cooldown_lock:
             self._cooldown_until = max(self._cooldown_until, cooldown_until)
@@ -1314,57 +1322,46 @@ class _CaptureContext:
         )
 
 
-def _view_artifact_identity(view: dict[str, Any]) -> str | None:
-    """A validated, path-equivalent view LUID, or None when this view cannot write an artifact."""
+def _selected_output_identities(view: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Raw selected LUID identity plus the derived artifact stem, without exposing either."""
     view_luid = view.get("id")
     if not isinstance(view_luid, str):
-        return None
+        return None, None
+    selected_identity = view_luid.casefold()
     try:
-        return artifact_stem(view_luid)
+        output_identity = artifact_stem(view_luid)
     except ValueError:
-        return None
+        output_identity = None
+    return selected_identity, output_identity
 
 
-def _workbook_capture_key(view: dict[str, Any]) -> str:
-    """Validated workbook LUID; unknown workbooks share one conservative serial lane."""
-    workbook = view.get("workbook") or {}
-    workbook_luid = workbook.get("id")
-    if not isinstance(workbook_luid, str):
-        return "unknown-workbook"
-    try:
-        return artifact_stem(workbook_luid)
-    except ValueError:
-        return "unknown-workbook"
-
-
-def _ensure_unique_view_luids(views: list[dict[str, Any]]) -> None:
-    """Refuse duplicate artifact identities before any worker can write a LUID-keyed path."""
-    identities = tuple(_view_artifact_identity(view) for view in views)
-    valid = tuple(identity for identity in identities if identity is not None)
-    if len(valid) != len(set(valid)):
+def _ensure_unique_output_identities(views: list[dict[str, Any]]) -> None:
+    """Reject duplicate selected and derived identities before capture requests or artifact writes."""
+    identities = tuple(_selected_output_identities(view) for view in views)
+    selected = tuple(identity[0] for identity in identities if identity[0] is not None)
+    outputs = tuple(identity[1] for identity in identities if identity[1] is not None)
+    if len(selected) != len(set(selected)):
         raise RuntimeError("duplicate selected view LUIDs; refusing before artifact writes")
+    if len(outputs) != len(set(outputs)):
+        raise RuntimeError("duplicate derived output identities; refusing before artifact writes")
 
 
-def _indexed_workbook_key(item: tuple[int, dict[str, Any]]) -> str:
-    """Workbook lane key for an indexed selected view."""
-    return _workbook_capture_key(item[1])
-
-
-def _workbook_lanes(views: list[dict[str, Any]]) -> tuple[tuple[tuple[int, dict[str, Any]], ...], ...]:
-    """Group selected views into deterministic, internally serial workbook lanes."""
-    ordered = sorted(enumerate(views), key=_indexed_workbook_key)
-    return tuple(tuple(group) for _, group in groupby(ordered, key=_indexed_workbook_key))
-
-
-def _capture_lane(
+def _capture_worker(
     context: _CaptureContext,
-    lane: tuple[tuple[int, dict[str, Any]], ...],
+    tasks: Queue[tuple[int, dict[str, Any]]],
     slots: tuple[Future[dict[str, Any]], ...],
     failure: threading.Event,
     result_lock: threading.Lock,
 ) -> None:
-    """Capture one workbook sequentially and publish each result into its selected-index slot."""
-    for index, view in lane:
+    """Pull selected views until the queue is empty or another worker reports an unexpected failure."""
+    while True:
+        with result_lock:
+            if failure.is_set():
+                return
+        try:
+            index, view = tasks.get_nowait()
+        except Empty:
+            return
         with result_lock:
             if failure.is_set():
                 return
@@ -1372,10 +1369,11 @@ def _capture_lane(
             record = context.capture(view)
         except BaseException as exc:
             with result_lock:
-                failure.set()
-                for slot in slots:
-                    if not slot.done():
-                        slot.set_exception(exc)
+                if not failure.is_set():
+                    failure.set()
+                    for slot in slots:
+                        if not slot.done():
+                            slot.set_exception(exc)
             raise
         with result_lock:
             if failure.is_set():
@@ -1402,28 +1400,31 @@ def _capture_selected_views(  # pylint: disable=too-many-arguments,too-many-loca
     if not views:
         return iter(())
 
-    lanes = _workbook_lanes(views)
+    tasks: Queue[tuple[int, dict[str, Any]]] = Queue()
+    for task in enumerate(views):
+        tasks.put(task)
     slots = tuple(Future() for _ in views)
     failure = threading.Event()
     result_lock = threading.Lock()
 
     def results():
-        """Yield selected-index slots in order while workbook lanes execute concurrently."""
+        """Yield selected-index slots in order while a bounded view pool executes concurrently."""
         executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tableau-oracle")
-        lane_futures = tuple(
-            executor.submit(_capture_lane, context, lane, slots, failure, result_lock) for lane in lanes
+        worker_futures = tuple(
+            executor.submit(_capture_worker, context, tasks, slots, failure, result_lock)
+            for _ in range(min(workers, len(views)))
         )
         completed_normally = False
         try:
             for slot in slots:
                 yield slot.result()
-            for future in lane_futures:
+            for future in worker_futures:
                 future.result()
             completed_normally = True
         finally:
             if not completed_normally:
                 failure.set()
-                for future in lane_futures:
+                for future in worker_futures:
                     future.cancel()
             executor.shutdown(wait=True, cancel_futures=not completed_normally)
 
@@ -1477,7 +1478,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=(
             f"selected-view capture workers (default {DEFAULT_WORKERS}, maximum {MAX_WORKERS}). "
-            "One process and one PAT session are shared; at most one view per workbook is in flight"
+            "One process and one PAT session are shared; each view keeps data and render legs serial"
         ),
     )
     parser.add_argument(
@@ -1593,7 +1594,7 @@ def main() -> int:  # pylint: disable=too-many-locals
         LOG.info("signed in to site %r (api %s)", env["TABLEAU_SITE"], session.version)
 
         views, workbook_names = select_views(session, args.workbook, args.limit)
-        _ensure_unique_view_luids(views)
+        _ensure_unique_output_identities(views)
         out_dir: Path = args.out
         out_dir.mkdir(parents=True, exist_ok=True)
         # A failed new run must not leave an older success-shaped manifest beside partial new files.
