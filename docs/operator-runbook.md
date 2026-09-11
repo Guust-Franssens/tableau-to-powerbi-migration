@@ -185,7 +185,7 @@ Check `$LASTEXITCODE` immediately after each child; a nonzero code stops diagnos
 powershell -NoProfile -Command {
     $ProgressPreference = 'SilentlyContinue'
     try {
-        Get-ExecutionPolicy -List -ErrorAction Stop
+        Get-ExecutionPolicy -List -ErrorAction Stop | Out-String
         exit 0
     } catch {
         Write-Output 'CANNOT_ESTABLISH_POLICY'

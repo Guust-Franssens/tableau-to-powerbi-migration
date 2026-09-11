@@ -317,17 +317,44 @@ def test_actual_process_refusal_and_clean_remotesigned_control(
         assert stream.read_text(encoding="ascii") == "[ZoneTransfer]\nZoneId=3\n", "control auto-unblocked the file"
 
 
-def test_actual_allsigned_refusal_still_allows_exact_readonly_diagnostics(process_shell: str, control: Path) -> None:
+def test_exact_policy_diagnostic_displays_scopes_on_a_clean_host(shell: str, control: Path) -> None:
+    """Flush the policy table before child exit; a successful but blank listing is not evidence."""
+    result = _published(shell, 0, control)
+    assert result.returncode == 0
+    assert "MachinePolicy" in result.stdout and "UserPolicy" in result.stdout
+    assert "CurrentUser" in result.stdout and "LocalMachine" in result.stdout
+    assert not result.stderr
+
+
+def test_policy_diagnostic_reports_native_allsigned_availability(process_shell: str, control: Path) -> None:
+    """An interpreter's own module can be refused too: report cannot-establish, never bypass it."""
+    native = _ps(
+        process_shell,
+        "-ExecutionPolicy",
+        "AllSigned",
+        "-Command",
+        "Get-ExecutionPolicy -List -ErrorAction Stop | Out-String",
+    )
+    result = _published(process_shell, 0, control, policy="AllSigned")
+    if native.returncode == 0:
+        assert result.returncode == 0
+        assert "MachinePolicy" in result.stdout and "AllSigned" in result.stdout
+    else:
+        assert native.stderr, "the independent native command failed without diagnostic evidence"
+        assert result.returncode == 1
+        assert result.stdout.splitlines() == ["CANNOT_ESTABLISH_POLICY"]
+    assert not result.stderr
+
+
+def test_actual_allsigned_refusal_still_allows_exact_file_diagnostic(process_shell: str, control: Path) -> None:
     """Built-in inspection can run after an actual unsigned-file refusal, without running that file."""
     stream = Path(str(control) + ":Zone.Identifier")
     content = "[ZoneTransfer]\nZoneId=3\nHostUrl=CONTROL_SECRET_URL\n"
     stream.write_text(content, encoding="ascii")
     blocked = _ps(process_shell, "-ExecutionPolicy", "AllSigned", "-File", str(control))
     assert blocked.returncode == 1 and "not digitally signed" in blocked.stderr
-    policy = _published(process_shell, 0, control, policy="AllSigned")
     result = _published(process_shell, 1, control, policy="AllSigned")
-    assert policy.returncode == result.returncode == 0
-    assert "MachinePolicy" in policy.stdout and "AllSigned" in policy.stdout
+    assert result.returncode == 0
     assert result.stdout.splitlines() == ["FILE_READABLE", "MOTW_PRESENT", "ZoneId=3"]
     assert not result.stderr and "CONTROL_SECRET_URL" not in result.stdout
     assert str(control) not in result.stdout and not control.with_name("started.txt").exists()
