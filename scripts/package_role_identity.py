@@ -54,7 +54,7 @@ import os
 import sys
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -68,15 +68,15 @@ from bundle_corpus import (  # noqa: E402  # pylint: disable=wrong-import-positi
     classify_target,
 )
 from host_paths import discloses_host_location  # noqa: E402  # pylint: disable=wrong-import-position
+from package_source import PackageKind, PackageSourceInput  # noqa: E402  # pylint: disable=wrong-import-position
+from reference_evidence import (  # noqa: E402  # pylint: disable=wrong-import-position
+    REVISION_UNCONFIRMED,
+    revision_status,
+)
 
 _ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 
-# ---------------------------------------------------------------------------------------------
-# vocabulary
-# ---------------------------------------------------------------------------------------------
-
 RoleState = Literal["resolved", "not_applicable", "missing", "ambiguous", "mismatch"]
-PackageKind = Literal["workbook", "datasource"]
 Topology = Literal["owned_model", "standalone_datasource", "published_provider", "published_consumer"]
 
 #: One admissible role, all applicable identity claims agreeing. The only passing state.
@@ -207,11 +207,6 @@ CODE_PROVIDER_MODEL = "provider_model_unresolved"
 CODE_PROVIDER_BLOCKED = "provider_not_s2_clean"
 
 
-# ---------------------------------------------------------------------------------------------
-# typed result
-# ---------------------------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class RoleResult:
     """One semantic role's state, its expected cardinality, and the package-relative paths it holds."""
@@ -252,6 +247,7 @@ class SourceIdentity:
     sha256: str | None
     tableau_luid: str | None
     published_key: str | None
+    revision: str = REVISION_UNCONFIRMED
 
     def as_dict(self) -> dict[str, Any]:
         """The JSON shape a consumer embeds."""
@@ -320,6 +316,7 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
     blockers: tuple[str, ...] = ()
     authorized_limitations: tuple[str, ...] = ()
     evidence: tuple[PackageEvidence, ...] = field(default=(), repr=False, compare=False)
+    verified: VerifiedPackage | None = field(default=None, repr=False, compare=False)
 
     @property
     def is_start_ready(self) -> bool:
@@ -333,6 +330,29 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
             if code not in seen:
                 seen.append(code)
         return tuple(seen)
+
+    def source_handoff(self) -> PackageSourceInput:
+        """Expose this result's OWN source role, bound to the fresh S1 observation that earned it.
+
+        The consumer never zips a separate list of roots to our results or reopens provenance.
+        An incomplete/inconsistent ready result produces an invalid handoff, not a source search.
+        """
+        root = self.verified.root if self.verified is not None else None
+        if self.verified is not None and not self.verified.integrity.is_clean:
+            return PackageSourceInput(
+                "cannot_establish", root, self.unit, self.kind, None, None, self.verified.integrity.codes()
+            )
+        if not self.is_start_ready:
+            return PackageSourceInput("blocked", root, self.unit, self.kind, None, None, self.codes())
+        assets = [role for role in self.roles if role.role == ROLE_SOURCE_ASSET]
+        path = (
+            PurePosixPath(assets[0].paths[0])
+            if len(assets) == 1 and assets[0].state == STATE_RESOLVED and len(assets[0].paths) == 1
+            else None
+        )
+        identity = self.source_identity
+        digest = identity.sha256 if identity is not None and identity.kind == self.kind else None
+        return PackageSourceInput("ready", root, self.unit, self.kind, path, digest, self.codes())
 
     def as_dict(self) -> dict[str, Any]:
         """The machine-readable shape the entry gate embeds in its verdict."""
@@ -365,11 +385,6 @@ def verify_s1(root: Path) -> VerifiedPackage:
     return VerifiedPackage(root=root, classification=classification, integrity=integrity)
 
 
-# ---------------------------------------------------------------------------------------------
-# per-package facts
-# ---------------------------------------------------------------------------------------------
-
-
 @dataclass
 class _Facts:  # pylint: disable=too-many-instance-attributes,attribute-defined-outside-init
     """Everything one package says about itself, read once from S1-verified bytes."""
@@ -381,6 +396,7 @@ class _Facts:  # pylint: disable=too-many-instance-attributes,attribute-defined-
     artifacts: dict[str, Any]
     digests: dict[str, str]
     walked: dict[str, Path]
+    verified: VerifiedPackage
     roles: list[RoleResult] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
@@ -390,6 +406,7 @@ class _Facts:  # pylint: disable=too-many-instance-attributes,attribute-defined-
     source_key: str | None = None
     source_sha: str | None = None
     source_luid: str | None = None
+    source_revision: str = REVISION_UNCONFIRMED
     published_key: str | None = None
     declared_dependencies: tuple[DeclaredDependency, ...] = ()
     model_role: str | None = None
@@ -513,6 +530,7 @@ def _facts(  # pylint: disable=too-many-return-statements
             artifacts=artifacts,
             digests=digests,
             walked=walked,
+            verified=cleared,
         )
     )
 
@@ -1133,7 +1151,7 @@ def verify_phase1_role_identity(
         except _IdentityError as exc:
             outcome = _blocked(clearance.classification.unit_name or None, None, str(exc))
         if isinstance(outcome, Phase1RoleIdentityResult):
-            results[index] = outcome
+            results[index] = replace(outcome, verified=clearance)
             continue
         facts.append(outcome)
     _resolve_cohort(facts)
@@ -1176,6 +1194,8 @@ def _identify(facts: _Facts) -> None:
     before matching, and it may only exist if this package's own provenance/asset/filename agree.
     """
     _role_result, row = _provenance_role(facts)
+    if row is not None:
+        facts.source_revision = revision_status(row.get("origin", {}), [row])
     facts.roles.append(_role_result)
     facts.roles.append(_source_identity_role(facts, row))
     facts.roles.append(_server_identity_role(facts, row))
@@ -1303,11 +1323,13 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
             sha256=facts.source_sha,
             tableau_luid=facts.source_luid,
             published_key=facts.published_key,
+            revision=facts.source_revision,
         ),
         dependencies=tuple(facts.dependencies),
         blockers=tuple(dict.fromkeys(blockers)),
         authorized_limitations=tuple(dict.fromkeys(facts.limitations)),
         evidence=tuple(facts.evidence) if not blockers else (),
+        verified=facts.verified,
     )
 
 

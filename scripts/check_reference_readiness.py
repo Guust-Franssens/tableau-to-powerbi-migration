@@ -85,6 +85,7 @@ from package_role_identity import (
     VerifiedPackage,
     verify_phase1_role_identity,
 )
+from package_source import PackageSourceResult, resolve_verified_package_source
 from reference_evidence import (
     MANUAL_KIND_HINT,
     CAP_VALIDATION,
@@ -766,27 +767,32 @@ def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-argum
     evidence: list[Evidence],
     explicit_source: Path | None,
     require_validation_grade: bool,
+    *,
+    package_identity: UnitIdentity | None = None,
 ) -> UnitResult:
     """Readiness for one shipping report."""
-    unit = report_dir.name[: -len(".Report")]
+    unit = package_identity.name if package_identity is not None else report_dir.name[: -len(".Report")]
     exempt = _datasource_only(unit, report_dir, engine_report)
     if exempt is not None:
         return exempt
 
     handover = _handover(root, unit)
-    source = resolve_source(root, unit, handover, explicit_source)
-    if source is None:
-        return _cannot(
-            unit,
-            "no Tableau source workbook could be resolved, so the expected page set cannot be derived "
-            "- pass --source, or run this against the bundle whose assets/ holds it",
-            report_dir,
-        )
-    identity = _identify(root, unit, source)
-    if identity is None:
-        return _cannot(unit, f"source workbook could not be hashed, so evidence cannot be attributed: {source}")
-    if isinstance(identity, str):
-        return _cannot(unit, f"this unit's workbook identity is ambiguous: {identity}", report_dir, source)
+    if package_identity is not None:
+        source, identity = package_identity.source_path, package_identity
+    else:
+        source = resolve_source(root, unit, handover, explicit_source)
+        if source is None:
+            return _cannot(
+                unit,
+                "no Tableau source workbook could be resolved, so the expected page set cannot be derived "
+                "- pass --source, or run this against the bundle whose assets/ holds it",
+                report_dir,
+            )
+        identity = _identify(root, unit, source)
+        if identity is None:
+            return _cannot(unit, f"source workbook could not be hashed, so evidence cannot be attributed: {source}")
+        if isinstance(identity, str):
+            return _cannot(unit, f"this unit's workbook identity is ambiguous: {identity}", report_dir, source)
 
     objects = _expectation(unit, report_dir, source)
     if isinstance(objects, UnitResult):
@@ -796,8 +802,13 @@ def assess_unit(  # pylint: disable=too-many-arguments,too-many-positional-argum
         return emitted
 
     scoped = _scope_evidence(evidence, identity)
-    rows = _page_rows(objects, emitted, drop_explanations(handover), scoped, require_validation_grade)
-    return _readiness_result(unit, report_dir, source, rows, scoped.census)
+    return _readiness_result(
+        unit,
+        report_dir,
+        source,
+        _page_rows(objects, emitted, drop_explanations(handover), scoped, require_validation_grade),
+        scoped.census,
+    )
 
 
 @dataclass(frozen=True)
@@ -1119,27 +1130,32 @@ def scan(  # pylint: disable=too-many-arguments
     It is used only when it is bound to this same root; otherwise everything is recomputed here, and
     a single-target invocation is simply a cohort of one.
 
-    A safe, clean, role-resolved package continues into the current behaviour completely unchanged,
-    and records both verifications in ``package_integrity`` and ``role_identity`` so those fields
-    answer "was this assessed?" as well as "what was wrong?".
+    A role-resolved package projects its own source from the root-bound S1/S2 result before any
+    source parsing, report discovery or reference grading. It never reaches legacy source discovery.
     """
     checked = prechecked if prechecked is not None and prechecked.root == root else _precheck(root)
     classification = checked.classification
     if not classification.is_safe:
         return _unsafe_target(root, classification)
     integrity = checked.integrity
+    roles = checked.roles
+    if roles is not None and roles.verified is not None and roles.verified.root == root:
+        # S2 rechecks S1 at its read seam; its bound observation supersedes the earlier one.
+        integrity = roles.verified.integrity
     if integrity is not None and not integrity.is_clean:
         return _damaged_package(root, classification, integrity)
-    roles = checked.roles
     if roles is not None and not roles.is_start_ready:
         return _role_blocked(root, classification, integrity, roles)
-    report = _scan_safe_target(
-        root,
-        explicit_source=explicit_source,
-        reference_dir=reference_dir,
-        oracle_dir=oracle_dir,
-        require_validation_grade=require_validation_grade,
-        package_roles=roles,
+    report = (
+        _scan_verified_package(root, roles, require_validation_grade)
+        if classification.declares_self_contained
+        else _scan_safe_target(
+            root,
+            explicit_source=explicit_source,
+            reference_dir=reference_dir,
+            oracle_dir=oracle_dir,
+            require_validation_grade=require_validation_grade,
+        )
     )
     if integrity is not None:
         report["package_integrity"] = [_integrity_block(classification, integrity)]
@@ -1161,7 +1177,7 @@ def _precheck(root: Path, classification: TargetClassification | None = None) ->
     return _Prechecked(root, classification, integrity, roles)
 
 
-def _precheck_cohort(paths: list[Path]) -> list[_Prechecked]:
+def _precheck_cohort(paths: list[Path], classifications: list[TargetClassification] | None = None) -> list[_Prechecked]:
     """Boundary, then bytes, then roles across EVERY supplied target, in that order.
 
     ⚠️ The role verifier is invoked **once**, over the whole cohort, and only for the packages S1
@@ -1169,7 +1185,7 @@ def _precheck_cohort(paths: list[Path]) -> list[_Prechecked]:
     ``check_reference_readiness.py <provider> <consumer>`` is still one operator action, and a
     consumer supplied alone is refused rather than assumed to have a provider somewhere.
     """
-    classifications = [classify_target(path) for path in paths]
+    classifications = [classify_target(path) for path in paths] if classifications is None else classifications
     integrities: list[PackageFilesystemResult | None] = [
         verify_package(path, classification)
         if classification.is_safe and classification.declares_self_contained
@@ -1181,17 +1197,40 @@ def _precheck_cohort(paths: list[Path]) -> list[_Prechecked]:
         for path, classification, integrity in zip(paths, classifications, integrities, strict=True)
         if integrity is not None and integrity.is_clean
     ]
-    verdicts = dict(
-        zip(
-            [str(entry.root) for entry in cohort],
-            verify_phase1_role_identity([entry.root for entry in cohort], verified=cohort),
-            strict=True,
-        )
-    )
+    verdicts = {
+        result.verified.root: result
+        for result in (verify_phase1_role_identity([entry.root for entry in cohort], verified=cohort) if cohort else ())
+        if result.verified is not None
+    }
     return [
-        _Prechecked(path, classification, integrity, verdicts.get(str(path)))
+        _Prechecked(path, classification, integrity, verdicts.get(path))
         for path, classification, integrity in zip(paths, classifications, integrities, strict=True)
     ]
+
+
+def _scan_verified_package(
+    root: Path, roles: Phase1RoleIdentityResult | None, require_validation_grade: bool
+) -> dict[str, Any]:
+    """Project the bound source before entering any source, report or evidence reader."""
+    handoff = roles.source_handoff() if roles is not None else None
+    source = resolve_verified_package_source(handoff if handoff is not None and handoff.package_root == root else None)
+    unit = roles.unit if roles is not None and roles.unit is not None else root.name
+    if source.state != "resolved":
+        status = STATUS_FINDINGS if source.state == "blocked" else STATUS_CANNOT_ESTABLISH
+        detail = f"package source {source.state}: {', '.join(source.codes)} - no source or evidence was read"
+        report = _merge(root, [UnitResult(unit=unit, status=status, detail=detail)], [], [])
+    else:
+        report = _scan_safe_target(
+            root,
+            explicit_source=None,
+            reference_dir=None,
+            oracle_dir=None,
+            require_validation_grade=require_validation_grade,
+            package_roles=roles,
+            package_source=source,
+        )
+    report["package_source"] = [{"ordinal": 0, "unit": unit, **source.as_dict()}]
+    return report
 
 
 def _scan_safe_target(  # pylint: disable=too-many-arguments
@@ -1202,14 +1241,25 @@ def _scan_safe_target(  # pylint: disable=too-many-arguments
     oracle_dir: Path | None,
     require_validation_grade: bool,
     package_roles: Phase1RoleIdentityResult | None = None,
+    package_source: PackageSourceResult | None = None,
 ) -> dict[str, Any]:
-    """The existing scan of a target that is safe AND (if a package) verified clean.
+    """Assess a cleared target; package source and identity come only from the preceding handoff.
 
-    Split out of :func:`scan` for one reason: it has two exits, and the integrity block has to be
-    attached to whichever one is taken. Nothing here changed with #562 - the ordering guarantee lives
-    in the caller, which is where it is asserted.
+    The ordinary branch retains its explicit-source, handover and ancestor compatibility. Packages
+    reuse the same page/evidence grading with an S2 identity, never the legacy resolver or rehasher.
     """
-    root = root.resolve()
+    package_identity = None
+    if package_roles is not None and package_source is not None:
+        assert package_roles.source_identity is not None  # Required by the resolved handoff.
+        package_identity = UnitIdentity(
+            name=package_roles.unit,
+            source_path=package_source.path,
+            source_sha256=package_source.sha256,
+            workbook_luid=package_roles.source_identity.tableau_luid if package_source.kind == "workbook" else None,
+            revision=package_roles.source_identity.revision,
+        )
+    else:
+        root = root.resolve()
     evidence, rejected = (
         _collect_package_evidence(package_roles.evidence)
         if package_roles is not None
@@ -1219,13 +1269,34 @@ def _scan_safe_target(  # pylint: disable=too-many-arguments
     reports = shipping_reports(root)
 
     if not reports and engine_report is None:
-        detail = "no shipping report and no engine report.json found - nothing was measured"
-        return _merge(root, [_cannot(root.name, detail)], evidence, rejected)
+        return _merge(
+            root,
+            [_cannot(root.name, "no shipping report and no engine report.json found - nothing was measured")],
+            evidence,
+            rejected,
+        )
     units = [
-        assess_unit(root, report, engine_report, evidence, explicit_source, require_validation_grade)
+        assess_unit(
+            root,
+            report,
+            engine_report,
+            evidence,
+            explicit_source,
+            require_validation_grade,
+            package_identity=package_identity,
+        )
         for report in reports
     ]
     units.extend(_units_without_reports(engine_report, reports))
+    if not units:
+        unit = _empty_bundle_unit(root, engine_report)
+        if package_identity is not None:
+            unit.unit = package_identity.name
+        units = [unit]
+    if package_source is not None:
+        for unit in units:
+            unit.source = package_source.relative_path.as_posix()
+            unit.detail = unit.detail.replace(str(package_source.path), unit.source)
     # Exclusivity is enforced ONCE, across every unit's rows. Round-4 finding: running it inside each
     # unit let the same render satisfy one page in each of two units and report READY 2/2.
     _enforce_exclusivity([row for unit in units for row in unit.pages])
@@ -1234,7 +1305,7 @@ def _scan_safe_target(  # pylint: disable=too-many-arguments
             unit.status = STATUS_FINDINGS
             ready = sum(1 for row in unit.pages if row["readiness"] == READY)
             unit.detail = f"{ready}/{len(unit.pages)} expected page(s) ready"
-    return _merge(root, units or [_empty_bundle_unit(root, engine_report)], evidence, rejected)
+    return _merge(root, units, evidence, rejected)
 
 
 def _merge(
@@ -1266,6 +1337,7 @@ def _merge(
         # reason as the field above: it says "assessed, and this is what was found", so an absent
         # entry means "not a package" rather than "a package with nothing wrong".
         "role_identity": [],
+        "package_source": [],
         "units_scanned": len(units),
         "units_ready": sum(1 for unit in units if unit.status == STATUS_READY),
         "units_not_applicable": sum(1 for unit in units if unit.status == STATUS_NOT_APPLICABLE),
@@ -1417,33 +1489,11 @@ def _render_page(page: dict[str, Any]) -> str:
     return f"{label}: ready [{page['grade']}] via {page['matched_by']}"
 
 
-def _prevalidate_targets(paths: list[Path]) -> dict[int, dict[str, Any]]:
-    """Classify every CLI target **before** any following check runs, keyed by position.
-
-    ⚠️ **The CLI had its own copy of the ordering defect** (round-1 review of PR #590). `scan()`
-    classified first, but `main()` reached it through `path.is_dir()`, which *follows*: a
-    package-shaped target whose boundary was missing or unassessable failed that check and left via
-    ``parser.error`` - **exit 2, with the supplied path echoed into the message** - so the typed
-    exit-3 refusal this gate exists to produce never happened, and a secret-bearing target was
-    printed on the way out. A gate whose entry point pre-checks in the following direction is not
-    protected by a guard further in.
-
-    Returns the generic refusal verdict for each unsafe target. An empty result means every target
-    classified safe and the caller may run the existing directory/source validation.
-    """
-    refusals: dict[int, dict[str, Any]] = {}
-    for index, path in enumerate(paths):
-        classification = classify_target(path)
-        if not classification.is_safe:
-            refusals[index] = _unsafe_target(path, classification)
-    return refusals
-
-
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="*", type=Path, help="engine bundle folder(s) or migration unit(s)")
-    parser.add_argument("--source", type=Path, help="the Tableau .twb/.twbx this bundle was built from")
+    parser.add_argument("--source", type=Path, help="the Tableau .twb/.twbx for an ordinary non-package target only")
     parser.add_argument("--reference", type=Path, help="reference/ folder holding manifest.json")
     parser.add_argument("--oracle", type=Path, help="oracle folder holding oracle-manifest.json")
     parser.add_argument(
@@ -1459,14 +1509,21 @@ def main(argv: list[str] | None = None) -> int:
     if not args.paths:
         parser.error("give a bundle or migration-unit path")
 
-    refusals = _prevalidate_targets(args.paths)
+    classifications = [classify_target(path) for path in args.paths]
+    if args.source is not None and any(classification.is_package for classification in classifications):
+        parser.error("--source is supported only for ordinary non-package targets")
+    refusals = {
+        index: _unsafe_target(path, classification)
+        for index, (path, classification) in enumerate(zip(args.paths, classifications, strict=True))
+        if not classification.is_safe
+    }
     if not refusals:
         # ⚠️ Only reached once EVERY target classified safe. These are following checks - `is_dir()`
         # and `is_file()` both dereference - and `parser.error` echoes the supplied path, so running
         # them ahead of classification is what let a package-shaped target with no boundary exit 2
         # with its own (possibly customer-bearing) path in the message instead of a typed exit 3.
-        for path in args.paths:
-            if not path.is_dir():
+        for path, classification in zip(args.paths, classifications, strict=True):
+            if classification.inherits_ancestor_evidence and not path.is_dir():
                 parser.error(f"{path} is not a directory")
         if args.source is not None and not args.source.is_file():
             parser.error(f"--source {args.source} is not a file")
@@ -1474,7 +1531,7 @@ def main(argv: list[str] | None = None) -> int:
     # ⚠️ The whole cohort is pre-checked HERE, in one pass, before any target is scanned: roles and
     # published-provider closure are properties of the SET, so judging them one target at a time
     # would make `<provider> <consumer>` mean something different from two separate commands.
-    prechecked = _precheck_cohort(list(args.paths))
+    prechecked = _precheck_cohort(list(args.paths), classifications)
     reports = [
         refusals.get(index)
         or scan(
@@ -1533,6 +1590,11 @@ def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
     # whose roles do not hold, and two blocked packages must keep BOTH sets of codes.
     merged["role_identity"] = [
         {**block, "ordinal": index} for index, report in enumerate(reports) for block in report.get("role_identity", [])
+    ]
+    merged["package_source"] = [
+        {**block, "ordinal": index}
+        for index, report in enumerate(reports)
+        for block in report.get("package_source", [])
     ]
     for key, value in reports[0].items():
         if isinstance(value, bool) or not isinstance(value, int):
