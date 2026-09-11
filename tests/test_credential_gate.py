@@ -222,7 +222,7 @@ def test_authorize_is_audit_backed_and_lifts_the_gate(migration: Path, monkeypat
     import credential_gate as gate  # noqa: PLC0415
 
     run_gate("block", str(migration), "--sources", "x")
-    monkeypatch.setattr(gate, "_has_copilot_ancestor", lambda _chain: False)
+    monkeypatch.setattr(gate, "_ancestry", lambda: ["python.exe", "pwsh.exe"])
     assert gate.authorize(migration, "tester") == 0
     assert gate.verify(migration) == 0
     audit = (migration / ".credential-gate-audit.log").read_text(encoding="utf-8")
@@ -2293,7 +2293,7 @@ def _unit(root: Path, name: str, *, marker: bool = False, override: bool = False
     if override:
         (d / ".credential-gate-AUTHORIZED").write_text("x", encoding="utf-8")
     for action in audit:
-        _append_audit(d, action, f"{action} fixture")
+        _trail(d, (action, [] if action in cg.BLOCK_ACTIONS else None))
     return d
 
 
@@ -2506,9 +2506,12 @@ def _da_root(tmp_path: Path, name: str, *connections: dict) -> Path:
 
 
 def _trail(root: Path, *entries: tuple) -> None:
-    """Append `(action, sources_or_None)` audit records in order. Detail text is irrelevant here."""
+    """Append `(action, sources_or_None)` with the production action's canonical detail shape."""
     for action, sources in entries:
-        _append_audit(root, action, f"{action} fixture", sources)
+        detail = "by=test; chain=[]" if action == "authorize" else f"{action} fixture"
+        if action in cg.BLOCK_ACTIONS and sources is not None:
+            detail = "sources_json=" + json.dumps(sources)
+        _append_audit(root, action, detail, sources)
 
 
 def _assess(root: Path, spec: dict, local: dict | None = None, **kwargs) -> object:
@@ -3630,6 +3633,8 @@ def test_data_access_malformed_audit_fields_poison_the_whole_trail(tmp_path: Pat
     entry = {
         "ts": "2026-09-11T08:00:00+00:00",
         "action": "probe-error",
+        "detail": "source probe -> ERROR",
+        "user": "test",
         "sources": [KEY_A],
         "scope": str(root.resolve()),
         field: value,
@@ -3649,7 +3654,14 @@ def test_data_access_strict_audit_rejects_lossy_decoding(tmp_path: Path, poison:
     root = _da_root(tmp_path, "lossy-audit", LIVE_A)
     _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
     entry = json.dumps(
-        {"scope": str(root.resolve()), "ts": "2026-09-11T08:00:00+00:00", "action": "probe-error", "sources": [KEY_A]}
+        {
+            "scope": str(root.resolve()),
+            "ts": "2026-09-11T08:00:00+00:00",
+            "action": "probe-error",
+            "detail": "source probe -> ERROR",
+            "user": "test",
+            "sources": [KEY_A],
+        }
     )
     if poison == "duplicate-action":
         tail = (entry[:-1] + ', "action": "block-skipped"}\n').encode("utf-8")
@@ -3749,13 +3761,13 @@ def test_data_access_provider_resolution_stays_with_the_caller(tmp_path: Path, m
     for name in ("_read_audit_trail", "load_bundle", "_classify_legs", "_override_is_authentic", "verify", "_audit"):
         monkeypatch.setattr(cg, name, forbidden)
     inherited = _assess(
-        root, published_spec, scope="report_only_shared_model", provider=("Exact S2 unit", PROVIDER_LIVE)
+        root, published_spec, scope="report_only_shared_model", provider=("Exact_S2_unit", PROVIDER_LIVE)
     )
     missing = _assess(root, published_spec, scope="report_only_shared_model", provider=[])
 
     assert (inherited.state, inherited.provider_unit, inherited.source_keys) == (
         "provider_inherited",
-        "Exact S2 unit",
+        "Exact_S2_unit",
         PROVIDER_LIVE.source_keys,
     )
     assert (missing.state, missing.codes) == ("cannot_establish", ("provider-missing",))

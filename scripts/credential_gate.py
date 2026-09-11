@@ -63,7 +63,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
@@ -88,6 +88,8 @@ AUDIT = ".credential-gate-audit.log"
 AUDIT_MISSING = "audit-missing"
 AUDIT_MALFORMED = "audit-malformed"
 AUDIT_FOREIGN_SCOPE = "audit-foreign-scope"
+AUDIT_CLOCK_SKEW = timedelta(minutes=5)
+AUDIT_FIELDS = frozenset({"ts", "action", "detail", "user", "scope"})
 
 # Denied rights: WD (write data / create files), AD (append data / create subdirs), WA (write
 # attributes). Read and traverse stay allowed on purpose - the agent must still be able to inspect
@@ -212,8 +214,79 @@ def _audit(migration: Path, action: str, detail: str, sources: list[str] | None 
         pass
 
 
+def _valid_audit_sources(value: object, *, diagnostic: bool = False) -> bool:
+    """Legacy labels remain readable, but malformed keys and coercible values never do."""
+    if not isinstance(value, list):
+        return False
+    if not all(
+        isinstance(source, str)
+        and source.strip()
+        and not any(char in source for char in "\r\n\x00")
+        and (not source.startswith("source-key:") or SOURCE_KEY_RE.fullmatch(source))
+        for source in value
+    ):
+        return False
+    # A duplicate-key REFUSAL records the offending list, not a successful arm/clear.
+    return diagnostic or len(set(value)) == len(value)
+
+
+def _valid_authorization_detail(detail: str) -> bool:
+    """Validate authorize()'s by/lineage record, including its non-Windows empty chain."""
+    who, separator, lineage = detail.removeprefix("by=").rpartition("; chain=")
+    if not detail.startswith("by=") or not separator or not who.strip():
+        return False
+    try:
+        chain = ast.literal_eval(lineage)
+    except (ValueError, SyntaxError, RecursionError):
+        return False
+    return (
+        isinstance(chain, list)
+        and repr(chain) == lineage
+        and all(
+            isinstance(name, str)
+            and name.strip()
+            and name != "<lineage-unavailable>"
+            and "copilot" not in name.casefold()
+            for name in chain
+        )
+    )
+
+
+def _canonical_audit_fields(entry: dict) -> bool:
+    """Action-specific shapes of _audit's callers; diagnostic rows are not proof rows."""
+    if not AUDIT_FIELDS <= entry.keys() or not all(isinstance(entry[field], str) for field in AUDIT_FIELDS):
+        return False
+    action, detail = entry["action"], entry["detail"]
+    source_rule = AUDIT_SOURCE_RULES.get(action)
+    if source_rule is None or not entry["user"].strip():
+        return False
+    allowed = AUDIT_FIELDS | ({"sources"} if source_rule != "absent" else set())
+    names = _entry_sources(entry)
+    if (
+        entry.keys() - allowed
+        or ("sources" in entry and not _valid_audit_sources(entry["sources"], diagnostic=action == "violation"))
+        or (source_rule == "arm" and names is None)
+    ):
+        return False
+    if action in BLOCK_ACTIONS | {PROBE_CLEARED} and detail.startswith(("sources=", "sources_json=")):
+        parsed = _parse_sources_detail(detail)
+        if parsed is None or parsed != names:
+            return False
+    if action == "authorize":
+        return _valid_authorization_detail(detail)
+    return action != "engine-receipt" or re.fullmatch(r"sha256=[0-9a-f]{64}", detail) is not None
+
+
+def _valid_audit_timestamp(value: str) -> bool:
+    try:
+        timestamp = datetime.fromisoformat(value)
+        return timestamp.utcoffset() is not None and timestamp <= datetime.now(timezone.utc) + AUDIT_CLOCK_SKEW
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def _scoped_audit_entry(line: str, scope: str) -> tuple[dict | None, str | None]:
-    """The sole audit parser: reject lossy JSON, foreign scope and malformed event fields."""
+    """The sole audit parser: canonical writer shapes, same scope and plausible aware times."""
     try:
         entry = json.loads(line, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite)
     except (ValueError, _DuplicateJsonKey, _NonFiniteJsonConstant):
@@ -222,22 +295,7 @@ def _scoped_audit_entry(line: str, scope: str) -> tuple[dict | None, str | None]
         return None, AUDIT_MALFORMED
     if entry.get("scope") != scope:
         return None, AUDIT_FOREIGN_SCOPE
-    try:
-        timestamp = datetime.fromisoformat(entry.get("ts", ""))
-        sources = entry.get("sources")
-        sources_valid = sources is None or (
-            isinstance(sources, list) and all(isinstance(source, str) and source for source in sources)
-        )
-        names = _entry_sources(entry) or []
-        if (
-            not isinstance(entry.get("action"), str)
-            or not entry["action"]
-            or timestamp.utcoffset() is None
-            or not sources_valid
-            or len(set(names)) != len(names)
-        ):
-            return None, AUDIT_MALFORMED
-    except (TypeError, ValueError):
+    if not _canonical_audit_fields(entry) or not _valid_audit_timestamp(entry["ts"]):
         return None, AUDIT_MALFORMED
     return entry, None
 
@@ -248,13 +306,7 @@ def _valid_scoped_audit_entry(line: str, scope: str) -> dict | None:
 
 
 def _read_audit_trail(migration: Path) -> tuple[list[dict] | None, str | None]:
-    """`_audit_entries`' whole body, plus the reason a refusal happened. See `_audit_entries`.
-
-    Returns `(entries, None)` on a fully trusted trail, else `(None, code)` where the code is one
-    of `AUDIT_MISSING` / `AUDIT_MALFORMED` / `AUDIT_FOREIGN_SCOPE`. A present-but-empty log is
-    `AUDIT_MALFORMED`, not `AUDIT_MISSING`: the file exists and says nothing, which is the shape of
-    a truncated log rather than of a migration that was never gated.
-    """
+    """Return one complete trusted snapshot or a closed audit-* refusal; an empty log is malformed."""
     path = migration / AUDIT
     if not path.is_file():
         return None, AUDIT_MISSING
@@ -278,29 +330,11 @@ def _read_audit_trail(migration: Path) -> tuple[list[dict] | None, str | None]:
 
 
 def _audit_entries(migration: Path) -> list[dict] | None:
-    """Parsed, scope-checked audit entries for `migration`, or None when none can be trusted.
+    """The sole trusted-audit reader used by every gate consumer (#354).
 
-    The SOLE reader of `AUDIT` - every function that used to `json.loads` it directly now calls
-    this instead, so every issue #354 fix applies wherever the log is trusted, not just in `verify`.
-
-    (B2, tightened per review) a path existing is not evidence; only successfully-parsed content is
-    - a directory or an unreadable/locked file returns None outright. A NONBLANK line that fails to
-    parse as a JSON object poisons the WHOLE file, not just that line: a partially-corrupt log used
-    to keep whatever parsed and read as trustworthy, which is exactly the "some of this is real, so
-    all of it must be" reasoning a forged/truncated trailing record relies on.
-
-    (B3, tightened per review) a path is not scope: an entry naming a DIFFERENT scope than
-    `migration`, OR carrying no `scope` key at all, POISONS THE WHOLE TRAIL - it is not merely
-    dropped while earlier/later same-scope entries are still trusted. A missing scope used to be
-    trusted as pre-fix legacy evidence; that concession is itself the forgery this closes - a
-    foreign log with its `scope` field stripped would otherwise certify any directory it was copied
-    into. Skipping just the bad entry and keeping the rest re-opens the exact "some of this is real,
-    so all of it must be" reasoning B2 already closes for malformed JSON - a single unscoped/foreign
-    line appended to an otherwise-genuine history must not leave that history still trusted. Only a
-    log where EVERY entry is this directory's OWN, actually-stamped scope counts at all.
-
-    Returns None (never `[]`) so callers can tell "no evidence" apart from "trusted, and it says
-    nothing happened".
+    Every nonblank row must parse, match this exact root and satisfy its action's writer schema.
+    One corrupt, foreign or unscoped row poisons the WHOLE trail; dropping it would launder earlier
+    proof. Missing, empty, directory-shaped or unreadable evidence returns None, never [].
     """
     return _read_audit_trail(migration)[0]
 
@@ -314,7 +348,7 @@ def _parse_sources_detail(detail: str) -> list[str] | None:
             parsed, _idx = decoder.raw_decode(detail[len(json_marker) :].lstrip())
         except ValueError:
             return None
-        return [str(source) for source in parsed] if isinstance(parsed, list) else None
+        return parsed if _valid_audit_sources(parsed) else None
     marker = "sources="
     if not detail.startswith(marker):
         return None
@@ -323,14 +357,14 @@ def _parse_sources_detail(detail: str) -> list[str] | None:
         parsed = ast.literal_eval(source_text)
     except (ValueError, SyntaxError):
         return None
-    return [str(source) for source in parsed] if isinstance(parsed, list) else None
+    return parsed if _valid_audit_sources(parsed) else None
 
 
 def _entry_sources(entry: dict) -> list[str] | None:
     """Structured audit sources, falling back to legacy detail parsing."""
     sources = entry.get("sources")
     if isinstance(sources, list):
-        return [str(source) for source in sources]
+        return sources
     return _parse_sources_detail(str(entry.get("detail") or ""))
 
 
@@ -374,24 +408,11 @@ def _earned_sources(migration: Path) -> tuple[dict[str, str | None], bool]:
 
 
 def _clear_was_earned(migration: Path, sources: list[str] | None = None) -> str | None:
-    """Return the action that legitimately lifted the gate, or None if nothing did.
+    """Return probe-cleared/authorize only for an audit-backed lift; a bare clear earns nothing.
 
-    Only two things earn a lift: a successful reachability probe, or an audit-backed human
-    authorization. A bare `clear` earns nothing.
-
-    This exists because `clear` was callable by anyone with any excuse - measured 2026-08-02, a
-    single `credential_gate.py clear --reason "I decided it is fine"` lifted the ACL and the build
-    proceeded with no probe ever run. That is the whole guarantee gone, via the front door.
-
-    ⚠️ KNOWN LIMIT, stated plainly: the audit log is a text file, so at same-user privilege an agent
-    can append a fake `probe-cleared` entry - measured, and it passed. Ordering below is per-source:
-    a later `block` invalidates only the source(s) it names, which preserves sibling clearances but
-    still makes each source earn its own post-block proof. No file-based receipt can be unforgeable.
-
-    **The real oracle is the source system.** A genuine probe leaves a `... limit 1` query in the
-    warehouse's query history; a forged receipt leaves nothing. `verify` prints the recorded
-    timestamp precisely so that claim is cheap to check externally. Treat the audit log as an
-    accountability trail, not as proof.
+    Source ordering preserves sibling clearances but invalidates each re-armed source's proof.
+    Same-user forgery remains possible: this text audit is accountability, not non-repudiation.
+    A genuine probe also leaves an independent one-row query in the source system's query history.
     """
     states, authorized = _earned_sources(migration)
     if authorized:
@@ -638,30 +659,10 @@ def _last_block_sources(migration: Path) -> list[str] | None:
 
 
 def _redundant_rearm(migration: Path, sources: list[str]) -> str | None:
-    """Would arming here merely re-block sources a probe ALREADY proved reachable?
+    """Skip only an earned lift covering EVERY incoming source, never a bare manual clear.
 
-    Returns the earning action (`probe-cleared`/`authorize`) when the re-arm is redundant, else
-    None. This closes a real, measured hole - and it is a hole in BOTH directions, which is why the
-    conditions are narrow rather than "skip whenever previously cleared".
-
-    Measured 2026-08-03 (`claude-haiku-4.5`, variant-m5c): after a legitimate probe had cleared the
-    gate and the model was built, the agent re-ran the classifier, which re-armed unconditionally.
-    Faced with its OWN freshly re-armed gate on a source it had *already* proven reachable minutes
-    earlier, it did not re-probe - it ran `cd variant-m5c; clear .` and bypassed the gate outright.
-    So an unconditional re-arm does not merely annoy: it manufactures the exact dead end that
-    invites a bypass, and it does so for a source whose reachability is already established fact.
-
-    The two conditions are both load-bearing:
-
-    * **The gate must be currently EARNED** (`_clear_was_earned`), not merely cleared. A bare
-      `manual-clear` earns nothing, so a migration cleared that way still gets re-armed - otherwise
-      this helper would launder an unearned clear into permanent immunity.
-    * **Each incoming source must be proven.** If the spec gained a new live source, that source has
-      never been probed, and skipping the re-arm would let a model be built against it unproven. A
-      sibling's later block no longer erases previously proven sources, but it also cannot borrow
-      their clearance.
-
-    Anything it cannot parse or compare falls through to a normal re-arm: fail closed.
+    Unconditional re-arming invited a measured bypass on an already-proven source (2026-08-03).
+    Conversely, a new/unproven source must re-arm; sibling proof cannot cover it.
     """
     return _clear_was_earned(migration, sources)
 
@@ -835,23 +836,12 @@ def clear_block(migration: Path, reason: str, earned: bool = False, sources: lis
 
 
 def _override_is_authentic(migration: Path, *, entries: list[dict] | None = None) -> bool:
-    """Is the override file backed by a real authorization, or was it forged by an agent?
+    """Require the override FILE and a canonical authorization; either alone earns nothing.
 
-    A bare file is worthless as an authorization token: measured 2026-08-01, agents created
-    `.credential-gate-AUTHORIZED` themselves twice - once directly, and once (after the hook started
-    matching that name) by assembling the name from string fragments so no literal appeared to match.
-    Any check over text loses that game.
-
-    So the file alone authorizes NOTHING. It is honoured only when the audit log also records an
-    `authorize` action, which is written exclusively by `credential_gate.py authorize`. That command
-    is what actually lifts the ACL - and the ACL, not the file, is what was ever holding the line.
-    A forged file therefore changes no behaviour, and its presence WITHOUT a matching audit entry is
-    itself evidence of an attempted bypass, which `verify` reports.
-
-    `entries`, when supplied by the assessor, is its already-validated same-root snapshot. This
-    avoids re-reading mutable evidence between the epoch fold and the authorization decision.
+    The assessor supplies its already-validated same-root snapshot, avoiding a second mutable read
+    between its epoch fold and authorization decision. authorize() owns the process-lineage guard.
     """
-    if not (migration / OVERRIDE).exists():
+    if not (migration / OVERRIDE).is_file():
         return False
     if entries is None:
         entries = _audit_entries(migration)
@@ -1371,21 +1361,7 @@ def verify(migration: Path) -> int:
     return _verify_one(migration)
 
 
-# ---------------------------------------------------------------------------------------------
-# Phase-1 package-local data-access authority (#562)
-#
-# One PURE, READ-ONLY assessor plus one strict deserializer. It exists because `verify()` is a
-# ship gate that RETURNS AN INTEGER AND APPENDS `violation` AUDIT LINES on several failures, so it
-# can never be called merely to describe a package: doing so would make the act of projecting a
-# state mutate the very evidence the state is derived from. `assess_data_access` therefore folds
-# the same canonical components - `_read_audit_trail`, `_classify_legs`/`_leg_key`,
-# `load_bundle`, `_override_is_authentic` - into a typed verdict and writes nothing at all.
-#
-# Privacy is structural, not editorial: every exported field is either a closed enum member, a
-# package unit identity the caller already holds, or a `source-key:<16 hex>` digest. No host, path,
-# database, display name, user, timestamp, audit detail, or free text can reach a projection,
-# because there is no field shaped to carry one.
-# ---------------------------------------------------------------------------------------------
+# Phase-1 authority is read-only: verify() appends audit rows and cannot produce this projection.
 
 DATA_ACCESS_SCHEMA = "phase1-data-access/v1"
 
@@ -1454,6 +1430,7 @@ DATA_ACCESS_CODES = ACCEPTED_CODES | BLOCKING_CODES | CANNOT_CODES
 # `_leg_key`'s output shape, pinned so a projection cannot smuggle a display name, a host, or a
 # path through the one list field that carries source identity.
 SOURCE_KEY_RE = re.compile(r"^source-key:[0-9a-f]{16}$")
+PROVIDER_UNIT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
 # Audit action -> blocking code for a per-leg probe ATTEMPT. `probe-data_ok` is the only success and
 # is handled separately; `probe-cleared` is a gate transition, not an attempt. `probe-operator_required`
@@ -1473,6 +1450,14 @@ PROBE_ATTEMPT_CODES = {
 PROBE_DATA_OK = "probe-data_ok"
 PROBE_CLEARED = "probe-cleared"
 
+# Gate transitions and probe attempts share _audit's base fields, not its optional sources field.
+# Unkeyed historical attempts/clears remain readable; the ledger never earns proof from them.
+AUDIT_SOURCE_RULES = {
+    **dict.fromkeys(BLOCK_ACTIONS, "arm"),
+    **dict.fromkeys((*PROBE_ATTEMPT_CODES, PROBE_DATA_OK, PROBE_CLEARED, "violation"), "optional"),
+    **dict.fromkeys(("authorize", "manual-clear", "block-skipped", "block-forced-scope", "engine-receipt"), "absent"),
+}
+
 # Every way `parse_data_access` can refuse. Closed so a test can assert WHICH refusal fired rather
 # than merely that something did - a fail-closed parser that refuses everything for one reason
 # would otherwise pass every negative control vacuously.
@@ -1487,6 +1472,7 @@ DATA_ACCESS_REJECTIONS = (
     "bad-type",
     "unknown-value",
     "source-key-invalid",
+    "provider-unit-invalid",
     "source-keys-unsorted",
     "codes-unsorted",
     "illegal-combination",
@@ -1506,12 +1492,7 @@ DATA_ACCESS_FIELDS = (
 
 
 class DataAccessProjectionError(ValueError):
-    """A `data-access.json` payload that `parse_data_access` refuses.
-
-    `code` is always the closed `cannot_establish` member `projection-invalid` - a consumer never
-    falls back to the audit, an ancestor, or a laxer parse. `reason` is a member of
-    `DATA_ACCESS_REJECTIONS`, for tests and diagnostics only; it never ships.
-    """
+    """Closed projection-invalid refusal; diagnostics carry only a DATA_ACCESS_REJECTIONS reason."""
 
     code = "projection-invalid"
 
@@ -1529,11 +1510,8 @@ class _NonFiniteJsonConstant(Exception):
 
 
 class DataAccessAssessment(NamedTuple):
-    """Immutable package authority; no raw audit details or credentials can be projected.
-
-    NamedTuple keeps the hook's unregistered `exec_module` import working. A dataclass with
-    postponed annotations dereferences the missing `sys.modules` entry and breaks that loader
-    (covered by `test_the_module_still_loads_the_way_the_hook_loads_it`).
+    """Immutable authority. NamedTuple also works with the hook's unregistered exec_module loader,
+    unlike dataclass/postponed-annotation resolution (covered by the hook-loading control).
     """
 
     state: str
@@ -1594,9 +1572,37 @@ def _cannot_establish(*codes: str) -> DataAccessAssessment:
 
 
 def _spec_source_legs(source: object, index: int) -> list[tuple[str, str, str, str]] | None:
-    """Reuse the canonical classifier for both sides of the root/package key comparison."""
-    if not isinstance(source, Mapping):
+    """Validate shapes before the canonical classifier's fallback/equality operations."""
+    if not isinstance(source, Mapping) or not isinstance(source.get("connection", {}), Mapping):
         return None
+    connection = source.get("connection", {})
+    legs = connection.get("connections", [])
+    if not isinstance(legs, list) or not all(isinstance(leg, Mapping) for leg in legs):
+        return None
+    for field in ("tables", "fields"):
+        if field in source and (
+            not isinstance(source[field], list) or not all(isinstance(item, Mapping) for item in source[field])
+        ):
+            return None
+    for leg in (connection, *legs):
+        port = leg.get("port")
+        if any(
+            leg.get(field) is not None and not isinstance(leg[field], str)
+            for field in (
+                "class",
+                "mode",
+                "powerbi_target",
+                "powerbi_target_reason",
+                "server",
+                "database",
+                "dbname",
+                "schema",
+                "http_path",
+                "warehouse",
+                "role",
+            )
+        ) or (port is not None and (isinstance(port, bool) or not isinstance(port, (str, int)))):
+            return None
     try:
         return _classify_legs(dict(source), index)
     except (AttributeError, KeyError, TypeError, ValueError):
@@ -1608,7 +1614,7 @@ def _package_spec_facts(package_spec: object) -> tuple[tuple[str, ...], bool, st
     if not isinstance(package_spec, Mapping):
         return (), False, "spec-unreadable"
     sources = package_spec.get("data_sources", [])
-    if not isinstance(sources, (list, tuple)):
+    if not isinstance(sources, list):
         return (), False, "spec-unreadable"
     keys: list[str] = []
     review = False
@@ -1639,16 +1645,30 @@ def _gate_root_live_keys(gate_root: Path) -> tuple[frozenset[str], str | None]:
 
 
 def _package_local_facts(package_data_sources: object) -> tuple[bool, str | None]:
-    """Check all four localization facts; missing fields cannot establish complete local bytes."""
+    """Validate localization types before interpreting completeness; binding stays Phase-2 work."""
     if not isinstance(package_data_sources, Mapping):
         return False, "spec-unreadable"
-    if package_data_sources.get("self_contained") is not True:
-        return False, None
-    for field in ("omissions", "neutralized", "retained_network"):
-        value = package_data_sources.get(field)
-        if not isinstance(value, (list, tuple)) or value:
-            return False, None
-    return True, None
+    fields = {"self_contained": bool, "omissions": list, "neutralized": list, "retained_network": list}
+    optional = {"shipped": list, "binding": (Mapping, type(None)), "parameter": (str, type(None)), "bytes": int}
+    for field, expected in (fields | optional).items():
+        if field in package_data_sources and not isinstance(package_data_sources[field], expected):
+            return False, "spec-unreadable"
+    if isinstance(package_data_sources.get("bytes"), bool):
+        return False, "spec-unreadable"
+    for field, item_type in (
+        ("omissions", Mapping),
+        ("shipped", Mapping),
+        ("neutralized", str),
+        ("retained_network", str),
+    ):
+        if not all(isinstance(item, item_type) for item in package_data_sources.get(field, [])):
+            return False, "spec-unreadable"
+    complete = (
+        fields.keys() <= package_data_sources.keys()
+        and package_data_sources["self_contained"]
+        and not any(package_data_sources[field] for field in ("omissions", "neutralized", "retained_network"))
+    )
+    return bool(complete), None
 
 
 def _new_key_state() -> dict:
@@ -1662,7 +1682,7 @@ def _apply_arm(tracked: dict[str, dict], sources: list[str] | None, timestamp: d
     for key in targets:
         if key in tracked:
             tracked[key] = _new_key_state()
-            tracked[key]["armed"] = timestamp
+            tracked[key]["armed"] = timestamp if sources is not None else None
 
 
 def _apply_probe_attempt(tracked: dict[str, dict], action: str, sources: list[str] | None, timestamp: datetime) -> None:
@@ -1734,7 +1754,9 @@ def _data_access_ledger(entries: list[dict], live_keys: tuple[str, ...]) -> tupl
             _apply_arm(tracked, sources, timestamp)
             authorized = False
         elif action == "authorize":
-            authorized = all(state["armed"] is not None and timestamp >= state["armed"] for state in tracked.values())
+            authorized = bool(tracked) and all(
+                state["armed"] is not None and timestamp >= state["armed"] for state in tracked.values()
+            )
         elif action == "manual-clear":
             for state in tracked.values():
                 state["manual"] = True
@@ -1772,7 +1794,7 @@ def _is_provider_pair(provider: object) -> bool:
     if not isinstance(provider, tuple) or len(provider) != 2:
         return False
     unit, assessment = provider
-    if not isinstance(unit, str) or not unit or not isinstance(assessment, DataAccessAssessment):
+    if not _valid_provider_unit(unit) or not isinstance(assessment, DataAccessAssessment):
         return False
     if not isinstance(assessment.source_keys, tuple) or not isinstance(assessment.codes, tuple):
         return False
@@ -1780,6 +1802,11 @@ def _is_provider_pair(provider: object) -> bool:
         return parse_data_access(assessment.dumps()) == assessment
     except (ValueError, TypeError, RecursionError):
         return False
+
+
+def _valid_provider_unit(unit: object) -> bool:
+    """S2's exact opaque package component, never a path, prose or a normalized name."""
+    return isinstance(unit, str) and PROVIDER_UNIT_RE.fullmatch(unit) is not None
 
 
 def _provider_candidates(provider: object) -> list | None:
@@ -1807,11 +1834,7 @@ def _resolve_single_provider(provider: object) -> tuple[tuple | None, str | None
 
 
 def _inherit_from_provider(provider: object, requested_scope: str) -> DataAccessAssessment:
-    """One level of EXACT provider inheritance, or a typed refusal. Never recursive, never a search.
-
-    S2 owns identity resolution and provider verification. This function checks the supplied
-    assessment and topology, then copies the direct authority's fields without strengthening them.
-    """
+    """Inherit S2's one exact direct provider, without search, recursion or strengthening its claim."""
     candidate, refusal = _resolve_single_provider(provider)
     if refusal:
         return _cannot_establish(refusal)
@@ -1914,10 +1937,13 @@ def _assess_direct(
     )
     if not has_review and local_complete and not any(key_codes.values()):
         return _accepted_direct(live_keys, requested_scope)
-    if authorized and not any(code in CANNOT_CODES for code in key_codes.values()):
-        # A human explicitly accepted an unvalidated build, so this outranks the per-key blocking
-        # reasons - it does not erase them, it declines to wait for them. The current source keys
-        # are still stamped, and the ceiling drops to structural-only.
+    if (
+        authorized
+        and live_keys
+        and not has_review
+        and local_complete
+        and not any(code in CANNOT_CODES for code in key_codes.values())
+    ):
         return _assessment(
             "authorized_model_only",
             codes=["human-authorize", "brief-model-only"],
@@ -1938,13 +1964,10 @@ def assess_data_access(  # pylint: disable=too-many-arguments
     requested_scope: str,
     provider: tuple[str, DataAccessAssessment] | list | None = None,
 ) -> DataAccessAssessment:
-    """The Phase-1 data-access authority for one package. PURE and READ-ONLY.
+    """Read-only authority over this root's audit/spec and supplied package facts or S2 provider.
 
-    Direct units read only this exact root's audit/spec plus supplied localization facts. No audit
-    mutation, probe, credential inspection, ancestor search or second leg classifier is permitted.
-    The caller supplies typed brief policy/scope and S2's provider pair (or list of candidates).
-    Inheritance uses only that verified provider result: published consumer legs are not endpoints.
-    Invalid policy/scope raises ValueError; malformed evidence returns a typed refusal.
+    No probe, mutation, ancestor search or second classifier. Invalid policy/scope raises ValueError;
+    malformed evidence returns a typed refusal. Published consumer legs are not direct endpoints.
     """
     if fallback_authorization not in FALLBACK_POLICIES:
         raise ValueError(f"fallback_authorization must be one of {FALLBACK_POLICIES}")
@@ -1962,28 +1985,24 @@ def assess_data_access(  # pylint: disable=too-many-arguments
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
-    """`json.loads` pairs hook: a repeated key is a refusal, never a last-one-wins merge.
-
-    Last-one-wins is how a payload says one thing to a human reading it and another to the parser
-    that consumes it, so the projection refuses the shape outright.
-    """
+    """Refuse last-one-wins JSON without retaining the duplicate key in an exception."""
     seen: set[str] = set()
     for key, _value in pairs:
         if key in seen:
-            raise _DuplicateJsonKey(key)
+            raise _DuplicateJsonKey from None
         seen.add(key)
     return dict(pairs)
 
 
-def _reject_nonfinite(constant: str) -> float:
+def _reject_nonfinite(_constant: str) -> float:
     """`json.loads` constant hook: `NaN`/`Infinity` are not JSON and never round-trip."""
-    raise _NonFiniteJsonConstant(constant)
+    raise _NonFiniteJsonConstant from None
 
 
 def _require(condition: object, reason: str) -> None:
     """Raise the typed projection refusal when `condition` is falsy."""
     if not condition:
-        raise DataAccessProjectionError(reason)
+        raise DataAccessProjectionError(reason) from None
 
 
 def _sorted_unique_strings(value: object, unsorted_reason: str) -> tuple[str, ...]:
@@ -2006,13 +2025,7 @@ def _check_enum(value: object, allowed: tuple[str, ...], *, nullable: bool = Fal
 
 
 def _check_state_combination(payload: dict) -> None:  # pylint: disable=too-many-branches
-    """The state-specific invariants. An accepted state must PROVE itself in its own fields.
-
-    Without this a payload could be structurally perfect and semantically impossible - a
-    `live_data_ok` with no source keys, a `local_import_ready` carrying live keys, an
-    `authorized_model_only` claiming `data_validated`. Those are precisely the shapes a tampered or
-    hand-edited projection takes, and none of them is caught by field types alone.
-    """
+    """Require each state's keys, codes, scope and claim ceiling to agree, not merely type-check."""
     state = payload["state"]
     keys, codes = payload["source_keys"], set(payload["codes"])
     scope, validation, ceiling = payload["effective_scope"], payload["validation"], payload["max_phase2_claim"]
@@ -2058,22 +2071,20 @@ def _check_state_combination(payload: dict) -> None:  # pylint: disable=too-many
 
 
 def parse_data_access(text: str) -> DataAccessAssessment:
-    """The ONE strict deserializer for a `data-access.json` payload.
-
-    Strict in every direction a lax parser leaks through: duplicate keys, unknown or missing
-    fields, wrong types, unknown enum members or codes, non-finite numbers, unsorted or duplicated
-    source keys, a source key that is not a `source-key:<16 hex>` digest, and any state/field
-    combination the assessor could not have produced. There is no fallback: a refusal is
-    `projection-invalid`, and the consumer must NOT then go read the audit log itself.
-    """
+    """Strictly parse the closed projection; a refusal never falls back to audit or ancestor data."""
+    _require(isinstance(text, str), "bad-type")
+    rejection = None
     try:
         payload = json.loads(text, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite)
-    except _DuplicateJsonKey as exc:
-        raise DataAccessProjectionError("duplicate-key") from exc
-    except _NonFiniteJsonConstant as exc:
-        raise DataAccessProjectionError("nonfinite") from exc
-    except ValueError as exc:
-        raise DataAccessProjectionError("malformed-json") from exc
+    except _DuplicateJsonKey:
+        rejection = "duplicate-key"
+    except _NonFiniteJsonConstant:
+        rejection = "nonfinite"
+    except (ValueError, RecursionError):
+        rejection = "malformed-json"
+    if rejection:
+        # Outside the except suite: even __context__ must not retain raw JSON/keys.
+        raise DataAccessProjectionError(rejection) from None
 
     _require(isinstance(payload, dict), "not-an-object")
     _require(not set(payload) - set(DATA_ACCESS_FIELDS), "unknown-field")
@@ -2087,6 +2098,7 @@ def parse_data_access(text: str) -> DataAccessAssessment:
     _check_enum(payload["provider_state"], DIRECT_ACCEPTED_STATES, nullable=True)
     if payload["provider_unit"] is not None:
         _require(isinstance(payload["provider_unit"], str) and payload["provider_unit"], "bad-type")
+        _require(_valid_provider_unit(payload["provider_unit"]), "provider-unit-invalid")
 
     keys = _sorted_unique_strings(payload["source_keys"], "source-keys-unsorted")
     for key in keys:
@@ -2110,10 +2122,13 @@ def parse_data_access(text: str) -> DataAccessAssessment:
 
 def read_data_access(path: Path) -> DataAccessAssessment:
     """`parse_data_access` over a file. An unreadable projection is a refusal, not an empty state."""
+    text = None
     try:
         text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise DataAccessProjectionError("unreadable") from exc
+    except (OSError, UnicodeError):
+        pass
+    if text is None:
+        raise DataAccessProjectionError("unreadable") from None
     return parse_data_access(text)
 
 

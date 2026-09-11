@@ -70,6 +70,8 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 # `_tmdl_ident` / `_tmdl_filename_stem` are re-exported, not used directly in this module: the seam
@@ -540,7 +542,9 @@ def _probe_custom_sql(table: dict) -> str | None:
     return table.get("custom_sql") or ""
 
 
-def _resolve_probe_targets(sources: list[dict], source_index: int) -> list[tuple[str, dict, list[dict], str]]:
+def _resolve_probe_targets(
+    sources: list[dict], source_index: int, migration: Path | None = None
+) -> list[tuple[str, dict, list[dict], str]]:
     """Pick every live connection leg, its candidate tables and a column to probe.
 
     Returns ALL tables, not just the first: a "table not found" is a spec error, and the workbook
@@ -574,15 +578,15 @@ def _resolve_probe_targets(sources: list[dict], source_index: int) -> list[tuple
         log.info("PROBE: SKIPPED not a live source ('%s') - nothing to probe", conn.get("powerbi_target"))
         return []
 
-    tables = [t for t in (source.get("tables") or []) if t.get("name")]
-    tables.sort(key=_is_custom_sql)
-    fields = [f for f in source.get("fields", []) if f.get("kind") == "column"]
-    if not tables or (not fields and not any(_is_custom_sql(t) for t in tables)):
-        log.error("PROBE: ERROR source has no table/column to probe")
-        raise SystemExit(1)
-    # Custom SQL is projected onto a probe column by build_m_query, so its parsed schema is not
-    # evidence needed to execute the query. Ordinary table navigation still requires a real column.
-    column = fields[0]["internal_name"].strip("[]") if fields else "ProbeOK"
+    with _recorded_attempt(migration, [name for name, _leg in live_legs]):
+        tables = [t for t in (source.get("tables") or []) if t.get("name")]
+        tables.sort(key=_is_custom_sql)
+        fields = [f for f in source.get("fields", []) if f.get("kind") == "column"]
+        if not tables or (not fields and not any(_is_custom_sql(t) for t in tables)):
+            log.error("PROBE: ERROR source has no table/column to probe")
+            raise SystemExit(1)
+        # A custom query supplies ProbeOK; ordinary navigation requires a real parsed column.
+        column = fields[0]["internal_name"].strip("[]") if fields else "ProbeOK"
     return [(name, leg, tables, column) for name, leg in live_legs]
 
 
@@ -858,6 +862,31 @@ def _record_attempt(migration: Path, verdict: str, what: str, sources: list[str]
     _audit(migration, f"probe-{verdict.lower()}", what, sources=list(sources))
 
 
+@contextmanager
+def _recorded_attempt(migration: Path | None, sources: list[str]) -> Iterator[Callable[[int, str], tuple[int, str]]]:
+    """One terminal boundary: explicit verdicts or exceptional ERROR, before slow cleanup.
+
+    Resolution that succeeds has no verdict to record. Its pure compatibility callers have no
+    root; production always supplies one. Exceptions propagate unchanged, without entering audit
+    detail, and every recorded attempt carries the already-resolved source identities.
+    """
+    verdict = None
+    completed = False
+
+    def finish(code: int, token: str) -> tuple[int, str]:
+        nonlocal verdict
+        verdict = token
+        return code, token
+
+    try:
+        yield finish
+        completed = True
+    finally:
+        if migration is not None and (verdict is not None or not completed):
+            recorded = verdict if completed and verdict is not None else "ERROR"
+            _record_attempt(migration, recorded, f"source probe -> {recorded}", sources)
+
+
 def _host_resolves(server: str) -> bool:
     """Cheap DNS check, run before any Desktop work.
 
@@ -946,7 +975,7 @@ def run_probe(bundle_path: Path, source_index: int | None, timeout_sec: int, kee
     if source_index is not None:
         live = [source_index]
     else:
-        live = [i for i, _source in enumerate(sources) if _resolve_probe_targets(sources, i)]
+        live = [i for i, _source in enumerate(sources) if _resolve_probe_targets(sources, i, bundle.migration_dir)]
     if not live:
         log.info("PROBE: SKIPPED no live sources in this spec - nothing to probe")
         return 0
@@ -963,7 +992,9 @@ def run_probe(bundle_path: Path, source_index: int | None, timeout_sec: int, kee
         # and this source proves nothing. Counting it would re-open #353 for exactly the shape that
         # exposed it: a `federated` outer connection carrying no server at all.
         if verdict != "SKIPPED":
-            proved_names.extend(name for name, _leg, _tables, _column in _resolve_probe_targets(sources, idx))
+            proved_names.extend(
+                name for name, _leg, _tables, _column in _resolve_probe_targets(sources, idx, bundle.migration_dir)
+            )
 
     if not _lift_gate(bundle.migration_dir, f"{len(proved_names)} live source leg(s)", proved_names):
         log.warning(
@@ -1085,7 +1116,7 @@ def _probe_one(
     spec error worth retrying past, while a credential or reachability failure is the answer and
     retrying it would just cost another Desktop launch per table.
     """
-    targets = _resolve_probe_targets(sources, source_index)
+    targets = _resolve_probe_targets(sources, source_index, migration)
     if not targets:
         return 0, "SKIPPED"
     for leg_name, conn, tables, column in targets:
@@ -1103,17 +1134,19 @@ def _probe_leg(
     opts: tuple[int, bool],
 ) -> tuple[int, str]:
     """Probe one resolved connection leg."""
-    tables, column = target
-    server = normalize_host(conn.get("server") or "")
-    if server and not _host_resolves(server):
-        log.error(
-            "PROBE: UNREACHABLE '%s' does not resolve in DNS. This is a spec/config problem, not a "
-            "credential one - check `server` (and `http_path`) in migration-spec.json. No credential "
-            "will fix an address that does not exist.",
-            server,
-        )
-        _record_attempt(migration, "UNREACHABLE", f"{server} -> UNREACHABLE (DNS)", [leg_name])
-        return 1, "UNREACHABLE"
+    with _recorded_attempt(migration, [leg_name]) as finish:
+        tables, column = target
+        server = normalize_host(conn.get("server") or "")
+        if server and not _host_resolves(server):
+            log.error(
+                "PROBE: UNREACHABLE '%s' does not resolve in DNS. This is a spec/config problem, not a "
+                "credential one - check `server` (and `http_path`) in migration-spec.json. No credential "
+                "will fix an address that does not exist.",
+                server,
+            )
+            return finish(1, "UNREACHABLE")
+        if not tables:
+            return finish(1, "BAD_TABLE")
 
     log.info("probing leg: %s", leg_name)
     for i, table in enumerate(tables):
@@ -1128,50 +1161,34 @@ def _probe_leg(
     return 1, "BAD_TABLE"
 
 
-def _probe_one_table(  # pylint: disable=too-many-locals
+def _probe_one_table(
     migration: Path, leg_name: str, conn: dict, target: tuple[dict, str], opts: tuple[int, bool]
 ) -> tuple[int, str]:
-    """Run the probe against one specific table. Returns (exit code, verdict).
-
-    `leg_name` is the `_leg_key` identity of the leg being measured and exists only so the audit
-    record can be keyed: every verdict written from here names the source it came from, or a reader
-    cannot tell which of several live endpoints answered. It is also the one local that pushed this
-    function over pylint's `max-locals` ceiling, which the disable above records rather than hides.
-
-    `opts` is read positionally rather than unpacked into names: this function sits at pylint's
-    `max-locals` ceiling, and each element is used exactly once.
-    """
-    table_spec, column = target
-    table = table_spec.get("name", "")
-    try:
-        m_query, note = build_m_query(conn, table, column, custom_sql=_probe_custom_sql(table_spec))
-    except ValueError as exc:
-        log.error("PROBE: ERROR %s", exc)
-        return 1, "ERROR"
-
-    pbip = (
-        _write_probe_model(migration, m_query, table, "ProbeOK" if _is_custom_sql(table_spec) else column)
-        / "Probe.pbip"
-    )
-    log.info("probe model built: %s", pbip.parent)
-    log.info("target: %s", note)
+    """Record every keyed terminal outcome, including preprocessing, before Desktop cleanup."""
     pid = None
     desktop_event = None
     try:
-        pid = _open_desktop(pbip)
-        desktop_event = _record_desktop_lifecycle(migration, "desktop-open", pid, pbip)
-        log.info("desktop pid %d", pid)
-        if not _wait_for_catalog(pid):
-            verdict = _classify_catalog_timeout(conn)
-            # Recorded HERE, not by the caller. Everything below this line - the `finally` that
-            # shuts Desktop down - is slow, and a measurement that is not written down did not
-            # happen as far as any later reader is concerned.
-            _record_attempt(migration, verdict, f"{table} -> {verdict} (no catalog)", [leg_name])
-            return 1, verdict
-        log.info("model loaded - refreshing")
-        rc, verdict = _refresh_and_classify(pid, table, opts[0], _network_fault_observed(conn))
-        _record_attempt(migration, verdict, f"{table} -> {verdict}", [leg_name])
-        return rc, verdict
+        with _recorded_attempt(migration, [leg_name]) as finish:
+            table_spec, column = target
+            table = table_spec.get("name", "")
+            try:
+                m_query, note = build_m_query(conn, table, column, custom_sql=_probe_custom_sql(table_spec))
+            except ValueError as exc:
+                log.error("PROBE: ERROR %s", exc)
+                return finish(1, "ERROR")
+            pbip = (
+                _write_probe_model(migration, m_query, table, "ProbeOK" if _is_custom_sql(table_spec) else column)
+                / "Probe.pbip"
+            )
+            log.info("probe model built: %s", pbip.parent)
+            log.info("target: %s", note)
+            pid = _open_desktop(pbip)
+            desktop_event = _record_desktop_lifecycle(migration, "desktop-open", pid, pbip)
+            log.info("desktop pid %d", pid)
+            if not _wait_for_catalog(pid):
+                return finish(1, _classify_catalog_timeout(conn))
+            log.info("model loaded - refreshing")
+            return finish(*_refresh_and_classify(pid, table, opts[0], _network_fault_observed(conn)))
     finally:
         if pid and desktop_event and opts[1]:
             _record_desktop_lifecycle(migration, "desktop-kept", pid, pbip, desktop_event)
