@@ -41,6 +41,7 @@ import os
 import re
 import warnings
 from pathlib import Path
+from urllib.parse import unquote
 from xml.etree import ElementTree
 
 # The secret half of the PAT credential. TABLEAU_PAT_SECRET is canonical; the engine's historical
@@ -74,6 +75,33 @@ DATASOURCE_CREDENTIAL_KEYS = frozenset({"TABLEAU_SF_USER", "TABLEAU_SF_PASSWORD"
 ACCEPTED_ENV_KEYS = frozenset(CANONICAL_ENV_KEYS) | {"TABLEAU_SERVER", "TABLEAU_PAT_VALUE"} | DATASOURCE_CREDENTIAL_KEYS
 
 _TABLEAU_AUTH_HEADER_RE = re.compile(r"(?i)([\"']?x-tableau-auth[\"']?\s*[:=]\s*[\"']?)([^\"'\s,;<>]+)")
+
+_CREDENTIAL_SHAPE_RE = re.compile(
+    r"""(?ix)
+    (?:["']?(?:authorization|proxy-authorization|x-tableau-auth|password|passwd|pwd|
+       token|(?:access|refresh|id|session)[_-]?token|(?:client[_-]?)?secret|api[_-]?key|
+       tableau_pat_(?:secret|value))["']?\s*[:=]\s*\S)
+    |(?:\bbearer\s+\S+)
+    |(?:\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b)
+    |(?:\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+\b)
+    """
+)
+
+
+def contains_credential(text: str) -> bool:
+    """Detect credential-shaped shareable text using the central secret/wire vocabulary.
+
+    This is a detector, not a claim that arbitrary prose can be certified secret-free. Known
+    configured secrets and their wire forms are also withheld; no secret or matching text is emitted.
+    """
+    if _CREDENTIAL_SHAPE_RE.search(unquote(text)):
+        return True
+    for key, value in os.environ.items():
+        if value and key.upper().endswith(("_TOKEN", "_SECRET", "_PASSWORD", "_PAT_VALUE")):
+            if any(form in text for form in secret_forms(value) if form):
+                return True
+    return False
+
 
 # Markers tried in order. A marker that CONTAINS a supplied secret would re-emit the credential it
 # is meant to hide -- `redact("credential=[REDACTED]", "[REDACTED]")` used to return its input

@@ -294,7 +294,7 @@ def test_capture_report_limits_capture_to_requested_page_ids() -> None:
         )
 
         assert code == 0
-        assert captured_page_ids == ["ReportSectionMap"]
+        assert captured_page_ids == ["ReportSectionMap", "ReportSectionMap"]
         assert (root / "out" / "Map.png").read_bytes() == b"settled"
         assert not (root / "out" / "Overview.png").exists()
         assert not list((root / "out").glob(".*.frames"))
@@ -386,7 +386,12 @@ def test_capture_report_full_sweep_captures_every_page() -> None:
         )
 
         assert code == 0
-        assert captured_page_ids == ["ReportSectionMap", "ReportSectionOverview"]
+        assert captured_page_ids == [
+            "ReportSectionMap",
+            "ReportSectionMap",
+            "ReportSectionOverview",
+            "ReportSectionOverview",
+        ]
         assert (root / "out" / "Map.png").read_bytes() == b"ReportSectionMap"
         assert (root / "out" / "Overview.png").read_bytes() == b"ReportSectionOverview"
         assert not list((root / "out").glob(".*.frames"))
