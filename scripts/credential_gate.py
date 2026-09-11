@@ -1739,17 +1739,27 @@ def _apply_probe_attempt(tracked: dict[str, dict], action: str, sources: list[st
 def _apply_clear(tracked: dict[str, dict], sources: list[str] | None) -> None:
     """`probe-cleared` earns ONLY where this key already has a keyed success in this epoch.
 
-    Everything else - an unkeyed clear, a clear for a key with no `probe-data_ok`, a clear after a
-    later failure - is `stale-clear`. This is the hole the producer correction closes from the other
-    side: `credential_gate.py clear --earned` writes a `probe-cleared` naming the last block's
-    sources whether or not anything was ever measured.
+    Everything else is `stale-clear`: a clear for a key with no `probe-data_ok`, a clear after a
+    later failure, and - the direction that actually shipped broken - an UNATTRIBUTABLE clear.
+
+    ⚠️ Measured on this branch before the fix: a `probe-cleared` carrying no source list earned
+    `live_data_ok` for every key that happened to hold a keyed success, because the "does this
+    clear name my key?" test was skipped rather than failed when there was no name to test. That is
+    reachable from production code, not only from a forged log: `clear_block(..., earned=True)`
+    passes `_last_block_sources`, which returns None whenever the arm's source list cannot be
+    parsed, and `_audit` then omits the field entirely. The invariant is that BOTH halves are
+    keyed, so an unattributable clear must earn nothing.
+
+    An already-earned key is never un-earned by a later unattributable clear - proof is removed by
+    a new arm or a measured failure, not by an unreadable record.
     """
+    attributable = sources is not None
     for key, state in tracked.items():
-        if sources is not None and key not in sources:
+        if attributable and key not in sources:
             continue
-        if state["data_ok"] and state["failure"] is None:
+        if attributable and state["data_ok"] and state["failure"] is None:
             state["earned"] = True
-        else:
+        elif not state["earned"]:
             state["stale"] = True
 
 
@@ -1785,7 +1795,10 @@ def _data_access_ledger(entries: list[dict], live_keys: tuple[str, ...]) -> tupl
     authorized = False
     for entry in entries:
         action = str(entry.get("action") or "")
-        sources = _entry_sources(entry)
+        # An EMPTY source list is as unattributable as a missing one, and is normalised to None so
+        # every branch below takes its fail-closed path rather than iterating over nothing. Without
+        # this an `[]`-keyed failure record would quietly leave an earned key earned.
+        sources = _entry_sources(entry) or None
         if action in BLOCK_ACTIONS:
             _apply_arm(tracked, sources)
             authorized = False
@@ -1842,28 +1855,66 @@ def _is_provider_pair(provider: object) -> bool:
     return isinstance(unit, str) and bool(unit) and isinstance(assessment, DataAccessAssessment)
 
 
+def _provider_candidates(provider: object) -> list | None:
+    """The caller's resolution as a candidate LIST, or None when the argument is malformed.
+
+    A bare pair is the ordinary "S2 matched exactly one provider" case. A LIST is how a caller
+    reports what its cohort resolution actually found, including zero or several - without that,
+    `provider-ambiguous` is unreachable through the API and a caller holding two LUID matches has
+    to flatten them into `None`, which reads as "no provider exists" and understates the problem.
+    Resolution itself still belongs entirely to the caller: nothing here searches, matches by name
+    or consults a registry.
+    """
+    if provider is None:
+        return []
+    if _is_provider_pair(provider):
+        return [provider]
+    if isinstance(provider, list):
+        return provider
+    return None
+
+
+def _resolve_single_provider(provider: object) -> tuple[tuple | None, str | None]:
+    """(the one usable candidate pair, cannot-establish code) - identity only, never semantics.
+
+    Split from `_inherit_from_provider` so each function stays inside pylint's return budget, and
+    because these four refusals are all about the SHAPE of what the caller resolved, before any
+    question about whether that provider is a usable authority.
+    """
+    candidates = _provider_candidates(provider)
+    if candidates is None:
+        return None, "provider-foreign"
+    if not candidates:
+        return None, "provider-missing"
+    if len(candidates) > 1:
+        return None, "provider-ambiguous"
+    if not _is_provider_pair(candidates[0]):
+        return None, "provider-foreign"
+    return candidates[0], None
+
+
 def _inherit_from_provider(
     provider: object, requested_scope: str, own_live_keys: tuple[str, ...]
 ) -> DataAccessAssessment:
     """One level of EXACT provider inheritance, or a typed refusal. Never recursive, never a search.
 
-    The provider pair is already resolved by the caller (S2's package cohort). This function does
-    no registry lookup, no display-name match and no ancestor walk - it only decides whether the
+    The provider is already resolved by the caller (S2's package cohort). This function does no
+    registry lookup, no display-name match and no ancestor walk - it only decides whether the
     resolved provider is a usable authority for THIS consumer's topology, and copies its semantic
     fields verbatim if so.
 
     Code routing, all `cannot_establish` because none of them is a finding ABOUT the data: no
-    provider where one is required is `provider-missing`; a malformed pair is `provider-foreign`; a
-    provider that is itself `provider_inherited` is `provider-ambiguous`, because a chain does not
-    resolve to exactly one direct authority and following it would be the recursion this refuses;
-    a provider that is itself blocked or cannot-establish is `provider-missing`, since it supplies
-    no authority to inherit.
+    provider where one is required is `provider-missing`; a malformed argument or pair is
+    `provider-foreign`; more than one candidate, or a provider that is itself `provider_inherited`,
+    is `provider-ambiguous` - both mean the same thing, that the input does not resolve to exactly
+    ONE DIRECT authority, and following either would be the search/recursion this refuses; a
+    provider that is itself blocked or cannot-establish is `provider-missing`, since it supplies no
+    authority to inherit.
     """
-    if provider is None:
-        return _cannot_establish("provider-missing")
-    if not _is_provider_pair(provider):
-        return _cannot_establish("provider-foreign")
-    unit, assessment = provider
+    candidate, refusal = _resolve_single_provider(provider)
+    if refusal:
+        return _cannot_establish(refusal)
+    unit, assessment = candidate
     if assessment.state == "provider_inherited":
         return _cannot_establish("provider-ambiguous")
     if assessment.state not in DIRECT_ACCEPTED_STATES:
@@ -2004,7 +2055,7 @@ def assess_data_access(  # pylint: disable=too-many-arguments
     package_data_sources: Mapping,
     fallback_authorization: str,
     requested_scope: str,
-    provider: tuple[str, DataAccessAssessment] | None = None,
+    provider: tuple[str, DataAccessAssessment] | list | None = None,
 ) -> DataAccessAssessment:
     """The Phase-1 data-access authority for one package. PURE and READ-ONLY.
 
@@ -2017,8 +2068,10 @@ def assess_data_access(  # pylint: disable=too-many-arguments
 
     `gate_root` must be the SAME root the gate was armed and probed against (`bundle.migration_dir`).
     `fallback_authorization` and `requested_scope` come from the typed brief/S2 authority; this
-    function does not parse the brief. `provider` is an already-resolved (unit, assessment) pair -
-    resolution belongs to the caller's package cohort, never here.
+    function does not parse the brief. `provider` is the caller's already-resolved result: a
+    `(unit, assessment)` pair, or a LIST of such pairs when the caller wants to report what its
+    cohort resolution found (zero, one, or an ambiguous several). Resolution belongs to the caller,
+    never here.
 
     Raises ValueError for an out-of-vocabulary `fallback_authorization`/`requested_scope`: that is
     a caller bug, and silently degrading it to `cannot_establish` would hide the bug behind a state

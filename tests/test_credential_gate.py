@@ -3106,17 +3106,29 @@ def test_a_model_only_provider_cannot_authorize_a_report_only_consumer(tmp_path:
     ("provider", "expected"),
     [
         pytest.param(None, "provider-missing", id="absent"),
+        pytest.param([], "provider-missing", id="resolved-nothing"),
+        pytest.param(
+            [("Upstream", PROVIDER_LIVE), ("Other", PROVIDER_LOCAL)], "provider-ambiguous", id="two-candidates"
+        ),
+        pytest.param([("Upstream", PROVIDER_LIVE), ("Upstream", PROVIDER_LIVE)], "provider-ambiguous", id="two-equal"),
         pytest.param(("Upstream", PROVIDER_RECURSIVE), "provider-ambiguous", id="recursive"),
         pytest.param(("Upstream", PROVIDER_BLOCKED), "provider-missing", id="not-an-authority"),
         pytest.param(("", PROVIDER_LIVE), "provider-foreign", id="empty-unit"),
         pytest.param(("Upstream", {"state": "live_data_ok"}), "provider-foreign", id="foreign-shape"),
         pytest.param(("Upstream", PROVIDER_LIVE, "extra"), "provider-foreign", id="wrong-arity"),
+        pytest.param([("Upstream", "not an assessment")], "provider-foreign", id="one-malformed-candidate"),
+        pytest.param("Upstream", "provider-foreign", id="bare-string"),
     ],
 )
 def test_an_unusable_provider_is_named_rather_than_searched_for(
     tmp_path: Path, provider: object, expected: str
 ) -> None:
-    """No registry lookup, no name match, no ancestor walk - each failure gets its own code."""
+    """No registry lookup, no name match, no ancestor walk - each failure gets its own code.
+
+    The LIST cases are how a caller reports what its cohort resolution actually found. Without
+    them `provider-ambiguous` is unreachable through the API and a caller holding two LUID matches
+    has to collapse them into `None`, which reads as "no provider exists" and understates it.
+    """
     root = _da_root(tmp_path, f"provider-{expected}-{type(provider).__name__}-{len(str(provider))}", FLAT)
 
     result = cg.assess_data_access(
@@ -3129,6 +3141,17 @@ def test_an_unusable_provider_is_named_rather_than_searched_for(
     )
 
     assert (result.state, result.codes) == ("cannot_establish", (expected,))
+
+
+def test_a_single_candidate_list_inherits_exactly_like_a_bare_pair(tmp_path: Path) -> None:
+    """Control for the ambiguity rule: one candidate is not ambiguous, however it was passed."""
+    root = _da_root(tmp_path, "one-candidate", FLAT)
+
+    as_list = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=[("Superstore", PROVIDER_LIVE)])
+    as_pair = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=("Superstore", PROVIDER_LIVE))
+
+    assert as_list == as_pair
+    assert (as_list.state, as_list.provider_unit) == ("provider_inherited", "Superstore")
 
 
 @pytest.mark.parametrize("policy", ["stop", "model_only_unvalidated"])
@@ -3378,6 +3401,125 @@ def test_the_module_still_loads_the_way_the_hook_loads_it(tmp_path: Path) -> Non
         == "blocked"
     )
     assert not (tmp_path / "unused").exists(), "importing the module must not touch the filesystem"
+
+
+def test_an_unkeyed_clear_earns_nothing_even_after_a_keyed_measurement(tmp_path: Path) -> None:
+    """The OTHER half of the keyed-evidence invariant, and a fail-open measured on this branch.
+
+    A `probe-cleared` carrying no source list used to earn `live_data_ok` for every key that held a
+    keyed success, because "does this clear name my key?" was SKIPPED rather than FAILED when there
+    was no name to test. It is reachable from production, not only from a forged log:
+    `clear_block(..., earned=True)` passes `_last_block_sources`, which is None whenever the arm's
+    source list cannot be parsed, and `_audit` then omits the field.
+
+    Three shapes, all unattributable, plus the keyed positive control.
+    """
+    keyed = _da_root(tmp_path, "clear-keyed", LIVE_A)
+    _trail(keyed, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
+
+    absent = _da_root(tmp_path, "clear-absent", LIVE_A)
+    _trail(absent, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", None))
+
+    empty = _da_root(tmp_path, "clear-empty", LIVE_A)
+    _trail(empty, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", []))
+
+    other = _da_root(tmp_path, "clear-other-key", LIVE_A, LIVE_B)
+    _trail(other, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_B]))
+
+    assert _assess(keyed, _da_spec(LIVE_A)).state == "live_data_ok", "control: the keyed clear must still earn"
+    for root, why in ((absent, "no sources field"), (empty, "empty sources list")):
+        result = _assess(root, _da_spec(LIVE_A))
+        assert (result.state, result.codes) == ("blocked", ("stale-clear",)), why
+
+    # A clear naming a DIFFERENT key does not touch this one at all, so the honest code is
+    # `marker-only` - armed, measured, and nothing ever lifted it - rather than `stale-clear`,
+    # which would claim a clear was applied here and found wanting.
+    sibling = _assess(other, _da_spec(LIVE_A))
+    assert (sibling.state, sibling.codes) == ("blocked", ("marker-only",))
+
+
+def test_an_unattributable_clear_does_not_un_earn_an_already_proved_key(tmp_path: Path) -> None:
+    """Fail-closed must not overshoot: proof is removed by a new arm or a measured failure only.
+
+    Without this the previous test would also be satisfied by a rule that treats any unreadable
+    record as invalidating, which would blank out correctly earned units on a log with one legacy
+    line in it.
+    """
+    root = _da_root(tmp_path, "unattributable-after-earned", LIVE_A)
+    _trail(
+        root,
+        ("block", [KEY_A]),
+        ("probe-data_ok", [KEY_A]),
+        ("probe-cleared", [KEY_A]),
+        ("probe-cleared", None),
+    )
+
+    assert _assess(root, _da_spec(LIVE_A)).state == "live_data_ok"
+
+
+def test_an_unattributable_failure_record_still_invalidates_every_key(tmp_path: Path) -> None:
+    """The failure direction of the same normalisation: `[]` must not be read as "affects nobody"."""
+    root = _da_root(tmp_path, "unattributable-failure", LIVE_A)
+    _trail(
+        root,
+        ("block", [KEY_A]),
+        ("probe-data_ok", [KEY_A]),
+        ("probe-cleared", [KEY_A]),
+        ("probe-no_credential", []),
+    )
+
+    result = _assess(root, _da_spec(LIVE_A))
+
+    assert (result.state, result.codes) == ("blocked", ("probe-no-credential",))
+
+
+def test_a_skipped_probe_is_corroborating_history_when_nothing_live_remains(tmp_path: Path) -> None:
+    """SKIPPED blocks a CURRENTLY live key, and only that.
+
+    A package whose spec now declares no live source at all is an import-only package; a historic
+    `probe-skipped` in its root's log describes a source it no longer has and must not block it.
+    The paired live spec is the control proving the entry is still read.
+    """
+    root = _da_root(tmp_path, "skipped-history", LIVE_A)
+    _trail(root, ("block", [KEY_A]), ("probe-skipped", [KEY_A]))
+
+    flat_now = _assess(root, _da_spec(FLAT))
+    still_live = _assess(root, _da_spec(LIVE_A))
+
+    assert flat_now.state == "local_import_ready"
+    assert (still_live.state, still_live.codes) == ("blocked", ("live-probe-skipped",))
+
+
+def test_every_state_the_assessor_actually_produces_survives_the_strict_parser(tmp_path: Path) -> None:
+    """Producer/parser agreement on ASSESSOR OUTPUT, not on hand-built constants.
+
+    The round-trip cases above are literals a test author wrote, so they prove the parser accepts
+    what a human believed the assessor emits. This builds one assessment of each producible state
+    from real fixtures and re-parses its own bytes, which is the check that actually catches the
+    producer and the parser drifting apart.
+    """
+    live = _da_root(tmp_path, "rt-live", LIVE_A)
+    _trail(live, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
+    blocked = _da_root(tmp_path, "rt-blocked", LIVE_A)
+    _trail(blocked, ("block", [KEY_A]))
+    authorized = _authorized_root(tmp_path, "rt-authorized")
+    flat = _da_root(tmp_path, "rt-flat", FLAT)
+    consumer = _da_root(tmp_path, "rt-consumer", FLAT)
+
+    produced = [
+        _assess(live, _da_spec(LIVE_A)),
+        _assess(blocked, _da_spec(LIVE_A)),
+        _assess(authorized, _da_spec(LIVE_A), policy="model_only_unvalidated", scope="model_only"),
+        _assess(flat, _da_spec(FLAT)),
+        _assess(flat, _da_spec(LIVE_A)),
+        _assess(consumer, _da_spec(FLAT), scope="report_only_shared_model", provider=("Up", PROVIDER_LIVE)),
+    ]
+
+    assert {result.state for result in produced} == set(cg.DATA_ACCESS_STATES), (
+        "this corpus must cover every producible state, or the round trip is partial"
+    )
+    for result in produced:
+        assert cg.parse_data_access(result.dumps()) == result, result.state
 
 
 def test_no_projection_field_can_carry_a_host_path_or_display_name(tmp_path: Path) -> None:
