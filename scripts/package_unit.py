@@ -3352,7 +3352,7 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals
             "Remove it and re-run that unit."
         )
     try:
-        result = _assemble_unit(
+        result, verify_staged = _assemble_unit(
             bundle,
             unit,
             staging,
@@ -3364,7 +3364,12 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals
             provider_packages=_external_providers(provider_packages, out_root, [unit]),
         )
         assert_assembled_fits(unit, staging, final, out_root, limits)
-        replace_dir(staging, final, verify=None if discard_edits else partial(_refuse_if_edited, unit))
+        replace_dir(
+            staging,
+            final,
+            verify=None if discard_edits else partial(_refuse_if_edited, unit),
+            verify_staged=verify_staged,
+        )
     except OSError as failure:
         refusal = _assembly_refusal(unit, failure)
         if refusal is None:
@@ -3518,7 +3523,13 @@ def assert_package_destination(out_root: Path, unit: str) -> Path:
     return out_root / unit
 
 
-def replace_dir(staged: Path, final: Path, verify: Callable[[Path], None] | None = None) -> None:
+def replace_dir(
+    staged: Path,
+    final: Path,
+    verify: Callable[[Path], None] | None = None,
+    *,
+    verify_staged: Callable[[], None],
+) -> None:
     """Put ``staged`` at ``final``, REPLACING whatever was there - never merging into it.
 
     ⚠️ **Round-2 blocker: packaging used to merge into an existing `<out>/<unit>`**, because every
@@ -3546,24 +3557,30 @@ def replace_dir(staged: Path, final: Path, verify: Callable[[Path], None] | None
     is the whole point: the check happens when nothing can still be written to the package through
     its own path, so "unchanged since I looked" is established rather than assumed (round-2 finding
     3). It is also why the deletion of the retired tree is the LAST thing that happens.
+
+    ``verify_staged`` is required and bound to the exact staged snapshot by assembly. After retiring
+    and checking any prior package, it validates the candidate immediately before publication. All
+    path-budget and other producer reads precede this callback; only the atomic rename and existing
+    prior-package cleanup follow. A failed check restores the prior directory without ever exposing
+    the candidate. The callback also runs for a new package and when prior edits are discarded.
     """
     final.parent.mkdir(parents=True, exist_ok=True)
-    if not final.exists():
-        _rename_retrying(staged, final)
-        return
-    retired = retired_dir(final)
-    _discard_scratch(retired)
-    _rename_retrying(final, retired)
+    retired = retired_dir(final) if final.exists() else None
+    if retired is not None:
+        _discard_scratch(retired)
+        _rename_retrying(final, retired)
     swapped = False
     try:
-        if verify is not None:
+        if retired is not None and verify is not None:
             verify(retired)
+        verify_staged()
         _rename_retrying(staged, final)
         swapped = True
     finally:
-        if not swapped:
+        if not swapped and retired is not None:
             _rename_retrying(retired, final)
-    _discard_scratch(retired)
+    if retired is not None:
+        _discard_scratch(retired)
 
 
 #: Windows denies a directory rename while anything still holds a handle inside it, and a scanner
@@ -4125,8 +4142,10 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     brief: bytes | None = None,
     gate_root: Path | None = None,
     provider_packages: Sequence[Path] = (),
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], Callable[[], None]]:
     """Build one unit's package into ``dest``, which is always a fresh, empty directory.
+
+    Return its manifest record and bound candidate validator for the guarded swap, after budgeting.
 
     ``final`` is where ``dest`` will be renamed to. Anything that must record its OWN separator
     flavour - only the data-folder parameter today - has to use it, because ``dest`` stops existing
@@ -4261,8 +4280,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
         ).encode("utf-8"),
     }
     _write_data_access_final(dest, result, snapshot, generated)
-    _final_data_access_check(inputs, generated)
-    return result
+    return result, partial(_final_data_access_check, inputs, generated)
 
 
 # --------------------------------------------------------------------------------------------

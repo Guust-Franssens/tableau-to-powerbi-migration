@@ -88,9 +88,11 @@ localizer's **in-memory `result["data_sources"]`** supply direct assessment at t
 Every recorded `shipped` path must exist in that snapshot. After S2, source/spec/brief/model/report/
 data/provenance changes or unexpected files refuse publication; resealing cannot legitimize them.
 Only the producer's exact final `data-access.json`, `handover.md`, `README.md` and manifest bytes may
-change. The final manifest extends the held content map, then final S1 and S2 verify that candidate
-against the same requested provider cohort before the existing guarded swap. Provider ordinals and
-brief policy must agree with the provisional S2 result; stable nonaccepted packages still ship.
+change. The final manifest extends the held content map. After path-budget work and prior-package
+retirement, the guarded swap runs the bound candidate snapshot/S1/S2 check against the same provider
+cohort immediately before the atomic publication. Failure restores the prior directory without
+exposing the candidate. Provider ordinals and brief policy must agree with the provisional S2 result;
+stable nonaccepted packages still ship.
 `live_data_ok` records the existing keyed-probe/localization
 evidence, not a fresh full-packaged-model refresh. Unbound local-folder tokens do not erase complete
 shipped bytes. Incomplete local bytes, bad audits and absent policy never default to success.

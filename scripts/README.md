@@ -234,8 +234,10 @@ Datasource candidates publish first; only successful publications join explicit 
 failed outputs or discovered siblings. The exact S2 input ordinal selects the provider, not its name.
 Assembly snapshots the provisional S1 namespace/digests and spec/policy/localization facts, then
 runs S2 and assesses. Shipped-data roles must remain present. Only exact generated projection,
-handover/README and manifest bytes may change; final S1/S2 recheck the same cohort before the guarded
-swap. Provider manifest/projection bytes are held through their bound S1 walk and digest, parsed once
+handover/README and manifest bytes may change. After budgeting and prior-package retirement, the
+guarded swap checks the held candidate and final S1/S2 cohort immediately before atomic publication;
+failure restores the prior directory without exposing the candidate. Provider manifest/projection
+bytes are held through their bound S1 walk and digest, parsed once
 before S2 and selected by the same ordinal. Reseals, root swaps or changed candidate/provider facts
 cannot create an accepted projection. Every published-only row needs a complete scalar `sqlproxy`
 connection and valid dependency; malformed/additional direct legs never disappear from the denominator.
