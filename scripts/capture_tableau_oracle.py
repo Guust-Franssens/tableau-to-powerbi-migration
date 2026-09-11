@@ -398,33 +398,38 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
         retry_after = header_value(headers, "Retry-After")
         if retry_after is None:
             return None
-        try:
-            delay = float(retry_after)
-        except ValueError:
+        value = retry_after.strip()
+        delay = None
+        if re.fullmatch(r"[0-9]+", value):
             try:
-                parsed = parsedate_to_datetime(retry_after)
+                seconds = int(value)
+            except ValueError:
+                seconds = 0
+            if seconds > 0:
+                delay = float(seconds)
+        elif value[:1] not in "+-.0123456789":
+            try:
+                parsed = parsedate_to_datetime(value)
             except (TypeError, ValueError, OverflowError):
-                return None
-            if parsed is None or parsed.tzinfo is None:
-                return None
-            delay = parsed.timestamp() - self._wall_time()
-        if not math.isfinite(delay) or delay <= 0:
+                parsed = None
+            if parsed is not None and parsed.tzinfo is not None:
+                delay = parsed.timestamp() - self._wall_time()
+        if delay is None or not math.isfinite(delay) or delay <= 0:
             return None
         return min(delay, BACKOFF_CAP_SEC)
 
-    def _observe_rate_limit(self, status: int, headers: dict[str, str]) -> None:
-        """Make one worker's Retry-After a pool-wide admission delay for later requests."""
-        if status != 429:
-            return
+    def _observe_rate_limit(self, status: int, headers: dict[str, str]) -> float | None:
+        """Parse Retry-After once and, for HTTP 429, publish the shared admission deadline."""
         delay = self._retry_after_delay(headers)
-        if delay is None:
-            return
+        if status != 429 or delay is None:
+            return delay
         cooldown_until = sum((self._monotonic(), delay))
         owner = getattr(self._request_context, "export_id", None)
         with self._cooldown_lock:
             if cooldown_until > self._cooldown_until:
                 self._cooldown_until = cooldown_until
                 self._cooldown_owner = owner
+        return delay
 
     def _request_with_generation(
         self,
@@ -433,7 +438,7 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
         api: str | None = None,
         deadline: float | None = None,
         export_id: object,
-    ) -> tuple[int, bytes, dict[str, str], int, float]:
+    ) -> tuple[int, bytes, dict[str, str], int, float, bool, float | None, bool]:
         """Issue one export against a token snapshot and return its generation plus external pool wait."""
         external_wait = self._wait_for_pool_cooldown(deadline, export_id)
         with self._auth_lock:
@@ -444,13 +449,32 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
         self._request_context.auth_token = token
         self._request_context.cooldown_waited = True
         self._request_context.export_id = export_id
+        self._request_context.retry_after_delay = None
+        self._request_context.retry_after_parsed = False
         try:
             status, payload, headers = self._request("GET", path, api=api, deadline=deadline)
+            retry_after_delay = self._request_context.retry_after_delay
+            retry_after_parsed = self._request_context.retry_after_parsed
         finally:
             del self._request_context.auth_token
             del self._request_context.cooldown_waited
             del self._request_context.export_id
-        return status, payload, headers, generation, external_wait
+            del self._request_context.retry_after_delay
+            del self._request_context.retry_after_parsed
+        with self._cooldown_lock:
+            shared_retry_wait = (
+                status == 429 and self._cooldown_owner is export_id and self._cooldown_until > self._monotonic()
+            )
+        return (
+            status,
+            payload,
+            headers,
+            generation,
+            external_wait,
+            shared_retry_wait,
+            retry_after_delay,
+            retry_after_parsed,
+        )
 
     def _reauthenticate_if_current(self, observed_generation: int) -> bool:
         """Publish one replacement token or one terminal failure for the observed generation."""
@@ -533,7 +557,10 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
             redactor=self._redact_response,
             deadline=deadline,
         )
-        self._observe_rate_limit(status, headers)
+        retry_after_delay = self._observe_rate_limit(status, headers)
+        if hasattr(self._request_context, "retry_after_parsed"):
+            self._request_context.retry_after_delay = retry_after_delay
+            self._request_context.retry_after_parsed = True
         return status, payload, headers
 
     def sign_in(self) -> None:
@@ -718,7 +745,16 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
         deadline = time.monotonic() + policy.budget_sec
         for attempt in range(1, policy.max_attempts + 1):
             started = time.perf_counter()
-            status, payload, headers, generation, external_wait = self._request_with_generation(
+            (
+                status,
+                payload,
+                headers,
+                generation,
+                external_wait,
+                shared_retry_wait,
+                parsed_retry_after,
+                retry_after_parsed,
+            ) = self._request_with_generation(
                 path,
                 api=api,
                 deadline=hard_deadline,
@@ -795,13 +831,15 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
                 )
 
             if kind == "transient" and attempt < policy.max_attempts and time.monotonic() < deadline:
-                delay = backoff_delay(attempt, header_value(headers, "Retry-After"))
+                retry_after_delay = parsed_retry_after if retry_after_parsed else self._retry_after_delay(headers)
+                delay = retry_after_delay if retry_after_delay is not None else backoff_delay(attempt)
                 if time.monotonic() + delay > deadline:
                     raise ExportFailed(f"GET {path} -> retry budget exhausted", "transient", detail)
                 self._increment_retry_count()
                 retries.append(detail[:80])
                 LOG.warning("  transient (%s); retry %d/%d in %.1fs", detail[:60], attempt, policy.max_attempts, delay)
-                time.sleep(delay)
+                if not shared_retry_wait:
+                    time.sleep(delay)
                 continue
 
             raise ExportFailed(

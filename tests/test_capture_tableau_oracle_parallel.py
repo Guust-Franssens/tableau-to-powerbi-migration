@@ -699,11 +699,159 @@ def test_http_date_retry_after_creates_a_monotonic_pool_cooldown(monkeypatch):
     assert clock.sleeps == [7.0]
 
 
+def _retry_after_value(kind: str, epoch: float) -> str:
+    """Equivalent seven-second Retry-After in either standards-valid wire form."""
+    return "7" if kind == "delay-seconds" else formatdate(epoch + 7, usegmt=True)
+
+
+@pytest.mark.parametrize("kind", ["delay-seconds", "http-date"])
+def test_numeric_and_http_date_retry_after_are_equally_refused_by_an_insufficient_budget(monkeypatch, kind):
+    """Both seven-second forms are terminal when only 2.5 seconds remain."""
+    clock = _VirtualClock()
+    epoch = 1_800_000_000.0
+    calls = 0
+    value = _retry_after_value(kind, epoch)
+
+    def transport(  # pylint: disable=unused-argument
+        req, *, timeout, redactor, deadline=None
+    ):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 429, b"slow down", {"Retry-After": value}
+        return 200, b"value\n1\n", {"Content-Type": "text/csv", "Content-Length": "8"}
+
+    monkeypatch.setattr(oracle, "_request", transport)
+    monkeypatch.setattr(oracle.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(oracle.time, "perf_counter", clock.perf_counter)
+    monkeypatch.setattr(oracle.time, "sleep", clock.sleep)
+    session = oracle.TableauSession(_creds(), oracle.RetryPolicy(max_attempts=2, budget_sec=2.5))
+    session.token, session.site_id = "initial-session-token", "site-id"
+    session._wall_time = lambda: epoch + clock.monotonic()
+
+    with pytest.raises(oracle.ExportFailed, match="retry budget exhausted"):
+        session.export("/views/one/data")
+
+    assert calls == 1
+    assert not clock.sleeps
+
+
+@pytest.mark.parametrize("kind", ["delay-seconds", "http-date"])
+def test_numeric_and_http_date_retry_after_are_equally_admitted_without_double_sleep(  # pylint: disable=too-many-locals
+    monkeypatch, kind
+):
+    """Both seven-second forms use one shared cooldown wait when the budget is sufficient."""
+    clock = _VirtualClock()
+    epoch = 1_800_000_000.0
+    calls = 0
+    value = _retry_after_value(kind, epoch)
+    pool_sleeps: list[float] = []
+    export_sleeps: list[float] = []
+    parser_calls = 0
+
+    def pool_sleep(seconds: float) -> None:
+        pool_sleeps.append(seconds)
+        clock.advance(seconds)
+
+    def export_sleep(seconds: float) -> None:
+        export_sleeps.append(seconds)
+        clock.advance(seconds)
+
+    def transport(  # pylint: disable=unused-argument
+        req, *, timeout, redactor, deadline=None
+    ):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 429, b"slow down", {"Retry-After": value}
+        return 200, b"value\n1\n", {"Content-Type": "text/csv", "Content-Length": "8"}
+
+    monkeypatch.setattr(oracle, "_request", transport)
+    monkeypatch.setattr(oracle.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(oracle.time, "perf_counter", clock.perf_counter)
+    monkeypatch.setattr(oracle.time, "sleep", export_sleep)
+    session = oracle.TableauSession(_creds(), oracle.RetryPolicy(max_attempts=2, budget_sec=8.0))
+    session.token, session.site_id = "initial-session-token", "site-id"
+    session._sleep = pool_sleep
+    session._wall_time = lambda: epoch + clock.monotonic()
+    strict_parser = session._retry_after_delay
+
+    def counted_parser(headers):
+        nonlocal parser_calls
+        if oracle.header_value(headers, "Retry-After") is not None:
+            parser_calls += 1
+        return strict_parser(headers)
+
+    session._retry_after_delay = counted_parser
+
+    payload, _, stats = session.export("/views/one/data")
+
+    assert payload == b"value\n1\n"
+    assert calls == 2
+    assert stats["retries"] == 1
+    assert pool_sleeps == [7.0]
+    assert not export_sleeps
+    assert clock.monotonic() == 7.0
+    assert parser_calls == 1
+
+
+@pytest.mark.parametrize("value", ["1.5", "+7", "1e2"])
+def test_malformed_delay_seconds_use_export_fallback_without_shared_cooldown(monkeypatch, value):
+    """Malformed numeric forms retain exponential fallback and never establish pool admission."""
+    clock = _VirtualClock()
+    calls = 0
+    pool_sleeps: list[float] = []
+    export_sleeps: list[float] = []
+
+    def pool_sleep(seconds: float) -> None:
+        pool_sleeps.append(seconds)
+        clock.advance(seconds)
+
+    def export_sleep(seconds: float) -> None:
+        export_sleeps.append(seconds)
+        clock.advance(seconds)
+
+    def transport(  # pylint: disable=unused-argument
+        req, *, timeout, redactor, deadline=None
+    ):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 429, b"slow down", {"Retry-After": value}
+        return 200, b"value\n1\n", {"Content-Type": "text/csv", "Content-Length": "8"}
+
+    monkeypatch.setattr(oracle, "_request", transport)
+    monkeypatch.setattr(oracle.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(oracle.time, "perf_counter", clock.perf_counter)
+    monkeypatch.setattr(oracle.time, "sleep", export_sleep)
+    monkeypatch.setattr(oracle, "backoff_delay", lambda *_args, **_kwargs: 1.0)
+    session = oracle.TableauSession(_creds(), oracle.RetryPolicy(max_attempts=2, budget_sec=2.5))
+    session.token, session.site_id = "initial-session-token", "site-id"
+    session._sleep = pool_sleep
+
+    payload, _, stats = session.export("/views/one/data")
+
+    assert payload == b"value\n1\n"
+    assert calls == 2
+    assert stats["retries"] == 1
+    assert not pool_sleeps
+    assert export_sleeps == [1.0]
+
+
+def test_valid_integer_retry_after_keeps_the_existing_cap():
+    """A valid large delay-seconds value is still capped at the existing backoff ceiling."""
+    session = _session()
+    assert session._retry_after_delay({"Retry-After": "999"}) == oracle.BACKOFF_CAP_SEC
+
+
 @pytest.mark.parametrize(
     ("status", "headers"),
     [
         (429, {}),
         (429, {"Retry-After": "not-a-number"}),
+        (429, {"Retry-After": "1.5"}),
+        (429, {"Retry-After": "+7"}),
+        (429, {"Retry-After": "1e2"}),
         (429, {"Retry-After": "-1"}),
         (429, {"Retry-After": "nan"}),
         (503, {"Retry-After": "7"}),
