@@ -99,7 +99,7 @@ def test_unsafe_digest_is_rejected_without_echoing_the_payload() -> None:
     state.accept(_discovery())
     state.accept({"kind": prov.MSG_OPERATION, "operation": "fingerprint", "completed": 1, "total": 1})
     try:
-        state.accept(_checkpoint(digest=r"C:\Users\private\credential"))
+        state.accept(_checkpoint(digest=r"C:\private\credential"))
     except estate.ProvenanceProtocolError as caught:
         assert str(caught) == ""
     else:
@@ -157,6 +157,8 @@ def test_partial_frame_cannot_hold_the_supervising_thread(raw: bytes) -> None:
         receiver.close()
         right.close()
         supervisor.join(0.1)
+        # The test owns this peer; production reaps its worker before closing the receiver.
+        receiver.thread.join(0.1)
     assert time.monotonic() - started < 0.35, "PARTIAL_FRAME_DEADLINE: receive held the parent"
     assert receiver.thread.daemon and not receiver.thread.is_alive()
     assert receiver.state.total is None
