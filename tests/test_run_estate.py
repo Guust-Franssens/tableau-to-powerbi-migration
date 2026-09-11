@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import builtins
 import contextlib
+import functools
 import io
 import json
+import multiprocessing
 import os
 import re
 import shutil
@@ -20,6 +22,7 @@ import time
 import uuid
 import zipfile
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -1900,7 +1903,7 @@ def _emitted_run(
     monkeypatch.setattr(
         run_estate,
         "stamp_inputs",
-        lambda _input, out_dir: (
+        lambda _input, out_dir, *_timeout: (
             stamped.append(out_dir)
             or run_estate.ProvenanceStampResult(True, "local_only", "fixture provenance published")
         ),
@@ -2261,13 +2264,31 @@ def _structured_provenance(status: str, code: str | None = None) -> dict:
     }
 
 
-def test_an_empty_structured_provenance_result_is_published_and_refuses(tmp_path: Path, monkeypatch) -> None:
-    import stamp_tableau_provenance as prov  # noqa: PLC0415
+def _collected(monkeypatch, result: dict, *, total: int | None = None) -> None:
+    """Stand in for the supervised leaf worker (#576) with one canned structured result.
 
+    The computation moved into a spawned process, so patching `prov.build` in THIS process no longer
+    reaches it. These tests are about what the parent PUBLISHES and VERDICTS, so they inject at the
+    supervisor seam instead; the worker lifecycle itself is proved separately, with a real spawn.
+    """
+    records = result.get("inputs")
+    completed = len(records) if isinstance(records, list) else 0
+    outcome = run_estate.ProvenanceOutcome(
+        result=result,
+        completed=completed,
+        total=completed if total is None else total,
+        worker_pid=None,
+        worker_alive=False,
+        worker_exitcode=0,
+        expired=False,
+    )
+    monkeypatch.setattr(run_estate, "collect_provenance", lambda *_args, **_kwargs: outcome)
+
+
+def test_an_empty_structured_provenance_result_is_published_and_refuses(tmp_path: Path, monkeypatch) -> None:
     out = tmp_path / "bundle"
     out.mkdir()
-    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
-    monkeypatch.setattr(prov, "build", lambda *_args: _structured_provenance("empty", "empty-input"))
+    _collected(monkeypatch, _structured_provenance("empty", "empty-input"))
 
     stamped = run_estate.stamp_inputs(tmp_path, out)
 
@@ -2282,17 +2303,14 @@ def test_an_empty_structured_provenance_result_is_published_and_refuses(tmp_path
 
 
 def test_a_build_exception_becomes_a_safe_published_failure(tmp_path: Path, monkeypatch) -> None:
+    """The worker's typed build failure is published verbatim - and carries no message text."""
     import stamp_tableau_provenance as prov  # noqa: PLC0415
 
     out = tmp_path / "bundle"
     out.mkdir()
     secret = str(tmp_path / "customer-secret")
-    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
+    _collected(monkeypatch, prov.failure_result("build-failed", "build", OSError(5, secret)))
 
-    def fail(*_args):
-        raise OSError(5, secret)
-
-    monkeypatch.setattr(prov, "build", fail)
     stamped = run_estate.stamp_inputs(tmp_path, out)
     raw = (out / run_estate.SOURCE_PROVENANCE_REPORT).read_text(encoding="utf-8")
     artifact = json.loads(raw)
@@ -2313,12 +2331,9 @@ def test_a_build_exception_becomes_a_safe_published_failure(tmp_path: Path, monk
 
 
 def test_a_publication_failure_is_a_non_success_stamp(tmp_path: Path, monkeypatch) -> None:
-    import stamp_tableau_provenance as prov  # noqa: PLC0415
-
     out = tmp_path / "bundle"
     out.mkdir()
-    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
-    monkeypatch.setattr(prov, "build", lambda *_args: _structured_provenance("local_only"))
+    _collected(monkeypatch, _structured_provenance("local_only"))
     monkeypatch.setattr(run_estate, "write_source_provenance", lambda *_args: None)
 
     stamped = run_estate.stamp_inputs(tmp_path, out)
@@ -2371,13 +2386,17 @@ def test_a_failed_provenance_replace_leaves_the_prior_artifact_byte_identical(tm
 
 @pytest.mark.parametrize(
     ("status", "error_code"),
-    [("partial", "live-lookup-refused"), ("failed", "collect-inputs-failed")],
+    [
+        ("partial", "live-lookup-refused"),
+        ("partial", "worker-reap-failed"),
+        ("failed", "collect-inputs-failed"),
+        ("failed", "worker-start-failed"),
+        ("failed", "worker-protocol-invalid"),
+    ],
 )
 def test_a_provenance_failure_stops_before_adjudication_and_handover(
     tmp_path: Path, monkeypatch, status: str, error_code: str
 ) -> None:
-    import stamp_tableau_provenance as prov  # noqa: PLC0415
-
     _without_pbir_validator(monkeypatch)
     engine = _versioned_engine(tmp_path / "engine", "2.339.0")
     out = tmp_path / "bundle"
@@ -2385,11 +2404,9 @@ def test_a_provenance_failure_stops_before_adjudication_and_handover(
     src.mkdir()
     (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
-    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
-    monkeypatch.setattr(
-        prov,
-        "build",
-        lambda *_args: {
+    _collected(
+        monkeypatch,
+        {
             "schema": "tableau-source-provenance/1",
             "stamped_at": "2026-09-10T00:00:00Z",
             "input_count": 0 if status == "failed" else 1,
@@ -2446,11 +2463,8 @@ def _honest_local_only(count: int = 1) -> dict:
 
 
 def _stamp_of(monkeypatch, tmp_path: Path, out: Path, result: dict) -> run_estate.ProvenanceStampResult:
-    """`stamp_inputs` over one canned structured result, with no site and no .env."""
-    import stamp_tableau_provenance as prov  # noqa: PLC0415
-
-    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
-    monkeypatch.setattr(prov, "build", lambda *_args: result)
+    """`stamp_inputs` over one canned structured result, with no worker and no site."""
+    _collected(monkeypatch, result)
     out.mkdir(parents=True, exist_ok=True)
     return run_estate.stamp_inputs(tmp_path, out)
 
@@ -2484,8 +2498,6 @@ def test_the_provenance_line_names_the_artifact_bundle_relatively(
 
 def test_the_success_log_line_carries_no_host_path(tmp_path: Path, monkeypatch, caplog) -> None:
     """The line emitted on the PASSING path - the one a run emits every time - is shareable too."""
-    import stamp_tableau_provenance as prov  # noqa: PLC0415
-
     _without_pbir_validator(monkeypatch)
     engine = _versioned_engine(tmp_path / "engine", "2.339.0")
     out = tmp_path / "bundle"
@@ -2493,8 +2505,7 @@ def test_the_success_log_line_carries_no_host_path(tmp_path: Path, monkeypatch, 
     src.mkdir()
     (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
-    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
-    monkeypatch.setattr(prov, "build", lambda *_args: _honest_local_only())
+    _collected(monkeypatch, _honest_local_only())
 
     with caplog.at_level("INFO", logger="run_estate"), contextlib.redirect_stdout(io.StringIO()):
         exit_code = run_estate.main(_landing_argv(engine, src, out))
@@ -2510,8 +2521,6 @@ def test_the_success_log_line_carries_no_host_path(tmp_path: Path, monkeypatch, 
 
 def test_the_refusal_console_line_carries_no_host_path(tmp_path: Path, monkeypatch) -> None:
     """`main`'s printed refusal names the artifact bundle-relatively, not by its location on disk."""
-    import stamp_tableau_provenance as prov  # noqa: PLC0415
-
     _without_pbir_validator(monkeypatch)
     engine = _versioned_engine(tmp_path / "engine", "2.339.0")
     out = tmp_path / "bundle"
@@ -2519,8 +2528,7 @@ def test_the_refusal_console_line_carries_no_host_path(tmp_path: Path, monkeypat
     src.mkdir()
     (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
-    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
-    monkeypatch.setattr(prov, "build", lambda *_args: _structured_provenance("failed", "collect-inputs-failed"))
+    _collected(monkeypatch, _structured_provenance("failed", "collect-inputs-failed"))
 
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
@@ -2631,8 +2639,6 @@ def test_an_honest_local_only_result_is_published_unchanged_and_passes(tmp_path:
 
 def test_a_contradictory_result_never_reaches_adjudication_or_handover(tmp_path: Path, monkeypatch) -> None:
     """The consequence the verdict exists for, measured through `main` rather than asserted."""
-    import stamp_tableau_provenance as prov  # noqa: PLC0415
-
     _without_pbir_validator(monkeypatch)
     engine = _versioned_engine(tmp_path / "engine", "2.339.0")
     out = tmp_path / "bundle"
@@ -2640,12 +2646,7 @@ def test_a_contradictory_result_never_reaches_adjudication_or_handover(tmp_path:
     src.mkdir()
     (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
     monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
-    monkeypatch.setattr(prov, "resolve_env", lambda _path: {})
-    monkeypatch.setattr(
-        prov,
-        "build",
-        lambda *_args: _contradictory(CONTRADICTORY_RESULTS["success-with-no-inputs"][0]),
-    )
+    _collected(monkeypatch, _contradictory(CONTRADICTORY_RESULTS["success-with-no-inputs"][0]))
     monkeypatch.setattr(
         run_estate,
         "check_pbir_validity",
@@ -3003,3 +3004,752 @@ def test_the_scan_verdict_and_structured_evidence_survive_the_code_only_diagnost
     assert offender["length"] > offender["ceiling"] and offender["kind"] in {"file", "directory"}
     assert offender["path"].startswith(f"{run_estate.SAFE_BUNDLE_ROOT}/")
     assert (out / Path(offender["path"][len(run_estate.SAFE_BUNDLE_ROOT) + 1 :])).exists()
+
+
+# ---------------------------------------------------------------------------
+# issue #576: ONE leaf worker, ONE monotonic deadline, ONE parent publication
+#
+# The measured failure is a provenance phase that never returns: 66 harvested inputs cost 200 remote
+# calls, and a trickled response body outlasts `urlopen(timeout=180)` because that bounds each socket
+# read rather than the transfer. Local reads, ZIP member scans, the recursive scrub and sign-out have
+# no bound at all. A thread cannot be stopped, a cooperative check cannot interrupt a blocking call
+# and `Future.cancel()` returns False for a running task - all three were measured, all three are
+# rejected. What is proved below is the surviving mechanism: the parent computes one absolute
+# deadline BEFORE spawning one leaf worker, stops accepting IPC at expiry, terminates/kills/reaps it
+# with bounded joins, and publishes exactly one honest artifact from the evidence it had accepted.
+#
+# Every test here spawns a REAL process (`spawn`, on every platform), because an in-process fake
+# would prove the bookkeeping and nothing about preemption. The scenarios live in
+# `tests/provenance_workers.py`: a spawn target is pickled by reference, so it has to be a top-level
+# function in an importable module.
+# ---------------------------------------------------------------------------
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # so the SPAWNED child can import the fixtures
+
+import provenance_workers  # noqa: E402  # pylint: disable=wrong-import-position
+
+#: Long enough that a cold Windows spawn still gets its first messages out before the latch (measured
+#: spawn cost on the development host: 0.46 s), short enough that seven of them stay quick.
+WORKER_TIMEOUT_SEC = 4.0
+
+#: Spawn is charged to the computation deadline. This additional allowance covers cold OS scheduling
+#: and small local publication, not eight seconds of hidden cleanup after a four-second timeout.
+SPAWN_ALLOWANCE_SEC = 1.0
+ELAPSED_BOUND_SEC = (
+    WORKER_TIMEOUT_SEC
+    + run_estate.PROVENANCE_TERMINATE_JOIN_SEC
+    + run_estate.PROVENANCE_KILL_JOIN_SEC
+    + run_estate.PROVENANCE_RECEIVER_JOIN_SEC
+    + SPAWN_ALLOWANCE_SEC
+)
+
+
+def _pid_is_running(pid: int) -> bool:
+    """Ask the OPERATING SYSTEM whether that process still exists.
+
+    `Process.is_alive()` is the object's opinion; after `terminate`/`kill`/`join` the interesting
+    question is whether anything is still running under that PID, and only the OS can answer it.
+    """
+    if os.name == "nt":
+        listing = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return f" {pid} " in listing.stdout or f"{pid}\t" in listing.stdout
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:  # pragma: no cover - it exists and is not ours
+        return True
+    return True
+
+
+class _SupervisedRun(NamedTuple):
+    stamped: run_estate.ProvenanceStampResult
+    artifact: dict
+    elapsed: float
+    published: list[dict]
+    outcome: run_estate.ProvenanceOutcome
+
+
+def _supervise(
+    monkeypatch,
+    tmp_path: Path,
+    entry,
+    timeout_sec: float = WORKER_TIMEOUT_SEC,
+) -> _SupervisedRun:
+    """One real supervised phase against `entry`, through the production `stamp_inputs`.
+
+    Only the worker TARGET is substituted. The deadline, the pipe, the protocol validation, the
+    terminate/kill/reap and the publication are all the shipping ones.
+    """
+    out = tmp_path / "bundle"
+    out.mkdir(parents=True, exist_ok=True)
+    supervise = run_estate.collect_provenance
+    seen: list[run_estate.ProvenanceOutcome] = []
+
+    def collect(input_dir, timeout=timeout_sec, **_kwargs):
+        outcome = supervise(input_dir, timeout, entry=entry)
+        seen.append(outcome)
+        return outcome
+
+    publish = run_estate.write_source_provenance
+    published: list[dict] = []
+
+    def write(out_dir, result):
+        published.append(result)
+        return publish(out_dir, result)
+
+    monkeypatch.setattr(run_estate, "collect_provenance", collect)
+    monkeypatch.setattr(run_estate, "write_source_provenance", write)
+
+    started = time.monotonic()
+    stamped = run_estate.stamp_inputs(tmp_path, out, timeout_sec)
+    elapsed = time.monotonic() - started
+    assert len(published) == 1, "PUBLISH_COUNT: the parent must attempt publication exactly once"
+    assert elapsed < ELAPSED_BOUND_SEC - WORKER_TIMEOUT_SEC + timeout_sec, (
+        "COMPUTATION_ELAPSED: cleanup exceeded its allowance"
+    )
+    artifact_path = out / run_estate.SOURCE_PROVENANCE_REPORT
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8")) if artifact_path.exists() else {}
+    return _SupervisedRun(stamped, artifact, elapsed, published, seen[0])
+
+
+def _progress_events(printed: str) -> list[dict]:
+    return [
+        json.loads(line[len(run_estate.PROVENANCE_PROGRESS_PREFIX) :])
+        for line in printed.splitlines()
+        if line.startswith(run_estate.PROVENANCE_PROGRESS_PREFIX)
+    ]
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["collect-inputs", "fingerprint", "sign-in", "inventory", "content", "scrub", "sign-out"],
+)
+def test_a_worker_blocked_in_any_operation_class_is_preempted_at_the_deadline(
+    tmp_path: Path, monkeypatch, capsys, operation: str
+) -> None:
+    """THE #576 claim, one operation class at a time: whatever it is stuck in, the phase ENDS.
+
+    The parent is deliberately agnostic about WHICH operation blocked - it terminates a process - so
+    the operation the artifact names is the last one the worker reported, which is what makes the
+    record actionable rather than a bare "it timed out somewhere".
+    """
+    run = _supervise(monkeypatch, tmp_path, functools.partial(provenance_workers.blocks_in, operation))
+
+    assert run.stamped.ok is False
+    assert run.artifact["phase"]["status"] in {"partial", "failed"}
+    assert run.artifact["phase"]["errors"][-1] == {
+        "code": run_estate.PROVENANCE_DEADLINE_CODE,
+        "operation": operation,
+    }, run.artifact["phase"]
+    assert run.artifact["input_count"] == len(run.artifact["inputs"]) == (0 if operation == "collect-inputs" else 2)
+    if operation == "fingerprint":
+        assert all(record["input"] == {"status": "unavailable"} for record in run.artifact["inputs"])
+    elif operation != "collect-inputs":
+        assert all(record["input"]["sha256"] for record in run.artifact["inputs"])
+    assert len(run.published) == 1, "the artifact is published exactly once, by the parent"
+    assert run.outcome.expired is True
+    assert run.outcome.worker_alive is False and run.outcome.worker_exitcode is not None
+    assert run.elapsed < ELAPSED_BOUND_SEC, f"the phase did not end: {run.elapsed:.1f}s"
+    events = _progress_events(capsys.readouterr().out)
+    assert [event["event"] for event in events].count("phase-finish") == 1
+    assert events[-1]["status"] in {"partial", "failed"}
+
+
+def test_a_terminal_result_that_arrives_after_the_deadline_is_never_accepted(tmp_path: Path, monkeypatch) -> None:
+    """The fail-open shape this design exists to refuse: a late success is not a success.
+
+    The worker sends a complete, well-formed SUCCESS result 30 s after a 4 s deadline. If the parent
+    were still reading, the phase would report two happily stamped inputs it never saw finish.
+    """
+    run = _supervise(monkeypatch, tmp_path, provenance_workers.sends_a_late_terminal)
+
+    raw = json.dumps(run.artifact)
+    assert run.stamped.ok is False
+    assert run.artifact["phase"]["status"] == "partial"
+    assert run.artifact["phase"]["errors"][-1]["code"] == run_estate.PROVENANCE_DEADLINE_CODE
+    assert "late-a.twb" not in raw and "late-b.twb" not in raw, "a post-deadline result was accepted"
+    assert run.artifact["inputs"][0]["input"]["sha256"] == provenance_workers.CHECKPOINT_SHA
+    assert run.elapsed < ELAPSED_BOUND_SEC
+
+
+def test_a_worker_that_crashes_after_a_checkpoint_keeps_the_evidence_and_names_the_exit_code(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A crash is its own fault code, and never the deadline's - the parent's latch is the only clock."""
+    run = _supervise(monkeypatch, tmp_path, provenance_workers.crashes_after_a_checkpoint)
+
+    error = run.artifact["phase"]["errors"][-1]
+    assert run.stamped.ok is False
+    assert run.artifact["phase"]["status"] == "partial"
+    assert error["code"] == run_estate.PROVENANCE_CRASH_CODE
+    assert error["exit_code"] == 7, error
+    assert run.artifact["inputs"][0]["input"]["sha256"] == provenance_workers.CHECKPOINT_SHA
+    assert run.artifact["inputs"][1] == {
+        "input": {"status": "unavailable"},
+        "fingerprint_error": {"code": run_estate.PROVENANCE_CRASH_CODE, "operation": "fingerprint"},
+    }
+    assert run.outcome.worker_alive is False
+    assert run.outcome.expired is False, "a crash is not a timeout"
+    assert run.elapsed < ELAPSED_BOUND_SEC
+
+
+def test_a_stall_after_the_first_fingerprint_keeps_it_and_marks_only_the_second_unavailable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Completed local evidence survives the kill; the unfinished input says so EXPLICITLY.
+
+    Absent would be worse than unavailable: `input_count` must keep equalling `len(inputs)` (the
+    identity #594's normalisation refuses to let a result contradict), and a reader must be able to
+    tell "we did not get to this one" from "this one is fine".
+    """
+    run = _supervise(
+        monkeypatch,
+        tmp_path,
+        functools.partial(provenance_workers.blocks_in_with_evidence, "fingerprint"),
+    )
+
+    kept, missing = run.artifact["inputs"]
+    assert run.artifact["phase"]["status"] == "partial"
+    assert kept["input"]["sha256"] == provenance_workers.CHECKPOINT_SHA
+    assert "file" not in kept["input"], "a checkpoint may carry no copied string"
+    assert missing["fingerprint_error"] == {
+        "code": run_estate.PROVENANCE_DEADLINE_CODE,
+        "operation": "fingerprint",
+    }
+    assert run.artifact["phase"]["errors"][-1]["operation"] == "fingerprint"
+
+
+def test_a_hung_sign_out_after_the_safe_snapshot_keeps_the_complete_scrubbed_records(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Sign-out is cleanup, and cleanup may not cost a finished run its evidence.
+
+    Measured on the pre-cache code: a sign-out whose connection closed without a response discarded
+    3 of 3 fingerprints. Here it hangs instead, which the old code could not survive at all.
+    """
+    run = _supervise(monkeypatch, tmp_path, provenance_workers.blocks_after_safe_snapshot)
+
+    assert run.artifact["phase"]["status"] == "partial"
+    assert run.artifact["input_count"] == 1
+    assert run.artifact["inputs"][0]["input"]["file"] == "unit.twb", "the scrubbed snapshot is kept whole"
+    assert run.artifact["phase"]["errors"][-1] == {
+        "code": run_estate.PROVENANCE_DEADLINE_CODE,
+        "operation": "sign-out",
+    }
+    assert run.stamped.ok is False
+
+
+def test_publication_happens_once_after_a_deadline_and_a_failed_one_preserves_the_prior_bytes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The artifact writer is the parent's, runs AFTER expiry, and #594's atomicity still holds."""
+    out = tmp_path / "bundle"
+    out.mkdir()
+    previous = out / run_estate.SOURCE_PROVENANCE_REPORT
+    previous.write_bytes(TRUSTWORTHY_REPORT)
+    _half_writing_open(monkeypatch)
+
+    run = _supervise(monkeypatch, tmp_path, functools.partial(provenance_workers.blocks_in, "content"))
+
+    assert len(run.published) == 1, "exactly one publication attempt, timeout or not"
+    assert run.stamped.status == "publication_failed" and run.stamped.ok is False
+    assert previous.read_bytes() == TRUSTWORTHY_REPORT, "a failed publication harmed the prior artifact"
+    assert not list(out.glob("*.tmp"))
+
+
+def test_progress_output_carries_only_allowlisted_keys_and_nothing_from_the_environment(
+    tmp_path: Path, monkeypatch, capsys, caplog
+) -> None:
+    """Progress is pasted into issues, so it is numbers and enums - never a payload, at any level.
+
+    The worker here sends a legitimately scrubbed snapshot that still contains copied strings (that
+    is what a scrubbed origin IS). Accepting it is correct; RENDERING it would be the leak.
+    """
+    secret = f"{SECRET_ACCOUNT}-{SECRET_FOLDER}-Superstore.twbx"
+    with caplog.at_level("DEBUG"):
+        run = _supervise(
+            monkeypatch,
+            tmp_path,
+            functools.partial(provenance_workers.sends_a_secret_bearing_snapshot, secret),
+        )
+
+    printed = capsys.readouterr().out
+    events = _progress_events(printed)
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+
+    assert secret in json.dumps(run.artifact), "the snapshot itself is kept - only its RENDERING is refused"
+    assert secret not in printed and secret not in logged, "a payload was rendered"
+    assert SECRET_ACCOUNT not in printed and SECRET_FOLDER not in printed
+    assert str(tmp_path) not in printed
+    assert [event["event"] for event in events].count("phase-start") == 1
+    assert [event["event"] for event in events].count("phase-finish") == 1
+    assert events[0]["event"] == "phase-start" and events[-1]["event"] == "phase-finish"
+    assert events[0]["timeout_sec"] == WORKER_TIMEOUT_SEC
+    for event in events:
+        assert set(event) <= {"event", "operation", "completed", "total", "status", "timeout_sec"}, event
+        assert event["event"] in run_estate.PROVENANCE_PROGRESS_EVENTS
+        assert event["operation"] in run_estate.PROVENANCE_PROGRESS_OPERATIONS
+        assert isinstance(event["completed"], int) and event["completed"] >= 0
+        assert event["total"] is None or (isinstance(event["total"], int) and event["total"] >= 0)
+        assert "status" not in event or event["status"] in run_estate.PROVENANCE_PROGRESS_STATUSES
+    fingerprint_counters = [e["completed"] for e in events if e["operation"] == "fingerprint"]
+    assert fingerprint_counters == sorted(fingerprint_counters)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        pytest.param(provenance_workers.sends_an_unknown_message, id="unknown-kind"),
+        pytest.param(provenance_workers.sends_invalid_pickle, id="invalid-pickle"),
+        pytest.param(
+            functools.partial(provenance_workers.sends_an_unsafe_checkpoint, "j.doe-Superstore-secret.twbx"),
+            id="checkpoint-with-a-copied-string",
+        ),
+    ],
+)
+def test_a_message_outside_the_closed_protocol_is_refused_rather_than_interpreted(
+    tmp_path: Path, monkeypatch, capsys, entry
+) -> None:
+    """Fail closed at the process boundary: the parent does not take the worker's word for safety.
+
+    The checkpoint case is the one that matters for privacy - a mutation that checkpoints the RAW
+    fingerprint (filename, member names) is caught here rather than published.
+    """
+    run = _supervise(monkeypatch, tmp_path, entry)
+
+    printed = capsys.readouterr().out
+    assert run.stamped.ok is False
+    assert run.artifact["phase"]["errors"][-1]["code"] == run_estate.PROVENANCE_PROTOCOL_CODE
+    assert run.artifact["phase"]["status"] == "failed", "a rejected message is not evidence"
+    assert "secret.twbx" not in json.dumps(run.artifact) and "secret.twbx" not in printed
+
+
+def test_a_successful_worker_result_is_published_unchanged_and_passes(tmp_path: Path, monkeypatch, capsys) -> None:
+    """The positive control. Without it every assertion above could be satisfied by refusing always."""
+    run = _supervise(monkeypatch, tmp_path, provenance_workers.succeeds)
+
+    events = _progress_events(capsys.readouterr().out)
+    assert run.stamped.ok is True and run.stamped.status == "local_only"
+    assert run.artifact["input_count"] == 1
+    assert run.artifact["phase"] == {"status": "local_only", "errors": []}
+    assert run.outcome.expired is False and run.outcome.worker_alive is False
+    assert events[-1] == {
+        "event": "phase-finish",
+        "operation": "phase",
+        "completed": 1,
+        "total": 1,
+        "status": "local_only",
+    }
+    assert run.elapsed < ELAPSED_BOUND_SEC
+
+
+@pytest.mark.parametrize("part", ["header", "body"])
+def test_a_real_spawned_partial_frame_sender_cannot_hold_publication(tmp_path: Path, monkeypatch, part: str) -> None:
+    """The marker proves the spawned sender reached the partial frame before the parent's deadline."""
+    run = _supervise(monkeypatch, tmp_path, functools.partial(provenance_workers.sends_partial_frame, part))
+    assert (tmp_path / "frame-sent").read_text(encoding="utf-8") == part
+    assert run.outcome.expired and not run.stamped.ok
+    assert run.artifact["phase"]["errors"][-1]["code"] == run_estate.PROVENANCE_DEADLINE_CODE
+    assert len(run.published) == 1 and not _pid_is_running(run.outcome.worker_pid)
+
+
+def test_the_direct_worker_process_is_gone_from_the_operating_system_after_a_deadline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Reaped, as the OS sees it - not merely as the `Process` object reports it.
+
+    ⚠️ This is a DIRECT-process claim only. A Windows control in the audit showed a grandchild
+    surviving its parent's kill, which is why the worker is required to be a leaf (it is started as a
+    daemon, and `multiprocessing` refuses to let a daemon have children). Nothing here claims
+    descendant cleanup.
+    """
+    run = _supervise(monkeypatch, tmp_path, functools.partial(provenance_workers.blocks_in, "content"))
+
+    assert run.outcome.worker_pid is not None
+    assert run.outcome.worker_alive is False
+    assert run.outcome.worker_exitcode is not None, "an unreaped process has no exit code"
+    assert not _pid_is_running(run.outcome.worker_pid), "the worker outlived the phase that owned it"
+
+
+def test_a_worker_that_survives_terminate_and_kill_cannot_certify_a_success(tmp_path: Path, monkeypatch) -> None:
+    """A complete terminal result, and still not a pass: the phase could not account for its worker.
+
+    ⚠️ The substituted piece is deliberately the ONE thing this host cannot produce honestly - a
+    process that survives `terminate()` and `kill()`. Everything else is the shipping path: a real
+    spawned worker really sends a real terminal result, and only `_stop_worker`'s OS-level verdict is
+    replaced. It is a seam-substituted control, not a reproduction of an unkillable process.
+
+    The direction matters in both halves. Fail-closed on the VERDICT: exit 11, never `local_only`.
+    Fail-open on the EVIDENCE: the accepted records survive, because they were accepted before the
+    latch and throwing away 66 real fingerprints over a failed kill would help nobody.
+    """
+    real_stop = run_estate._stop_worker  # noqa: SLF001
+
+    def unknown_stop(process):
+        real_stop(process)
+        return run_estate._WorkerStop(True, None, True)  # noqa: SLF001
+
+    monkeypatch.setattr(run_estate, "_stop_worker", unknown_stop)
+
+    run = _supervise(monkeypatch, tmp_path, provenance_workers.succeeds)
+
+    assert run.outcome.worker_alive is True
+    assert run.outcome.expired is False, "an unreapable worker is not a timeout"
+    assert run.stamped.ok is False, "a phase that lost track of its worker reported a pass"
+    assert run.artifact["phase"]["status"] == "partial"
+    assert run.artifact["phase"]["errors"][-1] == {
+        "code": run_estate.PROVENANCE_REAP_CODE,
+        "operation": "fingerprint",
+    }
+    assert run.artifact["inputs"][0]["input"]["file"] == "unit.twb", "the accepted evidence was discarded"
+    assert run.artifact["input_count"] == len(run.artifact["inputs"]) == 1
+    assert len(run.published) == 1
+
+
+def test_an_unreapable_worker_without_a_result_is_a_failure_not_a_partial(tmp_path: Path, monkeypatch) -> None:
+    """The negative control for the branch above: nothing accepted means nothing to be partial about."""
+    real_stop = run_estate._stop_worker  # noqa: SLF001
+
+    def unknown_stop(process):
+        real_stop(process)
+        return run_estate._WorkerStop(True, None, True)  # noqa: SLF001
+
+    monkeypatch.setattr(run_estate, "_stop_worker", unknown_stop)
+
+    run = _supervise(monkeypatch, tmp_path, functools.partial(provenance_workers.blocks_in, "collect-inputs"))
+
+    assert run.stamped.ok is False
+    assert run.artifact["phase"]["status"] == "failed"
+    assert [error["code"] for error in run.artifact["phase"]["errors"]] == [
+        run_estate.PROVENANCE_DEADLINE_CODE,
+        run_estate.PROVENANCE_REAP_CODE,
+    ], "the timeout and the unknown reap must both be explicit"
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "NaN", "Infinity", "-Infinity"])
+def test_an_unusable_provenance_timeout_is_refused_before_any_work(tmp_path: Path, monkeypatch, capsys, value) -> None:
+    """A budget that is not a duration cannot bound anything, so nothing starts.
+
+    `0` is not "no timeout" and not "local only"; `NaN` compares false against every deadline and
+    `Infinity` is the unbounded wait this phase exists to end. The `=` form is used for the negative
+    values because argparse would otherwise read a leading `-` as an option, which is a different
+    (and less interesting) exit 2.
+    """
+    for name in ("resolve_run_engine", "collect_provenance", "write_source_provenance", "stamp_inputs"):
+        monkeypatch.setattr(run_estate, name, lambda *_a, **_k: pytest.fail("work started on an unusable timeout"))
+
+    code = run_estate.main(
+        ["--input", str(tmp_path), "--output", str(tmp_path / "bundle"), f"--provenance-timeout-sec={value}"]
+    )
+
+    captured = capsys.readouterr()
+    assert code == run_estate.EXIT_USAGE
+    assert "--provenance-timeout-sec must be a finite number greater than zero" in captured.err
+    assert value not in captured.err.replace("--provenance-timeout-sec", ""), "the diagnostic echoed the input"
+    assert not _progress_events(captured.out), "a refused configuration announced a phase"
+
+
+def test_an_over_ceiling_emitted_tree_starts_no_worker_and_announces_no_provenance_phase(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The path gate keeps its precedence: a refused bundle never enters provenance at all.
+
+    The sentinel is the SUPERVISOR rather than `stamp_inputs`, so a mutation that moves provenance
+    ahead of the gate is caught by a started process as well as by a printed event.
+    """
+    _without_pbir_validator(monkeypatch)
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    out = tmp_path / "bundle"
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
+    monkeypatch.setattr(run_estate, "PATH_CEILING_LIMITS", _ceilings(40, 4096))
+    monkeypatch.setattr(
+        run_estate,
+        "collect_provenance",
+        lambda *_a, **_k: pytest.fail("a worker was started for a bundle the path gate refused"),
+    )
+
+    code = run_estate.main(_landing_argv(engine, src, out))
+
+    printed = capsys.readouterr().out
+    assert code == run_estate.EXIT_PATH_CEILING
+    assert not _progress_events(printed), printed
+    assert not (out / run_estate.SOURCE_PROVENANCE_REPORT).exists()
+
+
+def test_the_real_worker_speaks_exactly_the_protocol_the_parent_accepts(tmp_path: Path) -> None:
+    """The production worker's wire shape, validated by the production parent - no fixture in between.
+
+    Run in-process over a real pipe: this is about the CONTRACT between the two halves, which a
+    scenario stand-in cannot prove. It is also where the derived-only rule is proved on real
+    fingerprint output rather than on a hand-written record.
+    """
+    import stamp_tableau_provenance as prov  # noqa: PLC0415
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    recv, send = multiprocessing.Pipe(duplex=False)
+
+    prov.provenance_worker(send, None, {"input": str(src), "env": str(tmp_path / "absent.env")})
+
+    messages = []
+    with contextlib.suppress(EOFError, OSError):
+        while recv.poll():
+            messages.append(recv.recv())
+    state = run_estate._ProvenanceState(emit=lambda *_a, **_k: None)  # noqa: SLF001
+    for message in messages:
+        state.accept(message)  # raises ProvenanceProtocolError on anything outside the protocol
+
+    checkpoints = [m for m in messages if m["kind"] == prov.MSG_CHECKPOINT]
+    assert state.total == 1
+    assert state.terminal is not None and state.terminal["phase"]["status"] == "local_only"
+    assert len(checkpoints) == 1
+    assert set(checkpoints[0]["record"]["input"]) <= {"size_bytes", "sha256", "revision_key", "members", "status"}
+    assert "unit.twb" not in json.dumps(checkpoints), "a checkpoint carried a filename"
+    assert "unit.twb" in json.dumps(state.terminal), "the terminal result is the one that names files"
+
+
+def _protocol_main(tmp_path: Path, monkeypatch, messages: list[dict]) -> tuple[int, dict, Path]:
+    """Replay a spawned worker through the actual coordinator and its one publication attempt."""
+    _without_pbir_validator(monkeypatch)
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    src, out = tmp_path / "src", tmp_path / "bundle"
+    src.mkdir()
+    (src / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    monkeypatch.setattr(run_estate, "run_engine", _bundle_engine())
+    collect, publish = run_estate.collect_provenance, run_estate.write_source_provenance
+    outcomes, publications = [], []
+
+    def replay(input_dir: Path, timeout_sec: float) -> run_estate.ProvenanceOutcome:
+        outcome = collect(input_dir, timeout_sec, entry=functools.partial(provenance_workers.sends_messages, messages))
+        outcomes.append(outcome)
+        return outcome
+
+    def write(directory: Path, result: dict) -> Path | None:
+        publications.append(result)
+        return publish(directory, result)
+
+    monkeypatch.setattr(run_estate, "collect_provenance", replay)
+    monkeypatch.setattr(run_estate, "write_source_provenance", write)
+    code = run_estate.main([*_landing_argv(engine, src, out), "--provenance-timeout-sec", str(WORKER_TIMEOUT_SEC)])
+    assert len(publications) == 1, "PUBLISH_COUNT: protocol outcomes must publish exactly once"
+    assert len(outcomes) == 1 and outcomes[0].worker_pid is not None, "the control never spawned its worker"
+    assert not outcomes[0].expired and outcomes[0].worker_alive is False, "not a protocol verdict"
+    return code, _provenance_artifact(out), out
+
+
+def _assert_protocol_refused(run: tuple[int, dict, Path], total: int) -> None:
+    code, artifact, out = run
+    assert (
+        artifact["phase"]["errors"] and artifact["phase"]["errors"][-1]["code"] == run_estate.PROVENANCE_PROTOCOL_CODE
+    ), "STATUS_HISTORY: an invalid worker history did not produce the protocol fault"
+    assert code == run_estate.EXIT_PROVENANCE_FAILED == 11, "STATUS_HISTORY: invalid history continued"
+    assert artifact["phase"]["status"] not in {"success", "local_only"}
+    assert artifact["input_count"] == len(artifact["inputs"]) == total
+    assert not {"adjudicate", "slice_handovers"} & set(_phase_names(out))
+    assert not (out / "handover").exists()
+
+
+def test_spawned_success_without_any_live_history_is_protocol_invalid(tmp_path: Path, monkeypatch) -> None:
+    """Exact re-review reproduction: fingerprint -> success, with no live intent or operation."""
+    messages = provenance_workers.protocol_messages(live=False)
+    messages = [message for message in messages if message["kind"] != "lookup-intent"]
+    messages[-1]["result"]["phase"]["status"] = "success"
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.parametrize(
+    "stage", ["lookup-intent", "sign-in", "inventory", "content", "scrub", "safe-snapshot", "sign-out"]
+)
+def test_spawned_success_cannot_skip_an_applicable_stage(tmp_path: Path, monkeypatch, stage: str) -> None:
+    """Each missing stage is refused independently, not hidden inside the all-stages-missing case."""
+    messages = provenance_workers.protocol_messages(("first.twb", "second.twb"))
+    messages = [message for message in messages if message["kind"] != stage and message.get("operation") != stage]
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 2)
+
+
+@pytest.mark.parametrize("stage", ["sign-in", "inventory", "content", "scrub", "sign-out"])
+@pytest.mark.parametrize("completed", [0, 1], ids=["missing-start", "missing-completion"])
+def test_spawned_success_requires_both_ends_of_each_live_operation(
+    tmp_path: Path, monkeypatch, stage: str, completed: int
+) -> None:
+    """Removing only a start or completion must not be covered by the whole-stage control alone."""
+    messages = provenance_workers.protocol_messages()
+    messages = [
+        message for message in messages if not (message.get("operation") == stage and message["completed"] == completed)
+    ]
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.parametrize(
+    ("stage", "before"),
+    [("inventory", "sign-in"), ("content", "inventory"), ("scrub", "content"), ("sign-out", "scrub")],
+)
+def test_spawned_live_operations_cannot_run_out_of_order(tmp_path: Path, monkeypatch, stage: str, before: str) -> None:
+    """All stages still exist; only their legal order is broken."""
+    messages = provenance_workers.protocol_messages()
+    moved = [message for message in messages if message.get("operation") == stage]
+    messages = [message for message in messages if message.get("operation") != stage]
+    index = next(index for index, message in enumerate(messages) if message.get("operation") == before)
+    messages[index:index] = moved
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.parametrize("stage", ["sign-in", "inventory", "content"])
+@pytest.mark.parametrize("completed", [0, 1], ids=["started", "completed"])
+def test_spawned_local_only_after_live_work_is_protocol_invalid(
+    tmp_path: Path, monkeypatch, stage: str, completed: int
+) -> None:
+    """The terminal is independently local-shaped; the accepted live history is what contradicts it."""
+    messages = provenance_workers.protocol_messages()
+    index = next(
+        index
+        for index, message in enumerate(messages)
+        if message.get("operation") == stage and message["completed"] == completed
+    )
+    messages = [*messages[: index + 1], provenance_workers.protocol_messages(live=False)[-1]]
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.parametrize("requested", [None, True], ids=["missing-intent", "live-requested"])
+def test_spawned_local_only_requires_explicit_local_intent(tmp_path: Path, monkeypatch, requested: bool | None) -> None:
+    """No observed network operation is insufficient when live intent is absent or contradicts local-only."""
+    messages = provenance_workers.protocol_messages(live=False)
+    if requested is None:
+        messages = [message for message in messages if message["kind"] != "lookup-intent"]
+    else:
+        next(message for message in messages if message["kind"] == "lookup-intent")["requested"] = requested
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+def test_spawned_local_only_cannot_carry_live_result_semantics(tmp_path: Path, monkeypatch) -> None:
+    """A false live-intent flag cannot license an origin-bearing local-only terminal."""
+    messages = provenance_workers.protocol_messages(live=False)
+    origin = provenance_workers.protocol_messages()[-1]["result"]["inputs"][0]["origin"]
+    messages[-1]["result"]["inputs"][0]["origin"] = origin
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.parametrize(
+    ("matches", "counts"),
+    [
+        ((0, 1), [0, 2, 2, 2]),
+        ((0, 1), [0, 1, 1, 1]),
+        ((0, 0), [0, 1, 1, 2]),
+        ((None, None), [0, 0, 0, 1]),
+    ],
+    ids=["skipped-attempt-count", "missing-distinct-attempt", "cache-hit-counted-twice", "invented-download"],
+)
+def test_spawned_content_counts_reconcile_to_distinct_live_results(
+    tmp_path: Path, monkeypatch, matches: tuple[int | None, ...], counts: list[int]
+) -> None:
+    """Physical inputs are not content attempts; a finished count must agree with distinct matched LUIDs."""
+    messages = provenance_workers.protocol_messages(("first.twb", "second.twb"), matches=matches)
+    content = [message for message in messages if message.get("operation") == "content"]
+    for message, completed in zip(content, counts):
+        message["completed"] = completed
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 2)
+
+
+def test_spawned_success_cannot_omit_one_inputs_content_pair(tmp_path: Path, monkeypatch) -> None:
+    """Even a cache hit needs its input's start/completion pair; a matching final count cannot hide it."""
+    messages = provenance_workers.protocol_messages(("first.twb", "second.twb"), matches=(0, 0))
+    content_indexes = [index for index, message in enumerate(messages) if message.get("operation") == "content"]
+    messages = [message for index, message in enumerate(messages) if index not in content_indexes[-2:]]
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 2)
+
+
+@pytest.mark.parametrize(
+    "matches", [(0, 1), (0, 0), (None, None), (0, None)], ids=["distinct", "cached", "misses", "mixed"]
+)
+def test_spawned_full_live_success_is_accepted(tmp_path: Path, monkeypatch, matches: tuple[int | None, ...]) -> None:
+    """Positive controls preserve #582: inventory once, zero/one/two distinct content attempts, two inputs."""
+    messages = provenance_workers.protocol_messages(("first.twb", "second.twb"), matches=matches)
+    code, artifact, _out = _protocol_main(tmp_path, monkeypatch, messages)
+    assert artifact == messages[-1]["result"], "FULL_LIVE_SUCCESS: a complete legal live history was refused"
+    assert code == 0
+    assert artifact["input_count"] == 2
+
+
+def test_spawned_true_local_only_is_accepted(tmp_path: Path, monkeypatch) -> None:
+    """Positive control: no live intent, no live operations and a genuinely local result."""
+    messages = provenance_workers.protocol_messages(live=False)
+    code, artifact, _out = _protocol_main(tmp_path, monkeypatch, messages)
+    assert artifact == messages[-1]["result"], "TRUE_LOCAL_ONLY: an independently local run was refused"
+    assert code == 0
+
+
+@pytest.mark.parametrize("basename", ["Sales:Q3.twb", r"Sales\Q3.twb"])
+def test_spawned_posix_scrubbed_basename_is_accepted(tmp_path: Path, monkeypatch, capsys, basename: str) -> None:
+    """POSIX punctuation crosses the real worker boundary without ever being used as a path."""
+    monkeypatch.setattr(run_estate, "_BASENAME_PLATFORM", "posix")
+    messages = provenance_workers.protocol_messages((basename,))
+    code, artifact, _out = _protocol_main(tmp_path, monkeypatch, messages)
+    assert artifact == messages[-1]["result"], "POSIX_BASENAME: a legal scrubbed basename was refused"
+    assert code == 0
+    printed = capsys.readouterr()
+    assert basename not in printed.out + printed.err
+    assert str(tmp_path) not in "".join(
+        line for line in printed.out.splitlines() if line.startswith(run_estate.PROVENANCE_PROGRESS_PREFIX)
+    )
+
+
+@pytest.mark.parametrize(
+    "basename",
+    [
+        "Sales:Q3.twb",
+        r"Sales\Q3.twb",
+        r"C:unit.twb",
+        r"C:\private\unit.twb",
+        r"\\private-host\share\unit.twb",
+        ".",
+        "..",
+        "CON.twb",
+        "COM¹.twb",
+        "unit.twb.",
+        "unit.twb ",
+        "unit|part.twb",
+        "unit\x00part.twb",
+    ],
+    ids=[
+        "colon",
+        "separator",
+        "drive-relative",
+        "absolute",
+        "unc",
+        "dot",
+        "dotdot",
+        "device",
+        "superscript-device",
+        "trailing-dot",
+        "trailing-space",
+        "punctuation",
+        "nul",
+    ],
+)
+def test_spawned_windows_invalid_scrubbed_basename_is_refused(tmp_path: Path, monkeypatch, basename: str) -> None:
+    """The deterministic Windows seam runs on both OSes; none of these strings is opened or stat'ed."""
+    monkeypatch.setattr(run_estate, "_BASENAME_PLATFORM", "nt")
+    messages = provenance_workers.protocol_messages((basename,))
+    _assert_protocol_refused(_protocol_main(tmp_path, monkeypatch, messages), 1)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX native filename control; both flavours also run through a seam")
+@pytest.mark.parametrize("basename", ["Sales:Q3.twb", r"Sales\Q3.twb"])
+def test_native_posix_worker_preserves_legal_punctuation(tmp_path: Path, monkeypatch, basename: str) -> None:
+    """The shipping worker, not a wire fixture, fingerprints and publishes the actual POSIX filename."""
+    monkeypatch.delenv("TABLEAU_SERVER_URL", raising=False)
+    monkeypatch.delenv("TABLEAU_PAT_NAME", raising=False)
+    (tmp_path / basename).write_text("<workbook />", encoding="utf-8")
+    outcome = run_estate.collect_provenance(tmp_path, WORKER_TIMEOUT_SEC, env_path=tmp_path / "absent.env")
+    assert outcome.result["phase"] == {"status": "local_only", "errors": []}, "NATIVE_POSIX_BASENAME"
+    assert outcome.result["inputs"][0]["input"]["file"] == basename

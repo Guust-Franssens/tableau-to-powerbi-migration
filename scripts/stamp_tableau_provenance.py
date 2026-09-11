@@ -50,6 +50,8 @@ import hashlib
 import json
 import logging
 import re
+import socket
+import struct
 import sys
 import time
 import urllib.error
@@ -77,17 +79,132 @@ CONSISTENCY_OPERATION = "validate-result"
 #: too, without learning a second state machine.
 UNASSESSABLE_STATUS = "failed"
 
+# --------------------------------------------------------------------------- the worker protocol
+#
+# Issue #576: every operation below can block past any socket timeout - a trickled response body is
+# not a connect timeout, and neither a local `read_bytes` nor a recursive scrub has one at all. The
+# only mechanism measured to preempt all of them on Windows AND POSIX is a separate process the
+# supervisor can terminate, so `build()` is instrumented to report progress and completed evidence
+# to a parent that owns the deadline. The channel is deliberately TINY and closed: numeric, boolean
+# or already-safe messages, nothing free-form, and no credential ever travels back over it.
+
+MSG_INPUTS_DISCOVERED = "inputs-discovered"
+MSG_OPERATION = "operation"
+MSG_CHECKPOINT = "checkpoint"
+MSG_LOOKUP_INTENT = "lookup-intent"
+MSG_SAFE_SNAPSHOT = "safe-snapshot"
+MSG_TERMINAL = "terminal"
+
+OP_COLLECT_INPUTS = "collect-inputs"
+OP_FINGERPRINT = "fingerprint"
+OP_SIGN_IN = "sign-in"
+OP_INVENTORY = "inventory"
+OP_CONTENT = "content"
+OP_SCRUB = "scrub"
+OP_SIGN_OUT = "sign-out"
+
+#: Every operation the WORKER may name. The supervisor allows two more (`phase`, `publish`) that
+#: describe parent-owned work and can therefore never arrive over the pipe.
+WORKER_OPERATIONS = frozenset(
+    {OP_COLLECT_INPUTS, OP_FINGERPRINT, OP_SIGN_IN, OP_INVENTORY, OP_CONTENT, OP_SCRUB, OP_SIGN_OUT}
+)
+
+#: The stable code a supervisor records for evidence the worker never finished.
+DEADLINE_CODE = "deadline-expired"
+CANCELLED_CODE = "cancelled"
+RESULT_STATUSES = SUCCESS_STATUSES | {"partial", "failed", "empty"}
+NO_ORIGIN_NOTE = "no workbook of this LUID or name on the site - local-only input"
+
+# Only these labels, never an exception's dynamically supplied name or text, cross the channel.
+ERROR_CLASSES = frozenset(
+    {
+        "Exception",
+        "OSError",
+        "PermissionError",
+        "FileNotFoundError",
+        "IsADirectoryError",
+        "NotADirectoryError",
+        "TimeoutError",
+        "ConnectionError",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+        "BrokenPipeError",
+        "HTTPError",
+        "URLError",
+        "ValueError",
+        "TypeError",
+        "KeyError",
+        "IndexError",
+        "RuntimeError",
+        "BadZipFile",
+        "LargeZipFile",
+        "UnicodeDecodeError",
+        "JSONDecodeError",
+        "RecursionError",
+        "MemoryError",
+    }
+)
+
+
+class ProvenanceChannel:
+    """Spawn-picklable socket endpoint; length-prefixed UTF-8 JSON, never received pickle.
+
+    Reads may block on an incomplete frame. ONLY the parent's daemon transport thread reads this
+    channel; the supervising thread never does. A bounded header is checked before body allocation.
+    """
+
+    def __init__(self, endpoint: socket.socket) -> None:
+        self.endpoint = endpoint
+
+    def send(self, message: dict[str, Any]) -> None:
+        """Send one JSON frame. Serialization and blocking writes belong to the leaf worker."""
+        payload = json.dumps(message, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        self.endpoint.sendall(struct.pack("!I", len(payload)) + payload)
+
+    def recv_bytes(self, maximum: int) -> bytes:
+        """Read a capped frame; this is deliberately NOT advertised as a deadline-aware read."""
+        size = struct.unpack("!I", self._read_exact(4, allow_eof=True))[0]
+        if not 0 < size <= maximum:
+            raise ValueError("invalid frame size")
+        return self._read_exact(size)
+
+    def _read_exact(self, size: int, allow_eof: bool = False) -> bytes:
+        chunks = bytearray()
+        while len(chunks) < size:
+            chunk = self.endpoint.recv(min(size - len(chunks), 65536))
+            if not chunk:
+                if allow_eof and not chunks:
+                    raise EOFError
+                raise ValueError("truncated frame")
+            chunks.extend(chunk)
+        return bytes(chunks)
+
+    def shutdown(self) -> None:
+        """Interrupt a parent-side read without waiting for the peer or acquiring a peer lock."""
+        self.endpoint.shutdown(socket.SHUT_RDWR)
+
+    def close(self) -> None:
+        """Release this process's socket handle."""
+        self.endpoint.close()
+
+
+def _exception_class(exc: BaseException) -> str:
+    name = type(exc).__name__
+    return name if name in ERROR_CLASSES else "Exception"
+
 
 def _error(code: str, operation: str, exc: BaseException | None = None, **facts: int) -> dict[str, Any]:
     """A stable failure record containing no exception or response text."""
     record: dict[str, Any] = {"code": code, "operation": operation}
     if exc is not None:
-        record["exception_class"] = type(exc).__name__
+        record["exception_class"] = _exception_class(exc)
         for attribute in ("errno", "winerror"):
             value = getattr(exc, attribute, None)
-            if isinstance(value, int):
+            if isinstance(value, int) and not isinstance(value, bool):
                 record[attribute] = value
-    record.update({key: value for key, value in facts.items() if isinstance(value, int)})
+    record.update(
+        {key: value for key, value in facts.items() if isinstance(value, int) and not isinstance(value, bool)}
+    )
     return record
 
 
@@ -142,7 +259,7 @@ def consistency_faults(result: Any) -> list[str]:
 
     phase = result.get("phase")
     status = phase.get("status") if isinstance(phase, dict) else None
-    if not isinstance(status, str):
+    if not isinstance(status, str) or status not in RESULT_STATUSES:
         faults.append("phase-status-unassessable")
     elif status in SUCCESS_STATUSES and not (counted and records):
         faults.append("success-without-inputs")
@@ -187,6 +304,141 @@ def is_success(result: Any) -> bool:
     if consistency_faults(result):
         return False
     return result["phase"]["status"] in SUCCESS_STATUSES
+
+
+def phase_error(code: str, operation: str, **facts: int) -> dict[str, Any]:
+    """A stable failure record a SUPERVISOR may record about work this module never finished.
+
+    The same shape :func:`_error` builds for the worker's own faults, exported so the deadline owner
+    does not grow a second error vocabulary that a consumer would have to learn.
+    """
+    return _error(code, operation, **facts)
+
+
+def phase_result(inputs: list[dict[str, Any]], status: str, errors: list[dict[str, Any]] | None = None) -> dict:
+    """One complete provenance document assembled by a SUPERVISOR from the evidence it accepted."""
+    return _result(inputs, status, errors)
+
+
+def unavailable_input(code: str, operation: str = OP_FINGERPRINT) -> dict[str, Any]:
+    """The placeholder for an input whose evidence never arrived.
+
+    Explicit rather than absent: ``input_count`` must keep equalling ``len(inputs)`` (that identity is
+    what :func:`consistency_faults` refuses to let a result contradict), and "we did not get to this
+    one" is a different statement from "this one is fine". It names no file: an input that was never
+    fingerprinted is identified by its ORDINAL, so a placeholder cannot leak a filename.
+    """
+    return {"input": {"status": "unavailable"}, "fingerprint_error": _error(code, operation)}
+
+
+def checkpoint_record(record: dict[str, Any]) -> dict[str, Any]:
+    """One completed input reduced to what this module DERIVED, ready to cross a process boundary.
+
+    A checkpoint is emitted BEFORE the live half has been scrubbed, so it may carry nothing copied
+    from the environment - not the filename, not a member name. Sizes, digests and CRCs cannot carry
+    a credential (:func:`_derived_only` is the same reduction the unusable-redactor path falls back
+    to), and the typed fingerprint error carries a class name and an errno, never a message.
+    """
+    derived = _derived_only(record.get("input") or {})
+    reduced: dict[str, Any] = {"input": derived or {"status": "unavailable"}}
+    if isinstance(record.get("fingerprint_error"), dict):
+        reduced["fingerprint_error"] = record["fingerprint_error"]
+    return reduced
+
+
+class NullReporter:
+    """The no-op channel :func:`build` uses when nobody is supervising it.
+
+    The standalone CLI and every direct test call :func:`build` in-process; instrumenting it must not
+    make it depend on having a parent.
+    """
+
+    cancelled = False
+
+    def inputs_discovered(self, total: int) -> None:
+        """Ignore the discovered input count."""
+
+    def operation(self, operation: str, completed: int, total: int | None = None) -> None:
+        """Ignore an operation counter."""
+
+    def checkpoint(self, index: int, record: dict[str, Any]) -> None:
+        """Ignore a completed-input checkpoint."""
+
+    def lookup_intent(self, requested: bool) -> None:
+        """Ignore whether the completed local pass is followed by live work."""
+
+    def safe_snapshot(self, result: dict[str, Any]) -> None:
+        """Ignore the scrubbed snapshot."""
+
+    def terminal(self, result: dict[str, Any]) -> None:
+        """Ignore the terminal result."""
+
+
+class WorkerReporter(NullReporter):
+    """The worker's end of the pipe, plus the cancellation flag the supervisor sets at the deadline.
+
+    Sending is best-effort: once the supervisor has latched expiry it closes its receive end, and a
+    write to that pipe is then an ordinary broken-pipe error. The worker is about to be terminated,
+    so the only correct response is to keep going quietly rather than to raise something the parent
+    will never see.
+
+    ``cancelled`` is an OPTIMISATION, never the enforcement. It lets the worker stop before starting
+    the next expensive operation; what actually bounds an operation already in flight is the parent
+    terminating this process.
+    """
+
+    def __init__(self, conn: Any, cancel_event: Any = None) -> None:
+        self._conn = conn
+        self._cancel = cancel_event
+        self._discovered = False
+
+    @property
+    def cancelled(self) -> bool:  # type: ignore[override]
+        """Whether the supervisor has asked for this run to stop."""
+        try:
+            return self._cancel is not None and bool(self._cancel.value)
+        except (OSError, ValueError):  # pragma: no cover - the shared byte died with the parent
+            return True
+
+    def _send(self, message: dict[str, Any]) -> None:
+        try:
+            self._conn.send(message)
+        except (OSError, ValueError, EOFError):  # pragma: no cover - parent closed the pipe at expiry
+            LOG.debug("provenance progress channel closed")
+
+    def inputs_discovered(self, total: int) -> None:
+        """Numeric only: how many physical inputs discovery found."""
+        self._discovered = True
+        self._send({"kind": MSG_INPUTS_DISCOVERED, "total": int(total)})
+
+    def operation(self, operation: str, completed: int, total: int | None = None) -> None:
+        """One allowlisted operation label and two numbers - never what it was operating on."""
+        self._send(
+            {
+                "kind": MSG_OPERATION,
+                "operation": operation,
+                "completed": int(completed),
+                "total": None if total is None else int(total),
+            }
+        )
+
+    def checkpoint(self, index: int, record: dict[str, Any]) -> None:
+        """Derived-only evidence for one completed input, addressed by ordinal."""
+        self._send({"kind": MSG_CHECKPOINT, "index": int(index), "record": checkpoint_record(record)})
+
+    def lookup_intent(self, requested: bool) -> None:
+        """Declare live intent before sign-in without sending any credential or host identity."""
+        self._send({"kind": MSG_LOOKUP_INTENT, "requested": bool(requested)})
+
+    def safe_snapshot(self, result: dict[str, Any]) -> None:
+        """The whole result once it is scrubbed - sent BEFORE sign-out, which can hang."""
+        self._send({"kind": MSG_SAFE_SNAPSHOT, "result": result})
+
+    def terminal(self, result: dict[str, Any]) -> None:
+        """The final result, only after cleanup has finished or produced a typed error."""
+        if not self._discovered:
+            self.inputs_discovered(0)
+        self._send({"kind": MSG_TERMINAL, "result": result})
 
 
 def fingerprint(path: Path) -> dict[str, Any]:
@@ -250,6 +502,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         self._content_cache: dict[str, bytes | None] = {}
         self._content_failure: dict[str, Exception] = {}
         self._content_unavailable: dict[str, str] = {}
+        self.reporter: NullReporter = NullReporter()
 
     def _call(self, method: str, path: str, body: dict | None = None, accept: str | None = None):
         request = urllib.request.Request(
@@ -302,7 +555,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
             try:
                 self._call("POST", "/auth/signout")
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                LOG.debug("Tableau sign-out failed (%s) - session left to expire", type(exc).__name__)
+                LOG.debug("Tableau sign-out failed (%s) - session left to expire", _exception_class(exc))
                 failure = exc
             finally:
                 self.token = None
@@ -331,6 +584,8 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         return self._inventory
 
     def _fetch_workbooks(self) -> list[dict[str, Any]]:
+        if self.reporter.cancelled:
+            raise RuntimeError(CANCELLED_CODE)
         status, payload = self._call("GET", f"/sites/{self.site_id}/workbooks?pageSize=1000", accept="application/json")
         if status != 200:
             raise RuntimeError(f"listing workbooks failed: HTTP {status}")
@@ -370,6 +625,14 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         """
         return self._content_unavailable.get(workbook_id)
 
+    def content_attempts(self) -> int:
+        """How many DISTINCT workbooks this run actually asked the site for.
+
+        A cache hit is not an attempt: two inputs resolving to one LUID are one download (#582), and
+        progress that counted them twice would report remote work that never happened.
+        """
+        return len(self._content_cache) + len(self._content_failure)
+
     def _content(self, workbook_id: str) -> bytes | None:
         """The site's bytes for one workbook, downloaded at most once - miss and failure cached.
 
@@ -387,6 +650,8 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
             raise self._content_failure[workbook_id]
         if workbook_id not in self._content_cache:
             try:
+                if self.reporter.cancelled:
+                    raise RuntimeError(CANCELLED_CODE)
                 status, payload = self._call(
                     "GET", f"/sites/{self.site_id}/workbooks/{workbook_id}/content?includeExtract=True"
                 )
@@ -555,72 +820,179 @@ def collect_inputs(target: Path) -> list[Path]:
     return sorted(p for p in target.iterdir() if p.suffix.lower() in WORKBOOK_SUFFIXES)
 
 
-def build(target: Path, env: dict[str, str]) -> dict[str, Any]:  # pylint: disable=too-many-locals
-    """Fingerprint every input, and attach its Tableau origin when credentials allow."""
+def _cancelled_result(records: list[dict[str, Any]], total: int, operation: str) -> dict[str, Any]:
+    """Never keep an unscrubbed live record or lose an unfinished physical input on cancellation."""
+    reduced = [checkpoint_record(record) for record in records]
+    reduced.extend(unavailable_input(CANCELLED_CODE) for _ in range(total - len(reduced)))
+    usable = any(record["input"].get("status") != "unavailable" for record in reduced)
+    return _result(reduced, "partial" if usable else "failed", [_error(CANCELLED_CODE, operation)])
+
+
+def build(target: Path, env: dict[str, str], reporter: NullReporter | None = None) -> dict[str, Any]:
+    """Fingerprint every input, and attach its Tableau origin when credentials allow.
+
+    **Local evidence first.** The two passes used to be interleaved per input, so one slow remote
+    call stalled every LATER file's fingerprint as well - and a run preempted at the deadline then
+    had local evidence for nothing beyond the first input, although the bytes were sitting on this
+    machine the whole time. Fingerprints owe the site nothing, so they are all taken before the
+    first remote call and checkpointed as they complete.
+
+    ``reporter`` is the optional supervisor channel (issue #576). With none it is a no-op, which is
+    what the standalone CLI and every direct test use.
+    """
+    reporter = reporter or NullReporter()
+    reporter.operation(OP_COLLECT_INPUTS, 0, 1)
+    if reporter.cancelled:
+        reporter.inputs_discovered(0)
+        return _cancelled_result([], 0, OP_COLLECT_INPUTS)
     try:
         inputs = collect_inputs(target)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        LOG.warning("provenance input discovery failed (%s)", type(exc).__name__)
-        return failure_result("collect-inputs-failed", "collect-inputs", exc)
+        LOG.warning("provenance input discovery failed (%s)", _exception_class(exc))
+        reporter.inputs_discovered(0)
+        return failure_result("collect-inputs-failed", OP_COLLECT_INPUTS, exc)
+    reporter.inputs_discovered(len(inputs))
+    reporter.operation(OP_COLLECT_INPUTS, 1, 1)
     if not inputs:
-        return _result([], "empty", [_error("empty-input", "collect-inputs")])
+        return _result([], "empty", [_error("empty-input", OP_COLLECT_INPUTS)])
 
-    lookup: TableauLookup | None = None
     errors: list[dict[str, Any]] = []
-    live_requested = bool(env.get("TABLEAU_SERVER_URL") and env.get("TABLEAU_PAT_NAME"))
-    if live_requested:
-        try:
-            lookup = TableauLookup(env)
-            lookup.sign_in()
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            LOG.warning("no Tableau lookup (%s) - fingerprints only", type(exc).__name__)
-            errors.append(_error("live-lookup-refused", "sign-in", exc))
-            lookup = None
+    records = _fingerprint_pass(inputs, errors, reporter)
+    if reporter.cancelled:
+        return _cancelled_result(records, len(inputs), OP_FINGERPRINT)
+    return _complete_provenance(inputs, records, env, reporter, errors)
 
-    records = []
-    for path in inputs:
-        try:
-            local = fingerprint(path)
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            error = _error("local-fingerprint-failed", "fingerprint", exc)
-            errors.append(error)
-            records.append({"input": {"status": "unavailable"}, "fingerprint_error": error})
-            continue
-        record = {"input": local}
-        if lookup is not None:
-            try:
-                origin = find_origin(lookup, path.stem, record["input"])
-            except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                origin = None
-                record["lookup_error"] = _error("live-lookup-failed", "lookup-origin", exc)
-                errors.append(record["lookup_error"])
-            record["origin"] = origin
-            if origin is None:
-                record["origin_note"] = "no workbook of this LUID or name on the site - local-only input"
-            elif origin["match"] == "name_only":
-                record["origin_note"] = (
-                    f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "
-                    "figures measured here will not reproduce against it"
-                )
-            elif origin["match"] == "unavailable":
-                reason = origin.get("content_unavailable") or "the site refused the download"
-                record["origin_note"] = (
-                    f"matched by {origin['matched_by']}, but the site copy could NOT be read "
-                    f"({reason}) - no byte or revision comparison was made"
-                )
-                status = int(reason.removeprefix("HTTP ")) if reason.startswith("HTTP ") else 0
-                record["lookup_error"] = _error("content-unavailable", "download-workbook", http_status=status)
-                errors.append(record["lookup_error"])
-        records.append(record)
+
+def _complete_provenance(
+    inputs: list[Path],
+    records: list[dict[str, Any]],
+    env: dict[str, str],
+    reporter: NullReporter,
+    errors: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Only after local evidence has been checkpointed may a live lookup begin."""
+    lookup: TableauLookup | None = None
+    live_requested = bool(env.get("TABLEAU_SERVER_URL") and env.get("TABLEAU_PAT_NAME"))
+    reporter.lookup_intent(live_requested)
+    if live_requested and not reporter.cancelled:
+        lookup = _open_lookup(env, errors, reporter)
+    if reporter.cancelled:
+        return _cancelled_result(records, len(inputs), OP_SIGN_IN)
+    if lookup is not None:
+        _origin_pass(inputs, records, lookup, errors, reporter)
+    if reporter.cancelled:
+        return _cancelled_result(records, len(inputs), OP_CONTENT if lookup is not None else OP_SIGN_IN)
+
     usable = sum(record["input"].get("status") != "unavailable" for record in records)
     status = "failed" if not usable else ("partial" if errors else ("success" if live_requested else "local_only"))
     result = _result(records, status, errors)
     if lookup is None:
         return result
-    return _finish_live(result, lookup)
+    return _finish_live(result, lookup, reporter)
 
 
-def _finish_live(result: dict[str, Any], lookup: TableauLookup) -> dict[str, Any]:
+def _fingerprint_pass(inputs: list[Path], errors: list[dict[str, Any]], reporter: NullReporter) -> list[dict[str, Any]]:
+    """Every input's LOCAL evidence, checkpointed one by one so a later stall cannot discard it."""
+    records: list[dict[str, Any]] = []
+    for index, path in enumerate(inputs):
+        reporter.operation(OP_FINGERPRINT, index, len(inputs))
+        if reporter.cancelled:
+            break
+        try:
+            local = fingerprint(path)
+        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+            error = _error("local-fingerprint-failed", OP_FINGERPRINT, exc)
+            errors.append(error)
+            record: dict[str, Any] = {"input": {"status": "unavailable"}, "fingerprint_error": error}
+        else:
+            record = {"input": local}
+        records.append(record)
+        reporter.operation(OP_FINGERPRINT, len(records), len(inputs))
+        reporter.checkpoint(index, record)
+    return records
+
+
+def _open_lookup(env: dict[str, str], errors: list[dict[str, Any]], reporter: NullReporter) -> TableauLookup | None:
+    """Sign in, or record WHY there is no live half and continue with the local one."""
+    reporter.operation(OP_SIGN_IN, 0, 1)
+    if reporter.cancelled:
+        return None
+    try:
+        lookup = TableauLookup(env)
+        lookup.reporter = reporter
+        if reporter.cancelled:
+            return None
+        lookup.sign_in()
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        LOG.warning("no Tableau lookup (%s) - fingerprints only", _exception_class(exc))
+        errors.append(_error("live-lookup-refused", OP_SIGN_IN, exc))
+        reporter.operation(OP_SIGN_IN, 1, 1)
+        return None
+    reporter.operation(OP_SIGN_IN, 1, 1)
+    return lookup
+
+
+def _origin_pass(
+    inputs: list[Path],
+    records: list[dict[str, Any]],
+    lookup: TableauLookup,
+    errors: list[dict[str, Any]],
+    reporter: NullReporter,
+) -> None:
+    """Attach the site half to every input that has local evidence, in place.
+
+    The inventory is primed once, ahead of the loop, purely so the phase can be REPORTED as one
+    operation rather than as N: :meth:`TableauLookup.workbooks` already latches both the listing and
+    its failure (#582), so this costs no extra round trip and a failure here is deliberately dropped
+    - :func:`find_origin` re-raises the latched one so each input still records its own reason.
+    """
+    reporter.operation(OP_INVENTORY, 0, 1)
+    if reporter.cancelled:
+        return
+    try:
+        lookup.workbooks()
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        LOG.debug("site inventory unavailable (%s) - each input records its own reason", _exception_class(exc))
+    reporter.operation(OP_INVENTORY, 1, 1)
+
+    for path, record in zip(inputs, records):
+        if record["input"].get("status") == "unavailable":
+            continue
+        reporter.operation(OP_CONTENT, lookup.content_attempts(), None)
+        if reporter.cancelled:
+            break
+        _attach_origin(record, lookup, path.stem, errors)
+        reporter.operation(OP_CONTENT, lookup.content_attempts(), None)
+
+
+def _attach_origin(record: dict[str, Any], lookup: TableauLookup, stem: str, errors: list[dict[str, Any]]) -> None:
+    """One input's site half, or the typed reason there is none."""
+    try:
+        origin = find_origin(lookup, stem, record["input"])
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        origin = None
+        record["lookup_error"] = _error("live-lookup-failed", "lookup-origin", exc)
+        errors.append(record["lookup_error"])
+    record["origin"] = origin
+    if origin is None:
+        record["origin_note"] = NO_ORIGIN_NOTE
+    elif origin["match"] == "name_only":
+        record["origin_note"] = (
+            f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "
+            "figures measured here will not reproduce against it"
+        )
+    elif origin["match"] == "unavailable":
+        reason = origin.get("content_unavailable") or "the site refused the download"
+        record["origin_note"] = (
+            f"matched by {origin['matched_by']}, but the site copy could NOT be read "
+            f"({reason}) - no byte or revision comparison was made"
+        )
+        status = int(reason.removeprefix("HTTP ")) if reason.startswith("HTTP ") else 0
+        record["lookup_error"] = _error("content-unavailable", "download-workbook", http_status=status)
+        errors.append(record["lookup_error"])
+
+
+def _finish_live(result: dict[str, Any], lookup: TableauLookup, reporter: NullReporter | None = None) -> dict[str, Any]:
     """Scrub the live-derived record and release the session, without either being able to lose it.
 
     ⚠️ Both steps used to sit unguarded after all the work was done, and that cost the whole file:
@@ -632,24 +1004,72 @@ def _finish_live(result: dict[str, Any], lookup: TableauLookup) -> dict[str, Any
     Redaction failing is the one case where fingerprints are NOT simply kept alongside the rest: an
     unscrubbed live record can carry a reflected credential, so the response-derived half is withheld
     and the local half survives. Fail-closed on the secret, fail-open on the evidence.
+
+    The SAFE SNAPSHOT goes to the supervisor between the two steps and nowhere else: after scrubbing
+    the result is safe to hold, and sign-out is a network call that can hang past any deadline (#576).
+    Sending it first is what stops a hung cleanup from costing a completed run its evidence.
     """
+    reporter = reporter or NullReporter()
+    reporter.operation(OP_SCRUB, 0, 1)
+    if reporter.cancelled:
+        return _cancelled_result(result["inputs"], result["input_count"], OP_SCRUB)
     try:
         result, _paths = scrub_tree(result, lookup.redact_text)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        LOG.warning("provenance redaction failed (%s) - live origin fields withheld", type(exc).__name__)
-        result["phase"]["errors"].append(_error("scrub-failed", "scrub", exc))
-        result = _without_live_fields(result, lookup.redact_text)
-    finally:
-        try:
-            signout_failure = lookup.sign_out()
-            if signout_failure is not None:
-                result["phase"]["errors"].append(_error("sign-out-failed", "sign-out", signout_failure))
-        except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            LOG.warning("Tableau sign-out failed (%s) - session left to expire", type(exc).__name__)
-            result["phase"]["errors"].append(_error("sign-out-failed", "sign-out", exc))
+        LOG.warning("provenance redaction failed (%s) - live origin fields withheld", _exception_class(exc))
+        result["phase"]["errors"].append(_error("scrub-failed", OP_SCRUB, exc))
+        result = _without_live_fields(result, lookup.redact_text, reporter)
+    if reporter.cancelled:
+        return _cancelled_result(result["inputs"], result["input_count"], OP_SCRUB)
+    reporter.operation(OP_SCRUB, 1, 1)
+    if result["phase"]["errors"]:
+        result["phase"]["status"] = "partial"
+    reporter.safe_snapshot(result)
+
+    reporter.operation(OP_SIGN_OUT, 0, 1)
+    if reporter.cancelled:
+        result["phase"]["status"] = "partial"
+        result["phase"]["errors"].append(_error(CANCELLED_CODE, OP_SIGN_OUT))
+        return result
+    try:
+        signout_failure = lookup.sign_out()
+        if signout_failure is not None:
+            result["phase"]["errors"].append(_error("sign-out-failed", OP_SIGN_OUT, signout_failure))
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        LOG.warning("Tableau sign-out failed (%s) - session left to expire", _exception_class(exc))
+        result["phase"]["errors"].append(_error("sign-out-failed", OP_SIGN_OUT, exc))
+    reporter.operation(OP_SIGN_OUT, 1, 1)
     if result["phase"]["errors"]:
         result["phase"]["status"] = "partial"
     return result
+
+
+def provenance_worker(conn: Any, cancel_event: Any, payload: dict[str, str]) -> None:
+    """The whole provenance computation, as one LEAF process a supervisor can terminate (#576).
+
+    It resolves its own credentials from the ``.env`` path it is handed, so no secret ever crosses
+    the pipe in either direction, and it owns no artifact path: publication is the parent's, exactly
+    once, whatever happens here. A failure it can describe is returned as a typed terminal result; a
+    failure it cannot is what the parent's deadline and exit-code inspection are for.
+
+    ⚠️ It must stay a LEAF. Killing a process does not kill its descendants on Windows (measured: a
+    grandchild survived and had to be terminated by PID), so the supervisor's guarantee is only as
+    good as this function starting no subprocess and no pool. The parent starts it as a DAEMON
+    process, which makes that structural: `multiprocessing` refuses to let a daemon have children.
+    """
+    reporter = WorkerReporter(conn, cancel_event)
+    try:
+        env = resolve_env(Path(payload.get("env") or ".env"))
+        result = build(Path(payload["input"]), env, reporter)
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        result = failure_result("build-failed", "build", exc)
+    try:
+        reporter.terminal(result)
+    finally:
+        try:
+            conn.close()
+        except (OSError, ValueError):  # pragma: no cover - the parent may already have closed it
+            LOG.debug("provenance progress channel already closed")
 
 
 WITHHELD_NOTE = "live origin withheld - provenance redaction failed for this run"
@@ -657,7 +1077,7 @@ DERIVED_INPUT_FIELDS = ("size_bytes", "sha256", "revision_key")
 DERIVED_MEMBER_FIELDS = ("size_bytes", "crc32")
 
 
-def _without_live_fields(result: dict[str, Any], redactor) -> dict[str, Any]:
+def _without_live_fields(result: dict[str, Any], redactor, reporter: NullReporter | None = None) -> dict[str, Any]:
     """The stamp with the response-derived half dropped and the local half made safe to persist.
 
     ⚠️ Keeping the local record verbatim is NOT safe, and an earlier revision did exactly that. A
@@ -673,6 +1093,9 @@ def _without_live_fields(result: dict[str, Any], redactor) -> dict[str, Any]:
     revision key, member sizes and CRCs. Every copied string goes, filename included. Losing the
     filename hurts a consumer; persisting a credential is not recoverable.
     """
+    reporter = reporter or NullReporter()
+    if reporter.cancelled:
+        return _cancelled_result(result["inputs"], result["input_count"], OP_SCRUB)
     reduced = {
         **result,
         "inputs": [
@@ -680,10 +1103,12 @@ def _without_live_fields(result: dict[str, Any], redactor) -> dict[str, Any]:
         ],
     }
     try:
+        if reporter.cancelled:
+            return _cancelled_result(result["inputs"], result["input_count"], OP_SCRUB)
         scrubbed, _paths = scrub_tree(reduced, redactor)
         return scrubbed
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-        LOG.warning("provenance redaction is unusable (%s) - keeping DERIVED evidence only", type(exc).__name__)
+        LOG.warning("provenance redaction is unusable (%s) - keeping DERIVED evidence only", _exception_class(exc))
         result["phase"]["errors"].append(_error("scrub-failed", "scrub-local-fields", exc))
         return {
             **result,

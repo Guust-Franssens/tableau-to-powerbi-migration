@@ -767,7 +767,7 @@ def _slice_only_run(bundle: Path, source_dir: Path, monkeypatch) -> tuple[int, l
     monkeypatch.setattr(
         run_estate,
         "stamp_inputs",
-        lambda _input, out_dir: (
+        lambda _input, out_dir, *_timeout: (
             stamped.append(out_dir)
             or run_estate.ProvenanceStampResult(True, "local_only", "fixture provenance published")
         ),
