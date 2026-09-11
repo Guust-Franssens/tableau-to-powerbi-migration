@@ -752,8 +752,10 @@ class DefinitionWitness:
 def compare_definitions(disk_blob: bytes, live_blob: bytes, model_revision: str) -> DefinitionWitness:
     """Exact TOM metadata equality including DAX, M, relationships, roles and culture instructions.
 
-    Normalization is JSON object-key order ONLY. Lists, defaults, expressions, annotations and
-    every nested property remain significant. There is no name-set, regex, or subset equality.
+    Compare the held serializer bytes, not a JSON float round-trip. The same TOM serializer/options
+    produce both sides; even an ordering/format difference refuses rather than guessing a semantic
+    normalization. Lists, defaults, expressions, annotations and every nested property remain
+    significant. There is no name-set, regex, or subset equality.
     Unknown root features are explicitly unsupported, even if a test supplies them on both sides.
     """
     disk, live = rev.parse_json_bytes(disk_blob), rev.parse_json_bytes(live_blob)
@@ -770,9 +772,9 @@ def compare_definitions(disk_blob: bytes, live_blob: bytes, model_revision: str)
                 raise EvidenceError("DEFINITION_UNSUPPORTED")
             if any(key in table for key in ("calculationGroup", "refreshPolicy", "detailRowsDefinition")):
                 raise EvidenceError("DEFINITION_UNSUPPORTED")
-    if _json_bytes(disk) != _json_bytes(live):
+    if disk_blob != live_blob:
         raise EvidenceError("DEFINITION_MISMATCH")
-    return DefinitionWitness(_json_bytes(disk), model_revision)
+    return DefinitionWitness(disk_blob, model_revision)
 
 
 def _skill_modules() -> tuple[Any, Any]:

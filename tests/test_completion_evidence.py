@@ -470,6 +470,19 @@ def test_unknown_definition_feature_is_not_silently_normalized():
         ce.compare_definitions(blob(model), blob(model), "sha256:" + "a" * 64)
 
 
+def test_semantic_witness_never_rounds_json_metadata_before_comparing_or_hashing():
+    original = (
+        b'{"tables":[{"name":"Orders","extendedProperties":[{"name":"numericHint","type":"json",'
+        b'"value":{"precision":1.00000000000000001}}]}]}'
+    )
+    changed = original.replace(b"1.00000000000000001", b"1.00000000000000002")
+    observed = ce.compare_definitions(original, original, "sha256:" + "a" * 64)
+    assert observed.model_blob == original
+    assert observed.facts()["sha256"] == hashlib.sha256(original).hexdigest()
+    with pytest.raises(ce.EvidenceError, match="^DEFINITION_MISMATCH$"):
+        ce.compare_definitions(original, changed, "sha256:" + "a" * 64)
+
+
 def test_wrong_endpoint_and_unreachable_connector_mention_do_not_cover_source():
     model = model_fixture()
     witness = ce.DefinitionWitness(blob(model), "sha256:" + "a" * 64)

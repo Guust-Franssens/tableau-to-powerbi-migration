@@ -329,11 +329,11 @@ def execute_typed(connection, dax: str, *, max_rows: int = 100_000, timeout_seco
 
 
 def _json_safe(value: Any) -> Any:  # pylint: disable=too-many-return-statements  # a type dispatch
-    """Coerce one .NET/CLR value into something `json.dumps` accepts, WITHOUT changing its meaning.
+    """Legacy NDJSON coercion, deliberately lossy for Decimal; NEVER use for evidence hashing.
 
     Numerics stay numeric (a stringified number would silently become a string comparison upstream);
     null stays null (never 0 - see obligation 3); anything genuinely foreign degrades to `str`, which
-    is lossy but honest and cannot crash the stream.
+    keeps the old wire contract. Exact observations use execute_typed/TypedResult instead.
     """
     if value is None:
         return None
