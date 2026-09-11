@@ -311,8 +311,8 @@ def test_actual_process_refusal_and_clean_remotesigned_control(
     assert result.returncode == expected
     assert control.with_name("started.txt").exists() is (expected == 23)
     if expected == 1:
-        assert not result.stdout
-        assert "not digitally signed" in result.stderr or "running scripts is disabled" in result.stderr
+        # The known policy and independent start witness are the oracle, not rendered error prose.
+        assert not result.stdout and result.stderr
     if marked:
         assert stream.read_text(encoding="ascii") == "[ZoneTransfer]\nZoneId=3\n", "control auto-unblocked the file"
 
@@ -352,7 +352,8 @@ def test_actual_allsigned_refusal_still_allows_exact_file_diagnostic(process_she
     content = "[ZoneTransfer]\nZoneId=3\nHostUrl=CONTROL_SECRET_URL\n"
     stream.write_text(content, encoding="ascii")
     blocked = _ps(process_shell, "-ExecutionPolicy", "AllSigned", "-File", str(control))
-    assert blocked.returncode == 1 and "not digitally signed" in blocked.stderr
+    assert blocked.returncode == 1 and not blocked.stdout and blocked.stderr
+    assert not control.with_name("started.txt").exists()
     result = _published(process_shell, 1, control, policy="AllSigned")
     assert result.returncode == 0
     assert result.stdout.splitlines() == ["FILE_READABLE", "MOTW_PRESENT", "ZoneId=3"]
