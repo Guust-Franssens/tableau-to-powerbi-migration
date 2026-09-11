@@ -431,8 +431,10 @@ clone is self-configuring:
 In Copilot CLI, install the plugins once with `/plugin` (including
 `tableau-fabric-skills@tableau-collection`, plus the `microsoft/skills-for-fabric` and
 `Guust-Franssens/powerbi-playbook` skill plugins) and register the MCP servers with `/mcp`. Then run
-the [preflight cannot start](docs/operator-runbook.md#preflight-cannot-start) bootstrap route first,
-then `powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1` to confirm the machine is configured.
+`powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1` first to confirm the machine is configured.
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+the [preflight cannot start](docs/operator-runbook.md#preflight-cannot-start) recovery route.
+If recovery is allowed, retry the **exact originating command and arguments** (plain preflight).
 Preflight reports a concrete install hint for anything missing and blocks if the conversion engine is
 installed from more than one source; the plugin is the canonical engine.
 

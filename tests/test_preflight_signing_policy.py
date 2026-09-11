@@ -21,14 +21,14 @@ import test_openability_claim_citations as persona_pins
 
 ROOT = Path(__file__).resolve().parents[1]
 ORIGINS = {
-    "AGENTS.md": ("-Update", "-CheckUpstream"),
-    ".github/copilot-instructions.md": ("-Update", "-CheckUpstream"),
-    "README.md": (),
-    "docs/operator-runbook.md": ("-Update", "-CheckUpstream"),
-    "docs/start-with-one-workbook.md": ("-Update",),
-    "scripts/README.md": ("-Update", "-CheckUpstream"),
-    ".github/agents/tableau-migrator.agent.md": (),
-    ".github/agents/dry-run-operator.agent.md": (),
+    "AGENTS.md": (("-Update", "-CheckUpstream"), ()),
+    ".github/copilot-instructions.md": (("-Update", "-CheckUpstream"),),
+    "README.md": ((), ()),
+    "docs/operator-runbook.md": (("-Update", "-CheckUpstream"),),
+    "docs/start-with-one-workbook.md": (("-Update",),),
+    "scripts/README.md": (("-Update", "-CheckUpstream"),),
+    ".github/agents/tableau-migrator.agent.md": ((),),
+    ".github/agents/dry-run-operator.agent.md": ((),),
 }
 PERSONAS = ("tableau-migrator.agent.md", "dry-run-operator.agent.md")
 ENTRY = re.compile(r"powershell -ExecutionPolicy Bypass -File scripts[\\/]preflight\.ps1[^\r\n`]*")
@@ -71,43 +71,80 @@ def _route_row(verdict: str) -> str:
     return next(line for line in _runbook_recovery().splitlines() if f"| **{verdict}." in line)
 
 
-def _assert_entry_route(text: str, arguments: tuple[str, ...]) -> str:
-    entry = ENTRY.search(text)
-    route = ROUTE.search(text)
-    assert entry is not None, "direct preflight invocation missing"
-    assert route is not None and entry.end() < route.start(), "fallback must follow the direct invocation"
-    expected = " ".join(("powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1", *arguments))
-    assert entry.group().strip().replace("\\", "/") == expected, "originating command arguments changed"
-    recovery = _normalized(text[entry.end() : route.end() + 400]).lower()
-    assert REFUSAL in recovery, "recovery must require an actual startup refusal"
-    assert "exact originating command and arguments" in recovery, "recovery lost its originating command"
-    assert not re.search(r"Get-ExecutionPolicy|Zone\.Identifier|Before any PS1", text[: entry.start()], re.I)
-    return entry.group().strip()
+def _assert_entry_route(text: str, arguments: tuple[tuple[str, ...], ...]) -> list[str]:
+    entries = list(ENTRY.finditer(text))
+    assert entries, "direct preflight invocation missing"
+    assert len(entries) == len(arguments), "direct preflight occurrence count changed"
+    assert not ROUTE.search(text[: entries[0].start()]), "fallback must follow the direct invocation"
+    assert not re.search(r"Get-ExecutionPolicy|Zone\.Identifier|Before any PS1", text[: entries[0].start()], re.I)
+    commands = []
+    for index, (entry, flags) in enumerate(zip(entries, arguments, strict=True)):
+        commands.append(entry.group().strip())
+        expected = " ".join(("powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1", *flags))
+        assert commands[-1].replace("\\", "/") == expected, "originating command arguments changed"
+        end = entries[index + 1].start() if index + 1 < len(entries) else len(text)
+        following = text[entry.end() : end]
+        routes = list(ROUTE.finditer(following))
+        if not routes and index > 0 and not flags:
+            # AGENTS.md's plain setup call explicitly reuses its already-validated session-start fallback.
+            assert re.match(r"\s*```\s+That fallback keeps this call \*\*plain\*\*, without updates\.", following), (
+                "direct invocation is missing its recovery route"
+            )
+            continue
+        assert len(routes) == 1, "fallback must follow the direct invocation"
+        route = routes[0]
+        assert REFUSAL in _normalized(following[: route.start()]).lower(), (
+            "recovery must require an actual startup refusal"
+        )
+        recovery = _normalized(following[route.end() :].split("\n\n", 1)[0]).lower()
+        assert "exact originating command and arguments" in recovery, "recovery lost its originating command"
+    return commands
 
 
 @pytest.mark.parametrize("document", ORIGINS)
 def test_direct_preflight_precedes_reactive_recovery(document: str) -> None:
-    """Every entry keeps its original first command, including independently invoked personas."""
+    """Every command and linked recovery is checked, including later setup sections in the same file."""
     _assert_entry_route((ROOT / document).read_text(encoding="utf-8"), ORIGINS[document])
 
 
 @pytest.mark.parametrize("document", ORIGINS)
-def test_moving_recovery_before_preflight_fails_the_order_assertion(document: str) -> None:
-    """A policy-listing gate must not replace the first action again."""
+def test_each_occurrence_rejects_proactive_recovery_and_changed_arguments(document: str) -> None:
+    """Mutate each occurrence separately: earlier correct instructions must not mask a later defect."""
     text = (ROOT / document).read_text(encoding="utf-8")
     _assert_entry_route(text, ORIGINS[document])
-    link = ROUTE.search(text).group()
-    with pytest.raises(AssertionError, match="fallback must follow the direct invocation"):
-        _assert_entry_route(link + "\n" + ROUTE.sub("preflight cannot start", text), ORIGINS[document])
+    entries = list(ENTRY.finditer(text))
+    for entry in entries:
+        changed = text[: entry.end()] + " -Update" + text[entry.end() :]
+        with pytest.raises(AssertionError, match="originating command arguments changed"):
+            _assert_entry_route(changed, ORIGINS[document])
+    for route in ROUTE.finditer(text):
+        entry = next(match for match in reversed(entries) if match.end() < route.start())
+        changed = (
+            text[: entry.start()] + route.group() + "\n" + text[entry.start() : route.start()] + text[route.end() :]
+        )
+        with pytest.raises(AssertionError, match="fallback must follow the direct invocation"):
+            _assert_entry_route(changed, ORIGINS[document])
+        qualifier = text[entry.end() : route.start()]
+        proactive = re.sub(
+            r"only\s+after\s+an\s+actual\s+unsigned/ExecutionPolicy\s+startup\s+refusal",
+            "Before preflight starts",
+            qualifier,
+            count=1,
+            flags=re.I,
+        )
+        assert proactive != qualifier, "the intended refusal condition was not mutated"
+        changed = text[: entry.end()] + proactive + text[route.start() :]
+        with pytest.raises(AssertionError, match="recovery must require an actual startup refusal"):
+            _assert_entry_route(changed, ORIGINS[document])
 
 
 @pytest.mark.parametrize("persona", PERSONAS)
 def test_migration_update_substitution_fails_the_origin_assertion(persona: str) -> None:
     """Following the fallback must not change a migration call into session-start repair."""
     text = (ROOT / ".github" / "agents" / persona).read_text(encoding="utf-8")
-    command = _assert_entry_route(text, ())
-    with pytest.raises(AssertionError, match="originating command arguments changed"):
-        _assert_entry_route(text.replace(command, command + " -Update -CheckUpstream", 1), ())
+    for command in _assert_entry_route(text, ((),)):
+        with pytest.raises(AssertionError, match="originating command arguments changed"):
+            _assert_entry_route(text.replace(command, command + " -Update -CheckUpstream", 1), ((),))
 
 
 @pytest.mark.parametrize("persona", PERSONAS)
@@ -391,16 +428,18 @@ def test_explicit_trusted_file_unblock_after_actual_motw_refusal(process_shell: 
 def test_originating_commands_keep_arguments_outputs_and_exit_codes(
     process_shell: str, control: Path, document: str, code: int
 ) -> None:
-    """Execute each published direct command; an in-script dependency failure is not startup refusal."""
-    command = _assert_entry_route((ROOT / document).read_text(encoding="utf-8"), ORIGINS[document])
-    command += f' -Tenant "tenant with spaces" -Subscription "sub with spaces" -Code {code}'
-    result = _ps(process_shell, "-Command", command + "\nexit $LASTEXITCODE", cwd=control.parent.parent)
-    assert result.returncode == code
-    assert control.with_name("started.txt").read_text(encoding="utf-8").strip() == "CONTROL_STARTED"
-    assert result.stderr.strip() == "CONTROL_STDERR"
-    assert json.loads(result.stdout) == {
-        "Update": "-Update" in ORIGINS[document],
-        "CheckUpstream": "-CheckUpstream" in ORIGINS[document],
-        "Tenant": "tenant with spaces",
-        "Subscription": "sub with spaces",
-    }
+    """Execute every occurrence; a prior invocation's start witness must not mask a later failure."""
+    commands = _assert_entry_route((ROOT / document).read_text(encoding="utf-8"), ORIGINS[document])
+    for command, arguments in zip(commands, ORIGINS[document], strict=True):
+        control.with_name("started.txt").unlink(missing_ok=True)
+        command += f' -Tenant "tenant with spaces" -Subscription "sub with spaces" -Code {code}'
+        result = _ps(process_shell, "-Command", command + "\nexit $LASTEXITCODE", cwd=control.parent.parent)
+        assert result.returncode == code
+        assert control.with_name("started.txt").read_text(encoding="utf-8").strip() == "CONTROL_STARTED"
+        assert result.stderr.strip() == "CONTROL_STDERR"
+        assert json.loads(result.stdout) == {
+            "Update": "-Update" in arguments,
+            "CheckUpstream": "-CheckUpstream" in arguments,
+            "Tenant": "tenant with spaces",
+            "Subscription": "sub with spaces",
+        }
