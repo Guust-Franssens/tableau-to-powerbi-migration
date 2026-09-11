@@ -49,7 +49,9 @@ git sparse-checkout set .github .vscode docs scripts tests migrations
 git sparse-checkout add examples/eea-urban-adaptation
 ```
 
-For the full repo (all examples + showcase), use a normal `git clone …`. Then set up the Python env:
+For the full repo (all examples + showcase), use a normal `git clone …`.
+
+Set up the Python environment and run preflight directly, without a signing-policy pre-check:
 
 ```powershell
 uv venv
@@ -57,7 +59,16 @@ uv venv
 uv sync --all-extras   # --all-extras pulls tableauhyperapi/playwright/pillow used by the scripts below
 
 powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
+```
 
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+[preflight cannot start](docs/operator-runbook.md#preflight-cannot-start).
+If recovery is allowed, retry the **exact originating command and arguments**; this quickstart uses
+plain preflight. If activation was the refused command, diagnose that exact script instead.
+
+Continue only after preflight exits 0:
+
+```powershell
 # Parse a workbook into the intermediate spec
 python scripts\parse_tableau.py migrations\workbooks\<name>\source\<workbook>.twbx `
     -o migrations\workbooks\<name>\migration-spec.json
@@ -420,7 +431,10 @@ clone is self-configuring:
 In Copilot CLI, install the plugins once with `/plugin` (including
 `tableau-fabric-skills@tableau-collection`, plus the `microsoft/skills-for-fabric` and
 `Guust-Franssens/powerbi-playbook` skill plugins) and register the MCP servers with `/mcp`. Then run
-`powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1` to confirm the machine is configured.
+`powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1` first to confirm the machine is configured.
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+the [preflight cannot start](docs/operator-runbook.md#preflight-cannot-start) recovery route.
+If recovery is allowed, retry the **exact originating command and arguments** (plain preflight).
 Preflight reports a concrete install hint for anything missing and blocks if the conversion engine is
 installed from more than one source; the plugin is the canonical engine.
 

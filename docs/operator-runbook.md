@@ -95,9 +95,16 @@ Everything in this section fails silently or slowly if you leave it to the morni
 
 ### 1.1 Tooling
 
+Run the canonical direct command first; do not make a policy listing a prerequisite:
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 -Update -CheckUpstream
 ```
+
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+[preflight cannot start](#preflight-cannot-start).
+If recovery is allowed, retry the **exact originating command and arguments**; this session-start
+call retains `-Update -CheckUpstream`. An ordinary dependency failure uses preflight's own hints.
 
 ✅ verified — the timing rule is real and it matters:
 
@@ -152,6 +159,138 @@ how to set it, including why the hint preflight prints does not fix your current
 `-CheckUpstream` costs ~3s of network and is **advisory only**. It is the only check that asks *"has
 the world moved"* rather than *"is what I have good enough"* — every other check compares against a
 hard-coded number.
+
+#### Preflight cannot start
+
+**Reactive, manual recovery only — not a pre-check.** First try the exact command in the document
+that sent you here. Use this fallback **only after an actual unsigned/ExecutionPolicy startup
+refusal**, not just exit `1`, an `UnauthorizedAccess` identifier or a policy listing. If preflight
+started and printed dependency hints, use those hints instead. If you cannot establish whether it
+started, stop as **CANNOT_ESTABLISH**; do not guess from an error identifier.
+
+A customer reported a startup signing refusal on **September 11, 2026** (#610). The recovery does
+not require customer screenshots, identity or local paths in a report. Keep the **exact originating
+command and arguments** locally, including its interpreter and any `-ExecutionPolicy` request.
+
+From that repository root, run these **read-only diagnostics**, one at a time, in Windows
+PowerShell 5.1 or PowerShell 7 on Windows. They run built-in inspection commands, never repository
+script contents. If the refusing interpreter was `pwsh`, use `pwsh` instead of the leading
+`powershell` in each diagnostic — **not** as an alternate engine to run a denied script.
+Check `$LASTEXITCODE` immediately after each child; a nonzero code stops diagnosis.
+
+1. Read policy scopes. A fresh diagnostic child's **Process** scope need not match the failed
+   child's: combine this listing with the original invocation, not an assumed effective policy.
+
+```powershell
+powershell -NoProfile -Command {
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Get-ExecutionPolicy -List -ErrorAction Stop | Out-String
+        exit 0
+    } catch {
+        Write-Output 'CANNOT_ESTABLISH_POLICY'
+        exit 1
+    }
+}
+```
+
+2. Check the exact target's existence and readability **before**, and separately from, its
+   `Zone.Identifier` stream. Keep the literal path quoted, including in a checkout with spaces.
+   If another script was refused, substitute that exact file, not `preflight.ps1`.
+
+```powershell
+powershell -NoProfile -Command {
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        $file = Get-Item -LiteralPath '.\scripts\preflight.ps1' -ErrorAction Stop
+        if ($file.PSIsContainer) { throw 'Not a file' }
+        $reader = [IO.File]::OpenRead($file.FullName)
+        $reader.Dispose()
+    } catch {
+        Write-Output 'CANNOT_ESTABLISH_FILE'
+        exit 1
+    }
+    Write-Output 'FILE_READABLE'
+    try {
+        $streams = @(Get-Item -LiteralPath $file.FullName -Stream * -ErrorAction Stop)
+        if ($streams.Stream -notcontains 'Zone.Identifier') {
+            Write-Output 'MOTW_ABSENT'
+            exit 0
+        }
+        Write-Output 'MOTW_PRESENT'
+        Get-Content -LiteralPath $file.FullName -Stream Zone.Identifier -ErrorAction Stop |
+            Select-String -Pattern '^ZoneId=[34]$' |
+            Select-Object -ExpandProperty Line
+        exit 0
+    } catch {
+        Write-Output 'CANNOT_ESTABLISH_STREAM'
+        exit 1
+    }
+}
+```
+
+An existing, readable file without that stream prints **FILE_READABLE / MOTW_ABSENT, exit 0**.
+A missing, unreadable or non-file target prints **CANNOT_ESTABLISH_FILE, exit 1**; stream inspection
+failure prints **CANNOT_ESTABLISH_STREAM, exit 1**, never MOTW_ABSENT. A present stream prints only
+**MOTW_PRESENT** and exact `ZoneId=3` / `ZoneId=4` lines, never its URL-bearing contents.
+
+✅ **Microsoft's precedence, not a retry strategy:** the first defined scope wins:
+**MachinePolicy → UserPolicy → Process → CurrentUser → LocalMachine**.
+`-ExecutionPolicy Bypass` requests **Process** only; it does **not** override Group Policy and does
+not persist a setting. `Zone.Identifier` is a file download marker, not a signature. Its existence
+alone does not prove an Internet zone or explain a refusal.
+Sources: Microsoft [execution-policy precedence and Group Policy](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies?view=powershell-5.1)
+and [Unblock-File](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/unblock-file?view=powershell-5.1).
+
+**Choose the route from the actual refusal and established facts, not from a policy name alone:**
+
+| Observed facts | Action |
+|---|---|
+| **No startup refusal**, including managed **RemoteSigned** or another permissive policy with **MOTW_ABSENT** | **USE_ORIGINAL_COMMAND.** No recovery is needed: use the exact originating command and arguments. A defined MachinePolicy/UserPolicy alone is not a reason to stop or diagnose. If the command already completed, continue normally rather than rerunning it. |
+| **Actual startup refusal**; the highest-priority defined **MachinePolicy/UserPolicy** is **AllSigned** or **Restricted** | **STOP — MANAGED_SIGNING_POLICY.** Request **IT action / an approved signed distribution** for AllSigned; Restricted needs IT approval to permit scripts, not merely a signature. No retry, unblocking, alternate interpreter or script-content workaround. |
+| **Actual unsigned startup refusal**; the **failed invocation's effective policy was RemoteSigned**, the target is **FILE_READABLE**, and its stream has **ZoneId=3 or ZoneId=4** | **MOTW_REMOTESIGNED.** This can include managed RemoteSigned, but never a winning AllSigned/Restricted policy. **Verify the repository source and review the file first. Prefer a fresh `git clone` from the verified repository.** Within the approved workflow, the alternative is the narrow trusted-file unblock below. Never auto-unblock, recurse over a checkout/downloads folder, or change persistent policy. |
+| An **actual managed refusal** is not explained by the signing/MOTW cases, or a non-managed AllSigned/Restricted refusal needs an approved route | **STOP — POLICY_REFUSAL.** Ask IT for an approved distribution/path; do not weaken policy or assume removing a marker will help. |
+| Both managed scopes are Undefined and the attempted command requested **Process Bypass**, but startup still failed | **STOP — CANNOT_ESTABLISH.** MOTW alone cannot explain this failure: Process Bypass outranks local RemoteSigned. Ask IT to inspect application-control logs; do not recommend unblocking merely because a stream exists. |
+| **PowerShell is unavailable**, diagnostics fail, access is denied, facts disagree, or **AppLocker/WDAC** or another unknown block is suspected | **STOP — CANNOT_ESTABLISH.** This is distinct from a proven signing-policy refusal, not an AppLocker/WDAC diagnosis. Ask IT to check the approved installation/path and application-control logs. Do not switch engines or execute script contents. |
+
+**Only for the MOTW_REMOTESIGNED row**, after source verification and review of this exact file:
+
+```powershell
+powershell -NoProfile -Command {
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Unblock-File -LiteralPath '.\scripts\preflight.ps1' -ErrorAction Stop
+        exit 0
+    } catch {
+        Write-Output 'CANNOT_ESTABLISH_UNBLOCK'
+        exit 1
+    }
+}
+```
+
+That removes only this file's alternate stream; it does not sign it or change policy. Any other
+script needs its own review and diagnosis. After an allowed recovery, **retry the exact originating
+command and arguments once**, from the verified repository root:
+
+- **Session start** (`AGENTS.md`, `.github/copilot-instructions.md`, this runbook or the session-start
+  example in `scripts/README.md`): retain `-Update -CheckUpstream`.
+- **Migration personas** (`tableau-migrator`, `dry-run-operator`), a migration-start call or the
+  README quickstart: return to **plain preflight**, with neither update flag.
+- **Single-workbook setup** (`docs/start-with-one-workbook.md`): retain its `-Update`.
+
+These are the defaults, not replacement commands: preserve any original `-Tenant`, `-Subscription`
+or other arguments too. Never substitute a session-start command for a migration call. If the retry
+is refused, stop and report the established facts; no relaunch loop. Do not post raw error output,
+full paths, stream URLs or screenshots; report only the route, scope/policy names and redacted error type.
+
+❌ **Automatic bootstrap remains unsupported (#610).** This manual fallback leaves `preflight.ps1`
+unchanged and does not claim an automatic run-or-diagnose entrypoint or ship a `.cmd` dispatcher.
+No signed release is provided: approved signing certificates, publisher trust and organizational
+distribution remain prerequisites outside this change.
+⚠️ `tests/test_preflight_signing_policy.py` exercises generated local files and child-process policy
+controls; it does **not change or emulate Group Policy, AppLocker or WDAC enforcement**.
+The managed-policy routes rely on Microsoft's documented precedence; customer-device validation
+remains an IT/operator step.
 
 ### 1.2 Know which engine you are running — the bundle records it for you
 

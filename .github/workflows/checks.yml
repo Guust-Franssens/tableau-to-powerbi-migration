@@ -194,6 +194,9 @@ jobs:
       - name: Tests (pbip-model-refresh bundle, on the platform it actually runs on)
         run: uv run pytest -q .github/skills/pbip-model-refresh/tests/
 
+      - name: Tests (preflight signing-policy controls, without changing Group Policy)
+        run: uv run pytest -q tests/test_preflight_signing_policy.py --basetemp _preflight_signing_tests
+
       # The root `conftest.py` deselects `gui` (window-spawning) tests in every tier, so an
       # operator's desktop is never hijacked (issue #447). That protection is worthless if NOBODY
       # runs them: issue #435 is this repo's own record of 15 engine tests skipping silently in CI,

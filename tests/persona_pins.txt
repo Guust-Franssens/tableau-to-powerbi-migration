@@ -82,6 +82,8 @@ f583f9bfa584c624448841bf27f1866054ff653887487346852cd1819f79faf6  | 5 | engine |
 977dfe8972ec0400bcbc3fdca64160fdd9294a649cb38cfc75a8e67339dfe92f  | 7 | **PRE-check** | `python scripts/check_reference_readin
 6f692a8af643b0e9bf4987fc5442f080d298fb20f9814dee8501b646ed9e85fa  | 8 | **POST-check** | `python scripts/check_unit.py <run>/b
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+859d0070eaac435765a6f45ed27fb1e8e764267b0c512c2b452d86aeec526c6d  **Only after an actual unsigned/ExecutionPolicy startup refu
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 05fe13f2d5905006da515cf47b73944b0b9093366cd66c824af9d19075d7a6b4  ~~ **Credentials come from `.env` or exported environment va
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 ea3f150cc48476f9756e7321caec9c910f268459fb5fee455df160c168e21cc1  ## How to read a gate ~ this is the part that is easy to get
@@ -443,9 +445,9 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 7136000e494604c07769c55da3f0ec4ea85eef9508d8840bc71ec8a6e745b742  ## Workflow
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-2d7297727cbe0f620e8d5e84b3b0990e9abd9f395ae823ccd406410d0b721706  0. **Preflight every invocation, before anything else** ~ th
+4cb0883da72ab2344d1a30ea472a1722da7347db99db2a1be99391c9881ea35a  0. **Preflight every invocation, first** ~ **plain**, **neve
 a5415270216716edb9afac3881a5e7970e1f9a2adcede2d299f2f6b25b02a697  ``` powershell -ExecutionPolicy Bypass -File scripts/preflig
-3ceb7cf6d7f97e087068fd666fb09e58037b7bf4325185f11a47fc306fd7c41a  `-Update` belongs to *session start* only (`AGENTS.md`): upg
+8db99ded121e393f37502220f5ea3a7515a3db1cab85c7538ee30e219c489a20  **Only after an actual unsigned/ExecutionPolicy startup refu
 187acc29692c89cd15e512985265a1f822077baecac261d4415e514ab2ac93d1  1. **Read the brief, then confirm inputs.** `migrations/work
 d4c8d021b6e27e59433c5c23b5680b4dd0ee077ca799c1eeab2e065e33d00c6a  2. **Run the deterministic tier ~ it builds, you consume.** 
 272158cc1a2edb7e189325c99d69def28de430900304fdea05fbca16345868ca  3. **Pick the canonical contract; never invent a parallel sp

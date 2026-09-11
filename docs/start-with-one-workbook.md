@@ -16,7 +16,7 @@ For a whole site instead, see [`AGENTS.md`](../AGENTS.md) → *Starting a migrat
 > authenticate and then has to stop and ask you anyway. Open Desktop, connect to the database or
 > warehouse the dashboard reads, and confirm it refreshes — *before* you start.
 
-Then get the environment green:
+Get the environment green with the direct preflight command, without a signing-policy pre-check:
 
 ```
 git clone <this repo>
@@ -24,6 +24,11 @@ cd tableau-to-pbi-migration
 uv sync --all-extras
 powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update
 ```
+
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+[preflight cannot start](operator-runbook.md#preflight-cannot-start).
+If recovery is allowed, retry the **exact originating command and arguments**; this setup call
+retains `-Update`, not the runbook's session-start arguments.
 
 Preflight is the contract — it prints an install hint beside anything missing and exits non-zero.
 Beyond the Fabric skills, the Power BI Desktop bridge and the `powerbi-report-author` CLI, the one
