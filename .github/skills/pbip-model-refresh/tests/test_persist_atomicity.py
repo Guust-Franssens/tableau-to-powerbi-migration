@@ -37,6 +37,7 @@ the code persisted by default).
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import socket
 import struct
@@ -44,12 +45,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 # `conftest.py` next to this file puts the skill's own `scripts/` on `sys.path`.
 # ruff: noqa: E402  (the conftest-provided path must be in place before these imports)
 import refresh_pbip_model
+from probe_desktop_query import DesktopIdentity
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 
@@ -188,6 +191,117 @@ def _no_staging_files(cache: Path) -> bool:
     unique-named staging file leaked.
     """
     return not list(cache.parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("mode", ["normal", "commit-raise", "wrong-image", "failed-replace", "truncated"])
+def test_causal_commit_observes_intended_bytes_not_mtime_or_a_writer_flag(tmp_path, monkeypatch, mode):
+    cache = _model(tmp_path, compat=1604)
+    content = _abf_bytes()
+    cache.parent.mkdir()
+    cache.write_bytes(content)  # An old identical image cannot stand in for this operation.
+    stamp = cache.stat().st_mtime_ns
+    native_replace = os.replace
+    observed = []
+
+    def replace_cache(source, destination):
+        if Path(destination) == cache:
+            if mode == "failed-replace":
+                raise OSError("replace failed")
+            native_replace(source, destination)
+            if mode == "wrong-image":
+                Path(destination).write_bytes(_abf_bytes(seed=1))
+            os.utime(destination, ns=(stamp, stamp))  # Successful writes need not change mtime.
+            if mode in ("commit-raise", "wrong-image"):
+                raise OSError("moved, then raised")
+        else:
+            native_replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", replace_cache)
+
+    def persist():
+        return refresh_pbip_model._persist_image(
+            cache,
+            cache.parent.parent,
+            1606,
+            lambda path: path.write_bytes(content[:-1] if mode == "truncated" else content),
+            on_commit=observed.append,
+        )[0]
+
+    if mode == "wrong-image":
+        with pytest.raises(refresh_pbip_model.CompatRollbackError, match="intended image"):
+            persist()
+    elif mode == "failed-replace":
+        with pytest.raises(OSError, match="replace failed"):
+            persist()
+    else:
+        assert persist() is (mode != "truncated")
+    if mode in ("normal", "commit-raise"):
+        digest = hashlib.sha256(content).hexdigest()
+        assert observed == [refresh_pbip_model.ImageCommit(digest, len(content), digest, len(content))]
+        assert cache.read_bytes() == content
+    else:
+        assert observed == []
+    level = "1606" if mode in ("normal", "commit-raise", "wrong-image") else "1604"
+    assert f"compatibilityLevel: {level}" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
+    assert _no_staging_files(cache)
+
+
+@pytest.mark.parametrize("catalogues", ["one", "missing", "ambiguous", "wrong"])
+def test_imagesave_observation_is_bound_and_holds_post_alignment_input(tmp_path, monkeypatch, catalogues):
+    cache = _model(tmp_path, compat=1604)
+    identity = refresh_pbip_model.BoundDesktop(
+        DesktopIdentity(111, "100", 222, "101", 52001),
+        "11111111-2222-3333-4444-555555555555",
+    )
+    database = SimpleNamespace(ID=identity.catalogue, CompatibilityLevel=1606)
+    databases = {
+        "one": [database],
+        "missing": [],
+        "ambiguous": [database, database],
+        "wrong": [SimpleNamespace(ID="other", CompatibilityLevel=1606)],
+    }[catalogues]
+    writes, observed = [], []
+
+    def write(catalogue, stream):
+        writes.append(catalogue)
+        stream.path.write_bytes(_abf_bytes())
+
+    server = SimpleNamespace(Databases=databases, Connect=lambda _: None, Disconnect=lambda: None, ImageSave=write)
+    monkeypatch.setattr(refresh_pbip_model, "_load_amo", lambda: lambda: server)
+    monkeypatch.setattr(refresh_pbip_model, "desktop_identity", lambda _: identity.identity)
+    monkeypatch.setitem(
+        sys.modules,
+        "System.IO",
+        SimpleNamespace(
+            FileAccess=SimpleNamespace(Write=1),
+            FileMode=SimpleNamespace(Create=2),
+            FileStream=lambda path, *_: SimpleNamespace(path=Path(path), Close=lambda: None),
+        ),
+    )
+
+    def record(observation):
+        assert cache.with_name("cache.abf.lock").exists()
+        observed.append(observation)
+
+    if catalogues != "one":
+        code = "CATALOGUE_CHANGED" if catalogues == "wrong" else "CATALOGUE_UNESTABLISHED"
+        with pytest.raises(refresh_pbip_model.ObservationUnavailable, match=f"^{code}$"):
+            refresh_pbip_model.image_save(52001, cache, cache.parent.parent, bound=identity, on_persist=record)
+        assert writes == observed == []
+        return
+    assert (
+        refresh_pbip_model.image_save(52001, cache, cache.parent.parent, bound=identity, on_persist=record)[0] is True
+    )
+    assert writes == [identity.catalogue] and len(observed) == 1
+    assert observed[0].catalogue == identity.catalogue and observed[0].method == "AMO_ImageSave"
+    assert observed[0].compatibility_level == 1606
+    assert observed[0].database_tmdl == (cache.parent.parent / "definition" / "database.tmdl").read_bytes()
+    assert b"compatibilityLevel: 1606" in observed[0].database_tmdl
+    assert not cache.with_name("cache.abf.lock").exists()
+    with pytest.raises(refresh_pbip_model.ObservationUnavailable, match="^WRONG_PID_PORT$"):
+        refresh_pbip_model.image_save(52002, cache, bound=identity, on_persist=record)
+    with pytest.raises(refresh_pbip_model.ObservationUnavailable, match="^IDENTITY_UNESTABLISHED$"):
+        refresh_pbip_model.image_save(52001, cache, on_persist=record)
 
 
 def test_the_builder_reproduces_a_real_cache_abf_header() -> None:

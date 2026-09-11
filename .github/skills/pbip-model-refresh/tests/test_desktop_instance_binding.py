@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import asdict, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +35,8 @@ from refresh_pbip_model import _instance, _resolve_pid, same_model, tmdl_tables
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 CREDENTIAL_PROBE_PS1 = SKILL_ROOT / "scripts" / "probe_desktop_credential.ps1"
 REF_TABLE_RE = re.compile(r"^ref table\s+(?:'([^']+)'|(\S+))", re.MULTILINE)
+OBSERVED_IDENTITY = probe_desktop_query.DesktopIdentity(111, "100", 222, "101", 52001)
+OBSERVED_CATALOGUE = "11111111-2222-3333-4444-555555555555"
 
 # Real Power BI auto date/time tables ALWAYS carry a canonical 8-4-4-4-12 GUID suffix, and the
 # identity fingerprint now filters them by that exact shape rather than a name prefix (round-3
@@ -153,6 +157,65 @@ def test_msmdsrv_lookup_scopes_by_pid_and_dedupes_its_output(monkeypatch) -> Non
     assert seen["env"]["PID_FILTER"] == "", "an inherited PID_FILTER must not scope a machine-wide query"
 
 
+def test_observation_identity_uses_exact_parent_start_child_and_unique_port(monkeypatch):
+    calls = []
+    monkeypatch.setattr(probe_desktop_query, "os", SimpleNamespace(name="nt", environ={}))
+
+    def observe(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(stdout=json.dumps(asdict(OBSERVED_IDENTITY)))
+
+    monkeypatch.setattr(probe_desktop_query.subprocess, "run", observe)
+    assert probe_desktop_query.desktop_identity(111, 52001) == OBSERVED_IDENTITY
+    assert calls[0][1]["env"]["OBSERVATION_PID"] == "111"
+    assert calls[0][1]["timeout"] == 30 and calls[0][1]["check"] is True
+    script = calls[0][0][-1]
+    assert "ParentProcessId -eq $p.ProcessId" in script
+    assert "$a.Count -ne 1" in script and "$ports.Count -ne 1" in script
+    assert "Select-Object -First" not in script
+    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^WRONG_PID_PORT$"):
+        probe_desktop_query.desktop_identity(111, 52002)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("pid", True),
+        ("pid", 112),
+        ("as_pid", 111),
+        ("as_pid", 0),
+        ("port", True),
+        ("port", 65536),
+        ("process_start", ""),
+        ("process_start", None),
+        ("as_process_start", "1"),
+    ],
+)
+def test_observation_identity_rejects_missing_or_coerced_fields(field, value):
+    payload = asdict(OBSERVED_IDENTITY)
+    payload[field] = value
+    with pytest.raises(ValueError):
+        probe_desktop_query._validate_identity(payload, 111)
+    with pytest.raises(ValueError):
+        probe_desktop_query._validate_identity({}, 111)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"process_start": "200"},
+        {"as_pid": 223},
+        {"as_process_start": "201"},
+        {"port": 52002},
+    ],
+)
+def test_observation_recheck_refuses_pid_reuse_or_a_changed_child(monkeypatch, change):
+    monkeypatch.setattr(probe_desktop_query, "desktop_identity", lambda _: replace(OBSERVED_IDENTITY, **change))
+    bound = probe_desktop_query.BoundDesktop(OBSERVED_IDENTITY, OBSERVED_CATALOGUE)
+    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^PID_REUSED$"):
+        probe_desktop_query.recheck_bound(bound, None)
+
+
 class _FakeReader:
     """Minimal stand-in for an ADOMD data reader (PascalCase because the real one is .NET)."""
 
@@ -189,6 +252,59 @@ class _FakeConnection:
 
     def CreateCommand(self) -> _FakeCommand:  # noqa: N802
         return _FakeCommand(self.reader)
+
+
+@pytest.mark.parametrize("catalogues", [[], [OBSERVED_CATALOGUE], [OBSERVED_CATALOGUE] * 2, ["named-model"]])
+def test_observation_catalogue_is_one_exact_id_and_reader_is_closed(catalogues):
+    connection = _FakeConnection([(name, False) for name in catalogues])
+    if catalogues == [OBSERVED_CATALOGUE]:
+        assert probe_desktop_query.catalogue_id(connection) == OBSERVED_CATALOGUE
+    else:
+        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^CATALOGUE_UNESTABLISHED$"):
+            probe_desktop_query.catalogue_id(connection)
+    assert connection.reader.closed
+
+
+@pytest.mark.parametrize(
+    "argv,kind,tables",
+    [
+        ([], "full", ()),
+        (["--tables", "Orders"], "full", ("Orders",)),
+        (["--calculate-only"], "calculate", ()),
+        (["--measures-only"], "calculate", ()),
+        (["--calculate-only", "--tables", "Orders"], "calculate", ("Orders",)),
+    ],
+)
+def test_refresh_observation_matches_the_executed_scope(monkeypatch, argv, kind, tables):
+    bound = probe_desktop_query.BoundDesktop(OBSERVED_IDENTITY, OBSERVED_CATALOGUE)
+    sent, observations = [], []
+    command = SimpleNamespace()
+    command.ExecuteNonQuery = lambda: sent.append(json.loads(command.CommandText))
+    connection = SimpleNamespace(CreateCommand=lambda: command, Close=lambda: None)
+    monkeypatch.setattr(refresh_pbip_model, "open_bound", lambda _: connection)
+    monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_: None)
+    args = refresh_pbip_model._build_arg_parser().parse_args(argv)
+    assert (
+        refresh_pbip_model.refresh(
+            52001,
+            args.tables,
+            desktop_pid=111,
+            refresh_type=args.refresh_type,
+            bound=bound,
+            observations=observations,
+            progress_enabled=False,
+        )[0]
+        is True
+    )
+    objects = [{"database": OBSERVED_CATALOGUE, "table": "Orders"}] if tables else [{"database": OBSERVED_CATALOGUE}]
+    assert sent == [{"refresh": {"type": kind, "objects": objects}}]
+    assert observations == [
+        refresh_pbip_model.RefreshObservation(OBSERVED_CATALOGUE, kind, "tables" if tables else "database", tables)
+    ]
+    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^WRONG_PID_PORT$"):
+        refresh_pbip_model.refresh(52002, None, desktop_pid=111, bound=bound, observations=[])
+    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^IDENTITY_UNESTABLISHED$"):
+        refresh_pbip_model.refresh(52001, None, observations=[])
 
 
 def test_table_names_filters_the_auto_date_scaffolding_but_can_keep_hidden_tables() -> None:

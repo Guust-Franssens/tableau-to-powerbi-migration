@@ -11,7 +11,29 @@ stat()ing the cache, so it is cheap to test directly.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
+
+
+@dataclass(frozen=True, slots=True)
+class DataVerdict:
+    """Legacy data/scope vocabulary, not source coverage or a persistence observation."""
+
+    code: Literal["NO_DATA", "TABLE_OK", "TABLES_OK", "DATA_OK"]
+    empty_tables: tuple[str, ...]
+
+
+def derive_data_verdict(results: list[tuple[str, int]], implicit: bool, *, narrowed: bool = False) -> DataVerdict:
+    """Derive the shared legacy classification; observation producers validate their inputs.
+
+    Keep historical CLI semantics here, including repeated canaries. The stricter observation
+    API refuses empty/duplicate caller sets and non-integer counts before reaching this layer.
+    No cache timestamps, UI flags or save booleans enter this record.
+    """
+    empty = tuple(table for table, rows in results if rows <= 0)
+    code = "NO_DATA" if empty else "TABLE_OK" if implicit else "TABLES_OK" if narrowed else "DATA_OK"
+    return DataVerdict(code, empty)
 
 
 def _canary_tables(args: argparse.Namespace) -> list[str] | None:
@@ -64,8 +86,9 @@ def _emit_data_verdict(
         # sent me looking in the wrong place for ten minutes; the real one is on the 'save' line.
         print("  cache  : not persisted (the write did not land - see 'save' above)")
 
-    empty = [table for table, rows in results if rows <= 0]
-    if empty:
+    verdict = derive_data_verdict(results, implicit, narrowed=bool(args.tables and not args.verify_only))
+    if verdict.code == "NO_DATA":
+        empty = verdict.empty_tables
         print(f"REFRESH: NO_DATA (empty: {', '.join(empty)} - check the source and credentials)")
         return 1
     wanted_save = not args.no_save and not args.verify_only
@@ -73,7 +96,7 @@ def _emit_data_verdict(
         print("REFRESH: NOT_PERSISTED (model has data in memory, but cache.abf did not update)")
         return 1
     suffix = " + PERSISTED" if wanted_save else ""
-    if implicit:
+    if verdict.code == "TABLE_OK":
         # No canaries were named, so only the first queryable table was probed. That is NOT a
         # model-level guarantee (a static parameter/CSV table can pass while a live source never
         # loaded), so the verdict names the single table actually probed instead of claiming DATA_OK.
@@ -86,7 +109,7 @@ def _emit_data_verdict(
             "(this mirrors the powerbi-semantic-model-gotchas rule: prove a REAL read per live source)."
         )
         return 0
-    if args.tables and not args.verify_only:
+    if verdict.code == "TABLES_OK":
         # Canaries all returned rows, but --tables narrowed the REFRESH, so the tables outside that
         # list still hold whatever they held before (possibly nothing). A model-level DATA_OK over a
         # partially refreshed model is exactly the false certificate #115 was filed about, so the
