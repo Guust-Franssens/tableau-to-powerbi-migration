@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -312,8 +313,10 @@ def test_evidence_query_has_an_outer_deadline_even_when_the_driver_does_not_retu
     clean = SimpleNamespace(modal=None, dialog=None, process_gone=None, desktop_unready=None, unknown_reason=None)
     monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda *_args, **_kwargs: clean)
     release = threading.Event()
+    started = time.monotonic()
     try:
         with pytest.raises(probe_desktop_query.EvidenceUnavailable, match="^TIMEOUT$"):
             probe_desktop_query.evidence_call(111, lambda: release.wait(5), timeout_seconds=0.02)
     finally:
         release.set()
+    assert time.monotonic() - started < 0.5
