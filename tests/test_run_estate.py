@@ -3349,7 +3349,6 @@ def test_a_successful_worker_result_is_published_unchanged_and_passes(tmp_path: 
     assert run.elapsed < ELAPSED_BOUND_SEC
 
 
-@pytest.mark.timing
 @pytest.mark.parametrize("part", ["header", "body"])
 def test_a_real_spawned_partial_frame_sender_cannot_hold_publication(tmp_path: Path, monkeypatch, part: str) -> None:
     """The marker proves the spawned sender reached the partial frame before the parent's deadline."""
