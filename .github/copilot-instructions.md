@@ -11,6 +11,11 @@
 powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update -CheckUpstream
 ```
 
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+[preflight cannot start](../docs/operator-runbook.md#preflight-cannot-start).
+If recovery is allowed, retry the **exact originating command and arguments**; this session-start
+call retains `-Update -CheckUpstream`. Do not run policy diagnostics first.
+
 Repairs the npm bridge CLIs **if they are below the correctness floor**, then prints the environment
 readiness matrix. Session start is the **only safe moment** to change them.
 
