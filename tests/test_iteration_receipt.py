@@ -325,6 +325,25 @@ def test_pending_state_cannot_have_a_final_outcome(package: Path) -> None:
     assert _code(lambda: receipt.validate_receipt(payload)) == "STATE_INVALID"
 
 
+def test_data_state_has_no_caller_authored_accepted_form(package: Path) -> None:
+    payload = _iterate(package)
+    payload["generated"]["data_evidence"]["status"] = "accepted"
+    assert _code(lambda: receipt.validate_receipt(payload)) == "SCHEMA"
+
+
+@pytest.mark.parametrize("value", [True, -1, receipt.MAX_COUNT + 1, float("nan"), float("inf")])
+@pytest.mark.parametrize("field", ["cache_byte_count", "byte_count", "entry_count"])
+def test_generated_counts_reject_booleans_nonfinite_and_out_of_range(package: Path, field: str, value: object) -> None:
+    payload = _iterate(package)
+    if field == "cache_byte_count":
+        payload["generated"]["artifact"].update(cache_sha256="1" * 64, cache_byte_count=value)
+    elif field == "byte_count":
+        payload["generated"]["pages"][0]["powerbi"]["byte_count"] = value
+    else:
+        payload["generated"]["limitations"]["entry_count"] = value
+    assert _code(lambda: receipt.validate_receipt(payload)) in {"SCHEMA", "NONFINITE_NUMBER"}
+
+
 @pytest.mark.parametrize(
     "field,value",
     [
@@ -792,6 +811,8 @@ def test_credential_string_cannot_reach_a_pending_receipt_write(package: Path) -
     "text",
     [
         "Authorization: fake-review-token",
+        "Authorization%3A%20fake-review-token",
+        "token=synthetic-token",
         "password=synthetic-password",
         "Bearer fake-token",
         "x-tableau-auth: synthetic-session",
@@ -850,6 +871,38 @@ def test_every_package_json_reader_refuses_invalid_utf8(package: Path, relative:
     package.joinpath(*relative.split("/")).write_bytes(b"\xff")
     assert _code(lambda: _iterate(package)) == "JSON_NOT_UTF8"
     assert not _path(package).exists()
+
+
+def test_reference_and_history_json_also_refuse_invalid_utf8(package: Path) -> None:
+    _reference(package)
+    pending = _iterate(package)
+    _path(package).write_bytes(b"\xff")
+    assert _code(lambda: receipt.read_chain(package)) == "JSON_NOT_UTF8"
+    _path(package).write_bytes(receipt.receipt_bytes(pending))
+    (package / "reference" / "manifest.json").write_bytes(b"\xff")
+    assert _code(lambda: _finalize(package, pending)) == "JSON_NOT_UTF8"
+
+
+def test_reviewer_file_invalid_utf8_has_a_fixed_cli_refusal(
+    package: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pending = _iterate(package)
+    review = tmp_path / "review.json"
+    review.write_bytes(b"\xff")
+    args = capture.parse_args(
+        [
+            "finalize",
+            "--package",
+            str(package),
+            "--capture-sha256",
+            receipt.receipt_sha256(pending),
+            "--judgement",
+            str(review),
+        ]
+    )
+    assert capture.cmd_finalize(args, _runtime(package)) == capture.EXIT_REFUSED
+    output = capsys.readouterr().out
+    assert output == "REFUSED: JSON_NOT_UTF8: JSON input is not valid UTF-8\n"
 
 
 def test_strict_reader_refuses_duplicate_keys_and_nonfinite_tokens(tmp_path: Path) -> None:

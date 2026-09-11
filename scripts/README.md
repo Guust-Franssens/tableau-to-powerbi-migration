@@ -82,6 +82,33 @@ Conventions: Python first (`.ps1` only where Windows-specific APIs make it unavo
 | `current_artifact_revision.py` | **Library, no CLI.** Reuses `package_filesystem` for strict JSON, no-follow traversal and canonical portable names; no competing filesystem walker. The working revision covers every package file except `validation/iterations` and the declared model's **exact** separately hashed `.pbi/cache.abf`. All other `.pbi` files remain covered. Artifact revisions distinguish report, model and cache changes. The PBIR denominator enumerates immediate canonical page/visual directories, requires each definition with folder/name agreement, and requires unique nonempty string `pageOrder` entries without coercion. The packaging-time `contents.files` baseline is not used to reject legitimate Phase-2 edits. |
 | `build_synthetic_reference.py` | Renders an **honestly-labeled SYNTHETIC** reference (HTML/CSS bar chart from real queried data, screenshotted via Playwright) when no real Tableau capture exists - e.g. the `_probe-lab/` credential-gate fixtures, whose `.twb` is a generated skeleton with nothing to screenshot. Tagged `provider: synthetic_data_chart`, `capabilities: []`, `synthetic: true` - never claims layout/validation fidelity. Deliberately **not** wired into `capture_tableau_reference.py`'s fail-closed provider chain (see its docstring). | manual / test-harness use only |
 
+### Package-local review iteration commands
+
+```text
+python scripts\capture_powerbi_pages.py iterate --package <package> --pid <pid>
+python scripts\capture_powerbi_pages.py finalize --package <package> --capture-sha256 <returned-CAPTURE_SHA256> --judgement <review.json>
+python scripts\capture_powerbi_pages.py iterate --package <package> --pid <pid> --previous-sha256 <returned-FINAL_SHA256>
+```
+
+Copy the pending receipt's `judgement` object into `<review.json>` **outside the package**, then edit
+that copy. Keep `completed_at: null`; the producer supplies completion time. Keep the printed
+checksums outside the package too. They are compare-and-swap tokens, not signatures: recomputing a
+checksum from edited evidence does not establish that the producer wrote it. No editable file inside
+an iteration, additional registry or signed-proof framework is introduced.
+
+`pass` requires an admitted validation-grade Tableau reference and a stable Power BI capture.
+`layout_match` records a narrower comparison, including an oracle's layout/text ceiling; it is not a
+full visual pass. Numeric rows must remain `unverified`, with all three numeric hashes `null`:
+caller-authored hashes and status strings are not an independently populated query/result record.
+Data is likewise pending, so **a successful finalize writes `outcome: incomplete`**, not a unit
+completion verdict. PNG validation uses the existing Pillow extra (`uv sync --extra showcase`);
+if unavailable it refuses instead of treating a hash as an image certificate.
+
+Finding identity includes its limitation pointer/hash. To accept a limitation in a later iteration,
+carry that binding from its first appearance; do not rewrite an old ID. Legal transitions are
+`still_open` to itself, `resolved` or a prebound `accepted_limitation`; terminal states remain
+terminal. Prior findings never disappear. A new finding must name the captured inventory.
+
 ## Forwarding shims into skill bundles
 
 These four are **four-line `runpy` shims**. The real scripts live in the skill bundle that owns them,

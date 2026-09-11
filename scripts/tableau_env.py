@@ -41,6 +41,7 @@ import os
 import re
 import warnings
 from pathlib import Path
+from urllib.parse import unquote
 from xml.etree import ElementTree
 
 # The secret half of the PAT credential. TABLEAU_PAT_SECRET is canonical; the engine's historical
@@ -78,7 +79,7 @@ _TABLEAU_AUTH_HEADER_RE = re.compile(r"(?i)([\"']?x-tableau-auth[\"']?\s*[:=]\s*
 _CREDENTIAL_SHAPE_RE = re.compile(
     r"""(?ix)
     (?:["']?(?:authorization|proxy-authorization|x-tableau-auth|password|passwd|pwd|
-       (?:access|refresh|id|session)[_-]?token|(?:client[_-]?)?secret|api[_-]?key|
+       token|(?:access|refresh|id|session)[_-]?token|(?:client[_-]?)?secret|api[_-]?key|
        tableau_pat_(?:secret|value))["']?\s*[:=]\s*\S)
     |(?:\bbearer\s+\S+)
     |(?:\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b)
@@ -93,7 +94,7 @@ def contains_credential(text: str) -> bool:
     This is a detector, not a claim that arbitrary prose can be certified secret-free. Known
     configured secrets and their wire forms are also withheld; no secret or matching text is emitted.
     """
-    if _CREDENTIAL_SHAPE_RE.search(text):
+    if _CREDENTIAL_SHAPE_RE.search(unquote(text)):
         return True
     for key, value in os.environ.items():
         if value and key.upper().endswith(("_TOKEN", "_SECRET", "_PASSWORD", "_PAT_VALUE")):
