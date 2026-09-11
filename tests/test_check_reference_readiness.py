@@ -28,6 +28,7 @@ import struct
 import subprocess
 import sys
 import zlib
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,16 @@ import bundle_corpus  # noqa: E402  # pylint: disable=wrong-import-position
 import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-import-position
 import package_filesystem  # noqa: E402  # pylint: disable=wrong-import-position
 import package_role_identity  # noqa: E402  # pylint: disable=wrong-import-position
+from test_package_role_identity import (  # noqa: E402
+    DS_LUID,
+    DS_UNIT,
+    PUBLISHED_KEY,
+    WB_LUID,
+    WB_UNIT,
+    datasource_package,
+    seal,
+    workbook_package,
+)
 
 # Page ids observed in the real engine bundle
 # `_runs/406-meridian-smoke-2-339-0-20260901/bundle/pbip/Meridian Revenue by Region/...`,
@@ -1519,10 +1530,19 @@ def _forbid_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
         raise _Continued("scan continued past an unsafe package classification")
 
     monkeypatch.setattr(Path, "resolve", boom)
-    monkeypatch.setattr(crr, "_collect_evidence", boom)
-    monkeypatch.setattr(crr, "_engine_report", boom)
-    monkeypatch.setattr(crr, "shipping_reports", boom)
-    monkeypatch.setattr(crr, "resolve_source", boom)
+    for name in (
+        "_collect_evidence",
+        "_collect_package_evidence",
+        "_engine_report",
+        "shipping_reports",
+        "resolve_source",
+        "resolve_verified_package_source",
+        "source_objects",
+        "_identify",
+        "_handover",
+        "json_object",
+    ):
+        monkeypatch.setattr(crr, name, boom)
 
 
 def _scan_forbidding_discovery(unit: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[dict | None, str]:
@@ -1559,6 +1579,8 @@ def _main_forbidding_following(argv: list[str], monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(Path, "resolve", boom)
     try:
         return crr.main(argv), ""
+    except SystemExit as exc:
+        return exc.code, ""
     except _Continued as exc:
         return None, str(exc)
     finally:
@@ -2383,3 +2405,429 @@ def test_the_merged_integrity_evidence_is_deterministic(tmp_path: Path) -> None:
 
     assert runs[0] == runs[1]
     assert json.dumps(crr.scan(first)["package_integrity"]) == json.dumps(crr.scan(first)["package_integrity"])
+
+
+# Source return after S1/S2 (#558): no package may use the ordinary source resolver.
+
+
+def _forbid_legacy_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a package entered legacy source discovery or identity re-reading")
+
+    for name in ("resolve_source", "_identify", "sha256_of", "provenance_origin", "_collect_evidence"):
+        monkeypatch.setattr(crr, name, forbidden)
+
+
+def test_redacted_package_source_matches_the_historical_explicit_page_denominator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "packages" / "Minimal"
+    names = ["North", "South", "East", "West"]
+    digest = build_package(
+        package,
+        "Minimal",
+        worksheets=names,
+        oracle_views=[{"view_name": name, "view_type": "worksheet", "workbook_luid": UNIT_LUID} for name in names],
+    )
+    seal_package(package, "Minimal")
+    asset = package / "assets" / "Minimal.twb"
+    control = tmp_path / "ordinary-control"
+    shutil.copytree(package, control)
+    (control / bundle_corpus.PACKAGE_MARKER).unlink()
+    historical = crr.scan(control, explicit_source=asset)
+
+    handover = package / "handover" / "Minimal.json"
+    payload = json.loads(handover.read_text(encoding="utf-8"))
+    payload["workbook"]["source_id"] = "<redacted:absolute-path>"
+    handover.write_text(json.dumps(payload), encoding="utf-8")
+    seal_package(package, "Minimal")
+    parsed: list[Path] = []
+    original = crr.source_objects
+
+    def parse(path: Path) -> list[crr.SourceObject] | None:
+        parsed.append(path)
+        return original(path)
+
+    _forbid_legacy_source(monkeypatch)
+    monkeypatch.setattr(crr, "source_objects", parse)
+
+    report = crr.scan(package)
+
+    assert parsed == [asset], "only the declared package-local source may reach the parser"
+    assert report["status"] == historical["status"] == "READY"
+    assert report["pages_expected"] == historical["pages_expected"] == 4
+    assert report["pages_ready"] == historical["pages_ready"] == 4
+    assert {page["source_object"] for unit in report["units"] for page in unit["pages"]} == set(names)
+    assert [(page["page_id"], page["source_type"], page["source_object"]) for page in report["units"][0]["pages"]] == [
+        (page["page_id"], page["source_type"], page["source_object"]) for page in historical["units"][0]["pages"]
+    ]
+    assert report["units"][0]["source"] == "assets/Minimal.twb"
+    assert report["package_source"] == [
+        {
+            "ordinal": 0,
+            "unit": "Minimal",
+            "state": "resolved",
+            "path": "assets/Minimal.twb",
+            "kind": "workbook",
+            "sha256": digest,
+            "codes": [],
+        }
+    ]
+
+
+def test_package_projection_precedes_every_source_report_and_reference_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _packaged_unit(tmp_path)
+    order: list[str] = []
+    for name, step in (
+        ("classify_target", "boundary"),
+        ("verify_package", "s1"),
+        ("verify_phase1_role_identity", "s2"),
+        ("resolve_verified_package_source", "source"),
+        ("_collect_package_evidence", "evidence"),
+        ("_engine_report", "engine-report"),
+        ("shipping_reports", "reports"),
+        ("_handover", "handover"),
+        ("source_objects", "parse"),
+    ):
+        original = getattr(crr, name)
+
+        def observed(*args, _original=original, _step=step, **kwargs):
+            order.append(_step)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(crr, name, observed)
+    _forbid_legacy_source(monkeypatch)
+
+    report = crr.scan(package)
+
+    assert order[:4] == ["boundary", "s1", "s2", "source"], order
+    assert set(order[4:]) == {"evidence", "engine-report", "reports", "handover", "parse"}
+    assert report["status"] == "READY"
+
+
+@pytest.mark.parametrize(
+    ("damage", "status", "code"),
+    [
+        ("foreign-file", "CANNOT_ESTABLISH", "package_file_undeclared"),
+        ("missing-source", "CANNOT_ESTABLISH", "package_file_missing"),
+        ("deleted-role", "FINDINGS", "role_declaration_absent"),
+        ("contradictory-luid", "FINDINGS", "server_luid_contradiction"),
+    ],
+)
+def test_s1_s2_refusal_never_reaches_source_projection_or_any_later_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str, status: str, code: str
+) -> None:
+    package = workbook_package(tmp_path / "packages" / WB_UNIT)
+    manifest_path = package / bundle_corpus.PACKAGE_MARKER
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if damage == "foreign-file":
+        (package / "foreign.txt").write_text("undeclared", encoding="utf-8")
+    elif damage == "missing-source":
+        (package / manifest["artifacts"]["asset"]).unlink()
+    elif damage == "deleted-role":
+        manifest["artifacts"]["asset"] = None
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    else:
+        provenance = package / "source-provenance.json"
+        payload = json.loads(provenance.read_text(encoding="utf-8"))
+        payload["inputs"][0]["origin"]["workbook_luid"] = OTHER_LUID
+        provenance.write_text(json.dumps(payload), encoding="utf-8")
+        seal(package, **manifest)
+    if status == "CANNOT_ESTABLISH":
+
+        def forbidden_s2(*_args: object, **_kwargs: object) -> object:
+            raise _Continued("S2 ran after S1 refused the package")
+
+        monkeypatch.setattr(crr, "verify_phase1_role_identity", forbidden_s2)
+
+    report, violation = _scan_forbidding_discovery(package, monkeypatch)
+
+    assert violation == "", "an earlier S1/S2 refusal reached a later source/evidence helper"
+    assert report is not None and report["status"] == status
+    assert code in report["units"][0]["detail"]
+    assert report["pages_expected"] == report["evidence_records"] == 0
+    assert report["package_source"] == []
+
+
+def test_fresh_s1_refusal_inside_s2_retains_the_original_integrity_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _packaged_unit(tmp_path)
+    verify = crr.verify_phase1_role_identity
+
+    def change_before_s2(roots, **kwargs):
+        (package / "foreign.txt").write_text("changed after the first S1 observation", encoding="utf-8")
+        return verify(roots, **kwargs)
+
+    monkeypatch.setattr(crr, "verify_phase1_role_identity", change_before_s2)
+
+    report, violation = _scan_forbidding_discovery(package, monkeypatch)
+
+    assert violation == "", "the fresh S1 refusal must stop source projection and every later read"
+    assert report is not None and report["status"] == "CANNOT_ESTABLISH"
+    assert report["package_integrity"][0]["findings"][0]["code"] == "package_file_undeclared"
+    assert report["package_source"] == []
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["package", "bad-manifest", "missing-marker", "missing-root", "mixed-first", "mixed-last"],
+)
+@pytest.mark.parametrize("source_exists", [False, True], ids=["unknown-source", "own-packaged-source"])
+def test_package_source_override_refuses_before_is_file_or_any_legacy_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    shape: str,
+    source_exists: bool,
+) -> None:
+    package = _packaged_unit(tmp_path)
+    explicit = package / "assets" / "Minimal.twb" if source_exists else tmp_path / "private-host" / "missing.twb"
+    targets = [package]
+    if shape == "bad-manifest":
+        (package / bundle_corpus.PACKAGE_MARKER).write_text("invalid-json", encoding="utf-8")
+    elif shape == "missing-marker":
+        (package / bundle_corpus.PACKAGE_MARKER).unlink()
+    elif shape == "missing-root":
+        targets = [package.parent / "NeverBuilt"]
+    elif shape.startswith("mixed"):
+        ordinary = tmp_path / "ordinary"
+        ordinary.mkdir()
+        targets = [ordinary, package] if shape == "mixed-last" else [package, ordinary]
+    _forbid_discovery(monkeypatch)
+
+    def forbidden_gate(*_args: object, **_kwargs: object) -> object:
+        raise _Continued("package --source entered S1/S2 instead of the fixed usage refusal")
+
+    monkeypatch.setattr(crr, "_precheck_cohort", forbidden_gate)
+    monkeypatch.setattr(crr, "verify_package", forbidden_gate)
+    monkeypatch.setattr(crr, "verify_phase1_role_identity", forbidden_gate)
+
+    code, violation = _main_forbidding_following(
+        [*(str(path) for path in targets), "--source", str(explicit)], monkeypatch
+    )
+    captured = capsys.readouterr()
+
+    assert violation == "", "package --source inspected a path or entered a later helper before refusal"
+    assert code == 2
+    assert captured.err.endswith("error: --source is supported only for ordinary non-package targets\n")
+    assert str(explicit) not in captured.err + captured.out
+    assert str(package) not in captured.err + captured.out
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["ancestor-source", "explicit-source"])
+def test_ordinary_source_and_ancestor_compatibility_never_enters_the_projector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool
+) -> None:
+    root = tmp_path / "run" / "ordinary"
+    root.mkdir(parents=True)
+    build_unit(root, "Legacy", worksheets=["Overview"])
+    asset = root.parent / "assets" / "Legacy.twb"
+    write_handover(root, "Legacy", source_id="historical/run/assets/Legacy.twb")
+    write_oracle(root.parent, [{"view_name": "Overview", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
+    output = tmp_path / "ordinary.json"
+
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("ordinary source compatibility entered the package authorities")
+
+    monkeypatch.setattr(crr, "resolve_verified_package_source", forbidden)
+    monkeypatch.setattr(crr, "verify_package", forbidden)
+    monkeypatch.setattr(crr, "verify_phase1_role_identity", forbidden)
+    args = [str(root), "--json", str(output), "--quiet"]
+    if explicit:
+        args += ["--source", str(asset)]
+
+    code = crr.main(args)
+    report = json.loads(output.read_text(encoding="utf-8"))
+
+    assert code == 0
+    assert report["pages_expected"] == report["pages_ready"] == 1
+    assert report["units"][0]["source"] == str(asset)
+    assert report["package_source"] == report["role_identity"] == report["package_integrity"] == []
+
+
+@pytest.mark.parametrize("extension", [".tds", ".tdsx"])
+def test_datasource_source_resolves_before_reference_not_applicable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extension: str
+) -> None:
+    package = datasource_package(tmp_path / "packages" / DS_UNIT, luid=None, asset_name=f"local-source{extension}")
+    digest = hashlib.sha256((package / "assets" / f"local-source{extension}").read_bytes()).hexdigest()
+    projected = []
+    project = crr.resolve_verified_package_source
+    engine_report = crr._engine_report
+
+    def project_source(value):
+        result = project(value)
+        projected.append(result)
+        return result
+
+    def read_report(path: Path):
+        assert len(projected) == 1 and projected[0].state == "resolved", "N/A must follow source resolution"
+        return engine_report(path)
+
+    def forbidden_parse(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a datasource has no workbook page denominator to parse")
+
+    _forbid_legacy_source(monkeypatch)
+    monkeypatch.setattr(crr, "resolve_verified_package_source", project_source)
+    monkeypatch.setattr(crr, "_engine_report", read_report)
+    monkeypatch.setattr(crr, "source_objects", forbidden_parse)
+
+    report = crr.scan(package)
+
+    assert report["status"] == "NOT_APPLICABLE"
+    assert report["units_not_applicable"] == 1
+    assert report["pages_expected"] == 0
+    assert report["units"][0]["source"] == f"assets/local-source{extension}"
+    assert report["package_source"][0] == {
+        "ordinal": 0,
+        "unit": DS_UNIT,
+        "state": "resolved",
+        "path": f"assets/local-source{extension}",
+        "kind": "datasource",
+        "sha256": digest,
+        "codes": [],
+    }
+
+
+def _shared_source_pair(tmp_path: Path) -> tuple[Path, Path]:
+    provider = datasource_package(tmp_path / DS_UNIT, published_key=PUBLISHED_KEY)
+    consumer = workbook_package(
+        tmp_path / WB_UNIT,
+        published={"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY, "luid": DS_LUID},
+        binding=f"../../../{DS_UNIT}/fabric/{DS_UNIT}.SemanticModel",
+        body="<workbook><worksheets><worksheet name='Overview'/></worksheets></workbook>",
+    )
+    shutil.rmtree(consumer / "oracle")
+    write_report(consumer, WB_UNIT, [crr.engine_page_id("page-ws-Overview")], base="fabric")
+    write_oracle(consumer, [{"view_name": "Overview", "view_type": "worksheet", "workbook_luid": WB_LUID}])
+    seal(consumer, **json.loads((consumer / bundle_corpus.PACKAGE_MARKER).read_text(encoding="utf-8")))
+    return provider, consumer
+
+
+@pytest.mark.parametrize("provider_first", [True, False], ids=["provider-consumer", "consumer-provider"])
+@pytest.mark.parametrize("reverse_results", [False, True], ids=["s2-order", "s2-reordered"])
+def test_provider_consumer_command_returns_two_own_local_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    provider_first: bool,
+    reverse_results: bool,
+) -> None:
+    provider, consumer = _shared_source_pair(tmp_path / "packages")
+    targets = [provider, consumer] if provider_first else [consumer, provider]
+    asset = consumer / "assets" / f"{WB_LUID}_{WB_UNIT}.twb"
+    parsed: list[Path] = []
+    parse = crr.source_objects
+    verify = crr.verify_phase1_role_identity
+
+    def parse_source(path: Path) -> list[crr.SourceObject] | None:
+        parsed.append(path)
+        return parse(path)
+
+    def cohort(roots, **kwargs):
+        results = verify(roots, **kwargs)
+        return tuple(reversed(results)) if reverse_results else results
+
+    _forbid_legacy_source(monkeypatch)
+    monkeypatch.setattr(crr, "source_objects", parse_source)
+    monkeypatch.setattr(crr, "verify_phase1_role_identity", cohort)
+    output = tmp_path / "pair.json"
+
+    code = crr.main([*(str(path) for path in targets), "--json", str(output)])
+    report = json.loads(output.read_text(encoding="utf-8"))
+    printed = capsys.readouterr().out
+    sources = {row["unit"]: row for row in report["package_source"]}
+
+    assert (sources[DS_UNIT]["path"], sources[DS_UNIT]["kind"]) == (
+        f"assets/{DS_LUID}_{DS_UNIT}.tdsx",
+        "datasource",
+    )
+    assert (sources[WB_UNIT]["path"], sources[WB_UNIT]["kind"]) == (
+        f"assets/{WB_LUID}_{WB_UNIT}.twb",
+        "workbook",
+    ), "the consumer must return its own workbook, not its provider's datasource"
+    assert parsed == [asset], "only the consumer workbook supplies Tableau page expectations"
+    assert code == 0
+    assert report["units_not_applicable"] == report["units_ready"] == 1
+    assert report["pages_expected"] == report["pages_ready"] == 1
+    assert [row["ordinal"] for row in report["package_source"]] == [0, 1]
+    for path in (asset, provider / "assets" / f"{DS_LUID}_{DS_UNIT}.tdsx"):
+        assert str(path) not in printed
+        assert str(path).replace("\\", "\\\\") not in json.dumps(report)
+
+
+def test_ambiguous_provider_stops_consumer_before_source_or_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider, consumer = _shared_source_pair(tmp_path / "packages")
+    duplicate = tmp_path / "duplicate-provider"
+    shutil.copytree(provider, duplicate)
+    checked = crr._precheck_cohort([provider, consumer, duplicate])[1]
+    _forbid_discovery(monkeypatch)
+    report, violation = None, ""
+    try:
+        report = crr.scan(consumer, prechecked=checked)
+    except _Continued as exc:
+        violation = str(exc)
+    finally:
+        monkeypatch.undo()
+
+    assert violation == "", "an unresolved provider must stop before any consumer source or evidence read"
+    assert report is not None and report["status"] == "FINDINGS"
+    assert "provider_ambiguous" in report["role_identity"][0]["blockers"]
+    assert report["package_source"] == []
+
+
+@pytest.mark.parametrize("unbound", [False, True], ids=["foreign-root", "missing-root"])
+def test_unbound_or_foreign_s2_handoff_cannot_enter_legacy_or_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unbound: bool
+) -> None:
+    package = _packaged_unit(tmp_path)
+    checked = crr._precheck(package)
+    foreign = replace(checked.roles, verified=None if unbound else replace(checked.roles.verified, root=tmp_path))
+    checked = replace(checked, roles=foreign)
+    project = crr.resolve_verified_package_source
+    _forbid_discovery(monkeypatch)
+    monkeypatch.setattr(crr, "resolve_verified_package_source", project)
+    report, violation = None, ""
+    try:
+        report = crr.scan(package, prechecked=checked)
+    except _Continued as exc:
+        violation = str(exc)
+    finally:
+        monkeypatch.undo()
+
+    assert violation == "", "an inconsistent authority must not trigger source/evidence fallback"
+    assert report is not None and report["status"] == "CANNOT_ESTABLISH"
+    assert report["package_source"][0]["codes"] == ["package_root_binding_invalid"]
+    assert report["pages_expected"] == report["evidence_records"] == 0
+
+
+def test_unparseable_package_source_never_prints_its_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    package = _packaged_unit(tmp_path)
+    asset = package / "assets" / "Minimal.twb"
+    asset.write_text("not-xml", encoding="utf-8")
+    digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+    provenance = package / "source-provenance.json"
+    payload = json.loads(provenance.read_text(encoding="utf-8"))
+    payload["inputs"][0]["input"]["sha256"] = digest
+    provenance.write_text(json.dumps(payload), encoding="utf-8")
+    seal_package(package, "Minimal")
+    _forbid_legacy_source(monkeypatch)
+    output = tmp_path / "parse-failure.json"
+
+    code = crr.main([str(package), "--json", str(output)])
+    report = json.loads(output.read_text(encoding="utf-8"))
+    printed = capsys.readouterr().out
+
+    assert code == 3
+    assert report["package_source"][0]["state"] == "resolved", "parsing happens after source selection"
+    assert report["units"][0]["source"] == "assets/Minimal.twb"
+    assert "source workbook could not be parsed: assets/Minimal.twb" in printed
+    assert str(asset) not in printed
+    assert str(asset).replace("\\", "\\\\") not in json.dumps(report)

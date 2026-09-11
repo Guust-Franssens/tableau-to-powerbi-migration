@@ -772,7 +772,7 @@ def test_a_clearance_for_a_DIFFERENT_root_is_never_applied(tmp_path: Path) -> No
 
     result = pri.verify_phase1_role_identity([damaged], verified=[clearance])[0]
 
-    assert result.blockers == (pri.CODE_INTEGRITY_NOT_CLEAN,), "a foreign clearance was accepted"
+    assert result.blockers == (pri.CODE_ROOT_BINDING_INVALID,), "a foreign clearance was accepted"
 
 
 def test_a_bound_clearance_is_reverified_once_at_the_S2_seam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
