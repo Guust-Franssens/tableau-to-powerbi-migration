@@ -580,6 +580,7 @@ and 2/5 reproduced by running the command:
 | `8` | `EXIT_BLANK_PLACEHOLDER` | **live** ✅ reproduced — a handover-backed `BLANK()` placeholder is consumed by a report filter or visual field binding | read `<bundle>/blank-placeholder-check.json`; translate the calc or remove the consuming report dependency knowingly |
 | `9` | `EXIT_BUNDLE_REWRITE` | **pre-engine refusal** (#250) — the `--output` bundle holds work an engine re-run would delete, a **different engine version** built it, **or the barrier cannot assess either question** (missing/empty/truncated baseline, `--slice-only`-backfilled baseline, unreadable engine version) | land into a FRESH `--output`, or acknowledge with `--accept-bundle-rewrite` / `--accept-engine-version-change`; the acknowledgement, the destroyed files **and the coverage gaps** are written to `<bundle>/bundle-rewrite-acknowledgement.json` |
 | `10` | `EXIT_PATH_CEILING` | **pre-engine refusal** (#479) — the projected canonical PBIP path exceeds Power BI Desktop's measured UTF-16 file or directory ceiling, or the estate cannot be assessed safely | allocate a run under a short EXTERNAL parent instead: `python scripts/work_dirs.py <unit> --runs-parent <short-dir> --json`, then point `--output` at that run's `bundle/` and retry — `LongPathsEnabled` and `\\?\` prefixes do not make Desktop accept these paths |
+| `11` | `EXIT_PROVENANCE_FAILED` | **post-engine refusal** (#576) — `<bundle>/source-provenance.json` could not be published, or the published result is not a pass: a failed or empty stamp, or one that contradicts itself (a `success`/`local_only` status carrying no inputs, a count that disagrees with its list) | read `<bundle>/source-provenance.json` — `phase.status` and `phase.errors[].code` name the cause; nothing downstream (adjudication, handover slices) ran |
 
 ❌ **Correction: exits 5 and 6 are NOT "pending branch only"** — the previous edition said so, and
 §5.1 check 10 was written against the same stale assumption. Both shipped 2026-08-13 (#109, #111).
@@ -1508,12 +1509,12 @@ Placeholders used in this document — and where the real value lives:
 
 `—` means that script cannot return that exit code.
 
-| script | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| `preflight.ps1` | ready | critical missing | — | — | — | — | — | — | — | — | — |
-| `assess_estate.py` | assessed (may be secondary-degraded) | nothing assessed · sign-in refused (raises) | usage | **a PRIMARY listing is incomplete** | — | — | — | — | — | — | — |
-| `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** | **invalid PBIR** | **BLANK() placeholder** | **bundle rewrite refused** | **path ceiling / cannot assess** |
-| `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — | — | — | — | — |
+| script | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `preflight.ps1` | ready | critical missing | — | — | — | — | — | — | — | — | — | — |
+| `assess_estate.py` | assessed (may be secondary-degraded) | nothing assessed · sign-in refused (raises) | usage | **a PRIMARY listing is incomplete** | — | — | — | — | — | — | — | — |
+| `run_estate.py` | READY | engine failed | usage | **DoD failed** | approval collision | non-canonical engine | **empty model** | **invalid PBIR** | **BLANK() placeholder** | **bundle rewrite refused** | **path ceiling / cannot assess** | **provenance not published / not a pass** |
+| `deploy_estate.py` | all deployed | item failed / refused | preflight | **incomplete by skip** | — | — | — | — | — | — | — | — |
 
 One run returns **one** code, in the order collision → DoD → invalid PBIR → BLANK() placeholder →
 empty model — so a bundle can trip a gate the exit code never mentions. Read the log body,
