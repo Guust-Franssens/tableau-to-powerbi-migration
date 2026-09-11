@@ -39,6 +39,8 @@ def _twbx(tmp_path: Path, name: str = "Superstore", payload: bytes = b"<workbook
 class FakeLookup:
     """A site that answers by name, and hands back whatever content it was told to."""
 
+    inventory_completeness = None
+
     def __init__(self, workbooks, remote_sha="deadbeef", remote_key=None):
         self._workbooks = workbooks
         self._remote_sha = remote_sha
@@ -516,6 +518,7 @@ class RecordingSite(prov.TableauLookup):
         workbooks=(),
         inventory_status=200,
         inventory_error=None,
+        inventory_document=...,
         content_errors=(),
         content_status=None,
         signout_error=None,
@@ -526,6 +529,7 @@ class RecordingSite(prov.TableauLookup):
         self._site_workbooks = list(workbooks)
         self._inventory_status = inventory_status
         self._inventory_error = inventory_error
+        self._inventory_document = inventory_document
         self._content_errors = set(content_errors)
         self._content_status = dict(content_status or {})
         self._signout_error = signout_error
@@ -555,6 +559,9 @@ class RecordingSite(prov.TableauLookup):
             raise self._inventory_error
         if self._inventory_status != 200:
             return self._inventory_status, b"{}"
+        if self._inventory_document is not ...:
+            document = self._inventory_document
+            return 200, document if isinstance(document, bytes) else json.dumps(document).encode()
         return 200, json.dumps({"workbooks": {"workbook": self._site_workbooks}}).encode()
 
     def count(self, kind: str) -> int:
@@ -1594,3 +1601,288 @@ def test_production_sign_in_refusal_needs_no_inapplicable_inventory_or_cleanup(t
     assert result["phase"]["status"] == "partial"
     assert [error["code"] for error in result["phase"]["errors"]] == ["live-lookup-refused"]
     assert not reporter.operations("inventory") and not reporter.operations("sign-out")
+
+
+# ------------------------------------------------ single-page completeness (issue #576)
+
+
+def _inventory_page(row_count: int, pagination: object = ...) -> dict:
+    """The REST envelope already used by RecordingSite and assess_estate's REST parser."""
+    document = {
+        "workbooks": {
+            "workbook": [{"id": _fixture_luid(index), "name": f"Fixture {index}"} for index in range(row_count)]
+        }
+    }
+    if pagination is not ...:
+        document["pagination"] = pagination
+    return document
+
+
+def _build_inventory_page(tmp_path: Path, monkeypatch, row_count: int, pagination: object = ...) -> tuple:
+    """Two copies of a matched LUID plus one absent LUID: three fingerprints, at most one download."""
+    for suffix in ("Copy_A", "Copy_B"):
+        _twbx(tmp_path, f"{_fixture_luid(0)}_{suffix}")
+    _twbx(tmp_path, f"{_fixture_luid(2000)}_Absent")
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, inventory_document=_inventory_page(row_count, pagination)))
+    return site, prov.build(tmp_path, LIVE_ENV)
+
+
+def _assert_page_call_budget_and_fingerprints(site: RecordingSite, result: dict, tmp_path: Path) -> None:
+    assert (site.count("inventory"), site.count("content")) == (
+        1,
+        int(site.inventory_completeness.returned_count > 0),
+    ), "PAGINATION_CACHE_BUDGET: completeness changed the one-inventory/one-content-per-LUID contract"
+    assert result["input_count"] == len(result["inputs"]) == 3
+    for record in result["inputs"]:
+        local = record["input"]
+        assert local["sha256"] == hashlib.sha256((tmp_path / local["file"]).read_bytes()).hexdigest()
+        if record["origin"] is not None:
+            served = site.served[record["origin"]["workbook_luid"]]
+            assert len(served) == 1
+            assert record["origin"]["remote_sha256"] == hashlib.sha256(served[0]).hexdigest()
+            assert record["origin"]["remote_revision_key"] == oid.revision_key(served[0]).as_json()
+
+
+@pytest.mark.parametrize(
+    "env", [{}, {"TABLEAU_SERVER_URL": "https://tableau.invalid"}, {"TABLEAU_PAT_NAME": "fixture"}]
+)
+def test_offline_inventory_never_acquires_a_pagination_finding(tmp_path: Path, monkeypatch, env: dict) -> None:
+    _twbx(tmp_path)
+    monkeypatch.setattr(prov, "TableauLookup", lambda *_a: pytest.fail("offline run opened a live lookup"))
+    monkeypatch.setattr(
+        prov, "_inventory_completeness", lambda *_a: pytest.fail("offline run classified a nonexistent response")
+    )
+    reporter = RecordingReporter()
+    result = prov.build(tmp_path, env, reporter)
+    assert result["phase"] == {"status": "local_only", "errors": []}, "NO_UNCONDITIONAL_PAGINATION"
+    assert prov.is_success(result) and not reporter.operations("inventory")
+
+
+@pytest.mark.parametrize("row_count", [0, 1, 999])
+@pytest.mark.parametrize("pagination", [..., {}, {"pageNumber": "1", "pageSize": "1000"}])
+def test_short_inventory_is_complete_without_a_pagination_finding(
+    tmp_path: Path, monkeypatch, row_count: int, pagination: object
+) -> None:
+    site, result = _build_inventory_page(tmp_path, monkeypatch, row_count, pagination)
+    assert site.inventory_completeness.status == "complete", "SHORT_PAGE_COMPLETE"
+    assert result["phase"] == {"status": "success", "errors": []}, "NO_SMALL_INVENTORY_RESIDUAL"
+    assert prov.is_success(result)
+    assert result["inputs"][-1]["origin_note"] == prov.NO_ORIGIN_NOTE
+    _assert_page_call_budget_and_fingerprints(site, result, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "pagination",
+    [
+        {"totalAvailable": "1000"},
+        {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "1000"},
+        {"pageNumber": 1, "pageSize": 1000, "totalAvailable": 1000},
+    ],
+)
+def test_exactly_full_inventory_with_explicit_total_is_complete(tmp_path: Path, monkeypatch, pagination: dict) -> None:
+    site, result = _build_inventory_page(tmp_path, monkeypatch, 1000, pagination)
+    assert site.inventory_completeness.status == "complete", "EXPLICIT_FULL_TOTAL_COMPLETE"
+    assert result["phase"] == {"status": "success", "errors": []}
+    _assert_page_call_budget_and_fingerprints(site, result, tmp_path)
+
+
+@pytest.mark.parametrize("row_count,total", [(0, 1), (1, 2), (999, 1001), (1000, 1001), (1000, 2000)])
+def test_inventory_total_available_overrides_short_page_inference(
+    tmp_path: Path, monkeypatch, row_count: int, total: int
+) -> None:
+    pagination = {"pageNumber": "1", "pageSize": "1000", "totalAvailable": str(total)}
+    site, result = _build_inventory_page(tmp_path, monkeypatch, row_count, pagination)
+    assert site.inventory_completeness.status == "truncated", "TOTAL_AVAILABLE_BINDS"
+    assert result["phase"] == {
+        "status": "partial",
+        "errors": [
+            {
+                "code": "inventory-truncated",
+                "operation": "inventory",
+                "returned_count": row_count,
+                "requested_page_size": 1000,
+                "page_number": 1,
+                "page_size": 1000,
+                "total_available": total,
+            }
+        ],
+    }
+    assert not prov.is_success(result)
+    assert result["inputs"][-1]["origin_note"] == prov.INCOMPLETE_INVENTORY_NOTE
+    _assert_page_call_budget_and_fingerprints(site, result, tmp_path)
+
+
+@pytest.mark.parametrize("pagination", [..., {}, {"pageNumber": "1", "pageSize": "1000"}])
+def test_full_inventory_without_total_remains_unestablished(tmp_path: Path, monkeypatch, pagination: object) -> None:
+    site, result = _build_inventory_page(tmp_path, monkeypatch, 1000, pagination)
+    assert site.inventory_completeness.status == "cannot_establish", "FULL_PAGE_AMBIGUITY"
+    assert result["phase"]["status"] == "partial"
+    assert [error["code"] for error in result["phase"]["errors"]] == ["inventory-cannot-establish"]
+    assert not prov.is_success(result)
+    _assert_page_call_budget_and_fingerprints(site, result, tmp_path)
+
+
+@pytest.mark.parametrize("row_count", [1, 1000])
+@pytest.mark.parametrize("key", ["pageNumber", "pageSize", "totalAvailable"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        None,
+        True,
+        False,
+        -1,
+        1.0,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        {},
+        [],
+        "private-response",
+        "1e3",
+        " 1",
+        1 << 63,
+    ],
+)
+def test_malformed_pagination_counts_never_prove_completeness(row_count: int, key: str, bad: object) -> None:
+    metadata = {"pageNumber": "1", "pageSize": "1000", "totalAvailable": str(row_count), key: bad}
+    site = RecordingSite(LIVE_ENV, inventory_document=_inventory_page(row_count, metadata))
+    assert len(site.workbooks()) == row_count
+    assert site.inventory_completeness.status == "cannot_establish", "MALFORMED_METADATA_NOT_COMPLETE"
+    error = site.inventory_completeness.error()
+    assert error["code"] == "inventory-cannot-establish"
+    assert all(type(value) is int for field, value in error.items() if field not in {"code", "operation"})
+    assert "private-response" not in json.dumps(error, allow_nan=False)
+
+
+@pytest.mark.parametrize("metadata", [None, True, -1, float("nan"), "private-response", [], [{}]])
+def test_malformed_pagination_container_is_not_missing_metadata(metadata: object) -> None:
+    site = RecordingSite(LIVE_ENV, inventory_document=_inventory_page(1, metadata))
+    site.workbooks()
+    assert site.inventory_completeness.status == "cannot_establish", "MALFORMED_CONTAINER_NOT_COMPLETE"
+
+
+@pytest.mark.parametrize(
+    "row_count,metadata",
+    [
+        (1, {"pageNumber": 0}),
+        (1, {"pageNumber": 2, "pageSize": 1000, "totalAvailable": 1}),
+        (1000, {"pageNumber": 2, "pageSize": 1000, "totalAvailable": 2000}),
+        (1, {"pageSize": 0}),
+        (1, {"pageSize": 999}),
+        (1, {"pageSize": 1001}),
+        (1000, {"totalAvailable": 999}),
+        (1001, {"pageNumber": 1, "pageSize": 1000, "totalAvailable": 1001}),
+    ],
+)
+def test_contradictory_page_facts_cannot_certify_a_complete_inventory(row_count: int, metadata: dict) -> None:
+    site = RecordingSite(LIVE_ENV, inventory_document=_inventory_page(row_count, metadata))
+    site.workbooks()
+    assert site.inventory_completeness.status == "cannot_establish", "CONTRADICTORY_METADATA_NOT_COMPLETE"
+
+
+@pytest.mark.parametrize(
+    "document,count",
+    [
+        ({"workbooks": {}}, 0),
+        ({"workbooks": {"workbook": {}}}, 0),
+        ({"workbooks": {"workbook": {"id": "fixture", "name": "Fixture"}}}, 1),
+    ],
+)
+def test_rest_empty_and_singleton_collection_shapes_count_rows_not_fields(document: dict, count: int) -> None:
+    site = RecordingSite(LIVE_ENV, inventory_document=document)
+    rows = site.workbooks()
+    assert isinstance(rows, list) and len(rows) == count
+    assert site.inventory_completeness.status == "complete"
+    assert site.inventory_completeness.returned_count == count
+
+
+@pytest.mark.parametrize(
+    "kwargs,exception_class",
+    [
+        ({"inventory_status": 500}, "RuntimeError"),
+        ({"inventory_error": urllib.error.URLError("private-response")}, "URLError"),
+        ({"inventory_document": b"{"}, "JSONDecodeError"),
+        ({"inventory_document": None}, "ValueError"),
+        ({"inventory_document": {}}, "ValueError"),
+        ({"inventory_document": {"workbooks": None}}, "ValueError"),
+        ({"inventory_document": {"workbooks": {"workbook": "private-response"}}}, "ValueError"),
+        ({"inventory_document": {"workbooks": {"workbook": [None]}}}, "ValueError"),
+        (
+            {
+                "inventory_document": (
+                    b'{"pagination":{"totalAvailable":2,"totalAvailable":0},"workbooks":{"workbook":[]}}'
+                )
+            },
+            "ValueError",
+        ),
+    ],
+)
+def test_inventory_failure_does_not_acquire_a_pagination_state(
+    tmp_path: Path, monkeypatch, kwargs: dict, exception_class: str
+) -> None:
+    _harvested(tmp_path, 2)
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, **kwargs))
+    result = prov.build(tmp_path, LIVE_ENV)
+    assert site.inventory_completeness is None, "FAILED_INVENTORY_HAS_NO_PAGINATION_STATE"
+    assert result["phase"]["status"] == "partial"
+    assert (
+        result["phase"]["errors"]
+        == [{"code": "live-lookup-failed", "operation": "lookup-origin", "exception_class": exception_class}] * 2
+    )
+    assert all(record["input"]["sha256"] for record in result["inputs"])
+    assert (site.count("inventory"), site.count("content")) == (1, 0)
+    assert "private-response" not in json.dumps(result, allow_nan=False)
+
+
+def test_inventory_rows_and_completeness_share_one_decode_and_one_cache(monkeypatch) -> None:
+    site = RecordingSite(LIVE_ENV, inventory_document=_inventory_page(1000, {"totalAvailable": "1001"}))
+    decoded, classified = [], []
+    decode, classify = json.loads, prov._inventory_completeness
+
+    def counted_decode(*args, **kwargs):
+        decoded.append(True)
+        return decode(*args, **kwargs)
+
+    def counted_classification(count, metadata):
+        classified.append((count, metadata))
+        return classify(count, metadata)
+
+    monkeypatch.setattr(prov.json, "loads", counted_decode)
+    monkeypatch.setattr(prov, "_inventory_completeness", counted_classification)
+    rows = site.workbooks()
+    page = site.inventory_completeness
+    site._inventory_document = _inventory_page(0, {"totalAvailable": "0"})
+    for _ in range(3):
+        assert site.workbooks() is rows and site.inventory_completeness is page
+    assert len(decoded) == 1 and classified == [(1000, {"totalAvailable": "1001"})], "ONE_PAGE_ONE_PARSE"
+    assert site.count("inventory") == 1
+
+
+def test_pagination_diagnostics_and_progress_never_copy_response_text(tmp_path: Path, monkeypatch) -> None:
+    import run_estate as estate  # pylint: disable=import-outside-toplevel
+
+    secrets = ["https://private.invalid/token", "private-site", "private-workbook", "private-project", "private-error"]
+    metadata = dict(zip(("pageNumber", "pageSize", "totalAvailable", "unknown", "exception"), secrets))
+    _twbx(tmp_path, f"{_fixture_luid(2000)}_Absent")
+    _install(monkeypatch, RecordingSite(LIVE_ENV, inventory_document=_inventory_page(1000, metadata)))
+    reporter = RecordingReporter()
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+    reporter.terminal(result)
+    emitted = []
+    state = estate._ProvenanceState(emit=lambda *args: emitted.append(args))
+    for message in reporter.messages:
+        state.accept(message)
+    assert state.terminal == result
+    assert result["phase"] == {
+        "status": "partial",
+        "errors": [
+            {
+                "code": "inventory-cannot-establish",
+                "operation": "inventory",
+                "returned_count": 1000,
+                "requested_page_size": 1000,
+            }
+        ],
+    }
+    rendered = json.dumps({"result": result, "messages": reporter.messages, "progress": emitted}, allow_nan=False)
+    assert all(secret not in rendered for secret in secrets), "PAGINATION_DIAGNOSTIC_PRIVACY"

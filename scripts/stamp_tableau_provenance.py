@@ -58,7 +58,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from object_identity import RevisionKey, revision_key  # noqa: E402  # pylint: disable=wrong-import-position
@@ -114,6 +114,13 @@ DEADLINE_CODE = "deadline-expired"
 CANCELLED_CODE = "cancelled"
 RESULT_STATUSES = SUCCESS_STATUSES | {"partial", "failed", "empty"}
 NO_ORIGIN_NOTE = "no workbook of this LUID or name on the site - local-only input"
+INCOMPLETE_INVENTORY_NOTE = "workbook not found in the incomplete inventory page - origin cannot be established"
+INVENTORY_PAGE_SIZE = 1000
+INVENTORY_MAX_COUNT = (1 << 63) - 1
+INVENTORY_ERROR_CODES = frozenset({"inventory-truncated", "inventory-cannot-establish"})
+INVENTORY_FACT_KEYS = frozenset(
+    {"returned_count", "requested_page_size", "page_number", "page_size", "total_available"}
+)
 
 # Only these labels, never an exception's dynamically supplied name or text, cross the channel.
 ERROR_CLASSES = frozenset(
@@ -471,6 +478,78 @@ def fingerprint(path: Path) -> dict[str, Any]:
     return record
 
 
+class InventoryCompleteness(NamedTuple):
+    """Numeric evidence from the same response as the cached first-page rows."""
+
+    status: Literal["complete", "truncated", "cannot_establish"]
+    returned_count: int
+    page_number: int | None = None
+    page_size: int | None = None
+    total_available: int | None = None
+
+    def error(self) -> dict[str, Any] | None:
+        """Only an incomplete inventory adds a finding; no copied response fields survive."""
+        if self.status == "complete":
+            return None
+        code = "inventory-truncated" if self.status == "truncated" else "inventory-cannot-establish"
+        facts = {"returned_count": self.returned_count, "requested_page_size": INVENTORY_PAGE_SIZE}
+        for key, value in (
+            ("page_number", self.page_number),
+            ("page_size", self.page_size),
+            ("total_available", self.total_available),
+        ):
+            if value is not None:
+                facts[key] = value
+        return _error(code, OP_INVENTORY, **facts)
+
+
+def _pagination_count(value: object) -> int | None:
+    """REST counts may be decimal strings or integers, never coercible/nonfinite values."""
+    if isinstance(value, str):
+        if re.fullmatch(r"[0-9]{1,19}", value) is None:
+            return None
+        value = int(value)
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= INVENTORY_MAX_COUNT:
+        return value
+    return None
+
+
+def _inventory_completeness(returned_count: int, metadata: object) -> InventoryCompleteness:
+    """Classify the requested first page, not a site beyond the rows the server returned."""
+    if not isinstance(metadata, dict):
+        return InventoryCompleteness("cannot_establish", returned_count)
+    counts = {
+        key: _pagination_count(metadata[key]) for key in ("pageNumber", "pageSize", "totalAvailable") if key in metadata
+    }
+    page = InventoryCompleteness(
+        "cannot_establish",
+        returned_count,
+        counts.get("pageNumber"),
+        counts.get("pageSize"),
+        counts.get("totalAvailable"),
+    )
+    if any(value is None for value in counts.values()):
+        return page
+    if (
+        returned_count > INVENTORY_PAGE_SIZE
+        or page.page_number not in (None, 1)
+        or page.page_size not in (None, INVENTORY_PAGE_SIZE)
+        or (page.total_available is not None and page.total_available < returned_count)
+    ):
+        return page
+    if page.total_available is not None:
+        return page._replace(status="truncated" if page.total_available > returned_count else "complete")
+    return page._replace(status="complete") if returned_count < INVENTORY_PAGE_SIZE else page
+
+
+def _inventory_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """A duplicated count must not silently replace contradictory evidence during JSON decoding."""
+    record = dict(pairs)
+    if len(record) != len(pairs):
+        raise ValueError("duplicate inventory response field")
+    return record
+
+
 class TableauLookup:  # pylint: disable=too-many-instance-attributes
     """Minimal read-only REST client, used only to identify a workbook we already hold.
 
@@ -488,8 +567,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
     """
 
     def __init__(self, env: dict[str, str]) -> None:
-        # Seven fields describe the site and the session; the four after them are this run's answer
-        # cache, kept as plain fields rather than a container so each one reads at its use site.
+        # Site/session fields precede this run's cached answers and their evidence.
         self.base = env["TABLEAU_SERVER_URL"].rstrip("/")
         self.version = env.get("TABLEAU_REST_API_VERSION", "3.21")
         self.site = env["TABLEAU_SITE"]
@@ -499,6 +577,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         self.site_id: str | None = None
         self._inventory: list[dict[str, Any]] | None = None
         self._inventory_failure: Exception | None = None
+        self.inventory_completeness: InventoryCompleteness | None = None
         self._content_cache: dict[str, bytes | None] = {}
         self._content_failure: dict[str, Exception] = {}
         self._content_unavailable: dict[str, str] = {}
@@ -566,7 +645,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         return redact(text, self._pat[0], self._pat[1], self.token or "")
 
     def workbooks(self) -> list[dict[str, Any]]:
-        """Every workbook on the site, listed **once per run** - the failure included.
+        """The first inventory page, cached **once per run** with its completeness or failure.
 
         The listing does not vary between inputs, so asking again for the second and every later
         input bought nothing and cost one round trip each (66 of 66 measured). Latching the failure
@@ -586,10 +665,20 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
     def _fetch_workbooks(self) -> list[dict[str, Any]]:
         if self.reporter.cancelled:
             raise RuntimeError(CANCELLED_CODE)
-        status, payload = self._call("GET", f"/sites/{self.site_id}/workbooks?pageSize=1000", accept="application/json")
+        status, payload = self._call(
+            "GET", f"/sites/{self.site_id}/workbooks?pageSize={INVENTORY_PAGE_SIZE}", accept="application/json"
+        )
         if status != 200:
             raise RuntimeError(f"listing workbooks failed: HTTP {status}")
-        return json.loads(payload).get("workbooks", {}).get("workbook", [])
+        document = json.loads(payload, object_pairs_hook=_inventory_object)
+        if not isinstance(document, dict) or not isinstance(document.get("workbooks"), dict):
+            raise ValueError("invalid workbook inventory")
+        rows = document["workbooks"].get("workbook", [])
+        rows = ([rows] if rows else []) if isinstance(rows, dict) else rows
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise ValueError("invalid workbook inventory rows")
+        self.inventory_completeness = _inventory_completeness(len(rows), document.get("pagination", {}))
+        return rows
 
     def content_sha256(self, workbook_id: str) -> str | None:
         """sha256 of the workbook as the server would hand it to us, or ``None`` if it cannot be read.
@@ -953,6 +1042,10 @@ def _origin_pass(
         lookup.workbooks()
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         LOG.debug("site inventory unavailable (%s) - each input records its own reason", _exception_class(exc))
+    else:
+        completeness = lookup.inventory_completeness
+        if completeness is not None and (finding := completeness.error()) is not None:
+            errors.append(finding)
     reporter.operation(OP_INVENTORY, 1, 1)
 
     for path, record in zip(inputs, records):
@@ -975,7 +1068,12 @@ def _attach_origin(record: dict[str, Any], lookup: TableauLookup, stem: str, err
         errors.append(record["lookup_error"])
     record["origin"] = origin
     if origin is None:
-        record["origin_note"] = NO_ORIGIN_NOTE
+        completeness = lookup.inventory_completeness
+        record["origin_note"] = (
+            INCOMPLETE_INVENTORY_NOTE
+            if completeness is not None and completeness.status != "complete"
+            else NO_ORIGIN_NOTE
+        )
     elif origin["match"] == "name_only":
         record["origin_note"] = (
             f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "

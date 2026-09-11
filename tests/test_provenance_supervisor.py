@@ -67,6 +67,73 @@ def test_count_validator_rejects_non_counts_for_its_own_reason(value: object) ->
     pytest.fail("COUNT_VALIDATOR: a non-count was admitted as the discovery total")
 
 
+@pytest.mark.parametrize("code", ["inventory-truncated", "inventory-cannot-establish"])
+def test_numeric_pagination_findings_use_the_existing_typed_error_path(code: str) -> None:
+    estate._validated_error(
+        {
+            "code": code,
+            "operation": "inventory",
+            "returned_count": 1000,
+            "requested_page_size": 1000,
+            "page_number": 1,
+            "page_size": 1000,
+            "total_available": (1 << 63) - 1,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "field", ["returned_count", "requested_page_size", "page_number", "page_size", "total_available"]
+)
+@pytest.mark.parametrize("value", [True, False, -1, 1.0, float("nan"), float("inf"), "1000", None, 1 << 63])
+def test_pagination_protocol_facts_are_bounded_integers(field: str, value: object) -> None:
+    error = {
+        "code": "inventory-cannot-establish",
+        "operation": "inventory",
+        "returned_count": 1000,
+        "requested_page_size": 1000,
+        field: value,
+    }
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_error(error)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"code": "live-lookup-failed"},
+        {"operation": "sign-in"},
+        {"requested_page_size": 999},
+        {"exception_class": "ValueError"},
+        {"http_status": 200},
+        {"url": "https://private.invalid"},
+    ],
+)
+def test_pagination_protocol_fields_cannot_escape_the_inventory_error_shape(updates: dict) -> None:
+    error = {
+        "code": "inventory-cannot-establish",
+        "operation": "inventory",
+        "returned_count": 1000,
+        "requested_page_size": 1000,
+        **updates,
+    }
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_error(error)
+
+
+@pytest.mark.parametrize("field", ["returned_count", "requested_page_size"])
+def test_pagination_protocol_requires_both_observed_and_requested_counts(field: str) -> None:
+    error = {
+        "code": "inventory-cannot-establish",
+        "operation": "inventory",
+        "returned_count": 1000,
+        "requested_page_size": 1000,
+    }
+    del error[field]
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_error(error)
+
+
 @pytest.mark.parametrize("index", [-1, True, 0, 2, 100000])
 def test_checkpoint_index_cannot_duplicate_skip_or_amplify(index: int) -> None:
     """An index never determines allocation size."""

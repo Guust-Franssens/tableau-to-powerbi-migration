@@ -10,6 +10,7 @@ from __future__ import annotations
 import builtins
 import contextlib
 import functools
+import hashlib
 import io
 import json
 import multiprocessing
@@ -3557,6 +3558,70 @@ def _assert_protocol_refused(run: tuple[int, dict, Path], total: int) -> None:
     assert artifact["input_count"] == len(artifact["inputs"]) == total
     assert not {"adjudicate", "slice_handovers"} & set(_phase_names(out))
     assert not (out / "handover").exists()
+
+
+@pytest.mark.parametrize(
+    "row_count,pagination,status,error_code",
+    [
+        (None, ..., "local_only", None),
+        (0, ..., "success", None),
+        (1, ..., "success", None),
+        (999, ..., "success", None),
+        (1000, {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "1000"}, "success", None),
+        (1000, {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "1001"}, "partial", "inventory-truncated"),
+        (1, {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "2"}, "partial", "inventory-truncated"),
+        (1000, ..., "partial", "inventory-cannot-establish"),
+        (1, {"totalAvailable": True}, "partial", "inventory-cannot-establish"),
+    ],
+    ids=[
+        "offline",
+        "zero",
+        "one",
+        "999",
+        "full-proven",
+        "full-truncated",
+        "short-truncated",
+        "full-ambiguous",
+        "malformed",
+    ],
+)
+def test_real_inventory_result_publishes_once_and_binds_later_phases(
+    tmp_path: Path, monkeypatch, row_count: int | None, pagination: object, status: str, error_code: str | None
+) -> None:
+    """Real transport/parser/build output crosses the spawned protocol and the unchanged atomic writer."""
+    import test_stamp_tableau_provenance as fixtures  # pylint: disable=import-outside-toplevel
+
+    source = tmp_path / "recorded-input"
+    source.mkdir()
+    original = b"<workbook />"
+    (source / "unit.twb").write_bytes(original)
+    document = fixtures._inventory_page(row_count or 0, pagination)
+    if row_count:
+        document["workbooks"]["workbook"][0]["name"] = "unit"
+    site = fixtures._install(monkeypatch, fixtures.RecordingSite(fixtures.LIVE_ENV, inventory_document=document))
+    reporter = fixtures.RecordingReporter()
+    result = fixtures.prov.build(source, fixtures.LIVE_ENV if row_count is not None else {}, reporter)
+    reporter.terminal(result)
+    messages = json.loads(json.dumps(reporter.messages, allow_nan=False))
+
+    code, artifact, out = _protocol_main(tmp_path, monkeypatch, messages)
+
+    assert artifact == result, "PAGINATION_PROTOCOL_RESULT: the typed result was replaced or lost"
+    assert artifact["phase"]["status"] == status
+    assert [error["code"] for error in artifact["phase"]["errors"]] == ([error_code] if error_code else [])
+    assert artifact["input_count"] == len(artifact["inputs"]) == 1
+    assert artifact["inputs"][0]["input"]["sha256"] == hashlib.sha256(original).hexdigest()
+    assert site.count("inventory") == int(row_count is not None)
+    assert site.count("content") == int(bool(row_count))
+    assert not list(out.glob("source-provenance.json.*.tmp"))
+    phases = set(_phase_names(out))
+    if error_code:
+        assert code == run_estate.EXIT_PROVENANCE_FAILED == 11, "PAGINATION_EXIT_11"
+        assert not {"adjudicate", "slice_handovers"} & phases, "PAGINATION_NO_LATER_PHASES"
+        assert not (out / "handover").exists()
+    else:
+        assert code == run_estate.EXIT_OK == 0, "PAGINATION_POSITIVE_CONTROL"
+        assert {"adjudicate", "slice_handovers"} <= phases
 
 
 def test_spawned_success_without_any_live_history_is_protocol_invalid(tmp_path: Path, monkeypatch) -> None:

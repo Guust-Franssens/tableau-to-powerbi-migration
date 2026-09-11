@@ -328,21 +328,24 @@ _CHECKPOINT_INPUT_KEYS = frozenset({"size_bytes", "sha256", "revision_key", "mem
 _CHECKPOINT_MEMBER_KEYS = frozenset({"size_bytes", "crc32"})
 _CHECKPOINT_REVISION_KEYS = frozenset({"algo", "value"})
 _CHECKPOINT_ERROR_KEYS = frozenset({"code", "operation", "exception_class", "errno", "winerror"})
-_ERROR_KEYS = _CHECKPOINT_ERROR_KEYS | {"http_status"}
-_WORKER_ERROR_CODES = frozenset(
-    {
-        "collect-inputs-failed",
-        "empty-input",
-        "local-fingerprint-failed",
-        "live-lookup-refused",
-        "live-lookup-failed",
-        "content-unavailable",
-        "scrub-failed",
-        "sign-out-failed",
-        "build-failed",
-        prov.CANCELLED_CODE,
-        prov.DEADLINE_CODE,
-    }
+_ERROR_KEYS = _CHECKPOINT_ERROR_KEYS | {"http_status"} | prov.INVENTORY_FACT_KEYS
+_WORKER_ERROR_CODES = (
+    frozenset(
+        {
+            "collect-inputs-failed",
+            "empty-input",
+            "local-fingerprint-failed",
+            "live-lookup-refused",
+            "live-lookup-failed",
+            "content-unavailable",
+            "scrub-failed",
+            "sign-out-failed",
+            "build-failed",
+            prov.CANCELLED_CODE,
+            prov.DEADLINE_CODE,
+        }
+    )
+    | prov.INVENTORY_ERROR_CODES
 )
 _ERROR_OPERATIONS = prov.WORKER_OPERATIONS | {"lookup-origin", "download-workbook", "build", "scrub-local-fields"}
 _REVISION_ALGORITHMS = frozenset({"twbx-content-v3", "tableau-xml-v1", "raw-sha256-v1"})
@@ -890,6 +893,18 @@ def _validated_error(error: object) -> None:
     _require(type(error) is dict and {"code", "operation"} <= error.keys() <= _ERROR_KEYS)
     _enum(error["code"], _WORKER_ERROR_CODES)
     _enum(error["operation"], _ERROR_OPERATIONS)
+    if error["code"] in prov.INVENTORY_ERROR_CODES:
+        _require(
+            {"code", "operation", "returned_count", "requested_page_size"}
+            <= error.keys()
+            <= {"code", "operation"} | prov.INVENTORY_FACT_KEYS
+        )
+        _require(error["operation"] == prov.OP_INVENTORY)
+        _require(error["requested_page_size"] == prov.INVENTORY_PAGE_SIZE)
+    else:
+        _require(prov.INVENTORY_FACT_KEYS.isdisjoint(error))
+    for key in error.keys() & prov.INVENTORY_FACT_KEYS:
+        _require(_is_count(error[key]))
     if "exception_class" in error:
         _enum(error["exception_class"], prov.ERROR_CLASSES)
     for key in ("errno", "winerror"):
@@ -992,7 +1007,7 @@ def _validated_result_record(record: object) -> dict:
     if "origin_note" in record:
         _text(record["origin_note"])
         origin = record.get("origin")
-        notes = {prov.WITHHELD_NOTE, prov.NO_ORIGIN_NOTE}
+        notes = {prov.WITHHELD_NOTE, prov.NO_ORIGIN_NOTE, prov.INCOMPLETE_INVENTORY_NOTE}
         if origin:
             notes.add(
                 f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "

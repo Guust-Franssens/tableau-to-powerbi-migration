@@ -121,6 +121,7 @@ disappeared. The artifact reports that failure.
 This is a direct-worker computation bound, **not** descendant supervision, a standalone-stamper
 deadline, pagination, or a deadline on the parent's filesystem publication. Path validation still runs
 before provenance. Strict-JSON atomic replacement and prior-byte preservation are unchanged.
+The single cached inventory page is complete only when valid first-page counts prove it or it is shorter than the requested 1,000 rows without contradictory metadata; a truncated or unestablished page records numeric-only facts, preserves local fingerprints, and exits 11 before later phases, while offline and proven-complete inventories gain no pagination finding.
 
 ### S2 package preparation
 
