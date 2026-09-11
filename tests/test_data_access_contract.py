@@ -341,6 +341,50 @@ def test_authorization_cannot_override_authority_failures(root: Path, fault: str
 
 
 @pytest.mark.usefixtures("desktop")
+@pytest.mark.parametrize("authorized", [False, True], ids=["earned", "authorized"])
+@pytest.mark.parametrize(
+    "fault,code",
+    [
+        ("identical-duplicate", "source-key-invalid"),
+        ("invalid-element", "spec-unreadable"),
+        ("duplicate-json-field", "spec-unreadable"),
+    ],
+)
+def test_current_root_facts_are_not_silently_normalized(root: Path, authorized: bool, fault: str, code: str) -> None:
+    """Loader deduplication/filtering must not hide invalid current keys from either authority."""
+    if authorized:
+        _authorize(root)
+    else:
+        _earn(root)
+    assert _assess(root, authorized=authorized).state in {"live_data_ok", "authorized_model_only"}
+    spec = _spec(LIVE)
+    if fault == "identical-duplicate":
+        spec["data_sources"].append(copy.deepcopy(spec["data_sources"][0]))
+    elif fault == "invalid-element":
+        spec["data_sources"].append(False)
+    text = json.dumps(spec)
+    if fault == "duplicate-json-field":
+        text = '{"data_sources": [],' + text[1:]
+    (root / gate.MIGRATION_SPEC).write_text(text, encoding="utf-8")
+    result = _assess(root, authorized=authorized)
+    assert (result.state, result.codes) == ("cannot_establish", (code,))
+
+
+@pytest.mark.usefixtures("desktop")
+@pytest.mark.parametrize("authorized", [False, True], ids=["earned", "authorized"])
+def test_native_engine_root_keeps_the_canonical_adapter(root: Path, authorized: bool) -> None:
+    """A native engine root with no parser spec must retain its existing data-source adapter."""
+    (root / gate.MIGRATION_SPEC).unlink()
+    (root / "report.json").write_text(json.dumps(_spec(LIVE)), encoding="utf-8")
+    (root / "input_manifest.json").write_text("{}", encoding="utf-8")
+    if authorized:
+        _authorize(root)
+    else:
+        _earn(root)
+    assert _assess(root, authorized=authorized).state == ("authorized_model_only" if authorized else "live_data_ok")
+
+
+@pytest.mark.usefixtures("desktop")
 def test_all_current_audit_writers_remain_readable(root: Path) -> None:
     """Diagnostics may lack sources, and duplicate-source refusal rows must not poison history."""
     _audit(root, "engine-receipt", "sha256=" + "a" * 64)

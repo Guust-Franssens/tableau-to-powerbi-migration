@@ -1393,16 +1393,12 @@ CANNOT_CODES = frozenset(
 )
 DATA_ACCESS_CODES = ACCEPTED_CODES | BLOCKING_CODES | CANNOT_CODES
 
-# `_leg_key`'s output shape, pinned so a projection cannot smuggle a display name, a host, or a
-# path through the one list field that carries source identity.
+# Closed identities: no endpoint/display text, paths or normalization.
 SOURCE_KEY_RE = re.compile(r"^source-key:[0-9a-f]{16}$")
 PROVIDER_UNIT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 
-# Audit action -> blocking code for a per-leg probe ATTEMPT. `probe-data_ok` is the only success and
-# is handled separately; `probe-cleared` is a gate transition, not an attempt. `probe-operator_required`
-# and `probe-credential_present` are RESERVED: no producer emits them today (`_verdict_lines.py` maps
-# human-dialog tokens to ERROR), and reserving them is deliberately not the same as accepting them -
-# both are blocking, so a future producer cannot turn one into a green by merely existing.
+# Attempts are not clears. Reserved operator_required/credential_present remain blocking even
+# though today's classifier does not emit them; only probe-data_ok can supply measured success.
 PROBE_ATTEMPT_CODES = {
     "probe-operator_required": "probe-operator-required",
     "probe-no_credential": "probe-no-credential",
@@ -1424,9 +1420,6 @@ AUDIT_SOURCE_RULES = {
     **dict.fromkeys(("authorize", "manual-clear", "block-skipped", "block-forced-scope", "engine-receipt"), "absent"),
 }
 
-# Every way `parse_data_access` can refuse. Closed so a test can assert WHICH refusal fired rather
-# than merely that something did - a fail-closed parser that refuses everything for one reason
-# would otherwise pass every negative control vacuously.
 DATA_ACCESS_REJECTIONS = (
     "unreadable",
     "malformed-json",
@@ -1601,12 +1594,21 @@ def _package_spec_facts(package_spec: object) -> tuple[tuple[str, ...], bool, st
 
 
 def _gate_root_live_keys(gate_root: Path) -> tuple[frozenset[str], str | None]:
-    """Root keys through the canonical bundle loader; extra root keys never enter the projection."""
+    """Validate raw spec facts before the bundle adapter can deduplicate/filter current keys."""
     try:
-        bundle = load_bundle(gate_root)
-    except (OSError, ValueError, TypeError, AttributeError):
+        spec_path = gate_root / MIGRATION_SPEC
+        spec = (
+            json.loads(
+                spec_path.read_text(encoding="utf-8"),
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_nonfinite,
+            )
+            if spec_path.is_file()
+            else {"data_sources": load_bundle(gate_root).data_sources}
+        )
+    except (OSError, ValueError, TypeError, AttributeError, _DuplicateJsonKey, _NonFiniteJsonConstant, RecursionError):
         return frozenset(), "spec-unreadable"
-    keys, _review, refusal = _package_spec_facts({"data_sources": bundle.data_sources})
+    keys, _review, refusal = _package_spec_facts(spec)
     return frozenset(keys), refusal
 
 
