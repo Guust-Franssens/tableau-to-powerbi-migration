@@ -852,13 +852,15 @@ def parse_brief_policy(  # pylint: disable=too-many-return-statements
     scrub = tableau_env.env_redactor(env, *(env.get(key, "") for key in sorted(tableau_env.DATASOURCE_CREDENTIAL_KEYS)))
     if discloses_host_location(text) or scrub(text) != text:
         return CODE_BRIEF_UNSAFE, None
-    if not text.startswith("+++"):
+    lines = text.replace("\r\n", "\n").split("\n")
+    first = next((line for line in lines if line.strip()), "")
+    if "+++" not in first:
         return None, None
-    head, delimiter, _rest = text.replace("\r\n", "\n")[3:].partition("\n+++")
-    if not delimiter:
+    closing = next((index for index in range(1, len(lines)) if lines[index] == "+++"), None)
+    if lines[0] != "+++" or closing is None or any("+++" in line for line in lines[closing + 1 :]):
         return CODE_BRIEF_FRONTMATTER, None
     try:
-        front = tomllib.loads(head)
+        front = tomllib.loads("\n".join(lines[1:closing]))
     except (tomllib.TOMLDecodeError, ValueError):
         return CODE_BRIEF_FRONTMATTER, None
     if front.get("unit") != unit:

@@ -109,7 +109,9 @@ def workbook_package(  # pylint: disable=too-many-arguments,too-many-positional-
 
     data_sources: list[dict[str, Any]] = [{"id": "ds-1"}]
     if published is not None:
-        data_sources = [{"id": "ds-1", "published_datasource": published}]
+        data_sources = [
+            {"id": "ds-1", "connection": {"class": "sqlproxy", "mode": "live"}, "published_datasource": published}
+        ]
     _write(package / "migration-spec.json", {"source": {"file_name": name}, "data_sources": data_sources})
     _write(package / "migration-spec.schema.json", {"$schema": "http://json-schema.org/draft-07/schema#"})
     _write(
@@ -815,6 +817,70 @@ def test_strict_brief_policy_is_frozen_and_nonserialized(tmp_path: Path) -> None
     with pytest.raises(AttributeError):
         result.brief_policy.requested_scope = "model_and_report"
     assert pri.brief_identity(brief_text(DS_UNIT, "model_only"), DS_UNIT, "model_only") == (None, False)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "exact",
+        "opening-suffix",
+        "opening-prefix",
+        "opening-space",
+        "opening-tab",
+        "opening-blank",
+        "closing-suffix",
+        "closing-prefix",
+        "closing-space",
+        "closing-tab",
+        "closing-missing",
+        "extra-exact",
+        "extra-suffix",
+        "extra-prefix",
+        "extra-space",
+    ],
+)
+def test_frontmatter_requires_two_exact_boundary_lines(tmp_path: Path, boundary: str, newline: str) -> None:
+    """Malformed explicit policy is not prose, and no malformed boundary can authorize a fallback."""
+    text = brief_text(DS_UNIT, "model_only").replace('"stop"', '"model_only_unvalidated"')
+    lines = text.split("\n")
+    opening = {
+        "opening-suffix": "+++not-a-delimiter",
+        "opening-prefix": "not-a-delimiter+++",
+        "opening-space": " +++",
+        "opening-tab": "+++\t",
+        "opening-blank": "\n+++",
+    }
+    closing = {
+        "closing-suffix": "+++not-a-delimiter",
+        "closing-prefix": "not-a-delimiter+++",
+        "closing-space": "+++ ",
+        "closing-tab": "\t+++",
+        "closing-missing": "",
+    }
+    extra = {
+        "extra-exact": "+++",
+        "extra-suffix": "+++not-a-delimiter",
+        "extra-prefix": "not-a-delimiter+++",
+        "extra-space": " +++ ",
+    }
+    lines[0] = opening.get(boundary, lines[0])
+    lines[5] = closing.get(boundary, lines[5])
+    if boundary in extra:
+        lines.append(extra[boundary])
+    text = "\n".join(lines).replace("\n", newline)
+    expected_code = None if boundary == "exact" else "brief_frontmatter_unparseable"
+    expected_policy = pri.BriefPolicy("model_only", "model_only_unvalidated") if boundary == "exact" else None
+    assert pri.parse_brief_policy(text, DS_UNIT, "model_only") == (expected_code, expected_policy)
+
+    package = datasource_package(tmp_path / "Provider")
+    (package / "migration-brief.md").write_bytes(text.encode("utf-8"))
+    manifest = json.loads((package / "package-manifest.json").read_text(encoding="utf-8"))
+    seal(package, **manifest)
+    result = verify_one(package)
+    assert role(result, "migration_brief").code == expected_code
+    assert result.brief_policy == expected_policy
+    assert result.is_start_ready is (boundary == "exact")
 
 
 @pytest.mark.parametrize(

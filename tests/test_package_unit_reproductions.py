@@ -382,7 +382,8 @@ def test_real_localized_bytes_and_exact_in_memory_facts_drive_projection(
         return facts
 
     def same_facts(root, **kwargs):
-        assert kwargs["package_data_sources"] is localized[0]
+        assert kwargs["package_data_sources"] == localized[0]
+        assert kwargs["package_data_sources"] is not localized[0], "assessment must use a held copy"
         assessed.append(root)
         return assess(root, **kwargs)
 
@@ -404,7 +405,7 @@ def test_real_localized_bytes_and_exact_in_memory_facts_drive_projection(
         else ("local_import_ready", ("all-flat-file", "package-self-contained"))
     )
     assert assessed == [bundle.resolve()]
-    assert result["data_sources"] is localized[0]
+    assert result["data_sources"] == localized[0]
     assert result["data_sources"]["binding"] is not None, "unbound is not the same as missing bytes"
     assert len(result["data_sources"]["shipped"]) == (1 if missing else 2)
     for index, row in enumerate(result["data_sources"]["shipped"]):
@@ -812,7 +813,9 @@ def test_contradictory_luid_and_second_dependency_cannot_be_collapsed_by_name(tm
     other = _direct_provider(tmp_path / "other", luid=s2.WB_LUID, key=authority.OTHER_KEY)
     consumer = _provider_consumer(tmp_path, selected)
     spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
-    spec["data_sources"].append({"published_datasource": {"luid": s2.WB_LUID}})
+    spec["data_sources"].append(
+        {"connection": {"class": "sqlproxy", "mode": "live"}, "published_datasource": {"luid": s2.WB_LUID}}
+    )
     s2._write(consumer / "migration-spec.json", spec)
     _reseal(consumer)
     verdict = pkg.pri.verify_phase1_role_identity([selected, other, consumer])[-1]

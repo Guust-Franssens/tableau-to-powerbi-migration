@@ -224,14 +224,22 @@ states. The single brief parser requires exactly four string policy fields:
 `schema = "phase1-start-ready/v1"`, exact `unit`, topology-exact `scope`, and
 `fallback_authorization = "stop"` or `"model_only_unvalidated"`. Plain/legacy/missing policy remains
 `brief_policy_not_parsed`, never inferred approval. The validated brief bytes are copied unchanged.
+Only exact opening/closing `+++` lines are policy boundaries (LF and CRLF supported); malformed or
+extra boundaries return `brief_frontmatter_unparseable`.
 
 `package_unit.py --gate-root <exact-original-root>` selects the gate's bundle or parser-spec
 directory/file; the default is `load_bundle(bundle).migration_dir`. Repeatable
 `--provider-package <exact-package-root>` supplies separate-command providers. Paths stay in memory.
 Datasource candidates publish first; only successful publications join explicit providers, never stale
 failed outputs or discovered siblings. The exact S2 input ordinal selects the provider, not its name.
-Assembly seals a provisional non-accepted candidate, runs real S1/S2, assesses, strictly projects and
-reseals final bytes before the existing guarded swap. No probe/audit/gate writes or scope downgrade.
+Assembly snapshots the provisional S1 namespace/digests and spec/policy/localization facts, then
+runs S2 and assesses. Shipped-data roles must remain present. Only exact generated projection,
+handover/README and manifest bytes may change; final S1/S2 recheck the same cohort before the guarded
+swap. Provider manifest/projection bytes are held through their bound S1 walk and digest, parsed once
+before S2 and selected by the same ordinal. Reseals, root swaps or changed candidate/provider facts
+cannot create an accepted projection. Every published-only row needs a complete scalar `sqlproxy`
+connection and valid dependency; malformed/additional direct legs never disappear from the denominator.
+No probe/audit/gate writes or scope downgrade.
 
 ❌ **Producer-only:** the final `check_reference_readiness.py` START_READY data consumer is pending.
 Construction exit 0, reference `READY`, `packaged` and `self_contained` are not data authorization.

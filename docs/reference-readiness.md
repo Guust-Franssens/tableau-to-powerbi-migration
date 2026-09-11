@@ -420,6 +420,9 @@ fallback_authorization = "model_only_unvalidated"
 `model_and_report` for an owned workbook, `report_only_shared_model` for a consumer).
 `fallback_authorization` is exactly `stop` or `model_only_unvalidated`. Unknown keys/schema/enums,
 wrong types and incomplete explicit policy refuse before packaging. Plain/legacy text is not policy.
+The opening and closing lines must be exactly `+++`; LF and CRLF are accepted without changing
+the shipped brief bytes. Prefixes, suffixes, whitespace, missing or additional boundary forms
+return `brief_frontmatter_unparseable`, not inferred policy or a fallback to prose.
 The existing `brief_identity()` wrapper uses this same parser, not a second implementation.
 
 S2 also retains the successful dependency's **input-cohort `provider_ordinal`**, never serialized.
@@ -448,9 +451,15 @@ target orders and the exact structured S2 finding.
 
 Every newly published package declares `artifacts.data_access = "data-access.json"` and hashes
 its final UTF-8/LF bytes in `contents.files`. Assembly writes a strict non-accepted provisional file,
-seals the candidate, runs real S1/S2, calls only `credential_gate.assess_data_access`, validates the
-nine-field projection with `parse_data_access` and the zero-drop shipment allowlist, then reseals
-**last** and checks S1 before the existing path-budget/edit-safe swap.
+seals and snapshots the candidate, runs real S1/S2, calls only `credential_gate.assess_data_access`,
+and validates the nine-field projection with `parse_data_access` and the zero-drop shipment allowlist.
+The snapshot holds the exact namespace/digests and assessment facts; every `data_sources.shipped`
+role must exist. Resealing extends that held map, never baselines arbitrary new bytes. Only the exact
+producer-generated projection, `handover.md`, `README.md` and manifest may change. Final S1 **and S2**
+run over those final bytes and the same provider cohort before the path-budget/edit-safe swap.
+Provider projection bytes are held and parsed once before S2, bound to the provider's root and
+declared digest. Changed provider bytes/root or final provider ordinal/policy drift refuse rather
+than silently selecting a new baseline.
 
 ⚠️ This is **not** the final START_READY consumer. `check_reference_readiness.py` does not yet fold
 the projection. Construction success, its internal S2 `START_READY`, and reference `READY` do not

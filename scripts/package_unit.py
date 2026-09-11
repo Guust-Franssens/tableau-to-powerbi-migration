@@ -209,6 +209,7 @@ import traceback
 import uuid
 from collections import Counter
 from collections.abc import Callable, Sequence
+from copy import deepcopy
 from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
@@ -3744,12 +3745,162 @@ def _checked_data_access(assessment: data_access.DataAccessAssessment) -> data_a
     return checked
 
 
-def _provider_projection(
-    root: Path, provider: pri.Phase1RoleIdentityResult
+class _PackageSnapshot(NamedTuple):
+    """Producer-held S1 bytes, bound to the same physical and lexical package root."""
+
+    verified: pri.VerifiedPackage
+    directory_id: tuple[int, int]
+    manifest: bytes
+    digests: tuple[tuple[str, str], ...]
+    spec: bytes | None
+    projection: data_access.DataAccessAssessment | None
+    projection_refusal: str | None
+
+
+class _DataAccessInputs(NamedTuple):
+    """One fixed provider cohort and the candidate facts used for its assessment."""
+
+    roots: tuple[Path, ...]
+    snapshots: tuple[_PackageSnapshot | None, ...]
+    roles: tuple[pri.Phase1RoleIdentityResult, ...]
+    localized: dict[str, Any]
+    spec: dict[str, Any] | None
+
+
+_DATA_ACCESS_FINAL_FILES = frozenset({DATA_ACCESS_NAME, "handover.md", "README.md", MANIFEST_NAME})
+
+
+def _package_directory_id(root: Path) -> tuple[int, int]:
+    info = root.lstat()
+    if is_reparse_entry(info) or not stat.S_ISDIR(info.st_mode):
+        raise PackagingError("data_access_package_root_changed")
+    return info.st_dev, info.st_ino
+
+
+def _snapshot_matches(snapshot: _PackageSnapshot, generated: dict[str, bytes] | None = None) -> bool:
+    """Compare against HELD digests, never against a subsequently resealed manifest."""
+    generated = {} if generated is None else generated
+    root = snapshot.verified.root
+    try:
+        if (
+            set(generated) - _DATA_ACCESS_FINAL_FILES
+            or not snapshot.verified.is_bound_to(str(root))
+            or _package_directory_id(root) != snapshot.directory_id
+            or pfs._recheck_boundary(root)  # pylint: disable=protected-access
+        ):
+            return False
+        walked, findings, _empty = pfs.walk_package(root)
+        expected = dict(snapshot.digests)
+        expected[MANIFEST_NAME] = hashlib.sha256(snapshot.manifest).hexdigest()
+        expected.update({key: hashlib.sha256(raw).hexdigest() for key, raw in generated.items()})
+        return (
+            not findings
+            and set(walked) == set(expected)
+            and all(pfs._hash_file(walked[key]) == digest for key, digest in expected.items())  # pylint: disable=protected-access
+            and _package_directory_id(root) == snapshot.directory_id
+        )
+    except (OSError, ValueError, PackagingError):
+        return False
+
+
+def _held_projection(
+    manifest: dict[str, Any], held: dict[str, bytes]
 ) -> tuple[data_access.DataAccessAssessment | None, str | None]:
-    """Read only the exact S2-clean provider's declared, S1-covered direct projection."""
+    artifacts = manifest.get("artifacts")
+    if (
+        not isinstance(artifacts, dict)
+        or artifacts.get("data_access") != DATA_ACCESS_NAME
+        or DATA_ACCESS_NAME not in held
+    ):
+        return None, "provider-missing"
+    try:
+        return data_access.parse_data_access(held[DATA_ACCESS_NAME].decode("utf-8")), None
+    except (ValueError, TypeError):
+        return None, "projection-invalid"
+
+
+def _package_snapshot(root: Path) -> _PackageSnapshot | None:
+    """Hold the manifest BEFORE S1; read selected walk-produced bytes against its declared hashes."""
+    try:
+        directory_id = _package_directory_id(root)
+        if pfs._recheck_boundary(root):  # pylint: disable=protected-access
+            return None
+        walked, findings, _empty = pfs.walk_package(root)
+        if findings or MANIFEST_NAME not in walked:
+            return None
+        raw_manifest = walked[MANIFEST_NAME].read_bytes()
+        manifest = pfs.parse_manifest_text(raw_manifest.decode("utf-8"))
+        digests = pfs.declared_files(manifest)
+        verified = pri.verify_s1(root)
+        if not verified.is_bound_to(str(root)) or not verified.integrity.is_clean:
+            return None
+        held = {}
+        for key in ("migration-spec.json", pri.BRIEF_NAME, DATA_ACCESS_NAME):
+            if key in digests and key in walked:
+                raw = walked[key].read_bytes()
+                if hashlib.sha256(raw).hexdigest() != digests[key]:
+                    return None
+                held[key] = raw
+        projection, refusal = _held_projection(manifest, held)
+        snapshot = _PackageSnapshot(
+            verified,
+            directory_id,
+            raw_manifest,
+            tuple(digests.items()),
+            held.get("migration-spec.json"),
+            projection,
+            refusal,
+        )
+        return snapshot if _snapshot_matches(snapshot) else None
+    except (OSError, ValueError, TypeError, PackagingError, pfs._ManifestError):  # pylint: disable=protected-access
+        return None
+
+
+def _require_candidate_snapshot(
+    inputs: _DataAccessInputs, *, generated: dict[str, bytes] | None = None
+) -> _PackageSnapshot:
+    snapshot = inputs.snapshots[-1]
+    if snapshot is None or not _snapshot_matches(snapshot, generated):
+        raise PackagingError("data_access_candidate_changed")
+    shipped = inputs.localized.get("shipped")
+    declared = dict(snapshot.digests)
+    if not isinstance(shipped, list) or any(
+        not isinstance(row, dict) or not isinstance(row.get("path"), str) or row["path"] not in declared
+        for row in shipped
+    ):
+        raise PackagingError("data_access_shipped_role_missing")
+    return snapshot
+
+
+def _data_access_inputs(dest: Path, localized: dict[str, Any], provider_packages: Sequence[Path]) -> _DataAccessInputs:
+    roots = (*provider_packages, dest)
+    snapshots = tuple(_package_snapshot(root) for root in roots)
+    snapshot = snapshots[-1]
+    spec = None
+    if snapshot is not None and snapshot.spec is not None:
+        try:
+            spec = pfs.parse_manifest_text(snapshot.spec.decode("utf-8"))
+        except (ValueError, pfs._ManifestError):  # pylint: disable=protected-access
+            pass
+    inputs = _DataAccessInputs(roots, snapshots, (), deepcopy(localized), spec)
+    _require_candidate_snapshot(inputs)
+    roles = pri.verify_phase1_role_identity(roots)
+    inputs = inputs._replace(roles=roles)
+    _require_candidate_snapshot(inputs)
+    return inputs
+
+
+def _provider_projection(
+    snapshot: _PackageSnapshot | None, provider: pri.Phase1RoleIdentityResult
+) -> tuple[data_access.DataAccessAssessment | None, str | None]:
+    """Select the assessment held BEFORE S2, never reopen or parse a provider projection here."""
     verified = provider.verified
-    bound = verified is not None and verified.is_bound_to(str(root)) and verified.integrity.is_clean
+    bound = (
+        snapshot is not None
+        and verified is not None
+        and verified.is_bound_to(snapshot.verified.root_identity)
+        and verified.integrity.is_clean
+    )
     if (
         not provider.is_start_ready
         or provider.kind != pri.KIND_DATASOURCE
@@ -3757,19 +3908,11 @@ def _provider_projection(
         or not bound
     ):
         return None, "provider-missing"
-    walked, findings, _empty = pfs.walk_package(root)
-    if findings or MANIFEST_NAME not in walked:
+    if not _snapshot_matches(snapshot):
         return None, "projection-invalid"
-    manifest = pfs.parse_manifest_text(walked[MANIFEST_NAME].read_text(encoding="utf-8"))
-    artifacts = manifest.get("artifacts")
-    if (
-        not isinstance(artifacts, dict)
-        or artifacts.get("data_access") != DATA_ACCESS_NAME
-        or DATA_ACCESS_NAME not in pfs.declared_files(manifest)
-        or DATA_ACCESS_NAME not in walked
-    ):
-        return None, "provider-missing"
-    assessment = data_access.read_data_access(walked[DATA_ACCESS_NAME])
+    assessment = snapshot.projection
+    if assessment is None:
+        return None, snapshot.projection_refusal or "projection-invalid"
     if assessment.state not in data_access.DIRECT_ACCEPTED_STATES:
         return None, "provider-ambiguous" if assessment.state == "provider_inherited" else "provider-missing"
     if assessment.effective_scope != provider.brief_policy.requested_scope or (
@@ -3781,10 +3924,10 @@ def _provider_projection(
 
 
 def _selected_data_provider(  # pylint: disable=too-many-return-statements
-    cohort: Sequence[tuple[Path, pri.Phase1RoleIdentityResult]],
+    inputs: _DataAccessInputs,
 ) -> tuple[tuple[str, data_access.DataAccessAssessment] | None, str | None]:
     """Use every S2 dependency row and its input ordinal, never the provider's display name."""
-    consumer = cohort[-1][1]
+    consumer = inputs.roles[-1]
     dependencies = consumer.dependencies
     if not dependencies:
         return None, "provider-missing"
@@ -3796,7 +3939,7 @@ def _selected_data_provider(  # pylint: disable=too-many-return-statements
         return None, "provider-missing" if all(row.code in missing for row in unresolved) else "provider-foreign"
     ordinals = [row.provider_ordinal for row in dependencies]
     if any(
-        not isinstance(ordinal, int) or isinstance(ordinal, bool) or not 0 <= ordinal < len(cohort) - 1
+        not isinstance(ordinal, int) or isinstance(ordinal, bool) or not 0 <= ordinal < len(inputs.roots) - 1
         for ordinal in ordinals
     ):
         return None, "provider-foreign"
@@ -3804,8 +3947,8 @@ def _selected_data_provider(  # pylint: disable=too-many-return-statements
         return None, "provider-ambiguous"
     if not consumer.is_start_ready:
         return None, "projection-invalid"
-    root, provider = cohort[ordinals[0]]
-    assessment, refusal = _provider_projection(root, provider)
+    provider = inputs.roles[ordinals[0]]
+    assessment, refusal = _provider_projection(inputs.snapshots[ordinals[0]], provider)
     if refusal:
         return None, refusal
     return (data_access.provider_reference(provider.unit), assessment), None
@@ -3814,23 +3957,43 @@ def _selected_data_provider(  # pylint: disable=too-many-return-statements
 def _published_only_sources(spec: dict[str, Any]) -> bool:
     """Exclude direct/unknown/aggregate shapes, including legs inside a published source row.
 
-    This does not classify connections: a supplied connection must be a single sqlproxy. S2 owns
-    the published identity; no direct leg is assessed or silently folded into inheritance here.
+    Only the schema's scalar connection/dependency metadata is supported. Unknown fields cannot
+    smuggle additional legs; S2 still owns matching and all declared rows stay in the denominator.
     """
     rows = spec.get("data_sources")
     if not isinstance(rows, list) or not rows:
         return False
     for row in rows:
-        if not isinstance(row, dict) or not isinstance(row.get("published_datasource"), dict):
+        if not isinstance(row, dict) or set(row) - {
+            "id",
+            "caption",
+            "internal_name",
+            "connection",
+            "published_datasource",
+            "tables",
+            "joins",
+            "fields",
+        }:
             return False
-        if "connection" in row:
-            connection = row["connection"]
-            if (
-                not isinstance(connection, dict)
-                or connection.get("class") != "sqlproxy"
-                or connection.get("connections") not in (None, [])
-            ):
-                return False
+        connection = row.get("connection")
+        published = row.get("published_datasource")
+        if (
+            not isinstance(connection, dict)
+            or connection.get("class") != "sqlproxy"
+            or connection.get("mode") not in ("live", "extract")
+            or set(connection)
+            - {"class", "mode", "server", "database", "hyper_file", "powerbi_target", "powerbi_target_reason", "note"}
+            or any(value is not None and not isinstance(value, str) for value in connection.values())
+        ):
+            return False
+        if (
+            not isinstance(published, dict)
+            or set(published)
+            - {"id", "site", "path", "derived_from", "revision", "name_source", "id_attribute", "luid", "key"}
+            or any(value is not None and not isinstance(value, str) for value in published.values())
+            or not any(isinstance(published.get(key), str) and published[key].strip() for key in ("luid", "key"))
+        ):
+            return False
     return True
 
 
@@ -3841,11 +4004,15 @@ def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-
     *,
     gate_root: Path | None,
     provider_packages: Sequence[Path],
+    inputs: _DataAccessInputs | None = None,
 ) -> tuple[data_access.DataAccessAssessment, list[str]]:
     """Fresh S1/S2 over the sealed candidate, then the one read-only authority; paths stay in memory."""
-    roots = (*provider_packages, dest)
-    cohort = tuple(zip(roots, pri.verify_phase1_role_identity(roots), strict=True))
-    current = cohort[-1][1]
+    if inputs is None:
+        try:
+            inputs = _data_access_inputs(dest, localized, provider_packages)
+        except PackagingError:
+            return _cannot_data_access(), []
+    current = inputs.roles[-1]
     notes = [f"DATA_ACCESS S2={','.join(current.codes())}"] if current.codes() else []
     policy = current.brief_policy
     if policy is None:
@@ -3853,9 +4020,8 @@ def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-
         return _cannot_data_access(), notes
     if current.verified is None or not current.verified.integrity.is_clean:
         return _cannot_data_access(), notes
-    try:
-        spec = pfs.parse_manifest_text((dest / "migration-spec.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError, pfs._ManifestError):  # pylint: disable=protected-access
+    spec = inputs.spec
+    if spec is None:
         return _cannot_data_access("spec-unreadable"), notes
     provider = None
     try:
@@ -3863,7 +4029,7 @@ def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-
             if not _published_only_sources(spec):
                 notes.append("DATA_ACCESS limitation=published_direct_mixed_unsupported")
                 return _cannot_data_access(), notes
-            provider, refusal = _selected_data_provider(cohort)
+            provider, refusal = _selected_data_provider(inputs)
             if refusal:
                 return _cannot_data_access(refusal), notes
         elif not current.is_start_ready:
@@ -3871,8 +4037,8 @@ def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-
         original_root = load_bundle(bundle if gate_root is None else gate_root).migration_dir
         assessment = data_access.assess_data_access(
             original_root,
-            package_spec=spec,
-            package_data_sources=localized,
+            package_spec=deepcopy(spec),
+            package_data_sources=deepcopy(inputs.localized),
             fallback_authorization=policy.fallback_authorization,
             requested_scope=policy.requested_scope,
             provider=provider,
@@ -3892,12 +4058,44 @@ def _data_access_notice(assessment: data_access.DataAccessAssessment) -> str:
     )
 
 
-def _seal_package(dest: Path, result: dict[str, Any], *, verify: bool = False) -> None:
-    """Write the manifest last, using final bytes, and require S1 before publication."""
-    result["contents"] = {"files": package_contents(dest)}
+def _seal_package(
+    dest: Path, result: dict[str, Any], *, files: dict[str, str] | None = None, verify: bool = False
+) -> bytes:
+    """Final seals extend the held map, never rebaseline whatever happens to remain on disk."""
+    result["contents"] = {"files": package_contents(dest) if files is None else files}
+    raw = (json.dumps(result, indent=2, ensure_ascii=False) + "\n").replace("\n", os.linesep).encode("utf-8")
     write_json(dest / MANIFEST_NAME, result)
     if verify and not pri.verify_s1(dest).integrity.is_clean:
         raise PackagingError("data_access_final_integrity_failed")
+    return raw
+
+
+def _final_data_access_check(inputs: _DataAccessInputs, generated: dict[str, bytes]) -> None:
+    """Verify the final candidate and the SAME cohort; a different provider selection is a refusal."""
+    _require_candidate_snapshot(inputs, generated=generated)
+    final_roles = pri.verify_phase1_role_identity(inputs.roots)
+    for before, after in zip(inputs.roles, final_roles, strict=True):
+        if (
+            before != after
+            or before.brief_policy != after.brief_policy
+            or tuple(row.provider_ordinal for row in before.dependencies)
+            != tuple(row.provider_ordinal for row in after.dependencies)
+        ):
+            raise PackagingError("data_access_final_roles_changed")
+    _require_candidate_snapshot(inputs, generated=generated)
+    if any(snapshot is not None and not _snapshot_matches(snapshot) for snapshot in inputs.snapshots[:-1]):
+        raise PackagingError("data_access_provider_changed")
+
+
+def _write_data_access_final(
+    dest: Path, result: dict[str, Any], snapshot: _PackageSnapshot, generated: dict[str, bytes]
+) -> None:
+    """Write only producer-generated final roles and extend the provisional content map."""
+    for key, raw in generated.items():
+        (dest / key).write_bytes(raw)
+    files = dict(snapshot.digests)
+    files.update({key: hashlib.sha256(raw).hexdigest() for key, raw in generated.items()})
+    generated[MANIFEST_NAME] = _seal_package(dest, result, files=files, verify=True)
 
 
 def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments,too-many-statements
@@ -4023,28 +4221,31 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     provisional = _checked_data_access(_cannot_data_access())
     (dest / DATA_ACCESS_NAME).write_bytes(provisional.dumps().encode("utf-8"))
     _seal_package(dest, result)
+    inputs = _data_access_inputs(dest, result["data_sources"], provider_packages)
     assessment, data_notes = _assess_package_data_access(
-        bundle, dest, result["data_sources"], gate_root=gate_root, provider_packages=provider_packages
+        bundle, dest, result["data_sources"], gate_root=gate_root, provider_packages=provider_packages, inputs=inputs
     )
     assessment = _checked_data_access(assessment)
-    (dest / DATA_ACCESS_NAME).write_bytes(assessment.dumps().encode("utf-8"))
+    snapshot = _require_candidate_snapshot(inputs)
+    result = pfs.parse_manifest_text(snapshot.manifest.decode("utf-8"))
     notice = _data_access_notice(assessment)
-    notes.extend([notice, *data_notes, DATA_ACCESS_PENDING])
+    result["notes"].extend([notice, *data_notes, DATA_ACCESS_PENDING])
     report_dir = dest / "fabric" / report_name if report_name else None
     workbook = _handover_workbook(handover, unit, dest)
-    (dest / "handover.md").write_text(render_handover(result, workbook, visual_pages(report_dir)), encoding="utf-8")
-    (dest / "README.md").write_text(
-        README.format(
+    generated = {
+        DATA_ACCESS_NAME: assessment.dumps().encode("utf-8"),
+        "handover.md": render_handover(result, workbook, visual_pages(report_dir)).encode("utf-8"),
+        "README.md": README.format(
             unit=unit,
             kind=result["kind"],
             package_root=PACKAGE_ROOT_TOKEN,
             unavailable=UNAVAILABLE_TOKEN,
             data_access=notice,
             data_access_pending=DATA_ACCESS_PENDING,
-        ),
-        encoding="utf-8",
-    )
-    _seal_package(dest, result, verify=True)
+        ).encode("utf-8"),
+    }
+    _write_data_access_final(dest, result, snapshot, generated)
+    _final_data_access_check(inputs, generated)
     return result
 
 
