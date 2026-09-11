@@ -63,8 +63,11 @@ def seal(package: Path, **manifest: Any) -> Path:
 
 
 def brief_text(unit: str, scope: str) -> str:
-    """The dispatcher's brief, with the strict leading TOML frontmatter S2 checks IDENTITY in."""
-    return f'+++\nschema = "phase1-start-ready/v1"\nunit = "{unit}"\nscope = "{scope}"\n+++\n\nMigrate it.\n'
+    """An explicit strict policy, not legacy identity-only frontmatter."""
+    return (
+        f'+++\nschema = "phase1-start-ready/v1"\nunit = "{unit}"\nscope = "{scope}"\n'
+        'fallback_authorization = "stop"\n+++\n\nMigrate it.\n'
+    )
 
 
 def fabric_tree(
@@ -106,7 +109,9 @@ def workbook_package(  # pylint: disable=too-many-arguments,too-many-positional-
 
     data_sources: list[dict[str, Any]] = [{"id": "ds-1"}]
     if published is not None:
-        data_sources = [{"id": "ds-1", "published_datasource": published}]
+        data_sources = [
+            {"id": "ds-1", "connection": {"class": "sqlproxy", "mode": "live"}, "published_datasource": published}
+        ]
     _write(package / "migration-spec.json", {"source": {"file_name": name}, "data_sources": data_sources})
     _write(package / "migration-spec.schema.json", {"$schema": "http://json-schema.org/draft-07/schema#"})
     _write(
@@ -802,3 +807,152 @@ def test_the_verifier_returns_no_source_path_anywhere_in_its_result(tmp_path: Pa
     assert str(tmp_path) not in payload
     assert not any(isinstance(value, Path) for row in result.roles for value in row.paths)
     assert all(not path.startswith(("/", "\\")) and ":" not in path for row in result.roles for path in row.paths)
+
+
+def test_strict_brief_policy_is_frozen_and_nonserialized(tmp_path: Path) -> None:
+    package = datasource_package(tmp_path / "Provider")
+    result = verify_one(package)
+    assert result.brief_policy == pri.BriefPolicy("model_only", "stop")
+    assert "brief_policy" not in result.as_dict()
+    with pytest.raises(AttributeError):
+        result.brief_policy.requested_scope = "model_and_report"
+    assert pri.brief_identity(brief_text(DS_UNIT, "model_only"), DS_UNIT, "model_only") == (None, False)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "exact",
+        "opening-suffix",
+        "opening-prefix",
+        "opening-space",
+        "opening-tab",
+        "opening-blank",
+        "closing-suffix",
+        "closing-prefix",
+        "closing-space",
+        "closing-tab",
+        "closing-missing",
+        "extra-exact",
+        "extra-suffix",
+        "extra-prefix",
+        "extra-space",
+    ],
+)
+def test_frontmatter_requires_two_exact_boundary_lines(tmp_path: Path, boundary: str, newline: str) -> None:
+    """Malformed explicit policy is not prose, and no malformed boundary can authorize a fallback."""
+    text = brief_text(DS_UNIT, "model_only").replace('"stop"', '"model_only_unvalidated"')
+    lines = text.split("\n")
+    opening = {
+        "opening-suffix": "+++not-a-delimiter",
+        "opening-prefix": "not-a-delimiter+++",
+        "opening-space": " +++",
+        "opening-tab": "+++\t",
+        "opening-blank": "\n+++",
+    }
+    closing = {
+        "closing-suffix": "+++not-a-delimiter",
+        "closing-prefix": "not-a-delimiter+++",
+        "closing-space": "+++ ",
+        "closing-tab": "\t+++",
+        "closing-missing": "",
+    }
+    extra = {
+        "extra-exact": "+++",
+        "extra-suffix": "+++not-a-delimiter",
+        "extra-prefix": "not-a-delimiter+++",
+        "extra-space": " +++ ",
+    }
+    lines[0] = opening.get(boundary, lines[0])
+    lines[5] = closing.get(boundary, lines[5])
+    if boundary in extra:
+        lines.append(extra[boundary])
+    text = "\n".join(lines).replace("\n", newline)
+    expected_code = None if boundary == "exact" else "brief_frontmatter_unparseable"
+    expected_policy = pri.BriefPolicy("model_only", "model_only_unvalidated") if boundary == "exact" else None
+    assert pri.parse_brief_policy(text, DS_UNIT, "model_only") == (expected_code, expected_policy)
+
+    package = datasource_package(tmp_path / "Provider")
+    (package / "migration-brief.md").write_bytes(text.encode("utf-8"))
+    manifest = json.loads((package / "package-manifest.json").read_text(encoding="utf-8"))
+    seal(package, **manifest)
+    result = verify_one(package)
+    assert role(result, "migration_brief").code == expected_code
+    assert result.brief_policy == expected_policy
+    assert result.is_start_ready is (boundary == "exact")
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "code"),
+    [
+        ('fallback_authorization = "stop"', "fallback_authorization = 99", "brief_policy_invalid"),
+        ('fallback_authorization = "stop"', 'fallback_authorization = ["stop"]', "brief_policy_invalid"),
+        ('fallback_authorization = "stop"', 'fallback_authorization = "continue"', "brief_policy_invalid"),
+        ('schema = "phase1-start-ready/v1"', 'schema = "phase1-start-ready/v2"', "brief_policy_invalid"),
+        ('schema = "phase1-start-ready/v1"\n', "", "brief_policy_invalid"),
+        ('scope = "model_only"\n', "", "brief_policy_invalid"),
+        ('scope = "model_only"', 'scope = "model_and_report"', "brief_scope_mismatch"),
+        (f'unit = "{DS_UNIT}"', 'unit = "Other"', "brief_unit_mismatch"),
+        (
+            'fallback_authorization = "stop"',
+            'fallback_authorization = "stop"\nextra = "canary"',
+            "brief_policy_invalid",
+        ),
+        (
+            'fallback_authorization = "stop"',
+            'fallback_authorization = "stop"\nfallback_authorization = "stop"',
+            "brief_frontmatter_unparseable",
+        ),
+    ],
+)
+def test_strict_policy_refuses_exact_invalid_field(tmp_path: Path, old: str, new: str, code: str) -> None:
+    package = datasource_package(tmp_path / "Provider")
+    text = brief_text(DS_UNIT, "model_only").replace(old, new)
+    _write(package / "migration-brief.md", text)
+    manifest = json.loads((package / "package-manifest.json").read_text(encoding="utf-8"))
+    seal(package, **manifest)
+    result = verify_one(package)
+    assert role(result, "migration_brief").code == code
+    assert result.brief_policy is None
+    assert pri.brief_identity(text, DS_UNIT, "model_only") == (code, False)
+
+
+@pytest.mark.parametrize("variant", ["plain", "identity-only", "absent"])
+def test_missing_policy_never_infers_stop(tmp_path: Path, variant: str) -> None:
+    package = datasource_package(tmp_path / "Provider")
+    brief = package / "migration-brief.md"
+    if variant == "absent":
+        brief.unlink()
+    else:
+        text = "Migrate it; a model-only fallback is probably fine."
+        if variant == "identity-only":
+            text = brief_text(DS_UNIT, "model_only").replace('fallback_authorization = "stop"\n', "")
+        _write(brief, text)
+    manifest = json.loads((package / "package-manifest.json").read_text(encoding="utf-8"))
+    seal(package, **manifest)
+    result = verify_one(package)
+    assert result.brief_policy is None
+    assert "brief_policy_not_parsed" in result.authorized_limitations
+    assert result.is_start_ready is (variant != "absent")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_selected_provider_ordinal_survives_duplicate_units_and_filtered_roots(tmp_path: Path, reverse: bool) -> None:
+    first = datasource_package(tmp_path / "first", unit="Shared", luid=DS_LUID)
+    second = datasource_package(tmp_path / "second", unit="Shared", luid=WB_LUID)
+    consumer = workbook_package(
+        tmp_path / "Consumer",
+        published={"luid": DS_LUID},
+        binding="../../../first/fabric/Shared.SemanticModel",
+    )
+    roots = [second, first] if reverse else [first, second]
+    roots.insert(0, tmp_path / "absent")
+    roots.append(consumer)
+    result = pri.verify_phase1_role_identity(roots)[-1]
+    assert result.is_start_ready, result.codes()
+    selected = result.dependencies[0]
+    assert selected.provider_ordinal == (2 if reverse else 1)
+    assert roots[selected.provider_ordinal] == first
+    assert selected.provider_unit == "Shared"
+    assert "provider_ordinal" not in selected.as_dict()

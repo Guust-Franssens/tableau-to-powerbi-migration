@@ -162,6 +162,7 @@ Per-unit layout (authoritative list: `package_unit.py`'s module docstring):
     migration-spec.json          parse_tableau.py; check_unit.py's expected page set (#443)
     migration-brief.md           the dispatcher's brief, COPIED in (--brief). Bytes only: the
                                  external path is never recorded (#562 S2)
+    data-access.json             strict, declared S1-covered projection; blocked/cannot states ship too
     report.json                  the engine's own classification, SCOPED to this unit
     source-provenance.json       SCOPED; the only trusted route to a workbook/datasource LUID
     engine-output-receipt.json   what built this, so version drift stays checkable
@@ -199,6 +200,29 @@ without one is blocked by the entry gate.
 One `--brief` requires exactly one selected unit; run packaging once per unit with its own brief.
 Typed unit/scope and the whole brief's host-location/credential containment are checked before
 assembly. Unsafe text is refused, not redacted or echoed, and the copy uses the exact validated bytes.
+The policy header requires exactly `schema`, `unit`, `scope`, `fallback_authorization` (all strings;
+schema `phase1-start-ready/v1`, fallback `stop` or `model_only_unvalidated`), with unit and topology
+scope exact. Legacy/plain/missing policy yields `brief_policy_not_parsed` and a non-accepted
+`data-access.json`; invalid explicit policy refuses before assembly.
+
+**Data-access producer (#562):** selected datasource units publish first, then workbooks, sorted
+within each phase; the requested denominator and every outcome bucket are unchanged. Providers are
+only successfully published datasource packages from this invocation or repeatable explicit
+`--provider-package <exact-root>` inputs. There is no output/sibling scan, stale failed-provider
+reuse, recursive inheritance or post-publication cohort rewrite. Separate provider/consumer commands
+each need their own brief; this does not introduce bulk brief support.
+
+`--gate-root <original-bundle-or-spec-dir-or-spec-file>` binds the existing audit authority exactly.
+Without it, the default is `load_bundle(bundle).migration_dir`, **not** the run parent or package.
+Neither runtime gate/provider paths nor audit contents are shipped. The nine-field projection is
+declared and hashed after final rendering; its accepted state does not imply a new full-PBIP refresh.
+Authorized model-only is limited to a model-only datasource, authentic same-root authorization and
+explicit fallback policy. No owned-workbook scope downgrade or published-plus-direct aggregate is
+invented; a report cannot inherit an authorized-unvalidated model-only provider.
+
+❌ **Final START_READY data-access consumption remains a separate PR.** Packaging exit 0 still
+means construction, not authorization to dispatch Phase 2. Handover/README/output state the actual
+blocked/cannot-establish/authorized-unvalidated result and the pending consumer; no gate is cleared.
 
 ⚠️ **The oracle kind directories are SINGULAR on purpose** — `dashboard/`, `worksheet/`, `unknown/`
 are `object_identity`'s `KIND_*` values *verbatim*, never a pluralised copy. `unknown/` is carried
@@ -292,8 +316,8 @@ package's `package-manifest.json` still describes exactly the bytes on disk (#56
 does not) and that the package carries every role its kind and topology require with agreeing
 identities (#562 S2, exit 1 when it does not) — see
 [`docs/reference-readiness.md`](reference-readiness.md). `check_unit.py` still performs the boundary
-check alone; verified source RETURN (#558) and the credential/data-access projection remain later
-slices.
+check alone. The package-local source return (#558) and data-access producer are available; the
+final START_READY data-access fold remains a separate slice.
 
 ### The two gates
 

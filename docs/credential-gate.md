@@ -70,6 +70,62 @@ problem before the probe has returned one.
 | **Lifted by** | a successful one-row probe (`probe-cleared`), or an audit-backed human `authorize` |
 | **Audited by** | `credential_gate.py verify` — the authoritative pre-ship check |
 
+### Package data-access projection
+
+`package_unit.py` calls only the read-only `assess_data_access` authority. It never probes,
+authorizes, clears, arms or runs mutating `verify` to produce `data-access.json`.
+Staged spec generation uses the existing pure parser and schema validator in a bounded subprocess,
+not the parser CLI (which invokes credential preflight beside its output). No second staged gate or
+raw audit is created/shipped.
+The original gate root defaults to `load_bundle(bundle).migration_dir`; pass exact `--gate-root`
+when proof belongs to a parser-spec directory/file instead. There is no audit-log search or fallback
+to a package, run parent or sibling. Extra live keys in an estate root are allowed; every packaged
+live key still needs current same-root keyed proof. Source removal is not independently historical
+tamper. During production, changing or resealing the candidate does not replace its held S1 baseline.
+
+The provisional S1 namespace/digests, packaged spec bytes, S2 brief policy and a held copy of the
+localizer's **in-memory `result["data_sources"]`** supply direct assessment at the exact root.
+Every recorded `shipped` path must exist in that snapshot. After S2, source/spec/brief/model/report/
+data/provenance changes or unexpected files refuse publication; resealing cannot legitimize them.
+Only the producer's exact final `data-access.json`, `handover.md`, `README.md` and manifest bytes may
+change. The final manifest extends the held content map. After path-budget work and prior-package
+retirement, the guarded swap runs the bound candidate snapshot/S1/S2 check against the same provider
+cohort immediately before the atomic publication. Failure restores the prior directory without
+exposing the candidate. Provider ordinals and brief policy must agree with the provisional S2 result;
+stable nonaccepted packages still ship.
+`live_data_ok` records the existing keyed-probe/localization
+evidence, not a fresh full-packaged-model refresh. Unbound local-folder tokens do not erase complete
+shipped bytes. Incomplete local bytes, bad audits and absent policy never default to success.
+
+A published-only consumer may inherit from **one exact S2-selected, S1/S2-clean direct provider**
+supplied through `--provider-package` or published earlier in the same invocation. S2's runtime
+cohort ordinal selects the root even when unit names repeat; `provider_reference(exact_unit)` is
+applied once. Provider manifest and projection bytes are captured through the bound S1 walk and
+declared digest before S2; the once-parsed assessment is retained by ordinal. Changed root identity,
+manifest or projection bytes cannot be inherited, even after a valid reseal. Provider keys,
+validation and claim ceiling are preserved. No provider re-assessment
+against the consumer's gate, recursion or published-plus-direct aggregation is allowed. Direct or
+aggregate connections inside a published row are excluded too. **Every** consumer row must contain
+a mapping-valued `connection` with exact `class = "sqlproxy"`, valid `mode`, scalar schema-defined
+metadata, and a structurally valid published dependency. Missing/null/malformed rows, connection lists
+(even empty ones), nested or unknown legs are nonaccepted; no row is dropped from the denominator.
+Table/field/join metadata cannot hide a second connection declaration at a deeper level.
+`authorized_model_only` requires model-only scope, authentic same-root audit/override and explicit
+`model_only_unvalidated` policy, remains `unvalidated/structural_only`, and cannot serve a report
+consumer. An owned workbook is never automatically downgraded.
+
+The strict nine fields are `schema`, `state`, `source_keys`, `provider_unit`, `provider_state`,
+`validation`, `effective_scope`, `max_phase2_claim`, `codes`. They carry only closed values and
+opaque references, never endpoints, source/provider names, credentials, host paths or audit text.
+This privacy claim concerns the projection and its new diagnostics, not existing source/spec/model
+content. S1 hashes the exact UTF-8/LF file; it does not interpret its semantics.
+
+❌ **The final START_READY consumer is pending.** Construction success and reference `READY`
+do not authorize Phase-2 dispatch or clear the existing credential stop. Every package and its CLI
+summary expose that ceiling and the actual closed data state. Audit/spec reads are not an atomic
+cross-file snapshot, and projected evidence can age after packaging; no post-publication lifecycle
+is added here.
+
 ### Engine-produced bundles: detection, not prevention
 
 The deterministic engine runs before the agent tier and can emit `pbip/`, `reports/`,
