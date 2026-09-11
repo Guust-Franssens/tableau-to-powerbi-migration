@@ -275,6 +275,27 @@ def redact_host_paths(payload: Any, *, prefix: str = "") -> tuple[Any, list[str]
 # the surfaces, each descoped to what the gates measurably read
 # --------------------------------------------------------------------------------------------
 
+#: The authority owns meaning; this allowlist only closes the shipment's nine-field surface.
+DATA_ACCESS_ALLOW = {
+    **_fields(
+        "schema", "state", "provider_unit", "provider_state", "validation", "effective_scope", "max_phase2_claim"
+    ),
+    "source_keys": SCALAR_LIST,
+    "codes": SCALAR_LIST,
+}
+
+
+def project_data_access(payload: dict[str, Any]) -> dict[str, Any]:
+    """Project without dropping or repairing anything; never disclose an untrusted field name."""
+    try:
+        projected, dropped = project(payload, DATA_ACCESS_ALLOW)
+    except UnscopedStructure:
+        raise UnscopedStructure("data-access projection refused") from None
+    if dropped or projected != payload:
+        raise UnscopedStructure("data-access projection refused")
+    return projected
+
+
 #: `report.json`. The gate surface is a NAME, so a name is all that ships. The engine's 29-field
 #: workbook row and 29-field datasource row are no longer carried at all: nothing in either gate
 #: reads them, and the same account of this unit's residual work is in the handover slice, which is
