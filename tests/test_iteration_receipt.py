@@ -280,7 +280,7 @@ def test_clean_first_iteration_has_real_images_and_honest_data_state(package: Pa
     assert final["generated"]["data_evidence"] == {"status": "pending", "reason": receipt.DATA_PENDING_REASON}
     assert final["judgement"]["completed_at"] is not None
     assert final["generated"] == pending["generated"]
-    assert len(receipt.read_chain(package)) == 1
+    assert len(receipt.read_chain(package, receipt.receipt_sha256(final))) == 1
 
 
 def test_valid_second_iteration_preserves_finding_identity_and_evolution(package: Path) -> None:
@@ -296,7 +296,7 @@ def test_valid_second_iteration_preserves_finding_identity_and_evolution(package
     assert any(row["before_sha256"] != row["after_sha256"] for row in sealed["generated"]["changes_from_previous"])
     assert sealed["judgement"]["findings"] == [resolved]
     assert sealed["outcome"] == "incomplete"  # Data is still not independently proven.
-    assert [item.name for item in receipt.read_chain(package)] == ["001", "002"]
+    assert [item.name for item in receipt.read_chain(package, receipt.receipt_sha256(sealed))] == ["001", "002"]
 
 
 @pytest.mark.parametrize(
@@ -896,7 +896,7 @@ def test_reference_and_history_json_also_refuse_invalid_utf8(package: Path) -> N
     _reference(package)
     pending = _iterate(package)
     _path(package).write_bytes(b"\xff")
-    assert _code(lambda: receipt.read_chain(package)) == "JSON_NOT_UTF8"
+    assert _code(lambda: receipt.read_history(package)) == "JSON_NOT_UTF8"
     _path(package).write_bytes(receipt.receipt_bytes(pending))
     (package / "reference" / "manifest.json").write_bytes(b"\xff")
     assert _code(lambda: _finalize(package, pending)) == "JSON_NOT_UTF8"
@@ -1044,7 +1044,7 @@ def _change_during_finalization(package: Path, pending: dict, kind: str) -> None
         (directory / pending["generated"]["pages"][0]["powerbi"]["path"]).write_bytes(valid_png(100, 81))
 
 
-def test_read_chain_checksum_is_of_the_exact_bytes_parsed_and_validated(
+def test_read_history_checksum_is_of_the_exact_bytes_parsed_and_validated(
     package: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pending = _iterate(package)
@@ -1059,7 +1059,7 @@ def test_read_chain_checksum_is_of_the_exact_bytes_parsed_and_validated(
         return result
 
     monkeypatch.setattr(receipt, "validate_receipt", validate_then_swap)
-    selected = receipt.read_chain(package)[-1]
+    selected = receipt.read_history(package)[-1]
     assert selected.payload == pending
     assert selected.receipt_sha256 == hashlib.sha256(original).hexdigest()
     assert selected.receipt_bytes == original
@@ -1197,7 +1197,10 @@ def test_unchanged_publication_retains_exact_final_bytes_and_full_predecessor_ch
     final = _finalize(package, pending)
     assert len(published) == 1 and path.read_bytes() == published[0] == receipt.receipt_bytes(final)
     assert _path(package).read_bytes() == predecessor
-    assert [item.receipt_bytes for item in receipt.read_chain(package)] == [predecessor, published[0]]
+    assert [item.receipt_bytes for item in receipt.read_chain(package, receipt.receipt_sha256(final))] == [
+        predecessor,
+        published[0],
+    ]
     assert final["outcome"] == "incomplete" and final["generated"]["data_evidence"]["status"] == "pending"
     assert all(row["status"] == "unverified" for page in final["judgement"]["pages"] for row in page["numeric_results"])
     assert not (path.parent / receipt.PENDING_BACKUP_NAME).exists()
@@ -1228,7 +1231,7 @@ def test_rollback_rename_failure_retains_original_pending_and_a_refused_chain(
     assert _code(lambda: _finalize(package, pending)) == "FINALIZATION_ROLLBACK_FAILED"
     assert rollbacks == [True]
     assert backup.read_bytes() == original and _path(package).read_bytes() == predecessor
-    assert _code(lambda: receipt.read_chain(package)) == "EXTRA_FILE"
+    assert _code(lambda: receipt.read_chain(package, receipt.receipt_sha256(pending))) == "EXTRA_FILE"
     assert _code(lambda: _finalize(package, pending)) == "EXTRA_FILE"
     assert _code(lambda: receipt.allocate_iteration(package, receipt.receipt_sha256(pending))) == "EXTRA_FILE"
 
@@ -1250,4 +1253,4 @@ def test_current_receipt_swap_at_displacement_never_leaves_an_authoritative_fina
     assert _code(lambda: _finalize(package, pending)) == "FINALIZATION_ROLLBACK_FAILED"
     assert not path.exists()
     assert (path.parent / receipt.PENDING_BACKUP_NAME).read_bytes() == changed
-    assert _code(lambda: receipt.read_chain(package)) == "INPUT_UNREADABLE"
+    assert _code(lambda: receipt.read_chain(package, receipt.receipt_sha256(pending))) == "INPUT_UNREADABLE"

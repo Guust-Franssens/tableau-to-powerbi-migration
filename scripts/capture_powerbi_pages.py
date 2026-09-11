@@ -342,7 +342,7 @@ def run_iteration(
                 "judgement": receipt.pending_judgement(selected),
             }
             receipt.write_receipt(directory, payload)
-            receipt.read_chain(request.package)
+            receipt.read_history(request.package)
             return payload
         except BaseException:
             shutil.rmtree(directory, ignore_errors=True)

@@ -103,11 +103,25 @@ file into `.iteration.pending`, and publishes without overwriting a concurrently
 It then rederives the package facts and validates the full receipt/PNG chain, including the exact
 intended final bytes. A detected post-publication change restores the exact pending receipt and
 returns `FINALIZATION_CHANGED`; publication failure returns `FINALIZATION_WRITE_FAILED`.
-If rollback cannot restore those bytes, `FINALIZATION_ROLLBACK_FAILED` retains the pending sibling:
-the normal chain reader refuses that extra file, so an interrupted or failed transaction is **not
-authoritative**. Do not delete that sibling to make a final document look valid; restore the
-verified pending bytes before retrying. This is a local rollback boundary, not a package lock or a
-guarantee against edits after finalization.
+After retiring the pending sibling, publication calls the same strict `read_chain(package,
+expected_sha256)` used by current-final consumers. It requires the producer's final checksum,
+rebuilds current package/report/model/cache and reference facts, and verifies the exact entire
+receipt/PNG chain. This is the literal final snapshot: **no filesystem-sensitive operation follows
+it on success**. A later authoritative read repeats those checks; deleting a marker cannot make
+stale artifacts or receipts authoritative.
+
+If rollback cannot restore the pending bytes, `FINALIZATION_ROLLBACK_FAILED` returns no final token.
+Keep any pending sibling for recovery, but **do not assume one exists**: marker recreation and final
+withdrawal can both fail, leaving a stale final file on disk. Independent authority reads still
+refuse it without needing another write. Retain the successfully returned `FINAL_SHA256` outside
+the package and pass it to `read_chain`; computing a token from a surviving file is not a trusted
+invocation. This is a local snapshot/rollback boundary, not a package lock or a filesystem transaction.
+
+`read_history(package)` is explicitly **non-authoritative**: it checks retained receipt/PNG bytes,
+predecessor links and closed file sets, but allows pending captures and historical artifacts that
+differ from current work. Allocation, post-capture checking and the pending side of finalization use
+it so legitimate edits can start the next iteration. It must not be used to consume current-final
+authority; publication and its `finalize` CLI consumer go through the strict reader instead.
 
 `pass` requires an admitted validation-grade Tableau reference and a stable Power BI capture.
 `layout_match` records a narrower comparison, including an oracle's layout/text ceiling; it is not a

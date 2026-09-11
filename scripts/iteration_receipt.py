@@ -7,6 +7,8 @@ that producer-returned checksum and separate judgement input. A later allocation
 the previous final receipt's returned checksum. These are caller-held compare-and-swap tokens,
 not signatures: computing a replacement checksum from edited disk is not a trusted invocation.
 No signing service, secondary registry, package gate, promotion or completion aggregator is added.
+read_chain requires the successful producer's final checksum and independently revalidates current
+artifacts. read_history verifies retained evidence only, never current completion authority.
 
 All filesystem identities, inventory, images, Tableau admission, data state and outcome are rebuilt
 at finalization. Capture-time timing observations cannot be recovered from a PNG; they are immutable
@@ -711,12 +713,31 @@ def _require_pin(actual: str, expected: str | None, code: str) -> None:
         raise ReceiptError(code, "the producer-returned receipt checksum is required and must still match")
 
 
-def read_chain(package: Path) -> list[Iteration]:
-    """Read EVERY prior receipt, allowed file set and PNG; a JSON-only predecessor hash is insufficient."""
-    return _read_chain(package)
+def read_chain(package: Path, expected_sha256: str) -> list[Iteration]:
+    """Read current final authority, pinned to the successful producer's returned final checksum.
+
+    A final file and absent rollback markers are insufficient. Rebuild current artifact identity
+    independently of publication/rollback writes; do not derive the expected checksum from disk.
+    """
+    with _named_refusals():
+        chain = read_history(package)
+        if not chain or chain[-1].payload["state"] != STATE_FINAL:
+            raise ReceiptError("NO_FINAL_ITERATION", "the latest iteration must be final")
+        _require_pin(chain[-1].receipt_sha256, expected_sha256, "FINAL_RECEIPT_MISMATCH")
+        _assert_snapshot(package, chain)
+        return chain
 
 
-def _read_chain(package: Path, pending_backup: Iteration | None = None) -> list[Iteration]:
+def read_history(package: Path) -> list[Iteration]:
+    """Parse retained receipt/PNG history, including pending captures; NEVER confer current authority.
+
+    Previous artifacts may legitimately differ while building the next iteration. Historical reads
+    still verify every exact predecessor link, retained PNG and allowed file set.
+    """
+    return _read_history(package)
+
+
+def _read_history(package: Path, pending_backup: Iteration | None = None) -> list[Iteration]:
     """Only the active finalizer may admit its exact displaced pending bytes; other readers refuse."""
     root = iterations_root(package)
     with _named_refusals():
@@ -760,7 +781,7 @@ def _read_chain(package: Path, pending_backup: Iteration | None = None) -> list[
 def allocate_iteration(package: Path, previous_sha256: str | None = None) -> tuple[Path, Iteration | None]:
     """Validate the caller-pinned entire chain before an exclusive allocation."""
     with _named_refusals():
-        chain = read_chain(package)
+        chain = read_history(package)
         if chain:
             _require_pin(chain[-1].receipt_sha256, previous_sha256, "PREVIOUS_RECEIPT_MISMATCH")
             if chain[-1].payload["state"] != STATE_FINAL:
@@ -920,8 +941,8 @@ def _assert_snapshot(package: Path, chain: list[Iteration], pending_backup: Iter
     current = generated_facts(
         resolve_package(package), selected.directory, captured, generated["review"], generated["generated_at"], previous
     )
-    if current != generated or _read_chain(package, pending_backup) != chain:
-        raise ReceiptError("GENERATED_CHANGED", "the package or exact iteration chain changed during finalization")
+    if current != generated or _read_history(package, pending_backup) != chain:
+        raise ReceiptError("GENERATED_CHANGED", "the package or exact iteration chain no longer matches the receipt")
 
 
 def _restore_pending(selected: Iteration) -> None:
@@ -946,10 +967,10 @@ def _restore_pending(selected: Iteration) -> None:
             raise OSError("pending backup changed")
         os.replace(backup, destination)
     except OSError as error:
-        # Keep the backup: the ordinary chain reader refuses its extra-file marker, even if the
-        # filesystem no longer permits any writes. Never delete the marker to conceal a failed undo.
+        # Retain whatever rollback evidence exists. Compound write failure can leave no marker:
+        # read_chain still requires the producer's final token and an independent current snapshot.
         raise ReceiptError(
-            "FINALIZATION_ROLLBACK_FAILED", "blocking backup retained; the iteration is not authoritative"
+            "FINALIZATION_ROLLBACK_FAILED", "rollback failed; no authoritative final checksum was returned"
         ) from error
 
 
@@ -981,7 +1002,7 @@ def _publish_final(package: Path, chain: list[Iteration], payload: dict[str, Any
         backup.unlink()
         # This is the success boundary: all cleanup is over, and rollback still has the exact
         # pending bytes in selected. No filesystem or external operation may follow this snapshot.
-        _assert_snapshot(package, expected)
+        read_chain(package, expected[-1].receipt_sha256)
         return
     except BaseException as error:
         try:
@@ -1017,7 +1038,7 @@ def finalize(  # pylint: disable=too-many-locals
         name = iteration or (names[-1] if names else "")
         if not ITERATION_RE.fullmatch(name) or name != (names[-1] if names else None):
             raise ReceiptError("NO_ITERATION", "only the latest canonical iteration can be finalized")
-        chain = read_chain(package)
+        chain = read_history(package)
         if not chain or chain[-1].name != name:
             raise ReceiptError("NO_ITERATION", "the selected latest iteration changed during finalization")
         selected, previous = chain[-1], chain[-2] if len(chain) > 1 else None

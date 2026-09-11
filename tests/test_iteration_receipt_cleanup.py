@@ -111,7 +111,10 @@ def test_unchanged_backup_cleanup_ends_with_snapshot_and_no_filesystem_work(  # 
         final = _finalize(package, pending)
 
     assert events == ["cleanup", "final-snapshot"]
-    assert [item.receipt_bytes for item in receipt.read_chain(package)] == [predecessor, path.read_bytes()]
+    assert [item.receipt_bytes for item in receipt.read_chain(package, receipt.receipt_sha256(final))] == [
+        predecessor,
+        path.read_bytes(),
+    ]
     assert path.read_bytes() == receipt.receipt_bytes(final)
     assert final["state"] == "final" and final["outcome"] == "incomplete"
     assert not backup.exists() and not (path.parent / ".iteration.writing").exists()
@@ -160,7 +163,8 @@ def test_failed_post_cleanup_snapshot_restores_exact_pending_atomically(
     )
     assert failures == [failure] and restored == [True]
     assert path.read_bytes() == original
-    assert receipt.read_chain(package)[-1].receipt_bytes == original
+    assert receipt.read_history(package)[-1].receipt_bytes == original
+    assert _code(lambda: receipt.read_chain(package, hashlib.sha256(original).hexdigest())) == "NO_FINAL_ITERATION"
     assert not backup.exists() and not (path.parent / ".iteration.writing").exists()
 
 
@@ -210,6 +214,6 @@ def test_post_cleanup_rollback_failure_blocks_ordinary_chain_readers(  # pylint:
     else:
         assert not path.exists() and json.loads(backup.read_bytes())["state"] == "final"
     expected = "INPUT_UNREADABLE" if failure == "create" else "EXTRA_FILE"
-    assert _code(lambda: receipt.read_chain(package)) == expected
+    assert _code(lambda: receipt.read_chain(package, receipt.receipt_sha256(pending))) == expected
     assert _code(lambda: _finalize(package, pending)) == expected
     assert _code(lambda: receipt.allocate_iteration(package, receipt.receipt_sha256(pending))) == expected
