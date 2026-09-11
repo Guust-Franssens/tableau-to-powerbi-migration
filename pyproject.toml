@@ -160,7 +160,12 @@ max-line-length = 120
 # growth from closing fail-open holes, not comment bloat. Bumped again for the 2nd bounded review
 # round (mixed-scope-poisoning + multi-source-earned-state fixes, plus the `_valid_scoped_audit_entry`
 # split needed to keep `_audit_entries` under the return-statement limit): 1260 -> ~1350 -> ~1380.
-max-module-lines = 1400
+#
+# Issue #562: one typed data-access authority and strict projection parser remain beside the
+# existing gate. The audit/authorization and terminal-probe corrections also remove redundant
+# explanations/helpers: the ceiling is now 2150, below the previous 2200/2300 allowances.
+# No second authority module or per-file size-check exemption.
+max-module-lines = 2150
 
 [tool.pylint."messages control"]
 # TODO comments are a deliberate scope-tracking practice in this repo, not a defect.
