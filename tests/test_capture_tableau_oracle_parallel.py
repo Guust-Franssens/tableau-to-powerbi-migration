@@ -844,6 +844,13 @@ def test_valid_integer_retry_after_keeps_the_existing_cap():
     assert session._retry_after_delay({"Retry-After": "999"}) == oracle.BACKOFF_CAP_SEC
 
 
+@pytest.mark.parametrize("digits", [308, 309, 310])
+def test_hundreds_of_ascii_integer_digits_are_capped_before_float_conversion(digits):
+    """Valid huge delay-seconds values reach the existing cap without integer-to-float overflow."""
+    session = _session()
+    assert session._retry_after_delay({"Retry-After": "9" * digits}) == oracle.BACKOFF_CAP_SEC
+
+
 @pytest.mark.parametrize(
     ("status", "headers"),
     [

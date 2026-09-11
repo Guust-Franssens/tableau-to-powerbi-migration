@@ -406,7 +406,7 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
             except ValueError:
                 seconds = 0
             if seconds > 0:
-                delay = float(seconds)
+                delay = float(min(seconds, int(BACKOFF_CAP_SEC)))
         elif value[:1] not in "+-.0123456789":
             try:
                 parsed = parsedate_to_datetime(value)
