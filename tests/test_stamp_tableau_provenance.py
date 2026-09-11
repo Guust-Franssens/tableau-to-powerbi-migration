@@ -1374,3 +1374,152 @@ def test_the_worker_reports_progress_it_can_no_longer_send(tmp_path):
     result = prov.build(tmp_path, {}, reporter)
 
     assert result["input_count"] == 1, "a closed channel stopped the work it was only observing"
+
+
+@pytest.mark.parametrize(
+    ("operation", "completed", "expected"),
+    [
+        ("collect-inputs", 0, (0, 0, 0, 0, 0, 0)),
+        ("fingerprint", 0, (0, 0, 0, 0, 0, 0)),
+        ("fingerprint", 1, (1, 0, 0, 0, 0, 0)),
+        ("sign-in", 0, (3, 0, 0, 0, 0, 0)),
+        ("sign-in", 1, (3, 1, 0, 0, 0, 0)),
+        ("inventory", 0, (3, 1, 0, 0, 0, 0)),
+        ("inventory", 1, (3, 1, 1, 0, 0, 0)),
+        ("content", 0, (3, 1, 1, 0, 0, 0)),
+        ("content", 1, (3, 1, 1, 1, 0, 0)),
+        ("scrub", 0, (3, 1, 1, 3, 0, 0)),
+        ("scrub", 1, (3, 1, 1, 3, 1, 0)),
+        ("sign-out", 0, (3, 1, 1, 3, 1, 0)),
+    ],
+    ids=[
+        "discovery",
+        "first-fingerprint",
+        "next-fingerprint",
+        "before-sign-in",
+        "after-sign-in",
+        "before-inventory",
+        "after-inventory",
+        "before-first-content",
+        "before-next-content",
+        "before-scrub",
+        "after-scrub",
+        "before-sign-out",
+    ],
+)
+def test_cancellation_is_checked_at_every_expensive_boundary(
+    tmp_path: Path,
+    monkeypatch,
+    operation: str,
+    completed: int,
+    expected: tuple[int, ...],
+) -> None:
+    """Count actual expensive calls, not just reporter labels, including both sides of sign-in."""
+    inventory = _harvested(tmp_path, 3)
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=inventory))
+    reporter = RecordingReporter(cancel_after=operation, cancel_completed=completed)
+    fingerprint_calls, scrub_calls, discovery_calls = [], [], []
+    fingerprint, scrub, discover = prov.fingerprint, prov.scrub_tree, prov.collect_inputs
+
+    def counted_fingerprint(path):
+        fingerprint_calls.append(True)
+        return fingerprint(path)
+
+    def counted_scrub(*args):
+        scrub_calls.append(True)
+        return scrub(*args)
+
+    def counted_discovery(path):
+        discovery_calls.append(True)
+        return discover(path)
+
+    monkeypatch.setattr(prov, "fingerprint", counted_fingerprint)
+    monkeypatch.setattr(prov, "scrub_tree", counted_scrub)
+    monkeypatch.setattr(prov, "collect_inputs", counted_discovery)
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+
+    actual = (
+        len(fingerprint_calls),
+        site.count("signin"),
+        site.count("inventory"),
+        site.count("content"),
+        len(scrub_calls),
+        site.count("signout"),
+    )
+    assert actual == expected, f"CANCEL_BOUNDARY_{operation}_{completed}: expensive work started after cancellation"
+    assert len(discovery_calls) == (0 if operation == "collect-inputs" else 1), (
+        "CANCEL_DISCOVERY: discovery ran after cancellation"
+    )
+    assert result["input_count"] == len(result["inputs"]) == (0 if operation == "collect-inputs" else 3)
+    assert not prov.is_success(result), "a cooperatively cancelled run claimed success"
+
+
+def test_cancellation_before_scrub_fallback_does_not_call_the_redactor_again(tmp_path: Path, monkeypatch) -> None:
+    """A failing first scrub must not admit fallback work after the parent has cancelled."""
+    inventory = _harvested(tmp_path, 2)
+    site = _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=inventory))
+    reporter = RecordingReporter()
+    calls = []
+
+    def failing_scrub(*_args):
+        calls.append(True)
+        reporter.cancelled = True
+        raise RuntimeError("private-response-must-not-escape")
+
+    monkeypatch.setattr(prov, "scrub_tree", failing_scrub)
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+    assert len(calls) == 1, "CANCEL_SCRUB_FALLBACK: redaction was retried after cancellation"
+    assert site.count("signout") == 0
+    assert result["input_count"] == 2 and result["phase"]["status"] == "partial"
+    assert "private-response" not in json.dumps(result)
+    assert all("file" not in record["input"] for record in result["inputs"])
+
+
+def test_content_checks_cancellation_at_the_uncached_fetch_not_just_the_input_loop() -> None:
+    """Cancellation arising while matching one input must still stop that input's content fetch."""
+    site = RecordingSite(LIVE_ENV)
+    site.reporter = RecordingReporter()
+    site.reporter.cancelled = True
+    cancelled = False
+    try:
+        site.content_sha256(_fixture_luid(1))
+    except RuntimeError as exc:
+        cancelled = str(exc) == "cancelled"
+    assert site.count("content") == 0, "CANCEL_CONTENT_FETCH: an uncached download ignored cancellation"
+    assert cancelled
+
+
+def test_inventory_checks_cancellation_at_the_actual_fetch() -> None:
+    """A late cancellation must still prevent the inventory's one actual network request."""
+    site = RecordingSite(LIVE_ENV)
+    site.reporter = RecordingReporter()
+    site.reporter.cancelled = True
+    cancelled = False
+    try:
+        site.workbooks()
+    except RuntimeError as exc:
+        cancelled = str(exc) == "cancelled"
+    assert site.count("inventory") == 0, "CANCEL_INVENTORY_FETCH: the inventory ignored cancellation"
+    assert cancelled
+
+
+def test_worker_cancellation_uses_a_shared_byte_without_any_worker_owned_mutex() -> None:
+    """The parent's write primitive has no Event condition lock for a dying child to hold."""
+    flag = multiprocessing.get_context("spawn").RawValue("b", 0)
+    reporter = prov.WorkerReporter(None, flag)
+    assert not hasattr(flag, "get_lock") and not hasattr(flag, "_cond")
+    assert reporter.cancelled is False
+    flag.value = 1
+    assert reporter.cancelled is True
+
+
+def test_dynamic_exception_class_names_are_not_a_diagnostic_escape(tmp_path: Path, monkeypatch, caplog) -> None:
+    """Even an exception class's name is untrusted text; only stable class labels may survive."""
+    inventory = _harvested(tmp_path, 1)
+    hostile_class = type(r"C:\private\credential", (Exception,), {})
+    _install(monkeypatch, RecordingSite(LIVE_ENV, workbooks=inventory, signout_error=hostile_class("private-response")))
+    with caplog.at_level("DEBUG"):
+        result = prov.build(tmp_path, LIVE_ENV)
+    rendered = json.dumps(result) + "\n".join(record.getMessage() for record in caplog.records)
+    assert "private" not in rendered
+    assert result["phase"]["errors"][-1]["exception_class"] == "Exception"

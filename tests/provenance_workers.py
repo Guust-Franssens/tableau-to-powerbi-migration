@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import struct
 import time
+from pathlib import Path
 from typing import Any
 
 MESSAGE_INPUTS_DISCOVERED = "inputs-discovered"
@@ -189,6 +190,7 @@ def sends_partial_frame(part: str, conn, _cancel_event, _payload) -> None:
     """A live child sends an incomplete header or a valid header without its body, then stalls."""
     raw = b"\x00" if part == "header" else struct.pack("!I", 10000)
     conn.endpoint.sendall(raw)
+    (Path(_payload["input"]) / "frame-sent").write_text(part, encoding="utf-8")
     _block_forever()
 
 

@@ -924,7 +924,11 @@ def _validated_checkpoint(record: object) -> dict:
         _validated_revision(local["revision_key"])
     if "fingerprint_error" in record:
         _validated_error(record["fingerprint_error"])
+        _require(local == {"status": "unavailable"})
         _require(record["fingerprint_error"]["operation"] == prov.OP_FINGERPRINT)
+        _enum(
+            record["fingerprint_error"]["code"], {"local-fingerprint-failed", prov.CANCELLED_CODE, prov.DEADLINE_CODE}
+        )
     return record
 
 
@@ -964,6 +968,8 @@ def _validated_result_record(record: object) -> dict:
             )
             if "name" in member:
                 _text(member["name"])
+    if "fingerprint_error" in record:
+        _validated_error(record["fingerprint_error"])
     reduced = prov.checkpoint_record(record)
     _validated_checkpoint(reduced)
     if "origin" in record:
@@ -992,7 +998,14 @@ def _validated_result(result: object, total: int, checkpoints: dict[int, dict]) 
     _require(type(result) is dict and result.keys() == {"schema", "stamped_at", "input_count", "inputs", "phase"})
     _require(result["schema"] == prov.SCHEMA)
     stamp = result["stamped_at"]
-    _require(type(stamp) is str and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", stamp) is not None)
+    _require(
+        type(stamp) is str
+        and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", stamp) is not None
+    )
+    try:
+        datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        raise ProvenanceProtocolError from None
     _require(_is_count(result["input_count"]) and result["input_count"] == total)
     records = result["inputs"]
     _require(type(records) is list and len(records) == total)
@@ -1011,7 +1024,12 @@ def _validated_result(result: object, total: int, checkpoints: dict[int, dict]) 
         _validated_error(error)
     if phase["status"] in prov.SUCCESS_STATUSES:
         _require(total > 0 and not errors and len(checkpoints) == total)
-        _require(all("status" not in record["input"] for record in records))
+        _require(
+            all(
+                "status" not in record["input"] and not ({"lookup_error", "fingerprint_error"} & record.keys())
+                for record in records
+            )
+        )
     if phase["status"] == "empty":
         _require(total == 0)
     return result
@@ -1099,8 +1117,8 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
         _require(completed >= self.counters.get(operation, 0))
         if operation == prov.OP_COLLECT_INPUTS:
             _require(total == 1 and completed in (0, 1))
-            _require(completed == 0 or self.total is not None)
-            _require(operation not in self.counters or completed > self.counters[operation])
+            _require((completed == 0 and self.total is None) or (completed == 1 and self.total is not None))
+            _require(completed == (0 if operation not in self.counters else self.counters[operation] + 1))
         else:
             _require(self.total is not None)
             if operation == prov.OP_FINGERPRINT:
@@ -1114,7 +1132,7 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
                     _require(self.counters.get(prov.OP_INVENTORY) == 1)
                 else:
                     _require(total == 1 and completed in (0, 1))
-                    _require(operation not in self.counters or completed > self.counters[operation])
+                    _require(completed == (0 if operation not in self.counters else self.counters[operation] + 1))
                 if operation == prov.OP_INVENTORY:
                     _require(self.counters.get(prov.OP_SIGN_IN) == 1)
                 if operation == prov.OP_SIGN_OUT:
@@ -1303,6 +1321,8 @@ class _ProvenanceReceiver:
                 self.acknowledged.clear()
         except EOFError:
             self._deliver("eof")
+        except OSError:
+            self._deliver(PROVENANCE_CRASH_CODE)
         except Exception:  # pylint: disable=broad-exception-caught
             self._deliver(PROVENANCE_PROTOCOL_CODE)
 
@@ -1333,8 +1353,8 @@ def _drain_worker(receiver: _ProvenanceReceiver, deadline_at: float, state: _Pro
             return PROVENANCE_DEADLINE_CODE
         if candidate == "eof":
             return None if state.terminal is not None else PROVENANCE_CRASH_CODE
-        if candidate == PROVENANCE_PROTOCOL_CODE:
-            return PROVENANCE_PROTOCOL_CODE
+        if candidate in (PROVENANCE_PROTOCOL_CODE, PROVENANCE_CRASH_CODE):
+            return candidate
         state.commit(candidate)
         receiver.acknowledged.set()
 
@@ -1388,6 +1408,7 @@ def collect_provenance(
     state = _ProvenanceState()
     process = receiver = recv = send = cancel = None
     worker_pid = None
+    attempted = False
     stopped = _WorkerStop(None, None, False, True)
     code = PROVENANCE_START_CODE
     try:
@@ -1407,6 +1428,7 @@ def collect_provenance(
         if time.monotonic() >= deadline_at:
             code = PROVENANCE_DEADLINE_CODE
         else:
+            attempted = True
             process.start()
             worker_pid = process.pid
             send.close()
@@ -1418,9 +1440,12 @@ def collect_provenance(
     finally:
         if cancel is not None:
             cancel.value = 1
-        if process is not None and process.pid is not None:
+        if process is not None and attempted:
             stopped = _stop_worker(process)
-            worker_pid = process.pid
+            try:
+                worker_pid = process.pid
+            except Exception:  # pylint: disable=broad-exception-caught
+                stopped = stopped._replace(error=True)
             if stopped.reaped:
                 with contextlib.suppress(OSError, ValueError):
                     process.close()
@@ -1431,7 +1456,7 @@ def collect_provenance(
         if send is not None:
             send.close()
 
-    result = state.document(code) if worker_pid is None else _worker_document(state, code, stopped)
+    result = state.document(code) if not attempted else _worker_document(state, code, stopped)
     completed = len(result["inputs"]) if isinstance(result.get("inputs"), list) else 0
     return ProvenanceOutcome(
         result=result,

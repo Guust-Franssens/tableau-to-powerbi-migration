@@ -2386,7 +2386,13 @@ def test_a_failed_provenance_replace_leaves_the_prior_artifact_byte_identical(tm
 
 @pytest.mark.parametrize(
     ("status", "error_code"),
-    [("partial", "live-lookup-refused"), ("failed", "collect-inputs-failed")],
+    [
+        ("partial", "live-lookup-refused"),
+        ("partial", "worker-reap-failed"),
+        ("failed", "collect-inputs-failed"),
+        ("failed", "worker-start-failed"),
+        ("failed", "worker-protocol-invalid"),
+    ],
 )
 def test_a_provenance_failure_stops_before_adjudication_and_handover(
     tmp_path: Path, monkeypatch, status: str, error_code: str
@@ -3300,6 +3306,7 @@ def test_progress_output_carries_only_allowlisted_keys_and_nothing_from_the_envi
     "entry",
     [
         pytest.param(provenance_workers.sends_an_unknown_message, id="unknown-kind"),
+        pytest.param(provenance_workers.sends_invalid_pickle, id="invalid-pickle"),
         pytest.param(
             functools.partial(provenance_workers.sends_an_unsafe_checkpoint, "j.doe-Superstore-secret.twbx"),
             id="checkpoint-with-a-copied-string",
@@ -3340,6 +3347,17 @@ def test_a_successful_worker_result_is_published_unchanged_and_passes(tmp_path: 
         "status": "local_only",
     }
     assert run.elapsed < ELAPSED_BOUND_SEC
+
+
+@pytest.mark.timing
+@pytest.mark.parametrize("part", ["header", "body"])
+def test_a_real_spawned_partial_frame_sender_cannot_hold_publication(tmp_path: Path, monkeypatch, part: str) -> None:
+    """The marker proves the spawned sender reached the partial frame before the parent's deadline."""
+    run = _supervise(monkeypatch, tmp_path, functools.partial(provenance_workers.sends_partial_frame, part))
+    assert (tmp_path / "frame-sent").read_text(encoding="utf-8") == part
+    assert run.outcome.expired and not run.stamped.ok
+    assert run.artifact["phase"]["errors"][-1]["code"] == run_estate.PROVENANCE_DEADLINE_CODE
+    assert len(run.published) == 1 and not _pid_is_running(run.outcome.worker_pid)
 
 
 def test_the_direct_worker_process_is_gone_from_the_operating_system_after_a_deadline(

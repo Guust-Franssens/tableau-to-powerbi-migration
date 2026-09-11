@@ -546,7 +546,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
             try:
                 self._call("POST", "/auth/signout")
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                LOG.debug("Tableau sign-out failed (%s) - session left to expire", type(exc).__name__)
+                LOG.debug("Tableau sign-out failed (%s) - session left to expire", _exception_class(exc))
                 failure = exc
             finally:
                 self.token = None

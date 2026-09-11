@@ -64,15 +64,13 @@ INVALID = "INVALID"
 #: The pre-correction `stamp_inputs`, parameterised by the four flags each mutation sets. The body
 #: is otherwise the shipped one, so a mutation changes exactly the behaviour it names.
 _STAMP_BODY = """
-from pathlib import Path
-
 import run_estate
 import stamp_tableau_provenance as prov
 
 
 def stamp_inputs(input_dir, out_dir, timeout_sec=None):  # noqa: ARG001  # the deadline is not what is mutated here
     try:
-        result = prov.build(input_dir, prov.resolve_env(Path(".env")))
+        result = run_estate.collect_provenance(input_dir, timeout_sec).result
     except Exception as exc:  # noqa: BLE001
         result = prov.failure_result("build-failed", "build", exc)
 
