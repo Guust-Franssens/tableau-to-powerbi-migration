@@ -631,6 +631,7 @@ def test_evidence_predating_the_most_recent_block_does_not_count(migration: Path
             "ts": "2020-01-01T00:00:00+00:00",
             "action": "probe-cleared",
             "detail": "forged",
+            "user": "test",
             "scope": str(migration.resolve()),
         }
     )

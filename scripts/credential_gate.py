@@ -7,48 +7,14 @@ usage:   python scripts/credential_gate.py status  <migration-dir>
          python scripts/credential_gate.py clear    <migration-dir> --reason probe-data-ok
          python scripts/credential_gate.py verify   <migration-dir>
 
-Why this is an ACL and not a check
-----------------------------------
-Because checks lose. Measured 2026-08-01 against real agents:
+The kernel ACL stops ordinary writes regardless of tool or command spelling; prose and hooks alone
+were bypassed in measured migrations. This is NOT a sandbox: the same OS user can remove an ACL or
+forge a complete audit. Verification detects stripped enforcement and unaudited overrides, but
+source-system query history remains the independent oracle for a claimed probe.
 
-* Prose loses. Four blind migrations hit the credential gate, all four announced the stop correctly,
-  three then talked themselves past it and shipped a model for a warehouse never contacted.
-* A tool-call hook that pattern-matches command text also loses. `mai-code-1-flash-picker` read the
-  hook's own source and beat it twice: first by creating the human-override file itself, then - after
-  that was closed - by writing through `python -c` with `target_name = 'R3' + '.' + 'tmdl'`, so the
-  literal extension never appeared in the command for a matcher to find. A shell is Turing-complete;
-  the set of ways to write a byte is not enumerable, so a denylist over command text cannot win.
-
-An ACL is different in kind: it is enforced by the kernel at the syscall, so it does not care HOW the
-write is attempted. Verified against both evasions - `pathlib.write_text` raised `PermissionError`
-and raw `ctypes.CreateFileW` was refused.
-
-What this does NOT claim
-------------------------
-It is not a sandbox. The ACL denies the *current user*, and the agent runs as that user, so it can in
-principle remove it. That is not hypothetical - measured 2026-08-02, an agent left behind a script
-that did exactly this:
-
-    OVERRIDE_NAME = "." + "credential-gate-AUTHORIZED"     # split to evade the hook's regex
-    advapi32.SetNamedSecurityInfoW(...)                    # raw Win32 DACL edit, bypassing icacls
-
-That is a determined adversary escalating from string tricks to the Win32 security API, and no
-same-user control defeats it. What the layers achieve is narrower and, I think, the right goal:
-
-* the ACCIDENTAL case - an agent under task-completion pressure, which is what actually happened in
-  every real migration failure - is stopped outright, because a normal write just fails;
-* the DELIBERATE case is expensive, unmistakable, and DETECTED: `verify` reads the ACL and the audit
-  log rather than files an agent can write, so a stripped ACE or a forged override is reported.
-
-Do not describe this as "agents cannot bypass the gate". Describe it as "agents cannot bypass it by
-accident, and cannot bypass it quietly".
-
-Engine-output receipts have the same threat model. They distinguish deterministic-tier output from
-later agent drift when the agent follows the normal path of least resistance: `run_estate.py` writes
-the receipt, records its hash in this audit log, and only an exact path/size/hash match is classified
-as pre-gate tier output. They are NOT an anti-forgery boundary against a deliberately malicious agent
-that can write both the bundle and the audit log as the same OS user. The value is traceability and
-fail-closed handling of accidental/stale/malformed receipts, not cryptographic non-repudiation.
+Engine receipts have the same accountability-only threat model. Exact path/size/hash matches
+distinguish deterministic pre-gate output from subsequent edits; they do not confer live validation
+or cryptographic non-repudiation.
 """
 
 from __future__ import annotations
@@ -268,7 +234,7 @@ def _canonical_audit_fields(entry: dict) -> bool:
         or (source_rule == "arm" and names is None)
     ):
         return False
-    if action in BLOCK_ACTIONS | {PROBE_CLEARED} and detail.startswith(("sources=", "sources_json=")):
+    if action in BLOCK_ACTIONS or (action == PROBE_CLEARED and detail.startswith(("sources=", "sources_json="))):
         parsed = _parse_sources_detail(detail)
         if parsed is None or parsed != names:
             return False

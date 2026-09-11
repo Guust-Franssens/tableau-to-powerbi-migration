@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import copy
 import json
-import sys
 import traceback
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -17,13 +16,10 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-
-import credential_gate as gate  # noqa: E402
-import probe_live_source as probe  # noqa: E402
-from credential_gate import _audit, _audit_entries, _DuplicateJsonKey, _reject_duplicate_keys  # noqa: E402
-from preflight_source_credentials import _leg_key  # noqa: E402
-from probe_live_source import _probe_leg, _probe_one_table  # noqa: E402
+from test_probe_earned_clear import cg as gate, pls as probe
+from credential_gate import _audit, _audit_entries, _DuplicateJsonKey, _override_is_authentic, _reject_duplicate_keys
+from preflight_source_credentials import _leg_key
+from probe_live_source import _probe_leg, _probe_one_table
 
 LIVE = {"class": "sqlserver", "server": "source.example", "database": "db", "powerbi_target": "live_source"}
 OTHER = {**LIVE, "server": "other.example"}
@@ -69,8 +65,8 @@ def _assess(
     )
 
 
-@pytest.fixture
-def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+@pytest.fixture(name="root")
+def _root_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Use real marker/audit writers without changing this machine's ACLs or process lineage."""
     monkeypatch.setattr(gate.platform, "system", lambda: "Linux")
     monkeypatch.setattr(gate, "_ancestry", lambda: [])
@@ -80,8 +76,8 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return unit
 
 
-@pytest.fixture
-def desktop(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture(name="desktop")
+def _desktop_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub only external primitives; model construction, audit and gate-lift code stay real."""
     monkeypatch.setattr(probe, "_host_resolves", lambda _host: True)
     monkeypatch.setattr(probe, "_network_fault_observed", lambda _connection: False)
@@ -116,6 +112,7 @@ def _authorize(root: Path, sources: list[str] | None = None) -> None:
 @pytest.mark.parametrize("action", ["block-marker-only", "probe-data_ok", "probe-cleared"])
 @pytest.mark.parametrize("field", ["detail", "user"])
 def test_audit_requires_each_production_field(root: Path, action: str, field: str) -> None:
+    """Removing one base field from otherwise earned production history invalidates the trail."""
     _earn(root)
     rows = _rows(root)
     next(row for row in rows if row["action"] == action).pop(field)
@@ -146,6 +143,7 @@ def test_audit_requires_each_production_field(root: Path, action: str, field: st
     ],
 )
 def test_audit_rejects_noncanonical_action_shapes(root: Path, field: str, value: object) -> None:
+    """Each mutated field must fail independently of missing fields or unrelated bad rows."""
     _earn(root)
     rows = _rows(root)
     rows[1][field] = value
@@ -155,7 +153,23 @@ def test_audit_rejects_noncanonical_action_shapes(root: Path, field: str, value:
 
 
 @pytest.mark.usefixtures("desktop")
+@pytest.mark.parametrize(
+    "detail",
+    ["not a production arm", "", "sources=[True]", "sources_json=[false]", "sources=[]"],
+)
+def test_arm_detail_is_canonical_and_agrees_with_sources(root: Path, detail: str) -> None:
+    """An arm's structured sources and legacy detail cannot make contradictory identity claims."""
+    _earn(root)
+    rows = _rows(root)
+    rows[0]["detail"] = detail
+    _write_rows(root, rows)
+    result = _assess(root)
+    assert (result.state, result.codes) == ("cannot_establish", ("audit-malformed",))
+
+
+@pytest.mark.usefixtures("desktop")
 def test_audit_rejects_future_times_with_fixed_skew(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bound clock skew without refusing an otherwise canonical boundary timestamp."""
     now = datetime.now(timezone.utc).replace(microsecond=0)
 
     class Clock(datetime):
@@ -194,6 +208,7 @@ def test_audit_rejects_future_times_with_fixed_skew(root: Path, monkeypatch: pyt
     ],
 )
 def test_authorization_requires_production_detail(root: Path, detail: object) -> None:
+    """The authorize action must carry the writer's actual authorizer/lineage contract."""
     _authorize(root)
     assert _assess(root, authorized=True).state == "authorized_model_only"
     rows = _rows(root)
@@ -201,11 +216,12 @@ def test_authorization_requires_production_detail(root: Path, detail: object) ->
     _write_rows(root, rows)
     result = _assess(root, authorized=True)
     assert (result.state, result.codes) == ("cannot_establish", ("audit-malformed",))
-    assert not gate._override_is_authentic(root)  # pylint: disable=protected-access
+    assert not _override_is_authentic(root)
 
 
 @pytest.mark.parametrize("shape", ["minimal", "bool-user", "future", "forbidden-sources", "directory"])
 def test_forged_authorization_never_qualifies(root: Path, shape: str) -> None:
+    """An action label plus a forged or directory-shaped override confers no authority."""
     _authorize(root)
     rows = _rows(root)
     row = next(row for row in rows if row["action"] == "authorize")
@@ -238,6 +254,7 @@ def test_forged_authorization_never_qualifies(root: Path, shape: str) -> None:
 def test_authentic_authorization_written_on_each_platform(
     root: Path, monkeypatch: pytest.MonkeyPatch, system: str, chain: list[str]
 ) -> None:
+    """Both current platform writers must produce readable, structural-only authorization."""
     monkeypatch.setattr(gate.platform, "system", lambda: system)
     monkeypatch.setattr(gate, "_ancestry", lambda: chain)
     monkeypatch.setattr(gate, "_icacls", lambda _args: (0, ""))
@@ -263,6 +280,7 @@ def test_authentic_authorization_written_on_each_platform(
     ],
 )
 def test_authorization_cannot_override_incomplete_local_bytes(root: Path, field: str, value: object) -> None:
+    """The fallback waives a live measurement, never the presence of local input bytes."""
     _authorize(root)
     assert _assess(root, authorized=True).state == "authorized_model_only"
     result = _assess(root, authorized=True, local={**LOCAL, field: value})
@@ -272,6 +290,7 @@ def test_authorization_cannot_override_incomplete_local_bytes(root: Path, field:
 
 @pytest.mark.parametrize("connections", [(REVIEW,), (LIVE, REVIEW)])
 def test_authorization_cannot_override_review_legs(root: Path, connections: tuple[dict, ...]) -> None:
+    """Unknown/review legs stay in the denominator even when no live key was classifiable."""
     _authorize(root)
     result = _assess(root, spec=_spec(*connections), authorized=True)
     assert result.state == "blocked"
@@ -280,6 +299,7 @@ def test_authorization_cannot_override_review_legs(root: Path, connections: tupl
 
 @pytest.mark.parametrize("arms", [[], [OTHER_KEY], ["legacy display"]])
 def test_authorization_requires_current_keyed_arm(root: Path, arms: list[str]) -> None:
+    """Readable legacy/empty/sibling arms cannot invent this package's current epoch."""
     _authorize(root, arms)
     assert _audit_entries(root) is not None, "a readable historic arm is not necessarily current key coverage"
     result = _assess(root, authorized=True)
@@ -287,6 +307,7 @@ def test_authorization_requires_current_keyed_arm(root: Path, arms: list[str]) -
 
 
 def test_authorization_without_any_arm_cannot_establish(root: Path) -> None:
+    """The production authorization writer does not itself create a current arm."""
     assert gate.authorize(root, "Fixture Human") == 0
     assert _audit_entries(root) is not None
     result = _assess(root, authorized=True)
@@ -295,6 +316,7 @@ def test_authorization_without_any_arm_cannot_establish(root: Path) -> None:
 
 @pytest.mark.parametrize("fault", ["duplicate-package", "duplicate-root", "invalid-key", "new-key", "forced-scope"])
 def test_authorization_cannot_override_authority_failures(root: Path, fault: str) -> None:
+    """Invalid identities, unmatched source sets and forced scope outrank authorization."""
     spec = _spec(LIVE)
     if fault == "forced-scope":
         (root / gate.MIGRATION_SPEC).unlink()
@@ -350,6 +372,7 @@ def test_all_current_audit_writers_remain_readable(root: Path) -> None:
 
 @pytest.mark.usefixtures("desktop")
 def test_legacy_unkeyed_success_is_readable_but_not_earned(root: Path) -> None:
+    """The pre-key probe writer remains readable, without becoming evidence for any key."""
     assert gate.apply_block(root, [KEY]) == 0
     _audit(root, "probe-data_ok", "Orders -> DATA_OK")
     assert gate.clear_block(root, "legacy success", earned=True, sources=[KEY]) == 0
@@ -359,9 +382,20 @@ def test_legacy_unkeyed_success_is_readable_but_not_earned(root: Path) -> None:
     _earn(root)
 
 
+@pytest.mark.usefixtures("desktop")
+@pytest.mark.parametrize("detail", ["sources=['legacy source']", 'sources_json=["legacy source"]'])
+def test_legacy_arm_names_stay_readable_without_becoming_current_coverage(root: Path, detail: str) -> None:
+    """Pre-structured-source arms remain diagnostic history, never current keyed authority."""
+    _audit(root, "block-marker-only", detail)
+    assert _audit_entries(root) == _rows(root)
+    assert _assess(root).codes == ("source-key-set-changed",)
+    _earn(root)
+
+
 @pytest.mark.parametrize("field", ["omissions", "neutralized", "retained_network", "shipped"])
 @pytest.mark.parametrize("value", [(), {}, "", False, None])
 def test_local_json_arrays_are_actual_lists(root: Path, field: str, value: object) -> None:
+    """Empty non-list iterables must not masquerade as empty canonical JSON arrays."""
     assert _assess(root, spec=_spec(FLAT)).state == "local_import_ready"
     result = _assess(root, spec=_spec(FLAT), local={**LOCAL, field: value})
     assert (result.state, result.codes) == ("cannot_establish", ("spec-unreadable",))
@@ -383,6 +417,7 @@ def test_local_json_arrays_are_actual_lists(root: Path, field: str, value: objec
     ],
 )
 def test_local_fact_types_precede_completeness(root: Path, field: str, value: object) -> None:
+    """A false completeness flag must not short-circuit malformed-field validation."""
     local = {**LOCAL, "self_contained": False, field: value}
     result = _assess(root, spec=_spec(FLAT), local=local)
     assert (result.state, result.codes) == ("cannot_establish", ("spec-unreadable",))
@@ -406,6 +441,7 @@ def test_local_fact_types_precede_completeness(root: Path, field: str, value: ob
     ],
 )
 def test_spec_fact_shapes_precede_classifier_fallback(root: Path, path: tuple, value: object) -> None:
+    """The classifier must not turn malformed falsey facts into absent/default facts."""
     spec = _spec(FLAT)
     assert _assess(root, spec=spec).state == "local_import_ready"
     parent = spec
@@ -419,6 +455,7 @@ def test_spec_fact_shapes_precede_classifier_fallback(root: Path, path: tuple, v
 @pytest.mark.usefixtures("desktop")
 @pytest.mark.parametrize("sql", ["", "-- comment only", "/* comment only */", None])
 def test_custom_sql_preprocessing_failure_invalidates_earned_key(root: Path, sql: str | None) -> None:
+    """Comment-only SQL cannot leave the same key's earlier earned state green."""
     _earn(root)
     table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": sql}
     assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (1, "ERROR")
@@ -429,7 +466,19 @@ def test_custom_sql_preprocessing_failure_invalidates_earned_key(root: Path, sql
 
 
 @pytest.mark.usefixtures("desktop")
+def test_malformed_custom_sql_type_also_records_its_terminal_error(root: Path) -> None:
+    """A preprocessing exception, rather than a handled ValueError, must still invalidate proof."""
+    _earn(root)
+    table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": True}
+    with pytest.raises(TypeError):
+        _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False))
+    assert (_rows(root)[-1]["action"], _rows(root)[-1]["sources"]) == ("probe-error", [KEY])
+    assert _assess(root).codes == ("probe-error",)
+
+
+@pytest.mark.usefixtures("desktop")
 def test_custom_sql_success_is_keyed_and_earns_only_after_clear(root: Path) -> None:
+    """Real custom-query scaffolding reaches the same keyed attempt/clear boundary."""
     assert gate.apply_block(root, [KEY]) == 0
     table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": "SELECT 'private-query-value'"}
     assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (0, "DATA_OK")
@@ -448,6 +497,7 @@ def test_custom_sql_success_is_keyed_and_earns_only_after_clear(root: Path) -> N
 def test_exceptional_attempts_record_safe_keyed_errors_before_cleanup(
     root: Path, monkeypatch: pytest.MonkeyPatch, stage: str
 ) -> None:
+    """Every exception keeps its original behavior but leaves a safe keyed audit first."""
     _earn(root)
     secret = str(root / "private-cause")
     cleanup = []
@@ -470,12 +520,13 @@ def test_exceptional_attempts_record_safe_keyed_errors_before_cleanup(
     if stage in {"_wait_for_catalog", "_refresh_and_classify"}:
         assert cleanup == [last], "record must precede the slow Desktop close"
     else:
-        assert cleanup == []
+        assert not cleanup
 
 
 @pytest.mark.usefixtures("desktop")
 @pytest.mark.parametrize("source_index", [None, 0])
 def test_production_resolution_error_invalidates_old_key(root: Path, source_index: int | None) -> None:
+    """Both run_probe entry selections must record table-resolution errors for known legs."""
     _earn(root)
     spec = _spec(LIVE)
     spec["data_sources"][0]["tables"] = []
@@ -489,6 +540,7 @@ def test_production_resolution_error_invalidates_old_key(root: Path, source_inde
 
 @pytest.mark.usefixtures("desktop")
 def test_live_key_skip_is_recorded_without_becoming_success(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A skipped terminal attempt invalidates old proof while retaining its original verdict."""
     _earn(root)
     monkeypatch.setattr(probe, "_refresh_and_classify", lambda *_args: (0, "SKIPPED"))
     assert _probe_one_table(root, KEY, LIVE, ({"name": "Orders"}, "ID"), (1, False)) == (0, "SKIPPED")
@@ -516,6 +568,7 @@ def test_live_key_skip_is_recorded_without_becoming_success(root: Path, monkeypa
     ],
 )
 def test_provider_identity_has_one_closed_syntax(root: Path, unit: str) -> None:
+    """Assessor and strict parser must reject the same path/prose-shaped provider identities."""
     provider = _assess(root, spec=_spec(FLAT))
     result = gate.assess_data_access(
         root,
@@ -545,6 +598,7 @@ def test_provider_identity_has_one_closed_syntax(root: Path, unit: str) -> None:
 def test_valid_provider_unit_is_preserved_exactly_without_search(
     root: Path, monkeypatch: pytest.MonkeyPatch, unit: str
 ) -> None:
+    """Accept exact S2 identifiers without normalization, matching or another evidence read."""
     provider = _assess(root, spec=_spec(FLAT))
 
     def forbidden(*_args, **_kwargs) -> None:
@@ -580,6 +634,7 @@ def _safe_error(call: Callable, reason: str, secret: str) -> None:
 
 @pytest.mark.parametrize("kind", ["missing", "directory", "invalid-utf8"])
 def test_projection_read_errors_retain_no_unsafe_cause(tmp_path: Path, kind: str) -> None:
+    """A safe wrapper message must not retain a raw path-bearing exception in its context."""
     path = tmp_path / "private-filename.json"
     if kind == "directory":
         path.mkdir()
@@ -590,6 +645,7 @@ def test_projection_read_errors_retain_no_unsafe_cause(tmp_path: Path, kind: str
 
 @pytest.mark.parametrize("kind", ["duplicate", "malformed", "nonfinite"])
 def test_projection_parse_errors_retain_no_raw_payload(tmp_path: Path, kind: str) -> None:
+    """JSON rejection objects and tracebacks carry only the closed safe reason."""
     secret = str(tmp_path / "private-key")
     key = json.dumps(secret)
     if kind == "duplicate":
@@ -602,6 +658,7 @@ def test_projection_parse_errors_retain_no_raw_payload(tmp_path: Path, kind: str
 
 
 def test_duplicate_detection_never_stores_the_key(tmp_path: Path) -> None:
+    """The duplicate hook's own exception must not hold the key even before translation."""
     secret = str(tmp_path / "private-key")
     with pytest.raises(_DuplicateJsonKey) as error:
         _reject_duplicate_keys([(secret, 1), (secret, 2)])

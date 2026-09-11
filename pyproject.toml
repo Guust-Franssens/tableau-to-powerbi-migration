@@ -162,10 +162,10 @@ max-line-length = 120
 # split needed to keep `_audit_entries` under the return-statement limit): 1260 -> ~1350 -> ~1380.
 #
 # Issue #562: one typed data-access authority and strict projection parser remain beside the
-# existing gate. Recovery removed redundant explanations/helpers while closing the original
-# per-key epoch and provider-input invariants: credential_gate.py is now below 2200 lines, not
-# the original 2300 allowance. No second authority module or per-file size-check exemption.
-max-module-lines = 2200
+# existing gate. The audit/authorization and terminal-probe corrections also remove redundant
+# explanations/helpers: the ceiling is now 2150, below the previous 2200/2300 allowances.
+# No second authority module or per-file size-check exemption.
+max-module-lines = 2150
 
 [tool.pylint."messages control"]
 # TODO comments are a deliberate scope-tracking practice in this repo, not a defect.
