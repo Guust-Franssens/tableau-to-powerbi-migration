@@ -16,6 +16,12 @@ preflight) and `refresh_pbip_model.row_counts` (the refresh's own data check).
 from __future__ import annotations
 
 import re
+import threading
+import time
+from dataclasses import FrozenInstanceError, replace
+from types import SimpleNamespace
+
+import pytest
 
 # `conftest.py` next to this file puts the skill's own `scripts/` on `sys.path`.
 # ruff: noqa: E402  (the conftest-provided path must be in place before these imports)
@@ -66,6 +72,8 @@ class _Conn:
     def __init__(self, tables: list[tuple[str, bool]], counts: dict[str, int]) -> None:
         self._tables = tables
         self._counts = counts
+        self.Database = "11111111-2222-3333-4444-555555555555"
+        self.queries = []
 
     def Open(self) -> None:  # noqa: N802
         pass
@@ -77,11 +85,14 @@ class _Conn:
         return _Command(self)
 
     def reader_for(self, text: str) -> _Reader:
+        self.queries.append(text)
+        if "DBSCHEMA_CATALOGS" in text:
+            return _Reader(["CATALOG_NAME"], [[self.Database]])
         if "TMSCHEMA_TABLES" in text:
             return _Reader(["Name", "IsHidden"], [[name, hidden] for name, hidden in self._tables])
-        topn = re.search(r"TOPN\(1, '([^']+)'\)", text)
+        topn = re.search(r"TOPN\(1, '((?:''|[^'])+)'\)", text)
         if topn:
-            has_rows = self._counts.get(topn.group(1), 0) > 0
+            has_rows = self._counts.get(topn.group(1).replace("''", "'"), 0) > 0
             return _Reader(["Sales Amount"], [["value"]] if has_rows else [])
         countrows = re.search(r"COUNTROWS\('([^']+)'\)", text)
         if countrows:
@@ -261,3 +272,128 @@ def test_an_empty_canary_still_beats_every_other_verdict(capsys) -> None:
     )
     assert "REFRESH: NO_DATA" in out
     assert "Live" in out
+
+
+def _bound_connection(monkeypatch, conn):
+    identity = probe_desktop_query.DesktopIdentity(111, "100", 222, "101", 52001)
+    monkeypatch.setattr(probe_desktop_query, "desktop_identity", lambda *_: identity)
+    _wire(monkeypatch, probe_desktop_query, conn)
+    return probe_desktop_query.bind_desktop(111, 52001)
+
+
+@pytest.mark.parametrize("count", [0, 1])
+def test_canary_observation_uses_the_bound_query_and_actual_returned_rows(monkeypatch, count):
+    conn = _Conn([("Owner's Orders", False)], {"Owner's Orders": count})
+    bound = _bound_connection(monkeypatch, conn)
+    observations = probe_desktop_query.probe_observations(bound, ["Owner's Orders"])
+    query = "EVALUATE TOPN(1, 'Owner''s Orders')"
+    assert observations == (probe_desktop_query.CanaryObservation(conn.Database, "Owner's Orders", query, count),)
+    assert conn.queries.count(query) == 1
+    assert probe_desktop_query.derive_data_verdict is refresh_pbip_model.derive_data_verdict
+    with pytest.raises(FrozenInstanceError):
+        observations[0].returned_rows = 9
+    assert not hasattr(observations[0], "persisted")
+
+
+@pytest.mark.parametrize(
+    "canaries",
+    [None, [], [""], [" "], [True], "Orders", {"Orders": 1}, ["Orders", "orders"]],
+    ids=["implicit", "empty", "empty-name", "blank-name", "bool-name", "string", "mapping", "duplicate"],
+)
+def test_observations_require_nonempty_explicit_unique_canaries(monkeypatch, canaries):
+    bound = _bound_connection(monkeypatch, _Conn([("Parameters", False)], {"Parameters": 1}))
+    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^CANARIES_REQUIRED$"):
+        probe_desktop_query.probe_observations(bound, canaries)
+
+
+@pytest.mark.parametrize("count", [True, False, 1.0, -1])
+def test_observation_counts_are_not_coerced(monkeypatch, count):
+    conn = _Conn([("Orders", False)], {})
+    bound = _bound_connection(monkeypatch, conn)
+    monkeypatch.setattr(probe_desktop_query, "_probe_one", lambda *_args, **_kwargs: count)
+    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TOOL_UNAVAILABLE$"):
+        probe_desktop_query.probe_observations(bound, ["Orders"])
+
+
+@pytest.mark.parametrize("changed", ["catalogue", "process_start", "as_pid", "as_process_start", "port"])
+def test_query_result_is_not_returned_after_bound_identity_changes(monkeypatch, changed):
+    conn = _Conn([("Orders", False)], {"Orders": 1})
+    bound = _bound_connection(monkeypatch, conn)
+    probe_one = probe_desktop_query._probe_one
+
+    def query(*args, **kwargs):
+        count = probe_one(*args, **kwargs)
+        if changed == "catalogue":
+            conn.Database = "22222222-2222-3333-4444-555555555555"
+        else:
+            value = "200" if "start" in changed else 500
+            monkeypatch.setattr(
+                probe_desktop_query, "desktop_identity", lambda _: replace(bound.identity, **{changed: value})
+            )
+        return count
+
+    monkeypatch.setattr(probe_desktop_query, "_probe_one", query)
+    code = "CATALOGUE_CHANGED" if changed == "catalogue" else "PID_REUSED"
+    with pytest.raises(probe_desktop_query.ObservationUnavailable, match=f"^{code}$"):
+        probe_desktop_query.probe_observations(bound, ["Orders"])
+    assert "EVALUATE TOPN(1, 'Orders')" in conn.queries
+
+
+@pytest.mark.parametrize(
+    "field,code",
+    [
+        ("modal", "CREDENTIAL_MISSING"),
+        ("dialog", "DIALOG_NEEDS_HUMAN"),
+        ("dialog", "DIALOG_UNREADABLE"),
+        ("dialog", "DIALOG_UNRECOGNIZED"),
+        ("dialog", "REFRESH_IN_PROGRESS"),
+        ("process_gone", "DESKTOP_GONE"),
+        ("desktop_unready", "DESKTOP_UNREADY"),
+        ("unknown_reason", "CREDENTIAL_UNKNOWN"),
+    ],
+)
+def test_observation_refusals_are_one_attempt_and_do_not_query(monkeypatch, field, code):
+    state = probe_desktop_query.CredentialDetection(**{field: SimpleNamespace(verdict=code)})
+    calls = []
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda pid, **_: calls.append(pid) or state)
+    with pytest.raises(probe_desktop_query.ObservationUnavailable, match=f"^{code}$"):
+        probe_desktop_query._observation_call(111, lambda: pytest.fail("refused read ran"), 1)
+    assert calls == [111]
+
+
+def test_late_credential_refusal_interrupts_the_bounded_read(monkeypatch):
+    release = threading.Event()
+    calls = []
+
+    def inspect_state(_pid, *, in_flight=False):
+        calls.append(in_flight)
+        return probe_desktop_query.CredentialDetection(modal=object() if in_flight else None)
+
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", inspect_state)
+    try:
+        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^CREDENTIAL_MISSING$"):
+            probe_desktop_query._observation_call(111, lambda: release.wait(5), 1)
+        assert calls == [False, True]
+    finally:
+        release.set()
+
+
+@pytest.mark.timing
+def test_observation_deadline_bounds_native_query_and_inspection(monkeypatch):
+    for blocked in ("query", "inspection"):
+        release = threading.Event()
+        queried = []
+        if blocked == "inspection":
+            monkeypatch.setattr(
+                probe_desktop_query, "_credential_state", lambda *_a, event=release, **_k: event.wait(5)
+            )
+        started = time.monotonic()
+        try:
+            with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TIMEOUT$"):
+                probe_desktop_query._observation_call(
+                    111, lambda event=release, count=queried: count.append(1) or event.wait(5), 0.03
+                )
+            assert time.monotonic() - started < 0.5
+            assert queried == ([1] if blocked == "query" else [])
+        finally:
+            release.set()

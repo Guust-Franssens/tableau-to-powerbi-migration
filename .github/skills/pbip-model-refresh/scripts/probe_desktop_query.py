@@ -32,14 +32,20 @@ from __future__ import annotations
 import argparse
 import glob
 import inspect
+import json
 import os
+import queue
 import re
 import subprocess
 import sys
 import threading
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from typing import Callable, NoReturn, TypeVar
+
+from _verdict import derive_data_verdict
 
 from _credential_modal import (
     CredentialDetection,
@@ -71,6 +77,249 @@ def adomd_dll_globs() -> list[str]:
 PORT_DISCOVERY_ATTEMPTS = 6
 PORT_DISCOVERY_INTERVAL_SECONDS = 2
 PREFLIGHT_CREDENTIAL_POLL_SECONDS = 5.0
+OBSERVATION_TIMEOUT_SECONDS = 120
+_T = TypeVar("_T")
+
+
+class ObservationUnavailable(RuntimeError):
+    """A locally named refusal; native exceptions are mapped to TOOL_UNAVAILABLE, not reflected."""
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopIdentity:
+    """Exact OS parent/child start identities and the child's sole listener."""
+
+    pid: int
+    process_start: str
+    as_pid: int
+    as_process_start: str
+    port: int
+
+
+@dataclass(frozen=True, slots=True)
+class BoundDesktop:
+    """The process and sole catalogue to which an observation operation must bind."""
+
+    identity: DesktopIdentity
+    catalogue: str
+
+
+@dataclass(frozen=True, slots=True)
+class CanaryObservation:
+    """Rows returned by this query, not a total table count or source-leg coverage."""
+
+    catalogue: str
+    table: str
+    query: str
+    returned_rows: int
+
+
+def desktop_identity(pid: int, supplied_port: int | None = None) -> DesktopIdentity:
+    """Read one exact PID/start -> child/start -> unique port, without alternate-PID fallback."""
+    if os.name != "nt" or type(pid) is not int or not 0 < pid < 2**32:  # pylint: disable=unidiomatic-typecheck
+        raise ObservationUnavailable("IDENTITY_UNESTABLISHED")
+    script = (
+        "$ErrorActionPreference='Stop';"
+        '$p=Get-CimInstance Win32_Process -Filter "ProcessId=$env:OBSERVATION_PID";'
+        "if ($p.Name -ne 'PBIDesktop.exe') { throw 'identity' };"
+        "$a=@(Get-CimInstance Win32_Process -Filter \"Name='msmdsrv.exe'\" | "
+        "Where-Object { $_.ParentProcessId -eq $p.ProcessId });"
+        "if ($a.Count -ne 1) { throw 'children' };"
+        "$ports=@(Get-NetTCPConnection -OwningProcess $a[0].ProcessId -State Listen | "
+        "Select-Object -ExpandProperty LocalPort -Unique);"
+        "if ($ports.Count -ne 1) { throw 'listeners' };"
+        "[ordered]@{pid=[int]$p.ProcessId;process_start=[string]$p.CreationDate.ToUniversalTime().Ticks;"
+        "as_pid=[int]$a[0].ProcessId;as_process_start=[string]$a[0].CreationDate.ToUniversalTime().Ticks;"
+        "port=[int]$ports[0]} | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+            env=_merged_env({"OBSERVATION_PID": str(pid)}),
+        )
+        payload = json.loads(result.stdout)
+        _validate_identity(payload, pid)
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        raise ObservationUnavailable("IDENTITY_UNESTABLISHED") from None
+    if supplied_port is not None and (
+        type(supplied_port) is not int or supplied_port != payload["port"]  # pylint: disable=unidiomatic-typecheck
+    ):
+        raise ObservationUnavailable("WRONG_PID_PORT")
+    return DesktopIdentity(**payload)
+
+
+def _validate_identity(payload: dict, pid: int) -> None:
+    if not isinstance(payload, dict) or set(payload) != {"pid", "process_start", "as_pid", "as_process_start", "port"}:
+        raise ValueError("identity")
+    if payload["pid"] != pid or any(type(payload[key]) is not int for key in ("pid", "as_pid", "port")):  # pylint: disable=unidiomatic-typecheck
+        raise ValueError("identity")
+    if not 0 < payload["as_pid"] < 2**32 or payload["as_pid"] == pid or not 0 < payload["port"] < 65536:
+        raise ValueError("identity")
+    if any(
+        not isinstance(payload[key], str) or not re.fullmatch(r"[1-9][0-9]{0,19}", payload[key])
+        for key in ("process_start", "as_process_start")
+    ):
+        raise ValueError("identity")
+    if int(payload["as_process_start"]) < int(payload["process_start"]):
+        raise ValueError("identity")
+
+
+def catalogue_id(connection) -> str:
+    """Read exactly one canonical Desktop catalogue ID; missing/ambiguous identity is refused."""
+    command = connection.CreateCommand()
+    command.CommandTimeout = 30
+    command.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS"
+    reader = command.ExecuteReader()
+    try:
+        if not reader.Read():
+            raise ValueError("missing catalogue")
+        value = str(reader.GetValue(0))
+        if reader.Read() or str(uuid.UUID(value)) != value:
+            raise ValueError("ambiguous catalogue")
+        return value
+    except (ValueError, TypeError):
+        raise ObservationUnavailable("CATALOGUE_UNESTABLISHED") from None
+    finally:
+        reader.Close()
+
+
+def _observation_credential_check(pid: int, *, in_flight: bool) -> None:
+    state = _credential_state(pid, in_flight=in_flight)
+    for found, code in (
+        (state.modal, "CREDENTIAL_MISSING"),
+        (state.dialog, state.dialog.verdict if state.dialog else ""),
+        (state.process_gone, "DESKTOP_GONE"),
+        (state.desktop_unready, "DESKTOP_UNREADY"),
+        (state.unknown_reason, "CREDENTIAL_UNKNOWN"),
+    ):
+        if found is not None:
+            raise ObservationUnavailable(code)
+
+
+def _observation_call(pid: int, operation: Callable[[], _T], timeout_seconds: float) -> _T:
+    """Bound reads, including credential inspection. Timed-out native work is not cancellable.
+
+    Workers are daemon-only and never publish a late result to a caller's observation sink.
+    This helper is for reads, NOT a lifecycle wrapper around refresh or persistence.
+    """
+    if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= OBSERVATION_TIMEOUT_SECONDS:  # pylint: disable=unidiomatic-typecheck
+        raise ObservationUnavailable("TIMEOUT")
+    outcome = queue.Queue()
+    stopped = threading.Event()
+
+    def guarded(call) -> None:
+        try:
+            outcome.put((True, call()))
+        except BaseException as error:  # pylint: disable=broad-exception-caught
+            outcome.put((False, error))
+
+    def poll() -> None:
+        while not stopped.wait(0.1):
+            _observation_credential_check(pid, in_flight=True)
+
+    def run() -> _T | None:
+        _observation_credential_check(pid, in_flight=False)
+        if stopped.is_set():
+            return None
+        threading.Thread(target=lambda: guarded(poll), daemon=True).start()
+        result = operation()
+        if not stopped.is_set():
+            _observation_credential_check(pid, in_flight=True)
+        return result
+
+    deadline = time.monotonic() + timeout_seconds
+    threading.Thread(target=lambda: guarded(run), daemon=True).start()
+    try:
+        succeeded, value = outcome.get(timeout=max(0, deadline - time.monotonic()))
+        if time.monotonic() > deadline:
+            raise ObservationUnavailable("TIMEOUT")
+        if not succeeded:
+            if isinstance(value, (ObservationUnavailable, KeyboardInterrupt)):
+                raise value
+            raise ObservationUnavailable("TOOL_UNAVAILABLE") from None
+        return value
+    except queue.Empty:
+        raise ObservationUnavailable("TIMEOUT") from None
+    finally:
+        stopped.set()
+
+
+def bind_desktop(pid: int, supplied_port: int | None = None) -> BoundDesktop:
+    """Bracket catalogue discovery with PID/start observations, within one bounded read."""
+
+    def discover() -> BoundDesktop:
+        identity = desktop_identity(pid, supplied_port)
+        connection = _load_adomd()(f"Data Source=localhost:{identity.port};Connect Timeout=30")
+        connection.Open()
+        try:
+            bound = BoundDesktop(identity, catalogue_id(connection))
+            if desktop_identity(pid) != identity:
+                raise ObservationUnavailable("PID_REUSED")
+            return bound
+        finally:
+            connection.Close()
+
+    return _observation_call(pid, discover, OBSERVATION_TIMEOUT_SECONDS)
+
+
+def recheck_bound(bound: BoundDesktop, connection) -> None:
+    """Refuse PID reuse, a changed child/listener, or a different/multiple catalogue."""
+    if desktop_identity(bound.identity.pid) != bound.identity:
+        raise ObservationUnavailable("PID_REUSED")
+    if catalogue_id(connection) != bound.catalogue or str(connection.Database) != bound.catalogue:
+        raise ObservationUnavailable("CATALOGUE_CHANGED")
+
+
+def bound_call(
+    bound: BoundDesktop, operation: Callable[[object], _T], *, timeout_seconds: float = OBSERVATION_TIMEOUT_SECONDS
+) -> _T:
+    """Give a read executor the internally opened connection, and recheck before returning facts."""
+
+    def read() -> _T:
+        if desktop_identity(bound.identity.pid) != bound.identity:
+            raise ObservationUnavailable("PID_REUSED")
+        connection = _load_adomd()(
+            f"Data Source=localhost:{bound.identity.port};Initial Catalog={bound.catalogue};Connect Timeout=30"
+        )
+        try:
+            connection.Open()
+            recheck_bound(bound, connection)
+            result = operation(connection)
+            recheck_bound(bound, connection)
+            return result
+        finally:
+            connection.Close()
+
+    return _observation_call(bound.identity.pid, read, timeout_seconds)
+
+
+def probe_observations(
+    bound: BoundDesktop, canaries: list[str], *, timeout_seconds: float = OBSERVATION_TIMEOUT_SECONDS
+) -> tuple[CanaryObservation, ...]:
+    """Observe an explicit, unique canary set; no caller-supplied connection/result or source mapping."""
+    if not isinstance(canaries, (list, tuple)):
+        raise ObservationUnavailable("CANARIES_REQUIRED")
+    targets = tuple(canaries or ())
+    if not targets or any(not isinstance(name, str) or not name.strip() for name in targets):
+        raise ObservationUnavailable("CANARIES_REQUIRED")
+    if len({name.casefold() for name in targets}) != len(targets):
+        raise ObservationUnavailable("CANARIES_REQUIRED")
+
+    def read(connection) -> tuple[CanaryObservation, ...]:
+        observed = []
+        for name in targets:
+            rows = _probe_one(bound.identity.port, connection, name, emit=lambda _: None)
+            if type(rows) is not int or rows < 0:  # pylint: disable=unidiomatic-typecheck
+                raise ObservationUnavailable("TOOL_UNAVAILABLE")
+            observed.append(CanaryObservation(bound.catalogue, name, _canary_query(name), rows))
+        return tuple(observed)
+
+    return bound_call(bound, read, timeout_seconds=timeout_seconds)
+
 
 # Power BI's auto date/time scaffolding. Present in the engine, and serialized into a PBIP's
 # `definition/tables/` too when auto date/time is (or ever was) on - so a comparison of the two
@@ -314,9 +563,13 @@ def measure_names(conn) -> set[tuple[str, str]]:
     return pairs
 
 
+def _canary_query(table: str) -> str:
+    return f"EVALUATE TOPN(1, '{table.replace(chr(39), chr(39) * 2)}')"
+
+
 def _probe_one(port: int, conn, table: str, emit=print) -> int:
     """Run EVALUATE TOPN(1, '<table>') for one table, print the evidence, and return the row count."""
-    dax = f"EVALUATE TOPN(1, '{table}')"
+    dax = _canary_query(table)
     cmd = conn.CreateCommand()
     cmd.CommandText = dax
     reader = cmd.ExecuteReader()
@@ -351,14 +604,15 @@ def probe(port: int, tables: list[str] | None, emit=print) -> int:
         implicit = not tables
         targets = list(tables) if tables else [first_table(conn)]
         results = [(target, _probe_one(port, conn, target, emit)) for target in targets]
-        empty = [target for target, rows in results if rows <= 0]
-        if empty:
+        verdict = derive_data_verdict(results, implicit)
+        if verdict.code == "NO_DATA":
+            empty = verdict.empty_tables
             emit(
                 f"PREFLIGHT: NO_DATA (0 rows from: {', '.join(empty)} - source empty, "
                 "credential missing, or refresh failed)"
             )
             return 1
-        if implicit:
+        if verdict.code == "TABLE_OK":
             only = results[0][0]
             emit(f"PREFLIGHT: TABLE_OK '{only}'")
             emit(

@@ -49,7 +49,9 @@ import json
 import math
 import os
 import stat
-from dataclasses import dataclass
+import weakref
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from bundle_corpus import PACKAGE_MARKER, TargetClassification, is_reparse_entry
@@ -99,6 +101,9 @@ CODE_FILE_UNDECLARED = "package_file_undeclared"
 CODE_FILE_MISSING = "package_file_missing"
 CODE_FILE_UNREADABLE = "package_file_unreadable"
 CODE_DIGEST_MISMATCH = "package_file_digest_mismatch"
+CODE_ROOT_BINDING = "package_root_binding_invalid"
+CODE_MEMBER_UNVERIFIED = "package_member_not_verified"
+CODE_MEMBER_REPLACED = "package_member_replaced"
 
 #: Generic wording per code. ASCII only: these reach a Windows console, whose default code page
 #: cannot encode the arrows and warning glyphs the docstrings use.
@@ -106,7 +111,7 @@ _DETAILS = {
     CODE_NOT_A_DECLARED_PACKAGE: (
         "this target does not declare a package boundary, so its contents cannot be verified here"
     ),
-    CODE_ROOT_REPLACED: "the package root is no longer a plain directory",
+    CODE_ROOT_REPLACED: "the package root is no longer the original plain directory",
     CODE_ROOT_UNREADABLE: "the package root could not be assessed without following it",
     CODE_MARKER_REPLACED: f"{PACKAGE_MARKER} is no longer a regular file",
     CODE_MARKER_UNREADABLE: f"{PACKAGE_MARKER} could not be assessed without following it",
@@ -147,6 +152,9 @@ _DETAILS = {
     CODE_FILE_MISSING: f"a file declared by {PACKAGE_MARKER} is not a regular file in the package",
     CODE_FILE_UNREADABLE: "a declared file could not be read to verify its digest",
     CODE_DIGEST_MISMATCH: "a declared file no longer hashes to its recorded digest",
+    CODE_ROOT_BINDING: "the verified namespace belongs to a different exact package root",
+    CODE_MEMBER_UNVERIFIED: "the requested member has no exact verified declaration",
+    CODE_MEMBER_REPLACED: "a verified member no longer has its original regular-file identity",
 }
 
 #: Codes that mean "I could not tell", as opposed to "I checked and it is wrong".
@@ -223,7 +231,27 @@ class Finding:
 
 
 @dataclass(frozen=True)
-class PackageFilesystemResult:
+class VerifiedFile:
+    """One S1-verified name, digest and walk-produced file identity; no asset bytes are retained."""
+
+    relative_path: str
+    sha256: str
+    path: Path = field(repr=False)
+    file_identity: tuple[int, int, int] = field(repr=False)
+
+
+@dataclass(frozen=True)
+class HeldVerifiedMember:
+    """Immutable bytes from one exact S1 namespace. Not a serialized diagnostic or a live path."""
+
+    relative_path: str
+    sha256: str
+    content: bytes = field(repr=False)
+    root_identity: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class PackageFilesystemResult:  # pylint: disable=too-many-instance-attributes
     """What the manifest/filesystem comparison established, and nothing more.
 
     ``findings`` are proven defects; ``unassessable`` are the places the verifier could not look.
@@ -236,11 +264,26 @@ class PackageFilesystemResult:
     unassessable: tuple[Finding, ...] = ()
     files_declared: int = 0
     files_verified: int = 0
+    root_identity: str | None = field(default=None, repr=False, compare=False)
+    verified_files: tuple[VerifiedFile, ...] = field(default=(), repr=False, compare=False)
+    manifest: HeldVerifiedMember | None = field(default=None, repr=False, compare=False)
+    boundary_identity: tuple[tuple[int, ...], ...] = field(default=(), repr=False, compare=False)
+    _authority: Callable[[object], bool] | None = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def is_clean(self) -> bool:
         """``True`` only when the manifest exactly describes the bytes on disk."""
         return self.status == STATUS_CLEAN
+
+    def has_read_authority(self) -> bool:
+        """Only the original, internally unchanged verification can authorize held reads.
+
+        An in-process ownership check, not a signature or protection against arbitrary Python code.
+        """
+        try:
+            return self._authority is not None and self._authority(self)
+        except (AttributeError, TypeError):
+            return False
 
     @property
     def first_code(self) -> str | None:
@@ -274,6 +317,22 @@ class _ManifestError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+def _read_authority_state(result: PackageFilesystemResult) -> tuple:
+    """Capture immutable metadata values, not another copy of the package's bytes."""
+    manifest = result.manifest
+    return (
+        result.status,
+        result.findings,
+        result.unassessable,
+        result.files_declared,
+        result.files_verified,
+        result.root_identity,
+        tuple((row.relative_path, row.sha256, str(row.path), row.file_identity) for row in result.verified_files),
+        (manifest.relative_path, manifest.sha256, manifest.root_identity) if manifest is not None else None,
+        result.boundary_identity,
+    )
 
 
 def _finding(code: str, *, path: str | None = None, ordinal: int | None = None) -> Finding:
@@ -495,6 +554,11 @@ def walk_package(root: Path) -> tuple[dict[str, Path], list[Finding], list[str]]
     the bytes on its far side are never listed, let alone opened). Descending first and judging
     afterwards would already have read outside the package.
     """
+    return _walk_package(root)
+
+
+def _walk_package(root: Path) -> tuple[dict[str, Path], list[Finding], list[str]]:
+    """Shared no-follow traversal for published namespaces and later freshness checks."""
     files: dict[str, Path] = {}
     rows: list[Finding] = []
     empty_dirs: list[str] = []
@@ -554,37 +618,46 @@ def _recheck_boundary(root: Path) -> list[Finding]:
     or marker swapped in between is exactly the accident this module exists to notice, and the cost
     of noticing is two syscalls.
     """
+    return _boundary_identity(root)[1]
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int, int]:
+    return info.st_dev, info.st_ino, info.st_nlink
+
+
+def _boundary_identity(root: Path) -> tuple[tuple[tuple[int, ...], ...], list[Finding]]:
+    """The original root/marker identities, checked without following either entry."""
     try:
         root_info = os.lstat(root)
     except (OSError, ValueError):
-        return [_finding(CODE_ROOT_UNREADABLE)]
+        return (), [_finding(CODE_ROOT_UNREADABLE)]
     if is_reparse_entry(root_info) or not stat.S_ISDIR(root_info.st_mode):
-        return [_finding(CODE_ROOT_REPLACED)]
+        return (), [_finding(CODE_ROOT_REPLACED)]
     try:
         marker_info = os.lstat(root / PACKAGE_MARKER)
     except FileNotFoundError:
-        return [_finding(CODE_MARKER_REPLACED)]
+        return (), [_finding(CODE_MARKER_REPLACED)]
     except (OSError, ValueError):
-        return [_finding(CODE_MARKER_UNREADABLE)]
-    if is_reparse_entry(marker_info) or not stat.S_ISREG(marker_info.st_mode):
-        return [_finding(CODE_MARKER_REPLACED)]
-    return []
+        return (), [_finding(CODE_MARKER_UNREADABLE)]
+    if is_reparse_entry(marker_info) or not stat.S_ISREG(marker_info.st_mode) or marker_info.st_nlink != 1:
+        return (), [_finding(CODE_MARKER_REPLACED)]
+    return ((root_info.st_dev, root_info.st_ino), _file_identity(marker_info)), []
 
 
-def _read_manifest(root: Path) -> tuple[dict[str, object] | None, Finding | None]:
+def _read_manifest(root: Path) -> tuple[dict[str, object] | None, bytes | None, Finding | None]:
     """Read and strictly parse the root manifest, or return the single refusal that stopped it."""
     try:
         raw = (root / PACKAGE_MARKER).read_bytes()
     except (OSError, ValueError):
-        return None, _finding(CODE_MANIFEST_UNREADABLE)
+        return None, None, _finding(CODE_MANIFEST_UNREADABLE)
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
-        return None, _finding(CODE_MANIFEST_NOT_UTF8)
+        return None, None, _finding(CODE_MANIFEST_NOT_UTF8)
     try:
-        return parse_manifest_text(text), None
+        return parse_manifest_text(text), raw, None
     except _ManifestError as exc:
-        return None, _finding(exc.code)
+        return None, None, _finding(exc.code)
 
 
 def _declared_digests(files: dict[str, object]) -> tuple[dict[str, str], list[Finding]]:
@@ -594,21 +667,26 @@ def _declared_digests(files: dict[str, object]) -> tuple[dict[str, str], list[Fi
     return digests, [*key_rows, *digest_rows]
 
 
-def _walked_files(root: Path) -> tuple[dict[str, Path], list[Finding]]:
+def _walked_files(root: Path, *, publish: bool = False) -> tuple[dict[str, Path], list[Finding]]:
     """The walk's regular files and its findings, with the manifest itself removed.
 
     Empty directories are deliberately dropped here: :func:`walk_package` reports them because a
     caller may want to see them, but a directory holds no bytes, so it is neither declarable nor an
     extra file. The manifest is the ONLY excluded file - it carries the map.
+
+    Only namespace creation publishes Path objects through `walk_package`. Freshness checks share
+    the traversal implementation without publishing replacement objects for S1's retained paths.
     """
-    walked, rows, _empty_dirs = walk_package(root)
+    walked, rows, _empty_dirs = walk_package(root) if publish else _walk_package(root)
     walked.pop(PACKAGE_MARKER, None)
     # Sorted so a verdict is byte-stable across hosts: the walk uses a stack, so its natural order
     # depends on directory ordering rather than on anything a reader can predict or diff.
     return walked, sorted(rows, key=lambda row: (row.path or "", row.code))
 
 
-def verify_package(root: Path, classification: TargetClassification) -> PackageFilesystemResult:
+def verify_package(  # pylint: disable=too-many-locals,too-many-return-statements
+    root: Path, classification: TargetClassification
+) -> PackageFilesystemResult:
     """Prove ``root``'s manifest describes exactly the regular files under it.
 
     ``classification`` is the verdict the caller ALREADY computed with
@@ -624,11 +702,11 @@ def verify_package(root: Path, classification: TargetClassification) -> PackageF
     if not classification.declares_self_contained:
         return _result([_finding(CODE_NOT_A_DECLARED_PACKAGE)])
 
-    boundary = _recheck_boundary(root)
+    identity, boundary = _boundary_identity(root)
     if boundary:
         return _result(boundary)
 
-    manifest, refusal = _read_manifest(root)
+    manifest, raw_manifest, refusal = _read_manifest(root)
     if manifest is None:
         return _result([refusal or _finding(CODE_MANIFEST_UNREADABLE)])
 
@@ -638,13 +716,34 @@ def verify_package(root: Path, classification: TargetClassification) -> PackageF
         return _result([_finding(exc.code)])
 
     digests, declared_rows = _declared_digests(files)
-    walked, walk_rows = _walked_files(root)
-    compare_rows, verified = _compare_declared_with_walked(digests, walked)
+    walked, walk_rows = _walked_files(root, publish=True)
+    members: list[VerifiedFile] = []
+    compare_rows, verified = _compare_declared_with_walked(digests, walked, members=members)
     rows = [*declared_rows, *walk_rows, *compare_rows]
-    return _result(rows, files_declared=len(files), files_verified=verified)
+    result = _result(rows, files_declared=len(files), files_verified=verified)
+    if not result.is_clean:
+        return result
+    current, boundary = _boundary_identity(root)
+    if boundary or current != identity:
+        return _result(boundary or [_finding(CODE_ROOT_REPLACED)])
+    result = replace(
+        result,
+        root_identity=str(root),
+        boundary_identity=identity,
+        verified_files=tuple(members),
+        manifest=HeldVerifiedMember(PACKAGE_MARKER, hashlib.sha256(raw_manifest).hexdigest(), raw_manifest, str(root)),
+    )
+    owner = weakref.ref(result)
+    state = _read_authority_state(result)
+    object.__setattr__(
+        result, "_authority", lambda candidate: owner() is candidate and _read_authority_state(candidate) == state
+    )
+    return result
 
 
-def _compare_declared_with_walked(digests: dict[str, str], walked: dict[str, Path]) -> tuple[list[Finding], int]:
+def _compare_declared_with_walked(
+    digests: dict[str, str], walked: dict[str, Path], *, members: list[VerifiedFile] | None = None
+) -> tuple[list[Finding], int]:
     """Exact set equality in both directions, then a rehash of every file present on both sides.
 
     ⚠️ **The path hashed is the one the WALK produced, never ``root / key``.** A manifest key is
@@ -656,6 +755,10 @@ def _compare_declared_with_walked(digests: dict[str, str], walked: dict[str, Pat
     rows.extend(_finding(CODE_FILE_MISSING, path=name) for name in sorted(set(digests) - set(walked)))
     verified = 0
     for relative in sorted(set(digests) & set(walked)):
+        info, refusal = _regular_identity(walked[relative])
+        if refusal:
+            rows.append(_finding(refusal, path=relative))
+            continue
         actual = _hash_file(walked[relative])
         if actual is None:
             rows.append(_finding(CODE_FILE_UNREADABLE, path=relative))
@@ -664,4 +767,88 @@ def _compare_declared_with_walked(digests: dict[str, str], walked: dict[str, Pat
             rows.append(_finding(CODE_DIGEST_MISMATCH, path=relative))
             continue
         verified += 1
+        if members is not None:
+            members.append(VerifiedFile(relative, digests[relative], walked[relative], info))
     return rows, verified
+
+
+def _regular_identity(path: Path) -> tuple[tuple[int, int, int] | None, str | None]:
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None, CODE_FILE_MISSING
+    except (OSError, ValueError):
+        return None, CODE_ENTRY_UNASSESSABLE
+    if is_reparse_entry(info):
+        return None, CODE_ENTRY_REPARSE
+    if not stat.S_ISREG(info.st_mode):
+        return None, CODE_ENTRY_NOT_REGULAR
+    if info.st_nlink != 1:
+        return None, CODE_MEMBER_REPLACED
+    return _file_identity(info), None
+
+
+def member_refusal(code: str = CODE_MEMBER_UNVERIFIED) -> PackageFilesystemResult:
+    """A typed held-read refusal with no path, artifact text or exception attached."""
+    return _result([_finding(code)])
+
+
+def read_verified_member(  # pylint: disable=too-many-return-statements,too-many-branches
+    root: Path, verified: PackageFilesystemResult, relative_path: str
+) -> HeldVerifiedMember | PackageFilesystemResult:
+    """Read one canonical member ONCE against S1's original namespace and digest, never a new manifest.
+
+    Only the requested member and manifest are rehashed; unrelated content requires a new S1 check.
+    Namespace/identity checks still refuse extra, missing, aliased or replaced members. Copies and
+    reconstructions carry no originating read authority. This is not cryptographic security or a
+    handle-level concurrency guarantee; S1's unsigned-manifest and lstat/open race limits remain.
+    """
+    if (
+        type(verified) is not PackageFilesystemResult  # pylint: disable=unidiomatic-typecheck
+        or type(root) is not type(Path())  # pylint: disable=unidiomatic-typecheck
+        or type(verified.root_identity) is not str  # pylint: disable=unidiomatic-typecheck
+        or str(root) != verified.root_identity
+    ):
+        return member_refusal(CODE_ROOT_BINDING)
+    if not verified.has_read_authority():
+        return member_refusal()
+    if not verified.is_clean or verified.manifest is None or not verified.boundary_identity:
+        return member_refusal(verified.first_code or CODE_MEMBER_UNVERIFIED)
+    if (
+        not isinstance(verified.manifest.content, bytes)
+        or hashlib.sha256(verified.manifest.content).hexdigest() != verified.manifest.sha256
+    ):
+        return member_refusal(CODE_DIGEST_MISMATCH)
+    members = {member.relative_path: member for member in verified.verified_files}
+    if type(relative_path) is not str or relative_path not in members:  # pylint: disable=unidiomatic-typecheck
+        return member_refusal()
+    boundary, rows = _boundary_identity(root)
+    if rows or boundary != verified.boundary_identity:
+        return member_refusal(rows[0].code if rows else CODE_ROOT_REPLACED)
+    walked, rows = _walked_files(root)
+    if rows:
+        return member_refusal(rows[0].code)
+    if set(walked) != set(members):
+        return member_refusal(CODE_FILE_UNDECLARED if set(walked) - set(members) else CODE_FILE_MISSING)
+    for key, member in members.items():
+        identity, refusal = _regular_identity(walked[key])
+        if refusal or str(walked[key]) != str(member.path) or identity != member.file_identity:
+            return member_refusal(refusal or CODE_MEMBER_REPLACED)
+    if _hash_file(root / PACKAGE_MARKER) != verified.manifest.sha256:
+        return member_refusal(CODE_DIGEST_MISMATCH)
+    member = members[relative_path]
+    try:
+        raw = walked[relative_path].read_bytes()
+    except FileNotFoundError:
+        return member_refusal(CODE_FILE_MISSING)
+    except (OSError, ValueError):
+        return member_refusal(CODE_FILE_UNREADABLE)
+    if hashlib.sha256(raw).hexdigest() != member.sha256:
+        return member_refusal(CODE_DIGEST_MISMATCH)
+    current, rows = _boundary_identity(root)
+    identity, refusal = _regular_identity(walked[relative_path])
+    if rows or current != boundary:
+        return member_refusal(rows[0].code if rows else CODE_ROOT_REPLACED)
+    if refusal or identity != member.file_identity:
+        return member_refusal(refusal or CODE_MEMBER_REPLACED)
+    return HeldVerifiedMember(relative_path, member.sha256, raw, verified.root_identity)

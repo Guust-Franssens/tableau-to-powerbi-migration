@@ -400,25 +400,10 @@ PROBE_DIR = "_probe"
 
 
 def probe_dir(migration: Path) -> Path:
-    """The writable sandbox where the reachability probe builds. A SIBLING of `fabric/`, not a child.
+    """Writable one-table probe sandbox, a SIBLING of denied `fabric/`, never a deliverable.
 
-    That placement is the whole design, and it is the fix for the flaw that got v1 reverted off
-    master.
-
-    The rule is "no semantic model for a source you never reached". The way you *earn* the right to
-    build is the one-row probe: a minimal PBIP with a single table that refreshes and returns a row.
-    But the probe is itself a PBIP, and v1 denied writes to all of `fabric/` - so the probe was
-    blocked by the gate it exists to satisfy, and EVERY live-source migration dead-ended at "a human
-    must authorize an unvalidated build", credentials or not.
-
-    The obvious patch - a sub-folder of `fabric/` re-granted after the deny - works but is fragile in
-    three separate ways, all measured: the deny is inherited so the grant must come after it, the
-    folder cannot be recreated once deleted, and healing it means briefly lifting the gate. Putting
-    the sandbox OUTSIDE the denied tree removes all three at once. There is no inheritance, no
-    ordering dependency, and no window where the gate is open.
-
-    Safe to leave writable because the probe is not a deliverable: one table, thrown away, and
-    `verify` only ever inspects the real output paths under `fabric/`.
+    A child inherits the deny and cannot earn the clear it needs to build. Re-granting a child
+    introduces ACL ordering, recreation and temporary-lift hazards; the sibling avoids all three.
     """
     d = migration / PROBE_DIR
     d.mkdir(parents=True, exist_ok=True)
@@ -428,17 +413,8 @@ def probe_dir(migration: Path) -> Path:
 def denied_dirs(migration: Path, create: bool = True) -> list[Path]:
     """Directories the ACL DENIES writes to while the gate is up. Enforcement surface only.
 
-    Only `fabric/` is denied. The probe sandbox is `<migration>/_probe/`, a SIBLING that is never
-    in this list and so is never touched by the deny - see `probe_dir` for why it sits outside the
-    denied tree rather than inside it.
-
-    `create=False` is for read-only callers (`verify`, `status`): applying an ACL needs the
-    directory to exist, but INSPECTING the gate must not conjure one into every migration it looks
-    at.
-
-    ⚠️ This is deliberately NARROWER than what `audited_paths` verifies. Denying a directory the
-    build must write into would dead-end the migration; detecting that something was written there
-    anyway costs nothing. Enforcement and verification are different jobs and must not share a list.
+    Only `fabric/` is denied; the sibling probe stays writable. Read-only callers pass create=False.
+    This is deliberately narrower than `audited_paths`: enforcement and verification are different.
     """
     fabric = migration / "fabric"
     if create:
@@ -470,14 +446,8 @@ AUDIT_EXCLUDED_DIRS = frozenset({"source", "reference", "_probe"})
 def audited_paths(migration: Path) -> list[Path]:
     """Every file under `migration` whose existence would mean something was built or extracted.
 
-    Verification surface. Read-only: unlike `denied_dirs` this creates nothing, because `verify` is
-    a post-hoc check and must not have side effects on the tree it is judging.
-
-    Scans the WHOLE migration rather than one directory. The gate's guarantee is "no model, and no
-    extracted rows, for a source that was never reached" - so where the artifact landed is
-    irrelevant to whether the harm occurred. A build that writes outside `fabric/` (the deterministic
-    tier writes to `pbip/`, `reports/`, `semantic_models/` and `data/`) is exactly the case a
-    `fabric/`-only scan misses.
+    Read-only and migration-wide, including `pbip/`, `reports/`, `semantic_models/` and `data/`.
+    Limiting verification to denied `fabric/` misses engine output and extracted source rows.
     """
     if not migration.exists():
         return []
@@ -1026,19 +996,9 @@ def _gate_was_ever_applied(migration: Path) -> bool:
 def _spec_all_sources_are_flat_file(migration: Path) -> bool | None:
     """Does `migration-spec.json` classify EVERY declared data source as a valid flat file?
 
-    Issue #354 review, scoped down: reuses `preflight_source_credentials._classify_legs` - the SAME
-    canonical classifier (`connection_target.powerbi_target`) that arms the gate in the first place
-    - rather than a second, independently-maintained opinion of what "extract-only" means. Only an
-    EXPLICIT, VALID `no-creds` verdict (i.e. `powerbi_target == FLAT_FILE`, stamped or freshly
-    computed from the connection class) on every leg of every data source counts as legitimately
-    never-gated. `needs-credential` (a live system) and `review` (unknown, unsupported, or a legacy
-    connection with nothing to classify) both mean "cannot be assumed extract-only" and return
-    False - the allow-list is deliberately narrow, because under-gating a live source is the failure
-    this whole module exists to prevent.
-
-    An empty/absent `data_sources` list is vacuously all-flat: there is nothing declared to gate.
-    Returns None only when the spec itself cannot be read in the shape this classifier expects -
-    callers must not default a parse failure to a pass either.
+    Reuses the arming classifier, never a separate interpretation of extract-only (#354).
+    Every leg must explicitly yield `no-creds`; live/review is False and unreadable is None.
+    An empty/absent list is vacuously all-flat. Neither False nor None permits a never-gated claim.
     """
     try:
         spec = json.loads((migration / MIGRATION_SPEC).read_text(encoding="utf-8"))
@@ -1059,13 +1019,7 @@ def _spec_all_sources_are_flat_file(migration: Path) -> bool | None:
 
 
 def _current_live_source_keys(migration: Path) -> set[str] | None:
-    """Live-source identity keys `migration-spec.json` names TODAY, or None when unreadable.
-
-    Same classifier and the same stable identity (`preflight_source_credentials._leg_key`, via
-    `_classify_legs`) a real `block`/earned `clear` is armed and lifted against, so a trusted
-    clearance can be compared against what is ACTUALLY present now - not just what it once said.
-    None means "cannot compare"; callers must treat that as neither a match nor a mismatch.
-    """
+    """Current spec keys from the arming `_classify_legs`/`_leg_key`; None means unreadable, not matched."""
     try:
         spec = json.loads((migration / MIGRATION_SPEC).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -1088,24 +1042,10 @@ def _current_live_source_keys(migration: Path) -> set[str] | None:
 def _source_set_mismatch_reason(migration: Path) -> str | None:
     """Why a trusted clearance no longer covers what the spec names TODAY, or None when it does.
 
-    Issue #354 review: the recorded clearance covers whatever `_earned_sources` -- the SAME
-    per-source ledger `_clear_was_earned`/`_redundant_rearm` already trust -- currently reports as
-    earned, not merely the most recent `block`'s source list. That distinction is load-bearing for a
-    multi-source migration: source E1 earned first, then E2 independently blocked and earned later,
-    is two TRUE clearances, but `_last_block_sources` only ever sees the LAST block's list (just
-    E2) and would wrongly report E1 as uncovered - a false state-3 against a fully, correctly earned
-    migration. `_earned_sources` accumulates per-source state across every block/clear in the log,
-    so both stay covered.
-
-    If `migration-spec.json` in this SAME directory has since been re-pointed at a DIFFERENT live
-    source - a cleared key swapped for a new one, not merely dropped - that new key is not in the
-    earned set: nobody has proven the NEW upstream is reachable. Compared by `_leg_key`, the
-    identity the gate itself arms and clears against, never by display name.
-
-    A global `authorize` (human sign-off not tied to any specific source) covers everything
-    unconditionally, same as `_clear_was_earned` treats it - the mismatch question does not apply.
-    Silent when there is nothing to compare (no earned sources, or `_current_live_source_keys`
-    unreadable/empty) - this only fires on a real, positive mismatch.
+    Compare current `_leg_key` identities with the COMPLETE per-source earned ledger (#354).
+    The last block alone loses earlier, independently earned sources. Only a new uncovered key
+    mismatches; dropping keys does not. Global human authorization bypasses this comparison.
+    No earned sources, or unreadable/empty current keys, cannot establish a positive mismatch.
     """
     states, authorized = _earned_sources(migration)
     if authorized:
@@ -1128,25 +1068,10 @@ def _source_set_mismatch_reason(migration: Path) -> str | None:
 def _no_audit_trail_reason(migration: Path, artifacts: list[Path]) -> str | None:
     """Why `verify` cannot even ask whether a gate applied here, or None when it legitimately can.
 
-    Issue #354: no TRUSTED audit entry (`_audit_entries`, B2/B3) is correct for (1) genuinely never
-    gated at its own root - engine bundles always carry a real entry, but the parser path instead
-    carries `migration-spec.json` classifying every data source as flat_file; and (2) a SHIP
-    DESTINATION holding only a COPY of built artifacts, with no trusted entry and (ordinarily) no
-    `SCOPE_MARKERS` either - except `package_unit.py` writes a fresh `migration-spec.json` into
-    handover packages purely as documentation, unconnected to gating history. Marker presence alone
-    cannot tell that apart from case 1; its CONTENT can, via `_spec_all_sources_are_flat_file`.
-
-    Deliberately never tries to locate the originating bundle - `engine-output-receipt.json` records
-    only a VERSION, not a path, so there is no link from a copy back to the root that gated it, and
-    guessing one (a sibling directory, an unauthenticated `--bundle` argument) would be exactly the
-    invented link this refuses. Fail closed, naming the real fix: verify at the bundle/spec root. A
-    copied flat_file spec placed beside UNRELATED artifacts remains unattributable this way too -
-    that residual is tracked separately in #391, not solved here.
-
-    `_audit_entries` is checked FIRST - a `--force-scope` arm on an unusual target still leaves a
-    trusted entry, indistinguishable from a bare copy by `_scope_refusal` alone. An
-    `ENGINE_RECEIPT`/`input_manifest.json` marker with no trusted entry is NEVER legitimate; only
-    `migration-spec.json` can stand alone, and only when its content backs it up.
+    Check trusted audit FIRST: a forced-scope arm can legitimately cover an unusual target.
+    Engine roots require audit; only an explicitly all-flat parser spec can stand alone (#354).
+    Packaged specs are copies, not gating history. Never search for an originating bundle or borrow
+    ancestor audit. A copied flat spec beside unrelated artifacts remains the #391 residual.
     """
     if not artifacts:
         return None
@@ -1301,13 +1226,8 @@ def _verify_one(migration: Path) -> int:
 def verify(migration: Path) -> int:
     """Verify one audit-bearing migration/bundle target.
 
-    Exit codes, deliberately three-way rather than a pass/fail boolean (issue #354): **0** a gate
-    was applied and passed, or was never needed at a location that could legitimately say so; **1**
-    a gate was applied and failed, or was cleared unearned; **3** no audit history exists at this
-    path AT ALL, and the path is not itself a place a gate could have been armed - most commonly a
-    ship-destination copy of built artifacts checked instead of the bundle/spec root that actually
-    carries `.credential-gate-audit.log`. `3` must never be read as `0`: "I could not check this"
-    and "I checked and it is clean" are different claims and must not print or exit alike.
+    Exit 0 = earned/legitimately never needed; 1 = failed/unearned; 3 = no attributable audit.
+    A ship-destination copy is not its audit-bearing origin (#354). Exit 3 is never clean.
     """
     return _verify_one(migration)
 
@@ -1454,11 +1374,7 @@ class _NonFiniteJsonConstant(Exception):
 
 
 class DataAccessAssessment(NamedTuple):
-    """Immutable authority; provider_unit holds only an opaque provider_reference(), never a name.
-
-    NamedTuple also works with the hook's unregistered exec_module loader,
-    unlike dataclass/postponed-annotation resolution (covered by the hook-loading control).
-    """
+    """Opaque provider-reference projection; NamedTuple supports the hook's unregistered exec_module."""
 
     state: str
     source_keys: tuple[str, ...]
@@ -1580,6 +1496,94 @@ def _package_spec_facts(package_spec: object) -> tuple[tuple[str, ...], bool, st
     return tuple(sorted(keys)), review, None
 
 
+class PackageSpecFacts(NamedTuple):
+    """Current direct-source facts only; applicability flags never authorize provider inheritance."""
+
+    live_source_keys: tuple[str, ...]
+    has_review: bool
+    direct_applicable: bool
+    published_only: bool
+    refusal_code: str | None
+
+    @property
+    def all_flat(self) -> bool:
+        """The canonical classifier found only no-credential legs, not an absent published provider."""
+        return self.direct_applicable and not self.live_source_keys and not self.has_review
+
+
+def _published_only_row(row: object) -> bool:
+    """A scalar sqlproxy reference, not an aggregate or a row hiding additional connection metadata."""
+    if not isinstance(row, Mapping) or set(row) - {
+        "id",
+        "caption",
+        "internal_name",
+        "connection",
+        "published_datasource",
+        "tables",
+        "joins",
+        "fields",
+    }:
+        return False
+    if any(
+        key in row and (not isinstance(row[key], list) or not all(isinstance(item, Mapping) for item in row[key]))
+        for key in ("tables", "joins", "fields")
+    ) or any(row.get(key) is not None and not isinstance(row[key], str) for key in ("id", "caption", "internal_name")):
+        return False
+    connection, published = row.get("connection"), row.get("published_datasource")
+    for value, fields in (
+        (
+            connection,
+            {"class", "mode", "server", "database", "hyper_file", "powerbi_target", "powerbi_target_reason", "note"},
+        ),
+        (published, {"id", "site", "path", "derived_from", "revision", "name_source", "id_attribute", "luid", "key"}),
+    ):
+        if (
+            not isinstance(value, Mapping)
+            or set(value) - fields
+            or any(item is not None and not isinstance(item, str) for item in value.values())
+        ):
+            return False
+    if (
+        connection.get("class") != "sqlproxy"
+        or connection.get("mode") not in ("live", "extract")
+        or not any(isinstance(published.get(key), str) and published[key].strip() for key in ("luid", "key"))
+    ):
+        return False
+    pending = [value for key, value in row.items() if key not in ("connection", "published_datasource")]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, Mapping):
+            if {"class", "connection", "connections"} & value.keys():
+                return False
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return True
+
+
+def package_spec_facts(package_spec: object) -> PackageSpecFacts:
+    """Pure held-spec facts; the existing derivation classifies every direct leg, without I/O.
+
+    Every row reaches the canonical leg authority, including provider-shaped sqlproxy rows.
+    Published-only also requires no live/review leg or refusal. S2 owns dependency identity/permission.
+    """
+    sources = package_spec.get("data_sources") if isinstance(package_spec, Mapping) else None
+    if not isinstance(sources, list):
+        return PackageSpecFacts((), False, False, False, "spec-unreadable")
+    keys, review, refusal = _package_spec_facts(package_spec)
+    published = [_published_only_row(row) for row in sources]
+    has_published = any(
+        isinstance(row, Mapping)
+        and (
+            "published_datasource" in row
+            or (isinstance(row.get("connection"), Mapping) and row["connection"].get("class") == "sqlproxy")
+        )
+        for row in sources
+    )
+    published_only = bool(sources) and all(published) and not keys and not review and refusal is None
+    return PackageSpecFacts(keys, review, not has_published and refusal is None, published_only, refusal)
+
+
 def _gate_root_live_keys(gate_root: Path) -> tuple[frozenset[str], str | None]:
     """Validate raw spec facts before the bundle adapter can deduplicate/filter current keys."""
     try:
@@ -1664,11 +1668,7 @@ def _apply_probe_attempt(tracked: dict[str, dict], action: str, sources: list[st
 
 
 def _apply_clear(tracked: dict[str, dict], sources: list[str] | None, timestamp: datetime) -> None:
-    """Both halves must name the key in its current epoch, with a non-backdated clear.
-
-    An unattributable clear earns nothing but does not erase previously earned proof. Syntactically
-    malformed records have already poisoned the trail in the strict reader.
-    """
+    """Require a current-epoch keyed pair; unattributable clears cannot earn or erase prior proof."""
     attributable = sources is not None
     for key, state in tracked.items():
         if attributable and key not in sources:
@@ -1745,10 +1745,7 @@ def _blocked_assessment(
 
 
 def provider_reference(unit: str) -> str:
-    """Hash an exact S2-selected component into a versioned SHA-256 provider_unit reference.
-
-    Reuse S2's pure predicate; no search/normalization. UTF-8 surrogatepass preserves all code points.
-    """
+    """Versioned SHA-256 reference of an exact S2 component; no search, normalization or lost code points."""
     _require(isinstance(unit, str) and "/" not in unit and is_canonical_key(unit), "provider-unit-invalid")
     digest = hashlib.sha256(
         b"phase1-data-access/provider-unit/v1\0" + unit.encode("utf-8", "surrogatepass")
@@ -1933,9 +1930,8 @@ def assess_data_access(  # pylint: disable=too-many-arguments
 ) -> DataAccessAssessment:
     """Read-only authority over this root's audit/spec and supplied package facts or S2 provider.
 
-    No probe, mutation, ancestor search or second classifier. Invalid policy/scope raises ValueError;
-    malformed evidence returns a typed refusal. Published consumer legs are not direct endpoints.
-    Provider pairs must already carry provider_reference(S2's selected unit), not raw unit names.
+    Invalid policy/scope raises ValueError; malformed evidence returns a typed refusal.
+    No probe, mutation or ancestor search. Provider pairs carry provider_reference(), not raw names.
     """
     if fallback_authorization not in FALLBACK_POLICIES:
         raise ValueError(f"fallback_authorization must be one of {FALLBACK_POLICIES}")
