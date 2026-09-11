@@ -1,7 +1,9 @@
 """
 purpose: assemble ONE self-contained, no-flags handover package per migration unit (report or datasource).
 usage:   python scripts/package_unit.py --bundle <bundle> --out <dir> [--unit NAME ...]
-                                        [--oracle <dir>] [--assets <dir>] [--json <file>] [--quiet]
+                                        [--oracle <dir>] [--assets <dir>] [--brief <file>]
+                                        [--gate-root <original-root>] [--provider-package <root> ...]
+                                        [--json <file>] [--quiet]
 
 Issue #446: the three things an agent needs to start one report all exist and NOTHING assembles them.
 They live in four naming schemes across two trees - the engine keys `pbip/`, `reports/` and
@@ -29,6 +31,7 @@ This script emits a folder both gates accept with NO flags:
             worksheet/{images,data}/<Object>.<ext>      KIND_* value verbatim, never a pluralised copy
             unknown/{images,data}/<Object>.<ext>     <- carried but MARKED, never filed as either kind
         package-manifest.json        <- what was packaged, and every omission with its reason
+        data-access.json             <- strict S1-covered authority projection, never a gate clear
         README.md
 
 Why `assets/` and not the `source/` the issue sketched: `check_reference_readiness.resolve_source`
@@ -159,7 +162,8 @@ Measured on the SES estate (47 assets, 2026-09-03): 29 units packaged, then
 `IA_Operation_Health_Summary_Dashboard` raised `shutil.Error: [WinError 3]` out of a plain
 comprehension over `sorted(units)`, and every alphabetically later unit was **never attempted and
 never reported** - the operator could not tell *"not packaged"* from *"packaged and fine"* without
-diffing directories by hand. Every requested unit is now attempted in deterministic (sorted) order,
+diffing directories by hand. Every requested unit is now attempted deterministically (datasources
+first, then workbooks; sorted within each phase),
 a raise is caught per unit and carried in `--json` under `failed[]` with its traceback, and the run
 still exits 5.
 
@@ -204,7 +208,7 @@ import time
 import traceback
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, NamedTuple
@@ -214,8 +218,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest  # noqa: E402  # pylint: disable=wrong-import-position
 import package_filesystem as pfs  # noqa: E402  # pylint: disable=wrong-import-position
+import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-import-position
+import credential_gate as data_access  # noqa: E402  # pylint: disable=wrong-import-position
 from bundle_corpus import is_reparse_entry  # noqa: E402  # pylint: disable=wrong-import-position
-from package_role_identity import brief_identity  # noqa: E402  # pylint: disable=wrong-import-position
+from migration_bundle import load_bundle  # noqa: E402  # pylint: disable=wrong-import-position
 
 # The path budget is measured by `check_path_ceiling.py` and NOWHERE else (#476). Its ceilings were
 # taken end to end against Power BI Desktop 2.157.828.0, and its `utf16_len` counts the UTF-16 code
@@ -235,6 +241,7 @@ from host_paths import discloses_host_location  # noqa: E402  # pylint: disable=
 from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
     ORACLE_MANIFEST_ALLOW,
     project,
+    project_data_access,
     scope_handover,
     scope_receipt,
     scope_report,
@@ -389,6 +396,11 @@ MANIFEST_NAME = "package-manifest.json"
 #: role name, never a discovered `*.md`: "the brief is present" must not be satisfiable by any other
 #: Markdown file a package happens to carry.
 BRIEF_NAME = "migration-brief.md"
+DATA_ACCESS_NAME = "data-access.json"
+DATA_ACCESS_PENDING = (
+    "Final START_READY data-access consumer pending: package construction and reference READY do not "
+    "authorize Phase-2 dispatch or clear the credential gate."
+)
 
 #: Refuse to copy a single source larger than this, rather than silently turning a handover folder
 #: into a data lake. Measured on estate run 408 the largest referenced extract is 1.33 MB and the
@@ -1689,6 +1701,12 @@ def render_handover(result: dict[str, Any], workbook: dict[str, Any] | None, pag
 
 README = """# {unit}
 
+## Data access (not the final START_READY verdict)
+
+{data_access}
+
+{data_access_pending}
+
 Handover package for one migration unit ({kind}). It carries its own rows, its own reference and its
 own source - but it is **not bound to a location**, so do this FIRST, wherever this folder now is,
 before opening the model. Then the two gates, each of which takes THIS FOLDER'S PATH as its only
@@ -1719,6 +1737,7 @@ expected set is every dashboard PLUS every worksheet not placed on one.
 | `data/` | the rows the model imports, shipped with it (#461), reached through a `{package_root}` folder parameter in `expressions.tmdl` - see the binding command above. Absent when nothing was shipped - either the model imports nothing, or a source it names was unavailable when this was packaged, in which case that literal now reads `{unavailable}` rather than a path on the builder's machine and `package-manifest.json`'s `data_sources` says which, one line per source, repeated in `handover.md` as a `PACKAGE_NOTE`. |
 | `migration-spec.json` | the parsed source; the expected page set both gates grade against |
 | `migration-brief.md` | **what this migration is FOR**, copied from the dispatcher: scope, fidelity bar, autonomy, refresh strategy, and what was pre-authorized if we hit a wall. A copy, so it travels with the package; the dispatcher's own file stays authoritative and its path is deliberately not recorded here. Absent only when the packager was given none - `package-manifest.json`'s notes then say so. |
+| `data-access.json` | The strict nine-field authority projection, declared as `artifacts.data_access` and hashed in `contents.files`. Blocked/cannot-establish never mean ready; authorized model-only remains **UNVALIDATED**, with a structural-only ceiling. |
 | `migration-spec.schema.json` | the CONTRACT `validate_spec.py` enforces. Read it before appending a `limitations_encountered` entry: exactly `item`/`issue`/`severity`/`stage`, `additionalProperties: false`, so one invented field rejects every entry. |
 | `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). **`oracle/*/data/*.csv` is the NUMERIC oracle** - exact labels and figures, no OCR and no judgement. Read it first. |
 | `report.json` | **gate input, and readable.** The engine's classification of THIS unit - workbook vs datasource - which is what earns a datasource-only unit `NOT_APPLICABLE` instead of a finding. Scoped to this unit. |
@@ -1740,7 +1759,7 @@ so an oracle render may depict a different build than `assets/`. Re-stamping nee
 `stamp_tableau_provenance.py`, Tableau Server credentials AND the fields `scope.dropped_fields`
 strips here: `origin.remote_sha256`, `origin.server`, `origin.site`. Measured consequence: every
 emitted page then reads `UNVERIFIABLE - REVISION NOT ESTABLISHED`, so `check_reference_readiness.py`
-can NEVER exit 0 from this package alone. Log it and build anyway.
+can NEVER exit 0 from this package alone. Log it; this does not waive the data-access credential stop.
 """
 
 
@@ -2655,7 +2674,7 @@ def _prepare_brief(bundle: Path, unit: str, assets_dir: Path | None, brief: Path
         text = raw.decode("utf-8")
     except (OSError, ValueError) as exc:
         raise PackagingError("brief_unreadable") from exc
-    code, _unparsed = brief_identity(text, unit, _brief_scope(bundle, unit, assets_dir))
+    code, _policy = pri.parse_brief_policy(text, unit, _brief_scope(bundle, unit, assets_dir))
     if code is not None:
         raise PackagingError(code)
     return raw
@@ -2713,6 +2732,7 @@ _SCAFFOLD_FILES = (
     "source-provenance.json",
     "engine-output-receipt.json",
     "migration-spec.json",
+    DATA_ACCESS_NAME,
     BRIEF_NAME,
     SPEC_SCHEMA.name,
 )
@@ -3246,6 +3266,8 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals
     oracle_dir: Path | None,
     assets_dir: Path | None,
     brief: Path | None = None,
+    gate_root: Path | None = None,
+    provider_packages: Sequence[Path] = (),
     discard_edits: bool = False,
     limits: Limits | None = None,
 ) -> dict[str, Any]:
@@ -3310,7 +3332,15 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals
         )
     try:
         result = _assemble_unit(
-            bundle, unit, staging, final=final, oracle_dir=oracle_dir, assets_dir=assets_dir, brief=prepared_brief
+            bundle,
+            unit,
+            staging,
+            final=final,
+            oracle_dir=oracle_dir,
+            assets_dir=assets_dir,
+            brief=prepared_brief,
+            gate_root=gate_root,
+            provider_packages=_external_providers(provider_packages, out_root, [unit]),
         )
         assert_assembled_fits(unit, staging, final, out_root, limits)
         replace_dir(staging, final, verify=None if discard_edits else partial(_refuse_if_edited, unit))
@@ -3678,6 +3708,162 @@ def _stage_handover(bundle: Path, unit: str, dest: Path) -> tuple[Any, list[str]
     return cleaned, redactions, None
 
 
+def _cannot_data_access(code: str = "projection-invalid") -> data_access.DataAccessAssessment:
+    """A closed, non-accepted placeholder when producer prerequisites cannot be established."""
+    return data_access.DataAccessAssessment(
+        "cannot_establish", (), None, None, "not_established", None, "none", (code,)
+    )
+
+
+def _checked_data_access(assessment: data_access.DataAccessAssessment) -> data_access.DataAccessAssessment:
+    """Validate before shipment, refuse every dropped field, and strictly round-trip the wire bytes."""
+    checked = data_access.parse_data_access(assessment.dumps())
+    projected = project_data_access(checked.to_json())
+    if projected != checked.to_json() or data_access.parse_data_access(checked.dumps()) != checked:
+        raise data_access.DataAccessProjectionError("illegal-combination")
+    return checked
+
+
+def _provider_projection(
+    root: Path, provider: pri.Phase1RoleIdentityResult
+) -> tuple[data_access.DataAccessAssessment | None, str | None]:
+    """Read only the exact S2-clean provider's declared, S1-covered direct projection."""
+    verified = provider.verified
+    bound = verified is not None and verified.is_bound_to(str(root)) and verified.integrity.is_clean
+    if (
+        not provider.is_start_ready
+        or provider.kind != pri.KIND_DATASOURCE
+        or provider.brief_policy is None
+        or not bound
+    ):
+        return None, "provider-missing"
+    walked, findings, _empty = pfs.walk_package(root)
+    if findings or MANIFEST_NAME not in walked:
+        return None, "projection-invalid"
+    manifest = pfs.parse_manifest_text(walked[MANIFEST_NAME].read_text(encoding="utf-8"))
+    artifacts = manifest.get("artifacts")
+    if (
+        not isinstance(artifacts, dict)
+        or artifacts.get("data_access") != DATA_ACCESS_NAME
+        or DATA_ACCESS_NAME not in pfs.declared_files(manifest)
+        or DATA_ACCESS_NAME not in walked
+    ):
+        return None, "provider-missing"
+    assessment = data_access.read_data_access(walked[DATA_ACCESS_NAME])
+    if assessment.state not in data_access.DIRECT_ACCEPTED_STATES:
+        return None, "provider-ambiguous" if assessment.state == "provider_inherited" else "provider-missing"
+    if assessment.effective_scope != provider.brief_policy.requested_scope or (
+        assessment.state == "authorized_model_only"
+        and provider.brief_policy.fallback_authorization != "model_only_unvalidated"
+    ):
+        return None, "provider-foreign"
+    return assessment, None
+
+
+def _selected_data_provider(  # pylint: disable=too-many-return-statements
+    cohort: Sequence[tuple[Path, pri.Phase1RoleIdentityResult]],
+) -> tuple[tuple[str, data_access.DataAccessAssessment] | None, str | None]:
+    """Use every S2 dependency row and its input ordinal, never the provider's display name."""
+    consumer = cohort[-1][1]
+    dependencies = consumer.dependencies
+    if not dependencies:
+        return None, "provider-missing"
+    if any(row.state == pri.STATE_AMBIGUOUS for row in dependencies):
+        return None, "provider-ambiguous"
+    unresolved = [row for row in dependencies if row.state != pri.STATE_RESOLVED]
+    if unresolved:
+        missing = {pri.CODE_PROVIDER_MISSING, pri.CODE_PROVIDER_MODEL, pri.CODE_PROVIDER_BLOCKED}
+        return None, "provider-missing" if all(row.code in missing for row in unresolved) else "provider-foreign"
+    ordinals = [row.provider_ordinal for row in dependencies]
+    if any(
+        not isinstance(ordinal, int) or isinstance(ordinal, bool) or not 0 <= ordinal < len(cohort) - 1
+        for ordinal in ordinals
+    ):
+        return None, "provider-foreign"
+    if len(set(ordinals)) != 1:
+        return None, "provider-ambiguous"
+    if not consumer.is_start_ready:
+        return None, "projection-invalid"
+    root, provider = cohort[ordinals[0]]
+    assessment, refusal = _provider_projection(root, provider)
+    if refusal:
+        return None, refusal
+    return (data_access.provider_reference(provider.unit), assessment), None
+
+
+def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-locals,too-many-return-statements
+    bundle: Path,
+    dest: Path,
+    localized: dict[str, Any],
+    *,
+    gate_root: Path | None,
+    provider_packages: Sequence[Path],
+) -> tuple[data_access.DataAccessAssessment, list[str]]:
+    """Fresh S1/S2 over the sealed candidate, then the one read-only authority; paths stay in memory."""
+    roots = (*provider_packages, dest)
+    cohort = tuple(zip(roots, pri.verify_phase1_role_identity(roots), strict=True))
+    current = cohort[-1][1]
+    notes = [f"DATA_ACCESS S2={','.join(current.codes())}"] if current.codes() else []
+    policy = current.brief_policy
+    if policy is None:
+        notes.append(f"DATA_ACCESS limitation={pri.LIMITATION_BRIEF_POLICY_UNPARSED}")
+        return _cannot_data_access(), notes
+    if current.verified is None or not current.verified.integrity.is_clean:
+        return _cannot_data_access(), notes
+    try:
+        spec = pfs.parse_manifest_text((dest / "migration-spec.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, pfs._ManifestError):  # pylint: disable=protected-access
+        return _cannot_data_access("spec-unreadable"), notes
+    provider = None
+    try:
+        if current.topology == pri.TOPOLOGY_PUBLISHED_CONSUMER:
+            rows = spec.get("data_sources")
+            if (
+                not isinstance(rows, list)
+                or not rows
+                or any(
+                    not isinstance(row, dict) or not isinstance(row.get("published_datasource"), dict) for row in rows
+                )
+            ):
+                notes.append("DATA_ACCESS limitation=published_direct_mixed_unsupported")
+                return _cannot_data_access(), notes
+            provider, refusal = _selected_data_provider(cohort)
+            if refusal:
+                return _cannot_data_access(refusal), notes
+        elif not current.is_start_ready:
+            return _cannot_data_access(), notes
+        original_root = load_bundle(bundle if gate_root is None else gate_root).migration_dir
+        assessment = data_access.assess_data_access(
+            original_root,
+            package_spec=spec,
+            package_data_sources=localized,
+            fallback_authorization=policy.fallback_authorization,
+            requested_scope=policy.requested_scope,
+            provider=provider,
+        )
+        return _checked_data_access(assessment), notes
+    except (OSError, ValueError, TypeError, RecursionError, pfs._ManifestError):  # pylint: disable=protected-access
+        # Readers and authority inputs may contain private text. Only this closed code escapes.
+        return _cannot_data_access(), notes
+
+
+def _data_access_notice(assessment: data_access.DataAccessAssessment) -> str:
+    """Only strictly checked, closed fields enter the visible handover/README/CLI summary."""
+    return (
+        f"DATA_ACCESS state={assessment.state} validation={assessment.validation} "
+        f"scope={assessment.effective_scope or 'none'} ceiling={assessment.max_phase2_claim} "
+        f"codes={','.join(assessment.codes)}"
+    )
+
+
+def _seal_package(dest: Path, result: dict[str, Any], *, verify: bool = False) -> None:
+    """Write the manifest last, using final bytes, and require S1 before publication."""
+    result["contents"] = {"files": package_contents(dest)}
+    write_json(dest / MANIFEST_NAME, result)
+    if verify and not pri.verify_s1(dest).integrity.is_clean:
+        raise PackagingError("data_access_final_integrity_failed")
+
+
 def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments,too-many-statements
     bundle: Path,
     unit: str,
@@ -3687,6 +3873,8 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     oracle_dir: Path | None,
     assets_dir: Path | None,
     brief: bytes | None = None,
+    gate_root: Path | None = None,
+    provider_packages: Sequence[Path] = (),
 ) -> dict[str, Any]:
     """Build one unit's package into ``dest``, which is always a fresh, empty directory.
 
@@ -3783,6 +3971,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
             "migration_spec": spec,
             "migration_spec_schema": schema,
             "migration_brief": packaged_brief,
+            "data_access": DATA_ACCESS_NAME,
             "asset": f"assets/{asset.name}" if asset else None,
             "asset_route": asset_route,
             "report": f"fabric/{report_name}" if report_name else None,
@@ -3795,15 +3984,31 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
         "oracle": oracle,
         "notes": notes,
     }
+    provisional = _checked_data_access(_cannot_data_access())
+    (dest / DATA_ACCESS_NAME).write_bytes(provisional.dumps().encode("utf-8"))
+    _seal_package(dest, result)
+    assessment, data_notes = _assess_package_data_access(
+        bundle, dest, result["data_sources"], gate_root=gate_root, provider_packages=provider_packages
+    )
+    assessment = _checked_data_access(assessment)
+    (dest / DATA_ACCESS_NAME).write_bytes(assessment.dumps().encode("utf-8"))
+    notice = _data_access_notice(assessment)
+    notes.extend([notice, *data_notes, DATA_ACCESS_PENDING])
     report_dir = dest / "fabric" / report_name if report_name else None
     workbook = _handover_workbook(handover, unit, dest)
     (dest / "handover.md").write_text(render_handover(result, workbook, visual_pages(report_dir)), encoding="utf-8")
     (dest / "README.md").write_text(
-        README.format(unit=unit, kind=result["kind"], package_root=PACKAGE_ROOT_TOKEN, unavailable=UNAVAILABLE_TOKEN),
+        README.format(
+            unit=unit,
+            kind=result["kind"],
+            package_root=PACKAGE_ROOT_TOKEN,
+            unavailable=UNAVAILABLE_TOKEN,
+            data_access=notice,
+            data_access_pending=DATA_ACCESS_PENDING,
+        ),
         encoding="utf-8",
     )
-    result["contents"] = {"files": package_contents(dest)}
-    write_json(dest / MANIFEST_NAME, result)
+    _seal_package(dest, result, verify=True)
     return result
 
 
@@ -3898,6 +4103,7 @@ def render(
             "what happened to them is unknown and this run is NOT clean: "
             + "; ".join(f"{gap['unit']} ({gap['state']})" for gap in gaps)
         )
+    lines.append(DATA_ACCESS_PENDING)
     return "\n".join(lines)
 
 
@@ -3911,6 +4117,7 @@ def _unit_line(result: dict[str, Any]) -> str:
         f"  {'OK  ' if result['packaged'] else 'MISS'} {result['unit']} [{result['kind']}] - {detail}"
         + (f", {untyped} untyped" if untyped else "")
         + (f"; {len(result['notes'])} note(s)" if result["notes"] else "")
+        + "".join(f"\n    {note}" for note in result["notes"] if note.startswith("DATA_ACCESS "))
     )
 
 
@@ -3963,7 +4170,7 @@ def partition_gaps(
     return gaps
 
 
-def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     units: list[str],
     bundle: Path,
     out_root: Path,
@@ -3974,6 +4181,8 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
     refused: list[PackageEditsRefused],
     failed: list[PackagingError] | None = None,
     brief: Path | None = None,
+    gate_root: Path | None = None,
+    provider_packages: Sequence[Path] = (),
 ) -> None:
     """Package each unit, in deterministic order, collecting failures instead of stopping at one.
 
@@ -4001,19 +4210,25 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
     """
     if brief is not None and len(units) != 1:
         raise PackagingError("brief_requires_one_unit")
-    for unit in units:
+    workbooks, datasources = engine_unit_names(read_json(bundle / "report.json"))
+    ordered = sorted(units, key=lambda unit: (unit_kind(unit, workbooks, datasources) != KIND_DATASOURCE, unit))
+    providers = list(_external_providers(provider_packages, out_root, units))
+    for unit in ordered:
         try:
-            results.append(
-                package_unit(
-                    bundle,
-                    unit,
-                    out_root,
-                    oracle_dir=oracle_dir,
-                    assets_dir=assets_dir,
-                    brief=brief,
-                    discard_edits=discard_edits,
-                )
+            result = package_unit(
+                bundle,
+                unit,
+                out_root,
+                oracle_dir=oracle_dir,
+                assets_dir=assets_dir,
+                brief=brief,
+                gate_root=gate_root,
+                provider_packages=tuple(providers),
+                discard_edits=discard_edits,
             )
+            results.append(result)
+            if result["kind"] == KIND_DATASOURCE and result["packaged"]:
+                providers.append(out_root / unit)
         except PackageEditsRefused as refusal:
             print(_sanitize_diagnostic(str(refusal)), file=sys.stderr)
             refused.append(refusal)
@@ -4031,6 +4246,16 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
             failed.append(crash)
 
 
+def _external_providers(packages: Sequence[Path], out_root: Path, selected: Sequence[str]) -> tuple[Path, ...]:
+    """Exclude exact rebuild destinations, including failures; never rescue them from stale output.
+
+    Address exclusion is not provider matching. Keep duplicate/aliased explicit roots for S2 to
+    refuse, and do not resolve links before its no-follow boundary check.
+    """
+    rebuilding = {os.path.normcase(os.path.abspath(out_root / unit)) for unit in selected}
+    return tuple(root for root in packages if os.path.normcase(os.path.abspath(root)) not in rebuilding)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """The CLI surface, in its own function so ``main`` stays inside its complexity budget."""
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("Attribution", maxsplit=1)[0])
@@ -4044,9 +4269,21 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "the dispatcher's migration-brief.md for exactly one selected unit; repeat the command "
-            "per unit for a batch. Unit/scope and whole-message privacy are checked before assembly. "
+            "per unit for a batch. Strict policy/unit/scope and whole-message privacy are checked before assembly. "
             "Its bytes travel, never its external path"
         ),
+    )
+    parser.add_argument(
+        "--gate-root",
+        type=Path,
+        help="exact original gate bundle or parser-spec directory/file; defaults to load_bundle(bundle).migration_dir",
+    )
+    parser.add_argument(
+        "--provider-package",
+        type=Path,
+        action="append",
+        default=[],
+        help="exact previously published datasource package root (repeatable); no sibling/output discovery",
     )
     parser.add_argument("--json", type=Path, help="write the machine-readable packaging report here")
     parser.add_argument("--quiet", action="store_true", help="suppress the rendered summary")
@@ -4195,8 +4432,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     if not units:
         return _refuse_zero_units(bundle, out_root, args.json)
 
-    # Sorted once, and the SAME list is packaged, reported against and measured against: the request
-    # is what the totals are denominated in, so it cannot be re-derived from whatever survived.
+    # The denominator stays sorted by name even though assembly publishes datasources first.
     requested = sorted(units)
     results: list[dict[str, Any]] = []
     refused: list[PackageEditsRefused] = []
@@ -4214,6 +4450,8 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         refused,
         failed,
         brief=args.brief.resolve() if args.brief else None,
+        gate_root=args.gate_root,
+        provider_packages=_external_providers(args.provider_package, out_root, requested),
     )
     gaps = partition_gaps(requested, results, failed, refused)
 

@@ -393,17 +393,39 @@ overrides. Ordinary bundle handling is unchanged.
 
 - `local_source_no_server_luid` — a genuinely local `.twb`/`.tds`: SHA, filename and spec agree and
   there is no server LUID to agree with;
-- `brief_policy_not_parsed` — the packaged `migration-brief.md` carries no strict `+++` TOML
-  frontmatter, so only its presence and its bytes are established here. S2 checks brief **identity**
-  (`unit`, and `scope` against the topology), plus whole-message privacy containment: reading policy out of
-  free-form Markdown would make wording into a gate. The typed policy object is a `START_READY`
-  prerequisite, not something inferred.
+- `brief_policy_not_parsed` — the brief is absent, plain Markdown or legacy identity-only
+  frontmatter. No policy is inferred (not even `stop`); a missing brief also retains its blocking
+  role. The producer emits `cannot_establish/projection-invalid`.
 
 `package_unit.py --brief` accepts **exactly one selected unit**; package a batch with one invocation
 and one brief per unit rather than broadcasting one identity. Unit/scope are checked before assembly.
 The complete brief is checked with the existing host-location and credential containment functions,
 and unsafe text is refused without copying, redacting or echoing it. Only the bytes that passed
 validation are copied, preserving the source file and its original line endings.
+
+The **single** brief TOML parser now returns a frozen, runtime-only
+`BriefPolicy(requested_scope, fallback_authorization)`. A policy header has exactly four string
+keys, with no extras or duplicates:
+
+```toml
++++
+schema = "phase1-start-ready/v1"
+unit = "Exact_Unit"
+scope = "model_only"
+fallback_authorization = "model_only_unvalidated"
++++
+```
+
+`unit` must match exactly; `scope` must match the S2 topology (`model_only` for a datasource,
+`model_and_report` for an owned workbook, `report_only_shared_model` for a consumer).
+`fallback_authorization` is exactly `stop` or `model_only_unvalidated`. Unknown keys/schema/enums,
+wrong types and incomplete explicit policy refuse before packaging. Plain/legacy text is not policy.
+The existing `brief_identity()` wrapper uses this same parser, not a second implementation.
+
+S2 also retains the successful dependency's **input-cohort `provider_ordinal`**, never serialized.
+Results stay in input order, including blocked roots; bind them with the supplied roots by position,
+not `unit`. Two distinct providers can legitimately have the same unit name. The opaque
+`provider_reference(unit)` in the data projection is a privacy token, **not** a unique root identifier.
 
 **Failing S2 is `FINDINGS`, exit 1 — not `CANNOT_ESTABLISH`.** S1 refuses because the package cannot
 be described at all; here it describes itself perfectly well and what it describes is wrong, which is
@@ -421,6 +443,24 @@ and `tests/test_package_unit_gates.py`. The correction controls are in
 `tests/test_package_role_identity_reproductions.py`, `tests/test_package_unit_reproductions.py` and
 `tests/test_check_reference_readiness.py`, including both `[clean, blocked]` and `[blocked, clean]`
 target orders and the exact structured S2 finding.
+
+### Package data-access producer — final consumer still pending (#562)
+
+Every newly published package declares `artifacts.data_access = "data-access.json"` and hashes
+its final UTF-8/LF bytes in `contents.files`. Assembly writes a strict non-accepted provisional file,
+seals the candidate, runs real S1/S2, calls only `credential_gate.assess_data_access`, validates the
+nine-field projection with `parse_data_access` and the zero-drop shipment allowlist, then reseals
+**last** and checks S1 before the existing path-budget/edit-safe swap.
+
+⚠️ This is **not** the final START_READY consumer. `check_reference_readiness.py` does not yet fold
+the projection. Construction success, its internal S2 `START_READY`, and reference `READY` do not
+authorize Phase-2 dispatch or clear a credential gate. Handover, README and packaging output expose
+the actual closed data state and this pending step. `packaged`/`self_contained` keep their original
+construction/containment meanings.
+
+See [credential gate](credential-gate.md#package-data-access-projection) for gate-root, provider and
+scope limits. The final consumer remains a separate PR; S1 stays byte authority, not a semantic
+interpreter of `artifacts.data_access`.
 
 ## Package-local source return (issue #558)
 

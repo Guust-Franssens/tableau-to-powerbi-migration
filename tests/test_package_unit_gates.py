@@ -126,12 +126,13 @@ def _write_input_manifest(bundle: Path, assets: list[Path]) -> None:
     )
 
 
-def _brief(tmp_path: Path, unit: str, scope: str = "model_and_report") -> Path:
+def _brief(tmp_path: Path, unit: str, scope: str = "model_and_report", fallback_authorization: str = "stop") -> Path:
     """The dispatcher's brief - the file `--brief` copies into every package it writes."""
     path = tmp_path / "briefs" / f"{unit}-migration-brief.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        f'+++\nschema = "phase1-start-ready/v1"\nunit = "{unit}"\nscope = "{scope}"\n+++\n\nFaithful re-creation.\n',
+        f'+++\nschema = "phase1-start-ready/v1"\nunit = "{unit}"\nscope = "{scope}"\n'
+        f'fallback_authorization = "{fallback_authorization}"\n+++\n\nFaithful re-creation.\n',
         encoding="utf-8",
     )
     return path

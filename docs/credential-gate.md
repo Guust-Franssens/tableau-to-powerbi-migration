@@ -70,6 +70,42 @@ problem before the probe has returned one.
 | **Lifted by** | a successful one-row probe (`probe-cleared`), or an audit-backed human `authorize` |
 | **Audited by** | `credential_gate.py verify` — the authoritative pre-ship check |
 
+### Package data-access projection
+
+`package_unit.py` calls only the read-only `assess_data_access` authority. It never probes,
+authorizes, clears, arms or runs mutating `verify` to produce `data-access.json`.
+The original gate root defaults to `load_bundle(bundle).migration_dir`; pass exact `--gate-root`
+when proof belongs to a parser-spec directory/file instead. There is no audit-log search or fallback
+to a package, run parent or sibling. Extra live keys in an estate root are allowed; every packaged
+live key still needs current same-root keyed proof. Source removal is not independently historical
+tamper, while changes to packaged bytes without resealing remain S1 failures.
+
+The packaged spec, the localizer's **in-memory `result["data_sources"]`**, strict copied brief and
+exact root supply direct assessment. `live_data_ok` records the existing keyed-probe/localization
+evidence, not a fresh full-packaged-model refresh. Unbound local-folder tokens do not erase complete
+shipped bytes. Incomplete local bytes, bad audits and absent policy never default to success.
+
+A published-only consumer may inherit from **one exact S2-selected, S1/S2-clean direct provider**
+supplied through `--provider-package` or published earlier in the same invocation. S2's runtime
+cohort ordinal selects the root even when unit names repeat; `provider_reference(exact_unit)` is
+applied once. Provider keys, validation and claim ceiling are preserved. No provider re-assessment
+against the consumer's gate, recursion or published-plus-direct aggregation is allowed.
+`authorized_model_only` requires model-only scope, authentic same-root audit/override and explicit
+`model_only_unvalidated` policy, remains `unvalidated/structural_only`, and cannot serve a report
+consumer. An owned workbook is never automatically downgraded.
+
+The strict nine fields are `schema`, `state`, `source_keys`, `provider_unit`, `provider_state`,
+`validation`, `effective_scope`, `max_phase2_claim`, `codes`. They carry only closed values and
+opaque references, never endpoints, source/provider names, credentials, host paths or audit text.
+This privacy claim concerns the projection and its new diagnostics, not existing source/spec/model
+content. S1 hashes the exact UTF-8/LF file; it does not interpret its semantics.
+
+❌ **The final START_READY consumer is pending.** Construction success and reference `READY`
+do not authorize Phase-2 dispatch or clear the existing credential stop. Every package and its CLI
+summary expose that ceiling and the actual closed data state. Audit/spec reads are not an atomic
+cross-file snapshot, and projected evidence can age after packaging; no post-publication lifecycle
+is added here.
+
 ### Engine-produced bundles: detection, not prevention
 
 The deterministic engine runs before the agent tier and can emit `pbip/`, `reports/`,

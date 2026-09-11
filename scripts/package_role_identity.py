@@ -6,8 +6,9 @@ S2 (#562) re-runs no-follow S1 even when earlier observations are supplied. Both
 with the original lexical roots. Roles are declarations, never discovery; only walked paths open.
 Provider closure uses datasource LUID, then exact published key only when BOTH sides lack a LUID.
 Display names and paths never supply identity; a consumer alone blocks.
-source_handoff() retains the bound root and RAW asset role for #558's pure projector. No source Path,
-search, credentials, evidence grade, policy, final START_READY fold or package writes here.
+source_handoff() retains the bound root and RAW asset role for #558's pure projector. Brief policy
+and the selected provider's input ordinal travel only in memory. No source Path, search, credentials,
+evidence grade, final START_READY fold or package writes here.
 Full contract and limitations: docs/reference-readiness.md, S2.
 """
 
@@ -107,9 +108,7 @@ SOURCE_EXTENSIONS: dict[str, tuple[str, ...]] = {
 #: "the brief is present" cannot be satisfied by any other Markdown file a package happens to carry.
 BRIEF_NAME = "migration-brief.md"
 
-#: The brief's frontmatter ``scope`` value implied by each topology. S2 checks IDENTITY only - unit
-#: and scope - and leaves every policy field (fidelity bar, fallback authorization, refresh strategy,
-#: grade) to the START_READY brief-policy parser, which is a separate prerequisite.
+#: The brief's explicit scope must agree with topology; it is never inferred as authorization.
 TOPOLOGY_SCOPE = {
     TOPOLOGY_OWNED_MODEL: "model_and_report",
     TOPOLOGY_STANDALONE_DATASOURCE: "model_only",
@@ -120,9 +119,7 @@ TOPOLOGY_SCOPE = {
 #: Recorded when a source is genuinely local: no Tableau Server LUID exists to agree with, and the
 #: SHA/filename/spec axes all do. It does NOT convert a role state - it says why one is N/A.
 LIMITATION_LOCAL_SOURCE = "local_source_no_server_luid"
-#: The packaged brief carries no ``+++`` frontmatter, so only its PRESENCE and bytes are established
-#: here. Parsing free-form Markdown as policy is refused outright; the typed policy object is a
-#: START_READY prerequisite, tracked as a limitation rather than silently inferred.
+#: Plain/legacy/missing briefs establish no typed policy. Markdown never authorizes a fallback.
 LIMITATION_BRIEF_POLICY_UNPARSED = "brief_policy_not_parsed"
 
 # Stable diagnostic codes. ⚠️ These are printed into shared verdicts: no host path, no customer
@@ -170,6 +167,7 @@ CODE_BRIEF_FRONTMATTER = "brief_frontmatter_unparseable"
 CODE_BRIEF_UNIT = "brief_unit_mismatch"
 CODE_BRIEF_SCOPE = "brief_scope_mismatch"
 CODE_BRIEF_UNSAFE = "brief_contains_unsafe_text"
+CODE_BRIEF_POLICY = "brief_policy_invalid"
 CODE_DEPENDENCY_IDENTITY = "published_dependency_identity_missing"
 CODE_DEPENDENCY_INVALID = "published_dependency_invalid"
 CODE_PROVIDER_MISSING = "provider_missing"
@@ -179,6 +177,14 @@ CODE_PROVIDER_KEY_CONTRADICTION = "provider_key_contradiction"
 CODE_PROVIDER_BINDING = "provider_binding_mismatch"
 CODE_PROVIDER_MODEL = "provider_model_unresolved"
 CODE_PROVIDER_BLOCKED = "provider_not_s2_clean"
+
+
+@dataclass(frozen=True)
+class BriefPolicy:
+    """The exact brief's explicit policy, not an inferred scope or an earned data-access verdict."""
+
+    requested_scope: str
+    fallback_authorization: str
 
 
 @dataclass(frozen=True)
@@ -237,6 +243,7 @@ class DependencyResult:
     provider_unit: str | None = None
     model_role: str | None = None
     code: str | None = None
+    provider_ordinal: int | None = field(default=None, repr=False, compare=False)
 
     def as_dict(self) -> dict[str, Any]:
         """The JSON shape a consumer embeds."""
@@ -285,6 +292,7 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
     authorized_limitations: tuple[str, ...] = ()
     evidence: tuple[PackageEvidence, ...] = field(default=(), repr=False, compare=False)
     verified: VerifiedPackage | None = field(default=None, repr=False, compare=False)
+    brief_policy: BriefPolicy | None = field(default=None, repr=False, compare=False)
 
     @property
     def is_start_ready(self) -> bool:
@@ -410,6 +418,8 @@ class _Facts:  # pylint: disable=too-many-instance-attributes,attribute-defined-
     declared_dependencies: tuple[DeclaredDependency, ...] = ()
     model_role: str | None = None
     provider_ready: bool = False
+    ordinal: int | None = None
+    brief_policy: BriefPolicy | None = None
 
     @property
     def keys(self) -> frozenset[str]:
@@ -830,27 +840,50 @@ def _handover_role(facts: _Facts) -> RoleResult:
     return result
 
 
-def brief_identity(text: str, unit: str, scope: str) -> tuple[str | None, bool]:  # pylint: disable=too-many-return-statements
-    """Validate the whole brief's containment and its typed unit/scope, without interpreting policy."""
+def parse_brief_policy(  # pylint: disable=too-many-return-statements
+    text: str, unit: str, scope: str
+) -> tuple[str | None, BriefPolicy | None]:
+    """One TOML parser for preparation and S2: strict policy, or truthful legacy non-policy.
+
+    A header without fallback authorization may carry only the legacy identity keys. An explicit
+    policy requires all four string fields; malformed/unknown fields refuse without echoing text.
+    """
     env = tableau_env.resolve_env(_ENV_PATH)
     scrub = tableau_env.env_redactor(env, *(env.get(key, "") for key in sorted(tableau_env.DATASOURCE_CREDENTIAL_KEYS)))
     if discloses_host_location(text) or scrub(text) != text:
-        return CODE_BRIEF_UNSAFE, False
+        return CODE_BRIEF_UNSAFE, None
     if not text.startswith("+++"):
-        return None, True
+        return None, None
     head, delimiter, _rest = text.replace("\r\n", "\n")[3:].partition("\n+++")
     if not delimiter:
-        return CODE_BRIEF_FRONTMATTER, False
+        return CODE_BRIEF_FRONTMATTER, None
     try:
         front = tomllib.loads(head)
     except (tomllib.TOMLDecodeError, ValueError):
-        return CODE_BRIEF_FRONTMATTER, False
+        return CODE_BRIEF_FRONTMATTER, None
     if front.get("unit") != unit:
-        return CODE_BRIEF_UNIT, False
+        return CODE_BRIEF_UNIT, None
     supplied_scope = front.get("scope")
     if supplied_scope is not None and supplied_scope != scope:
-        return CODE_BRIEF_SCOPE, False
-    return None, supplied_scope is None
+        return CODE_BRIEF_SCOPE, None
+    allowed = {"schema", "unit", "scope", "fallback_authorization"}
+    if (
+        set(front) - allowed
+        or any(not isinstance(value, str) for value in front.values())
+        or ("schema" in front and front["schema"] != "phase1-start-ready/v1")
+    ):
+        return CODE_BRIEF_POLICY, None
+    if "fallback_authorization" not in front:
+        return None, None
+    if set(front) != allowed or front["fallback_authorization"] not in ("stop", "model_only_unvalidated"):
+        return CODE_BRIEF_POLICY, None
+    return None, BriefPolicy(supplied_scope, front["fallback_authorization"])
+
+
+def brief_identity(text: str, unit: str, scope: str) -> tuple[str | None, bool]:
+    """Compatibility handoff: identity/policy refusal and whether policy remains unparsed."""
+    code, policy = parse_brief_policy(text, unit, scope)
+    return code, code is None and policy is None
 
 
 def _brief_role(facts: _Facts, topology: str) -> tuple[RoleResult, list[str]]:
@@ -859,14 +892,15 @@ def _brief_role(facts: _Facts, topology: str) -> tuple[RoleResult, list[str]]:
     candidates = [BRIEF_NAME] if BRIEF_NAME in facts.digests else []
     result = _declared_role(ROLE_MIGRATION_BRIEF, "1 file", declared, candidates, facts.digests)
     if result.blocks:
-        return result, []
+        return result, [LIMITATION_BRIEF_POLICY_UNPARSED]
     text = facts.text(declared)
     if text is None:
         return _role(ROLE_MIGRATION_BRIEF, STATE_MISMATCH, "1 file", [BRIEF_NAME], CODE_ROLE_NOT_VERIFIED), []
-    code, unparsed = brief_identity(text, facts.unit, TOPOLOGY_SCOPE[topology])
+    code, policy = parse_brief_policy(text, facts.unit, TOPOLOGY_SCOPE[topology])
     if code is not None:
         return _role(ROLE_MIGRATION_BRIEF, STATE_MISMATCH, "1 file", [BRIEF_NAME], code), []
-    return result, [LIMITATION_BRIEF_POLICY_UNPARSED] if unparsed else []
+    facts.brief_policy = policy
+    return result, [LIMITATION_BRIEF_POLICY_UNPARSED] if policy is None else []
 
 
 def _evidence_role(  # pylint: disable=too-many-return-statements
@@ -1120,7 +1154,9 @@ def _dependency(  # pylint: disable=too-many-return-statements
         return DependencyResult(STATE_MISMATCH, luid, key, provider.unit, code=CODE_PROVIDER_BLOCKED)
     if not _binding_matches(facts, provider):
         return DependencyResult(STATE_MISMATCH, luid, key, provider.unit, provider.model_role, CODE_PROVIDER_BINDING)
-    return DependencyResult(STATE_RESOLVED, luid, key, provider.unit, provider.model_role)
+    return DependencyResult(
+        STATE_RESOLVED, luid, key, provider.unit, provider.model_role, provider_ordinal=provider.ordinal
+    )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1155,7 +1191,7 @@ def verify_phase1_role_identity(
         if isinstance(outcome, Phase1RoleIdentityResult):
             results[index] = replace(outcome, verified=clearance)
             continue
-        facts.append(outcome)
+        facts.append(replace(outcome, ordinal=index))
     _resolve_cohort(facts)
     ordered: list[Phase1RoleIdentityResult] = []
     position = 0
@@ -1332,6 +1368,7 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
         authorized_limitations=tuple(dict.fromkeys(facts.limitations)),
         evidence=tuple(facts.evidence) if not blockers else (),
         verified=facts.verified,
+        brief_policy=facts.brief_policy,
     )
 
 
