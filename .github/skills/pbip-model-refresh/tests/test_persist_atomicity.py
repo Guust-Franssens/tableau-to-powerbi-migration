@@ -265,6 +265,11 @@ def test_imagesave_observation_is_bound_and_holds_post_alignment_input(tmp_path,
     def write(catalogue, stream):
         writes.append(catalogue)
         stream.path.write_bytes(_abf_bytes())
+        database.ID = identity.catalogue
+
+    def file_stream(path, *_):
+        database.ID = "22222222-2222-3333-4444-555555555555"
+        return SimpleNamespace(path=Path(path), Close=lambda: None)
 
     server = SimpleNamespace(Databases=databases, Connect=lambda _: None, Disconnect=lambda: None, ImageSave=write)
     monkeypatch.setattr(refresh_pbip_model, "_load_amo", lambda: lambda: server)
@@ -275,7 +280,7 @@ def test_imagesave_observation_is_bound_and_holds_post_alignment_input(tmp_path,
         SimpleNamespace(
             FileAccess=SimpleNamespace(Write=1),
             FileMode=SimpleNamespace(Create=2),
-            FileStream=lambda path, *_: SimpleNamespace(path=Path(path), Close=lambda: None),
+            FileStream=file_stream,
         ),
     )
 

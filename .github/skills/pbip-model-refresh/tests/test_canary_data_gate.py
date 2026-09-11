@@ -379,17 +379,21 @@ def test_late_credential_refusal_interrupts_the_bounded_read(monkeypatch):
 
 
 @pytest.mark.timing
-@pytest.mark.parametrize("blocked", ["query", "inspection"])
-def test_observation_deadline_bounds_native_query_and_inspection(monkeypatch, blocked):
-    release = threading.Event()
-    queried = []
-    if blocked == "inspection":
-        monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda *_a, **_k: release.wait(5))
-    started = time.monotonic()
-    try:
-        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TIMEOUT$"):
-            probe_desktop_query._observation_call(111, lambda: queried.append(1) or release.wait(5), 0.03)
-        assert time.monotonic() - started < 0.5
-        assert queried == ([1] if blocked == "query" else [])
-    finally:
-        release.set()
+def test_observation_deadline_bounds_native_query_and_inspection(monkeypatch):
+    for blocked in ("query", "inspection"):
+        release = threading.Event()
+        queried = []
+        if blocked == "inspection":
+            monkeypatch.setattr(
+                probe_desktop_query, "_credential_state", lambda *_a, event=release, **_k: event.wait(5)
+            )
+        started = time.monotonic()
+        try:
+            with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TIMEOUT$"):
+                probe_desktop_query._observation_call(
+                    111, lambda event=release, count=queried: count.append(1) or event.wait(5), 0.03
+                )
+            assert time.monotonic() - started < 0.5
+            assert queried == ([1] if blocked == "query" else [])
+        finally:
+            release.set()

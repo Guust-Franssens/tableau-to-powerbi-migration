@@ -1376,7 +1376,8 @@ def image_save(
         def write_image(staging: Path) -> None:
             stream = FileStream(str(staging), FileMode.Create, FileAccess.Write)
             try:
-                server.ImageSave(database.ID, stream)
+                # The observed argument is the held binding, not a later value of the mutable AMO ID.
+                server.ImageSave(database.ID if bound is None else bound.catalogue, stream)
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                 # AMO's response parser trips even on a fully correct write, so ONLY that specific
                 # error is swallowed; the staged-file check in _staged_image_write is the real
@@ -1400,7 +1401,7 @@ def image_save(
             definition = model_dir / "definition" / "database.tmdl" if model_dir is not None else None
             aligned = definition.read_bytes() if definition is not None and definition.is_file() else None
             if on_persist is not None:
-                on_persist(PersistenceObservation(str(database.ID), live_level, commit, aligned))
+                on_persist(PersistenceObservation(bound.catalogue, live_level, commit, aligned))
 
         return _persist_image(
             cache_path, model_dir, live_level, write_image, on_commit=record if bound is not None else None
