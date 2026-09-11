@@ -68,6 +68,7 @@
               "revision": { "type": ["string", "null"] },
               "name_source": { "type": ["string", "null"], "description": "Which attribute the name was resolved from: derived-from | connection.dbname | repository-location.id (in precedence order)" },
               "id_attribute": { "type": ["string", "null"], "description": "Raw repository-location@id. When it differs from `id`, the server-side datasource was renamed after this workbook was published and this value is stale." },
+              "luid": { "type": ["string", "null"], "description": "The published datasource's Tableau Server LUID, stamped ONLY when a producer genuinely establishes it from the server (a harvest dependency edge or an exported .tds). It is the STRONGEST provider identity: scripts/package_role_identity.py matches a consuming workbook to its provider datasource package by this value first, and falls back to `key` only when a LUID is genuinely unavailable on either side. Never derive it from a display name, a folder stem or a filename that is not the harvester's own `<luid>_<name>` form - a guessed LUID is worse than an absent one, because it silently binds a report to the wrong model." },
               "key": { "type": ["string", "null"], "description": "Stable dedup identity '<site>/<name>' (lowercased, excludes revision + host) - the key to match the SAME published datasource across multiple workbooks so it is migrated to ONE shared semantic model" }
             }
           },
