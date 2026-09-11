@@ -6,6 +6,7 @@ Run: pytest -q tests/test_preflight_signing_policy.py --basetemp _preflight_sign
 """
 
 import ctypes
+import importlib
 import json
 import os
 import re
@@ -36,6 +37,12 @@ ROUTE = re.compile(
     r"\[preflight cannot start\]\((?:[^)]*/operator-runbook\.md|operator-runbook\.md)?#preflight-cannot-start\)"
 )
 REFUSAL = "only after an actual unsigned/executionpolicy startup refusal"
+SKIP_REASONS = {
+    "platform": "requires Windows PowerShell/PowerShell 7 on Windows and NTFS",
+    "powershell": "powershell is not installed",
+    "pwsh": "pwsh is not installed",
+    "managed": "Group Policy is configured; process-only controls must not override or change it",
+}
 CONTROL = """
 param([switch]$Update, [switch]$CheckUpstream, [string]$Tenant, [string]$Subscription, [int]$Code = 0)
 Set-Content -LiteralPath (Join-Path $PSScriptRoot 'started.txt') -Value 'CONTROL_STARTED'
@@ -171,6 +178,14 @@ def test_shared_fallback_returns_to_the_exact_origin_not_a_command_above() -> No
     assert "`-Tenant`, `-Subscription` or other arguments too" in route
 
 
+@pytest.mark.parametrize("reason", SKIP_REASONS.values())
+def test_signing_control_skip_reasons_are_registered_exactly(reason: str) -> None:
+    """Only the named platform/interpreter constraints are expected skips, not arbitrary failures."""
+    gate = importlib.import_module("conftest")
+    assert gate.is_expected_skip_reason(reason)
+    assert not gate.is_expected_skip_reason(reason + "; an unrelated failure")
+
+
 def _native_env() -> dict[str, str]:
     # Python does not perform pwsh's Windows PowerShell module-path adaptation for a native child.
     return {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
@@ -192,10 +207,10 @@ def _ps(shell: str, *arguments: str, cwd: Path | None = None) -> subprocess.Comp
 def installed_shell(request: pytest.FixtureRequest) -> str:
     """Run on both installed Windows engines; other platforms cannot exercise NTFS or policy."""
     if os.name != "nt":
-        pytest.skip("requires Windows PowerShell/PowerShell 7 on Windows and NTFS")
+        pytest.skip(SKIP_REASONS["platform"])
     executable = shutil.which(request.param)
     if executable is None:
-        pytest.skip(f"{request.param} is not installed")
+        pytest.skip(SKIP_REASONS[request.param])
     return executable
 
 
@@ -215,7 +230,7 @@ def unmanaged_process_shell(shell: str) -> Iterator[str]:
     """Never change an enforced policy to make a local control possible."""
     before = _policies(shell)
     if any(row["Scope"] in ("MachinePolicy", "UserPolicy") and row["Policy"] != "Undefined" for row in before):
-        pytest.skip("Group Policy is configured; process-only controls must not override or change it")
+        pytest.skip(SKIP_REASONS["managed"])
     yield shell
     assert _policies(shell) == before, "child-process controls changed the host policy snapshot"
 
