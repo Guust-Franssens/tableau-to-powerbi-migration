@@ -33,8 +33,12 @@ Subagents read it as step 0; `scripts/check_navigation_index.py` checks it bidir
 powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update -CheckUpstream
 ```
 
-`-Update` repairs the npm bridge CLIs **only when they are below the correctness floor** — a floor
-check, not a blind `@latest`, so at or above the floor it costs nothing.
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+[preflight cannot start](docs/operator-runbook.md#preflight-cannot-start).
+If allowed, retry the **exact originating command and arguments**; here, `-Update -CheckUpstream`.
+Do not pre-check policy.
+
+`-Update` repairs npm bridge CLIs **only when they are below the correctness floor**, not a blind `@latest`.
 
 **Why a floor:** `powerbi-report-author` **>= 0.1.4** is a *correctness* floor. Older builds returned
 `errorCount: 0` for PBIR that Power BI Desktop cannot open — e.g. a `report.json` whose
@@ -43,16 +47,13 @@ check, not a blind `@latest`, so at or above the floor it costs nothing.
 committed ground-truth shape live in the `powerbi-report-gotchas` skill). A stale CLI silently
 green-lights a broken report.
 
-**Above the known-good matrix is a WARN, not an error.** It means the version-specific gotchas in
-`.github/agents/` and the skills were verified against an older build and may be stale — re-verify
-the prose; never "fix" it by downgrading.
+**Above the known-good matrix is a WARN, not an error.** Re-verify version-specific gotchas in
+`.github/agents/` and skills; never "fix" it by downgrading.
 
-**`-CheckUpstream` is opt-in (~3 s of network) and advisory — it never upgrades and never fails the
-run.** Every other check compares an installed version against a hard-coded number: that answers "is
-what I have good enough", never "has the world moved". It asks npm for `powerbi-report-author` /
-`powerbi-desktop` and GitHub for the engine's upstream `VERSION`. Measured 2026-08-06: the engine
-moved **2.60.0 → 2.72.0** unnoticed and **Power BI Desktop auto-updated** and broke the bridge's exe
-discovery, both while preflight still reported "Ready to migrate".
+**`-CheckUpstream` is opt-in (~3 s of network) and advisory — it never upgrades or fails the run.**
+It compares npm bridge versions and GitHub's engine `VERSION` with installed versions, rather than
+only checking fixed floors. Measured 2026-08-06: the engine moved **2.60.0 → 2.72.0** unnoticed and
+**Power BI Desktop auto-updated**, breaking bridge exe discovery, while preflight reported READY.
 
 **The timing rule is what makes upgrading safe:**
 
@@ -78,6 +79,8 @@ any critical miss**.
 ```
 powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1
 ```
+
+That fallback keeps this call **plain**, without updates.
 
 **If setup guidance is missing or too thin, improve the preflight hint rather than adding another
 install recipe here.** An agent that never reads this section should still be stopped by the exit
