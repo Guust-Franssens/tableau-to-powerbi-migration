@@ -45,6 +45,7 @@ import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-positio
 import path_flavour as pf  # noqa: E402  # pylint: disable=wrong-import-position
 import reference_evidence as rev  # noqa: E402  # pylint: disable=wrong-import-position
 import set_data_folder as sdf  # noqa: E402  # pylint: disable=wrong-import-position
+from test_package_unit_gates import _binding_cli, _binding_package  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import KEEP, REPORT_ALLOW, Rows, project  # noqa: E402  # pylint: disable=wrong-import-position
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
     write_engine_report,
@@ -1362,12 +1363,12 @@ def test_the_data_folder_parameter_names_a_PLACEHOLDER_not_the_machine_that_buil
     The shipped value is a placeholder; binding resolves it, and that is asserted here end to end
     rather than trusted, because a placeholder nobody can resolve is not an improvement.
     """
-    root = _package_with_receipt(tmp_path)
+    root = _binding_package(tmp_path)
     expressions = (_model_definition(root) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8")
     value = re.search(rf'expression {pkg.DATA_FOLDER_PARAM} = "([^"]+)"', expressions)
     assert value is not None, expressions
     assert value.group(1).startswith(pkg.PACKAGE_ROOT_TOKEN), value.group(1)
-    staging = pkg.staging_dir(root.parent, UNIT).name
+    staging = pkg.staging_dir(root.parent, root.name).name
     assert staging not in value.group(1), f"the parameter names staging: {value.group(1)}"
     assert str(root) not in value.group(1), "the package names the machine that built it"
     assert str(tmp_path) not in expressions, "some other build-time path survived into the model"
@@ -1396,8 +1397,8 @@ def test_a_moved_package_still_reaches_its_rows_once_it_is_BOUND(tmp_path: Path)
     whole route - package here, MOVE the folder, bind it there, and read the file the partition now
     names off disk.
     """
-    root = _package_with_receipt(tmp_path)
-    moved = tmp_path / "customer" / "delivered" / UNIT
+    root = _binding_package(tmp_path)
+    moved = tmp_path / "customer" / "delivered" / root.name
     moved.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(root), str(moved))
 
@@ -1412,7 +1413,125 @@ def test_a_moved_package_still_reaches_its_rows_once_it_is_BOUND(tmp_path: Path)
     assert tail is not None, "no partition reads the shipped copy through the parameter"
     reached = Path(value.group(1) + tail.group(1))
     assert reached.is_file(), f"the bound model names rows that are not there: {reached}"
-    assert reached.read_text(encoding="utf-8").startswith("Employee_ID")
+    assert reached.read_bytes() == b"value\n7\n"
+
+
+@pytest.mark.parametrize("shape", ["relative", "foreign", "unc", "reparse", "over-budget", "volume"])
+def test_binding_admission_refuses_before_staging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str) -> None:
+    """Authority: native root admission + path budget; no copy/rewriter may run on a refused root."""
+    from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
+    from test_package_filesystem import link_directory  # pylint: disable=import-outside-toplevel
+
+    root = _binding_package(tmp_path)
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    requested = str(root)
+    code = "binding_root_not_local_absolute"
+    if shape == "relative":
+        requested = root.name
+    elif shape == "foreign":
+        requested = "/foreign/canary" if os.name == "nt" else r"X:\foreign\canary"
+    elif shape == "unc":
+        requested = r"\\fixture-server\uncontacted-share\package"
+    elif shape == "reparse":
+        alias = root.with_name("alias")
+        link_directory(alias, root)
+        requested, code = str(alias), "binding_root_unsafe"
+    elif shape == "over-budget":
+        monkeypatch.setattr(pkg, "platform_limits", lambda: cpc.Limits(file_ceiling=1, dir_ceiling=1))
+        code = "binding_path_budget_exceeded"
+    elif shape == "volume":
+        real_stat = Path.lstat
+
+        def other_volume(path):
+            info = real_stat(path)
+            return (
+                SimpleNamespace(
+                    st_dev=info.st_dev + 1,
+                    st_ino=info.st_ino,
+                    st_mode=info.st_mode,
+                    st_file_attributes=getattr(info, "st_file_attributes", 0),
+                )
+                if path == root
+                else info
+            )
+
+        monkeypatch.setattr(Path, "lstat", other_volume)
+        code = "binding_volume_mismatch"
+
+    def no_staging(*_args, **_kwargs):
+        pytest.fail("admission refusal happened after staging")
+
+    monkeypatch.setattr(pkg, "_binding_stage", no_staging)
+    result = _binding_cli(requested)
+    assert (result["exit_code"], result["outcome"], result["codes"]) == (1, "unchanged", [code])
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("location", ["profile", "home", "tmp"])
+def test_binding_profile_home_and_tmp_are_local_work_not_a_shareability_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
+) -> None:
+    root = _binding_package(tmp_path / location)
+    for variable in ("USERPROFILE", "HOME", "TMP", "TEMP"):
+        monkeypatch.setenv(variable, str(root.parent))
+    assert _binding_cli(root)["exit_code"] == 0
+    assert _binding_cli(root, "--inspect")["exit_code"] == 0
+    assert _binding_cli(root, "--sanitize")["exit_code"] == 0
+    assert all(str(root).encode() not in path.read_bytes() for path in root.rglob("*") if path.is_file())
+
+
+def test_binding_manual_copy_requires_fresh_current_location_inspection(tmp_path: Path) -> None:
+    root = _binding_package(tmp_path)
+    assert _binding_cli(root)["exit_code"] == 0
+    original = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    moved = tmp_path / "recipient" / root.name
+    shutil.copytree(root, moved)
+    assert pkg.pri.verify_s1(moved).integrity.is_clean, "a copy alone does not invalidate S1"
+    stale = _binding_cli(moved, "--inspect")
+    assert stale["exit_code"] == 1 and stale["inspection"]["codes"] == ["binding_not_current"]
+    assert _binding_cli(moved)["exit_code"] == 0
+    assert _binding_cli(moved, "--inspect")["exit_code"] == 0
+    assert original == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing-brief", "missing-data", "missing-source", "missing-oracle", "binding-text", "tail"]
+)
+def test_binding_cannot_use_incomplete_roles_or_ambiguous_owned_text(tmp_path: Path, fault: str) -> None:
+    root = _binding_package(tmp_path)
+    manifest_path = root / "package-manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    targets = {
+        "missing-brief": "migration-brief.md",
+        "missing-data": manifest["data_sources"]["shipped"][0]["path"],
+        "missing-source": manifest["artifacts"]["asset"],
+        "missing-oracle": "oracle/oracle-manifest.json",
+    }
+    if fault in targets:
+        (root / targets[fault]).unlink()
+    elif fault == "binding-text":
+        path = root / "README.md"
+        path.write_bytes(path.read_bytes().replace(b"Why binding is a step", b"Altered binding text"))
+    else:
+        path = next((root / "fabric").glob("*.SemanticModel/definition/expressions.tmdl"))
+        raw = path.read_bytes()
+        assert b"<PACKAGE_ROOT>" in raw
+        path.write_bytes(raw.replace(b"<PACKAGE_ROOT>", b"<PACKAGE_ROOT>/data/.."))
+    # A reseal intentionally removes S1 dirtiness so the downstream authority must see the fault.
+    manifest["contents"]["files"] = pkg.package_contents(root)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    result = _binding_cli(root)
+    assert result["exit_code"] in (1, 3), result
+    assert result["outcome"] == "unchanged"
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+def test_binding_provider_sanitize_is_usage_without_opening_either_root() -> None:
+    with pytest.raises(SystemExit) as failure:
+        sdf.main(["--package", "not-opened", "--sanitize", "--provider-package", "not-opened-either"])
+    assert failure.value.code == 2
 
 
 @pytest.mark.parametrize(

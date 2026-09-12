@@ -19,12 +19,15 @@ it would fail here too.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from contextlib import redirect_stdout
 
 import pytest
 
@@ -35,6 +38,7 @@ import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-i
 import check_unit  # noqa: E402  # pylint: disable=wrong-import-position
 import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
+import set_data_folder as sdf  # noqa: E402  # pylint: disable=wrong-import-position
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
     write_engine_report,
     write_handover,
@@ -249,6 +253,121 @@ def _cli_args(bundle: Path, out: Path, oracle: Path, tmp_path: Path) -> list[str
         str(_brief(tmp_path, UNIT)),
         "--quiet",
     ]
+
+
+def _binding_package(
+    parent: Path, *, datasource: bool = False, folder: bool = False, datasource_luid: str = DS_LUID
+) -> Path:
+    """Real producer output with independently inspectable CSV bytes and an accepted projection."""
+    bundle, oracle, _objects = _bundle(parent, covered=None, datasource_only=datasource)
+    unit = DS_UNIT if datasource else UNIT
+    if datasource:
+        asset = bundle.parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
+        text = asset.read_text(encoding="utf-8")
+        assert text.count("class='postgres'") == 1
+        asset.write_text(text.replace("class='postgres'", "class='textscan'"), encoding="utf-8")
+        if datasource_luid != DS_LUID:
+            asset.rename(asset.with_name(f"{datasource_luid}_{DS_UNIT}.tds"))
+        _write_input_manifest(bundle, sorted((bundle.parent / "assets").iterdir()))
+    source = parent / "Extract.Data" / "rows.csv"
+    source.parent.mkdir()
+    source.write_bytes(b"value\n7\n")
+    definition = bundle / "pbip" / unit / f"{unit}.SemanticModel" / "definition"
+    (definition / "tables").mkdir()
+    if folder:
+        (definition / "expressions.tmdl").write_text(
+            f'expression Caption = "ordinary"\nexpression #"Extract Folder" = "{source.parent}"\n',
+            encoding="utf-8",
+        )
+        expression = f'File.Contents(#"Extract Folder" & "{os.sep}rows.csv")'
+    else:
+        expression = f'File.Contents("{source}")'
+    (definition / "tables" / "Rows.tmdl").write_text(
+        f"table Rows\n\tpartition Rows = m\n\t\tmode: import\n\t\tsource = Csv.Document({expression})\n",
+        encoding="utf-8",
+    )
+    _write_receipt(bundle, [UNIT, DS_UNIT] if datasource else [UNIT])
+    root = _package(parent, bundle, oracle, unit, "model_only" if datasource else "model_and_report")
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    assert pkg.data_access.read_data_access(root / "data-access.json").state == "local_import_ready"
+    return root
+
+
+def _binding_cli(root: str | Path, *flags: str) -> dict:
+    """The public argument parser and return code, with diagnostics held for privacy assertions."""
+    output = io.StringIO()
+    with redirect_stdout(output):
+        code = sdf.main(["--package", str(root), *flags])
+    result = json.loads(output.getvalue())
+    assert result["exit_code"] == code
+    assert str(root) not in output.getvalue()
+    assert "START_READY" not in output.getvalue()
+    return result
+
+
+@pytest.mark.parametrize("step", ["bind", "inspect", "sanitize", "transfer", "rebind"])
+def test_binding_lifecycle_public_commands_have_distinct_evidence(tmp_path: Path, step: str) -> None:
+    """S1 owns bytes; inspection owns current location, not reference readiness or shareability."""
+    root = _binding_package(tmp_path)
+    portable = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    assert _binding_cli(root)["exit_code"] == 0
+    if step in ("sanitize", "transfer", "rebind"):
+        assert _binding_cli(root, "--sanitize")["exit_code"] == 0
+        assert {
+            path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*") if path.is_file()
+        } == portable
+    if step in ("transfer", "rebind"):
+        recipient = tmp_path / "recipient" / root.name
+        shutil.copytree(root, recipient)
+        root = recipient
+    if step == "rebind":
+        assert _binding_cli(root)["exit_code"] == 0
+    inspection = _binding_cli(root, "--inspect")
+    assert inspection["exit_code"] == (1 if step in ("sanitize", "transfer") else 0)
+    rows = inspection["inspection"]["parameters"]
+    assert len(rows) == 1 and rows[0]["target_exists"]
+    assert rows[0]["current_root_match"] == (step not in ("sanitize", "transfer"))
+    assert rows[0]["placeholder"] == (step in ("sanitize", "transfer"))
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    assert pri.verify_phase1_role_identity((root,))[0].is_start_ready, "S2 is unchanged, not new readiness"
+
+
+@pytest.mark.parametrize("datasource", [False, True])
+def test_binding_inspection_tracks_parameter_identity_tail_and_separator(tmp_path: Path, datasource: bool) -> None:
+    root = _binding_package(tmp_path, datasource=datasource, folder=True)
+    before = _binding_cli(root, "--inspect")
+    assert before["exit_code"] == 1
+    assert _binding_cli(root)["exit_code"] == 0
+    after = _binding_cli(root, "--inspect")
+    row = after["inspection"]["parameters"][0]
+    assert after["inspection"]["applicability"] == "applicable"
+    assert row["parameter_ordinal"] == 1
+    assert row["parameter_identity"] == hashlib.sha256(b'#"Extract Folder"').hexdigest()
+    assert row["data_tail"] == "data/Extract.Data"
+    assert row["trailing_separator"] is False
+    assert row["member"] == before["inspection"]["parameters"][0]["member"]
+    expression = (root / row["member"]).read_text(encoding="utf-8")
+    assert f'"{root}{os.sep}data{os.sep}Extract.Data"' in expression
+    assert (root / row["data_tail"] / "rows.csv").read_bytes() == b"value\n7\n"
+
+
+def test_binding_no_flags_reference_gate_stays_s1_clean(tmp_path: Path) -> None:
+    root = _binding_package(tmp_path)
+    before = _readiness(root, tmp_path)
+    assert before[0] == 0
+    assert _binding_cli(root)["exit_code"] == 0
+    after = _readiness(root, tmp_path)
+    assert after[0] == 0, after
+    for key in ("pages_ready", "pages_expected", "units_ready", "pages_blind"):
+        assert before[1][key] == after[1][key]
+    result = subprocess.run(
+        [sys.executable, str(SCRIPTS / "set_data_folder.py"), "--package", str(root), "--inspect"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["inspection"]["parameters"][0]["current_root_match"]
 
 
 # --------------------------------------------------------------------------------------------

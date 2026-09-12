@@ -6,12 +6,306 @@ from __future__ import annotations
 # pylint: disable=protected-access
 
 from collections.abc import Callable
+from dataclasses import replace
+import json
 from pathlib import Path
 
 import pytest
 
 from test_package_data_access_snapshot import _files, _local_bundle
-from test_package_unit_gates import UNIT, pkg
+from test_package_unit_gates import UNIT, _binding_cli, _binding_package, pkg
+
+
+def test_binding_final_inspection_is_inside_swap_before_retired_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _binding_package(tmp_path)
+    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
+    events = []
+    rename, final, cleanup = pkg._rename_retrying, pkg._binding_final, pkg._discard_scratch
+
+    def moving(source, destination):
+        rename(source, destination)
+        if source == staged and destination == root:
+            events.append("rename")
+
+    def inspecting(*args, **kwargs):
+        assert events == ["rename"] and retired.is_dir()
+        final(*args, **kwargs)
+        assert pkg.pri.verify_s1(root).integrity.is_clean
+        events.append("final-s1-exact-inspection-cohort")
+
+    def cleaning(path):
+        if path == retired:
+            assert events == ["rename", "final-s1-exact-inspection-cohort"]
+            events.append("cleanup")
+        return cleanup(path)
+
+    monkeypatch.setattr(pkg, "_rename_retrying", moving)
+    monkeypatch.setattr(pkg, "_binding_final", inspecting)
+    monkeypatch.setattr(pkg, "_discard_scratch", cleaning)
+    result = _binding_cli(root)
+    assert result["exit_code"] == 0 and result["outcome"] == "published"
+    assert events == ["rename", "final-s1-exact-inspection-cohort", "cleanup"]
+
+
+@pytest.mark.parametrize(
+    "failure", ["retire", "publish", "final", "rollback", "cleanup", "interrupt", "cleanup-interrupt"]
+)
+def test_binding_publication_failure_reports_exact_directory_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    root = _binding_package(tmp_path)
+    before, original_id = _files(root), root.lstat().st_ino
+    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
+    rename, final, cleanup = pkg._rename_retrying, pkg._binding_final, pkg._discard_scratch
+    hits = []
+
+    def moving(source, destination):
+        point = (
+            "retire"
+            if source == root and destination == retired
+            else ("publish" if source == staged and destination == root else "rollback")
+        )
+        if failure == point or (failure == "rollback" and point == "publish"):
+            hits.append(point)
+            raise OSError("private-rename-canary")
+        rename(source, destination)
+
+    def inspecting(*args, **kwargs):
+        assert retired.is_dir() and root.is_dir()
+        if failure in ("final", "interrupt"):
+            hits.append("final")
+            if failure == "interrupt":
+                raise KeyboardInterrupt()
+            raise pkg._BindingRefusal("binding_final_inspection_failed", 1)
+        return final(*args, **kwargs)
+
+    def cleaning(path):
+        if path == retired and failure in ("cleanup", "cleanup-interrupt"):
+            hits.append("cleanup")
+            if failure == "cleanup-interrupt":
+                raise KeyboardInterrupt()
+            return "private-cleanup-canary"
+        return cleanup(path)
+
+    monkeypatch.setattr(pkg, "_rename_retrying", moving)
+    monkeypatch.setattr(pkg, "_binding_final", inspecting)
+    monkeypatch.setattr(pkg, "_discard_scratch", cleaning)
+    result = _binding_cli(root)
+    expected = {
+        "retire": ("unchanged", 3, ["retire"]),
+        "publish": ("rolled-back", 3, ["publish"]),
+        "final": ("rolled-back", 1, ["final"]),
+        "rollback": ("cannot-establish", 3, ["publish", "rollback"]),
+        "cleanup": ("published-with-residue", 1, ["cleanup"]),
+        "interrupt": ("rolled-back", 130, ["final"]),
+        "cleanup-interrupt": ("published-with-residue", 130, ["cleanup"]),
+    }
+    assert (result["outcome"], result["exit_code"], hits) == expected[failure]
+    assert not staged.exists()
+    if failure == "rollback":
+        assert not root.exists() and _files(retired) == before
+    elif failure.startswith("cleanup"):
+        assert _files(retired) == before
+        assert root.lstat().st_ino != original_id and pkg.pri.verify_s1(root).integrity.is_clean
+    else:
+        assert _files(root) == before and root.lstat().st_ino == original_id
+        assert not retired.exists()
+
+
+@pytest.mark.parametrize("fault", ["s1", "exact-candidate", "inspection", "sanitize-placeholder"])
+def test_binding_final_authorities_reject_at_the_final_root_not_after_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    root = _binding_package(tmp_path)
+    if fault == "sanitize-placeholder":
+        assert _binding_cli(root)["exit_code"] == 0
+    before = _files(root)
+    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
+    hits = []
+    if fault == "s1":
+        verify = pkg.pri.verify_s1
+
+        def unavailable(location):
+            verified = verify(location)
+            if location == root and retired.exists():
+                assert pkg._package_directory_id(root) != pkg._package_directory_id(retired)
+                hits.append(True)
+                return replace(verified, integrity=replace(verified.integrity, status="unassessable"))
+            return verified
+
+        monkeypatch.setattr(pkg.pri, "verify_s1", unavailable)
+    elif fault == "exact-candidate":
+        rename = pkg._rename_retrying
+
+        def changed(source, destination):
+            rename(source, destination)
+            if source == staged and destination == root:
+                path = root / "migration-spec.json"
+                path.write_bytes(path.read_bytes() + b"\n")
+                manifest = json.loads((root / "package-manifest.json").read_bytes())
+                manifest["contents"]["files"] = pkg.package_contents(root)
+                (root / "package-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+                assert pkg.pri.verify_s1(root).integrity.is_clean
+                hits.append(True)
+
+        monkeypatch.setattr(pkg, "_rename_retrying", changed)
+    else:
+        inspect = pkg._binding_observation
+
+        def mismatch(package, location):
+            result = inspect(package, location)
+            if location == root and retired.exists():
+                assert not staged.exists(), "the candidate must already have its final address"
+                hits.append(True)
+                if fault == "inspection":
+                    assert result["codes"] == []
+                    result["codes"] = ["binding_not_current"]
+                else:
+                    assert result["parameters"][0]["placeholder"]
+                    result["parameters"][0]["placeholder"] = False
+            return result
+
+        monkeypatch.setattr(pkg, "_binding_observation", mismatch)
+    result = _binding_cli(root, *(["--sanitize"] if fault == "sanitize-placeholder" else []))
+    assert hits == [True]
+    assert result["outcome"] == "rolled-back"
+    expected = {
+        "s1": (3, "binding_s1_not_clean"),
+        "exact-candidate": (3, "binding_final_candidate_changed"),
+        "inspection": (1, "binding_final_inspection_failed"),
+        "sanitize-placeholder": (3, "binding_sanitize_incomplete"),
+    }
+    assert (result["exit_code"], result["codes"]) == (expected[fault][0], [expected[fault][1]])
+    assert _files(root) == before and not staged.exists() and not retired.exists()
+
+
+@pytest.mark.parametrize("barrier", ["marker", "malformed", "acl", "query-failure"])
+@pytest.mark.parametrize("address", ["original", "retired"])
+def test_binding_checks_the_retired_original_physical_barrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, barrier: str, address: str
+) -> None:
+    from test_credential_gate import _physical_marker  # pylint: disable=import-outside-toplevel
+
+    root = _binding_package(tmp_path)
+    retired = pkg.retired_dir(root)
+    stage = pkg._binding_stage
+    observed = []
+    retained = {}
+
+    def write_marker():
+        if barrier in ("marker", "malformed"):
+            (root / pkg.data_access.MARKER).write_text(
+                json.dumps(_physical_marker() if barrier == "marker" else {}), encoding="utf-8"
+            )
+
+    if address == "original":
+        write_marker()
+        manifest = json.loads((root / "package-manifest.json").read_bytes())
+        manifest["contents"]["files"] = pkg.package_contents(root)
+        (root / "package-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        retained.update(_files(root))
+
+    def after_stage(*args, **kwargs):
+        assert address == "retired", "the original physical stop must refuse before staging"
+        identity = stage(*args, **kwargs)
+        write_marker()
+        retained.update(_files(root))
+        return identity
+
+    def query(args):
+        if args == [str((root if address == "original" else retired) / "fabric")]:
+            observed.append(True)
+            return (5, "private-acl-canary") if barrier == "query-failure" else (0, "fixture:(DENY)(WD)")
+        return 0, "fixture:(F)"
+
+    inspect = pkg.data_access.inspect_physical_barrier
+
+    def observe(location):
+        result = inspect(location)
+        if location == (root if address == "original" else retired) and barrier in ("marker", "malformed"):
+            observed.append(True)
+        return result
+
+    monkeypatch.setattr(pkg, "_binding_stage", after_stage)
+    monkeypatch.setattr(pkg.data_access.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(pkg.data_access, "_icacls", query)
+    monkeypatch.setattr(pkg.data_access, "inspect_physical_barrier", observe)
+    result = _binding_cli(root)
+    expected = {
+        "marker": (1, "physical_marker_blocked"),
+        "malformed": (3, "physical_marker_invalid"),
+        "acl": (1, "physical_acl_blocked"),
+        "query-failure": (3, "physical_acl_query_failed"),
+    }
+    assert observed == [True]
+    assert result["outcome"] == ("rolled-back" if address == "retired" else "unchanged")
+    assert (result["exit_code"], result["codes"]) == (expected[barrier][0], [expected[barrier][1]])
+    assert _files(root) == retained and not retired.exists()
+
+
+@pytest.mark.parametrize("seam", ["stage", "post-retire", "post-publish", "post-swap", "rollback"])
+def test_binding_interrupts_never_report_an_unknown_publication_as_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
+) -> None:
+    root = _binding_package(tmp_path)
+    before = _files(root)
+    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
+    hits = []
+    rename, stage, swap = pkg._rename_retrying, pkg._binding_stage, pkg.replace_dir
+
+    def moving(source, destination):
+        if seam == "rollback" and source == staged and destination == root:
+            raise OSError("force rollback")
+        if seam == "rollback" and source == retired:
+            hits.append(True)
+            raise KeyboardInterrupt()
+        rename(source, destination)
+        if (seam == "post-retire" and source == root and destination == retired) or (
+            seam == "post-publish" and source == staged and destination == root
+        ):
+            hits.append(True)
+            raise KeyboardInterrupt()
+
+    def staging(*args, **kwargs):
+        result = stage(*args, **kwargs)
+        if seam == "stage":
+            hits.append(True)
+            raise KeyboardInterrupt()
+        return result
+
+    def swapping(*args, **kwargs):
+        result = swap(*args, **kwargs)
+        if seam == "post-swap":
+            hits.append(True)
+            raise KeyboardInterrupt()
+        return result
+
+    monkeypatch.setattr(pkg, "_rename_retrying", moving)
+    monkeypatch.setattr(pkg, "_binding_stage", staging)
+    monkeypatch.setattr(pkg, "replace_dir", swapping)
+    result = _binding_cli(root)
+    assert hits == [True]
+    assert result["exit_code"] == 130
+    assert (
+        result["outcome"]
+        == {
+            "stage": "unchanged",
+            "post-retire": "rolled-back",
+            "post-publish": "rolled-back",
+            "post-swap": "published",
+            "rollback": "cannot-establish",
+        }[seam]
+    )
+    assert not staged.exists()
+    if seam == "rollback":
+        assert not root.exists() and _files(retired) == before
+    elif seam == "post-swap":
+        assert pkg.pri.verify_s1(root).integrity.is_clean and not retired.exists()
+        assert _binding_cli(root, "--inspect")["exit_code"] == 0
+    else:
+        assert _files(root) == before and not retired.exists()
 
 
 @pytest.mark.parametrize("change", ["spec", "localized_data", "brief", "projection"])

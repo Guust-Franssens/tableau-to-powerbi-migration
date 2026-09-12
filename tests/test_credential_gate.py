@@ -34,6 +34,95 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _physical_marker() -> dict:
+    """Independent current marker wire shape; creating it must not earn any data-access evidence."""
+    return {
+        "writes_blocked": True,
+        "reachability": "UNPROVEN",
+        "credential_status": "UNKNOWN - nothing has contacted this source yet",
+        "reason": "live data source(s) detected; reachability has NOT been measured",
+        "next_step": "operator action required",
+        "read_this_before_reporting": "No source was contacted.",
+        "sources": ["fixture-source"],
+        "applied": "2026-09-01T00:00:00+00:00",
+    }
+
+
+@pytest.mark.parametrize(
+    ("marker", "acl", "expected"),
+    [
+        (None, (0, "fixture:(F)"), ("clear", "physical_clear")),
+        ("valid", (0, "fixture:(F)"), ("blocked", "physical_marker_blocked")),
+        ("malformed", (0, "fixture:(F)"), ("cannot_establish", "physical_marker_invalid")),
+        ("duplicate", (0, "fixture:(F)"), ("cannot_establish", "physical_query_failed")),
+        ("directory", (0, "fixture:(F)"), ("cannot_establish", "physical_marker_invalid")),
+        (None, (0, "fixture:(DENY)(WD,AD,WA)"), ("blocked", "physical_acl_blocked")),
+        (None, (5, "private-acl-canary (DENY)"), ("cannot_establish", "physical_acl_query_failed")),
+    ],
+)
+def test_physical_barrier_is_read_only_and_keeps_query_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    marker: str | None,
+    acl: tuple[int, str],
+    expected: tuple[str, str],
+) -> None:
+    """Authority: inspect_physical_barrier, not projection state, audit, or the lossy old bool reader."""
+    root = tmp_path / "package"
+    (root / "fabric").mkdir(parents=True)
+    if marker == "directory":
+        (root / cg.MARKER).mkdir()
+    elif marker is not None:
+        raw = json.dumps(_physical_marker()) if marker != "malformed" else "{}"
+        if marker == "duplicate":
+            raw = raw[:-1] + ',"writes_blocked":true}'
+        (root / cg.MARKER).write_text(raw, encoding="utf-8")
+    original = {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    directories = sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_dir())
+    query_calls, deny_calls = [], []
+    denied = cg.denied_dirs
+
+    def query(args: list[str]) -> tuple[int, str]:
+        assert args == [str(root / "fabric")]
+        query_calls.append(True)
+        return acl
+
+    def read_dirs(location: Path, create: bool = True) -> list[Path]:
+        assert location == root and create is False
+        deny_calls.append(True)
+        return denied(location, create=create)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("physical inspection must not call any evidence or mutation authority")
+
+    monkeypatch.setattr(cg.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(cg, "_icacls", query)
+    monkeypatch.setattr(cg, "denied_dirs", read_dirs)
+    for name in ("_audit", "_has_deny_ace", "authorize", "clear_block", "verify", "assess_data_access"):
+        monkeypatch.setattr(cg, name, forbidden)
+    result = cg.inspect_physical_barrier(root)
+    assert result == expected
+    assert query_calls == ([True] if marker is None else [])
+    assert deny_calls == query_calls
+    assert original == {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    assert directories == sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_dir())
+    assert str(root) not in repr(result) and "private-acl-canary" not in repr(result)
+
+
+def test_physical_barrier_does_not_create_fabric_or_follow_a_marker(tmp_path: Path) -> None:
+    from test_package_filesystem import link_directory  # pylint: disable=import-outside-toplevel
+
+    root = tmp_path / "package"
+    root.mkdir()
+    assert cg.inspect_physical_barrier(root) == ("clear", "physical_clear")
+    assert list(root.iterdir()) == []
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link_directory(root / cg.MARKER, outside)
+    assert cg.inspect_physical_barrier(root) == ("cannot_establish", "physical_marker_invalid")
+    assert list(outside.iterdir()) == []
+
+
 def _write_engine_receipt(migration: Path, artifacts: list[Path]) -> None:
     receipt = migration / "engine-output-receipt.json"
     receipt.write_text(

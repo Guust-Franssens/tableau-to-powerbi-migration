@@ -27,6 +27,7 @@ import logging
 import os
 import platform
 import re
+import stat
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -34,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+from bundle_corpus import is_reparse_entry
 from migration_bundle import ENGINE_OUTPUT_DIRS, ENGINE_RECEIPT, is_engine_artifact, load_bundle, sha256_file
 from package_filesystem import is_canonical_key
 
@@ -420,6 +422,87 @@ def denied_dirs(migration: Path, create: bool = True) -> list[Path]:
     if create:
         fabric.mkdir(parents=True, exist_ok=True)
     return [fabric]
+
+
+# The existing authority owns this one additional read-only boundary; no fourth producer module.
+# pylint: disable=too-many-lines
+def inspect_physical_barrier(root: Path) -> tuple[str, str]:  # pylint: disable=too-many-return-statements,too-many-branches
+    """Read only the physical stop, never audit/proof/authorization; return fixed path-free codes."""
+    try:
+        for parent in (root, *root.parents):
+            info = parent.lstat()
+            if is_reparse_entry(info) or not stat.S_ISDIR(info.st_mode):
+                return "cannot_establish", "physical_root_unsafe"
+        marker = root / MARKER
+        try:
+            before = marker.lstat()
+        except FileNotFoundError:
+            before = None
+        if before is not None:
+            if is_reparse_entry(before) or not stat.S_ISREG(before.st_mode):
+                return "cannot_establish", "physical_marker_invalid"
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            with os.fdopen(os.open(marker, flags), "rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+                    return "cannot_establish", "physical_marker_changed"
+                payload = json.loads(
+                    stream.read(), object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite
+                )
+            after = marker.lstat()
+            if is_reparse_entry(after) or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+            ):
+                return "cannot_establish", "physical_marker_changed"
+            fields = {
+                "writes_blocked",
+                "reachability",
+                "credential_status",
+                "reason",
+                "next_step",
+                "read_this_before_reporting",
+                "sources",
+                "applied",
+            }
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != fields
+                or payload["writes_blocked"] is not True
+                or payload["reachability"] != "UNPROVEN"
+                or any(
+                    not isinstance(payload[key], str) or not payload[key]
+                    for key in fields - {"writes_blocked", "sources"}
+                )
+            ):
+                return "cannot_establish", "physical_marker_invalid"
+            if (
+                not isinstance(payload["sources"], list)
+                or not payload["sources"]
+                or any(not isinstance(source, str) or not source.strip() for source in payload["sources"])
+                or len(set(payload["sources"])) != len(payload["sources"])
+                or not _valid_audit_timestamp(payload["applied"])
+            ):
+                return "cannot_establish", "physical_marker_invalid"
+            return "blocked", "physical_marker_blocked"
+        for directory in denied_dirs(root, create=False):
+            try:
+                info = directory.lstat()
+            except FileNotFoundError:
+                continue
+            if is_reparse_entry(info) or not stat.S_ISDIR(info.st_mode):
+                return "cannot_establish", "physical_directory_unsafe"
+            if platform.system() == "Windows":
+                code, output = _icacls([str(directory)])
+                if code != 0:
+                    return "cannot_establish", "physical_acl_query_failed"
+                if "(DENY)" in output.upper():
+                    return "blocked", "physical_acl_blocked"
+        return "clear", "physical_clear"
+    except (OSError, ValueError, _DuplicateJsonKey, _NonFiniteJsonConstant):
+        return "cannot_establish", "physical_query_failed"
 
 
 # Model/report DEFINITION files: their existence means a model or report was built.

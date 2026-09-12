@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -15,11 +16,342 @@ import test_data_access_contract as authority
 import test_package_role_identity as s2
 import test_package_unit_reproductions as producer
 from test_data_access_contract import _root_fixture  # noqa: F401  # shared pytest fixture
-from test_package_unit_gates import UNIT, _brief, _bundle, pkg
+from test_package_unit_gates import DS_LUID, UNIT, _binding_cli, _binding_package, _brief, _bundle, pkg
 
 
 def _files(root: Path) -> dict[str, bytes]:
     return {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+def test_binding_changes_only_the_exact_owned_bytes_and_corresponding_hashes(tmp_path: Path) -> None:
+    """Independent oracle: literal substitution + deep manifest comparison, not the producer's plan."""
+    root = _binding_package(tmp_path, folder=True)
+    before = _files(root)
+    result = _binding_cli(root)
+    assert (result["exit_code"], result["outcome"]) == (0, "published")
+    after = _files(root)
+    expression = f"fabric/{UNIT}.SemanticModel/definition/expressions.tmdl"
+    changed = {key for key in before if before[key] != after[key]}
+    assert set(after) == set(before)
+    assert changed == {expression, "README.md", "handover.md", "package-manifest.json"}
+    old_value = next(line for line in before[expression].decode().splitlines() if "Extract Folder" in line)
+    new_value = f'expression #"Extract Folder" = "{root / "data" / "Extract.Data"}"'
+    assert old_value.endswith('"')
+    assert after[expression] == before[expression].replace(old_value.encode(), new_value.encode())
+    old_manifest, new_manifest = json.loads(before["package-manifest.json"]), json.loads(after["package-manifest.json"])
+    assert new_manifest["data_sources"]["binding"]["state"] == "bound"
+    assert set(new_manifest["data_sources"]["binding"]) == {"state", "token", "command", "reason"}
+    new_manifest["data_sources"]["binding"] = old_manifest["data_sources"]["binding"]
+    old_notes, new_notes = old_manifest["notes"], new_manifest["notes"]
+    assert len(old_notes) == len(new_notes)
+    assert sum(old != new for old, new in zip(old_notes, new_notes, strict=True)) == 1
+    new_manifest["notes"] = old_notes
+    new_manifest["contents"]["files"] = old_manifest["contents"]["files"]
+    assert new_manifest == old_manifest, "no status/revision/data-access/role field may be minted or changed"
+    declared = json.loads(after["package-manifest.json"])["contents"]["files"]
+    assert declared == {
+        key: hashlib.sha256(raw).hexdigest() for key, raw in after.items() if key != "package-manifest.json"
+    }
+    assert _binding_cli(root)["outcome"] == "unchanged"
+    assert _files(root) == after
+
+
+@pytest.mark.parametrize(
+    "seam", ["planner", "digest", "unrelated", "concurrent-reseal", "directory", "empty-directory"]
+)
+def test_binding_mutations_reach_their_intended_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
+) -> None:
+    """Each mutant crosses the named boundary; unrelated setup failure cannot count as a kill."""
+    from test_package_unit_gates import sdf  # pylint: disable=import-outside-toplevel
+
+    root = _binding_package(tmp_path)
+    before = _files(root)
+    hits = []
+    if seam == "planner":
+        rewrite = sdf._rewritten
+
+        def disabled(text, base):
+            new, count, untouched = rewrite(text, base)
+            assert new != text and count > 0
+            hits.append(True)
+            return text, count, untouched
+
+        monkeypatch.setattr(sdf, "_rewritten", disabled)
+    elif seam == "digest":
+        seal = pkg._seal_package
+
+        def omit_digest(dest, manifest, **kwargs):
+            assert manifest["data_sources"]["binding"]["state"] == "bound"
+            kwargs["files"] = json.loads(before["package-manifest.json"])["contents"]["files"]
+            hits.append(True)
+            return seal(dest, manifest, **kwargs)
+
+        monkeypatch.setattr(pkg, "_seal_package", omit_digest)
+    else:
+        stage = pkg._binding_stage
+
+        def mutate(*args, **kwargs):
+            identity = stage(*args, **kwargs)
+            location = root if seam in ("concurrent-reseal", "directory") else args[2]
+            if seam == "directory":
+                replacement = root.with_name("replacement")
+                shutil.copytree(root, replacement)
+                root.rename(root.with_name("previous-original"))
+                replacement.rename(root)
+                assert _files(root) == before, "only physical directory identity changes"
+            elif seam == "empty-directory":
+                (location / "empty-new-directory").mkdir()
+            else:
+                path = location / "migration-spec.json"
+                path.write_bytes(path.read_bytes() + b"\n")
+                producer._reseal(location)
+            assert pkg.pri.verify_s1(location).integrity.is_clean
+            hits.append(True)
+            return identity
+
+        monkeypatch.setattr(pkg, "_binding_stage", mutate)
+    result = _binding_cli(root)
+    assert hits == [True]
+    assert result["exit_code"] != 0
+    expected_codes = {
+        "planner": "binding_planner_delta_invalid",
+        "digest": "binding_staging_failed",
+        "unrelated": "binding_candidate_changed",
+        "concurrent-reseal": "binding_original_changed",
+        "directory": "binding_original_changed",
+        "empty-directory": "binding_candidate_changed",
+    }
+    assert result["codes"] == [expected_codes[seam]], result
+    if seam == "concurrent-reseal":
+        assert _files(root)["migration-spec.json"] == before["migration-spec.json"] + b"\n"
+    else:
+        assert _files(root) == before
+    assert not pkg.staging_dir(root.parent, root.name).exists()
+    assert not pkg.retired_dir(root).exists()
+
+
+def test_binding_legacy_dirty_baseline_is_not_repaired(tmp_path: Path) -> None:
+    from test_package_unit_gates import sdf  # pylint: disable=import-outside-toplevel
+
+    root = _binding_package(tmp_path)
+    path = root / f"fabric/{UNIT}.SemanticModel/definition/expressions.tmdl"
+    text, count, _untouched = sdf._rewritten(path.read_text(encoding="utf-8"), str(root))
+    assert count == 1
+    path.write_text(text, encoding="utf-8")
+    before = _files(root)
+    assert not pkg.pri.verify_s1(root).integrity.is_clean
+    result = _binding_cli(root)
+    assert (result["exit_code"], result["codes"]) == (1, ["binding_s1_not_clean"])
+    assert _files(root) == before
+
+
+def _binding_consumer(parent: Path, provider: Path) -> Path:
+    """Independent S2 fixture plus a strict, pre-existing inherited wire projection."""
+    root = parent / "Consumer"
+    model = json.loads((provider / "package-manifest.json").read_bytes())["artifacts"]["model"]
+    relative = os.path.relpath(provider / model, root / "fabric" / "Revenue.Report").replace("\\", "/")
+    root = s2.workbook_package(root, published={"luid": DS_LUID}, binding=relative)
+    manifest = json.loads((root / "package-manifest.json").read_bytes())
+    manifest["data_sources"] = {
+        "parameter": None,
+        "shipped": [],
+        "omissions": [],
+        "bytes": 0,
+        "neutralized": [],
+        "retained_network": [],
+        "binding": None,
+        "self_contained": True,
+    }
+    s2.seal(root, **manifest)
+    provider_manifest = json.loads((provider / "package-manifest.json").read_bytes())
+    producer._projection_fixture(
+        root,
+        {
+            **producer.LOCAL_PROJECTION,
+            "state": "provider_inherited",
+            "provider_unit": pkg.data_access.provider_reference(provider_manifest["unit"]),
+            "provider_state": "local_import_ready",
+            "effective_scope": "report_only_shared_model",
+            "codes": ["provider-exact"],
+        },
+    )
+    return root
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_binding_provider_cohort_is_explicit_ordered_read_only_and_independently_bound(
+    tmp_path: Path, reverse: bool
+) -> None:
+    provider = _binding_package(tmp_path / "selected", datasource=True)
+    other = _binding_package(tmp_path / "other", datasource=True, datasource_luid=s2.WB_LUID)
+    consumer = _binding_consumer(tmp_path, provider)
+    providers = (other, provider) if reverse else (provider, other)
+    flags = tuple(value for path in providers for value in ("--provider-package", str(path)))
+    assert _binding_cli(consumer, *flags)["codes"] == ["binding_provider_not_bound"]
+    for path in providers:
+        assert _binding_cli(path)["exit_code"] == 0
+    before = [_files(path) for path in (*providers, consumer)]
+    assert _binding_cli(consumer, *flags)["exit_code"] == 0
+    result = _binding_cli(consumer, "--inspect", *flags)
+    assert result["exit_code"] == 0
+    assert result["inspection"]["applicability"] == "not_applicable"
+    assert result["inspection"]["provider_ordinals"] == [1 if reverse else 0]
+    assert before == [_files(path) for path in (*providers, consumer)]
+    assert _binding_cli(consumer, "--sanitize")["exit_code"] == 0, "no local parameters need a provider to sanitize"
+
+
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "wrong", "dirty", "blocked", "nested"])
+def test_binding_provider_refusals_do_not_recurse_or_modify_any_package(tmp_path: Path, fault: str) -> None:
+    provider = _binding_package(tmp_path / "selected", datasource=True)
+    consumer = _binding_consumer(tmp_path, provider)
+    assert _binding_cli(provider)["exit_code"] == 0
+    providers = [provider]
+    if fault == "missing":
+        providers = []
+    elif fault == "duplicate":
+        providers.append(provider)
+    elif fault == "wrong":
+        other = _binding_package(tmp_path / "other", datasource=True, datasource_luid=s2.WB_LUID)
+        assert _binding_cli(other)["exit_code"] == 0
+        providers = [other]
+    elif fault == "dirty":
+        (provider / "data-access.json").write_bytes(b"{}")
+    else:
+        payload = json.loads((provider / "data-access.json").read_bytes())
+        if fault == "blocked":
+            payload.update(
+                state="blocked",
+                validation="not_established",
+                effective_scope=None,
+                max_phase2_claim="none",
+                codes=["probe-no-credential"],
+            )
+        else:
+            payload.update(
+                state="provider_inherited",
+                provider_unit=pkg.data_access.provider_reference("Other"),
+                provider_state="local_import_ready",
+                codes=["provider-exact"],
+            )
+        producer._projection_fixture(provider, payload)
+    before = {str(path): _files(path) for path in (*providers, consumer)}
+    flags = tuple(value for path in providers for value in ("--provider-package", str(path)))
+    result = _binding_cli(consumer, *flags)
+    expected = {
+        "missing": (3, "binding_s2_not_clean"),
+        "duplicate": (1, "binding_cohort_duplicate"),
+        "wrong": (3, "binding_s2_not_clean"),
+        "dirty": (1, "binding_s1_not_clean"),
+        "blocked": (1, "binding_data_access_refused"),
+        "nested": (3, "binding_source_facts_mismatch"),
+    }
+    assert (result["exit_code"], result["codes"]) == (expected[fault][0], [expected[fault][1]])
+    assert before == {str(path): _files(path) for path in (*providers, consumer)}
+
+
+@pytest.mark.parametrize("seam", ["provider-reseal", "ordinal", "boolean-ordinal"])
+def test_binding_provider_recheck_is_against_the_fixed_held_cohort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
+) -> None:
+    provider = _binding_package(tmp_path / "selected", datasource=True)
+    assert _binding_cli(provider)["exit_code"] == 0
+    consumer = (
+        _binding_package(tmp_path / "owned") if seam == "provider-reseal" else _binding_consumer(tmp_path, provider)
+    )
+    before = _files(consumer)
+    hits = []
+    if seam == "provider-reseal":
+        stage = pkg._binding_stage
+
+        def changed(*args, **kwargs):
+            result = stage(*args, **kwargs)
+            path = provider / "data-access.json"
+            path.write_bytes(path.read_bytes() + b"\n")
+            producer._reseal(provider)
+            assert pkg.pri.verify_s1(provider).integrity.is_clean
+            hits.append(True)
+            return result
+
+        monkeypatch.setattr(pkg, "_binding_stage", changed)
+    else:
+        verify = pkg.pri.verify_phase1_role_identity
+        calls = []
+
+        def switched(roots, **kwargs):
+            results = verify(roots, **kwargs)
+            if len(roots) == 2:
+                calls.append(True)
+                if len(calls) == 2:
+                    original = results[-1]
+                    ordinal = False if seam == "boolean-ordinal" else 1
+                    mutated = replace(
+                        original, dependencies=(replace(original.dependencies[0], provider_ordinal=ordinal),)
+                    )
+                    assert mutated == original, "ordinary dataclass equality deliberately omits ordinal"
+                    hits.append(True)
+                    return (*results[:-1], mutated)
+            return results
+
+        monkeypatch.setattr(pkg.pri, "verify_phase1_role_identity", switched)
+    result = _binding_cli(consumer, "--provider-package", str(provider))
+    assert hits == [True]
+    assert (result["exit_code"], result["codes"]) == (3, ["binding_cohort_changed"])
+    assert _files(consumer) == before
+
+
+@pytest.mark.parametrize("state", ["missing", "malformed", "blocked", "cannot_establish", "authorized_model_only"])
+def test_binding_existing_data_access_is_required_and_never_upgraded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    root = _binding_package(tmp_path, datasource=True)
+    manifest_path = root / "package-manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    path = root / "data-access.json"
+    payload = json.loads(path.read_bytes())
+    if state == "missing":
+        manifest["artifacts"].pop("data_access")
+    elif state == "malformed":
+        path.write_bytes(b"{}")
+    else:
+        payload.update(state=state, validation="not_established", effective_scope=None, max_phase2_claim="none")
+        payload["codes"] = ["audit-missing"] if state == "cannot_establish" else ["probe-no-credential"]
+        if state == "authorized_model_only":
+            spec_path = root / "migration-spec.json"
+            spec = json.loads(spec_path.read_bytes())
+            spec["data_sources"][0]["connection"] = copy.deepcopy(authority.LIVE)
+            spec_path.write_text(json.dumps(spec), encoding="utf-8")
+            payload.update(
+                source_keys=list(pkg.data_access.package_spec_facts(spec).live_source_keys),
+                effective_scope="model_only",
+                validation="unvalidated",
+                max_phase2_claim="structural_only",
+                codes=["brief-model-only", "human-authorize"],
+            )
+            brief = root / "migration-brief.md"
+            brief.write_text(
+                brief.read_text(encoding="utf-8").replace('"stop"', '"model_only_unvalidated"'), encoding="utf-8"
+            )
+        path.write_bytes((json.dumps(payload) + "\n").encode())
+        assert pkg.data_access.read_data_access(path).state == state
+    manifest["contents"]["files"] = pkg.package_contents(root)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    before = _files(root)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("binder attempted assessment, proof creation or reassembly")
+
+    for name in ("assess_data_access", "authorize", "clear_block", "_audit", "verify"):
+        monkeypatch.setattr(pkg.data_access, name, forbidden)
+    monkeypatch.setattr(pkg, "_assemble_unit", forbidden)
+    result = _binding_cli(root)
+    if state == "authorized_model_only":
+        assert result["exit_code"] == 0
+        assert (root / "data-access.json").read_bytes() == before["data-access.json"]
+        assert pkg.data_access.read_data_access(path).max_phase2_claim == "structural_only"
+    else:
+        assert result["exit_code"] == (1 if state == "blocked" else 3)
+        assert _files(root) == before
 
 
 def _local_bundle(parent: Path) -> tuple[Path, Path, dict]:
