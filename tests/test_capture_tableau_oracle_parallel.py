@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from email.utils import formatdate
 from pathlib import Path
+from types import GeneratorType
 
 import pytest
 
@@ -29,6 +31,7 @@ WB_3 = "33333333-3333-4333-8333-333333333333"
 SESSION_LOST = (
     b"<?xml version='1.0'?><tsResponse><error code='401002'><summary>Unauthorized Access</summary></error></tsResponse>"
 )
+HANG_GUARD_SEC = 5
 
 
 def _creds() -> oracle.SiteCredentials:
@@ -130,6 +133,299 @@ def _main_env() -> dict[str, str]:
         "TABLEAU_PAT_SECRET": "parallel-capture-secret",
         "TABLEAU_REST_API_VERSION": "3.29",
     }
+
+
+def _configure_main(monkeypatch, session, views, out_dir, workbook_names=None) -> None:
+    """Keep new coordinator controls on main's real consumption and finally paths."""
+    monkeypatch.setattr(oracle, "resolve_env", lambda _path: _main_env())
+    monkeypatch.setattr(oracle, "TableauSession", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(oracle, "select_views", lambda *_args, **_kwargs: (views, workbook_names or {}))
+    monkeypatch.setattr(oracle.tableau_view_types, "resolve_and_stamp", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["capture_tableau_oracle.py", "--out", str(out_dir), "--workers", "2"],
+    )
+
+
+@pytest.mark.parametrize(("workers", "view_count"), [(1, 0), (4, 0), (1, 2)])
+def test_empty_and_serial_iteration_are_closeable_without_an_executor(monkeypatch, tmp_path, workers, view_count):
+    """Empty and serial iteration share the close contract without creating pool resources."""
+    captured = []
+    views = [_view(LUID_1, WB_1), _view(LUID_2, WB_2)][:view_count]
+
+    def no_executor(*_args, **_kwargs):
+        pytest.fail("empty/serial iteration must not create an executor")
+
+    def capture(_session, view, *_args, **_kwargs):
+        captured.append(view["id"])
+        return _record(view)
+
+    monkeypatch.setattr(oracle, "ThreadPoolExecutor", no_executor)
+    monkeypatch.setattr(oracle, "capture_view", capture)
+    records = oracle._capture_selected_views(
+        _session(), views, out_dir=tmp_path, wants=frozenset(), api_overrides={}, max_age=1, workers=workers
+    )
+    assert isinstance(records, GeneratorType)
+    assert not captured
+    try:
+        if views:
+            assert next(records)["view_luid"] == LUID_1
+            assert captured == [LUID_1], "serial capture must yield before starting the next view"
+        else:
+            assert not list(records)
+    finally:
+        records.close()
+    assert not list(records)
+    assert captured == ([LUID_1] if views else [])
+
+
+@pytest.mark.parametrize("workers", [1, 2, 4])
+def test_closing_before_first_next_allocates_no_executor(monkeypatch, tmp_path, workers):
+    """Even a nonempty parallel generator owns no executor before iteration begins."""
+
+    def no_executor(*_args, **_kwargs):
+        pytest.fail("an unstarted generator must own no executor")
+
+    monkeypatch.setattr(oracle, "ThreadPoolExecutor", no_executor)
+    records = oracle._capture_selected_views(
+        _session(),
+        [_view(LUID_1, WB_1), _view(LUID_2, WB_2)],
+        out_dir=tmp_path,
+        wants=frozenset(),
+        api_overrides={},
+        max_age=1,
+        workers=workers,
+    )
+    assert isinstance(records, GeneratorType)
+    records.close()
+    assert not list(records)
+
+
+def test_first_view_progress_is_visible_while_later_sibling_is_blocked(  # pylint: disable=too-many-locals
+    monkeypatch, tmp_path, caplog
+):
+    """The real progress logger runs before a later selected export is allowed to finish."""
+    session = _MainSession()
+    second_started = threading.Event()
+    release_second = threading.Event()
+    first_progress = threading.Event()
+    progress = []
+    out_dir = tmp_path / "oracle"
+    views = [_view(LUID_1, WB_1, "First"), _view(LUID_2, WB_2, "Second")]
+    real_progress = oracle.log_progress
+
+    def capture(_session, view, *_args, **_kwargs):
+        if view["id"] == LUID_1:
+            assert second_started.wait(HANG_GUARD_SEC)
+        else:
+            second_started.set()
+            assert release_second.wait(HANG_GUARD_SEC)
+        return _record(view)
+
+    def observe_progress(index, total, record, redactor):
+        real_progress(index, total, record, redactor)
+        progress.append(record["view_luid"])
+        if index == 1:
+            first_progress.set()
+
+    _configure_main(monkeypatch, session, views, out_dir)
+    monkeypatch.setattr(oracle, "capture_view", capture)
+    monkeypatch.setattr(oracle, "log_progress", observe_progress)
+
+    with caplog.at_level(logging.INFO, logger=oracle.LOG.name), ThreadPoolExecutor(max_workers=1) as harness:
+        run = harness.submit(oracle.main)
+        try:
+            assert first_progress.wait(HANG_GUARD_SEC), "first-view progress must not wait for the blocked sibling"
+            assert progress == [LUID_1]
+            assert any("First" in message and "1/2" in message for message in caplog.messages)
+            assert session.signouts == 0
+            assert not (out_dir / "oracle-manifest.json").exists()
+        finally:
+            release_second.set()
+        assert run.result(timeout=HANG_GUARD_SEC) == 0
+    assert progress == [LUID_1, LUID_2]
+    assert session.signouts == 1
+
+
+@pytest.mark.parametrize("fault_site", ["enrichment", "log_progress"])
+def test_coordinator_interrupt_drains_before_signout(  # pylint: disable=too-many-locals,too-many-statements
+    monkeypatch, tmp_path, fault_site
+):
+    """Either consumer fault must enter drain before any active worker exits or sign-out occurs."""
+    second_started = threading.Event()
+    fault_raised = threading.Event()
+    drain_entered = threading.Event()
+    release_workers = threading.Event()
+    signed_out = threading.Event()
+    state_lock = threading.Lock()
+    events = []
+    active_workers = set()
+    active_at_signout = []
+    data_requests = []
+    post_signout_requests = []
+    iterators = []
+    out_dir = tmp_path / "oracle"
+    views = [_view(LUID_1, WB_1), _view(LUID_2, WB_2), _view(LUID_3, WB_3)]
+    real_worker = oracle._capture_worker
+    real_iterator = oracle._capture_selected_views
+
+    class HeldFirstSlot(Future):
+        """Keep the first worker occupied after its slot is published, leaving view three pending."""
+
+        def set_result(self, result) -> None:
+            super().set_result(result)
+            if result["view_luid"] == LUID_1:
+                assert release_workers.wait(HANG_GUARD_SEC)
+
+    class ObservedExecutor(ThreadPoolExecutor):
+        """Observe the existing shutdown seam, not a substitute scheduler."""
+
+        def shutdown(self, wait=True, *, cancel_futures=False) -> None:
+            assert wait and cancel_futures
+            with state_lock:
+                events.append("drain")
+            drain_entered.set()
+            super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+    def observed_worker(*args, **kwargs):
+        identity = threading.get_ident()
+        with state_lock:
+            active_workers.add(identity)
+        try:
+            return real_worker(*args, **kwargs)
+        finally:
+            with state_lock:
+                active_workers.remove(identity)
+                events.append("worker-exit")
+
+    def retained_iterator(*args, **kwargs):
+        records = real_iterator(*args, **kwargs)
+        iterators.append(records)
+        return records
+
+    def transport(req, **_kwargs):
+        if req.full_url.endswith("/auth/signin"):
+            return 200, json.dumps({"credentials": {"token": "pool-token", "site": {"id": "site-id"}}}).encode(), {}
+        if req.full_url.endswith("/auth/signout"):
+            with state_lock:
+                active_at_signout.append(len(active_workers))
+                events.append("signout")
+            signed_out.set()
+            return 204, b"", {}
+        with state_lock:
+            data_requests.append(req.full_url)
+            if signed_out.is_set():
+                post_signout_requests.append(req.full_url)
+        if LUID_1 in req.full_url:
+            assert second_started.wait(HANG_GUARD_SEC)
+        elif LUID_2 in req.full_url:
+            second_started.set()
+            assert release_workers.wait(HANG_GUARD_SEC)
+        return 200, b"value\n1\n", {"Content-Type": "text/csv", "Content-Length": "8"}
+
+    def interrupt(*_args, **_kwargs):
+        assert second_started.is_set()
+        with state_lock:
+            assert len(active_workers) == 2
+            events.append("fault")
+        fault_raised.set()
+        raise KeyboardInterrupt(f"controlled {fault_site} interruption")
+
+    class InterruptingNames(dict):
+        """Inject at workbook-name enrichment independently of the progress call."""
+
+        def get(self, key, default=None):
+            return interrupt(key, default)
+
+    def no_manifest(*_args, **_kwargs):
+        pytest.fail("a coordinator interruption must not publish a manifest")
+
+    session = _session()
+    names = InterruptingNames({WB_1: "One"}) if fault_site == "enrichment" else {WB_1: "One"}
+    _configure_main(monkeypatch, session, views, out_dir, names)
+    monkeypatch.setattr(oracle, "_request", transport)
+    monkeypatch.setattr(oracle, "Future", HeldFirstSlot)
+    monkeypatch.setattr(oracle, "ThreadPoolExecutor", ObservedExecutor)
+    monkeypatch.setattr(oracle, "_capture_worker", observed_worker)
+    monkeypatch.setattr(oracle, "_capture_selected_views", retained_iterator)
+    monkeypatch.setattr(oracle, "write_manifest", no_manifest)
+    if fault_site == "log_progress":
+        monkeypatch.setattr(oracle, "log_progress", interrupt)
+
+    with ThreadPoolExecutor(max_workers=1) as harness:
+        run = harness.submit(oracle.main)
+        try:
+            assert fault_raised.wait(HANG_GUARD_SEC)
+            assert drain_entered.wait(HANG_GUARD_SEC), "the consumer must close its iterator before sign-out"
+            assert not signed_out.is_set()
+        finally:
+            release_workers.set()
+            try:
+                with pytest.raises(KeyboardInterrupt, match=f"controlled {fault_site} interruption"):
+                    run.result(timeout=HANG_GUARD_SEC)
+            finally:
+                for records in iterators:
+                    records.close()
+
+    assert events == ["fault", "drain", "worker-exit", "worker-exit", "signout"]
+    assert active_at_signout == [0]
+    assert not active_workers
+    assert len(data_requests) == 2
+    assert all(LUID_3 not in path for path in data_requests)
+    assert not post_signout_requests
+    assert not (out_dir / "oracle-manifest.json").exists()
+
+
+def test_normal_exhaustion_drains_before_manifest(monkeypatch, tmp_path):
+    """Successful records are progressive, but manifest publication waits for worker exit and shutdown."""
+    session = _MainSession()
+    release_workers = threading.Event()
+    all_progress = threading.Event()
+    events = []
+    real_worker = oracle._capture_worker
+    views = [_view(LUID_1, WB_1), _view(LUID_2, WB_2)]
+
+    class ObservedExecutor(ThreadPoolExecutor):
+        """Record completed shutdown, including its normal-exhaustion cancellation policy."""
+
+        def shutdown(self, wait=True, *, cancel_futures=False) -> None:
+            assert wait and not cancel_futures
+            super().shutdown(wait=wait, cancel_futures=cancel_futures)
+            events.append("shutdown")
+
+    def held_worker(*args, **kwargs):
+        real_worker(*args, **kwargs)
+        assert release_workers.wait(HANG_GUARD_SEC)
+        events.append("worker-exit")
+
+    def progress(index, total, *_args):
+        if index == total:
+            all_progress.set()
+
+    def manifest(*_args, **_kwargs):
+        assert events == ["worker-exit", "worker-exit", "shutdown"]
+        events.append("manifest")
+        return 0
+
+    _configure_main(monkeypatch, session, views, tmp_path / "oracle")
+    monkeypatch.setattr(oracle, "ThreadPoolExecutor", ObservedExecutor)
+    monkeypatch.setattr(oracle, "_capture_worker", held_worker)
+    monkeypatch.setattr(oracle, "capture_view", lambda _session, view, *_args, **_kwargs: _record(view))
+    monkeypatch.setattr(oracle, "log_progress", progress)
+    monkeypatch.setattr(oracle, "write_manifest", manifest)
+
+    with ThreadPoolExecutor(max_workers=1) as harness:
+        run = harness.submit(oracle.main)
+        try:
+            assert all_progress.wait(HANG_GUARD_SEC)
+            assert not events
+            assert session.signouts == 0
+        finally:
+            release_workers.set()
+        assert run.result(timeout=HANG_GUARD_SEC) == 0
+    assert events == ["worker-exit", "worker-exit", "shutdown", "manifest"]
+    assert session.signouts == 1
 
 
 def test_workers_default_to_serial_and_values_outside_one_through_four_are_rejected(tmp_path, capsys):
@@ -390,11 +686,14 @@ def test_one_signin_precedes_overlapping_authenticated_requests(monkeypatch, tmp
     assert authenticated_tokens == ["one-pool-token", "one-pool-token"]
 
 
-def test_two_workers_losing_one_token_generation_reauthenticate_once(monkeypatch):
-    """Two 401002 responses for the old generation share one refresh and both reuse its token."""
+@pytest.mark.parametrize("refresh_owner", ["one", "two"])
+def test_two_workers_losing_one_token_generation_reauthenticate_once(monkeypatch, refresh_owner):
+    """Either worker may own the refresh; both exports must count their own admitted recovery."""
     signin_count = 0
     count_lock = threading.Lock()
     old_token_requests = threading.Barrier(2)
+    refresh_completed = threading.Event()
+    requests = []
     new_token_requests: list[str] = []
 
     def transport(  # pylint: disable=unused-argument
@@ -409,8 +708,12 @@ def test_two_workers_losing_one_token_generation_reauthenticate_once(monkeypatch
             return 200, payload, {}
 
         token = req.get_header("X-tableau-auth")
+        with count_lock:
+            requests.append((req.full_url.rsplit("/", 3)[-2], token))
         if token == "old-session-token":
             old_token_requests.wait(timeout=2)
+            if f"/{refresh_owner}/" not in req.full_url:
+                assert refresh_completed.wait(HANG_GUARD_SEC)
             return 401, SESSION_LOST, {}
         if token == "new-session-token":
             with count_lock:
@@ -421,6 +724,15 @@ def test_two_workers_losing_one_token_generation_reauthenticate_once(monkeypatch
     monkeypatch.setattr(oracle, "_request", transport)
     session = oracle.TableauSession(_creds(), oracle.RetryPolicy(max_attempts=3, budget_sec=60))
     session.sign_in()
+    real_refresh = session._reauthenticate_if_current
+
+    def observed_refresh(generation):
+        replaced = real_refresh(generation)
+        if replaced:
+            refresh_completed.set()
+        return replaced
+
+    monkeypatch.setattr(session, "_reauthenticate_if_current", observed_refresh)
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(session.export, ("/views/one/data", "/views/two/data")))
@@ -428,9 +740,154 @@ def test_two_workers_losing_one_token_generation_reauthenticate_once(monkeypatch
     stats = [result[2] for result in results]
     assert signin_count == 2, "one initial sign-in plus exactly one shared reauthentication"
     assert session.reauth_count == 1
-    assert sorted(item["reauths"] for item in stats) == [0, 1]
+    assert [item["reauths"] for item in stats] == [1, 1]
+    assert [item["retries"] for item in stats] == [1, 1]
     assert [item["retry_reasons"] for item in stats] == [["session_lost"], ["session_lost"]]
+    assert session.retry_count == 0
+    assert sorted(requests) == [
+        ("one", "new-session-token"),
+        ("one", "old-session-token"),
+        ("two", "new-session-token"),
+        ("two", "old-session-token"),
+    ]
     assert len(new_token_requests) == 2
+
+
+def test_a_multi_generation_jump_is_one_local_recovery(monkeypatch):
+    """A late old-token response reuses two replacements but admits just one recovery of its own."""
+    both_old = threading.Barrier(2)
+    two_replacements_ready = threading.Event()
+    signins = []
+    requests = {"leader": [], "late": []}
+
+    def transport(req, **_kwargs):
+        if req.full_url.endswith("/auth/signin"):
+            token = f"generation-{len(signins) + 1}-token"
+            signins.append(token)
+            return 200, json.dumps({"credentials": {"token": token, "site": {"id": "site-id"}}}).encode(), {}
+        name = req.full_url.rsplit("/", 3)[-2]
+        token = req.get_header("X-tableau-auth")
+        requests[name].append(token)
+        if token == "generation-1-token":
+            both_old.wait(timeout=HANG_GUARD_SEC)
+            if name == "late":
+                assert two_replacements_ready.wait(HANG_GUARD_SEC)
+            return 401, SESSION_LOST, {}
+        if name == "leader" and token == "generation-2-token":
+            return 401, SESSION_LOST, {}
+        assert token == "generation-3-token"
+        two_replacements_ready.set()
+        return 200, b"value\n1\n", {"Content-Type": "text/csv"}
+
+    monkeypatch.setattr(oracle, "_request", transport)
+    session = _session()
+    session.sign_in()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(session.export, ("/views/leader/data", "/views/late/data")))
+
+    stats = [result[2] for result in results]
+    assert [item["reauths"] for item in stats] == [2, 1]
+    assert [item["retries"] for item in stats] == [2, 1]
+    assert [item["retry_reasons"] for item in stats] == [["session_lost", "session_lost"], ["session_lost"]]
+    assert session.reauth_count == 2
+    assert session.retry_count == 0
+    assert signins == ["generation-1-token", "generation-2-token", "generation-3-token"]
+    assert requests == {
+        "leader": ["generation-1-token", "generation-2-token", "generation-3-token"],
+        "late": ["generation-1-token", "generation-3-token"],
+    }
+
+
+def test_reusing_replacements_still_exhausts_the_local_recovery_cap(monkeypatch):  # pylint: disable=too-many-locals
+    """After two reused replacements the third 401002 must refuse, not buy a third recovery as owner."""
+    assert oracle.MAX_REAUTH_PER_VIEW == 2
+    stale_requests = [threading.Event(), threading.Event()]
+    replacements = [threading.Event(), threading.Event()]
+    signins = []
+    requests = {"owner": [], "reuser": []}
+    recoveries = {"owner": [], "reuser": []}
+    caller = threading.local()
+
+    def transport(req, **_kwargs):
+        if req.full_url.endswith("/auth/signin"):
+            token = f"generation-{len(signins) + 1}-token"
+            signins.append(token)
+            return 200, json.dumps({"credentials": {"token": token, "site": {"id": "site-id"}}}).encode(), {}
+        name = caller.name
+        token = req.get_header("X-tableau-auth")
+        attempt = len(requests[name])
+        requests[name].append(token)
+        if attempt < 2:
+            if name == "reuser":
+                stale_requests[attempt].set()
+                assert replacements[attempt].wait(HANG_GUARD_SEC)
+            else:
+                assert stale_requests[attempt].wait(HANG_GUARD_SEC)
+            return 401, SESSION_LOST, {}
+        if name == "reuser" and attempt == 2:
+            return 401, SESSION_LOST, {}
+        return 200, b"value\n1\n", {"Content-Type": "text/csv"}
+
+    monkeypatch.setattr(oracle, "_request", transport)
+    session = oracle.TableauSession(_creds(), oracle.RetryPolicy(max_attempts=4, budget_sec=60))
+    session.sign_in()
+    real_refresh = session._reauthenticate_if_current
+
+    def observed_refresh(generation):
+        recoveries[caller.name].append(generation)
+        replaced = real_refresh(generation)
+        if replaced and generation <= 2:
+            replacements[generation - 1].set()
+        return replaced
+
+    def export(name):
+        caller.name = name
+        return session.export(f"/views/{name}/data")
+
+    monkeypatch.setattr(session, "_reauthenticate_if_current", observed_refresh)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        owner = pool.submit(export, "owner")
+        reuser = pool.submit(export, "reuser")
+        owner_stats = owner.result(timeout=HANG_GUARD_SEC)[2]
+        with pytest.raises(oracle.ExportFailed) as excinfo:
+            reuser.result(timeout=HANG_GUARD_SEC)
+
+    assert excinfo.value.kind == "session_lost"
+    assert owner_stats["reauths"] == 2
+    assert owner_stats["retry_reasons"] == ["session_lost", "session_lost"]
+    assert recoveries == {"owner": [1, 2], "reuser": [1, 2]}
+    assert requests == {
+        "owner": ["generation-1-token", "generation-2-token", "generation-3-token"],
+        "reuser": ["generation-1-token", "generation-2-token", "generation-3-token"],
+    }
+    assert signins == ["generation-1-token", "generation-2-token", "generation-3-token"]
+    assert session.reauth_count == 2
+    assert session.retry_count == 0
+
+
+@pytest.mark.parametrize("already_replaced", [False, True])
+def test_final_attempt_neither_refreshes_nor_reuses_a_generation(monkeypatch, already_replaced):
+    """Even a reusable newer generation cannot admit recovery when no request attempt remains."""
+    session = _session()
+    requests = []
+
+    def transport(req, **_kwargs):
+        requests.append(req.full_url)
+        if already_replaced:
+            session._publish_auth("replacement-token", "site-id")
+        return 401, SESSION_LOST, {}
+
+    def no_recovery(_generation):
+        pytest.fail("the final attempt cannot admit refresh or reuse")
+
+    monkeypatch.setattr(oracle, "_request", transport)
+    monkeypatch.setattr(session, "_reauthenticate_if_current", no_recovery)
+    with pytest.raises(oracle.ExportFailed, match="HTTP 401") as excinfo:
+        session.export("/views/one/data", retry=oracle.RetryPolicy(max_attempts=1))
+    assert excinfo.value.kind == "session_lost"
+    assert "the last this policy allows" in excinfo.value.detail
+    assert len(requests) == 1
+    assert session.reauth_count == session.retry_count == 0
 
 
 def test_failed_generation_refresh_is_reused_as_one_terminal_failure(monkeypatch):
@@ -547,6 +1004,110 @@ class _VirtualClock:
         """Move an already-in-flight response later on the monotonic timeline."""
         with self.lock:
             self.value += seconds
+
+
+@pytest.mark.parametrize("route", ["snapshot", "direct", "export-admit", "export-refuse"])
+def test_post_auth_admission_credits_measured_external_wait_once(  # pylint: disable=too-many-locals,too-many-statements
+    monkeypatch, route
+):
+    """A cooldown published during auth wins; only its actual wait, not auth time, buys retry budget."""
+    clock = _VirtualClock()
+    auth_waiting = threading.Event()
+    caller = threading.local()
+    auth_acquisitions = 0
+    admissions = []
+    transports = []
+    pool_sleeps = []
+    monkeypatch.setattr(oracle.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(oracle.time, "perf_counter", clock.perf_counter)
+    monkeypatch.setattr(oracle.time, "sleep", clock.sleep)
+    monkeypatch.setattr(oracle, "backoff_delay", lambda *_args, **_kwargs: 1.0)
+    budget = 4.75 if route == "export-refuse" else 5.0
+    session = oracle.TableauSession(_creds(), oracle.RetryPolicy(max_attempts=2, budget_sec=budget))
+    session.token, session.site_id = "initial-session-token", "site-id"
+
+    class ObservedAuthLock:
+        """Signal attempted auth acquisition before blocking behind the publishing thread."""
+
+        def __init__(self) -> None:
+            self.lock = threading.RLock()
+
+        def __enter__(self):
+            nonlocal auth_acquisitions
+            if getattr(caller, "target", False):
+                auth_acquisitions += 1
+                auth_waiting.set()
+            self.lock.acquire()
+            return self
+
+        def __exit__(self, *_args) -> None:
+            self.lock.release()
+
+    def pool_sleep(seconds):
+        pool_sleeps.append(seconds)
+        clock.sleep(seconds)
+        clock.advance(0.25)  # Credit measured sleep, including overshoot, rather than advertised delay.
+
+    real_admission = session._wait_for_pool_cooldown
+
+    def observed_admission(deadline=None, owner=None):
+        started = clock.monotonic()
+        credit = real_admission(deadline, owner)
+        admissions.append((started, deadline, credit))
+        return credit
+
+    def transport(req, *, deadline, **_kwargs):
+        if not transports:
+            assert auth_acquisitions == 1, "the export snapshot must not reacquire auth in the request adapter"
+        transports.append((clock.monotonic(), deadline, req.get_header("X-tableau-auth")))
+        if route.startswith("export-") and len(transports) == 1:
+            clock.advance(1.0)
+            return 503, b"gateway", {}
+        return 200, b"value\n1\n", {"Content-Type": "text/csv"}
+
+    def request():
+        caller.target = True
+        if route == "direct":
+            return session._request("GET", "/views/one/data", deadline=20.0)
+        if route == "snapshot":
+            return session._request_with_generation("/views/one/data", deadline=20.0, export_id=object())
+        return session.export("/views/one/data", hard_deadline=20.0)
+
+    monkeypatch.setattr(session, "_auth_lock", ObservedAuthLock())
+    monkeypatch.setattr(session, "_sleep", pool_sleep)
+    monkeypatch.setattr(session, "_wait_for_pool_cooldown", observed_admission)
+    monkeypatch.setattr(oracle, "_request", transport)
+    session._request_context.export_id = object()
+    session._observe_rate_limit(429, {"Retry-After": "5"})
+    with ThreadPoolExecutor(max_workers=1) as harness:
+        with session._auth_lock:
+            run = harness.submit(request)
+            assert auth_waiting.wait(HANG_GUARD_SEC)
+            clock.advance(3.0)
+            session._publish_auth("post-auth-token", "site-id")
+            session._observe_rate_limit(429, {"Retry-After": "7"})
+        del session._request_context.export_id
+        if route == "export-refuse":
+            with pytest.raises(oracle.ExportFailed, match="retry budget exhausted"):
+                run.result(timeout=HANG_GUARD_SEC)
+        else:
+            result = run.result(timeout=HANG_GUARD_SEC)
+            if route == "snapshot":
+                assert result[3:5] == (1, 7.25)
+            elif route == "export-admit":
+                assert result[2]["retries"] == 1
+
+    expected_credit = 0.0 if route == "direct" else 7.25
+    expected_admissions = [(3.0, 20.0, expected_credit)]
+    expected_transports = [(10.25, 20.0, "post-auth-token")]
+    if route == "export-admit":
+        expected_admissions.append((12.25, 20.0, 0.0))
+        expected_transports.append((12.25, 20.0, "post-auth-token"))
+    assert admissions == expected_admissions, "each request must have exactly one authoritative post-auth admission"
+    assert transports == expected_transports, "external credit must never move the absolute hard deadline"
+    assert pool_sleeps == [7.0]
+    assert clock.sleeps == ([7.0, 1.0] if route == "export-admit" else [7.0])
+    assert session.retry_count == (1 if route == "export-admit" else 0)
 
 
 def test_retry_after_stops_later_pool_requests_until_shared_cooldown(monkeypatch):
@@ -736,18 +1297,23 @@ def test_numeric_and_http_date_retry_after_are_equally_refused_by_an_insufficien
     assert not clock.sleeps
 
 
-@pytest.mark.parametrize("kind", ["delay-seconds", "http-date"])
-def test_numeric_and_http_date_retry_after_are_equally_admitted_without_double_sleep(  # pylint: disable=too-many-locals
+@pytest.mark.parametrize("kind", ["delay-seconds", "http-date", "huge", "zero", "invalid"])
+def test_retry_after_is_parsed_once_and_uses_one_wait(  # pylint: disable=too-many-locals
     monkeypatch, kind
 ):
-    """Both seven-second forms use one shared cooldown wait when the budget is sufficient."""
+    """One parser result controls admission and waiting, including exact zero and missing-delay fallback."""
     clock = _VirtualClock()
     epoch = 1_800_000_000.0
     calls = 0
-    value = _retry_after_value(kind, epoch)
+    value = {"huge": "9" * 100_000, "zero": "0", "invalid": "7suffix"}.get(kind, _retry_after_value(kind, epoch))
     pool_sleeps: list[float] = []
     export_sleeps: list[float] = []
+    fallback_calls = []
     parser_calls = 0
+
+    def fallback(attempt):
+        fallback_calls.append(attempt)
+        return 1.0
 
     def pool_sleep(seconds: float) -> None:
         pool_sleeps.append(seconds)
@@ -770,7 +1336,8 @@ def test_numeric_and_http_date_retry_after_are_equally_admitted_without_double_s
     monkeypatch.setattr(oracle.time, "monotonic", clock.monotonic)
     monkeypatch.setattr(oracle.time, "perf_counter", clock.perf_counter)
     monkeypatch.setattr(oracle.time, "sleep", export_sleep)
-    session = oracle.TableauSession(_creds(), oracle.RetryPolicy(max_attempts=2, budget_sec=8.0))
+    monkeypatch.setattr(oracle, "backoff_delay", fallback)
+    session = oracle.TableauSession(_creds(), oracle.RetryPolicy(max_attempts=2, budget_sec=31.0))
     session.token, session.site_id = "initial-session-token", "site-id"
     session._sleep = pool_sleep
     session._wall_time = lambda: epoch + clock.monotonic()
@@ -789,9 +1356,12 @@ def test_numeric_and_http_date_retry_after_are_equally_admitted_without_double_s
     assert payload == b"value\n1\n"
     assert calls == 2
     assert stats["retries"] == 1
-    assert pool_sleeps == [7.0]
-    assert not export_sleeps
-    assert clock.monotonic() == 7.0
+    delay = {"huge": 30.0, "zero": 0.0, "invalid": 1.0}.get(kind, 7.0)
+    shared = kind not in {"zero", "invalid"}
+    assert pool_sleeps == ([delay] if shared else [])
+    assert export_sleeps == ([] if shared else [delay])
+    assert fallback_calls == ([1] if kind == "invalid" else [])
+    assert clock.monotonic() == delay
     assert parser_calls == 1
 
 
@@ -844,11 +1414,120 @@ def test_valid_integer_retry_after_keeps_the_existing_cap():
     assert session._retry_after_delay({"Retry-After": "999"}) == oracle.BACKOFF_CAP_SEC
 
 
-@pytest.mark.parametrize("digits", [308, 309, 310])
-def test_hundreds_of_ascii_integer_digits_are_capped_before_float_conversion(digits):
-    """Valid huge delay-seconds values reach the existing cap without integer-to-float overflow."""
+@pytest.mark.parametrize("digits", [308, 309, 310, 4300, 4301, 100_000])
+def test_arbitrary_ascii_integer_lengths_are_capped_before_conversion(digits):
+    """Valid huge tokens reach the cap without float overflow or Python's integer digit limit."""
     session = _session()
     assert session._retry_after_delay({"Retry-After": "9" * digits}) == oracle.BACKOFF_CAP_SEC
+
+
+@pytest.mark.parametrize("zeros", [4300, 4301, 100_000])
+@pytest.mark.parametrize(("suffix", "expected"), [("0", 0.0), ("7", 7.0)])
+def test_leading_zeros_preserve_zero_and_small_delays(zeros, suffix, expected):
+    """Lexical bounds apply after zero stripping, not to the length of the original token."""
+    result = _session()._retry_after_delay({"Retry-After": "0" * zeros + suffix})
+    assert result == expected
+    assert isinstance(result, float)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("0", 0.0),
+        (" 000\t", 0.0),
+        (" \t0007\r\n", 7.0),
+        ("9", 9.0),
+        ("29", 29.0),
+        ("30", 30.0),
+        ("31", 30.0),
+        ("100", 30.0),
+        ("", None),
+        (" \t", None),
+        ("7suffix", None),
+        ("7\nsuffix", None),
+        ("+7", None),
+        ("-0", None),
+        ("1.5", None),
+        ("1e2", None),
+        ("７", None),
+        ("٧", None),
+        ("7٧", None),
+        ("⁷", None),
+    ],
+)
+def test_delay_seconds_require_the_entire_trimmed_ascii_token(value, expected):
+    """Only a whole trimmed ASCII integer is numeric; zero is distinct from absent or invalid."""
+    assert _session()._retry_after_delay({"Retry-After": value}) == expected
+    assert _session()._retry_after_delay({}) is None
+
+
+@pytest.mark.parametrize("form", ["all-zero", "leading-zero-seven", "above-cap"])
+def test_numeric_conversion_never_receives_the_arbitrary_original_token(monkeypatch, form):
+    """A conversion guard checks the boundary independently of the interpreter's configured digit limit."""
+    session = _session()
+    values = {
+        "all-zero": ("0" * 100_000, 0.0),
+        "leading-zero-seven": ("0" * 100_000 + "7", 7.0),
+        "above-cap": ("9" * 100_000, 30.0),
+    }
+    value, expected = values[form]
+    integer_limit = sys.get_int_max_str_digits()
+    real_int, real_float = int, float
+    converted = []
+
+    def check_token(token):
+        if isinstance(token, str):
+            assert len(token) <= 2 and token == token.lstrip("0"), "only bounded significant digits may be converted"
+            converted.append(token)
+
+    def bounded_int(token):
+        check_token(token)
+        return real_int(token)
+
+    def bounded_float(token):
+        check_token(token)
+        return real_float(token)
+
+    def no_limit_change(*_args):
+        pytest.fail("Retry-After parsing must not alter Python's integer digit limit")
+
+    monkeypatch.setattr(oracle, "int", bounded_int, raising=False)
+    monkeypatch.setattr(oracle, "float", bounded_float, raising=False)
+    monkeypatch.setattr(sys, "set_int_max_str_digits", no_limit_change)
+    assert session._retry_after_delay({"Retry-After": value}) == expected
+    assert converted == (["7"] if form == "leading-zero-seven" else [])
+    assert sys.get_int_max_str_digits() == integer_limit
+
+
+def test_zero_cannot_shorten_or_take_ownership_of_an_active_cooldown():
+    """An explicit zero delay retains the existing later deadline and its credit owner."""
+    clock = _VirtualClock()
+    session = _session()
+    session._monotonic = clock.monotonic
+    session._sleep = clock.sleep
+    first_owner = object()
+    session._request_context.export_id = first_owner
+    assert session._observe_rate_limit(429, {"Retry-After": "7"}) == 7.0
+    clock.advance(1)
+    second_owner = object()
+    session._request_context.export_id = second_owner
+    assert session._observe_rate_limit(429, {"Retry-After": "0"}) == 0.0
+    assert session._cooldown_until == 7.0
+    assert session._cooldown_owner is first_owner
+    assert session._wait_for_pool_cooldown(owner=second_owner) == 6.0
+    assert clock.sleeps == [6.0]
+
+
+@pytest.mark.parametrize("seconds", [7, 29, 30, 31, 100])
+def test_http_date_and_numeric_cap_parity(seconds):
+    """HTTP-date keeps the same positive-delay capping as delay-seconds."""
+    session = _session()
+    epoch = 1_800_000_000.0
+    session._wall_time = lambda: epoch
+    expected = min(float(seconds), oracle.BACKOFF_CAP_SEC)
+    assert session._retry_after_delay({"Retry-After": str(seconds)}) == expected
+    assert session._retry_after_delay({"Retry-After": formatdate(epoch + seconds, usegmt=True)}) == expected
+    assert session._retry_after_delay({"Retry-After": formatdate(epoch - 1, usegmt=True)}) is None
 
 
 @pytest.mark.parametrize(

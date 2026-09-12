@@ -133,7 +133,7 @@ import sys
 import threading
 import time
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Generator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
@@ -394,20 +394,21 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
                 external_wait = sum((external_wait, waited))
 
     def _retry_after_delay(self, headers: dict[str, str]) -> float | None:
-        """Parse Retry-After delay-seconds or HTTP-date into a bounded positive delay."""
+        """Parse Retry-After without converting an unbounded numeric token."""
         retry_after = header_value(headers, "Retry-After")
         if retry_after is None:
             return None
         value = retry_after.strip()
         delay = None
         if re.fullmatch(r"[0-9]+", value):
-            try:
-                seconds = int(value)
-            except ValueError:
-                seconds = 0
-            if seconds > 0:
-                delay = float(min(seconds, int(BACKOFF_CAP_SEC)))
-        elif value[:1] not in "+-.0123456789":
+            significant = value.lstrip("0")
+            if not significant:
+                return 0.0
+            cap = str(int(BACKOFF_CAP_SEC))
+            if (len(significant), significant) >= (len(cap), cap):
+                return BACKOFF_CAP_SEC
+            return float(significant)
+        if value[:1] not in "+-.0123456789":
             try:
                 parsed = parsedate_to_datetime(value)
             except (TypeError, ValueError, OverflowError):
@@ -440,24 +441,24 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
         export_id: object,
     ) -> tuple[int, bytes, dict[str, str], int, float, bool, float | None, bool]:
         """Issue one export against a token snapshot and return its generation plus external pool wait."""
-        external_wait = self._wait_for_pool_cooldown(deadline, export_id)
         with self._auth_lock:
             generation = self._token_generation
             token = self.token
             if token:
                 self._known_tokens.add(token)
         self._request_context.auth_token = token
-        self._request_context.cooldown_waited = True
+        self._request_context.external_wait = 0.0
         self._request_context.export_id = export_id
         self._request_context.retry_after_delay = None
         self._request_context.retry_after_parsed = False
         try:
             status, payload, headers = self._request("GET", path, api=api, deadline=deadline)
+            external_wait = self._request_context.external_wait
             retry_after_delay = self._request_context.retry_after_delay
             retry_after_parsed = self._request_context.retry_after_parsed
         finally:
             del self._request_context.auth_token
-            del self._request_context.cooldown_waited
+            del self._request_context.external_wait
             del self._request_context.export_id
             del self._request_context.retry_after_delay
             del self._request_context.retry_after_parsed
@@ -536,8 +537,6 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
         ``tableau_render_capability``, whose three hand-rolled copies of it each leaked a reflected
         credential in a different review round. The bare ``_request`` below is that module-level
         import, not recursion into this method."""
-        if not getattr(self._request_context, "cooldown_waited", False):
-            self._wait_for_pool_cooldown(deadline)
         req = urllib.request.Request(
             f"{self._creds.base.rstrip('/')}/api/{api or self._creds.version}{path}",
             data=json.dumps(body).encode() if body else None,
@@ -547,10 +546,18 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
             req.add_header("Accept", accept)
         if body:
             req.add_header("Content-Type", "application/json")
-        with self._auth_lock:
-            token = getattr(self._request_context, "auth_token", self.token)
+        if hasattr(self._request_context, "auth_token"):
+            token = self._request_context.auth_token
+        else:
+            with self._auth_lock:
+                token = self.token
         if authed and token:
             req.add_header("X-Tableau-Auth", token)
+        # Auth may block while another export publishes a cooldown. Admit only after the snapshot
+        # and header construction, with no later auth-lock acquisition before transport.
+        external_wait = self._wait_for_pool_cooldown(deadline, getattr(self._request_context, "export_id", None))
+        if hasattr(self._request_context, "external_wait"):
+            self._request_context.external_wait = external_wait
         status, payload, headers = _request(
             req,
             timeout=self.timeout_sec,
@@ -813,9 +820,9 @@ class TableauSession:  # pylint: disable=too-many-instance-attributes
                 # (which runs on the SESSION policy, so several more request timeouts) and then the
                 # export failed anyway. Unbounded work in service of nothing, and the reason the
                 # "at most one timeout" salvage bound did not hold.
+                reauths += 1
                 retries.append("session_lost")
                 if self._reauthenticate_if_current(generation):
-                    reauths += 1
                     count = self._increment_reauth_count()
                     LOG.debug("session lost (401002); re-authenticating (%d)", count)
                 else:
@@ -1473,15 +1480,17 @@ def _capture_selected_views(  # pylint: disable=too-many-arguments,too-many-loca
     api_overrides: dict[str, str],
     max_age: int,
     workers: int,
-) -> Iterator[dict[str, Any]]:
-    """Capture selected views with a bounded worker pool and deterministic original-index reduction."""
+) -> Generator[dict[str, Any], None, None]:
+    """Yield selected-order progress; closing unfinished iteration cancels and drains its workers."""
     if not DEFAULT_WORKERS <= workers <= MAX_WORKERS:
         raise ValueError(f"workers must be from {DEFAULT_WORKERS} through {MAX_WORKERS}, got {workers}")
     context = _CaptureContext(session, out_dir, wants, api_overrides, max_age)
-    if workers == 1:
-        return (context.capture(view) for view in views)
     if not views:
-        return iter(())
+        return
+    if workers == 1:
+        for view in views:
+            yield context.capture(view)
+        return
 
     tasks: Queue[tuple[int, dict[str, Any]]] = Queue()
     for task in enumerate(views):
@@ -1490,30 +1499,26 @@ def _capture_selected_views(  # pylint: disable=too-many-arguments,too-many-loca
     failure = threading.Event()
     result_lock = threading.Lock()
 
-    def results():
-        """Yield selected-index slots in order while a bounded view pool executes concurrently."""
-        executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tableau-oracle")
-        worker_futures: tuple[Future[None], ...] = ()
-        completed_normally = False
-        try:
-            for _ in range(min(workers, len(views))):
-                worker_futures = (
-                    *worker_futures,
-                    executor.submit(_capture_worker, context, tasks, slots, failure, result_lock),
-                )
-            for slot in slots:
-                yield slot.result()
+    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="tableau-oracle")
+    worker_futures: tuple[Future[None], ...] = ()
+    completed_normally = False
+    try:
+        for _ in range(min(workers, len(views))):
+            worker_futures = (
+                *worker_futures,
+                executor.submit(_capture_worker, context, tasks, slots, failure, result_lock),
+            )
+        for slot in slots:
+            yield slot.result()
+        for future in worker_futures:
+            future.result()
+        completed_normally = True
+    finally:
+        if not completed_normally:
+            failure.set()
             for future in worker_futures:
-                future.result()
-            completed_normally = True
-        finally:
-            if not completed_normally:
-                failure.set()
-                for future in worker_futures:
-                    future.cancel()
-            executor.shutdown(wait=True, cancel_futures=not completed_normally)
-
-    return results()
+                future.cancel()
+        executor.shutdown(wait=True, cancel_futures=not completed_normally)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1713,10 +1718,13 @@ def main() -> int:  # pylint: disable=too-many-locals
             workers=args.workers,
         )
         named_records = []
-        for index, record in enumerate(records, 1):
-            record["workbook_name"] = workbook_names.get(record["workbook_luid"])
-            named_records.append(record)
-            log_progress(index, len(views), record, session.redact_text)
+        try:
+            for index, record in enumerate(records, 1):
+                record["workbook_name"] = workbook_names.get(record["workbook_luid"])
+                named_records.append(record)
+                log_progress(index, len(views), record, session.redact_text)
+        finally:
+            records.close()
 
         try:
             return write_manifest(
