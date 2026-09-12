@@ -890,6 +890,13 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         ["test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker"],
     ),
     (
+        "#614: leave the retired package manifest discoverable after publish interruption",
+        PACKAGER,
+        '        cleanup_code = _make_scratch_nondiscoverable(retired, "retired")',
+        "        cleanup_code = None  # noqa",
+        ["test_post_rename_line_interrupt_hides_retired_manifest_before_reporting_status"],
+    ),
+    (
         "#478: restore rmtree(ignore_errors=True), so a staging tree that survived is assembled into",
         PACKAGER,
         "    reason: str | None = None\n    for attempt in range(_SCRATCH_CLEAR_ATTEMPTS):",

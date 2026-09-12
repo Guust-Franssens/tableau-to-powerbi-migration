@@ -658,10 +658,17 @@ class InterruptedUnit(PackagingError):
 class AssemblyInterrupted(KeyboardInterrupt):
     """A handled operator interruption carrying only observed swap state."""
 
-    def __init__(self, *, published: bool, rollback_failed: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        published: bool,
+        rollback_failed: bool = False,
+        secondary_code: str | None = None,
+    ) -> None:
         super().__init__()
         self.published = published
         self.rollback_failed = rollback_failed
+        self.secondary_code = secondary_code
         self.unit: str | None = None
         self.result: dict[str, Any] | None = None
         self.reason_code = "assembly_interrupted_after_publish" if published else "assembly_interrupted_before_publish"
@@ -3499,39 +3506,54 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals
             "Remove it and re-run that unit."
         )
     result: dict[str, Any] | None = None
+    candidate_manifest_sha256: str | None = None
+    publication_started = False
     try:
-        result, verify_staged = _assemble_unit(
-            bundle,
-            unit,
-            staging,
+        try:
+            result, verify_staged = _assemble_unit(
+                bundle,
+                unit,
+                staging,
+                final=final,
+                oracle_dir=oracle_dir,
+                assets_dir=assets_dir,
+                brief=prepared_brief,
+                gate_root=gate_root,
+                provider_packages=_external_providers(provider_packages, out_root, [unit]),
+            )
+            assert_assembled_fits(unit, staging, final, out_root, limits)
+            candidate_manifest_sha256 = sha256_of(staging / MANIFEST_NAME)
+            if candidate_manifest_sha256 is None:
+                raise PackagingError("candidate_manifest_unreadable")
+            publication_started = True
+            replace_dir(
+                staging,
+                final,
+                verify=None if discard_edits else partial(_refuse_if_edited, unit),
+                verify_staged=verify_staged,
+            )
+        except OSError as failure:
+            refusal = _assembly_refusal(unit, failure)
+            if refusal is None:
+                raise
+            raise refusal from failure
+        finally:
+            _refuse_surviving_staging(unit, staging, final)
+        if result is None:
+            raise PackagingError("assembly_result_missing")
+        return result
+    except KeyboardInterrupt as error:
+        interruption = _publication_interruption(
+            error,
             final=final,
-            oracle_dir=oracle_dir,
-            assets_dir=assets_dir,
-            brief=prepared_brief,
-            gate_root=gate_root,
-            provider_packages=_external_providers(provider_packages, out_root, [unit]),
+            staging=staging,
+            candidate_manifest_sha256=candidate_manifest_sha256,
+            publication_started=publication_started,
         )
-        assert_assembled_fits(unit, staging, final, out_root, limits)
-        replace_dir(
-            staging,
-            final,
-            verify=None if discard_edits else partial(_refuse_if_edited, unit),
-            verify_staged=verify_staged,
-        )
-    except AssemblyInterrupted as interruption:
         interruption.unit = unit
         interruption.result = result if interruption.published and result is not None else None
-        raise
-    except OSError as failure:
-        refusal = _assembly_refusal(unit, failure)
-        if refusal is None:
-            raise
-        raise refusal from failure
-    finally:
-        _refuse_surviving_staging(unit, staging, final)
-    if result is None:
-        raise PackagingError("assembly_result_missing")
-    return result
+        cause = error.__cause__ if isinstance(error, AssemblyInterrupted) and error.__cause__ is not None else error
+        raise interruption from cause
 
 
 def _refuse_surviving_staging(unit: str, staging: Path, final: Path) -> None:
@@ -3750,8 +3772,85 @@ def replace_dir(
                 rollback_failed = True
                 error.add_note("package rollback failed during swap recovery")
         if isinstance(error, KeyboardInterrupt):
-            raise AssemblyInterrupted(published=published, rollback_failed=rollback_failed) from error
+            raise AssemblyInterrupted(
+                published=published,
+                rollback_failed=rollback_failed,
+                secondary_code="rollback_failed" if rollback_failed else None,
+            ) from error
         raise
+
+
+def _valid_published_package(final: Path, candidate_manifest_sha256: str | None) -> bool:
+    """Whether ``final`` is the exact assembled candidate and its manifest still verifies."""
+    if candidate_manifest_sha256 is None:
+        return False
+    if sha256_of(final / MANIFEST_NAME) != candidate_manifest_sha256:
+        return False
+    try:
+        return final.is_dir() and pri.verify_s1(final).integrity.is_clean
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
+
+
+def _make_scratch_nondiscoverable(root: Path, role: str) -> str | None:
+    """Remove reserved scratch, or at least remove its package-discovery marker."""
+    try:
+        residue = _discard_scratch(root)
+    except BaseException:  # pylint: disable=broad-exception-caught
+        residue = "cleanup interrupted"
+    if not root.exists():
+        return None
+    manifest = root / MANIFEST_NAME
+    if not manifest.is_file():
+        return f"{role}_cleanup_incomplete"
+    try:
+        manifest.unlink()
+        return f"{role}_cleanup_incomplete_manifest_removed"
+    except OSError:
+        hidden = manifest.with_name(f".{MANIFEST_NAME}.retired")
+        try:
+            _rename_retrying(manifest, hidden)
+        except OSError:
+            return f"{role}_manifest_still_discoverable"
+        return f"{role}_cleanup_incomplete_manifest_hidden"
+    finally:
+        del residue
+
+
+def _publication_interruption(
+    error: KeyboardInterrupt,
+    *,
+    final: Path,
+    staging: Path,
+    candidate_manifest_sha256: str | None,
+    publication_started: bool,
+) -> AssemblyInterrupted:
+    """Resolve an interrupt from verified final/scratch state, then close package discovery."""
+    prior = error if isinstance(error, AssemblyInterrupted) else None
+    prior_refused_publication = prior is not None and not prior.published
+    published = (
+        publication_started
+        and not prior_refused_publication
+        and not staging.exists()
+        and _valid_published_package(final, candidate_manifest_sha256)
+    )
+    secondary_code = prior.secondary_code if prior is not None else None
+    if published:
+        retired = retired_dir(final)
+        cleanup_code = _make_scratch_nondiscoverable(retired, "retired")
+        secondary_code = cleanup_code or secondary_code
+        published = (
+            _valid_published_package(final, candidate_manifest_sha256)
+            and not (staging / MANIFEST_NAME).is_file()
+            and not (retired / MANIFEST_NAME).is_file()
+        )
+        if not published and secondary_code is None:
+            secondary_code = "publication_state_unverified"
+    return AssemblyInterrupted(
+        published=published,
+        rollback_failed=bool(prior and prior.rollback_failed),
+        secondary_code=secondary_code,
+    )
 
 
 #: Windows denies a directory rename while anything still holds a handle inside it, and a scanner
@@ -5120,6 +5219,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
                 "reason_code": interruption.reason_code,
                 "published": interruption.published,
                 "rollback_failed": interruption.rollback_failed,
+                "secondary_code": interruption.secondary_code,
             }
             if interruption is not None
             else None

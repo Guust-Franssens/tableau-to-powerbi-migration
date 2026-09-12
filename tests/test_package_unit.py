@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -37,6 +38,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import check_path_ceiling as cpc  # noqa: E402  # pylint: disable=wrong-import-position
+import check_migration_progress as cmp  # noqa: E402  # pylint: disable=wrong-import-position
 import host_paths as hp  # noqa: E402  # pylint: disable=wrong-import-position
 import manifest_scope as ms  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
@@ -4801,6 +4803,36 @@ def _batch_main(tmp_path: Path, bundle: Path, oracle: Path, report: Path, *extra
     )
 
 
+def _run_with_line_interrupt(
+    function: Callable,
+    marker: str,
+    action: Callable[[], int],
+    *,
+    occurrence: int = 1,
+) -> int:
+    """Raise KeyboardInterrupt on one exact executable line in ``function``."""
+    source, start = inspect.getsourcelines(function)
+    matches = [start + index for index, line in enumerate(source) if line.rstrip() == marker]
+    assert len(matches) >= occurrence, (marker, occurrence, matches)
+    target_line = matches[occurrence - 1]
+    fired = False
+
+    def trace(frame, event, arg):  # pylint: disable=unused-argument
+        nonlocal fired
+        if frame.f_code is function.__code__ and event == "line" and frame.f_lineno == target_line:
+            fired = True
+            sys.settrace(None)
+            raise KeyboardInterrupt("line-trace interrupt")
+        return trace
+
+    sys.settrace(trace)
+    try:
+        return action()
+    finally:
+        sys.settrace(None)
+        assert fired, f"line trace never reached {function.__name__}:{target_line}"
+
+
 def test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker(  # pylint: disable=too-many-locals
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -5232,46 +5264,75 @@ def test_an_operator_interrupt_before_publish_is_persisted_and_stops_the_run(
         "reason_code": "assembly_interrupted_before_publish",
         "published": False,
         "rollback_failed": False,
+        "secondary_code": None,
     }
     assert payload["failed"][0]["unit"] == BATCH_BOOM
     assert payload["failed"][0]["reason_code"] == "assembly_interrupted_before_publish"
     assert BATCH_LATE in [row["unit"] for row in payload["unaccounted"]]
 
 
-def test_interrupt_after_publish_keeps_the_package_assembled_and_invalidates_prior_json(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The rename's observed filesystem state outranks the interrupted control flow."""
+def test_post_return_line_interrupt_uses_verified_final_package_state(tmp_path: Path) -> None:
+    """An interrupt after replace_dir returns still observes the just-published package."""
     bundle, oracle = _many_unit_bundle(tmp_path, [UNIT, BATCH_LATE])
     out = _out(tmp_path)
     final = out / UNIT
-    real = pkg._rename_retrying  # pylint: disable=protected-access
-
-    def publish_then_interrupt(src: Path, dst: Path) -> None:
-        real(src, dst)
-        if dst == final:
-            raise KeyboardInterrupt("https://customer.example/query?token=do-not-persist")
-
-    monkeypatch.setattr(pkg, "_rename_retrying", publish_then_interrupt)
     report = tmp_path / "packaging.json"
     report.write_text('{"stale": true}', encoding="utf-8")
 
-    assert _batch_main(tmp_path, bundle, oracle, report) == pkg.EXIT_CANNOT_ASSESS
+    code = _run_with_line_interrupt(
+        pkg.package_unit,
+        "        if result is None:",
+        lambda: _batch_main(tmp_path, bundle, oracle, report),
+    )
     payload = json.loads(report.read_text(encoding="utf-8"))
     construction = payload["construction"]
+    assert code == pkg.EXIT_CANNOT_ASSESS
     assert "stale" not in payload
     assert payload["interruption"] == {
         "unit": UNIT,
         "reason_code": "assembly_interrupted_after_publish",
         "published": True,
         "rollback_failed": False,
+        "secondary_code": None,
     }
     assert [row["unit"] for row in payload["units"]] == [UNIT]
     assert [row["unit"] for row in construction["assembled"]] == [UNIT]
     assert UNIT not in [row["unit"] for row in construction["blocked"]]
     assert [row["unit"] for row in construction["blocked"]] == [BATCH_LATE]
     assert (final / pkg.MANIFEST_NAME).is_file()
-    assert "do-not-persist" not in report.read_text(encoding="utf-8")
+    assert list(out.rglob(pkg.MANIFEST_NAME)) == [final / pkg.MANIFEST_NAME]
+    assert cmp.discover_package_roots(bundle, out) == [final]
+
+
+def test_post_rename_line_interrupt_hides_retired_manifest_before_reporting_status(tmp_path: Path) -> None:
+    """The old package cannot remain discoverable beside the published replacement."""
+    bundle, oracle = _many_unit_bundle(tmp_path, [UNIT, BATCH_LATE])
+    out = _out(tmp_path)
+    final = out / UNIT
+    pkg.package_unit(bundle, UNIT, out, oracle_dir=oracle, assets_dir=bundle.parent / "assets")
+    report = tmp_path / "packaging.json"
+    report.write_text('{"stale": true}', encoding="utf-8")
+
+    code = _run_with_line_interrupt(
+        pkg.replace_dir,
+        "            _discard_scratch(retired)",
+        lambda: _batch_main(tmp_path, bundle, oracle, report),
+        occurrence=2,
+    )
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    construction = payload["construction"]
+    assert code == pkg.EXIT_CANNOT_ASSESS
+    assert payload["interruption"] == {
+        "unit": UNIT,
+        "reason_code": "assembly_interrupted_after_publish",
+        "published": True,
+        "rollback_failed": False,
+        "secondary_code": None,
+    }
+    assert [row["unit"] for row in construction["assembled"]] == [UNIT]
+    assert [row["unit"] for row in construction["blocked"]] == [BATCH_LATE]
+    assert list(out.rglob(pkg.MANIFEST_NAME)) == [final / pkg.MANIFEST_NAME]
+    assert cmp.discover_package_roots(bundle, out) == [final]
 
 
 def test_failed_rollback_cannot_mask_keyboard_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5298,6 +5359,7 @@ def test_failed_rollback_cannot_mask_keyboard_interrupt(tmp_path: Path, monkeypa
     assert isinstance(caught.value, KeyboardInterrupt)
     assert caught.value.published is False
     assert caught.value.rollback_failed is True
+    assert caught.value.secondary_code == "rollback_failed"
     assert isinstance(caught.value.__cause__, KeyboardInterrupt)
     assert not final.exists() and retired.is_dir() and staged.is_dir()
 
