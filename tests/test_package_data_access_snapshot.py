@@ -160,15 +160,20 @@ def test_binding_mutations_reach_their_intended_authority(
         "planner": "binding_planner_delta_invalid",
         "digest": "binding_staging_failed",
         "unrelated": "binding_candidate_changed",
-        "concurrent-reseal": "binding_original_changed",
-        "directory": "binding_original_changed",
+        "concurrent-reseal": "binding_discovery_unassessable",
+        "directory": "binding_discovery_unassessable",
         "empty-directory": "binding_candidate_changed",
     }
     assert result["codes"] == [expected_codes[seam]], result
     if seam == "concurrent-reseal":
         assert _files(root)["migration-spec.json"] == before["migration-spec.json"] + b"\n"
+        assert not (root / pkg.MANIFEST_NAME).exists()
+    elif seam == "directory":
+        assert _files(root) == {key: raw for key, raw in before.items() if key != pkg.MANIFEST_NAME}
+        assert _files(root.with_name("previous-original")) == before
     else:
         assert _files(root) == before
+    assert result["inspection"] == {}
     assert not pkg.staging_dir(root.parent, root.name).exists()
     assert not pkg.retired_dir(root).exists()
 
@@ -229,6 +234,7 @@ def test_binding_provider_cohort_is_explicit_ordered_read_only_and_independently
     providers = (other, provider) if reverse else (provider, other)
     flags = tuple(value for path in providers for value in ("--provider-package", str(path)))
     assert _binding_cli(consumer, *flags)["codes"] == ["binding_provider_not_bound"]
+    assert _binding_cli(consumer, "--sanitize", *flags)["codes"] == ["binding_provider_not_bound"]
     for path in providers:
         assert _binding_cli(path)["exit_code"] == 0
     before = [_files(path) for path in (*providers, consumer)]
@@ -240,11 +246,13 @@ def test_binding_provider_cohort_is_explicit_ordered_read_only_and_independently
     assert result["inspection"]["applicability"] == "not_applicable"
     assert result["inspection"]["provider_ordinals"] == [1 if reverse else 0]
     assert before == [_files(path) for path in (*providers, consumer)]
-    sanitized = _binding_cli(consumer, "--sanitize")
-    assert sanitized["exit_code"] == 0, "no local parameters need a provider to sanitize"
+    sanitized = _binding_cli(consumer, "--sanitize", *flags)
+    assert sanitized["exit_code"] == 0, "report-only sanitize must use the same accepted provider cohort"
     assert sanitized["codes"] == ["binding_not_applicable"]
     assert sanitized["inspection"]["state"] == "NOT_APPLICABLE"
-    current = pkg.bind_package(consumer, rewrite=sdf._rewritten, inspect=True, provider_packages=providers)
+    assert sanitized["inspection"]["provider_ordinals"] == [1 if reverse else 0]
+    assert before == [_files(path) for path in (*providers, consumer)]
+    current = pkg.bind_package(consumer, rewrite=sdf._rewritten, sanitize=True, provider_packages=providers)
     assert current.inspection.authority.roots == (*providers, consumer)
     assert (
         current.inspection.authority.roles[-1].data_access_handoff(consumer).data_access.content
@@ -252,8 +260,11 @@ def test_binding_provider_cohort_is_explicit_ordered_read_only_and_independently
     )
 
 
-@pytest.mark.parametrize("fault", ["missing", "duplicate", "wrong", "dirty", "blocked", "nested"])
-def test_binding_provider_refusals_do_not_recurse_or_modify_any_package(tmp_path: Path, fault: str) -> None:
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "wrong", "dirty", "blocked", "nested", "stale"])
+@pytest.mark.parametrize("sanitize", [False, True])
+def test_binding_provider_refusals_do_not_recurse_or_modify_any_package(
+    tmp_path: Path, fault: str, sanitize: bool
+) -> None:
     provider = _binding_package(tmp_path / "selected", datasource=True)
     consumer = _binding_consumer(tmp_path, provider)
     assert _binding_cli(provider)["exit_code"] == 0
@@ -268,6 +279,11 @@ def test_binding_provider_refusals_do_not_recurse_or_modify_any_package(tmp_path
         providers = [other]
     elif fault == "dirty":
         (provider / "data-access.json").write_bytes(b"{}")
+    elif fault == "stale":
+        moved = provider.with_name("moved-provider")
+        provider.rename(moved)
+        providers = [moved]
+        assert pkg.pri.verify_s1(moved).integrity.is_clean
     else:
         payload = json.loads((provider / "data-access.json").read_bytes())
         if fault == "blocked":
@@ -288,7 +304,7 @@ def test_binding_provider_refusals_do_not_recurse_or_modify_any_package(tmp_path
         producer._projection_fixture(provider, payload)
     before = {str(path): _files(path) for path in (*providers, consumer)}
     flags = tuple(value for path in providers for value in ("--provider-package", str(path)))
-    result = _binding_cli(consumer, *flags)
+    result = _binding_cli(consumer, *(("--sanitize",) if sanitize else ()), *flags)
     expected = {
         "missing": (3, "binding_s2_not_clean"),
         "duplicate": (1, "binding_cohort_duplicate"),
@@ -296,9 +312,40 @@ def test_binding_provider_refusals_do_not_recurse_or_modify_any_package(tmp_path
         "dirty": (1, "binding_s1_not_clean"),
         "blocked": (1, "binding_data_access_refused"),
         "nested": (3, "binding_source_facts_mismatch"),
+        "stale": (1, "binding_provider_not_bound"),
     }
     assert (result["exit_code"], result["codes"]) == (expected[fault][0], [expected[fault][1]])
+    assert result["inspection"] == {}, "an invalid cohort cannot issue even NOT_APPLICABLE authority"
     assert before == {str(path): _files(path) for path in (*providers, consumer)}
+
+
+def test_binding_report_only_sanitize_rechecks_the_held_cohort_after_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A fresh S1-clean provider reseal must not be accepted as the earlier held cohort."""
+    provider = _binding_package(tmp_path / "selected", datasource=True)
+    assert _binding_cli(provider)["exit_code"] == 0
+    consumer = _binding_consumer(tmp_path, provider)
+    before = _files(consumer)
+    observation = pkg._binding_observation
+    changed = []
+
+    def resealed(package, location):
+        result = observation(package, location)
+        if location == consumer:
+            assert result["applicability"] == "not_applicable"
+            path = provider / "data-access.json"
+            path.write_bytes(path.read_bytes() + b"\n")
+            producer._reseal(provider)
+            assert pkg.pri.verify_s1(provider).integrity.is_clean
+            changed.append(_files(provider))
+        return result
+
+    monkeypatch.setattr(pkg, "_binding_observation", resealed)
+    result = _binding_cli(consumer, "--sanitize", "--provider-package", str(provider))
+    assert len(changed) == 1, "the mutation must occur after the first cohort was held"
+    assert (result["exit_code"], result["codes"], result["inspection"]) == (3, ["binding_cohort_changed"], {})
+    assert _files(consumer) == before and _files(provider) == changed[0]
 
 
 @pytest.mark.parametrize("seam", ["provider-reseal", "ordinal", "boolean-ordinal"])

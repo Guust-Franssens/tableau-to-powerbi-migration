@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,7 @@ def test_binding_final_inspection_is_inside_swap_before_retired_cleanup(
     assert result["exit_code"] == 0 and result["outcome"] == "published"
     assert result["inspection"]["state"] == "BOUND" and result["inspection"]["validation"] == "UNVALIDATED"
     assert events == ["rename", "final-s1-exact-inspection-cohort", "cleanup"]
+    assert set(root.parent.rglob(pkg.MANIFEST_NAME)) == {root / pkg.MANIFEST_NAME}
 
 
 @pytest.mark.parametrize(
@@ -245,9 +247,19 @@ def test_binding_checks_the_retired_original_physical_barrier(
         "query-failure": (3, "physical_acl_query_failed"),
     }
     assert observed == [True]
-    assert result["outcome"] == ("rolled-back" if address == "retired" else "unchanged")
-    assert (result["exit_code"], result["codes"]) == (expected[barrier][0], [expected[barrier][1]])
-    assert _files(root) == retained and not retired.exists()
+    if address == "retired" and barrier in ("marker", "malformed"):
+        assert (result["outcome"], result["exit_code"], result["codes"]) == (
+            "cannot-establish",
+            3,
+            ["binding_discovery_unassessable"],
+        )
+        assert _files(root) == {key: raw for key, raw in retained.items() if key != pkg.MANIFEST_NAME}
+        assert (root / pkg.data_access.MARKER).read_bytes() == retained[pkg.data_access.MARKER]
+    else:
+        assert result["outcome"] == ("rolled-back" if address == "retired" else "unchanged")
+        assert (result["exit_code"], result["codes"]) == (expected[barrier][0], [expected[barrier][1]])
+        assert _files(root) == retained
+    assert result["inspection"] == {} and not retired.exists()
 
 
 @pytest.mark.parametrize("seam", ["stage", "post-retire", "post-publish", "post-swap", "rollback"])
@@ -439,6 +451,212 @@ def test_binding_cleanup_and_obstructed_recovery_close_package_discovery(
         assert result["exit_code"] == (130 if failure == "retired-marker-interrupt" else 1)
         assert result["inspection"]["state"] == "BOUND"
         assert (retired / f".{pkg.MANIFEST_NAME}.retired").read_bytes() == before[pkg.MANIFEST_NAME]
+
+
+def test_binding_discovery_rejects_an_original_resealed_to_different_clean_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Directory survival and a newly clean S1 are not the original authority held at admission."""
+    root = _binding_package(tmp_path)
+    before = _files(root)
+    original_id = pkg._package_directory_id(root)
+    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
+    stage = pkg._binding_stage
+    changed = []
+    candidate = []
+
+    def resealed(*args, **kwargs):
+        identity = stage(*args, **kwargs)
+        assert _files(staged) == args[1], "the independently observed stage must be the exact planned candidate"
+        candidate.append(identity)
+        path = root / "migration-spec.json"
+        path.write_bytes(path.read_bytes() + b"\n")
+        manifest = json.loads((root / pkg.MANIFEST_NAME).read_bytes())
+        manifest["contents"]["files"] = pkg.package_contents(root)
+        (root / pkg.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+        assert pkg.pri.verify_s1(root).integrity.is_clean
+        assert pkg._package_directory_id(root) == original_id
+        changed.append(_files(root))
+        return identity
+
+    monkeypatch.setattr(pkg, "_binding_stage", resealed)
+    result = _binding_cli(root)
+    assert len(changed) == len(candidate) == 1 and candidate[0] != original_id
+    assert changed[0]["migration-spec.json"] == before["migration-spec.json"] + b"\n"
+    assert changed[0][pkg.MANIFEST_NAME] != before[pkg.MANIFEST_NAME]
+    assert (result["outcome"], result["exit_code"], result["codes"], result["inspection"]) == (
+        "cannot-establish",
+        3,
+        ["binding_discovery_unassessable"],
+        {},
+    ), "discovery must refuse a different S1-clean tree instead of adopting it as the held authority"
+    assert _files(root) == {key: raw for key, raw in changed[0].items() if key != pkg.MANIFEST_NAME}
+    assert pkg._package_directory_id(root) == original_id
+    assert not staged.exists() and not retired.exists()
+    assert set(root.parent.rglob(pkg.MANIFEST_NAME)) == set()
+
+
+def test_binding_discovery_rechecks_the_exact_candidate_after_scratch_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A matching candidate cannot lend its inspection to different clean bytes written during cleanup."""
+    root = _binding_package(tmp_path)
+    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
+    cleanup = pkg._discard_scratch
+    changed = []
+
+    def resealed(location):
+        if location == staged:
+            assert not staged.exists() and not retired.exists(), "publication and retired cleanup must have finished"
+            path = root / "README.md"
+            path.write_bytes(path.read_bytes() + b"\n")
+            manifest = json.loads((root / pkg.MANIFEST_NAME).read_bytes())
+            assert manifest["data_sources"]["binding"]["state"] == "bound"
+            manifest["contents"]["files"] = pkg.package_contents(root)
+            (root / pkg.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+            assert pkg.pri.verify_s1(root).integrity.is_clean
+            changed.append(_files(root))
+        return cleanup(location)
+
+    monkeypatch.setattr(pkg, "_discard_scratch", resealed)
+    result = _binding_cli(root)
+    assert len(changed) == 1
+    assert (result["outcome"], result["exit_code"], result["codes"], result["inspection"]) == (
+        "cannot-establish",
+        3,
+        ["binding_discovery_unassessable"],
+        {},
+    ), "the exact candidate must still match after discovery cleanup"
+    assert _files(root) == {key: raw for key, raw in changed[0].items() if key != pkg.MANIFEST_NAME}
+    assert set(root.parent.rglob(pkg.MANIFEST_NAME)) == set()
+
+
+def test_binding_discovery_does_not_fall_back_after_an_uncertain_authority_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient unknown root is not negative evidence permitting selection of the retired copy."""
+    root = _binding_package(tmp_path)
+    before = _files(root)
+    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
+    rename, lstat = pkg._rename_retrying, Path.lstat
+    rollback = []
+    queried = []
+
+    def obstructed(source, destination):
+        if source == staged and destination == root:
+            raise OSError("force-publication-failure")
+        if source == retired and destination == root:
+            assert _files(retired) == before
+            rollback.append(True)
+            raise OSError("force-rollback-failure")
+        return rename(source, destination)
+
+    def uncertain(path, *args, **kwargs):
+        if rollback and path == root and not queried:
+            queried.append(True)
+            raise OSError("one-uncertain-authority-read")
+        return lstat(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pkg, "_rename_retrying", obstructed)
+        patch.setattr(Path, "lstat", uncertain)
+        result = _binding_cli(root)
+    assert rollback == queried == [True]
+    assert (result["outcome"], result["exit_code"], result["codes"], result["inspection"]) == (
+        "cannot-establish",
+        3,
+        ["binding_discovery_unassessable"],
+        {},
+    ), "uncertain authority reads must not fall back to a different authority"
+    assert not root.exists() and not staged.exists()
+    assert _files(retired) == {key: raw for key, raw in before.items() if key != pkg.MANIFEST_NAME}
+    assert set(root.parent.rglob(pkg.MANIFEST_NAME)) == set()
+
+
+@pytest.mark.parametrize(
+    "probe", ["root-marker", "staged-marker", "retired-marker", "authority-root", "authority-read"]
+)
+@pytest.mark.parametrize("exception", [OSError, KeyboardInterrupt])
+def test_binding_discovery_query_uncertainty_revokes_the_exact_published_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, probe: str, exception: type[BaseException]
+) -> None:
+    """Uncertainty after final inspection must not become false absence beside a second manifest."""
+    root = _binding_package(tmp_path)
+    before = _files(root)
+    original_id = pkg._package_directory_id(root)
+    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
+    final, cleanup = pkg._binding_final, pkg._discard_scratch
+    lstat, path_lstat, read_bytes = os.lstat, Path.lstat, Path.read_bytes
+    armed = []
+    observed = []
+    candidate = []
+    target = {
+        "root-marker": root / pkg.MANIFEST_NAME,
+        "staged-marker": staged / pkg.MANIFEST_NAME,
+        "retired-marker": retired / pkg.MANIFEST_NAME,
+        "authority-root": root,
+        "authority-read": root / "migration-spec.json",
+    }[probe]
+
+    def inspected(*args, **kwargs):
+        result = final(*args, **kwargs)
+        assert result.state == "BOUND" and result.validation == "UNVALIDATED"
+        assert result.authority.packages[-1].snapshot.directory_id != original_id
+        assert _files(root) == args[1]
+        candidate.append(_files(root))
+        return result
+
+    def retained(location):
+        if location == retired:
+            assert _files(retired) == before and len(candidate) == 1
+            armed.append(True)
+            return "private-retired-cleanup-canary"
+        return cleanup(location)
+
+    def uncertain_lstat(path, *args, **kwargs):
+        if armed and probe != "authority-read" and Path(path) == target:
+            observed.append(True)
+            raise exception("private-discovery-query-canary")
+        return lstat(path, *args, **kwargs)
+
+    def uncertain_path_lstat(path, *args, **kwargs):
+        if armed and probe != "authority-read" and path == target:
+            observed.append(True)
+            raise exception("private-discovery-query-canary")
+        return path_lstat(path, *args, **kwargs)
+
+    def uncertain_read(path, *args, **kwargs):
+        if armed and probe == "authority-read" and path == target:
+            observed.append(True)
+            raise exception("private-authority-read-canary")
+        return read_bytes(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pkg, "_binding_final", inspected)
+        patch.setattr(pkg, "_discard_scratch", retained)
+        # Cover the old lexists primitive and Path.lstat, which delegates to os.stat on Python 3.13.
+        patch.setattr(os, "lstat", uncertain_lstat)
+        patch.setattr(Path, "lstat", uncertain_path_lstat)
+        patch.setattr(Path, "read_bytes", uncertain_read)
+        result = _binding_cli(root)
+    assert armed == [True] and observed and len(candidate) == 1
+    assert (result["outcome"], result["exit_code"], result["codes"], result["inspection"]) == (
+        "cannot-establish",
+        130 if exception is KeyboardInterrupt else 3,
+        ["binding_discovery_unassessable"],
+        {},
+    ), "an unassessable marker or held candidate must revoke BOUND authority"
+    visible = set(root.parent.rglob(pkg.MANIFEST_NAME))
+    assert len(visible) <= 1
+    if probe == "authority-root":
+        assert visible == {root / pkg.MANIFEST_NAME}
+        assert _files(root) == candidate[0], "an unassessable root must not be traversed for marker removal"
+    else:
+        assert visible == set()
+        assert _files(root) == {key: raw for key, raw in candidate[0].items() if key != pkg.MANIFEST_NAME}
+    assert _files(retired) == {key: raw for key, raw in before.items() if key != pkg.MANIFEST_NAME}
+    assert not staged.exists()
+    assert "private-" not in json.dumps(result)
 
 
 @pytest.mark.parametrize("change", ["spec", "localized_data", "brief", "projection"])

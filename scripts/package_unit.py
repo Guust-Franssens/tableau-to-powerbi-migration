@@ -3801,6 +3801,16 @@ def _valid_published_package(final: Path, candidate_manifest_sha256: str | None)
         return False
 
 
+def _discovery_entry(path: Path) -> tuple[os.stat_result | None, OSError | KeyboardInterrupt | None]:
+    """Hold presence, known absence, or uncertainty; lexists silently treats I/O errors as absence."""
+    try:
+        return path.lstat(), None
+    except FileNotFoundError:
+        return None, None
+    except (OSError, KeyboardInterrupt) as error:
+        return None, error
+
+
 def _make_scratch_nondiscoverable(root: Path, role: str, *, preserve_tree: bool = False) -> str | None:
     """Remove reserved scratch or its discovery marker; preserve uncertain recovery evidence on request."""
     interrupted = False
@@ -3809,26 +3819,43 @@ def _make_scratch_nondiscoverable(root: Path, role: str, *, preserve_tree: bool 
             _discard_scratch(root)
         except BaseException as error:  # pylint: disable=broad-exception-caught
             interrupted = isinstance(error, KeyboardInterrupt)
+    entry, error = _discovery_entry(root)
+    if error is not None or (entry is not None and (is_reparse_entry(entry) or not stat.S_ISDIR(entry.st_mode))):
+        return f"{role}_manifest_unassessable{'_interrupted' if isinstance(error, KeyboardInterrupt) else ''}"
+    if entry is None:
+        return None
     manifest = root / MANIFEST_NAME
-    try:
-        if not os.path.lexists(root):
-            return None
-        if not os.path.lexists(manifest):
-            return f"{role}_cleanup_incomplete"
-    except (OSError, KeyboardInterrupt):
-        return f"{role}_manifest_unassessable"
+    entry, error = _discovery_entry(manifest)
+    interrupted |= isinstance(error, KeyboardInterrupt)
+    if entry is None and error is None:
+        return f"{role}_cleanup_incomplete"
+    action = "removed"
     try:
         manifest.unlink()
-        return f"{role}_cleanup_{'interrupted' if interrupted else 'incomplete'}_manifest_removed"
-    except (OSError, KeyboardInterrupt) as error:
-        interrupted |= isinstance(error, KeyboardInterrupt)
+    except FileNotFoundError:
+        action = "absent"
+    except (OSError, KeyboardInterrupt) as removal:
+        interrupted |= isinstance(removal, KeyboardInterrupt)
         hidden = manifest.with_name(f".{MANIFEST_NAME}.retired")
         try:
             _rename_retrying(manifest, hidden)
+            action = "hidden"
+        except FileNotFoundError:
+            action = "absent"
         except (OSError, KeyboardInterrupt) as recovery:
             interrupted |= isinstance(recovery, KeyboardInterrupt)
-            return f"{role}_manifest_{'interrupted' if interrupted else 'still_discoverable'}"
-        return f"{role}_cleanup_{'interrupted' if interrupted else 'incomplete'}_manifest_hidden"
+            action = "still_discoverable"
+    if error is not None:
+        return f"{role}_manifest_unassessable{'_interrupted' if interrupted else ''}"
+    return f"{role}_cleanup_{'interrupted' if interrupted else 'incomplete'}_manifest_{action}"
+
+
+def _binding_revoke_discovery(locations: tuple[tuple[Path, str], ...], interrupted: bool) -> tuple[str, int, str]:
+    """An uncertain selection/query revokes every transaction marker, not just the proposed authority."""
+    for location, role in locations:
+        code = _make_scratch_nondiscoverable(location, role, preserve_tree=True)
+        interrupted |= code is not None and "interrupted" in code
+    return "cannot-establish", 130 if interrupted else 3, "binding_discovery_unassessable"
 
 
 def _binding_close_discovery(  # pylint: disable=too-many-locals
@@ -3840,47 +3867,58 @@ def _binding_close_discovery(  # pylint: disable=too-many-locals
     """Leave one held authority discoverable, hiding all other transaction-owned markers."""
     root, package = inputs.roots[-1], inputs.packages[-1]
     staged, retired = staging_dir(root.parent, root.name), retired_dir(root)
+    locations = ((root, "candidate"), (staged, "staging"), (retired, "retired"))
+    markers = [_discovery_entry(location / MANIFEST_NAME) for location, _role in locations]
+    uncertain = any(error is not None for _entry, error in markers)
+    interrupted = outcome[1] == 130 or any(isinstance(error, KeyboardInterrupt) for _entry, error in markers)
+    members = expected if inspection is not None else package.members
+    identity = (
+        inspection.authority.packages[-1].snapshot.directory_id
+        if inspection is not None
+        else package.snapshot.directory_id
+    )
     authority = None
-    if inspection is not None and _binding_matches(
-        root, expected, package.directories, inspection.authority.packages[-1].snapshot.directory_id
-    ):
-        authority = root
-        if outcome[0] not in ("published", "published-with-residue"):
-            outcome = ("published", outcome[1], outcome[2])
-    elif outcome[0] in ("unchanged", "rolled-back") and root.is_dir() and not retired.exists():
-        # Recovery owns the directory it retired, including any edits that caused its refusal.
-        # Leaving that original visible does not certify its bytes or issue a binding inspection.
-        authority = root
-    else:
-        authority = next(
-            (
-                location
-                for location in (root, retired)
-                if _binding_matches(location, package.members, package.directories, package.snapshot.directory_id)
-            ),
-            None,
-        )
-    interrupted, residue = outcome[1] == 130, False
+    try:
+        if not uncertain:
+            authority = next(
+                (
+                    location
+                    for location in ((root,) if inspection is not None else (root, retired))
+                    if _binding_matches(location, members, package.directories, identity, strict=True)
+                ),
+                None,
+            )
+            if (
+                inspection is not None
+                and authority == root
+                and outcome[0] not in ("published", "published-with-residue")
+            ):
+                outcome = ("published", outcome[1], outcome[2])
+    except (OSError, ValueError, PackagingError, _BindingRefusal, KeyboardInterrupt) as error:
+        uncertain = True
+        interrupted |= isinstance(error, KeyboardInterrupt)
     try:
         residue = _discard_scratch(staged) is not None
     except BaseException as error:  # pylint: disable=broad-exception-caught
         residue = True
         interrupted |= isinstance(error, KeyboardInterrupt)
-    for location, role in ((staged, "staging"), (retired, "retired"), (root, "candidate")):
+    for location, role in locations:
         if location != authority:
             code = _make_scratch_nondiscoverable(location, role, preserve_tree=True)
             residue |= code is not None
             interrupted |= code is not None and "interrupted" in code
-    # If a non-authoritative marker cannot be hidden, revoke discovery of the authority too.
-    # This is a cannot-establish outcome, never a second "published" package.
-    unwanted = any(
-        os.path.lexists(location / MANIFEST_NAME) for location in (root, staged, retired) if location != authority
-    )
-    if unwanted or authority is None:
+            uncertain |= code is not None and "unassessable" in code
+        entry, error = _discovery_entry(location / MANIFEST_NAME)
+        uncertain |= error is not None or ((entry is not None) != (location == authority))
+        interrupted |= isinstance(error, KeyboardInterrupt)
+    try:
         if authority is not None:
-            code = _make_scratch_nondiscoverable(authority, "authority", preserve_tree=True)
-            interrupted |= code is not None and "interrupted" in code
-        return "cannot-establish", 130 if interrupted else 3, "binding_discovery_unassessable"
+            uncertain |= not _binding_matches(authority, members, package.directories, identity, strict=True)
+    except (OSError, ValueError, PackagingError, _BindingRefusal, KeyboardInterrupt) as error:
+        uncertain = True
+        interrupted |= isinstance(error, KeyboardInterrupt)
+    if uncertain or authority is None:
+        return _binding_revoke_discovery(locations, interrupted)
     if authority == retired:
         return "cannot-establish", 130 if interrupted else 3, outcome[2]
     if residue:
@@ -4779,7 +4817,12 @@ def _binding_tree(root: Path) -> tuple[dict[str, bytes], tuple[str, ...]]:
 
 
 def _binding_matches(
-    root: Path, members: dict[str, bytes], directories: tuple[str, ...], identity: tuple[int, int]
+    root: Path,
+    members: dict[str, bytes],
+    directories: tuple[str, ...],
+    identity: tuple[int, int],
+    *,
+    strict: bool = False,
 ) -> bool:
     try:
         return (
@@ -4787,7 +4830,11 @@ def _binding_matches(
             and _binding_tree(root) == (members, directories)
             and _package_directory_id(root) == identity
         )
+    except FileNotFoundError:
+        return False
     except (OSError, ValueError, PackagingError, _BindingRefusal):
+        if strict:
+            raise
         return False
 
 
@@ -5347,19 +5394,9 @@ def bind_package(
     """Public package binder/inspector. Local working bytes only; no readiness or sharing receipt."""
     inspection = None
     try:
-        if (inspect and sanitize) or (sanitize and provider_packages):
+        if inspect and sanitize:
             raise _BindingRefusal("binding_usage", 2)
         roots = tuple(_binding_admit(str(value)) for value in (*provider_packages, package_root))
-        # A report-only consumer has nothing local to sanitize and needs no provider for this no-op.
-        if sanitize:
-            held = _binding_hold(roots[-1])
-            observation = _binding_observation(held, roots[-1])
-            if observation["applicability"] == "not_applicable":
-                _binding_barrier(roots[-1])
-                if not _binding_matches(roots[-1], held.members, held.directories, held.snapshot.directory_id):
-                    raise _BindingRefusal("binding_snapshot_changed")
-                inspection = _binding_inspection(_BindingInputs(roots, (held,), ()), observation)
-                return PackageBindingResult("unchanged", 0, inspection.codes, inspection)
         inputs = _binding_inputs(roots)
         package = inputs.packages[-1]
         observation = _binding_observation(package, roots[-1])

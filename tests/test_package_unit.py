@@ -1566,10 +1566,10 @@ def test_binding_cannot_use_incomplete_roles_or_ambiguous_owned_text(tmp_path: P
     assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
-def test_binding_provider_sanitize_is_usage_without_opening_either_root() -> None:
-    with pytest.raises(SystemExit) as failure:
-        sdf.main(["--package", "not-opened", "--sanitize", "--provider-package", "not-opened-either"])
-    assert failure.value.code == 2
+def test_binding_provider_sanitize_is_admitted_by_the_public_parser() -> None:
+    """The provider option reaches ordinary root admission instead of an incompatible-options error."""
+    result = _binding_cli("not-opened", "--sanitize", "--provider-package", "not-opened-either")
+    assert (result["exit_code"], result["codes"], result["inspection"]) == (1, ["binding_root_not_local_absolute"], {})
 
 
 @pytest.mark.parametrize(

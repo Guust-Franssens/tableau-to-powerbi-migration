@@ -16,6 +16,7 @@ usage:   python scripts/set_data_folder.py            # localize: set every mode
          python scripts/set_data_folder.py --package <absolute-dir> --inspect
          python scripts/set_data_folder.py --package <absolute-dir> --sanitize
          python scripts/set_data_folder.py --package <absolute-dir> --provider-package <absolute-provider>
+         python scripts/set_data_folder.py --package <consumer-ABS> --sanitize --provider-package <provider-ABS>
 
 Package exits: 0 success/idempotent/not applicable; 1 refusal/mismatch/published-with-residue;
 2 usage; 3 cannot-establish; 130 interrupt with the observed transaction outcome.
@@ -269,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.package is None and (args.inspect or args.provider_package):
         parser.error("package_options_require_package")
-    if args.package is not None and (args.check or (args.sanitize and args.provider_package)):
+    if args.package is not None and args.check:
         parser.error("incompatible_package_options")
 
     if args.package is not None:
