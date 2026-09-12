@@ -48,14 +48,32 @@ Values come back as .NET types, and two of them will break this protocol if pass
 
 So every value goes through `_json_safe`, and numerics stay NUMERIC - returning `"12.5"` as a string
 would make `compare_scalars` do a string comparison and quietly mislabel a correct translation.
+
+OPT-IN EXACT TRANSPORT
+---------------------
+Only an NDJSON request with result_format exactly "typed-v1" selects the additive typed path.
+It requires dax and a positive integer max_payload_bytes, with no other request fields. Success
+uses the same rows/error response union: {schema_version: 1, query_sha256, columns, rows}, where
+columns contain {name, kind} and each row contains ordered {kind, value} cells. Kinds are string,
+int32, int64, decimal, and blank (null, in cells only). Nonblank values are lossless strings.
+The limit charges the exact UTF-8 success envelope, excluding its framing LF. Success is withheld
+until EOF, NextResult() == False, and reader.Close() all succeed. No row/cell/digit cap is imposed.
+
+execute_typed(connection, dax, max_payload_bytes=...) is the native-qualification seam; the normal
+--pid/--port NDJSON server wires it before legacy marshalling. Native qualification is mandatory
+before merge; offline mocks do not qualify ADOMD's CLR conversions. --offline deliberately returns
+TYPED_UNAVAILABLE for typed requests. This is transport, not receipt, identity, or completion proof.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
+import re
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
@@ -79,6 +97,206 @@ from engine_source import (  # noqa: E402  # pylint: disable=wrong-import-positi
     EngineNotFoundError,
     engine_scripts_dir,
 )
+
+_TYPED_CLR_KINDS = {
+    "System.String": "string",
+    "System.Int32": "int32",
+    "System.Int64": "int64",
+    "System.Decimal": "decimal",
+}
+_TYPED_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", re.ASCII)
+
+
+class TypedResultError(ValueError):
+    """Closed typed-mode diagnostics; never format cells, queries, or driver exceptions."""
+
+    CODES = frozenset(
+        {
+            "INPUT_INVALID",
+            "QUERY_INVALID",
+            "PAYLOAD_LIMIT",
+            "RESULT_SCHEMA",
+            "RESULT_COLUMNS",
+            "RESULT_TYPE",
+            "RESULT_INCOMPLETE",
+            "EXECUTION_FAILED",
+            "TYPED_UNAVAILABLE",
+        }
+    )
+
+    def __init__(self, code: str) -> None:
+        self.code = code if isinstance(code, str) and code in self.CODES else "RESULT_SCHEMA"
+        super().__init__(self.code)
+
+
+def _typed_json(payload: object) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def _typed_query_args(dax: str, max_payload_bytes: int) -> None:
+    if not isinstance(max_payload_bytes, int) or isinstance(max_payload_bytes, bool) or max_payload_bytes <= 0:
+        raise TypedResultError("INPUT_INVALID")
+    if not isinstance(dax, str) or not dax.strip():
+        raise TypedResultError("QUERY_INVALID")
+    try:
+        dax.encode("utf-8")
+    except UnicodeError:
+        raise TypedResultError("QUERY_INVALID") from None
+    if not is_read_only(dax):
+        raise TypedResultError("QUERY_INVALID")
+
+
+def _decimal_text(value: Any) -> str:
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if type(value).__name__ == "Decimal" and hasattr(value, "ToString"):
+        # Preserve CLR scale and digits without using the operator's decimal separator.
+        from System.Globalization import CultureInfo  # pylint: disable=import-outside-toplevel,import-error
+
+        return str(value.ToString(CultureInfo.InvariantCulture))
+    raise TypedResultError("RESULT_TYPE")
+
+
+def _typed_integer(value: Any, kind: str) -> str:
+    native_name = "System.Int32" if kind == "int32" else "System.Int64"
+    if not isinstance(value, int) or isinstance(value, bool):
+        if not hasattr(value, "GetType") or value.GetType().FullName != native_name:
+            raise TypedResultError("RESULT_TYPE")
+        value = int(value)
+    bits = 32 if kind == "int32" else 64
+    if not -(2 ** (bits - 1)) <= value < 2 ** (bits - 1):
+        raise TypedResultError("RESULT_TYPE")
+    return str(value)
+
+
+def _typed_value(value: Any, kind: str) -> dict:
+    if value is None or type(value).__name__ == "DBNull":
+        return {"kind": "blank", "value": None}
+    if kind == "string" and isinstance(value, str):
+        text = value
+    elif kind in {"int32", "int64"}:
+        text = _typed_integer(value, kind)
+    elif kind == "decimal":
+        text = _decimal_text(value)
+        if not _TYPED_NUMBER.fullmatch(text):
+            raise TypedResultError("RESULT_TYPE")
+    else:
+        raise TypedResultError("RESULT_TYPE")
+    try:
+        text.encode("utf-8")
+    except UnicodeError:
+        raise TypedResultError("RESULT_TYPE") from None
+    return {"kind": kind, "value": text}
+
+
+def _typed_columns(reader: Any) -> list[dict]:
+    columns, names = [], set()
+    for index in range(reader.FieldCount):
+        name = reader.GetName(index)
+        if not isinstance(name, str) or not name or name in names:
+            raise TypedResultError("RESULT_COLUMNS")
+        try:
+            name.encode("utf-8")
+        except UnicodeError:
+            raise TypedResultError("RESULT_COLUMNS") from None
+        names.add(name)
+        kind = _TYPED_CLR_KINDS.get(reader.GetFieldType(index).FullName)
+        if kind is None:
+            raise TypedResultError("RESULT_TYPE")
+        columns.append({"name": name, "kind": kind})
+    if not columns:
+        raise TypedResultError("RESULT_COLUMNS")
+    return columns
+
+
+def _read_typed(reader: Any, query_hash: str, max_payload_bytes: int) -> bytes:
+    columns = _typed_columns(reader)
+    envelope = _typed_json({"schema_version": 1, "query_sha256": query_hash, "columns": columns, "rows": []})
+    if len(envelope) > max_payload_bytes:
+        raise TypedResultError("PAYLOAD_LIMIT")
+    # Keep the exact bytes that will be sent, rather than estimating a smaller projection.
+    buffer = bytearray(envelope[:-2])
+    separator = b""
+    while True:
+        read = reader.Read()
+        if read is False:
+            break
+        if read is not True:
+            raise TypedResultError("RESULT_INCOMPLETE")
+        row = [_typed_value(reader.GetValue(index), column["kind"]) for index, column in enumerate(columns)]
+        encoded = _typed_json(row)
+        if len(buffer) + len(separator) + len(encoded) + 2 > max_payload_bytes:
+            raise TypedResultError("PAYLOAD_LIMIT")
+        buffer.extend(separator)
+        buffer.extend(encoded)
+        separator = b","
+    if reader.NextResult() is not False:
+        raise TypedResultError("RESULT_INCOMPLETE")
+    buffer.extend(b"]}")
+    return bytes(buffer)
+
+
+def execute_typed(connection: Any, dax: str, *, max_payload_bytes: int) -> bytes:
+    """Return one complete typed-v1 success envelope on an already-open connection, or refuse.
+
+    This public seam must also be qualified with native ADOMD before merge. Mock readers exercise
+    control flow, not CLR conversion fidelity. Exceptions crossing this boundary carry fixed codes.
+    """
+    _typed_query_args(dax, max_payload_bytes)
+    try:
+        command = connection.CreateCommand()
+        command.CommandText = dax
+        reader = command.ExecuteReader()
+    except Exception:  # pylint: disable=broad-exception-caught
+        raise TypedResultError("EXECUTION_FAILED") from None
+    try:
+        try:
+            return _read_typed(reader, hashlib.sha256(dax.encode("utf-8")).hexdigest(), max_payload_bytes)
+        finally:
+            reader.Close()
+    except TypedResultError:
+        raise
+    except Exception:  # pylint: disable=broad-exception-caught
+        raise TypedResultError("RESULT_INCOMPLETE") from None
+
+
+def _typed_request_object(pairs: list[tuple[str, object]]) -> dict:
+    request = {}
+    for key, value in pairs:
+        if key in request:
+            raise TypedResultError("INPUT_INVALID")
+        request[key] = value
+    return request
+
+
+def _typed_response(line: str, executor: Callable[[str, int], bytes] | None) -> bytes:
+    try:
+        request = json.loads(line, object_pairs_hook=_typed_request_object)
+        if set(request) != {"dax", "result_format", "max_payload_bytes"}:
+            raise TypedResultError("INPUT_INVALID")
+        dax, limit = request["dax"], request["max_payload_bytes"]
+        _typed_query_args(dax, limit)
+        if executor is None:
+            raise TypedResultError("TYPED_UNAVAILABLE")
+        payload = executor(dax, limit)
+        if not isinstance(payload, bytes) or not payload:
+            raise TypedResultError("RESULT_SCHEMA")
+        if len(payload) > limit:
+            raise TypedResultError("PAYLOAD_LIMIT")
+        return payload
+    except TypedResultError as error:
+        return _typed_json({"error": error.code})
+    except Exception:  # pylint: disable=broad-exception-caught
+        return _typed_json({"error": "EXECUTION_FAILED"})
+
+
+def _write_typed(stdout: Any, payload: bytes) -> None:
+    if hasattr(stdout, "buffer"):
+        stdout.buffer.write(payload + b"\n")
+        stdout.buffer.flush()
+    else:
+        stdout.write(payload.decode("utf-8") + "\n")
+        stdout.flush()
 
 
 def _json_safe(value: Any) -> Any:  # pylint: disable=too-many-return-statements  # a type dispatch
@@ -178,10 +396,13 @@ def adomd_executor(port: int) -> Callable[[str], list[dict]]:
             reader.Close()
 
     execute.close = connection.Close  # type: ignore[attr-defined]
+    execute.typed = lambda dax, limit: execute_typed(connection, dax, max_payload_bytes=limit)
     return execute
 
 
-def serve(oracle: Callable[[str], dict], stdin=None, stdout=None) -> int:
+def serve(
+    oracle: Callable[[str], dict], stdin=None, stdout=None, *, typed_executor: Callable[[str, int], bytes] | None = None
+) -> int:
     """The `persistent_oracle` protocol: one JSON request per line in, one response per line out.
 
     A malformed line answers with an error and keeps the session alive. Killing the process on bad
@@ -196,6 +417,12 @@ def serve(oracle: Callable[[str], dict], stdin=None, stdout=None) -> int:
             continue
         try:
             request = json.loads(line)
+        except (ValueError, TypeError):
+            request = None
+        if isinstance(request, dict) and request.get("result_format") == "typed-v1":
+            _write_typed(stdout, _typed_response(line, typed_executor))
+            continue
+        try:
             dax = request["dax"] if isinstance(request, dict) else None
         except (ValueError, KeyError, TypeError):
             dax = None
@@ -203,6 +430,35 @@ def serve(oracle: Callable[[str], dict], stdin=None, stdout=None) -> int:
         stdout.write(json.dumps(response) + "\n")
         stdout.flush()
     return 0
+
+
+def _serve_native(resolve_port: Callable[[], int]) -> int:
+    # Select the wire mode before connection acquisition: typed startup failures must not escape
+    # through the legacy exception diagnostics. Both modes still share ONE ordinary ADOMD executor.
+    execute = None
+
+    def get_executor():
+        nonlocal execute
+        if execute is None:
+            execute = adomd_executor(resolve_port())
+        return execute
+
+    def legacy(dax: str) -> dict:
+        return make_oracle(get_executor())(dax)
+
+    def typed(dax: str, limit: int) -> bytes:
+        return get_executor().typed(dax, limit)
+
+    close_failed = False
+    try:
+        status = serve(legacy, typed_executor=typed)
+    finally:
+        if execute is not None:
+            try:
+                execute.close()
+            except Exception:  # pylint: disable=broad-exception-caught
+                close_failed = True
+    return 1 if close_failed else status
 
 
 def _load_contract():
@@ -285,6 +541,10 @@ def main(argv: list[str] | None = None) -> int:
     sys.path.insert(0, str(SKILL_SCRIPTS))
     # pylint: disable-next=import-outside-toplevel  # the skill dir is only on sys.path from here
     import probe_desktop_query as pdq  # noqa: PLC0415
+
+    if not args.certify and not args.query:
+        log.info('ready: one {"dax": ...} JSON request per line on stdin')
+        return _serve_native(lambda: args.port or pdq.discover_port(args.pid))  # pylint: disable=no-member
 
     port = args.port or pdq.discover_port(args.pid)  # pylint: disable=no-member  # resolved at runtime
     log.info("bound to Power BI Desktop local AS on port %s", port)
