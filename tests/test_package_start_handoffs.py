@@ -812,3 +812,218 @@ def test_r1_member_read_does_not_claim_fresh_integrity_for_unrelated_content(tmp
     (package / SPEC).write_bytes(b"unrelated changed content")
     assert require_held(pfs.read_verified_member(package, original, PROJECTION)).content == b'{"held":true}\r\n'
     assert verify(package).first_code == "package_file_digest_mismatch"
+
+
+@pytest.mark.parametrize(
+    "member,field,value",
+    [
+        ("source_identity", "kind", "workbook"),
+        ("source_identity", "sha256", "0" * 64),
+        ("source_identity", "tableau_luid", WB_LUID),
+        ("source_identity", "published_key", "HANDOFF_PRIVATE_KEY"),
+        ("source_identity", "revision", "HANDOFF_PRIVATE_REVISION"),
+        ("brief_policy", "requested_scope", "model_and_report"),
+        ("brief_policy", "fallback_authorization", "model_only_unvalidated"),
+    ],
+)
+def test_issued_s2_binds_each_source_and_brief_scalar(tmp_path: Path, member: str, field: str, value: str) -> None:
+    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(LIVE), LIVE_PROJECTION)
+    original = pri.verify_phase1_role_identity([package])[0]
+    require_handoff(original.data_access_handoff(package))
+    component = getattr(original, member)
+    assert getattr(component, field) != value
+    object.__setattr__(component, field, value)
+    assert getattr(original, member) is component and original.is_start_ready
+    refused = original.data_access_handoff(package)
+    assert_refusal(refused, "package_member_not_verified")
+    assert "HANDOFF_PRIVATE" not in json.dumps(refused.as_dict())
+
+
+def test_issued_s2_preserves_absent_brief_policy(tmp_path: Path) -> None:
+    package = with_data_access(datasource_package(tmp_path / "Source", luid=None), source_rows(FLAT))
+    (package / "migration-brief.md").write_text("Migrate it.\n", encoding="utf-8")
+    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
+    original = pri.verify_phase1_role_identity([package])[0]
+    assert original.is_start_ready and original.brief_policy is None
+    assert (original.source_identity.tableau_luid, original.source_identity.published_key) == (None, None)
+    assert require_handoff(original.data_access_handoff(package)).facts.all_flat
+    object.__setattr__(original, "brief_policy", pri.BriefPolicy("model_only", "stop"))
+    assert_refusal(original.data_access_handoff(package), "package_member_not_verified")
+
+
+def test_fresh_s1_cannot_renew_stale_s2_by_grafting_both_integrity_references(tmp_path: Path) -> None:
+    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(LIVE), LIVE_PROJECTION)
+    stale = pri.verify_phase1_role_identity([package])[0]
+    held = require_handoff(stale.data_access_handoff(package))
+    wrapper, snapshot = stale.verified, stale._data_access_snapshot
+    issued_integrity = wrapper.integrity
+    brief = package / "migration-brief.md"
+    before = brief.read_bytes()
+    after = before.replace(b'fallback_authorization = "stop"', b'fallback_authorization = "model_only_unvalidated"')
+    assert after != before
+    brief.write_bytes(after)
+    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
+    fresh_s1 = pri.verify_s1(package)
+    assert fresh_s1.integrity.is_clean and fresh_s1.integrity.has_read_authority()
+    assert fresh_s1.integrity is not issued_integrity
+    assert require_held(fresh_s1.read_verified_member(package, SPEC)).content == held.migration_spec.content
+    assert require_held(fresh_s1.read_verified_member(package, PROJECTION)).content == held.data_access.content
+    object.__setattr__(wrapper, "integrity", fresh_s1.integrity)
+    object.__setattr__(snapshot, "integrity", fresh_s1.integrity)
+    assert stale.verified is wrapper and stale._data_access_snapshot is snapshot
+    assert stale.brief_policy.fallback_authorization == "stop"
+    assert_refusal(stale.data_access_handoff(package), "package_member_not_verified")
+
+    renewed = pri.verify_phase1_role_identity([package], verified=[fresh_s1])[0]
+    assert renewed.is_start_ready and renewed.brief_policy.fallback_authorization == "model_only_unvalidated"
+    assert renewed.verified.integrity is not fresh_s1.integrity
+    assert require_handoff(renewed.data_access_handoff(package)).facts.live_source_keys == (LIVE_KEY,)
+
+
+def test_issued_s2_requires_its_integrity_to_retain_read_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(FLAT))
+    original = pri.verify_phase1_role_identity([package])[0]
+    require_handoff(original.data_access_handoff(package))
+    integrity = original.verified.integrity
+    object.__setattr__(integrity, "files_verified", 0)
+    assert original._data_access_snapshot.integrity is integrity and not integrity.has_read_authority()
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("an S2 capability with inconsistent issuing S1 authority reached a member read")
+
+    monkeypatch.setattr(pfs, "read_verified_member", forbidden)
+    assert_refusal(original.data_access_handoff(package), "package_member_not_verified")
+
+
+@pytest.mark.parametrize("connection,keys,all_flat", [(FLAT, (), True), (LIVE, (LIVE_KEY,), False)])
+@pytest.mark.parametrize("selected", [False, True])
+def test_published_provider_applicability_uses_final_cohort_topology(
+    tmp_path: Path, connection: dict, keys: tuple[str, ...], all_flat: bool, selected: bool
+) -> None:
+    rows = [{**source_rows(connection)[0], "published_datasource": {"luid": DS_LUID, "key": PUBLISHED_KEY}}]
+    provider = with_data_access(
+        datasource_package(tmp_path / "Provider", unit="Shared", published_key=PUBLISHED_KEY), rows
+    )
+    roots = [provider]
+    if selected:
+        roots.append(
+            with_data_access(
+                workbook_package(
+                    tmp_path / "Consumer",
+                    published={"luid": DS_LUID, "key": PUBLISHED_KEY},
+                    binding="../../../Provider/fabric/Shared.SemanticModel",
+                ),
+                [PUBLISHED],
+            )
+        )
+    canonical = gate.package_spec_facts({"data_sources": rows})
+    assert tuple(canonical) == (keys, False, False, False, None), "the one-argument canonical API must not change"
+    results = pri.verify_phase1_role_identity(roots)
+    assert all(result.is_start_ready for result in results)
+    provider_result = results[0]
+    assert provider_result.topology == ("published_provider" if selected else "standalone_datasource")
+    assert provider_result.source_identity.published_key == PUBLISHED_KEY
+    facts = require_handoff(provider_result.data_access_handoff(provider)).facts
+    assert tuple(facts) == (keys, False, True, False, None)
+    assert facts.all_flat is all_flat
+    if selected:
+        assert results[1].topology == "published_consumer" and results[1].dependencies[0].provider_ordinal == 0
+
+
+@pytest.mark.parametrize("publication_metadata", [False, True])
+@pytest.mark.parametrize("selected", [False, True])
+def test_mixed_case_sqlproxy_retains_canonical_direct_applicability(
+    tmp_path: Path, publication_metadata: bool, selected: bool
+) -> None:
+    rows = source_rows({**PUBLISHED["connection"], "class": "SQLPROXY"})
+    if publication_metadata:
+        rows[0]["published_datasource"] = {"luid": DS_LUID, "key": PUBLISHED_KEY}
+    canonical = gate.package_spec_facts({"data_sources": rows})
+    assert tuple(canonical) == ((), False, not publication_metadata, False, None)
+    assert canonical.all_flat is (not publication_metadata)
+    provider = with_data_access(datasource_package(tmp_path / "Provider", unit="Shared"), rows)
+    roots = [provider]
+    if selected:
+        roots.append(
+            with_data_access(
+                workbook_package(
+                    tmp_path / "Consumer",
+                    published={"luid": DS_LUID, "key": PUBLISHED_KEY},
+                    binding="../../../Provider/fabric/Shared.SemanticModel",
+                ),
+                [PUBLISHED],
+            )
+        )
+    results = pri.verify_phase1_role_identity(roots)
+    assert all(result.is_start_ready for result in results)
+    assert results[0].topology == ("published_provider" if selected else "standalone_datasource")
+    facts = require_handoff(results[0].data_access_handoff(provider)).facts
+    assert tuple(facts) == ((), False, True, False, None)
+    assert facts.all_flat
+    if selected:
+        assert results[1].topology == "published_consumer" and results[1].dependencies[0].provider_ordinal == 0
+        assert require_handoff(results[1].data_access_handoff(roots[1])).facts.published_only
+
+
+@pytest.mark.parametrize(
+    "additional,keys,review",
+    [(None, (), False), (LIVE, (LIVE_KEY,), False), (REVIEW, (), True)],
+)
+def test_consumer_applicability_preserves_strict_proxy_and_mixed_canonical_facts(
+    tmp_path: Path, additional: dict | None, keys: tuple[str, ...], review: bool
+) -> None:
+    provider = with_data_access(datasource_package(tmp_path / "Provider", unit="Shared"), source_rows(FLAT))
+    rows = [PUBLISHED, *(source_rows(additional) if additional is not None else [])]
+    consumer = with_data_access(
+        workbook_package(
+            tmp_path / "Consumer",
+            published={"luid": DS_LUID, "key": PUBLISHED_KEY},
+            binding="../../../Provider/fabric/Shared.SemanticModel",
+        ),
+        rows,
+    )
+    canonical = gate.package_spec_facts({"data_sources": rows})
+    assert tuple(canonical) == (keys, review, False, additional is None, None)
+    results = pri.verify_phase1_role_identity([provider, consumer])
+    assert all(result.is_start_ready for result in results)
+    assert results[0].topology == "published_provider" and results[1].topology == "published_consumer"
+    facts = require_handoff(results[1].data_access_handoff(consumer)).facts
+    assert tuple(facts) == (keys, review, False, additional is None, None)
+    assert not facts.all_flat
+
+
+def test_datasource_proxy_cannot_borrow_consumer_applicability(tmp_path: Path) -> None:
+    package = with_data_access(datasource_package(tmp_path / "Source"), [PUBLISHED])
+    assert tuple(gate.package_spec_facts({"data_sources": [PUBLISHED]})) == ((), False, False, True, None)
+    result = pri.verify_phase1_role_identity([package])[0]
+    assert result.is_start_ready and result.topology == "standalone_datasource"
+    facts = require_handoff(result.data_access_handoff(package)).facts
+    assert tuple(facts) == ((), False, False, False, None)
+    assert not facts.all_flat
+
+
+def test_handoff_consistency_refusal_preserves_private_policy_and_public_shapes(tmp_path: Path) -> None:
+    package = with_data_access(datasource_package(tmp_path / "Source", luid=None), source_rows(LIVE), LIVE_PROJECTION)
+    result = pri.verify_phase1_role_identity([package])[0]
+    handoff = require_handoff(result.data_access_handoff(package))
+    public_role, public_integrity = result.as_dict(), result.verified.integrity.as_dict()
+    assert set(public_role["source_identity"]) == {"kind", "sha256", "tableau_luid", "published_key"}
+    assert set(public_integrity) == {"status", "files_declared", "files_verified", "findings", "unassessable"}
+    assert tuple(field.name for field in fields(handoff)) == ("migration_spec", "facts", "data_access")
+    assert handoff.facts._fields == (
+        "live_source_keys",
+        "has_review",
+        "direct_applicable",
+        "published_only",
+        "refusal_code",
+    )
+    object.__setattr__(result.brief_policy, "fallback_authorization", "HANDOFF_PRIVATE credential endpoint")
+    refused = result.data_access_handoff(package)
+    assert_refusal(refused, "package_member_not_verified")
+    assert result.as_dict() == public_role and result.verified.integrity.as_dict() == public_integrity
+    assert set(refused.as_dict()) == set(public_integrity)
+    assert set(refused.as_dict()["findings"][0]) == {"code", "detail"}
+    serialized = json.dumps(refused.as_dict())
+    assert "HANDOFF_PRIVATE" not in serialized and str(package) not in serialized
