@@ -577,13 +577,19 @@ def test_changed_missing_or_unresolved_expression_is_not_adopted(
     _allow_test_root(monkeypatch)
     expression = _expression(package)
     text = expression.read_text(encoding="utf-8")
+    value = next(
+        match.group(2)
+        for match in folder.EXPRESSION_RE.finditer(text)
+        if match.group(2).startswith(pkg.PACKAGE_ROOT_TOKEN)
+    )
+    separator = "\\" if "\\" in value else "/"
     if change == "unresolved":
-        text = text.replace("<PACKAGE_ROOT>\\data\\", "<PACKAGE_ROOT>\\missing\\")
+        replacement = value.replace(f"{separator}data{separator}", f"{separator}missing{separator}", 1)
     elif change == "changed":
-        foreign = "C:\\other\\data\\" if os.name == "nt" else "/other/data/"
-        text = text.replace("<PACKAGE_ROOT>\\data\\", foreign)
+        replacement = "C:\\other\\data\\" if os.name == "nt" else "/other/data/"
     else:
-        text = ""
+        replacement = ""
+    text = text.replace(value, replacement, 1)
     expression.write_text(text, encoding="utf-8")
     _reseal(package)
 
