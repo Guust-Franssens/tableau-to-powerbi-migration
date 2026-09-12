@@ -39,13 +39,16 @@ from __future__ import annotations
 import json
 import hashlib
 import inspect
-from dataclasses import fields
+from contextlib import contextmanager
+from dataclasses import FrozenInstanceError, fields, replace
 import os
 import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -55,7 +58,7 @@ import pytest
 # ruff: noqa: E402  (the conftest-provided path must be in place before these imports)
 import refresh_pbip_model
 import _abf
-from probe_desktop_query import DesktopIdentity
+from probe_desktop_query import BoundDesktop, DesktopIdentity, ObservationUnavailable
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 
@@ -204,7 +207,7 @@ def test_image_observation_does_not_infer_commitment_from_replacement_bytes(tmp_
     cache.write_bytes(content)  # An old identical image cannot stand in for this operation.
     stamp = cache.stat().st_mtime_ns
     native_replace = os.replace
-    observed = []
+    published = []
 
     def replace_cache(source, destination):
         if Path(destination) == cache:
@@ -227,27 +230,24 @@ def test_image_observation_does_not_infer_commitment_from_replacement_bytes(tmp_
             cache.parent.parent,
             1606,
             lambda path: path.write_bytes(content[:-1] if mode == "truncated" else content),
-            on_observation=observed.append,
-        )[0]
+            return_observation=True,
+        )
 
-    if mode == "wrong-image":
-        with pytest.raises(refresh_pbip_model.CompatRollbackError, match="intended image"):
-            persist()
-    elif mode == "commit-raise":
-        with pytest.raises(refresh_pbip_model.CompatRollbackError, match="unestablished"):
-            persist()
-    elif mode == "failed-replace":
-        with pytest.raises(OSError, match="replace failed"):
-            persist()
+    if mode in ("wrong-image", "commit-raise"):
+        with pytest.raises(refresh_pbip_model.CompatRollbackError, match="^TOOL_UNAVAILABLE$"):
+            published.append(persist())
+    elif mode in ("failed-replace", "truncated"):
+        with pytest.raises(ObservationUnavailable, match="^TOOL_UNAVAILABLE$"):
+            published.append(persist())
     else:
-        assert persist() is (mode != "truncated")
+        published.append(persist())
     if mode == "normal":
         digest = hashlib.sha256(content).hexdigest()
-        assert observed == [refresh_pbip_model.ImageObservation(digest, len(content), digest, len(content))]
-        assert observed[0].commitment == "UNESTABLISHED"
+        assert published == [refresh_pbip_model.ImageObservation(digest, len(content), digest, len(content))]
+        assert published[0].commitment == "UNESTABLISHED"
         assert cache.read_bytes() == content
     else:
-        assert observed == []
+        assert published == []
     level = "1606" if mode in ("normal", "commit-raise", "wrong-image") else "1604"
     assert f"compatibilityLevel: {level}" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
     assert _no_staging_files(cache)
@@ -267,7 +267,7 @@ def test_imagesave_observation_is_bound_and_exports_only_native_facts(tmp_path, 
         "ambiguous": [database, database],
         "wrong": [SimpleNamespace(ID="other", CompatibilityLevel=1606)],
     }[catalogues]
-    writes, observed = [], []
+    writes = []
 
     def write(catalogue, stream):
         writes.append(catalogue)
@@ -291,56 +291,57 @@ def test_imagesave_observation_is_bound_and_exports_only_native_facts(tmp_path, 
         ),
     )
 
-    def record(observation):
-        assert cache.with_name("cache.abf.lock").exists()
-        observed.append(observation)
-
     if catalogues != "one":
         code = "CATALOGUE_CHANGED" if catalogues == "wrong" else "CATALOGUE_UNESTABLISHED"
         with pytest.raises(refresh_pbip_model.ObservationUnavailable, match=f"^{code}$"):
-            refresh_pbip_model.image_save(52001, cache, cache.parent.parent, bound=identity, on_persist=record)
-        assert writes == observed == []
+            refresh_pbip_model.image_save(52001, cache, cache.parent.parent, bound=identity, return_observation=True)
+        assert writes == []
         return
-    assert (
-        refresh_pbip_model.image_save(52001, cache, cache.parent.parent, bound=identity, on_persist=record)[0] is True
+    observation = refresh_pbip_model.image_save(
+        52001, cache, cache.parent.parent, bound=identity, return_observation=True
     )
-    assert writes == [identity.catalogue] and len(observed) == 1
-    assert observed[0].catalogue == identity.catalogue and observed[0].method == "AMO_ImageSave"
-    assert observed[0].compatibility_level == 1606
-    assert {item.name for item in fields(observed[0])} == {"catalogue", "compatibility_level", "image", "method"}
-    assert observed[0].image.commitment == "UNESTABLISHED"
+    assert writes == [identity.catalogue]
+    assert observation.catalogue == identity.catalogue and observation.method == "AMO_ImageSave"
+    assert observation.compatibility_level == 1606 and observation.identity == identity.identity
+    assert {item.name for item in fields(observation)} == {
+        "catalogue",
+        "compatibility_level",
+        "image",
+        "identity",
+        "method",
+    }
+    assert observation.image.commitment == "UNESTABLISHED"
+    with pytest.raises(FrozenInstanceError):
+        observation.catalogue = "caller mutation"
     assert not cache.with_name("cache.abf.lock").exists()
     with pytest.raises(refresh_pbip_model.ObservationUnavailable, match="^WRONG_PID_PORT$"):
-        refresh_pbip_model.image_save(52002, cache, bound=identity, on_persist=record)
+        refresh_pbip_model.image_save(52002, cache, bound=identity, return_observation=True)
     with pytest.raises(refresh_pbip_model.ObservationUnavailable, match="^IDENTITY_UNESTABLISHED$"):
-        refresh_pbip_model.image_save(52001, cache, on_persist=record)
+        refresh_pbip_model.image_save(52001, cache, return_observation=True)
 
 
 def test_a_missing_or_failing_flush_barrier_never_becomes_durable_evidence(tmp_path, monkeypatch):
     cache = _model(tmp_path, compat=1604)
-    observed, flushes = [], []
+    flushes = []
 
     def failing_flush(_descriptor):
         flushes.append(1)
         raise OSError("durable flush failed")
 
     monkeypatch.setattr(os, "fsync", failing_flush)
-    assert (
-        refresh_pbip_model._persist_image(
-            cache,
-            cache.parent.parent,
-            1606,
-            lambda path: path.write_bytes(_abf_bytes()),
-            on_observation=observed.append,
-        )[0]
-        is True
+    observation = refresh_pbip_model._persist_image(
+        cache,
+        cache.parent.parent,
+        1606,
+        lambda path: path.write_bytes(_abf_bytes()),
+        return_observation=True,
     )
-    assert observed[0].commitment == "UNESTABLISHED"
+    assert observation.commitment == "UNESTABLISHED"
     assert flushes == []  # Exact review control: close/replace/readback did not exercise a barrier.
     assert not hasattr(_abf, "ImageCommit")
 
     old = cache.read_bytes()
-    observed.clear()
+    published = []
 
     def writer_with_barrier(path):
         with path.open("wb") as handle:
@@ -348,11 +349,13 @@ def test_a_missing_or_failing_flush_barrier_never_becomes_durable_evidence(tmp_p
             handle.flush()
             os.fsync(handle.fileno())
 
-    with pytest.raises(OSError, match="durable flush failed"):
-        refresh_pbip_model._persist_image(
-            cache, cache.parent.parent, 1702, writer_with_barrier, on_observation=observed.append
+    with pytest.raises(ObservationUnavailable, match="^TOOL_UNAVAILABLE$"):
+        published.append(
+            refresh_pbip_model._persist_image(
+                cache, cache.parent.parent, 1702, writer_with_barrier, return_observation=True
+            )
         )
-    assert flushes == [1] and observed == [] and cache.read_bytes() == old
+    assert flushes == [1] and published == [] and cache.read_bytes() == old
     assert "compatibilityLevel: 1606" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
 
 
@@ -361,7 +364,7 @@ def test_removed_stage_and_raised_replace_cannot_reuse_identical_old_target(tmp_
     cache.parent.mkdir()
     content = _abf_bytes()
     cache.write_bytes(content)
-    observed = []
+    published = []
     replace_file = os.replace
 
     def failed_replace(source, destination):
@@ -371,24 +374,26 @@ def test_removed_stage_and_raised_replace_cannot_reuse_identical_old_target(tmp_
         return replace_file(source, destination)
 
     monkeypatch.setattr(os, "replace", failed_replace)
-    with pytest.raises(refresh_pbip_model.CompatRollbackError, match="unestablished"):
-        refresh_pbip_model._persist_image(
-            cache, cache.parent.parent, 1606, lambda path: path.write_bytes(content), on_observation=observed.append
+    with pytest.raises(refresh_pbip_model.CompatRollbackError, match="^TOOL_UNAVAILABLE$"):
+        published.append(
+            refresh_pbip_model._persist_image(
+                cache, cache.parent.parent, 1606, lambda path: path.write_bytes(content), return_observation=True
+            )
         )
-    assert observed == [] and cache.read_bytes() == content
+    assert published == [] and cache.read_bytes() == content
     assert "compatibilityLevel: 1606" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
 
 
-@pytest.mark.parametrize("fault", ["read", "hash", "list", "interrupt"])
+@pytest.mark.parametrize("fault", ["read", "hash", "reader-exit", "interrupt"])
 @pytest.mark.parametrize("observe", [False, True], ids=["legacy", "observing"])
 def test_post_swap_observation_faults_never_roll_compatibility_back(tmp_path, monkeypatch, fault, observe):
     cache = _model(tmp_path, compat=1604)
     cache.parent.mkdir()
     cache.write_bytes(_abf_bytes(seed=1))
     intended = _abf_bytes(seed=2)
-    observed, attempted = [], []
+    attempted = []
     swapped = False
-    replace_file, read_bytes, digest, stage = os.replace, Path.read_bytes, hashlib.sha256, _abf._staged_image_write
+    replace_file, open_file, digest = os.replace, Path.open, hashlib.sha256
 
     def install(source, destination):
         nonlocal swapped
@@ -401,45 +406,39 @@ def test_post_swap_observation_faults_never_roll_compatibility_back(tmp_path, mo
         attempted.append(fault)
         raise KeyboardInterrupt() if fault == "interrupt" else OSError(f"post-swap {fault}")
 
-    def read(path):
-        if swapped and path == cache and fault in ("read", "interrupt"):
+    @contextmanager
+    def open_reader(path, *args, **kwargs):
+        with open_file(path, *args, **kwargs) as handle:
+            if swapped and path == cache and fault in ("read", "interrupt"):
+                fail()
+            yield handle
+        if swapped and path == cache and fault == "reader-exit":
             fail()
-        return read_bytes(path)
 
     def hash_bytes(*args, **kwargs):
         if swapped and fault == "hash":
             fail()
         return digest(*args, **kwargs)
 
-    class FailingList(list):
-        def append(self, _item):
-            fail()
-
-    def write_stage(*args, **kwargs):
-        if fault == "list" and kwargs["observations"] is not None:
-            kwargs["observations"] = FailingList()
-        return stage(*args, **kwargs)
-
-    monkeypatch.setattr(os, "replace", install)
-    monkeypatch.setattr(Path, "read_bytes", read)
-    monkeypatch.setattr(hashlib, "sha256", hash_bytes)
-    monkeypatch.setattr(refresh_pbip_model, "_staged_image_write", write_stage)
     result, error = None, None
-    try:
-        result = refresh_pbip_model._persist_image(
-            cache,
-            cache.parent.parent,
-            1606,
-            lambda path: path.write_bytes(intended),
-            on_observation=observed.append if observe else None,
-        )
-    except BaseException as caught:
-        error = caught
-    assert swapped and read_bytes(cache) == intended
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", install)
+        patch.setattr(Path, "open", open_reader)
+        patch.setattr(hashlib, "sha256", hash_bytes)
+        try:
+            result = refresh_pbip_model._persist_image(
+                cache,
+                cache.parent.parent,
+                1606,
+                lambda path: path.write_bytes(intended),
+                return_observation=observe,
+            )
+        except BaseException as caught:
+            error = caught
+    assert swapped and cache.read_bytes() == intended
     assert "compatibilityLevel: 1606" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
-    assert observed == []
     if observe:
-        assert isinstance(error, KeyboardInterrupt if fault == "interrupt" else OSError)
+        assert result is None and type(error) is (KeyboardInterrupt if fault == "interrupt" else ObservationUnavailable)
         assert attempted == [fault]
     else:
         assert error is None and result[0] is True
@@ -472,7 +471,7 @@ def test_interrupt_after_replace_returns_before_installed_flag_preserves_alignme
     cache.parent.mkdir()
     cache.write_bytes(_abf_bytes(seed=1))
     intended = _abf_bytes(seed=2)
-    observed, interrupted = [], []
+    published, interrupted = [], []
     stage = _abf._staged_image_write
     lines, first_line = inspect.getsourcelines(stage)
     flag_line = first_line + next(
@@ -492,12 +491,14 @@ def test_interrupt_after_replace_returns_before_installed_flag_preserves_alignme
     error = None
     try:
         sys.settrace(interrupt)
-        refresh_pbip_model._persist_image(
-            cache,
-            cache.parent.parent,
-            1606,
-            lambda path: path.write_bytes(intended),
-            on_observation=observed.append,
+        published.append(
+            refresh_pbip_model._persist_image(
+                cache,
+                cache.parent.parent,
+                1606,
+                lambda path: path.write_bytes(intended),
+                return_observation=True,
+            )
         )
     except BaseException as caught:
         error = caught
@@ -507,8 +508,8 @@ def test_interrupt_after_replace_returns_before_installed_flag_preserves_alignme
     assert cache.read_bytes() == intended
     assert "compatibilityLevel: 1606" in (cache.parent.parent / "definition" / "database.tmdl").read_text()
     assert interrupted[0][:2] == (False, True)
-    assert isinstance(error, refresh_pbip_model.CompatRollbackError) and "unestablished" in str(error)
-    assert observed == []
+    assert isinstance(error, refresh_pbip_model.CompatRollbackError) and error.args == ("TOOL_UNAVAILABLE",)
+    assert published == []
     assert not hasattr(_abf, "ImageCommit")
     assert _no_staging_files(cache)
 
@@ -1316,3 +1317,808 @@ def test_a_failed_persist_preserves_the_definition_mtime(tmp_path: Path) -> None
     assert database_tmdl.read_bytes() == before_bytes, "bytes must be restored exactly"
     assert database_tmdl.stat().st_mtime_ns == before_mtime, "the mtime must be restored too"
     assert cache.stat().st_mtime > database_tmdl.stat().st_mtime, "the existing cache must stay valid"
+
+
+def _native_imagesave(monkeypatch, cache, *, identity=None, content=None):
+    """Native doubles only: retain the real persistence transaction, validators and rechecks."""
+    bound = BoundDesktop(
+        identity or DesktopIdentity(111, "100", 222, "101", 52001),
+        "11111111-2222-3333-4444-555555555555",
+    )
+    events, calls = [], []
+    content = _abf_bytes(seed=3) if content is None else content
+
+    def stream(path, *_args):
+        events.append("stream-open")
+        return SimpleNamespace(path=Path(path), Close=lambda: events.append("stream-close"))
+
+    def write(catalogue, handle):
+        events.append("write")
+        calls.append(catalogue)
+        handle.path.write_bytes(content)
+
+    server = SimpleNamespace(
+        Databases=[SimpleNamespace(ID=bound.catalogue, CompatibilityLevel=1606)],
+        Connect=lambda _: events.append("connect"),
+        Disconnect=lambda: events.append("amo-disconnect"),
+        ImageSave=write,
+    )
+    native_io = SimpleNamespace(
+        FileAccess=SimpleNamespace(Write=1), FileMode=SimpleNamespace(Create=2), FileStream=stream
+    )
+    monkeypatch.setitem(sys.modules, "System.IO", native_io)
+    monkeypatch.setattr(refresh_pbip_model, "_load_amo", lambda: lambda: server)
+    monkeypatch.setattr(refresh_pbip_model, "desktop_identity", lambda *_: events.append("identity") or bound.identity)
+    return SimpleNamespace(bound=bound, server=server, io=native_io, events=events, calls=calls, content=content)
+
+
+def _save_observed(cache, native, **options):
+    return refresh_pbip_model.image_save(
+        native.bound.identity.port, cache, cache.parent.parent, bound=native.bound, return_observation=True, **options
+    )
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["default", "explicit-false"])
+def test_imagesave_preserves_the_legacy_tuple(monkeypatch, tmp_path, explicit):
+    cache = _model(tmp_path, compat=1604)
+    native = _native_imagesave(monkeypatch, cache)
+    options = {"return_observation": False} if explicit else {}
+    result = refresh_pbip_model.image_save(52001, cache, cache.parent.parent, **options)
+    assert result == (
+        True,
+        f"persisted via AMO ImageSave ({len(native.content) / 1024:.1f} KB, compatibilityLevel 1606)",
+    )
+    assert native.calls == [native.bound.catalogue] and native.events[-1] == "amo-disconnect"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("pid", 333),
+        ("process_start", "200"),
+        ("as_pid", 444),
+        ("as_process_start", "201"),
+        ("port", 52002),
+    ],
+)
+def test_persistence_keeps_every_identity_component_even_for_one_catalogue(monkeypatch, tmp_path, field, value):
+    cache = _model(tmp_path, compat=1604)
+    first = _native_imagesave(monkeypatch, cache)
+    prior = _save_observed(cache, first)
+    second = _native_imagesave(monkeypatch, cache, identity=replace(first.bound.identity, **{field: value}))
+    current = _save_observed(cache, second)
+    assert prior.catalogue == current.catalogue and prior.image == current.image
+    assert current.identity == second.bound.identity and prior != current, f"persistence must retain {field}"
+
+
+@pytest.mark.parametrize("field", ["pid", "process_start", "as_pid", "as_process_start", "port", "catalogue"])
+def test_persistence_final_recheck_refuses_each_changed_identity(monkeypatch, tmp_path, field):
+    cache = _model(tmp_path, compat=1604)
+    native = _native_imagesave(monkeypatch, cache)
+    checked = refresh_pbip_model._checked_image
+    entered = []
+
+    def change_after_readback(path):
+        result = checked(path)
+        assert path == cache, "the mutation must occur after installed, not staged, readback"
+        entered.append(field)
+        if field == "catalogue":
+            native.server.Databases[0].ID = "22222222-2222-3333-4444-555555555555"
+        else:
+            value = "200" if "start" in field else 777
+            monkeypatch.setattr(
+                refresh_pbip_model, "desktop_identity", lambda *_: replace(native.bound.identity, **{field: value})
+            )
+        return result
+
+    monkeypatch.setattr(refresh_pbip_model, "_checked_image", change_after_readback)
+    code = "CATALOGUE_CHANGED" if field == "catalogue" else "PID_REUSED"
+    with pytest.raises(ObservationUnavailable, match=f"^{code}$"):
+        _save_observed(cache, native)
+    assert entered == [field] and native.calls == [native.bound.catalogue]
+    assert native.events[-1] == "amo-disconnect" and cache.read_bytes() == native.content
+    assert refresh_pbip_model.read_declared_compatibility(cache.parent.parent)[0] == 1606
+
+
+def test_caller_mutation_and_failed_retry_cannot_supply_persistence_observations(monkeypatch, tmp_path):
+    cache = _model(tmp_path, compat=1604)
+    native = _native_imagesave(monkeypatch, cache)
+    prior = _save_observed(cache, native)
+    entered, release = threading.Event(), threading.Event()
+    published = []
+    write = native.server.ImageSave
+
+    def blocked_write(*args):
+        write(*args)
+        entered.set()
+        assert release.wait(5)
+
+    native.server.ImageSave = blocked_write
+    caller = threading.Thread(target=lambda: published.append(_save_observed(cache, native)))
+    caller.start()
+    try:
+        assert entered.wait(3), "must mutate old caller state while this invocation is inside ImageSave"
+        object.__setattr__(prior, "catalogue", "forged prior")
+        object.__setattr__(prior.image, "installed_sha256", "forged digest")
+        assert published == [] and caller.is_alive()
+    finally:
+        release.set()
+        caller.join(5)
+    assert not caller.is_alive() and len(published) == 1
+    assert published[0].catalogue == native.bound.catalogue
+    assert published[0].image.installed_sha256 == hashlib.sha256(native.content).hexdigest()
+
+    def failed_retry(*_args):
+        entered.clear()
+        raise RuntimeError("retry failed")
+
+    native.server.ImageSave = failed_retry
+    with pytest.raises(ObservationUnavailable, match="^TOOL_UNAVAILABLE$"):
+        published.append(_save_observed(cache, native))
+    assert not entered.is_set() and len(published) == 1, "failed retry must enter the writer but publish nothing"
+
+
+class _TrackedCacheReader:
+    def __init__(self, handle, role, events):
+        self.handle, self.role, self.events = handle, role, events
+        self.reads, self.seeks = [], []
+
+    def __enter__(self):
+        self.handle.__enter__()
+        self.events.append(f"{self.role}-open")
+        return self
+
+    def read(self, size=-1):
+        assert 0 <= size <= 1024 * 1024, "cache reads must request at most 1 MiB"
+        offset = self.handle.tell()
+        chunk = self.handle.read(size)
+        self.reads.append((offset, size, len(chunk)))
+        return chunk
+
+    def seek(self, offset):
+        self.seeks.append(offset)
+        return self.handle.seek(offset)
+
+    def __exit__(self, *args):
+        result = self.handle.__exit__(*args)
+        self.events.append(f"{self.role}-exit")
+        return result
+
+
+@pytest.mark.parametrize("observe", [False, True], ids=["legacy-headers-only", "two-sequential-observation-passes"])
+def test_persistence_cache_traversal_and_publication_order_are_exact(monkeypatch, tmp_path, observe):
+    cache = _model(tmp_path, compat=1604)
+    (tmp_path / "input_manifest.json").write_text(
+        json.dumps({"generated_artifacts": {"version": 1, "run_id": "test-run"}}), encoding="utf-8"
+    )
+    payload = 1024 * 1024 + 13
+    content = _abf_bytes(((_ABF_MAX_BLOCK_BYTES, payload), (128, 17)))
+    native = _native_imagesave(monkeypatch, cache, content=content)
+    events, readers, hashes = native.events, [], []
+    open_file, replace_file = Path.open, os.replace
+    declaration, lock = refresh_pbip_model._append_generated_edit_declaration, refresh_pbip_model.model_lock
+
+    def open_path(path, mode="r", *args, **kwargs):
+        handle = open_file(path, mode, *args, **kwargs)
+        if mode == "rb" and path.name.startswith("cache.abf"):
+            reader = _TrackedCacheReader(handle, "installed" if path == cache else "stage", events)
+            readers.append(reader)
+            return reader
+        return handle
+
+    def install(source, destination):
+        result = replace_file(source, destination)
+        if Path(destination) == cache:
+            events.append("replace")
+        return result
+
+    def declare(*args):
+        result = declaration(*args)
+        events.append("declare")
+        return result
+
+    @contextmanager
+    def model_lock(*args, **kwargs):
+        with lock(*args, **kwargs):
+            yield
+        events.append("lock-exit")
+
+    class CountingHash:
+        def __init__(self):
+            self.digest, self.count = hashlib.sha256(), 0
+            hashes.append(self)
+
+        def update(self, data):
+            self.count += len(data)
+            self.digest.update(data)
+
+        def hexdigest(self):
+            return self.digest.hexdigest()
+
+    monkeypatch.setattr(Path, "open", open_path)
+    monkeypatch.setattr(os, "replace", install)
+    monkeypatch.setattr(refresh_pbip_model, "_append_generated_edit_declaration", declare)
+    monkeypatch.setattr(refresh_pbip_model, "model_lock", model_lock)
+    monkeypatch.setattr(_abf, "hashlib", SimpleNamespace(sha256=CountingHash))
+    result = refresh_pbip_model.image_save(
+        52001, cache, cache.parent.parent, bound=native.bound, return_observation=observe
+    )
+    if observe:
+        next_header = 102 + 12 + payload
+        expected = [
+            (0, 102, 102),
+            (102, 12, 12),
+            (114, 1024 * 1024, 1024 * 1024),
+            (114 + 1024 * 1024, 13, 13),
+            (next_header, 12, 12),
+            (next_header + 12, 17, 17),
+            (len(content), 1, 0),
+        ]
+        assert [reader.role for reader in readers] == ["stage", "installed"], "exactly two cache opens/passes"
+        assert all(reader.reads == expected and reader.seeks == [] for reader in readers), (
+            "no skips, rewinds or rereads"
+        )
+        assert [digest.count for digest in hashes] == [len(content), len(content)], (
+            "hash every consumed byte exactly once"
+        )
+        assert events == [
+            "identity",
+            "connect",
+            "stream-open",
+            "write",
+            "stream-close",
+            "stage-open",
+            "stage-exit",
+            "replace",
+            "declare",
+            "installed-open",
+            "installed-exit",
+            "identity",
+            "lock-exit",
+            "amo-disconnect",
+        ]
+        assert result.image.intended_sha256 == result.image.installed_sha256 == hashlib.sha256(content).hexdigest()
+        assert result.image.intended_size == result.image.installed_size == len(content)
+        assert result.image.commitment == "UNESTABLISHED"
+    else:
+        assert len(readers) == 1 and readers[0].role == "stage" and hashes == []
+        assert readers[0].reads == [(0, 100, 100), (102, 12, 12), (102 + 12 + payload, 12, 12)]
+        assert readers[0].seeks == [102, 102 + 12 + payload], "legacy validation must not traverse payload bytes"
+        assert result[0] is True
+    assert events[-2:] == ["lock-exit", "amo-disconnect"], "publish only after the contexts and teardown"
+
+
+class _LogicalImage:
+    """More than 3 GiB of logical ABF data, backed by one reusable 1 MiB payload buffer."""
+
+    block_span = 2 * 1024 * 1024
+    full_blocks = 1536
+    last_payload = 31
+
+    def __init__(self):
+        self.size = 102 + self.full_blocks * self.block_span + 12 + self.last_payload
+        self.position, self.consumed, self.maximum, self.eofs, self.closed = 0, 0, 0, 0, False
+        self.payload = memoryview(bytes(1024 * 1024))
+
+    def stat(self):
+        return SimpleNamespace(st_size=self.size)
+
+    def open(self, mode):
+        assert mode == "rb" and self.position == 0, "one fresh sequential read only"
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        self.closed = True
+
+    def read(self, size):
+        assert 0 < size <= 1024 * 1024, "multi-GiB input must never request a whole-cache allocation"
+        self.maximum = max(self.maximum, size)
+        if self.position == self.size:
+            self.eofs += 1
+            return b""
+        if self.position < 102:
+            data = (_ABF_PREAMBLE + b"\0\0")[self.position : self.position + size]
+        else:
+            index, within = divmod(self.position - 102, self.block_span)
+            final = index == self.full_blocks
+            payload = self.last_payload if final else self.block_span - 12
+            if within < 12:
+                header = struct.pack("<II", 128 if final else 2 * 1024 * 1024, payload + 4) + b"\x2a\xd7\x86\x4e"
+                data = header[within : within + size]
+            else:
+                data = self.payload[: min(size, payload - (within - 12))]
+        self.position += len(data)
+        self.consumed += len(data)
+        return data
+
+    def seek(self, *_args):
+        raise AssertionError("logical cache cannot be rewound or skipped")
+
+    def read_bytes(self):
+        raise AssertionError("whole-cache reads are forbidden")
+
+
+def test_multigib_image_uses_bounded_sequential_reads_and_a_counting_hash(monkeypatch):
+    logical = _LogicalImage()
+    hashes = []
+
+    class CountingHash:
+        def __init__(self):
+            self.count = 0
+            hashes.append(self)
+
+        def update(self, data):
+            self.count += len(data)
+
+        def hexdigest(self):
+            return f"{self.count:064x}"
+
+    monkeypatch.setattr(_abf, "hashlib", SimpleNamespace(sha256=CountingHash))
+    digest, size = _abf._checked_image(logical)
+    assert size == logical.size > 3 * 1024**3 and digest == f"{size:064x}"
+    assert logical.consumed == size and logical.eofs == 1 and logical.closed
+    assert logical.maximum == 1024 * 1024 and len(logical.payload) == 1024 * 1024
+    assert len(hashes) == 1 and hashes[0].count == size, "hash byte-count must agree with EOF, not a stat proxy"
+
+
+def test_small_image_uses_the_real_sha256_digest_and_byte_count(tmp_path):
+    cache = tmp_path / "cache.abf"
+    content = _abf_bytes(((_ABF_MAX_BLOCK_BYTES, 19), (128, 31)), seed=7)
+    cache.write_bytes(content)
+    assert _abf._checked_image(cache) == (hashlib.sha256(content).hexdigest(), len(content))
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "stream-close",
+        "stage-read",
+        "stage-hash",
+        "stage-exit",
+        "replace",
+        "declaration",
+        "installed-read",
+        "installed-hash",
+        "installed-exit",
+        "lock-exit",
+    ],
+)
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt, SystemExit])
+def test_required_persistence_failure_never_publishes_and_respects_installation(
+    monkeypatch, tmp_path, capsys, phase, error_type
+):
+    cache = _model(tmp_path, compat=1604)
+    cache.parent.mkdir()
+    old = _abf_bytes(seed=1)
+    cache.write_bytes(old)
+    (tmp_path / "input_manifest.json").write_text(
+        json.dumps({"generated_artifacts": {"version": 1, "run_id": "test-run"}}), encoding="utf-8"
+    )
+    native = _native_imagesave(monkeypatch, cache)
+    attempted, published = [], []
+    installed = False
+    open_file, replace_file = Path.open, os.replace
+    declaration, lock = refresh_pbip_model._append_generated_edit_declaration, refresh_pbip_model.model_lock
+    file_stream = native.io.FileStream
+
+    def fail():
+        attempted.append(phase)
+        raise error_type("PRIVATE_REQUIRED_FAILURE")
+
+    def stream(*args):
+        handle = file_stream(*args)
+        close = handle.Close
+
+        def finalize():
+            close()
+            if phase == "stream-close":
+                fail()
+
+        handle.Close = finalize
+        return handle
+
+    @contextmanager
+    def open_path(path, mode="r", *args, **kwargs):
+        role = (
+            ("installed" if path == cache else "stage") if path.name.startswith("cache.abf") and mode == "rb" else None
+        )
+        with open_file(path, mode, *args, **kwargs) as handle:
+            if role:
+                native.events.append(f"{role}-read")
+                if phase == f"{role}-read":
+                    fail()
+            yield handle
+        if role:
+            native.events.append(f"{role}-exit")
+            if phase == f"{role}-exit":
+                fail()
+
+    def digest():
+        if phase == ("installed-hash" if installed else "stage-hash"):
+            fail()
+        return hashlib.sha256()
+
+    def install(source, destination):
+        nonlocal installed
+        if Path(destination) == cache and phase == "replace":
+            fail()
+        result = replace_file(source, destination)
+        if Path(destination) == cache:
+            installed = True
+            native.events.append("replace")
+        return result
+
+    def declare(*args):
+        result = declaration(*args)
+        native.events.append("declare")
+        if phase == "declaration":
+            fail()
+        return result
+
+    @contextmanager
+    def model_lock(*args, **kwargs):
+        with lock(*args, **kwargs):
+            yield
+        native.events.append("lock-exit")
+        if phase == "lock-exit":
+            fail()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(native.io, "FileStream", stream)
+        patch.setattr(Path, "open", open_path)
+        patch.setattr(os, "replace", install)
+        patch.setattr(_abf, "hashlib", SimpleNamespace(sha256=digest))
+        patch.setattr(refresh_pbip_model, "_append_generated_edit_declaration", declare)
+        patch.setattr(refresh_pbip_model, "model_lock", model_lock)
+        expected_type = KeyboardInterrupt if error_type is KeyboardInterrupt else ObservationUnavailable
+        with pytest.raises(expected_type) as caught:
+            published.append(_save_observed(cache, native))
+    assert attempted == [phase] and "stream-close" in native.events, f"must reach the intended {phase} boundary"
+    after_install = phase in {"declaration", "installed-read", "installed-hash", "installed-exit", "lock-exit"}
+    assert installed is after_install and published == []
+    assert cache.read_bytes() == (native.content if after_install else old)
+    assert refresh_pbip_model.read_declared_compatibility(cache.parent.parent)[0] == (1606 if after_install else 1604)
+    assert native.events[-1] == "amo-disconnect", "required failure must still attempt AMO teardown"
+    assert caught.value.args == (() if error_type is KeyboardInterrupt else ("TOOL_UNAVAILABLE",))
+    assert caught.value.__cause__ is caught.value.__context__ is None
+    assert "PRIVATE_REQUIRED_FAILURE" not in str(capsys.readouterr())
+
+
+@pytest.mark.parametrize(
+    "phase,error_type",
+    [
+        ("staging-exists", OSError),
+        ("staging-exists", RuntimeError),
+        ("staging-unlink", OSError),
+        ("staging-unlink", RuntimeError),
+        ("lock-unlink", OSError),
+        ("amo-disconnect", OSError),
+        ("amo-disconnect", RuntimeError),
+    ],
+)
+def test_best_effort_persistence_cleanup_does_not_erase_established_facts(
+    monkeypatch, tmp_path, capsys, phase, error_type
+):
+    cache = _model(tmp_path, compat=1604)
+    native = _native_imagesave(monkeypatch, cache)
+    attempted, stages = [], []
+    replace_file, exists, unlink, os_unlink = os.replace, Path.exists, Path.unlink, os.unlink
+    installed = False
+
+    def fail():
+        attempted.append(phase)
+        raise error_type("PRIVATE_BEST_EFFORT_FAILURE")
+
+    def install(source, destination):
+        nonlocal installed
+        result = replace_file(source, destination)
+        if Path(destination) == cache:
+            stages.append(Path(source))
+            installed = True
+            if phase == "staging-unlink":
+                Path(source).write_bytes(b"leftover staging, not authority")
+        return result
+
+    def path_exists(path):
+        if installed and path in stages and phase == "staging-exists":
+            fail()
+        return exists(path)
+
+    def path_unlink(path, *args, **kwargs):
+        if installed and path in stages and phase == "staging-unlink":
+            fail()
+        return unlink(path, *args, **kwargs)
+
+    def remove(path, *args, **kwargs):
+        if installed and Path(path) == cache.with_name("cache.abf.lock") and phase == "lock-unlink":
+            fail()
+        return os_unlink(path, *args, **kwargs)
+
+    def disconnect():
+        native.events.append("amo-disconnect")
+        if phase == "amo-disconnect":
+            fail()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", install)
+        patch.setattr(Path, "exists", path_exists)
+        patch.setattr(Path, "unlink", path_unlink)
+        patch.setattr(os, "unlink", remove)
+        patch.setattr(native.server, "Disconnect", disconnect)
+        result = _save_observed(cache, native)
+    assert installed and attempted == [phase], "exercise the actual caught cleanup operation after replacement"
+    assert type(result) is refresh_pbip_model.PersistenceObservation and result.identity == native.bound.identity
+    assert result.image.installed_sha256 == hashlib.sha256(native.content).hexdigest()
+    assert native.events[-1] == "amo-disconnect" and cache.read_bytes() == native.content
+    assert "PRIVATE_BEST_EFFORT_FAILURE" not in str(capsys.readouterr())
+
+
+@pytest.mark.parametrize("observe", [False, True], ids=["legacy", "observation"])
+@pytest.mark.parametrize("phase", ["load", "write", "stream-close", "disconnect"])
+@pytest.mark.parametrize(
+    "kind,code",
+    [
+        ("native", "TOOL_UNAVAILABLE"),
+        ("exit", "TOOL_UNAVAILABLE"),
+        ("interrupt", None),
+        ("known", "PID_REUSED"),
+        ("forged", "TOOL_UNAVAILABLE"),
+    ],
+)
+def test_imagesave_error_boundary_is_closed_and_legacy_errors_are_unchanged(
+    monkeypatch, tmp_path, capsys, observe, phase, kind, code
+):
+    cache = _model(tmp_path, compat=1604)
+    cache.parent.mkdir()
+    old = _abf_bytes(seed=1)
+    cache.write_bytes(old)
+    native = _native_imagesave(monkeypatch, cache)
+    sentinel = "PRIVATE_IMAGE_ENDPOINT_PATH_TOKEN_PAYLOAD"
+    error = {
+        "native": OSError(sentinel),
+        "exit": SystemExit(sentinel),
+        "interrupt": KeyboardInterrupt(sentinel),
+        "known": ObservationUnavailable("PID_REUSED"),
+        "forged": ObservationUnavailable(sentinel),
+    }[kind]
+    error.add_note(sentinel)
+    cause = RuntimeError(sentinel)
+    attempted, published = [], []
+
+    def native_failure(*_args):
+        attempted.append(phase)
+        raise error from cause
+
+    if phase == "load":
+        monkeypatch.setattr(refresh_pbip_model, "_load_amo", native_failure)
+    elif phase == "write":
+        native.server.ImageSave = native_failure
+    elif phase == "disconnect":
+        native.server.Disconnect = native_failure
+    else:
+        file_stream = native.io.FileStream
+
+        def stream(*args):
+            handle = file_stream(*args)
+            handle.Close = native_failure
+            return handle
+
+        native.io.FileStream = stream
+    suppressed = observe and phase == "disconnect" and isinstance(error, Exception)
+    if suppressed:
+        published.append(
+            refresh_pbip_model.image_save(
+                52001, cache, cache.parent.parent, bound=native.bound, return_observation=observe
+            )
+        )
+        assert type(published[0]) is refresh_pbip_model.PersistenceObservation
+    else:
+        with pytest.raises(BaseException) as caught:
+            published.append(
+                refresh_pbip_model.image_save(
+                    52001, cache, cache.parent.parent, bound=native.bound, return_observation=observe
+                )
+            )
+        assert published == []
+        if observe:
+            expected = KeyboardInterrupt if kind == "interrupt" else ObservationUnavailable
+            assert type(caught.value) is expected and caught.value is not error
+            assert caught.value.args == (() if code is None else (code,))
+            assert caught.value.__context__ is caught.value.__cause__ is None
+            assert not getattr(caught.value, "__notes__", ())
+            rendered = "".join(traceback.format_exception(caught.value))
+            assert sentinel not in rendered and "native_failure" not in rendered
+        else:
+            assert caught.value is error and caught.value.__cause__ is cause and caught.value.__notes__ == [sentinel]
+    assert attempted == [phase], "privacy control must exercise the specified native phase"
+    assert cache.read_bytes() == (native.content if phase == "disconnect" else old)
+    assert refresh_pbip_model.read_declared_compatibility(cache.parent.parent)[0] == (
+        1606 if phase == "disconnect" else 1604
+    )
+    if observe:
+        assert sentinel not in str(capsys.readouterr())
+
+
+@pytest.mark.parametrize("observe", [False, True], ids=["legacy", "observation"])
+@pytest.mark.parametrize("error_type", [refresh_pbip_model.ModelLockTimeout, refresh_pbip_model.CompatRollbackError])
+def test_lock_and_compatibility_errors_keep_only_their_public_type_in_observation_mode(
+    monkeypatch, tmp_path, observe, error_type
+):
+    cache = _model(tmp_path, compat=1604)
+    native = _native_imagesave(monkeypatch, cache)
+    error = error_type("PRIVATE_LOCK_OR_COMPATIBILITY_DETAIL")
+    error.add_note("PRIVATE_NOTE")
+    entered = []
+
+    @contextmanager
+    def refuse_lock(*_args, **_kwargs):
+        entered.append("lock-enter")
+        raise error
+        yield  # pragma: no cover - make entry failure a real context-manager failure
+
+    monkeypatch.setattr(refresh_pbip_model, "model_lock", refuse_lock)
+    with pytest.raises(error_type) as caught:
+        refresh_pbip_model.image_save(52001, cache, cache.parent.parent, bound=native.bound, return_observation=observe)
+    assert entered == ["lock-enter"] and native.calls == [], "must refuse at lock entry, before ImageSave"
+    assert native.events[-1] == "amo-disconnect"
+    if observe:
+        assert caught.value is not error and caught.value.args == ("TOOL_UNAVAILABLE",)
+        assert caught.value.__cause__ is caught.value.__context__ is None
+        assert not getattr(caught.value, "__notes__", ())
+    else:
+        assert caught.value is error and caught.value.__notes__ == ["PRIVATE_NOTE"]
+
+
+@pytest.mark.parametrize("phase", ["stage", "installed"])
+@pytest.mark.parametrize("change", ["truncate", "append"])
+def test_cache_eof_and_actual_byte_count_are_required_even_after_stat(monkeypatch, tmp_path, phase, change):
+    cache = _model(tmp_path, compat=1604)
+    cache.parent.mkdir()
+    old = _abf_bytes(seed=1)
+    cache.write_bytes(old)
+    native = _native_imagesave(monkeypatch, cache)
+    stat = Path.stat
+    touched, published = [], []
+
+    def stale_size(path, *args, **kwargs):
+        result = stat(path, *args, **kwargs)
+        is_target = (
+            path == cache if phase == "installed" else path.name.startswith("cache.abf.") and path.suffix == ".tmp"
+        )
+        if is_target and not touched:
+            touched.append(path)
+            content = native.content[:-1] if change == "truncate" else native.content + b"unexpected tail"
+            path.write_bytes(content)
+        return result
+
+    # Apply the race after the writer has closed, not to an earlier exists()/staging preparation stat.
+    file_stream = native.io.FileStream
+
+    def stream(*args):
+        handle = file_stream(*args)
+        close = handle.Close
+
+        def finalize():
+            close()
+            monkeypatch.setattr(Path, "stat", stale_size)
+
+        handle.Close = finalize
+        return handle
+
+    native.io.FileStream = stream
+    with pytest.raises(ObservationUnavailable, match="^TOOL_UNAVAILABLE$"):
+        published.append(_save_observed(cache, native))
+    assert len(touched) == 1 and "stream-close" in native.events, "must race a real cache read after ImageSave"
+    assert published == []
+    expected = (
+        old
+        if phase == "stage"
+        else (native.content[:-1] if change == "truncate" else native.content + b"unexpected tail")
+    )
+    assert cache.read_bytes() == expected
+    assert refresh_pbip_model.read_declared_compatibility(cache.parent.parent)[0] == (
+        1604 if phase == "stage" else 1606
+    )
+
+
+@pytest.mark.parametrize("observe", [False, True], ids=["legacy", "observation"])
+def test_benign_native_imagesave_error_still_requires_a_valid_closed_image(monkeypatch, tmp_path, observe):
+    cache = _model(tmp_path, compat=1604)
+    native = _native_imagesave(monkeypatch, cache)
+    write = native.server.ImageSave
+
+    def benign(*args):
+        write(*args)
+        raise RuntimeError("The server sent an unrecognizable response")
+
+    native.server.ImageSave = benign
+    result = refresh_pbip_model.image_save(
+        52001, cache, cache.parent.parent, bound=native.bound, return_observation=observe
+    )
+    assert native.events[-1] == "amo-disconnect" and "stream-close" in native.events
+    if observe:
+        assert result.image.installed_sha256 == hashlib.sha256(native.content).hexdigest()
+    else:
+        assert result[0] is True
+
+
+@pytest.mark.parametrize("phase", ["staging-exists", "staging-unlink", "lock-unlink"])
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit])
+def test_persistence_cleanup_interrupts_cannot_publish(monkeypatch, tmp_path, phase, error_type):
+    cache = _model(tmp_path, compat=1604)
+    native = _native_imagesave(monkeypatch, cache)
+    stages, entered, published = [], [], []
+    replace_file, exists, unlink, os_unlink = os.replace, Path.exists, Path.unlink, os.unlink
+
+    def fail():
+        entered.append(phase)
+        raise error_type("PRIVATE_CLEANUP_INTERRUPT")
+
+    def install(source, destination):
+        result = replace_file(source, destination)
+        if Path(destination) == cache:
+            stages.append(Path(source))
+            if phase == "staging-unlink":
+                Path(source).write_bytes(b"leftover stage")
+        return result
+
+    def path_exists(path):
+        if path in stages and phase == "staging-exists":
+            fail()
+        return exists(path)
+
+    def path_unlink(path, *args, **kwargs):
+        if path in stages and phase == "staging-unlink":
+            fail()
+        return unlink(path, *args, **kwargs)
+
+    def remove(path, *args, **kwargs):
+        if stages and Path(path) == cache.with_name("cache.abf.lock") and phase == "lock-unlink":
+            fail()
+        return os_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "replace", install)
+        patch.setattr(Path, "exists", path_exists)
+        patch.setattr(Path, "unlink", path_unlink)
+        patch.setattr(os, "unlink", remove)
+        expected = KeyboardInterrupt if error_type is KeyboardInterrupt else ObservationUnavailable
+        with pytest.raises(expected) as caught:
+            published.append(_save_observed(cache, native))
+    assert entered == [phase] and len(stages) == 1, "interrupt must enter actual cleanup after replacement"
+    assert published == [] and caught.value.args == (() if error_type is KeyboardInterrupt else ("TOOL_UNAVAILABLE",))
+    assert caught.value.__cause__ is caught.value.__context__ is None
+    assert cache.read_bytes() == native.content
+    assert refresh_pbip_model.read_declared_compatibility(cache.parent.parent)[0] == 1606
+    assert native.events[-1] == "amo-disconnect"
+
+
+@pytest.mark.parametrize("observe", [False, True], ids=["legacy-fallback", "observation-refusal"])
+def test_observation_refusal_cannot_fall_through_to_ui_save(monkeypatch, tmp_path, capsys, observe):
+    cache = _model(tmp_path, compat=1604)
+    native = _native_imagesave(monkeypatch, cache)
+    entered, ui_saves = [], []
+    image_save = refresh_pbip_model.image_save
+
+    def failed_write(*_args):
+        entered.append("native-write")
+        raise RuntimeError("PRIVATE_WRITE_FAILURE")
+
+    def selected_mode(port, path, model_dir):
+        return image_save(port, path, model_dir, bound=native.bound, return_observation=observe)
+
+    native.server.ImageSave = failed_write
+    monkeypatch.setattr(refresh_pbip_model, "image_save", selected_mode)
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda *_a, **_k: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "save", lambda pid: ui_saves.append(pid) or (True, "UI save"))
+    args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "111"])
+    result = refresh_pbip_model._refresh_and_save(111, 52001, cache, args)
+    assert entered == ["native-write"] and native.events[-1] == "amo-disconnect"
+    if observe:
+        assert result == 1 and ui_saves == [], "typed observation refusal must stop, never invoke the fallback"
+        assert "PRIVATE_WRITE_FAILURE" not in str(capsys.readouterr())
+    else:
+        assert result is None and ui_saves == [111], "ordinary legacy unavailability still permits the UI path"

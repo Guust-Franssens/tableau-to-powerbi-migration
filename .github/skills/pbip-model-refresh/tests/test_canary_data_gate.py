@@ -18,6 +18,8 @@ from __future__ import annotations
 import re
 import threading
 import time
+import queue
+import traceback
 from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
 
@@ -287,7 +289,9 @@ def test_canary_observation_uses_the_bound_query_and_actual_returned_rows(monkey
     bound = _bound_connection(monkeypatch, conn)
     observations = probe_desktop_query.probe_observations(bound, ["Owner's Orders"])
     query = "EVALUATE TOPN(1, 'Owner''s Orders')"
-    assert observations == (probe_desktop_query.CanaryObservation(conn.Database, "Owner's Orders", query, count),)
+    assert observations == (
+        probe_desktop_query.CanaryObservation(conn.Database, "Owner's Orders", query, count, bound.identity),
+    )
     assert conn.queries.count(query) == 1
     assert probe_desktop_query.derive_data_verdict is refresh_pbip_model.derive_data_verdict
     with pytest.raises(FrozenInstanceError):
@@ -301,21 +305,26 @@ def test_canary_observation_uses_the_bound_query_and_actual_returned_rows(monkey
     ids=["implicit", "empty", "empty-name", "blank-name", "bool-name", "string", "mapping", "duplicate"],
 )
 def test_observations_require_nonempty_explicit_unique_canaries(monkeypatch, canaries):
-    bound = _bound_connection(monkeypatch, _Conn([("Parameters", False)], {"Parameters": 1}))
+    conn = _Conn([("Parameters", False)], {"Parameters": 1})
+    bound = _bound_connection(monkeypatch, conn)
+    before = list(conn.queries)
     with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^CANARIES_REQUIRED$"):
         probe_desktop_query.probe_observations(bound, canaries)
+    assert conn.queries == before, "canary-set guard must precede opening/querying a new connection"
 
 
 @pytest.mark.parametrize("count", [True, False, 1.0, -1])
 def test_observation_counts_are_not_coerced(monkeypatch, count):
     conn = _Conn([("Orders", False)], {})
     bound = _bound_connection(monkeypatch, conn)
-    monkeypatch.setattr(probe_desktop_query, "_probe_one", lambda *_args, **_kwargs: count)
+    queried = []
+    monkeypatch.setattr(probe_desktop_query, "_probe_one", lambda *_args, **_kwargs: queried.append(1) or count)
     with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TOOL_UNAVAILABLE$"):
         probe_desktop_query.probe_observations(bound, ["Orders"])
+    assert queried == [1], "returned-row type guard must reject an actual current query result"
 
 
-@pytest.mark.parametrize("changed", ["catalogue", "process_start", "as_pid", "as_process_start", "port"])
+@pytest.mark.parametrize("changed", ["catalogue", "pid", "process_start", "as_pid", "as_process_start", "port"])
 def test_query_result_is_not_returned_after_bound_identity_changes(monkeypatch, changed):
     conn = _Conn([("Orders", False)], {"Orders": 1})
     bound = _bound_connection(monkeypatch, conn)
@@ -397,3 +406,215 @@ def test_observation_deadline_bounds_native_query_and_inspection(monkeypatch):
             assert queried == ([1] if blocked == "query" else [])
         finally:
             release.set()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("pid", 333),
+        ("process_start", "200"),
+        ("as_pid", 444),
+        ("as_process_start", "201"),
+        ("port", 52002),
+    ],
+)
+def test_canary_identity_does_not_collapse_same_catalogue_sessions(monkeypatch, field, value):
+    conn = _Conn([("Orders", False)], {"Orders": 1})
+    first = _bound_connection(monkeypatch, conn)
+    prior = probe_desktop_query.probe_observations(first, ["Orders"])[0]
+    second = replace(first, identity=replace(first.identity, **{field: value}))
+    monkeypatch.setattr(probe_desktop_query, "desktop_identity", lambda *_: second.identity)
+    current = probe_desktop_query.probe_observations(second, ["Orders"])[0]
+    assert prior.catalogue == current.catalogue
+    assert current.identity == second.identity and prior != current, f"{field} must remain bound to its query"
+    assert conn.queries.count("EVALUATE TOPN(1, 'Orders')") == 2
+
+
+def test_canary_inputs_and_old_results_cannot_mutate_current_invocation(monkeypatch):
+    conn = _Conn([("Orders", False)], {"Orders": 1})
+    bound = _bound_connection(monkeypatch, conn)
+    prior = probe_desktop_query.probe_observations(bound, ["Orders"])[0]
+    entered, release = threading.Event(), threading.Event()
+    query = probe_desktop_query._probe_one
+    published = []
+
+    def blocked_query(*args, **kwargs):
+        rows = query(*args, **kwargs)
+        entered.set()
+        assert release.wait(5)
+        return rows
+
+    monkeypatch.setattr(probe_desktop_query, "_probe_one", blocked_query)
+    canaries = ["Orders"]
+    caller = threading.Thread(target=lambda: published.append(probe_desktop_query.probe_observations(bound, canaries)))
+    caller.start()
+    try:
+        assert entered.wait(3), "mutation must occur after the current canary entered its read"
+        object.__setattr__(prior, "returned_rows", 999)
+        canaries[:] = ["Forged"]
+        assert published == [] and caller.is_alive()
+    finally:
+        release.set()
+        caller.join(5)
+    assert not caller.is_alive() and len(published) == 1
+    assert published[0][0].table == "Orders" and published[0][0].returned_rows == 1
+
+    def failed_retry(*_args, **_kwargs):
+        entered.clear()
+        raise RuntimeError("retry failed")
+
+    monkeypatch.setattr(probe_desktop_query, "_probe_one", failed_retry)
+    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TOOL_UNAVAILABLE$"):
+        published.append(probe_desktop_query.probe_observations(bound, ["Orders"]))
+    assert not entered.is_set() and len(published) == 1, "a failed new read cannot return an old observation"
+
+
+@pytest.mark.parametrize("phase", ["connection-close", "canary-reader-close", "catalogue-reader-close"])
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt, SystemExit])
+def test_canary_adomd_teardown_is_best_effort_but_does_not_swallow_interrupts(monkeypatch, phase, error_type):
+    conn = _Conn([("Orders", False)], {"Orders": 1})
+    bound = _bound_connection(monkeypatch, conn)
+    entered = []
+
+    def close():
+        entered.append(phase)
+        raise error_type("PRIVATE_ADOMD_CLOSE")
+
+    if phase == "connection-close":
+        conn.Close = close
+    else:
+        reader_for = conn.reader_for
+
+        def reader(text):
+            result = reader_for(text)
+            if ("TOPN" in text) == (phase == "canary-reader-close"):
+                result.Close = close
+            return result
+
+        conn.reader_for = reader
+    if error_type is RuntimeError:
+        observed = probe_desktop_query.probe_observations(bound, ["Orders"])
+        assert observed[0].returned_rows == 1 and observed[0].identity == bound.identity
+    else:
+        expected = KeyboardInterrupt if error_type is KeyboardInterrupt else probe_desktop_query.ObservationUnavailable
+        with pytest.raises(expected) as caught:
+            probe_desktop_query.probe_observations(bound, ["Orders"])
+        assert caught.value.args == (() if error_type is KeyboardInterrupt else ("TOOL_UNAVAILABLE",))
+    assert entered, f"must enter {phase}, not refuse for an unrelated reason"
+
+
+@pytest.mark.parametrize("observe", [False, True], ids=["legacy", "observation"])
+@pytest.mark.parametrize(
+    "kind,code",
+    [
+        ("native", "TOOL_UNAVAILABLE"),
+        ("exit", "TOOL_UNAVAILABLE"),
+        ("interrupt", None),
+        ("known", "CATALOGUE_CHANGED"),
+        ("forged", "TOOL_UNAVAILABLE"),
+    ],
+)
+def test_canary_error_privacy_has_an_unchanged_legacy_control(monkeypatch, capsys, observe, kind, code):
+    conn = _Conn([("Orders", False)], {"Orders": 1})
+    bound = _bound_connection(monkeypatch, conn)
+    sentinel = "PRIVATE_QUERY_ENDPOINT_TOKEN_PATH_PAYLOAD"
+    error = {
+        "native": RuntimeError(sentinel),
+        "exit": SystemExit(sentinel),
+        "interrupt": KeyboardInterrupt(sentinel),
+        "known": probe_desktop_query.ObservationUnavailable("CATALOGUE_CHANGED"),
+        "forged": probe_desktop_query.ObservationUnavailable(sentinel),
+    }[kind]
+    error.add_note(sentinel)
+    cause = RuntimeError(sentinel)
+    reader_for = conn.reader_for
+
+    def native_reader(text):
+        if "TOPN" in text:
+            conn.queries.append(text)
+            raise error from cause
+        return reader_for(text)
+
+    conn.reader_for = native_reader
+    with pytest.raises(BaseException) as caught:
+        if observe:
+            probe_desktop_query.probe_observations(bound, ["Orders"])
+        else:
+            probe_desktop_query.probe(52001, ["Orders"])
+    assert conn.queries.count("EVALUATE TOPN(1, 'Orders')") == 1, "must enter the native query failure"
+    if observe:
+        expected = KeyboardInterrupt if kind == "interrupt" else probe_desktop_query.ObservationUnavailable
+        assert type(caught.value) is expected and caught.value is not error
+        assert caught.value.args == (() if code is None else (code,))
+        assert caught.value.__context__ is caught.value.__cause__ is None
+        assert not getattr(caught.value, "__notes__", ())
+        rendered = "".join(traceback.format_exception(caught.value))
+        assert sentinel not in rendered and "native_reader" not in rendered
+        assert sentinel not in str(capsys.readouterr())
+    else:
+        assert caught.value is error and caught.value.__cause__ is cause and caught.value.__notes__ == [sentinel]
+
+
+def test_read_result_waits_for_worker_termination_not_queue_publication(monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    workers, published = [], []
+
+    class DelayedQueue(queue.Queue):
+        def put(self, item, *args, **kwargs):
+            super().put(item, *args, **kwargs)
+            if item[0] is True:
+                workers.append(threading.current_thread())
+                entered.set()
+                assert release.wait(5), "test must release its own post-result worker"
+
+    monkeypatch.setattr(probe_desktop_query.queue, "Queue", DelayedQueue)
+    try:
+        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TIMEOUT$"):
+            published.append(probe_desktop_query._observation_call(111, lambda: "private facts", 0.1))
+        assert entered.is_set() and workers[0].is_alive(), "must reject a queued result from an unfinished worker"
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(5)
+    assert published == [] and all(not worker.is_alive() for worker in workers)
+
+
+def test_inspection_failure_after_queued_read_still_refuses(monkeypatch):
+    inspecting, release, queued = threading.Event(), threading.Event(), threading.Event()
+    published, failures = [], []
+
+    class ObservedQueue(queue.Queue):
+        def put(self, item, *args, **kwargs):
+            super().put(item, *args, **kwargs)
+            if item[0] is True:
+                queued.set()
+
+    def inspect_state(_pid, **_kwargs):
+        if threading.current_thread().name == "observation-inspection":
+            inspecting.set()
+            assert release.wait(5)
+            return probe_desktop_query.CredentialDetection(modal=object())
+        return probe_desktop_query.CredentialDetection()
+
+    def read():
+        assert inspecting.wait(3), "inspection must be in flight before the read completes"
+        return "private facts"
+
+    def call():
+        try:
+            published.append(probe_desktop_query._observation_call(111, read, 4))
+        except probe_desktop_query.ObservationUnavailable as error:
+            failures.append(error)
+
+    monkeypatch.setattr(probe_desktop_query.queue, "Queue", ObservedQueue)
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", inspect_state)
+    caller = threading.Thread(target=call)
+    caller.start()
+    try:
+        assert queued.wait(3), "must queue a read result while the inspection is unfinished"
+        assert caller.is_alive() and published == []
+    finally:
+        release.set()
+        caller.join(5)
+    assert not caller.is_alive() and published == []
+    assert len(failures) == 1 and failures[0].args == ("CREDENTIAL_MISSING",)

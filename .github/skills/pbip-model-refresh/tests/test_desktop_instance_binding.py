@@ -17,8 +17,11 @@ candidates), and prove the connected model really is the one that owns the cache
 from __future__ import annotations
 
 import json
+import inspect
 import re
-from dataclasses import asdict
+import threading
+import traceback
+from dataclasses import FrozenInstanceError, asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -253,38 +256,37 @@ def test_observation_catalogue_is_one_exact_id_and_reader_is_closed(catalogues):
 @pytest.mark.parametrize("tables", [(), ("Orders",)], ids=["database", "tables"])
 def test_refresh_observation_matches_the_executed_scope(monkeypatch, kind, tables):
     bound = probe_desktop_query.BoundDesktop(OBSERVED_IDENTITY, OBSERVED_CATALOGUE)
-    sent, observations = [], []
+    sent = []
     command = SimpleNamespace()
     command.ExecuteNonQuery = lambda: sent.append(json.loads(command.CommandText))
     connection = SimpleNamespace(CreateCommand=lambda: command, Open=lambda: None, Close=lambda: None)
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _: connection)
     monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_: None)
-    ok, _ = refresh_pbip_model.refresh(
+    observation = refresh_pbip_model.refresh(
         52001,
         list(tables),
         desktop_pid=111,
         refresh_type=kind,
         bound=bound,
-        observations=observations,
+        return_observation=True,
         progress_enabled=False,
     )
-    assert ok is True
     objects = [{"database": OBSERVED_CATALOGUE, "table": "Orders"}] if tables else [{"database": OBSERVED_CATALOGUE}]
     assert sent == [{"refresh": {"type": kind, "objects": objects}}]
-    assert observations == [
-        refresh_pbip_model.RefreshObservation(
-            OBSERVED_CATALOGUE, kind, "tables" if tables else "database", tables, OBSERVED_IDENTITY
-        )
-    ]
+    assert observation == refresh_pbip_model.RefreshObservation(
+        OBSERVED_CATALOGUE, kind, "tables" if tables else "database", tables, OBSERVED_IDENTITY
+    )
+    with pytest.raises(FrozenInstanceError):
+        observation.catalogue = "caller mutation"
     with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^WRONG_PID_PORT$"):
-        refresh_pbip_model.refresh(52002, None, desktop_pid=111, bound=bound, observations=[])
+        refresh_pbip_model.refresh(52002, None, desktop_pid=111, bound=bound, return_observation=True)
     with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^IDENTITY_UNESTABLISHED$"):
-        refresh_pbip_model.refresh(52001, None, observations=[])
+        refresh_pbip_model.refresh(52001, None, return_observation=True)
 
 
 def test_a_failed_retry_cannot_reuse_a_prior_refresh_observation(monkeypatch):
     bound = probe_desktop_query.BoundDesktop(OBSERVED_IDENTITY, OBSERVED_CATALOGUE)
-    opened, executed, observed = [], [], []
+    opened, executed = [], []
 
     def execute():
         executed.append(1)
@@ -296,42 +298,395 @@ def test_a_failed_retry_cannot_reuse_a_prior_refresh_observation(monkeypatch):
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _: connection)
     monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_: None)
     options = dict(desktop_pid=111, bound=bound, progress_enabled=False)
-    assert refresh_pbip_model.refresh(52001, None, observations=observed, **options)[0] is True
-    prior = tuple(observed)
-    error = None
-    try:
-        refresh_pbip_model.refresh(52001, None, observations=observed, **options)
-    except BaseException as caught:
-        error = caught
-    assert opened == executed == [1], "a reused collector must be refused before native work"
-    assert isinstance(error, probe_desktop_query.ObservationUnavailable) and str(error) == "OBSERVATIONS_NOT_EMPTY"
-    assert tuple(observed) == prior
-    fresh = []
-    with pytest.raises(RuntimeError, match="native retry failed"):
-        refresh_pbip_model.refresh(52001, None, observations=fresh, **options)
-    assert fresh == [] and tuple(observed) == prior
+    prior = refresh_pbip_model.refresh(52001, None, return_observation=True, **options)
+    published = []
+    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TOOL_UNAVAILABLE$"):
+        published.append(refresh_pbip_model.refresh(52001, None, return_observation=True, **options))
+    assert opened == executed == [1, 1], "the retry must enter XMLA, not merely reject an old collector"
+    assert published == [] and prior.identity == OBSERVED_IDENTITY
 
 
 def test_same_catalogue_refreshes_retain_their_distinct_desktop_and_as_identity(monkeypatch):
-    second = probe_desktop_query.DesktopIdentity(333, "200", 444, "201", 52002)
     command = SimpleNamespace(ExecuteNonQuery=lambda: None)
     connection = SimpleNamespace(CreateCommand=lambda: command, Open=lambda: None, Close=lambda: None)
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _: connection)
     monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_: None)
     observations = []
-    for identity in (OBSERVED_IDENTITY, second):
+    for identity in (
+        OBSERVED_IDENTITY,
+        *(
+            replace(OBSERVED_IDENTITY, **{field: value})
+            for field, value in (
+                ("pid", 333),
+                ("process_start", "200"),
+                ("as_pid", 444),
+                ("as_process_start", "201"),
+                ("port", 52002),
+            )
+        ),
+    ):
         bound = probe_desktop_query.BoundDesktop(identity, OBSERVED_CATALOGUE)
-        own = []
-        assert (
-            refresh_pbip_model.refresh(
-                identity.port, None, desktop_pid=identity.pid, bound=bound, observations=own, progress_enabled=False
-            )[0]
-            is True
+        own = refresh_pbip_model.refresh(
+            identity.port, None, desktop_pid=identity.pid, bound=bound, return_observation=True, progress_enabled=False
         )
-        assert len(own) == 1 and own[0].identity == identity
-        observations.extend(own)
-    assert observations[0].catalogue == observations[1].catalogue == OBSERVED_CATALOGUE
-    assert observations[0] != observations[1]
+        assert own.identity == identity
+        observations.append(own)
+    assert {item.catalogue for item in observations} == {OBSERVED_CATALOGUE}
+    assert len(set(observations)) == 6, "every identity component is authoritative, even in the same catalogue"
+
+
+class _HostileObservationArgument:
+    def __init__(self):
+        self.touched = []
+
+    def __bool__(self):
+        self.touched.append("bool")
+        raise AssertionError("retired argument inspected")
+
+    def __len__(self):
+        self.touched.append("len")
+        raise AssertionError("retired argument inspected")
+
+    def __iter__(self):
+        self.touched.append("iter")
+        raise AssertionError("retired argument inspected")
+
+    def __call__(self, *_args):
+        self.touched.append("call")
+        raise AssertionError("retired argument invoked")
+
+    def append(self, _value):
+        self.touched.append("append")
+        raise AssertionError("retired argument invoked")
+
+
+def _observation_entry(name, cache, **options):
+    bound = probe_desktop_query.BoundDesktop(OBSERVED_IDENTITY, OBSERVED_CATALOGUE)
+    if name == "refresh":
+        return refresh_pbip_model.refresh(52001, None, desktop_pid=111, bound=bound, **options)
+    if name == "image_save":
+        return refresh_pbip_model.image_save(52001, cache, bound=bound, **options)
+    if name == "_staged_image_write":
+        return refresh_pbip_model._staged_image_write(cache, lambda _path: None, **options)
+    return getattr(refresh_pbip_model, name)(cache, cache.parent.parent, 1606, lambda _path: None, **options)
+
+
+@pytest.mark.parametrize(
+    "name,sink_name",
+    [
+        ("refresh", "observations"),
+        ("image_save", "on_persist"),
+        ("_persist_image", "on_observation"),
+        ("_persist_image_locked", "on_observation"),
+        ("_staged_image_write", "observations"),
+    ],
+)
+@pytest.mark.parametrize("mode", [False, True])
+@pytest.mark.parametrize("sink_kind", ["empty", "populated", "false", "callable", "hostile"])
+def test_all_retired_sinks_refuse_without_inspection_or_io(monkeypatch, tmp_path, name, sink_name, mode, sink_kind):
+    touched = []
+    hostile = _HostileObservationArgument()
+    sink = {
+        "empty": [],
+        "populated": [object()],
+        "false": False,
+        "callable": lambda _: touched.append("called"),
+        "hostile": hostile,
+    }[sink_kind]
+
+    def unexpected(*_args, **_kwargs):
+        touched.append("I/O")
+        raise AssertionError("retired-sink guard ran too late")
+
+    with monkeypatch.context() as patch:
+        for module, attr in (
+            (refresh_pbip_model, "_load_adomd"),
+            (refresh_pbip_model, "_load_amo"),
+            (refresh_pbip_model, "desktop_identity"),
+            (refresh_pbip_model, "_credential_state"),
+            (refresh_pbip_model, "_snapshot_rollback_paths"),
+            (Path, "mkdir"),
+        ):
+            patch.setattr(module, attr, unexpected)
+        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TOOL_UNAVAILABLE$"):
+            _observation_entry(name, tmp_path / "cache.abf", return_observation=mode, **{sink_name: sink})
+    assert touched == hostile.touched == [], "the retired-sink identity guard must precede all inspection/work"
+
+
+@pytest.mark.parametrize(
+    "name", ["refresh", "image_save", "_persist_image", "_persist_image_locked", "_staged_image_write"]
+)
+@pytest.mark.parametrize(
+    "mode",
+    [None, 0, 1, 0.0, 1.0, "", "True", [], _HostileObservationArgument()],
+    ids=["none", "zero", "one", "float-zero", "float-one", "empty-text", "text", "list", "hostile"],
+)
+def test_observation_mode_is_an_exact_bool_before_io(monkeypatch, tmp_path, name, mode):
+    touched = []
+
+    def unexpected(*_args, **_kwargs):
+        touched.append("I/O")
+        raise AssertionError("exact-mode guard ran too late")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "mkdir", unexpected)
+        patch.setattr(refresh_pbip_model, "_load_adomd", unexpected)
+        patch.setattr(refresh_pbip_model, "_load_amo", unexpected)
+        patch.setattr(refresh_pbip_model, "desktop_identity", unexpected)
+        patch.setattr(refresh_pbip_model, "_credential_state", unexpected)
+        patch.setattr(refresh_pbip_model, "_snapshot_rollback_paths", unexpected)
+        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TOOL_UNAVAILABLE$"):
+            _observation_entry(name, tmp_path / "cache.abf", return_observation=mode)
+    assert touched == [], "bool substitutes must not enter native or filesystem phases"
+    if isinstance(mode, _HostileObservationArgument):
+        assert mode.touched == []
+
+
+def test_public_observation_modes_are_keyword_only_and_default_to_legacy():
+    for function in (refresh_pbip_model.refresh, refresh_pbip_model.image_save):
+        parameter = inspect.signature(function).parameters["return_observation"]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY and parameter.default is False
+
+
+def _refresh_connection(monkeypatch):
+    """A local connection double with the real bound/catalogue rechecks still in the path."""
+    events = []
+    bound = probe_desktop_query.BoundDesktop(OBSERVED_IDENTITY, OBSERVED_CATALOGUE)
+    connection = SimpleNamespace(
+        Database=OBSERVED_CATALOGUE, Open=lambda: events.append("open"), Close=lambda: events.append("adomd-close")
+    )
+
+    def command():
+        cmd = SimpleNamespace()
+        cmd.ExecuteReader = lambda: _FakeReader([(connection.Database, False)])
+        cmd.ExecuteNonQuery = lambda: events.append(json.loads(cmd.CommandText))
+        return cmd
+
+    connection.CreateCommand = command
+    monkeypatch.setattr(probe_desktop_query, "desktop_identity", lambda *_: bound.identity)
+    monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _: connection)
+    return bound, connection, events
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["default", "explicit-false"])
+def test_refresh_legacy_tuple_is_unchanged(monkeypatch, explicit):
+    _, _, events = _refresh_connection(monkeypatch)
+    options = {"return_observation": False} if explicit else {}
+    result = refresh_pbip_model.refresh(52001, ["Orders"], progress_enabled=False, **options)
+    assert result == (True, f"refreshed Orders (catalog {OBSERVED_CATALOGUE})")
+    assert events[-1] == "adomd-close"
+
+
+@pytest.mark.parametrize("field", ["pid", "process_start", "as_pid", "as_process_start", "port", "catalogue"])
+def test_refresh_rechecks_each_identity_component_after_xmla(monkeypatch, field):
+    bound, connection, events = _refresh_connection(monkeypatch)
+    create = connection.CreateCommand
+
+    def command():
+        cmd = create()
+        execute = cmd.ExecuteNonQuery
+
+        def change_after_execution():
+            execute()
+            if field == "catalogue":
+                connection.Database = "22222222-2222-3333-4444-555555555555"
+            else:
+                value = "200" if "start" in field else 777
+                monkeypatch.setattr(
+                    probe_desktop_query, "desktop_identity", lambda *_: replace(bound.identity, **{field: value})
+                )
+
+        cmd.ExecuteNonQuery = change_after_execution
+        return cmd
+
+    connection.CreateCommand = command
+    code = "CATALOGUE_CHANGED" if field == "catalogue" else "PID_REUSED"
+    with pytest.raises(probe_desktop_query.ObservationUnavailable, match=f"^{code}$"):
+        refresh_pbip_model.refresh(
+            52001, None, bound=bound, desktop_pid=111, progress_enabled=False, return_observation=True
+        )
+    assert isinstance(events[1], dict) and events[-1] == "adomd-close", "must reach the post-XMLA recheck"
+
+
+def test_caller_mutation_cannot_change_an_event_blocked_refresh(monkeypatch):
+    bound, connection, events = _refresh_connection(monkeypatch)
+    options = dict(bound=bound, desktop_pid=111, progress_enabled=False, return_observation=True)
+    prior = refresh_pbip_model.refresh(52001, ["Orders"], **options)
+    entered, release = threading.Event(), threading.Event()
+    create = connection.CreateCommand
+    published = []
+
+    def command():
+        cmd = create()
+        execute = cmd.ExecuteNonQuery
+
+        def block():
+            execute()
+            entered.set()
+            assert release.wait(5), "test failed to release its owned XMLA worker"
+
+        cmd.ExecuteNonQuery = block
+        return cmd
+
+    connection.CreateCommand = command
+    tables = ["Orders"]
+    caller = threading.Thread(target=lambda: published.append(refresh_pbip_model.refresh(52001, tables, **options)))
+    caller.start()
+    try:
+        assert entered.wait(3), "must enter the current invocation before mutating caller-owned state"
+        object.__setattr__(prior, "catalogue", "forged old result")
+        tables[:] = ["Forged"]
+        assert published == [] and caller.is_alive()
+    finally:
+        release.set()
+        caller.join(5)
+    assert not caller.is_alive() and len(published) == 1
+    assert published[0].catalogue == OBSERVED_CATALOGUE and published[0].tables == ("Orders",)
+    assert events[-2]["refresh"]["objects"] == [{"database": OBSERVED_CATALOGUE, "table": "Orders"}]
+
+
+def test_refresh_refuses_when_join_returns_before_worker_teardown(monkeypatch):
+    bound, connection, events = _refresh_connection(monkeypatch)
+    entered, release = threading.Event(), threading.Event()
+    workers, published = [], []
+
+    def close():
+        events.append("adomd-close-entered")
+        entered.set()
+        assert release.wait(5)
+
+    def premature_join(worker, **_kwargs):
+        workers.append(worker)
+        assert entered.wait(3), "must reach close with a completed XMLA result"
+        return True
+
+    connection.Close = close
+    monkeypatch.setattr(refresh_pbip_model, "_join_refresh_worker", premature_join)
+    try:
+        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TIMEOUT$"):
+            published.append(
+                refresh_pbip_model.refresh(
+                    52001, None, bound=bound, desktop_pid=111, progress_enabled=False, return_observation=True
+                )
+            )
+        assert workers[0].is_alive() and isinstance(events[1], dict), "worker-completion guard must be exercised"
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(5)
+    assert published == [] and all(not worker.is_alive() for worker in workers), "no late publication after refusal"
+
+
+@pytest.mark.parametrize("phase", ["adomd-close", "trace-stop", "trace-drop", "trace-disconnect", "monitor-close"])
+@pytest.mark.parametrize("error_type", [RuntimeError, KeyboardInterrupt, SystemExit])
+def test_refresh_teardown_distinguishes_ordinary_failures_from_interrupts(monkeypatch, capsys, phase, error_type):
+    bound, connection, events = _refresh_connection(monkeypatch)
+
+    def action(name):
+        def call():
+            events.append(name)
+            if name == phase:
+                raise error_type("PRIVATE_TEARDOWN_DETAIL")
+
+        return call
+
+    connection.Close = action("adomd-close")
+    monitor = refresh_pbip_model.RefreshProgressMonitor(
+        trace=SimpleNamespace(Stop=action("trace-stop"), Drop=action("trace-drop")),
+        server=SimpleNamespace(Disconnect=action("trace-disconnect")),
+        observation_mode=True,
+    )
+    if phase == "monitor-close":
+        monitor.close = action(phase)
+    monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_a, **_k: monitor)
+    published = []
+    if error_type is RuntimeError:
+        published.append(refresh_pbip_model.refresh(52001, None, bound=bound, desktop_pid=111, return_observation=True))
+        assert type(published[0]) is refresh_pbip_model.RefreshObservation
+        expected = (
+            ["adomd-close", "monitor-close"]
+            if phase == "monitor-close"
+            else ["adomd-close", "trace-stop", "trace-drop", "trace-disconnect"]
+        )
+        assert events[-len(expected) :] == expected, "ordinary failure must not skip later teardown attempts"
+    else:
+        expected_type = (
+            KeyboardInterrupt if error_type is KeyboardInterrupt else probe_desktop_query.ObservationUnavailable
+        )
+        with pytest.raises(expected_type) as caught:
+            published.append(
+                refresh_pbip_model.refresh(52001, None, bound=bound, desktop_pid=111, return_observation=True)
+            )
+        assert caught.value.args == (() if error_type is KeyboardInterrupt else ("TOOL_UNAVAILABLE",))
+    assert phase in events and isinstance(events[1], dict), "must enter teardown after XMLA completion"
+    assert "PRIVATE_TEARDOWN_DETAIL" not in str(capsys.readouterr())
+
+
+@pytest.mark.parametrize("observe", [False, True], ids=["legacy", "observation"])
+@pytest.mark.parametrize(
+    "kind,code",
+    [
+        ("native", "TOOL_UNAVAILABLE"),
+        ("system-exit", "TOOL_UNAVAILABLE"),
+        ("interrupt", None),
+        ("known", "PID_REUSED"),
+        ("unknown-code", "TOOL_UNAVAILABLE"),
+        ("timeout", "TIMEOUT"),
+    ],
+)
+def test_refresh_errors_are_fresh_closed_observations_or_unchanged_legacy(monkeypatch, capsys, observe, kind, code):
+    bound, connection, events = _refresh_connection(monkeypatch)
+    sentinel = "PRIVATE_NATIVE_PATH_ENDPOINT_TOKEN_PAYLOAD"
+    error = {
+        "native": RuntimeError(sentinel),
+        "system-exit": SystemExit(sentinel),
+        "interrupt": KeyboardInterrupt(sentinel),
+        "known": probe_desktop_query.ObservationUnavailable("PID_REUSED"),
+        "unknown-code": probe_desktop_query.ObservationUnavailable(sentinel),
+        "timeout": TimeoutError(sentinel),
+    }[kind]
+    error.add_note(sentinel)
+    cause = RuntimeError(sentinel)
+    create = connection.CreateCommand
+
+    def command():
+        cmd = create()
+
+        def native_execute():
+            events.append("native-execute")
+            raise error from cause
+
+        cmd.ExecuteNonQuery = native_execute
+        return cmd
+
+    connection.CreateCommand = command
+    with pytest.raises(BaseException) as caught:
+        refresh_pbip_model.refresh(
+            52001, None, bound=bound, desktop_pid=111, progress_enabled=False, return_observation=observe
+        )
+    assert events == ["open", "native-execute", "adomd-close"], "must reach the actual worker error"
+    if observe:
+        expected = KeyboardInterrupt if kind == "interrupt" else probe_desktop_query.ObservationUnavailable
+        assert type(caught.value) is expected and caught.value is not error
+        assert caught.value.args == (() if code is None else (code,))
+        assert caught.value.__cause__ is caught.value.__context__ is None
+        assert not getattr(caught.value, "__notes__", ())
+        rendered = "".join(traceback.format_exception(caught.value))
+        assert sentinel not in rendered and "native_execute" not in rendered
+        assert sentinel not in str(capsys.readouterr())
+    else:
+        assert caught.value is error and caught.value.__cause__ is cause
+        assert caught.value.__notes__ == [sentinel]
+
+
+def test_closed_refusal_severs_an_exception_active_in_the_caller():
+    try:
+        raise RuntimeError("PRIVATE_OUTER_CONTEXT")
+    except RuntimeError:
+        with pytest.raises(probe_desktop_query.ObservationUnavailable) as caught:
+            refresh_pbip_model.refresh(52001, None, observations=[])
+    assert caught.value.args == ("TOOL_UNAVAILABLE",)
+    assert caught.value.__cause__ is caught.value.__context__ is None
 
 
 def test_table_names_filters_the_auto_date_scaffolding_but_can_keep_hidden_tables() -> None:
