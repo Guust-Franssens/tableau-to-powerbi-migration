@@ -13,7 +13,8 @@ So `check_reference_readiness.py` and `check_unit.py` both need `--source`/`--or
 cannot be derived from the unit path, and getting one wrong reads as "this unit is broken" rather
 than "you did not tell me where the workbook is".
 
-This script emits a folder both gates accept with NO flags:
+This script emits a diagnostic folder both gates accept with NO flags. Entries below are conditional;
+`package-manifest.json` records what was present and every omission:
 
     <out>/<Unit>/
         migration-spec.json          <- parse_tableau.py; check_unit.py's expected page set (#443)
@@ -30,7 +31,7 @@ This script emits a folder both gates accept with NO flags:
             dashboard/{images,data}/<Object>.<ext>   <- SINGULAR: the directory is object_identity's
             worksheet/{images,data}/<Object>.<ext>      KIND_* value verbatim, never a pluralised copy
             unknown/{images,data}/<Object>.<ext>     <- carried but MARKED, never filed as either kind
-        package-manifest.json        <- what was packaged, and every omission with its reason
+        package-manifest.json        <- what was assembled, and every omission with its reason
         data-access.json             <- strict S1-covered authority projection, never a gate clear
         README.md
 
@@ -156,15 +157,14 @@ comprehension over `sorted(units)`, and every alphabetically later unit was **ne
 never reported** - the operator could not tell *"not packaged"* from *"packaged and fine"* without
 diffing directories by hand. Every requested unit is now attempted deterministically (datasources
 first, then workbooks; sorted within each phase),
-a raise is caught per unit and carried in `--json` under `blocked[]` with its traceback, and the run
-still exits 5.
+a raise is caught per unit and carried in the compatibility `failed[]` bucket with a stable
+reason code and code-owned traceback frames; `construction.blocked[]` projects its status, and the
+run still exits 5.
 
-Every requested unit lands in EXACTLY ONE construction state - `assembled[]` or `blocked[]` - and
-`accounting_findings[]` names any raw-bucket contradiction. The totals are measured against the
-REQUEST, never against whatever survived it: a unit that raised before it could be recorded anywhere
-would otherwise shrink the denominator and read as a clean run of a smaller estate. The raw local
-lists still separate results, failures and edit refusals so existing continuation and exit-code
-precedence stay intact; the JSON folds them into the two construction states.
+The ordered compatibility buckets remain `units[]`, `failed[]`, `refused[]` and `unaccounted[]`.
+`construction` is the ONE ASSEMBLED/BLOCKED projection over them. Its totals are measured against
+the REQUEST, never against whatever survived it: a unit that raised before it could be recorded
+anywhere would otherwise shrink the denominator and read as a clean run of a smaller estate.
 
 An oracle omission INSIDE a package does not BLOCK assembly: a unit whose oracle genuinely has no
 render for a page is the negative control, and it must still produce a diagnostic package whose page
@@ -200,7 +200,7 @@ import sys
 import time
 import traceback
 import uuid
-from collections import Counter, defaultdict
+from collections import Counter
 from collections.abc import Callable, Sequence
 from copy import deepcopy
 from functools import partial
@@ -432,6 +432,17 @@ _MAX_ERROR_LINE = 200
 KIND_WORKBOOK = "workbook"
 KIND_DATASOURCE = "datasource"
 KIND_UNCLASSIFIED = "unclassified"
+IDENTITY_ENGINE_KIND_COLLISION = "engine_kind_collision"
+IDENTITY_ENGINE_DUPLICATE = "duplicate_engine_identity"
+IDENTITY_REQUEST_DUPLICATE = "duplicate_requested_identity"
+IDENTITY_DESTINATION_ALIAS = "destination_alias"
+_IDENTITY_REASON_ORDER = (
+    IDENTITY_ENGINE_KIND_COLLISION,
+    IDENTITY_ENGINE_DUPLICATE,
+    IDENTITY_REQUEST_DUPLICATE,
+    IDENTITY_DESTINATION_ALIAS,
+)
+_REASON_CODE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 class PackagingError(RuntimeError):
@@ -450,6 +461,12 @@ class PackagingError(RuntimeError):
     """
 
     unit: str | None = None
+    reason_code = "construction_failed"
+
+    def __init__(self, message: str = "", *, reason_code: str | None = None) -> None:
+        default = type(self).reason_code
+        self.reason_code = reason_code or (message if _REASON_CODE_RE.fullmatch(message) else default)
+        super().__init__(message)
 
 
 class PackageEditsRefused(PackagingError):
@@ -458,6 +475,8 @@ class PackageEditsRefused(PackagingError):
     Carries the changed paths (or the reason they could not be established) so the CLI can name them
     rather than saying "something changed".
     """
+
+    reason_code = "package_edits_refused"
 
     def __init__(self, unit: str, package: Path, changed: list[str], reason: str | None) -> None:
         self.unit, self.package, self.changed, self.reason = unit, package, changed, reason
@@ -479,6 +498,8 @@ class PackagePathTooLong(PackagingError):
     limit and no remedy. Carries the measured :class:`PathBudget` so the message can name all three.
     """
 
+    reason_code = "path_budget_exceeded"
+
     def __init__(self, budget: PathBudget) -> None:
         self.budget = budget
         super().__init__(render_path_budget(budget))
@@ -499,8 +520,11 @@ class UnassessableInput(PackagingError):
     replaced by one built from input nobody could read.
     """
 
+    reason_code = "unassessable_input"
+
     def __init__(self, unit: str, reasons: list[str], error: BaseException | None = None) -> None:
         self.unit, self.reasons = unit, reasons
+        self.exception_class = _error_label(error) if error is not None else None
         self.traceback = _safe_traceback(error) if error is not None else None
         safe_reasons = [_sanitize_diagnostic(reason) for reason in reasons]
         super().__init__(
@@ -522,6 +546,8 @@ class UnsafeUnitName(PackagingError):
     name that matches nothing in the bundle, and every later join - handover slice, oracle
     attribution, `promote_unit.py`'s manifest kind - is keyed by that name.
     """
+
+    reason_code = "unsafe_unit_name"
 
     def __init__(self, unit: str, reason: str) -> None:
         self.unit, self.reason = unit, reason
@@ -562,14 +588,14 @@ def _safe_frame_name(filename: str) -> str:
 
 
 def _safe_traceback(error: BaseException) -> str:
-    """Render actionable traceback frames while applying the shipped-artifact path rule to text."""
+    """Render code-owned frame identities, never exception text, URLs, queries or credentials."""
     lines = ["Traceback (most recent call last):"]
     for frame in traceback.extract_tb(error.__traceback__):
         lines.append(f'  File "{_safe_frame_name(frame.filename)}", line {frame.lineno}, in {frame.name}')
-        if frame.line:
-            lines.append(f"    {_sanitize_diagnostic(frame.line.strip())}")
-    lines.append(f"{_error_label(error)}: {_one_line(error)}")
-    lines.extend(_sanitize_diagnostic(note) for note in getattr(error, "__notes__", ()))
+    lines.append(f"exception_class={_error_label(error)}")
+    notes = getattr(error, "__notes__", ())
+    if notes:
+        lines.append(f"diagnostic_notes_withheld={len(notes)}")
     return "\n".join(lines) + "\n"
 
 
@@ -583,19 +609,62 @@ class UnitCrashed(PackagingError):
     because those are the operator ending the run rather than a unit failing.
 
     It is a :class:`PackagingError` so it travels the path every other per-unit refusal already
-    travels - `blocked[]`, the `BLOCKED` line, `EXIT_UNIT_FAILED` - rather than opening a second one.
-    The original exception and its traceback are kept, because "a unit raised" without the traceback
-    is not a defect report anyone can act on.
+    travels - `failed[]`, `construction.blocked[]`, `EXIT_UNIT_FAILED` - rather than opening a second one.
+    Only its stable class and code-owned frame identities are persisted. Exception messages can carry
+    endpoint URLs, query strings or credentials, so they are never copied into JSON or console text.
     """
+
+    reason_code = "unit_exception"
 
     def __init__(self, unit: str, error: BaseException) -> None:
         self.unit, self.error = unit, error
-        self.label = _error_label(error)
+        self.exception_class = _error_label(error)
+        self.label = self.exception_class
         self.traceback = _safe_traceback(error)
         super().__init__(
-            f"assembly of {unit} FAILED and nothing was written for it ({self.label}: {_one_line(error)}). "
-            "Every other requested unit was still attempted; see the traceback in --json under blocked[]."
+            f"assembly of {unit} failed (reason_code={self.reason_code}, "
+            f"exception_class={self.exception_class}). "
+            "Every other requested unit was still attempted; see the stable traceback in --json under failed[]."
         )
+
+
+class IdentityBlocked(PackagingError):
+    """A requested identity cannot select one unique package destination."""
+
+    reason_code = "identity_collision"
+
+    def __init__(self, unit: str, reason_codes: Sequence[str]) -> None:
+        self.unit = unit
+        self.reason_codes = tuple(reason_codes)
+        super().__init__(
+            f"construction identity blocked (reason_codes={','.join(self.reason_codes)})",
+            reason_code=self.reason_codes[0],
+        )
+
+
+class InterruptedUnit(PackagingError):
+    """The operator interrupted this unit before its package was published."""
+
+    reason_code = "assembly_interrupted_before_publish"
+
+    def __init__(self, unit: str, *, rollback_failed: bool) -> None:
+        self.unit = unit
+        self.rollback_failed = rollback_failed
+        self.exception_class = "builtins.KeyboardInterrupt"
+        self.traceback = None
+        super().__init__(f"assembly of {unit} was interrupted before publication (reason_code={self.reason_code})")
+
+
+class AssemblyInterrupted(KeyboardInterrupt):
+    """A handled operator interruption carrying only observed swap state."""
+
+    def __init__(self, *, published: bool, rollback_failed: bool = False) -> None:
+        super().__init__()
+        self.published = published
+        self.rollback_failed = rollback_failed
+        self.unit: str | None = None
+        self.result: dict[str, Any] | None = None
+        self.reason_code = "assembly_interrupted_after_publish" if published else "assembly_interrupted_before_publish"
 
 
 # --------------------------------------------------------------------------------------------
@@ -710,6 +779,84 @@ def bundle_units(bundle: Path) -> list[str]:
     pbip = bundle / "pbip"
     folders = [path.name for path in pbip.iterdir() if path.is_dir()] if pbip.is_dir() else []
     return sorted(set(folders) | set(workbooks) | set(datasources))
+
+
+def bundle_unit_occurrences(bundle: Path) -> list[str]:
+    """Every engine identity occurrence plus one row for each working-copy-only unit."""
+    engine_report = read_json(bundle / "report.json")
+    workbooks, datasources = engine_unit_names(engine_report)
+    named = set(workbooks) | set(datasources)
+    pbip = bundle / "pbip"
+    extras = (
+        sorted(path.name for path in pbip.iterdir() if path.is_dir() and path.name not in named)
+        if pbip.is_dir()
+        else []
+    )
+    return [*workbooks, *datasources, *extras]
+
+
+def _destination_identity(out_root: Path, unit: str) -> str:
+    """A Windows-filesystem canonical key for one already-validated package destination."""
+    destination = assert_package_destination(out_root, unit).resolve()
+    parent = str(PureWindowsPath(str(destination.parent))).casefold()
+    leaf_name = destination.name.rstrip(" .").casefold()
+    return f"{parent}\\{leaf_name}"
+
+
+def _aliased_unit_names(units: set[str], out_root: Path) -> set[str]:
+    """Names that select one Windows-canonical destination despite differing exactly."""
+    canonical_names: dict[str, set[str]] = {}
+    for unit in units:
+        try:
+            key = _destination_identity(out_root, unit)
+        except PackagingError:
+            continue
+        canonical_names.setdefault(key, set()).add(unit)
+    return {unit for names in canonical_names.values() if len(names) > 1 for unit in names}
+
+
+def _identity_preflight(  # pylint: disable=too-many-locals
+    requested: list[str],
+    workbooks: list[str],
+    datasources: list[str],
+    known_units: list[str],
+    out_root: Path,
+) -> tuple[list[str], list[PackagingError]]:
+    """Block every ambiguous occurrence before output creation, budgeting or assembly."""
+    request_counts = Counter(requested)
+    workbook_counts = Counter(workbooks)
+    datasource_counts = Counter(datasources)
+    reason_codes: list[set[str]] = [set() for _ in requested]
+    direct_failures: dict[int, PackagingError] = {}
+    aliased_names = _aliased_unit_names(set(requested) | set(known_units), out_root)
+
+    for index, unit in enumerate(requested):
+        if workbook_counts[unit] and datasource_counts[unit]:
+            reason_codes[index].add(IDENTITY_ENGINE_KIND_COLLISION)
+        if workbook_counts[unit] > 1 or datasource_counts[unit] > 1:
+            reason_codes[index].add(IDENTITY_ENGINE_DUPLICATE)
+        if request_counts[unit] > 1:
+            reason_codes[index].add(IDENTITY_REQUEST_DUPLICATE)
+        if unit in aliased_names:
+            reason_codes[index].add(IDENTITY_DESTINATION_ALIAS)
+        try:
+            _destination_identity(out_root, unit)
+        except PackagingError as failure:
+            failure.unit = unit
+            direct_failures[index] = failure
+
+    packageable: list[str] = []
+    failures: list[PackagingError] = []
+    for index, unit in enumerate(requested):
+        if index in direct_failures:
+            failures.append(direct_failures[index])
+            continue
+        if reason_codes[index]:
+            ordered = [code for code in _IDENTITY_REASON_ORDER if code in reason_codes[index]]
+            failures.append(IdentityBlocked(unit, ordered))
+            continue
+        packageable.append(unit)
+    return packageable, failures
 
 
 # --------------------------------------------------------------------------------------------
@@ -1707,10 +1854,11 @@ README = """# {unit}
 
 {data_access_pending}
 
-Handover package for one migration unit ({kind}). It carries its own rows, its own reference and its
-own source - but it is **not bound to a location**, so do this FIRST, wherever this folder now is,
-before opening the model. Then the two gates, each of which takes THIS FOLDER'S PATH as its only
-argument - a bare unit name is a usage error, never a verdict (exit 2 from
+Diagnostic handover package for one migration unit ({kind}). It may carry imported rows, reference
+evidence, source bytes and engine output; `package-manifest.json` names what is present and every
+omission. If it carries a location placeholder it is **not bound to a location**, so do this FIRST,
+wherever this folder now is, before opening the model. Then the two gates, each of which takes THIS
+FOLDER'S PATH as its only argument - a bare unit name is a usage error, never a verdict (exit 2 from
 `check_reference_readiness.py`, exit 64 from `check_unit.py`, both with a message on stderr):
 
     python scripts/set_data_folder.py --package <path-to-this-folder>
@@ -1743,7 +1891,7 @@ expected set is every dashboard PLUS every worksheet not placed on one.
 | `report.json` | **gate input, and readable.** The engine's classification of THIS unit - workbook vs datasource - which is what earns a datasource-only unit `NOT_APPLICABLE` instead of a finding. Scoped to this unit. |
 | `source-provenance.json` | **gate input.** The only trusted route from this package's asset to a Tableau workbook LUID, keyed by the asset's sha256; `origin.match` decides whether a render can be trusted - see UNFIXABLE below. An entry ships only when attribution was NOT refused (`scope.suppressed_reason`). |
 | `engine-output-receipt.json` | **read `engine.version` when a result looks wrong** - it establishes which engine built this, so version drift stays checkable months later. Install paths are not shipped. |
-| `package-manifest.json` | what was packaged, and every omission with its reason. Its `contents.files` digest is how a re-run knows this package has been edited and refuses to overwrite it. |
+| `package-manifest.json` | what was assembled, and every omission with its reason. Its `contents.files` digest is how a re-run knows this package has been edited and refuses to overwrite it. |
 
 `oracle/` images are **layout/text grade only**: a capture is taken in the view's default state with
 no `?vf_` filter pinning, so a visual PASS signed off on one alone is overstated, and it is no claim
@@ -3350,6 +3498,7 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals
             f"inherit whatever an earlier build left there and still be reported as a success ({residue}). "
             "Remove it and re-run that unit."
         )
+    result: dict[str, Any] | None = None
     try:
         result, verify_staged = _assemble_unit(
             bundle,
@@ -3369,17 +3518,23 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals
             verify=None if discard_edits else partial(_refuse_if_edited, unit),
             verify_staged=verify_staged,
         )
+    except AssemblyInterrupted as interruption:
+        interruption.unit = unit
+        interruption.result = result if interruption.published and result is not None else None
+        raise
     except OSError as failure:
         refusal = _assembly_refusal(unit, failure)
         if refusal is None:
             raise
         raise refusal from failure
     finally:
-        _refuse_surviving_staging(unit, staging)
+        _refuse_surviving_staging(unit, staging, final)
+    if result is None:
+        raise PackagingError("assembly_result_missing")
     return result
 
 
-def _refuse_surviving_staging(unit: str, staging: Path) -> None:
+def _refuse_surviving_staging(unit: str, staging: Path, final: Path) -> None:
     """Remove ``staging`` on the way out, and refuse to call the unit clean if it is still there.
 
     ⚠️ **Never raises over an exception that is already propagating.** An exception raised out of a
@@ -3398,10 +3553,17 @@ def _refuse_surviving_staging(unit: str, staging: Path) -> None:
             file=sys.stderr,
         )
         return
+    if final.is_dir():
+        print(
+            _sanitize_diagnostic(
+                f"WARN: staging {staging} survived after {unit} was published; the package is ASSEMBLED, "
+                "and the residue will block its next construction attempt"
+            ),
+            file=sys.stderr,
+        )
+        return
     raise PackagingError(
-        f"construction of {unit} finished, but its staging directory {staging} could not be removed ({left}). "
-        "The diagnostic package itself is complete on disk; this unit is BLOCKED because a staging directory that "
-        "outlives its build is what a later build would silently assemble into."
+        f"construction of {unit} failed to remove its staging directory ({left}), and no package was published"
     )
 
 
@@ -3565,21 +3727,31 @@ def replace_dir(
     """
     final.parent.mkdir(parents=True, exist_ok=True)
     retired = retired_dir(final) if final.exists() else None
-    if retired is not None:
-        _discard_scratch(retired)
-        _rename_retrying(final, retired)
-    swapped = False
+    publish_armed = False
     try:
+        if retired is not None:
+            _discard_scratch(retired)
+            _rename_retrying(final, retired)
         if retired is not None and verify is not None:
             verify(retired)
         verify_staged()
+        publish_armed = True
         _rename_retrying(staged, final)
-        swapped = True
-    finally:
-        if not swapped and retired is not None:
-            _rename_retrying(retired, final)
-    if retired is not None:
-        _discard_scratch(retired)
+        if retired is not None:
+            _discard_scratch(retired)
+        publish_armed = False
+    except BaseException as error:  # pylint: disable=broad-exception-caught
+        published = publish_armed and final.is_dir() and not staged.exists()
+        rollback_failed = False
+        if not published and retired is not None and retired.exists() and not final.exists():
+            try:
+                _rename_retrying(retired, final)
+            except BaseException:  # pylint: disable=broad-exception-caught
+                rollback_failed = True
+                error.add_note("package rollback failed during swap recovery")
+        if isinstance(error, KeyboardInterrupt):
+            raise AssemblyInterrupted(published=published, rollback_failed=rollback_failed) from error
+        raise
 
 
 #: Windows denies a directory rename while anything still holds a handle inside it, and a scanner
@@ -4229,13 +4401,16 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
             "this package, so it opens with no model; promote the model this report shares and rewrite "
             "byPath, or repackage the unit that owns it"
         )
+    has_engine_working_copy = report_name is not None or model_name is not None
     result = {
         "unit": unit,
         "kind": kind,
         "engine": ((receipt or {}).get("engine") or {}).get("version"),
         "mode": ASSEMBLY_MODE,
         "construction_status": STATUS_ASSEMBLED,
-        "has_engine_working_copy": report_name is not None or model_name is not None,
+        "packaged": has_engine_working_copy,
+        "packaged_semantics": "legacy engine-working-copy indicator; not construction or dispatch readiness",
+        "has_engine_working_copy": has_engine_working_copy,
         "dispatch_readiness": _dispatch_readiness(),
         "self_contained": bool(data_sources["self_contained"] and binding["resolves_in_package"]),
         "artifacts": {
@@ -4357,7 +4532,7 @@ def _mode(explicit: bool) -> dict[str, Any]:
     }
 
 
-def render(  # pylint: disable=too-many-arguments
+def render(  # pylint: disable=too-many-arguments,too-many-locals
     results: list[dict[str, Any]],
     out_root: Path,
     refused: list[PackageEditsRefused] | None = None,
@@ -4365,6 +4540,7 @@ def render(  # pylint: disable=too-many-arguments
     requested: list[str] | None = None,
     *,
     assemble_only_explicit: bool = False,
+    interruption: AssemblyInterrupted | None = None,
 ) -> str:
     """The human construction verdict: one line per requested unit, then exact-denominator totals.
 
@@ -4375,19 +4551,33 @@ def render(  # pylint: disable=too-many-arguments
     """
     refused, failed = refused or [], failed or []
     requested = list(requested) if requested is not None else _bucketed_units(results, failed, refused)
-    assembled, blocked, gaps = construction_outcomes(requested, results, failed, refused)
+    gaps = partition_gaps(requested, results, failed, refused)
+    failed_rows = [_failure_row(failure) for failure in failed]
+    refused_rows = [_refusal_row(item) for item in refused]
+    construction = construction_status_projection(requested, results, failed_rows, refused_rows, gaps)
+    assembled_counts = Counter(row["unit"] for row in construction["assembled"])
     mode_note = "explicit --assemble-only" if assemble_only_explicit else "current default"
     lines = [
         f"package_unit: {len(requested)} requested unit(s) -> {out_root}",
         f"mode: {ASSEMBLY_MODE} ({mode_note}; construction only)",
     ]
-    lines += [_unit_line(result) for result in sorted(assembled, key=lambda item: item["unit"])]
-    lines += [_blocked_line(row) for row in sorted(blocked, key=lambda item: item["unit"])]
+    for result in results:
+        if assembled_counts[result["unit"]]:
+            lines.append(_unit_line(result))
+            assembled_counts[result["unit"]] -= 1
+    lines += [_blocked_line(row) for row in construction["blocked"]]
     with_oracle = sum(1 for result in results if result["oracle"].get("objects"))
-    lines.append(f"ASSEMBLED: {len(assembled)}/{len(requested)} ({with_oracle} carry oracle evidence)")
-    lines.append(f"BLOCKED: {len(blocked)}/{len(requested)}")
-    lines.append(f"{len(requested)} requested = {len(assembled)} ASSEMBLED + {len(blocked)} BLOCKED")
+    totals = construction["totals"]
+    lines.append(f"ASSEMBLED: {totals['assembled']}/{totals['requested']} ({with_oracle} carry oracle evidence)")
+    lines.append(f"BLOCKED: {totals['blocked']}/{totals['requested']}")
+    lines.append(f"{totals['requested']} requested = {totals['assembled']} ASSEMBLED + {totals['blocked']} BLOCKED")
     lines.extend(_run_totals(results, refused, failed))
+    if interruption is not None:
+        publication = "the current package was published" if interruption.published else "no package was published"
+        lines.append(
+            f"INTERRUPTED: {interruption.unit or '?'} ({interruption.reason_code}); {publication}. "
+            "The command stopped and its result is nonzero."
+        )
     if gaps:
         lines.append(
             f"ACCOUNTING FINDINGS: {len(gaps)} raw outcome contradiction(s); this run is NOT clean: "
@@ -4414,7 +4604,7 @@ def _unit_line(result: dict[str, Any]) -> str:
 
 def _blocked_line(row: dict[str, Any]) -> str:
     """One named construction refusal/failure, never a readiness verdict."""
-    return f"  {STATUS_BLOCKED} {row['unit']} [{row['blocker']}] - {_one_line(row['reason'])}"
+    return f"  {STATUS_BLOCKED} {row['unit']} [{row['reason_code']}] - {row['reason']}"
 
 
 def _failed_unit(failure: PackagingError) -> str:
@@ -4448,26 +4638,32 @@ def partition_gaps(
     estate, and a unit recorded twice inflates it.
     """
     counted = Counter(_bucketed_units(results, failed, refused))
-    asked = set(requested)
-    gaps = [
-        {"unit": unit, "state": "not_attempted", "reason": "requested but recorded in no outcome bucket"}
-        for unit in sorted(asked)
-        if not counted[unit]
-    ]
-    gaps += [
-        {"unit": unit, "state": "recorded_twice", "reason": f"recorded in {count} buckets"}
-        for unit, count in sorted(counted.items())
-        if count > 1
-    ]
-    gaps += [
-        {"unit": unit, "state": "never_requested", "reason": "recorded although it was never requested"}
-        for unit in sorted(set(counted) - asked)
-    ]
+    asked = Counter(requested)
+    gaps: list[dict[str, str]] = []
+    for unit in sorted(set(asked) | set(counted)):
+        if counted[unit] < asked[unit]:
+            gaps.extend(
+                {
+                    "unit": unit,
+                    "state": "not_attempted",
+                    "reason": "requested occurrence recorded in no outcome bucket",
+                }
+                for _ in range(asked[unit] - counted[unit])
+            )
+        elif counted[unit] > asked[unit]:
+            state = "never_requested" if not asked[unit] else "recorded_too_many"
+            gaps.append(
+                {
+                    "unit": unit,
+                    "state": state,
+                    "reason": f"requested {asked[unit]} time(s) but recorded {counted[unit]} outcome(s)",
+                }
+            )
     return gaps
 
 
-def _refusal_block(refusal: PackageEditsRefused) -> dict[str, Any]:
-    """Fold an edit-preservation refusal into the construction-only BLOCKED vocabulary."""
+def _refusal_row(refusal: PackageEditsRefused) -> dict[str, Any]:
+    """The compatibility-safe legacy refusal row."""
     detail = refusal.reason or (
         f"{len(refusal.changed)} existing package file(s) differ from the recorded assembly: "
         + ", ".join(refusal.changed[:5])
@@ -4475,62 +4671,94 @@ def _refusal_block(refusal: PackageEditsRefused) -> dict[str, Any]:
     )
     return {
         "unit": refusal.unit,
-        "construction_status": STATUS_BLOCKED,
-        "blocker": "PACKAGE_EDITS_REFUSED",
+        "reason_code": refusal.reason_code,
         "reason": detail,
         "changed": refusal.changed,
     }
 
 
-def _failure_block(failure: PackagingError) -> dict[str, Any]:
-    """Fold a modelled/unexpected failure into BLOCKED without losing its diagnostic."""
+def _failure_reason(failure: PackagingError) -> str:
+    """A stable, non-sensitive explanation for persisted construction failure rows."""
+    reasons = (
+        (UnassessableInput, "a required construction input could not be assessed"),
+        (IdentityBlocked, "the requested identity does not select one unique package destination"),
+        (InterruptedUnit, "the operator interrupted construction before publication"),
+        (PackagePathTooLong, "the package destination exceeds the measured path ceiling"),
+        (UnsafeUnitName, "the unit name cannot select a safe package destination"),
+        (UnitCrashed, "the unit raised an unexpected exception during construction"),
+    )
+    return next((reason for kind, reason in reasons if isinstance(failure, kind)), "construction failed")
+
+
+def _failure_row(failure: PackagingError) -> dict[str, Any]:
+    """The compatibility-safe legacy failure row: stable codes/classes, never exception text."""
     return {
         "unit": _failed_unit(failure),
-        "construction_status": STATUS_BLOCKED,
-        "blocker": "UNASSESSABLE_INPUT" if isinstance(failure, UnassessableInput) else "CONSTRUCTION_FAILED",
-        "reason": _sanitize_diagnostic(str(failure)),
+        "state": "cannot_assess" if isinstance(failure, UnassessableInput) else "unit_failed",
+        "reason_code": failure.reason_code,
+        "reason": _failure_reason(failure),
+        "exception_class": getattr(failure, "exception_class", _error_label(failure)),
         "traceback": getattr(failure, "traceback", None),
     }
 
 
-def construction_outcomes(
+def construction_status_projection(
     requested: list[str],
     results: list[dict[str, Any]],
-    failed: list[PackagingError],
-    refused: list[PackageEditsRefused],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, str]]]:
-    """Fold raw continuation buckets into exactly one construction state per requested unit."""
-    buckets: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
-    for result in results:
-        buckets[result["unit"]].append((STATUS_ASSEMBLED, result))
-    for failure in failed:
-        block = _failure_block(failure)
-        buckets[block["unit"]].append((STATUS_BLOCKED, block))
-    for refusal in refused:
-        block = _refusal_block(refusal)
-        buckets[block["unit"]].append((STATUS_BLOCKED, block))
-
-    gaps = partition_gaps(requested, results, failed, refused)
-    assembled: list[dict[str, Any]] = []
-    blocked: list[dict[str, Any]] = []
+    failed_rows: list[dict[str, Any]],
+    refused_rows: list[dict[str, Any]],
+    gaps: list[dict[str, str]],
+) -> dict[str, Any]:
+    """One construction-only projection over the ordered compatibility buckets."""
+    asked = Counter(requested)
+    observed = Counter(
+        [result["unit"] for result in results]
+        + [row["unit"] for row in failed_rows]
+        + [row["unit"] for row in refused_rows]
+    )
+    mismatched = {unit for unit in set(asked) | set(observed) if asked[unit] != observed[unit]}
+    assembled = [
+        {
+            "unit": result["unit"],
+            "status": STATUS_ASSEMBLED,
+            "has_engine_working_copy": result["has_engine_working_copy"],
+            "self_contained": result.get("self_contained", True),
+        }
+        for result in results
+        if result["unit"] in asked and result["unit"] not in mismatched
+    ]
+    blocked = [
+        {
+            "unit": row["unit"],
+            "status": STATUS_BLOCKED,
+            "reason_code": row["reason_code"],
+            "reason": row["reason"],
+        }
+        for row in [*failed_rows, *refused_rows]
+        if row["unit"] in asked and row["unit"] not in mismatched
+    ]
     for unit in requested:
-        outcomes = buckets.get(unit, [])
-        if len(outcomes) == 1 and outcomes[0][0] == STATUS_ASSEMBLED:
-            assembled.append(outcomes[0][1])
-            continue
-        if len(outcomes) == 1:
-            blocked.append(outcomes[0][1])
-            continue
-        gap = next((item for item in gaps if item["unit"] == unit), None)
-        blocked.append(
-            {
-                "unit": unit,
-                "construction_status": STATUS_BLOCKED,
-                "blocker": "UNATTEMPTED" if not outcomes else "ACCOUNTING_ERROR",
-                "reason": (gap or {}).get("reason", "requested unit has contradictory construction outcomes"),
-            }
-        )
-    return assembled, blocked, gaps
+        if unit in mismatched:
+            blocked.append(
+                {
+                    "unit": unit,
+                    "status": STATUS_BLOCKED,
+                    "reason_code": "outcome_accounting_mismatch",
+                    "reason": "the requested occurrence did not reach exactly one construction bucket",
+                }
+            )
+    return {
+        "schema": "package-construction/v1",
+        "scope": "construction_only",
+        "assembled": assembled,
+        "blocked": blocked,
+        "accounting_findings": gaps,
+        "totals": {
+            "requested": len(requested),
+            "assembled": len(assembled),
+            "blocked": len(blocked),
+        },
+    }
 
 
 def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
@@ -4568,11 +4796,9 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
     `PackagingError` at all: the blast radius of ANY exception must be one unit, and a narrower
     clause leaves the next unforeseen type free to abort the batch again. It is wrapped in
     :class:`UnitCrashed` so it travels the path the modelled refusals already travel, with the
-    traceback kept. `BaseException` - `KeyboardInterrupt`, `SystemExit` - still passes through,
-    because that is the operator ending the run rather than a unit failing.
+    safe traceback kept. `SystemExit` still passes through. `KeyboardInterrupt` is handled only
+    long enough to publish truthful JSON, then stops the batch with a nonzero result.
     """
-    if brief is not None and len(units) != 1:
-        raise PackagingError("brief_requires_one_unit")
     workbooks, datasources = engine_unit_names(read_json(bundle / "report.json"))
     ordered = sorted(units, key=lambda unit: (unit_kind(unit, workbooks, datasources) != KIND_DATASOURCE, unit))
     providers = list(_external_providers(provider_packages, out_root, units))
@@ -4592,6 +4818,19 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
             results.append(result)
             if result["kind"] == KIND_DATASOURCE and result["has_engine_working_copy"]:
                 providers.append(out_root / unit)
+        except AssemblyInterrupted as interruption:
+            interruption.unit = unit
+            if interruption.published and interruption.result is not None:
+                results.append(interruption.result)
+            elif failed is not None:
+                failed.append(InterruptedUnit(unit, rollback_failed=interruption.rollback_failed))
+            raise
+        except KeyboardInterrupt as error:
+            interruption = AssemblyInterrupted(published=False)
+            interruption.unit = unit
+            if failed is not None:
+                failed.append(InterruptedUnit(unit, rollback_failed=False))
+            raise interruption from error
         except PackageEditsRefused as refusal:
             print(_sanitize_diagnostic(str(refusal)), file=sys.stderr)
             refused.append(refusal)
@@ -4680,6 +4919,7 @@ def _refuse_zero_units(bundle: Path, out_root: Path, json_path: Path | None, *, 
         file=sys.stderr,
     )
     if json_path:
+        construction = construction_status_projection([], [], [], [], [])
         write_json(
             json_path,
             {
@@ -4689,10 +4929,20 @@ def _refuse_zero_units(bundle: Path, out_root: Path, json_path: Path | None, *, 
                 "mode": _mode(assemble_only_explicit),
                 "dispatch_readiness": _dispatch_readiness(),
                 "requested": [],
-                "totals": {"requested": 0, "assembled": 0, "blocked": 0},
-                "assembled": [],
-                "blocked": [],
-                "accounting_findings": [],
+                "legacy_bucket_semantics": "construction_only; never dispatch readiness",
+                "totals": {
+                    "requested": 0,
+                    "units": 0,
+                    "failed": 0,
+                    "refused": 0,
+                    "unaccounted": 0,
+                    **construction["totals"],
+                },
+                "units": [],
+                "failed": [],
+                "refused": [],
+                "unaccounted": [],
+                "construction": construction,
                 "cannot_assess": ["the bundle names no units"],
             },
         )
@@ -4700,10 +4950,10 @@ def _refuse_zero_units(bundle: Path, out_root: Path, json_path: Path | None, *, 
 
 
 def _run_verdict(
-    blocked: list[dict[str, Any]],
     refused: list[PackageEditsRefused],
     failed: list[PackagingError],
     gaps: list[dict[str, str]] | None = None,
+    interruption: AssemblyInterrupted | None = None,
 ) -> int:
     """The run's exit code, worst first; content limitations do not change construction status.
 
@@ -4715,9 +4965,9 @@ def _run_verdict(
     outcome bucket is not "fine" and it is not "failed" - nobody knows what happened to it, which is
     the same third state, and it must never be able to leave a run clean (#478).
     """
-    if not blocked and not gaps:
+    if not failed and not refused and not gaps and interruption is None:
         return EXIT_OK
-    if gaps or any(isinstance(failure, UnassessableInput) for failure in failed):
+    if interruption is not None or gaps or any(isinstance(failure, UnassessableInput) for failure in failed):
         return EXIT_CANNOT_ASSESS
     if failed:
         return EXIT_UNIT_FAILED
@@ -4792,41 +5042,53 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         # otherwise write a whole estate of packages that all silently lack the brief.
         parser.error("--brief must be a readable file")
 
+    engine_report = read_json(bundle / "report.json")
+    workbooks, datasources = engine_unit_names(engine_report)
     available = bundle_units(bundle)
-    units = args.unit or available
+    units = list(args.unit) if args.unit else bundle_unit_occurrences(bundle)
     if args.brief is not None and len(units) != 1:
         parser.error("--brief requires exactly one unit; package each unit with its own brief")
     unknown = [unit for unit in units if unit not in available]
     if unknown:
         parser.error(f"the bundle's report.json and pbip/ know nothing of: {', '.join(sorted(unknown))}")
 
-    out_root = _prepare_out(args.out)
     if not units:
+        out_root = _prepare_out(args.out)
         return _refuse_zero_units(bundle, out_root, args.json, assemble_only_explicit=args.assemble_only)
 
     # The denominator stays sorted by name even though assembly publishes datasources first.
     requested = sorted(units)
+    packageable, identity_failures = _identity_preflight(
+        requested, workbooks, datasources, available, args.out.resolve()
+    )
+    out_root = _prepare_out(args.out)
     results: list[dict[str, Any]] = []
     refused: list[PackageEditsRefused] = []
-    failed: list[PackagingError] = []
-    packageable, budgets = _measure_unit_budgets(bundle, requested, out_root, assets_dir, failed)
+    failed: list[PackagingError] = list(identity_failures)
+    packageable, budgets = _measure_unit_budgets(bundle, packageable, out_root, assets_dir, failed)
     _warn_shipping(budgets)
-    _package_each(
-        packageable,
-        bundle,
-        out_root,
-        oracle_dir,
-        assets_dir,
-        args.discard_package_edits,
-        results,
-        refused,
-        failed,
-        brief=args.brief.resolve() if args.brief else None,
-        gate_root=args.gate_root,
-        provider_packages=_external_providers(args.provider_package, out_root, requested),
-    )
+    interruption: AssemblyInterrupted | None = None
+    try:
+        _package_each(
+            packageable,
+            bundle,
+            out_root,
+            oracle_dir,
+            assets_dir,
+            args.discard_package_edits,
+            results,
+            refused,
+            failed,
+            brief=args.brief.resolve() if args.brief else None,
+            gate_root=args.gate_root,
+            provider_packages=_external_providers(args.provider_package, out_root, requested),
+        )
+    except AssemblyInterrupted as error:
+        interruption = error
     gaps = partition_gaps(requested, results, failed, refused)
-    assembled, blocked, accounting_findings = construction_outcomes(requested, results, failed, refused)
+    failed_rows = [_failure_row(failure) for failure in failed]
+    refused_rows = [_refusal_row(item) for item in refused]
+    construction = construction_status_projection(requested, results, failed_rows, refused_rows, gaps)
 
     payload = {
         "id": "package-unit",
@@ -4837,14 +5099,31 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         "mode": _mode(args.assemble_only),
         "dispatch_readiness": _dispatch_readiness(),
         "requested": requested,
+        "legacy_bucket_semantics": "construction_only; never dispatch readiness",
         "totals": {
             "requested": len(requested),
-            "assembled": len(assembled),
-            "blocked": len(blocked),
+            "units": len(results),
+            "failed": len(failed_rows),
+            "refused": len(refused_rows),
+            "unaccounted": len(gaps),
+            "assembled": construction["totals"]["assembled"],
+            "blocked": construction["totals"]["blocked"],
         },
-        "assembled": assembled,
-        "blocked": blocked,
-        "accounting_findings": accounting_findings,
+        "units": results,
+        "failed": failed_rows,
+        "refused": refused_rows,
+        "unaccounted": gaps,
+        "construction": construction,
+        "interruption": (
+            {
+                "unit": interruption.unit,
+                "reason_code": interruption.reason_code,
+                "published": interruption.published,
+                "rollback_failed": interruption.rollback_failed,
+            }
+            if interruption is not None
+            else None
+        ),
         # The relocation number, per unit, travelling WITH the report: how long a Windows root each
         # package still tolerates. Nothing downstream re-measures it, and it is the one figure that
         # says whether a package that is valid here will open where a customer unpacks it.
@@ -4861,11 +5140,12 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
                 failed,
                 requested,
                 assemble_only_explicit=args.assemble_only,
+                interruption=interruption,
             )
         )
     elif args.assemble_only:
         print(NOT_START_READY_NOTICE)
-    return _run_verdict(blocked, refused, failed, gaps)
+    return _run_verdict(refused, failed, gaps, interruption)
 
 
 if __name__ == "__main__":

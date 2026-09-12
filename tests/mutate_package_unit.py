@@ -846,8 +846,8 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "#478: stop measuring the buckets against the request, so a lost unit is never named",
         PACKAGER,
-        "    counted = Counter(_bucketed_units(results, failed, refused))",
-        "    counted = Counter(requested)",
+        "    asked = Counter(requested)",
+        "    asked = Counter(_bucketed_units(results, failed, refused))",
         [
             "test_an_unaccounted_unit_is_reported_and_cannot_exit_zero",
             "test_a_requested_unit_in_no_bucket_is_named_rather_than_counted_clean",
@@ -856,8 +856,8 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "#478: let an unaccounted unit leave the run clean",
         PACKAGER,
-        "    if gaps or any(isinstance(failure, UnassessableInput) for failure in failed):",
-        "    if any(isinstance(failure, UnassessableInput) for failure in failed):",
+        "    if interruption is not None or gaps or any(isinstance(failure, UnassessableInput) for failure in failed):",
+        "    if interruption is not None or any(isinstance(failure, UnassessableInput) for failure in failed):",
         ["test_an_unaccounted_unit_is_reported_and_cannot_exit_zero"],
     ),
     (
@@ -871,21 +871,21 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "#614: shrink the requested denominator to the units that assembled",
         PACKAGER,
-        '            "requested": len(requested),',
-        '            "requested": len(assembled),',
+        '        "totals": {\n            "requested": len(requested),\n            "assembled": len(assembled),',
+        '        "totals": {\n            "requested": len(assembled),\n            "assembled": len(assembled),',
         ["test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker"],
     ),
     (
         "#614: classify a successfully constructed package as BLOCKED",
         PACKAGER,
-        "        if len(outcomes) == 1 and outcomes[0][0] == STATUS_ASSEMBLED:",
-        "        if len(outcomes) == 1 and outcomes[0][0] == STATUS_BLOCKED:",
+        '            "status": STATUS_ASSEMBLED,\n            "has_engine_working_copy": result["has_engine_working_copy"],',
+        '            "status": STATUS_BLOCKED,\n            "has_engine_working_copy": result["has_engine_working_copy"],',
         ["test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker"],
     ),
     (
         "#614: let a partial batch exit zero",
         PACKAGER,
-        "    if not blocked and not gaps:\n        return EXIT_OK",
+        "    if not failed and not refused and not gaps and interruption is None:\n        return EXIT_OK",
         "    if True:\n        return EXIT_OK  # noqa",
         ["test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker"],
     ),

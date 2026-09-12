@@ -938,8 +938,17 @@ def test_provider_first_ordering_preserves_requested_denominator_and_final_publi
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert attempted == [DS_UNIT, UNIT], "the alphabetical consumer must wait for the datasource's final swap"
     assert payload["requested"] == [UNIT, DS_UNIT]
-    assert payload["totals"] == {"requested": 2, "assembled": 2, "blocked": 0}
-    assert [row["unit"] for row in payload["assembled"]] == [UNIT, DS_UNIT]
+    assert payload["totals"] == {
+        "requested": 2,
+        "units": 2,
+        "failed": 0,
+        "refused": 0,
+        "unaccounted": 0,
+        "assembled": 2,
+        "blocked": 0,
+    }
+    assert [row["unit"] for row in payload["units"]] == [DS_UNIT, UNIT]
+    assert [row["unit"] for row in payload["construction"]["assembled"]] == [DS_UNIT, UNIT]
 
 
 @pytest.mark.parametrize("failure", ["assembly", "budget", "refused"])
@@ -1000,11 +1009,13 @@ def test_selected_failed_provider_never_reuses_even_an_explicit_stale_output(
     assert (provider / "package-manifest.json").read_bytes() == prior
     assert pkg.pri.verify_s1(provider).integrity.is_clean
     report = json.loads(json_path.read_text(encoding="utf-8"))
-    assert report["requested"] == [UNIT, DS_UNIT] and report["accounting_findings"] == []
-    assert [row["unit"] for row in report["assembled"]] == [UNIT]
-    assert [row["unit"] for row in report["blocked"]] == [DS_UNIT]
-    assert report["blocked"][0]["blocker"] == (
-        "PACKAGE_EDITS_REFUSED" if failure == "refused" else "CONSTRUCTION_FAILED"
+    assert report["requested"] == [UNIT, DS_UNIT] and report["unaccounted"] == []
+    assert [row["unit"] for row in report["construction"]["assembled"]] == [UNIT]
+    assert [row["unit"] for row in report["construction"]["blocked"]] == [DS_UNIT]
+    assert report["construction"]["blocked"][0]["reason_code"] == (
+        "package_edits_refused"
+        if failure == "refused"
+        else ("unit_exception" if failure == "assembly" else "construction_failed")
     )
 
 

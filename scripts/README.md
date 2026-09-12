@@ -235,6 +235,12 @@ Totals always use the original requested denominator, and any BLOCKED request ma
 nonzero while preserving ASSEMBLED siblings. A missing working copy, non-self-contained package,
 unbound data path or absent oracle remains ASSEMBLED diagnostic output.
 
+The legacy ordered `units` / `failed` / `refused` / `unaccounted` JSON buckets and their totals
+remain present, explicitly marked `construction_only`; `construction` is the single ASSEMBLED /
+BLOCKED projection over them. `units` and its projection preserve provider-first publication order.
+The legacy manifest `packaged` boolean remains an engine-working-copy indicator only, with adjacent
+`packaged_semantics`; it is not a success label.
+
 **ASSEMBLED is never START_READY.** Output records dispatch readiness as unavailable and
 `NOT_EVALUATED`; #622 and the final #562 consumer own that later decision. The command creates no
 dispatch authorization and does not call or reimplement `check_reference_readiness.py`.
