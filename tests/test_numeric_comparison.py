@@ -507,3 +507,58 @@ def test_csv_final_record_does_not_require_a_newline() -> None:
     payload = _payload()
     payload["rows"] = []
     assert _compare(b"Region,Item,Amount", _wire(payload)) == "EMPTY"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("79228162514264337593543950335", "EQUAL"),
+        ("-79228162514264337593543950335", "EQUAL"),
+        ("79228162514264337593543950336", "VALUE_UNSUPPORTED"),
+        ("-79228162514264337593543950336", "VALUE_UNSUPPORTED"),
+        ("7.9228162514264337593543950335", "EQUAL"),
+        ("-7.9228162514264337593543950335", "EQUAL"),
+        ("7.9228162514264337593543950336", "VALUE_UNSUPPORTED"),
+        ("-7.9228162514264337593543950336", "VALUE_UNSUPPORTED"),
+        ("0.0000000000000000000000000001", "EQUAL"),
+        ("-0.0000000000000000000000000001", "EQUAL"),
+        ("0.00000000000000000000000000001", "VALUE_UNSUPPORTED"),
+        ("-0.00000000000000000000000000001", "VALUE_UNSUPPORTED"),
+        ("0.00000000000000000000000000000", "VALUE_UNSUPPORTED"),
+        ("1.0000000000000000000000000000", "EQUAL"),
+        ("1.00000000000000000000000000000", "VALUE_UNSUPPORTED"),
+        ("79228162514264337593543950335.0", "VALUE_UNSUPPORTED"),
+        ("-0.0000000000000000000000000000", "EQUAL"),
+    ],
+)
+def test_typed_decimal_requires_its_exact_clr_coefficient_and_scale(text: str, expected: str) -> None:
+    """The declared scale must fit, not merely a value obtainable by trimming trailing zeros."""
+    payload = _payload()
+    payload["rows"] = [_row("North", "A", text)]
+    csv = f"Region,Item,Amount\nNorth,A,{text}\n".encode()
+    with localcontext() as context:
+        context.prec = 1
+        context.traps[Inexact] = context.traps[Rounded] = True
+        context.clear_flags()
+        assert _compare(csv, _wire(payload)) == expected
+        assert not any(context.flags.values())
+
+
+@pytest.mark.parametrize(
+    "csv_number,typed_number,expected",
+    [
+        ("79228162514264337593543950336", "79228162514264337593543950335", "DIFFERENT"),
+        ("-79228162514264337593543950336", "-79228162514264337593543950335", "DIFFERENT"),
+        ("0.00000000000000000000000000001", "0.0000", "DIFFERENT"),
+        ("1.00000000000000000000000000000", "1", "EQUAL"),
+        ("79228162514264337593543950335.0", "79228162514264337593543950335", "EQUAL"),
+    ],
+)
+def test_csv_numbers_do_not_acquire_the_clr_decimal_domain(csv_number: str, typed_number: str, expected: str) -> None:
+    """CLR representability constrains only typed cells, never the admitted CSV numeric grammar."""
+    payload = _payload()
+    payload["rows"] = [_row("North", "A", typed_number)]
+    csv = f"Region,Item,Amount\nNorth,A,{csv_number}\n".encode()
+    with localcontext() as context:
+        context.prec = 1
+        assert _compare(csv, _wire(payload)) == expected

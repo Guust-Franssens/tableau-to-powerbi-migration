@@ -56,8 +56,17 @@ It requires dax and a positive integer max_payload_bytes, with no other request 
 uses the same rows/error response union: {schema_version: 1, query_sha256, columns, rows}, where
 columns contain {name, kind} and each row contains ordered {kind, value} cells. Kinds are string,
 int32, int64, decimal, and blank (null, in cells only). Nonblank values are lossless strings.
+Decimal cells require the actual CLR 96-bit coefficient and scale 0..28; trailing zeros are retained,
+not trimmed to force an otherwise impossible representation into that domain.
 The limit charges the exact UTF-8 success envelope, excluding its framing LF. Success is withheld
-until EOF, NextResult() == False, and reader.Close() all succeed. No row/cell/digit cap is imposed.
+until EOF, NextResult() == False, and reader.Close() all succeed. No independent row/cell/digit
+policy cap is imposed.
+
+There is one duplicate-rejecting JSON parse before mode routing. Ambiguous, malformed, truncated,
+or undecodable/deep frames return a fixed INPUT_INVALID, never a legacy echo or float result.
+Only an established legacy request enters legacy marshalling. Native binding precedes readiness,
+even for empty stdin. A startup failure is exposed only for established legacy requests or empty
+stdin; typed/unestablished frames retain fixed errors and an unbound native server exits nonzero.
 
 execute_typed(connection, dax, max_payload_bytes=...) is the native-qualification seam; the normal
 --pid/--port NDJSON server wires it before legacy marshalling. Native qualification is mandatory
@@ -73,6 +82,7 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -105,6 +115,7 @@ _TYPED_CLR_KINDS = {
     "System.Decimal": "decimal",
 }
 _TYPED_NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", re.ASCII)
+_CLR_DECIMAL_MAX_COEFFICIENT = "79228162514264337593543950335"
 
 
 class TypedResultError(ValueError):
@@ -148,13 +159,31 @@ def _typed_query_args(dax: str, max_payload_bytes: int) -> None:
 
 def _decimal_text(value: Any) -> str:
     if isinstance(value, Decimal):
-        return format(value, "f")
-    if type(value).__name__ == "Decimal" and hasattr(value, "ToString"):
+        if not value.is_finite():
+            raise TypedResultError("RESULT_TYPE")
+        sign, digits, exponent = value.as_tuple()
+        # Check the native domain before expanding an arbitrarily large Python exponent.
+        if exponent < -28 or (any(digits) and len(digits) + max(exponent, 0) > 29):
+            raise TypedResultError("RESULT_TYPE")
+        text = ("-0" if sign else "0") if not any(digits) and exponent >= 0 else format(value, "f")
+    elif type(value).__name__ == "Decimal" and hasattr(value, "ToString"):
         # Preserve CLR scale and digits without using the operator's decimal separator.
         from System.Globalization import CultureInfo  # pylint: disable=import-outside-toplevel,import-error
 
-        return str(value.ToString(CultureInfo.InvariantCulture))
-    raise TypedResultError("RESULT_TYPE")
+        text = str(value.ToString(CultureInfo.InvariantCulture))
+    else:
+        raise TypedResultError("RESULT_TYPE")
+    if not _TYPED_NUMBER.fullmatch(text):
+        raise TypedResultError("RESULT_TYPE")
+    whole, _, fraction = text.removeprefix("-").partition(".")
+    coefficient = (whole + fraction).lstrip("0") or "0"
+    if (
+        len(fraction) > 28
+        or len(coefficient) > len(_CLR_DECIMAL_MAX_COEFFICIENT)
+        or (len(coefficient) == len(_CLR_DECIMAL_MAX_COEFFICIENT) and coefficient > _CLR_DECIMAL_MAX_COEFFICIENT)
+    ):
+        raise TypedResultError("RESULT_TYPE")
+    return text
 
 
 def _typed_integer(value: Any, kind: str) -> str:
@@ -178,8 +207,6 @@ def _typed_value(value: Any, kind: str) -> dict:
         text = _typed_integer(value, kind)
     elif kind == "decimal":
         text = _decimal_text(value)
-        if not _TYPED_NUMBER.fullmatch(text):
-            raise TypedResultError("RESULT_TYPE")
     else:
         raise TypedResultError("RESULT_TYPE")
     try:
@@ -260,7 +287,7 @@ def execute_typed(connection: Any, dax: str, *, max_payload_bytes: int) -> bytes
         raise TypedResultError("RESULT_INCOMPLETE") from None
 
 
-def _typed_request_object(pairs: list[tuple[str, object]]) -> dict:
+def _request_object(pairs: list[tuple[str, object]]) -> dict:
     request = {}
     for key, value in pairs:
         if key in request:
@@ -269,9 +296,24 @@ def _typed_request_object(pairs: list[tuple[str, object]]) -> dict:
     return request
 
 
-def _typed_response(line: str, executor: Callable[[str, int], bytes] | None) -> bytes:
+def _request_constant(_value: str) -> None:
+    raise TypedResultError("INPUT_INVALID")
+
+
+def _read_request(line: str | bytes) -> dict:
+    # The decoder delivers ordered pairs, so duplicate mode fields cannot be lost before routing.
+    # Its syntax, recursion and conversion failures establish NO mode and must never select legacy.
     try:
-        request = json.loads(line, object_pairs_hook=_typed_request_object)
+        request = json.loads(line, object_pairs_hook=_request_object, parse_constant=_request_constant)
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        raise TypedResultError("INPUT_INVALID") from None
+    if not isinstance(request, dict):
+        raise TypedResultError("INPUT_INVALID")
+    return request
+
+
+def _typed_response(request: dict, executor: Callable[[str, int], bytes] | None) -> bytes:
+    try:
         if set(request) != {"dax", "result_format", "max_payload_bytes"}:
             raise TypedResultError("INPUT_INVALID")
         dax, limit = request["dax"], request["max_payload_bytes"]
@@ -297,6 +339,19 @@ def _write_typed(stdout: Any, payload: bytes) -> None:
     else:
         stdout.write(payload.decode("utf-8") + "\n")
         stdout.flush()
+
+
+def _input_lines(stdin: Any) -> Iterator[str | bytes | None]:
+    lines = iter(stdin)
+    while True:
+        try:
+            line = next(lines)
+        except StopIteration:
+            return
+        except (UnicodeError, OSError):
+            yield None
+            return
+        yield line
 
 
 def _json_safe(value: Any) -> Any:  # pylint: disable=too-many-return-statements  # a type dispatch
@@ -401,7 +456,12 @@ def adomd_executor(port: int) -> Callable[[str], list[dict]]:
 
 
 def serve(
-    oracle: Callable[[str], dict], stdin=None, stdout=None, *, typed_executor: Callable[[str, int], bytes] | None = None
+    oracle: Callable[[str], dict],
+    stdin=None,
+    stdout=None,
+    *,
+    typed_executor: Callable[[str, int], bytes] | None = None,
+    on_empty: Callable[[], None] | None = None,
 ) -> int:
     """The `persistent_oracle` protocol: one JSON request per line in, one response per line out.
 
@@ -411,54 +471,75 @@ def serve(
     """
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
-    for line in stdin:
+    received = False
+    for line in _input_lines(stdin):
+        if not isinstance(line, (str, bytes)):
+            received = True
+            _write_typed(stdout, _typed_json({"error": "INPUT_INVALID"}))
+            continue
         line = line.strip()
         if not line:
             continue
+        received = True
         try:
-            request = json.loads(line)
-        except (ValueError, TypeError):
-            request = None
-        if isinstance(request, dict) and request.get("result_format") == "typed-v1":
-            _write_typed(stdout, _typed_response(line, typed_executor))
+            request = _read_request(line)
+        except TypedResultError:
+            _write_typed(stdout, _typed_json({"error": "INPUT_INVALID"}))
+            continue
+        if request.get("result_format") == "typed-v1":
+            _write_typed(stdout, _typed_response(request, typed_executor))
             continue
         try:
-            dax = request["dax"] if isinstance(request, dict) else None
-        except (ValueError, KeyError, TypeError):
-            dax = None
-        response = oracle(dax) if isinstance(dax, str) else {"error": f"expected {{'dax': ...}}, got {line[:120]}"}
-        stdout.write(json.dumps(response) + "\n")
+            dax = request["dax"]
+            if not isinstance(dax, str):
+                raise TypeError
+            dax.encode("utf-8")
+        except (KeyError, TypeError, UnicodeError):
+            _write_typed(stdout, _typed_json({"error": "INPUT_INVALID"}))
+            continue
+        stdout.write(json.dumps(oracle(dax)) + "\n")
         stdout.flush()
+    if not received and on_empty is not None:
+        on_empty()
     return 0
 
 
 def _serve_native(resolve_port: Callable[[], int]) -> int:
-    # Select the wire mode before connection acquisition: typed startup failures must not escape
-    # through the legacy exception diagnostics. Both modes still share ONE ordinary ADOMD executor.
+    # Bind once before readiness, as the base server did. Hold a startup failure until the ONE
+    # protocol loop establishes legacy intent (or empty input); never echo it for ambiguous input.
     execute = None
-
-    def get_executor():
-        nonlocal execute
-        if execute is None:
-            execute = adomd_executor(resolve_port())
-        return execute
+    bind_error = None
+    try:
+        execute = adomd_executor(resolve_port())
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        bind_error = error
+    else:
+        log.info('ready: one {"dax": ...} JSON request per line on stdin')
 
     def legacy(dax: str) -> dict:
-        return make_oracle(get_executor())(dax)
+        if bind_error is not None:
+            raise bind_error
+        return make_oracle(execute)(dax)
 
     def typed(dax: str, limit: int) -> bytes:
-        return get_executor().typed(dax, limit)
+        if bind_error is not None:
+            raise TypedResultError("EXECUTION_FAILED") from None
+        return execute.typed(dax, limit)
+
+    def empty() -> None:
+        if bind_error is not None:
+            raise bind_error
 
     close_failed = False
     try:
-        status = serve(legacy, typed_executor=typed)
+        status = serve(legacy, typed_executor=typed, on_empty=empty)
     finally:
         if execute is not None:
             try:
                 execute.close()
             except Exception:  # pylint: disable=broad-exception-caught
                 close_failed = True
-    return 1 if close_failed else status
+    return 1 if close_failed or execute is None else status
 
 
 def _load_contract():
@@ -543,7 +624,6 @@ def main(argv: list[str] | None = None) -> int:
     import probe_desktop_query as pdq  # noqa: PLC0415
 
     if not args.certify and not args.query:
-        log.info('ready: one {"dax": ...} JSON request per line on stdin')
         return _serve_native(lambda: args.port or pdq.discover_port(args.pid))  # pylint: disable=no-member
 
     port = args.port or pdq.discover_port(args.pid)  # pylint: disable=no-member  # resolved at runtime

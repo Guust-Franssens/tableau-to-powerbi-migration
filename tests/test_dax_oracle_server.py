@@ -684,14 +684,14 @@ def test_only_the_exact_discriminator_changes_the_legacy_response(discriminator:
     assert output.getvalue().encode() == b'{"rows": [{"v": 12.5, "blank": null, "text": "\\u00e9"}]}\n'
 
 
-def test_legacy_malformed_missing_and_empty_requests_keep_exact_bytes() -> None:
-    """The opt-in branch does not redact, reformat, or otherwise change legacy responses."""
+def test_invalid_frames_are_fixed_errors_and_valid_legacy_responses_keep_exact_bytes() -> None:
+    """Unestablished requests have fixed errors; established legacy response bytes are unchanged."""
     output = StringIO()
     requests = 'not json\n{"other":1}\n{"dax":""}\n{"dax":"EVALUATE \'T\'"}\n'
     dos.serve(dos.make_oracle(lambda _query: []), StringIO(requests), output)
     assert output.getvalue() == (
-        '{"error": "expected {\'dax\': ...}, got not json"}\n'
-        '{"error": "expected {\'dax\': ...}, got {\\"other\\":1}"}\n'
+        '{"error":"INPUT_INVALID"}\n'
+        '{"error":"INPUT_INVALID"}\n'
         '{"error": "empty DAX query"}\n'
         '{"error": "query returned no rows"}\n'
     )
@@ -745,10 +745,11 @@ def test_typed_native_startup_failures_do_not_leak_or_enter_legacy_diagnostics(
     monkeypatch.setattr(sys, "stdin", StringIO(json.dumps(request) + "\n"))
     monkeypatch.setattr(sys, "stdout", output)
     with caplog.at_level("INFO"):
-        assert dos.main(["--pid", "45678"] if phase == "discovery" else ["--port", "45678"]) == 0
+        assert dos.main(["--pid", "45678"] if phase == "discovery" else ["--port", "45678"]) == 1
     assert output.getvalue() == '{"error":"EXECUTION_FAILED"}\n'
     assert all(sentinel not in caplog.text + output.getvalue() for sentinel in SENTINELS)
     assert "45678" not in caplog.text
+    assert "ready:" not in caplog.text
 
 
 def test_offline_cli_refuses_typed_results_but_keeps_legacy_plumbing() -> None:
@@ -807,3 +808,285 @@ def test_typed_writer_emits_exact_utf8_bytes_without_text_newline_translation() 
         typed_executor=_reader_executor(_TypedReader()),
     )
     assert output.buffer.getvalue() == expected + b"\n"
+
+
+AMBIGUOUS_TYPED_FRAMES = [
+    (
+        '{"dax":"EVALUATE \'SENSITIVE_QUERY\'","result_format":"typed-v1",'
+        '"result_format":"legacy","max_payload_bytes":1000}'
+    ),
+    (
+        '{"result_format":"legacy","result_format":"typed-v1",'
+        '"dax":"EVALUATE \'SENSITIVE_QUERY\'","max_payload_bytes":1000}'
+    ),
+    '{"result_format":"typed-v1","\\u0072esult_format":"legacy","dax":"EVALUATE \'SENSITIVE_QUERY\'"}',
+    '{"result_format":"typed-v1","dax":"EVALUATE \'SENSITIVE_QUERY\'","max_payload_bytes":1000',
+    '{"result_format":"typed-v1","dax":"SENSITIVE_QUERY',
+    '{"result_format":"typed-v1",,"dax":"SENSITIVE_QUERY"}',
+    '{"extra":' + "[" * 3000 + "0" + "]" * 3000 + ',"result_format":"typed-v1","dax":"SENSITIVE_QUERY"}',
+    '{"result_format":"typed-v1","extra":' + "[" * 3000 + "0" + "]" * 3000 + ',"dax":"SENSITIVE_QUERY"}',
+]
+AMBIGUOUS_FRAME_IDS = (
+    "duplicate-last-legacy",
+    "duplicate-last-typed",
+    "duplicate-escaped",
+    "truncated-object",
+    "truncated-string",
+    "malformed",
+    "deep-before-mode",
+    "deep-after-mode",
+)
+
+
+@pytest.mark.parametrize("frame", AMBIGUOUS_TYPED_FRAMES, ids=AMBIGUOUS_FRAME_IDS)
+def test_unestablished_frames_cannot_fall_through_to_legacy(
+    frame: str, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Duplicate, malformed, truncated, and deep inputs must not select a lossy/raw-echo path."""
+    calls = []
+
+    def legacy(query: str) -> dict:
+        calls.append(query)
+        return {"rows": [{"v": 12.5}]}
+
+    output = StringIO()
+    subsequent = '{"dax":"EVALUATE \'KnownLegacy\'"}\n'
+    assert (
+        dos.serve(
+            legacy,
+            StringIO(frame + "\n" + subsequent),
+            output,
+            typed_executor=lambda *_args: pytest.fail("invalid frame reached typed execution"),
+        )
+        == 0
+    )
+    assert output.getvalue() == '{"error":"INPUT_INVALID"}\n{"rows": [{"v": 12.5}]}\n'
+    assert calls == ["EVALUATE 'KnownLegacy'"]
+    captured = capsys.readouterr()
+    assert all(sentinel not in output.getvalue() + captured.out + captured.err + caplog.text for sentinel in SENTINELS)
+
+
+@pytest.mark.parametrize(
+    "text,admitted",
+    [
+        ("79228162514264337593543950335", True),
+        ("-79228162514264337593543950335", True),
+        ("79228162514264337593543950336", False),
+        ("-79228162514264337593543950336", False),
+        ("7.9228162514264337593543950335", True),
+        ("-7.9228162514264337593543950335", True),
+        ("7.9228162514264337593543950336", False),
+        ("-7.9228162514264337593543950336", False),
+        ("0.0000000000000000000000000001", True),
+        ("-0.0000000000000000000000000001", True),
+        ("0.00000000000000000000000000001", False),
+        ("-0.00000000000000000000000000001", False),
+        ("0.00000000000000000000000000000", False),
+        ("1.0000000000000000000000000000", True),
+        ("1.00000000000000000000000000000", False),
+        ("79228162514264337593543950335.0", False),
+        ("-0.0000000000000000000000000000", True),
+    ],
+)
+@pytest.mark.parametrize("clr_wrapper", [False, True])
+def test_producer_decimal_requires_actual_clr_representability(
+    text: str, admitted: bool, clr_wrapper: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both Python stand-ins and the CLR formatting seam enforce the same physical type domain."""
+    if clr_wrapper:
+        value = type("Decimal", (), {"ToString": lambda _self, _provider: text})()
+        monkeypatch.setitem(
+            sys.modules,
+            "System.Globalization",
+            SimpleNamespace(CultureInfo=SimpleNamespace(InvariantCulture=object())),
+        )
+    else:
+        value = Decimal(text)
+    reader = _TypedReader(columns=[("v", "System.Decimal")], rows=[[value]])
+    with localcontext() as context:
+        context.prec = 1
+        context.clear_flags()
+        result = _serve_typed(_reader_executor(reader))
+        assert not any(context.flags.values())
+    if admitted:
+        expected = {
+            "schema_version": 1,
+            "query_sha256": hashlib.sha256(TYPED_QUERY.encode()).hexdigest(),
+            "columns": [{"name": "v", "kind": "decimal"}],
+            "rows": [[{"kind": "decimal", "value": text}]],
+        }
+        assert result == _expected_wire(expected) + b"\n"
+    else:
+        assert result == b'{"error":"RESULT_TYPE"}\n'
+    assert reader.state.closed
+
+
+def _install_native_startup_mock(
+    monkeypatch: pytest.MonkeyPatch, events: list[str], failure: str | None = None
+) -> RuntimeError:
+    error = RuntimeError(" ".join(SENTINELS))
+
+    def discover(_pid: int) -> int:
+        events.append("discover")
+        if failure == "discovery":
+            raise error
+        return 45678
+
+    def open_connection() -> None:
+        events.append("open")
+        if failure == "open":
+            raise error
+
+    connection = SimpleNamespace(
+        Open=open_connection,
+        Close=lambda: events.append("close"),
+        CreateCommand=lambda: pytest.fail("empty input must not execute a query"),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "probe_desktop_query",
+        SimpleNamespace(discover_port=discover, _load_adomd=lambda: lambda _connection_string: connection),
+    )
+    return error
+
+
+@pytest.mark.parametrize("input_text", ["", "\n \n"])
+def test_empty_native_input_matches_base_binding_readiness_order(
+    input_text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Golden order from f48a2cf: discover, Open, ready, stdin, Close; never lazy empty success."""
+    events = []
+    _install_native_startup_mock(monkeypatch, events)
+
+    class Input(StringIO):
+        """Observe when the single existing protocol loop starts reading."""
+
+        def __iter__(self) -> "Input":
+            events.append("stdin")
+            return super().__iter__()
+
+    def log_info(message: str, *_args: object) -> None:
+        if message.startswith("ready:"):
+            events.append("ready")
+
+    monkeypatch.setattr(dos.log, "info", log_info)
+    monkeypatch.setattr(sys, "stdin", Input(input_text))
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    assert dos.main(["--pid", "7777"]) == 0
+    assert events == ["discover", "open", "ready", "stdin", "close"]
+    assert output.getvalue() == ""
+
+
+@pytest.mark.parametrize("phase", ["discovery", "open"])
+@pytest.mark.parametrize("input_text", ["", "\n \n", '{"dax":"EVALUATE \'KnownLegacy\'"}\n'])
+def test_legacy_failed_binding_preserves_base_exception_and_no_ready(
+    phase: str, input_text: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The base never reports ready/exit zero when discovery or Open failed, including EOF."""
+    events = []
+    error = _install_native_startup_mock(monkeypatch, events, phase)
+    monkeypatch.setattr(sys, "stdin", StringIO(input_text))
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    with caplog.at_level("INFO"), pytest.raises(RuntimeError) as raised:
+        dos.main(["--pid", "7777"])
+    assert raised.value is error
+    assert events == (["discover"] if phase == "discovery" else ["discover", "open"])
+    assert output.getvalue() == ""
+    assert "ready:" not in caplog.text
+
+
+@pytest.mark.parametrize("frame", AMBIGUOUS_TYPED_FRAMES, ids=AMBIGUOUS_FRAME_IDS)
+def test_unestablished_typed_frame_cannot_expose_native_startup_failure(
+    frame: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Unbound native startup remains nonzero and sanitized even if a frame cannot establish its mode."""
+    events = []
+    _install_native_startup_mock(monkeypatch, events, "open")
+    monkeypatch.setattr(sys, "stdin", StringIO(frame + "\n"))
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    with caplog.at_level("INFO"):
+        assert dos.main(["--pid", "7777"]) == 1
+    assert output.getvalue() == '{"error":"INPUT_INVALID"}\n'
+    assert events == ["discover", "open"]
+    assert "ready:" not in caplog.text
+    assert all(sentinel not in output.getvalue() + caplog.text for sentinel in SENTINELS)
+
+
+def test_invalid_utf8_frame_is_not_legacy_intent() -> None:
+    """A binary input's decoder failure must not become raw echo or lossily marshalled rows."""
+    from io import BytesIO  # pylint: disable=import-outside-toplevel
+
+    frame = b'{"result_format":"typed-v1","dax":"SENSITIVE_QUERY\xff"}\n'
+    output = StringIO()
+    assert dos.serve(lambda _query: pytest.fail("legacy reached"), BytesIO(frame), output) == 0
+    assert output.getvalue() == '{"error":"INPUT_INVALID"}\n'
+
+
+@pytest.mark.parametrize("failure_kind", ["encoding", "io"])
+def test_unreadable_stream_does_not_reenter_empty_legacy_startup(
+    failure_kind: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unreadable non-legacy stream is not the empty-stdin legacy compatibility case."""
+    events = []
+    _install_native_startup_mock(monkeypatch, events, "open")
+    error = (
+        UnicodeDecodeError("utf-8", b"SENSITIVE_QUERY\xff", 15, 16, "SENSITIVE_VALUE")
+        if failure_kind == "encoding"
+        else OSError("SENSITIVE_ENDPOINT")
+    )
+
+    class BrokenInput:
+        """One failed read, without retrying the same unreadable stream."""
+
+        def __iter__(self) -> "BrokenInput":
+            return self
+
+        def __next__(self) -> str:
+            events.append("read_error")
+            raise error
+
+    monkeypatch.setattr(sys, "stdin", BrokenInput())
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    with caplog.at_level("INFO"):
+        assert dos.main(["--pid", "7777"]) == 1
+    assert output.getvalue() == '{"error":"INPUT_INVALID"}\n'
+    assert events == ["discover", "open", "read_error"]
+    assert "ready:" not in caplog.text
+    assert all(sentinel not in output.getvalue() + caplog.text for sentinel in SENTINELS)
+
+
+@pytest.mark.parametrize("number", ["1E+1000000", "1E-1000000"])
+def test_unrepresentable_python_decimal_is_refused_before_expansion(
+    number: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLR domain is checked before Python fixed-format output could expand a huge exponent."""
+    monkeypatch.setattr(dos, "format", lambda *_args: pytest.fail("expanded an impossible CLR value"), raising=False)
+    reader = _TypedReader(columns=[("v", "System.Decimal")], rows=[[Decimal(number)]])
+    assert _serve_typed(_reader_executor(reader)) == b'{"error":"RESULT_TYPE"}\n'
+    assert reader.state.closed
+
+
+def test_valid_native_legacy_wire_bytes_match_the_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The f48a2cf legacy path emits 12.5 as a JSON number, with the same formatting and close."""
+    reader = _TypedReader(columns=[("[v]", "System.Decimal")], rows=[[Decimal("12.50")]])
+    connection, command = _typed_connection(reader)
+    calls = []
+    connection.Open = lambda: calls.append("open")
+    connection.Close = lambda: calls.append("close")
+    monkeypatch.setitem(
+        sys.modules,
+        "probe_desktop_query",
+        SimpleNamespace(_load_adomd=lambda: lambda _connection_string: connection),
+    )
+    monkeypatch.setattr(sys, "stdin", StringIO('{"dax":"EVALUATE \'KnownLegacy\'"}\n'))
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    assert dos.main(["--port", "45678"]) == 0
+    assert output.getvalue() == '{"rows": [{"[v]": 12.5}]}\n'
+    assert command.CommandText == "EVALUATE 'KnownLegacy'"
+    assert calls == ["open", "close"]
+    assert reader.state.closed

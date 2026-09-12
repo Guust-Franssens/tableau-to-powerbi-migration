@@ -10,11 +10,14 @@ The typed success envelope has exactly schema_version (1), query_sha256 (64 lowe
 columns ([{name, kind}]), and rows ([[{kind, value}]]). Column kinds are string, int32, int64, decimal;
 cells retain that kind, or blank with value null. Other cell values are strings. Numbers use ASCII
 ``-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?``; integer kinds additionally require integral syntax and range.
-Decimal equality ignores native kind and scale, never uses floats, arithmetic, or a tolerance.
+Typed decimals require a 96-bit unsigned coefficient and scale 0..28, including retained trailing
+zeros. CSV numbers do not inherit that CLR domain. Equality ignores native kind and scale, never
+uses floats, arithmetic, or a tolerance.
 
 Budgets charge original CSV bytes and the entire received typed envelope, including JSON whitespace
 and escaping. One terminal NDJSON LF (optionally CRLF) is framing, not envelope bytes. Nothing is
-reserialized for admission. There are no row, column, cell, or digit limits beyond the byte budgets.
+reserialized for admission. There are no independent row, column, cell, or digit policy ceilings;
+native type representability is separate from the byte budgets.
 
 Returns only EQUAL, DIFFERENT, EMPTY, or a fixed refusal. Both inputs are fully validated before a
 relation is returned. This module does no I/O, execution, identity/certification admission, evidence
@@ -33,6 +36,7 @@ from decimal import Decimal
 
 _NUMBER = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", re.ASCII)
 _INTEGER = re.compile(r"-?(?:0|[1-9][0-9]*)", re.ASCII)
+_CLR_DECIMAL_MAX_COEFFICIENT = "79228162514264337593543950335"
 _NUMERIC_KINDS = frozenset({"int32", "int64", "decimal"})
 _COLUMN_KINDS = _NUMERIC_KINDS | {"string"}
 _INTEGER_RANGES = {
@@ -208,9 +212,18 @@ def _mapping(
     return keys, values
 
 
-def _number(text: str, kind: str = "decimal") -> Decimal:
+def _clr_decimal_text(text: str) -> bool:
+    whole, _, fraction = text.removeprefix("-").partition(".")
+    coefficient = (whole + fraction).lstrip("0") or "0"
+    return len(fraction) <= 28 and (
+        len(coefficient) < len(_CLR_DECIMAL_MAX_COEFFICIENT)
+        or (len(coefficient) == len(_CLR_DECIMAL_MAX_COEFFICIENT) and coefficient <= _CLR_DECIMAL_MAX_COEFFICIENT)
+    )
+
+
+def _number(text: str, kind: str | None = None) -> Decimal:
     grammar = _INTEGER if kind in _INTEGER_RANGES else _NUMBER
-    if not grammar.fullmatch(text):
+    if not grammar.fullmatch(text) or (kind == "decimal" and not _clr_decimal_text(text)):
         raise _Refusal("VALUE_UNSUPPORTED")
     try:
         value = Decimal(text)
