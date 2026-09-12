@@ -7,14 +7,9 @@ usage:   python scripts/credential_gate.py status  <migration-dir>
          python scripts/credential_gate.py clear    <migration-dir> --reason probe-data-ok
          python scripts/credential_gate.py verify   <migration-dir>
 
-The kernel ACL stops ordinary writes regardless of tool or command spelling; prose and hooks alone
-were bypassed in measured migrations. This is NOT a sandbox: the same OS user can remove an ACL or
-forge a complete audit. Verification detects stripped enforcement and unaudited overrides, but
-source-system query history remains the independent oracle for a claimed probe.
-
-Engine receipts have the same accountability-only threat model. Exact path/size/hash matches
-distinguish deterministic pre-gate output from subsequent edits; they do not confer live validation
-or cryptographic non-repudiation.
+ACLs stop ordinary writes, not the same user's deliberate ACL removal or complete audit forgery.
+Source-system query history remains the independent probe oracle. Receipts distinguish deterministic
+pre-gate bytes from edits; they confer neither live validation nor cryptographic non-repudiation.
 """
 
 from __future__ import annotations
@@ -27,6 +22,7 @@ import logging
 import os
 import platform
 import re
+import stat
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -34,13 +30,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+from bundle_corpus import is_reparse_entry
 from migration_bundle import ENGINE_OUTPUT_DIRS, ENGINE_RECEIPT, is_engine_artifact, load_bundle, sha256_file
 from package_filesystem import is_canonical_key
 
-# Imported as a plain NAME, not reached through the module (`preflight_source_credentials._classify_legs`
-# is `protected-access` to pylint, W0212). This is the SAME canonical classifier
-# (`connection_target.powerbi_target`) that arms the gate in the first place; issue #354's review
-# explicitly required reusing it here rather than a second, independently-maintained opinion.
+# Reuse the canonical classifier that arms the gate; never maintain a second opinion (#354).
 from preflight_source_credentials import _classify_legs
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -50,57 +44,33 @@ MARKER = ".credential-gate-BLOCKED.json"
 OVERRIDE = ".credential-gate-AUTHORIZED"
 AUDIT = ".credential-gate-audit.log"
 
-# Why a trusted audit trail could not be read. Members of the closed `cannot_establish` vocabulary
-# below, defined here because `_read_audit_trail` - the single parser - is the only place that can
-# tell them apart.
+# Closed reasons from the sole audit parser.
 AUDIT_MISSING = "audit-missing"
 AUDIT_MALFORMED = "audit-malformed"
 AUDIT_FOREIGN_SCOPE = "audit-foreign-scope"
 AUDIT_CLOCK_SKEW = timedelta(minutes=5)
 AUDIT_FIELDS = frozenset({"ts", "action", "detail", "user", "scope"})
 
-# Denied rights: WD (write data / create files), AD (append data / create subdirs), WA (write
-# attributes). Read and traverse stay allowed on purpose - the agent must still be able to inspect
-# the tree, and a gate that blinds it produces worse reports, not safer ones.
+# Deny write/append/attributes; preserve read/traverse so a gated tree remains inspectable.
 DENY_RIGHTS = "(OI)(CI)(WD,AD,WA)"
 
-# Both audit actions mean "the gate was armed"; they differ only in how strongly it is ENFORCED
-# (kernel ACL vs marker file). Every READER must treat them alike, or the gate's ordering guarantee
-# silently becomes Windows-only. Measured 2026-08-03 by simulating the non-Windows path: with only
-# `block` recognised, a `probe-cleared` recorded BEFORE a re-arm still counted as earned afterwards,
-# so backdated evidence survived exactly the event that exists to invalidate it. The distinct names
-# are kept because the enforcement difference is real and belongs in the log.
+# Both actions arm the gate. Readers must recognize marker-only re-arms too: otherwise an older
+# probe-cleared survives a non-Windows re-arm (measured 2026-08-03).
 BLOCK_ACTIONS = frozenset({"block", "block-marker-only"})
 
-# Files that mark a directory as a legitimately gateable UNIT of work - one migration, or one engine
-# bundle. A gate target should be one of these, because the hook's `_blocking_marker()` walks UPWARD
-# from any write target and stops at the first marker it meets: a marker therefore governs its whole
-# subtree, and one placed too high governs work it knows nothing about.
+# A marker governs the whole subtree: require a unit/bundle scope, not a checkout.
 MIGRATION_SPEC = "migration-spec.json"
 SCOPE_MARKERS = (MIGRATION_SPEC, ENGINE_RECEIPT, "input_manifest.json")
 
-# Shape of a repository checkout rather than a unit of work. `.git` alone is the decisive one (it is
-# what the real incident hit); the other two catch a checkout exported without its git directory.
+# Also recognize exported checkouts without .git.
 REPO_ROOT_SIGNS = (".git", "AGENTS.md", "pyproject.toml")
 
 
 def _scope_refusal(migration: Path) -> str | None:
-    """Why `migration` is too broad to gate, or None when it is a legitimate scoped target.
+    """Refuse filesystem/checkout roots; scoped units pass, unusual layouts need --force-scope.
 
-    Measured 2026-08-18, from a real incident: `credential_gate.py block` was invoked from the wrong
-    working directory and wrote its marker at the REPO ROOT. Because `_blocking_marker()` walks up
-    from any write target and returns the first marker found, that one file governed every migration
-    in the checkout - blocking ~13 unrelated in-flight agents at once, including bundles that had
-    already independently earned their clearance, and stranding a live unsaved DAX measure in a
-    Desktop session with nowhere to write.
-
-    Nothing refused it, because `apply_block` accepted any directory at all. The blast radius of a
-    gate is its entire subtree, so the target has to BE a unit of work - not merely contain some.
-
-    Deliberately a positive check with an escape hatch: a directory carrying its own scope marker is
-    always allowed, anything shaped like a checkout root is always refused, and anything else is
-    refused with `--force-scope` named in the message. That keeps an unusual-but-legitimate layout
-    workable without making the catastrophic case reachable by accident.
+    A repo-root marker blocked ~13 unrelated migrations on 2026-08-18. The hook walks upward, so
+    the target must BE a unit, not merely contain units.
     """
     resolved = migration.resolve()
     if resolved.parent == resolved:
@@ -160,11 +130,7 @@ def _block_refusal(migration: Path, sources: list[str], force_scope: bool) -> in
 
 
 def _audit(migration: Path, action: str, detail: str, sources: list[str] | None = None) -> None:
-    """Append a tamper-evident-ish record of every gate transition.
-
-    Issue #354 (B3): every entry names the SCOPE it was written for so `_audit_entries`, the sole
-    reader, can refuse an entry copied/hardlinked/symlinked in from a different migration.
-    """
+    """Append a scoped transition; the reader refuses foreign copied/linked audit rows (#354)."""
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "action": action,
@@ -293,12 +259,7 @@ def _read_audit_trail(migration: Path) -> tuple[list[dict] | None, str | None]:
 
 
 def _audit_entries(migration: Path) -> list[dict] | None:
-    """The sole trusted-audit reader used by every gate consumer (#354).
-
-    Every nonblank row must parse, match this exact root and satisfy its action's writer schema.
-    One corrupt, foreign or unscoped row poisons the WHOLE trail; dropping it would launder earlier
-    proof. Missing, empty, directory-shaped or unreadable evidence returns None, never [].
-    """
+    """Sole trusted reader: any corrupt, foreign, empty, unscoped or unreadable trail yields None."""
     return _read_audit_trail(migration)[0]
 
 
@@ -400,55 +361,123 @@ PROBE_DIR = "_probe"
 
 
 def probe_dir(migration: Path) -> Path:
-    """Writable one-table probe sandbox, a SIBLING of denied `fabric/`, never a deliverable.
-
-    A child inherits the deny and cannot earn the clear it needs to build. Re-granting a child
-    introduces ACL ordering, recreation and temporary-lift hazards; the sibling avoids all three.
-    """
+    """Writable one-table probe SIBLING of denied fabric/: a child would inherit the deny."""
     d = migration / PROBE_DIR
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def denied_dirs(migration: Path, create: bool = True) -> list[Path]:
-    """Directories the ACL DENIES writes to while the gate is up. Enforcement surface only.
-
-    Only `fabric/` is denied; the sibling probe stays writable. Read-only callers pass create=False.
-    This is deliberately narrower than `audited_paths`: enforcement and verification are different.
-    """
+    """Enforcement-only fabric/; read-only callers use create=False. Auditing is broader."""
     fabric = migration / "fabric"
     if create:
         fabric.mkdir(parents=True, exist_ok=True)
     return [fabric]
 
 
+def _physical_marker(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if is_reparse_entry(info) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise ValueError("marker-shape")
+    with path.open("rb") as handle:
+        opened = os.fstat(handle.fileno())
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            raise ValueError("marker-changed")
+        payload = json.loads(
+            handle.read().decode("utf-8"), object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite
+        )
+    fields = {
+        "writes_blocked",
+        "reachability",
+        "credential_status",
+        "reason",
+        "next_step",
+        "read_this_before_reporting",
+        "sources",
+        "applied",
+    }
+    if (  # pylint: disable=too-many-boolean-expressions
+        not isinstance(payload, dict)
+        or payload.keys() != fields
+        or payload["writes_blocked"] is not True
+        or payload["reachability"] != "UNPROVEN"
+        or not payload["sources"]
+        or not _valid_audit_sources(payload["sources"])
+        or any(
+            not isinstance(payload[key], str) or not payload[key].strip()
+            for key in fields - {"writes_blocked", "sources"}
+        )
+        or datetime.fromisoformat(payload["applied"]).utcoffset() is None
+        or (path.lstat().st_dev, path.lstat().st_ino, path.lstat().st_mtime_ns, path.lstat().st_size)
+        != (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_size)
+    ):
+        raise ValueError("marker-shape")
+    return True
+
+
+def _physical_acl(directory: Path) -> tuple[str, str] | None:
+    info = directory.lstat()
+    if is_reparse_entry(info) or not stat.S_ISDIR(info.st_mode):
+        return "cannot_establish", "barrier_directory_unsafe"
+    if platform.system() != "Windows":
+        return None
+    code, text = _icacls([str(directory)])
+    if code != 0:
+        return "cannot_establish", "barrier_acl_query_failed"
+    rows = [line.strip() for line in text.splitlines() if ":(" in line]
+    if not rows or any(not re.fullmatch(r".+:(?:\([A-Z0-9_,]+\))+", row) for row in rows):
+        return "cannot_establish", "barrier_acl_unparseable"
+    if any("(DENY)" in row or "(N)" in row for row in rows):
+        return "blocked", "barrier_acl_deny"
+    return None
+
+
+def inspect_physical_barrier(root: Path) -> tuple[str, str]:
+    """Read-only (clear/blocked/cannot_establish, fixed code); absence never authorizes a build.
+
+    Inspect no-follow marker shapes, including ancestors governing the root, and the existing
+    enforcement directories. No audit, authorization, probe, repair or data assessment is performed.
+    """
+    try:
+        for directory in reversed((root, *root.parents)):
+            info = directory.lstat()
+            if is_reparse_entry(info) or not stat.S_ISDIR(info.st_mode):
+                return "cannot_establish", "barrier_directory_unsafe"
+            if _physical_marker(directory / MARKER):
+                return "blocked", "barrier_marker_present"
+        for directory in (root, *denied_dirs(root, create=False)):
+            try:
+                directory.lstat()
+            except FileNotFoundError:
+                if directory == root:
+                    raise
+                continue
+            result = _physical_acl(directory)
+            if result is not None:
+                return result
+    except (OSError, UnicodeError):
+        return "cannot_establish", "barrier_unreadable"
+    except (ValueError, TypeError, _DuplicateJsonKey, _NonFiniteJsonConstant, RecursionError):
+        return "cannot_establish", "barrier_marker_invalid"
+    return "clear", "barrier_clear"
+
+
 # Model/report DEFINITION files: their existence means a model or report was built.
 DEFINITION_SUFFIXES = frozenset({".tmdl", ".pbism", ".pbir", ".pbip"})
 
-# MATERIALIZED SOURCE ROWS. These are a strictly LARGER harm than a definition file: a `.tmdl`
-# describes a model, but a materialized `.csv` IS the customer's data, sitting unencrypted on a
-# workstation, extracted from a source whose reachability was never proven.
-#
-# Measured 2026-08-04: a deterministic-tier run wrote **two 110 MB CSVs** of source rows to
-# `<out>/data/`, and `verify()` reported "OK - gate applied, no model/report artifacts exist",
-# because it only ever looked at `DEFINITION_SUFFIXES`. `.json` is deliberately absent from this
-# set - PBIR is made of `visual.json`/`report.json`, so including it would flag every report.
+# Definition-only checks missed two unproven 110 MB CSVs on 2026-08-04. JSON is excluded here:
+# PBIR uses JSON, so treating it as materialized rows would flag every report.
 MATERIALIZED_DATA_SUFFIXES = frozenset({".csv", ".tsv", ".parquet", ".hyper", ".xlsx", ".xls", ".dat"})
 
-# Directories that are NOT harm, and must be excluded or every migration self-reports a violation:
-#   `source/`    - the input workbook. Always present; it is what we were given, not what we built.
-#   `reference/` - Tableau-side screenshots used as fidelity ground truth.
-#   `_probe/`    - the sanctioned sandbox for the one-row reachability probe, which by design is
-#                  built WHILE the gate is up. Flagging it would make earning the clear impossible.
+# Inputs, Tableau reference images and the sanctioned one-row probe are not build violations.
 AUDIT_EXCLUDED_DIRS = frozenset({"source", "reference", "_probe"})
 
 
 def audited_paths(migration: Path) -> list[Path]:
-    """Every file under `migration` whose existence would mean something was built or extracted.
-
-    Read-only and migration-wide, including `pbip/`, `reports/`, `semantic_models/` and `data/`.
-    Limiting verification to denied `fabric/` misses engine output and extracted source rows.
-    """
+    """Read-only migration-wide build/extract audit; fabric-only would miss engine output and rows."""
     if not migration.exists():
         return []
     found: list[Path] = []
@@ -886,34 +915,11 @@ def _unit_state(unit: Path) -> str:
 
 
 def list_units(root: Path, as_json: bool = False) -> int:
-    """Report gate state for EVERY unit beneath `root`. Read-only.
+    """Read-only estate resume signal: enumerate marker/override/audit files, not ACL enforcement.
 
-    Exists because every other subcommand takes exactly one migration, so "what is still gated?"
-    across an estate cost one invocation per unit. Field report 2026-08-26, a ~44-unit estate:
-    *"I am always asked to run these for all the dashboards manually"*.
-
-    The agent needs this as much as the human. After a human signs in, a credential caches
-    machine-wide (DPAPI), so units sharing that source may now be probeable -- but with no way to
-    enumerate what is gated, an agent cannot discover what became retryable and cannot resume.
-
-    Exit codes are for scripting, and deliberately rank the security signal above the workflow one:
-    **3 = a forged override exists anywhere**, 1 = something is still blocked, 0 = nothing gated,
-    4 = a bad `<root>`. **2 is reserved for argparse's usage errors** and is never returned here.
-
-    That numbering is the *second* correction to this contract, and the reason is worth keeping.
-    Blind review 2026-08-27 found `2` meant three unrelated things -- forged override, bad root, and
-    argparse usage error -- while the docs sold it as forgery alone, so a mistyped estate root raised
-    the most alarming state in the vocabulary. The first fix moved only *bad root* off `2` and
-    documented the argparse overlap, which left the collision intact: `list <root> --badflag` still
-    exited `2`. argparse hard-codes that and it is not ours to move, so the **security signal** moved
-    instead. Two independent reviewers landed on this, and `3 = forged` now also matches
-    `reprobe_blocked.py` -- its sibling in the documented pipeline -- which had the two codes swapped.
-
-    ⚠️ **This reads the marker/override/audit FILES, not the ACL.** `_has_deny_ace` is the real
-    enforcement state, so a unit whose marker was removed while the write-deny ACE survives reports
-    here as `clean`. That direction is safe -- it under-reports "blocked" and cannot help produce an
-    unvalidated artifact -- but it is why `list` is a *resume signal*, never a ship gate. `verify`
-    remains the authoritative pre-ship check.
+    Exit 3 = forged override, 1 = blocked, 0 = none gated, 4 = bad root. Argparse owns usage exit 2,
+    never forgery. A surviving ACL without a marker can still appear clean here: use verify for
+    the pre-ship verdict. Machine-wide sign-in may make multiple listed units probeable.
     """
     units = sorted({p.parent for name in (MARKER, OVERRIDE, AUDIT) for p in root.rglob(name)})
     rows = [
@@ -951,12 +957,7 @@ def list_units(root: Path, as_json: bool = False) -> int:
 
 
 def _has_deny_ace(migration: Path) -> bool:
-    """Is the kernel-level write-deny still applied? This is the real gate state.
-
-    Reads `denied_dirs` WITHOUT creating them: this is called from `verify`, which must not mutate
-    the tree it judges. A directory that does not exist cannot carry a deny ACE, so skipping it is
-    also the correct answer, not merely the safe one.
-    """
+    """Read-only enforcement check used by verify; absent directories cannot carry deny ACEs."""
     if platform.system() != "Windows":
         return (migration / MARKER).exists()
     for d in denied_dirs(migration, create=False):

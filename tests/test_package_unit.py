@@ -1362,7 +1362,9 @@ def test_the_data_folder_parameter_names_a_PLACEHOLDER_not_the_machine_that_buil
     The shipped value is a placeholder; binding resolves it, and that is asserted here end to end
     rather than trusted, because a placeholder nobody can resolve is not an improvement.
     """
-    root = _package_with_receipt(tmp_path)
+    from test_package_data_access_snapshot import _binding_package  # pylint: disable=import-outside-toplevel
+
+    root = _binding_package(tmp_path)
     expressions = (_model_definition(root) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8")
     value = re.search(rf'expression {pkg.DATA_FOLDER_PARAM} = "([^"]+)"', expressions)
     assert value is not None, expressions
@@ -1396,7 +1398,9 @@ def test_a_moved_package_still_reaches_its_rows_once_it_is_BOUND(tmp_path: Path)
     whole route - package here, MOVE the folder, bind it there, and read the file the partition now
     names off disk.
     """
-    root = _package_with_receipt(tmp_path)
+    from test_package_data_access_snapshot import _binding_package  # pylint: disable=import-outside-toplevel
+
+    root = _binding_package(tmp_path, b"Employee_ID\nnew-recipient-row\n")
     moved = tmp_path / "customer" / "delivered" / UNIT
     moved.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(root), str(moved))

@@ -191,6 +191,160 @@ def migration(tmp_path: Path) -> Path:
     run_gate("clear", str(tmp_path), "--reason", "test-teardown")
 
 
+def _barrier_marker(root: Path) -> Path:
+    """Independent current-writer marker shape; no audit or permission mutation is needed."""
+    path = root / cg.MARKER
+    path.write_text(
+        json.dumps(
+            {
+                "writes_blocked": True,
+                "reachability": "UNPROVEN",
+                "credential_status": "UNKNOWN - nothing has contacted this source yet",
+                "reason": "live data source(s) detected; reachability has NOT been measured",
+                "next_step": "fixture probe instruction",
+                "read_this_before_reporting": "fixture static-only notice",
+                "sources": ["fixture-source"],
+                "applied": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_physical_barrier_reads_the_real_production_marker(migration: Path) -> None:
+    assert run_gate("block", str(migration), "--sources", "fixture-source").returncode == 0
+    assert cg.inspect_physical_barrier(migration) == ("blocked", "barrier_marker_present")
+    _assert_gate_fully_cleared(migration)
+    assert cg.inspect_physical_barrier(migration) == ("clear", "barrier_clear")
+
+
+@pytest.mark.parametrize("damage", ["valid", "json", "false", "extra", "sources", "directory", "duplicate-key"])
+def test_physical_barrier_marker_shape_is_strict_and_path_free(tmp_path: Path, damage: str) -> None:
+    marker = _barrier_marker(tmp_path)
+    raw = marker.read_bytes()
+    if damage == "json":
+        marker.write_bytes(b"private malformed bytes")
+    elif damage == "directory":
+        marker.unlink()
+        marker.mkdir()
+    elif damage == "duplicate-key":
+        marker.write_bytes(raw.replace(b'"writes_blocked": true', b'"writes_blocked": false, "writes_blocked": true'))
+    elif damage != "valid":
+        payload = json.loads(raw)
+        if damage == "false":
+            payload["writes_blocked"] = False
+        elif damage == "extra":
+            payload["extra"] = "not producer-owned"
+        else:
+            payload["sources"] = []
+        marker.write_text(json.dumps(payload), encoding="utf-8")
+    expected = (
+        ("blocked", "barrier_marker_present") if damage == "valid" else ("cannot_establish", "barrier_marker_invalid")
+    )
+    assert cg.inspect_physical_barrier(tmp_path) == expected
+    assert str(tmp_path) not in repr(expected)
+
+
+def test_physical_barrier_reads_ancestor_markers_and_never_authority_or_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "package"
+    root.mkdir()
+    (root / cg.AUDIT).write_bytes(b"unparseable audit is not this helper's authority")
+    (root / cg.OVERRIDE).write_bytes(b"not an override evaluation")
+    monkeypatch.setattr(cg.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(cg, "_icacls", lambda _arguments: (0, "fixture:(F)"))
+    calls = []
+    denied = cg.denied_dirs
+
+    def no_create(path, create=True):
+        assert create is False
+        calls.append(path)
+        return denied(path, create=create)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("physical inspection used audit, authorization, source assessment or repair")
+
+    for name in (
+        "_audit",
+        "_audit_entries",
+        "_read_audit_trail",
+        "_override_is_authentic",
+        "verify",
+        "authorize",
+        "clear_block",
+        "assess_data_access",
+        "probe_dir",
+    ):
+        monkeypatch.setattr(cg, name, forbidden)
+    monkeypatch.setattr(cg, "denied_dirs", no_create)
+    before = {path.name: path.read_bytes() for path in root.iterdir()}
+    assert cg.inspect_physical_barrier(root) == ("clear", "barrier_clear")
+    assert calls == [root] and {path.name: path.read_bytes() for path in root.iterdir()} == before
+    assert not (root / "fabric").exists()
+    _barrier_marker(tmp_path)
+    assert cg.inspect_physical_barrier(root) == ("blocked", "barrier_marker_present")
+
+
+@pytest.mark.parametrize("case", ["clear", "deny", "failed-with-deny", "unparseable", "missing-command", "unreadable"])
+def test_physical_barrier_never_treats_acl_query_failure_as_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    (tmp_path / "fabric").mkdir()
+    monkeypatch.setattr(cg.platform, "system", lambda: "Windows")
+    queries = []
+
+    def query(arguments):
+        queries.append(arguments)
+        if case == "missing-command":
+            raise FileNotFoundError("private executable path")
+        if case == "unreadable":
+            raise PermissionError("private ACL diagnostic")
+        return {
+            "clear": (0, "fixture:(I)(OI)(CI)(F)"),
+            "deny": (0, "fixture:(DENY)(WD,AD,WA)"),
+            "failed-with-deny": (5, "fixture:(DENY)(WD,AD,WA)"),
+            "unparseable": (0, "fixture:(broken"),
+        }[case]
+
+    monkeypatch.setattr(cg, "_icacls", query)
+    result = cg.inspect_physical_barrier(tmp_path)
+    assert queries
+    assert (
+        result
+        == {
+            "clear": ("clear", "barrier_clear"),
+            "deny": ("blocked", "barrier_acl_deny"),
+            "failed-with-deny": ("cannot_establish", "barrier_acl_query_failed"),
+            "unparseable": ("cannot_establish", "barrier_acl_unparseable"),
+            "missing-command": ("cannot_establish", "barrier_unreadable"),
+            "unreadable": ("cannot_establish", "barrier_unreadable"),
+        }[case]
+    )
+    assert "private" not in repr(result)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows ACL enforcement control")
+def test_physical_barrier_finds_real_acl_only_deny_without_a_marker(tmp_path: Path) -> None:
+    fabric = tmp_path / "fabric"
+    fabric.mkdir()
+    account = os.environ["USERNAME"]
+    try:
+        deny = subprocess.run(
+            ["icacls", str(fabric), "/deny", f"{account}:(OI)(CI)(WD,AD,WA)"], capture_output=True, check=False
+        )
+        assert deny.returncode == 0
+        assert not (tmp_path / cg.MARKER).exists()
+        with pytest.raises(PermissionError):
+            (fabric / "must-not-land.tmdl").write_bytes(b"denied")
+        assert cg.inspect_physical_barrier(tmp_path) == ("blocked", "barrier_acl_deny")
+    finally:
+        cleared = subprocess.run(["icacls", str(fabric), "/remove:d", account], capture_output=True, check=False)
+        assert cleared.returncode == 0, "the real ACL control must leave no denied fixture behind"
+    assert cg.inspect_physical_barrier(tmp_path) == ("clear", "barrier_clear")
+
+
 def test_block_then_clear_round_trips(migration: Path) -> None:
     assert run_gate("block", str(migration), "--sources", "x").returncode == 0
     assert (migration / ".credential-gate-BLOCKED.json").is_file()

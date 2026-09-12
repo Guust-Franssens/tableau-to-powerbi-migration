@@ -19,8 +19,10 @@ it would fail here too.
 from __future__ import annotations
 
 import hashlib
+import builtins
 import json
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -35,6 +37,7 @@ import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-i
 import check_unit  # noqa: E402  # pylint: disable=wrong-import-position
 import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
+import set_data_folder as sdf  # noqa: E402  # pylint: disable=wrong-import-position
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
     write_engine_report,
     write_handover,
@@ -561,6 +564,245 @@ PATH_PLACEHOLDER = "<path-to-this-folder>"
 #: The command the package README leads with. Not a gate - it has no verdict and no usage-exit map -
 #: so it is checked by RUNNING it and reading its effect, not by its exit classification.
 BIND_SCRIPT = "scripts/set_data_folder.py"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--package", "package", "--check"],
+        ["--package", "package", "--inspect", "--sanitize"],
+        ["--package", "package", "--sanitize", "--provider-package", "provider"],
+        ["--inspect"],
+        ["--provider-package", "provider"],
+    ],
+)
+def test_binding_cli_conflicts_are_usage_before_any_package_read(
+    arguments: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def no_package(*_args, **_kwargs):
+        pytest.fail("usage reached package implementation")
+
+    monkeypatch.setattr(sdf, "_package", no_package)
+    with pytest.raises(SystemExit) as caught:
+        sdf.main(arguments)
+    assert caught.value.code == 2 and capsys.readouterr().err
+
+
+def test_binding_cli_preserves_provider_order_and_duplicates(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    captured = []
+
+    def bind(root, *, provider_packages, planner):
+        captured.append((root, provider_packages, planner))
+        return pkg.PackageBindingResult(1, "unchanged", "binding_roles_refused")
+
+    monkeypatch.setattr(pkg, "bind_package", bind)
+    with pytest.raises(SystemExit) as caught:
+        sdf.main(
+            [
+                "--package",
+                "root",
+                "--provider-package",
+                "second",
+                "--provider-package",
+                "first",
+                "--provider-package",
+                "second",
+            ]
+        )
+    assert caught.value.code == 1
+    assert captured == [("root", ("second", "first", "second"), sdf._rewritten)]
+    assert json.loads(capsys.readouterr().out)["code"] == "binding_roles_refused"
+
+
+def test_binding_cli_does_not_double_import_its_main_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from test_package_data_access_snapshot import _binding_package  # pylint: disable=import-outside-toplevel
+
+    root = _binding_package(tmp_path)
+    original_import = builtins.__import__
+
+    def import_once(name, *args, **kwargs):
+        assert name != "set_data_folder", "running __main__ must supply its planner, not re-import itself"
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_once)
+    monkeypatch.setattr(sys, "argv", [str(SCRIPTS / "set_data_folder.py"), "--package", str(root)])
+    with pytest.raises(SystemExit) as caught:
+        runpy.run_path(str(SCRIPTS / "set_data_folder.py"), run_name="__main__")
+    assert caught.value.code == 0
+    assert json.loads(capsys.readouterr().out)["code"] == "binding_bound"
+    assert pri.verify_s1(root).integrity.is_clean
+
+
+def test_checkout_binder_modes_retain_their_original_bytes_and_exits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "examples" / "fixture" / "fabric" / "Model.SemanticModel" / "definition" / "expressions.tmdl"
+    path.parent.mkdir(parents=True)
+    original = 'expression DataFolder = "<REPO_ROOT>\\examples\\fixture\\data\\"\n'
+    path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(sdf, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(sdf, "_model_expression_files", lambda: [path])
+    assert sdf.main([]) is None
+    assert path.read_text(encoding="utf-8") == (
+        f'expression DataFolder = "{tmp_path / "examples" / "fixture" / "data"}{sdf.flavour_join("", trailing=True)}"\n'
+    )
+    output = capsys.readouterr().out
+    assert output.startswith("localize (this checkout): 1 model(s)\n") and output.endswith("done - 1 file(s) updated\n")
+    assert sdf.main(["--sanitize"]) is None
+    assert path.read_text(encoding="utf-8") == original
+    assert capsys.readouterr().out.startswith("sanitize (placeholder): 1 model(s)\n")
+    monkeypatch.setattr(sdf, "_tracked_files", lambda: [])
+    with pytest.raises(SystemExit) as caught:
+        sdf.main(["--check"])
+    assert caught.value.code == 0
+    assert capsys.readouterr().out == "OK - no absolute user paths found in tracked files.\n"
+
+
+@pytest.mark.parametrize("kind", ["relative", "foreign", "unc"])
+def test_binding_rejects_nonlocal_roots_before_filesystem_reads(kind: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    import os  # pylint: disable=import-outside-toplevel
+
+    values = {
+        "relative": "relative-package",
+        "foreign": "/foreign/Package" if os.name == "nt" else r"Q:\foreign\Package",
+        "unc": r"\\unreachable-fixture\share\Package",
+    }
+
+    def no_read(_path):
+        pytest.fail("nonlocal root reached filesystem admission")
+
+    monkeypatch.setattr(Path, "lstat", no_read)
+    result = pkg.bind_package(values[kind])
+    assert (result.exit_code, result.code, result.outcome) == (1, "binding_root_not_native_local", "unchanged")
+    assert values[kind] not in json.dumps(result.as_dict())
+
+
+@pytest.mark.parametrize("kind", ["profile", "home", "temp"])
+def test_binding_accepts_current_local_working_roots_without_a_neutral_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    from test_package_data_access_snapshot import _binding_package  # pylint: disable=import-outside-toplevel
+
+    local = tmp_path / kind / "fixture-person"
+    local.mkdir(parents=True)
+    for key in ("HOME", "USERPROFILE", "TMP", "TEMP"):
+        monkeypatch.setenv(key, str(local))
+    root = _binding_package(local)
+    result = pkg.bind_package(root)
+    assert (result.exit_code, result.code) == (0, "binding_bound")
+    output = json.dumps(result.as_dict()) + repr(result)
+    assert str(local) not in output and "fixture-person" not in output
+    assert pkg.sanitize_package(root).exit_code == 0
+
+
+def test_binding_transfer_and_rebind_read_recipient_rows_not_old_rows(tmp_path: Path) -> None:
+    from test_package_data_access_snapshot import _binding_package, _files  # pylint: disable=import-outside-toplevel
+
+    old = _binding_package(tmp_path / "sender", b"value\n101\n")
+    assert pkg.bind_package(old).exit_code == 0
+    assert pkg.sanitize_package(old).exit_code == 0
+    recipient = tmp_path / "recipient" / "Package"
+    shutil.copytree(old, recipient)
+    old_csv = next((old / "data").rglob("*.csv"))
+    old_csv.write_bytes(b"value\n-999\n")
+    assert pkg.bind_package(recipient).exit_code == 0
+    before_move = _files(recipient)
+    rebound = tmp_path / "rebound" / "Package"
+    shutil.copytree(recipient, rebound)
+    assert pri.verify_s1(rebound).integrity.is_clean
+    mismatch = pkg.inspect_package(rebound)
+    assert (mismatch.exit_code, mismatch.code) == (1, "binding_mismatch")
+    assert _files(recipient) == before_move
+    result = pkg.bind_package(rebound)
+    assert (result.exit_code, result.code) == (0, "binding_bound")
+    expression = next(rebound.glob("fabric/*.SemanticModel/definition/expressions.tmdl")).read_text(encoding="utf-8")
+    literal = re.search(r'expression \w+ = "([^"]+)"', expression).group(1)
+    assert Path(literal) == rebound / "data"
+    assert next(Path(literal).rglob("*.csv")).read_bytes() == b"value\n101\n"
+    assert old_csv.read_bytes() == b"value\n-999\n"
+
+
+def test_binding_root_path_budget_is_refused_before_staging(tmp_path: Path) -> None:
+    from test_package_data_access_snapshot import _binding_package, _files  # pylint: disable=import-outside-toplevel
+
+    source = _binding_package(tmp_path / "source")
+    longest_tail = max(len(key) for key in _files(source))
+    depth = max(1, cpc.WINDOWS_LIMITS.file_ceiling - len(str(tmp_path)) - longest_tail + 20)
+    root = tmp_path / ("x" * depth) / "Package"
+    shutil.copytree(source, root)
+    before = _files(root)
+    result = pkg.bind_package(root)
+    assert (result.exit_code, result.code) == (1, "binding_path_budget")
+    assert _files(root) == before and not pkg.staging_dir(root.parent, root.name).exists()
+
+
+def test_binding_reparse_root_is_refused_without_touching_target(tmp_path: Path) -> None:
+    import os  # pylint: disable=import-outside-toplevel
+    from test_package_data_access_snapshot import _binding_package, _files  # pylint: disable=import-outside-toplevel
+
+    source = _binding_package(tmp_path / "source")
+    alias = tmp_path / "alias"
+    before = _files(source)
+    if os.name == "nt":
+        created = subprocess.run(
+            [os.environ["COMSPEC"], "/c", "mklink", "/J", str(alias), str(source)], capture_output=True, check=False
+        )
+        assert created.returncode == 0, "the real junction fixture must be creatable"
+    else:
+        alias.symlink_to(source, target_is_directory=True)
+    try:
+        result = pkg.bind_package(alias)
+        assert (result.exit_code, result.code) == (1, "binding_root_unsafe")
+        assert _files(source) == before
+    finally:
+        os.rmdir(alias) if os.name == "nt" else alias.unlink()
+
+
+def test_binding_missing_and_case_aliased_roots_are_not_normalized_into_acceptance(tmp_path: Path) -> None:
+    import os  # pylint: disable=import-outside-toplevel
+    from test_package_data_access_snapshot import _binding_package, _files  # pylint: disable=import-outside-toplevel
+
+    root = _binding_package(tmp_path)
+    before = _files(root)
+    missing = root.with_name("missing")
+    result = pkg.bind_package(missing)
+    assert (result.exit_code, result.code) == (1, "binding_root_missing")
+    if os.name == "nt":
+        alias = root.with_name(root.name.swapcase())
+        assert alias.name != root.name and alias.is_dir()
+        result = pkg.bind_package(alias)
+        assert (result.exit_code, result.code) == (1, "binding_root_alias")
+    assert _files(root) == before
+
+
+def test_binding_volume_identity_mismatch_refuses_before_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
+    from test_package_data_access_snapshot import _binding_package  # pylint: disable=import-outside-toplevel
+
+    root = _binding_package(tmp_path)
+    lstat = Path.lstat
+    hits = []
+
+    def foreign_device(path):
+        info = lstat(path)
+        if path == root:
+            fields = {name: getattr(info, name) for name in dir(info) if name.startswith("st_")}
+            fields["st_dev"] = info.st_dev + 1
+            hits.append(True)
+            return SimpleNamespace(**fields)
+        return info
+
+    monkeypatch.setattr(Path, "lstat", foreign_device)
+    result = pkg.bind_package(root)
+    assert hits
+    assert (result.exit_code, result.code) == (1, "binding_volume_mismatch")
+    assert not pkg.staging_dir(root.parent, root.name).exists()
 
 
 def _rejected_the_argument(script: str, proc: subprocess.CompletedProcess[str]) -> bool:

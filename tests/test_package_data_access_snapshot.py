@@ -5,9 +5,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import shutil
 from dataclasses import replace
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 
@@ -15,7 +17,7 @@ import test_data_access_contract as authority
 import test_package_role_identity as s2
 import test_package_unit_reproductions as producer
 from test_data_access_contract import _root_fixture  # noqa: F401  # shared pytest fixture
-from test_package_unit_gates import UNIT, _brief, _bundle, pkg
+from test_package_unit_gates import DS_LUID, DS_UNIT, UNIT, _brief, _bundle, pkg
 
 
 def _files(root: Path) -> dict[str, bytes]:
@@ -41,6 +43,423 @@ def _local_bundle(parent: Path) -> tuple[Path, Path, dict]:
             "brief": _brief(parent, UNIT),
         },
     )
+
+
+def _binding_package(parent: Path, rows: bytes = b"value\n7\n") -> Path:
+    """Real producer output with accepted local authority and an eligible folder declaration."""
+    bundle, out, options = _local_bundle(parent)
+    (parent / "rows.csv").write_bytes(rows)
+    pkg.package_unit(bundle, UNIT, out, **options)
+    root = out / UNIT
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    assert pkg.pri.verify_phase1_role_identity((root,))[0].is_start_ready
+    assert pkg.data_access.read_data_access(root / "data-access.json").state == "local_import_ready"
+    return root
+
+
+def test_binding_roundtrip_keeps_exact_bytes_and_authority(tmp_path: Path) -> None:
+    """Independent old/new literal and digest expectations, through the three public APIs."""
+    root = _binding_package(tmp_path)
+    before = _files(root)
+    expression = f"fabric/{UNIT}.SemanticModel/definition/expressions.tmdl"
+    original_manifest = json.loads(before["package-manifest.json"])
+    result = pkg.bind_package(root)
+    assert (result.exit_code, result.outcome, result.code) == (0, "published", "binding_bound")
+    after = _files(root)
+    assert after[expression] == before[expression].replace(b"<PACKAGE_ROOT>", str(root).encode("utf-8"))
+    allowed = {expression, "README.md", "handover.md", "package-manifest.json"}
+    assert set(before) == set(after)
+    assert all(before[key] == raw for key, raw in after.items() if key not in allowed)
+    manifest = json.loads(after["package-manifest.json"])
+    for key, raw in after.items():
+        if key != "package-manifest.json":
+            assert manifest["contents"]["files"][key] == hashlib.sha256(raw).hexdigest()
+    for key in original_manifest.keys() - {"data_sources", "notes", "contents"}:
+        assert manifest[key] == original_manifest[key], f"unrelated manifest field changed: {key}"
+    assert {key: value for key, value in manifest["data_sources"].items() if key != "binding"} == {
+        key: value for key, value in original_manifest["data_sources"].items() if key != "binding"
+    }
+    inspected = pkg.inspect_package(root)
+    assert inspected.exit_code == 0 and inspected.parameters
+    assert all(row.matches_current_root and row.target_exists for row in inspected.parameters)
+    assert str(root) not in json.dumps(inspected.as_dict()) + repr(inspected)
+    assert "START_READY" not in json.dumps(result.as_dict())
+    assert _files(root) == after, "inspection is read-only"
+    repeated = pkg.bind_package(root)
+    assert (repeated.exit_code, repeated.outcome) == (0, "unchanged")
+    assert _files(root) == after, "an idempotent bind does not reserialize anything"
+    sanitized = pkg.sanitize_package(root)
+    assert (sanitized.exit_code, sanitized.outcome, sanitized.code) == (0, "published", "binding_unbound")
+    assert _files(root) == before, "sanitize must restore the exact portable bytes, not render/rebaseline"
+    clean = pkg.inspect_package(root)
+    assert clean.exit_code == 0 and all(row.code == "binding_placeholder" for row in clean.parameters)
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+
+
+def _binding_provider(parent: Path, rows: bytes = b"value\n19\n", *, gate_root: Path | None = None) -> Path:
+    bundle, oracle, _objects = _bundle(parent, covered=None, datasource_only=True)
+    asset = parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
+    document = ElementTree.parse(asset)
+    connection = document.getroot().find("connection")
+    assert connection is not None
+    connection.attrib.clear()
+    connection.attrib.update(
+        {"class": "sqlserver", "server": "source.example", "dbname": "db"}
+        if gate_root is not None
+        else {"class": "textscan", "filename": "provider.csv"}
+    )
+    document.write(asset, encoding="utf-8", xml_declaration=True)
+    manifest_path = bundle / "input_manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    next(row for row in manifest["assets"] if row["name"] == asset.name)["sha256"] = hashlib.sha256(
+        asset.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    source = parent / "provider.csv"
+    source.write_bytes(rows)
+    tables = bundle / "pbip" / DS_UNIT / f"{DS_UNIT}.SemanticModel" / "definition" / "tables"
+    tables.mkdir()
+    (tables / "Rows.tmdl").write_text(
+        f'table Rows\n\tpartition Rows = m\n\t\tmode: import\n\t\tsource = Csv.Document(File.Contents("{source}"))\n',
+        encoding="utf-8",
+    )
+    out = parent / "out"
+    pkg.package_unit(
+        bundle,
+        DS_UNIT,
+        out,
+        oracle_dir=oracle,
+        assets_dir=parent / "assets",
+        brief=_brief(parent, DS_UNIT, "model_only", "model_only_unvalidated" if gate_root is not None else "stop"),
+        gate_root=gate_root,
+    )
+    root = out / DS_UNIT
+    assert pkg.data_access.read_data_access(root / "data-access.json").state == (
+        "authorized_model_only" if gate_root is not None else "local_import_ready"
+    )
+    return root
+
+
+def _binding_consumer(parent: Path, provider: Path) -> Path:
+    root = parent / "Consumer"
+    binding = os.path.relpath(
+        provider / "fabric" / f"{DS_UNIT}.SemanticModel", root / "fabric" / "Revenue.Report"
+    ).replace("\\", "/")
+    s2.workbook_package(root, published={"luid": DS_LUID}, binding=binding)
+    manifest = json.loads((root / "package-manifest.json").read_bytes())
+    manifest["data_sources"] = copy.deepcopy(authority.LOCAL)
+    (root / "package-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    producer._projection_fixture(
+        root,
+        {
+            **producer.LOCAL_PROJECTION,
+            "state": "provider_inherited",
+            "provider_state": "local_import_ready",
+            "provider_unit": pkg.data_access.provider_reference(DS_UNIT),
+            "effective_scope": "report_only_shared_model",
+            "codes": ["provider-exact"],
+        },
+    )
+    return root
+
+
+@pytest.mark.parametrize("operation", [pkg.bind_package, pkg.inspect_package, pkg.sanitize_package])
+@pytest.mark.parametrize("damage", ["legacy-binding", "spec", "source", "oracle", "data", "projection"])
+def test_binding_refuses_dirty_baselines_without_legitimizing_them(tmp_path: Path, operation, damage: str) -> None:
+    root = _binding_package(tmp_path)
+    manifest = json.loads((root / "package-manifest.json").read_bytes())
+    targets = {
+        "spec": "migration-spec.json",
+        "source": manifest["artifacts"]["asset"],
+        "oracle": next(
+            key for key in manifest["contents"]["files"] if key.startswith("oracle/") and key.endswith(".csv")
+        ),
+        "data": manifest["data_sources"]["shipped"][0]["path"],
+        "projection": "data-access.json",
+        "legacy-binding": f"fabric/{UNIT}.SemanticModel/definition/expressions.tmdl",
+    }
+    path = root / targets[damage]
+    if damage == "legacy-binding":
+        path.write_bytes(path.read_bytes().replace(b"<PACKAGE_ROOT>", str(root).encode("utf-8")))
+    else:
+        path.unlink()
+    before = _files(root)
+    identity = root.lstat().st_ino
+    result = operation(root)
+    assert (result.exit_code, result.code, result.outcome) == (1, "binding_s1_dirty", "unchanged")
+    assert _files(root) == before and root.lstat().st_ino == identity
+    assert not pkg.staging_dir(root.parent, root.name).exists()
+    assert not pkg.retired_dir(root).exists()
+
+
+@pytest.mark.parametrize("operation", [pkg.bind_package, pkg.inspect_package, pkg.sanitize_package])
+@pytest.mark.parametrize("member", ["README.md", "handover.md", "notes"])
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_binding_requires_exact_owned_prose_even_with_a_clean_s1(
+    tmp_path: Path, operation, member: str, ambiguous: bool
+) -> None:
+    root = _binding_package(tmp_path)
+    if member == "notes":
+        manifest = json.loads((root / "package-manifest.json").read_bytes())
+        note = next(note for note in manifest["notes"] if note.startswith("this package is UNBOUND:"))
+        manifest["notes"].append(note) if ambiguous else manifest["notes"].remove(note)
+        (root / "package-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    else:
+        path = root / member
+        raw = path.read_bytes()
+        path.write_bytes(
+            raw + raw
+            if ambiguous
+            else raw.replace(b"binding is a step", b"binding is not a step").replace(
+                b"this package is UNBOUND:",
+                b"custom binding reminder:",
+            )
+        )
+    producer._reseal(root)
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    before = _files(root)
+    result = operation(root)
+    assert (result.exit_code, result.code) == (3, "binding_prose_unestablished")
+    assert _files(root) == before
+    assert not pkg.staging_dir(root.parent, root.name).exists()
+
+
+@pytest.mark.parametrize("change", ["disabled-rewrite", "unrelated-expression", "omitted-digest", "manifest-field"])
+def test_binding_exact_delta_rejects_real_planner_mutations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    import set_data_folder as binder  # pylint: disable=import-outside-toplevel
+
+    root = _binding_package(tmp_path)
+    before = _files(root)
+    hits = []
+    rewrite, plan = binder._rewritten, pkg._plan_package_binding
+
+    def mutated_rewrite(text: str, base: str) -> tuple[str, int, list[str]]:
+        changed, count, untouched = rewrite(text, base)
+        assert changed != text, "the control must contain a real eligible placeholder"
+        hits.append(change)
+        return (
+            (text if change == "disabled-rewrite" else changed + "\nannotation Unexpected = true\n"),
+            count,
+            untouched,
+        )
+
+    def mutated_plan(*args, **kwargs):
+        generated = plan(*args, **kwargs)
+        payload = json.loads(generated["package-manifest.json"])
+        if change == "omitted-digest":
+            expression = next(key for key in generated if key.endswith("expressions.tmdl"))
+            payload["contents"]["files"][expression] = json.loads(before["package-manifest.json"])["contents"]["files"][
+                expression
+            ]
+        else:
+            payload["engine"] = "unrelated engine mutation"
+        generated["package-manifest.json"] = json.dumps(payload).encode("utf-8")
+        hits.append(change)
+        return generated
+
+    if change in ("disabled-rewrite", "unrelated-expression"):
+        result = pkg.bind_package(root, planner=mutated_rewrite)
+        expected = "binding_delta_refused"
+    else:
+        monkeypatch.setattr(pkg, "_plan_package_binding", mutated_plan)
+        result = pkg.bind_package(root)
+        expected = "binding_seal_refused"
+    assert hits == [change]
+    assert (result.exit_code, result.code) == (1, expected), "the exact-delta authority must reject the intended input"
+    assert _files(root) == before and not pkg.staging_dir(root.parent, root.name).exists()
+
+
+def test_binding_missing_shipped_data_is_not_fixed_by_resealing(tmp_path: Path) -> None:
+    root = _binding_package(tmp_path)
+    manifest = json.loads((root / "package-manifest.json").read_bytes())
+    (root / manifest["data_sources"]["shipped"][0]["path"]).unlink()
+    producer._reseal(root)
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    before = _files(root)
+    result = pkg.bind_package(root)
+    assert (result.exit_code, result.code) == (1, "binding_shipped_data_missing")
+    assert _files(root) == before
+
+
+@pytest.mark.parametrize("state", ["blocked", "cannot_establish", "missing", "malformed"])
+def test_binding_never_upgrades_unaccepted_projection(tmp_path: Path, state: str) -> None:
+    root = _binding_package(tmp_path)
+    path = root / "data-access.json"
+    if state == "missing":
+        path.unlink()
+    elif state == "malformed":
+        path.write_bytes(b'{"state":"live_data_ok"}')
+    else:
+        payload = {
+            **producer.LOCAL_PROJECTION,
+            "state": state,
+            "validation": "not_established",
+            "effective_scope": None,
+            "max_phase2_claim": "none",
+            "codes": ["marker-only" if state == "blocked" else "audit-missing"],
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    producer._reseal(root)
+    before = _files(root)
+    result = pkg.bind_package(root)
+    assert result.exit_code == (1 if state == "blocked" else 3)
+    assert result.code in {"binding_projection_not_accepted", "binding_projection_unestablished"}
+    assert _files(root) == before
+
+
+def test_binding_preserves_authentic_model_only_authorization(
+    tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An actual gate authorization produces the projection; binding never accesses that gate."""
+    authority._authorize(root)
+    authorized = authority._assess(root, authorized=True)
+    assert (authorized.state, authorized.validation) == ("authorized_model_only", "unvalidated")
+    package = _binding_provider(tmp_path / "package-source", gate_root=root)
+    prior = _files(package)
+
+    def never_assess(*_args, **_kwargs):
+        pytest.fail("binding attempted to read/upgrade original gate authority")
+
+    for name in ("assess_data_access", "_audit_entries", "_read_audit_trail", "authorize", "clear_block", "_audit"):
+        monkeypatch.setattr(pkg.data_access, name, never_assess)
+    result = pkg.bind_package(package)
+    assert (result.exit_code, result.code) == (0, "binding_bound")
+    assert (package / "data-access.json").read_bytes() == prior["data-access.json"]
+    assert pkg.data_access.read_data_access(package / "data-access.json") == authorized
+    assert "unvalidated" not in json.dumps(result.as_dict()).lower(), "binding must not add its own validation state"
+
+
+@pytest.mark.parametrize("providers", ["unbound", "missing", "duplicate", "foreign", "accepted"])
+def test_binding_consumer_uses_read_only_explicit_providers(tmp_path: Path, providers: str) -> None:
+    provider = _binding_provider(tmp_path / "provider")
+    consumer = _binding_consumer(tmp_path / "consumer", provider)
+    if providers != "unbound":
+        assert pkg.bind_package(provider).exit_code == 0
+        assert pkg.inspect_package(provider).code == "binding_bound"
+    cohort = () if providers == "missing" else (provider, provider) if providers == "duplicate" else (provider,)
+    if providers == "foreign":
+        other = _binding_package(tmp_path / "other")
+        assert pkg.bind_package(other).exit_code == 0
+        cohort = (other,)
+    before, provider_bytes = _files(consumer), _files(provider)
+    result = pkg.bind_package(consumer, provider_packages=cohort)
+    if providers == "accepted":
+        assert (result.exit_code, result.code) == (0, "binding_not_applicable")
+        assert pkg.inspect_package(consumer, provider_packages=cohort).exit_code == 0
+        assert pkg.sanitize_package(consumer).exit_code == 0, "sanitize never needs provider arguments"
+    else:
+        assert result.exit_code == 1
+        assert result.code in {"binding_provider_not_bound", "binding_roles_refused"}
+    assert _files(consumer) == before and _files(provider) == provider_bytes
+
+
+def test_binding_provider_mutation_after_s2_is_caught_by_held_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _binding_provider(tmp_path / "provider")
+    assert pkg.bind_package(provider).exit_code == 0
+    consumer = _binding_consumer(tmp_path / "consumer", provider)
+    original = _files(consumer)
+    verify = pkg.pri.verify_phase1_role_identity
+    hits = []
+
+    def mutate(roots, **kwargs):
+        result = verify(roots, **kwargs)
+        if not hits:
+            path = next((provider / "data").rglob("*.csv"))
+            path.write_bytes(b"value\nchanged-provider-row\n")
+            producer._reseal(provider)
+            assert pkg.pri.verify_s1(provider).integrity.is_clean
+            hits.append(True)
+        return result
+
+    monkeypatch.setattr(pkg.pri, "verify_phase1_role_identity", mutate)
+    result = pkg.bind_package(consumer, provider_packages=(provider,))
+    assert hits == [True]
+    assert (result.exit_code, result.code) == (3, "binding_authority_changed")
+    assert _files(consumer) == original
+    assert b"changed-provider-row" in next((provider / "data").rglob("*.csv")).read_bytes()
+
+
+@pytest.mark.parametrize("wrong_ordinal", [False, True])
+def test_binding_holds_s2_provider_ordinals_in_the_exact_ordered_cohort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrong_ordinal: bool
+) -> None:
+    selected = _binding_provider(tmp_path / "selected")
+    assert pkg.bind_package(selected).exit_code == 0
+    other = producer._direct_provider(tmp_path / "other", luid=s2.WB_LUID)
+    manifest = json.loads((other / "package-manifest.json").read_bytes())
+    manifest["data_sources"] = copy.deepcopy(authority.LOCAL)
+    (other / "package-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    producer._reseal(other)
+    assert pkg.bind_package(other).code == "binding_not_applicable"
+    consumer = _binding_consumer(tmp_path / "consumer", selected)
+    providers = (other, selected)
+    verify = pkg.pri.verify_phase1_role_identity
+    calls, hits = [], []
+
+    def ordinal_at(roots, **kwargs):
+        assert tuple(roots) == (*providers, consumer)
+        result = verify(roots, **kwargs)
+        assert result[-1].dependencies[0].provider_ordinal == 1
+        calls.append(tuple(roots))
+        if wrong_ordinal and len(calls) == 2:
+            dependency = replace(result[-1].dependencies[0], provider_ordinal=0)
+            result = (*result[:-1], replace(result[-1], dependencies=(dependency,)))
+            hits.append("ordinal")
+        return result
+
+    monkeypatch.setattr(pkg.pri, "verify_phase1_role_identity", ordinal_at)
+    before = tuple(_files(root) for root in (*providers, consumer))
+    result = pkg.bind_package(consumer, provider_packages=providers)
+    assert len(calls) == 2, "idempotent/N/A operations also require a final fixed-cohort recheck"
+    assert (result.exit_code, result.code) == (
+        (3, "binding_cohort_changed") if wrong_ordinal else (0, "binding_not_applicable")
+    )
+    assert hits == (["ordinal"] if wrong_ordinal else [])
+    assert tuple(_files(root) for root in (*providers, consumer)) == before
+
+
+def test_binding_datasource_applicability_requires_actual_declaration_inspection(tmp_path: Path) -> None:
+    root = _binding_provider(tmp_path)
+    inspected = pkg.inspect_package(root)
+    assert inspected.applicable is True and inspected.code == "binding_unbound"
+    expression = next(root.glob("fabric/*.SemanticModel/definition/expressions.tmdl"))
+    expression.write_bytes(b"expression NotAFolder = 7\n")
+    producer._reseal(root)
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    result = pkg.bind_package(root)
+    assert (result.exit_code, result.code) == (3, "binding_declaration_missing")
+
+
+def test_binding_inspection_preserves_parameter_ordinals_data_tails_and_separator_intent(tmp_path: Path) -> None:
+    root = _binding_package(tmp_path)
+    expression = next(root.glob("fabric/*.SemanticModel/definition/expressions.tmdl"))
+    nested = root / "data" / "Nested.Data"
+    nested.mkdir()
+    (nested / "other.csv").write_bytes(b"value\n23\n")
+    separator = os.sep
+    expression.write_bytes(
+        expression.read_bytes()
+        + (
+            'expression Label = "ordinary value"\n'
+            f'expression SourceFolder = "<PACKAGE_ROOT>{separator}data{separator}Nested.Data"\n'
+        ).encode("utf-8")
+    )
+    producer._reseal(root)
+    before = expression.read_bytes()
+    result = pkg.bind_package(root)
+    assert result.exit_code == 0
+    assert [(row.ordinal, row.parameter, row.data_tail, row.trailing_separator) for row in result.parameters] == [
+        (0, "DataFolder", "", True),
+        (2, "SourceFolder", "Nested.Data", False),
+    ]
+    assert all(row.matches_current_root and row.target_exists for row in result.parameters)
+    assert expression.read_bytes() == before.replace(b"<PACKAGE_ROOT>", str(root).encode("utf-8"))
+    assert pkg.sanitize_package(root).exit_code == 0
+    assert expression.read_bytes() == before
 
 
 @pytest.mark.parametrize(
