@@ -846,8 +846,8 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "#478: stop measuring the buckets against the request, so a lost unit is never named",
         PACKAGER,
-        "    counted = Counter(_bucketed_units(results, failed, refused))",
-        "    counted = Counter(requested)",
+        "    asked = Counter(requested)",
+        "    asked = Counter(_bucketed_units(results, failed, refused))",
         [
             "test_an_unaccounted_unit_is_reported_and_cannot_exit_zero",
             "test_a_requested_unit_in_no_bucket_is_named_rather_than_counted_clean",
@@ -856,8 +856,8 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "#478: let an unaccounted unit leave the run clean",
         PACKAGER,
-        "    if gaps or any(isinstance(failure, UnassessableInput) for failure in failed):",
-        "    if any(isinstance(failure, UnassessableInput) for failure in failed):",
+        "    if interruption is not None or gaps or any(isinstance(failure, UnassessableInput) for failure in failed):",
+        "    if interruption is not None or any(isinstance(failure, UnassessableInput) for failure in failed):",
         ["test_an_unaccounted_unit_is_reported_and_cannot_exit_zero"],
     ),
     (
@@ -866,6 +866,35 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "    requested = list(requested) if requested is not None else _bucketed_units(results, failed, refused)",
         "    requested = _bucketed_units(results, failed, refused)",
         ["test_an_unaccounted_unit_is_reported_and_cannot_exit_zero"],
+    ),
+    # ---- #614: construction status is not dispatch readiness -----------------------------------
+    (
+        "#614: shrink the requested denominator to the units that assembled",
+        PACKAGER,
+        '        "totals": {\n            "requested": len(requested),\n            "assembled": len(assembled),',
+        '        "totals": {\n            "requested": len(assembled),\n            "assembled": len(assembled),',
+        ["test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker"],
+    ),
+    (
+        "#614: classify a successfully constructed package as BLOCKED",
+        PACKAGER,
+        '            "status": STATUS_ASSEMBLED,\n            "has_engine_working_copy": result["has_engine_working_copy"],',
+        '            "status": STATUS_BLOCKED,\n            "has_engine_working_copy": result["has_engine_working_copy"],',
+        ["test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker"],
+    ),
+    (
+        "#614: let a partial batch exit zero",
+        PACKAGER,
+        "    if not failed and not refused and not gaps and interruption is None:\n        return EXIT_OK",
+        "    if True:\n        return EXIT_OK  # noqa",
+        ["test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker"],
+    ),
+    (
+        "#614: leave the retired package manifest discoverable after publish interruption",
+        PACKAGER,
+        '        cleanup_code = _make_scratch_nondiscoverable(retired, "retired")',
+        "        cleanup_code = None  # noqa",
+        ["test_post_rename_line_interrupt_hides_retired_manifest_before_reporting_status"],
     ),
     (
         "#478: restore rmtree(ignore_errors=True), so a staging tree that survived is assembled into",
@@ -890,11 +919,11 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         ["test_a_residue_found_while_a_unit_is_already_failing_does_not_replace_the_root_cause"],
     ),
     (
-        f"{NEGATIVE_CONTROL} (#478): a comment-only edit inside the batch loop",
+        f"{NEGATIVE_CONTROL} (#614): a comment-only edit beside the status report",
         PACKAGER,
-        '            # Only a crash carries one: the modelled refusals ARE their reason, while "a unit',
-        '            # (control) Only a crash carries one: the modelled refusals ARE their reason, while "a unit',
-        ["test_one_unit_raising_does_not_stop_the_units_after_it"],
+        "        # The relocation number, per unit, travelling WITH the report: how long a Windows root each",
+        "        # (control) The relocation number, per unit, travelling WITH the report: how long a Windows root each",
+        ["test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker"],
     ),
 ]
 

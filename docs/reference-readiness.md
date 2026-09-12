@@ -464,8 +464,10 @@ than silently selecting a new baseline.
 ⚠️ This is **not** the final START_READY consumer. `check_reference_readiness.py` does not yet fold
 the projection. Construction success, its internal S2 `START_READY`, and reference `READY` do not
 authorize Phase-2 dispatch or clear a credential gate. Handover, README and packaging output expose
-the actual closed data state and this pending step. `packaged`/`self_contained` keep their original
-construction/containment meanings.
+the actual closed data state and this pending step. `construction_status = "ASSEMBLED"` means only
+that a diagnostic package directory was constructed; `has_engine_working_copy` and `self_contained`
+remain separate limitations. `dispatch_readiness.status = "NOT_EVALUATED"` is explicit until #622
+and the final #562 consumer establish the later decision.
 
 See [credential gate](credential-gate.md#package-data-access-projection) for gate-root, provider and
 scope limits. The final consumer remains a separate PR; S1 stays byte authority, not a semantic

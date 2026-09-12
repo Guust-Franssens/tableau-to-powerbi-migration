@@ -222,6 +222,29 @@ and credential containment checks run before assembly. Unsafe text is refused wi
 redacting or echoing it. Datasource resolution retains the unique selecting input-manifest row with
 its walked path and validates that row's basename/path/digest; ambiguous rows or candidates refuse.
 
+### Construction status (#614)
+
+This section supersedes the legacy exit/status vocabulary embedded in the long `package_unit.py`
+catalog row above; its historical construction, containment and attribution evidence remains valid.
+
+`package_unit.py` is inherently assembly-only before #622. `--assemble-only` is an explicit alias
+and status marker for that existing behavior, not a second construction path. Human output, the
+batch JSON and every package manifest use **ASSEMBLED** only when a diagnostic package directory was
+constructed; failures, edit refusals, unassessable inputs and unattempted requests are **BLOCKED**.
+Totals always use the original requested denominator, and any BLOCKED request makes the command
+nonzero while preserving ASSEMBLED siblings. A missing working copy, non-self-contained package,
+unbound data path or absent oracle remains ASSEMBLED diagnostic output.
+
+The legacy ordered `units` / `failed` / `refused` / `unaccounted` JSON buckets and their totals
+remain present, explicitly marked `construction_only`; `construction` is the single ASSEMBLED /
+BLOCKED projection over them. `units` and its projection preserve provider-first publication order.
+The legacy manifest `packaged` boolean remains an engine-working-copy indicator only, with adjacent
+`packaged_semantics`; it is not a success label.
+
+**ASSEMBLED is never START_READY.** Output records dispatch readiness as unavailable and
+`NOT_EVALUATED`; #622 and the final #562 consumer own that later decision. The command creates no
+dispatch authorization and does not call or reimplement `check_reference_readiness.py`.
+
 `package_role_identity.py` re-runs no-follow S1 at the S2 entry seam rather than trusting an earlier
 clearance. It strictly reads identity JSON, preserves every dependency row, requires S2-clean
 providers and checks actual PBIR bindings to complete declared model roles. Evidence consumers receive
@@ -272,8 +295,9 @@ connection and valid dependency; malformed/additional direct legs never disappea
 No probe/audit/gate writes or scope downgrade.
 
 ❌ **Producer-only:** the final `check_reference_readiness.py` START_READY data consumer is pending.
-Construction exit 0, reference `READY`, `packaged` and `self_contained` are not data authorization.
-Handover/README/output make this explicit. Model-only authorization stays unvalidated and cannot be
+Construction `ASSEMBLED`, reference `READY`, `has_engine_working_copy` and `self_contained` are not
+data authorization. Handover/README/output record dispatch readiness as unavailable and not
+evaluated. Model-only authorization stays unvalidated and cannot be
 inherited by a report; published-plus-direct mixtures and recursive inheritance remain non-accepted.
 Details and residuals: [credential gate](../docs/credential-gate.md#package-data-access-projection).
 
