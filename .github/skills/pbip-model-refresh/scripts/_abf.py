@@ -9,20 +9,21 @@ it in atomically, and restoring a provisional compatibility alignment when the w
 every public name here is re-exported from ``refresh_pbip_model`` so callers and tests reach them
 through that module.
 
-Extracted from ``refresh_pbip_model`` so that module stays under its line cap; nothing here depends on
-the rest of the bundle, only on ``os``/``struct``/``pathlib``.
+Extracted from ``refresh_pbip_model`` so that module stays under its line cap. The observation-request
+guard is shared with the bundled probe; cache validation itself requires no native libraries.
 """
 
 from __future__ import annotations
 
 import os
 import hashlib
-import io
 import struct
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+
+from probe_desktop_query import _validate_observation_request
 
 # THE FORMAT, MEASURED - not assumed. An earlier round asserted a cache.abf was a Microsoft Compound
 # File Binary (OLE2/CFBF, magic `D0 CF 11 E0 ...`). It is NOT, and the cost of that guess was total:
@@ -44,6 +45,7 @@ _ABF_BLOCK_HEADER_BYTES = 8 + len(_ABF_BLOCK_MAGIC)  # uint32 uncompressed + uin
 # less. That fixed interior size is load-bearing: without it, a write truncated exactly on a block
 # boundary can land cleanly on EOF and look complete.
 _ABF_MAX_BLOCK_BYTES = 2 * 1024 * 1024
+_ABF_READ_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,15 +68,24 @@ class _ImageInstallation:
     ambiguous: bool = False
 
 
-def _checked_image(path: Path) -> tuple[bytes | None, str | None]:
-    try:
-        blob = path.read_bytes()
-        preamble = blob[: len(_ABF_PREAMBLE)]
-        if preamble != _ABF_PREAMBLE:
-            return None, f"not an AS backup preamble (first {len(preamble)} byte(s): {preamble[:16].hex(' ')})"
-        return blob, _walk_abf_blocks(io.BytesIO(blob), len(blob))
-    except OSError as exc:
-        return None, f"unreadable ({type(exc).__name__})"
+def _checked_image(path: Path) -> tuple[str, int]:
+    """Validate and hash one sequential pass, including pad/payload/EOF, in bounded memory.
+
+    The returned facts are unavailable until the reader's context exits successfully. File size is
+    only a bound: consuming every declared byte and checking EOF must independently agree with it.
+    """
+    with path.open("rb") as handle:
+        size = path.stat().st_size
+        digest = hashlib.sha256()
+        prefix = handle.read(_ABF_FIRST_BLOCK_OFFSET)
+        digest.update(prefix)
+        if len(prefix) != _ABF_FIRST_BLOCK_OFFSET or prefix[: len(_ABF_PREAMBLE)] != _ABF_PREAMBLE:
+            raise ValueError("not a complete AS backup preamble")
+        reason = _walk_abf_blocks(handle, size, digest=digest)
+        if reason is not None:
+            raise ValueError(reason)
+        checked = digest.hexdigest(), size
+    return checked
 
 
 def _abf_rejection_reason(path: Path) -> str | None:
@@ -94,7 +105,15 @@ def _abf_rejection_reason(path: Path) -> str | None:
     multiple of 2 MiB, whose final block would then be full-sized; none of the 13 measured files is
     such a file, and the cost if one appears is the fallback, not data loss.
     """
-    return _checked_image(path)[1]
+    try:
+        with path.open("rb") as handle:
+            size = path.stat().st_size
+            preamble = handle.read(len(_ABF_PREAMBLE))
+            if preamble != _ABF_PREAMBLE:
+                return f"not an AS backup preamble (first {len(preamble)} byte(s): {preamble[:16].hex(' ')})"
+            return _walk_abf_blocks(handle, size)
+    except OSError as exc:
+        return f"unreadable ({type(exc).__name__})"
 
 
 def _abf_block_header_problem(header: bytes, ordinal: int, offset: int, size: int) -> str | None:
@@ -111,13 +130,27 @@ def _abf_block_header_problem(header: bytes, ordinal: int, offset: int, size: in
     return None
 
 
-def _walk_abf_blocks(handle, size: int) -> str | None:
-    """Walk the XPress9 block chain from the first header; return a reason string, or None if intact."""
+def _hash_abf_payload(handle, digest, remaining: int) -> str | None:
+    """Consume exactly this payload, without seeking, retaining chunks or trusting a stat alone."""
+    while remaining:
+        chunk = handle.read(min(remaining, _ABF_READ_BYTES))
+        digest.update(chunk)
+        if not chunk or len(chunk) > remaining:
+            return "payload byte count disagrees with the declared block length"
+        remaining -= len(chunk)
+    return None
+
+
+def _walk_abf_blocks(handle, size: int, *, digest=None) -> str | None:
+    """Check the same block chain in both modes: legacy header seeks, or sequential hashing."""
     offset = _ABF_FIRST_BLOCK_OFFSET
     blocks = 0
     while True:
-        handle.seek(offset)
+        if digest is None:
+            handle.seek(offset)
         header = handle.read(_ABF_BLOCK_HEADER_BYTES)
+        if digest is not None:
+            digest.update(header)
         problem = _abf_block_header_problem(header, blocks + 1, offset, size)
         if problem is not None:
             return problem
@@ -126,6 +159,10 @@ def _walk_abf_blocks(handle, size: int) -> str | None:
         end = offset + 8 + length
         if end > size:
             return f"block {blocks} needs {end} byte(s) but the file is {size} - truncated write"
+        if digest is not None:
+            problem = _hash_abf_payload(handle, digest, length - len(_ABF_BLOCK_MAGIC))
+            if problem is not None:
+                return problem
         if end < size:
             if uncompressed != _ABF_MAX_BLOCK_BYTES:
                 return (
@@ -135,8 +172,15 @@ def _walk_abf_blocks(handle, size: int) -> str | None:
             offset = end
             continue
         if uncompressed == _ABF_MAX_BLOCK_BYTES:
-            return f"ends on a full {_ABF_MAX_BLOCK_BYTES}-byte block boundary after {blocks} block(s) - more was due"
-        return None
+            problem = (
+                f"ends on a full {_ABF_MAX_BLOCK_BYTES}-byte block boundary after {blocks} block(s) - more was due"
+            )
+        elif digest is not None:
+            trailer = handle.read(1)
+            digest.update(trailer)
+            if trailer:
+                problem = "backup has bytes beyond its declared size"
+        return problem
 
 
 def _is_complete_abf(path: Path) -> bool:
@@ -160,14 +204,15 @@ def _staging_path(cache_path: Path) -> Path:
     return cache_path.with_name(f"{cache_path.name}.{os.getpid()}-{uuid.uuid4().hex}.tmp")
 
 
-def _staged_image_write(
+def _staged_image_write(  # pylint: disable=too-many-arguments
     cache_path: Path,
     write_image,
     staging: Path | None = None,
     *,
     observations: list[ImageObservation] | None = None,
     installation: _ImageInstallation | None = None,
-) -> bool:
+    return_observation: bool = False,
+) -> bool | tuple[str, int]:
     """Write the cache to a staging file and swap it in atomically. Returns True only on a COMPLETE write.
 
     `FileMode.Create` on the live `cache.abf` truncates a good cache the instant the write begins, so
@@ -181,25 +226,33 @@ def _staged_image_write(
     staging file is removed, letting the caller roll the compatibility bump back; and even on a clean
     return the staged file must look like a backup (`_is_complete_abf`) before it is swapped in.
 
-    A normal replace return establishes installation, not durability. Its private state is set BEFORE
-    optional readback/hash/list work. A raised replace never produces an observation; if its stage
+    Observation mode returns only the checked staged digest and byte count, never installed evidence.
+    The caller must declare compatibility, check the installed bytes once, and finish its contexts.
+    A normal replace return establishes installation, not durability. A raised replace never produces
+    an observation; if its stage
     vanished, the outcome is ambiguous and the caller must not roll compatibility back underneath a
     possibly installed image. No durable commitment is inferred from close/replace/readback.
 
     A staged file that is REJECTED is announced, not swallowed. A silent "did not swap" is how a
     wrong acceptance predicate hid for a whole review round while persist-by-default was dead.
     """
+    _validate_observation_request(return_observation, observations)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     if staging is None:
         staging = _staging_path(cache_path)
     if staging.exists():
         staging.unlink()
     installation = installation if installation is not None else _ImageInstallation()
+    intended = None
     try:
         write_image(staging)
-        intended, reason = _checked_image(staging)
+        if return_observation:
+            intended = _checked_image(staging)
+            reason = None
+        else:
+            reason = _abf_rejection_reason(staging)
         if reason is None:
-            installation.size = len(intended)
+            installation.size = intended[1] if return_observation else staging.stat().st_size
             # Cover an interrupt after replace returns but before its success flag is stored.
             installation.ambiguous = True
             try:
@@ -210,27 +263,13 @@ def _staged_image_write(
                 raise
             installation.installed = True
             installation.ambiguous = False
-            if observations is not None:
-                installed = cache_path.read_bytes()
-                if staging.exists() or installed != intended:
-                    raise CompatRollbackError(
-                        "installed cache differs from the intended image; observation unavailable"
-                    )
-                observations.append(
-                    ImageObservation(
-                        hashlib.sha256(intended).hexdigest(),
-                        len(intended),
-                        hashlib.sha256(installed).hexdigest(),
-                        len(installed),
-                    )
-                )
         else:
             print(f"  save   : staged cache REJECTED - {reason}")
     finally:
         # Cleanup cannot establish installation: the caller retains the pre-cleanup outcome.
-        if not installation.installed and staging.exists():
-            staging.unlink()
-    return installation.installed
+        if not installation.installed:
+            _cleanup_staging(staging)
+    return intended if return_observation else installation.installed
 
 
 class CompatRollbackError(RuntimeError):
@@ -246,7 +285,7 @@ def _cleanup_staging(staging: Path) -> None:
     try:
         if staging.exists():
             staging.unlink()
-    except OSError:
+    except Exception:  # pylint: disable=broad-exception-caught
         pass
 
 
