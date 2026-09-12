@@ -325,7 +325,9 @@ def test_physical_barrier_never_treats_acl_query_failure_as_absence(
     assert "private" not in repr(result)
 
 
-@pytest.mark.skipif(os.name != "nt", reason="actual Windows ACL enforcement control")
+@pytest.mark.skipif(
+    os.name != "nt", reason="write-deny enforcement is an icacls ACL; the marker-only path cannot block a write"
+)
 def test_physical_barrier_finds_real_acl_only_deny_without_a_marker(tmp_path: Path) -> None:
     fabric = tmp_path / "fabric"
     fabric.mkdir()

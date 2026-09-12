@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
-import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -227,7 +227,6 @@ def test_binding_final_root_s1_is_required_even_when_the_candidate_is_exact(
     assert _files(root) == before and root.lstat().st_ino == original_id
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows mkdir private-ACL capability")
 @pytest.mark.parametrize("version", [(3, 11, 9), (3, 12, 3)])
 def test_binding_refuses_runtime_that_ignores_private_staging_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: tuple[int, int, int]
@@ -238,6 +237,7 @@ def test_binding_refuses_runtime_that_ignores_private_staging_mode(
 
     def old_runtime(staged):
         with monkeypatch.context() as patch:
+            patch.setattr(pkg, "os", SimpleNamespace(name="nt"))
             patch.setattr(pkg.sys, "version_info", version)
             hits.append(version)
             make_stage(staged)
