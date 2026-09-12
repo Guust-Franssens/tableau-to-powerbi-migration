@@ -932,6 +932,41 @@ def test_published_provider_applicability_uses_final_cohort_topology(
         assert results[1].topology == "published_consumer" and results[1].dependencies[0].provider_ordinal == 0
 
 
+@pytest.mark.parametrize("publication_metadata", [False, True])
+@pytest.mark.parametrize("selected", [False, True])
+def test_mixed_case_sqlproxy_retains_canonical_direct_applicability(
+    tmp_path: Path, publication_metadata: bool, selected: bool
+) -> None:
+    rows = source_rows({**PUBLISHED["connection"], "class": "SQLPROXY"})
+    if publication_metadata:
+        rows[0]["published_datasource"] = {"luid": DS_LUID, "key": PUBLISHED_KEY}
+    canonical = gate.package_spec_facts({"data_sources": rows})
+    assert tuple(canonical) == ((), False, not publication_metadata, False, None)
+    assert canonical.all_flat is (not publication_metadata)
+    provider = with_data_access(datasource_package(tmp_path / "Provider", unit="Shared"), rows)
+    roots = [provider]
+    if selected:
+        roots.append(
+            with_data_access(
+                workbook_package(
+                    tmp_path / "Consumer",
+                    published={"luid": DS_LUID, "key": PUBLISHED_KEY},
+                    binding="../../../Provider/fabric/Shared.SemanticModel",
+                ),
+                [PUBLISHED],
+            )
+        )
+    results = pri.verify_phase1_role_identity(roots)
+    assert all(result.is_start_ready for result in results)
+    assert results[0].topology == ("published_provider" if selected else "standalone_datasource")
+    facts = require_handoff(results[0].data_access_handoff(provider)).facts
+    assert tuple(facts) == ((), False, True, False, None)
+    assert facts.all_flat
+    if selected:
+        assert results[1].topology == "published_consumer" and results[1].dependencies[0].provider_ordinal == 0
+        assert require_handoff(results[1].data_access_handoff(roots[1])).facts.published_only
+
+
 @pytest.mark.parametrize(
     "additional,keys,review",
     [(None, (), False), (LIVE, (LIVE_KEY,), False), (REVIEW, (), True)],

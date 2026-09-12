@@ -1500,7 +1500,7 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
                 and all(
                     isinstance(row, Mapping)
                     and isinstance(row.get("connection", {}), Mapping)
-                    and (row.get("connection", {}).get("class") or "").casefold() != "sqlproxy"
+                    and row.get("connection", {}).get("class") != "sqlproxy"
                     for row in sources
                 )
             ),
