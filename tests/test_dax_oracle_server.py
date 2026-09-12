@@ -12,14 +12,19 @@ The third obligation carries the weight: *"a fabricated zero is indistinguishabl
 would produce a false ``verified``, which is the single worst outcome in this system."*
 """
 
+# Preserve legacy regression node IDs and exercise private adapters/native method names.
+# pylint: disable=invalid-name,protected-access,missing-function-docstring,too-few-public-methods
+
+import hashlib
 import importlib.util
 import json
 import os
 import subprocess
 import sys
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -76,7 +81,7 @@ def test_reconcile_reaches_BOTH_verified_and_mismatch_through_us():
     """The socket's whole purpose. A wiring that can only say `verified` proves nothing."""
     contract = _contract()
     sys.path.insert(0, str(Path(contract.__file__).parent))
-    import translation_reconcile as tr  # noqa: PLC0415
+    import translation_reconcile as tr  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,import-error
 
     cmd = [sys.executable, str(REPO / "scripts" / "dax_oracle_server.py"), "--offline"]
     with contract.persistent_oracle(cmd) as oracle:
@@ -159,7 +164,7 @@ def test_a_real_BLANK_survives_as_null_not_zero():
 def test_extract_scalar_reads_our_row_shape():
     """Our shape has to be one HIS parser already reads - that function IS the contract."""
     sys.path.insert(0, str(Path(_contract().__file__).parent))
-    import translation_reconcile as tr  # noqa: PLC0415
+    import translation_reconcile as tr  # noqa: PLC0415  # pylint: disable=import-outside-toplevel,import-error
 
     value, error = tr.extract_scalar(dos.make_oracle(lambda _d: [{"[value]": 12.5}])('EVALUATE ROW("value", 1)'))
     assert (value, error) == (12.5, None)
@@ -204,6 +209,8 @@ def test_plain_values_pass_through_unchanged(value):
 
 def test_an_unserialisable_value_degrades_to_a_string_rather_than_crashing():
     class Foreign:
+        """Legacy foreign values intentionally retain their string fallback."""
+
         def __str__(self):
             return "2026-08-07"
 
@@ -281,7 +288,7 @@ def test_certify_without_the_engine_refuses_rather_than_passing_vacuously():
     absence is simulated by making that resolver raise - which is exactly what it does when the
     plugin is not installed. It no longer searches a candidate list, so there is no list to blank.
     """
-    import dax_oracle_server as module  # noqa: PLC0415
+    import dax_oracle_server as module  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
     def _absent():
         raise module.EngineNotFoundError("plugin not installed (simulated)")
@@ -293,3 +300,793 @@ def test_certify_without_the_engine_refuses_rather_than_passing_vacuously():
         assert module.certify(module.make_oracle(module._stub_executor)) == 2
     finally:
         module.engine_scripts_dir = original
+
+
+# --- typed-v1: independent fake reader controls, NOT native ADOMD qualification -------------------
+
+TYPED_QUERY = "EVALUATE 'T'"
+SENTINELS = ("SENSITIVE_QUERY", "SENSITIVE_COLUMN", "SENSITIVE_VALUE", "SENSITIVE_ENDPOINT", "SENSITIVE_CREDENTIAL")
+
+
+def _native_failure() -> None:
+    raise RuntimeError(" ".join(SENTINELS))
+
+
+class _TypedReader:
+    """A controllable reader with explicit EOF, second-result, and close observations."""
+
+    def __init__(self, columns=None, rows=None, extra=False, fault=None):
+        self.columns = (
+            [
+                ("[key]", "System.String"),
+                ("[small]", "System.Int32"),
+                ("[amount]", "System.Decimal"),
+                ("[big]", "System.Int64"),
+            ]
+            if columns is None
+            else columns
+        )
+        self.rows = iter(
+            [
+                ["\u00e9", 7, Decimal("9007199254740993.1250"), 9223372036854775807],
+                ["\u00e9", 7, Decimal("9007199254740993.1250"), 9223372036854775807],
+                ["z", -2147483648, None, -9223372036854775808],
+            ]
+            if rows is None
+            else rows
+        )
+        self.FieldCount = len(self.columns)
+        self.state = SimpleNamespace(closed=False, reads=0, next_results=0)
+        self.extra = extra
+        self.fault = fault
+        self.current = None
+
+    def GetName(self, index: int) -> str:
+        return self.columns[index][0]
+
+    def GetFieldType(self, index: int) -> SimpleNamespace:
+        return SimpleNamespace(FullName=self.columns[index][1])
+
+    def Read(self) -> bool | None:
+        self.state.reads += 1
+        if self.fault == "read" and self.state.reads > 1:
+            _native_failure()
+        self.current = next(self.rows, None)
+        if self.current is None and self.fault == "eof":
+            return None
+        return self.current is not None
+
+    def GetValue(self, index: int) -> object:
+        if self.fault == "value" and self.state.reads > 1:
+            _native_failure()
+        return self.current[index]
+
+    def NextResult(self) -> bool | None:
+        self.state.next_results += 1
+        if self.fault == "next":
+            _native_failure()
+        return self.extra
+
+    def Close(self) -> None:
+        self.state.closed = True
+        if self.fault == "close":
+            _native_failure()
+
+
+def _typed_connection(reader: _TypedReader) -> tuple[SimpleNamespace, SimpleNamespace]:
+    command = SimpleNamespace(CommandText=None, ExecuteReader=lambda: reader)
+    return SimpleNamespace(CreateCommand=lambda: command), command
+
+
+def _expected_typed(query: str = TYPED_QUERY) -> dict:
+    # Hand-authored cells and metadata: no production serializer/normalizer builds the expected side.
+    return {
+        "schema_version": 1,
+        "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+        "columns": [
+            {"name": "[key]", "kind": "string"},
+            {"name": "[small]", "kind": "int32"},
+            {"name": "[amount]", "kind": "decimal"},
+            {"name": "[big]", "kind": "int64"},
+        ],
+        "rows": [
+            [
+                {"kind": "string", "value": "\u00e9"},
+                {"kind": "int32", "value": "7"},
+                {"kind": "decimal", "value": "9007199254740993.1250"},
+                {"kind": "int64", "value": "9223372036854775807"},
+            ],
+            [
+                {"kind": "string", "value": "\u00e9"},
+                {"kind": "int32", "value": "7"},
+                {"kind": "decimal", "value": "9007199254740993.1250"},
+                {"kind": "int64", "value": "9223372036854775807"},
+            ],
+            [
+                {"kind": "string", "value": "z"},
+                {"kind": "int32", "value": "-2147483648"},
+                {"kind": "blank", "value": None},
+                {"kind": "int64", "value": "-9223372036854775808"},
+            ],
+        ],
+    }
+
+
+def _expected_wire(payload: dict) -> bytes:
+    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def _serve_typed(executor=None, request=None) -> bytes:
+    if request is None:
+        request = {"dax": TYPED_QUERY, "result_format": "typed-v1", "max_payload_bytes": 100_000}
+    output = StringIO()
+    dos.serve(
+        lambda _query: pytest.fail("typed requests must not enter the legacy oracle"),
+        StringIO(json.dumps(request) + "\n"),
+        output,
+        typed_executor=executor,
+    )
+    return output.getvalue().encode("utf-8")
+
+
+def _reader_executor(reader: _TypedReader):
+    connection, _ = _typed_connection(reader)
+    return lambda query, limit: dos.execute_typed(connection, query, max_payload_bytes=limit)
+
+
+def test_typed_reader_keeps_complete_order_multiplicity_and_native_kinds() -> None:
+    """Every column and duplicate row survives, including exact Decimal scale and BLANK."""
+    reader = _TypedReader()
+    connection, command = _typed_connection(reader)
+    got = dos.execute_typed(connection, TYPED_QUERY, max_payload_bytes=100_000)
+    assert got == _expected_wire(_expected_typed())
+    assert command.CommandText == TYPED_QUERY
+    assert reader.state.reads == 4
+    assert reader.state.next_results == 1
+    assert reader.state.closed
+
+
+def test_typed_query_hash_covers_exact_unrewritten_utf8() -> None:
+    """Whitespace, comments, accents, and line endings are hashed exactly as executed."""
+    query = "\n// \u00e9 comment\r\n  EVALUATE 'T' \r\n"
+    reader = _TypedReader()
+    connection, command = _typed_connection(reader)
+    got = dos.execute_typed(connection, query, max_payload_bytes=100_000)
+    assert command.CommandText == query
+    assert json.loads(got)["query_sha256"] == hashlib.sha256(query.encode("utf-8")).hexdigest()
+    assert json.loads(got)["query_sha256"] != hashlib.sha256(query.strip().encode("utf-8")).hexdigest()
+    assert json.loads(got)["query_sha256"] != hashlib.sha256(TYPED_QUERY.encode()).hexdigest()
+
+
+def test_typed_decimal_never_enters_legacy_float_marshalling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lossy legacy normalizer is unreachable in typed mode."""
+    monkeypatch.setattr(dos, "_json_safe", lambda _value: pytest.fail("legacy marshaller reached"))
+    assert _serve_typed(_reader_executor(_TypedReader())) == _expected_wire(_expected_typed()) + b"\n"
+
+
+def test_clr_decimal_uses_invariant_formatting_without_float(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The CLR formatting seam is independently mocked; real pythonnet remains a native gate."""
+    invariant = object()
+    seen = []
+
+    def to_string(_self, provider):
+        seen.append(provider)
+        return "12345678901234567890.1200"
+
+    native_decimal = type(
+        "Decimal", (), {"ToString": to_string, "__float__": lambda _self: pytest.fail("float used")}
+    )()
+    monkeypatch.setitem(
+        sys.modules, "System.Globalization", SimpleNamespace(CultureInfo=SimpleNamespace(InvariantCulture=invariant))
+    )
+    reader = _TypedReader(columns=[("v", "System.Decimal")], rows=[[native_decimal]])
+    result = json.loads(_reader_executor(reader)(TYPED_QUERY, 1000))
+    assert result["rows"] == [[{"kind": "decimal", "value": "12345678901234567890.1200"}]]
+    assert seen == [invariant]
+
+
+def test_clr_dbnull_is_blank_not_a_fabricated_zero() -> None:
+    """A native-shaped DBNull and Python None have the same lossless transport meaning."""
+    dbnull = type("DBNull", (), {})()
+    reader = _TypedReader(columns=[("v", "System.Decimal")], rows=[[dbnull], [None]])
+    result = json.loads(_reader_executor(reader)(TYPED_QUERY, 1000))
+    assert result["rows"] == [[{"kind": "blank", "value": None}], [{"kind": "blank", "value": None}]]
+
+
+@pytest.mark.parametrize("kind,value", [("Int32", 2147483647), ("Int64", 9223372036854775807)])
+def test_native_integral_wrappers_keep_the_declared_kind(kind: str, value: int) -> None:
+    """An integral CLR wrapper does not require a float or a kind inference."""
+    full_name = f"System.{kind}"
+    native = type(
+        kind, (), {"GetType": lambda _self: SimpleNamespace(FullName=full_name), "__int__": lambda _self: value}
+    )()
+    reader = _TypedReader(columns=[("v", full_name)], rows=[[native]])
+    assert json.loads(_reader_executor(reader)(TYPED_QUERY, 1000))["rows"] == [
+        [{"kind": kind.lower(), "value": str(value)}]
+    ]
+
+
+def test_typed_zero_rows_are_allowed_only_after_verified_eof() -> None:
+    """A complete empty result is transport success, not legacy's empty-result error."""
+    reader = _TypedReader(rows=[])
+    expected = _expected_typed()
+    expected["rows"] = []
+    assert _reader_executor(reader)(TYPED_QUERY, 1000) == _expected_wire(expected)
+    assert reader.state.reads == reader.state.next_results == 1
+    assert reader.state.closed
+
+
+@pytest.mark.parametrize("fault", ["read", "value", "next", "eof", "close"])
+def test_typed_read_failures_never_return_partial_success(fault: str) -> None:
+    """Even a late read/EOF/close failure must discard every collected row."""
+    reader = _TypedReader(fault=fault)
+    assert _serve_typed(_reader_executor(reader)) == b'{"error":"RESULT_INCOMPLETE"}\n'
+    assert reader.state.closed
+
+
+@pytest.mark.parametrize("extra", [True, None])
+def test_second_result_or_unestablished_result_termination_refuses(extra: bool | None) -> None:
+    """Only an explicit False from NextResult completes the admitted single result set."""
+    reader = _TypedReader(extra=extra)
+    assert _serve_typed(_reader_executor(reader)) == b'{"error":"RESULT_INCOMPLETE"}\n'
+    assert reader.state.next_results == 1
+    assert reader.state.closed
+
+
+@pytest.mark.parametrize("columns", [[], [("", "System.Int64")], [("v", "System.Int64"), ("v", "System.Int64")]])
+def test_typed_missing_or_duplicate_columns_refuse(columns: list[tuple[str, str]]) -> None:
+    """Column ambiguity must not be hidden by dict construction."""
+    reader = _TypedReader(columns=columns, rows=[])
+    assert _serve_typed(_reader_executor(reader)) == b'{"error":"RESULT_COLUMNS"}\n'
+    assert reader.state.closed
+
+
+def test_case_distinct_column_names_are_preserved_not_folded() -> None:
+    """Transport names are exact, not a case-insensitive identity guess."""
+    reader = _TypedReader(columns=[("a", "System.Int32"), ("A", "System.Int32")], rows=[[1, 2]])
+    got = json.loads(_reader_executor(reader)(TYPED_QUERY, 1000))
+    assert got["columns"] == [{"name": "a", "kind": "int32"}, {"name": "A", "kind": "int32"}]
+    assert got["rows"] == [[{"kind": "int32", "value": "1"}, {"kind": "int32", "value": "2"}]]
+
+
+@pytest.mark.parametrize("native_kind", ["System.Boolean", "System.Double", "System.DateTime", "System.Object"])
+def test_unsupported_native_column_kind_refuses_even_for_zero_rows(native_kind: str) -> None:
+    """An empty result does not turn unsupported type metadata into admitted evidence."""
+    reader = _TypedReader(columns=[("v", native_kind)], rows=[])
+    assert _serve_typed(_reader_executor(reader)) == b'{"error":"RESULT_TYPE"}\n'
+
+
+@pytest.mark.parametrize(
+    "native_kind,value",
+    [
+        ("System.Int32", True),
+        ("System.Int32", 1.0),
+        ("System.Int32", 2147483648),
+        ("System.Int64", 9223372036854775808),
+        ("System.Decimal", 1.0),
+        ("System.Decimal", "1.00"),
+        ("System.Decimal", Decimal("NaN")),
+        ("System.Decimal", Decimal("Infinity")),
+        ("System.String", 1),
+        ("System.String", "\ud800"),
+    ],
+)
+def test_unsupported_or_lossy_cells_are_not_stringified(native_kind: str, value: object) -> None:
+    """The typed path has no legacy foreign-value fallback."""
+    reader = _TypedReader(columns=[("v", native_kind)], rows=[[value]])
+    assert _serve_typed(_reader_executor(reader)) == b'{"error":"RESULT_TYPE"}\n'
+    assert reader.state.closed
+
+
+def test_typed_payload_budget_is_the_exact_success_envelope() -> None:
+    """Use independently encoded expected bytes for both the accepted and refused boundary."""
+    expected = _expected_wire(_expected_typed())
+    reader = _TypedReader()
+    assert _reader_executor(reader)(TYPED_QUERY, len(expected)) == expected
+    request = {"dax": TYPED_QUERY, "result_format": "typed-v1", "max_payload_bytes": len(expected) - 1}
+    reader = _TypedReader()
+    assert _serve_typed(_reader_executor(reader), request) == b'{"error":"PAYLOAD_LIMIT"}\n'
+    assert reader.state.closed
+    assert len(expected.decode("utf-8")) < len(expected)
+
+
+def test_typed_empty_header_also_consumes_budget() -> None:
+    """A budget too small for metadata cannot yield an empty success."""
+    reader = _TypedReader(rows=[])
+    request = {"dax": TYPED_QUERY, "result_format": "typed-v1", "max_payload_bytes": 1}
+    assert _serve_typed(_reader_executor(reader), request) == b'{"error":"PAYLOAD_LIMIT"}\n'
+    assert reader.state.reads == 0
+    assert reader.state.closed
+
+
+@pytest.mark.parametrize("limit", [None, True, 0, -1, 1.5, "100"])
+def test_typed_request_budget_is_required_and_not_coerced(limit: object) -> None:
+    """Reject malformed budgets before the executor can be called."""
+    request = {"dax": TYPED_QUERY, "result_format": "typed-v1", "max_payload_bytes": limit}
+    assert _serve_typed(lambda *_args: pytest.fail("executor reached"), request) == b'{"error":"INPUT_INVALID"}\n'
+
+
+@pytest.mark.parametrize("variant", ["missing_budget", "missing_query", "extra"])
+def test_typed_request_fields_are_closed(variant: str) -> None:
+    """No request identity, receipt, or execution-policy fields enter through this branch."""
+    request = {"dax": TYPED_QUERY, "result_format": "typed-v1", "max_payload_bytes": 1000}
+    if variant == "missing_budget":
+        del request["max_payload_bytes"]
+    elif variant == "missing_query":
+        del request["dax"]
+    else:
+        request["extra"] = "SENSITIVE_CREDENTIAL"
+    assert _serve_typed(lambda *_args: pytest.fail("executor reached"), request) == b'{"error":"INPUT_INVALID"}\n'
+
+
+def test_duplicate_typed_request_members_are_refused_without_echo() -> None:
+    """The legacy JSON parser must not silently decide an ambiguous typed budget."""
+    request = (
+        '{"result_format":"typed-v1","dax":"EVALUATE \'SENSITIVE_QUERY\'",'
+        '"max_payload_bytes":1000,"max_payload_bytes":2000}\n'
+    )
+    output = StringIO()
+    dos.serve(lambda _query: pytest.fail("legacy reached"), StringIO(request), output)
+    assert output.getvalue() == '{"error":"INPUT_INVALID"}\n'
+
+
+@pytest.mark.parametrize("query", [None, "", "  ", "\ud800", "DROP TABLE SENSITIVE_QUERY"])
+def test_typed_invalid_queries_refuse_without_native_execution(query: object) -> None:
+    """Validation never rewrites a query or sends an unsupported statement to ADOMD."""
+    request = {"dax": query, "result_format": "typed-v1", "max_payload_bytes": 1000}
+    assert _serve_typed(lambda *_args: pytest.fail("executor reached"), request) == b'{"error":"QUERY_INVALID"}\n'
+
+
+def test_typed_execution_failure_is_a_fixed_union_error() -> None:
+    """Connection/command exceptions carry no driver message into the typed response."""
+    connection = SimpleNamespace(CreateCommand=_native_failure)
+
+    def execute(query: str, limit: int) -> bytes:
+        return dos.execute_typed(connection, query, max_payload_bytes=limit)
+
+    assert _serve_typed(execute) == b'{"error":"EXECUTION_FAILED"}\n'
+
+
+def test_no_typed_executor_means_unavailable_not_legacy_stub_rows() -> None:
+    """Offline plumbing never fabricates a typed success."""
+    assert _serve_typed() == b'{"error":"TYPED_UNAVAILABLE"}\n'
+
+
+@pytest.mark.parametrize("fault", ["read", "value", "next", "close"])
+def test_sensitive_sentinels_are_absent_from_typed_diagnostics(
+    fault: str, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Late failures may contain sensitive driver text; only the fixed code may escape."""
+    reader = _TypedReader(
+        columns=[("SENSITIVE_COLUMN", "System.String")],
+        rows=[["SENSITIVE_VALUE"], ["SENSITIVE_CREDENTIAL"]],
+        fault=fault,
+    )
+    request = {"dax": "EVALUATE 'SENSITIVE_QUERY'", "result_format": "typed-v1", "max_payload_bytes": 1000}
+    output = _serve_typed(_reader_executor(reader), request)
+    assert output == b'{"error":"RESULT_INCOMPLETE"}\n'
+    captured = capsys.readouterr()
+    diagnostics = output.decode() + captured.out + captured.err + caplog.text
+    assert all(sentinel not in diagnostics for sentinel in SENTINELS)
+
+
+@pytest.mark.parametrize("discriminator", [None, False, "Typed-v1", "typed-v2", "typed-v1 ", {"kind": "typed-v1"}])
+def test_only_the_exact_discriminator_changes_the_legacy_response(discriminator: object) -> None:
+    """Other requests retain byte-identical legacy output, even with an invalid typed budget."""
+    request = {"dax": TYPED_QUERY, "result_format": discriminator, "max_payload_bytes": False}
+    output = StringIO()
+    dos.serve(
+        dos.make_oracle(lambda _query: [{"v": 12.5, "blank": None, "text": "\u00e9"}]),
+        StringIO(json.dumps(request) + "\n"),
+        output,
+        typed_executor=lambda *_args: pytest.fail("typed executor reached"),
+    )
+    assert output.getvalue().encode() == b'{"rows": [{"v": 12.5, "blank": null, "text": "\\u00e9"}]}\n'
+
+
+def test_invalid_frames_are_fixed_errors_and_valid_legacy_responses_keep_exact_bytes() -> None:
+    """Unestablished requests have fixed errors; established legacy response bytes are unchanged."""
+    output = StringIO()
+    requests = 'not json\n{"other":1}\n{"dax":""}\n{"dax":"EVALUATE \'T\'"}\n'
+    dos.serve(dos.make_oracle(lambda _query: []), StringIO(requests), output)
+    assert output.getvalue() == (
+        '{"error":"INPUT_INVALID"}\n'
+        '{"error":"INPUT_INVALID"}\n'
+        '{"error": "empty DAX query"}\n'
+        '{"error": "query returned no rows"}\n'
+    )
+
+
+def test_typed_failure_does_not_break_following_legacy_requests() -> None:
+    """One typed refusal must leave the persistent legacy socket usable."""
+    output = StringIO()
+    requests = (
+        '{"dax":"EVALUATE \'T\'","result_format":"typed-v1","max_payload_bytes":1000}\n{"dax":"EVALUATE \'T\'"}\n'
+    )
+    dos.serve(dos.make_oracle(lambda _query: [{"v": 7}]), StringIO(requests), output)
+    assert output.getvalue() == '{"error":"TYPED_UNAVAILABLE"}\n{"rows": [{"v": 7}]}\n'
+
+
+def test_native_server_seam_routes_before_legacy_marshalling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The actual --port route reaches execute_typed on a mocked connection, not a new runtime."""
+    reader = _TypedReader()
+    connection, command = _typed_connection(reader)
+    calls = []
+    connection.Open = lambda: calls.append("open")
+    connection.Close = lambda: calls.append("close")
+
+    def connect(connection_string: str):
+        assert connection_string == "Data Source=localhost:45678"
+        return connection
+
+    monkeypatch.setitem(sys.modules, "probe_desktop_query", SimpleNamespace(_load_adomd=lambda: connect))
+    monkeypatch.setattr(dos, "_json_safe", lambda _value: pytest.fail("legacy marshaller reached"))
+    request = {"dax": TYPED_QUERY, "result_format": "typed-v1", "max_payload_bytes": 100_000}
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdin", StringIO(json.dumps(request) + "\n"))
+    monkeypatch.setattr(sys, "stdout", output)
+    assert dos.main(["--port", "45678"]) == 0
+    assert output.getvalue().encode("utf-8") == _expected_wire(_expected_typed()) + b"\n"
+    assert command.CommandText == TYPED_QUERY
+    assert reader.state.closed
+    assert calls == ["open", "close"]
+
+
+@pytest.mark.parametrize("phase", ["discovery", "connection"])
+def test_typed_native_startup_failures_do_not_leak_or_enter_legacy_diagnostics(
+    phase: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Mocked discovery/open failures must cross the same sanitized typed response boundary."""
+    pdq = SimpleNamespace(discover_port=lambda _pid: _native_failure())
+    monkeypatch.setitem(sys.modules, "probe_desktop_query", pdq)
+    monkeypatch.setattr(dos, "adomd_executor", lambda _port: _native_failure())
+    request = {"dax": "EVALUATE 'SENSITIVE_QUERY'", "result_format": "typed-v1", "max_payload_bytes": 1000}
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdin", StringIO(json.dumps(request) + "\n"))
+    monkeypatch.setattr(sys, "stdout", output)
+    with caplog.at_level("INFO"):
+        assert dos.main(["--pid", "45678"] if phase == "discovery" else ["--port", "45678"]) == 1
+    assert output.getvalue() == '{"error":"EXECUTION_FAILED"}\n'
+    assert all(sentinel not in caplog.text + output.getvalue() for sentinel in SENTINELS)
+    assert "45678" not in caplog.text
+    assert "ready:" not in caplog.text
+
+
+def test_offline_cli_refuses_typed_results_but_keeps_legacy_plumbing() -> None:
+    """This is a real subprocess, but explicitly no Desktop/ADOMD qualification."""
+    requests = (
+        '{"dax":"EVALUATE \'T\'","result_format":"typed-v1","max_payload_bytes":1000}\n'
+        '{"dax":"EVALUATE ROW(\\"v\\",1)"}\n'
+    )
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "dax_oracle_server.py"), "--offline"],
+        input=requests,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == '{"error":"TYPED_UNAVAILABLE"}\n{"rows": [{"[value]": 1}]}\n'
+
+
+def test_typed_decimal_transport_does_not_use_context_precision() -> None:
+    """Scale and digits survive even when the caller has an unusually small Decimal context."""
+    expected = _expected_wire(_expected_typed())
+    with localcontext() as context:
+        context.prec = 1
+        context.clear_flags()
+        assert _reader_executor(_TypedReader())(TYPED_QUERY, len(expected)) == expected
+        assert context.prec == 1
+        assert not any(context.flags.values())
+
+
+def test_typed_transport_has_no_inherited_row_limit() -> None:
+    """The frozen candidate's 100,000-row ceiling is deliberately not part of this slice."""
+    reader = _TypedReader(columns=[("v", "System.Int32")], rows=([1] for _ in range(100_001)))
+    expected = {
+        "schema_version": 1,
+        "query_sha256": hashlib.sha256(TYPED_QUERY.encode()).hexdigest(),
+        "columns": [{"name": "v", "kind": "int32"}],
+        "rows": [[{"kind": "int32", "value": "1"}]] * 100_001,
+    }
+    wire = _expected_wire(expected)
+    assert _reader_executor(reader)(TYPED_QUERY, len(wire)) == wire
+    assert reader.state.reads == 100_002
+    assert reader.state.closed
+
+
+def test_typed_writer_emits_exact_utf8_bytes_without_text_newline_translation() -> None:
+    """A real stdout buffer receives UTF-8 and one LF, regardless of its text encoding."""
+    from io import BytesIO  # pylint: disable=import-outside-toplevel
+
+    output = SimpleNamespace(buffer=BytesIO(), write=lambda _text: pytest.fail("text writer used"))
+    expected = _expected_wire(_expected_typed())
+    dos.serve(
+        lambda _query: pytest.fail("legacy reached"),
+        StringIO('{"dax":"EVALUATE \'T\'","result_format":"typed-v1","max_payload_bytes":100000}\n'),
+        output,
+        typed_executor=_reader_executor(_TypedReader()),
+    )
+    assert output.buffer.getvalue() == expected + b"\n"
+
+
+AMBIGUOUS_TYPED_FRAMES = [
+    (
+        '{"dax":"EVALUATE \'SENSITIVE_QUERY\'","result_format":"typed-v1",'
+        '"result_format":"legacy","max_payload_bytes":1000}'
+    ),
+    (
+        '{"result_format":"legacy","result_format":"typed-v1",'
+        '"dax":"EVALUATE \'SENSITIVE_QUERY\'","max_payload_bytes":1000}'
+    ),
+    '{"result_format":"typed-v1","\\u0072esult_format":"legacy","dax":"EVALUATE \'SENSITIVE_QUERY\'"}',
+    '{"result_format":"typed-v1","dax":"EVALUATE \'SENSITIVE_QUERY\'","max_payload_bytes":1000',
+    '{"result_format":"typed-v1","dax":"SENSITIVE_QUERY',
+    '{"result_format":"typed-v1",,"dax":"SENSITIVE_QUERY"}',
+    '{"extra":' + "[" * 3000 + "0" + "]" * 3000 + ',"result_format":"typed-v1","dax":"SENSITIVE_QUERY"}',
+    '{"result_format":"typed-v1","extra":' + "[" * 3000 + "0" + "]" * 3000 + ',"dax":"SENSITIVE_QUERY"}',
+]
+AMBIGUOUS_FRAME_IDS = (
+    "duplicate-last-legacy",
+    "duplicate-last-typed",
+    "duplicate-escaped",
+    "truncated-object",
+    "truncated-string",
+    "malformed",
+    "deep-before-mode",
+    "deep-after-mode",
+)
+
+
+@pytest.mark.parametrize("frame", AMBIGUOUS_TYPED_FRAMES, ids=AMBIGUOUS_FRAME_IDS)
+def test_unestablished_frames_cannot_fall_through_to_legacy(
+    frame: str, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Duplicate, malformed, truncated, and deep inputs must not select a lossy/raw-echo path."""
+    calls = []
+
+    def legacy(query: str) -> dict:
+        calls.append(query)
+        return {"rows": [{"v": 12.5}]}
+
+    output = StringIO()
+    subsequent = '{"dax":"EVALUATE \'KnownLegacy\'"}\n'
+    assert (
+        dos.serve(
+            legacy,
+            StringIO(frame + "\n" + subsequent),
+            output,
+            typed_executor=lambda *_args: pytest.fail("invalid frame reached typed execution"),
+        )
+        == 0
+    )
+    assert output.getvalue() == '{"error":"INPUT_INVALID"}\n{"rows": [{"v": 12.5}]}\n'
+    assert calls == ["EVALUATE 'KnownLegacy'"]
+    captured = capsys.readouterr()
+    assert all(sentinel not in output.getvalue() + captured.out + captured.err + caplog.text for sentinel in SENTINELS)
+
+
+@pytest.mark.parametrize(
+    "text,admitted",
+    [
+        ("79228162514264337593543950335", True),
+        ("-79228162514264337593543950335", True),
+        ("79228162514264337593543950336", False),
+        ("-79228162514264337593543950336", False),
+        ("7.9228162514264337593543950335", True),
+        ("-7.9228162514264337593543950335", True),
+        ("7.9228162514264337593543950336", False),
+        ("-7.9228162514264337593543950336", False),
+        ("0.0000000000000000000000000001", True),
+        ("-0.0000000000000000000000000001", True),
+        ("0.00000000000000000000000000001", False),
+        ("-0.00000000000000000000000000001", False),
+        ("0.00000000000000000000000000000", False),
+        ("1.0000000000000000000000000000", True),
+        ("1.00000000000000000000000000000", False),
+        ("79228162514264337593543950335.0", False),
+        ("-0.0000000000000000000000000000", True),
+    ],
+)
+@pytest.mark.parametrize("clr_wrapper", [False, True])
+def test_producer_decimal_requires_actual_clr_representability(
+    text: str, admitted: bool, clr_wrapper: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both Python stand-ins and the CLR formatting seam enforce the same physical type domain."""
+    if clr_wrapper:
+        value = type("Decimal", (), {"ToString": lambda _self, _provider: text})()
+        monkeypatch.setitem(
+            sys.modules,
+            "System.Globalization",
+            SimpleNamespace(CultureInfo=SimpleNamespace(InvariantCulture=object())),
+        )
+    else:
+        value = Decimal(text)
+    reader = _TypedReader(columns=[("v", "System.Decimal")], rows=[[value]])
+    with localcontext() as context:
+        context.prec = 1
+        context.clear_flags()
+        result = _serve_typed(_reader_executor(reader))
+        assert not any(context.flags.values())
+    if admitted:
+        expected = {
+            "schema_version": 1,
+            "query_sha256": hashlib.sha256(TYPED_QUERY.encode()).hexdigest(),
+            "columns": [{"name": "v", "kind": "decimal"}],
+            "rows": [[{"kind": "decimal", "value": text}]],
+        }
+        assert result == _expected_wire(expected) + b"\n"
+    else:
+        assert result == b'{"error":"RESULT_TYPE"}\n'
+    assert reader.state.closed
+
+
+def _install_native_startup_mock(
+    monkeypatch: pytest.MonkeyPatch, events: list[str], failure: str | None = None
+) -> RuntimeError:
+    error = RuntimeError(" ".join(SENTINELS))
+
+    def discover(_pid: int) -> int:
+        events.append("discover")
+        if failure == "discovery":
+            raise error
+        return 45678
+
+    def open_connection() -> None:
+        events.append("open")
+        if failure == "open":
+            raise error
+
+    connection = SimpleNamespace(
+        Open=open_connection,
+        Close=lambda: events.append("close"),
+        CreateCommand=lambda: pytest.fail("empty input must not execute a query"),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "probe_desktop_query",
+        SimpleNamespace(discover_port=discover, _load_adomd=lambda: lambda _connection_string: connection),
+    )
+    return error
+
+
+@pytest.mark.parametrize("input_text", ["", "\n \n"])
+def test_empty_native_input_matches_base_binding_readiness_order(
+    input_text: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Golden order from f48a2cf: discover, Open, ready, stdin, Close; never lazy empty success."""
+    events = []
+    _install_native_startup_mock(monkeypatch, events)
+
+    class Input(StringIO):
+        """Observe when the single existing protocol loop starts reading."""
+
+        def __iter__(self) -> "Input":
+            events.append("stdin")
+            return super().__iter__()
+
+    def log_info(message: str, *_args: object) -> None:
+        if message.startswith("ready:"):
+            events.append("ready")
+
+    monkeypatch.setattr(dos.log, "info", log_info)
+    monkeypatch.setattr(sys, "stdin", Input(input_text))
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    assert dos.main(["--pid", "7777"]) == 0
+    assert events == ["discover", "open", "ready", "stdin", "close"]
+    assert output.getvalue() == ""
+
+
+@pytest.mark.parametrize("phase", ["discovery", "open"])
+@pytest.mark.parametrize("input_text", ["", "\n \n", '{"dax":"EVALUATE \'KnownLegacy\'"}\n'])
+def test_legacy_failed_binding_preserves_base_exception_and_no_ready(
+    phase: str, input_text: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The base never reports ready/exit zero when discovery or Open failed, including EOF."""
+    events = []
+    error = _install_native_startup_mock(monkeypatch, events, phase)
+    monkeypatch.setattr(sys, "stdin", StringIO(input_text))
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    with caplog.at_level("INFO"), pytest.raises(RuntimeError) as raised:
+        dos.main(["--pid", "7777"])
+    assert raised.value is error
+    assert events == (["discover"] if phase == "discovery" else ["discover", "open"])
+    assert output.getvalue() == ""
+    assert "ready:" not in caplog.text
+
+
+@pytest.mark.parametrize("frame", AMBIGUOUS_TYPED_FRAMES, ids=AMBIGUOUS_FRAME_IDS)
+def test_unestablished_typed_frame_cannot_expose_native_startup_failure(
+    frame: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Unbound native startup remains nonzero and sanitized even if a frame cannot establish its mode."""
+    events = []
+    _install_native_startup_mock(monkeypatch, events, "open")
+    monkeypatch.setattr(sys, "stdin", StringIO(frame + "\n"))
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    with caplog.at_level("INFO"):
+        assert dos.main(["--pid", "7777"]) == 1
+    assert output.getvalue() == '{"error":"INPUT_INVALID"}\n'
+    assert events == ["discover", "open"]
+    assert "ready:" not in caplog.text
+    assert all(sentinel not in output.getvalue() + caplog.text for sentinel in SENTINELS)
+
+
+def test_invalid_utf8_frame_is_not_legacy_intent() -> None:
+    """A binary input's decoder failure must not become raw echo or lossily marshalled rows."""
+    from io import BytesIO  # pylint: disable=import-outside-toplevel
+
+    frame = b'{"result_format":"typed-v1","dax":"SENSITIVE_QUERY\xff"}\n'
+    output = StringIO()
+    assert dos.serve(lambda _query: pytest.fail("legacy reached"), BytesIO(frame), output) == 0
+    assert output.getvalue() == '{"error":"INPUT_INVALID"}\n'
+
+
+@pytest.mark.parametrize("failure_kind", ["encoding", "io"])
+def test_unreadable_stream_does_not_reenter_empty_legacy_startup(
+    failure_kind: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An unreadable non-legacy stream is not the empty-stdin legacy compatibility case."""
+    events = []
+    _install_native_startup_mock(monkeypatch, events, "open")
+    error = (
+        UnicodeDecodeError("utf-8", b"SENSITIVE_QUERY\xff", 15, 16, "SENSITIVE_VALUE")
+        if failure_kind == "encoding"
+        else OSError("SENSITIVE_ENDPOINT")
+    )
+
+    class BrokenInput:
+        """One failed read, without retrying the same unreadable stream."""
+
+        def __iter__(self) -> "BrokenInput":
+            return self
+
+        def __next__(self) -> str:
+            events.append("read_error")
+            raise error
+
+    monkeypatch.setattr(sys, "stdin", BrokenInput())
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    with caplog.at_level("INFO"):
+        assert dos.main(["--pid", "7777"]) == 1
+    assert output.getvalue() == '{"error":"INPUT_INVALID"}\n'
+    assert events == ["discover", "open", "read_error"]
+    assert "ready:" not in caplog.text
+    assert all(sentinel not in output.getvalue() + caplog.text for sentinel in SENTINELS)
+
+
+@pytest.mark.parametrize("number", ["1E+1000000", "1E-1000000"])
+def test_unrepresentable_python_decimal_is_refused_before_expansion(
+    number: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLR domain is checked before Python fixed-format output could expand a huge exponent."""
+    monkeypatch.setattr(dos, "format", lambda *_args: pytest.fail("expanded an impossible CLR value"), raising=False)
+    reader = _TypedReader(columns=[("v", "System.Decimal")], rows=[[Decimal(number)]])
+    assert _serve_typed(_reader_executor(reader)) == b'{"error":"RESULT_TYPE"}\n'
+    assert reader.state.closed
+
+
+def test_valid_native_legacy_wire_bytes_match_the_base(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The f48a2cf legacy path emits 12.5 as a JSON number, with the same formatting and close."""
+    reader = _TypedReader(columns=[("[v]", "System.Decimal")], rows=[[Decimal("12.50")]])
+    connection, command = _typed_connection(reader)
+    calls = []
+    connection.Open = lambda: calls.append("open")
+    connection.Close = lambda: calls.append("close")
+    monkeypatch.setitem(
+        sys.modules,
+        "probe_desktop_query",
+        SimpleNamespace(_load_adomd=lambda: lambda _connection_string: connection),
+    )
+    monkeypatch.setattr(sys, "stdin", StringIO('{"dax":"EVALUATE \'KnownLegacy\'"}\n'))
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdout", output)
+    assert dos.main(["--port", "45678"]) == 0
+    assert output.getvalue() == '{"rows": [{"[v]": 12.5}]}\n'
+    assert command.CommandText == "EVALUATE 'KnownLegacy'"
+    assert calls == ["open", "close"]
+    assert reader.state.closed
