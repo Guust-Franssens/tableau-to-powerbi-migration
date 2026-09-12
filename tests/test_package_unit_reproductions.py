@@ -289,7 +289,9 @@ def test_producer_keeps_a_strict_cannot_file_when_policy_is_unparsed(tmp_path: P
     assert (assessment.state, assessment.codes) == ("cannot_establish", ("projection-invalid",))
     assert assessment.source_keys == () and assessment.effective_scope is None
     assert "DATA_ACCESS limitation=brief_policy_not_parsed" in result["notes"]
-    assert result["packaged"] is True and result["self_contained"] is True
+    assert result["construction_status"] == pkg.STATUS_ASSEMBLED
+    assert result["has_engine_working_copy"] is True and result["self_contained"] is True
+    assert result["dispatch_readiness"]["status"] == pkg.DISPATCH_READINESS_NOT_EVALUATED
     assert pkg.pri.verify_s1(package).integrity.is_clean
 
 
@@ -878,7 +880,7 @@ def test_explicit_separate_provider_command_and_no_retroactive_or_sibling_rescue
     bundle, oracle = _shared_bundle(tmp_path)
     out = tmp_path / "out"
     command = _package_command(bundle, oracle, out, UNIT, _brief(tmp_path, UNIT, "report_only_shared_model"))
-    assert pkg.main(command) == 4, "shared binding still does not become package-local containment"
+    assert pkg.main(command) == 0, "a non-self-contained diagnostic package is still ASSEMBLED"
     consumer = out / UNIT
     initial = (consumer / "data-access.json").read_bytes()
     assert pkg.data_access.read_data_access(consumer / "data-access.json").codes == ("provider-missing",)
@@ -886,9 +888,9 @@ def test_explicit_separate_provider_command_and_no_retroactive_or_sibling_rescue
     provider = out / DS_UNIT
     assert pkg.data_access.read_data_access(provider / "data-access.json").state == "local_import_ready"
     assert (consumer / "data-access.json").read_bytes() == initial, "publishing a provider must not reopen consumers"
-    assert pkg.main(command) == 4
+    assert pkg.main(command) == 0
     assert (consumer / "data-access.json").read_bytes() == initial, "a sibling is not an explicit provider"
-    assert pkg.main([*command, "--provider-package", str(provider)]) == 4
+    assert pkg.main([*command, "--provider-package", str(provider)]) == 0
     inherited = pkg.data_access.read_data_access(consumer / "data-access.json")
     assert (inherited.state, inherited.provider_state, inherited.validation, inherited.effective_scope) == (
         "provider_inherited",
@@ -932,12 +934,12 @@ def test_provider_first_ordering_preserves_requested_denominator_and_final_publi
     args = ["--bundle", str(bundle), "--out", str(out), "--oracle", str(oracle), "--json", str(json_path), "--quiet"]
     for unit in selected:
         args.extend(["--unit", unit])
-    assert pkg.main(args) == 4
+    assert pkg.main(args) == 0
     payload = json.loads(json_path.read_text(encoding="utf-8"))
     assert attempted == [DS_UNIT, UNIT], "the alphabetical consumer must wait for the datasource's final swap"
     assert payload["requested"] == [UNIT, DS_UNIT]
-    assert payload["totals"] == {"requested": 2, "units": 2, "failed": 0, "refused": 0, "unaccounted": 0}
-    assert [row["unit"] for row in payload["units"]] == [DS_UNIT, UNIT]
+    assert payload["totals"] == {"requested": 2, "assembled": 2, "blocked": 0}
+    assert [row["unit"] for row in payload["assembled"]] == [UNIT, DS_UNIT]
 
 
 @pytest.mark.parametrize("failure", ["assembly", "budget", "refused"])
@@ -998,9 +1000,12 @@ def test_selected_failed_provider_never_reuses_even_an_explicit_stale_output(
     assert (provider / "package-manifest.json").read_bytes() == prior
     assert pkg.pri.verify_s1(provider).integrity.is_clean
     report = json.loads(json_path.read_text(encoding="utf-8"))
-    assert report["requested"] == [UNIT, DS_UNIT] and report["unaccounted"] == []
-    assert [row["unit"] for row in report["units"]] == [UNIT]
-    assert [row["unit"] for row in report["refused" if failure == "refused" else "failed"]] == [DS_UNIT]
+    assert report["requested"] == [UNIT, DS_UNIT] and report["accounting_findings"] == []
+    assert [row["unit"] for row in report["assembled"]] == [UNIT]
+    assert [row["unit"] for row in report["blocked"]] == [DS_UNIT]
+    assert report["blocked"][0]["blocker"] == (
+        "PACKAGE_EDITS_REFUSED" if failure == "refused" else "CONSTRUCTION_FAILED"
+    )
 
 
 @pytest.mark.usefixtures("desktop")

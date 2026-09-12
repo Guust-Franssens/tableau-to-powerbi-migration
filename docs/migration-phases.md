@@ -177,7 +177,7 @@ Per-unit layout (authoritative list: `package_unit.py`'s module docstring):
         dashboard/{images,data}/<Object>.<ext>
         worksheet/{images,data}/<Object>.<ext>
         unknown/{images,data}/<Object>.<ext>
-    package-manifest.json        what was packaged, and every omission with its reason
+    package-manifest.json        what was assembled, and every omission with its reason
     README.md
 ```
 

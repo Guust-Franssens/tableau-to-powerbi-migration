@@ -236,7 +236,7 @@ _runs/<NNN>-<slug>/                     ◀── PHASE 1  collect & convert  (g
 │   │   └── oracle-manifest.json
 │   ├── report.json  source-provenance.json   gate input, and source-to-LUID attribution
 │   ├── engine-output-receipt.json            which engine version built this      (67 of 67)
-│   └── package-manifest.json               what was packaged, and every omission with its reason
+│   └── package-manifest.json               what was assembled, and every omission with its reason
 │
 ├── deliverables/                           customer-facing outputs — never committed
 └── scratch/                                the ONLY subdir that is safe to delete
