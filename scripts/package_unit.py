@@ -3811,6 +3811,37 @@ def _discovery_entry(path: Path) -> tuple[os.stat_result | None, OSError | Keybo
         return None, error
 
 
+def _binding_discovery_assessment(
+    inputs: _BindingInputs, *, require_empty_scratch: bool = False
+) -> _BindingRefusal | None:
+    """Read-only common gate: exact held roots and no competing or unassessable discovery markers."""
+    failed, interrupted = False, False
+    for root, package in zip(inputs.roots, inputs.packages, strict=True):
+        failed |= str(package.snapshot.verified.root) != str(root)
+        entry, error = _discovery_entry(root / MANIFEST_NAME)
+        failed |= entry is None or error is not None
+        interrupted |= isinstance(error, KeyboardInterrupt)
+        for scratch in (staging_dir(root.parent, root.name), retired_dir(root)):
+            entry, error = _discovery_entry(scratch)
+            unsafe = entry is not None and (is_reparse_entry(entry) or not stat.S_ISDIR(entry.st_mode))
+            failed |= error is not None or unsafe
+            interrupted |= isinstance(error, KeyboardInterrupt)
+            failed |= require_empty_scratch and root == inputs.roots[-1] and entry is not None
+            if error is not None or unsafe:
+                continue
+            marker, error = _discovery_entry(scratch / MANIFEST_NAME)
+            failed |= marker is not None or error is not None
+            interrupted |= isinstance(error, KeyboardInterrupt)
+        try:
+            failed |= not _binding_matches(
+                root, package.members, package.directories, package.snapshot.directory_id, strict=True
+            )
+        except (OSError, ValueError, PackagingError, _BindingRefusal, KeyboardInterrupt) as error:
+            failed = True
+            interrupted |= isinstance(error, KeyboardInterrupt)
+    return _BindingRefusal("binding_discovery_unassessable", 130 if interrupted else 3) if failed else None
+
+
 def _make_scratch_nondiscoverable(root: Path, role: str, *, preserve_tree: bool = False) -> str | None:
     """Remove reserved scratch or its discovery marker; preserve uncertain recovery evidence on request."""
     interrupted = False
@@ -3863,6 +3894,8 @@ def _binding_close_discovery(  # pylint: disable=too-many-locals
     expected: dict[str, bytes],
     inspection: PackageBindingInspection | None,
     outcome: tuple[str, int, str],
+    *,
+    discard_staged: bool = True,
 ) -> tuple[str, int, str]:
     """Leave one held authority discoverable, hiding all other transaction-owned markers."""
     root, package = inputs.roots[-1], inputs.packages[-1]
@@ -3898,7 +3931,7 @@ def _binding_close_discovery(  # pylint: disable=too-many-locals
         uncertain = True
         interrupted |= isinstance(error, KeyboardInterrupt)
     try:
-        residue = _discard_scratch(staged) is not None
+        residue = discard_staged and _discard_scratch(staged) is not None
     except BaseException as error:  # pylint: disable=broad-exception-caught
         residue = True
         interrupted |= isinstance(error, KeyboardInterrupt)
@@ -3919,7 +3952,7 @@ def _binding_close_discovery(  # pylint: disable=too-many-locals
         interrupted |= isinstance(error, KeyboardInterrupt)
     if uncertain or authority is None:
         return _binding_revoke_discovery(locations, interrupted)
-    if authority == retired:
+    if outcome[2] == "binding_discovery_unassessable" or authority == retired:
         return "cannot-establish", 130 if interrupted else 3, outcome[2]
     if residue:
         state = "published-with-residue" if inspection is not None else outcome[0]
@@ -5315,16 +5348,19 @@ def _replace_binding_dir(  # pylint: disable=too-many-arguments,too-many-positio
         return outcome, 130 if interrupted else exit_code, "binding_interrupted" if interrupted else code
 
 
-def _binding_publish(inputs: _BindingInputs, expected: dict[str, bytes], sanitize: bool) -> PackageBindingResult:
+def _binding_publish(
+    inputs: _BindingInputs, expected: dict[str, bytes], sanitize: bool
+) -> tuple[tuple[str, int, str], PackageBindingInspection | None]:
     root = inputs.roots[-1]
     staged = staging_dir(root.parent, root.name)
-    if os.path.lexists(staged) or os.path.lexists(retired_dir(root)):
-        raise _BindingRefusal("binding_scratch_occupied", 1)
     outcome = ("unchanged", 3, "binding_staging_failed")
     owned = False
     identity = None
     inspection = None
     try:
+        failure = _binding_discovery_assessment(inputs, require_empty_scratch=True)
+        if failure is not None:
+            raise failure
         staged.mkdir()
         owned = True
         identity = _binding_stage(inputs, expected, staged)
@@ -5370,16 +5406,35 @@ def _binding_publish(inputs: _BindingInputs, expected: dict[str, bytes], sanitiz
                 if _binding_matches(root, package.members, package.directories, package.snapshot.directory_id)
                 else "cannot-establish"
             )
-        outcome = (state, 130, "binding_interrupted")
-    except _BindingRefusal as error:
-        outcome = ("unchanged", error.exit_code, error.code)
+        outcome = (state, 130, "binding_interrupted" if owned else "binding_discovery_unassessable")
+    except _BindingRefusal as failure:
+        outcome = ("unchanged", failure.exit_code, failure.code)
     except Exception:  # pylint: disable=broad-exception-caught
-        outcome = ("unchanged", 3, "binding_staging_failed")
+        outcome = ("unchanged", 3, "binding_staging_failed" if owned else "binding_discovery_unassessable")
     finally:
-        if owned:
-            outcome = _binding_close_discovery(inputs, expected, inspection, outcome)
+        outcome = _binding_close_discovery(inputs, expected, inspection, outcome, discard_staged=owned)
     if outcome[0] not in ("published", "published-with-residue"):
         inspection = None
+    return outcome, inspection
+
+
+def _binding_checked_result(
+    outcome: tuple[str, int, str], inspection: PackageBindingInspection | None, *, read_only: bool
+) -> PackageBindingResult:
+    """The only public result constructor; provisional inspections cannot bypass discovery assessment."""
+    if inspection is not None:
+        refusal = _binding_discovery_assessment(inspection.authority)
+        if refusal is not None:
+            outcome = ("cannot-establish", refusal.exit_code, refusal.code)
+            if not read_only:
+                outcome = _binding_close_discovery(
+                    inspection.authority,
+                    inspection.authority.packages[-1].members,
+                    inspection,
+                    outcome,
+                    discard_staged=False,
+                )
+            inspection = None
     return PackageBindingResult(outcome[0], outcome[1], (outcome[2],), inspection)
 
 
@@ -5411,14 +5466,14 @@ def bind_package(
                 inspection = _binding_inspection(inputs, observation)
                 outcome = ("unchanged", 0, f"binding_{inspection.state.lower()}")
             else:
-                return _binding_publish(inputs, expected, sanitize)
+                outcome, inspection = _binding_publish(inputs, expected, sanitize)
     except _BindingRefusal as error:
         outcome = ("unchanged", error.exit_code, error.code)
     except KeyboardInterrupt:
         outcome = ("unchanged", 130, "binding_interrupted")
     except Exception:  # pylint: disable=broad-exception-caught
         outcome = ("cannot-establish", 3, "binding_cannot_establish")
-    return PackageBindingResult(outcome[0], outcome[1], (outcome[2],), inspection)
+    return _binding_checked_result(outcome, inspection, read_only=inspect)
 
 
 # --------------------------------------------------------------------------------------------

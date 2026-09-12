@@ -10,11 +10,243 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import shutil
 
 import pytest
 
-from test_package_data_access_snapshot import _files, _local_bundle
+from test_package_data_access_snapshot import _binding_consumer, _files, _local_bundle
 from test_package_unit_gates import UNIT, _binding_cli, _binding_package, pkg
+
+
+_DISCOVERY_RETURN_MODES = (
+    "inspect",
+    "idempotent",
+    "sanitize",
+    "report-sanitize",
+    "report-inspect",
+    "publish",
+    "sanitize-publish",
+)
+
+
+def _discovery_case(parent: Path, mode: str) -> tuple[Path, tuple[str, ...], tuple[Path, ...]]:
+    if mode.startswith("report-"):
+        provider = _binding_package(parent / "provider", datasource=True)
+        assert _binding_cli(provider)["exit_code"] == 0
+        return (
+            _binding_consumer(parent, provider),
+            ("--inspect" if mode == "report-inspect" else "--sanitize", "--provider-package", str(provider)),
+            (provider,),
+        )
+    root = _binding_package(parent)
+    if mode in ("inspect", "idempotent", "sanitize-publish"):
+        assert _binding_cli(root)["exit_code"] == 0
+    flags = ("--inspect",) if mode == "inspect" else (("--sanitize",) if "sanitize" in mode else ())
+    return root, flags, ()
+
+
+@pytest.mark.parametrize("mode", _DISCOVERY_RETURN_MODES)
+def test_binding_every_typed_return_rejects_competing_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """A common return-boundary decision must cover reads, no-ops, report-only and publication alike."""
+    root, flags, providers = _discovery_case(tmp_path, mode)
+    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
+    held = {"members": _files(root), "identity": pkg._package_directory_id(root)}
+    provider_bytes = [_files(provider) for provider in providers]
+    copied = []
+    publish = pkg._binding_publish
+
+    def duplicate():
+        assert not staged.exists()
+        shutil.copytree(root, staged)
+        assert pkg.pri.verify_s1(staged).integrity.is_clean
+        assert _files(staged) == held["members"]
+        copied.append(pkg._package_directory_id(staged))
+
+    def after_publication(*args, **kwargs):
+        outcome, inspection = publish(*args, **kwargs)
+        assert outcome[1] == 0 and inspection is not None and not retired.exists()
+        package = inspection.authority.packages[-1]
+        held.update(members=package.members, identity=package.snapshot.directory_id)
+        assert _files(root) == held["members"]
+        duplicate()
+        return outcome, inspection
+
+    if mode in ("publish", "sanitize-publish"):
+        monkeypatch.setattr(pkg, "_binding_publish", after_publication)
+    else:
+        duplicate()
+    result = _binding_cli(root, *flags)
+    assert len(copied) == 1 and copied[0] != held["identity"]
+    assert (result["exit_code"], result["codes"], result["inspection"]) == (
+        3,
+        ["binding_discovery_unassessable"],
+        {},
+    ), "the central assessment must reject competing discovery on every typed-return path"
+    assert _files(root) == held["members"] and pkg._package_directory_id(root) == held["identity"]
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    assert provider_bytes == [_files(provider) for provider in providers]
+    visible = {path / pkg.MANIFEST_NAME for path in (root, staged, retired) if (path / pkg.MANIFEST_NAME).is_file()}
+    if "--inspect" in flags:
+        assert _files(staged) == held["members"], "read-only inspect must not repair the supplied duplicate"
+        assert visible == {root / pkg.MANIFEST_NAME, staged / pkg.MANIFEST_NAME}
+    else:
+        assert visible == {root / pkg.MANIFEST_NAME}
+        assert _files(staged) == {key: raw for key, raw in held["members"].items() if key != pkg.MANIFEST_NAME}, (
+            "pre-existing/unowned scratch may lose its discovery marker, not its evidence"
+        )
+
+
+@pytest.mark.parametrize("mode", _DISCOVERY_RETURN_MODES)
+def test_binding_every_typed_return_rejects_unassessable_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    root, flags, providers = _discovery_case(tmp_path, mode)
+    staged = pkg.staging_dir(root.parent, root.name)
+    held = {"members": _files(root), "identity": pkg._package_directory_id(root)}
+    provider_bytes = [_files(provider) for provider in providers]
+    armed, queried = [], []
+    inspect_binding, publish, lstat = pkg._binding_inspection, pkg._binding_publish, Path.lstat
+
+    def after_inspection(*args, **kwargs):
+        inspection = inspect_binding(*args, **kwargs)
+        if inspection.authority.roots[-1] == root and mode not in ("publish", "sanitize-publish"):
+            armed.append(True)
+        return inspection
+
+    def after_publication(*args, **kwargs):
+        outcome, inspection = publish(*args, **kwargs)
+        assert outcome[1] == 0 and inspection is not None
+        package = inspection.authority.packages[-1]
+        held.update(members=package.members, identity=package.snapshot.directory_id)
+        armed.append(True)
+        return outcome, inspection
+
+    def uncertain(path, *args, **kwargs):
+        if armed and path == staged / pkg.MANIFEST_NAME:
+            queried.append(True)
+            raise OSError("private-return-discovery-canary")
+        return lstat(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pkg, "_binding_inspection", after_inspection)
+        patch.setattr(pkg, "_binding_publish", after_publication)
+        patch.setattr(Path, "lstat", uncertain)
+        result = _binding_cli(root, *flags)
+    assert armed == [True] and queried
+    assert (result["exit_code"], result["codes"], result["inspection"]) == (
+        3,
+        ["binding_discovery_unassessable"],
+        {},
+    ), "unassessable return-boundary discovery cannot produce a typed inspection"
+    assert pkg._package_directory_id(root) == held["identity"]
+    if "--inspect" in flags:
+        assert _files(root) == held["members"]
+    else:
+        assert not (root / pkg.MANIFEST_NAME).exists()
+        assert _files(root) == {key: raw for key, raw in held["members"].items() if key != pkg.MANIFEST_NAME}
+    assert provider_bytes == [_files(provider) for provider in providers]
+
+
+@pytest.mark.parametrize("mode", ["inspect", "idempotent"])
+def test_binding_return_assessment_uses_the_exact_held_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    root, flags, _providers = _discovery_case(tmp_path, mode)
+    inspect_binding = pkg._binding_inspection
+    held, changed = [], []
+
+    def resealed(*args, **kwargs):
+        inspection = inspect_binding(*args, **kwargs)
+        held.append(inspection.authority.packages[-1])
+        path = root / "README.md"
+        path.write_bytes(path.read_bytes() + b"\n")
+        manifest = json.loads((root / pkg.MANIFEST_NAME).read_bytes())
+        manifest["contents"]["files"] = pkg.package_contents(root)
+        (root / pkg.MANIFEST_NAME).write_text(json.dumps(manifest), encoding="utf-8")
+        assert pkg.pri.verify_s1(root).integrity.is_clean
+        changed.append(_files(root))
+        return inspection
+
+    monkeypatch.setattr(pkg, "_binding_inspection", resealed)
+    result = _binding_cli(root, *flags)
+    assert len(held) == len(changed) == 1 and changed[0] != held[0].members
+    assert (result["exit_code"], result["codes"], result["inspection"]) == (
+        3,
+        ["binding_discovery_unassessable"],
+        {},
+    ), "a different clean root cannot borrow the held inspection"
+    expected = (
+        changed[0] if mode == "inspect" else {key: raw for key, raw in changed[0].items() if key != pkg.MANIFEST_NAME}
+    )
+    assert _files(root) == expected
+
+
+def test_binding_report_only_return_assesses_provider_discovery_without_writing_providers(
+    tmp_path: Path,
+) -> None:
+    root, flags, providers = _discovery_case(tmp_path, "report-sanitize")
+    provider = providers[0]
+    staged = pkg.staging_dir(provider.parent, provider.name)
+    shutil.copytree(provider, staged)
+    before = [_files(path) for path in (root, provider, staged)]
+    result = _binding_cli(root, *flags)
+    assert (result["exit_code"], result["codes"], result["inspection"]) == (3, ["binding_discovery_unassessable"], {})
+    assert before == [_files(path) for path in (root, provider, staged)], "providers remain strictly read-only"
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+
+
+@pytest.mark.parametrize("fault", ["staged-copy", "retired-copy", "false-absence", "interrupt"])
+def test_binding_scratch_admission_assesses_before_mkdir_and_closes_before_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    root = _binding_package(tmp_path)
+    before = _files(root)
+    identity = pkg._package_directory_id(root)
+    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
+    target = retired if fault == "retired-copy" else staged
+    if fault.endswith("copy"):
+        shutil.copytree(root, target)
+    lstat, mkdir, close = Path.lstat, Path.mkdir, pkg._binding_close_discovery
+    observed, created, closed = [], [], []
+
+    def uncertain(path, *args, **kwargs):
+        if path == staged and fault in ("false-absence", "interrupt") and not observed:
+            observed.append(True)
+            error = KeyboardInterrupt if fault == "interrupt" else OSError
+            raise error("private-before-mkdir-canary")
+        return lstat(path, *args, **kwargs)
+
+    def creating(path, *args, **kwargs):
+        if path == staged:
+            created.append(True)
+        return mkdir(path, *args, **kwargs)
+
+    def closing(*args, **kwargs):
+        closed.append(kwargs["discard_staged"])
+        return close(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "lstat", uncertain)
+        patch.setattr(Path, "mkdir", creating)
+        patch.setattr(pkg, "_binding_close_discovery", closing)
+        result = _binding_cli(root)
+    assert closed == [False], "pre-admission refusals must reach closure without claiming scratch ownership"
+    assert not created, "uncertain or colliding scratch must be refused before mkdir"
+    assert (result["exit_code"], result["codes"], result["inspection"]) == (
+        130 if fault == "interrupt" else 3,
+        ["binding_discovery_unassessable"],
+        {},
+    )
+    assert observed == ([] if fault.endswith("copy") else [True])
+    assert _files(root) == before and pkg._package_directory_id(root) == identity
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    visible = {path / pkg.MANIFEST_NAME for path in (root, staged, retired) if (path / pkg.MANIFEST_NAME).is_file()}
+    assert visible == {root / pkg.MANIFEST_NAME}
+    if fault.endswith("copy"):
+        assert _files(target) == {key: raw for key, raw in before.items() if key != pkg.MANIFEST_NAME}
+    assert "private-" not in json.dumps(result)
 
 
 def test_binding_final_inspection_is_inside_swap_before_retired_cleanup(
