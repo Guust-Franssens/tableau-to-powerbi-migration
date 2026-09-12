@@ -97,6 +97,7 @@ must appear below unless the script docstring marks it `internal: true` with an 
 | `scripts/manifest_scope.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/migration_bundle.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/migration_cost_report.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
+| `scripts/numeric_comparison.py` | `agent-facing` | Library, no CLI: pure keyed CSV numeric vs typed-v1 DAX relation for a later receipt-v3 consumer. Returns only `EQUAL`/`DIFFERENT`/`EMPTY`/fixed refusal; no certification, final evidence verdict, or `COMPLETE`. Named in `scripts/README.md`; not a completion gate. |
 | `scripts/object_identity.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/package_filesystem.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/package_role_identity.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
