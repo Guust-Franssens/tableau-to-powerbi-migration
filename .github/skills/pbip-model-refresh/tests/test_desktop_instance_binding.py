@@ -261,7 +261,7 @@ def test_refresh_observation_matches_the_executed_scope(monkeypatch, kind, table
     command.ExecuteNonQuery = lambda: sent.append(json.loads(command.CommandText))
     connection = SimpleNamespace(CreateCommand=lambda: command, Open=lambda: None, Close=lambda: None)
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _: connection)
-    monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_: None)
+    monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_args, **_kwargs: None)
     observation = refresh_pbip_model.refresh(
         52001,
         list(tables),
@@ -296,7 +296,7 @@ def test_a_failed_retry_cannot_reuse_a_prior_refresh_observation(monkeypatch):
     command = SimpleNamespace(ExecuteNonQuery=execute)
     connection = SimpleNamespace(CreateCommand=lambda: command, Open=lambda: opened.append(1), Close=lambda: None)
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _: connection)
-    monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_: None)
+    monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_args, **_kwargs: None)
     options = dict(desktop_pid=111, bound=bound, progress_enabled=False)
     prior = refresh_pbip_model.refresh(52001, None, return_observation=True, **options)
     published = []
@@ -310,7 +310,7 @@ def test_same_catalogue_refreshes_retain_their_distinct_desktop_and_as_identity(
     command = SimpleNamespace(ExecuteNonQuery=lambda: None)
     connection = SimpleNamespace(CreateCommand=lambda: command, Open=lambda: None, Close=lambda: None)
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _: connection)
-    monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_: None)
+    monkeypatch.setattr(refresh_pbip_model, "recheck_bound", lambda *_args, **_kwargs: None)
     observations = []
     for identity in (
         OBSERVED_IDENTITY,
@@ -475,6 +475,83 @@ def test_refresh_legacy_tuple_is_unchanged(monkeypatch, explicit):
     result = refresh_pbip_model.refresh(52001, ["Orders"], progress_enabled=False, **options)
     assert result == (True, f"refreshed Orders (catalog {OBSERVED_CATALOGUE})")
     assert events[-1] == "adomd-close"
+
+
+@pytest.mark.parametrize("mode", ["default", "false", "true"])
+@pytest.mark.parametrize("phase", ["before-xmla", "after-xmla"])
+@pytest.mark.parametrize("fault", ["execute-reader", "reader-close"])
+def test_bound_refresh_catalogue_failures_respect_observation_mode(monkeypatch, capsys, mode, phase, fault):
+    """Exercise both production rechecks, not a helper that the legacy refresh could bypass."""
+    bound, connection, events = _refresh_connection(monkeypatch)
+    create = connection.CreateCommand
+    sentinel = "PRIVATE_CATALOGUE_QUERY_OR_CLOSE_DIAGNOSTIC"
+    error = RuntimeError(sentinel)
+    cause = OSError("PRIVATE_CATALOGUE_CAUSE")
+    error.add_note("PRIVATE_CATALOGUE_NOTE")
+    entered, readers = [], []
+
+    def native_catalogue_failure():
+        entered.append((phase, fault))
+        raise error from cause
+
+    def command():
+        cmd = create()
+        execute_reader = cmd.ExecuteReader
+
+        def read():
+            assert cmd.CommandText == "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS"
+            current_phase = "after-xmla" if any(isinstance(event, dict) for event in events) else "before-xmla"
+            targeted = current_phase == phase
+            if targeted and fault == "execute-reader":
+                native_catalogue_failure()
+            reader = execute_reader()
+            readers.append(reader)
+            if targeted and fault == "reader-close":
+                close = reader.Close
+
+                def fail_close():
+                    close()
+                    native_catalogue_failure()
+
+                reader.Close = fail_close
+            return reader
+
+        cmd.ExecuteReader = read
+        return cmd
+
+    connection.CreateCommand = command
+    options = {} if mode == "default" else {"return_observation": mode == "true"}
+    result, failure = None, None
+    try:
+        result = refresh_pbip_model.refresh(
+            52001, None, bound=bound, desktop_pid=111, progress_enabled=False, **options
+        )
+    except BaseException as caught:
+        failure = caught
+    assert entered == [(phase, fault)], "the actual catalogue query/Close must enter the intended recheck phase"
+    assert events[-1] == "adomd-close" and all(reader.closed for reader in readers)
+    executed = sum(isinstance(event, dict) for event in events)
+    assert executed == int(phase == "after-xmla" or (mode == "true" and fault == "reader-close")), (
+        "legacy failure at the initial catalogue recheck must abort before XMLA"
+    )
+    if mode != "true":
+        assert failure is error, "legacy catalogue errors, including Close failures, must propagate the original object"
+        assert result is None, "legacy Close failure must abort rather than report successful refresh"
+        assert type(failure) is RuntimeError and failure.args == (sentinel,)
+        assert failure.__cause__ is cause and failure.__notes__ == ["PRIVATE_CATALOGUE_NOTE"]
+        rendered = "".join(traceback.format_exception(failure))
+        assert sentinel in rendered and "native_catalogue_failure" in rendered
+    elif fault == "reader-close":
+        assert failure is None and type(result) is refresh_pbip_model.RefreshObservation
+        assert result.identity == bound.identity and result.catalogue == bound.catalogue
+    else:
+        assert result is None and type(failure) is probe_desktop_query.ObservationUnavailable and failure is not error
+        assert failure.args == ("TOOL_UNAVAILABLE",) and failure.__cause__ is failure.__context__ is None
+        assert not getattr(failure, "__notes__", ())
+        rendered = "".join(traceback.format_exception(failure))
+        assert sentinel not in rendered and "native_catalogue_failure" not in rendered
+    if mode == "true":
+        assert sentinel not in str(capsys.readouterr())
 
 
 @pytest.mark.parametrize("field", ["pid", "process_start", "as_pid", "as_process_start", "port", "catalogue"])

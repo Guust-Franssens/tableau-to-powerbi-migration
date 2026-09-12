@@ -258,24 +258,30 @@ def _validate_identity(payload: dict, pid: int) -> None:
         raise ValueError("identity")
 
 
-@_observation_errors()
-def catalogue_id(connection) -> str:
-    """Read exactly one canonical Desktop catalogue ID; missing/ambiguous identity is refused."""
-    command = connection.CreateCommand()
-    command.CommandTimeout = 30
-    command.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS"
-    reader = command.ExecuteReader()
-    try:
-        if not reader.Read():
-            raise ValueError("missing catalogue")
-        value = str(reader.GetValue(0))
-        if reader.Read() or str(uuid.UUID(value)) != value:
-            raise ValueError("ambiguous catalogue")
-        return value
-    except (ValueError, TypeError):
-        raise ObservationUnavailable("CATALOGUE_UNESTABLISHED") from None
-    finally:
-        _close_observation_connection(reader)
+def catalogue_id(connection, *, observation_mode: bool = False) -> str:
+    """Read one canonical catalogue, retaining raw query/Close failures for legacy callers.
+
+    Only observation mode closes the error surface and treats ordinary reader teardown as best-effort.
+    """
+    with _observation_errors(observation_mode):
+        command = connection.CreateCommand()
+        command.CommandTimeout = 30
+        command.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS"
+        reader = command.ExecuteReader()
+        try:
+            if not reader.Read():
+                raise ValueError("missing catalogue")
+            value = str(reader.GetValue(0))
+            if reader.Read() or str(uuid.UUID(value)) != value:
+                raise ValueError("ambiguous catalogue")
+            return value
+        except (ValueError, TypeError):
+            raise ObservationUnavailable("CATALOGUE_UNESTABLISHED") from None
+        finally:
+            if observation_mode:
+                _close_observation_connection(reader)
+            else:
+                reader.Close()
 
 
 def _observation_credential_check(pid: int, *, in_flight: bool) -> None:
@@ -360,7 +366,7 @@ def bind_desktop(pid: int, supplied_port: int | None = None) -> BoundDesktop:
         connection = _load_adomd()(f"Data Source=localhost:{identity.port};Connect Timeout=30")
         try:
             connection.Open()
-            bound = BoundDesktop(identity, catalogue_id(connection))
+            bound = BoundDesktop(identity, catalogue_id(connection, observation_mode=True))
             if desktop_identity(pid) != identity:
                 raise ObservationUnavailable("PID_REUSED")
             return bound
@@ -370,13 +376,16 @@ def bind_desktop(pid: int, supplied_port: int | None = None) -> BoundDesktop:
     return _observation_call(pid, discover, OBSERVATION_TIMEOUT_SECONDS)
 
 
-@_observation_errors()
-def recheck_bound(bound: BoundDesktop, connection) -> None:
-    """Refuse PID reuse, a changed child/listener, or a different/multiple catalogue."""
-    if desktop_identity(bound.identity.pid) != bound.identity:
-        raise ObservationUnavailable("PID_REUSED")
-    if catalogue_id(connection) != bound.catalogue or str(connection.Database) != bound.catalogue:
-        raise ObservationUnavailable("CATALOGUE_CHANGED")
+def recheck_bound(bound: BoundDesktop, connection, *, observation_mode: bool = False) -> None:
+    """Recheck the binding without changing a legacy caller's catalogue failure semantics."""
+    with _observation_errors(observation_mode):
+        if desktop_identity(bound.identity.pid) != bound.identity:
+            raise ObservationUnavailable("PID_REUSED")
+        if (
+            catalogue_id(connection, observation_mode=observation_mode) != bound.catalogue
+            or str(connection.Database) != bound.catalogue
+        ):
+            raise ObservationUnavailable("CATALOGUE_CHANGED")
 
 
 @_observation_errors()
@@ -393,9 +402,9 @@ def bound_call(
         )
         try:
             connection.Open()
-            recheck_bound(bound, connection)
+            recheck_bound(bound, connection, observation_mode=True)
             result = operation(connection)
-            recheck_bound(bound, connection)
+            recheck_bound(bound, connection, observation_mode=True)
             return result
         finally:
             _close_observation_connection(connection)

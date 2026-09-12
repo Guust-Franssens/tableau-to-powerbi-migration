@@ -672,7 +672,7 @@ def _refresh(
                 conn = adomd_connection(f"Data Source=localhost:{port}{selection}")
                 conn.Open()
                 if bound is not None:
-                    recheck_bound(bound, conn)
+                    recheck_bound(bound, conn, observation_mode=return_observation)
                 catalog = bound.catalogue if bound is not None else _catalog_id(conn)
                 objects = [{"database": catalog, "table": t} for t in targets] if targets else [{"database": catalog}]
                 cmd = conn.CreateCommand()
@@ -680,7 +680,7 @@ def _refresh(
                 cmd.CommandTimeout = command_timeout
                 cmd.ExecuteNonQuery()
                 if bound is not None:
-                    recheck_bound(bound, conn)
+                    recheck_bound(bound, conn, observation_mode=return_observation)
                     result["observation"] = RefreshObservation(
                         catalog, refresh_type, "tables" if targets else "database", targets, bound.identity
                     )
