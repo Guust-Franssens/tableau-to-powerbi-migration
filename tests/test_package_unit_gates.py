@@ -279,7 +279,8 @@ def _binding_package(
             f'expression Caption = "ordinary"\nexpression #"Extract Folder" = "{source.parent}"\n',
             encoding="utf-8",
         )
-        expression = f'File.Contents(#"Extract Folder" & "{os.sep}rows.csv")'
+        # Preserve the source's Windows suffix, not a CI host's "/" absolute-source literal.
+        expression = 'File.Contents(#"Extract Folder" & "\\rows.csv")'
     else:
         expression = f'File.Contents("{source}")'
     (definition / "tables" / "Rows.tmdl").write_text(
@@ -289,7 +290,8 @@ def _binding_package(
     _write_receipt(bundle, [UNIT, DS_UNIT] if datasource else [UNIT])
     root = _package(parent, bundle, oracle, unit, "model_only" if datasource else "model_and_report")
     assert pkg.pri.verify_s1(root).integrity.is_clean
-    assert pkg.data_access.read_data_access(root / "data-access.json").state == "local_import_ready"
+    assessment = pkg.data_access.read_data_access(root / "data-access.json")
+    assert assessment.state == "local_import_ready", assessment.codes
     return root
 
 
