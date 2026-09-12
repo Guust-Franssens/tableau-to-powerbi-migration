@@ -379,6 +379,7 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
         The caller cannot substitute a root or obtain an undeclared file by its familiar name.
         S1 rechecks only the two small roles and manifest, not unrelated asset content. The held
         spec is not reparsed/reclassified. Copies cannot borrow the original role result's authority.
+        Renewal requires fresh S1 and S2, not a fresh S1 grafted into the issued S2 result.
         """
         verified = self.verified
         if type(verified) is not VerifiedPackage or not verified.is_bound_to(str(root)):
@@ -456,8 +457,9 @@ class VerifiedPackage:
 
 
 def _handoff_authority_state(result: Phase1RoleIdentityResult) -> tuple:
-    """The role/fact consistency binding, without re-running any role or connection classifier."""
+    """Capture scalar role/fact values without re-running any role or connection classifier."""
     snapshot = result._data_access_snapshot  # pylint: disable=protected-access
+    identity, policy = result.source_identity, result.brief_policy
     return (
         result.verdict,
         result.unit,
@@ -466,7 +468,15 @@ def _handoff_authority_state(result: Phase1RoleIdentityResult) -> tuple:
         result.blockers,
         result.authorized_limitations,
         tuple((row.role, row.state, row.cardinality, row.paths, row.code) for row in result.roles),
-        result.source_identity,
+        (
+            identity.kind,
+            identity.sha256,
+            identity.tableau_luid,
+            identity.published_key,
+            identity.revision,
+        )
+        if identity is not None
+        else None,
         tuple(
             (
                 row.state,
@@ -479,7 +489,7 @@ def _handoff_authority_state(result: Phase1RoleIdentityResult) -> tuple:
             )
             for row in result.dependencies
         ),
-        result.brief_policy,
+        (policy.requested_scope, policy.fallback_authorization) if policy is not None else None,
         snapshot.declared,
         (snapshot.spec.relative_path, snapshot.spec.sha256, snapshot.spec.root_identity),
     )
@@ -1462,7 +1472,7 @@ def _assess_roles(facts: _Facts) -> None:
 
 
 def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
-    """Fold assessed local roles and the cohort's dependency rows without dropping either."""
+    """Fold assessed roles and dependencies, then contextualize the already-derived source facts."""
     topology = facts.topology or _topology(facts)
     roles = list(facts.roles)
     for row in facts.dependencies:
@@ -1478,6 +1488,24 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
     if topology == TOPOLOGY_PUBLISHED_CONSUMER and not facts.dependencies:
         roles.append(_role(ROLE_PUBLISHED_DEPENDENCY, STATE_MISSING, "1 provider", [], CODE_PROVIDER_MISSING))
     blockers = [*facts.blockers, *(role.code or role.state for role in roles if role.blocks)]
+    spec_facts = facts.spec_facts
+    if spec_facts is not None:
+        sources = facts.spec_document.get("data_sources") if isinstance(facts.spec_document, Mapping) else None
+        # Self-publication metadata is not a proxy leg; only applicability depends on cohort topology.
+        spec_facts = spec_facts._replace(
+            direct_applicable=(
+                topology in (TOPOLOGY_OWNED_MODEL, TOPOLOGY_STANDALONE_DATASOURCE, TOPOLOGY_PUBLISHED_PROVIDER)
+                and spec_facts.refusal_code is None
+                and isinstance(sources, list)
+                and all(
+                    isinstance(row, Mapping)
+                    and isinstance(row.get("connection", {}), Mapping)
+                    and (row.get("connection", {}).get("class") or "").casefold() != "sqlproxy"
+                    for row in sources
+                )
+            ),
+            published_only=topology == TOPOLOGY_PUBLISHED_CONSUMER and spec_facts.published_only,
+        )
     result = Phase1RoleIdentityResult(
         verdict=VERDICT_BLOCKED if blockers else VERDICT_START_READY,
         unit=facts.unit,
@@ -1501,10 +1529,10 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
             _DataAccessSnapshot(
                 facts.verified.integrity,
                 facts.spec_member,
-                facts.spec_facts,
+                spec_facts,
                 facts.artifacts.get("data_access") == DATA_ACCESS_NAME,
             )
-            if facts.spec_member is not None and facts.spec_facts is not None
+            if facts.spec_member is not None and spec_facts is not None
             else None
         ),
     )
@@ -1514,6 +1542,7 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
         state = _handoff_authority_state(result)
         source_facts = snapshot.facts
         verified = result.verified
+        issued_integrity = verified.integrity
         object.__setattr__(
             result,
             "_authority",
@@ -1521,6 +1550,9 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
                 owner() is candidate
                 and candidate.verified is verified
                 and candidate._data_access_snapshot is snapshot  # pylint: disable=protected-access
+                and candidate.verified.integrity is issued_integrity
+                and snapshot.integrity is issued_integrity
+                and issued_integrity.has_read_authority()
                 and snapshot.facts is source_facts
                 and _handoff_authority_state(candidate) == state
             ),
