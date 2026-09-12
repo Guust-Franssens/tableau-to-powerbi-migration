@@ -104,6 +104,8 @@ from probe_desktop_query import (
     DesktopIdentity,
     ObservationUnavailable,
     _load_adomd,
+    _observation_errors,
+    _validate_observation_request,
     column_names,
     desktop_identity,
     discover_port,
@@ -125,6 +127,7 @@ from _abf import (  # noqa: F401  # pylint: disable=unused-import
     ImageObservation,
     _ImageInstallation,
     _abf_rejection_reason,
+    _checked_image,
     _cleanup_staging,
     _is_complete_abf,
     _restore_rollback_snapshot,
@@ -191,6 +194,7 @@ class PersistenceObservation:
     catalogue: str
     compatibility_level: int
     image: ImageObservation
+    identity: DesktopIdentity
     method: Literal["AMO_ImageSave"] = "AMO_ImageSave"
 
 
@@ -396,6 +400,7 @@ def _join_refresh_worker(
     initial_state: CredentialDetection | None,
     total_timeout: float,
     progress_monitor: RefreshProgressMonitor | None,
+    observation_mode: bool = False,
 ) -> bool:
     """Wait for the refresh thread, with credential polling and optional progress liveness.
 
@@ -406,7 +411,7 @@ def _join_refresh_worker(
     refresh it was reporting on. Measured: ``DialogFoundError(REFRESH_IN_PROGRESS)`` on the first poll,
     with no ``in_flight`` argument reaching the detector at all.
     """
-    if progress_monitor is None:
+    if progress_monitor is None and not observation_mode:
         if desktop_pid is None:
             worker.join(total_timeout)
             return not worker.is_alive()
@@ -431,10 +436,11 @@ def _join_refresh_worker(
         absolute_remaining = max(0.0, total_timeout - elapsed)
         if absolute_remaining <= 0:
             break
-        progress_monitor.print_liveness_warning_if_due()
+        if progress_monitor is not None:
+            progress_monitor.print_liveness_warning_if_due()
         wait_for = min(
             absolute_remaining,
-            progress_monitor.seconds_until_liveness_warning(),
+            progress_monitor.seconds_until_liveness_warning() if progress_monitor is not None else absolute_remaining,
             REFRESH_CREDENTIAL_POLL_SECONDS,
             max(0.0, next_heartbeat - elapsed),
         )
@@ -444,15 +450,18 @@ def _join_refresh_worker(
             raise_terminal_detection(desktop_pid, state, source_hint)
             if state.dialog is not None and latched_dialog is None:
                 latched_dialog = state.dialog
-                print_dialog_observed_notice(desktop_pid, state.dialog)
+                if not observation_mode:
+                    print_dialog_observed_notice(desktop_pid, state.dialog)
             if state.desktop_unready and latched_desktop_unready is None:
                 latched_desktop_unready = state.desktop_unready
             if state.unknown_reason and latched_unknown is None:
                 latched_unknown = state.unknown_reason
-                print_indeterminate_state_notice(desktop_pid, state.unknown_reason)
+                if not observation_mode:
+                    print_indeterminate_state_notice(desktop_pid, state.unknown_reason)
         elapsed = time.monotonic() - started
         if elapsed >= next_heartbeat and worker.is_alive():
-            progress_monitor.print_evidence_heartbeat(elapsed, total_timeout)
+            if progress_monitor is not None:
+                progress_monitor.print_evidence_heartbeat(elapsed, total_timeout)
             next_heartbeat += REFRESH_HEARTBEAT_SECONDS
     if worker.is_alive():
         # The latches used to be computed here and DISCARDED, so this branch always degraded to the
@@ -484,8 +493,13 @@ def refresh(
     absolute_timeout_sec: float = REFRESH_ABSOLUTE_TIMEOUT_SECONDS,
     bound: BoundDesktop | None = None,
     observations: list[RefreshObservation] | None = None,
-) -> tuple[bool, str]:
-    """Send a TMSL refresh over XMLA. Returns (ok, message).
+    return_observation: bool = False,
+) -> tuple[bool, str] | RefreshObservation:
+    """Send a TMSL refresh over XMLA; return the legacy tuple or one bound observation.
+
+    ``return_observation`` requires an exact bool. True returns only this invocation's immutable
+    facts after the worker and teardown finish, or raises a closed, detail-free refusal. Retired
+    ``observations`` sinks reject every non-None value before I/O; no collector can carry authority.
 
     Refreshing named tables is preferred over the whole database: a full refresh can hang for
     minutes on a large table that no report even uses. ``refresh_type='calculate'`` is an opt-in
@@ -524,11 +538,43 @@ def refresh(
     90 s" because there was no 90. Never take a timing measurement against a bundle preflight reports
     as STALE.
     """
+    _validate_observation_request(return_observation, observations)
+    with _observation_errors(return_observation, preserve=(CompatRollbackError, ModelLockTimeout)):
+        return _refresh(
+            port,
+            tables,
+            timeout_sec,
+            refresh_type=refresh_type,
+            desktop_pid=desktop_pid,
+            source_hint=source_hint,
+            initial_state=initial_state,
+            progress_enabled=progress_enabled,
+            progress_liveness_sec=progress_liveness_sec,
+            absolute_timeout_sec=absolute_timeout_sec,
+            bound=bound,
+            return_observation=return_observation,
+        )
+
+
+def _refresh(
+    port: int,
+    tables: list[str] | None,
+    timeout_sec: int,
+    *,
+    refresh_type: str,
+    desktop_pid: int | None,
+    source_hint: str | None,
+    initial_state: CredentialDetection | None,
+    progress_enabled: bool,
+    progress_liveness_sec: float,
+    absolute_timeout_sec: float,
+    bound: BoundDesktop | None,
+    return_observation: bool,
+) -> tuple[bool, str] | RefreshObservation:
+    """Run the existing refresh lifecycle with invocation-private results."""
     if refresh_type not in REFRESH_TYPES:
         raise ValueError(f"unsupported refresh type {refresh_type!r}; expected one of {sorted(REFRESH_TYPES)}")
-    if observations:
-        raise ObservationUnavailable("OBSERVATIONS_NOT_EMPTY")
-    if observations is not None and bound is None:
+    if return_observation and bound is None:
         raise ObservationUnavailable("IDENTITY_UNESTABLISHED")
     if bound is not None and (bound.identity.port != port or bound.identity.pid != desktop_pid):
         raise ObservationUnavailable("WRONG_PID_PORT")
@@ -548,7 +594,10 @@ def refresh(
         total_timeout = absolute_timeout_sec
         untraced_absolute_backstop = True
         try:
-            progress_monitor = _start_refresh_progress_trace(port, progress_liveness_sec)
+            if return_observation:
+                progress_monitor = _start_refresh_progress_trace(port, progress_liveness_sec, observation_mode=True)
+            else:
+                progress_monitor = _start_refresh_progress_trace(port, progress_liveness_sec)
             untraced_absolute_backstop = False
             print(
                 f"[progress] enabled: no progress event for {progress_liveness_sec:.1f}s prints a warning "
@@ -556,16 +605,19 @@ def refresh(
                 flush=True,
             )
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            print(
-                f"[progress] unavailable ({type(exc).__name__}: {exc}). Row counts and the liveness "
-                "warning are OFF for this run; you cannot tell a slow refresh from a stuck one. "
-                f"The {absolute_timeout_sec:.0f}s absolute backstop still applies. To regain visibility: "
-                "restore the AMO package (Microsoft.AnalysisServices.NetCore.retail.amd64), or use "
-                "the operator refresh strategy and watch Desktop's own row counter.",
-                file=sys.stderr,
-                flush=True,
-            )
-    if desktop_pid is not None:
+            if return_observation:
+                print("[progress] unavailable (TOOL_UNAVAILABLE); absolute backstop retained", file=sys.stderr)
+            else:
+                print(
+                    f"[progress] unavailable ({type(exc).__name__}: {exc}). Row counts and the liveness "
+                    "warning are OFF for this run; you cannot tell a slow refresh from a stuck one. "
+                    f"The {absolute_timeout_sec:.0f}s absolute backstop still applies. To regain visibility: "
+                    "restore the AMO package (Microsoft.AnalysisServices.NetCore.retail.amd64), or use "
+                    "the operator refresh strategy and watch Desktop's own row counter.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+    if desktop_pid is not None and not return_observation:
         state = initial_state or CredentialDetection()
         if progress_monitor is None:
             if untraced_absolute_backstop:
@@ -614,41 +666,38 @@ def refresh(
     def _run() -> None:
         conn = None
         try:
-            adomd_connection = _load_adomd()
-            selection = f";Initial Catalog={bound.catalogue};Connect Timeout=30" if bound is not None else ""
-            conn = adomd_connection(f"Data Source=localhost:{port}{selection}")
-            conn.Open()
-            if bound is not None:
-                recheck_bound(bound, conn)
-            catalog = bound.catalogue if bound is not None else _catalog_id(conn)
-            if targets:
-                objects = [{"database": catalog, "table": t} for t in targets]
-            else:
-                objects = [{"database": catalog}]
-            tmsl = json.dumps({"refresh": {"type": refresh_type, "objects": objects}})
-            cmd = conn.CreateCommand()
-            cmd.CommandText = tmsl
-            cmd.CommandTimeout = command_timeout
-            cmd.ExecuteNonQuery()
-            if bound is not None:
-                recheck_bound(bound, conn)
-                result["observation"] = RefreshObservation(
-                    catalog, refresh_type, "tables" if targets else "database", targets, bound.identity
-                )
-            target = "/".join(tables) if tables else "entire database"
-            verb = "calculated" if refresh_type == REFRESH_TYPE_CALCULATE else "refreshed"
-            result["ok"] = (True, f"{verb} {target} (catalog {catalog})")
+            try:
+                adomd_connection = _load_adomd()
+                selection = f";Initial Catalog={bound.catalogue};Connect Timeout=30" if bound is not None else ""
+                conn = adomd_connection(f"Data Source=localhost:{port}{selection}")
+                conn.Open()
+                if bound is not None:
+                    recheck_bound(bound, conn, observation_mode=return_observation)
+                catalog = bound.catalogue if bound is not None else _catalog_id(conn)
+                objects = [{"database": catalog, "table": t} for t in targets] if targets else [{"database": catalog}]
+                cmd = conn.CreateCommand()
+                cmd.CommandText = json.dumps({"refresh": {"type": refresh_type, "objects": objects}})
+                cmd.CommandTimeout = command_timeout
+                cmd.ExecuteNonQuery()
+                if bound is not None:
+                    recheck_bound(bound, conn, observation_mode=return_observation)
+                    result["observation"] = RefreshObservation(
+                        catalog, refresh_type, "tables" if targets else "database", targets, bound.identity
+                    )
+                target = "/".join(targets) if targets else "entire database"
+                verb = "calculated" if refresh_type == REFRESH_TYPE_CALCULATE else "refreshed"
+                result["ok"] = (True, f"{verb} {target} (catalog {catalog})")
+            finally:
+                if conn is not None:
+                    try:
+                        conn.Close()
+                    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+                        pass
         except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             # Everything the worker can raise has to be handed back, not left to die on the thread:
             # `main` classifies on the exception text, and an unhandled thread exception would reach
             # it as "worker returned no result" - a generic failure masking a specific, actionable one.
             result["ok"] = exc
-        finally:
-            if conn is not None:
-                try:
-                    conn.Close()
-                except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                    pass
 
     worker = threading.Thread(target=_run, name="xmla-refresh", daemon=True)
     try:
@@ -662,6 +711,7 @@ def refresh(
             initial_state=initial_state,
             total_timeout=total_timeout,
             progress_monitor=progress_monitor,
+            observation_mode=return_observation,
         )
         if worker.is_alive():
             if desktop_pid is not None:
@@ -684,16 +734,19 @@ def refresh(
             )
     finally:
         if progress_monitor is not None:
-            progress_monitor.close()
+            try:
+                progress_monitor.close()
+            except Exception:  # pylint: disable=broad-exception-caught
+                if not return_observation:
+                    raise
+                print("[progress] teardown unavailable (TOOL_UNAVAILABLE)")
 
     outcome = result.get("ok")
     if isinstance(outcome, BaseException):
         raise outcome
     if outcome is None:  # pragma: no cover - defensive; the worker always records something
         raise RuntimeError("refresh worker returned no result")
-    if observations is not None:
-        observations.append(result["observation"])
-    return outcome
+    return result["observation"] if return_observation else outcome
 
 
 # pylint: enable=too-many-arguments,too-many-statements
@@ -825,6 +878,7 @@ class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
         clock=time.monotonic,
         printer=print,
         current_event_values: set[str] | None = None,
+        observation_mode: bool = False,
     ) -> None:
         self.trace = trace
         self.server = server
@@ -832,7 +886,8 @@ class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
         self.liveness_seconds = liveness_seconds
         self.throttle_seconds = throttle_seconds
         self.clock = clock
-        self.printer = printer
+        self.printer = (lambda *_args, **_kwargs: None) if observation_mode else printer
+        self._observation_mode = observation_mode
         self._lock = threading.Lock()
         self._started_at = clock()
         self._last_event_at = self._started_at
@@ -941,11 +996,13 @@ class RefreshProgressMonitor:  # pylint: disable=too-many-instance-attributes
             try:
                 self.trace.Stop()
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                print(f"[progress] trace stop failed ({type(exc).__name__}: {exc})")
+                detail = "TOOL_UNAVAILABLE" if self._observation_mode else f"{type(exc).__name__}: {exc}"
+                print(f"[progress] trace stop failed ({detail})")
             try:
                 self.trace.Drop()
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-                print(f"[progress] trace drop failed ({type(exc).__name__}: {exc})")
+                detail = "TOOL_UNAVAILABLE" if self._observation_mode else f"{type(exc).__name__}: {exc}"
+                print(f"[progress] trace drop failed ({detail})")
         if self.server is not None:
             try:
                 self.server.Disconnect()
@@ -1038,7 +1095,9 @@ def _negotiate_progress_trace_columns(trace, trace_event_class, trace_column, tr
     raise RuntimeError("progress trace column negotiation did not converge")
 
 
-def _start_refresh_progress_trace(port: int, liveness_seconds: float) -> RefreshProgressMonitor:
+def _start_refresh_progress_trace(
+    port: int, liveness_seconds: float, *, observation_mode: bool = False
+) -> RefreshProgressMonitor:
     """Start a server-level progress trace, or raise so the caller can safely degrade."""
     server_type, trace_column, trace_event_class, trace_event_type = _load_amo_trace_types()
     server = server_type()
@@ -1054,6 +1113,7 @@ def _start_refresh_progress_trace(port: int, liveness_seconds: float) -> Refresh
             trace_column,
             liveness_seconds=liveness_seconds,
             current_event_values=_progress_event_values(trace_event_class, "ProgressReportCurrent"),
+            observation_mode=observation_mode,
         )
         trace.OnEvent += monitor.handle_event
         setattr(trace, "_py_progress_handler", monitor.handle_event)  # noqa: B010
@@ -1237,7 +1297,9 @@ def _persist_image(  # pylint: disable=too-many-arguments
     lock_timeout: float = PERSIST_LOCK_TIMEOUT_SECONDS,
     *,
     on_observation=None,
-) -> tuple[bool, str]:
+    return_observation: bool = False,
+    final_check=None,
+) -> tuple[bool, str] | ImageObservation:
     """Align compat, stage the cache write, and restore metadata only when no installation occurred.
 
     Pure-Python (no .NET), so the guarantees are unit-testable without a live AS instance.
@@ -1254,15 +1316,32 @@ def _persist_image(  # pylint: disable=too-many-arguments
     lock is reclaimed rather than blocking forever, and a live holder that overruns ``lock_timeout``
     surfaces as :class:`ModelLockTimeout` rather than an unbounded wait.
     """
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = cache_path.with_name(cache_path.name + ".lock")
-    with model_lock(lock_path, timeout=lock_timeout):
-        return _persist_image_locked(cache_path, model_dir, live_level, write_image, on_observation=on_observation)
+    _validate_observation_request(return_observation, on_observation)
+    with _observation_errors(return_observation, preserve=(CompatRollbackError, ModelLockTimeout)):
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = cache_path.with_name(cache_path.name + ".lock")
+        with model_lock(lock_path, timeout=lock_timeout):
+            observation = _persist_image_locked(
+                cache_path,
+                model_dir,
+                live_level,
+                write_image,
+                return_observation=return_observation,
+                final_check=final_check,
+            )
+        return observation
 
 
-def _persist_image_locked(
-    cache_path: Path, model_dir: Path | None, live_level: int, write_image, *, on_observation=None
-) -> tuple[bool, str]:
+def _persist_image_locked(  # pylint: disable=too-many-arguments
+    cache_path: Path,
+    model_dir: Path | None,
+    live_level: int,
+    write_image,
+    *,
+    on_observation=None,
+    return_observation: bool = False,
+    final_check=None,
+) -> tuple[bool, str] | ImageObservation:
     """The persist transaction itself, run while the per-model lock is held (see :func:`_persist_image`).
 
     ``KeyboardInterrupt`` handling is the subtle part (issue #113 route 2). The commit-detection and
@@ -1273,18 +1352,21 @@ def _persist_image_locked(
     rollback. If the rollback itself fails, :class:`CompatRollbackError` is raised INSTEAD (chained
     from the interrupt): a bricked project matters more than a tidy Ctrl+C.
     """
+    _validate_observation_request(return_observation, on_observation)
     rollback_paths = _compat_rollback_paths(model_dir)
     snapshot = _snapshot_rollback_paths(rollback_paths)
     staging = _staging_path(cache_path)
     installation = _ImageInstallation()
-    observations = [] if on_observation is not None else None
+    intended = None
     write_error: BaseException | None = None
     pending_declaration: tuple[Path, Path, str, str, str] | None = None
     try:
         aligned, pending_declaration = _align_compatibility(model_dir, live_level, defer_declaration=True)
-        if aligned:
+        if aligned and not return_observation:
             print(f"  save   : {aligned}")
-        _staged_image_write(cache_path, write_image, staging, observations=observations, installation=installation)
+        intended = _staged_image_write(
+            cache_path, write_image, staging, installation=installation, return_observation=return_observation
+        )
     except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught  # KeyboardInterrupt must NOT bypass rollback; commit judged below by the filesystem
         write_error = exc
 
@@ -1292,10 +1374,15 @@ def _persist_image_locked(
         _cleanup_staging(staging)
         if pending_declaration is not None:
             _append_generated_edit_declaration(*pending_declaration)
-        if on_observation is not None:
+        if return_observation:
             if write_error is not None:
                 raise write_error
-            on_observation(observations[0])
+            installed = _checked_image(cache_path)
+            if installed != intended:
+                raise CompatRollbackError("installed cache differs from the intended image; observation unavailable")
+            if final_check is not None:
+                final_check()
+            return ImageObservation(intended[0], intended[1], installed[0], installed[1])
         size_note = f"{installation.size / 1024:.1f} KB, "
         return True, f"persisted via AMO ImageSave ({size_note}compatibilityLevel {live_level})"
 
@@ -1318,17 +1405,40 @@ def _persist_image_locked(
         # consistent again, so re-raise. For an interrupt this honours the Ctrl+C; for an ordinary
         # ImageSave failure the caller falls back to the UI save.
         raise write_error
+    if return_observation:
+        raise ObservationUnavailable("TOOL_UNAVAILABLE")
     return False, "ImageSave did not produce a complete cache file (compatibility alignment rolled back)"
 
 
-def image_save(
+def image_save(  # pylint: disable=too-many-arguments
     port: int,
     cache_path: Path,
     model_dir: Path | None = None,
     *,
     bound: BoundDesktop | None = None,
     on_persist=None,
-):
+    return_observation: bool = False,
+) -> tuple[bool, str] | PersistenceObservation:
+    """Return the legacy save tuple, or this invocation's bound ImageSave/readback observation.
+
+    An exact True opts into closed errors and requires a binding. The retired ``on_persist`` sink
+    refuses all non-None values. Nothing is published until finalization, the two bounded cache
+    passes, compatibility declaration, final recheck, lock exit and AMO teardown have completed.
+    This is neither a durable-write barrier nor proof of a cold reopen.
+    """
+    _validate_observation_request(return_observation, on_persist)
+    with _observation_errors(return_observation, preserve=(CompatRollbackError, ModelLockTimeout)):
+        return _image_save(port, cache_path, model_dir, bound=bound, return_observation=return_observation)
+
+
+def _image_save(
+    port: int,
+    cache_path: Path,
+    model_dir: Path | None,
+    *,
+    bound: BoundDesktop | None,
+    return_observation: bool,
+) -> tuple[bool, str] | PersistenceObservation:
     """Persist the in-memory model to ``<Name>.SemanticModel/.pbi/cache.abf`` via AMO ``ImageSave``.
 
     ⚠️ **A cache is only loadable if its compatibility level MATCHES the project's**, so this
@@ -1351,7 +1461,7 @@ def image_save(
     never written. Note the client throws "The server sent an unrecognizable response" while writing
     correctly, so success is judged by the FILE, never by the absence of an exception.
     """
-    if on_persist is not None and bound is None:
+    if return_observation and bound is None:
         raise ObservationUnavailable("IDENTITY_UNESTABLISHED")
     if bound is not None:
         if bound.identity.port != port:
@@ -1391,26 +1501,32 @@ def image_save(
             finally:
                 stream.Close()
 
-        def record(observation: ImageObservation) -> None:
+        def final_check() -> None:
             if desktop_identity(bound.identity.pid) != bound.identity:
                 raise ObservationUnavailable("PID_REUSED")
             current = list(server.Databases)
             if len(current) != 1 or str(current[0].ID) != bound.catalogue:
                 raise ObservationUnavailable("CATALOGUE_CHANGED")
-            blob = cache_path.read_bytes()
-            if (
-                hashlib.sha256(blob).hexdigest() != observation.installed_sha256
-                or len(blob) != observation.installed_size
-            ):
-                raise CompatRollbackError("installed cache changed before observation; do NOT fall back to UI Save")
-            if on_persist is not None:
-                on_persist(PersistenceObservation(bound.catalogue, live_level, observation))
 
-        return _persist_image(
-            cache_path, model_dir, live_level, write_image, on_observation=record if on_persist is not None else None
+        outcome = _persist_image(
+            cache_path,
+            model_dir,
+            live_level,
+            write_image,
+            return_observation=return_observation,
+            final_check=final_check if return_observation else None,
         )
     finally:
-        server.Disconnect()
+        if return_observation:
+            try:
+                server.Disconnect()
+            except Exception:  # pylint: disable=broad-exception-caught
+                print("[save] AMO disconnect unavailable (TOOL_UNAVAILABLE)")
+        else:
+            server.Disconnect()
+    if return_observation:
+        return PersistenceObservation(bound.catalogue, live_level, outcome, bound.identity)
+    return outcome
 
 
 def save(pid: int) -> tuple[bool, str]:
@@ -1878,6 +1994,9 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
                     "REFRESH: NOT_PERSISTED (a concurrent persist of this model holds the lock; "
                     "data is in memory only). Wait for the other run to finish and retry."
                 )
+                return 1
+            except ObservationUnavailable:
+                print("REFRESH: NOT_PERSISTED (observation unavailable; do NOT fall back to UI Save)")
                 return 1
             except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
                 saved, save_message = False, f"ImageSave unavailable ({type(exc).__name__}); falling back to UI"
