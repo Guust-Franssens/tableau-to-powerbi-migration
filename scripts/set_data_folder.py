@@ -102,14 +102,21 @@ def _data_tail(value: str) -> str | None:
     file it reads is not there. Nothing downstream can see that: the model stays structurally perfect
     and fails at refresh, on someone else's machine.
 
-    Read from the LAST `data` segment, so a checkout that itself lives under a folder called `data`
-    cannot truncate the tail in the wrong place.
+    A package value has an explicit `<PACKAGE_ROOT>/data` boundary. Everything after it belongs
+    to the tail, even another `data`. Package planning first projects held bound values onto that
+    portable boundary; the legacy checkout-only fallback still reads from the last `data`.
 
     ⚠️ Returned `/`-joined and SEPARATOR-FREE of intent: the caller composes it onto the destination
     with that destination's own separator (:func:`path_flavour.join`). Joining it here with a literal
     backslash is what wrote `/tmp/package\\data\\...` on POSIX - one path segment with backslashes
     inside it - and then reported the directory missing (round-2 finding 4).
     """
+    if value.startswith(PACKAGE_PLACEHOLDER):
+        portable = value.replace("\\", "/")
+        boundary = f"{PACKAGE_PLACEHOLDER}/{DATA_SEGMENT}"
+        if portable == boundary:
+            return ""
+        return portable[len(boundary) + 1 :].rstrip("/") if portable.startswith(f"{boundary}/") else None
     parts = [part for part in re.split(r"[\\/]", value) if part]
     lowered = [part.casefold() for part in parts]
     if DATA_SEGMENT not in lowered:
@@ -191,8 +198,8 @@ def _package(
     result = bind_package(
         str(root), rewrite=_rewritten, inspect=inspect, sanitize=sanitize, provider_packages=providers
     )
-    print(json.dumps(result, ensure_ascii=True))
-    return result["exit_code"]
+    print(json.dumps(result.as_dict(), ensure_ascii=True))
+    return result.exit_code
 
 
 def _unresolved(text: str) -> list[str]:

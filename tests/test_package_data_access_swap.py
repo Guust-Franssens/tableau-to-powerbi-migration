@@ -31,9 +31,10 @@ def test_binding_final_inspection_is_inside_swap_before_retired_cleanup(
 
     def inspecting(*args, **kwargs):
         assert events == ["rename"] and retired.is_dir()
-        final(*args, **kwargs)
+        inspection = final(*args, **kwargs)
         assert pkg.pri.verify_s1(root).integrity.is_clean
         events.append("final-s1-exact-inspection-cohort")
+        return inspection
 
     def cleaning(path):
         if path == retired:
@@ -46,6 +47,7 @@ def test_binding_final_inspection_is_inside_swap_before_retired_cleanup(
     monkeypatch.setattr(pkg, "_discard_scratch", cleaning)
     result = _binding_cli(root)
     assert result["exit_code"] == 0 and result["outcome"] == "published"
+    assert result["inspection"]["state"] == "BOUND" and result["inspection"]["validation"] == "UNVALIDATED"
     assert events == ["rename", "final-s1-exact-inspection-cohort", "cleanup"]
 
 
@@ -103,12 +105,14 @@ def test_binding_publication_failure_reports_exact_directory_state(
         "cleanup-interrupt": ("published-with-residue", 130, ["cleanup"]),
     }
     assert (result["outcome"], result["exit_code"], hits) == expected[failure]
+    assert len(list(root.parent.rglob(pkg.MANIFEST_NAME))) <= 1
     assert not staged.exists()
     if failure == "rollback":
         assert not root.exists() and _files(retired) == before
     elif failure.startswith("cleanup"):
-        assert _files(retired) == before
+        assert _files(retired) == {key: raw for key, raw in before.items() if key != pkg.MANIFEST_NAME}
         assert root.lstat().st_ino != original_id and pkg.pri.verify_s1(root).integrity.is_clean
+        assert result["inspection"]["state"] == "BOUND"
     else:
         assert _files(root) == before and root.lstat().st_ino == original_id
         assert not retired.exists()
@@ -179,6 +183,7 @@ def test_binding_final_authorities_reject_at_the_final_root_not_after_cleanup(
     }
     assert (result["exit_code"], result["codes"]) == (expected[fault][0], [expected[fault][1]])
     assert _files(root) == before and not staged.exists() and not retired.exists()
+    assert len(list(root.parent.rglob(pkg.MANIFEST_NAME))) == 1
 
 
 @pytest.mark.parametrize("barrier", ["marker", "malformed", "acl", "query-failure"])
@@ -288,6 +293,7 @@ def test_binding_interrupts_never_report_an_unknown_publication_as_unchanged(
     result = _binding_cli(root)
     assert hits == [True]
     assert result["exit_code"] == 130
+    assert len(list(root.parent.rglob(pkg.MANIFEST_NAME))) <= 1
     assert (
         result["outcome"]
         == {
@@ -306,6 +312,133 @@ def test_binding_interrupts_never_report_an_unknown_publication_as_unchanged(
         assert _binding_cli(root, "--inspect")["exit_code"] == 0
     else:
         assert _files(root) == before and not retired.exists()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "staging-cleanup",
+        "rollback-candidate",
+        "rollback-original",
+        "unknown-original",
+        "staged-marker-unlink",
+        "retired-marker-unlink",
+        "retired-marker-interrupt",
+        "retired-marker-hide",
+    ],
+)
+def test_binding_cleanup_and_obstructed_recovery_close_package_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """The filesystem's surviving markers, not the returned outcome, are the independent oracle."""
+    root = _binding_package(tmp_path)
+    before = _files(root)
+    staged, retired = pkg.staging_dir(root.parent, root.name), pkg.retired_dir(root)
+    stage, final = pkg._binding_stage, pkg._binding_final
+    rename, cleanup, directory_id, unlink = (
+        pkg._rename_retrying,
+        pkg._discard_scratch,
+        pkg._package_directory_id,
+        Path.unlink,
+    )
+    hits = []
+    refused = []
+    stage_failure = failure in ("staging-cleanup", "staged-marker-unlink")
+
+    def staging(*args, **kwargs):
+        identity = stage(*args, **kwargs)
+        if stage_failure:
+            hits.append("stage")
+            raise pkg._BindingRefusal("binding_candidate_changed")
+        return identity
+
+    def inspecting(*args, **kwargs):
+        if failure.startswith("rollback") or failure == "unknown-original":
+            refused.append(True)
+            raise pkg._BindingRefusal("binding_final_inspection_failed", 1)
+        return final(*args, **kwargs)
+
+    def moving(source, destination):
+        obstructed = (
+            (failure == "rollback-candidate" and source == root and destination == staged)
+            or (failure == "rollback-original" and source == retired and destination == root)
+            or (failure == "retired-marker-hide" and source == retired / pkg.MANIFEST_NAME)
+        )
+        if obstructed:
+            hits.append("rename")
+            raise OSError("private-rename-canary")
+        return rename(source, destination)
+
+    def identity(location):
+        result = directory_id(location)
+        if failure == "unknown-original" and refused and location == retired:
+            hits.append("identity")
+            return result[0], result[1] + 1
+        return result
+
+    def cleaning(location):
+        if (location == staged and (stage_failure or failure == "rollback-original")) or (
+            location == retired and failure.startswith("retired-marker")
+        ):
+            hits.append("cleanup")
+            return "private-cleanup-canary"
+        return cleanup(location)
+
+    def removing(path, *args, **kwargs):
+        target = staged if failure == "staged-marker-unlink" else retired
+        if "marker" in failure and path == target / pkg.MANIFEST_NAME:
+            hits.append("unlink")
+            if failure == "retired-marker-interrupt":
+                raise KeyboardInterrupt()
+            raise PermissionError("private-marker-canary")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(pkg, "_binding_stage", staging)
+    monkeypatch.setattr(pkg, "_binding_final", inspecting)
+    monkeypatch.setattr(pkg, "_rename_retrying", moving)
+    monkeypatch.setattr(pkg, "_package_directory_id", identity)
+    monkeypatch.setattr(pkg, "_discard_scratch", cleaning)
+    monkeypatch.setattr(Path, "unlink", removing)
+    result = _binding_cli(root)
+    assert hits and result["exit_code"] != 0
+    assert "private-" not in json.dumps(result)
+    discovered = set(root.parent.rglob(pkg.MANIFEST_NAME))
+    assert len(discovered) <= 1, "a failed transaction exposed more than one package"
+    if failure.startswith("rollback"):
+        assert discovered == {retired / pkg.MANIFEST_NAME}
+        assert _files(retired) == before
+        assert (result["outcome"], result["exit_code"], result["codes"]) == (
+            "cannot-establish",
+            3,
+            ["binding_rollback_failed"],
+        )
+        assert result["inspection"] == {}
+    elif failure == "unknown-original":
+        assert discovered == set()
+        assert (result["outcome"], result["exit_code"], result["codes"]) == (
+            "cannot-establish",
+            3,
+            ["binding_discovery_unassessable"],
+        )
+        assert _files(retired) == {key: raw for key, raw in before.items() if key != pkg.MANIFEST_NAME}
+        assert (root / "fabric").is_dir(), "uncertain recovery evidence must not be deleted"
+    elif stage_failure:
+        assert discovered == {root / pkg.MANIFEST_NAME} and _files(root) == before
+        assert (result["outcome"], result["exit_code"]) == ("unchanged", 3)
+    elif failure == "retired-marker-hide":
+        assert discovered == {retired / pkg.MANIFEST_NAME} and _files(retired) == before
+        assert (result["outcome"], result["exit_code"], result["codes"]) == (
+            "cannot-establish",
+            3,
+            ["binding_discovery_unassessable"],
+        )
+        assert result["inspection"] == {}
+    else:
+        assert discovered == {root / pkg.MANIFEST_NAME}
+        assert result["outcome"] == "published-with-residue"
+        assert result["exit_code"] == (130 if failure == "retired-marker-interrupt" else 1)
+        assert result["inspection"]["state"] == "BOUND"
+        assert (retired / f".{pkg.MANIFEST_NAME}.retired").read_bytes() == before[pkg.MANIFEST_NAME]
 
 
 @pytest.mark.parametrize("change", ["spec", "localized_data", "brief", "projection"])

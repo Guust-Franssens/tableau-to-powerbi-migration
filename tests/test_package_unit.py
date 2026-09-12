@@ -1467,6 +1467,44 @@ def test_binding_admission_refuses_before_staging(tmp_path: Path, monkeypatch: p
     assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
+@pytest.mark.parametrize("seam", ["root-lstat", "parent-lstat", "resolve-os", "resolve-loop", "resolve-value"])
+def test_binding_unassessable_admission_is_path_free_and_distinct_from_internal_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
+) -> None:
+    root = _binding_package(tmp_path)
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    reached = []
+    original = Path.lstat if seam.endswith("lstat") else Path.resolve
+    target = root.parent if seam == "parent-lstat" else root
+
+    def uncertain(path, *args, **kwargs):
+        if path == target:
+            reached.append(seam)
+            exception = {"resolve-loop": RuntimeError, "resolve-value": ValueError}.get(seam, PermissionError)
+            raise exception(f"private-admission-canary {root}")
+        return original(path, *args, **kwargs)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("unassessable admission must precede staging")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "lstat" if seam.endswith("lstat") else "resolve", uncertain)
+        patch.setattr(pkg, "_binding_stage", forbidden)
+        result = _binding_cli(root)
+    assert reached == [seam]
+    assert (result["exit_code"], result["outcome"], result["codes"]) == (3, "unchanged", ["binding_root_unassessable"])
+    assert "private-admission-canary" not in json.dumps(result)
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    def internal(_root):
+        raise OSError(f"private-internal-canary {root}")
+
+    monkeypatch.setattr(pkg, "_binding_hold", internal)
+    result = _binding_cli(root)
+    assert (result["exit_code"], result["codes"]) == (3, ["binding_cannot_establish"])
+    assert "private-internal-canary" not in json.dumps(result)
+
+
 @pytest.mark.parametrize("location", ["profile", "home", "tmp"])
 def test_binding_profile_home_and_tmp_are_local_work_not_a_shareability_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str

@@ -307,6 +307,98 @@ def _binding_cli(root: str | Path, *flags: str) -> dict:
     return result
 
 
+def _binding_tail_package(parent: Path, tail: str, trailing: bool) -> Path:
+    """A clean portable fixture with literal, independently placed later-data segments."""
+    root = _binding_package(parent, folder=True)
+    original, target = root / "data" / "Extract.Data", root / "data" / tail
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original.rename(target)
+    path = next((root / "fabric").glob("*.SemanticModel/definition/expressions.tmdl"))
+    old = f"<PACKAGE_ROOT>{os.sep}data{os.sep}Extract.Data"
+    new = f"<PACKAGE_ROOT>{os.sep}data{os.sep}{tail.replace('/', os.sep)}" + (os.sep if trailing else "")
+    raw = path.read_bytes()
+    assert raw.count(old.encode()) == 1
+    path.write_bytes(raw.replace(old.encode(), new.encode()))
+    manifest_path = root / "package-manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    for row in manifest["data_sources"]["shipped"]:
+        row["path"] = row["path"].replace("data/Extract.Data/", f"data/{tail}/")
+    manifest["contents"]["files"] = pkg.package_contents(root)
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    assert (target / "rows.csv").read_bytes() == b"value\n7\n"
+    return root
+
+
+@pytest.mark.parametrize("tail", ["data", "north/data/leaf", "data/north/data", "data/data"])
+def test_binding_root_boundary_preserves_every_later_segment(tmp_path: Path, tail: str) -> None:
+    root = _binding_tail_package(tmp_path, tail, True)
+    held = pkg._binding_hold(root)
+    portable = f"<PACKAGE_ROOT>{os.sep}data{os.sep}{tail.replace('/', os.sep)}{os.sep}"
+    bound = str(root / "data" / tail) + os.sep
+    text = f'expression Folder = "{portable}"\n'
+    rewritten, count, untouched = sdf._rewritten(text, str(root))
+    assert rewritten == text.replace(portable, bound), "portable rewriting truncated the declared data tail"
+    assert (count, untouched) == (1, [])
+    for value in (portable, bound):
+        assert pkg._binding_relative(held, root, value, '#"Extract Folder"') == f"data/{tail}", (
+            "held-root parsing truncated the declared data tail"
+        )
+
+
+@pytest.mark.parametrize("tail", ["data", "north/data/leaf", "data/north/data", "data/data"])
+@pytest.mark.parametrize("trailing", [False, True])
+def test_binding_later_data_segments_survive_planning_inspection_and_public_lifecycle(
+    tmp_path: Path, tail: str, trailing: bool
+) -> None:
+    root = _binding_tail_package(tmp_path / "data", tail, trailing)
+    expression = f"fabric/{UNIT}.SemanticModel/definition/expressions.tmdl"
+    portable = (root / expression).read_bytes()
+    value = f"<PACKAGE_ROOT>{os.sep}data{os.sep}{tail.replace('/', os.sep)}" + (os.sep if trailing else "")
+    held = pkg._binding_hold(root)
+    planned = pkg._binding_plan(held, root, False, sdf._rewritten)
+    bound = str(root / "data" / tail) + (os.sep if trailing else "")
+    assert planned[expression] == portable.replace(value.encode(), bound.encode())
+    before = _binding_cli(root, "--inspect")
+    assert before["inspection"]["state"] == "UNBOUND"
+    assert before["inspection"]["parameters"][0]["data_tail"] == f"data/{tail}"
+    first = _binding_cli(root)
+    assert first["exit_code"] == 0 and first["inspection"]["state"] == "BOUND"
+    assert (root / expression).read_bytes() == planned[expression]
+    recipient = tmp_path / "data" / "recipient" / root.name
+    shutil.copytree(root, recipient)
+    for current, moved in ((root, False), (recipient, True)):
+        inspection = _binding_cli(current, "--inspect")
+        row = inspection["inspection"]["parameters"][0]
+        assert row["data_tail"] == f"data/{tail}" and row["target_exists"]
+        assert row["trailing_separator"] is trailing and row["current_root_match"] is not moved
+        if moved:
+            assert inspection["exit_code"] == 1
+        rebound = _binding_cli(current)
+        assert rebound["exit_code"] == 0 and rebound["inspection"]["validation"] == "UNVALIDATED"
+        bound = str(current / "data" / tail) + (os.sep if trailing else "")
+        assert (current / expression).read_bytes() == portable.replace(value.encode(), bound.encode())
+        assert (Path(bound) / "rows.csv").read_bytes() == b"value\n7\n"
+        sanitized = _binding_cli(current, "--sanitize")
+        assert sanitized["exit_code"] == 0 and sanitized["inspection"]["state"] == "UNBOUND"
+        assert sanitized["codes"] == ["binding_unbound"]
+        assert (current / expression).read_bytes() == portable
+
+
+def test_binding_a_package_named_data_does_not_lose_its_nested_data_tail(tmp_path: Path) -> None:
+    root = _binding_tail_package(tmp_path / "source", "data/north/data", True)
+    renamed = root.with_name("data")
+    root.rename(renamed)
+    assert _binding_cli(renamed)["exit_code"] == 0
+    recipient = tmp_path / "recipient" / "data"
+    shutil.copytree(renamed, recipient)
+    inspection = _binding_cli(recipient, "--inspect")
+    assert inspection["inspection"]["state"] == "UNBOUND"
+    assert inspection["inspection"]["parameters"][0]["data_tail"] == "data/data/north/data"
+    assert _binding_cli(recipient)["exit_code"] == 0
+    assert _binding_cli(recipient, "--sanitize")["exit_code"] == 0
+
+
 @pytest.mark.parametrize("step", ["bind", "inspect", "sanitize", "transfer", "rebind"])
 def test_binding_lifecycle_public_commands_have_distinct_evidence(tmp_path: Path, step: str) -> None:
     """S1 owns bytes; inspection owns current location, not reference readiness or shareability."""
@@ -326,6 +418,8 @@ def test_binding_lifecycle_public_commands_have_distinct_evidence(tmp_path: Path
         assert _binding_cli(root)["exit_code"] == 0
     inspection = _binding_cli(root, "--inspect")
     assert inspection["exit_code"] == (1 if step in ("sanitize", "transfer") else 0)
+    assert inspection["inspection"]["state"] == ("UNBOUND" if step in ("sanitize", "transfer") else "BOUND")
+    assert inspection["inspection"]["validation"] == "UNVALIDATED"
     rows = inspection["inspection"]["parameters"]
     assert len(rows) == 1 and rows[0]["target_exists"]
     assert rows[0]["current_root_match"] == (step not in ("sanitize", "transfer"))

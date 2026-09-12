@@ -16,7 +16,7 @@ import test_data_access_contract as authority
 import test_package_role_identity as s2
 import test_package_unit_reproductions as producer
 from test_data_access_contract import _root_fixture  # noqa: F401  # shared pytest fixture
-from test_package_unit_gates import DS_LUID, UNIT, _binding_cli, _binding_package, _brief, _bundle, pkg
+from test_package_unit_gates import DS_LUID, UNIT, _binding_cli, _binding_package, _brief, _bundle, pkg, sdf
 
 
 def _files(root: Path) -> dict[str, bytes]:
@@ -56,6 +56,50 @@ def test_binding_changes_only_the_exact_owned_bytes_and_corresponding_hashes(tmp
     assert _files(root) == after
 
 
+@pytest.mark.parametrize("mode", ["bind", "inspect", "idempotent", "sanitize"])
+def test_binding_inspection_holds_current_s1_s2_and_the_publication_callback_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    root = _binding_package(tmp_path)
+    if mode != "bind":
+        assert _binding_cli(root)["exit_code"] == 0
+    original_id = pkg._package_directory_id(root)
+    captured = []
+    final = pkg._binding_final
+
+    def capture(*args, **kwargs):
+        inspection = final(*args, **kwargs)
+        assert pkg.retired_dir(root).is_dir(), "inspection must precede retired cleanup"
+        captured.append(inspection)
+        return inspection
+
+    monkeypatch.setattr(pkg, "_binding_final", capture)
+    result = pkg.bind_package(root, rewrite=sdf._rewritten, inspect=mode == "inspect", sanitize=mode == "sanitize")
+    assert result.exit_code == 0
+    inspection = result.inspection
+    assert isinstance(inspection, pkg.PackageBindingInspection)
+    assert inspection.state == ("UNBOUND" if mode == "sanitize" else "BOUND")
+    assert inspection.validation == "UNVALIDATED"
+    held = inspection.authority
+    assert held.roots == (root,)
+    snapshot, role = held.packages[-1].snapshot, held.roles[-1]
+    assert snapshot.directory_id == pkg._package_directory_id(root)
+    assert snapshot.manifest == (root / "package-manifest.json").read_bytes()
+    assert snapshot.verified.root == role.verified.root == root
+    assert snapshot.verified.integrity.is_clean and role.verified.integrity.is_clean
+    handoff = role.data_access_handoff(root)
+    assert isinstance(handoff, pkg.pri.PackageDataAccessHandoff)
+    assert handoff.migration_spec.content == snapshot.spec
+    assert handoff.data_access.content == (root / "data-access.json").read_bytes()
+    if mode in ("bind", "sanitize"):
+        assert len(captured) == 1 and inspection is captured[0]
+        assert snapshot.directory_id != original_id
+    else:
+        assert not captured and snapshot.directory_id == original_id
+    assert str(root) not in json.dumps(result.as_dict())
+    assert "authority" not in result.as_dict()["inspection"]
+
+
 @pytest.mark.parametrize(
     "seam", ["planner", "digest", "unrelated", "concurrent-reseal", "directory", "empty-directory"]
 )
@@ -63,8 +107,6 @@ def test_binding_mutations_reach_their_intended_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
 ) -> None:
     """Each mutant crosses the named boundary; unrelated setup failure cannot count as a kill."""
-    from test_package_unit_gates import sdf  # pylint: disable=import-outside-toplevel
-
     root = _binding_package(tmp_path)
     before = _files(root)
     hits = []
@@ -132,8 +174,6 @@ def test_binding_mutations_reach_their_intended_authority(
 
 
 def test_binding_legacy_dirty_baseline_is_not_repaired(tmp_path: Path) -> None:
-    from test_package_unit_gates import sdf  # pylint: disable=import-outside-toplevel
-
     root = _binding_package(tmp_path)
     path = root / f"fabric/{UNIT}.SemanticModel/definition/expressions.tmdl"
     text, count, _untouched = sdf._rewritten(path.read_text(encoding="utf-8"), str(root))
@@ -192,13 +232,24 @@ def test_binding_provider_cohort_is_explicit_ordered_read_only_and_independently
     for path in providers:
         assert _binding_cli(path)["exit_code"] == 0
     before = [_files(path) for path in (*providers, consumer)]
-    assert _binding_cli(consumer, *flags)["exit_code"] == 0
+    binding = _binding_cli(consumer, *flags)
+    assert binding["exit_code"] == 0 and binding["codes"] == ["binding_not_applicable"]
     result = _binding_cli(consumer, "--inspect", *flags)
-    assert result["exit_code"] == 0
+    assert result["exit_code"] == 0 and result["codes"] == ["binding_not_applicable"]
+    assert result["inspection"]["state"] == "NOT_APPLICABLE"
     assert result["inspection"]["applicability"] == "not_applicable"
     assert result["inspection"]["provider_ordinals"] == [1 if reverse else 0]
     assert before == [_files(path) for path in (*providers, consumer)]
-    assert _binding_cli(consumer, "--sanitize")["exit_code"] == 0, "no local parameters need a provider to sanitize"
+    sanitized = _binding_cli(consumer, "--sanitize")
+    assert sanitized["exit_code"] == 0, "no local parameters need a provider to sanitize"
+    assert sanitized["codes"] == ["binding_not_applicable"]
+    assert sanitized["inspection"]["state"] == "NOT_APPLICABLE"
+    current = pkg.bind_package(consumer, rewrite=sdf._rewritten, inspect=True, provider_packages=providers)
+    assert current.inspection.authority.roots == (*providers, consumer)
+    assert (
+        current.inspection.authority.roles[-1].data_access_handoff(consumer).data_access.content
+        == (consumer / "data-access.json").read_bytes()
+    )
 
 
 @pytest.mark.parametrize("fault", ["missing", "duplicate", "wrong", "dirty", "blocked", "nested"])
@@ -347,6 +398,7 @@ def test_binding_existing_data_access_is_required_and_never_upgraded(
     result = _binding_cli(root)
     if state == "authorized_model_only":
         assert result["exit_code"] == 0
+        assert result["inspection"]["state"] == "BOUND" and result["inspection"]["validation"] == "UNVALIDATED"
         assert (root / "data-access.json").read_bytes() == before["data-access.json"]
         assert pkg.data_access.read_data_access(path).max_phase2_claim == "structural_only"
     else:
