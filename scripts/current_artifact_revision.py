@@ -24,6 +24,7 @@ from bundle_corpus import is_reparse_entry
 
 REVISION_PREFIX = "sha256:"
 CACHE_RELPATH = (".pbi", "cache.abf")
+PACKAGE_MANIFEST = "package-manifest.json"
 IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", re.ASCII)
 
 
@@ -130,6 +131,11 @@ def package_working_revision(package: Path, model_dir: Path | None = None) -> st
     """Current package bytes, not its stale packaging-time contents declaration."""
     cache = model_dir.joinpath(*CACHE_RELPATH).relative_to(package).as_posix() if model_dir else None
     return _revision(package, excluded_file=cache, iterations=True)
+
+
+def package_manifest_excluded_revision(package: Path) -> str:
+    """Current package bytes under the existing revision algorithm, excluding only its manifest."""
+    return _revision(package, excluded_file=PACKAGE_MANIFEST)
 
 
 def report_revision(report_dir: Path) -> str:

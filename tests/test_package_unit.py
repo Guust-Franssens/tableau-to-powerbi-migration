@@ -44,7 +44,6 @@ import manifest_scope as ms  # noqa: E402  # pylint: disable=wrong-import-positi
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
 import path_flavour as pf  # noqa: E402  # pylint: disable=wrong-import-position
 import reference_evidence as rev  # noqa: E402  # pylint: disable=wrong-import-position
-import set_data_folder as sdf  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import KEEP, REPORT_ALLOW, Rows, project  # noqa: E402  # pylint: disable=wrong-import-position
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
     write_engine_report,
@@ -1359,8 +1358,9 @@ def test_the_data_folder_parameter_names_a_PLACEHOLDER_not_the_machine_that_buil
     the builder's own output folder, so moving the handover package left its rows present on disk
     and unreachable, and shipped a `C:\\Users\\<name>\\...` to a customer.
 
-    The shipped value is a placeholder; binding resolves it, and that is asserted here end to end
-    rather than trusted, because a placeholder nobody can resolve is not an improvement.
+    The shipped value is a placeholder. Issue #622's guarded binding transition is exercised against
+    an authority-complete package in `test_package_binding.py`; this construction control stops at
+    the portable bytes and must not mutate or authorize them.
     """
     root = _package_with_receipt(tmp_path)
     expressions = (_model_definition(root) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8")
@@ -1376,18 +1376,12 @@ def test_the_data_folder_parameter_names_a_PLACEHOLDER_not_the_machine_that_buil
 
     binding = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))["data_sources"]["binding"]
     assert binding["state"] == "unbound" and binding["token"] == pkg.PACKAGE_ROOT_TOKEN
-    assert sdf._package(root) == 0, "the package could not be bound to its own location"  # noqa: SLF001
-    bound = re.search(
-        rf'expression {pkg.DATA_FOLDER_PARAM} = "([^"]+)"',
-        (_model_definition(root) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8"),
-    )
-    assert bound is not None
-    named = Path(bound.group(1))
-    assert named.is_dir(), f"binding named a directory that does not exist: {named}"
-    assert named.resolve() == (root / pkg.DATA_DIR).resolve()
+    assert "binding" not in json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))
 
 
-def test_a_moved_package_still_reaches_its_rows_once_it_is_BOUND(tmp_path: Path) -> None:
+def test_a_moved_package_still_reaches_its_rows_once_it_is_BOUND(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The acceptance test for the design decision, and the one the old value could not pass.
 
     Round-2 finding 1 measured `embedded_path_exists_after_move=False` beside
@@ -1396,12 +1390,20 @@ def test_a_moved_package_still_reaches_its_rows_once_it_is_BOUND(tmp_path: Path)
     whole route - package here, MOVE the folder, bind it there, and read the file the partition now
     names off disk.
     """
-    root = _package_with_receipt(tmp_path)
-    moved = tmp_path / "customer" / "delivered" / UNIT
+    from test_package_data_access_snapshot import _local_bundle  # pylint: disable=import-outside-toplevel
+    from test_package_unit_gates import UNIT as GATE_UNIT  # pylint: disable=import-outside-toplevel
+
+    bundle, _unused, options = _local_bundle(tmp_path)
+    out = tmp_path / "neutral" / "packages"
+    pkg.package_unit(bundle, GATE_UNIT, out, **options)
+    root = out / GATE_UNIT
+    monkeypatch.setattr(pkg, "_known_private_roots", lambda: ())
+    pkg.rebind_package(root)
+    moved = root.parent / "delivered" / root.name
     moved.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(root), str(moved))
 
-    assert sdf._package(moved) == 0  # noqa: SLF001
+    pkg.rebind_package(moved)
     text = (_model_definition(moved) / pkg.EXPRESSIONS_TMDL).read_text(encoding="utf-8")
     value = re.search(rf'expression {pkg.DATA_FOLDER_PARAM} = "([^"]+)"', text)
     assert value is not None and Path(value.group(1)).is_dir()
@@ -1412,7 +1414,7 @@ def test_a_moved_package_still_reaches_its_rows_once_it_is_BOUND(tmp_path: Path)
     assert tail is not None, "no partition reads the shipped copy through the parameter"
     reached = Path(value.group(1) + tail.group(1))
     assert reached.is_file(), f"the bound model names rows that are not there: {reached}"
-    assert reached.read_text(encoding="utf-8").startswith("Employee_ID")
+    assert reached.read_text(encoding="utf-8").startswith("value")
 
 
 @pytest.mark.parametrize(

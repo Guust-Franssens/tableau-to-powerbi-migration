@@ -5,12 +5,14 @@ purpose: Manage the per-model folder M-parameter that each generated Fabric sema
          username) ever ships in the repo. Run this once after cloning to point every model at your
          local checkout so Power BI Desktop can refresh with real data. `--package` is the same idea
          for ONE handover package: `scripts/package_unit.py` writes `<PACKAGE_ROOT>` rather than the
-         machine that built the package, so BINDING it to wherever it now lives is a step of using
-         it - run this before opening the model, and again after every move.
+         machine that built the package. It now delegates to package_unit's neutral-root,
+         whole-directory bind/reseal transition and produces BOUND/UNVALIDATED only; run it before
+         opening the model, and again after every move.
 usage:   python scripts/set_data_folder.py            # localize: set every model to THIS checkout's absolute path
          python scripts/set_data_folder.py --sanitize # restore the <REPO_ROOT> placeholder (run before committing)
          python scripts/set_data_folder.py --check     # CI gate: fail if any tracked file leaks an absolute user path
-         python scripts/set_data_folder.py --package <dir>  # bind ONE package to its own data/
+         python scripts/set_data_folder.py --package <dir>  # guarded bind/reseal of ONE package
+                                           [--provider-package <bound-provider> ...]
 """
 
 import argparse
@@ -18,6 +20,9 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -53,6 +58,41 @@ EXPRESSIONS_TMDL = "expressions.tmdl"
 #: package, so treating "no model" as "you pointed me at the wrong folder" would make the package's
 #: own first documented command fail for a whole class of units. The manifest tells the two apart.
 PACKAGE_MANIFEST = "package-manifest.json"
+
+
+class PackageRewriteError(RuntimeError):
+    """A fixed package rewrite refusal that never exposes an absolute root."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class PackageValueRewrite:
+    """One exact expression-value substitution in one package-relative member."""
+
+    member: str
+    old_value: str
+    new_value: str
+
+
+@dataclass(frozen=True)
+class PackageMemberRewrite:
+    """The exact held and planned bytes for one affected expression member."""
+
+    member: str
+    original: bytes
+    rewritten: bytes
+
+
+@dataclass(frozen=True)
+class PackageRewritePlan:
+    """A write-free package rewrite plan with a complete affected-member set."""
+
+    values: tuple[PackageValueRewrite, ...]
+    members: tuple[PackageMemberRewrite, ...]
+    affected_members: tuple[str, ...]
 
 
 def _model_expression_files() -> list[Path]:
@@ -147,6 +187,130 @@ def _rewritten(text: str, base: str) -> tuple[str, int, list[str]]:
     return EXPRESSION_RE.sub(_sub, text), rewrites, untouched
 
 
+def _data_root(value: str) -> str | None:  # pylint: disable=too-many-return-statements
+    """The spelling before the final `data` segment, preserving a filesystem-root separator."""
+    segments = list(re.finditer(r"[^\\/]+", value))
+    indexes = [index for index, match in enumerate(segments) if match.group(0).casefold() == DATA_SEGMENT]
+    if not indexes:
+        return None
+    match = segments[indexes[-1]]
+    prefix = value[: match.start()]
+    stripped = prefix.rstrip("\\/")
+    if stripped:
+        if re.fullmatch(r"[A-Za-z]:", stripped) and prefix[-1:] in ("\\", "/"):
+            return stripped + prefix[-1]
+        return stripped
+    if prefix.startswith("\\\\"):
+        return "\\\\"
+    if prefix.startswith("//"):
+        return "//"
+    if prefix.startswith("/"):
+        return "/"
+    return stripped
+
+
+def plan_package_rewrite(  # pylint: disable=too-many-arguments,too-many-locals,too-many-statements
+    root: Path,
+    base: str,
+    *,
+    previous_root_identity: str | None = None,
+    identity_of: Callable[[str], str] | None = None,
+    expected_members: Sequence[str] | None = None,
+    allow_empty: bool = False,
+) -> PackageRewritePlan:
+    """Plan exact package data-folder substitutions without changing a byte.
+
+    A portable package may target only the exact ``<PACKAGE_ROOT>`` spelling. A previously bound
+    package may target only values whose old root reproduces its held canonical identity. This lets
+    a moved package be rebound without persisting the old root, while a sanitized or manually
+    changed expression is refused instead of adopted as a new baseline.
+    """
+    expected = None if expected_members is None else tuple(sorted(set(expected_members)))
+    if expected_members is not None and list(expected_members) != list(expected):
+        raise PackageRewriteError("package_rewrite_member_set_invalid")
+
+    values: list[PackageValueRewrite] = []
+    members: list[PackageMemberRewrite] = []
+
+    def _sub(
+        match: re.Match[str],
+        *,
+        member: str,
+        member_values: list[PackageValueRewrite],
+    ) -> str:
+        value = match.group(2)
+        if PACKAGE_PLACEHOLDER in value and _data_tail(value) is None:
+            raise PackageRewriteError("package_root_token_unresolved")
+        if not _is_pathish(value):
+            return match.group(0)
+        tail = _data_tail(value)
+        if tail is None:
+            return match.group(0)
+        old_root = _data_root(value)
+        if previous_root_identity is None:
+            accepted = old_root == PACKAGE_PLACEHOLDER
+        else:
+            if old_root == PACKAGE_PLACEHOLDER or identity_of is None or old_root is None:
+                accepted = False
+            else:
+                try:
+                    accepted = identity_of(old_root) == previous_root_identity
+                except (TypeError, ValueError, UnicodeError):
+                    accepted = False
+        if not accepted:
+            raise PackageRewriteError("package_rewrite_old_value_changed")
+        segments = [DATA_SEGMENT, tail] if tail else [DATA_SEGMENT]
+        rewritten = flavour_join(base, *segments, trailing=value.endswith(("\\", "/")))
+        row = PackageValueRewrite(member, value, rewritten)
+        member_values.append(row)
+        values.append(row)
+        return f"{match.group(1)}{rewritten}{match.group(3)}"
+
+    expression_files = sorted(root.glob(f"fabric/*.SemanticModel/definition/{EXPRESSIONS_TMDL}"))
+    for expr_file in expression_files:
+        member = expr_file.relative_to(root).as_posix()
+        try:
+            original = expr_file.read_bytes()
+            text = original.decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            raise PackageRewriteError("package_rewrite_member_unreadable") from None
+        member_values: list[PackageValueRewrite] = []
+        rewritten_text = EXPRESSION_RE.sub(partial(_sub, member=member, member_values=member_values), text)
+        if PACKAGE_PLACEHOLDER in rewritten_text:
+            raise PackageRewriteError("package_root_token_unresolved")
+        if member_values:
+            members.append(PackageMemberRewrite(member, original, rewritten_text.encode("utf-8")))
+
+    for tmdl in sorted(root.glob("fabric/*.SemanticModel/definition/**/*.tmdl")):
+        if tmdl.name == EXPRESSIONS_TMDL:
+            continue
+        try:
+            if PACKAGE_PLACEHOLDER in tmdl.read_text(encoding="utf-8"):
+                raise PackageRewriteError("package_root_token_unresolved")
+        except OSError:
+            raise PackageRewriteError("package_rewrite_member_unreadable") from None
+
+    affected = tuple(sorted(member.member for member in members))
+    if expected is not None and affected != expected:
+        raise PackageRewriteError("package_rewrite_member_set_changed")
+    if not values and not allow_empty:
+        raise PackageRewriteError("package_rewrite_expression_missing")
+    return PackageRewritePlan(tuple(values), tuple(members), affected)
+
+
+def apply_package_rewrite_plan(root: Path, plan: PackageRewritePlan) -> None:
+    """Apply a held plan only when every source member still has its exact planned old bytes."""
+    for member in plan.members:
+        path = root.joinpath(*member.member.split("/"))
+        try:
+            current = path.read_bytes()
+        except OSError:
+            raise PackageRewriteError("package_rewrite_source_changed") from None
+        if current != member.original:
+            raise PackageRewriteError("package_rewrite_source_changed")
+        path.write_bytes(member.rewritten)
+
+
 def _rewrite(expr_file: Path, sanitize: bool) -> bool:
     text = expr_file.read_text(encoding="utf-8")
     tree, slug = _tree_and_slug_for(expr_file)
@@ -173,57 +337,27 @@ def _rewrite(expr_file: Path, sanitize: bool) -> bool:
     return False
 
 
-def _package(root: Path) -> int:
-    """Re-point ONE handover package's model at the package's own `data/`. 0 ok / 1 findings.
-
-    `package_unit.py` writes the folder parameter as :data:`PACKAGE_PLACEHOLDER` (Power Query rejects
-    a relative `File.Contents` argument outright, and the builder cannot know where the package will
-    end up), so a package does not resolve its own rows until it is BOUND - which is what this does,
-    and what the package README leads with. Re-run it after every move.
-
-    ⚠️ **Every value is computed and validated BEFORE anything is written.** The old order wrote each
-    file as it went and only then checked what it had produced, so a package that failed the check
-    had already been modified - on POSIX it was left holding `/tmp/package\\data\\...`, an invalid
-    value, with exit 1 as the only sign (round-2 finding 4). A relocation that cannot succeed must
-    leave the package exactly as it found it, because the alternative is a customer artifact in a
-    state neither this script nor its README describes.
-    """
-    root = root.resolve()
-    if not root.is_dir():
-        print(f"--package {root} is not a directory")
+def _package(root: Path, provider_packages: Sequence[Path] = ()) -> int:
+    """Bind/reseal one package through package_unit's guarded whole-directory transition."""
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve().with_name("package_unit.py")),
+        "--bind-package",
+        str(root.absolute()),
+    ]
+    for provider in provider_packages:
+        command.extend(["--provider-package", str(provider.absolute())])
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)  # noqa: S603
+    safe_lines = [
+        line
+        for line in (*completed.stdout.splitlines(), *completed.stderr.splitlines())
+        if line.startswith(("OK - BOUND/UNVALIDATED ", "BLOCKED authority=", "CANNOT_ESTABLISH authority="))
+    ]
+    if not safe_lines:
+        print("CANNOT_ESTABLISH authority=transition code=binding_subprocess_failed; package remains UNBOUND")
         return 1
-    expr_files = sorted(root.glob(f"fabric/*.SemanticModel/definition/{EXPRESSIONS_TMDL}"))
-    if not expr_files:
-        if (root / PACKAGE_MANIFEST).is_file():
-            print(f"OK - nothing to bind: no model in {root.name} declares a data-folder parameter")
-            return 0
-        print(f"no fabric/*.SemanticModel/definition/{EXPRESSIONS_TMDL} under {root} - is this a package folder?")
-        return 1
-    findings: list[str] = []
-    planned: list[tuple[Path, str, int]] = []
-    for expr_file in expr_files:
-        text = expr_file.read_text(encoding="utf-8")
-        new_text, rewrites, untouched = _rewritten(text, str(root))
-        findings += [f"path parameter with no `{DATA_SEGMENT}` segment: {value}" for value in untouched]
-        if rewrites == 0:
-            print(f"  none {expr_file.relative_to(root)} declares no data-folder parameter")
-            continue
-        findings += _unresolved(new_text)
-        planned.append((expr_file, new_text, rewrites))
-    if findings:
-        print("PACKAGE NOT USABLE - nothing was written, the model would still name something that is not there:")
-        for finding in findings:
-            print(f"  {finding}")
-        return 1
-    for expr_file, new_text, rewrites in planned:
-        if new_text != expr_file.read_text(encoding="utf-8"):
-            expr_file.write_text(new_text, encoding="utf-8")
-        print(
-            f"  set  {expr_file.relative_to(root)} -> {flavour_join(str(root), DATA_SEGMENT, trailing=True)}"
-            f" ({rewrites} parameter(s))"
-        )
-    print(f"OK - {len(expr_files)} model(s) re-pointed at {flavour_join(str(root), DATA_SEGMENT, trailing=True)}")
-    return 0
+    print(safe_lines[-1])
+    return 0 if completed.returncode == 0 else 1
 
 
 def _unresolved(text: str) -> list[str]:
@@ -287,12 +421,23 @@ def main() -> None:
         "--package",
         type=Path,
         metavar="DIR",
-        help="bind ONE handover package's model to its own data/, wherever the package now lives",
+        help="bind/reseal ONE handover package through the canonical guarded package transition",
+    )
+    parser.add_argument(
+        "--provider-package",
+        action="append",
+        type=Path,
+        default=[],
+        metavar="DIR",
+        help="exact already-bound datasource provider package (repeatable; --package only)",
     )
     args = parser.parse_args()
 
     if args.package is not None:
-        sys.exit(_package(args.package))
+        sys.exit(_package(args.package, args.provider_package))
+
+    if args.provider_package:
+        parser.error("--provider-package requires --package")
 
     if args.check:
         sys.exit(_check())

@@ -4,6 +4,8 @@ usage:   python scripts/package_unit.py --bundle <bundle> --out <dir> [--unit NA
                                         [--oracle <dir>] [--assets <dir>] [--brief <file>]
                                         [--gate-root <original-root>] [--provider-package <root> ...]
                                         [--assemble-only] [--json <file>] [--quiet]
+         python scripts/package_unit.py --bind-package <package>
+                                        [--provider-package <bound-provider> ...]
 
 Issue #446: the three things an agent needs to start one report all exist and NOTHING assembles them.
 They live in four naming schemes across two trees - the engine keys `pbip/`, `reports/` and
@@ -205,16 +207,22 @@ from collections.abc import Callable, Sequence
 from copy import deepcopy
 from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, NoReturn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest  # noqa: E402  # pylint: disable=wrong-import-position
+import current_artifact_revision as artifact_revision  # noqa: E402  # pylint: disable=wrong-import-position
 import package_filesystem as pfs  # noqa: E402  # pylint: disable=wrong-import-position
 import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-import-position
 import credential_gate as data_access  # noqa: E402  # pylint: disable=wrong-import-position
-from bundle_corpus import is_reparse_entry  # noqa: E402  # pylint: disable=wrong-import-position
+from bundle_corpus import (  # noqa: E402  # pylint: disable=wrong-import-position
+    PLACEMENT_NONE,
+    is_reparse_entry,
+    normalized_parts,
+    package_placement,
+)
 from migration_bundle import load_bundle  # noqa: E402  # pylint: disable=wrong-import-position
 
 # The path budget is measured by `check_path_ceiling.py` and NOWHERE else (#476). Its ceilings were
@@ -229,9 +237,12 @@ from check_path_ceiling import (  # noqa: E402  # pylint: disable=wrong-import-p
     WINDOWS_LIMITS,
     Limits,
     platform_limits,
+    scan as scan_path_ceiling,
     utf16_len,
 )
-from host_paths import discloses_host_location  # noqa: E402  # pylint: disable=wrong-import-position
+from host_paths import (  # noqa: E402  # pylint: disable=wrong-import-position
+    discloses_host_location,
+)
 from manifest_scope import (  # noqa: E402  # pylint: disable=wrong-import-position
     ORACLE_MANIFEST_ALLOW,
     project,
@@ -248,9 +259,13 @@ from object_identity import (  # noqa: E402  # pylint: disable=wrong-import-posi
     KIND_WORKSHEET,
 )
 from path_flavour import (  # noqa: E402  # pylint: disable=wrong-import-position
+    POSIX,
+    WINDOWS,
     flavour,
+    host_flavour,
     is_host_native,
     leaf,
+    normalize as normalize_flavour_path,
 )
 from path_flavour import separator as flavour_separator  # noqa: E402  # pylint: disable=wrong-import-position
 from path_flavour import inside as inside_lexically  # noqa: E402  # pylint: disable=wrong-import-position
@@ -359,7 +374,9 @@ UNAVAILABLE_TOKEN = "<UNAVAILABLE_SOURCE>"
 
 #: The command that binds a package to wherever it now lives. Written into the README and into
 #: `package-manifest.json` so the state and its remedy travel with the artifact.
-BIND_COMMAND = "python scripts/set_data_folder.py --package <path-to-this-folder>"
+BIND_COMMAND = (
+    "python scripts/set_data_folder.py --package <path-to-this-folder> [--provider-package <bound-provider> ...]"
+)
 
 #: This script's exit codes, named so a caller never has to read a bare integer. The table in the
 #: module docstring is the contract; these are the same numbers.
@@ -401,6 +418,27 @@ NOT_START_READY_NOTICE = (
     "Phase-2 dispatch or clear the credential gate."
 )
 DATA_ACCESS_PENDING = NOT_START_READY_NOTICE
+
+# Binding is a producer handoff only. The final #562 consumer remains the sole START_READY authority.
+BINDING_STATE = "BOUND"
+BINDING_PRIVACY_POLICY = "neutral_root"
+BINDING_ROOT_DOMAIN = b"t2p-neutral-root-v1\0"
+BINDING_REVISION_PREFIX = "sha256:"
+BINDING_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+BINDING_PROVIDER_RE = re.compile(r"^provider-ref:v1:sha256:[0-9a-f]{64}$")
+BINDING_CODE_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+BINDING_FIELDS = frozenset(
+    {
+        "state",
+        "privacy_policy",
+        "canonical_root_identity",
+        "manifest_excluded_revision",
+        "bound_members",
+        "data_access_authority",
+    }
+)
+BINDING_DATA_ACCESS_FIELDS = frozenset({"identity", "state", "validation", "scope", "provider_cohort"})
+BINDING_PROVIDER_FIELDS = frozenset({"identity", "revision", "ordinal"})
 
 #: Refuse to copy a single source larger than this, rather than silently turning a handover folder
 #: into a data lake. Measured on estate run 408 the largest referenced extract is 1.33 MB and the
@@ -467,6 +505,20 @@ class PackagingError(RuntimeError):
         default = type(self).reason_code
         self.reason_code = reason_code or (message if _REASON_CODE_RE.fullmatch(message) else default)
         super().__init__(message)
+
+
+class BindingTransitionError(RuntimeError):
+    """A privacy-safe BOUND/UNVALIDATED refusal with a named authority and stable code."""
+
+    def __init__(self, state: str, authority: str, code: str) -> None:
+        if state not in (STATUS_BLOCKED, "CANNOT_ESTABLISH"):
+            raise ValueError("binding transition state must be BLOCKED or CANNOT_ESTABLISH")
+        if not _REASON_CODE_RE.fullmatch(authority) or not BINDING_CODE_RE.fullmatch(code):
+            raise ValueError("binding transition authority and code must be stable identifiers")
+        self.state = state
+        self.authority = authority
+        self.code = code
+        super().__init__(f"{state} authority={authority} code={code}")
 
 
 class PackageEditsRefused(PackagingError):
@@ -1864,9 +1916,13 @@ README = """# {unit}
 Diagnostic handover package for one migration unit ({kind}). It may carry imported rows, reference
 evidence, source bytes and engine output; `package-manifest.json` names what is present and every
 omission. If it carries a location placeholder it is **not bound to a location**, so do this FIRST,
-wherever this folder now is, before opening the model. Then the two gates, each of which takes THIS
-FOLDER'S PATH as its only argument - a bare unit name is a usage error, never a verdict (exit 2 from
-`check_reference_readiness.py`, exit 64 from `check_unit.py`, both with a message on stderr):
+before opening the model. Binding accepts only an existing native, non-reparse neutral root outside
+the current profile/home/temp hierarchy: use the canonical `.../_runs/<run>/packages/<unit>` layout
+(including a short external `--runs-parent`) or a root-level package directory. A shared-model
+consumer also appends `--provider-package <bound-provider>` for its already-bound datasource
+provider. Then the two gates, each of which takes THIS FOLDER'S PATH as its only argument - a bare
+unit name is a usage error, never a verdict (exit 2 from `check_reference_readiness.py`, exit 64 from
+`check_unit.py`, both with a message on stderr):
 
     python scripts/set_data_folder.py --package <path-to-this-folder>
     python scripts/check_reference_readiness.py <path-to-this-folder>
@@ -3712,6 +3768,7 @@ def replace_dir(
     verify: Callable[[Path], None] | None = None,
     *,
     verify_staged: Callable[[], None],
+    verify_published: Callable[[Path], None] | None = None,
 ) -> None:
     """Put ``staged`` at ``final``, REPLACING whatever was there - never merging into it.
 
@@ -3742,10 +3799,12 @@ def replace_dir(
     3). It is also why the deletion of the retired tree is the LAST thing that happens.
 
     ``verify_staged`` is required and bound to the exact staged snapshot by assembly. After retiring
-    and checking any prior package, it validates the candidate immediately before publication. All
-    path-budget and other producer reads precede this callback; only the atomic rename and existing
-    prior-package cleanup follow. A failed check restores the prior directory without ever exposing
-    the candidate. The callback also runs for a new package and when prior edits are discarded.
+    and checking any prior package, it validates the candidate immediately before publication.
+
+    ``verify_published`` is the optional post-rename authority used by the binding transition. It
+    runs while the complete prior directory is still retired and therefore restorable. If it raises,
+    the candidate is moved back to ``staged`` and the exact retired directory is restored before the
+    error escapes. Ordinary assembly does not supply it and retains its existing behavior.
     """
     final.parent.mkdir(parents=True, exist_ok=True)
     retired = retired_dir(final) if final.exists() else None
@@ -3759,13 +3818,23 @@ def replace_dir(
         verify_staged()
         publish_armed = True
         _rename_retrying(staged, final)
+        if verify_published is not None:
+            verify_published(final)
         if retired is not None:
             _discard_scratch(retired)
         publish_armed = False
     except BaseException as error:  # pylint: disable=broad-exception-caught
         published = publish_armed and final.is_dir() and not staged.exists()
         rollback_failed = False
-        if not published and retired is not None and retired.exists() and not final.exists():
+        if published and retired is not None and retired.exists() and verify_published is not None:
+            try:
+                _rename_retrying(final, staged)
+                _rename_retrying(retired, final)
+                published = False
+            except BaseException:  # pylint: disable=broad-exception-caught
+                rollback_failed = True
+                error.add_note("package rollback failed after published-candidate verification")
+        elif not published and retired is not None and retired.exists() and not final.exists():
             try:
                 _rename_retrying(retired, final)
             except BaseException:  # pylint: disable=broad-exception-caught
@@ -4390,6 +4459,801 @@ def _final_data_access_check(inputs: _DataAccessInputs, generated: dict[str, byt
         raise PackagingError("data_access_provider_changed")
 
 
+class _NeutralRoot(NamedTuple):
+    """A current accepted package root and its privacy-safe canonical identity."""
+
+    path: Path
+    identity: str
+
+
+class _BoundProvider(NamedTuple):
+    """One selected provider handoff, ordered exactly as S2 selected it."""
+
+    identity: str
+    revision: str
+    ordinal: int
+
+
+class _BindingAuthority(NamedTuple):
+    """Exact S1/S2/data-access facts held across one binding publication."""
+
+    roots: tuple[Path, ...]
+    snapshots: tuple[_PackageSnapshot, ...]
+    role_signature: tuple[Any, ...]
+    unit: str
+    kind: str
+    topology: str
+    assessment: data_access.DataAccessAssessment
+    projection_sha256: str
+    spec_sha256: str
+    providers: tuple[_BoundProvider, ...]
+
+
+def _binding_failure(state: str, authority: str, code: str) -> NoReturn:
+    """Raise the one privacy-safe binding refusal type."""
+    raise BindingTransitionError(state, authority, code)
+
+
+def _binding_blocked(authority: str, code: str) -> NoReturn:
+    _binding_failure(STATUS_BLOCKED, authority, code)
+
+
+def _binding_cannot(authority: str, code: str) -> NoReturn:
+    _binding_failure("CANNOT_ESTABLISH", authority, code)
+
+
+def _canonical_root_spelling(value: str, kind: str | None = None) -> str:
+    """Canonical native-root spelling used only as the input to the root-identity digest."""
+    path_kind = flavour(value) if kind is None else kind
+    if path_kind not in (WINDOWS, POSIX):
+        raise ValueError("root flavour is not established")
+    normalized = normalize_flavour_path(value, path_kind)
+    if path_kind == WINDOWS:
+        pure = PureWindowsPath(normalized)
+        if not pure.is_absolute() or pure.anchor.startswith(("\\\\", "//")):
+            raise ValueError("root is not an absolute local Windows path")
+        spelling = str(pure).replace("\\", "/").casefold()
+        return spelling if len(spelling) <= 3 else spelling.rstrip("/")
+    pure = PurePosixPath(normalized)
+    if not pure.is_absolute():
+        raise ValueError("root is not an absolute POSIX path")
+    spelling = str(pure)
+    return spelling if spelling == "/" else spelling.rstrip("/")
+
+
+def _canonical_root_identity(value: str, kind: str | None = None) -> str:
+    """The approved v1 neutral-root digest; the raw spelling never leaves this call."""
+    canonical = _canonical_root_spelling(value, kind).encode("utf-8")
+    return BINDING_REVISION_PREFIX + hashlib.sha256(BINDING_ROOT_DOMAIN + canonical).hexdigest()
+
+
+def _known_private_roots() -> tuple[str, ...]:
+    """Known current profile/home/temp roots, without enumerating arbitrary account names."""
+    candidates: list[str] = []
+    try:
+        candidates.append(str(Path.home()))
+    except (OSError, RuntimeError):
+        pass
+    for name in ("USERPROFILE", "HOME", "TMPDIR", "TEMP", "TMP"):
+        value = os.environ.get(name)
+        if value:
+            candidates.append(value)
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidates.append(str(Path(local_app_data) / "Temp"))
+    if os.name != "nt":
+        candidates.extend(("/tmp", "/var/tmp", "/usr/tmp"))
+    native = []
+    for value in candidates:
+        if flavour(value) != host_flavour():
+            continue
+        try:
+            normalized = _canonical_root_spelling(value)
+        except (TypeError, ValueError, UnicodeError):
+            continue
+        if normalized not in native:
+            native.append(normalized)
+    return tuple(native)
+
+
+def _binder_root_allowed(root: PurePath) -> bool:
+    """The explicit supported-root policy: canonical package placement or one root-level package."""
+    parts = normalized_parts(root)
+    anchor_parts = 1 if root.anchor and parts else 0
+    direct_root_child = len(parts) == anchor_parts + 1
+    return direct_root_child or package_placement(root) != PLACEMENT_NONE
+
+
+def _neutral_root(root: Path) -> _NeutralRoot:  # pylint: disable=too-many-branches
+    """Apply the approved existing/native/non-reparse/private-hierarchy/root-policy predicate."""
+    raw = str(root)
+    if raw.startswith(("\\\\", "//")):
+        _binding_blocked("neutral_root", "binding_root_unc")
+    kind = flavour(raw)
+    if kind is not None and kind != host_flavour():
+        _binding_blocked("neutral_root", "binding_root_foreign_flavour")
+    if kind is None or not Path(raw).is_absolute():
+        _binding_blocked("neutral_root", "binding_root_not_absolute")
+    try:
+        lexical = Path(normalize_flavour_path(raw, kind))
+    except (TypeError, ValueError):
+        _binding_cannot("neutral_root", "binding_root_normalization_failed")
+
+    boundaries = (lexical, *lexical.parents)
+    root_info: os.stat_result | None = None
+    try:
+        for boundary in boundaries:
+            info = os.lstat(boundary)
+            if boundary == lexical:
+                root_info = info
+            if is_reparse_entry(info):
+                _binding_blocked("neutral_root", "binding_root_reparse")
+    except FileNotFoundError:
+        _binding_cannot("neutral_root", "binding_root_missing")
+    except (OSError, ValueError):
+        _binding_cannot("neutral_root", "binding_root_unassessable")
+    if root_info is None or not stat.S_ISDIR(root_info.st_mode):
+        _binding_blocked("neutral_root", "binding_root_not_directory")
+
+    try:
+        resolved = lexical.resolve(strict=True)
+        lexical_identity = _canonical_root_spelling(str(lexical), kind)
+        resolved_identity = _canonical_root_spelling(str(resolved), kind)
+    except (OSError, RuntimeError, TypeError, ValueError, UnicodeError):
+        _binding_cannot("neutral_root", "binding_root_resolution_failed")
+    if lexical_identity != resolved_identity:
+        _binding_blocked("neutral_root", "binding_root_alias")
+    if any(inside_lexically(private, str(resolved)) for private in _known_private_roots()):
+        _binding_blocked("neutral_root", "binding_root_private_hierarchy")
+    if not _binder_root_allowed(resolved):
+        _binding_blocked("neutral_root", "binding_root_policy_refused")
+    if is_reserved_packaging_name(resolved.name):
+        _binding_blocked("neutral_root", "binding_root_reserved_name")
+    try:
+        identity = _canonical_root_identity(str(resolved), kind)
+    except (TypeError, ValueError, UnicodeError):
+        _binding_cannot("neutral_root", "binding_root_identity_failed")
+    return _NeutralRoot(resolved, identity)
+
+
+def _require_binding_path_budget(root: Path) -> None:
+    """Reuse the existing measured Desktop ceilings without exposing the offending host path."""
+    try:
+        report = scan_path_ceiling(root, DEFAULT_LIMITS)
+        counted = report["counted"]
+    except (OSError, TypeError, ValueError, UnicodeError, KeyError):
+        _binding_cannot("path_budget", "binding_path_budget_unassessable")
+    if counted["unknown"] or not counted["measured"]:
+        _binding_cannot("path_budget", "binding_path_budget_unassessable")
+    if counted["over_ceiling"]:
+        _binding_blocked("path_budget", "binding_path_budget_exceeded")
+
+
+def _require_clean_snapshot(root: Path) -> _PackageSnapshot:
+    """Name S1's own refusal code before obtaining the exact producer snapshot."""
+    verified = pri.verify_s1(root)
+    if not verified.integrity.is_clean:
+        code = verified.integrity.first_code or "package_integrity_not_clean"
+        if verified.integrity.status == pfs.STATUS_UNASSESSABLE:
+            _binding_cannot("s1", code)
+        _binding_blocked("s1", code)
+    snapshot = _package_snapshot(root)
+    if snapshot is None:
+        _binding_cannot("s1", "binding_snapshot_unavailable")
+    return snapshot
+
+
+def _snapshot_matches_at(snapshot: _PackageSnapshot, root: Path) -> bool:
+    """Recheck held bytes after the original directory has been renamed to its retired path."""
+    try:
+        if _package_directory_id(root) != snapshot.directory_id or pfs._recheck_boundary(root):  # pylint: disable=protected-access
+            return False
+        walked, findings, _empty = pfs.walk_package(root)
+        expected = dict(snapshot.digests)
+        expected[MANIFEST_NAME] = hashlib.sha256(snapshot.manifest).hexdigest()
+        return (
+            not findings
+            and set(walked) == set(expected)
+            and all(pfs._hash_file(walked[key]) == digest for key, digest in expected.items())  # pylint: disable=protected-access
+        )
+    except (OSError, ValueError, PackagingError):
+        return False
+
+
+def _role_signature(result: pri.Phase1RoleIdentityResult) -> tuple[Any, ...]:
+    """Root-independent S2 identity, including provider ordinals that dataclass equality omits."""
+    identity = result.source_identity
+    source = (
+        None
+        if identity is None
+        else (identity.kind, identity.sha256, identity.tableau_luid, identity.published_key, identity.revision)
+    )
+    dependencies = tuple(
+        (
+            row.state,
+            row.datasource_luid,
+            row.published_key,
+            row.provider_unit,
+            row.model_role,
+            row.code,
+            row.provider_ordinal,
+        )
+        for row in result.dependencies
+    )
+    policy = (
+        None
+        if result.brief_policy is None
+        else (result.brief_policy.requested_scope, result.brief_policy.fallback_authorization)
+    )
+    return (
+        result.verdict,
+        result.unit,
+        result.kind,
+        result.topology,
+        tuple((row.role, row.state, row.cardinality, row.paths, row.code) for row in result.roles),
+        source,
+        dependencies,
+        result.blockers,
+        result.authorized_limitations,
+        policy,
+    )
+
+
+def _read_binding_data_access(
+    result: pri.Phase1RoleIdentityResult, root: Path
+) -> tuple[data_access.DataAccessAssessment, str, str]:
+    """Consume the exact held S1/S2 projection and spec facts; never re-assess or authorize it."""
+    handoff = result.data_access_handoff(root)
+    if isinstance(handoff, pfs.PackageFilesystemResult):
+        code = handoff.first_code or "package_member_not_verified"
+        if handoff.status == pfs.STATUS_UNASSESSABLE:
+            _binding_cannot("data_access", code)
+        _binding_blocked("data_access", code)
+    try:
+        assessment = data_access.parse_data_access(handoff.data_access.content.decode("utf-8"))
+    except (UnicodeDecodeError, data_access.DataAccessProjectionError):
+        _binding_blocked("data_access", "projection_invalid")
+    if assessment.state == "cannot_establish":
+        _binding_cannot("data_access", assessment.codes[0])
+    if assessment.state == "blocked":
+        _binding_blocked("data_access", assessment.codes[0])
+
+    policy = result.brief_policy
+    if policy is None or assessment.effective_scope != policy.requested_scope:
+        _binding_blocked("data_access", "binding_data_access_scope_mismatch")
+    if assessment.state == "authorized_model_only" and policy.fallback_authorization != "model_only_unvalidated":
+        _binding_blocked("data_access", "binding_data_access_policy_mismatch")
+    return assessment, handoff.data_access.sha256, handoff.migration_spec.sha256
+
+
+def _snapshot_manifest(snapshot: _PackageSnapshot) -> dict[str, Any]:
+    """Strictly parse the held manifest bytes without reopening the package."""
+    try:
+        return pfs.parse_manifest_text(snapshot.manifest.decode("utf-8"))
+    except (UnicodeDecodeError, pfs._ManifestError):  # pylint: disable=protected-access
+        _binding_cannot("s1", "package_manifest_unreadable")
+
+
+def _strict_binding_block(  # pylint: disable=too-many-branches,too-many-boolean-expressions
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate the producer's one existing-manifest handoff shape without repairing it."""
+    block = manifest.get("binding")
+    if not isinstance(block, dict):
+        _binding_blocked("binding_handoff", "binding_handoff_missing")
+    if set(block) != BINDING_FIELDS:
+        _binding_blocked("binding_handoff", "binding_handoff_fields_invalid")
+    if (
+        block.get("state") != BINDING_STATE
+        or block.get("privacy_policy") != BINDING_PRIVACY_POLICY
+        or not isinstance(block.get("canonical_root_identity"), str)
+        or not BINDING_DIGEST_RE.fullmatch(block["canonical_root_identity"])
+        or not isinstance(block.get("manifest_excluded_revision"), str)
+        or not BINDING_DIGEST_RE.fullmatch(block["manifest_excluded_revision"])
+    ):
+        _binding_blocked("binding_handoff", "binding_handoff_value_invalid")
+
+    members = block.get("bound_members")
+    if (
+        not isinstance(members, list)
+        or members != sorted(set(members))
+        or any(
+            not isinstance(member, str)
+            or not pfs.is_canonical_key(member)
+            or not member.startswith("fabric/")
+            or not member.endswith(f"/definition/{EXPRESSIONS_TMDL}")
+            for member in members
+        )
+    ):
+        _binding_blocked("binding_handoff", "binding_member_set_invalid")
+
+    authority = block.get("data_access_authority")
+    if not isinstance(authority, dict) or set(authority) != BINDING_DATA_ACCESS_FIELDS:
+        _binding_blocked("binding_handoff", "binding_data_access_fields_invalid")
+    if (
+        not isinstance(authority.get("identity"), str)
+        or not BINDING_DIGEST_RE.fullmatch(authority["identity"])
+        or authority.get("state") not in (*data_access.DIRECT_ACCEPTED_STATES, "provider_inherited")
+        or authority.get("validation") not in data_access.VALIDATION_STATES
+        or authority.get("scope") not in data_access.EFFECTIVE_SCOPES
+    ):
+        _binding_blocked("binding_handoff", "binding_data_access_value_invalid")
+    providers = authority.get("provider_cohort")
+    if not isinstance(providers, list):
+        _binding_blocked("binding_handoff", "binding_provider_cohort_invalid")
+    ordinals: list[int] = []
+    for row in providers:
+        if (
+            not isinstance(row, dict)
+            or set(row) != BINDING_PROVIDER_FIELDS
+            or not isinstance(row.get("identity"), str)
+            or not BINDING_PROVIDER_RE.fullmatch(row["identity"])
+            or not isinstance(row.get("revision"), str)
+            or not BINDING_DIGEST_RE.fullmatch(row["revision"])
+            or not isinstance(row.get("ordinal"), int)
+            or isinstance(row.get("ordinal"), bool)
+            or row["ordinal"] < 0
+        ):
+            _binding_blocked("binding_handoff", "binding_provider_cohort_invalid")
+        ordinals.append(row["ordinal"])
+    if ordinals != sorted(set(ordinals)):
+        _binding_blocked("binding_handoff", "binding_provider_ordinal_invalid")
+    if discloses_host_location(json.dumps(block, ensure_ascii=False)):
+        _binding_blocked("binding_handoff", "binding_handoff_discloses_root")
+    return deepcopy(block)
+
+
+def _data_access_binding_block(
+    assessment: data_access.DataAccessAssessment,
+    projection_sha256: str,
+    providers: Sequence[_BoundProvider],
+) -> dict[str, Any]:
+    """Project only exact accepted authority identities; no root or endpoint text."""
+    return {
+        "identity": f"sha256:{projection_sha256}",
+        "state": assessment.state,
+        "validation": assessment.validation,
+        "scope": assessment.effective_scope,
+        "provider_cohort": [
+            {"identity": row.identity, "revision": row.revision, "ordinal": row.ordinal} for row in providers
+        ],
+    }
+
+
+def _target_directories_exist(plan: Any) -> bool:
+    """Every planned absolute data-folder value resolves to an existing directory."""
+    try:
+        return all(Path(row.new_value.rstrip("\\/")).is_dir() for row in plan.values)
+    except (OSError, ValueError):
+        return False
+
+
+def _plan_existing_binding(root: Path, block: dict[str, Any], *, allow_empty: bool, base: Path | None = None) -> Any:
+    """Reproduce an existing block's complete member set without changing the package."""
+    import set_data_folder as folder_binding  # pylint: disable=import-outside-toplevel
+
+    try:
+        return folder_binding.plan_package_rewrite(
+            root,
+            str(root if base is None else base),
+            previous_root_identity=block["canonical_root_identity"],
+            identity_of=_canonical_root_identity,
+            expected_members=block["bound_members"],
+            allow_empty=allow_empty,
+        )
+    except folder_binding.PackageRewriteError as error:
+        _binding_blocked("rewrite_plan", error.code)
+
+
+def _validate_provider_binding(  # pylint: disable=too-many-locals
+    root: Path,
+    result: pri.Phase1RoleIdentityResult,
+    snapshot: _PackageSnapshot,
+    ordinal: int,
+) -> _BoundProvider:
+    """Consume a provider's already-published immutable BOUND handoff; never certify it."""
+    if not result.is_start_ready or result.topology != pri.TOPOLOGY_PUBLISHED_PROVIDER or not result.unit:
+        code = result.codes()[0] if result.codes() else "binding_provider_role_invalid"
+        _binding_blocked("provider", code)
+    neutral = _neutral_root(root)
+    _require_no_binding_residue(root)
+    _require_binding_path_budget(root)
+    assessment, projection_sha256, _spec_sha256 = _read_binding_data_access(result, root)
+    if assessment.state not in data_access.DIRECT_ACCEPTED_STATES:
+        _binding_blocked("provider", "binding_provider_data_access_invalid")
+    manifest = _snapshot_manifest(snapshot)
+    block = _strict_binding_block(manifest)
+    expected_authority = _data_access_binding_block(assessment, projection_sha256, ())
+    if block["data_access_authority"] != expected_authority:
+        _binding_blocked("provider", "binding_provider_authority_changed")
+    if block["canonical_root_identity"] != neutral.identity:
+        _binding_blocked("provider", "binding_provider_root_changed")
+    try:
+        revision = artifact_revision.package_manifest_excluded_revision(root)
+    except artifact_revision.RevisionError as error:
+        _binding_cannot("provider", error.code.lower())
+    if revision != block["manifest_excluded_revision"]:
+        _binding_blocked("provider", "binding_provider_revision_changed")
+    plan = _plan_existing_binding(root, block, allow_empty=True)
+    if any(row.old_value != row.new_value for row in plan.values) or not _target_directories_exist(plan):
+        _binding_blocked("provider", "binding_provider_target_changed")
+    try:
+        identity = data_access.provider_reference(result.unit)
+    except data_access.DataAccessProjectionError:
+        _binding_cannot("provider", "binding_provider_identity_unestablished")
+    return _BoundProvider(identity, revision, ordinal)
+
+
+def _provider_failure(result: pri.Phase1RoleIdentityResult) -> None:
+    """Route S2 provider cardinality/identity failures without collapsing them into role errors."""
+    codes = result.codes()
+    code = codes[0] if codes else "binding_provider_unestablished"
+    if code in (pri.CODE_PROVIDER_MISSING, pri.CODE_PROVIDER_AMBIGUOUS):
+        _binding_cannot("provider", code)
+    _binding_blocked("provider", code)
+
+
+def _binding_authority(  # pylint: disable=too-many-branches,too-many-locals,too-many-boolean-expressions
+    roots: Sequence[Path],
+) -> _BindingAuthority:
+    """Hold one exact candidate and its exact already-bound provider cohort."""
+    ordered = tuple(roots)
+    if not ordered:
+        _binding_cannot("transition", "binding_candidate_missing")
+    snapshots = tuple(_require_clean_snapshot(root) for root in ordered)
+    roles = pri.verify_phase1_role_identity(ordered)
+    if len(roles) != len(ordered):
+        _binding_cannot("role_identity", "binding_role_count_mismatch")
+    candidate = roles[-1]
+    topology = candidate.topology
+    if candidate.topology == pri.TOPOLOGY_STANDALONE_DATASOURCE:
+        identity = candidate.source_identity
+        if identity is None or not identity.published_key:
+            _binding_blocked("topology", "datasource_only_no_bind")
+        # S2 can only name this a provider once a consumer is in the same cohort. Its own exact
+        # published key is enough to let the provider bind first; the consumer still re-establishes
+        # the cohort and ordinal before it may consume the handoff.
+        topology = pri.TOPOLOGY_PUBLISHED_PROVIDER
+    if not candidate.is_start_ready or not candidate.unit or not candidate.kind or not candidate.topology:
+        if topology == pri.TOPOLOGY_PUBLISHED_CONSUMER:
+            _provider_failure(candidate)
+        code = candidate.codes()[0] if candidate.codes() else "binding_role_identity_unestablished"
+        _binding_blocked("role_identity", code)
+
+    providers: list[_BoundProvider] = []
+    selected_provider: pri.Phase1RoleIdentityResult | None = None
+    selected_root: Path | None = None
+    if topology == pri.TOPOLOGY_PUBLISHED_CONSUMER:
+        dependencies = candidate.dependencies
+        if not dependencies or any(row.state != pri.STATE_RESOLVED for row in dependencies):
+            _provider_failure(candidate)
+        ordinals = {row.provider_ordinal for row in dependencies}
+        if any(not isinstance(ordinal, int) or isinstance(ordinal, bool) for ordinal in ordinals) or len(ordinals) != 1:
+            _binding_cannot("provider", "binding_provider_ordinal_ambiguous")
+        selected = next(iter(ordinals))
+        if selected is None or selected < 0 or selected >= len(ordered) - 1:
+            _binding_cannot("provider", "binding_provider_ordinal_invalid")
+        if set(range(len(ordered) - 1)) != {selected}:
+            _binding_cannot("provider", "binding_provider_cohort_ambiguous")
+        selected_provider = roles[selected]
+        selected_root = ordered[selected]
+        provider = _validate_provider_binding(selected_root, selected_provider, snapshots[selected], selected)
+        providers.append(provider)
+    elif len(ordered) != 1:
+        _binding_blocked("provider", "binding_provider_cohort_unexpected")
+
+    assessment, projection_sha256, spec_sha256 = _read_binding_data_access(candidate, ordered[-1])
+    if topology == pri.TOPOLOGY_PUBLISHED_CONSUMER:
+        assert selected_provider is not None and selected_root is not None
+        provider_assessment = _read_binding_data_access(selected_provider, selected_root)[0]
+        if (
+            assessment.state != "provider_inherited"
+            or assessment.provider_unit != providers[0].identity
+            or assessment.provider_state != provider_assessment.state
+        ):
+            _binding_blocked("provider", "binding_provider_authority_mismatch")
+    elif assessment.state not in data_access.DIRECT_ACCEPTED_STATES:
+        _binding_blocked("data_access", "binding_direct_authority_required")
+
+    signature = (
+        tuple(_role_signature(result) for result in roles),
+        assessment,
+        projection_sha256,
+        spec_sha256,
+        tuple(providers),
+    )
+    return _BindingAuthority(
+        ordered,
+        snapshots,
+        signature,
+        candidate.unit,
+        candidate.kind,
+        topology,
+        assessment,
+        projection_sha256,
+        spec_sha256,
+        tuple(providers),
+    )
+
+
+def _binding_allows_empty_plan(topology: str) -> bool:
+    """Only provider/consumer cohort handoffs may bind without a local data-folder member."""
+    return topology in (pri.TOPOLOGY_PUBLISHED_PROVIDER, pri.TOPOLOGY_PUBLISHED_CONSUMER)
+
+
+def _expected_binding_authority(authority: _BindingAuthority) -> dict[str, Any]:
+    return _data_access_binding_block(authority.assessment, authority.projection_sha256, authority.providers)
+
+
+def _prior_binding_plan(  # pylint: disable=too-many-locals
+    authority: _BindingAuthority, root: Path, neutral: _NeutralRoot
+) -> tuple[dict[str, Any] | None, Any, bool]:
+    """Validate an optional old handoff and return its exact rewrite plan and currentness."""
+    import set_data_folder as folder_binding  # pylint: disable=import-outside-toplevel
+
+    manifest = _snapshot_manifest(authority.snapshots[-1])
+    old = manifest.get("binding")
+    data_sources = manifest.get("data_sources")
+    portable_binding = data_sources.get("binding") if isinstance(data_sources, dict) else None
+    declares_unbound_target = isinstance(portable_binding, dict) and portable_binding.get("state") == "unbound"
+    allow_empty = _binding_allows_empty_plan(authority.topology) or not declares_unbound_target
+    if old is None:
+        try:
+            plan = folder_binding.plan_package_rewrite(root, str(neutral.path), allow_empty=allow_empty)
+        except folder_binding.PackageRewriteError as error:
+            _binding_blocked("rewrite_plan", error.code)
+        return None, plan, False
+
+    block = _strict_binding_block(manifest)
+    allow_empty = allow_empty or not block["bound_members"]
+    try:
+        current_revision = artifact_revision.package_manifest_excluded_revision(root)
+    except artifact_revision.RevisionError as error:
+        _binding_cannot("revision", error.code.lower())
+    if current_revision != block["manifest_excluded_revision"]:
+        _binding_blocked("revision", "binding_manifest_excluded_revision_mismatch")
+
+    expected_access = _expected_binding_authority(authority)
+    old_access = block["data_access_authority"]
+    if {key: value for key, value in old_access.items() if key != "provider_cohort"} != {
+        key: value for key, value in expected_access.items() if key != "provider_cohort"
+    }:
+        _binding_blocked("data_access", "binding_data_access_authority_changed")
+    old_providers = [(row["identity"], row["ordinal"]) for row in old_access["provider_cohort"]]
+    new_providers = [(row["identity"], row["ordinal"]) for row in expected_access["provider_cohort"]]
+    if old_providers != new_providers:
+        _binding_blocked("provider", "binding_provider_identity_or_ordinal_changed")
+
+    plan = _plan_existing_binding(root, block, allow_empty=allow_empty, base=neutral.path)
+    current = (
+        block["canonical_root_identity"] == neutral.identity
+        and old_access["provider_cohort"] == expected_access["provider_cohort"]
+        and all(row.old_value == row.new_value for row in plan.values)
+        and _target_directories_exist(plan)
+    )
+    return block, plan, current
+
+
+def _walked_binding_files(root: Path) -> dict[str, Path]:
+    """One no-follow package walk, promoted to a typed transition refusal."""
+    files, findings, _empty = pfs.walk_package(root)
+    if findings:
+        code = findings[0].code
+        if code in (pfs.CODE_ENTRY_UNASSESSABLE, pfs.CODE_DIRECTORY_UNREADABLE):
+            _binding_cannot("allowed_diff", code)
+        _binding_blocked("allowed_diff", code)
+    return files
+
+
+def _assert_binding_allowed_diff(  # pylint: disable=too-many-branches
+    snapshot: _PackageSnapshot, staged: Path, plan: Any
+) -> None:
+    """Require the complete pre-manifest delta to be exactly the planner's held substitutions."""
+    walked = _walked_binding_files(staged)
+    expected_names = {MANIFEST_NAME, *dict(snapshot.digests)}
+    if set(walked) != expected_names:
+        _binding_blocked("allowed_diff", "binding_file_set_changed")
+    planned = {row.member: row.rewritten for row in plan.members}
+    verified_names = {row.relative_path for row in snapshot.verified.integrity.verified_files}
+    if set(planned) != set(plan.affected_members) or not set(planned) <= verified_names:
+        # The second set check below uses paths; this first branch rejects malformed planner output.
+        _binding_blocked("allowed_diff", "binding_planner_output_invalid")
+    declared = dict(snapshot.digests)
+    for name, path in walked.items():
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            _binding_cannot("allowed_diff", "binding_member_unreadable")
+        if name == MANIFEST_NAME:
+            if raw != snapshot.manifest:
+                _binding_blocked("allowed_diff", "binding_manifest_changed_early")
+        elif name in planned:
+            if raw != planned[name]:
+                _binding_blocked("allowed_diff", "binding_target_change_mismatch")
+        elif hashlib.sha256(raw).hexdigest() != declared[name]:
+            _binding_blocked("allowed_diff", "binding_unrelated_change")
+
+
+def _binding_block(
+    authority: _BindingAuthority, neutral: _NeutralRoot, revision: str, bound_members: Sequence[str]
+) -> dict[str, Any]:
+    """The sole BOUND handoff stored in the existing package manifest."""
+    block = {
+        "state": BINDING_STATE,
+        "privacy_policy": BINDING_PRIVACY_POLICY,
+        "canonical_root_identity": neutral.identity,
+        "manifest_excluded_revision": revision,
+        "bound_members": list(bound_members),
+        "data_access_authority": _expected_binding_authority(authority),
+    }
+    if discloses_host_location(json.dumps(block, ensure_ascii=False)):
+        _binding_blocked("binding_handoff", "binding_handoff_discloses_root")
+    return block
+
+
+def _verify_bound_candidate(  # pylint: disable=too-many-arguments
+    root: Path,
+    final_root: _NeutralRoot,
+    provider_roots: Sequence[Path],
+    expected_authority: _BindingAuthority,
+    expected_block: dict[str, Any],
+    *,
+    published: bool,
+) -> None:
+    """Verify S1/revision/authority/cohort on staged or published bytes."""
+    authority = _binding_authority((*provider_roots, root))
+    if authority.role_signature != expected_authority.role_signature:
+        _binding_blocked("authority_snapshot", "binding_authority_or_cohort_changed")
+    manifest = _snapshot_manifest(authority.snapshots[-1])
+    block = _strict_binding_block(manifest)
+    if block != expected_block:
+        _binding_blocked("binding_handoff", "binding_handoff_changed")
+    try:
+        revision = artifact_revision.package_manifest_excluded_revision(root)
+    except artifact_revision.RevisionError as error:
+        _binding_cannot("revision", error.code.lower())
+    if revision != block["manifest_excluded_revision"]:
+        _binding_blocked("revision", "binding_manifest_excluded_revision_mismatch")
+    if published:
+        current = _neutral_root(root)
+        _require_binding_path_budget(root)
+        if current.identity != block["canonical_root_identity"] or current.identity != final_root.identity:
+            _binding_blocked("neutral_root", "binding_root_identity_mismatch")
+    plan = _plan_existing_binding(
+        root,
+        block,
+        allow_empty=_binding_allows_empty_plan(authority.topology) or not block["bound_members"],
+        base=final_root.path,
+    )
+    if any(row.old_value != row.new_value for row in plan.values):
+        _binding_blocked("rewrite_plan", "binding_target_not_final")
+    if published:
+        if not _target_directories_exist(plan):
+            _binding_blocked("rewrite_plan", "binding_target_directory_missing")
+
+
+def _require_no_binding_residue(final: Path) -> None:
+    """A prior staging/retired candidate makes publication state ambiguous, never clean."""
+    for candidate in (staging_dir(final.parent, final.name), retired_dir(final)):
+        try:
+            os.lstat(candidate)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            _binding_cannot("transition", "binding_publication_ambiguous")
+        _binding_cannot("transition", "binding_publication_ambiguous")
+
+
+def verify_bound_package(package: Path, *, provider_packages: Sequence[Path] = ()) -> dict[str, Any]:
+    """Verify the producer handoff only; this never evaluates or emits START_READY."""
+    neutral = _neutral_root(package)
+    _require_no_binding_residue(neutral.path)
+    provider_roots = tuple(_neutral_root(path).path for path in provider_packages)
+    authority = _binding_authority((*provider_roots, neutral.path))
+    _require_binding_path_budget(neutral.path)
+    manifest = _snapshot_manifest(authority.snapshots[-1])
+    block = _strict_binding_block(manifest)
+    _verify_bound_candidate(
+        neutral.path,
+        neutral,
+        provider_roots,
+        authority,
+        block,
+        published=True,
+    )
+    return block
+
+
+def rebind_package(  # pylint: disable=too-many-locals
+    package: Path, *, provider_packages: Sequence[Path] = ()
+) -> dict[str, Any]:
+    """Bind/reseal one accepted package in private same-volume staging, then publish atomically."""
+    import set_data_folder as folder_binding  # pylint: disable=import-outside-toplevel
+
+    neutral = _neutral_root(package)
+    final = neutral.path
+    _require_no_binding_residue(final)
+    provider_roots = tuple(_neutral_root(path).path for path in provider_packages)
+    authority = _binding_authority((*provider_roots, final))
+    _require_binding_path_budget(final)
+    old_block, plan, current = _prior_binding_plan(authority, final, neutral)
+    if current and old_block is not None:
+        verify_bound_package(final, provider_packages=provider_roots)
+        return _snapshot_manifest(authority.snapshots[-1])
+    if not _target_directories_exist(plan):
+        _binding_blocked("rewrite_plan", "binding_target_directory_missing")
+
+    staging = staging_dir(final.parent, final.name)
+    try:
+        shutil.copytree(final, staging, copy_function=shutil.copy2)
+        folder_binding.apply_package_rewrite_plan(staging, plan)
+        _assert_binding_allowed_diff(authority.snapshots[-1], staging, plan)
+        try:
+            revision = artifact_revision.package_manifest_excluded_revision(staging)
+        except artifact_revision.RevisionError as error:
+            _binding_cannot("revision", error.code.lower())
+        block = _binding_block(authority, neutral, revision, plan.affected_members)
+        manifest = deepcopy(_snapshot_manifest(authority.snapshots[-1]))
+        manifest["binding"] = block
+        _seal_package(staging, manifest)
+        _verify_bound_candidate(
+            staging,
+            neutral,
+            provider_roots,
+            authority,
+            block,
+            published=False,
+        )
+
+        def verify_original(retired: Path) -> None:
+            if not _snapshot_matches_at(authority.snapshots[-1], retired):
+                _binding_cannot("transition", "binding_original_changed")
+            if any(not _snapshot_matches(snapshot) for snapshot in authority.snapshots[:-1]):
+                _binding_cannot("provider", "binding_provider_changed")
+
+        def verify_staged() -> None:
+            _verify_bound_candidate(
+                staging,
+                neutral,
+                provider_roots,
+                authority,
+                block,
+                published=False,
+            )
+
+        def verify_published(published_root: Path) -> None:
+            _verify_bound_candidate(
+                published_root,
+                neutral,
+                provider_roots,
+                authority,
+                block,
+                published=True,
+            )
+
+        replace_dir(
+            staging,
+            final,
+            verify=verify_original,
+            verify_staged=verify_staged,
+            verify_published=verify_published,
+        )
+    except BindingTransitionError:
+        residue = _discard_scratch(staging)
+        if residue or not _snapshot_matches(authority.snapshots[-1]):
+            _binding_cannot("transition", "binding_publication_ambiguous")
+        raise
+    except (OSError, ValueError, TypeError, UnicodeError, shutil.Error):
+        residue = _discard_scratch(staging)
+        if residue or not _snapshot_matches(authority.snapshots[-1]):
+            _binding_cannot("transition", "binding_publication_ambiguous")
+        _binding_cannot("transition", "binding_publication_failed")
+
+    if staging.exists() or retired_dir(final).exists():
+        _binding_cannot("transition", "binding_publication_ambiguous")
+    return _snapshot_manifest(_require_clean_snapshot(final))
+
+
 def _write_data_access_final(
     dest: Path, result: dict[str, Any], snapshot: _PackageSnapshot, generated: dict[str, bytes]
 ) -> None:
@@ -4960,8 +5824,14 @@ def _external_providers(packages: Sequence[Path], out_root: Path, selected: Sequ
 def _build_parser() -> argparse.ArgumentParser:
     """The CLI surface, in its own function so ``main`` stays inside its complexity budget."""
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("Attribution", maxsplit=1)[0])
-    parser.add_argument("--bundle", type=Path, required=True, help="engine bundle root (holds pbip/, handover/)")
-    parser.add_argument("--out", type=Path, required=True, help="directory to write <Unit>/ packages into")
+    parser.add_argument("--bundle", type=Path, help="engine bundle root (holds pbip/, handover/)")
+    parser.add_argument("--out", type=Path, help="directory to write <Unit>/ packages into")
+    parser.add_argument(
+        "--bind-package",
+        type=Path,
+        metavar="DIR",
+        help="bind/reseal one accepted package as BOUND/UNVALIDATED; never evaluates START_READY",
+    )
     parser.add_argument("--unit", action="append", default=[], help="package only this unit (repeatable)")
     parser.add_argument("--oracle", type=Path, help="oracle capture holding oracle-manifest.json")
     parser.add_argument("--assets", type=Path, help="directory holding the harvested .twb/.twbx/.tds assets")
@@ -5121,7 +5991,22 @@ def _warn_shipping(budgets: list[PathBudget]) -> None:
         print(advisory, file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals
+def _run_binding_cli(package: Path, provider_packages: Sequence[Path]) -> int:
+    """Privacy-safe CLI projection of the guarded binding transition."""
+    try:
+        result = rebind_package(package, provider_packages=provider_packages)
+    except BindingTransitionError as error:
+        print(f"{error.state} authority={error.authority} code={error.code}; package remains UNBOUND")
+        return 1
+    binding = result["binding"]
+    print(
+        "OK - BOUND/UNVALIDATED "
+        f"root_identity={binding['canonical_root_identity']} members={len(binding['bound_members'])}"
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-statements
     """Package the requested units and report what each one carries.
 
     The three outcome buckets are separate local lists on purpose: `_package_each` fills them, and
@@ -5130,6 +6015,25 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    if args.bind_package is not None:
+        incompatible = (
+            args.bundle is not None
+            or args.out is not None
+            or bool(args.unit)
+            or args.oracle is not None
+            or args.assets is not None
+            or args.brief is not None
+            or args.gate_root is not None
+            or args.json is not None
+            or args.discard_package_edits
+            or args.assemble_only
+        )
+        if incompatible:
+            parser.error("--bind-package is a separate transition and cannot be combined with assembly options")
+        return _run_binding_cli(args.bind_package, args.provider_package)
+    if args.bundle is None or args.out is None:
+        parser.error("--bundle and --out are required unless --bind-package is used")
 
     bundle = args.bundle.resolve()
     if not bundle.is_dir():

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -658,36 +659,58 @@ def test_the_readme_command_that_BINDS_the_package_actually_binds_it(tmp_path: P
     invalid value. Round-2 finding 1 makes binding load-bearing rather than a repair, so it is run
     exactly as printed and its effect is read off disk.
 
-    ⚠️ This fixture's unit is report-only, so what it proves is that the README's own first command
-    RUNS and succeeds on a package this packager actually produced - including the model-less shape,
-    which is a whole class of units and used to be answered with "is this a package folder?". The
-    row-level proof (placeholder in, real directory out, partition reads the file) needs a model with
-    imported data and lives in `test_package_unit.py`:
+    The package is moved under the explicit neutral package-root policy first. The child process's
+    profile/temp variables point at a disjoint control hierarchy, so this proves the command rather
+    than depending on where pytest itself happens to allocate `tmp_path`. The row-level proof
+    (placeholder in, real directory out, partition reads the file) lives in `test_package_unit.py`:
     `test_a_moved_package_still_reaches_its_rows_once_it_is_BOUND`.
     """
     bundle, oracle, _ = _bundle(tmp_path, covered=None)
-    unit = _package(tmp_path, bundle, oracle)
+    original = _package(tmp_path, bundle, oracle)
+    control = hashlib.sha256(str(tmp_path).encode("utf-8")).hexdigest()[:12]
+    neutral = SCRIPTS.parent / "_binding-cli-tests" / control
+    unit = neutral / "packages" / original.name
+    unit.parent.mkdir(parents=True)
+    shutil.move(str(original), str(unit))
     readme = (unit / "README.md").read_text(encoding="utf-8")
     printed = [line.split() for line in readme.splitlines() if line.startswith(f"    python {BIND_SCRIPT}")]
     assert len(printed) == 1, f"the package README no longer prints the binding command: {readme[:400]}"
 
     _python, script, *arguments = printed[0]
-    proc = subprocess.run(  # noqa: S603
-        [sys.executable, str(SCRIPTS.parent / script), *[a.replace(PATH_PLACEHOLDER, str(unit)) for a in arguments]],
-        capture_output=True,
-        text=True,
-        check=False,
-        cwd=str(tmp_path),
-        timeout=900,
-    )
-    assert proc.returncode == 0, f"the documented binding command failed: {proc.stdout}\n{proc.stderr}"
-    expressions = list(unit.glob("fabric/*.SemanticModel/definition/expressions.tmdl"))
-    for path in expressions:
-        text = path.read_text(encoding="utf-8")
-        assert pkg.PACKAGE_ROOT_TOKEN not in text, "binding left the placeholder in place"
-        for value in re.findall(r'expression\s+(?:#"[^"]+"|[^\s=]+)\s*=\s*"([^"]*)"', text):
-            if value.startswith(str(unit)):
-                assert Path(value.rstrip("\\/")).is_dir(), f"binding wrote a directory that is not there: {value}"
+    private_control = str(SCRIPTS.parent.parent / "_binding-private-control")
+    env = {
+        **os.environ,
+        "HOME": private_control,
+        "USERPROFILE": private_control,
+        "TMPDIR": private_control,
+        "TEMP": private_control,
+        "TMP": private_control,
+        "LOCALAPPDATA": private_control,
+    }
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [
+                sys.executable,
+                str(SCRIPTS.parent / script),
+                *[a.replace(PATH_PLACEHOLDER, str(unit)) for a in arguments],
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(tmp_path),
+            env=env,
+            timeout=900,
+        )
+        assert proc.returncode == 0, f"the documented binding command failed: {proc.stdout}\n{proc.stderr}"
+        expressions = list(unit.glob("fabric/*.SemanticModel/definition/expressions.tmdl"))
+        for path in expressions:
+            text = path.read_text(encoding="utf-8")
+            assert pkg.PACKAGE_ROOT_TOKEN not in text, "binding left the placeholder in place"
+            for value in re.findall(r'expression\s+(?:#"[^"]+"|[^\s=]+)\s*=\s*"([^"]*)"', text):
+                if value.startswith(str(unit)):
+                    assert Path(value.rstrip("\\/")).is_dir(), f"binding wrote a directory that is not there: {value}"
+    finally:
+        shutil.rmtree(neutral, ignore_errors=True)
 
 
 def _run_gate(script: str, arguments: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
