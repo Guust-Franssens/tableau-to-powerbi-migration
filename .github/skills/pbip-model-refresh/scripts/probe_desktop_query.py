@@ -41,16 +41,22 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, NoReturn, TypeVar
+from typing import Callable, Iterator, NoReturn, TypeVar
 
 from _verdict import derive_data_verdict
 
 from _credential_modal import (
     CredentialDetection,
+    CredentialMissingError,
     CredentialModal,
+    CredentialUnknownError,
+    DesktopGoneError,
+    DesktopUnreadyError,
     DialogFinding,
+    DialogFoundError,
     describe_dialog_finding,
     describe_modal,
     dialog_guidance,
@@ -85,6 +91,88 @@ class ObservationUnavailable(RuntimeError):
     """A locally named refusal; native exceptions are mapped to TOOL_UNAVAILABLE, not reflected."""
 
 
+_OBSERVATION_CODES = frozenset(
+    {
+        "IDENTITY_UNESTABLISHED",
+        "WRONG_PID_PORT",
+        "PID_REUSED",
+        "CATALOGUE_UNESTABLISHED",
+        "CATALOGUE_CHANGED",
+        "CANARIES_REQUIRED",
+        "CREDENTIAL_MISSING",
+        "CREDENTIAL_UNKNOWN",
+        "DESKTOP_GONE",
+        "DESKTOP_UNREADY",
+        "DIALOG_NEEDS_HUMAN",
+        "DIALOG_UNREADABLE",
+        "DIALOG_UNRECOGNIZED",
+        "REFRESH_IN_PROGRESS",
+        "TIMEOUT",
+        "TOOL_UNAVAILABLE",
+    }
+)
+
+
+def _fresh_observation_error(error: BaseException) -> BaseException:
+    """Copy a local code only, never native arguments, evidence, notes or exception state."""
+    if isinstance(error, KeyboardInterrupt):
+        return KeyboardInterrupt()
+    code = "TOOL_UNAVAILABLE"
+    if type(error) is ObservationUnavailable and len(error.args) == 1:  # pylint: disable=unidiomatic-typecheck
+        code = error.args[0]
+    elif type(error) is DialogFoundError and type(error.finding) is DialogFinding:  # pylint: disable=unidiomatic-typecheck
+        code = error.finding.verdict
+    else:
+        code = {
+            CredentialMissingError: "CREDENTIAL_MISSING",
+            CredentialUnknownError: "CREDENTIAL_UNKNOWN",
+            DesktopGoneError: "DESKTOP_GONE",
+            DesktopUnreadyError: "DESKTOP_UNREADY",
+            TimeoutError: "TIMEOUT",
+        }.get(type(error), code)
+    if type(code) is not str or code not in _OBSERVATION_CODES:  # pylint: disable=unidiomatic-typecheck
+        code = "TOOL_UNAVAILABLE"
+    return ObservationUnavailable(code)
+
+
+def _raise_closed_error(error: BaseException) -> NoReturn:
+    """Sever even an exception active in the caller; ``from None`` only hides that context."""
+    try:
+        raise error from None
+    except BaseException:  # pylint: disable=broad-exception-caught
+        error.__context__ = None
+        error.__cause__ = None
+        raise
+
+
+@contextmanager
+def _observation_errors(enabled: bool = True, *, preserve: tuple[type[Exception], ...] = ()) -> Iterator[None]:
+    """A closed public error boundary; legacy calls keep their original exceptions."""
+    try:
+        yield
+    except BaseException as error:  # pylint: disable=broad-exception-caught
+        if not enabled:
+            raise
+        failure = type(error)("TOOL_UNAVAILABLE") if type(error) in preserve else _fresh_observation_error(error)
+    else:
+        return
+    _raise_closed_error(failure)
+
+
+def _validate_observation_request(return_observation: bool, sink) -> None:
+    """Retired sinks are refused by identity alone, before inspecting them or doing any I/O."""
+    if type(return_observation) is not bool or sink is not None:  # pylint: disable=unidiomatic-typecheck
+        _raise_closed_error(ObservationUnavailable("TOOL_UNAVAILABLE"))
+
+
+def _close_observation_connection(connection) -> None:
+    """Ordinary ADOMD teardown is best-effort; an interrupt must still refuse publication."""
+    try:
+        connection.Close()
+    except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+
 @dataclass(frozen=True, slots=True)
 class DesktopIdentity:
     """Exact OS parent/child start identities and the child's sole listener."""
@@ -112,8 +200,10 @@ class CanaryObservation:
     table: str
     query: str
     returned_rows: int
+    identity: DesktopIdentity
 
 
+@_observation_errors()
 def desktop_identity(pid: int, supplied_port: int | None = None) -> DesktopIdentity:
     """Read one exact PID/start -> child/start -> unique port, without alternate-PID fallback."""
     if os.name != "nt" or type(pid) is not int or not 0 < pid < 2**32:  # pylint: disable=unidiomatic-typecheck
@@ -168,23 +258,30 @@ def _validate_identity(payload: dict, pid: int) -> None:
         raise ValueError("identity")
 
 
-def catalogue_id(connection) -> str:
-    """Read exactly one canonical Desktop catalogue ID; missing/ambiguous identity is refused."""
-    command = connection.CreateCommand()
-    command.CommandTimeout = 30
-    command.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS"
-    reader = command.ExecuteReader()
-    try:
-        if not reader.Read():
-            raise ValueError("missing catalogue")
-        value = str(reader.GetValue(0))
-        if reader.Read() or str(uuid.UUID(value)) != value:
-            raise ValueError("ambiguous catalogue")
-        return value
-    except (ValueError, TypeError):
-        raise ObservationUnavailable("CATALOGUE_UNESTABLISHED") from None
-    finally:
-        reader.Close()
+def catalogue_id(connection, *, observation_mode: bool = False) -> str:
+    """Read one canonical catalogue, retaining raw query/Close failures for legacy callers.
+
+    Only observation mode closes the error surface and treats ordinary reader teardown as best-effort.
+    """
+    with _observation_errors(observation_mode):
+        command = connection.CreateCommand()
+        command.CommandTimeout = 30
+        command.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS"
+        reader = command.ExecuteReader()
+        try:
+            if not reader.Read():
+                raise ValueError("missing catalogue")
+            value = str(reader.GetValue(0))
+            if reader.Read() or str(uuid.UUID(value)) != value:
+                raise ValueError("ambiguous catalogue")
+            return value
+        except (ValueError, TypeError):
+            raise ObservationUnavailable("CATALOGUE_UNESTABLISHED") from None
+        finally:
+            if observation_mode:
+                _close_observation_connection(reader)
+            else:
+                reader.Close()
 
 
 def _observation_credential_check(pid: int, *, in_flight: bool) -> None:
@@ -200,10 +297,11 @@ def _observation_credential_check(pid: int, *, in_flight: bool) -> None:
             raise ObservationUnavailable(code)
 
 
+@_observation_errors()
 def _observation_call(pid: int, operation: Callable[[], _T], timeout_seconds: float) -> _T:
     """Bound reads, including credential inspection. Timed-out native work is not cancellable.
 
-    Workers are daemon-only and never publish a late result to a caller's observation sink.
+    Workers are daemon-only; results stay invocation-private until both workers terminate.
     This helper is for reads, NOT a lifecycle wrapper around refresh or persistence.
     """
     if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= OBSERVATION_TIMEOUT_SECONDS:  # pylint: disable=unidiomatic-typecheck
@@ -211,69 +309,86 @@ def _observation_call(pid: int, operation: Callable[[], _T], timeout_seconds: fl
     outcome = queue.Queue()
     stopped = threading.Event()
 
-    def guarded(call) -> None:
+    def poll() -> None:
         try:
-            outcome.put((True, call()))
+            while not stopped.wait(0.1):
+                _observation_credential_check(pid, in_flight=True)
         except BaseException as error:  # pylint: disable=broad-exception-caught
             outcome.put((False, error))
 
-    def poll() -> None:
-        while not stopped.wait(0.1):
-            _observation_credential_check(pid, in_flight=True)
+    monitor = threading.Thread(target=poll, name="observation-inspection", daemon=True)
 
-    def run() -> _T | None:
-        _observation_credential_check(pid, in_flight=False)
-        if stopped.is_set():
-            return None
-        threading.Thread(target=lambda: guarded(poll), daemon=True).start()
-        result = operation()
-        if not stopped.is_set():
-            _observation_credential_check(pid, in_flight=True)
-        return result
+    def run() -> None:
+        try:
+            _observation_credential_check(pid, in_flight=False)
+            if stopped.is_set():
+                return
+            monitor.start()
+            result = operation()
+            if not stopped.is_set():
+                _observation_credential_check(pid, in_flight=True)
+                outcome.put((True, result))
+        except BaseException as error:  # pylint: disable=broad-exception-caught
+            outcome.put((False, error))
 
     deadline = time.monotonic() + timeout_seconds
-    threading.Thread(target=lambda: guarded(run), daemon=True).start()
+    worker = threading.Thread(target=run, name="observation-read", daemon=True)
+    worker.start()
     try:
         succeeded, value = outcome.get(timeout=max(0, deadline - time.monotonic()))
-        if time.monotonic() > deadline:
-            raise ObservationUnavailable("TIMEOUT")
         if not succeeded:
-            if isinstance(value, (ObservationUnavailable, KeyboardInterrupt)):
-                raise value
-            raise ObservationUnavailable("TOOL_UNAVAILABLE") from None
-        return value
+            raise value
+        stopped.set()
+        worker.join(max(0, deadline - time.monotonic()))
+        monitor.join(max(0, deadline - time.monotonic()))
+        if worker.is_alive() or monitor.is_alive() or time.monotonic() > deadline:
+            raise ObservationUnavailable("TIMEOUT")
+        # An in-flight inspection can refuse after the operation queued its private result.
+        try:
+            _, failure = outcome.get_nowait()
+        except queue.Empty:
+            pass
+        else:
+            raise failure
     except queue.Empty:
         raise ObservationUnavailable("TIMEOUT") from None
     finally:
         stopped.set()
+    return value
 
 
+@_observation_errors()
 def bind_desktop(pid: int, supplied_port: int | None = None) -> BoundDesktop:
     """Bracket catalogue discovery with PID/start observations, within one bounded read."""
 
     def discover() -> BoundDesktop:
         identity = desktop_identity(pid, supplied_port)
         connection = _load_adomd()(f"Data Source=localhost:{identity.port};Connect Timeout=30")
-        connection.Open()
         try:
-            bound = BoundDesktop(identity, catalogue_id(connection))
+            connection.Open()
+            bound = BoundDesktop(identity, catalogue_id(connection, observation_mode=True))
             if desktop_identity(pid) != identity:
                 raise ObservationUnavailable("PID_REUSED")
             return bound
         finally:
-            connection.Close()
+            _close_observation_connection(connection)
 
     return _observation_call(pid, discover, OBSERVATION_TIMEOUT_SECONDS)
 
 
-def recheck_bound(bound: BoundDesktop, connection) -> None:
-    """Refuse PID reuse, a changed child/listener, or a different/multiple catalogue."""
-    if desktop_identity(bound.identity.pid) != bound.identity:
-        raise ObservationUnavailable("PID_REUSED")
-    if catalogue_id(connection) != bound.catalogue or str(connection.Database) != bound.catalogue:
-        raise ObservationUnavailable("CATALOGUE_CHANGED")
+def recheck_bound(bound: BoundDesktop, connection, *, observation_mode: bool = False) -> None:
+    """Recheck the binding without changing a legacy caller's catalogue failure semantics."""
+    with _observation_errors(observation_mode):
+        if desktop_identity(bound.identity.pid) != bound.identity:
+            raise ObservationUnavailable("PID_REUSED")
+        if (
+            catalogue_id(connection, observation_mode=observation_mode) != bound.catalogue
+            or str(connection.Database) != bound.catalogue
+        ):
+            raise ObservationUnavailable("CATALOGUE_CHANGED")
 
 
+@_observation_errors()
 def bound_call(
     bound: BoundDesktop, operation: Callable[[object], _T], *, timeout_seconds: float = OBSERVATION_TIMEOUT_SECONDS
 ) -> _T:
@@ -287,16 +402,17 @@ def bound_call(
         )
         try:
             connection.Open()
-            recheck_bound(bound, connection)
+            recheck_bound(bound, connection, observation_mode=True)
             result = operation(connection)
-            recheck_bound(bound, connection)
+            recheck_bound(bound, connection, observation_mode=True)
             return result
         finally:
-            connection.Close()
+            _close_observation_connection(connection)
 
     return _observation_call(bound.identity.pid, read, timeout_seconds)
 
 
+@_observation_errors()
 def probe_observations(
     bound: BoundDesktop, canaries: list[str], *, timeout_seconds: float = OBSERVATION_TIMEOUT_SECONDS
 ) -> tuple[CanaryObservation, ...]:
@@ -312,10 +428,10 @@ def probe_observations(
     def read(connection) -> tuple[CanaryObservation, ...]:
         observed = []
         for name in targets:
-            rows = _probe_one(bound.identity.port, connection, name, emit=lambda _: None)
+            rows = _probe_one(bound.identity.port, connection, name, emit=lambda _: None, observation_mode=True)
             if type(rows) is not int or rows < 0:  # pylint: disable=unidiomatic-typecheck
                 raise ObservationUnavailable("TOOL_UNAVAILABLE")
-            observed.append(CanaryObservation(bound.catalogue, name, _canary_query(name), rows))
+            observed.append(CanaryObservation(bound.catalogue, name, _canary_query(name), rows, bound.identity))
         return tuple(observed)
 
     return bound_call(bound, read, timeout_seconds=timeout_seconds)
@@ -567,12 +683,7 @@ def _canary_query(table: str) -> str:
     return f"EVALUATE TOPN(1, '{table.replace(chr(39), chr(39) * 2)}')"
 
 
-def _probe_one(port: int, conn, table: str, emit=print) -> int:
-    """Run EVALUATE TOPN(1, '<table>') for one table, print the evidence, and return the row count."""
-    dax = _canary_query(table)
-    cmd = conn.CreateCommand()
-    cmd.CommandText = dax
-    reader = cmd.ExecuteReader()
+def _read_canary(reader) -> tuple[list[str], int, list[str]]:
     cols = [reader.GetName(i) for i in range(reader.FieldCount)]
     rows = 0
     first_values: list[str] = []
@@ -580,7 +691,23 @@ def _probe_one(port: int, conn, table: str, emit=print) -> int:
         rows += 1
         if rows == 1:
             first_values = [str(reader.GetValue(i)) for i in range(reader.FieldCount)]
-    reader.Close()
+    return cols, rows, first_values
+
+
+def _probe_one(port: int, conn, table: str, emit=print, *, observation_mode: bool = False) -> int:
+    """Run EVALUATE TOPN(1, '<table>') for one table, print the evidence, and return the row count."""
+    dax = _canary_query(table)
+    cmd = conn.CreateCommand()
+    cmd.CommandText = dax
+    reader = cmd.ExecuteReader()
+    if observation_mode:
+        try:
+            cols, rows, first_values = _read_canary(reader)
+        finally:
+            _close_observation_connection(reader)
+    else:
+        cols, rows, first_values = _read_canary(reader)
+        reader.Close()
     emit(f"port={port}  table='{table}'  dax={dax}")
     emit(f"  columns ({len(cols)}): {cols[:8]}")
     if rows:
