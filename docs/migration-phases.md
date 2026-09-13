@@ -342,6 +342,10 @@ final START_READY data-access fold remains a separate slice.
 
 ### The two gates
 
+The entry check is **post-emission, before agentic fidelity work**, not before engine conversion.
+Use the authoritative [conversion, dispatch, and fidelity boundaries](reference-readiness.md#conversion-dispatch-and-fidelity-boundaries)
+for the transition, including the pending final package consumer; the lifecycle above is unchanged.
+
 | gate | question | verdicts |
 |---|---|---|
 | [`check_reference_readiness.py`](../scripts/check_reference_readiness.py) — the **ENTRY** gate | per report page, is there trustworthy Tableau reference evidence to *start from*? | exit 0 ready / 1 findings / 3 `CANNOT_ESTABLISH`; a page is `ready`, `blind`, `unverifiable`, or below the required grade. Neither 1 nor 3 is a pass |

@@ -1,13 +1,45 @@
 # Reference readiness — the entry gate (issue #421)
 
-`scripts/check_reference_readiness.py` is the only **entry** gate in this toolkit. Every other gate
-answers whether work is *done*; this one answers whether there is enough visual evidence to **start**.
+`scripts/check_reference_readiness.py` is the **reference entry** gate: is there enough visual
+evidence to start the requested agentic fidelity work on an already-emitted bundle?
 
 ```
 python scripts/check_reference_readiness.py <bundle> [--require-validation-grade] [--json <file>]
 ```
 
-Run it **before dispatching any builder** — it is step 1 of `docs/INDEX.md`'s per-unit route.
+## Conversion, dispatch, and fidelity boundaries
+
+These are three separate decisions; this section is the authoritative timing and claim boundary
+for the routes linked from `docs/INDEX.md`.
+
+1. **Deterministic conversion may proceed without reference imagery.** Images are optional for
+   parsing, semantic-model emission and report emission. Missing or unsuccessful acquisition does
+   not, by itself, block that engine conversion; other engine prerequisites and failures still
+   apply. Capture while source access is available, even if that is earlier than emission, but do
+   not make capture success an engine prerequisite.
+2. **Reference readiness is a post-emission, pre-agentic prerequisite.** Run
+   `check_reference_readiness.py` after the engine emits the bundle and before dispatching
+   fidelity-building or fidelity-review work. It checks source expectations, emitted pages and
+   attributable evidence at the requested grade. Findings or `CANNOT_ESTABLISH` do not permit
+   blind dispatch, and do not mean the deterministic engine could not run. An accepted layout/text
+   manual image can meet the default reference bar without meeting a validation-grade request.
+   For self-contained packages, this is one prerequisite of final Phase-1 `START_READY`, not a
+   substitute for its package, source, data-access and binding authorities. The
+   [final package consumer is still pending](#package-data-access-producer--final-consumer-still-pending-562):
+   ordinary reference `READY` or engine-earned `NOT_APPLICABLE` is not final package `START_READY`
+   or permission to dispatch that package.
+3. **Fidelity claims require comparison, not just readiness.** Claims are limited to the accepted
+   evidence's capabilities and provider ceiling for each relevant page/state, plus the actual
+   comparison and remaining validation obligations. Reference `READY`, even at validation grade,
+   is input readiness: it is not completed visual/numeric comparison, `COMPLETE`, or sign-off.
+   A manifest's presence, filename, capture exit 0, structural-only capture, successful conversion
+   or binding, and a higher-resolution render cannot establish identity or promote evidence grade.
+   Oracle default-state images remain layout/text-grade only, including copied/grouped renders.
+
+Use the existing [provider ceilings and provenance rules](#provider-ceilings--and-the-one-walkable-route-to-validation-grade)
+and [capture-provider instructions](reference-capture.md#providers--resolve-by-fitness-not-availability)
+to establish what each record supports; neither the route name nor an object-kind flag replaces
+those checks.
 
 ---
 
@@ -100,6 +132,9 @@ also *unwalkable* until round 2: `collect_manual` globs `tableau-*.png` and name
 file stem, so every name carried a `tableau-` prefix and matched nothing. The prefix is stripped now,
 so a file dropped as `tableau-<object>.png` resolves. The ceiling note in the output names each
 provider's ceiling and this route, rather than merely saying validation grade is rare.
+The manual flag is an attributable human assertion, not independent proof of the depicted revision
+or filter state. Likewise, the source SHA binds the declared source file; it does not prove the
+screenshot depicts that file's contents.
 
 ⚠️ **Grade does NOT widen scope, and the route stayed unwalkable for a second reason until #519.**
 Round 3 removed the grade⇒kind promotion (`reference_evidence.MANUAL_KIND_HINT`), so a `manual` record
@@ -109,7 +144,8 @@ back `UNVERIFIABLE - name only; scope unknown cannot satisfy a dashboard page`, 
 for `view_type` named a field no flag could produce. `capture_tableau_reference.py` now DERIVES it
 from `migration-spec.json` — the name join is `object_identity.normalize`'s (whitespace-collapsed,
 casefolded, **never slugified**), a name claimed by two kinds is dropped rather than guessed, and
-`--manual-object-type` is the explicit fallback when the filename cannot carry the object's name.
+`--manual-object-type` explicitly declares **kind only**. It cannot repair an unrepresentable,
+different or ambiguous object name; unsupported identity remains a gap, not a successful join.
 
 ### The page mapping must be readable
 

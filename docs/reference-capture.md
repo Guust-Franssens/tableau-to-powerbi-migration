@@ -197,19 +197,20 @@ reason (wrong prefix, wrong extension, not a PNG, empty, or below the 64 px legi
 `MIN_RENDER_EDGE`, shared with the readiness gate so a file adopted here cannot be rejected as
 illegible there). Byte size is no longer a criterion for a hand-supplied file: PNG is lossless, so a
 legible 1440×900 flat-fill dashboard measures ~7 KB and was silently discarded by the old 20 KB floor.
-`--manual-object-type` declares what a screenshot is a picture OF when its filename cannot carry the
-source object's exact name; normally the type is derived from `migration-spec.json`. First-timer
+`--manual-object-type` declares **kind only**; normally the type is derived from
+`migration-spec.json`. It cannot turn a different, ambiguous or unrepresentable filename into the
+source object's identity, and it does not assert a higher grade. First-timer
 route, verified end to end with no server: [`start-with-one-workbook.md`](start-with-one-workbook.md).
 
 ### Default = fail **closed**
 
-If no provider can produce a reference, the pipeline **blocks before report *planning* and asks for a
-source** — it does **not** "proceed with a warning" (a buried warning recreates the exact
-build-blind bug this design fixes). The only escape hatch is an explicit, user-acknowledged
-**`structural-only` mode** that (a) may still build the semantic model + a provisional report, but
-(b) **cannot claim visual fidelity** and (c) **cannot receive normal migration sign-off** — the
-validator is told up front that gestalt grading is impossible. In non-interactive/CI runs, fail with an
-actionable "missing reference" manifest instead of hanging on input.
+If a fresh capture gets no provider records, **the capture command** refuses acquisition; this is not
+an engine-conversion refusal. Its explicit `--structural-only` mode can instead write an empty
+manifest and exit 0, but produces no usable reference evidence. Neither outcome is a readiness
+verdict or permission for normal agentic fidelity planning. Use the authoritative
+[conversion, dispatch, and fidelity boundaries](reference-readiness.md#conversion-dispatch-and-fidelity-boundaries)
+for what can proceed and what remains non-clean. In non-interactive/CI runs, report the acquisition
+gap rather than hanging on input or interpreting capture exit 0 as dispatch/sign-off.
 
 **Configured-but-auth-failed ≠ not-configured.** During an explicit Server request, if
 `TABLEAU_SERVER_*` is set but the PAT is dead/expired, **halt with a specific credential error** —
@@ -219,9 +220,9 @@ Server capture is requested explicitly with **`--server-rest`**; credentials mer
 default `.env` do not request it and cannot pre-empt an offline thumbnail or manual reference.
 `--env <path>` is the credential-file selector reserved for an explicit Server request (for example,
 an engagement-specific file rather than the repository default); the unwired provider does not open
-it yet. A requested Server capture still halts instead of degrading. `--structural-only` is the
-explicit exception: it may bypass that halt, but its manifest cannot support a visual-fidelity claim
-or normal sign-off.
+it yet. A requested Server capture still halts instead of degrading. `--structural-only` explicitly
+requests no capture and can bypass that acquisition halt; it does not grant data-access/model-only
+authorization, clear a physical credential stop, or supply evidence for visual fidelity/sign-off.
 
 ## Route survey — what the server can actually give you for a DASHBOARD (issue #403)
 

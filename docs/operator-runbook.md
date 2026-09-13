@@ -873,6 +873,10 @@ unit path**, and getting one wrong is silent: `check_reference_readiness.py` ret
 `CANNOT_ESTABLISH` (exit 3), which reads as *"this unit is broken"* rather than *"you did not tell
 me where the workbook is"* (issue #446).
 
+This handoff is **after deterministic emission**; conversion output is not agentic dispatch
+readiness. Apply the authoritative [conversion, dispatch, and fidelity boundaries](reference-readiness.md#conversion-dispatch-and-fidelity-boundaries),
+including the current final-package-consumer limitation, before handing off the constructed package.
+
 ```powershell
 python scripts\package_unit.py --bundle _bundle --out _runs\<NNN>-<slug>\packages `
     --json _runs\<NNN>-<slug>\packages\packaging.json

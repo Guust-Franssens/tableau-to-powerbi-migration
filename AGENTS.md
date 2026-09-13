@@ -228,11 +228,12 @@ A fidelity review later needs a picture of the *source*, and nothing downstream 
 Desktop Bridge `screenshot`/`screenshot-all` commands shoot the Power BI *output*, not Tableau.
 Capturing it while you are already authenticated is the difference between one command and a
 re-authentication against a server that may since have gone dark (#198). **Pick the tool by the
-source:**
+source:** Timing and permitted claims follow the authoritative
+[conversion, dispatch, and fidelity boundaries](docs/reference-readiness.md#conversion-dispatch-and-fidelity-boundaries).
 
 | Source | Capture command | Notes |
 |---|---|---|
-| **Tableau Public URL, or a local `.twb`/`.twbx`** | `python scripts/capture_tableau_reference.py migrations/workbooks/<slug> [--public-url <url> --view <view>]` | Writes a provenance-stamped `reference/manifest.json` — a `capabilities`-carrying `validation_grade` source; its `manual` provider also adopts user-dropped `tableau-*.png` in `reference/`. An existing manifest **short-circuits to exit 0** — re-run with `--force`. |
+| **Tableau Public URL, or a local `.twb`/`.twbx`** | `python scripts/capture_tableau_reference.py migrations/workbooks/<slug> [--public-url <url> --view <view>]` | Writes per-record provenance and `capabilities` in `reference/manifest.json`, not blanket grade. Adopts manual `tableau-*.png` files. An existing manifest **short-circuits to exit 0** — use `--force`, then recheck readiness. |
 | **Tableau Server/Cloud** (`TABLEAU_SERVER_URL` configured) | `python scripts/capture_tableau_oracle.py --out _oracle --images [--reference-best] [--workbook "<published name>"]` | This row **is** the oracle route: it does the live REST image export. **Exit 4 is "no views selected"** — a wrong or over-narrow target (usually a `--workbook` filter matching nothing), **NOT** "capture is impossible"; **exit 3** is a total non-credential failure. Reading a selection miss as an impossibility is the whole of #198. Full code list below. |
 
 Three oracle traps, all verified in `scripts/capture_tableau_oracle.py`:
@@ -379,14 +380,12 @@ this session's entire working memory with it — measured 2026-08-08), and it is
 subagent receives instead of re-deriving intent nobody wrote down. Then invoke `@tableau-migrator`
 per unit of work, handing it the brief.
 
-**Record the Step-1 capture in the brief — grade included.** For each unit write **where the
-reference landed**, **which tool produced it**, and **what grade of evidence it is** — the
-load-bearing part. A `reference/` capture carries a `capabilities` manifest and is a
-`validation_grade` source. An **oracle** capture is **not**: its images land outside `reference/`,
-carry no `capabilities` manifest, and are taken in the view's **default state only** (no `?vf_`
-filter pinning), so they are **layout- and text-grade only**. Say so, and tell the consumer to log
-that ceiling in `limitations_encountered` — a visual PASS signed off on oracle imagery alone is
-overstated (#194). Do not quietly drop this, and do not inflate it.
+**Record the Step-1 capture in the brief — grade included.** Name **where** it landed, **which tool**
+produced it, and each accepted manifest record's **capabilities, grade and provider ceiling**; a
+`reference/` directory alone earns none. Oracle images carry no `capabilities` manifest and cover
+only the view's **default state** (no `?vf_` pinning): **layout- and text-grade only**, even if
+copied into `reference/`. Log that ceiling in `limitations_encountered` — a visual PASS on oracle
+imagery alone is overstated (#194). Do not inflate it.
 
 **Add `--reference-best` to any oracle run that covers dashboards.** `?resolution=high` is measured
 to be exactly 2× the dashboard's declared size with no parameter that raises it, so a label-dense
