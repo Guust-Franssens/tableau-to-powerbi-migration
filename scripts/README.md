@@ -368,12 +368,17 @@ capability. This in-process ownership binding is not cryptographic security or a
 guarantee. `role_result.data_access_handoff(root)` selects only the declared `data-access.json` and
 returns its held bytes together with the exact spec already parsed by S2 and
 `credential_gate.package_spec_facts()` (opaque sorted direct-live keys, review/refusal and
-direct/published-only applicability). Every row, including `sqlproxy`, reaches the canonical leg
-authority; published-only requires no live/review leg or source-set refusal. No provider permission
-is inferred. S2 binds its exact issued result, role/blocker state and facts, validates the held spec
+direct/published-only applicability). This is the sole package source-facts authority. A nonempty set
+of strict scalar `sqlproxy` references with valid published identity can be published-only:
+the parser's `powerbi_target=live_source` stays verbatim and is not a second direct database leg.
+Direct sources retain canonical keys, including a datasource's own connection alongside
+self-publication metadata. Mixed, nested, aggregate, malformed, unknown/review or additional direct
+legs never become published-only. No provider permission is inferred. S2 binds its exact issued
+result, role/blocker state and facts, validates the held spec
 digest, and freshly reads only spec/projection metadata through S1 without reparsing/reclassifying.
 These capabilities and fields are nonserialized. The future consumer must use
-`parse_data_access()` on those held bytes; no audit read, reprobe or final data-access fold is added here.
+`parse_data_access()` on those held bytes and the canonical conjunction below; handoff consumption
+does not reparse the spec, read an audit or reprobe.
 
 ### Current packaged numeric-scope authority (#363)
 
@@ -423,7 +428,7 @@ is added. Recommissioning scope returns to Phase-1 packaging, not a Phase-2 rewr
 brief/manifest do not authenticate customer agreement, producer identity or latest-ever history.
 Detailed contract and limits: [numeric-obligation authority](../docs/reference-readiness.md#numeric-obligation-authority).
 
-### Package data-access producer (#562)
+### Package data-access producer and binder (#562, #622)
 
 Each new package declares and S1-hashes a strict `data-access.json`, including blocked/cannot-establish
 states. The single brief parser above accepts v1's four string policy fields or v2's five, retaining
@@ -449,7 +454,24 @@ cannot create an accepted projection. Every published-only row needs a complete 
 connection and valid dependency; malformed/additional direct legs never disappear from the denominator.
 No probe/audit/gate writes or scope downgrade.
 
-❌ **Producer-only:** the final `check_reference_readiness.py` START_READY data consumer is pending.
+Both the producer and binder call
+`credential_gate.reconcile_package_data_access(assessment, facts, *, requested_scope, fallback_authorization, provider=None)`.
+This pure, read-only conjunction accepts only an already-issued/parsed assessment, canonical
+`PackageSpecFacts`, strict `BriefPolicy` scope/fallback values (or truthful absence), and at most one
+exact S2-selected provider reference with its own canonically checked assessment. It has no path,
+raw-spec/brief, audit, filesystem or provider-search input. The producer still earns the initial
+assessment through `assess_data_access`; the binder checks its held projection without earning proof.
+Neither adapter maintains another source/policy/provider matrix.
+
+Accepted assessments retain the same fields and ceiling; existing `blocked`/`cannot_establish`
+states and codes remain refusals. Inheritance requires the selected direct local/live provider's
+exact token, state, source keys, validation and ceiling. Missing policy, contradictory source facts,
+recursive inheritance and model-only providers serving reports cannot be repaired or authorized by
+the conjunction. The binder maps a canonical refusal to `binding_data_access_refused` (exit 1 for
+blocked, 3 for cannot-establish), without rewriting the stored projection.
+
+❌ **Final consumer pending:** `check_reference_readiness.py` does not yet supply the final START_READY
+data/binding conjunction. This prerequisite adds no final START_READY verdict; BOUND remains UNVALIDATED.
 Construction `ASSEMBLED`, reference `READY`, `has_engine_working_copy` and `self_contained` are not
 data authorization. Handover/README/output record dispatch readiness as unavailable and not
 evaluated. Model-only authorization stays unvalidated and cannot be

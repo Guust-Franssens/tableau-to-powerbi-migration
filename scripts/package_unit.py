@@ -4610,26 +4610,27 @@ def _provider_projection(
         and verified.is_bound_to(snapshot.verified.root_identity)
         and verified.integrity.is_clean
     )
-    if (
-        not provider.is_start_ready
-        or provider.kind != pri.KIND_DATASOURCE
-        or provider.brief_policy is None
-        or not bound
-    ):
+    if not provider.is_start_ready or provider.kind != pri.KIND_DATASOURCE or not bound:
         return None, "provider-missing"
     if not _snapshot_matches(snapshot):
         return None, "projection-invalid"
     assessment = snapshot.projection
     if assessment is None:
         return None, snapshot.projection_refusal or "projection-invalid"
-    if assessment.state not in data_access.DIRECT_ACCEPTED_STATES:
-        return None, "provider-ambiguous" if assessment.state == "provider_inherited" else "provider-missing"
-    if assessment.effective_scope != provider.brief_policy.requested_scope or (
-        assessment.state == "authorized_model_only"
-        and provider.brief_policy.fallback_authorization != "model_only_unvalidated"
+    handoff = provider.data_access_handoff(snapshot.verified.root)
+    if (
+        not isinstance(handoff, pri.PackageDataAccessHandoff)
+        or handoff.migration_spec.content != snapshot.spec
+        or handoff.data_access.sha256 != dict(snapshot.digests).get(DATA_ACCESS_NAME)
     ):
-        return None, "provider-foreign"
-    return assessment, None
+        return None, "projection-invalid"
+    policy = provider.brief_policy
+    return data_access.reconcile_package_data_access(
+        assessment,
+        handoff.facts,
+        requested_scope=policy.requested_scope if policy else None,
+        fallback_authorization=policy.fallback_authorization if policy else None,
+    ), None
 
 
 def _selected_data_provider(  # pylint: disable=too-many-return-statements
@@ -4663,65 +4664,6 @@ def _selected_data_provider(  # pylint: disable=too-many-return-statements
     return (data_access.provider_reference(provider.unit), assessment), None
 
 
-def _nested_connection_metadata(row: dict[str, Any]) -> bool:
-    """Table/field/join metadata cannot smuggle an additional connection below the row guard."""
-    pending = [value for key, value in row.items() if key not in ("connection", "published_datasource")]
-    while pending:
-        value = pending.pop()
-        if isinstance(value, dict):
-            if {"class", "connection", "connections"} & value.keys():
-                return True
-            pending.extend(value.values())
-        elif isinstance(value, list):
-            pending.extend(value)
-    return False
-
-
-def _published_only_sources(spec: dict[str, Any]) -> bool:
-    """Exclude direct/unknown/aggregate shapes, including legs inside a published source row.
-
-    Only the schema's scalar connection/dependency metadata is supported. Unknown fields cannot
-    smuggle additional legs; S2 still owns matching and all declared rows stay in the denominator.
-    """
-    rows = spec.get("data_sources")
-    if not isinstance(rows, list) or not rows:
-        return False
-    for row in rows:
-        if not isinstance(row, dict) or set(row) - {
-            "id",
-            "caption",
-            "internal_name",
-            "connection",
-            "published_datasource",
-            "tables",
-            "joins",
-            "fields",
-        }:
-            return False
-        connection = row.get("connection")
-        published = row.get("published_datasource")
-        if (
-            not isinstance(connection, dict)
-            or connection.get("class") != "sqlproxy"
-            or connection.get("mode") not in ("live", "extract")
-            or set(connection)
-            - {"class", "mode", "server", "database", "hyper_file", "powerbi_target", "powerbi_target_reason", "note"}
-            or any(value is not None and not isinstance(value, str) for value in connection.values())
-        ):
-            return False
-        if (
-            not isinstance(published, dict)
-            or set(published)
-            - {"id", "site", "path", "derived_from", "revision", "name_source", "id_attribute", "luid", "key"}
-            or any(value is not None and not isinstance(value, str) for value in published.values())
-            or not any(isinstance(published.get(key), str) and published[key].strip() for key in ("luid", "key"))
-        ):
-            return False
-        if _nested_connection_metadata(row):
-            return False
-    return True
-
-
 def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-locals,too-many-return-statements
     bundle: Path,
     dest: Path,
@@ -4751,9 +4693,6 @@ def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-
     provider = None
     try:
         if current.topology == pri.TOPOLOGY_PUBLISHED_CONSUMER:
-            if not _published_only_sources(spec):
-                notes.append("DATA_ACCESS limitation=published_direct_mixed_unsupported")
-                return _cannot_data_access(), notes
             provider, refusal = _selected_data_provider(inputs)
             if refusal:
                 return _cannot_data_access(refusal), notes
@@ -4768,7 +4707,15 @@ def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-
             requested_scope=policy.requested_scope,
             provider=provider,
         )
-        return _checked_data_access(assessment), notes
+        return _checked_data_access(
+            data_access.reconcile_package_data_access(
+                assessment,
+                data_access.package_spec_facts(spec),
+                requested_scope=policy.requested_scope,
+                fallback_authorization=policy.fallback_authorization,
+                provider=provider,
+            )
+        ), notes
     except (OSError, ValueError, TypeError, AttributeError, RecursionError, pfs._ManifestError):  # pylint: disable=protected-access
         # Readers and authority inputs may contain private text. Only this closed code escapes.
         return _cannot_data_access(), notes
@@ -5315,8 +5262,12 @@ def _binding_observation(package: _BindingPackage, root: Path) -> dict[str, Any]
     return {"applicability": "applicable", "parameters": rows, "codes": codes}
 
 
-def _binding_access(  # pylint: disable=too-many-boolean-expressions
-    package: _BindingPackage, role: pri.Phase1RoleIdentityResult, root: Path
+def _binding_access(
+    package: _BindingPackage,
+    role: pri.Phase1RoleIdentityResult,
+    root: Path,
+    *,
+    provider: tuple[str, data_access.DataAccessAssessment] | None = None,
 ) -> None:
     """Consume the authentic S2 handoff and existing projection, never earn or repair evidence."""
     handoff = role.data_access_handoff(root)
@@ -5329,28 +5280,29 @@ def _binding_access(  # pylint: disable=too-many-boolean-expressions
     assessment = package.snapshot.projection
     if assessment is None:
         raise _BindingRefusal("binding_projection_invalid")
-    if assessment.state in ("blocked", "cannot_establish"):
-        raise _BindingRefusal("binding_data_access_refused", 1 if assessment.state == "blocked" else 3)
     policy = role.brief_policy
-    if policy is None or assessment.effective_scope != policy.requested_scope:
-        raise _BindingRefusal("binding_scope_mismatch")
-    direct = assessment.state != "provider_inherited"
-    # Inheritance uses the producer's existing published-only contract. A live sqlproxy is a
-    # provider reference, not a direct connection on which to earn a second source-key proof.
-    if not direct and not _published_only_sources(
-        pfs.parse_manifest_text(handoff.migration_spec.content.decode("utf-8"))
-    ):
-        raise _BindingRefusal("binding_source_facts_mismatch")
-    if direct and (
-        handoff.facts.refusal_code is not None
-        or not handoff.facts.direct_applicable
-        or handoff.facts.has_review
-        or assessment.source_keys != handoff.facts.live_source_keys
-        or (assessment.state == "local_import_ready" and not handoff.facts.all_flat)
-    ):
-        raise _BindingRefusal("binding_source_facts_mismatch")
-    if assessment.validation == "unvalidated" and policy.fallback_authorization != "model_only_unvalidated":
-        raise _BindingRefusal("binding_authorization_mismatch")
+    reconciled = data_access.reconcile_package_data_access(
+        assessment,
+        handoff.facts,
+        requested_scope=policy.requested_scope if policy else None,
+        fallback_authorization=policy.fallback_authorization if policy else None,
+        provider=provider,
+    )
+    if reconciled.state in ("blocked", "cannot_establish"):
+        raise _BindingRefusal("binding_data_access_refused", 1 if reconciled.state == "blocked" else 3)
+
+
+def _binding_data_provider(inputs: _BindingInputs) -> tuple[str, data_access.DataAccessAssessment] | None:
+    """Transport the exact S2-selected provider through the existing held cohort, without a policy fold."""
+    if not inputs.roles[-1].is_start_ready or inputs.roles[-1].topology != pri.TOPOLOGY_PUBLISHED_CONSUMER:
+        return None
+    data_inputs = _DataAccessInputs(
+        inputs.roots, tuple(package.snapshot for package in inputs.packages), inputs.roles, {}, None
+    )
+    selected, refusal = _selected_data_provider(data_inputs)
+    if refusal or selected is None:
+        raise _BindingRefusal("binding_provider_unresolved")
+    return selected
 
 
 def _binding_cohort(
@@ -5386,7 +5338,7 @@ def _binding_inputs(roots: tuple[Path, ...]) -> _BindingInputs:  # pylint: disab
     for root, package in zip(roots[:-1], packages[:-1], strict=True):
         role = pri.verify_phase1_role_identity((root,))[0]
         _binding_access(package, role, root)
-        if role.kind != KIND_DATASOURCE or package.snapshot.projection.state == "provider_inherited":
+        if role.kind != KIND_DATASOURCE:
             raise _BindingRefusal("binding_provider_not_direct")
         _binding_barrier(root)
         if _binding_observation(package, root)["codes"]:
@@ -5394,35 +5346,7 @@ def _binding_inputs(roots: tuple[Path, ...]) -> _BindingInputs:  # pylint: disab
     roles = pri.verify_phase1_role_identity(roots)
     inputs = _BindingInputs(roots, packages, roles)
     current = roles[-1]
-    _binding_access(packages[-1], current, roots[-1])
-    if current.topology == pri.TOPOLOGY_PUBLISHED_CONSUMER:
-        manifest = pfs.parse_manifest_text(packages[-1].snapshot.manifest.decode("utf-8"))
-        data_inputs = _DataAccessInputs(
-            roots, tuple(package.snapshot for package in packages), roles, manifest["data_sources"], None
-        )
-        selected, refusal = _selected_data_provider(data_inputs)
-        if refusal or selected is None:
-            raise _BindingRefusal("binding_provider_unresolved")
-        reference, provider = selected
-        inherited = packages[-1].snapshot.projection
-        if (
-            inherited.state,
-            inherited.provider_unit,
-            inherited.provider_state,
-            inherited.source_keys,
-            inherited.validation,
-            inherited.max_phase2_claim,
-        ) != (
-            "provider_inherited",
-            reference,
-            provider.state,
-            provider.source_keys,
-            provider.validation,
-            provider.max_phase2_claim,
-        ):
-            raise _BindingRefusal("binding_provider_projection_mismatch")
-    elif packages[-1].snapshot.projection.state == "provider_inherited":
-        raise _BindingRefusal("binding_provider_unresolved")
+    _binding_access(packages[-1], current, roots[-1], provider=_binding_data_provider(inputs))
     return inputs._replace(roles=_binding_cohort(inputs, roots[-1]))
 
 
@@ -5549,10 +5473,10 @@ def _binding_final(
         raise _BindingRefusal("binding_final_inspection_failed", 1)
     _binding_barrier(root)
     roles = _binding_cohort(inputs, root, original=False)
-    _binding_access(fresh, roles[-1], root)
+    current = inputs._replace(packages=(*inputs.packages[:-1], fresh), roles=roles)
+    _binding_access(fresh, roles[-1], root, provider=_binding_data_provider(current))
     if not _binding_matches(root, expected, fresh.directories, identity):
         raise _BindingRefusal("binding_final_candidate_changed")
-    current = inputs._replace(packages=(*inputs.packages[:-1], fresh), roles=roles)
     return _binding_inspection(current, observation)
 
 
