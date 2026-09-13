@@ -3637,12 +3637,14 @@ def test_an_unknown_unit_is_a_usage_error_not_an_empty_package(tmp_path: Path) -
         ("workbook-datasource-collision", pkg.IDENTITY_ENGINE_KIND_COLLISION, [UNIT, UNIT]),
     ],
 )
-def test_ambiguous_unit_identities_block_every_occurrence_before_budget_or_write(
+@pytest.mark.parametrize("with_brief", [False, True], ids=["no-brief", "supplied-brief"])
+def test_ambiguous_unit_identities_block_every_occurrence_before_budget_or_write(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     variant: str,
     reason_code: str,
     expected_requested: list[str],
+    with_brief: bool,
 ) -> None:
     """Exact occurrence ambiguities are known before any native directory needs to be created."""
     bundle, _oracle = _bundle(tmp_path)
@@ -3661,6 +3663,10 @@ def test_ambiguous_unit_identities_block_every_occurrence_before_budget_or_write
     out = _out(tmp_path)
     report = tmp_path / f"{variant}.json"
     command = ["--bundle", str(bundle), "--out", str(out), "--json", str(report), "--quiet"]
+    if with_brief:
+        brief = tmp_path / "migration-brief.md"
+        brief.write_text("identity refusal must precede brief parsing", encoding="utf-8")
+        command.extend(["--brief", str(brief)])
     for unit in selected:
         command.extend(["--unit", unit])
 
@@ -3671,7 +3677,58 @@ def test_ambiguous_unit_identities_block_every_occurrence_before_budget_or_write
     assert [row["reason_code"] for row in payload["failed"]] == [reason_code, reason_code]
     assert [row["unit"] for row in payload["construction"]["blocked"]] == expected_requested
     assert payload["construction"]["totals"] == {"requested": 2, "assembled": 0, "blocked": 2}
-    assert out.is_dir() and list(out.iterdir()) == []
+    if with_brief:
+        assert not out.exists()
+    else:
+        assert out.is_dir() and list(out.iterdir()) == []
+
+
+@pytest.mark.parametrize("variant", ["repeated-request", "duplicate-engine-row", "workbook-datasource-collision"])
+def test_shared_brief_refusal_preserves_specific_reasons_in_a_mixed_cohort(  # pylint: disable=too-many-locals
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variant: str
+) -> None:
+    """The otherwise-valid sibling gets the brief reason; identity failures keep their own reason."""
+    bundle, _oracle = _bundle(tmp_path)
+    selected = []
+    if variant == "repeated-request":
+        write_engine_report(bundle, workbooks=[UNIT, "Other"])
+        selected = ["Other", UNIT, UNIT]
+        reason = "duplicate_requested_identity"
+    elif variant == "duplicate-engine-row":
+        write_engine_report(bundle, workbooks=["Other", UNIT, UNIT])
+        reason = "duplicate_engine_identity"
+    else:
+        write_engine_report(bundle, workbooks=["Other", UNIT], datasources=[UNIT])
+        reason = "engine_kind_collision"
+    brief = tmp_path / "private-caller-brief.md"
+    original = b"shared bytes must not be read or broadcast"
+    brief.write_bytes(original)
+    out, report = _out(tmp_path), tmp_path / "status.json"
+    report.write_text('{"stale_success": true}', encoding="utf-8")
+    command = ["--bundle", str(bundle), "--out", str(out), "--brief", str(brief), "--json", str(report)]
+    for unit in selected:
+        command.extend(["--unit", unit])
+
+    def must_not_run(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a shared brief must refuse before brief parsing, budgets or construction")
+
+    for name in ("_prepare_brief", "_prepare_out", "_measure_unit_budgets", "_package_each"):
+        monkeypatch.setattr(pkg, name, must_not_run)
+    assert pkg.main(command) == 5
+    payload = json.loads(report.read_bytes())
+    assert "stale_success" not in payload
+    assert payload["requested"] == [UNIT, UNIT, "Other"]
+    assert payload["units"] == payload["refused"] == payload["unaccounted"] == []
+    assert [row["reason_code"] for row in payload["failed"]] == [reason, reason, "brief_requires_one_unit"]
+    assert [row["unit"] for row in payload["construction"]["blocked"]] == [UNIT, UNIT, "Other"]
+    assert [row["reason_code"] for row in payload["construction"]["blocked"]] == [
+        reason,
+        reason,
+        "brief_requires_one_unit",
+    ]
+    assert payload["construction"]["totals"] == {"requested": 3, "assembled": 0, "blocked": 3}
+    assert payload["dispatch_readiness"] == EXPECTED_DISPATCH_READINESS
+    assert not out.exists() and brief.read_bytes() == original
 
 
 def test_brief_cardinality_uses_the_original_request_before_identity_filtering(tmp_path: Path) -> None:
@@ -3704,6 +3761,7 @@ def test_brief_cardinality_uses_the_original_request_before_identity_filtering(t
     assert payload["unaccounted"] == []
     assert payload["failed"][0]["reason_code"] == pkg.IDENTITY_ENGINE_DUPLICATE
     assert payload["construction"]["totals"] == {"requested": 1, "assembled": 0, "blocked": 1}
+    assert not _out(tmp_path).exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")
@@ -5907,25 +5965,374 @@ def test_path_budget_diagnostics_keep_independent_utf16_measurements_without_pat
     assert str(out) not in report.read_text(encoding="utf-8") + captured.out + captured.err
 
 
-@pytest.mark.parametrize("variant", ["missing", "directory", "multi-unit"])
-def test_slice_one_preserves_brief_usage_refusal_before_output_creation(tmp_path: Path, variant: str) -> None:
-    """Rejected brief invocations retain usage exit 2 and remain outside the construction fold."""
+@pytest.mark.parametrize("variant", ["missing", "directory", "unreadable", "multi-unit"])
+@pytest.mark.parametrize("report_mode", ["none", "external", "under-output"])
+def test_supplied_brief_refusal_is_reported_before_output_creation(  # pylint: disable=too-many-branches,too-many-locals,too-many-statements
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    variant: str,
+    report_mode: str,
+) -> None:
+    """An established cohort is counted without package writes, even when no brief bytes can be read."""
     bundle = tmp_path / "bundle"
-    write_engine_report(bundle, workbooks=[UNIT, "Other"] if variant == "multi-unit" else [UNIT])
-    brief = tmp_path / "supplied-brief.md"
+    requested = [UNIT, "Other"] if variant == "multi-unit" else [UNIT]
+    write_engine_report(bundle, workbooks=requested)
+    brief = tmp_path / "customer-sql01-password-SuperSecret.md"
+    raw = b"cardinality refusal must precede content parsing"
     if variant == "directory":
         brief.mkdir()
-    elif variant == "multi-unit":
-        brief.write_text("cardinality refusal must precede content parsing", encoding="utf-8")
-    out, report = tmp_path / "packages", tmp_path / "prior-report.json"
-    stale = b'{"prior": "unchanged usage-error report"}\n'
-    report.write_bytes(stale)
+    elif variant in ("multi-unit", "unreadable"):
+        brief.write_bytes(raw)
+    out = tmp_path / "packages"
+    report = out / "reports" / "status.json" if report_mode == "under-output" else tmp_path / "status.json"
+    if report_mode == "external":
+        report.write_bytes(b'{"stale_success": true}\n')
+    original_read = Path.read_bytes
 
+    def denied(path: Path) -> bytes:
+        if path == brief:
+            raise PermissionError(errno.EACCES, "PRIVATE_ERROR_CANARY https://private.invalid/?token=secret", str(path))
+        return original_read(path)
+
+    def must_not_write(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("brief refusal must precede output preparation and package assembly")
+
+    if variant == "unreadable":
+        monkeypatch.setattr(Path, "read_bytes", denied)
+    monkeypatch.setattr(pkg, "_prepare_out", must_not_write)
+    monkeypatch.setattr(pkg, "_assemble_unit", must_not_write)
+    command = ["--bundle", str(bundle), "--out", str(out), "--brief", str(brief)]
+    if report_mode != "none":
+        command.extend(["--json", str(report)])
+    assert pkg.main(command) == 5
+    captured = capsys.readouterr()
+    exposed = captured.out + captured.err
+    reason = "brief_requires_one_unit" if variant == "multi-unit" else "brief_unreadable"
+    assert "NOT START_READY" in captured.out
+    assert reason in exposed
+    if report_mode != "none":
+        payload = json.loads(report.read_bytes())
+        exposed += report.read_text(encoding="utf-8")
+        assert "stale_success" not in payload
+        assert payload["requested"] == requested
+        assert payload["units"] == payload["refused"] == payload["unaccounted"] == []
+        assert [row["unit"] for row in payload["failed"]] == requested
+        assert [row["reason_code"] for row in payload["failed"]] == [reason] * len(requested)
+        assert [row["unit"] for row in payload["construction"]["blocked"]] == requested
+        assert all(row["status"] == "BLOCKED" for row in payload["construction"]["blocked"])
+        assert payload["construction"]["totals"] == {
+            "requested": len(requested),
+            "assembled": 0,
+            "blocked": len(requested),
+        }
+        assert payload["totals"] == {
+            "requested": len(requested),
+            "units": 0,
+            "failed": len(requested),
+            "refused": 0,
+            "unaccounted": 0,
+            "assembled": 0,
+            "blocked": len(requested),
+        }
+        assert payload["dispatch_readiness"] == EXPECTED_DISPATCH_READINESS
+        if variant != "multi-unit":
+            assert payload["failed"][0]["details"] == {"inputs": [{"role": "brief", "basename": "<withheld>"}]}
+    else:
+        assert not report.exists()
+    assert all(canary not in exposed for canary in (str(brief), brief.name, "PRIVATE_ERROR_CANARY", "private.invalid"))
+    if variant in ("multi-unit", "unreadable"):
+        assert original_read(brief) == raw
+    elif variant == "directory":
+        assert brief.is_dir() and not list(brief.iterdir())
+    else:
+        assert not brief.exists()
+    if report_mode == "under-output":
+        assert {path.relative_to(out).as_posix() for path in out.rglob("*")} == {"reports", "reports/status.json"}
+    else:
+        assert not out.exists()
+
+
+@pytest.mark.parametrize("destination", ["brief", "output-root", "selected-manifest", "staging", "retired"])
+@pytest.mark.parametrize("existing", [False, True], ids=["absent", "existing"])
+def test_json_destination_collision_precedes_any_write(  # pylint: disable=too-many-locals
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    destination: str,
+    existing: bool,
+) -> None:
+    """Literal input/output byte snapshots are the oracle, not a reported BLOCKED verdict."""
+    bundle = tmp_path / "bundle"
+    write_engine_report(bundle, workbooks=[UNIT, "Other"])
+    out = tmp_path / "private-output"
+    brief = tmp_path / "customer-sql01-password-SuperSecret.md"
+    digest = hashlib.sha256(UNIT.encode("utf-8")).hexdigest()[:8]
+    report = {
+        "brief": brief,
+        "output-root": out,
+        "selected-manifest": out / UNIT / "package-manifest.json",
+        "staging": out / f".{digest}" / "nested" / "status.json",
+        "retired": out / f".{digest}~" / "nested" / "status.json",
+    }[destination]
+    if destination != "brief" or existing:
+        brief.write_bytes(b"PRIVATE_BRIEF_BYTES must remain exactly intact")
+    if existing and destination == "output-root":
+        out.mkdir()
+        (out / "held.txt").write_bytes(b"prior output must not change")
+    elif existing and destination != "brief":
+        report.parent.mkdir(parents=True)
+        report.write_bytes(b'{"stale_target": "do not replace"}\n')
+    files_before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    dirs_before = {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()}
+
+    def must_not_write(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a reporting collision must be rejected before publication, mkdir or construction")
+
+    monkeypatch.setattr(Path, "mkdir", must_not_write)
+    monkeypatch.setattr(pkg, "write_json", must_not_write)
+    monkeypatch.setattr(pkg, "_package_each", must_not_write)
     with pytest.raises(SystemExit) as refused:
-        pkg.main(["--bundle", str(bundle), "--out", str(out), "--brief", str(brief), "--json", str(report), "--quiet"])
+        pkg.main(["--bundle", str(bundle), "--out", str(out), "--brief", str(brief), "--json", str(report)])
+    assert refused.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "--json destination is unsafe or unassessable" in captured.err
+    assert all(value not in captured.err for value in (str(report), str(out), str(brief), brief.name, out.name))
+    assert "PRIVATE_BRIEF_BYTES" not in captured.err
+    assert {
+        path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
+    } == files_before
+    assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()} == dirs_before
+
+
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "reporting-marker",
+        "reporting-marker-alias",
+        "marker-directory",
+        "other-staging",
+        "other-retired",
+        "unallocated-staging",
+        "unallocated-retired",
+        "nested-staging",
+    ],
+)
+@pytest.mark.parametrize("existing", [False, True], ids=["absent", "existing"])
+def test_json_destination_reserved_namespace_is_rejected(  # pylint: disable=too-many-locals
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    destination: str,
+    existing: bool,
+) -> None:
+    """A refused report cannot create a marker or scratch namespace and poison subsequent reporting."""
+    bundle, out = tmp_path / "bundle", tmp_path / "packages"
+    write_engine_report(bundle, workbooks=[UNIT, "Other"])
+    brief = tmp_path / "customer-sql01-password-SuperSecret.md"
+    brief.write_bytes(b"invalid supplied brief bytes must remain intact")
+    digest = hashlib.sha256(b"Other").hexdigest()[:8]
+    report = {
+        "reporting-marker": out / "reporting" / "package-manifest.json",
+        "reporting-marker-alias": out / "reporting" / "PACKAGE-MANIFEST.JSON",
+        "marker-directory": out / "reporting" / "package-manifest.json" / "status.json",
+        "other-staging": out / f".{digest}" / "package-manifest.json",
+        "other-retired": out / f".{digest}~" / "status.json",
+        "unallocated-staging": out / ".deadbeef" / "status.json",
+        "unallocated-retired": out / ".deadbeef~" / "status.json",
+        "nested-staging": out / "reporting" / ".deadbeef" / "status.json",
+    }[destination]
+    if existing:
+        report.parent.mkdir(parents=True)
+        report.write_bytes(b"prior reporting target")
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    before_dirs = {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()}
+    command = [
+        "--bundle",
+        str(bundle),
+        "--out",
+        str(out),
+        "--unit",
+        UNIT,
+        "--brief",
+        str(brief),
+        "--json",
+        str(report),
+    ]
+
+    def must_not_create(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("reserved report destination reached parent creation")
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(Path, "mkdir", must_not_create)
+        with pytest.raises(SystemExit) as refused:
+            pkg.main(command)
+    assert refused.value.code == 2
+    captured = capsys.readouterr()
+    assert "--json destination is unsafe or unassessable" in captured.err
+    assert all(value not in captured.err for value in (str(report), str(brief), brief.name))
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()} == before_dirs
+    if not existing:
+        assert not out.exists()
+        command[-1] = str(out / "reporting" / "status.json")
+        assert pkg.main(command) == 5, "the refused marker write must not poison an ordinary report"
+        payload = json.loads(Path(command[-1]).read_bytes())
+        assert payload["construction"]["totals"] == {"requested": 1, "assembled": 0, "blocked": 1}
+        assert payload["dispatch_readiness"]["status"] == "NOT_EVALUATED"
+        assert {path.relative_to(out).as_posix() for path in out.rglob("*")} == {"reporting", "reporting/status.json"}
+
+
+@pytest.mark.parametrize("requested", [[], [UNIT], [UNIT, "Other"]], ids=["empty", "single", "batch"])
+@pytest.mark.parametrize("supplied_brief", [False, True], ids=["no-brief", "invalid-brief"])
+def test_json_output_root_collision_precedes_every_cli_write_route(
+    tmp_path: Path, requested: list[str], supplied_brief: bool
+) -> None:
+    """Zero-denominator reporting and ordinary assembly share the same pre-write admission."""
+    bundle, out = tmp_path / "bundle", tmp_path / "packages"
+    write_engine_report(bundle, workbooks=requested)
+    command = ["--bundle", str(bundle), "--out", str(out), "--json", str(out)]
+    if supplied_brief:
+        command.extend(["--brief", str(tmp_path / "absent.md")])
+    with pytest.raises(SystemExit) as refused:
+        pkg.main(command)
     assert refused.value.code == 2
     assert not out.exists()
-    assert report.read_bytes() == stale
+
+
+def test_json_output_root_collision_preserves_an_existing_file(tmp_path: Path) -> None:
+    """A non-directory --out must not be overwritten as a report during a shared-brief refusal."""
+    bundle, out = tmp_path / "bundle", tmp_path / "output"
+    write_engine_report(bundle, workbooks=[UNIT, "Other"])
+    out.write_bytes(b"prior non-directory output")
+    with pytest.raises(SystemExit) as refused:
+        pkg.main(
+            ["--bundle", str(bundle), "--out", str(out), "--brief", str(tmp_path / "absent.md"), "--json", str(out)]
+        )
+    assert refused.value.code == 2
+    assert out.read_bytes() == b"prior non-directory output"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")
+@pytest.mark.parametrize("protected", ["brief", "output", "existing-package"])
+def test_json_destination_native_short_alias_is_refused(tmp_path: Path, protected: str) -> None:
+    """A real 8.3 witness tests native equivalence, not a guessed case-insensitive spelling."""
+    bundle, out = tmp_path / "bundle", tmp_path / "Long_Output_Directory"
+    write_engine_report(bundle, workbooks=[UNIT, "Other"])
+    out.mkdir()
+    brief = tmp_path / "Long_Caller_Migration_Brief.md"
+    brief.write_bytes(b"caller bytes")
+    package = out / "Long_Unselected_Package"
+    package.mkdir()
+    (package / "package-manifest.json").write_bytes(b"existing manifest bytes")
+    target = {"brief": brief, "output": out, "existing-package": package}[protected]
+    short_name = _native_short_name(target)
+    if short_name == target.name:
+        pytest.skip("8.3 name generation is disabled on this volume")
+    alias = target.with_name(short_name)
+    assert alias.samefile(target)
+    report = alias / "new" / "status.json" if protected == "existing-package" else alias
+    with pytest.raises(SystemExit) as refused:
+        pkg.main(["--bundle", str(bundle), "--out", str(out), "--brief", str(brief), "--json", str(report)])
+    assert refused.value.code == 2
+    assert brief.read_bytes() == b"caller bytes"
+    assert (package / "package-manifest.json").read_bytes() == b"existing manifest bytes"
+    assert not (package / "new").exists()
+
+
+def test_json_destination_unrelated_external_hardlink_remains_allowed(tmp_path: Path) -> None:
+    """Native equality only forbids protected aliases; unrelated external reports remain writable."""
+    bundle, out = tmp_path / "bundle", tmp_path / "packages"
+    write_engine_report(bundle, workbooks=[UNIT, "Other"])
+    prior, report = tmp_path / "prior.json", tmp_path / "report.json"
+    prior.write_bytes(b'{"stale": true}\n')
+    os.link(prior, report)
+    assert report.samefile(prior)
+    code = pkg.main(
+        ["--bundle", str(bundle), "--out", str(out), "--brief", str(tmp_path / "absent.md"), "--json", str(report)]
+    )
+    assert code == 5
+    assert json.loads(report.read_bytes())["construction"]["totals"] == {"requested": 2, "assembled": 0, "blocked": 2}
+    assert prior.read_bytes() == b'{"stale": true}\n' and not report.samefile(prior)
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("unassessable", ["report", "brief", "output", "package-member"])
+@pytest.mark.parametrize("fault", ["stat-denied", "identity-unavailable"])
+def test_json_destination_unassessable_identity_refuses_before_writes(  # pylint: disable=too-many-locals
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    unassessable: str,
+    fault: str,
+) -> None:
+    """Unreadable metadata or an unusable native ID cannot turn into a non-alias verdict."""
+    bundle, out = tmp_path / "bundle", tmp_path / "packages"
+    write_engine_report(bundle, workbooks=[UNIT, "Other"])
+    brief, report = tmp_path / "private-brief.md", tmp_path / "private-status.json"
+    brief.write_bytes(b"PRIVATE_BRIEF_CANARY")
+    report.write_bytes(b'{"stale": true}\n')
+    package = out / "Existing"
+    package.mkdir(parents=True)
+    (package / "package-manifest.json").write_bytes(b'{"existing_package": true}\n')
+    member = package / "held.txt"
+    member.write_bytes(b"existing artifact bytes")
+    target = {"report": report, "brief": brief, "output": out, "package-member": member}[unassessable]
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    original = Path.lstat
+
+    def inaccessible(path: Path) -> os.stat_result:
+        info = original(path)
+        if path != target or (fault == "identity-unavailable" and os.name == "nt"):
+            return info
+        if fault == "stat-denied":
+            raise PermissionError(errno.EACCES, "PRIVATE_ERROR_CANARY https://private.invalid/?token=secret", str(path))
+        values = list(info)
+        values[1] = 0
+        return os.stat_result(values)
+
+    monkeypatch.setattr(Path, "lstat", inaccessible)
+    if fault == "identity-unavailable" and os.name == "nt":
+        native = pkg._windows_directory  # pylint: disable=protected-access
+
+        def unavailable(path: Path):
+            observed = native(path)
+            return observed._replace(identity=(observed.identity[0], 0)) if path == target else observed
+
+        monkeypatch.setattr(pkg, "_windows_directory", unavailable)
+    with pytest.raises(SystemExit) as refused:
+        pkg.main(["--bundle", str(bundle), "--out", str(out), "--brief", str(brief), "--json", str(report)])
+    assert refused.value.code == 2
+    captured = capsys.readouterr()
+    assert "--json destination is unsafe or unassessable" in captured.err
+    assert all(value not in captured.err for value in (str(target), target.name, "PRIVATE_", "private.invalid"))
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+@pytest.mark.parametrize(
+    "variant", ["unknown-switch", "missing-bundle", "missing-out", "invalid-bundle", "unknown-unit"]
+)
+def test_brief_reporting_does_not_reclassify_ordinary_usage_errors(tmp_path: Path, variant: str) -> None:
+    """No valid selected cohort exists in these cases, so argparse and the prior report remain unchanged."""
+    bundle = tmp_path / "bundle"
+    write_engine_report(bundle, workbooks=[UNIT])
+    out, report = tmp_path / "packages", tmp_path / "status.json"
+    stale = b'{"prior": "usage errors do not replace reports"}\n'
+    report.write_bytes(stale)
+    command = ["--brief", str(tmp_path / "absent.md"), "--json", str(report)]
+    if variant != "missing-bundle":
+        command.extend(["--bundle", str(bundle if variant != "invalid-bundle" else tmp_path / "absent-bundle")])
+    if variant != "missing-out":
+        command.extend(["--out", str(out)])
+    if variant == "unknown-unit":
+        command.extend(["--unit", "Nope"])
+    elif variant == "unknown-switch":
+        command.append("--not-a-switch")
+    with pytest.raises(SystemExit) as refused:
+        pkg.main(command)
+    assert refused.value.code == 2
+    assert report.read_bytes() == stale and not out.exists()
 
 
 @pytest.mark.parametrize(
@@ -5974,7 +6381,7 @@ def test_typed_input_diagnostics_never_publish_caller_brief_basenames(role: str,
 
 
 @pytest.mark.parametrize("basename", _BRIEF_BASENAME_CANARIES, ids=["credential", "hostname", "token"])
-@pytest.mark.parametrize("fault", ["invalid-utf8", "wrong-unit"])
+@pytest.mark.parametrize("fault", ["invalid-utf8", "wrong-unit", "wrong-scope", "unsafe-text"])
 def test_cli_brief_diagnostics_withhold_caller_basenames(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], basename: str, fault: str
 ) -> None:
@@ -5982,13 +6389,21 @@ def test_cli_brief_diagnostics_withhold_caller_basenames(
     bundle, oracle = _bundle(tmp_path)
     brief = tmp_path / basename
     raw = (
-        b"\xff"
-        if fault == "invalid-utf8"
-        else (
-            b'+++\nschema = "phase1-start-ready/v1"\nunit = "OtherUnit"\nscope = "model_and_report"\n'
-            b'fallback_authorization = "stop"\n+++\n'
-        )
-    )
+        '+++\nschema = "phase1-start-ready/v1"\n'
+        f'unit = "{("OtherUnit" if fault == "wrong-unit" else UNIT)}"\n'
+        f'scope = "{("model_only" if fault == "wrong-scope" else "model_and_report")}"\n'
+        'fallback_authorization = "stop"\n+++\n'
+    ).encode("utf-8")
+    if fault == "invalid-utf8":
+        raw = b"\xff"
+    elif fault == "unsafe-text":
+        raw += b"\nX-Tableau-Auth: PRIVATE_HEADER_CANARY\n"
+    expected_code = {
+        "invalid-utf8": "brief_unreadable",
+        "wrong-unit": "brief_unit_mismatch",
+        "wrong-scope": "brief_scope_mismatch",
+        "unsafe-text": "brief_contains_unsafe_text",
+    }[fault]
     brief.write_bytes(raw)
     report = tmp_path / "brief-diagnostics.json"
     code = _batch_main(
@@ -5999,9 +6414,10 @@ def test_cli_brief_diagnostics_withhold_caller_basenames(
 
     assert code == pkg.EXIT_UNIT_FAILED and len(payload["failed"]) == 1
     failure = payload["failed"][0]
-    assert failure["reason_code"] == ("brief_unreadable" if fault == "invalid-utf8" else "brief_unit_mismatch")
+    assert failure["reason_code"] == expected_code
     assert failure["details"] == {"inputs": [{"role": "brief", "basename": "<withheld>"}]}
     assert failure["reason"] == "construction failed; input_role=brief basename=<withheld>"
     assert failure["reason"] in captured.err and failure["reason"] in captured.out
-    assert basename not in report.read_text(encoding="utf-8") + captured.err + captured.out
-    assert brief.read_bytes() == raw and not (_out(tmp_path) / UNIT).exists()
+    exposed = report.read_text(encoding="utf-8") + captured.err + captured.out
+    assert basename not in exposed and str(brief) not in exposed and "PRIVATE_HEADER_CANARY" not in exposed
+    assert brief.read_bytes() == raw and not _out(tmp_path).exists()

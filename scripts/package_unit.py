@@ -161,16 +161,23 @@ a raise is caught per unit and carried in the compatibility `failed[]` bucket wi
 reason code and code-owned traceback frames; `construction.blocked[]` projects its status, and the
 run still exits 5.
 
-For invocations admitted past the existing CLI brief checks, one terminal slot per requested
-occurrence owns construction status. The ordered compatibility
+Once the bundle and selected cohort are established, one terminal slot per requested occurrence
+owns construction status. The ordered compatibility
 buckets `units[]`, `failed[]`, `refused[]` and `unaccounted[]`, console and JSON are views of those
 slots, never separately appended outcomes. ASSEMBLED requires the candidate's native directory ID,
 actual spelling, held manifest and final integrity, with no competing transaction marker. Scratch
 that is proven nondiscoverable may leave an ASSEMBLED candidate plus a cleanup finding; the finding
 keeps the command nonzero and never creates a second failure row. Native identity is invocation-local,
 not a Unicode casefold or resolved path string. No concurrent-writer or hard-kill recovery is claimed.
-Missing/non-file and multi-unit briefs remain argparse usage errors before output preparation.
-Their occurrence reporting and stale-JSON behavior are deferred to the second #614 slice.
+An explicitly supplied brief that cannot serve the cohort is a modeled BLOCKED refusal (exit 5),
+not an argparse escape. A shared brief never broadcasts bytes; earlier identity reasons survive.
+Brief refusals create no package output, including the output root. An admitted --json still
+replaces the report; beneath --out, only an ordinary non-package reporting path may be created.
+Report aliases of the brief, output root, prospective package/transaction roots or existing package
+trees are usage errors before writes. Unassessable identities and reparses are refused, not followed.
+Damaged marker entries still protect their package. Report paths beneath --out cannot contain a
+package-marker or reserved scratch segment, whether or not its unit is selected.
+Ordinary syntax, missing mandatory switches, invalid bundles and unknown units remain usage exit 2.
 
 An oracle omission INSIDE a package does not BLOCK assembly: a unit whose oracle genuinely has no
 render for a page is the negative control, and it must still produce a diagnostic package whose page
@@ -778,10 +785,21 @@ def read_json_checked(path: Path) -> tuple[Any, str | None]:
         return None, f"{path.name} is present but could not be read ({type(exc).__name__})"
 
 
-def write_json(path: Path, payload: Any) -> None:
-    """Write pretty JSON, creating parents."""
+def write_json(path: Path, payload: Any, *, atomic: bool = False) -> None:
+    """Write pretty JSON, optionally replacing a batch report only after serialization completes."""
+    text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if not atomic:
+        path.write_text(text, encoding="utf-8")
+        return
+    replacement = path.with_name(f".{uuid.uuid4().hex}.json")
+    stream = replacement.open("x", encoding="utf-8")
+    try:
+        with stream:
+            stream.write(text)
+        replacement.replace(path)
+    finally:
+        replacement.unlink(missing_ok=True)
 
 
 def sha256_of(path: Path | None) -> str | None:
@@ -2977,6 +2995,8 @@ def _prepare_brief(bundle: Path, unit: str, assets_dir: Path | None, brief: Path
     if brief is None:
         return None
     try:
+        if not brief.is_file():
+            raise OSError("the supplied brief is not a regular file")
         raw = brief.read_bytes()
         text = raw.decode("utf-8")
     except (OSError, ValueError) as exc:
@@ -6172,6 +6192,88 @@ def _external_providers(packages: Sequence[Path], out_root: Path, selected: Sequ
     return tuple(root for root in packages if os.path.normcase(os.path.abspath(root)) not in rebuilding)
 
 
+def _report_location(path: Path) -> Path:
+    """Normalize a reporting/input address only after proving its ancestors without following links."""
+    path = path.absolute()
+    for entry in reversed((path, *path.parents)):
+        info, error = _discovery_entry(entry)
+        if error is not None:
+            raise ValueError("report_destination_unassessable") from error
+        if info is not None and (
+            is_reparse_entry(info) or not info.st_ino or (entry != path and not stat.S_ISDIR(info.st_mode))
+        ):
+            raise ValueError("report_destination_unsafe")
+        if os.name == "nt" and entry.name not in ("", "..") and not pfs.is_canonical_key(entry.name):
+            raise ValueError("report_destination_unsafe")
+    return path.resolve()
+
+
+def _report_entry_identity(path: Path) -> tuple[int, int] | None:
+    """Native identity of a plain, already boundary-checked entry, or established absence."""
+    info, error = _discovery_entry(path)
+    if error is not None:
+        raise ValueError("report_destination_unassessable") from error
+    if info is None:
+        return None
+    if is_reparse_entry(info) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+        raise ValueError("report_destination_unsafe")
+    # The existing Windows no-follow handle reader accepts regular files as well as directories.
+    identity = (
+        _windows_directory(path).identity if os.name == "nt" else pfs._file_identity(info)[:2]  # pylint: disable=protected-access
+    )
+    if not identity[1]:
+        raise ValueError("report_destination_unassessable")
+    return identity
+
+
+def _admit_report_destination(path: Path, out_root: Path, selected: Sequence[str], brief: Path | None) -> Path:
+    """Keep the caller's report outside held brief/package addresses before any mkdir or publication."""
+    report = _report_location(path)
+    out_root = _report_location(out_root)
+    report_id = _report_entry_identity(report)
+    reserved = report.is_relative_to(out_root) and any(
+        part == MANIFEST_NAME or is_reserved_packaging_name(part)
+        for part in map(pfs.alias_key, report.relative_to(out_root).parts)
+    )
+    if reserved or report == out_root or (report_id is not None and not stat.S_ISREG(report.lstat().st_mode)):
+        raise ValueError("report_destination_unsafe")
+    if brief is not None:
+        brief = _report_location(brief)
+        if report == brief or (report_id is not None and report_id == _report_entry_identity(brief)):
+            raise ValueError("report_destination_unsafe")
+
+    roots = []
+    for unit in selected:
+        if unit_name_problem(unit) is None:
+            final = out_root / unit
+            roots.extend(_report_location(root) for root in (final, staging_dir(out_root, unit), retired_dir(final)))
+    if any(report.is_relative_to(root) for root in roots):
+        raise ValueError("report_destination_unsafe")
+
+    if _construction_directory(out_root) is not None:
+        walked, findings, empty = pfs.walk_package(out_root)
+        if findings:
+            raise ValueError("report_destination_unassessable")
+        # Marker directories are damaged boundaries, not ordinary reporting space. The no-follow
+        # walk covers them through either an empty directory or a descendant's parent chain.
+        existing_roots = {
+            entry.parent
+            for member in (*walked.values(), *(out_root / relative for relative in empty))
+            for entry in (member, *member.parents)
+            if entry.parent.is_relative_to(out_root) and pfs.alias_key(entry.name) == pfs.alias_key(MANIFEST_NAME)
+        }
+        if any(report.is_relative_to(root) for root in existing_roots):
+            raise ValueError("report_destination_unsafe")
+        if report_id is not None:
+            for member in walked.values():
+                if (
+                    any(member.is_relative_to(root) for root in existing_roots)
+                    and _report_entry_identity(member) == report_id
+                ):
+                    raise ValueError("report_destination_unsafe")
+    return report
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """The CLI surface, in its own function so ``main`` stays inside its complexity budget."""
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("Attribution", maxsplit=1)[0])
@@ -6186,6 +6288,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "the dispatcher's migration-brief.md for exactly one selected unit; repeat the command "
             "per unit for a batch. Strict policy/unit/scope and whole-message privacy are checked before assembly. "
+            "Invalid/shared briefs produce BLOCKED outcomes (exit 5), with no package writes. "
             "Its bytes travel, never its external path"
         ),
     )
@@ -6201,7 +6304,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="exact previously published datasource package root (repeatable); no sibling/output discovery",
     )
-    parser.add_argument("--json", type=Path, help="write the machine-readable packaging report here")
+    parser.add_argument(
+        "--json",
+        type=Path,
+        help=(
+            "replace the construction report even on brief refusal; a brief/output/package/transaction collision "
+            "or an unassessable alias is a usage error before writes. Package-marker and reserved scratch segments "
+            "beneath --out are forbidden even for unselected units; ordinary reporting directories and "
+            "non-aliasing external reports are allowed"
+        ),
+    )
     parser.add_argument("--quiet", action="store_true", help="suppress the rendered summary")
     parser.add_argument(
         "--discard-package-edits",
@@ -6342,20 +6454,20 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         parser.error(f"--bundle {args.bundle} is not a directory")
     oracle_dir = args.oracle.resolve() if args.oracle else discover_dir(bundle, ("oracle", "_oracle"))
     assets_dir = args.assets.resolve() if args.assets else discover_dir(bundle, ("assets",))
-    if args.brief is not None and not args.brief.is_file():
-        # Fail on the command line rather than in a per-unit note: a mistyped --brief would
-        # otherwise write a whole estate of packages that all silently lack the brief.
-        parser.error("--brief must be a readable file")
 
     engine_report = read_json(bundle / "report.json")
     workbooks, datasources = engine_unit_names(engine_report)
     available = bundle_units(bundle)
     units = list(args.unit) if args.unit else bundle_unit_occurrences(bundle)
-    if args.brief is not None and len(units) != 1:
-        parser.error("--brief requires exactly one unit; package each unit with its own brief")
     unknown = [unit for unit in units if unit not in available]
     if unknown:
         parser.error(f"the bundle's report.json and pbip/ know nothing of: {', '.join(sorted(unknown))}")
+
+    if args.json is not None:
+        try:
+            args.json = _admit_report_destination(args.json, args.out, units, args.brief)
+        except (OSError, RuntimeError, ValueError, PackagingError):
+            parser.error("--json destination is unsafe or unassessable; choose a separate ordinary report file")
 
     if not units:
         out_root = _prepare_out(args.out)
@@ -6369,20 +6481,28 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     interruption: AssemblyInterrupted | None = None
     try:
         _identity_preflight(slots, workbooks, datasources, out_root)
-        out_root = _prepare_out(args.out)
-        budgets = _measure_unit_budgets(bundle, slots, out_root, assets_dir)
-        _warn_shipping(budgets)
-        _package_each(
-            slots,
-            bundle,
-            out_root,
-            oracle_dir,
-            assets_dir,
-            args.discard_package_edits,
-            brief=args.brief.resolve() if args.brief else None,
-            gate_root=args.gate_root,
-            provider_packages=_external_providers(args.provider_package, out_root, requested),
-        )
+        if args.brief is not None and len(slots) != 1:
+            for slot in slots:
+                failure = PackagingError("brief_requires_one_unit")
+                failure.unit = slot.unit
+                slot.complete(_ConstructionOutcome(None, failure))
+        else:
+            # The constructor validates and holds a single brief before its first mkdir. Do not
+            # eagerly create --out here, or a refused brief would still leave package output.
+            out_root = args.out.resolve() if args.brief is not None else _prepare_out(args.out)
+            budgets = _measure_unit_budgets(bundle, slots, out_root, assets_dir)
+            _warn_shipping(budgets)
+            _package_each(
+                slots,
+                bundle,
+                out_root,
+                oracle_dir,
+                assets_dir,
+                args.discard_package_edits,
+                brief=args.brief,
+                gate_root=args.gate_root,
+                provider_packages=_external_providers(args.provider_package, out_root, requested),
+            )
     except AssemblyInterrupted as error:
         interruption = error
     except KeyboardInterrupt:
@@ -6439,7 +6559,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         "shipping_root_budget": {budget.unit: budget.shipping_budget for budget in budgets},
     }
     if args.json:
-        write_json(args.json, payload)
+        write_json(args.json, payload, atomic=True)
     for row in [*failed_rows, *refused_rows]:
         print(_blocked_line(row), file=sys.stderr)
     for finding in cleanup_findings:
