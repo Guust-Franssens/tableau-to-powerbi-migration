@@ -161,10 +161,13 @@ a raise is caught per unit and carried in the compatibility `failed[]` bucket wi
 reason code and code-owned traceback frames; `construction.blocked[]` projects its status, and the
 run still exits 5.
 
-The ordered compatibility buckets remain `units[]`, `failed[]`, `refused[]` and `unaccounted[]`.
-`construction` is the ONE ASSEMBLED/BLOCKED projection over them. Its totals are measured against
-the REQUEST, never against whatever survived it: a unit that raised before it could be recorded
-anywhere would otherwise shrink the denominator and read as a clean run of a smaller estate.
+One terminal slot per requested occurrence owns construction status. The ordered compatibility
+buckets `units[]`, `failed[]`, `refused[]` and `unaccounted[]`, console and JSON are views of those
+slots, never separately appended outcomes. ASSEMBLED requires the candidate's native directory ID,
+actual spelling, held manifest and final integrity, with no competing transaction marker. Scratch
+that is proven nondiscoverable may leave an ASSEMBLED candidate plus a cleanup finding; the finding
+keeps the command nonzero and never creates a second failure row. Native identity is invocation-local,
+not a Unicode casefold or resolved path string. No concurrent-writer or hard-kill recovery is claimed.
 
 An oracle omission INSIDE a package does not BLOCK assembly: a unit whose oracle genuinely has no
 render for a page is the negative control, and it must still produce a diagnostic package whose page
@@ -3784,7 +3787,7 @@ def _complete_construction(  # pylint: disable=too-many-branches
     certain = True
     published = False
     try:
-        published = _construction_published(attempt)
+        published = _construction_published(attempt) and not isinstance(error, PackagingError)
     except (PackagingError, KeyboardInterrupt) as observation:
         certain = False
         attempt.findings.append(
@@ -5749,15 +5752,14 @@ def _run_totals(
     if unassessable:
         lines.append(
             f"CANNOT ASSESS: {len(unassessable)} unit(s) had an input that exists but could not be read, "
-            "so no package was produced for them - this is neither a clean nor a failed verdict: "
+            "so their construction was not established: "
             f"{', '.join(unassessable)}"
         )
     hard = sorted(_failed_unit(item) for item in failed if not isinstance(item, UnassessableInput))
     if hard:
         lines.append(
             f"UNIT FAILED: {len(hard)} unit(s) raised, or hit a contradiction this packager refuses to "
-            f"ship past, so nothing was written for them; every other requested unit was still "
-            f"attempted: {', '.join(hard)}"
+            f"ship past; their construction was not established: {', '.join(hard)}"
         )
     incomplete = sorted(result["unit"] for result in results if not result.get("self_contained", True))
     if incomplete:
@@ -6080,29 +6082,11 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
     gate_root: Path | None = None,
     provider_packages: Sequence[Path] = (),
 ) -> None:
-    """Package each unit, in deterministic order, collecting failures instead of stopping at one.
+    """Attempt pending occurrences, datasources first, without an independently mutable result bucket.
 
-    One unit's edits, and one unit's CRASH, must not stop the rest of the estate being packaged.
-    Measured on the SES estate (47 assets, 2026-09-03): 29 units packaged, then
-    `IA_Operation_Health_Summary_Dashboard` raised `shutil.Error: [WinError 3]` out of a plain
-    comprehension over `sorted(units)`, and every alphabetically later unit was never attempted and
-    never reported - the operator could not tell "not packaged" from "packaged and fine" without
-    diffing directories by hand (#478). `main` still returns 5 for any failure and 3 for any
-    refusal, so neither can pass unnoticed.
-
-    ⚠️ **Every :class:`PackagingError` is collected, not just the edit refusal.** Before this, an
-    unassessable input, an unsafe unit name or a containment tripwire escaped as an uncaught
-    traceback: the interpreter's exit 1 is indistinguishable from `EXIT_NO_WORKING_COPY`, and the
-    remaining units of an estate were never packaged at all. Collecting them keeps the run going and
-    gives each class its own exit code; nothing is written for a unit that raises, because assembly
-    happens in a staging directory that the `finally` in :func:`package_unit` removes.
-
-    ⚠️ **And the last clause is deliberately BROAD**, because the field failure was not a
-    `PackagingError` at all: the blast radius of ANY exception must be one unit, and a narrower
-    clause leaves the next unforeseen type free to abort the batch again. It is wrapped in
-    :class:`UnitCrashed` so it travels the path the modelled refusals already travel, with the
-    safe traceback kept. `SystemExit` still passes through. `KeyboardInterrupt` is handled only
-    long enough to publish truthful JSON, then stops the batch with a nonzero result.
+    The constructor completes its slot before returning or raising. The fallbacks here only complete
+    an untouched slot; an interruption in caller/provider bookkeeping preserves the terminal outcome
+    and stops further attempts. SystemExit and hard process termination remain outside handled runs.
     """
     workbooks, datasources = engine_unit_names(read_json(bundle / "report.json"))
     ordered = sorted(
@@ -6344,12 +6328,7 @@ def _warn_shipping(budgets: list[PathBudget]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
-    """Package the requested units and report what each one carries.
-
-    The three outcome buckets are separate local lists on purpose: `_package_each` fills them, and
-    :func:`partition_gaps` then measures them against the REQUEST, so "every requested unit reached
-    exactly one bucket" is checked rather than asserted in prose (#478).
-    """
+    """Freeze requested occurrences, complete their slots, then serialize one construction verdict."""
     parser = _build_parser()
     args = parser.parse_args(argv)
 

@@ -3635,7 +3635,6 @@ def test_an_unknown_unit_is_a_usage_error_not_an_empty_package(tmp_path: Path) -
         ("repeated-request", pkg.IDENTITY_REQUEST_DUPLICATE, [UNIT, UNIT]),
         ("duplicate-engine-row", pkg.IDENTITY_ENGINE_DUPLICATE, [UNIT, UNIT]),
         ("workbook-datasource-collision", pkg.IDENTITY_ENGINE_KIND_COLLISION, [UNIT, UNIT]),
-        ("windows-destination-alias", pkg.IDENTITY_DESTINATION_ALIAS, [UNIT, UNIT.lower()]),
     ],
 )
 def test_ambiguous_unit_identities_block_every_occurrence_before_budget_or_write(
@@ -3645,7 +3644,7 @@ def test_ambiguous_unit_identities_block_every_occurrence_before_budget_or_write
     reason_code: str,
     expected_requested: list[str],
 ) -> None:
-    """Exact duplicates and Windows-canonical aliases never compete for one package directory."""
+    """Exact occurrence ambiguities are known before any native directory needs to be created."""
     bundle, _oracle = _bundle(tmp_path)
     selected: list[str] = []
     if variant == "repeated-request":
@@ -3654,8 +3653,6 @@ def test_ambiguous_unit_identities_block_every_occurrence_before_budget_or_write
         write_engine_report(bundle, workbooks=[UNIT, UNIT])
     elif variant == "workbook-datasource-collision":
         write_engine_report(bundle, workbooks=[UNIT], datasources=[UNIT])
-    else:
-        write_engine_report(bundle, workbooks=[UNIT, UNIT.lower()])
 
     def budget_must_not_run(*_args: object, **_kwargs: object) -> pkg.PathBudget:
         pytest.fail("identity validation must precede path budgeting")
@@ -3709,10 +3706,13 @@ def test_brief_cardinality_uses_the_original_request_before_identity_filtering(t
     assert payload["construction"]["totals"] == {"requested": 1, "assembled": 0, "blocked": 1}
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")
 def test_selecting_one_engine_alias_still_blocks_before_it_can_overwrite_its_sibling(tmp_path: Path) -> None:
-    """An explicit `--unit Book` cannot make the engine's separate `book` identity disappear."""
-    bundle, _oracle = _bundle(tmp_path)
+    """Native spelling rejects an existing sibling, even without an invocation-local owner yet."""
+    bundle = tmp_path / "bundle"
     write_engine_report(bundle, workbooks=[UNIT, UNIT.lower()])
+    prior = pkg.package_unit(bundle, UNIT.lower(), _out(tmp_path), oracle_dir=None, assets_dir=None)
+    before = (_out(tmp_path) / UNIT.lower() / pkg.MANIFEST_NAME).read_bytes()
     report = tmp_path / "selected-alias.json"
 
     assert (
@@ -3735,7 +3735,9 @@ def test_selecting_one_engine_alias_still_blocks_before_it_can_overwrite_its_sib
     assert payload["requested"] == [UNIT]
     assert payload["failed"][0]["reason_code"] == pkg.IDENTITY_DESTINATION_ALIAS
     assert payload["construction"]["totals"] == {"requested": 1, "assembled": 0, "blocked": 1}
-    assert not (_out(tmp_path) / UNIT).exists()
+    assert prior["unit"] == UNIT.lower()
+    assert (_out(tmp_path) / UNIT.lower() / pkg.MANIFEST_NAME).read_bytes() == before
+    assert [path.name for path in _out(tmp_path).iterdir()] == [UNIT.lower()]
 
 
 def test_write_png_is_a_real_image_so_these_fixtures_could_fail(tmp_path: Path) -> None:
@@ -5231,7 +5233,10 @@ def test_one_unit_raising_does_not_stop_the_units_after_it(
     _arm_boom(monkeypatch, BATCH_BOOM, attempted)
     report = tmp_path / "packaging.json"
 
-    code = _batch_main(tmp_path, bundle, oracle, report)
+    try:
+        code = _batch_main(tmp_path, bundle, oracle, report)
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        pytest.fail(f"one unit's exception escaped the batch instead of preserving later units: {type(error).__name__}")
     payload = json.loads(report.read_text(encoding="utf-8"))
     summary = capsys.readouterr().out
 
@@ -5381,6 +5386,7 @@ def test_a_staging_tree_that_survives_cleanup_fails_its_unit_rather_than_being_a
     monkeypatch.setattr(pkg.shutil, "rmtree", stubborn)
     report = tmp_path / "packaging.json"
 
+    assert pkg._discard_scratch(staging) is not None  # pylint: disable=protected-access
     code = _batch_main(tmp_path, bundle, oracle, report, "--quiet")
     payload = json.loads(report.read_text(encoding="utf-8"))
 
@@ -5432,7 +5438,7 @@ def test_a_residue_found_while_a_unit_is_already_failing_does_not_replace_the_ro
     assert [item["unit"] for item in payload["construction"]["blocked"]] == [BATCH_BOOM]
     assert payload["failed"][0]["exception_class"] == "shutil.Error"
     assert "diagnostic_notes_withheld=1" in (payload["failed"][0]["traceback"] or "")
-    assert "[host location redacted]" in errors
+    assert "CLEANUP FINDING:" in errors
     assert str(staging) not in errors
     assert (_out(tmp_path) / BATCH_LATE / pkg.MANIFEST_NAME).is_file(), "the unit after the failure was skipped"
 
@@ -5605,7 +5611,7 @@ def test_post_return_line_interrupt_uses_verified_final_package_state(tmp_path: 
 
     code = _run_with_line_interrupt(
         pkg.package_unit,
-        "        if result is None:",
+        "        _complete_construction(attempt, error)",
         lambda: _batch_main(tmp_path, bundle, oracle, report),
     )
     payload = json.loads(report.read_text(encoding="utf-8"))
@@ -5639,7 +5645,7 @@ def test_post_rename_line_interrupt_hides_retired_manifest_before_reporting_stat
 
     code = _run_with_line_interrupt(
         pkg.replace_dir,
-        "            _discard_scratch(retired)",
+        "            cleanup = _discard_scratch(retired)",
         lambda: _batch_main(tmp_path, bundle, oracle, report),
         occurrence=2,
     )
@@ -5715,3 +5721,73 @@ def test_a_single_unit_run_is_unchanged_by_the_batch_contract(
     assert "BLOCKED: 0/1" in summary
     assert "1 requested = 1 ASSEMBLED + 0 BLOCKED" in summary
     assert pkg.NOT_START_READY_NOTICE in summary
+
+
+@pytest.mark.parametrize("seam", ["completed-slot", "provider-bookkeeping"])
+def test_completed_slots_survive_caller_bookkeeping_interrupts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
+) -> None:
+    """The terminal occurrence lives inside construction, before provider/result bookkeeping."""
+    bundle, oracle = _many_unit_bundle(tmp_path, [UNIT, BATCH_LATE])
+    write_engine_report(bundle, workbooks=[BATCH_LATE], datasources=[UNIT])
+    report = tmp_path / "bookkeeping.json"
+    report.write_text('{"stale": true}', encoding="utf-8")
+    completed = pkg._ConstructionSlot.complete  # pylint: disable=protected-access
+    fired = []
+
+    def interrupt_after_slot(slot, outcome) -> None:
+        completed(slot, outcome)
+        if not fired and slot.unit == UNIT and outcome.result is not None:
+            fired.append(True)
+            raise KeyboardInterrupt("after terminal slot transition")
+
+    if seam == "completed-slot":
+        monkeypatch.setattr(pkg._ConstructionSlot, "complete", interrupt_after_slot)  # pylint: disable=protected-access
+        code = _batch_main(tmp_path, bundle, oracle, report)
+        assert fired == [True]
+    else:
+        code = _run_with_line_interrupt(
+            pkg._package_each,  # pylint: disable=protected-access
+            "                providers.append(out_root / unit)",
+            lambda: _batch_main(tmp_path, bundle, oracle, report),
+        )
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert code == pkg.EXIT_CANNOT_ASSESS and "stale" not in payload
+    assert payload["interruption"]["published"] is True
+    assert payload["interruption"]["reason_code"] == "assembly_interrupted_after_publish"
+    assert [row["unit"] for row in payload["units"]] == [UNIT]
+    assert payload["failed"] == [] and payload["refused"] == []
+    assert [row["unit"] for row in payload["unaccounted"]] == [BATCH_LATE]
+    assert payload["construction"]["totals"] == {"requested": 2, "assembled": 1, "blocked": 1}
+    assert cmp.discover_package_roots(bundle, _out(tmp_path)) == [_out(tmp_path) / UNIT]
+
+
+def test_path_budget_diagnostics_keep_independent_utf16_measurements_without_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The known field-reproduction directory is the offender, not a string parsed from its error."""
+    _pin_windows(monkeypatch)
+    bundle = _pbir_bundle(tmp_path)
+    out = _padded_path(tmp_path, 170) / "private-location-\U0001f4c1"
+    report = tmp_path / "budget-details.json"
+    assert pkg.main(["--bundle", str(bundle), "--out", str(out), "--json", str(report)]) == pkg.EXIT_UNIT_FAILED
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    captured = capsys.readouterr()
+    failure = payload["failed"][0]
+    deepest = (out / _deepest_tail()).parent
+    length = len(str(deepest).encode("utf-16-le")) // 2
+    root_length = len(str(out).encode("utf-16-le")) // 2
+    expected = {
+        "path_kind": "directory",
+        "length_utf16": length,
+        "ceiling_utf16": 247,
+        "overage_utf16": length - 247,
+        "max_out_root_utf16": 247 - (length - root_length),
+        "shorten_out_by_utf16": length - 247,
+        "relative_shape_overage_utf16": 0,
+    }
+    assert failure["details"] == {"path_budget": expected}
+    assert length != len(str(deepest)), "the non-BMP witness must distinguish UTF-16 from code points"
+    assert failure["reason"] in captured.out
+    assert "private-location" not in report.read_text(encoding="utf-8") + captured.out + captured.err
+    assert str(out) not in report.read_text(encoding="utf-8") + captured.out + captured.err

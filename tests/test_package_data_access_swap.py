@@ -1063,3 +1063,251 @@ def test_swap_cannot_omit_candidate_validation(tmp_path: Path, prior_exists: boo
     assert _files(final) == prior and final.exists() == prior_exists
     assert _files(staged) == candidate
     assert not pkg.retired_dir(final).exists()
+
+
+def _construction_run(bundle: Path, out: Path, options: dict, report: Path) -> tuple[int, dict]:
+    code = pkg.main(
+        [
+            "--bundle",
+            str(bundle),
+            "--out",
+            str(out),
+            "--unit",
+            UNIT,
+            "--oracle",
+            str(options["oracle_dir"]),
+            "--assets",
+            str(options["assets_dir"]),
+            "--brief",
+            str(options["brief"]),
+            "--json",
+            str(report),
+            "--quiet",
+        ]
+    )
+    return code, json.loads(report.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("fault", "prior_exists"),
+    [
+        ("staging", False),
+        ("staging", True),
+        ("retired", True),
+        ("rollback", True),
+        ("marker-hide", True),
+        ("marker-hide-noop", True),
+    ],
+)
+def test_construction_reconciles_cleanup_rollback_and_discovery_facts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fault: str,
+    prior_exists: bool,
+) -> None:
+    """Independent bytes and actual markers distinguish an exact publication from cleanup residue."""
+    bundle, out, options = _local_bundle(tmp_path)
+    if prior_exists:
+        pkg.package_unit(bundle, UNIT, out, **options)
+    final = out / UNIT
+    staged, retired = pkg.staging_dir(out, UNIT), pkg.retired_dir(final)
+    prior = _files(final)
+    (tmp_path / "rows.csv").write_bytes(b"value\n8\n")
+    assemble, discard, rename, unlink = pkg._assemble_unit, pkg._discard_scratch, pkg._rename_retrying, Path.unlink
+    candidate, witnessed = {}, []
+    private = "https://private-host.example/?token=CONSTRUCTION_FAILURE_CANARY"
+
+    def assembled(*args, **kwargs):
+        result = assemble(*args, **kwargs)
+        candidate.update(_files(staged))
+        witnessed.append(staged.lstat().st_ino)
+        if fault == "staging":
+            raise RuntimeError(private)
+        return result
+
+    def leave_residue(root: Path) -> str | None:
+        blocked = staged if fault == "staging" else retired
+        if fault != "rollback" and root == blocked and root.exists():
+            return private
+        return discard(root)
+
+    def renamed(source: Path, destination: Path) -> None:
+        if fault == "rollback" and source in (staged, retired) and destination == final:
+            raise PermissionError(private)
+        if fault.startswith("marker-hide") and source == retired / pkg.MANIFEST_NAME:
+            raise PermissionError(private)
+        rename(source, destination)
+
+    def unlinked(path: Path, *args, **kwargs) -> None:
+        if fault.startswith("marker-hide") and path == retired / pkg.MANIFEST_NAME:
+            if fault == "marker-hide-noop":
+                return
+            raise PermissionError(private)
+        unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(pkg, "_assemble_unit", assembled)
+    monkeypatch.setattr(pkg, "_discard_scratch", leave_residue)
+    monkeypatch.setattr(pkg, "_rename_retrying", renamed)
+    monkeypatch.setattr(Path, "unlink", unlinked)
+    report = tmp_path / "construction.json"
+    report.write_text('{"stale": "ASSEMBLED"}', encoding="utf-8")
+    code, payload = _construction_run(bundle, out, options, report)
+    captured = capsys.readouterr()
+
+    assert len(witnessed) == 1 and candidate, "the fixture must reach real sealed construction"
+    assert code != 0 and "stale" not in payload
+    assert payload["cleanup_findings"], "residue must be a modeled nonzero finding"
+    assert payload["totals"]["units"] + payload["totals"]["failed"] + payload["totals"]["refused"] == 1
+    assert "CONSTRUCTION_FAILURE_CANARY" not in report.read_text(encoding="utf-8") + captured.out + captured.err
+    markers = sorted(out.rglob(pkg.MANIFEST_NAME))
+    if fault == "retired":
+        assert payload["construction"]["totals"] == {"requested": 1, "assembled": 1, "blocked": 0}
+        assert payload["failed"] == [] and payload["refused"] == []
+        assert final.lstat().st_ino == witnessed[0] and _files(final) == candidate
+        assert markers == [final / pkg.MANIFEST_NAME]
+        assert retired.is_dir() and not (retired / pkg.MANIFEST_NAME).exists()
+    else:
+        assert payload["construction"]["totals"] == {"requested": 1, "assembled": 0, "blocked": 1}
+        assert payload["units"] == [] and len(payload["failed"]) == 1
+        if fault == "staging":
+            assert _files(final) == prior and final.exists() == prior_exists
+            assert markers == ([final / pkg.MANIFEST_NAME] if prior_exists else [])
+        elif fault == "rollback":
+            assert not final.exists() and markers == []
+            assert _files(retired) == {key: value for key, value in prior.items() if key != pkg.MANIFEST_NAME}
+            assert any(row["reason_code"] == "rollback_failed" for row in payload["cleanup_findings"])
+        else:
+            assert markers == [retired / pkg.MANIFEST_NAME]
+            assert _files(retired) == prior
+            assert not (final / pkg.MANIFEST_NAME).exists(), "a competing candidate must not remain discoverable"
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    [
+        "destination-admission",
+        "staging-created",
+        "before-retirement",
+        "staged-verification",
+        "final-verification",
+        "final-reconciliation",
+    ],
+)
+def test_construction_identity_unavailable_never_falls_back_to_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkpoint: str
+) -> None:
+    """The native call fails at the named production checkpoint, even though lexical paths are known."""
+    bundle, out, options = _local_bundle(tmp_path)
+    pkg.package_unit(bundle, UNIT, out, **options)
+    final, staged = out / UNIT, pkg.staging_dir(out, UNIT)
+    prior, prior_id = _files(final), final.lstat().st_ino
+    target = staged if checkpoint.startswith(("staging-", "staged-")) else final
+    phase = {
+        "destination-admission": "_claim_construction_directory",
+        "staging-created": "_claim_construction_directory",
+        "before-retirement": "_verify_construction_destination",
+        "staged-verification": "_verify_construction_staged",
+        "final-verification": "_verify_construction_published",
+        "final-reconciliation": "_complete_construction",
+    }[checkpoint]
+    original = getattr(pkg, phase)
+    owner, name = (pkg, "_windows_directory") if os.name == "nt" else (os, "open")
+    native = getattr(owner, name)
+    armed, fired = [], []
+
+    def intervene(*args, **kwargs):
+        applicable = phase != "_claim_construction_directory" or (
+            args[1] == target and (checkpoint != "staging-created" or staged.is_dir())
+        )
+        if applicable:
+            armed.append(True)
+        try:
+            return original(*args, **kwargs)
+        finally:
+            if applicable:
+                armed.pop()
+
+    def unavailable(path, *args, **kwargs):
+        if armed and not fired and Path(path) == target:
+            fired.append(checkpoint)
+            raise PermissionError("native-identity-private-diagnostic")
+        return native(path, *args, **kwargs)
+
+    monkeypatch.setattr(pkg, phase, intervene)
+    monkeypatch.setattr(owner, name, unavailable)
+    code, payload = _construction_run(bundle, out, options, tmp_path / "identity.json")
+    assert fired == [checkpoint], "an unreached native checkpoint is not a passing refusal control"
+    assert code != 0
+    assert payload["construction"]["totals"] == {"requested": 1, "assembled": 0, "blocked": 1}
+    assert len(payload["failed"]) == 1 and payload["units"] == []
+    assert payload["failed"][0]["reason_code"] == (
+        "publication_state_unverified" if checkpoint == "final-reconciliation" else "construction_identity_unavailable"
+    )
+    if checkpoint.startswith("final-"):
+        assert not (final / pkg.MANIFEST_NAME).exists()
+        assert final.lstat().st_ino != prior_id
+    else:
+        assert _files(final) == prior and final.lstat().st_ino == prior_id
+        assert list(out.rglob(pkg.MANIFEST_NAME)) == [final / pkg.MANIFEST_NAME]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")
+def test_construction_real_denied_delete_handle_reports_residue_then_unlocked_control_assembles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hold a real read handle after retirement; deletion fails while the new candidate can publish."""
+    import ctypes  # pylint: disable=import-outside-toplevel
+    from ctypes import wintypes  # pylint: disable=import-outside-toplevel
+
+    bundle, out, options = _local_bundle(tmp_path)
+    pkg.package_unit(bundle, UNIT, out, **options)
+    final = out / UNIT
+    before_id = final.lstat().st_ino
+    prior = json.loads((final / pkg.MANIFEST_NAME).read_bytes())
+    data_file = prior["data_sources"]["shipped"][0]["path"]
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    rename = pkg._rename_retrying
+    handles, denied = [], []
+
+    def lock_after_retirement(source: Path, destination: Path) -> None:
+        rename(source, destination)
+        if source == final and destination == pkg.retired_dir(final):
+            locked = destination / data_file
+            handle = kernel.CreateFileW(str(locked), 0x80000000, 3, None, 3, 0, None)
+            assert handle != wintypes.HANDLE(-1).value, f"CreateFileW fixture failed: {ctypes.get_last_error()}"
+            handles.append(handle)
+            with pytest.raises(PermissionError):
+                locked.unlink()
+            denied.append(True)
+
+    monkeypatch.setattr(pkg, "_rename_retrying", lock_after_retirement)
+    (tmp_path / "rows.csv").write_bytes(b"value\n8\n")
+    try:
+        code, payload = _construction_run(bundle, out, options, tmp_path / "locked.json")
+        assert denied == [True], "the real denied-delete witness must be reached inside the ordinary swap"
+        assert code != 0 and payload["construction"]["totals"] == {"requested": 1, "assembled": 1, "blocked": 0}
+        assert payload["failed"] == [] and payload["cleanup_findings"]
+        assert final.lstat().st_ino != before_id and (final / data_file).read_bytes() == b"value\n8\n"
+        assert (pkg.retired_dir(final) / data_file).read_bytes() == b"value\n7\n"
+        assert list(out.rglob(pkg.MANIFEST_NAME)) == [final / pkg.MANIFEST_NAME]
+    finally:
+        for handle in handles:
+            assert kernel.CloseHandle(handle), "the fixture must release its own native handle"
+    monkeypatch.setattr(pkg, "_rename_retrying", rename)
+    code, payload = _construction_run(bundle, out, options, tmp_path / "unlocked.json")
+    assert code == 0 and payload["construction"]["totals"] == {"requested": 1, "assembled": 1, "blocked": 0}
+    assert final.lstat().st_ino != before_id
+    assert b"value\n8\n" in _files(final).values()
