@@ -81,6 +81,7 @@ from check_empty_model import eval_m_path, model_parameters
 from tmdl_checks import (
     ADVISORY_TMDL_CODES,
     TmdlFinding,
+    _QUOTED_NAME_RE,
     check_tmdl_model,
     check_tmdl_text,
     find_compact_filters,
@@ -553,7 +554,12 @@ def _collect_body(lines: list[str], idx: int, indent: int, metadata_re: re.Patte
     return body, idx
 
 
-def _iter_m_blocks(path: Path) -> list[tuple[str, int, int]]:  # pylint: disable=too-many-locals
+def _iter_m_blocks(path: Path) -> list[tuple[str, int, int]]:
+    """Read a document with the gate's existing replacement-decoding policy."""
+    return iter_m_blocks_text(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def iter_m_blocks_text(text: str) -> list[tuple[str, int, int]]:  # pylint: disable=too-many-locals
     """Every M expression in a .tmdl file, with the line it starts on, and its starting column.
 
     One cohesive line scanner; splitting it further would spread the TMDL shape knowledge across
@@ -567,13 +573,14 @@ def _iter_m_blocks(path: Path) -> list[tuple[str, int, int]]:  # pylint: disable
     separator). Reading those as M produced 64 false positives across the committed examples, so the
     partition's declared source type decides whether its `source =` is checked at all.
     """
-    text = path.read_text(encoding="utf-8", errors="replace").lstrip("\ufeff")
-    lines = text.splitlines()
-    blocks: list[tuple[str, int]] = []
+    lines = text.lstrip("\ufeff").splitlines()
+    blocks: list[tuple[str, int, int]] = []
     partition_re = re.compile(r"^\s*partition\s+.+?=\s*(\w+)\s*$")
     # `'quoted name'` first: TMDL requires quoting a name containing '=', and a non-greedy match
     # would otherwise stop at the wrong equals sign and feed the tail into the M scanner.
-    starters = re.compile(r"^(\s*)(?:expression\s+(?:'[^']*'|[^=]+?)\s*=|source\s*=)\s*(.*)$")
+    starters = re.compile(
+        rf"""^(\s*)(?:expression\s+(?:{_QUOTED_NAME_RE.pattern}|#"(?:[^"]|"")*"|[^=]+?)\s*=|source\s*=)\s*(.*)$"""
+    )
     # TMDL metadata keys only terminate the block at the SAME indent as a sibling property. Matching
     # them anywhere truncated valid M that merely uses one as an identifier (`let mode = 1 in mode`),
     # which then reported a bogus LET_WITHOUT_IN.
@@ -592,9 +599,7 @@ def _iter_m_blocks(path: Path) -> list[tuple[str, int, int]]:  # pylint: disable
             idx += 1
             continue
         is_source = lines[idx].lstrip().startswith("source")
-        if is_source and current_partition_kind not in (None, "m"):
-            idx += 1
-            continue
+        skip_source = is_source and current_partition_kind not in (None, "m")
         indent = len(match.group(1))
         # Column of the M text on the starter line, so a finding on it points at the real column.
         first_col = len(lines[idx]) - len(match.group(2))
@@ -606,11 +611,12 @@ def _iter_m_blocks(path: Path) -> list[tuple[str, int, int]]:  # pylint: disable
             if current.strip() and (len(current) - len(current.lstrip())) <= indent:
                 break
             metadata = metadata_re.match(current)
-            if metadata and len(metadata.group(1)) <= indent + 1:
+            if not skip_source and metadata and len(metadata.group(1)) <= indent + 1:
                 break
             body.append(current)
             idx += 1
-        blocks.append(("\n".join(body), start, first_col))
+        if not skip_source:
+            blocks.append(("\n".join(body), start, first_col))
     return blocks
 
 

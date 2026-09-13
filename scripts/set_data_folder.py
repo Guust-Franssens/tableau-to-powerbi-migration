@@ -6,7 +6,8 @@ purpose: Manage the per-model folder M-parameter that each generated Fabric sema
          local checkout so Power BI Desktop can refresh with real data. `--package` is the same idea
          for ONE handover package: `scripts/package_unit.py` writes `<PACKAGE_ROOT>` rather than the
          machine that built the package, so BINDING it to wherever it now lives is a step of using
-         it. Package mode delegates a guarded bind/reseal to package_unit: bind before opening,
+         it. Package mode delegates use-based parameter selection and a guarded bind/reseal to
+         package_unit, without a checkout-rewriter callback: bind before opening,
          sanitize before transfer, then bind at the recipient. Inspection proves the current
          location, not shareability or readiness. Existing S1-dirty packages are not rebaselined.
 usage:   python scripts/set_data_folder.py            # localize: set every model to THIS checkout's absolute path
@@ -103,9 +104,9 @@ def _data_tail(value: str) -> str | None:
     file it reads is not there. Nothing downstream can see that: the model stays structurally perfect
     and fails at refresh, on someone else's machine.
 
-    A package value has an explicit `<PACKAGE_ROOT>/data` boundary. Everything after it belongs
-    to the tail, even another `data`. Package planning first projects held bound values onto that
-    portable boundary; the legacy checkout-only fallback still reads from the last `data`.
+    This legacy checkout helper also recognizes an explicit `<PACKAGE_ROOT>/data` boundary and
+    preserves everything after it, even another `data`. Other values still use the last `data`.
+    Package mode no longer calls this helper: its use-based selection and binding live in package_unit.
 
     ⚠️ Returned `/`-joined and SEPARATOR-FREE of intent: the caller composes it onto the destination
     with that destination's own separator (:func:`path_flavour.join`). Joining it here with a literal
@@ -196,9 +197,7 @@ def _package(
     """Delegate package ownership locally; checkout rewriting remains independent."""
     from package_unit import bind_package  # pylint: disable=import-outside-toplevel
 
-    result = bind_package(
-        str(root), rewrite=_rewritten, inspect=inspect, sanitize=sanitize, provider_packages=providers
-    )
+    result = bind_package(str(root), inspect=inspect, sanitize=sanitize, provider_packages=providers)
     print(json.dumps(result.as_dict(), ensure_ascii=True))
     return result.exit_code
 

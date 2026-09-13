@@ -216,7 +216,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, NamedTuple
@@ -228,6 +228,7 @@ import tableau_oracle_manifest  # noqa: E402  # pylint: disable=wrong-import-pos
 import package_filesystem as pfs  # noqa: E402  # pylint: disable=wrong-import-position
 import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-import-position
 import credential_gate as data_access  # noqa: E402  # pylint: disable=wrong-import-position
+import check_datamodel as m_syntax  # noqa: E402  # pylint: disable=wrong-import-position
 from bundle_corpus import is_reparse_entry  # noqa: E402  # pylint: disable=wrong-import-position
 from migration_bundle import load_bundle  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -269,6 +270,7 @@ from path_flavour import (  # noqa: E402  # pylint: disable=wrong-import-positio
 from path_flavour import separator as flavour_separator  # noqa: E402  # pylint: disable=wrong-import-position
 from path_flavour import inside as inside_lexically  # noqa: E402  # pylint: disable=wrong-import-position
 from path_flavour import join as flavour_join  # noqa: E402  # pylint: disable=wrong-import-position
+from tmdl_checks import _QUOTED_NAME_RE  # noqa: E402  # pylint: disable=wrong-import-position
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -290,8 +292,10 @@ SPEC_SCHEMA = SCRIPT_DIR.parent / "docs" / "migration-spec.schema.json"
 #: call", so the general shape is what is targeted.
 ABSOLUTE_LITERAL_RE = re.compile(r'"((?:[A-Za-z]:[\\/]|\\\\|/)[^"]*)"')
 FILE_CONTENTS_RE = re.compile(r'File\.Contents\(\s*"([^"]*)"\s*\)')
-FOLDER_PARAM_RE = re.compile(r'(?P<prefix>expression\s+(?P<name>#"[^"]+"|[^\s=]+)\s*=\s*")(?P<value>[^"]*)(?P<quote>")')
-EXPRESSION_NAME_RE = re.compile(r'expression\s+(#"[^"]+"|[^\s=]+)\s*=')
+_EXPRESSION_NAME = rf"""{_QUOTED_NAME_RE.pattern}|#"(?:[^"]|"")*"|[^\s='"#]+"""
+EXPRESSION_NAME_RE = re.compile(rf"(?m)^[ \t]*expression[ \t]+({_EXPRESSION_NAME})[ \t]*=")
+_PARTITION_HEADER_RE = re.compile(rf"^[ \t]*partition[ \t]+(?:{_EXPRESSION_NAME})[ \t]*=[ \t]*(\w+)[ \t]*$")
+_FOLDER_READERS = frozenset({"File.Contents", "Folder.Files", "Folder.Contents"})
 WINDOWS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
 UNC_PATH_RE = re.compile(r"^\\\\")
 
@@ -320,11 +324,9 @@ UNCLASSIFIED_REASON = (
 )
 
 #: How a folder PARAMETER is read by the model, which decides what may be copied out of the folder
-#: it names. Anything other than the first two is a refusal - see :func:`_parameter_usages`.
+#: it names. Selection and refusal direction belong to :func:`interpret_folder_parameter`.
 NAMED_FILES = "named-files"
 WHOLE_FOLDER = "whole-folder"
-UNKNOWN_USAGE = "unknown-usage"
-NO_USAGE = "no-usage"
 
 #: Where a shipped source lands inside the package, and the M parameter a rewritten `File.Contents`
 #: literal reads its folder from. Both the parameter's `meta [...]` tail and the trailing-separator
@@ -2307,9 +2309,399 @@ def _declared_expressions(documents: list[Path]) -> set[str]:
 
 
 def _bare_name(token: str) -> str:
-    """`#"Source Folder"` / `SourceFolder` -> the identifier itself."""
+    """Decode TMDL names and the legacy M-quoted declaration spelling without folding case."""
     token = token.strip()
-    return token[2:-1] if token.startswith('#"') and token.endswith('"') else token
+    if token.startswith("'") and token.endswith("'"):
+        return token[1:-1].replace("''", "'")
+    if token.startswith('#"') and token.endswith('"'):
+        return token[2:-1].replace('""', '"')
+    return token
+
+
+@dataclass(frozen=True, repr=False)
+class FolderRoot:  # pylint: disable=too-many-instance-attributes
+    """Private selected identity and byte span; never a diagnostic or serialization payload."""
+
+    member: str
+    symbol: str
+    name_token: str
+    value_span: tuple[int, int]
+    value: str
+    ordinal: int
+    mode: str = NAMED_FILES
+    tails: tuple[str, ...] = ()
+    tail_spans: tuple[tuple[str, int, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class FolderParameterDecision:
+    """The interpreter owns direction; consumers only map the four states to their exits."""
+
+    state: Literal["zero", "selected", "refused", "unassessable"]
+    root: FolderRoot | None = field(repr=False)
+    code: str
+
+
+def _folder_blocks(text: str) -> list[tuple[str, int, int]] | None:
+    """Reject carriers the existing extractor cannot account for, rather than call them absent."""
+    blocks = m_syntax.iter_m_blocks_text(text)
+    starts = {start for _body, start, _col in blocks}
+    covered = {line for body, start, _col in blocks for line in range(start, start + body.count("\n") + 1)}
+    kind, pending = None, False
+    non_m_indent = None
+    for number, line in enumerate(text.splitlines(), 1):
+        if (number in covered and number not in starts) or (
+            non_m_indent is not None and (not line.strip() or len(line) - len(line.lstrip()) > non_m_indent)
+        ):
+            continue
+        non_m_indent = None
+        header = re.match(r"^[ \t]*(expression|partition|source|table)\b", line)
+        if header is None:
+            continue
+        if header[1] in ("partition", "table"):
+            match = _PARTITION_HEADER_RE.fullmatch(line) if header[1] == "partition" else None
+            if pending or (header[1] == "partition" and match is None):
+                return None
+            kind = match[1].lower() if match is not None else None
+            pending = kind == "m"
+        elif header[1] == "expression":
+            if number not in starts or EXPRESSION_NAME_RE.match(line) is None:
+                return None
+        elif kind in (None, "m"):
+            if not pending or number not in starts:
+                return None
+            pending = False
+        else:
+            non_m_indent = len(line) - len(line.lstrip())
+    for body, _start, _col in blocks:
+        lines = body.split("\n")
+        if (lines[0].strip() and any(line.strip() for line in lines[1:])) or body.lstrip().startswith("```"):
+            return None
+    return None if pending else blocks
+
+
+def _m_symbol(token: m_syntax.Token) -> str | None:
+    if token.kind == "ident":
+        return token.text
+    if token.kind == "string" and token.text.startswith('#"'):
+        return _bare_name(token.text) if "#(" not in token.text else None
+    return None
+
+
+def _m_literal(token: m_syntax.Token) -> str | None:
+    if token.kind != "string" or not token.text.startswith('"') or "#(" in token.text:
+        return None
+    return token.text[1:-1].replace('""', '"')
+
+
+def _folder_literal_value(tokens: list[m_syntax.Token]) -> str | None:
+    """Only a complete text literal, optionally followed by one metadata record, is a value span."""
+    value = _m_literal(tokens[0]) if tokens else None
+    if value is None or len(tokens) == 1:
+        return value
+    if len(tokens) < 4 or tokens[1].text != "meta" or tokens[2].text != "[":
+        return None
+    depth = 0
+    for index, token in enumerate(tokens[2:], 2):
+        if token.kind == "punct":
+            if token.text in m_syntax.PAIRS:
+                depth += 1
+            elif token.text in m_syntax.CLOSERS:
+                depth -= 1
+        if depth == 0:
+            return value if index == len(tokens) - 1 else None
+    return None
+
+
+def _m_token_span(raw: bytes, start: int, first_col: int, token: m_syntax.Token) -> tuple[int, int]:
+    """The interior of a string token in original UTF-8 bytes, not normalized extracted text."""
+    text = raw.decode("utf-8")
+    unmarked = text.lstrip("\ufeff")
+    lines = unmarked.splitlines(keepends=True)
+    offset = len(text) - len(unmarked) + sum(len(line) for line in lines[: start + token.line - 2])
+    offset += token.col - 1 + (first_col if token.line == 1 else 0)
+    return (
+        len(text[: offset + 1].encode("utf-8")),
+        len(text[: offset + len(token.text) - 1].encode("utf-8")),
+    )
+
+
+def _folder_declaration(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    member: str, raw: bytes, start: int, first_col: int, tokens: list[m_syntax.Token], ordinal: int
+) -> tuple[str, FolderRoot | None] | None:
+    declaration = EXPRESSION_NAME_RE.match(raw.decode("utf-8").lstrip("\ufeff").splitlines()[start - 1])
+    if declaration is None:
+        return None
+    symbol = _bare_name(declaration[1])
+    value = _folder_literal_value(tokens)
+    if value is None:
+        return symbol, None
+    return symbol, FolderRoot(
+        member, symbol, declaration[1], _m_token_span(raw, start, first_col, tokens[0]), value, ordinal
+    )
+
+
+def _folder_tail_key(tail: str) -> str | None:
+    key = "/".join(re.split(r"[\\/]+", tail.lstrip("\\/")))
+    return key if pfs.is_canonical_key(key) else None
+
+
+def _folder_first_argument(  # pylint: disable=too-many-return-statements
+    reader: str, argument: list[m_syntax.Token], declarations: dict[str, FolderRoot | None]
+) -> tuple[FolderRoot | None, str | None, str | None]:
+    """A bounded leading-symbol/literal-tail grammar, never prefix matching or alias expansion."""
+    if len(argument) == 1 and _m_literal(argument[0]) is not None:
+        return None, None, None
+    symbol = _m_symbol(argument[0]) if argument else None
+    if symbol is None:
+        return None, None, "folder_parameter_reader_unsupported"
+    if symbol not in declarations:
+        return None, None, "folder_parameter_unknown_symbol"
+    root = declarations[symbol]
+    if root is None or not root.value or any(ord(char) < 32 for char in root.value):
+        return None, None, "folder_parameter_value_unsupported"
+    if reader != "File.Contents":
+        return (root, None, None) if len(argument) == 1 else (None, None, "folder_parameter_reader_unsupported")
+    if len(argument) < 3 or len(argument) % 2 != 1:
+        return None, None, "folder_parameter_tail_unsupported"
+    pieces = []
+    for index in range(1, len(argument), 2):
+        literal = _m_literal(argument[index + 1])
+        if argument[index].text != "&" or literal is None:
+            return None, None, "folder_parameter_tail_unsupported"
+        pieces.append(literal)
+    tail = "".join(pieces)
+    if _folder_tail_key(tail) is None or not (root.value.endswith(("\\", "/")) or tail.startswith(("\\", "/"))):
+        return None, None, "folder_parameter_tail_unsafe"
+    return root, tail, None
+
+
+def _folder_field_names(tokens: list[m_syntax.Token]) -> set[int]:
+    """Mark only bracket field-name slots; record values remain executable tokens."""
+    names: set[int] = set()
+    frames: list[tuple[str, bool, int]] = []
+    for token in tokens:
+        if token.kind == "punct" and token.text in m_syntax.PAIRS:
+            frames.append((token.text, token.text == "[", 0))
+            continue
+        if token.kind == "punct" and token.text in m_syntax.CLOSERS:
+            frames.pop()
+            continue
+        if not frames or frames[-1][0] != "[":
+            continue
+        opener, in_name, lets = frames[-1]
+        if token.kind == "punct" and token.text == "=":
+            in_name = False
+        elif token.kind == "punct" and token.text == "," and not lets:
+            in_name = True
+        elif in_name:
+            names.add(id(token))
+        elif token.kind == "keyword":
+            # A comma inside a record's let value starts a binding, not another field.
+            if token.text == "let":
+                lets += 1
+            elif token.text == "in" and lets:
+                lets -= 1
+        frames[-1] = (opener, in_name, lets)
+    return names
+
+
+def _folder_selection(  # pylint: disable=too-many-locals,too-many-branches,too-many-return-statements,protected-access
+    blocks: list[list[m_syntax.Token]],
+    declarations: dict[str, FolderRoot | None],
+    locations: dict[int, tuple[str, int, int]],
+) -> FolderParameterDecision:
+    candidates: dict[str, FolderRoot] = {}
+    tails: dict[str, set[str]] = {}
+    whole, allowed = set(), set()
+    tail_spans: dict[str, set[tuple[str, int, int]]] = {}
+    literal_root = False
+    for tokens in blocks:
+        field_names = _folder_field_names(tokens)
+        allowed.update(field_names)
+        for index, token in enumerate(tokens):
+            reader = _m_symbol(token)
+            if reader not in _FOLDER_READERS or id(token) in field_names:
+                continue
+            if index + 1 == len(tokens) or tokens[index + 1].text != "(":
+                return FolderParameterDecision("refused", None, "folder_parameter_reader_unsupported")
+            arguments = m_syntax._function_arguments(tokens, index + 1)
+            if not arguments or not arguments[0]:
+                return FolderParameterDecision("unassessable", None, "folder_parameter_malformed_m")
+            root, tail, code = _folder_first_argument(reader, arguments[0], declarations)
+            if code is not None:
+                return FolderParameterDecision("refused", None, code)
+            if root is None:
+                literal = _m_literal(arguments[0][0]) or ""
+                literal_root |= (
+                    reader == "File.Contents" and _is_path_literal(literal) and not UNC_PATH_RE.match(literal)
+                )
+                continue
+            candidates[root.symbol] = root
+            allowed.add(id(arguments[0][0]))
+            tails.setdefault(root.symbol, set())
+            tail_spans.setdefault(root.symbol, set()).update(locations[id(piece)] for piece in arguments[0][2::2])
+            if tail is None:
+                whole.add(root.symbol)
+            else:
+                tails[root.symbol].add(tail)
+    if not candidates:
+        return FolderParameterDecision("zero", None, "folder_parameter_zero")
+    if len(candidates) != 1:
+        return FolderParameterDecision("refused", None, "folder_parameter_multiple")
+    root = next(iter(candidates.values()))
+    if any(_m_symbol(token) == root.symbol and id(token) not in allowed for tokens in blocks for token in tokens):
+        return FolderParameterDecision("refused", None, "folder_parameter_role_conflict")
+    if literal_root:
+        return FolderParameterDecision("refused", None, "folder_parameter_generated_root")
+    return FolderParameterDecision(
+        "selected",
+        replace(
+            root,
+            mode=WHOLE_FOLDER if root.symbol in whole else NAMED_FILES,
+            tails=tuple(sorted(tails[root.symbol])),
+            tail_spans=tuple(sorted(tail_spans[root.symbol])),
+        ),
+        "folder_parameter_selected",
+    )
+
+
+def _folder_unassessed_comments(body: str, tokens: list[m_syntax.Token]) -> bool:
+    """The reused lexer stops at the first block terminator; refuse nesting in its trivia gaps."""
+    starts = [0, *(index + 1 for index, char in enumerate(body) if char == "\n")]
+    gap_start = 0
+    for token in [*tokens, None]:
+        end = starts[token.line - 1] + token.col - 1 if token is not None else len(body)
+        for comment in re.finditer(r"//[^\n]*|/\*.*?(?:\*/|\Z)", body[gap_start:end], re.DOTALL):
+            text = comment[0]
+            if text.startswith("/*") and "/*" in text[2:]:
+                return True
+        gap_start = end + (len(token.text) if token is not None else 0)
+    return False
+
+
+def _folder_syntax_code(body: str, tokens: list[m_syntax.Token]) -> str | None:
+    # pylint: disable=protected-access
+    if _folder_unassessed_comments(body, tokens):
+        return "folder_parameter_unextractable_m"
+    unfinished = tokens and (
+        (tokens[-1].kind == "punct" and tokens[-1].text in {",", "&", "+", "-", "*", "/", "=", "<", ">", "|", "@", ":"})
+        or (tokens[-1].kind == "keyword" and tokens[-1].text in {"and", "or", "as", "is", "meta", "otherwise"})
+    )
+    stray_close = any(
+        left.kind == right.kind == "punct" and left.text == "*" and right.text == "/"
+        for left, right in zip(tokens, tokens[1:], strict=False)
+    )
+    if not tokens or unfinished or stray_close or m_syntax._check_expression(Path("held.tmdl"), body):
+        return "folder_parameter_malformed_m"
+    return None
+
+
+def interpret_folder_parameter(  # pylint: disable=too-many-locals,protected-access
+    documents: Sequence[tuple[str, bytes]],
+) -> FolderParameterDecision:
+    """Pure, model-wide role selection from held bytes; unsupported M never silently becomes zero.
+
+    Identity joins are case-sensitive; duplicate TMDL identities also refuse case-folded aliases.
+    The bounded M grammar reuses the model gate's tokenizer/structural checks and held-text extractor.
+    No filesystem, manifest, logging, or consumer-specific failure direction lives here.
+    """
+    if len({member for member, _raw in documents}) != len(documents):
+        return FolderParameterDecision("refused", None, "folder_parameter_identity_ambiguous")
+    declarations, names, blocks, locations = {}, [], [], {}
+    for member, raw in documents:
+        try:
+            text = raw.decode("utf-8").lstrip("\ufeff")
+        except UnicodeDecodeError:
+            return FolderParameterDecision("unassessable", None, "folder_parameter_decode")
+        extracted = _folder_blocks(text)
+        if extracted is None:
+            return FolderParameterDecision("unassessable", None, "folder_parameter_unextractable_m")
+        ordinal = 0
+        for body, start, first_col in extracted:
+            tokens, _errors = m_syntax._tokenize(body)
+            code = _folder_syntax_code(body, tokens)
+            if code is not None:
+                return FolderParameterDecision("unassessable", None, code)
+            locations.update(
+                (id(token), (member, *_m_token_span(raw, start, first_col, token)))
+                for token in tokens
+                if _m_literal(token) is not None
+            )
+            declaration = _folder_declaration(member, raw, start, first_col, tokens, ordinal)
+            if declaration is not None:
+                symbol, root = declaration
+                names.append(symbol.casefold())
+                declarations[symbol] = root
+                ordinal += 1
+            blocks.append(tokens)
+    if len(set(names)) != len(names):
+        return FolderParameterDecision("refused", None, "folder_parameter_identity_ambiguous")
+    return _folder_selection(blocks, declarations, locations)
+
+
+def _held_folder_documents(documents: list[Path], dest: Path) -> dict[str, tuple[Path, bytes]]:
+    """Read one owned model once; keys passed to the interpreter are model-relative."""
+    try:
+        return {
+            PurePosixPath(*document.relative_to(dest / "fabric").parts[1:]).as_posix(): (
+                document,
+                document.read_bytes(),
+            )
+            for document in documents
+        }
+    except OSError as error:
+        raise UnassessableInput("", ["folder_parameter_model_unreadable"], error) from error
+
+
+def _assembly_folder_root(decision: FolderParameterDecision) -> FolderRoot | None:
+    if decision.state == "refused":
+        raise PackagingError(decision.code, reason_code=decision.code)
+    if decision.state == "unassessable":
+        failure = UnassessableInput("", [decision.code])
+        failure.reason_code = decision.code
+        raise failure
+    if decision.state == "zero":
+        return None
+    assert decision.state == "selected" and decision.root is not None
+    return decision.root
+
+
+def _folder_cleanup_spans(documents: list[Path], dest: Path) -> dict[Path, list[tuple[int, int]]]:
+    """A leading slash inside a proven concatenated tail is not a second absolute source."""
+    held = _held_folder_documents(documents, dest)
+    root = _assembly_folder_root(interpret_folder_parameter([(key, raw) for key, (_path, raw) in held.items()]))
+    spans: dict[Path, list[tuple[int, int]]] = {}
+    for member, start, end in root.tail_spans if root is not None else ():
+        path, raw = held[member]
+        spans.setdefault(path, []).append((len(raw[:start].decode("utf-8")), len(raw[:end].decode("utf-8"))))
+    return spans
+
+
+def _path_scan_text(document: Path, tails: dict[Path, list[tuple[int, int]]] | None) -> tuple[str, str]:
+    text = document.read_bytes().decode("utf-8")
+    masked = text
+    for start, end in reversed((tails or {}).get(document, [])):
+        masked = masked[:start] + " " * (end - start) + masked[end:]
+    return text, masked
+
+
+def _literal_file_uses(raw: bytes) -> list[tuple[str, tuple[int, int]]]:
+    """Existing literal materialization, restricted to executable first arguments and exact spans."""
+    # pylint: disable=protected-access
+    uses = []
+    for body, start, first_col in _folder_blocks(raw.decode("utf-8").lstrip("\ufeff")) or ():
+        tokens, _errors = m_syntax._tokenize(body)
+        for index, token in enumerate(tokens[:-1]):
+            if _m_symbol(token) != "File.Contents" or tokens[index + 1].text != "(":
+                continue
+            arguments = m_syntax._function_arguments(tokens, index + 1)
+            if not arguments or len(arguments[0]) != 1:
+                continue
+            literal = _m_literal(arguments[0][0])
+            if literal is not None:
+                uses.append((literal, _m_token_span(raw, start, first_col, arguments[0][0])))
+    return uses
 
 
 def _data_folder_param(documents: list[Path]) -> str:
@@ -2464,9 +2856,12 @@ def _localize_data_sources(dest: Path, final: Path, model_name: str | None) -> d
     _localize_folder_parameters(documents, dest, final, record, taken, accounted)
     _localize_file_literals(documents, dest, final, record, taken, model_name, accounted)
     written = _model_tmdl(dest, model_name)
-    record["omissions"].extend(_external_after_rewrite(written, final, accounted))
-    record["neutralized"], record["retained_network"] = _neutralize_unshipped(written, final)
-    _assert_no_host_path_survives(written, final)
+    tails = _folder_cleanup_spans(written, dest)
+    record["omissions"].extend(_external_after_rewrite(written, final, accounted, tails))
+    neutralized, retained = _neutralize_unshipped(written, final, tails)
+    record["neutralized"] = sorted(set(record["neutralized"]) | set(neutralized))
+    record["retained_network"] = sorted(set(record["retained_network"]) | set(retained))
+    _assert_no_host_path_survives(written, final, _folder_cleanup_spans(written, dest))
     _assert_distinct_destinations(record)
     record["binding"] = _binding_state(written)
     record["self_contained"] = not (record["omissions"] or record["neutralized"] or record["retained_network"])
@@ -2494,7 +2889,9 @@ def _binding_state(documents: list[Path]) -> dict[str, str] | None:
     }
 
 
-def _neutralize_unshipped(documents: list[Path], final: Path) -> tuple[list[str], list[str]]:
+def _neutralize_unshipped(
+    documents: list[Path], final: Path, tails: dict[Path, list[tuple[int, int]]] | None = None
+) -> tuple[list[str], list[str]]:
     """Rewrite every HOST-ROOTED literal still escaping the package to :data:`UNAVAILABLE_TOKEN`.
 
     `(neutralized leaves, retained network leaves)`.
@@ -2526,20 +2923,21 @@ def _neutralize_unshipped(documents: list[Path], final: Path) -> tuple[list[str]
     neutralized: list[str] = []
     retained: list[str] = []
     for document in documents:
-        text = document.read_text(encoding="utf-8")
-        routes = _service_routes(text)
-        contained = _contained_literals(text)
+        text, masked = _path_scan_text(document, tails)
+        routes = _service_routes(masked)
+        contained = _contained_literals(masked)
         rewritten = text
-        for value in sorted({match.group(1) for match in ABSOLUTE_LITERAL_RE.finditer(text)}):
+        for match in reversed(list(ABSOLUTE_LITERAL_RE.finditer(masked))):
+            value = match[1]
             if value in routes or _inside(final, value) or value not in contained:
                 continue
             if not _host_local(value):
                 retained.append(_leaf(value))
                 continue
-            rewritten = rewritten.replace(f'"{value}"', f'"{_neutralized(value, final)}"')
+            rewritten = rewritten[: match.start(1)] + _neutralized(value, final) + rewritten[match.end(1) :]
             neutralized.append(_leaf(value))
         if rewritten != text:
-            document.write_text(rewritten, encoding="utf-8")
+            document.write_bytes(rewritten.encode("utf-8"))
     return sorted(set(neutralized)), sorted(set(retained))
 
 
@@ -2553,11 +2951,13 @@ def _contained_literals(text: str) -> set[str]:
     by_shape = {
         match.group(1) for match in ABSOLUTE_LITERAL_RE.finditer(text) if _path_verdict(match.group(1)) == PATH_LITERAL
     }
-    by_role = {match.group(1) for match in FILE_CONTENTS_RE.finditer(text) if match.group(1).strip()}
+    by_role = {value for value, _span in _literal_file_uses(text.encode("utf-8")) if value.strip()}
     return by_shape | by_role
 
 
-def _assert_no_host_path_survives(documents: list[Path], final: Path) -> None:
+def _assert_no_host_path_survives(
+    documents: list[Path], final: Path, tails: dict[Path, list[tuple[int, int]]] | None = None
+) -> None:
     """Tripwire: no shipped `.tmdl` may name a directory on the machine that built the package.
 
     :func:`_neutralize_unshipped` makes this unreachable, and it is asserted anyway for the same
@@ -2571,7 +2971,7 @@ def _assert_no_host_path_survives(documents: list[Path], final: Path) -> None:
     interpreter exit 1 is indistinguishable from `EXIT_NO_WORKING_COPY`.
     """
     for document in documents:
-        text = document.read_text(encoding="utf-8")
+        _raw, text = _path_scan_text(document, tails)
         routes = _service_routes(text)
         contained = _contained_literals(text)
         for match in ABSOLUTE_LITERAL_RE.finditer(text):
@@ -2608,50 +3008,43 @@ def _localize_folder_parameters(  # pylint: disable=too-many-arguments,too-many-
     copied, listed in the manifest and shipped, exit 0. A package exists to be handed to someone
     else, so that is a data-leak shape rather than untidiness - and the folder is very often a
     customer's own working directory. The set of members is derived from the M that reads the
-    parameter (:func:`_parameter_usages`), so it is evidence, not a guess; when the M cannot be
-    enumerated, nothing is copied and the reason is recorded.
+    parameter (:func:`interpret_folder_parameter`), so it is evidence, not a guess; a refused or
+    unassessable interpretation stops before source enumeration, copying or localization writes.
     """
-    texts = [document.read_text(encoding="utf-8") for document in documents]
-    for document, text in zip(documents, texts, strict=True):
-        rewritten = text
-        for match in FOLDER_PARAM_RE.finditer(text):
-            value = match.group("value")
-            verdict = _path_verdict(value)
-            if verdict == NOT_A_PATH or _inside(final, value):
-                continue
-            accounted.add(value)
-            if verdict == UNCLASSIFIED:
-                record["omissions"].append({"file": _leaf(value), "reason": UNCLASSIFIED_REASON})
-                continue
-            moved = _relocate_folder(match.group("name"), value, texts, dest, final, record, taken)
-            if moved is None:
-                continue
-            rewritten = rewritten.replace(
-                f"{match.group('prefix')}{value}{match.group('quote')}", f'{match.group("prefix")}{moved}"'
-            )
-        if rewritten != text:
-            document.write_text(rewritten, encoding="utf-8")
+    held = _held_folder_documents(documents, dest)
+    decision = interpret_folder_parameter([(key, raw) for key, (_path, raw) in held.items()])
+    folder = _assembly_folder_root(decision)
+    if folder is None or _inside(final, folder.value):
+        return
+    accounted.add(folder.value)
+    moved = _relocate_folder(folder, dest, final, record, taken)
+    if moved is None and _host_local(folder.value):
+        # A proven folder can lack both a suffix and a trailing separator. The shape-only cleanup
+        # cannot see that POSIX case, so contain this selected value using its exact held span.
+        moved = _neutralized(folder.value, final)
+        if folder.value.endswith(("\\", "/")):
+            moved += _path_separator(str(final))
+        record["neutralized"].append(_leaf(folder.value))
+    if moved is not None:
+        document, raw = held[folder.member]
+        start, end = folder.value_span
+        document.write_bytes(raw[:start] + moved.replace('"', '""').encode("utf-8") + raw[end:])
 
 
 def _relocate_folder(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    name: str,
-    value: str,
-    texts: list[str],
+    folder: FolderRoot,
     dest: Path,
     final: Path,
     record: dict[str, Any],
     taken: dict[str, str],
 ) -> str | None:
     """`the parameter's new value`, or None when nothing could be shipped for it (reason recorded)."""
-    mode, tails, reason = _parameter_usages(texts, _bare_name(name))
-    if reason is not None:
-        record["omissions"].append({"file": _leaf(value), "reason": reason})
-        return None
+    value = folder.value
     readable, refusal = _classify_source(value, expect_dir=True)
     if readable is None:
         record["omissions"].append({"file": _leaf(value), "reason": refusal})
         return None
-    members = _shippable_members(readable, mode, tails, value, record)
+    members = _shippable_members(readable, folder.mode, set(folder.tails), value, record)
     if members is None:
         return None
     relative = _packaged_data_target(value, taken, keep_leaf_only=True)
@@ -2683,56 +3076,6 @@ def _shippable_members(
         record["omissions"].append({"file": _leaf(value), "reason": ceiling})
         return None
     return members
-
-
-def _parameter_usages(texts: list[str], bare: str) -> tuple[str, set[str], str | None]:
-    """`(mode, literal tails, refusal)` - what the model actually reads through a folder parameter.
-
-    Three answers, and the third is why this exists rather than a `copytree`:
-
-    * :data:`NAMED_FILES` - every use is `<param> & "<literal>"`, so the members are enumerable and
-      only those are shipped;
-    * :data:`WHOLE_FOLDER` - a `Folder.Files`/`Folder.Contents` call reads the directory itself, so
-      the whole tree genuinely IS referenced and copying it is evidenced rather than assumed;
-    * a refusal - the parameter is used in a way this cannot enumerate (a computed file name), or is
-      never read at all. Nothing is copied, the literal is left resolving where it did before, and
-      the reason is recorded. Guessing "copy everything" there is exactly the leak.
-
-    Every occurrence of the name is accounted for, not just the ones that match a known shape: an
-    unexplained occurrence is what makes the answer a refusal.
-    """
-    quoted = re.escape(bare)
-    reference = rf'#"{quoted}"|(?<![A-Za-z0-9_]){quoted}(?![A-Za-z0-9_])'
-    token = re.compile(reference)
-    concat = re.compile(rf'(?:{reference})\s*&\s*"([^"]*)"')
-    whole = re.compile(rf"Folder\.(?:Files|Contents)\s*\(\s*(?:{reference})\s*[,)]")
-    declaration = re.compile(rf"expression\s+(?:{reference})\s*=")
-    tails: set[str] = set()
-    whole_folder = False
-    unexplained = 0
-    for text in texts:
-        spans = [match.span() for match in declaration.finditer(text)]
-        for match in concat.finditer(text):
-            tails.add(match.group(1))
-            spans.append(match.span())
-        for match in whole.finditer(text):
-            whole_folder = True
-            spans.append(match.span())
-        for match in token.finditer(text):
-            if not any(start <= match.start() and match.end() <= end for start, end in spans):
-                unexplained += 1
-    if unexplained:
-        return (
-            UNKNOWN_USAGE,
-            tails,
-            "the model reads this folder in a way the packager cannot enumerate, so shipping it "
-            "would mean copying every file in it - nothing was shipped",
-        )
-    if whole_folder:
-        return WHOLE_FOLDER, tails, None
-    if tails:
-        return NAMED_FILES, tails, None
-    return NO_USAGE, tails, "no partition reads a file through this parameter, so nothing was shipped for it"
 
 
 def _folder_members(readable: Path, tails: set[str]) -> tuple[list[Path], list[dict[str, str]]]:
@@ -2792,20 +3135,28 @@ def _localize_file_literals(  # pylint: disable=too-many-arguments,too-many-posi
     """Ship each bare `File.Contents("<absolute file>")` source and repoint it at a new parameter."""
     parameter = _data_folder_param(documents)
     shipped: dict[str, str] = {}
+    unavailable: dict[str, str] = {}
     for document in documents:
-        text = document.read_text(encoding="utf-8")
-        for source in sorted({match.group(1) for match in FILE_CONTENTS_RE.finditer(text)}):
+        for source in sorted({value for value, _span in _literal_file_uses(document.read_bytes())}):
             if not _is_path_literal(source) or _inside(final, source) or source in shipped:
                 continue
             readable, refusal = _classify_source(source)
             accounted.add(source)
             if readable is None:
                 record["omissions"].append({"file": _leaf(source), "reason": refusal})
+                if _host_local(source):
+                    unavailable[source] = _neutralized(source, final)
                 continue
             relative = _packaged_data_target(source, taken)
             _ship_file(readable, dest / DATA_DIR / relative, relative, record)
             shipped[source] = relative
 
+    # Literal-only models may mix available and unavailable reads. Contain the failed held values
+    # before interpreting the newly generated root; an unavailable file cannot create a second root.
+    _replace_file_arguments(
+        documents, {source: '"' + value.replace('"', '""') + '"' for source, value in unavailable.items()}
+    )
+    record["neutralized"].extend(_leaf(source) for source in unavailable)
     if not shipped:
         return
     _rewrite_partitions(documents, shipped, parameter, _path_separator(str(final)))
@@ -2859,21 +3210,30 @@ def _rewrite_partitions(documents: list[Path], shipped: dict[str, str], paramete
     ``separator`` is the parameter value's own, not a literal backslash: the tail written here is
     concatenated straight onto that value, so the two halves of one path must agree.
     """
+    replacements = {}
+    for source, relative in shipped.items():
+        tail = relative.replace("/", separator).replace('"', '""')
+        replacements[source] = f'{parameter} & "{tail}"'
+    _replace_file_arguments(documents, replacements)
+
+
+def _replace_file_arguments(documents: list[Path], replacements: dict[str, str]) -> None:
+    """Replace only executable literal first arguments using spans in each held document."""
     for document in documents:
-        text = document.read_text(encoding="utf-8")
-
-        def _sub(match: re.Match[str], _shipped: dict[str, str] = shipped, _sep: str = separator) -> str:
-            relative = _shipped.get(match.group(1))
-            if relative is None:
-                return match.group(0)
-            return f'File.Contents({parameter} & "{relative.replace("/", _sep)}")'
-
-        rewritten = FILE_CONTENTS_RE.sub(_sub, text)
-        if rewritten != text:
-            document.write_text(rewritten, encoding="utf-8")
+        raw = document.read_bytes()
+        rewritten = raw
+        for source, (start, end) in reversed(_literal_file_uses(raw)):
+            replacement = replacements.get(source)
+            if replacement is None:
+                continue
+            rewritten = rewritten[: start - 1] + replacement.encode("utf-8") + rewritten[end + 1 :]
+        if rewritten != raw:
+            document.write_bytes(rewritten)
 
 
-def _external_after_rewrite(documents: list[Path], final: Path, accounted: set[str]) -> list[dict[str, str]]:
+def _external_after_rewrite(
+    documents: list[Path], final: Path, accounted: set[str], tails: dict[Path, list[tuple[int, int]]] | None = None
+) -> list[dict[str, str]]:
     """Read the WRITTEN files back and report every literal still pointing outside the package.
 
     This is the verification step, and it is deliberately the general question - "is any absolute
@@ -2901,7 +3261,7 @@ def _external_after_rewrite(documents: list[Path], final: Path, accounted: set[s
     findings: list[dict[str, str]] = []
     seen: set[str] = set()
     for document in documents:
-        text = document.read_text(encoding="utf-8")
+        _raw, text = _path_scan_text(document, tails)
         routes = _service_routes(text)
         for match in ABSOLUTE_LITERAL_RE.finditer(text):
             value = match.group(1)
@@ -5129,8 +5489,9 @@ def _binding_metadata(state: str) -> dict[str, str]:
     }
 
 
-def _binding_relative(package: _BindingPackage, root: Path, value: str, name: str) -> str:
+def _binding_relative(package: _BindingPackage, root: Path, folder: FolderRoot) -> str:
     """Use the portable/current root boundary, or an unambiguous held-manifest boundary after a move."""
+    value = folder.value
     portable = value.replace("\\", "/").rstrip("/")
     if portable.startswith(f"{PACKAGE_ROOT_TOKEN}/"):
         return portable[len(PACKAGE_ROOT_TOKEN) + 1 :]
@@ -5158,22 +5519,13 @@ def _binding_relative(package: _BindingPackage, root: Path, value: str, name: st
     }
     if len(anchored) == 1:
         return anchored.pop()
-    if _bare_name(name) == sources.get("parameter"):
-        candidates &= {DATA_DIR}
-    else:
-        texts = [
-            raw.decode("utf-8")
-            for key, raw in package.members.items()
-            if key.startswith("fabric/") and key.endswith(".tmdl")
-        ]
-        mode, tails, refusal = _parameter_usages(texts, _bare_name(name))
-        if refusal is not None or mode != NAMED_FILES:
-            raise _BindingRefusal("binding_parameter_unclassified")
-        candidates = {
-            relative
-            for relative in candidates
-            if all(f"{relative}/{tail.replace(chr(92), '/').lstrip('/')}" in shipped for tail in tails)
-        }
+    if folder.mode != NAMED_FILES:
+        raise _BindingRefusal("binding_parameter_unclassified")
+    candidates = {
+        relative
+        for relative in candidates
+        if all(f"{relative}/{_folder_tail_key(tail)}" in shipped for tail in folder.tails)
+    }
     if len(candidates) != 1:
         raise _BindingRefusal("binding_parameter_unclassified")
     return candidates.pop()
@@ -5182,61 +5534,55 @@ def _binding_relative(package: _BindingPackage, root: Path, value: str, name: st
 def _binding_expressions(  # pylint: disable=too-many-locals
     package: _BindingPackage, root: Path
 ) -> tuple[list[dict[str, Any]], dict[str, list[tuple[int, int, str]]]]:
-    """Identify exact value spans. Only safe relative members/tails and opaque identities escape."""
-    rows, spans = [], {}
-    for key, raw in sorted(package.members.items()):
-        if not key.endswith(".tmdl"):
-            continue
-        text = raw.decode("utf-8")
-        parts = key.split("/")
-        eligible = (
-            len(parts) == 4
-            and parts[0] == "fabric"
-            and parts[1].endswith(".SemanticModel")
-            and parts[2:] == ["definition", EXPRESSIONS_TMDL]
-        )
-        matches = list(FOLDER_PARAM_RE.finditer(text)) if eligible else []
-        remaining = text
-        names = set()
-        for ordinal, match in enumerate(matches):
-            value = match["value"]
-            tail_parts = re.split(r"[\\/]", value.rstrip("\\/"))
-            pathish = flavour(value) is not None or value.startswith("<") or "data" in tail_parts
-            if not pathish:
-                continue
-            if not text[text.rfind("\n", 0, match.start()) + 1 : match.start()].strip() == "" or match["name"] in names:
-                raise _BindingRefusal("binding_parameter_ambiguous")
-            names.add(match["name"])
-            relative = _binding_relative(package, root, value, match["name"])
-            if not pfs.is_canonical_key(relative) or not (relative == DATA_DIR or relative.startswith(f"{DATA_DIR}/")):
-                raise _BindingRefusal("binding_tail_unsafe")
-            trailing = value.endswith(("\\", "/"))
-            portable = flavour_join(PACKAGE_ROOT_TOKEN, relative, trailing=trailing)
-            # Both canonical producer flavours are portable. All published local values use the
-            # root's native flavour; do not let a foreign/relative value masquerade as a bound one.
-            placeholder = value in (portable.replace("\\", "/"), portable.replace("/", "\\"))
-            if not placeholder and (not is_host_native(value) or value.startswith(("\\\\", "//")) or "<" in value):
-                raise _BindingRefusal("binding_parameter_unclassified")
-            expected = flavour_join(str(root), relative, trailing=trailing)
-            exists = relative in package.directories
-            rows.append(
-                {
-                    "member": key,
-                    "parameter_ordinal": ordinal,
-                    "parameter_identity": hashlib.sha256(match["name"].encode("utf-8")).hexdigest(),
-                    "data_tail": relative,
-                    "trailing_separator": trailing,
-                    "current_root_match": value == expected,
-                    "placeholder": placeholder,
-                    "target_exists": exists,
-                    "codes": [] if exists else ["binding_target_missing"],
-                }
-            )
-            spans.setdefault(key, []).append((match.start("value"), match.end("value"), relative))
-            remaining = remaining.replace(match.group(0), "", 1)
-        if PACKAGE_ROOT_TOKEN in remaining:
+    """Consume the same model-wide decision as assembly; spans are offsets in the held BYTES."""
+    manifest = pfs.parse_manifest_text(package.snapshot.manifest.decode("utf-8"))
+    model = manifest.get("artifacts", {}).get("model")
+    prefix = f"{model}/" if model else ""
+    documents = [
+        (key[len(prefix) :], raw)
+        for key, raw in sorted(package.members.items())
+        if prefix and key.startswith(prefix) and key.endswith(".tmdl")
+    ]
+    decision = interpret_folder_parameter(documents)
+    if decision.state == "refused":
+        raise _BindingRefusal(decision.code, 1)
+    if decision.state == "unassessable":
+        raise _BindingRefusal(decision.code, 3)
+    assert decision.state in ("zero", "selected")
+    folder = decision.root
+    key = f"{prefix}{folder.member}" if folder is not None else None
+    for member, raw in package.members.items():
+        if member == key:
+            start, end = folder.value_span
+            raw = raw[:start] + raw[end:]
+        if member.endswith(".tmdl") and PACKAGE_ROOT_TOKEN.encode("utf-8") in raw:
             raise _BindingRefusal("binding_parameter_unclassified")
-    return rows, spans
+    if decision.state == "zero":
+        return [], {}
+    assert folder is not None
+    value = folder.value
+    relative = _binding_relative(package, root, folder)
+    if not pfs.is_canonical_key(relative) or not (relative == DATA_DIR or relative.startswith(f"{DATA_DIR}/")):
+        raise _BindingRefusal("binding_tail_unsafe")
+    trailing = value.endswith(("\\", "/"))
+    portable = flavour_join(PACKAGE_ROOT_TOKEN, relative, trailing=trailing)
+    # Both producer flavours are portable; a published local value must have this root's flavour.
+    placeholder = value in (portable.replace("\\", "/"), portable.replace("/", "\\"))
+    if not placeholder and (not is_host_native(value) or value.startswith(("\\\\", "//")) or "<" in value):
+        raise _BindingRefusal("binding_parameter_unclassified")
+    exists = relative in package.directories
+    row = {
+        "member": key,
+        "parameter_ordinal": folder.ordinal,
+        "parameter_identity": hashlib.sha256(folder.name_token.encode("utf-8")).hexdigest(),
+        "data_tail": relative,
+        "trailing_separator": trailing,
+        "current_root_match": value == flavour_join(str(root), relative, trailing=trailing),
+        "placeholder": placeholder,
+        "target_exists": exists,
+        "codes": [] if exists else ["binding_target_missing"],
+    }
+    return [row], {key: [(*folder.value_span, relative)]}
 
 
 def _binding_observation(package: _BindingPackage, root: Path) -> dict[str, Any]:
@@ -5400,7 +5746,6 @@ def _binding_plan(  # pylint: disable=too-many-locals
     package: _BindingPackage,
     root: Path,
     sanitize: bool,
-    rewrite: Callable[[str, str], tuple[str, int, list[str]]],
 ) -> dict[str, bytes]:
     members = dict(package.members)
     rows, spans = _binding_expressions(package, root)
@@ -5410,18 +5755,12 @@ def _binding_plan(  # pylint: disable=too-many-locals
     if any(not row["target_exists"] for row in rows):
         raise _BindingRefusal("binding_target_missing", 1)
     for key, values in spans.items():
-        text = members[key].decode("utf-8")
+        raw = members[key]
         base = PACKAGE_ROOT_TOKEN if sanitize else str(root)
-        exact, portable = text, text
         for start, end, relative in reversed(values):
-            replacement = flavour_join(base, relative, trailing=text[start:end].endswith(("\\", "/")))
-            exact = exact[:start] + replacement + exact[end:]
-            placeholder = flavour_join(PACKAGE_ROOT_TOKEN, relative, trailing=text[start:end].endswith(("\\", "/")))
-            portable = portable[:start] + placeholder + portable[end:]
-        rewritten, count, untouched = rewrite(portable, base)
-        if untouched or count != len(values) or rewritten != exact:
-            raise _BindingRefusal("binding_planner_delta_invalid")
-        members[key] = rewritten.encode("utf-8")
+            replacement = flavour_join(base, relative, trailing=raw[start:end].endswith((b"\\", b"/")))
+            raw = raw[:start] + replacement.replace('"', '""').encode("utf-8") + raw[end:]
+        members[key] = raw
     before = manifest["data_sources"]["binding"]["state"]
     after = "unbound" if sanitize else "bound"
     if before != after:
@@ -5663,7 +6002,6 @@ def _binding_checked_result(
 def bind_package(
     package_root: str,
     *,
-    rewrite: Callable[[str, str], tuple[str, int, list[str]]],
     inspect: bool = False,
     sanitize: bool = False,
     provider_packages: Sequence[str] = (),
@@ -5682,7 +6020,7 @@ def bind_package(
             inspection = _binding_inspection(inputs, observation)
             outcome = ("unchanged", 1 if inspection.state == "UNBOUND" else 0, inspection.codes[0])
         else:
-            expected = _binding_plan(package, roots[-1], sanitize, rewrite)
+            expected = _binding_plan(package, roots[-1], sanitize)
             if expected == package.members:
                 inputs = inputs._replace(roles=_binding_cohort(inputs, roots[-1]))
                 inspection = _binding_inspection(inputs, observation)

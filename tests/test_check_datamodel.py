@@ -33,6 +33,7 @@ from check_datamodel import (
     find_compact_filters,
     find_incomplete_divide_calls,
     find_unguarded_divide_thresholds,
+    iter_m_blocks_text,
     main,
 )
 
@@ -195,6 +196,33 @@ def test_m_partitions_are_still_read(tmp_path: Path) -> None:
     assert [f.kind for f in findings] == ["TRAILING_COMMA"]
 
 
+def test_non_m_source_body_cannot_introduce_m_headers_but_later_siblings_are_checked(tmp_path: Path) -> None:
+    text = (
+        "table Calc\n"
+        "\tpartition Calc = calculated\n"
+        "\t\tsource =\n"
+        "\t\t\t/*\n"
+        "\t\t\texpression Fake = File.Contents(Missing)\n"
+        "\t\t\tpartition Fake = m\n"
+        "\t\t\tsource = Folder.Files(Missing)\n"
+        "\t\t\t*/\n"
+        "\t\t\tVAR expression = { 1 }\n"
+        "\t\t\tRETURN\n"
+        "\t\t\t\texpression\n"
+        "\tpartition Later = m\n"
+        "\t\tsource = {1, 2,}\n"
+        'expression Caption = "kept"\n'
+    )
+    model = tmp_path / "Calc.SemanticModel"
+    path = model / "definition" / "tables" / "Calc.tmdl"
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+    expected = [("{1, 2,}", 13, len("\t\tsource = ")), ('"kept"', 14, len("expression Caption = "))]
+    assert iter_m_blocks_text(text) == expected
+    assert _iter_m_blocks(path) == expected
+    assert [(finding.kind, finding.line) for finding in check_model(model)] == [("TRAILING_COMMA", 13)]
+
+
 def test_reported_line_points_at_the_real_line(tmp_path: Path) -> None:
     """The entire point is localisation - an off-by-N line number would waste the user's time."""
     tables = tmp_path / "L.SemanticModel" / "definition" / "tables"
@@ -294,6 +322,55 @@ def test_block_extraction_stops_at_tmdl_metadata() -> None:
     blocks = _iter_m_blocks(expressions)
     assert blocks
     assert all("lineageTag" not in body and "annotation" not in body for body, _, _ in blocks)
+
+
+@pytest.mark.parametrize("newline,bom", [("\n", ""), ("\r\n", "\ufeff")])
+@pytest.mark.parametrize(
+    "name",
+    ["'Owner''s = Root'", "'Owner''s \"Archive\" Root'", '#"Legacy = ""Archive"" Root"'],
+)
+def test_held_text_extractor_keeps_quoted_headers_and_matches_the_path_wrapper(
+    tmp_path: Path, newline: str, bom: str, name: str
+) -> None:
+    header = f'expression {name} = "Q:\\archive\\" meta [IsParameterQuery=true, Type="Text"]'
+    text = bom + newline.join(
+        [
+            header,
+            "\tlineageTag: fixed-fixture",
+            '\tannotation Note = "File.Contents(NotAnMReference)"',
+            "table Rows",
+            "\tpartition 'Owner''s = Partition' = m",
+            "\t\tmode: import",
+            "\t\tsource =",
+            "\t\t\tlet rows = {1} in rows",
+            "\t\tannotation Note = {1, 2,}",
+            "\tpartition 'Calculated = Neighbor' = calculated",
+            "\t\tsource = {(\"DAX\", NAMEOF('Rows'[Value]), 0)}",
+            "",
+        ]
+    )
+    expected = [
+        ('"Q:\\archive\\" meta [IsParameterQuery=true, Type="Text"]', 1, header.index('"Q:')),
+        ("\n\t\t\tlet rows = {1} in rows", 7, len("\t\tsource =")),
+    ]
+    path = tmp_path / "quoted.tmdl"
+    path.write_bytes(text.encode("utf-8"))
+    assert iter_m_blocks_text(text) == expected
+    assert _iter_m_blocks(path) == expected
+
+
+def test_held_text_extraction_has_no_io_and_retains_existing_path_decode_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "replacement.tmdl"
+    path.write_bytes(b'expression Caption = "\xff"\r\n')
+    assert _iter_m_blocks(path) == [('"�"', 1, len("expression Caption = "))]
+
+    def no_read(*_args, **_kwargs):
+        pytest.fail("held-text extraction performed filesystem I/O")
+
+    monkeypatch.setattr(Path, "open", no_read)
+    assert iter_m_blocks_text('expression Caption = "kept"\n') == [('"kept"', 1, len("expression Caption = "))]
 
 
 GOOD_TMDL = [

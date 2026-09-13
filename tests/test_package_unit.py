@@ -31,6 +31,7 @@ import shutil
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import FrozenInstanceError
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
@@ -1147,6 +1148,696 @@ def test_a_folder_PARAMETER_pointing_out_of_the_package_is_moved_with_its_files(
     assert (root / "data" / "SharedSource.Data" / "Sample - Superstore.xlsx").is_file()
     shipped = json.loads((root / "package-manifest.json").read_text(encoding="utf-8"))["data_sources"]["shipped"]
     assert [row["path"] for row in shipped] == ["data/SharedSource.Data/Sample - Superstore.xlsx"]
+
+
+def _folder_corpus(
+    use: str, declarations: str = 'expression ArchiveRoot = "Q:\\archive\\"\n'
+) -> list[tuple[str, bytes]]:
+    return [
+        ("definition/expressions.tmdl", declarations.encode()),
+        ("definition/tables/Rows.tmdl", f"table Rows\n\tpartition Rows = m\n\t\tsource = {use}\n".encode()),
+    ]
+
+
+@pytest.mark.parametrize(
+    "name,reference,symbol",
+    [
+        ("ArchiveRoot", "ArchiveRoot", "ArchiveRoot"),
+        ("DataFolder", "DataFolder", "DataFolder"),
+        ("SourceFolder", '#"SourceFolder"', "SourceFolder"),
+        ("PackageDataFolder", "PackageDataFolder", "PackageDataFolder"),
+        ('#"Extract Folder"', '#"Extract Folder"', "Extract Folder"),
+        ("""'Owner''s "Archive" Root'""", """#"Owner's ""Archive"" Root" """.strip(), """Owner's "Archive" Root"""),
+        ("'Owner''s = Root'", """#"Owner's = Root" """.strip(), "Owner's = Root"),
+        ("'Å Archive'", '#"Å Archive"', "Å Archive"),
+    ],
+)
+@pytest.mark.parametrize("newline,bom", [("\n", ""), ("\r\n", "\ufeff")])
+def test_folder_selector_preserves_identity_complete_tails_and_exact_byte_span(
+    name: str, reference: str, symbol: str, newline: str, bom: str
+) -> None:
+    declaration = (
+        "/// Ω is multibyte before the selected value\n"
+        'expression Caption = "ordinary"\n'
+        f'expression {name} = "Q:\\archive" meta [IsParameterQuery=true, Type="Text"]\n'
+        "\tlineageTag: kept\n"
+    )
+    raw = (bom + declaration.replace("\n", newline)).encode()
+    documents = _folder_corpus(f'File.Contents({reference} & "\\north/" & "rows.csv", [Encoding=65001])')
+    documents[0] = ("definition/expressions.tmdl", raw)
+    documents.append(
+        (
+            "definition/tables/Second.tmdl",
+            f'table Second\n\tpartition Second = m\n\t\tsource = File.Contents({reference} & "/second.csv")\n'.encode(),
+        )
+    )
+    before = list(documents)
+    decision = pkg.interpret_folder_parameter(documents)
+    assert (decision.state, decision.code) == ("selected", "folder_parameter_selected")
+    root = decision.root
+    assert root is not None
+    assert (root.member, root.symbol, root.name_token, root.ordinal) == ("definition/expressions.tmdl", symbol, name, 1)
+    assert (root.mode, root.tails, root.value) == ("named-files", ("/second.csv", "\\north/rows.csv"), "Q:\\archive")
+    start = raw.index(b'"Q:\\archive"') + 1
+    assert root.value_span == (start, start + len(b"Q:\\archive"))
+    assert raw[:start] + b"replacement" + raw[root.value_span[1] :] == raw.replace(b"Q:\\archive", b"replacement")
+    assert documents == before, "the pure interpreter modified its input"
+    assert name not in repr(decision) and "archive" not in repr(root)
+    with pytest.raises(FrozenInstanceError):
+        decision.state = "zero"
+    with pytest.raises(FrozenInstanceError):
+        root.value = "changed"
+
+
+@pytest.mark.parametrize("reader", ["Folder.Files", "Folder.Contents"])
+def test_folder_selector_accepts_whole_folder_and_named_files_of_the_same_root(reader: str) -> None:
+    decision = pkg.interpret_folder_parameter(
+        _folder_corpus(f'let A = {reader}(ArchiveRoot), B = File.Contents(ArchiveRoot & "rows.csv") in A')
+    )
+    assert decision.state == "selected" and decision.root is not None
+    assert decision.root.mode == "whole-folder" and decision.root.tails == ("rows.csv",)
+
+
+@pytest.mark.parametrize(
+    "name,reference,symbol",
+    [
+        ("ArchiveRoot", "ArchiveRoot", "ArchiveRoot"),
+        ("""'Owner''s "Archive" Root'""", """#"Owner's ""Archive"" Root" """.strip(), """Owner's "Archive" Root"""),
+    ],
+)
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "[$P = 1]",
+        "each [$P] <> null",
+        '[Outer = [$P = 1], Other = [#"File.Contents" = 2]]',
+        'each [#"File.Contents"] <> null',
+        'each [[$P], [Folder.Files], [#"Folder.Contents"]]',
+        "[Outer = [$P = 1]][Outer][$P]",
+        "[ArchiveRoot Name = 1, File.Contents Name = 2]",
+        "each [File.Contents Name]",
+        '[Field = (File.Contents($P & "rows.csv"))]',
+    ],
+)
+def test_folder_selector_field_names_are_not_executable_references(
+    name: str, reference: str, symbol: str, metadata: str
+) -> None:
+    use = (
+        f'let Metadata = {metadata.replace("$P", reference)}, Bytes = File.Contents({reference} & "rows.csv") in Bytes'
+    )
+    decision = pkg.interpret_folder_parameter(_folder_corpus(use, f'expression {name} = "Q:\\archive\\"\n'))
+    assert (decision.state, decision.code) == ("selected", "folder_parameter_selected")
+    assert decision.root is not None
+    assert (decision.root.symbol, decision.root.tails) == (symbol, ("rows.csv",))
+
+
+@pytest.mark.parametrize(
+    "name,reference",
+    [
+        ("ArchiveRoot", "ArchiveRoot"),
+        ("""'Owner''s "Archive" Root'""", """#"Owner's ""Archive"" Root" """.strip()),
+    ],
+)
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "[Field = $P]",
+        "[$P = $P]",
+        "[Outer = [Field = $P]]",
+        "[Field = {$P}]",
+        "[Field = ($P)]",
+        "[Field = let X = 1, Alias = $P in Alias]",
+        '[Field = let X = 1, $P = "shadow" in File.Contents($P & "\\rows.csv")]',
+        "$P[Field]",
+    ],
+)
+def test_folder_selector_record_values_keep_executable_role_conflicts(name: str, reference: str, metadata: str) -> None:
+    use = (
+        f'let Metadata = {metadata.replace("$P", reference)}, Bytes = File.Contents({reference} & "rows.csv") in Bytes'
+    )
+    decision = pkg.interpret_folder_parameter(_folder_corpus(use, f'expression {name} = "Q:\\archive\\"\n'))
+    assert (decision.state, decision.root, decision.code) == ("refused", None, "folder_parameter_role_conflict")
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        'Text.Length(ArchiveRoot & "rows.csv")',
+        '"File.Contents(ArchiveRoot & ""rows.csv"")"',
+        'let S = "kept" /* File.Contents(ArchiveRoot) */ in S',
+        'let S = "kept" in S // Folder.Files(ArchiveRoot)',
+        'File.Contents("Q:\\literal.csv")',
+        "Sql.Database(Server, Database)",
+        "Databricks.Catalogs(Server, HttpPath)",
+    ],
+)
+def test_folder_selector_zero_is_use_based_not_caption_value_or_proximity(use: str) -> None:
+    declarations = (
+        'expression ArchiveRoot = "Q:\\archive\\"\n'
+        'expression DataFolder = "data"\n'
+        'expression Server = "fixture.example"\n'
+        'expression Database = "warehouse"\n'
+        'expression HttpPath = "/sql/1.0/warehouses/fixture"\n'
+    )
+    decision = pkg.interpret_folder_parameter(_folder_corpus(use, declarations))
+    assert (decision.state, decision.root, decision.code) == ("zero", None, "folder_parameter_zero")
+
+
+@pytest.mark.parametrize(
+    "use,code",
+    [
+        ('File.Contents(ArchiveRoot & Text.From(1) & ".csv")', "folder_parameter_tail_unsupported"),
+        ("File.Contents(ArchiveRoot)", "folder_parameter_tail_unsupported"),
+        ('File.Contents(ArchiveRoot & "\\../outside.csv")', "folder_parameter_tail_unsafe"),
+        ('File.Contents(ArchiveRoot & "\\Q:\\outside.csv")', "folder_parameter_tail_unsafe"),
+        ('File.Contents(ArchiveRoot & "\\nul.csv")', "folder_parameter_tail_unsafe"),
+        ('File.Contents(ArchiveRoot & "\\#(lf)rows.csv")', "folder_parameter_tail_unsupported"),
+        ('File.Contents("prefix" & ArchiveRoot)', "folder_parameter_reader_unsupported"),
+        ('Folder.Files(ArchiveRoot & "\\sub")', "folder_parameter_reader_unsupported"),
+        ('File.Contents(Alias & "\\rows.csv")', "folder_parameter_unknown_symbol"),
+        ('let Alias = ArchiveRoot in File.Contents(Alias & "\\rows.csv")', "folder_parameter_unknown_symbol"),
+        ('let F = File.Contents in F(ArchiveRoot & "\\rows.csv")', "folder_parameter_reader_unsupported"),
+        (
+            'let ArchiveRoot = "Q:\\shadow\\" in File.Contents(ArchiveRoot & "rows.csv")',
+            "folder_parameter_role_conflict",
+        ),
+        (
+            'let S = File.Contents(ArchiveRoot & "rows.csv"), N = Text.Length(ArchiveRoot & "other") in S',
+            "folder_parameter_role_conflict",
+        ),
+        (
+            'let R = [Field = File.Contents], S = File.Contents(ArchiveRoot & "rows.csv") in S',
+            "folder_parameter_reader_unsupported",
+        ),
+        ('File.Contents(ArchiveRoot & "rows.csv", [Option=ArchiveRoot])', "folder_parameter_role_conflict"),
+        (
+            'let A = Folder.Files(ArchiveRoot), B = File.Contents("Q:\\other.csv") in A',
+            "folder_parameter_generated_root",
+        ),
+    ],
+)
+def test_folder_selector_refuses_unsupported_unsafe_and_conflicting_roles(use: str, code: str) -> None:
+    decision = pkg.interpret_folder_parameter(_folder_corpus(use))
+    assert (decision.state, decision.root, decision.code) == ("refused", None, code)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"Q:\\archive" & "\\computed\\"',
+        'Text.From("Q:\\archive\\")',
+        '"Q:\\archive\\" meta [a=1] & "more"',
+        '"Q:\\#(lf)\\"',
+    ],
+)
+def test_folder_selector_never_rewrites_a_literal_prefix_of_a_computed_value(value: str) -> None:
+    decision = pkg.interpret_folder_parameter(
+        _folder_corpus('File.Contents(ArchiveRoot & "\\rows.csv")', f"expression ArchiveRoot = {value}\n")
+    )
+    assert (decision.state, decision.code) == ("refused", "folder_parameter_value_unsupported")
+    assert decision.root is None
+
+
+def test_folder_selector_does_not_turn_filename_prefix_concatenation_into_a_folder_join() -> None:
+    decision = pkg.interpret_folder_parameter(
+        _folder_corpus('File.Contents(ArchiveRoot & "rows.csv")', 'expression ArchiveRoot = "Q:\\prefix"\n')
+    )
+    assert (decision.state, decision.code, decision.root) == ("refused", "folder_parameter_tail_unsafe", None)
+
+
+@pytest.mark.parametrize("same_value", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_folder_selector_counts_distinct_roots_across_the_complete_model(same_value: bool, reverse: bool) -> None:
+    second = "Q:\\archive\\" if same_value else "Q:\\second\\"
+    documents = _folder_corpus('File.Contents(ArchiveRoot & "rows.csv")')
+    documents += [
+        ("definition/other.tmdl", f'expression OtherRoot = "{second}"\n'.encode()),
+        ("definition/tables/Other.tmdl", b"table Other\n\tpartition Other = m\n\t\tsource = Folder.Files(OtherRoot)\n"),
+    ]
+    decision = pkg.interpret_folder_parameter(documents[::-1] if reverse else documents)
+    assert (decision.state, decision.root, decision.code) == ("refused", None, "folder_parameter_multiple")
+
+
+@pytest.mark.parametrize("duplicate", ["ArchiveRoot", "'ArchiveRoot'", '#"ArchiveRoot"', "'archiveroot'"])
+def test_folder_selector_refuses_duplicate_decoded_declaration_identity(duplicate: str) -> None:
+    documents = _folder_corpus(
+        'File.Contents(ArchiveRoot & "rows.csv")',
+        f'expression ArchiveRoot = "Q:\\archive\\"\nexpression {duplicate} = "Q:\\archive\\"\n',
+    )
+    decision = pkg.interpret_folder_parameter(documents)
+    assert (decision.state, decision.root, decision.code) == ("refused", None, "folder_parameter_identity_ambiguous")
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        'File.Contents(ArchiveRoot & "unterminated)',
+        'File.Contents(ArchiveRoot & "rows.csv") /* unterminated',
+        'File.Contents(ArchiveRoot & "rows.csv"]',
+        'let R = File.Contents(ArchiveRoot & "rows.csv")',
+        'File.Contents(ArchiveRoot & "rows.csv",)',
+        'File.Contents(ArchiveRoot & "rows.csv") +',
+        'File.Contents(ArchiveRoot & "rows.csv") & // unfinished',
+        'File.Contents(ArchiveRoot & "rows.csv") */',
+        "/* comment only */",
+        *[
+            f'File.Contents(ArchiveRoot & "rows.csv") {keyword}{trivia}'
+            for keyword in ("and", "or", "as", "is", "meta", "otherwise")
+            for trivia in ("", " // trailing comment", " /* trailing comment */")
+        ],
+    ],
+)
+def test_folder_selector_malformed_m_is_unassessable_never_zero(use: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("malformed M interpretation reached filesystem work")
+
+    with monkeypatch.context() as guarded:
+        for method in ("open", "exists", "is_file", "is_dir", "rglob", "stat"):
+            guarded.setattr(Path, method, forbidden)
+        decision = pkg.interpret_folder_parameter(_folder_corpus(use))
+    assert (decision.state, decision.root, decision.code) == ("unassessable", None, "folder_parameter_malformed_m")
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        'File.Contents(ArchiveRoot & "rows.csv") <> null and true',
+        'File.Contents(ArchiveRoot & "rows.csv") <> null or false',
+        'File.Contents(ArchiveRoot & "rows.csv") as binary',
+        'File.Contents(ArchiveRoot & "rows.csv") is binary',
+        'File.Contents(ArchiveRoot & "rows.csv") meta [Note = "kept"]',
+        'try File.Contents(ArchiveRoot & "rows.csv") otherwise null',
+    ],
+)
+def test_folder_selector_complete_keyword_operators_remain_supported(use: str) -> None:
+    decision = pkg.interpret_folder_parameter(_folder_corpus(use))
+    assert (decision.state, decision.code) == ("selected", "folder_parameter_selected")
+    assert decision.root is not None and decision.root.tails == ("rows.csv",)
+
+
+@pytest.mark.parametrize("keyword", ["and", "or", "as", "is", "meta", "otherwise"])
+@pytest.mark.parametrize("quoted_tail", ["", ' ""quoted""'])
+def test_folder_selector_keyword_lookalikes_in_trivia_and_quoted_tokens_are_not_operators(
+    keyword: str, quoted_tail: str
+) -> None:
+    use = (
+        f'let Note = "{keyword}", #"{keyword}{quoted_tail}" = File.Contents(ArchiveRoot & "rows.csv") '
+        f'in #"{keyword}{quoted_tail}" /* {keyword} */ // {keyword}'
+    )
+    decision = pkg.interpret_folder_parameter(_folder_corpus(use))
+    assert (decision.state, decision.code) == ("selected", "folder_parameter_selected")
+    assert decision.root is not None and decision.root.tails == ("rows.csv",)
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_folder_selector_refuses_nested_comments_instead_of_counting_commented_reads(closed: bool) -> None:
+    use = '/* outer /* inner */ File.Contents(ArchiveRoot & "unreferenced.csv")' + (" */ 1" if closed else "")
+    decision = pkg.interpret_folder_parameter(_folder_corpus(use))
+    assert (decision.state, decision.root, decision.code) == ("unassessable", None, "folder_parameter_unextractable_m")
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        'let T = "/* outer /* inner */ text */", S = File.Contents(ArchiveRoot & "rows.csv") in S',
+        '\n\t\t\t// /* a comment marker in a line comment\n\t\t\tFile.Contents(ArchiveRoot & "rows.csv")',
+    ],
+)
+def test_folder_selector_comment_nesting_refusal_does_not_scan_strings_or_line_comments(use: str) -> None:
+    decision = pkg.interpret_folder_parameter(_folder_corpus(use))
+    assert decision.state == "selected" and decision.root is not None
+    assert decision.root.tails == ("rows.csv",)
+
+
+@pytest.mark.parametrize(
+    "raw,code",
+    [
+        (b'expression ArchiveRoot = "\xff"\n', "folder_parameter_decode"),
+        (b"expression 'Truncated Root\n", "folder_parameter_unextractable_m"),
+        (b'expression \'Truncated = "Q:\\archive\\"\n', "folder_parameter_unextractable_m"),
+        (b"table Rows\n\tpartition Rows = m\n\t\tmode: import\n", "folder_parameter_unextractable_m"),
+        (b'source = File.Contents("Q:\\rows.csv")\n', "folder_parameter_unextractable_m"),
+        (b"expression Root = let\n\t\tx = 1\n\tin x\n", "folder_parameter_unextractable_m"),
+        (b"expression Root =\n\t\t```\n\t\t1\n\t\t```\n", "folder_parameter_unextractable_m"),
+    ],
+)
+def test_folder_selector_cannot_drop_unextractable_or_undecodable_carriers(raw: bytes, code: str) -> None:
+    decision = pkg.interpret_folder_parameter([("definition/private-model-canary.tmdl", raw)])
+    assert (decision.state, decision.root, decision.code) == ("unassessable", None, code)
+    assert "private-model-canary" not in repr(decision)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{(\"ArchiveRoot\", NAMEOF('C'[Value]), 1)}",
+        "\n\t\t\tVAR expression = { 1 }\n\t\t\tRETURN\n\t\t\t\texpression",
+    ],
+)
+def test_folder_selector_ignores_calculated_dax_and_tmdl_metadata_and_performs_no_io(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    documents = _folder_corpus('File.Contents(ArchiveRoot & "rows.csv")')
+    documents += [
+        (
+            "definition/tables/Calculated.tmdl",
+            f"table C\n\tpartition C = calculated\n\t\tsource = {source}\n".encode(),
+        ),
+        ("definition/model.tmdl", b'model Model\n\tannotation Note = "File.Contents(Alias)"\n'),
+    ]
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("pure folder interpretation reached the filesystem")
+
+    with monkeypatch.context() as guarded:
+        for method in ("open", "exists", "is_file", "is_dir", "rglob", "stat"):
+            guarded.setattr(Path, method, forbidden)
+        decision = pkg.interpret_folder_parameter(documents)
+        empty = pkg.interpret_folder_parameter([])
+    assert decision.state == "selected" and decision.root is not None
+    assert decision.root.symbol == "ArchiveRoot"
+    assert empty.state == "zero"
+
+
+@pytest.mark.parametrize("identifier", ["expression", "partition", "source"])
+@pytest.mark.parametrize("indent", ["\t", "    "])
+@pytest.mark.parametrize("following", ["none", "partition", "expression"])
+def test_folder_selector_non_m_source_body_stops_at_its_indentation_boundary(
+    monkeypatch: pytest.MonkeyPatch, identifier: str, indent: str, following: str
+) -> None:
+    dax = (
+        "table Calc\n\tpartition Calc = calculated\n\t\tsource =\n"
+        "\t\t\t/*\n"
+        '\t\t\texpression Fake = File.Contents(Missing & "not-a-reader.csv")\n'
+        "\t\t\tpartition Fake = m\n"
+        "\t\t\tsource = Folder.Files(Missing)\n"
+        "\t\t\t*/\n"
+        f"\t\t\tVAR {identifier} = {{ 1 }}\n\t\t\tRETURN\n\t\t\t\t{identifier}\n"
+    )
+    suffix = {
+        "none": "",
+        "partition": '\tpartition Later = m\n\t\tsource = File.Contents(ArchiveRoot & "later.csv")\n',
+        "expression": 'expression Later = File.Contents(ArchiveRoot & "later.csv")\n',
+    }[following]
+    documents = _folder_corpus("")
+    documents[1] = ("definition/tables/Calc.tmdl", (dax + suffix).replace("\t", indent).encode())
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("calculated source classification reached filesystem work")
+
+    with monkeypatch.context() as guarded:
+        for method in ("open", "exists", "is_file", "is_dir", "rglob", "stat"):
+            guarded.setattr(Path, method, forbidden)
+        decision = pkg.interpret_folder_parameter(documents)
+    expected = "zero" if following == "none" else "selected"
+    assert (decision.state, decision.code) == (expected, f"folder_parameter_{expected}")
+    if following != "none":
+        assert decision.root is not None
+        assert (decision.root.symbol, decision.root.tails) == ("ArchiveRoot", ("later.csv",))
+    else:
+        assert decision.root is None
+
+
+def _custom_folder_bundle(parent: Path, *, whole: str | None = None, trailing: bool = False) -> tuple[Path, Path, Path]:
+    bundle, oracle = _bundle(parent)
+    source = parent / "ArchiveData"
+    (source / "north").mkdir(parents=True)
+    (source / "north" / "rows.csv").write_bytes(b"amount\n17\n")
+    (source / "unreferenced.txt").write_bytes(b"must not ship in named-file mode")
+    _point_partition_at(bundle, folder=str(source), leaf="rows.csv")
+    definition = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
+    value = str(source) + (os.sep if trailing else "")
+    text = (
+        "\ufeff/// Ω ahead of the value\n"
+        'expression Caption = "data"\n'
+        f"""expression 'Owner''s "Archive" Root' = "{value}" meta [IsParameterQuery=true, Type="Text"]\n"""
+        "\tlineageTag: unchanged\n"
+    )
+    (definition / "expressions.tmdl").write_bytes(text.replace("\n", "\r\n").encode())
+    use = """File.Contents(#"Owner's ""Archive"" Root" & "\\north/" & "rows.csv")"""
+    if whole is not None:
+        use = f"""{whole}(#"Owner's ""Archive"" Root")"""
+    (definition / "tables" / "Shared.tmdl").write_bytes(
+        f"table Shared\r\n\tpartition Shared = m\r\n\t\tmode: import\r\n\t\tsource = {use}\r\n".encode()
+    )
+    return bundle, oracle, definition
+
+
+@pytest.mark.parametrize("whole", [None, "Folder.Files", "Folder.Contents"])
+@pytest.mark.parametrize("trailing", [False, True])
+def test_custom_folder_assembly_preserves_bytes_and_copies_only_the_proven_members(
+    tmp_path: Path, whole: str | None, trailing: bool
+) -> None:
+    bundle, oracle, definition = _custom_folder_bundle(tmp_path, whole=whole, trailing=trailing)
+    before = {path.relative_to(definition): path.read_bytes() for path in definition.rglob("*.tmdl")}
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    after = _model_definition(root)
+    value = (str(tmp_path / "ArchiveData") + (os.sep if trailing else "")).encode()
+    replacement = ("<PACKAGE_ROOT>" + os.sep + "data" + os.sep + "ArchiveData" + (os.sep if trailing else "")).encode()
+    for key, raw in before.items():
+        expected = raw.replace(value, replacement) if key == Path("expressions.tmdl") else raw
+        assert (after / key).read_bytes() == expected, "assembly must replace only the selected value bytes"
+    assert (root / "data" / "ArchiveData" / "north" / "rows.csv").read_bytes() == b"amount\n17\n"
+    assert (root / "data" / "ArchiveData" / "unreferenced.txt").exists() is (whole is not None)
+    manifest = json.loads((root / pkg.MANIFEST_NAME).read_bytes())
+    assert manifest["data_sources"]["parameter"] is None, "a private custom caption is not a diagnostic"
+    assert manifest["data_sources"]["binding"]["state"] == "unbound"
+    assert manifest["construction_status"] == "ASSEMBLED"
+
+
+@pytest.mark.parametrize("tail", ['"/north/" & "rows.csv"', '"/north\\" & "rows.csv"', '"\\north" & "/rows.csv"'])
+def test_folder_literal_tail_spans_survive_host_path_cleanup(tmp_path: Path, tail: str) -> None:
+    bundle, oracle, definition = _custom_folder_bundle(tmp_path)
+    table = definition / "tables" / "Shared.tmdl"
+    raw = table.read_bytes()
+    raw = raw.replace(b'"\\north/" & "rows.csv"', tail.encode())
+    table.write_bytes(raw)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    assert (_model_definition(root) / "tables" / "Shared.tmdl").read_bytes() == raw
+    assert (root / "data" / "ArchiveData" / "north" / "rows.csv").read_bytes() == b"amount\n17\n"
+    record = json.loads((root / pkg.MANIFEST_NAME).read_bytes())["data_sources"]
+    assert record["omissions"] == record["neutralized"] == []
+
+
+@pytest.mark.parametrize("source_kind", ["native", "foreign", "unc"])
+@pytest.mark.parametrize("trailing", [False, True])
+def test_unavailable_folder_keeps_the_existing_diagnostic_route_and_separator_convention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_kind: str, trailing: bool
+) -> None:
+    dest, final = tmp_path / "stage", tmp_path / "final"
+    definition = dest / "fabric" / "Rows.SemanticModel" / "definition"
+    (definition / "tables").mkdir(parents=True)
+    value = {
+        "native": str(tmp_path / "missing"),
+        "foreign": "/foreign/missing" if os.name == "nt" else "Q:\\foreign\\missing",
+        "unc": "\\\\uncontacted-616\\share\\missing",
+    }[source_kind]
+    value += ("/" if value.startswith("/") else "\\") if trailing else ""
+    tail = "rows.csv" if trailing else "\\rows.csv"
+    expression = f'expression ArchiveRoot = "{value}"\r\n'.encode()
+    partition = f'table Rows\r\n\tpartition Rows = m\r\n\t\tsource = File.Contents(ArchiveRoot & "{tail}")\r\n'.encode()
+    (definition / "expressions.tmdl").write_bytes(expression)
+    (definition / "tables" / "Rows.tmdl").write_bytes(partition)
+
+    def no_enumeration(*_args, **_kwargs):
+        pytest.fail("an unavailable folder reached member enumeration")
+
+    monkeypatch.setattr(pkg, "_shippable_members", no_enumeration)
+    try:
+        record = pkg._localize_data_sources(dest, final, "Rows.SemanticModel")
+    except pkg.PackagingError as error:
+        pytest.fail(f"unavailable folder lost its supported diagnostic route: {error.reason_code}")
+    expected = (
+        value if source_kind == "unc" else (pkg.UNAVAILABLE_TOKEN + os.sep + "missing" + (os.sep if trailing else ""))
+    )
+    assert (definition / "expressions.tmdl").read_bytes() == expression.replace(value.encode(), expected.encode())
+    assert (definition / "tables" / "Rows.tmdl").read_bytes() == partition
+    assert record["shipped"] == [] and record["omissions"] and not record["self_contained"]
+    assert record["binding"] is None
+    assert record["retained_network"] == (["missing"] if source_kind == "unc" else [])
+
+
+def test_literal_zero_route_copies_executable_reads_not_comment_or_metadata_lookalikes(tmp_path: Path) -> None:
+    bundle, oracle = _bundle(tmp_path)
+    source, unused = tmp_path / "rows.csv", tmp_path / "unreferenced.csv"
+    source.write_bytes(b"amount\n3\n")
+    unused.write_bytes(b"private\nnot referenced\n")
+    _point_partition_at(bundle, str(source))
+    definition = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
+    table = definition / "tables" / "Imported0.tmdl"
+    raw = table.read_bytes()
+    table.write_bytes(
+        raw + f'\tannotation Note = File.Contents("{unused}")\n'.encode() + f'// File.Contents("{unused}")\n'.encode()
+    )
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    record = json.loads((root / pkg.MANIFEST_NAME).read_bytes())["data_sources"]
+    assert len(record["shipped"]) == 1
+    assert (root / record["shipped"][0]["path"]).read_bytes() == b"amount\n3\n"
+    assert not list((root / "data").rglob("unreferenced.csv"))
+
+
+def test_literal_only_zero_retains_collision_free_generated_parameter_allocation(tmp_path: Path) -> None:
+    bundle, oracle = _bundle(tmp_path)
+    source = tmp_path / "rows.csv"
+    source.write_bytes(b"amount\n3\n")
+    _point_partition_at(bundle, str(source))
+    definition = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
+    declarations = b"""expression 'DataFolder' = "unused"\nexpression #"PackageDataFolder" = "also unused"\n"""
+    (definition / "expressions.tmdl").write_bytes(declarations)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    record = json.loads((root / pkg.MANIFEST_NAME).read_bytes())["data_sources"]
+    assert record["parameter"] == "PackageDataFolder2"
+    assert len(record["shipped"]) == 1
+    assert (root / record["shipped"][0]["path"]).read_bytes() == b"amount\n3\n"
+    expressions = (_model_definition(root) / "expressions.tmdl").read_text(encoding="utf-8")
+    assert declarations.decode() in expressions
+    assert expressions.count("expression PackageDataFolder2 =") == 1
+
+
+@pytest.mark.parametrize("unavailable", ["missing", "foreign", "unc", "unclassified"])
+def test_literal_only_partial_materialization_does_not_invent_a_second_root(tmp_path: Path, unavailable: str) -> None:
+    bundle, oracle = _bundle(tmp_path)
+    source = tmp_path / "rows.csv"
+    source.write_bytes(b"amount\n3\n")
+    other = {
+        "missing": str(tmp_path / "missing.csv"),
+        "foreign": "/foreign/absent.csv" if os.name == "nt" else "Q:\\foreign\\absent.csv",
+        "unc": "\\\\uncontacted-616\\share\\absent.csv",
+        "unclassified": "/unknown/service-or-file",
+    }[unavailable]
+    _point_partition_at(bundle, str(source), other)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    record = json.loads((root / pkg.MANIFEST_NAME).read_bytes())["data_sources"]
+    assert len(record["shipped"]) == 1 and record["omissions"]
+    assert (root / record["shipped"][0]["path"]).read_bytes() == b"amount\n3\n"
+    assert not record["self_contained"]
+    assert record["retained_network"] == (["absent.csv"] if unavailable == "unc" else [])
+    documents = [
+        (f"definition/{path.relative_to(_model_definition(root)).as_posix()}", path.read_bytes())
+        for path in _model_definition(root).rglob("*.tmdl")
+    ]
+    decision = pkg.interpret_folder_parameter(documents)
+    assert decision.state == "selected" and decision.root.symbol == "DataFolder"
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_folder_assembly_maps_direction_without_enumeration_or_private_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, malformed: bool, capsys: pytest.CaptureFixture
+) -> None:
+    bundle, oracle, definition = _custom_folder_bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    expression = definition / "expressions.tmdl"
+    expression.write_bytes(expression.read_bytes() + b'expression PrivateSymbolCanary = "Q:\\PrivateValueCanary\\"\r\n')
+    body = (
+        'File.Contents(PrivateSymbolCanary & "PrivateMemberCanary.csv"'
+        if malformed
+        else 'File.Contents(PrivateSymbolCanary & "PrivateMemberCanary.csv")'
+    )
+    (definition / "tables" / "PrivateModelCanary.tmdl").write_text(
+        f"table Other\n\tpartition Other = m\n\t\tsource = {body}\n", encoding="utf-8"
+    )
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("folder refusal reached source filesystem work")
+
+    monkeypatch.setattr(pkg, "_classify_source", forbidden)
+    monkeypatch.setattr(pkg, "_shippable_members", forbidden)
+    outcome = tmp_path / "outcome.json"
+    code = pkg.main(["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--json", str(outcome)])
+    assert code == (6 if malformed else 5)
+    report = json.loads(outcome.read_bytes())
+    assert report["failed"][0]["reason_code"] == (
+        "folder_parameter_malformed_m" if malformed else "folder_parameter_multiple"
+    )
+    emitted = outcome.read_text(encoding="utf-8") + "".join(capsys.readouterr())
+    for canary in ("PrivateSymbolCanary", "PrivateValueCanary", "PrivateMemberCanary", "PrivateModelCanary"):
+        assert canary not in emitted
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("keyword", ["and", "or", "as", "is", "meta", "otherwise"])
+def test_folder_assembly_unfinished_keyword_refuses_before_source_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keyword: str
+) -> None:
+    bundle, oracle, definition = _custom_folder_bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    table = definition / "tables" / "Shared.tmdl"
+    table.write_bytes(table.read_bytes().rstrip(b"\r\n") + f" {keyword}\r\n".encode())
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("unfinished keyword reached source filesystem work")
+
+    monkeypatch.setattr(pkg, "_classify_source", forbidden)
+    monkeypatch.setattr(pkg, "_shippable_members", forbidden)
+    outcome = tmp_path / "outcome.json"
+    assert pkg.main(["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--json", str(outcome)]) == 6
+    assert json.loads(outcome.read_bytes())["failed"][0]["reason_code"] == "folder_parameter_malformed_m"
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+def test_assembly_only_folder_decision_bypass_is_caught_before_source_enumeration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Direct production-arm control, not a mutant interpreter or a nonzero-exit oracle."""
+    bundle, oracle, definition = _custom_folder_bundle(tmp_path)
+    first = pkg.interpret_folder_parameter(
+        [
+            (f"definition/{path.relative_to(definition).as_posix()}", path.read_bytes())
+            for path in definition.rglob("*.tmdl")
+        ]
+    ).root
+    assert first is not None
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    expr = definition / "expressions.tmdl"
+    expr.write_bytes(expr.read_bytes() + f'expression Other = "{tmp_path / "ArchiveData"}"\r\n'.encode())
+    (definition / "tables" / "Other.tmdl").write_bytes(
+        b'table Other\n\tpartition Other = m\n\t\tsource = File.Contents(Other & "\\north/rows.csv")\n'
+    )
+    hits, enumerated = [], []
+    shippable = pkg._shippable_members
+    interpreter = pkg.interpret_folder_parameter
+
+    def observe(*args, **kwargs):
+        enumerated.append(True)
+        return shippable(*args, **kwargs)
+
+    monkeypatch.setattr(pkg, "_shippable_members", observe)
+
+    def assert_assembly_refusal():
+        with pytest.raises(pkg.PackagingError) as caught:
+            _package(tmp_path, bundle, oracle)
+        assert caught.value.reason_code == "folder_parameter_multiple"
+        assert not enumerated, "assembly decision bypass enumerated source members"
+        assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    assert_assembly_refusal()
+
+    def first_declaration_only(documents, dest, final, record, taken, accounted):
+        hits.append(True)
+        accounted.add(first.value)
+        moved = pkg._relocate_folder(first, dest, final, record, taken)
+        assert moved is not None
+        path = next(path for path in documents if path.name == "expressions.tmdl")
+        raw = path.read_bytes()
+        start, end = first.value_span
+        path.write_bytes(raw[:start] + moved.encode() + raw[end:])
+
+    monkeypatch.setattr(pkg, "_localize_folder_parameters", first_declaration_only)
+    with pytest.raises(AssertionError, match="assembly decision bypass enumerated source members"):
+        assert_assembly_refusal()
+    assert hits == [True] and enumerated == [True], "the assembly arm and real member enumeration must both run"
+    assert pkg.interpret_folder_parameter is interpreter
 
 
 def test_a_POSIX_literal_with_no_file_suffix_is_left_alone(tmp_path: Path) -> None:
