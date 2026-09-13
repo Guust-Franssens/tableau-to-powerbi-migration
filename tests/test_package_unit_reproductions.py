@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import html
 import json
@@ -252,6 +253,137 @@ def test_brief_refusal_preserves_existing_package_bytes_even_with_discard_edits(
     assert {path.relative_to(out): path.read_bytes() for path in out.rglob("*") if path.is_file()} == original
     assert {path.relative_to(out) for path in out.rglob("*") if path.is_dir()} == original_dirs
     assert (brief.read_bytes() if brief.is_file() else None) == original_brief
+
+
+@pytest.mark.parametrize("placement", ["absent-selected", "selected", "other", "nested-other"])
+@pytest.mark.parametrize("filename", ["package-manifest.json", "handover.md"])
+def test_json_destination_cannot_enter_real_or_prospective_packages(  # pylint: disable=too-many-locals
+    tmp_path: Path, placement: str, filename: str
+) -> None:
+    """The production manifest and every neighboring artifact stay byte-identical after misuse."""
+    bundle, oracle, _objects = _bundle(tmp_path, covered=None, datasource_only=True)
+    out = tmp_path / "packages"
+    brief = _brief(tmp_path, UNIT)
+    package_parent = out / "batch" if placement == "nested-other" else out
+    if placement != "absent-selected":
+        pkg.package_unit(
+            bundle, UNIT, package_parent, oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=brief
+        )
+    report = package_parent / UNIT / filename
+    selected = DS_UNIT if placement in ("other", "nested-other") else UNIT
+    original_brief = brief.read_bytes()
+    original_files = {path.relative_to(out): path.read_bytes() for path in out.rglob("*") if path.is_file()}
+    original_dirs = {path.relative_to(out) for path in out.rglob("*") if path.is_dir()}
+    with pytest.raises(SystemExit) as refused:
+        pkg.main(
+            [
+                "--bundle",
+                str(bundle),
+                "--out",
+                str(out),
+                "--unit",
+                selected,
+                "--brief",
+                str(brief if selected == DS_UNIT else tmp_path / "missing-brief.md"),
+                "--json",
+                str(report),
+                "--discard-package-edits",
+            ]
+        )
+    assert refused.value.code == 2
+    assert brief.read_bytes() == original_brief
+    assert {path.relative_to(out): path.read_bytes() for path in out.rglob("*") if path.is_file()} == original_files
+    assert {path.relative_to(out) for path in out.rglob("*") if path.is_dir()} == original_dirs
+    if placement == "absent-selected":
+        assert not out.exists(), "misuse must not manufacture a discoverable package marker"
+
+
+@pytest.mark.parametrize("protected", ["brief", "manifest", "artifact"])
+@pytest.mark.parametrize("link", ["symlink", "hardlink"])
+def test_json_destination_external_alias_cannot_replace_protected_files(  # pylint: disable=too-many-locals
+    tmp_path: Path, protected: str, link: str
+) -> None:
+    """Real native aliases must refuse even though the caller spells an external reporting path."""
+    bundle, oracle, _objects = _bundle(tmp_path, covered=None, datasource_only=True)
+    out = tmp_path / "packages"
+    brief = _brief(tmp_path, UNIT)
+    pkg.package_unit(bundle, UNIT, out, oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=brief)
+    target = {
+        "brief": brief,
+        "manifest": out / UNIT / "package-manifest.json",
+        "artifact": out / UNIT / "handover.md",
+    }[protected]
+    report = tmp_path / "external-status.json"
+    if link == "hardlink":
+        os.link(target, report)
+    else:
+        try:
+            report.symlink_to(target)
+        except (OSError, NotImplementedError) as error:
+            if (
+                isinstance(error, OSError)
+                and error.errno not in (errno.EACCES, errno.EPERM, errno.ENOTSUP)
+                and getattr(error, "winerror", None) != 1314
+            ):
+                raise
+            pytest.skip("this platform/account cannot create symlinks without elevation")
+    assert report.samefile(target), "the negative control must be an actual filesystem alias"
+    original_brief = brief.read_bytes()
+    original_report_id = report.lstat().st_ino
+    original_files = {path.relative_to(out): path.read_bytes() for path in out.rglob("*") if path.is_file()}
+    original_dirs = {path.relative_to(out) for path in out.rglob("*") if path.is_dir()}
+    with pytest.raises(SystemExit) as refused:
+        pkg.main(["--bundle", str(bundle), "--out", str(out), "--brief", str(brief), "--json", str(report)])
+    assert refused.value.code == 2
+    assert brief.read_bytes() == original_brief
+    assert report.lstat().st_ino == original_report_id and report.samefile(target)
+    assert {path.relative_to(out): path.read_bytes() for path in out.rglob("*") if path.is_file()} == original_files
+    assert {path.relative_to(out) for path in out.rglob("*") if path.is_dir()} == original_dirs
+
+
+def test_json_destination_reparse_parent_is_not_traversed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The no-follow check must precede even lstat of a child reached through a directory alias."""
+    bundle, _oracle, _objects = _bundle(tmp_path, covered=None, datasource_only=True)
+    out = tmp_path / "packages"
+    brief = _brief(tmp_path, UNIT)
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    sentinel = protected / "held.txt"
+    sentinel.write_bytes(b"outside data")
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(protected, target_is_directory=True)
+    except (OSError, NotImplementedError) as error:
+        if (
+            isinstance(error, OSError)
+            and error.errno not in (errno.EACCES, errno.EPERM, errno.ENOTSUP)
+            and getattr(error, "winerror", None) != 1314
+        ):
+            raise
+        pytest.skip("this platform/account cannot create symlinks without elevation")
+    original = Path.lstat
+
+    def no_follow(path: Path) -> os.stat_result:
+        assert path == alias or not path.is_relative_to(alias), "report admission traversed an unsafe parent"
+        return original(path)
+
+    monkeypatch.setattr(Path, "lstat", no_follow)
+    with pytest.raises(SystemExit) as refused:
+        pkg.main(
+            [
+                "--bundle",
+                str(bundle),
+                "--out",
+                str(out),
+                "--brief",
+                str(brief),
+                "--json",
+                str(alias / "new" / "status.json"),
+            ]
+        )
+    assert refused.value.code == 2
+    assert sentinel.read_bytes() == b"outside data" and list(protected.iterdir()) == [sentinel]
+    assert not out.exists()
 
 
 @pytest.mark.parametrize(

@@ -171,8 +171,10 @@ keeps the command nonzero and never creates a second failure row. Native identit
 not a Unicode casefold or resolved path string. No concurrent-writer or hard-kill recovery is claimed.
 An explicitly supplied brief that cannot serve the cohort is a modeled BLOCKED refusal (exit 5),
 not an argparse escape. A shared brief never broadcasts bytes; earlier identity reasons survive.
-Brief refusals create no package output, including the output root. An explicit --json still
-replaces the report; beneath --out, only that reporting path and its parents may be created.
+Brief refusals create no package output, including the output root. An admitted --json still
+replaces the report; beneath --out, only an ordinary non-package reporting path may be created.
+Report aliases of the brief, output root, prospective package/transaction roots or existing package
+trees are usage errors before writes. Unassessable identities and reparses are refused, not followed.
 Ordinary syntax, missing mandatory switches, invalid bundles and unknown units remain usage exit 2.
 
 An oracle omission INSIDE a package does not BLOCK assembly: a unit whose oracle genuinely has no
@@ -6188,6 +6190,79 @@ def _external_providers(packages: Sequence[Path], out_root: Path, selected: Sequ
     return tuple(root for root in packages if os.path.normcase(os.path.abspath(root)) not in rebuilding)
 
 
+def _report_location(path: Path) -> Path:
+    """Normalize a reporting/input address only after proving its ancestors without following links."""
+    path = path.absolute()
+    for entry in reversed((path, *path.parents)):
+        info, error = _discovery_entry(entry)
+        if error is not None:
+            raise ValueError("report_destination_unassessable") from error
+        if info is not None and (
+            is_reparse_entry(info) or not info.st_ino or (entry != path and not stat.S_ISDIR(info.st_mode))
+        ):
+            raise ValueError("report_destination_unsafe")
+        if os.name == "nt" and entry.name not in ("", "..") and not pfs.is_canonical_key(entry.name):
+            raise ValueError("report_destination_unsafe")
+    return path.resolve()
+
+
+def _report_entry_identity(path: Path) -> tuple[int, int] | None:
+    """Native identity of a plain, already boundary-checked entry, or established absence."""
+    info, error = _discovery_entry(path)
+    if error is not None:
+        raise ValueError("report_destination_unassessable") from error
+    if info is None:
+        return None
+    if is_reparse_entry(info) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+        raise ValueError("report_destination_unsafe")
+    # The existing Windows no-follow handle reader accepts regular files as well as directories.
+    identity = (
+        _windows_directory(path).identity if os.name == "nt" else pfs._file_identity(info)[:2]  # pylint: disable=protected-access
+    )
+    if not identity[1]:
+        raise ValueError("report_destination_unassessable")
+    return identity
+
+
+def _admit_report_destination(path: Path, out_root: Path, selected: Sequence[str], brief: Path | None) -> Path:
+    """Keep the caller's report outside held brief/package addresses before any mkdir or publication."""
+    report = _report_location(path)
+    out_root = _report_location(out_root)
+    report_id = _report_entry_identity(report)
+    if report == out_root or (report_id is not None and not stat.S_ISREG(report.lstat().st_mode)):
+        raise ValueError("report_destination_unsafe")
+    if brief is not None:
+        brief = _report_location(brief)
+        if report == brief or (report_id is not None and report_id == _report_entry_identity(brief)):
+            raise ValueError("report_destination_unsafe")
+
+    roots = []
+    for unit in selected:
+        if unit_name_problem(unit) is None:
+            final = out_root / unit
+            roots.extend(_report_location(root) for root in (final, staging_dir(out_root, unit), retired_dir(final)))
+    if any(report.is_relative_to(root) for root in roots):
+        raise ValueError("report_destination_unsafe")
+
+    if _construction_directory(out_root) is not None:
+        walked, findings, _empty = pfs.walk_package(out_root)
+        if findings:
+            raise ValueError("report_destination_unassessable")
+        existing_roots = {
+            member.parent for member in walked.values() if pfs.alias_key(member.name) == pfs.alias_key(MANIFEST_NAME)
+        }
+        if any(report.is_relative_to(root) for root in existing_roots):
+            raise ValueError("report_destination_unsafe")
+        if report_id is not None:
+            for member in walked.values():
+                if (
+                    any(member.is_relative_to(root) for root in existing_roots)
+                    and _report_entry_identity(member) == report_id
+                ):
+                    raise ValueError("report_destination_unsafe")
+    return report
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """The CLI surface, in its own function so ``main`` stays inside its complexity budget."""
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("Attribution", maxsplit=1)[0])
@@ -6222,7 +6297,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json",
         type=Path,
         help=(
-            "replace the construction report even on brief refusal, which permits only report-path writes beneath --out"
+            "replace the construction report even on brief refusal; a brief/output/package/transaction collision "
+            "or an unassessable alias is a usage error before writes. Ordinary reporting directories beneath --out "
+            "and non-aliasing external reports are allowed"
         ),
     )
     parser.add_argument("--quiet", action="store_true", help="suppress the rendered summary")
@@ -6373,6 +6450,12 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     unknown = [unit for unit in units if unit not in available]
     if unknown:
         parser.error(f"the bundle's report.json and pbip/ know nothing of: {', '.join(sorted(unknown))}")
+
+    if args.json is not None:
+        try:
+            args.json = _admit_report_destination(args.json, args.out, units, args.brief)
+        except (OSError, RuntimeError, ValueError, PackagingError):
+            parser.error("--json destination is unsafe or unassessable; choose a separate ordinary report file")
 
     if not units:
         out_root = _prepare_out(args.out)

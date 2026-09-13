@@ -324,8 +324,17 @@ assembly and records the missing brief; it is not the same as supplying an inval
 
 **Brief refusal precedes package writes.** Without `--json`, or with an external `--json`, it creates
 no `--out`, staging/candidate tree, unit directory, manifest or package marker. Existing package
-bytes and the caller's brief remain unchanged, including with `--discard-package-edits`. An explicit
-JSON destination beneath `--out` permits only the report and its parents, not a selected-unit package.
+bytes and the caller's brief remain unchanged, including with `--discard-package-edits`. Before any
+output/report parent creation or publication, `--json` must pass read-only destination admission.
+An address equal to `--brief` or `--out`, within a prospective selected-unit package or its
+staging/retired roots, within any existing package tree under `--out` (including unselected/nested
+packages), or sharing a protected file's native identity is **usage exit 2**, not a modeled brief
+refusal. Symlinks/reparses are not followed, and unassessable boundaries/identities fail closed.
+The generic diagnostic exposes no caller path, basename or exception text; rejection changes no
+brief, stale target, output directory or package marker.
+
+An ordinary non-package report such as `<out>/reporting/status.json` remains allowed and may create
+only its reporting parents/file during brief refusal; benign external reports remain allowed too.
 The complete occurrence report replaces stale JSON through a same-directory file replacement after
 serialization; this is ordinary writable-report publication, not durable recovery after a hard kill
 or power loss. Quiet/assemble-only modes keep the same refusal and reporting semantics.
