@@ -5157,6 +5157,152 @@ def test_constructor_return_interrupt_preserves_its_terminal_occurrence_and_stop
     assert list(_out(tmp_path).rglob(pkg.MANIFEST_NAME)) == [_out(tmp_path) / UNIT / pkg.MANIFEST_NAME]
 
 
+@pytest.mark.parametrize(
+    ("scratch_state", "interrupt"),
+    [("absent", True), ("marker-absent", True), ("absent", False)],
+)
+# pylint: disable-next=too-many-locals,too-many-statements
+def test_post_cleanup_interrupt_preserves_publication_and_stops_later_units(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scratch_state: str, interrupt: bool
+) -> None:
+    """Real scratch/marker deletion must not erase Ctrl-C; ordinary successful cleanup stays clean."""
+    bundle, oracle = _many_unit_bundle(tmp_path, [UNIT, BATCH_LATE])
+    out = _out(tmp_path)
+    final, staged = out / UNIT, pkg.staging_dir(out, UNIT)
+    swap, discard, assemble = pkg.replace_dir, pkg._discard_scratch, pkg._assemble_unit  # pylint: disable=protected-access
+    published, cleaned, attempted = [], [], []
+
+    def publish_with_scratch(source: Path, destination: Path, *args, **kwargs):
+        result = swap(source, destination, *args, **kwargs)
+        if destination == final:
+            published.append((final / pkg.MANIFEST_NAME).read_bytes())
+            source.mkdir()
+            (source / pkg.MANIFEST_NAME).write_bytes(b"{}")
+            (source / "residue.txt").write_bytes(b"scratch retained after real publication")
+        return result
+
+    def remove_then_interrupt(root: Path) -> str | None:
+        if root == staged and published and not cleaned:
+            assert root.is_dir() and (root / pkg.MANIFEST_NAME).is_file()
+            if scratch_state == "marker-absent":
+                (root / pkg.MANIFEST_NAME).unlink()
+                assert root.is_dir() and not (root / pkg.MANIFEST_NAME).exists()
+            else:
+                assert discard(root) is None
+                assert not root.exists(), "the interrupt must follow actual scratch removal"
+            cleaned.append(scratch_state)
+            if interrupt:
+                raise KeyboardInterrupt("after real cleanup")
+            return None
+        return discard(root)
+
+    def observe_assembly(bundle_root: Path, unit: str, *args, **kwargs):
+        attempted.append(unit)
+        return assemble(bundle_root, unit, *args, **kwargs)
+
+    monkeypatch.setattr(pkg, "replace_dir", publish_with_scratch)
+    monkeypatch.setattr(pkg, "_discard_scratch", remove_then_interrupt)
+    monkeypatch.setattr(pkg, "_assemble_unit", observe_assembly)
+    report = tmp_path / "cleanup-interrupt.json"
+    report.write_text('{"stale": true}', encoding="utf-8")
+    code = _batch_main(tmp_path, bundle, oracle, report)
+    payload = json.loads(report.read_bytes())
+
+    assert cleaned == [scratch_state] and len(published) == 1
+    assert "stale" not in payload and (final / pkg.MANIFEST_NAME).read_bytes() == published[0]
+    assert code == (pkg.EXIT_CANNOT_ASSESS if interrupt else pkg.EXIT_OK), "cleanup must preserve interruption"
+    if interrupt:
+        assert attempted == [UNIT], "an interruption must stop later construction attempts"
+        assert payload["interruption"]["published"] is True
+        assert payload["interruption"]["reason_code"] == "assembly_interrupted_after_publish"
+        assert payload["cleanup_findings"] == [{"unit": UNIT, "reason_code": "staging_cleanup_interrupted"}]
+        assert payload["failed"] == [] and payload["refused"] == []
+        assert [row["unit"] for row in payload["units"]] == [UNIT]
+        assert [row["unit"] for row in payload["unaccounted"]] == [BATCH_LATE]
+        assert payload["unaccounted"][0]["state"] == "not_attempted"
+        assert payload["construction"]["totals"] == {"requested": 2, "assembled": 1, "blocked": 1}
+        assert [row["unit"] for row in payload["construction"]["blocked"]] == [BATCH_LATE]
+        assert not (out / BATCH_LATE).exists()
+        assert list(out.rglob(pkg.MANIFEST_NAME)) == [final / pkg.MANIFEST_NAME]
+    else:
+        assert attempted == [UNIT, BATCH_LATE]
+        assert payload["interruption"] is None and payload["cleanup_findings"] == []
+        assert payload["unaccounted"] == []
+        assert payload["construction"]["totals"] == {"requested": 2, "assembled": 2, "blocked": 0}
+        assert not staged.exists()
+
+
+@pytest.mark.parametrize("cleanup", ["clean", "residue", "recovered"])
+# pylint: disable-next=too-many-locals
+def test_assembled_provider_is_registered_once_despite_cleanup_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup: str
+) -> None:
+    """The completed datasource, not the constructor's return path, supplies the next consumer."""
+    import test_package_unit_reproductions as producer  # pylint: disable=import-outside-toplevel
+
+    bundle, oracle = producer._shared_bundle(tmp_path)  # pylint: disable=protected-access
+    out = tmp_path / "out"
+    provider, consumer = out / producer.DS_UNIT, out / producer.UNIT
+    pkg.package_unit(bundle, producer.DS_UNIT, out, oracle_dir=oracle, assets_dir=bundle.parent / "assets")
+    prior_id = provider.lstat().st_ino
+    retired = pkg.retired_dir(provider)
+    discard, assess = pkg._discard_scratch, pkg._assess_package_data_access  # pylint: disable=protected-access
+    observed, diagnoses, residues = [], [], []
+
+    def retain_retired(root: Path) -> str | None:
+        if root == retired and root.is_dir() and cleanup != "clean" and (cleanup == "residue" or not residues):
+            residues.append(root)
+            return "fixture-retired-residue"
+        return discard(root)
+
+    def observe_cohort(bundle_root: Path, candidate: Path, local, **kwargs):
+        manifest = json.loads((candidate / pkg.MANIFEST_NAME).read_bytes())
+        providers = tuple(kwargs["provider_packages"])
+        observed.append((manifest["unit"], providers))
+        if manifest["unit"] == producer.UNIT:
+            role = pkg.pri.verify_phase1_role_identity([*providers, candidate])[-1]
+            diagnoses.extend(dependency.code for dependency in role.dependencies)
+        return assess(bundle_root, candidate, local, **kwargs)
+
+    monkeypatch.setattr(pkg, "_discard_scratch", retain_retired)
+    monkeypatch.setattr(pkg, "_assess_package_data_access", observe_cohort)
+    report = tmp_path / "provider-cleanup.json"
+    code = pkg.main(
+        [
+            "--bundle",
+            str(bundle),
+            "--out",
+            str(out),
+            "--oracle",
+            str(oracle),
+            "--provider-package",
+            str(provider),
+            "--json",
+            str(report),
+            "--quiet",
+        ]
+    )
+    payload = json.loads(report.read_bytes())
+
+    assert observed == [(producer.DS_UNIT, ()), (producer.UNIT, (provider,))], "register the completed provider once"
+    assert diagnoses == ["provider_not_s2_clean"], "a published diagnostic provider is not a missing provider"
+    assert bool(residues) == (cleanup != "clean"), "the fault must reach cleanup after real retirement"
+    expected = [{"unit": producer.DS_UNIT, "reason_code": "retired_cleanup_incomplete_manifest_removed"}]
+    assert payload["cleanup_findings"] == (expected if cleanup == "residue" else []), (
+        "one residue has one final finding"
+    )
+    assert code == (pkg.EXIT_UNIT_FAILED if cleanup == "residue" else pkg.EXIT_OK), "final cleanup determines the exit"
+    assert payload["construction"]["cleanup_findings"] == payload["cleanup_findings"]
+    assert payload["construction"]["totals"] == {"requested": 2, "assembled": 2, "blocked": 0}
+    assert [row["unit"] for row in payload["units"]] == [producer.DS_UNIT, producer.UNIT]
+    assert payload["failed"] == [] and payload["refused"] == [] and payload["unaccounted"] == []
+    assert payload["interruption"] is None
+    assert provider.lstat().st_ino != prior_id and pkg.pri.verify_s1(provider).integrity.is_clean
+    assert set(out.rglob(pkg.MANIFEST_NAME)) == {provider / pkg.MANIFEST_NAME, consumer / pkg.MANIFEST_NAME}
+    assert retired.exists() == (cleanup == "residue")
+    assert not (retired / pkg.MANIFEST_NAME).exists()
+
+
 def test_modeled_input_details_are_typed_and_never_parsed_from_diagnostics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -5796,3 +5942,66 @@ def test_typed_input_diagnostics_withhold_unsafe_basenames(basename: str) -> Non
     row = pkg._failure_row(failure)  # pylint: disable=protected-access
     assert row["details"] == {"inputs": [{"role": "handover", "basename": "<withheld>"}]}
     assert "PRIVATE_" not in json.dumps(row)
+
+
+_BRIEF_BASENAME_CANARIES = (
+    "customer-sql01-password-SuperSecret.md",
+    "customersql01internalcontoso.md",
+    "BearerTokenA17Z9X8SuperSecret7.md",
+)
+
+
+@pytest.mark.parametrize(
+    ("role", "basename", "expected"),
+    [
+        *(("brief", basename, "<withheld>") for basename in _BRIEF_BASENAME_CANARIES),
+        ("brief", "migration-brief.md", "<withheld>"),
+        ("report", "report.json", "report.json"),
+    ],
+    ids=["credential", "hostname", "token", "ordinary-brief", "fixed-report"],
+)
+def test_typed_input_diagnostics_never_publish_caller_brief_basenames(role: str, basename: str, expected: str) -> None:
+    """A brief name is caller-owned even when it passes the non-brief character/length policy."""
+    failure = pkg.PackagingError(
+        "input_unreadable",
+        inputs=[pkg._InputDetail(role, basename)],  # pylint: disable=protected-access
+    )
+    row = pkg._failure_row(failure)  # pylint: disable=protected-access
+    assert row["details"] == {"inputs": [{"role": role, "basename": expected}]}
+    assert row["reason"] == f"construction failed; input_role={role} basename={expected}"
+    if role == "brief":
+        assert basename not in json.dumps(row), "caller-owned brief basenames must never cross the diagnostic boundary"
+
+
+@pytest.mark.parametrize("basename", _BRIEF_BASENAME_CANARIES, ids=["credential", "hostname", "token"])
+@pytest.mark.parametrize("fault", ["invalid-utf8", "wrong-unit"])
+def test_cli_brief_diagnostics_withhold_caller_basenames(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], basename: str, fault: str
+) -> None:
+    """Both brief read/parse failures withhold alphanumeric identifiers in JSON and rendered output."""
+    bundle, oracle = _bundle(tmp_path)
+    brief = tmp_path / basename
+    raw = (
+        b"\xff"
+        if fault == "invalid-utf8"
+        else (
+            b'+++\nschema = "phase1-start-ready/v1"\nunit = "OtherUnit"\nscope = "model_and_report"\n'
+            b'fallback_authorization = "stop"\n+++\n'
+        )
+    )
+    brief.write_bytes(raw)
+    report = tmp_path / "brief-diagnostics.json"
+    code = _batch_main(
+        tmp_path, bundle, oracle, report, "--assets", str(bundle.parent / "assets"), "--brief", str(brief)
+    )
+    payload = json.loads(report.read_bytes())
+    captured = capsys.readouterr()
+
+    assert code == pkg.EXIT_UNIT_FAILED and len(payload["failed"]) == 1
+    failure = payload["failed"][0]
+    assert failure["reason_code"] == ("brief_unreadable" if fault == "invalid-utf8" else "brief_unit_mismatch")
+    assert failure["details"] == {"inputs": [{"role": "brief", "basename": "<withheld>"}]}
+    assert failure["reason"] == "construction failed; input_role=brief basename=<withheld>"
+    assert failure["reason"] in captured.err and failure["reason"] in captured.out
+    assert basename not in report.read_text(encoding="utf-8") + captured.err + captured.out
+    assert brief.read_bytes() == raw and not (_out(tmp_path) / UNIT).exists()

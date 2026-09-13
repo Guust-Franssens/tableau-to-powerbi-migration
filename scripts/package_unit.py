@@ -3665,7 +3665,7 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
             attempt.manifest_sha256 = sha256_of(staging / MANIFEST_NAME)
             if attempt.manifest_sha256 is None:
                 raise PackagingError("candidate_manifest_unreadable")
-            swap = replace_dir(
+            replace_dir(
                 staging,
                 final,
                 verify=None if discard_edits else partial(_refuse_if_edited, unit),
@@ -3673,8 +3673,6 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
                 verify_destination=partial(_verify_construction_destination, attempt),
                 verify_published=partial(_verify_construction_published, attempt),
             )
-            if swap is not None and swap[1]:
-                attempt.findings.append(swap[2])
         except (Exception, KeyboardInterrupt) as failure:  # pylint: disable=broad-exception-caught
             error = (_assembly_refusal(unit, failure) or failure) if isinstance(failure, OSError) else failure
         _complete_construction(attempt, error)
@@ -4141,15 +4139,16 @@ def _make_scratch_nondiscoverable(root: Path, role: str, *, preserve_tree: bool 
         except BaseException as error:  # pylint: disable=broad-exception-caught
             interrupted = isinstance(error, KeyboardInterrupt)
     entry, error = _discovery_entry(root)
+    interrupted |= isinstance(error, KeyboardInterrupt)
     if error is not None or (entry is not None and (is_reparse_entry(entry) or not stat.S_ISDIR(entry.st_mode))):
-        return f"{role}_manifest_unassessable{'_interrupted' if isinstance(error, KeyboardInterrupt) else ''}"
+        return f"{role}_manifest_unassessable{'_interrupted' if interrupted else ''}"
     if entry is None:
-        return None
+        return f"{role}_cleanup_interrupted" if interrupted else None
     manifest = root / MANIFEST_NAME
     entry, error = _discovery_entry(manifest)
     interrupted |= isinstance(error, KeyboardInterrupt)
     if entry is None and error is None:
-        return f"{role}_cleanup_incomplete"
+        return f"{role}_cleanup_{'interrupted' if interrupted else 'incomplete'}"
     action = "removed"
     try:
         manifest.unlink()
@@ -5993,7 +5992,8 @@ def _failure_details(failure: PackagingError) -> dict[str, Any]:
                 "role": item.role,
                 "basename": (
                     item.basename
-                    if item.basename not in ("", ".", "..")
+                    if item.role != "brief"
+                    and item.basename not in ("", ".", "..")
                     and len(item.basename) <= 160
                     and all(char.isalnum() or char in "._- " for char in item.basename)
                     else "<withheld>"
@@ -6102,19 +6102,27 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
             continue
         unit = slot.unit
         try:
-            package_unit(
-                bundle,
-                unit,
-                out_root,
-                oracle_dir=oracle_dir,
-                assets_dir=assets_dir,
-                brief=brief,
-                gate_root=gate_root,
-                provider_packages=tuple(providers),
-                discard_edits=discard_edits,
-                completion=slot,
-                identities=identities,
-            )
+            try:
+                package_unit(
+                    bundle,
+                    unit,
+                    out_root,
+                    oracle_dir=oracle_dir,
+                    assets_dir=assets_dir,
+                    brief=brief,
+                    gate_root=gate_root,
+                    provider_packages=tuple(providers),
+                    discard_edits=discard_edits,
+                    completion=slot,
+                    identities=identities,
+                )
+            except PackagingError as failure:
+                failure.unit = failure.unit or unit
+                slot.complete(_ConstructionOutcome(None, failure))
+            except Exception as error:  # pylint: disable=broad-exception-caught
+                crash = UnitCrashed(unit, error)
+                slot.complete(_ConstructionOutcome(None, crash))
+            # A cleanup exception cannot remove a provider whose terminal slot is already ASSEMBLED.
             result = slot.outcome.result if slot.outcome is not None else None
             if result is not None and result["kind"] == KIND_DATASOURCE and result["has_engine_working_copy"]:
                 providers.append(out_root / unit)
@@ -6133,12 +6141,6 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
             interruption.unit = unit
             interruption.result = result
             raise interruption from error
-        except PackagingError as failure:
-            failure.unit = failure.unit or unit
-            slot.complete(_ConstructionOutcome(None, failure))
-        except Exception as error:  # pylint: disable=broad-exception-caught
-            crash = UnitCrashed(unit, error)
-            slot.complete(_ConstructionOutcome(None, crash))
 
 
 def _construction_buckets(

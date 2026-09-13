@@ -1161,6 +1161,11 @@ def test_construction_reconciles_cleanup_rollback_and_discovery_facts(
     assert payload["totals"]["units"] + payload["totals"]["failed"] + payload["totals"]["refused"] == 1
     assert "CONSTRUCTION_FAILURE_CANARY" not in report.read_text(encoding="utf-8") + captured.out + captured.err
     markers = sorted(out.rglob(pkg.MANIFEST_NAME))
+    if fault in ("staging", "retired"):
+        assert code == pkg.EXIT_UNIT_FAILED
+        assert payload["cleanup_findings"] == [
+            {"unit": UNIT, "reason_code": f"{fault}_cleanup_incomplete_manifest_removed"}
+        ], "one physical residue must have exactly one final cleanup finding"
     if fault == "retired":
         assert payload["construction"]["totals"] == {"requested": 1, "assembled": 1, "blocked": 0}
         assert payload["failed"] == [] and payload["refused"] == []
@@ -1300,6 +1305,7 @@ def test_construction_real_denied_delete_handle_reports_residue_then_unlocked_co
         assert denied == [True], "the real denied-delete witness must be reached inside the ordinary swap"
         assert code != 0 and payload["construction"]["totals"] == {"requested": 1, "assembled": 1, "blocked": 0}
         assert payload["failed"] == [] and payload["cleanup_findings"]
+        assert len(payload["cleanup_findings"]) == 1, "the real denied-delete residue is one final finding"
         assert final.lstat().st_ino != before_id and (final / data_file).read_bytes() == b"value\n8\n"
         assert (pkg.retired_dir(final) / data_file).read_bytes() == b"value\n7\n"
         assert list(out.rglob(pkg.MANIFEST_NAME)) == [final / pkg.MANIFEST_NAME]

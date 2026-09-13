@@ -829,17 +829,17 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "#478: re-raise the unit's crash, so the first failure kills the batch again",
         PACKAGER,
-        "            crash = UnitCrashed(unit, error)",
-        "            raise error",
+        "                crash = UnitCrashed(unit, error)",
+        "                raise error",
         ["test_one_unit_raising_does_not_stop_the_units_after_it"],
     ),
     (
         "#478: narrow the clause to a modelled refusal, so the FIELD failure still aborts the batch",
         PACKAGER,
-        "        except Exception as error:  # pylint: disable=broad-exception-caught\n"
-        "            crash = UnitCrashed(unit, error)",
-        "        except PackagePathTooLong as error:  # pylint: disable=broad-exception-caught\n"
-        "            crash = UnitCrashed(unit, error)",
+        "            except Exception as error:  # pylint: disable=broad-exception-caught\n"
+        "                crash = UnitCrashed(unit, error)",
+        "            except PackagePathTooLong as error:  # pylint: disable=broad-exception-caught\n"
+        "                crash = UnitCrashed(unit, error)",
         ["test_one_unit_raising_does_not_stop_the_units_after_it"],
     ),
     (
@@ -895,6 +895,80 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "        code = _make_scratch_nondiscoverable(root, role, preserve_tree=preserve_tree)",
         '        code = None if role == "retired" else _make_scratch_nondiscoverable(root, role, preserve_tree=preserve_tree)',
         ["test_post_rename_line_interrupt_hides_retired_manifest_before_reporting_status"],
+    ),
+    (
+        "#614: discard the cleanup interrupt when the scratch root is absent",
+        PACKAGER,
+        '        return f"{role}_cleanup_interrupted" if interrupted else None',
+        "        return None",
+        ["test_post_cleanup_interrupt_preserves_publication_and_stops_later_units"],
+    ),
+    (
+        "#614: discard the cleanup interrupt when the scratch marker is absent",
+        PACKAGER,
+        "    if entry is None and error is None:\n"
+        "        return f\"{role}_cleanup_{'interrupted' if interrupted else 'incomplete'}\"",
+        '    if entry is None and error is None:\n        return f"{role}_cleanup_incomplete"',
+        ["test_post_cleanup_interrupt_preserves_publication_and_stops_later_units"],
+    ),
+    (
+        "#614: skip provider registration when completed construction raises",
+        PACKAGER,
+        "            except PackagingError as failure:\n"
+        "                failure.unit = failure.unit or unit\n"
+        "                slot.complete(_ConstructionOutcome(None, failure))",
+        "            except PackagingError as failure:\n"
+        "                failure.unit = failure.unit or unit\n"
+        "                slot.complete(_ConstructionOutcome(None, failure))\n"
+        "                continue",
+        ["test_assembled_provider_is_registered_once_despite_cleanup_finding"],
+    ),
+    (
+        "#614: register a completed datasource twice",
+        PACKAGER,
+        "                providers.append(out_root / unit)",
+        "                providers.append(out_root / unit)\n                providers.append(out_root / unit)",
+        ["test_assembled_provider_is_registered_once_despite_cleanup_finding"],
+    ),
+    (
+        "#614: remove the final cleanup finding authority alone",
+        PACKAGER,
+        "        if code:\n            attempt.findings.append(code)",
+        "        if code:\n            pass",
+        ["test_assembled_provider_is_registered_once_despite_cleanup_finding"],
+    ),
+    (
+        "#614: restore the preliminary swap cleanup finding authority alone",
+        PACKAGER,
+        "            replace_dir(\n"
+        "                staging,\n"
+        "                final,\n"
+        "                verify=None if discard_edits else partial(_refuse_if_edited, unit),\n"
+        "                verify_staged=partial(_verify_construction_staged, attempt, verify_staged),\n"
+        "                verify_destination=partial(_verify_construction_destination, attempt),\n"
+        "                verify_published=partial(_verify_construction_published, attempt),\n"
+        "            )",
+        "            swap = replace_dir(\n"
+        "                staging,\n"
+        "                final,\n"
+        "                verify=None if discard_edits else partial(_refuse_if_edited, unit),\n"
+        "                verify_staged=partial(_verify_construction_staged, attempt, verify_staged),\n"
+        "                verify_destination=partial(_verify_construction_destination, attempt),\n"
+        "                verify_published=partial(_verify_construction_published, attempt),\n"
+        "            )\n"
+        "            if swap is not None and swap[1]:\n"
+        "                attempt.findings.append(swap[2])",
+        ["test_assembled_provider_is_registered_once_despite_cleanup_finding"],
+    ),
+    (
+        "#614: disclose caller brief basenames that pass non-brief character vetting",
+        PACKAGER,
+        '                    if item.role != "brief"\n                    and item.basename not in ("", ".", "..")',
+        '                    if item.basename not in ("", ".", "..")',
+        [
+            "test_typed_input_diagnostics_never_publish_caller_brief_basenames",
+            "test_cli_brief_diagnostics_withhold_caller_basenames",
+        ],
     ),
     (
         "#478: restore rmtree(ignore_errors=True), so a staging tree that survived is assembled into",
