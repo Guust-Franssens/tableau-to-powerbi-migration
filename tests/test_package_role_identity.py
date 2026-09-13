@@ -22,6 +22,8 @@ from typing import Any
 
 import pytest
 
+from test_package_filesystem import link_directory, link_file
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-import-position
@@ -68,6 +70,26 @@ def brief_text(unit: str, scope: str) -> str:
         f'+++\nschema = "phase1-start-ready/v1"\nunit = "{unit}"\nscope = "{scope}"\n'
         'fallback_authorization = "stop"\n+++\n\nMigrate it.\n'
     )
+
+
+def numeric_brief_text(unit: str, scope: str, numeric_obligation: str) -> str:
+    """Literal v2 commissioning text; existing fixtures deliberately remain v1."""
+    return (
+        f'+++\nschema = "phase1-start-ready/v2"\nunit = "{unit}"\nscope = "{scope}"\n'
+        f'fallback_authorization = "stop"\nnumeric_obligation = "{numeric_obligation}"\n+++\n\nMigrate it.\n'
+    )
+
+
+def numeric_package(root: Path, numeric_obligation: str = "none", shape: str = "workbook") -> Path:
+    """Independently seal a known brief and the existing package fixture's own identity."""
+    if shape == "datasource":
+        package = datasource_package(root)
+        unit, scope = DS_UNIT, "model_only"
+    else:
+        package = workbook_package(root, published={"luid": DS_LUID} if shape == "consumer" else None)
+        unit, scope = WB_UNIT, "report_only_shared_model" if shape == "consumer" else "model_and_report"
+    (package / "migration-brief.md").write_bytes(numeric_brief_text(unit, scope, numeric_obligation).encode("utf-8"))
+    return seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
 
 
 def fabric_tree(
@@ -809,17 +831,29 @@ def test_the_verifier_returns_no_source_path_anywhere_in_its_result(tmp_path: Pa
     assert all(not path.startswith(("/", "\\")) and ":" not in path for row in result.roles for path in row.paths)
 
 
-def test_strict_brief_policy_is_frozen_and_nonserialized(tmp_path: Path) -> None:
+@pytest.mark.parametrize("numeric_obligation", [None, "none", "required"], ids=["v1", "v2-none", "v2-required"])
+def test_strict_brief_policy_is_frozen_and_nonserialized(tmp_path: Path, numeric_obligation: str | None) -> None:
     package = datasource_package(tmp_path / "Provider")
+    if numeric_obligation is not None:
+        (package / "migration-brief.md").write_bytes(
+            numeric_brief_text(DS_UNIT, "model_only", numeric_obligation).encode("utf-8")
+        )
+        seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
     result = verify_one(package)
-    assert result.brief_policy == pri.BriefPolicy("model_only", "stop")
+    assert result.is_start_ready, result.blockers
+    assert result.brief_policy == pri.BriefPolicy("model_only", "stop", numeric_obligation)
+    assert result.brief_policy.numeric_obligation == numeric_obligation
+    assert pri.BriefPolicy("model_only", "stop").numeric_obligation is None
     assert "brief_policy" not in result.as_dict()
     with pytest.raises(AttributeError):
         result.brief_policy.requested_scope = "model_and_report"
+    with pytest.raises(AttributeError):
+        result.brief_policy.numeric_obligation = "none"
     assert pri.brief_identity(brief_text(DS_UNIT, "model_only"), DS_UNIT, "model_only") == (None, False)
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("numeric_obligation", [None, "none"], ids=["v1", "v2"])
 @pytest.mark.parametrize(
     "boundary",
     [
@@ -840,9 +874,15 @@ def test_strict_brief_policy_is_frozen_and_nonserialized(tmp_path: Path) -> None
         "extra-space",
     ],
 )
-def test_frontmatter_requires_two_exact_boundary_lines(tmp_path: Path, boundary: str, newline: str) -> None:
+def test_frontmatter_requires_two_exact_boundary_lines(
+    tmp_path: Path, boundary: str, newline: str, numeric_obligation: str | None
+) -> None:
     """Malformed explicit policy is not prose, and no malformed boundary can authorize a fallback."""
     text = brief_text(DS_UNIT, "model_only").replace('"stop"', '"model_only_unvalidated"')
+    if numeric_obligation is not None:
+        text = numeric_brief_text(DS_UNIT, "model_only", numeric_obligation).replace(
+            '"stop"', '"model_only_unvalidated"'
+        )
     lines = text.split("\n")
     opening = {
         "opening-suffix": "+++not-a-delimiter",
@@ -865,12 +905,15 @@ def test_frontmatter_requires_two_exact_boundary_lines(tmp_path: Path, boundary:
         "extra-space": " +++ ",
     }
     lines[0] = opening.get(boundary, lines[0])
-    lines[5] = closing.get(boundary, lines[5])
+    closing_index = 5 if numeric_obligation is None else 6
+    lines[closing_index] = closing.get(boundary, lines[closing_index])
     if boundary in extra:
         lines.append(extra[boundary])
     text = "\n".join(lines).replace("\n", newline)
     expected_code = None if boundary == "exact" else "brief_frontmatter_unparseable"
-    expected_policy = pri.BriefPolicy("model_only", "model_only_unvalidated") if boundary == "exact" else None
+    expected_policy = (
+        pri.BriefPolicy("model_only", "model_only_unvalidated", numeric_obligation) if boundary == "exact" else None
+    )
     assert pri.parse_brief_policy(text, DS_UNIT, "model_only") == (expected_code, expected_policy)
 
     package = datasource_package(tmp_path / "Provider")
@@ -935,6 +978,305 @@ def test_missing_policy_never_infers_stop(tmp_path: Path, variant: str) -> None:
     assert result.brief_policy is None
     assert "brief_policy_not_parsed" in result.authorized_limitations
     assert result.is_start_ready is (variant != "absent")
+
+
+@pytest.mark.parametrize("numeric_obligation", ["none", "required"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(
+    ("shape", "unit", "scope"),
+    [
+        ("workbook", WB_UNIT, "model_and_report"),
+        ("datasource", DS_UNIT, "model_only"),
+        ("consumer", WB_UNIT, "report_only_shared_model"),
+    ],
+)
+def test_current_v2_brief_uses_package_identity_and_topology(
+    tmp_path: Path, shape: str, unit: str, scope: str, numeric_obligation: str, newline: str
+) -> None:
+    package = numeric_package(tmp_path / "Folder_Is_Not_Identity", numeric_obligation, shape)
+    raw = numeric_brief_text(unit, scope, numeric_obligation).replace("\n", newline).encode("utf-8")
+    (package / "migration-brief.md").write_bytes(raw)
+    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
+    expected = pri.BriefPolicy(scope, "stop", numeric_obligation)
+    assert pri.parse_brief_policy(raw.decode("utf-8"), unit, scope) == (None, expected)
+    assert pri.read_current_brief_policy(package) == (None, expected)
+    assert (package / "migration-brief.md").read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "code"),
+    [
+        ('numeric_obligation = "none"\n', "", "brief_policy_invalid"),
+        ('fallback_authorization = "stop"\n', "", "brief_policy_invalid"),
+        ('schema = "phase1-start-ready/v2"\n', "", "brief_policy_invalid"),
+        ('schema = "phase1-start-ready/v2"', 'schema = "phase1-start-ready/v1"', "brief_policy_invalid"),
+        ('schema = "phase1-start-ready/v2"', 'schema = "phase1-start-ready/v3"', "brief_policy_invalid"),
+        ('schema = "phase1-start-ready/v2"', "schema = 2", "brief_policy_invalid"),
+        ('numeric_obligation = "none"', 'numeric_obligation = "NONE"', "brief_policy_invalid"),
+        ('numeric_obligation = "none"', 'numeric_obligation = "skip"', "brief_policy_invalid"),
+        ('numeric_obligation = "none"', 'numeric_obligation = " none "', "brief_policy_invalid"),
+        ('numeric_obligation = "none"', 'numeric_obligation = ""', "brief_policy_invalid"),
+        ('numeric_obligation = "none"', "numeric_obligation = false", "brief_policy_invalid"),
+        ('numeric_obligation = "none"', "numeric_obligation = 0", "brief_policy_invalid"),
+        ('numeric_obligation = "none"', 'numeric_obligation = ["none"]', "brief_policy_invalid"),
+        ('numeric_obligation = "none"', 'numeric_obligation = {value = "none"}', "brief_policy_invalid"),
+        ('numeric_obligation = "none"', 'numeric_obligation = "none"\nextra = "none"', "brief_policy_invalid"),
+        ('numeric_obligation = "none"', "numeric_obligation =", "brief_frontmatter_unparseable"),
+        ('fallback_authorization = "stop"', 'fallback_authorization = "skip"', "brief_policy_invalid"),
+        (f'unit = "{WB_UNIT}"', 'unit = "Other"', "brief_unit_mismatch"),
+        (f'unit = "{WB_UNIT}"', "unit = 0", "brief_unit_mismatch"),
+        (f'unit = "{WB_UNIT}"\n', "", "brief_unit_mismatch"),
+        ('scope = "model_and_report"', 'scope = "model_only"', "brief_scope_mismatch"),
+        ('scope = "model_and_report"', 'scope = ["model_and_report"]', "brief_scope_mismatch"),
+        ('scope = "model_and_report"\n', "", "brief_policy_invalid"),
+    ],
+)
+def test_v2_invalid_policy_never_falls_back_to_prose(tmp_path: Path, old: str, new: str, code: str) -> None:
+    package = numeric_package(tmp_path / "Unit")
+    text = numeric_brief_text(WB_UNIT, "model_and_report", "none").replace(old, new)
+    text += '\nLegacy prose says numeric_obligation = "none"; this grants nothing.\n'
+    assert pri.parse_brief_policy(text, WB_UNIT, "model_and_report") == (code, None)
+    (package / "migration-brief.md").write_bytes(text.encode("utf-8"))
+    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
+    assert pri.read_current_brief_policy(package) == (code, None)
+    result = verify_one(package)
+    assert not result.is_start_ready and role(result, "migration_brief").code == code
+    assert result.brief_policy is None
+
+
+@pytest.mark.parametrize("key", ["schema", "unit", "scope", "fallback_authorization", "numeric_obligation"])
+def test_v2_duplicate_key_refuses_numeric_authority(tmp_path: Path, key: str) -> None:
+    package = numeric_package(tmp_path / "Unit")
+    text = numeric_brief_text(WB_UNIT, "model_and_report", "none")
+    duplicate = next(line for line in text.splitlines() if line.startswith(f"{key} ="))
+    text = text.replace(duplicate, f"{duplicate}\n{duplicate}")
+    (package / "migration-brief.md").write_bytes(text.encode("utf-8"))
+    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
+    assert pri.parse_brief_policy(text, WB_UNIT, "model_and_report") == ("brief_frontmatter_unparseable", None)
+    assert pri.read_current_brief_policy(package) == ("brief_frontmatter_unparseable", None)
+
+
+@pytest.mark.parametrize("variant", ["v1", "identity-only", "legacy", "plain", "absent"])
+def test_current_brief_never_upgrades_unknown_numeric_scope(tmp_path: Path, variant: str) -> None:
+    package = workbook_package(tmp_path / "Unit")
+    brief = package / "migration-brief.md"
+    if variant == "identity-only":
+        brief.write_bytes(
+            brief_text(WB_UNIT, "model_and_report").replace('fallback_authorization = "stop"\n', "").encode()
+        )
+    elif variant == "legacy":
+        brief.write_bytes(f'+++\nunit = "{WB_UNIT}"\nscope = "model_and_report"\n+++\n'.encode())
+    elif variant == "plain":
+        brief.write_bytes(b'No numeric work needed. numeric_obligation = "none"\n')
+    elif variant == "absent":
+        brief.unlink()
+    seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
+    expected_code = (
+        "role_declaration_not_a_verified_file" if variant == "absent" else "brief_numeric_obligation_unknown"
+    )
+    assert pri.read_current_brief_policy(package) == (expected_code, None)
+    phase1 = verify_one(package)
+    assert phase1.is_start_ready is (variant != "absent")
+    if variant == "v1":
+        assert phase1.brief_policy == pri.BriefPolicy("model_and_report", "stop")
+        assert phase1.brief_policy.numeric_obligation is None
+
+
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        ("undeclared-role", "role_declaration_absent"),
+        ("wrong-role-type", "identity_type_invalid"),
+        ("foreign-role", "role_declaration_not_an_admissible_candidate"),
+        ("aliased-role", "role_declaration_not_a_verified_file"),
+        ("traversal-role", "role_declaration_not_a_verified_file"),
+        ("missing-digest", "role_declaration_not_a_verified_file"),
+        ("wrong-digest-type", "package_declared_digest_not_a_string"),
+        ("malformed-digest", "package_declared_digest_malformed"),
+        ("uppercase-digest", "package_declared_digest_malformed"),
+        ("wrong-digest", "package_file_digest_mismatch"),
+        ("aliased-digest", "package_declared_keys_collide"),
+        ("changed-brief", "package_file_digest_mismatch"),
+        ("invalid-utf8", "role_declaration_not_a_verified_file"),
+    ],
+)
+def test_current_brief_requires_declared_role_digest_and_matching_held_bytes(
+    tmp_path: Path, change: str, code: str
+) -> None:
+    package = numeric_package(tmp_path / "Unit")
+    expected = (None, pri.BriefPolicy("model_and_report", "stop", "none"))
+    assert pri.read_current_brief_policy(package) == expected
+    manifest_path = package / "package-manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    files = manifest["contents"]["files"]
+    artifacts = manifest["artifacts"]
+    brief = package / "migration-brief.md"
+    if change == "undeclared-role":
+        del artifacts["migration_brief"]
+    elif change == "wrong-role-type":
+        artifacts["migration_brief"] = ["migration-brief.md"]
+    elif change == "foreign-role":
+        (package / "other.md").write_bytes(brief.read_bytes())
+        files["other.md"] = files["migration-brief.md"]
+        artifacts["migration_brief"] = "other.md"
+    elif change == "aliased-role":
+        artifacts["migration_brief"] = "Migration-Brief.md"
+    elif change == "traversal-role":
+        artifacts["migration_brief"] = "../migration-brief.md"
+    elif change == "missing-digest":
+        del files["migration-brief.md"]
+    elif change == "wrong-digest-type":
+        files["migration-brief.md"] = None
+    elif change == "malformed-digest":
+        files["migration-brief.md"] = "g" * 64
+    elif change == "uppercase-digest":
+        files["migration-brief.md"] = "A" * 64
+    elif change == "wrong-digest":
+        files["migration-brief.md"] = "0" * 64
+    elif change == "aliased-digest":
+        files["Migration-Brief.md"] = files["migration-brief.md"]
+    elif change == "changed-brief":
+        before = pri.revision.package_working_revision(package)
+        brief.write_bytes(brief.read_bytes().replace(b'"none"', b'"required"'))
+        assert pri.revision.package_working_revision(package) != before
+    else:
+        brief.write_bytes(b"\xff")
+        files["migration-brief.md"] = hashlib.sha256(b"\xff").hexdigest()
+    manifest_path.write_bytes(json.dumps(manifest).encode("utf-8"))
+    assert pri.read_current_brief_policy(package) == (code, None)
+
+
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        ("missing", "package_boundary_not_declared"),
+        ("not-utf8", "package_manifest_unreadable"),
+        ("malformed-json", "package_manifest_not_json"),
+        ("not-object", "package_manifest_not_object"),
+        ("duplicate-role", "package_manifest_duplicate_key"),
+        ("duplicate-contents", "package_manifest_duplicate_key"),
+        ("non-finite", "package_manifest_non_finite_number"),
+        ("missing-contents", "package_contents_missing"),
+        ("wrong-files-type", "package_contents_files_not_object"),
+        ("wrong-artifacts-type", "identity_type_invalid"),
+        ("unit", "brief_unit_mismatch"),
+        ("missing-unit", "package_unit_missing"),
+        ("unit-type", "identity_type_invalid"),
+        ("unit-path", "identity_type_invalid"),
+        ("kind", "package_kind_unclassified"),
+        ("topology", "brief_scope_mismatch"),
+        ("spec-role", "role_declaration_absent"),
+    ],
+)
+def test_current_brief_rereads_manifest_authority(tmp_path: Path, change: str, code: str) -> None:
+    package = numeric_package(tmp_path / "Unit")
+    assert pri.read_current_brief_policy(package)[1].numeric_obligation == "none"
+    target = package / "package-manifest.json"
+    manifest = json.loads(target.read_bytes())
+    if change == "missing":
+        target.unlink()
+    elif change == "not-utf8":
+        target.write_bytes(b"\xff")
+    elif change == "malformed-json":
+        target.write_bytes(b'{"private":')
+    elif change == "not-object":
+        target.write_bytes(b"[]")
+    elif change == "duplicate-role":
+        text = json.dumps(manifest).replace('"migration_brief":', '"migration_brief": "other.md", "migration_brief":')
+        target.write_bytes(text.encode())
+    elif change == "duplicate-contents":
+        text = json.dumps(manifest).replace('"contents":', '"contents": {}, "contents":')
+        target.write_bytes(text.encode())
+    elif change == "non-finite":
+        text = json.dumps(manifest)[:-1] + ', "private": NaN}'
+        target.write_bytes(text.encode())
+    else:
+        if change == "missing-contents":
+            del manifest["contents"]
+        elif change == "wrong-files-type":
+            manifest["contents"]["files"] = []
+        elif change == "wrong-artifacts-type":
+            manifest["artifacts"] = []
+        elif change == "unit":
+            manifest["unit"] = "Other"
+        elif change == "missing-unit":
+            del manifest["unit"]
+        elif change == "unit-type":
+            manifest["unit"] = 1
+        elif change == "unit-path":
+            manifest["unit"] = "../Other"
+        elif change == "kind":
+            manifest["kind"] = "unknown"
+        elif change == "topology":
+            manifest["kind"] = "datasource"
+        else:
+            del manifest["artifacts"]["migration_spec"]
+        target.write_bytes(json.dumps(manifest).encode())
+    assert pri.read_current_brief_policy(package) == (code, None)
+
+
+def test_current_brief_reads_held_bytes_once_without_whole_package_s1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = numeric_package(tmp_path / "Unit")
+    expected = (package / "migration-brief.md").read_bytes()
+    model = package / "fabric" / f"{WB_UNIT}.SemanticModel" / "definition" / "model.tmdl"
+    report = package / "fabric" / f"{WB_UNIT}.Report" / "definition" / "pages" / "pages.json"
+    model.write_bytes(b"model Edited\n")
+    report.write_bytes(b'{"pageOrder":["edited"]}\n')
+    assert "package_file_digest_mismatch" in pri.verify_s1(package).integrity.codes()
+    read_bytes, parser = Path.read_bytes, pri.parse_brief_policy
+    opened, parsed = [], []
+
+    def tracked_read(path: Path) -> bytes:
+        opened.append(path)
+        assert path.name in ("package-manifest.json", "migration-brief.md", "migration-spec.json")
+        return read_bytes(path)
+
+    def tracked_parser(text: str, unit: str, scope: str) -> tuple:
+        parsed.append((text, unit, scope))
+        return parser(text, unit, scope)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("the current brief reader must not renew S1 or hash unrelated working files")
+
+    monkeypatch.setattr(Path, "read_bytes", tracked_read)
+    monkeypatch.setattr(pri, "parse_brief_policy", tracked_parser)
+    monkeypatch.setattr(pri, "verify_s1", forbidden)
+    monkeypatch.setattr(pri.pfs, "verify_package", forbidden)
+    monkeypatch.setattr(pri.pfs, "_hash_file", forbidden)
+    assert pri.read_current_brief_policy(package) == (None, pri.BriefPolicy("model_and_report", "stop", "none"))
+    assert parsed == [(expected.decode("utf-8"), WB_UNIT, "model_and_report")]
+    assert sorted(path.name for path in opened) == [
+        "migration-brief.md",
+        "migration-spec.json",
+        "package-manifest.json",
+    ]
+
+
+@pytest.mark.parametrize("boundary", ["root", "ancestor", "manifest", "brief", "spec"])
+def test_current_brief_refuses_links_before_opening_any_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    package = numeric_package(tmp_path / "outside" / "Unit")
+    if boundary in ("root", "ancestor"):
+        alias = tmp_path / "linked"
+        link_directory(alias, package if boundary == "root" else package.parent)
+        package = alias if boundary == "root" else alias / package.name
+    else:
+        name = {"manifest": "package-manifest.json", "brief": "migration-brief.md", "spec": "migration-spec.json"}[
+            boundary
+        ]
+        original = package / name
+        target = tmp_path / "outside-member"
+        original.rename(target)
+        link_file(original, target)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("an unsafe package boundary was opened before no-follow refusal")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    assert pri.read_current_brief_policy(package) == ("package_boundary_unsafe", None)
 
 
 @pytest.mark.parametrize("reverse", [False, True])

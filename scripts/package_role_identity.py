@@ -9,6 +9,8 @@ Display names and paths never supply identity; a consumer alone blocks.
 source_handoff() retains the bound root and RAW asset role for #558's pure projector. Brief policy
 and the selected provider's input ordinal travel only in memory. No source Path, search, credentials,
 evidence grade, final START_READY fold or package writes here.
+read_current_brief_policy() independently rechecks the current brief role/digest without requiring
+the working model/report to retain their packaging-time bytes. It grants no completion verdict.
 Full contract and limitations: docs/reference-readiness.md, S2.
 """
 
@@ -28,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import package_filesystem as pfs  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_env  # noqa: E402  # pylint: disable=wrong-import-position
+import current_artifact_revision as revision  # noqa: E402  # pylint: disable=wrong-import-position
 from bundle_corpus import (  # noqa: E402  # pylint: disable=wrong-import-position
     TargetClassification,
     classify_target,
@@ -172,6 +175,7 @@ CODE_BRIEF_UNIT = "brief_unit_mismatch"
 CODE_BRIEF_SCOPE = "brief_scope_mismatch"
 CODE_BRIEF_UNSAFE = "brief_contains_unsafe_text"
 CODE_BRIEF_POLICY = "brief_policy_invalid"
+CODE_BRIEF_NUMERIC_UNKNOWN = "brief_numeric_obligation_unknown"
 CODE_DEPENDENCY_IDENTITY = "published_dependency_identity_missing"
 CODE_DEPENDENCY_INVALID = "published_dependency_invalid"
 CODE_PROVIDER_MISSING = "provider_missing"
@@ -189,6 +193,7 @@ class BriefPolicy:
 
     requested_scope: str
     fallback_authorization: str
+    numeric_obligation: Literal["none", "required"] | None = None
 
 
 @dataclass(frozen=True)
@@ -489,7 +494,9 @@ def _handoff_authority_state(result: Phase1RoleIdentityResult) -> tuple:
             )
             for row in result.dependencies
         ),
-        (policy.requested_scope, policy.fallback_authorization) if policy is not None else None,
+        (policy.requested_scope, policy.fallback_authorization, policy.numeric_obligation)
+        if policy is not None
+        else None,
         snapshot.declared,
         (snapshot.spec.relative_path, snapshot.spec.sha256, snapshot.spec.root_identity),
     )
@@ -982,7 +989,8 @@ def parse_brief_policy(  # pylint: disable=too-many-return-statements
     """One TOML parser for preparation and S2: strict policy, or truthful legacy non-policy.
 
     A header without fallback authorization may carry only the legacy identity keys. An explicit
-    policy requires all four string fields; malformed/unknown fields refuse without echoing text.
+    v1 policy requires four string fields, v2 all five including explicit numeric obligation.
+    v1 keeps its Phase-1 policy but has no numeric authority. Invalid policy never becomes prose.
     """
     env = tableau_env.resolve_env(_ENV_PATH)
     scrub = tableau_env.env_redactor(env, *(env.get(key, "") for key in sorted(tableau_env.DATASOURCE_CREDENTIAL_KEYS)))
@@ -1004,24 +1012,107 @@ def parse_brief_policy(  # pylint: disable=too-many-return-statements
     supplied_scope = front.get("scope")
     if supplied_scope is not None and supplied_scope != scope:
         return CODE_BRIEF_SCOPE, None
+    numeric_schema = front.get("schema") == "phase1-start-ready/v2"
     allowed = {"schema", "unit", "scope", "fallback_authorization"}
+    if numeric_schema:
+        allowed.add("numeric_obligation")
     if (
         set(front) - allowed
         or any(not isinstance(value, str) for value in front.values())
-        or ("schema" in front and front["schema"] != "phase1-start-ready/v1")
+        or ("schema" in front and front["schema"] not in ("phase1-start-ready/v1", "phase1-start-ready/v2"))
     ):
         return CODE_BRIEF_POLICY, None
-    if "fallback_authorization" not in front:
+    if not numeric_schema and "fallback_authorization" not in front:
         return None, None
-    if set(front) != allowed or front["fallback_authorization"] not in ("stop", "model_only_unvalidated"):
+    if (
+        set(front) != allowed
+        or front["fallback_authorization"] not in ("stop", "model_only_unvalidated")
+        or (numeric_schema and front["numeric_obligation"] not in ("none", "required"))
+    ):
         return CODE_BRIEF_POLICY, None
-    return None, BriefPolicy(supplied_scope, front["fallback_authorization"])
+    return None, BriefPolicy(supplied_scope, front["fallback_authorization"], front.get("numeric_obligation"))
 
 
 def brief_identity(text: str, unit: str, scope: str) -> tuple[str | None, bool]:
     """Compatibility handoff: identity/policy refusal and whether policy remains unparsed."""
     code, policy = parse_brief_policy(text, unit, scope)
     return code, code is None and policy is None
+
+
+def _current_brief_role_path(artifacts: Any, walked: Mapping[str, Path], role_name: str, canonical_name: str) -> Path:
+    """Resolve only the brief and its spec context through current declarations and walked paths."""
+    declared = _declared_string(artifacts, role_name)
+    candidates = [canonical_name] if canonical_name in walked else []
+    result = _declared_role(role_name, "1 file", declared, candidates, walked)
+    if result.blocks:
+        raise _IdentityError(result.code)
+    return walked[canonical_name]
+
+
+def _current_brief_context(manifest: dict[str, Any], walked: Mapping[str, Path]) -> tuple[str, str]:
+    """Use the package's own unit/kind and current spec topology, never a caller's scope label."""
+    unit = _declared_string(manifest, "unit")
+    if unit is None:
+        raise _IdentityError(CODE_UNIT_MISSING)
+    if not pfs.is_canonical_key(unit) or "/" in unit:
+        raise _IdentityError(CODE_IDENTITY_TYPE)
+    kind = _declared_string(manifest, "kind")
+    if kind not in (KIND_WORKBOOK, KIND_DATASOURCE):
+        raise _IdentityError(CODE_KIND_UNCLASSIFIED)
+    spec_path = _current_brief_role_path(manifest.get("artifacts"), walked, ROLE_MIGRATION_SPEC, SPEC_NAME)
+    try:
+        spec = pfs.parse_manifest_text(spec_path.read_bytes().decode("utf-8"))
+    except (OSError, ValueError, pfs._ManifestError) as exc:  # pylint: disable=protected-access
+        raise _IdentityError(CODE_IDENTITY_JSON) from exc
+    dependencies = _spec_dependencies(spec)
+    if any(row.code is not None for row in dependencies):
+        raise _IdentityError(CODE_DEPENDENCY_INVALID)
+    return unit, TOPOLOGY_SCOPE[_topology(kind, dependencies)]
+
+
+def read_current_brief_policy(  # pylint: disable=too-many-return-statements
+    root: Path,
+) -> tuple[str | None, BriefPolicy | None]:
+    """Read explicit numeric scope from the current package, or return a fixed refusal and no policy.
+
+    Only the immutable brief is compared with its existing contents.files digest. Current spec
+    bytes supply topology through the same S2 rule; unrelated working bytes need not match S1's
+    baseline. A consumer must separately bind this read to its checked current package snapshot.
+    This is not START_READY, a receipt/token check, or authentication of the customer's agreement.
+    """
+    try:
+        walked, _ = revision.tree_files(root)
+    except revision.RevisionError:
+        return CODE_UNSAFE_TARGET, None
+    if pfs.PACKAGE_MARKER not in walked:
+        return CODE_NOT_A_PACKAGE, None
+    try:
+        manifest = pfs.parse_manifest_text(walked[pfs.PACKAGE_MARKER].read_bytes().decode("utf-8"))
+        digests, findings = pfs._declared_digests(pfs.declared_files(manifest))  # pylint: disable=protected-access
+    except (OSError, ValueError):
+        return CODE_MANIFEST_UNREADABLE, None
+    except pfs._ManifestError as exc:  # pylint: disable=protected-access
+        return exc.code, None
+    if findings:
+        return findings[0].code, None
+    try:
+        brief_path = _current_brief_role_path(manifest.get("artifacts"), walked, ROLE_MIGRATION_BRIEF, BRIEF_NAME)
+        if BRIEF_NAME not in digests:
+            return CODE_ROLE_NOT_VERIFIED, None
+        raw = brief_path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != digests[BRIEF_NAME]:
+            return pfs.CODE_DIGEST_MISMATCH, None
+        unit, scope = _current_brief_context(manifest, walked)
+        code, policy = parse_brief_policy(raw.decode("utf-8"), unit, scope)
+    except _IdentityError as exc:
+        return str(exc), None
+    except (OSError, ValueError):
+        return CODE_ROLE_NOT_VERIFIED, None
+    if code is not None:
+        return code, None
+    if policy is None or policy.numeric_obligation is None:
+        return CODE_BRIEF_NUMERIC_UNKNOWN, None
+    return None, policy
 
 
 def _brief_role(facts: _Facts, topology: str) -> tuple[RoleResult, list[str]]:
@@ -1201,15 +1292,15 @@ def _oracle_records(
 # ---------------------------------------------------------------------------------------------
 
 
-def _topology(facts: _Facts) -> str:
+def _topology(kind: str, dependencies: Sequence[DeclaredDependency]) -> str:
     """What SHAPE this package is - decided from the engine's kind plus the spec's own dependencies.
 
     A datasource package that also emits a self-service report is still a datasource: kind comes from
     the engine's classification, never from the filesystem, so an auxiliary `.Report` cannot promote
     it into a workbook.
     """
-    if facts.kind == KIND_WORKBOOK:
-        return TOPOLOGY_PUBLISHED_CONSUMER if facts.declared_dependencies else TOPOLOGY_OWNED_MODEL
+    if kind == KIND_WORKBOOK:
+        return TOPOLOGY_PUBLISHED_CONSUMER if dependencies else TOPOLOGY_OWNED_MODEL
     return TOPOLOGY_STANDALONE_DATASOURCE
 
 
@@ -1347,7 +1438,7 @@ def _resolve_cohort(facts: Sequence[_Facts]) -> None:
     providers = [entry for entry in facts if entry.kind == KIND_DATASOURCE]
     consumers = [entry for entry in facts if entry.kind == KIND_WORKBOOK and entry.declared_dependencies]
     for entry in facts:
-        entry.topology = _topology(entry)
+        entry.topology = _topology(entry.kind, entry.declared_dependencies)
         try:
             _identify(entry)
             _assess_roles(entry)
@@ -1432,7 +1523,7 @@ def _required_fabric(facts: _Facts, topology: str) -> tuple[list[RoleResult], di
 
 def _assess_roles(facts: _Facts) -> None:
     """Finish local roles once, before computing provider eligibility or published edges."""
-    topology = facts.topology or _topology(facts)
+    topology = facts.topology or _topology(facts.kind, facts.declared_dependencies)
     facts.json(_declared_string(facts.artifacts, "migration_spec_schema"))
     roles: list[RoleResult] = [
         _package_scope_role(facts),
@@ -1473,7 +1564,7 @@ def _assess_roles(facts: _Facts) -> None:
 
 def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
     """Fold assessed roles and dependencies, then contextualize the already-derived source facts."""
-    topology = facts.topology or _topology(facts)
+    topology = facts.topology or _topology(facts.kind, facts.declared_dependencies)
     roles = list(facts.roles)
     for row in facts.dependencies:
         roles.append(

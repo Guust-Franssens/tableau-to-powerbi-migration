@@ -403,9 +403,11 @@ The complete brief is checked with the existing host-location and credential con
 and unsafe text is refused without copying, redacting or echoing it. Only the bytes that passed
 validation are copied, preserving the source file and its original line endings.
 
-The **single** brief TOML parser now returns a frozen, runtime-only
-`BriefPolicy(requested_scope, fallback_authorization)`. A policy header has exactly four string
-keys, with no extras or duplicates:
+The **single** brief TOML parser returns a frozen, runtime-only
+`BriefPolicy(requested_scope, fallback_authorization, numeric_obligation=None)`. Existing two-argument
+construction and valid v1 Phase-1 behavior are unchanged. `None` means **UNKNOWN numeric authority**,
+not the explicit string `none`. A v1 policy header has exactly four string keys, with no extras or
+duplicates:
 
 ```toml
 +++
@@ -416,6 +418,25 @@ fallback_authorization = "model_only_unvalidated"
 +++
 ```
 
+### Numeric-obligation authority
+
+✅ Schema `phase1-start-ready/v2` extends that same strict contract to **exactly five string keys**:
+
+```toml
++++
+schema = "phase1-start-ready/v2"
+unit = "Exact_Unit"
+scope = "model_and_report"
+fallback_authorization = "stop"
+numeric_obligation = "none"
++++
+```
+
+`numeric_obligation` is exactly `none` or `required`: respectively, an explicit commission without
+numeric comparison, or one that owes it. Neither value is a numeric result or a completion verdict.
+V2 requires the numeric field; v1 cannot acquire it as an extra field. No legacy package is upgraded
+automatically.
+
 `unit` must match exactly; `scope` must match the S2 topology (`model_only` for a datasource,
 `model_and_report` for an owned workbook, `report_only_shared_model` for a consumer).
 `fallback_authorization` is exactly `stop` or `model_only_unvalidated`. Unknown keys/schema/enums,
@@ -424,6 +445,41 @@ The opening and closing lines must be exactly `+++`; LF and CRLF are accepted wi
 the shipped brief bytes. Prefixes, suffixes, whitespace, missing or additional boundary forms
 return `brief_frontmatter_unparseable`, not inferred policy or a fallback to prose.
 The existing `brief_identity()` wrapper uses this same parser, not a second implementation.
+
+**Current package read:** `package_role_identity.read_current_brief_policy(root)` takes only the
+package root, never a receipt/request scope label, supplied policy object or numeric override. It:
+
+1. Establishes a safe no-follow boundary with `current_artifact_revision.tree_files`, including
+   ancestor, reparse-point and portable-name checks, before opening package bytes.
+2. Strictly parses the current `package-manifest.json` with `package_filesystem`'s existing JSON and
+   declaration utilities; duplicate JSON keys, unsafe/aliased declarations and malformed digests
+   refuse. The brief role must name exactly the walked `migration-brief.md`.
+3. Compares the held brief bytes with that role's existing `contents.files` digest, then passes those
+   same UTF-8 bytes through `parse_brief_policy`.
+4. Cross-checks against the manifest's unit/kind and the **current, declared** `migration-spec.json`
+   topology, using S2's existing dependency/topology rule, not a folder name or reviewer label.
+
+It returns `(None, policy)` only for a valid current v2 `none` or `required`; otherwise it returns a
+fixed refusal code and no policy. A valid v1 retains its Phase-1 fallback behavior, but this numeric
+reader returns `brief_numeric_obligation_unknown`. Identity-only, legacy and plain prose also have
+UNKNOWN numeric scope; absent, undeclared, malformed, mismatched or stale brief authority refuses.
+**None of those conditions can supply numeric `none`.**
+
+The read is deliberately **not** fresh whole-package S1 readiness: it rehashes the immutable brief,
+not unrelated model/report/spec working bytes. Their legitimate edits can stale the packaging
+baseline without changing the commissioned brief. The consuming checker must bind this read to its
+checked current working snapshot and re-establish it when that snapshot is checked again. A new
+working revision does not repair a changed brief's stale manifest digest. Phase-2 tools never rewrite
+brief/manifest policy to downgrade `required`; a commissioned rescope returns to Phase-1 packaging.
+
+The new numeric member is included in S2's existing scalar authority comparison: an issued policy
+cannot change through reconstruction, mutation or grafting fresh S1 into stale S2. No additional
+authority registry is involved. The unsigned brief/manifest prove no customer/producer authenticity,
+latest-ever history or anti-rollback property; replacing both authorities and a caller's external
+snapshot token is outside that claim. The no-follow utilities retain their documented non-adversarial
+between-syscall race limit. ❌ This slice introduces no receipt, numeric evidence or COMPLETE consumer.
+
+### Remaining S2 handoffs
 
 S2 also retains the successful dependency's **input-cohort `provider_ordinal`**, never serialized.
 Results stay in input order, including blocked roots; bind them with the supplied roots by position,

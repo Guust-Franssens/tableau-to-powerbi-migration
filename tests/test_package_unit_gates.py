@@ -719,6 +719,86 @@ def test_the_packaged_brief_carries_the_bytes_and_not_the_dispatchers_path(tmp_p
     assert str(source) not in manifest
     assert str(source.parent) not in manifest
     assert json.loads(manifest)["artifacts"]["migration_brief"] == "migration-brief.md"
+    assert (
+        json.loads(manifest)["contents"]["files"]["migration-brief.md"]
+        == hashlib.sha256(source.read_bytes()).hexdigest()
+    )
+    assert pri.read_current_brief_policy(package) == ("brief_numeric_obligation_unknown", None)
+
+
+@pytest.mark.parametrize("numeric_obligation", ["none", "required"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+def test_v2_packager_passage_preserves_validated_bytes_role_and_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, numeric_obligation: str, newline: str
+) -> None:
+    """The real producer copies its held v2 bytes even if the caller's brief changes afterwards."""
+    bundle, oracle, _objects = _bundle(tmp_path, covered=None)
+    source = _brief(tmp_path, UNIT)
+    expected = (
+        (
+            f'+++\nschema = "phase1-start-ready/v2"\nunit = "{UNIT}"\nscope = "model_and_report"\n'
+            f'fallback_authorization = "stop"\nnumeric_obligation = "{numeric_obligation}"\n+++\n\nFaithful re-creation.\n'
+        )
+        .replace("\n", newline)
+        .encode("utf-8")
+    )
+    source.write_bytes(expected)
+    assemble = pkg._assemble_unit  # pylint: disable=protected-access
+    replacement = "required" if numeric_obligation == "none" else "none"
+
+    def change_source_after_validation(*args: object, **kwargs: object) -> object:
+        source.write_bytes(expected.replace(f'"{numeric_obligation}"'.encode(), f'"{replacement}"'.encode()))
+        return assemble(*args, **kwargs)
+
+    monkeypatch.setattr(pkg, "_assemble_unit", change_source_after_validation)
+    pkg.package_unit(
+        bundle, UNIT, tmp_path / "out", oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=source
+    )
+    package = tmp_path / "out" / UNIT
+    assert source.read_bytes() != expected
+    assert (package / "migration-brief.md").read_bytes() == expected
+    manifest = json.loads((package / "package-manifest.json").read_bytes())
+    assert manifest["artifacts"]["migration_brief"] == "migration-brief.md"
+    assert manifest["contents"]["files"]["migration-brief.md"] == hashlib.sha256(expected).hexdigest()
+    assert str(source) not in json.dumps(manifest)
+    policy = pri.BriefPolicy("model_and_report", "stop", numeric_obligation)
+    assert pri.read_current_brief_policy(package) == (None, policy)
+    phase1 = pri.verify_phase1_role_identity([package])[0]
+    assert phase1.is_start_ready and phase1.brief_policy == policy
+    (package / "migration-brief.md").write_bytes(source.read_bytes())
+    assert pri.read_current_brief_policy(package) == ("package_file_digest_mismatch", None)
+
+
+@pytest.mark.parametrize(
+    ("replacement", "code"),
+    [
+        ("", "brief_policy_invalid"),
+        ("numeric_obligation = false\n", "brief_policy_invalid"),
+        ('numeric_obligation = "optional"\n', "brief_policy_invalid"),
+        ('numeric_obligation = "none"\nnumeric_obligation = "none"\n', "brief_frontmatter_unparseable"),
+    ],
+)
+def test_invalid_v2_brief_refuses_before_real_packager_assembly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str, code: str
+) -> None:
+    bundle, oracle, _objects = _bundle(tmp_path, covered=None)
+    source = _brief(tmp_path, UNIT)
+    source.write_bytes(
+        (
+            f'+++\nschema = "phase1-start-ready/v2"\nunit = "{UNIT}"\nscope = "model_and_report"\n'
+            f'fallback_authorization = "stop"\n{replacement}+++\n\nNo numeric work is needed.\n'
+        ).encode("utf-8")
+    )
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("an invalid explicit v2 brief reached package assembly")
+
+    monkeypatch.setattr(pkg, "_assemble_unit", forbidden)
+    with pytest.raises(pkg.PackagingError, match=f"^{code}$"):
+        pkg.package_unit(
+            bundle, UNIT, tmp_path / "out", oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=source
+        )
+    assert not (tmp_path / "out" / UNIT).exists()
 
 
 # --------------------------------------------------------------------------------------------
