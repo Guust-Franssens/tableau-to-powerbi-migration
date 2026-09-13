@@ -1595,7 +1595,7 @@ class PackageSpecFacts(NamedTuple):
 
 
 def _published_only_row(row: object) -> bool:
-    """A scalar sqlproxy reference, not an aggregate or a row hiding additional connection metadata."""
+    """A scalar sqlproxy reference; legacy annotations may be absent, never explicitly unknown."""
     if not isinstance(row, Mapping) or set(row) - {
         "id",
         "caption",
@@ -1626,10 +1626,17 @@ def _published_only_row(row: object) -> bool:
             or any(item is not None and not isinstance(item, str) for item in value.values())
         ):
             return False
+    luid = published.get("luid")
+    valid_luid = not luid or re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", luid
+    )
+    valid_target = connection.get("powerbi_target", "live_source") in ("live_source", "flat_file")
     if (
         connection.get("class") != "sqlproxy"
         or connection.get("mode") not in ("live", "extract")
+        or not valid_target
         or not any(isinstance(published.get(key), str) and published[key].strip() for key in ("luid", "key"))
+        or not valid_luid
     ):
         return False
     pending = [value for key, value in row.items() if key not in ("connection", "published_datasource")]
@@ -1645,26 +1652,24 @@ def _published_only_row(row: object) -> bool:
 
 
 def package_spec_facts(package_spec: object) -> PackageSpecFacts:
-    """Pure held-spec facts; the existing derivation classifies every direct leg, without I/O.
+    """Sole package source authority; strict published references have no direct database leg.
 
-    Every row reaches the canonical leg authority, including provider-shaped sqlproxy rows.
-    Published-only also requires no live/review leg or refusal. S2 owns dependency identity/permission.
+    Keep parser metadata intact. All other source sets retain the canonical direct-leg derivation;
+    self-publication metadata does not erase a datasource's own connection. S2 owns provider selection.
     """
     sources = package_spec.get("data_sources") if isinstance(package_spec, Mapping) else None
     if not isinstance(sources, list):
         return PackageSpecFacts((), False, False, False, "spec-unreadable")
+    if sources and all(_published_only_row(row) for row in sources):
+        return PackageSpecFacts((), False, False, True, None)
     keys, review, refusal = _package_spec_facts(package_spec)
-    published = [_published_only_row(row) for row in sources]
-    has_published = any(
+    direct = refusal is None and all(
         isinstance(row, Mapping)
-        and (
-            "published_datasource" in row
-            or (isinstance(row.get("connection"), Mapping) and row["connection"].get("class") == "sqlproxy")
-        )
+        and isinstance(row.get("connection", {}), Mapping)
+        and row.get("connection", {}).get("class") != "sqlproxy"
         for row in sources
     )
-    published_only = bool(sources) and all(published) and not keys and not review and refusal is None
-    return PackageSpecFacts(keys, review, not has_published and refusal is None, published_only, refusal)
+    return PackageSpecFacts(keys, review, direct, False, refusal)
 
 
 def _gate_root_live_keys(gate_root: Path) -> tuple[frozenset[str], str | None]:
@@ -1836,12 +1841,9 @@ def provider_reference(unit: str) -> str:
     return f"provider-ref:v1:sha256:{digest}"
 
 
-def _is_provider_pair(provider: object) -> bool:
-    """Validate a caller-supplied pair without normalizing its immutable assessment fields."""
-    if not isinstance(provider, tuple) or len(provider) != 2:
-        return False
-    reference, assessment = provider
-    if not _valid_provider_reference(reference) or not isinstance(assessment, DataAccessAssessment):
+def _is_data_access_assessment(assessment: object) -> bool:
+    """Reuse projection legality without replacing or normalizing the supplied assessment."""
+    if not isinstance(assessment, DataAccessAssessment):
         return False
     if not isinstance(assessment.source_keys, tuple) or not isinstance(assessment.codes, tuple):
         return False
@@ -1849,6 +1851,16 @@ def _is_provider_pair(provider: object) -> bool:
         return parse_data_access(assessment.dumps()) == assessment
     except (ValueError, TypeError, RecursionError):
         return False
+
+
+def _is_provider_pair(provider: object) -> bool:
+    """Validate one opaque reference/assessment pair, never search or normalize identities."""
+    return (
+        isinstance(provider, tuple)
+        and len(provider) == 2
+        and _valid_provider_reference(provider[0])
+        and _is_data_access_assessment(provider[1])
+    )
 
 
 def _valid_provider_reference(reference: object) -> bool:
@@ -2029,6 +2041,85 @@ def assess_data_access(  # pylint: disable=too-many-arguments
     return _assess_direct(
         gate_root, live_keys, has_review, package_data_sources, (fallback_authorization, requested_scope)
     )
+
+
+def reconcile_package_data_access(  # pylint: disable=too-many-return-statements,too-many-branches
+    assessment: DataAccessAssessment,
+    facts: PackageSpecFacts,
+    *,
+    requested_scope: str | None,
+    fallback_authorization: str | None,
+    provider: tuple[str, DataAccessAssessment] | None = None,
+) -> DataAccessAssessment:
+    """Conjoin held projection/facts/brief and one already-checked S2 provider, without I/O.
+
+    This never earns proof or repairs a projection. Accepted and pre-existing refused assessments
+    retain their exact object and ceiling. Callers check each provider against its own facts first.
+    """
+    if not _is_data_access_assessment(assessment):
+        return _cannot_establish("projection-invalid")
+    if assessment.state in ("blocked", "cannot_establish"):
+        return assessment
+    if not isinstance(facts, PackageSpecFacts):
+        return _cannot_establish("projection-invalid")
+    if assessment.state == "provider_inherited" and not facts.published_only:
+        return _cannot_establish(
+            "provider-ambiguous"
+            if facts.direct_applicable and requested_scope in DIRECT_SCOPES
+            else "projection-invalid"
+        )
+    if facts.refusal_code is not None:
+        return _cannot_establish(facts.refusal_code)
+    if facts.has_review:
+        return _assessment("blocked", codes=["unknown-target"], source_keys=facts.live_source_keys)
+    if (
+        requested_scope not in EFFECTIVE_SCOPES
+        or fallback_authorization not in FALLBACK_POLICIES
+        or assessment.effective_scope != requested_scope
+    ):
+        return _assessment("blocked", codes=["authorization-mismatch"], source_keys=facts.live_source_keys)
+    if assessment.state != "provider_inherited":
+        if not facts.direct_applicable or facts.published_only:
+            return _cannot_establish("projection-invalid")
+        if provider is not None:
+            return _cannot_establish("provider-foreign")
+        if assessment.source_keys != facts.live_source_keys:
+            return _cannot_establish("source-key-set-changed")
+        if assessment.state == "local_import_ready" and not facts.all_flat:
+            return _cannot_establish("projection-invalid")
+        if assessment.state == "authorized_model_only" and fallback_authorization != "model_only_unvalidated":
+            return _assessment("blocked", codes=["authorization-mismatch"], source_keys=facts.live_source_keys)
+        return assessment
+    if not facts.published_only or facts.direct_applicable or facts.live_source_keys:
+        return _cannot_establish("projection-invalid")
+    if requested_scope != "report_only_shared_model":
+        return _assessment("blocked", codes=["authorization-mismatch"])
+    if provider is None:
+        return _cannot_establish("provider-missing")
+    if not _is_provider_pair(provider):
+        return _cannot_establish("provider-foreign")
+    reference, supplied = provider
+    if supplied.state == "provider_inherited":
+        return _cannot_establish("provider-ambiguous")
+    if supplied.state not in DIRECT_ACCEPTED_STATES:
+        return _cannot_establish("provider-missing")
+    if supplied.state == "authorized_model_only":
+        return _assessment("blocked", codes=["provider-model-only"])
+    if (
+        assessment.provider_unit,
+        assessment.provider_state,
+        assessment.source_keys,
+        assessment.validation,
+        assessment.max_phase2_claim,
+    ) != (
+        reference,
+        supplied.state,
+        supplied.source_keys,
+        supplied.validation,
+        supplied.max_phase2_claim,
+    ):
+        return _cannot_establish("provider-foreign")
+    return assessment
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:

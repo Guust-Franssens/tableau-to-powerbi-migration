@@ -1,4 +1,4 @@
-"""Direct controls for PR #608's producer snapshots, final reseal and published-only inheritance."""
+"""Producer/binder snapshot controls and the canonical published-source/data-access conjunction."""
 
 from __future__ import annotations
 
@@ -197,6 +197,12 @@ def _binding_consumer(parent: Path, provider: Path) -> Path:
     model = json.loads((provider / "package-manifest.json").read_bytes())["artifacts"]["model"]
     relative = os.path.relpath(provider / model, root / "fabric" / "Revenue.Report").replace("\\", "/")
     root = s2.workbook_package(root, published={"luid": DS_LUID}, binding=relative)
+    spec_path = root / "migration-spec.json"
+    spec = json.loads(spec_path.read_bytes())
+    spec["data_sources"][0]["connection"].update(
+        server="published.example", database="Shared", powerbi_target="live_source"
+    )
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
     manifest = json.loads((root / "package-manifest.json").read_bytes())
     manifest["data_sources"] = {
         "parameter": None,
@@ -311,7 +317,7 @@ def test_binding_provider_refusals_do_not_recurse_or_modify_any_package(
         "wrong": (3, "binding_s2_not_clean"),
         "dirty": (1, "binding_s1_not_clean"),
         "blocked": (1, "binding_data_access_refused"),
-        "nested": (3, "binding_source_facts_mismatch"),
+        "nested": (3, "binding_provider_unresolved"),
         "stale": (1, "binding_provider_not_bound"),
     }
     assert (result["exit_code"], result["codes"]) == (expected[fault][0], [expected[fault][1]])
@@ -1081,16 +1087,25 @@ def test_published_only_rows_are_complete_before_any_inheritance(
     s2._write(consumer / "migration-spec.json", spec)
     producer._reseal(consumer)
     original_rows = copy.deepcopy(spec["data_sources"])
-    assert not pkg._published_only_sources(spec), f"published-only guard accepted {fault}"
+    assert not pkg.data_access.package_spec_facts(spec).published_only, f"canonical source facts accepted {fault}"
     assert spec["data_sources"] == original_rows, "malformed rows cannot shrink the denominator"
 
-    def never_inherit(*_args, **_kwargs):
-        pytest.fail("malformed published rows reached provider inheritance")
+    reconcile = pkg.data_access.reconcile_package_data_access
+    observed = []
 
-    monkeypatch.setattr(pkg, "_selected_data_provider", never_inherit)
+    def checked(assessment, facts, **kwargs):
+        result = reconcile(assessment, facts, **kwargs)
+        if kwargs.get("provider") is not None:
+            observed.append(result)
+            assert result.state in ("blocked", "cannot_establish"), "malformed rows passed the canonical conjunction"
+        return result
+
+    monkeypatch.setattr(pkg.data_access, "reconcile_package_data_access", checked)
     result = producer._assess_candidate(consumer, root, providers=(provider,))
-    assert result.state == "cannot_establish"
+    assert result.state in ("blocked", "cannot_establish")
     assert result.provider_unit is None and result.max_phase2_claim == "none"
+    if observed:
+        assert observed == [result]
 
 
 def test_published_metadata_without_connection_legs_is_not_mistaken_for_a_source() -> None:
@@ -1099,7 +1114,13 @@ def test_published_metadata_without_connection_legs_is_not_mistaken_for_a_source
         "data_sources": [
             {
                 "id": "published",
-                "connection": {"class": "sqlproxy", "mode": "extract", "note": "published source"},
+                "connection": {
+                    "class": "sqlproxy",
+                    "mode": "extract",
+                    "server": "published.example",
+                    "powerbi_target": "live_source",
+                    "note": "published source",
+                },
                 "published_datasource": {"key": "site/source", "id": None},
                 "tables": [{"id": "t", "name": "Rows", "source_relation": "table"}],
                 "fields": [{"name": "class", "caption": "connection", "kind": "column", "datatype": "string"}],
@@ -1107,4 +1128,202 @@ def test_published_metadata_without_connection_legs_is_not_mistaken_for_a_source
             }
         ]
     }
-    assert pkg._published_only_sources(spec)
+    assert pkg.data_access.package_spec_facts(spec).published_only
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_real_parsed_shared_provider_reaches_producer_handoff_and_binder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool
+) -> None:
+    """Use the unchanged TWB, real parser/producer and explicit cohort; no projection/source override."""
+    bundle, oracle = producer._shared_bundle(tmp_path)
+    out = tmp_path / "out"
+    reconcile = pkg.data_access.reconcile_package_data_access
+    observations = []
+    phase = ["producer"]
+
+    def recorded(assessment, facts, **kwargs):
+        result = reconcile(assessment, facts, **kwargs)
+        observations.append((phase[0], assessment, facts, kwargs, result))
+        return result
+
+    monkeypatch.setattr(pkg.data_access, "reconcile_package_data_access", recorded)
+    provider = out / producer.DS_UNIT
+    consumer = out / UNIT
+    for unit, scope in ((producer.DS_UNIT, "model_only"), (UNIT, "report_only_shared_model")):
+        brief = _brief(tmp_path, unit, scope)
+        brief_bytes = s2.numeric_brief_text(unit, scope, "required").encode("utf-8")
+        brief.write_bytes(brief_bytes)
+        command = producer._package_command(bundle, oracle, out, unit, brief)
+        if unit == UNIT:
+            command.extend(("--provider-package", str(provider)))
+        assert pkg.main(command) == 0
+        assert (out / unit / "migration-brief.md").read_bytes() == brief_bytes
+        manifest = json.loads((out / unit / "package-manifest.json").read_bytes())
+        assert manifest["construction_status"] == "ASSEMBLED"
+        assert manifest["dispatch_readiness"]["status"] == "NOT_EVALUATED"
+        assert manifest["dispatch_readiness"]["availability"] == "UNAVAILABLE"
+        assert pkg.pri.verify_s1(out / unit).integrity.is_clean
+    manifest = json.loads((consumer / "package-manifest.json").read_bytes())
+    assert (consumer / manifest["artifacts"]["asset"]).read_bytes() == (
+        Path(__file__).parent / "fixtures" / "published_datasource.twb"
+    ).read_bytes()
+    spec = json.loads((consumer / "migration-spec.json").read_bytes())
+    connection = spec["data_sources"][0]["connection"]
+    assert (connection["class"], connection["powerbi_target"]) == ("sqlproxy", "live_source")
+    expected_facts = pkg.data_access.PackageSpecFacts((), False, False, True, None)
+    assert pkg.data_access.package_spec_facts(spec) == expected_facts
+    roots = (consumer, provider) if reverse else (provider, consumer)
+    roles = pkg.pri.verify_phase1_role_identity(roots)
+    assert all(role.is_start_ready for role in roles)
+    role = roles[roots.index(consumer)]
+    assert role.brief_policy == pkg.pri.BriefPolicy("report_only_shared_model", "stop", "required")
+    assert {dependency.provider_ordinal for dependency in role.dependencies} == {roots.index(provider)}
+    handoff = role.data_access_handoff(consumer)
+    assert isinstance(handoff, pkg.pri.PackageDataAccessHandoff)
+    assert handoff.facts == expected_facts
+    assert handoff.migration_spec.content == (consumer / "migration-spec.json").read_bytes()
+    inherited = pkg.data_access.parse_data_access(handoff.data_access.content.decode("utf-8"))
+    expected_reference = (
+        "provider-ref:v1:sha256:" + hashlib.sha256(b"phase1-data-access/provider-unit/v1\0Shared_Extract").hexdigest()
+    )
+    assert inherited.to_json() == {
+        **producer.LOCAL_PROJECTION,
+        "state": "provider_inherited",
+        "provider_unit": expected_reference,
+        "provider_state": "local_import_ready",
+        "effective_scope": "report_only_shared_model",
+        "codes": ["provider-exact"],
+    }
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("the binder attempted to earn proof or reassemble the package")
+
+    monkeypatch.setattr(pkg.data_access, "assess_data_access", forbidden)
+    monkeypatch.setattr(pkg, "_assemble_unit", forbidden)
+    phase[0] = "binder"
+    provider_binding = pkg.bind_package(provider, rewrite=sdf._rewritten)
+    assert provider_binding.exit_code == 0 and provider_binding.inspection.state == "NOT_APPLICABLE"
+    before = [_files(root) for root in roots]
+    result = pkg.bind_package(consumer, rewrite=sdf._rewritten, inspect=True, provider_packages=(provider,))
+    assert (result.exit_code, result.inspection.state, result.inspection.validation) == (
+        0,
+        "NOT_APPLICABLE",
+        "NOT_APPLICABLE",
+    )
+    assert result.inspection.authority.roots == (provider, consumer)
+    assert before == [_files(root) for root in roots], "inspection must not rewrite either stored projection"
+    consumer_checks = [row for row in observations if row[1].state == "provider_inherited"]
+    assert {row[0] for row in consumer_checks} == {"producer", "binder"}
+    for _phase, assessment, facts, arguments, accepted in consumer_checks:
+        assert accepted is assessment and facts == expected_facts
+        assert arguments["provider"][0] == expected_reference
+        assert arguments["provider"][1].state == "local_import_ready"
+
+
+@pytest.mark.parametrize(
+    "state,code,exit_code",
+    [("blocked", "unknown-target", 1), ("cannot_establish", "source-key-set-changed", 3)],
+)
+def test_producer_and_binder_propagate_the_same_canonical_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, code: str, exit_code: int
+) -> None:
+    package = _binding_package(tmp_path)
+    manifest = json.loads((package / "package-manifest.json").read_bytes())
+    before = _files(package)
+    refused = pkg.data_access.parse_data_access(
+        json.dumps(
+            {
+                **producer.LOCAL_PROJECTION,
+                "state": state,
+                "validation": "not_established",
+                "effective_scope": None,
+                "max_phase2_claim": "none",
+                "codes": [code],
+            }
+        )
+    )
+    seen = []
+
+    def reject(assessment, facts, **kwargs):
+        assert assessment.state == "local_import_ready" and facts.all_flat
+        assert kwargs["requested_scope"] == "model_and_report"
+        seen.append(True)
+        return refused
+
+    monkeypatch.setattr(pkg.data_access, "reconcile_package_data_access", reject)
+    assessment, _notes = pkg._assess_package_data_access(
+        tmp_path / "bundle",
+        package,
+        manifest["data_sources"],
+        gate_root=None,
+        provider_packages=(),
+    )
+    assert assessment == refused and seen == [True]
+    result = pkg.bind_package(package, rewrite=sdf._rewritten, inspect=True)
+    assert (result.exit_code, result.codes, result.inspection) == (exit_code, ("binding_source_facts_mismatch",), None)
+    assert seen == [True, True]
+    assert _files(package) == before
+
+
+def test_binder_consumes_issued_facts_without_reparsing_or_reclassification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = _binding_package(tmp_path)
+    inputs = pkg._binding_inputs((package,))
+    before = _files(package)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("the binder reparsed or reclassified its issued handoff")
+
+    monkeypatch.setattr(pkg.pfs, "parse_manifest_text", forbidden)
+    monkeypatch.setattr(pkg.pri, "package_spec_facts", forbidden)
+    monkeypatch.setattr(pkg.data_access, "package_spec_facts", forbidden)
+    monkeypatch.setattr(pkg.data_access, "_classify_legs", forbidden)
+    pkg._binding_access(inputs.packages[-1], inputs.roles[-1], package)
+    assert _files(package) == before
+
+
+@pytest.mark.parametrize("change", ["projection-key", "connection-identity", "missing-connection"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_selected_provider_cannot_borrow_a_projection_key_from_another_root(
+    tmp_path: Path, root: Path, change: str, reverse: bool
+) -> None:
+    selected = producer._direct_provider(tmp_path / "selected")
+    other = producer._direct_provider(
+        tmp_path / "other", luid=s2.WB_LUID, key=authority.OTHER_KEY, connection=authority.OTHER
+    )
+    consumer = producer._provider_consumer(tmp_path, selected)
+    providers = (other, selected) if reverse else (selected, other)
+    baseline = producer._assess_candidate(consumer, root, providers=providers)
+    assert baseline.state == "provider_inherited" and baseline.source_keys == ("source-key:ab1baa4b3f77bb70",)
+    if change == "projection-key":
+        path = selected / "data-access.json"
+        payload = json.loads(path.read_bytes())
+        payload["source_keys"] = ["source-key:e625ce798a6d19bb"]
+    else:
+        path = selected / "migration-spec.json"
+        payload = json.loads(path.read_bytes())
+        if change == "connection-identity":
+            payload["data_sources"][0]["connection"]["server"] = "other.example"
+        else:
+            del payload["data_sources"][0]["connection"]
+    s2._write(path, payload)
+    producer._reseal(selected)
+    before = [_files(package) for package in (*providers, consumer)]
+    roles = pkg.pri.verify_phase1_role_identity((*providers, consumer))
+    assert all(role.is_start_ready for role in roles)
+    assert {dependency.provider_ordinal for dependency in roles[-1].dependencies} == {providers.index(selected)}
+    handoff = roles[providers.index(selected)].data_access_handoff(selected)
+    assert isinstance(handoff, pkg.pri.PackageDataAccessHandoff)
+    projection = pkg.data_access.parse_data_access(handoff.data_access.content.decode("utf-8"))
+    assert projection.state == "live_data_ok"
+    assert projection.source_keys != handoff.facts.live_source_keys
+    result = producer._assess_candidate(consumer, root, providers=providers)
+    assert (result.state, result.codes, result.source_keys, result.provider_unit) == (
+        "cannot_establish",
+        ("provider-foreign",),
+        (),
+        None,
+    )
+    assert before == [_files(package) for package in (*providers, consumer)]

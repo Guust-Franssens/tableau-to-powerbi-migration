@@ -61,6 +61,22 @@ LIVE_PROJECTION = {
     "source_keys": [LIVE_KEY],
     "codes": ["probe-cleared", "probe-data-ok"],
 }
+MODEL_ONLY_PROJECTION = {
+    **LIVE_PROJECTION,
+    "state": "authorized_model_only",
+    "validation": "unvalidated",
+    "max_phase2_claim": "structural_only",
+    "codes": ["brief-model-only", "human-authorize"],
+}
+PROVIDER_REF = "provider-ref:v1:sha256:c012985255180d7070f985ab17164c4c9975f518671f289d81cdcac409ece270"
+INHERITED_PROJECTION = {
+    **LIVE_PROJECTION,
+    "state": "provider_inherited",
+    "provider_unit": PROVIDER_REF,
+    "provider_state": "live_data_ok",
+    "effective_scope": "report_only_shared_model",
+    "codes": ["provider-exact"],
+}
 PUBLISHED = {
     "id": "ds",
     "connection": {"class": "sqlproxy", "mode": "live", "powerbi_target": "flat_file"},
@@ -729,12 +745,12 @@ def test_r1_blocked_s2_cannot_be_reconstructed_as_ready(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("target", ["live_source", "unknown"])
-def test_r1_sqlproxy_cohort_retains_canonical_direct_or_review_leg(tmp_path: Path, target: str) -> None:
+def test_published_row_with_direct_or_review_connection_retains_its_leg(tmp_path: Path, target: str) -> None:
     provider = with_data_access(
         datasource_package(tmp_path / "Provider", unit="Shared", luid=DS_LUID), source_rows(FLAT)
     )
     connection = {
-        "class": "sqlproxy",
+        "class": "sqlserver",
         "mode": "live",
         "server": "direct.example",
         "database": "db",
@@ -752,15 +768,15 @@ def test_r1_sqlproxy_cohort_retains_canonical_direct_or_review_leg(tmp_path: Pat
     assert all(result.is_start_ready for result in results)
     assert results[1].dependencies[0].provider_ordinal == 0
     facts = require_handoff(results[1].data_access_handoff(consumer)).facts
-    endpoint = {"class": "sqlproxy", "server": "direct.example", "database": "db", "schema": ""}
+    endpoint = {"class": "sqlserver", "server": "direct.example", "database": "db", "schema": ""}
     key = (
         "source-key:"
         + hashlib.sha256(json.dumps(endpoint, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
     )
     assert facts.live_source_keys == ((key,) if target == "live_source" else ()), (
-        "sqlproxy's canonical live key was stripped"
+        "the actual database connection's canonical live key was stripped"
     )
-    assert facts.has_review is (target == "unknown"), "sqlproxy's canonical review leg was stripped"
+    assert facts.has_review is (target == "unknown"), "the canonical review leg was stripped"
     assert facts.refusal_code is None
     assert not facts.published_only, "a provider-shaped direct/review leg was granted published-only applicability"
 
@@ -798,12 +814,15 @@ def test_r1_small_metadata_never_rehashes_unrelated_eight_mib_asset(
     assert unrelated not in held, f"{surface} small metadata access retained unrelated asset bytes"
 
 
-def test_r1_unclassified_sqlproxy_cannot_claim_published_only() -> None:
+@pytest.mark.parametrize("target", ["unknown", "unsupported", "", None])
+def test_explicit_unresolved_sqlproxy_classification_cannot_claim_published_only(target: object) -> None:
     row = copy.deepcopy(PUBLISHED)
-    del row["connection"]["powerbi_target"]
+    row["connection"].update(server="published.example", powerbi_target=target)
     facts = gate.package_spec_facts({"data_sources": [row]})
-    assert facts.refusal_code == "source-key-invalid"
     assert not facts.published_only, "published shape cannot repair canonical uncertainty"
+    assert not facts.direct_applicable
+    if target in ("unknown", "unsupported"):
+        assert facts.has_review
 
 
 def test_r1_member_read_does_not_claim_fresh_integrity_for_unrelated_content(tmp_path: Path) -> None:
@@ -964,7 +983,7 @@ def test_published_provider_applicability_uses_final_cohort_topology(
             )
         )
     canonical = gate.package_spec_facts({"data_sources": rows})
-    assert tuple(canonical) == (keys, False, False, False, None), "the one-argument canonical API must not change"
+    assert tuple(canonical) == (keys, False, True, False, None), "self-publication must not erase the direct source"
     results = pri.verify_phase1_role_identity(roots)
     assert all(result.is_start_ready for result in results)
     provider_result = results[0]
@@ -986,8 +1005,8 @@ def test_mixed_case_sqlproxy_retains_canonical_direct_applicability(
     if publication_metadata:
         rows[0]["published_datasource"] = {"luid": DS_LUID, "key": PUBLISHED_KEY}
     canonical = gate.package_spec_facts({"data_sources": rows})
-    assert tuple(canonical) == ((), False, not publication_metadata, False, None)
-    assert canonical.all_flat is (not publication_metadata)
+    assert tuple(canonical) == ((), False, True, False, None)
+    assert canonical.all_flat
     provider = with_data_access(datasource_package(tmp_path / "Provider", unit="Shared"), rows)
     roots = [provider]
     if selected:
@@ -1072,3 +1091,367 @@ def test_handoff_consistency_refusal_preserves_private_policy_and_public_shapes(
     assert set(refused.as_dict()["findings"][0]) == {"code", "detail"}
     serialized = json.dumps(refused.as_dict())
     assert "HANDOFF_PRIVATE" not in serialized and str(package) not in serialized
+
+
+@pytest.mark.parametrize("target", ["live_source", "flat_file", None])
+@pytest.mark.parametrize("repeated", [False, True])
+def test_strict_published_references_have_no_second_direct_database_leg(target: str | None, repeated: bool) -> None:
+    row = {
+        **PUBLISHED,
+        "connection": {
+            "class": "sqlproxy",
+            "mode": "live",
+            "server": "published.example",
+            "database": "db",
+            "powerbi_target": target,
+        },
+    }
+    if target is None:
+        del row["connection"]["powerbi_target"]
+    spec = {"data_sources": [copy.deepcopy(row) for _ in range(2 if repeated else 1)]}
+    original = copy.deepcopy(spec)
+    assert gate.package_spec_facts(spec) == gate.PackageSpecFacts((), False, False, True, None)
+    assert spec == original, "a reference route must not rewrite the parser's target annotation"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_published_plus_direct_keeps_every_canonical_key_in_both_orders(reverse: bool) -> None:
+    proxy = {
+        **PUBLISHED,
+        "connection": {
+            "class": "sqlproxy",
+            "mode": "live",
+            "server": "published.example",
+            "database": "db",
+            "powerbi_target": "live_source",
+        },
+    }
+    rows = [proxy, *source_rows(LIVE)]
+    if reverse:
+        rows.reverse()
+    original = copy.deepcopy(rows)
+    proxy_key = (
+        "source-key:"
+        + hashlib.sha256(b'{"class":"sqlproxy","database":"db","schema":"","server":"published.example"}').hexdigest()[
+            :16
+        ]
+    )
+    facts = gate.package_spec_facts({"data_sources": rows})
+    assert facts == gate.PackageSpecFacts(tuple(sorted((LIVE_KEY, proxy_key))), False, False, False, None)
+    assert rows == original
+
+
+@pytest.mark.parametrize(
+    "published",
+    [None, {}, {"luid": ""}, {"luid": "not-a-luid"}, {"luid": DS_LUID + " "}, {"key": " "}, {"key": []}],
+)
+def test_published_identity_must_be_structurally_valid(published: object) -> None:
+    row = {**PUBLISHED, "published_datasource": published}
+    facts = gate.package_spec_facts({"data_sources": [row]})
+    assert not facts.published_only and not facts.all_flat
+
+
+@pytest.mark.parametrize(
+    "payload,facts,fallback",
+    [
+        (LOCAL_PROJECTION, gate.PackageSpecFacts((), False, True, False, None), "stop"),
+        (
+            {**LOCAL_PROJECTION, "effective_scope": "model_and_report"},
+            gate.PackageSpecFacts((), False, True, False, None),
+            "stop",
+        ),
+        (LIVE_PROJECTION, gate.PackageSpecFacts((LIVE_KEY,), False, True, False, None), "stop"),
+        (
+            {**LIVE_PROJECTION, "effective_scope": "model_and_report"},
+            gate.PackageSpecFacts((LIVE_KEY,), False, True, False, None),
+            "stop",
+        ),
+        (
+            MODEL_ONLY_PROJECTION,
+            gate.PackageSpecFacts((LIVE_KEY,), False, True, False, None),
+            "model_only_unvalidated",
+        ),
+    ],
+)
+def test_reconcile_direct_acceptance_retains_the_original_assessment(
+    payload: dict, facts: gate.PackageSpecFacts, fallback: str
+) -> None:
+    assessment = gate.parse_data_access(json.dumps(payload))
+    result = gate.reconcile_package_data_access(
+        assessment, facts, requested_scope=payload["effective_scope"], fallback_authorization=fallback
+    )
+    assert result is assessment
+    assert result.to_json() == payload
+
+
+@pytest.mark.parametrize(
+    "state,codes,keys",
+    [
+        ("blocked", ["marker-only", "unknown-target"], [LIVE_KEY]),
+        ("cannot_establish", ["audit-malformed", "source-key-set-changed"], []),
+    ],
+)
+def test_reconcile_preserves_preexisting_refusals_before_other_inputs(
+    state: str, codes: list[str], keys: list[str]
+) -> None:
+    assessment = gate.parse_data_access(
+        json.dumps(
+            {
+                **LOCAL_PROJECTION,
+                "state": state,
+                "source_keys": keys,
+                "codes": codes,
+                "validation": "not_established",
+                "effective_scope": None,
+                "max_phase2_claim": "none",
+            }
+        )
+    )
+    result = gate.reconcile_package_data_access(
+        assessment,
+        gate.PackageSpecFacts((), True, False, False, "spec-unreadable"),
+        requested_scope=None,
+        fallback_authorization=None,
+    )
+    assert result is assessment and result.codes == tuple(codes)
+
+
+@pytest.mark.parametrize(
+    "fault,state,code",
+    [
+        ("spec", "cannot_establish", "spec-unreadable"),
+        ("identity", "cannot_establish", "source-key-invalid"),
+        ("review", "blocked", "unknown-target"),
+        ("inapplicable", "cannot_establish", "projection-invalid"),
+        ("published", "cannot_establish", "projection-invalid"),
+        ("keys", "cannot_establish", "source-key-set-changed"),
+        ("local-over-live", "cannot_establish", "source-key-set-changed"),
+        ("live-over-local", "cannot_establish", "source-key-set-changed"),
+        ("scope-absent", "blocked", "authorization-mismatch"),
+        ("scope-wrong", "blocked", "authorization-mismatch"),
+        ("fallback-absent", "blocked", "authorization-mismatch"),
+        ("model-only-stop", "blocked", "authorization-mismatch"),
+        ("unexpected-provider", "cannot_establish", "provider-foreign"),
+    ],
+)
+def test_reconcile_direct_consistency_refusals_use_existing_codes(fault: str, state: str, code: str) -> None:
+    facts = gate.PackageSpecFacts((LIVE_KEY,), False, True, False, None)
+    payload, scope, fallback, provider = dict(LIVE_PROJECTION), "model_only", "stop", None
+    if fault in ("spec", "identity"):
+        facts = facts._replace(refusal_code="spec-unreadable" if fault == "spec" else "source-key-invalid")
+    elif fault == "review":
+        facts = facts._replace(has_review=True)
+    elif fault in ("inapplicable", "published"):
+        facts = facts._replace(direct_applicable=False, published_only=fault == "published")
+    elif fault == "keys":
+        payload["source_keys"] = [OTHER_KEY]
+    elif fault == "local-over-live":
+        payload = dict(LOCAL_PROJECTION)
+    elif fault == "live-over-local":
+        facts = facts._replace(live_source_keys=())
+    elif fault.startswith("scope-"):
+        scope = None if fault == "scope-absent" else "model_and_report"
+    elif fault == "fallback-absent":
+        fallback = None
+    elif fault == "model-only-stop":
+        payload = dict(MODEL_ONLY_PROJECTION)
+    else:
+        provider = (PROVIDER_REF, gate.parse_data_access(json.dumps(LIVE_PROJECTION)))
+    assessment = gate.parse_data_access(json.dumps(payload))
+    assert assessment.state in gate.DIRECT_ACCEPTED_STATES, "this is a consistency test, not parser rejection"
+    result = gate.reconcile_package_data_access(
+        assessment, facts, requested_scope=scope, fallback_authorization=fallback, provider=provider
+    )
+    assert (result.state, result.codes, result.validation, result.max_phase2_claim) == (
+        state,
+        (code,),
+        "not_established",
+        "none",
+    )
+    assert gate.parse_data_access(result.dumps()) == result
+
+
+@pytest.mark.parametrize("local", [False, True])
+def test_reconcile_inherits_only_the_exact_canonically_checked_direct_provider(local: bool) -> None:
+    payload = LOCAL_PROJECTION if local else LIVE_PROJECTION
+    keys = () if local else (LIVE_KEY,)
+    supplied = gate.parse_data_access(json.dumps(payload))
+    checked = gate.reconcile_package_data_access(
+        supplied,
+        gate.PackageSpecFacts(keys, False, True, False, None),
+        requested_scope="model_only",
+        fallback_authorization="stop",
+    )
+    assert checked is supplied
+    assessment = gate.parse_data_access(
+        json.dumps({**INHERITED_PROJECTION, "provider_state": payload["state"], "source_keys": list(keys)})
+    )
+    result = gate.reconcile_package_data_access(
+        assessment,
+        gate.PackageSpecFacts((), False, False, True, None),
+        requested_scope="report_only_shared_model",
+        fallback_authorization="stop",
+        provider=(PROVIDER_REF, checked),
+    )
+    assert result is assessment
+    assert (result.source_keys, result.validation, result.max_phase2_claim) == (keys, "validated", "data_validated")
+
+
+@pytest.mark.parametrize(
+    "fault,state,code",
+    [
+        ("missing", "cannot_establish", "provider-missing"),
+        ("multiple", "cannot_establish", "provider-foreign"),
+        ("token", "cannot_establish", "provider-foreign"),
+        ("provider-state", "cannot_establish", "provider-foreign"),
+        ("keys", "cannot_establish", "provider-foreign"),
+        ("recursive", "cannot_establish", "provider-ambiguous"),
+        ("provider-blocked", "cannot_establish", "provider-missing"),
+        ("provider-cannot", "cannot_establish", "provider-missing"),
+        ("provider-model-only", "blocked", "provider-model-only"),
+        ("direct-leg", "cannot_establish", "projection-invalid"),
+        ("not-published", "cannot_establish", "projection-invalid"),
+        ("review", "blocked", "unknown-target"),
+        ("scope", "blocked", "authorization-mismatch"),
+        ("fallback-absent", "blocked", "authorization-mismatch"),
+    ],
+)
+def test_reconcile_provider_consistency_refusals_never_strengthen_the_ceiling(
+    fault: str, state: str, code: str
+) -> None:
+    facts = gate.PackageSpecFacts((), False, False, True, None)
+    payload, supplied = dict(INHERITED_PROJECTION), dict(LIVE_PROJECTION)
+    reference, fallback = PROVIDER_REF, "stop"
+    if fault == "token":
+        reference = "provider-ref:v1:sha256:" + "f" * 64
+    elif fault == "provider-state":
+        supplied = dict(LOCAL_PROJECTION)
+    elif fault == "keys":
+        supplied["source_keys"] = [OTHER_KEY]
+    elif fault == "recursive":
+        supplied = dict(INHERITED_PROJECTION)
+    elif fault.startswith("provider-b") or fault == "provider-cannot":
+        supplied.update(
+            state="blocked" if fault == "provider-blocked" else "cannot_establish",
+            source_keys=[],
+            validation="not_established",
+            effective_scope=None,
+            max_phase2_claim="none",
+            codes=["probe-no-credential" if fault == "provider-blocked" else "audit-missing"],
+        )
+    elif fault == "provider-model-only":
+        supplied = dict(MODEL_ONLY_PROJECTION)
+    elif fault == "direct-leg":
+        facts = facts._replace(live_source_keys=(LIVE_KEY,))
+    elif fault == "not-published":
+        facts = facts._replace(published_only=False)
+    elif fault == "review":
+        facts = facts._replace(has_review=True)
+    elif fault == "scope":
+        payload["effective_scope"] = "model_only"
+    elif fault == "fallback-absent":
+        fallback = None
+    provider = (reference, gate.parse_data_access(json.dumps(supplied)))
+    if fault == "missing":
+        provider = None
+    elif fault == "multiple":
+        provider = [provider, provider]
+    assessment = gate.parse_data_access(json.dumps(payload))
+    assert assessment.state == "provider_inherited", "every wire control must pass the existing parser"
+    result = gate.reconcile_package_data_access(
+        assessment,
+        facts,
+        requested_scope=payload["effective_scope"],
+        fallback_authorization=fallback,
+        provider=provider,
+    )
+    assert (result.state, result.codes) == (state, (code,))
+    assert (result.validation, result.max_phase2_claim) == ("not_established", "none")
+    assert assessment.to_json() == payload
+    assert gate.parse_data_access(result.dumps()) == result
+
+
+def test_reconcile_has_no_filesystem_audit_classification_or_brief_parser_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assessment = gate.parse_data_access(json.dumps(INHERITED_PROJECTION))
+    supplied = gate.parse_data_access(json.dumps(LIVE_PROJECTION))
+    facts = gate.PackageSpecFacts((), False, False, True, None)
+    assert tuple(inspect.signature(gate.reconcile_package_data_access).parameters) == (
+        "assessment",
+        "facts",
+        "requested_scope",
+        "fallback_authorization",
+        "provider",
+    )
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("the consistency conjunction acquired another authority or performed I/O")
+
+    for name in (
+        "_read_audit_trail",
+        "_audit_entries",
+        "_classify_legs",
+        "package_spec_facts",
+        "load_bundle",
+        "assess_data_access",
+        "read_data_access",
+        "authorize",
+        "clear_block",
+        "_audit",
+        "verify",
+    ):
+        monkeypatch.setattr(gate, name, forbidden)
+    monkeypatch.setattr(pri, "parse_brief_policy", forbidden)
+    with monkeypatch.context() as io_patch:
+        io_patch.setattr("builtins.open", forbidden)
+        for name in ("open", "read_bytes", "read_text", "write_bytes", "write_text", "stat", "lstat"):
+            io_patch.setattr(Path, name, forbidden)
+        result = gate.reconcile_package_data_access(
+            assessment,
+            facts,
+            requested_scope="report_only_shared_model",
+            fallback_authorization="stop",
+            provider=(PROVIDER_REF, supplied),
+        )
+    assert result is assessment
+
+
+@pytest.mark.parametrize("field,value", [("validation", "unvalidated"), ("max_phase2_claim", "structural_only")])
+def test_reconcile_does_not_repair_an_illegal_assessment(field: str, value: str) -> None:
+    parsed = gate.parse_data_access(json.dumps(LIVE_PROJECTION))
+    invalid = parsed._replace(**{field: value})
+    result = gate.reconcile_package_data_access(
+        invalid,
+        gate.PackageSpecFacts((LIVE_KEY,), False, True, False, None),
+        requested_scope="model_only",
+        fallback_authorization="stop",
+    )
+    assert (result.state, result.codes) == ("cannot_establish", ("projection-invalid",))
+    assert getattr(invalid, field) == value
+
+
+@pytest.mark.parametrize("scope", ["model_only", "model_and_report"])
+def test_inherited_projection_cannot_be_its_own_direct_provider(scope: str) -> None:
+    facts = gate.package_spec_facts({"data_sources": source_rows(LIVE)})
+    assert facts.live_source_keys == (LIVE_KEY,) and facts.direct_applicable
+    assessment = gate.parse_data_access(json.dumps({**INHERITED_PROJECTION, "effective_scope": scope}))
+    result = gate.reconcile_package_data_access(assessment, facts, requested_scope=scope, fallback_authorization="stop")
+    assert (result.state, result.codes) == ("cannot_establish", ("provider-ambiguous",))
+
+
+def test_legacy_published_reference_cannot_hide_an_additional_direct_leg() -> None:
+    proxy = copy.deepcopy(PUBLISHED)
+    del proxy["connection"]["powerbi_target"]
+    spec = {"data_sources": [proxy]}
+    assessment = gate.parse_data_access(json.dumps(INHERITED_PROJECTION))
+    provider = (PROVIDER_REF, gate.parse_data_access(json.dumps(LIVE_PROJECTION)))
+    policy = {"requested_scope": "report_only_shared_model", "fallback_authorization": "stop", "provider": provider}
+    assert gate.reconcile_package_data_access(assessment, gate.package_spec_facts(spec), **policy) is assessment
+    spec["data_sources"].extend(source_rows(LIVE))
+    before = copy.deepcopy(spec)
+    facts = gate.package_spec_facts(spec)
+    assert not facts.published_only and facts.refusal_code == "source-key-invalid"
+    result = gate.reconcile_package_data_access(assessment, facts, **policy)
+    assert (result.state, result.codes) == ("cannot_establish", ("projection-invalid",))
+    assert facts.refusal_code == "source-key-invalid" and spec == before
