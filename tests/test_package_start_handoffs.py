@@ -24,6 +24,7 @@ from test_package_role_identity import (
     PUBLISHED_KEY,
     WB_LUID,
     datasource_package,
+    numeric_brief_text,
     pri,
     seal,
     workbook_package,
@@ -824,6 +825,7 @@ def test_r1_member_read_does_not_claim_fresh_integrity_for_unrelated_content(tmp
         ("source_identity", "revision", "HANDOFF_PRIVATE_REVISION"),
         ("brief_policy", "requested_scope", "model_and_report"),
         ("brief_policy", "fallback_authorization", "model_only_unvalidated"),
+        ("brief_policy", "numeric_obligation", "none"),
     ],
 )
 def test_issued_s2_binds_each_source_and_brief_scalar(tmp_path: Path, member: str, field: str, value: str) -> None:
@@ -851,15 +853,58 @@ def test_issued_s2_preserves_absent_brief_policy(tmp_path: Path) -> None:
     assert_refusal(original.data_access_handoff(package), "package_member_not_verified")
 
 
-def test_fresh_s1_cannot_renew_stale_s2_by_grafting_both_integrity_references(tmp_path: Path) -> None:
+@pytest.mark.parametrize("numeric_obligation,replacement", [("required", "none"), ("none", "required")])
+@pytest.mark.parametrize("change", ["scalar", "policy", "reconstruction"])
+def test_issued_s2_numeric_scope_cannot_change(
+    tmp_path: Path, numeric_obligation: str, replacement: str, change: str
+) -> None:
+    package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(FLAT))
+    manifest = json.loads((package / "package-manifest.json").read_bytes())
+    (package / "migration-brief.md").write_bytes(
+        numeric_brief_text(manifest["unit"], "model_only", numeric_obligation).encode("utf-8")
+    )
+    seal(package, **manifest)
+    original = pri.verify_phase1_role_identity([package])[0]
+    assert original.brief_policy.numeric_obligation == numeric_obligation
+    require_handoff(original.data_access_handoff(package))
+    if change == "scalar":
+        object.__setattr__(original.brief_policy, "numeric_obligation", replacement)
+        changed = original
+    elif change == "policy":
+        object.__setattr__(original, "brief_policy", replace(original.brief_policy, numeric_obligation=replacement))
+        changed = original
+    else:
+        changed = replace(original, brief_policy=replace(original.brief_policy, numeric_obligation=replacement))
+    assert changed.is_start_ready and changed.brief_policy.numeric_obligation == replacement
+    assert_refusal(changed.data_access_handoff(package), "package_member_not_verified")
+    if change == "reconstruction":
+        require_handoff(original.data_access_handoff(package))
+
+
+@pytest.mark.parametrize(
+    "field,before_value,after_value",
+    [
+        ("fallback_authorization", "stop", "model_only_unvalidated"),
+        ("numeric_obligation", "required", "none"),
+    ],
+)
+def test_fresh_s1_cannot_renew_stale_s2_by_grafting_both_integrity_references(
+    tmp_path: Path, field: str, before_value: str, after_value: str
+) -> None:
     package = with_data_access(datasource_package(tmp_path / "Source"), source_rows(LIVE), LIVE_PROJECTION)
+    if field == "numeric_obligation":
+        manifest = json.loads((package / "package-manifest.json").read_bytes())
+        (package / "migration-brief.md").write_bytes(
+            numeric_brief_text(manifest["unit"], "model_only", before_value).encode("utf-8")
+        )
+        seal(package, **manifest)
     stale = pri.verify_phase1_role_identity([package])[0]
     held = require_handoff(stale.data_access_handoff(package))
     wrapper, snapshot = stale.verified, stale._data_access_snapshot
     issued_integrity = wrapper.integrity
     brief = package / "migration-brief.md"
     before = brief.read_bytes()
-    after = before.replace(b'fallback_authorization = "stop"', b'fallback_authorization = "model_only_unvalidated"')
+    after = before.replace(f'{field} = "{before_value}"'.encode(), f'{field} = "{after_value}"'.encode())
     assert after != before
     brief.write_bytes(after)
     seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
@@ -871,11 +916,11 @@ def test_fresh_s1_cannot_renew_stale_s2_by_grafting_both_integrity_references(tm
     object.__setattr__(wrapper, "integrity", fresh_s1.integrity)
     object.__setattr__(snapshot, "integrity", fresh_s1.integrity)
     assert stale.verified is wrapper and stale._data_access_snapshot is snapshot
-    assert stale.brief_policy.fallback_authorization == "stop"
+    assert getattr(stale.brief_policy, field) == before_value
     assert_refusal(stale.data_access_handoff(package), "package_member_not_verified")
 
     renewed = pri.verify_phase1_role_identity([package], verified=[fresh_s1])[0]
-    assert renewed.is_start_ready and renewed.brief_policy.fallback_authorization == "model_only_unvalidated"
+    assert renewed.is_start_ready and getattr(renewed.brief_policy, field) == after_value
     assert renewed.verified.integrity is not fresh_s1.integrity
     assert require_handoff(renewed.data_access_handoff(package)).facts.live_source_keys == (LIVE_KEY,)
 

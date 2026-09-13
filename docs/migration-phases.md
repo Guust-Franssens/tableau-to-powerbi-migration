@@ -201,10 +201,30 @@ without one is blocked by the entry gate.
 One `--brief` requires exactly one selected unit; run packaging once per unit with its own brief.
 Typed unit/scope and the whole brief's host-location/credential containment are checked before
 assembly. Unsafe text is refused, not redacted or echoed, and the copy uses the exact validated bytes.
-The policy header requires exactly `schema`, `unit`, `scope`, `fallback_authorization` (all strings;
-schema `phase1-start-ready/v1`, fallback `stop` or `model_only_unvalidated`), with unit and topology
-scope exact. Legacy/plain/missing policy yields `brief_policy_not_parsed` and a non-accepted
-`data-access.json`; invalid explicit policy refuses before assembly.
+The `phase1-start-ready/v1` policy header requires exactly `schema`, `unit`, `scope`,
+`fallback_authorization`, all strings. Its Phase-1 behavior is unchanged; it has **UNKNOWN numeric
+authority**, never an inferred `none`. The `phase1-start-ready/v2` header requires exactly those four
+string keys **plus** `numeric_obligation`, whose only values are `none` and `required`. Both versions
+require exact unit/topology scope and fallback `stop` or `model_only_unvalidated`. Duplicate boundaries
+or keys, malformed TOML, unknown keys/schema/values, wrong types and identity/scope mismatches refuse;
+invalid explicit policy never falls back to prose. Legacy/plain/missing policy still yields
+`brief_policy_not_parsed` and a non-accepted `data-access.json`. No package is automatically upgraded.
+
+✅ **Numeric-scope authority is package-bound, not a reviewer label.**
+`package_role_identity.read_current_brief_policy(root)` uses the existing no-follow working-tree
+walk, strictly reads the current manifest, and requires `artifacts.migration_brief` to declare exactly
+`migration-brief.md`. Its held bytes must match the existing `contents.files` digest and pass the
+same brief parser against the package's current unit/kind and declared spec topology. The reader
+returns a v2 policy or a fixed refusal with no policy; v1/legacy/plain/absent or malformed authority
+cannot become `none`. Its numeric value also participates in S2's existing issued-state comparison,
+so reconstruction or mutation cannot change an issued handoff's scope.
+
+This is **not a fresh whole-package S1 check**: legitimate model/report working edits do not make an
+unchanged brief stale merely because their packaging-time digests changed. Changing the brief alone
+does fail its independent digest check. Consumers must separately bind this current read to their
+checked package snapshot; no receipt, numeric result or COMPLETE predicate is introduced here.
+The unsigned brief/manifest do not authenticate the customer's agreement. Full v1/v2 examples and
+limits: [the brief contract](reference-readiness.md#numeric-obligation-authority).
 
 **Data-access producer (#562):** selected datasource units publish first, then workbooks, sorted
 within each phase; the requested denominator and every outcome bucket are unchanged. Providers are

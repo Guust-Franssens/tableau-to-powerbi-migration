@@ -322,13 +322,61 @@ digest, and freshly reads only spec/projection metadata through S1 without repar
 These capabilities and fields are nonserialized. The future consumer must use
 `parse_data_access()` on those held bytes; no audit read, reprobe or final data-access fold is added here.
 
+### Current packaged numeric-scope authority (#363)
+
+The existing `package_role_identity.parse_brief_policy` parser accepts a versioned v2 brief with
+**exactly five string keys**:
+
+```toml
++++
+schema = "phase1-start-ready/v2"
+unit = "Exact_Unit"
+scope = "model_and_report"
+fallback_authorization = "stop"
+numeric_obligation = "none"
++++
+```
+
+`numeric_obligation` accepts only `none` or `required`; these describe commissioned scope, not a
+numeric result. Unit and topology scope must match exactly. Fallback remains `stop` or
+`model_only_unvalidated`. Valid `phase1-start-ready/v1` retains its four-key Phase-1 behavior but has
+**UNKNOWN numeric authority for Phase 2**, as do absent, identity-only, plain and legacy briefs.
+Missing numeric authority never becomes `none`. Duplicate keys/boundaries, malformed TOML, unknown
+keys/schema/values, wrong types and identity/scope mismatches refuse without falling back to prose.
+No package is automatically upgraded or given a numeric default.
+
+The frozen `BriefPolicy(requested_scope, fallback_authorization, numeric_obligation=None)` preserves
+two-argument construction. Its numeric member is included in the existing S2 issued-state comparison;
+reconstruction, mutation or fresh-S1 grafting cannot change an issued handoff's numeric scope.
+
+`package_role_identity.read_current_brief_policy(root)` is the narrow **package-bound current read**:
+the existing no-follow working-tree utilities establish the boundary before package bytes open;
+strict current manifest/declaration parsing requires `artifacts.migration_brief` to name exactly the
+walked `migration-brief.md`, with a valid existing `contents.files` digest. The held brief bytes must
+match that digest and those same UTF-8 bytes pass through the shared parser, checked against the
+manifest's unit/kind and current declared spec topology using S2's existing rule. It accepts no
+caller policy document, scope override, receipt label or environment switch.
+
+The reader returns `(None, policy)` only for current valid v2 `none` or `required`; every unknown or
+refused case returns a fixed code and no policy. Valid v1 returns `brief_numeric_obligation_unknown`
+here without losing its Phase-1 fallback behavior. This is **not fresh whole-package S1 readiness**:
+legitimate model/report/spec working edits need not match their packaging baseline, while a changed
+brief alone fails its independent digest check. The future consumer must separately bind this read
+to its checked current snapshot; a new receipt token cannot repair a stale brief digest.
+
+❌ **No COMPLETE claim or consumer is introduced.** R1 receipt-v3 remains neutral and does not copy
+or establish numeric scope; no producer/reviewer override, numeric result or numeric-coverage relaxation
+is added. Recommissioning scope returns to Phase-1 packaging, not a Phase-2 rewrite. The unsigned
+brief/manifest do not authenticate customer agreement, producer identity or latest-ever history.
+Detailed contract and limits: [numeric-obligation authority](../docs/reference-readiness.md#numeric-obligation-authority).
+
 ### Package data-access producer (#562)
 
 Each new package declares and S1-hashes a strict `data-access.json`, including blocked/cannot-establish
-states. The single brief parser requires exactly four string policy fields:
-`schema = "phase1-start-ready/v1"`, exact `unit`, topology-exact `scope`, and
-`fallback_authorization = "stop"` or `"model_only_unvalidated"`. Plain/legacy/missing policy remains
-`brief_policy_not_parsed`, never inferred approval. The validated brief bytes are copied unchanged.
+states. The single brief parser above accepts v1's four string policy fields or v2's five, retaining
+the same exact unit, topology scope and fallback rules. Plain/legacy/missing policy remains
+`brief_policy_not_parsed`, never inferred approval or numeric `none`. The existing packager copies
+the validated brief bytes unchanged and declares their canonical role and digest.
 Only exact opening/closing `+++` lines are policy boundaries (LF and CRLF supported); malformed or
 extra boundaries return `brief_frontmatter_unparseable`.
 
