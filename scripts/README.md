@@ -281,19 +281,45 @@ its walked path and validates that row's basename/path/digest; ambiguous rows or
 This section supersedes the legacy exit/status vocabulary embedded in the long `package_unit.py`
 catalog row above; its historical construction, containment and attribution evidence remains valid.
 
-`package_unit.py` is inherently assembly-only before #622. `--assemble-only` is an explicit alias
-and status marker for that existing behavior, not a second construction path. Human output, the
-batch JSON and every package manifest use **ASSEMBLED** only when a diagnostic package directory was
-constructed; failures, edit refusals, unassessable inputs and unattempted requests are **BLOCKED**.
-Totals always use the original requested denominator, and any BLOCKED request makes the command
-nonzero while preserving ASSEMBLED siblings. A missing working copy, non-self-contained package,
-unbound data path or absent oracle remains ASSEMBLED diagnostic output.
+`package_unit.py` is a construction-only command. `--assemble-only` is an explicit alias and status
+marker for that behavior, not a second construction path. **For invocations admitted past the
+existing CLI brief checks**, each original requested occurrence has one constructor-owned terminal
+outcome: **ASSEMBLED** or **BLOCKED**. Repeated requests, duplicate engine identities and kind
+collisions retain their multiplicity; filtering never shrinks the denominator.
+
+**ASSEMBLED proves this attempt's exact candidate** at the canonical final location: native directory
+identity and actual spelling, held candidate bytes, final integrity, and no competing discoverable
+transaction marker. An earlier sibling survives a later NTFS alias request; distinct native objects
+are not merged because Unicode `casefold()` agrees. An unchanged prior package, retired-only output
+or uncertain authority is not this occurrence's successful construction. Failures, edit refusals,
+unassessable inputs and unattempted admitted occurrences are BLOCKED. Any BLOCKED occurrence keeps
+the command nonzero while preserving valid ASSEMBLED siblings. A missing working copy,
+non-self-contained package, unbound data path or absent oracle remains diagnostic output, not an
+independent construction failure.
 
 The legacy ordered `units` / `failed` / `refused` / `unaccounted` JSON buckets and their totals
-remain present, explicitly marked `construction_only`; `construction` is the single ASSEMBLED /
-BLOCKED projection over them. `units` and its projection preserve provider-first publication order.
+remain present, explicitly marked `construction_only`; they and the `construction` projection derive
+from terminal occurrence slots, not independently appended outcomes. `units` and its projection
+preserve provider-first publication order. A constructor's completed outcome survives post-return,
+post-slot and provider-bookkeeping interruptions; later unattempted occurrences remain named.
 The legacy manifest `packaged` boolean remains an engine-working-copy indicator only, with adjacent
 `packaged_semantics`; it is not a success label.
+
+**ASSEMBLED can coexist with a cleanup finding, never a clean exit.** If the exact final candidate
+is verified and retained scratch is proved nondiscoverable, its directory may remain ASSEMBLED while
+`cleanup_findings` explains the nonzero result. This does not add a second raw failure row for the
+same occurrence. A competing or unassessable marker prevents ASSEMBLED. Ordinary edit refusals retain
+exit 3, modeled construction/cleanup failures use 5, and cannot-assess, accounting and interruption
+cases retain exit 6 and their precedence; legacy exits 1 and 4 are not repurposed. Diagnostics retain
+typed input roles/vetted basenames and UTF-16 budget measurements, not arbitrary exception text or
+host paths.
+
+**Brief admission is unchanged in this partial #614 correction.** A missing/non-file supplied brief
+or one brief supplied to a multi-unit command is still an argparse usage error, `SystemExit(2)`,
+before `--out` is created. Valid single-unit brief bytes and scope/privacy checks are unchanged.
+Rejected brief invocations do not enter this construction fold or replace stale JSON; the remaining
+shared/invalid-brief occurrence-accounting and report-only write policy are explicitly deferred to
+the second slice. This slice does not close #614.
 
 **ASSEMBLED is never START_READY.** Output records dispatch readiness as unavailable and
 `NOT_EVALUATED`; #622 and the final #562 consumer own that later decision. The command creates no
