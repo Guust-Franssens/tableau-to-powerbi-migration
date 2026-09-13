@@ -5050,6 +5050,173 @@ def test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_block
     assert '"status": "packaged"' not in report.read_text(encoding="utf-8").casefold()
 
 
+def test_construction_keeps_unicode_casefold_distinct_native_directories(tmp_path: Path) -> None:
+    """Equal Python casefold keys are not evidence of one filesystem object."""
+    units = ["Strasse", "Straße"]
+    assert units[0].casefold() == units[1].casefold()
+    bundle = tmp_path / "bundle"
+    write_engine_report(bundle, workbooks=units)
+    report = tmp_path / "unicode.json"
+    out = _out(tmp_path)
+
+    assert pkg.main(["--bundle", str(bundle), "--out", str(out), "--json", str(report)]) == 0
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["construction"]["totals"] == {"requested": 2, "assembled": 2, "blocked": 0}
+    assert not (out / units[0]).samefile(out / units[1])
+    assert sorted(path.name for path in out.iterdir()) == units
+    assert all(json.loads((out / unit / pkg.MANIFEST_NAME).read_bytes())["unit"] == unit for unit in units)
+
+
+def _native_short_name(path: Path) -> str:
+    """Obtain an actual Windows alias; API errors are fixture failures, not skips."""
+    import ctypes  # pylint: disable=import-outside-toplevel
+    from ctypes import wintypes  # pylint: disable=import-outside-toplevel
+
+    get_short = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+    get_short.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    get_short.restype = wintypes.DWORD
+    size = get_short(str(path), None, 0)
+    if not size:
+        raise ctypes.WinError(ctypes.get_last_error())
+    buffer = ctypes.create_unicode_buffer(size)
+    written = get_short(str(path), buffer, size)
+    assert 0 < written < size, "GetShortPathNameW did not return a complete native witness"
+    return Path(buffer.value).name
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")
+def test_construction_blocks_a_later_real_short_alias_without_overwriting_its_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The alias is learned natively, then witnessed again after the real production rename."""
+    provider = "Provider_Long_Native_Unit"
+    out = _out(tmp_path)
+    staged = pkg.staging_dir(out, provider)
+    witness = out / provider
+    witness.mkdir(parents=True)
+    alias = _native_short_name(witness)
+    if alias == witness.name:
+        witness.rmdir()
+        pytest.skip("8.3 name generation is disabled on this volume")
+    witness.rmdir()
+    assert alias != provider and not pkg.is_reserved_packaging_name(alias)
+    bundle = tmp_path / "bundle"
+    write_engine_report(bundle, workbooks=[alias], datasources=[provider])
+    rename = pkg._rename_retrying  # pylint: disable=protected-access
+    witnessed: list[bytes] = []
+
+    def publish(source: Path, destination: Path) -> None:
+        rename(source, destination)
+        if source == staged and destination == out / provider:
+            assert _native_short_name(destination) == alias, "the predicted alias did not materialize"
+            assert destination.samefile(out / alias), "the native witness must select the same directory"
+            witnessed.append((destination / pkg.MANIFEST_NAME).read_bytes())
+
+    monkeypatch.setattr(pkg, "_rename_retrying", publish)
+    report = tmp_path / "alias.json"
+    assert pkg.main(["--bundle", str(bundle), "--out", str(out), "--json", str(report)]) != 0
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert len(witnessed) == 1, "the test must reach real construction and publication"
+    assert payload["construction"]["totals"] == {"requested": 2, "assembled": 1, "blocked": 1}
+    assert [row["unit"] for row in payload["units"]] == [provider]
+    assert [(row["unit"], row["reason_code"]) for row in payload["failed"]] == [(alias, pkg.IDENTITY_DESTINATION_ALIAS)]
+    assert (out / provider / pkg.MANIFEST_NAME).read_bytes() == witnessed[0]
+    assert [path.name for path in out.iterdir()] == [provider]
+    assert cmp.discover_package_roots(bundle, out) == [out / provider]
+
+
+@pytest.mark.parametrize("variant", ["engine-duplicate", "request-duplicate", "kind-collision", "unreadable"])
+def test_brief_refusal_serializes_every_original_occurrence_and_replaces_stale_json(
+    tmp_path: Path, variant: str
+) -> None:
+    """Brief validation cannot escape occurrence accounting through argparse or a filtered list."""
+    bundle, oracle = _bundle(tmp_path)
+    selected: list[str] = []
+    expected = [UNIT, UNIT]
+    if variant == "engine-duplicate":
+        write_engine_report(bundle, workbooks=expected)
+    elif variant == "kind-collision":
+        write_engine_report(bundle, workbooks=[UNIT], datasources=[UNIT])
+    elif variant == "request-duplicate":
+        selected = ["--unit", UNIT, "--unit", UNIT]
+    else:
+        expected = [UNIT]
+    brief = tmp_path / "migration-brief.md"
+    if variant != "unreadable":
+        brief.write_text("invalid shared brief", encoding="utf-8")
+    report = tmp_path / "brief-refused.json"
+    report.write_text('{"stale": "ASSEMBLED"}', encoding="utf-8")
+
+    code = _batch_main(tmp_path, bundle, oracle, report, "--brief", str(brief), *selected)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert code != 0 and "stale" not in payload
+    assert payload["requested"] == expected
+    assert payload["construction"]["totals"] == {"requested": len(expected), "assembled": 0, "blocked": len(expected)}
+    assert [row["unit"] for row in payload["failed"]] == expected
+    assert [row["unit"] for row in payload["construction"]["blocked"]] == expected
+    assert not list(_out(tmp_path).rglob(pkg.MANIFEST_NAME))
+
+
+def test_constructor_return_interrupt_preserves_its_terminal_occurrence_and_stops_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The caller cannot turn a completed constructor into a second, failed raw outcome."""
+    bundle, oracle = _many_unit_bundle(tmp_path, [UNIT, BATCH_LATE])
+    construct = pkg.package_unit
+    attempted = []
+
+    def returned(bundle_root: Path, unit: str, out_root: Path, **kwargs: object) -> dict:
+        attempted.append(unit)
+        result = construct(bundle_root, unit, out_root, **kwargs)
+        if unit == UNIT:
+            raise KeyboardInterrupt("after real constructor return")
+        return result
+
+    monkeypatch.setattr(pkg, "package_unit", returned)
+    report = tmp_path / "returned.json"
+    report.write_text('{"stale": true}', encoding="utf-8")
+    assert _batch_main(tmp_path, bundle, oracle, report) == pkg.EXIT_CANNOT_ASSESS
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert attempted == [UNIT] and "stale" not in payload
+    assert payload["interruption"]["published"] is True
+    assert payload["interruption"]["reason_code"] == "assembly_interrupted_after_publish"
+    assert [row["unit"] for row in payload["units"]] == [UNIT]
+    assert UNIT not in [row["unit"] for row in payload["failed"]]
+    assert [row["unit"] for row in payload["construction"]["blocked"]] == [BATCH_LATE]
+    assert payload["construction"]["totals"] == {"requested": 2, "assembled": 1, "blocked": 1}
+    assert list(_out(tmp_path).rglob(pkg.MANIFEST_NAME)) == [_out(tmp_path) / UNIT / pkg.MANIFEST_NAME]
+
+
+def test_modeled_input_details_are_typed_and_never_parsed_from_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A known input role remains actionable even when the read diagnostic is sensitive."""
+    bundle, oracle = _bundle(tmp_path)
+    handover = bundle / "handover" / f"{UNIT}.json"
+    read = pkg.read_json_checked
+    secret = "https://private-host.example/query?token=FORBIDDEN_DETAIL_CANARY"
+    reached = []
+
+    def unreadable(path: Path) -> tuple[object, str | None]:
+        if path == handover:
+            reached.append(path)
+            return None, secret
+        return read(path)
+
+    monkeypatch.setattr(pkg, "read_json_checked", unreadable)
+    report = tmp_path / "typed-details.json"
+    assert _batch_main(tmp_path, bundle, oracle, report) == pkg.EXIT_CANNOT_ASSESS
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    output = capsys.readouterr()
+    failure = payload["failed"][0]
+    assert reached
+    assert failure["details"] == {"inputs": [{"role": "handover", "basename": f"{UNIT}.json"}]}
+    assert f"input_role=handover basename={UNIT}.json" in failure["reason"]
+    assert failure["reason"] in output.out
+    assert "FORBIDDEN_DETAIL_CANARY" not in report.read_text(encoding="utf-8") + output.out + output.err
+    assert str(tmp_path) not in report.read_text(encoding="utf-8") + output.out + output.err
+
+
 def test_one_unit_raising_does_not_stop_the_units_after_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
