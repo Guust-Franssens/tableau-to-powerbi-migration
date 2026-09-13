@@ -913,8 +913,15 @@ def _projection_fixture(package: Path, payload: dict) -> None:
     s2.seal(package, **manifest)
 
 
-def _direct_provider(parent: Path, *, luid: str = DS_LUID, key: str = authority.KEY) -> Path:
+def _direct_provider(
+    parent: Path, *, luid: str = DS_LUID, key: str = authority.KEY, connection: dict[str, Any] | None = None
+) -> Path:
+    """Supply direct connection metadata independently of the projection's claimed key."""
     package = s2.datasource_package(parent, unit="Shared", luid=luid)
+    spec_path = package / "migration-spec.json"
+    spec = json.loads(spec_path.read_bytes())
+    spec["data_sources"][0]["connection"] = dict(authority.LIVE if connection is None else connection)
+    s2._write(spec_path, spec)
     _projection_fixture(
         package,
         {
@@ -933,13 +940,74 @@ def _provider_consumer(parent: Path, provider: Path) -> Path:
     return s2.workbook_package(package, published={"luid": DS_LUID}, binding=binding.replace("\\", "/"))
 
 
+@pytest.mark.parametrize("change", ["projection-key", "connection-identity", "missing-connection"])
+def test_direct_provider_projection_is_grounded_in_current_held_metadata(tmp_path: Path, change: str) -> None:
+    """A one-sided identity change reaches binding authority after clean S1/S2 and legal projection parsing."""
+    provider = _direct_provider(tmp_path / "provider", key="source-key:ab1baa4b3f77bb70")
+    held = pkg._binding_hold(provider)
+    role = pkg.pri.verify_phase1_role_identity([provider])[0]
+    assert role.verified is not None and role.verified.integrity.is_clean
+    assert role.is_start_ready, role.codes()
+    baseline = role.data_access_handoff(provider)
+    assert isinstance(baseline, pkg.pri.PackageDataAccessHandoff)
+    projection = pkg.data_access.parse_data_access(baseline.data_access.content.decode("utf-8"))
+    assert projection.state == "live_data_ok"
+    assert projection.source_keys == baseline.facts.live_source_keys == ("source-key:ab1baa4b3f77bb70",), (
+        "direct-provider source-key authority must derive the literal key from held connection metadata"
+    )
+    assert baseline.facts.direct_applicable and not baseline.facts.published_only
+    assert not baseline.facts.has_review and baseline.facts.refusal_code is None
+    pkg._binding_access(held, role, provider)
+
+    expected_keys = ("source-key:ab1baa4b3f77bb70",)
+    if change == "projection-key":
+        payload = json.loads(baseline.data_access.content)
+        payload["source_keys"] = ["source-key:e625ce798a6d19bb"]
+        s2._write(provider / "data-access.json", payload)
+    else:
+        spec = json.loads(baseline.migration_spec.content)
+        if change == "connection-identity":
+            spec["data_sources"][0]["connection"]["server"] = "other.example"
+            expected_keys = ("source-key:e625ce798a6d19bb",)
+        else:
+            del spec["data_sources"][0]["connection"]
+            expected_keys = ()
+        s2._write(provider / "migration-spec.json", spec)
+    _reseal(provider)
+
+    held = pkg._binding_hold(provider)
+    role = pkg.pri.verify_phase1_role_identity([provider])[0]
+    assert role.verified is not None and role.verified.integrity.is_clean
+    assert role.is_start_ready, role.codes()
+    handoff = role.data_access_handoff(provider)
+    assert isinstance(handoff, pkg.pri.PackageDataAccessHandoff)
+    if change == "projection-key":
+        assert handoff.migration_spec.content == baseline.migration_spec.content
+    else:
+        assert handoff.data_access.content == baseline.data_access.content
+    projection = pkg.data_access.parse_data_access(handoff.data_access.content.decode("utf-8"))
+    assert projection.state == "live_data_ok"
+    assert projection.source_keys == (
+        "source-key:e625ce798a6d19bb" if change == "projection-key" else "source-key:ab1baa4b3f77bb70",
+    )
+    assert handoff.facts.live_source_keys == expected_keys
+    assert handoff.facts.refusal_code == ("source-key-invalid" if change == "missing-connection" else None)
+    assert handoff.facts.direct_applicable is (change != "missing-connection")
+    assert not handoff.facts.published_only and not handoff.facts.has_review and not handoff.facts.all_flat
+    with pytest.raises(pkg._BindingRefusal) as caught:
+        pkg._binding_access(held, role, provider)
+    assert (caught.value.code, caught.value.exit_code) == ("binding_source_facts_mismatch", 3)
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("repeated", [False, True])
 def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
     tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool, repeated: bool
 ) -> None:
     selected = _direct_provider(tmp_path / "selected", key="source-key:ab1baa4b3f77bb70")
-    other = _direct_provider(tmp_path / "other", luid=s2.WB_LUID, key="source-key:e625ce798a6d19bb")
+    other = _direct_provider(
+        tmp_path / "other", luid=s2.WB_LUID, key="source-key:e625ce798a6d19bb", connection=authority.OTHER
+    )
     consumer = _provider_consumer(tmp_path, selected)
     if repeated:
         spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
@@ -951,6 +1019,27 @@ def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
     assert all(result.is_start_ready for result in s2_results)
     assert len(s2_results[-1].dependencies) == (2 if repeated else 1)
     assert {dep.provider_ordinal for dep in s2_results[-1].dependencies} == {1 if reverse else 0}
+    for ordinal, provider in enumerate(providers):
+        role = s2_results[ordinal]
+        assert role.verified is not None and role.verified.integrity.is_clean
+        assert role.verified.root == provider
+        handoff = role.data_access_handoff(provider)
+        assert isinstance(handoff, pkg.pri.PackageDataAccessHandoff)
+        assert handoff.migration_spec.root_identity == handoff.data_access.root_identity == str(provider)
+        connection, key = (
+            (authority.LIVE, "source-key:ab1baa4b3f77bb70")
+            if provider == selected
+            else (authority.OTHER, "source-key:e625ce798a6d19bb")
+        )
+        projection = pkg.data_access.parse_data_access(handoff.data_access.content.decode("utf-8"))
+        assert projection.state == "live_data_ok"
+        assert projection.source_keys == handoff.facts.live_source_keys == (key,), (
+            "direct-provider source-key authority must derive the literal key from held connection metadata"
+        )
+        assert json.loads(handoff.migration_spec.content)["data_sources"] == [{"id": "ds-1", "connection": connection}]
+        assert handoff.facts.direct_applicable and not handoff.facts.published_only
+        assert not handoff.facts.has_review and handoff.facts.refusal_code is None
+        pkg._binding_access(pkg._binding_hold(provider), role, provider)
     references = []
     make_reference = pkg.data_access.provider_reference
 
@@ -1115,7 +1204,7 @@ def test_mixed_published_and_direct_consumers_refuse_the_authoritys_inheritance_
 
 def test_contradictory_luid_and_second_dependency_cannot_be_collapsed_by_name(tmp_path: Path, root: Path) -> None:
     selected = _direct_provider(tmp_path / "selected")
-    other = _direct_provider(tmp_path / "other", luid=s2.WB_LUID, key=authority.OTHER_KEY)
+    other = _direct_provider(tmp_path / "other", luid=s2.WB_LUID, key=authority.OTHER_KEY, connection=authority.OTHER)
     consumer = _provider_consumer(tmp_path, selected)
     spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
     spec["data_sources"].append(
