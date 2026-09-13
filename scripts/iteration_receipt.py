@@ -10,11 +10,11 @@ No signing service, secondary registry, package gate, promotion or completion ag
 read_chain requires the successful producer's final checksum and independently revalidates current
 artifacts. read_history verifies retained evidence only, never current completion authority.
 
-All filesystem identities, inventory, images, Tableau admission, data state and outcome are rebuilt
-at finalization. Capture-time timing observations cannot be recovered from a PNG; they are immutable
-inputs pinned by the caller's capture checksum and checked for legal finite combinations.
-Until the existing query/refresh tools provide trusted structured results, data and numeric fidelity
-are unverified. A final receipt therefore records an INCOMPLETE review, never COMPLETE.
+Filesystem identities, inventory, images and Tableau admission are rebuilt at finalization.
+Capture timing and A1 observations are immutable inputs pinned by the caller's capture checksum,
+not measurements a reader can recollect. V3 final means retained, sealed evidence, never successful
+measurement; it has no top-level outcome. Numeric evidence is always unestablished. Literal v2
+semantics remain available only for reading/finalizing existing captures.
 """
 
 from __future__ import annotations
@@ -43,9 +43,9 @@ import package_filesystem as filesystem
 import reference_evidence as evidence
 from tableau_env import contains_credential
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 TOOL_NAME = "capture_powerbi_pages"
-TOOL_VERSION = "2.0.0"
+TOOL_VERSION = "3.0.0"
 RECEIPT_NAME = "iteration.json"
 PENDING_BACKUP_NAME = ".iteration.pending"
 PAGES_DIRNAME = "pages"
@@ -59,6 +59,22 @@ DATA_STATUS_PENDING = "pending"
 DATA_PENDING_REASON = (
     "probe_desktop_query and refresh_pbip_model do not expose trusted structured data evidence; "
     "data and numeric fidelity remain unverified"
+)
+OBSERVED, REFUSED, UNESTABLISHED = "observed", "refused", "unestablished"
+NUMERIC_ABSENCE = "numeric measurement is not supported by this receipt version"
+CSV_ABSENCE = "certified CSV operands are not collected by this receipt version"
+TYPED_ABSENCE = "typed DAX envelopes are not collected by this receipt version"
+MEASUREMENT_REFUSALS = (
+    "CANARIES_REQUIRED",
+    "CREDENTIAL_MISSING",
+    "CREDENTIAL_UNKNOWN",
+    "DESKTOP_UNREADY",
+    "DIALOG_NEEDS_HUMAN",
+    "DIALOG_UNREADABLE",
+    "DIALOG_UNRECOGNIZED",
+    "TIMEOUT",
+    "TOOL_UNAVAILABLE",
+    "MODEL_LOCK_TIMEOUT",
 )
 MAX_SECONDS = 3600
 MAX_FRAMES = 1_000_000
@@ -210,7 +226,7 @@ GENERATED_SCHEMA = _object(
         reviewer=IDENTITY,
         session_id=_nullable(IDENTITY),
         tool={"const": TOOL_NAME},
-        tool_version={"const": TOOL_VERSION},
+        tool_version={"const": "2.0.0"},
         desktop_pid={"type": "integer", "minimum": 1, "maximum": 2**32 - 1},
         desktop_binding_matches={"const": True},
         reload_confirmed={"const": True},
@@ -222,13 +238,129 @@ GENERATED_SCHEMA = _object(
     changes_from_previous=_array(_object(page_id=TEXT, before_sha256=_nullable(SHA), after_sha256=_nullable(SHA))),
 )
 RECEIPT_SCHEMA = _object(
-    schema_version={"type": "integer", "const": SCHEMA_VERSION},
+    schema_version={"type": "integer", "const": 2},
     iteration={"type": "string", "pattern": r"^[0-9]{3}$"},
     mode={"enum": list(MODES)},
     state={"enum": [STATE_PENDING, STATE_FINAL]},
     outcome={"enum": [None, OUTCOME_INCOMPLETE]},
     generated=GENERATED_SCHEMA,
     judgement=JUDGEMENT_SCHEMA,
+)
+
+IDENTITY_SCHEMA = _object(
+    pid={"type": "integer", "minimum": 1, "maximum": 2**32 - 1},
+    process_start={"type": "string", "pattern": r"^[1-9][0-9]{0,19}$"},
+    as_pid={"type": "integer", "minimum": 1, "maximum": 2**32 - 1},
+    as_process_start={"type": "string", "pattern": r"^[1-9][0-9]{0,19}$"},
+    port={"type": "integer", "minimum": 1, "maximum": 65535},
+)
+CATALOGUE = {"type": "string", "pattern": r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"}
+BINDING_SCHEMA = _object(identity=IDENTITY_SCHEMA, catalogue=CATALOGUE)
+PREPARATION_REQUEST_SCHEMA = _object(
+    refresh={"type": "boolean"}, persist={"type": "boolean"}, canaries={**_array(TEXT), "uniqueItems": True}
+)
+
+
+def _fact_schema(observation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "oneOf": [
+            _object(status={"const": OBSERVED}, reason={"type": "null"}, observation=observation),
+            _object(
+                status={"const": REFUSED},
+                reason={"enum": list(MEASUREMENT_REFUSALS)},
+                observation={"type": "null"},
+            ),
+            _object(
+                status={"const": UNESTABLISHED},
+                reason={"enum": ["not_requested", "observation_unavailable"]},
+                observation={"type": "null"},
+            ),
+        ]
+    }
+
+
+DATA_EVIDENCE_SCHEMA = _object(
+    binding=_fact_schema(BINDING_SCHEMA),
+    refresh=_fact_schema(
+        _object(
+            **BINDING_SCHEMA["properties"],
+            refresh_type={"const": "full"},
+            scope={"const": "database"},
+            tables={"const": []},
+        )
+    ),
+    canaries=_fact_schema(
+        _array(
+            _object(
+                **BINDING_SCHEMA["properties"],
+                table=TEXT,
+                query=TEXT,
+                query_sha256=SHA,
+                returned_rows=COUNT,
+            )
+        )
+    ),
+    persistence=_fact_schema(
+        _object(
+            **BINDING_SCHEMA["properties"],
+            compatibility_level={"type": "integer", "minimum": 1, "maximum": MAX_COUNT},
+            method={"const": "AMO_ImageSave"},
+            image=_object(
+                intended_sha256=SHA,
+                intended_size={**COUNT, "minimum": 1},
+                installed_sha256=SHA,
+                installed_size={**COUNT, "minimum": 1},
+                commitment={"const": "UNESTABLISHED"},
+            ),
+        )
+    ),
+)
+NUMERIC_FACT_SCHEMA = _object(status={"const": UNESTABLISHED}, reason={"const": NUMERIC_ABSENCE})
+V3_JUDGEMENT_SCHEMA = _object(
+    **{
+        **JUDGEMENT_SCHEMA["properties"],
+        "pages": _array(
+            _object(
+                **{
+                    **JUDGEMENT_SCHEMA["properties"]["pages"]["items"]["properties"],
+                    "numeric_results": _array(_object(visual_id=TEXT, finding_ids=_array(TEXT))),
+                }
+            )
+        ),
+    }
+)
+V3_GENERATED_SCHEMA = _object(
+    **{
+        **GENERATED_SCHEMA["properties"],
+        "review": _object(
+            **{**GENERATED_SCHEMA["properties"]["review"]["properties"], "tool_version": {"const": TOOL_VERSION}}
+        ),
+        "preparation": _object(
+            requested=PREPARATION_REQUEST_SCHEMA, artifact_before=GENERATED_SCHEMA["properties"]["artifact"]
+        ),
+        "data_evidence": DATA_EVIDENCE_SCHEMA,
+        "numeric_evidence": _array(
+            _object(
+                page_id=TEXT,
+                whole_page=NUMERIC_FACT_SCHEMA,
+                visuals=_array(_object(visual_id=TEXT, **NUMERIC_FACT_SCHEMA["properties"])),
+            )
+        ),
+        "retained_roles": _object(
+            receipt_json=_object(count={"const": 1}),
+            powerbi_png=_object(count=COUNT),
+            certified_tableau_csv=_object(count={"const": 0}, reason={"const": CSV_ABSENCE}),
+            typed_dax_envelope=_object(count={"const": 0}, reason={"const": TYPED_ABSENCE}),
+        ),
+    }
+)
+V3_RECEIPT_SCHEMA = _object(
+    **{
+        **{key: value for key, value in RECEIPT_SCHEMA["properties"].items() if key != "outcome"},
+        "schema_version": {"type": "integer", "const": 3},
+        "generated": V3_GENERATED_SCHEMA,
+        "judgement": V3_JUDGEMENT_SCHEMA,
+    }
 )
 
 
@@ -255,7 +387,7 @@ def _validate(schema: dict[str, Any], payload: Any) -> None:
 
 def _validate_state(payload: dict[str, Any]) -> None:
     pending = payload["state"] == STATE_PENDING
-    if payload["outcome"] != (None if pending else OUTCOME_INCOMPLETE):
+    if payload["schema_version"] == 2 and payload["outcome"] != (None if pending else OUTCOME_INCOMPLETE):
         raise ReceiptError("STATE_INVALID", "data pending can never produce a complete outcome")
     if (payload["judgement"]["completed_at"] is None) != pending:
         raise ReceiptError("STATE_INVALID", "completion time must agree with producer state")
@@ -265,7 +397,10 @@ def _validate_state(payload: dict[str, Any]) -> None:
 
 def validate_receipt(payload: Any) -> dict[str, Any]:
     """Closed shape AND semantic combinations; statuses alone never confer evidence."""
-    _validate(RECEIPT_SCHEMA, payload)
+    version = payload.get("schema_version") if isinstance(payload, dict) else None
+    if type(version) is not int or version not in (2, 3):  # pylint: disable=unidiomatic-typecheck
+        raise ReceiptError("SCHEMA_VERSION", "only literal v2 and v3 receipts are supported")
+    _validate(RECEIPT_SCHEMA if version == 2 else V3_RECEIPT_SCHEMA, payload)
     _validate_state(payload)
     generated = payload["generated"]
     artifact = generated["artifact"]
@@ -287,7 +422,74 @@ def validate_receipt(payload: Any) -> dict[str, Any]:
         visuals = row["expected_visual_ids"]
         if len(set(visuals)) != len(visuals):
             raise ReceiptError("INVENTORY_INVALID", "visual identifiers must be unique within a page")
+    if version == 3:
+        _validate_v3_facts(generated)
     return payload
+
+
+def unestablished_fact(reason: str = "not_requested") -> dict[str, Any]:
+    """An explicit absence, never a zero measurement."""
+    return {"status": UNESTABLISHED, "reason": reason, "observation": None}
+
+
+def _validate_v3_facts(generated: dict[str, Any]) -> None:
+    requested = generated["preparation"]["requested"]
+    canaries = requested["canaries"]
+    if any(not name.strip() for name in canaries) or len({name.casefold() for name in canaries}) != len(canaries):
+        raise ReceiptError("CANARIES_REQUIRED", "canary names must be explicit, nonempty and unique")
+    facts = generated["data_evidence"]
+    binding = facts["binding"]["observation"]
+    if requested["refresh"] or requested["persist"] or canaries:
+        if facts["binding"]["status"] != OBSERVED:
+            raise ReceiptError("A1_BINDING_UNESTABLISHED", "requested observations need the held A1 binding")
+        identity = binding["identity"]
+        if (
+            identity["pid"] != generated["review"]["desktop_pid"]
+            or identity["as_pid"] == identity["pid"]
+            or int(identity["as_process_start"]) < int(identity["process_start"])
+        ):
+            raise ReceiptError("A1_BINDING_MISMATCH", "A1 process identity does not match this capture")
+    elif facts["binding"] != unestablished_fact():
+        raise ReceiptError("A1_REQUEST_MISMATCH", "unrequested binding evidence cannot be supplied")
+    _validate_operation_facts(generated)
+    before, after = generated["preparation"]["artifact_before"], generated["artifact"]
+    if any(before[key] != after[key] for key in ("unit", "kind", "report_path", "model_path", "pbip_path")):
+        raise ReceiptError("GENERATED_CHANGED", "preparation cannot change the package binding")
+    if generated["retained_roles"]["powerbi_png"]["count"] != len(generated["pages"]):
+        raise ReceiptError("RETAINED_ROLES", "retained PNG cardinality must match the captured pages")
+
+
+def _validate_operation_facts(generated: dict[str, Any]) -> None:
+    requested, facts = generated["preparation"]["requested"], generated["data_evidence"]
+    binding, canaries = facts["binding"]["observation"], requested["canaries"]
+    for key, enabled in (
+        ("refresh", requested["refresh"]),
+        ("canaries", bool(canaries)),
+        ("persistence", requested["persist"]),
+    ):
+        fact = facts[key]
+        if not enabled and fact != unestablished_fact():
+            raise ReceiptError("A1_REQUEST_MISMATCH", "unrequested operation evidence cannot be supplied")
+        if enabled and fact == unestablished_fact():
+            raise ReceiptError("A1_REQUEST_MISMATCH", "a requested operation cannot be marked not requested")
+        observations = fact["observation"] if key == "canaries" else [fact["observation"]]
+        for observed in observations or []:
+            if observed is not None and any(observed[field] != binding[field] for field in ("identity", "catalogue")):
+                raise ReceiptError("A1_BINDING_MISMATCH", "all observations must belong to the same held binding")
+    rows = facts["canaries"]["observation"]
+    if rows is not None:
+        if [row["table"] for row in rows] != canaries:
+            raise ReceiptError("A1_CANARY_SET", "returned canaries must match the complete explicit request")
+        if any(hashlib.sha256(row["query"].encode("utf-8")).hexdigest() != row["query_sha256"] for row in rows):
+            raise ReceiptError("A1_QUERY_CHANGED", "the retained canary query and its digest disagree")
+    persisted = facts["persistence"]["observation"]
+    if persisted is not None:
+        image, artifact = persisted["image"], generated["artifact"]
+        if not (
+            image["intended_sha256"] == image["installed_sha256"] == artifact["cache_sha256"]
+            and image["intended_size"] == image["installed_size"] == artifact["cache_byte_count"]
+        ):
+            raise ReceiptError("A1_CACHE_MISMATCH", "ImageSave readback must agree with the current cache bytes")
 
 
 @dataclass(frozen=True)
@@ -584,9 +786,9 @@ def limitation_facts(package: Path) -> dict[str, Any]:
     return {"spec_path": "migration-spec.json", "entry_count": len(entries)}
 
 
-def pending_judgement(pages: list[rev.PageInventory]) -> dict[str, Any]:
-    """Every slot begins pending; numeric hashes have no reviewer-authored success route."""
-    return {
+def pending_judgement(pages: list[rev.PageInventory], *, schema_version: int = 3) -> dict[str, Any]:
+    """Visual slots begin pending; v3 numeric entries only reference generated slots/findings."""
+    judgement = {
         "completed_at": None,
         "pages": [
             {
@@ -611,6 +813,12 @@ def pending_judgement(pages: list[rev.PageInventory]) -> dict[str, Any]:
         ],
         "findings": [],
     }
+    if schema_version == 3:
+        for page in judgement["pages"]:
+            page["numeric_results"] = [
+                {"visual_id": row["visual_id"], "finding_ids": []} for row in page["numeric_results"]
+            ]
+    return judgement
 
 
 def now_rfc3339() -> str:
@@ -618,13 +826,17 @@ def now_rfc3339() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def generated_facts(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+def generated_facts(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     target: PackageTarget,
     directory: Path,
     captured: dict[str, dict[str, Any]],
     review: dict[str, Any],
     generated_at: str,
     previous: Iteration | None,
+    *,
+    schema_version: int = 2,
+    preparation: dict[str, Any] | None = None,
+    observations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build every generated field from current artifacts and checksum-pinned capture observations."""
     inventory = report_inventory(target.report_dir)
@@ -650,7 +862,7 @@ def generated_facts(  # pylint: disable=too-many-arguments,too-many-positional-a
         {row["page_id"]: row["powerbi"]["sha256"] for row in previous.payload["generated"]["pages"]} if previous else {}
     )
     after = {row["page_id"]: row["powerbi"]["sha256"] for row in pages}
-    return {
+    generated = {
         "generated_at": generated_at,
         "scope": "all_pages" if len(selected) == len(inventory) else "subset",
         "artifact": artifact_facts(target),
@@ -666,6 +878,45 @@ def generated_facts(  # pylint: disable=too-many-arguments,too-many-positional-a
         if previous
         else [],
     }
+    if schema_version == 3:
+        generated.update(
+            preparation=preparation,
+            data_evidence=observations,
+            numeric_evidence=[
+                {
+                    "page_id": page.page_id,
+                    "whole_page": {"status": UNESTABLISHED, "reason": NUMERIC_ABSENCE},
+                    "visuals": [
+                        {"visual_id": key, "status": UNESTABLISHED, "reason": NUMERIC_ABSENCE}
+                        for key in page.visual_ids
+                    ],
+                }
+                for page in inventory
+            ],
+            retained_roles={
+                "receipt_json": {"count": 1},
+                "powerbi_png": {"count": len(pages)},
+                "certified_tableau_csv": {"count": 0, "reason": CSV_ABSENCE},
+                "typed_dax_envelope": {"count": 0, "reason": TYPED_ABSENCE},
+            },
+        )
+    return generated
+
+
+def _current_generated(target: PackageTarget, selected: Iteration, previous: Iteration | None) -> dict[str, Any]:
+    """Re-read mutable artifact facts, carrying only checksum-pinned, non-recollectable observations."""
+    generated = selected.payload["generated"]
+    return generated_facts(
+        target,
+        selected.directory,
+        {row["page_id"]: row["powerbi"]["capture"] for row in generated["pages"]},
+        generated["review"],
+        generated["generated_at"],
+        previous,
+        schema_version=selected.payload["schema_version"],
+        preparation=generated["preparation"] if selected.payload["schema_version"] == 3 else None,
+        observations=generated["data_evidence"],
+    )
 
 
 @dataclass(frozen=True)
@@ -772,22 +1023,49 @@ def _read_history(package: Path, pending_backup: Iteration | None = None) -> lis
             )
             if chain and chain[-1].payload["state"] != STATE_FINAL:
                 raise ReceiptError("PREVIOUS_NOT_FINAL", "only a final receipt may have a successor")
+            assert_iteration_progress(
+                payload["generated"]["artifact"], chain[-1] if chain else None, version=payload["schema_version"]
+            )
             if payload["state"] == STATE_FINAL:
                 _assert_judgement(payload, chain[-1] if chain else None)
             chain.append(Iteration(name, directory, blob, payload))
         return chain
 
 
+def checked_history(package: Path, previous_sha256: str | None) -> list[Iteration]:
+    """Validate the predecessor token before preparation as well as before allocation."""
+    chain = read_history(package)
+    if chain:
+        _require_pin(chain[-1].receipt_sha256, previous_sha256, "PREVIOUS_RECEIPT_MISMATCH")
+        if chain[-1].payload["state"] != STATE_FINAL:
+            raise ReceiptError("PREVIOUS_NOT_FINAL", "finalize the current iteration before allocating another")
+    elif previous_sha256 is not None:
+        raise ReceiptError("PREVIOUS_RECEIPT_MISMATCH", "the first iteration cannot name a predecessor")
+    return chain
+
+
+def assert_iteration_progress(artifact: dict[str, Any], previous: Iteration | None, *, version: int = 3) -> None:
+    """V3 successors require a finding/revision association, not a claim that one caused the other."""
+    if previous is None:
+        return
+    prior = previous.payload
+    if version == 2:
+        if prior["schema_version"] != 2:
+            raise ReceiptError("SCHEMA_TRANSITION", "a v3 chain cannot return to v2")
+        return
+    changed = artifact != prior["generated"]["artifact"]
+    if not changed and prior["schema_version"] == 2:
+        return  # The single unchanged evidence-only upgrade; no downgrade can repeat it.
+    if not changed:
+        raise ReceiptError("ITERATION_UNCHANGED", "another v3 iteration requires an observable artifact revision")
+    if not any(row["status"] == FINDING_OPEN for row in prior["judgement"]["findings"]):
+        raise ReceiptError("ITERATION_WITHOUT_OPEN_FINDING", "a revised successor requires a predecessor open finding")
+
+
 def allocate_iteration(package: Path, previous_sha256: str | None = None) -> tuple[Path, Iteration | None]:
     """Validate the caller-pinned entire chain before an exclusive allocation."""
     with _named_refusals():
-        chain = read_history(package)
-        if chain:
-            _require_pin(chain[-1].receipt_sha256, previous_sha256, "PREVIOUS_RECEIPT_MISMATCH")
-            if chain[-1].payload["state"] != STATE_FINAL:
-                raise ReceiptError("PREVIOUS_NOT_FINAL", "finalize the current iteration before allocating another")
-        elif previous_sha256 is not None:
-            raise ReceiptError("PREVIOUS_RECEIPT_MISMATCH", "the first iteration cannot name a predecessor")
+        chain = checked_history(package, previous_sha256)
         if len(chain) >= 999:
             raise ReceiptError("ITERATION_LIMIT", "the three-digit iteration range is exhausted")
         root = iterations_root(package)
@@ -875,6 +1153,10 @@ def _assert_judgement(payload: dict[str, Any], previous: Iteration | None) -> No
             if [row["visual_id"] for row in judged[section]] != measured["expected_visual_ids"]:
                 raise ReceiptError("JUDGEMENT_VISUAL_SET", "judgement must cover exactly the captured visual inventory")
             for row in judged[section]:
+                if section == "numeric_results" and payload["schema_version"] == 3:
+                    _validate(_object(visual_id=TEXT, finding_ids=_array(TEXT)), row)
+                    _assert_result_findings(measured["page_id"], row, findings)
+                    continue
                 if row["status"] == STATUS_PENDING:
                     raise ReceiptError("PENDING_JUDGEMENT", "a visual or numeric judgement remains pending")
                 if section == "numeric_results":
@@ -937,10 +1219,7 @@ def write_receipt(directory: Path, payload: dict[str, Any]) -> str:
 def _assert_snapshot(package: Path, chain: list[Iteration], pending_backup: Iteration | None = None) -> None:
     selected, previous = chain[-1], chain[-2] if len(chain) > 1 else None
     generated = selected.payload["generated"]
-    captured = {row["page_id"]: row["powerbi"]["capture"] for row in generated["pages"]}
-    current = generated_facts(
-        resolve_package(package), selected.directory, captured, generated["review"], generated["generated_at"], previous
-    )
+    current = _current_generated(resolve_package(package), selected, previous)
     if current != generated or _read_history(package, pending_backup) != chain:
         raise ReceiptError("GENERATED_CHANGED", "the package or exact iteration chain no longer matches the receipt")
 
@@ -1046,15 +1325,12 @@ def finalize(  # pylint: disable=too-many-locals
         original = selected.payload
         if original["state"] != STATE_PENDING:
             raise ReceiptError("ALREADY_FINAL", "a final receipt is immutable")
-        _validate(JUDGEMENT_SCHEMA, judgement)
+        _validate(JUDGEMENT_SCHEMA if original["schema_version"] == 2 else V3_JUDGEMENT_SCHEMA, judgement)
         if judgement["completed_at"] is not None:
             raise ReceiptError("STATE_INVALID", "reviewer input cannot set producer completion time")
         generated = original["generated"]
         assert_desktop_binding(target, generated["review"]["desktop_pid"], state_reader)
-        captured = {row["page_id"]: row["powerbi"]["capture"] for row in generated["pages"]}
-        current = generated_facts(
-            target, selected.directory, captured, generated["review"], generated["generated_at"], previous
-        )
+        current = _current_generated(target, selected, previous)
         if current != generated:
             raise ReceiptError(
                 "GENERATED_CHANGED", "the complete generated facts no longer match current package truth"
@@ -1064,7 +1340,9 @@ def finalize(  # pylint: disable=too-many-locals
         _assert_limitations(package, payload)
         assert_desktop_binding(target, generated["review"]["desktop_pid"], state_reader)
         payload["judgement"]["completed_at"] = now_rfc3339()
-        payload["state"], payload["outcome"] = STATE_FINAL, OUTCOME_INCOMPLETE
+        payload["state"] = STATE_FINAL
+        if payload["schema_version"] == 2:
+            payload["outcome"] = OUTCOME_INCOMPLETE
         # No external PID/status/bridge call may follow this last pre-publication snapshot.
         _assert_snapshot(package, chain)
         _publish_final(package, chain, payload)
