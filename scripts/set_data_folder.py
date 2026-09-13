@@ -6,14 +6,24 @@ purpose: Manage the per-model folder M-parameter that each generated Fabric sema
          local checkout so Power BI Desktop can refresh with real data. `--package` is the same idea
          for ONE handover package: `scripts/package_unit.py` writes `<PACKAGE_ROOT>` rather than the
          machine that built the package, so BINDING it to wherever it now lives is a step of using
-         it - run this before opening the model, and again after every move.
+         it. Package mode delegates a guarded bind/reseal to package_unit: bind before opening,
+         sanitize before transfer, then bind at the recipient. Inspection proves the current
+         location, not shareability or readiness. Existing S1-dirty packages are not rebaselined.
 usage:   python scripts/set_data_folder.py            # localize: set every model to THIS checkout's absolute path
          python scripts/set_data_folder.py --sanitize # restore the <REPO_ROOT> placeholder (run before committing)
          python scripts/set_data_folder.py --check     # CI gate: fail if any tracked file leaks an absolute user path
          python scripts/set_data_folder.py --package <dir>  # bind ONE package to its own data/
+         python scripts/set_data_folder.py --package <absolute-dir> --inspect
+         python scripts/set_data_folder.py --package <absolute-dir> --sanitize
+         python scripts/set_data_folder.py --package <absolute-dir> --provider-package <absolute-provider>
+         python scripts/set_data_folder.py --package <consumer-ABS> --sanitize --provider-package <provider-ABS>
+
+Package exits: 0 success/idempotent/not applicable; 1 refusal/mismatch/published-with-residue;
+2 usage; 3 cannot-establish; 130 interrupt with the observed transaction outcome.
 """
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
@@ -93,14 +103,21 @@ def _data_tail(value: str) -> str | None:
     file it reads is not there. Nothing downstream can see that: the model stays structurally perfect
     and fails at refresh, on someone else's machine.
 
-    Read from the LAST `data` segment, so a checkout that itself lives under a folder called `data`
-    cannot truncate the tail in the wrong place.
+    A package value has an explicit `<PACKAGE_ROOT>/data` boundary. Everything after it belongs
+    to the tail, even another `data`. Package planning first projects held bound values onto that
+    portable boundary; the legacy checkout-only fallback still reads from the last `data`.
 
     ⚠️ Returned `/`-joined and SEPARATOR-FREE of intent: the caller composes it onto the destination
     with that destination's own separator (:func:`path_flavour.join`). Joining it here with a literal
     backslash is what wrote `/tmp/package\\data\\...` on POSIX - one path segment with backslashes
     inside it - and then reported the directory missing (round-2 finding 4).
     """
+    if value.startswith(PACKAGE_PLACEHOLDER):
+        portable = value.replace("\\", "/")
+        boundary = f"{PACKAGE_PLACEHOLDER}/{DATA_SEGMENT}"
+        if portable == boundary:
+            return ""
+        return portable[len(boundary) + 1 :].rstrip("/") if portable.startswith(f"{boundary}/") else None
     parts = [part for part in re.split(r"[\\/]", value) if part]
     lowered = [part.casefold() for part in parts]
     if DATA_SEGMENT not in lowered:
@@ -173,57 +190,17 @@ def _rewrite(expr_file: Path, sanitize: bool) -> bool:
     return False
 
 
-def _package(root: Path) -> int:
-    """Re-point ONE handover package's model at the package's own `data/`. 0 ok / 1 findings.
+def _package(
+    root: str | Path, *, inspect: bool = False, sanitize: bool = False, providers: tuple[str, ...] = ()
+) -> int:
+    """Delegate package ownership locally; checkout rewriting remains independent."""
+    from package_unit import bind_package  # pylint: disable=import-outside-toplevel
 
-    `package_unit.py` writes the folder parameter as :data:`PACKAGE_PLACEHOLDER` (Power Query rejects
-    a relative `File.Contents` argument outright, and the builder cannot know where the package will
-    end up), so a package does not resolve its own rows until it is BOUND - which is what this does,
-    and what the package README leads with. Re-run it after every move.
-
-    ⚠️ **Every value is computed and validated BEFORE anything is written.** The old order wrote each
-    file as it went and only then checked what it had produced, so a package that failed the check
-    had already been modified - on POSIX it was left holding `/tmp/package\\data\\...`, an invalid
-    value, with exit 1 as the only sign (round-2 finding 4). A relocation that cannot succeed must
-    leave the package exactly as it found it, because the alternative is a customer artifact in a
-    state neither this script nor its README describes.
-    """
-    root = root.resolve()
-    if not root.is_dir():
-        print(f"--package {root} is not a directory")
-        return 1
-    expr_files = sorted(root.glob(f"fabric/*.SemanticModel/definition/{EXPRESSIONS_TMDL}"))
-    if not expr_files:
-        if (root / PACKAGE_MANIFEST).is_file():
-            print(f"OK - nothing to bind: no model in {root.name} declares a data-folder parameter")
-            return 0
-        print(f"no fabric/*.SemanticModel/definition/{EXPRESSIONS_TMDL} under {root} - is this a package folder?")
-        return 1
-    findings: list[str] = []
-    planned: list[tuple[Path, str, int]] = []
-    for expr_file in expr_files:
-        text = expr_file.read_text(encoding="utf-8")
-        new_text, rewrites, untouched = _rewritten(text, str(root))
-        findings += [f"path parameter with no `{DATA_SEGMENT}` segment: {value}" for value in untouched]
-        if rewrites == 0:
-            print(f"  none {expr_file.relative_to(root)} declares no data-folder parameter")
-            continue
-        findings += _unresolved(new_text)
-        planned.append((expr_file, new_text, rewrites))
-    if findings:
-        print("PACKAGE NOT USABLE - nothing was written, the model would still name something that is not there:")
-        for finding in findings:
-            print(f"  {finding}")
-        return 1
-    for expr_file, new_text, rewrites in planned:
-        if new_text != expr_file.read_text(encoding="utf-8"):
-            expr_file.write_text(new_text, encoding="utf-8")
-        print(
-            f"  set  {expr_file.relative_to(root)} -> {flavour_join(str(root), DATA_SEGMENT, trailing=True)}"
-            f" ({rewrites} parameter(s))"
-        )
-    print(f"OK - {len(expr_files)} model(s) re-pointed at {flavour_join(str(root), DATA_SEGMENT, trailing=True)}")
-    return 0
+    result = bind_package(
+        str(root), rewrite=_rewritten, inspect=inspect, sanitize=sanitize, provider_packages=providers
+    )
+    print(json.dumps(result.as_dict(), ensure_ascii=True))
+    return result.exit_code
 
 
 def _unresolved(text: str) -> list[str]:
@@ -277,25 +254,32 @@ def _check() -> int:
     return 0
 
 
-def main() -> None:
-    """Parse args and run the requested mode (localize / sanitize / check / package)."""
+def main(argv: list[str] | None = None) -> int:
+    """Parse checkout modes or locally delegate package bind / inspect / transactional sanitize."""
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--sanitize", action="store_true", help="restore the <REPO_ROOT> placeholder before committing")
     group.add_argument("--check", action="store_true", help="CI gate: fail if any tracked file leaks an absolute path")
-    group.add_argument(
+    group.add_argument("--inspect", action="store_true", help="read-only current package binding inspection")
+    parser.add_argument(
         "--package",
-        type=Path,
-        metavar="DIR",
+        metavar="ABS",
         help="bind ONE handover package's model to its own data/, wherever the package now lives",
     )
-    args = parser.parse_args()
+    parser.add_argument("--provider-package", action="append", default=[], metavar="ABS")
+    args = parser.parse_args(argv)
+    if args.package is None and (args.inspect or args.provider_package):
+        parser.error("package_options_require_package")
+    if args.package is not None and args.check:
+        parser.error("incompatible_package_options")
 
     if args.package is not None:
-        sys.exit(_package(args.package))
+        return _package(
+            args.package, inspect=args.inspect, sanitize=args.sanitize, providers=tuple(args.provider_package)
+        )
 
     if args.check:
-        sys.exit(_check())
+        return _check()
 
     files = _model_expression_files()
     if not files:
@@ -303,12 +287,13 @@ def main() -> None:
             "no semantic-model expressions.tmdl files found under "
             "examples|migrations/workbooks|migrations/datasources /*/fabric/"
         )
-        return
+        return 0
     mode = "sanitize (placeholder)" if args.sanitize else "localize (this checkout)"
     print(f"{mode}: {len(files)} model(s)")
     changed = sum(_rewrite(f, args.sanitize) for f in files)
     print(f"done - {changed} file(s) updated")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

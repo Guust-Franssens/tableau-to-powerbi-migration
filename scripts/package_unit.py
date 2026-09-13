@@ -203,9 +203,10 @@ import uuid
 from collections import Counter
 from collections.abc import Callable, Sequence
 from copy import deepcopy
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -254,6 +255,7 @@ from path_flavour import (  # noqa: E402  # pylint: disable=wrong-import-positio
 )
 from path_flavour import separator as flavour_separator  # noqa: E402  # pylint: disable=wrong-import-position
 from path_flavour import inside as inside_lexically  # noqa: E402  # pylint: disable=wrong-import-position
+from path_flavour import join as flavour_join  # noqa: E402  # pylint: disable=wrong-import-position
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -3712,7 +3714,8 @@ def replace_dir(
     verify: Callable[[Path], None] | None = None,
     *,
     verify_staged: Callable[[], None],
-) -> None:
+    verify_final: Callable[[], None] | None = None,
+) -> tuple[str, int, str] | None:
     """Put ``staged`` at ``final``, REPLACING whatever was there - never merging into it.
 
     ⚠️ **Round-2 blocker: packaging used to merge into an existing `<out>/<unit>`**, because every
@@ -3746,7 +3749,12 @@ def replace_dir(
     path-budget and other producer reads precede this callback; only the atomic rename and existing
     prior-package cleanup follow. A failed check restores the prior directory without ever exposing
     the candidate. The callback also runs for a new package and when prior edits are discarded.
+
+    Binding supplies ``verify_final`` as well: its separate outcome-bearing extension checks the
+    final address after rename and before cleanup, and can roll back that candidate on refusal.
     """
+    if verify_final is not None:
+        return _replace_binding_dir(staged, final, verify, verify_staged, verify_final)
     final.parent.mkdir(parents=True, exist_ok=True)
     retired = retired_dir(final) if final.exists() else None
     publish_armed = False
@@ -3778,6 +3786,7 @@ def replace_dir(
                 secondary_code="rollback_failed" if rollback_failed else None,
             ) from error
         raise
+    return None
 
 
 def _valid_published_package(final: Path, candidate_manifest_sha256: str | None) -> bool:
@@ -3792,29 +3801,169 @@ def _valid_published_package(final: Path, candidate_manifest_sha256: str | None)
         return False
 
 
-def _make_scratch_nondiscoverable(root: Path, role: str) -> str | None:
-    """Remove reserved scratch, or at least remove its package-discovery marker."""
+def _discovery_entry(path: Path) -> tuple[os.stat_result | None, OSError | KeyboardInterrupt | None]:
+    """Hold presence, known absence, or uncertainty; lexists silently treats I/O errors as absence."""
     try:
-        residue = _discard_scratch(root)
-    except BaseException:  # pylint: disable=broad-exception-caught
-        residue = "cleanup interrupted"
-    if not root.exists():
+        return path.lstat(), None
+    except FileNotFoundError:
+        return None, None
+    except (OSError, KeyboardInterrupt) as error:
+        return None, error
+
+
+def _binding_discovery_assessment(
+    inputs: _BindingInputs, *, require_empty_scratch: bool = False
+) -> _BindingRefusal | None:
+    """Read-only common gate: exact held roots and no competing or unassessable discovery markers."""
+    failed, interrupted = False, False
+    for root, package in zip(inputs.roots, inputs.packages, strict=True):
+        failed |= str(package.snapshot.verified.root) != str(root)
+        entry, error = _discovery_entry(root / MANIFEST_NAME)
+        failed |= entry is None or error is not None
+        interrupted |= isinstance(error, KeyboardInterrupt)
+        for scratch in (staging_dir(root.parent, root.name), retired_dir(root)):
+            entry, error = _discovery_entry(scratch)
+            unsafe = entry is not None and (is_reparse_entry(entry) or not stat.S_ISDIR(entry.st_mode))
+            failed |= error is not None or unsafe
+            interrupted |= isinstance(error, KeyboardInterrupt)
+            failed |= require_empty_scratch and root == inputs.roots[-1] and entry is not None
+            if error is not None or unsafe:
+                continue
+            marker, error = _discovery_entry(scratch / MANIFEST_NAME)
+            failed |= marker is not None or error is not None
+            interrupted |= isinstance(error, KeyboardInterrupt)
+        try:
+            failed |= not _binding_matches(
+                root, package.members, package.directories, package.snapshot.directory_id, strict=True
+            )
+        except (OSError, ValueError, PackagingError, _BindingRefusal, KeyboardInterrupt) as error:
+            failed = True
+            interrupted |= isinstance(error, KeyboardInterrupt)
+    return _BindingRefusal("binding_discovery_unassessable", 130 if interrupted else 3) if failed else None
+
+
+def _make_scratch_nondiscoverable(root: Path, role: str, *, preserve_tree: bool = False) -> str | None:
+    """Remove reserved scratch or its discovery marker; preserve uncertain recovery evidence on request."""
+    interrupted = False
+    if not preserve_tree:
+        try:
+            _discard_scratch(root)
+        except BaseException as error:  # pylint: disable=broad-exception-caught
+            interrupted = isinstance(error, KeyboardInterrupt)
+    entry, error = _discovery_entry(root)
+    if error is not None or (entry is not None and (is_reparse_entry(entry) or not stat.S_ISDIR(entry.st_mode))):
+        return f"{role}_manifest_unassessable{'_interrupted' if isinstance(error, KeyboardInterrupt) else ''}"
+    if entry is None:
         return None
     manifest = root / MANIFEST_NAME
-    if not manifest.is_file():
+    entry, error = _discovery_entry(manifest)
+    interrupted |= isinstance(error, KeyboardInterrupt)
+    if entry is None and error is None:
         return f"{role}_cleanup_incomplete"
+    action = "removed"
     try:
         manifest.unlink()
-        return f"{role}_cleanup_incomplete_manifest_removed"
-    except OSError:
+    except FileNotFoundError:
+        action = "absent"
+    except (OSError, KeyboardInterrupt) as removal:
+        interrupted |= isinstance(removal, KeyboardInterrupt)
         hidden = manifest.with_name(f".{MANIFEST_NAME}.retired")
         try:
             _rename_retrying(manifest, hidden)
-        except OSError:
-            return f"{role}_manifest_still_discoverable"
-        return f"{role}_cleanup_incomplete_manifest_hidden"
-    finally:
-        del residue
+            action = "hidden"
+        except FileNotFoundError:
+            action = "absent"
+        except (OSError, KeyboardInterrupt) as recovery:
+            interrupted |= isinstance(recovery, KeyboardInterrupt)
+            action = "still_discoverable"
+    if error is not None:
+        return f"{role}_manifest_unassessable{'_interrupted' if interrupted else ''}"
+    return f"{role}_cleanup_{'interrupted' if interrupted else 'incomplete'}_manifest_{action}"
+
+
+def _binding_revoke_discovery(locations: tuple[tuple[Path, str], ...], interrupted: bool) -> tuple[str, int, str]:
+    """An uncertain selection/query revokes every transaction marker, not just the proposed authority."""
+    for location, role in locations:
+        code = _make_scratch_nondiscoverable(location, role, preserve_tree=True)
+        interrupted |= code is not None and "interrupted" in code
+    return "cannot-establish", 130 if interrupted else 3, "binding_discovery_unassessable"
+
+
+def _binding_close_discovery(  # pylint: disable=too-many-locals
+    inputs: _BindingInputs,
+    expected: dict[str, bytes],
+    inspection: PackageBindingInspection | None,
+    outcome: tuple[str, int, str],
+    *,
+    discard_staged: bool = True,
+) -> tuple[str, int, str]:
+    """Leave one held authority discoverable, hiding all other transaction-owned markers."""
+    root, package = inputs.roots[-1], inputs.packages[-1]
+    staged, retired = staging_dir(root.parent, root.name), retired_dir(root)
+    locations = ((root, "candidate"), (staged, "staging"), (retired, "retired"))
+    markers = [_discovery_entry(location / MANIFEST_NAME) for location, _role in locations]
+    uncertain = any(error is not None for _entry, error in markers)
+    interrupted = outcome[1] == 130 or any(isinstance(error, KeyboardInterrupt) for _entry, error in markers)
+    members = expected if inspection is not None else package.members
+    identity = (
+        inspection.authority.packages[-1].snapshot.directory_id
+        if inspection is not None
+        else package.snapshot.directory_id
+    )
+    authority = None
+    try:
+        if not uncertain:
+            authority = next(
+                (
+                    location
+                    for location in ((root,) if inspection is not None else (root, retired))
+                    if _binding_matches(location, members, package.directories, identity, strict=True)
+                ),
+                None,
+            )
+            if (
+                inspection is not None
+                and authority == root
+                and outcome[0] not in ("published", "published-with-residue")
+            ):
+                outcome = ("published", outcome[1], outcome[2])
+    except (OSError, ValueError, PackagingError, _BindingRefusal, KeyboardInterrupt) as error:
+        uncertain = True
+        interrupted |= isinstance(error, KeyboardInterrupt)
+    try:
+        residue = discard_staged and _discard_scratch(staged) is not None
+    except BaseException as error:  # pylint: disable=broad-exception-caught
+        residue = True
+        interrupted |= isinstance(error, KeyboardInterrupt)
+    for location, role in locations:
+        if location != authority:
+            code = _make_scratch_nondiscoverable(location, role, preserve_tree=True)
+            residue |= code is not None
+            interrupted |= code is not None and "interrupted" in code
+            uncertain |= code is not None and "unassessable" in code
+        entry, error = _discovery_entry(location / MANIFEST_NAME)
+        uncertain |= error is not None or ((entry is not None) != (location == authority))
+        interrupted |= isinstance(error, KeyboardInterrupt)
+    try:
+        if authority is not None:
+            uncertain |= not _binding_matches(authority, members, package.directories, identity, strict=True)
+    except (OSError, ValueError, PackagingError, _BindingRefusal, KeyboardInterrupt) as error:
+        uncertain = True
+        interrupted |= isinstance(error, KeyboardInterrupt)
+    if uncertain or authority is None:
+        return _binding_revoke_discovery(locations, interrupted)
+    if outcome[2] == "binding_discovery_unassessable" or authority == retired:
+        return "cannot-establish", 130 if interrupted else 3, outcome[2]
+    if residue:
+        state = "published-with-residue" if inspection is not None else outcome[0]
+        return (
+            state,
+            130 if interrupted else (1 if inspection is not None else 3),
+            "binding_interrupted" if interrupted else "binding_cleanup_incomplete",
+        )
+    if interrupted:
+        return outcome[0], 130, "binding_interrupted"
+    return outcome
 
 
 def _publication_interruption(
@@ -4557,6 +4706,774 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     }
     _write_data_access_final(dest, result, snapshot, generated)
     return result, partial(_final_data_access_check, inputs, generated)
+
+
+# Location binding is a narrow producer over an existing seal, never another assembly.
+_UNBOUND_NOTE = (
+    f"this package is UNBOUND: its folder parameter reads {PACKAGE_ROOT_TOKEN}, so run "
+    f"`{BIND_COMMAND}` before opening the model"
+)
+_BOUND_NOTE = (
+    "this package is BOUND for local work; sanitize before transfer, then bind at the recipient; "
+    "location binding does not establish readiness"
+)
+_UNBOUND_PARAGRAPH = (
+    "Why binding is a step rather than something already done for you: Power Query rejects a relative\n"
+    "`File.Contents` argument outright, so a folder parameter has to name an ABSOLUTE directory, and the\n"
+    "machine that built this package cannot know where you will put it. Baking in the builder's own path\n"
+    "is what made a moved package silently unable to reach rows that were sitting right beside it. So the\n"
+    f"model reads `{PACKAGE_ROOT_TOKEN}` and the command above resolves it here; `package-manifest.json`'s\n"
+    "`data_sources.binding` records the state, and re-run it after every move."
+)
+_BOUND_PARAGRAPH = (
+    "This is a local working package. Its folder parameters contain an absolute local path, possibly\n"
+    "including a profile or home name. Before transferring it, run\n"
+    f"`{BIND_COMMAND} --sanitize`, then bind at the recipient with the command above.\n"
+    f"`{BIND_COMMAND} --inspect` checks the current location, not shareability or readiness.\n"
+    "Manual copying is not prevented. Moving a bound package requires rebind and fresh inspection."
+)
+_BINDING_REASON = (
+    "Power Query rejects a relative File.Contents argument, so a folder parameter must name an "
+    "absolute directory; this package names a placeholder instead of the machine that built it, "
+    "and binding resolves it wherever the package now lives"
+)
+
+
+class _BindingRefusal(Exception):
+    """A closed diagnostic, with no artifact-controlled text or host path."""
+
+    def __init__(self, code: str, exit_code: int = 3) -> None:
+        super().__init__(code)
+        self.code = code
+        self.exit_code = exit_code
+
+
+class _BindingPackage(NamedTuple):
+    """Original S1 authority, every byte and the complete directory namespace held in memory."""
+
+    snapshot: _PackageSnapshot
+    members: dict[str, bytes]
+    directories: tuple[str, ...]
+
+
+class _BindingInputs(NamedTuple):
+    """An ordered cohort; never rediscovered or recursively bound."""
+
+    roots: tuple[Path, ...]
+    packages: tuple[_BindingPackage, ...]
+    roles: tuple[pri.Phase1RoleIdentityResult, ...]
+
+
+@dataclass(frozen=True)
+class PackageBindingInspection:
+    """Current location evidence attached to the held S1/S2 cohort, never a readiness receipt."""
+
+    state: Literal["BOUND", "UNBOUND", "NOT_APPLICABLE"]
+    codes: tuple[str, ...]
+    parameters: tuple[dict[str, Any], ...] = field(repr=False)
+    authority: _BindingInputs = field(repr=False, compare=False)
+
+    @property
+    def validation(self) -> Literal["UNVALIDATED", "NOT_APPLICABLE"]:
+        """Binding never upgrades the existing data-access or validation authority."""
+        return "NOT_APPLICABLE" if self.state == "NOT_APPLICABLE" else "UNVALIDATED"
+
+    def as_dict(self) -> dict[str, Any]:
+        """Path-free wire projection; the held authorities stay in process."""
+        return {
+            "state": self.state,
+            "validation": self.validation,
+            "applicability": "not_applicable" if self.state == "NOT_APPLICABLE" else "applicable",
+            "codes": list(self.codes),
+            "parameters": deepcopy(list(self.parameters)),
+            "provider_ordinals": [row.provider_ordinal for row in self.authority.roles[-1].dependencies]
+            if self.authority.roles
+            else [],
+        }
+
+
+@dataclass(frozen=True)
+class PackageBindingResult:
+    """One transaction outcome and, only when established, its current typed inspection."""
+
+    outcome: str
+    exit_code: int
+    codes: tuple[str, ...]
+    inspection: PackageBindingInspection | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialize diagnostics without serializing the in-process authority or host root."""
+        return {
+            "exit_code": self.exit_code,
+            "outcome": self.outcome,
+            "codes": list(self.codes),
+            "inspection": self.inspection.as_dict() if self.inspection is not None else {},
+        }
+
+
+def _binding_admit(value: str) -> Path:
+    if not is_host_native(value) or value.startswith(("\\\\", "//")) or not Path(value).is_absolute():
+        raise _BindingRefusal("binding_root_not_local_absolute", 1)
+    root = Path(value)
+    if ".." in re.split(r"[\\/]", value) or unit_name_problem(root.name):
+        raise _BindingRefusal("binding_root_unsafe", 1)
+    try:
+        for parent in (root, *root.parents):
+            info = parent.lstat()
+            if is_reparse_entry(info) or not stat.S_ISDIR(info.st_mode):
+                raise _BindingRefusal("binding_root_unsafe", 1)
+        if str(root.resolve(strict=True)) != str(root):
+            raise _BindingRefusal("binding_root_alias", 1)
+        if root.lstat().st_dev != root.parent.lstat().st_dev:
+            raise _BindingRefusal("binding_volume_mismatch", 1)
+    except FileNotFoundError as error:
+        raise _BindingRefusal("binding_root_missing", 1) from error
+    except (OSError, RuntimeError, ValueError) as error:
+        raise _BindingRefusal("binding_root_unassessable") from error
+    return root
+
+
+def _binding_tree(root: Path) -> tuple[dict[str, bytes], tuple[str, ...]]:
+    for parent in (root, *root.parents):
+        info = parent.lstat()
+        if is_reparse_entry(info) or not stat.S_ISDIR(info.st_mode):
+            raise _BindingRefusal("binding_namespace_unsafe")
+    walked, findings, empty = pfs.walk_package(root)
+    if findings or pfs._recheck_boundary(root):  # pylint: disable=protected-access
+        raise _BindingRefusal("binding_namespace_unsafe")
+    directories = set(empty)
+    for key in (*walked, *empty):
+        if not pfs.is_canonical_key(key):
+            raise _BindingRefusal("binding_namespace_unsafe")
+        directories.update(str(parent) for parent in PurePosixPath(key).parents if str(parent) != ".")
+    return {key: path.read_bytes() for key, path in walked.items()}, tuple(sorted(directories))
+
+
+def _binding_matches(
+    root: Path,
+    members: dict[str, bytes],
+    directories: tuple[str, ...],
+    identity: tuple[int, int],
+    *,
+    strict: bool = False,
+) -> bool:
+    try:
+        return (
+            _package_directory_id(root) == identity
+            and _binding_tree(root) == (members, directories)
+            and _package_directory_id(root) == identity
+        )
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, PackagingError, _BindingRefusal):
+        if strict:
+            raise
+        return False
+
+
+def _binding_hold(root: Path) -> _BindingPackage:
+    integrity = pri.verify_s1(root).integrity
+    if not integrity.is_clean:
+        mismatch = {pfs.CODE_DIGEST_MISMATCH, pfs.CODE_FILE_MISSING, pfs.CODE_FILE_UNDECLARED}
+        raise _BindingRefusal("binding_s1_not_clean", 1 if set(integrity.codes()) & mismatch else 3)
+    snapshot = _package_snapshot(root)
+    if snapshot is None:
+        raise _BindingRefusal("binding_snapshot_changed")
+    members, directories = _binding_tree(root)
+    expected = dict(snapshot.digests)
+    expected[MANIFEST_NAME] = hashlib.sha256(snapshot.manifest).hexdigest()
+    if {key: hashlib.sha256(raw).hexdigest() for key, raw in members.items()} != expected:
+        raise _BindingRefusal("binding_snapshot_changed")
+    if not _binding_matches(root, members, directories, snapshot.directory_id):
+        raise _BindingRefusal("binding_snapshot_changed")
+    return _BindingPackage(snapshot, members, directories)
+
+
+def _binding_barrier(root: Path) -> None:
+    state, code = data_access.inspect_physical_barrier(root)
+    if state != "clear":
+        raise _BindingRefusal(code, 1 if state == "blocked" else 3)
+
+
+def _binding_metadata(state: str) -> dict[str, str]:
+    return {
+        "state": state,
+        "token": PACKAGE_ROOT_TOKEN,
+        "command": BIND_COMMAND,
+        "reason": _BINDING_REASON if state == "unbound" else _BOUND_NOTE,
+    }
+
+
+def _binding_relative(package: _BindingPackage, root: Path, value: str, name: str) -> str:
+    """Use the portable/current root boundary, or an unambiguous held-manifest boundary after a move."""
+    portable = value.replace("\\", "/").rstrip("/")
+    if portable.startswith(f"{PACKAGE_ROOT_TOKEN}/"):
+        return portable[len(PACKAGE_ROOT_TOKEN) + 1 :]
+    if not is_host_native(value) or value.startswith(("\\\\", "//")) or "<" in value:
+        raise _BindingRefusal("binding_parameter_unclassified")
+    boundary = flavour_join(str(root), DATA_DIR)
+    value = value.rstrip("\\/")
+    if value == boundary or value.startswith(boundary + flavour_separator(str(root))):
+        return DATA_DIR + value[len(boundary) :].replace("\\", "/")
+    manifest = pfs.parse_manifest_text(package.snapshot.manifest.decode("utf-8"))
+    sources = manifest.get("data_sources", {})
+    shipped = {row["path"] for row in sources.get("shipped", [])}
+    candidates = {
+        str(parent)
+        for key in shipped
+        for parent in PurePosixPath(key).parents
+        if (str(parent) == DATA_DIR or str(parent).startswith(f"{DATA_DIR}/")) and portable.endswith(f"/{parent}")
+    }
+    # A moved value cannot borrow a suffix merely because it contains the word "data".
+    # The held unit boundary or the model's named files must identify that suffix uniquely.
+    anchored = {
+        relative
+        for relative in candidates
+        if any(portable.endswith(f"/{unit}/{relative}") for unit in (root.name, manifest.get("unit")))
+    }
+    if len(anchored) == 1:
+        return anchored.pop()
+    if _bare_name(name) == sources.get("parameter"):
+        candidates &= {DATA_DIR}
+    else:
+        texts = [
+            raw.decode("utf-8")
+            for key, raw in package.members.items()
+            if key.startswith("fabric/") and key.endswith(".tmdl")
+        ]
+        mode, tails, refusal = _parameter_usages(texts, _bare_name(name))
+        if refusal is not None or mode != NAMED_FILES:
+            raise _BindingRefusal("binding_parameter_unclassified")
+        candidates = {
+            relative
+            for relative in candidates
+            if all(f"{relative}/{tail.replace(chr(92), '/').lstrip('/')}" in shipped for tail in tails)
+        }
+    if len(candidates) != 1:
+        raise _BindingRefusal("binding_parameter_unclassified")
+    return candidates.pop()
+
+
+def _binding_expressions(  # pylint: disable=too-many-locals
+    package: _BindingPackage, root: Path
+) -> tuple[list[dict[str, Any]], dict[str, list[tuple[int, int, str]]]]:
+    """Identify exact value spans. Only safe relative members/tails and opaque identities escape."""
+    rows, spans = [], {}
+    for key, raw in sorted(package.members.items()):
+        if not key.endswith(".tmdl"):
+            continue
+        text = raw.decode("utf-8")
+        parts = key.split("/")
+        eligible = (
+            len(parts) == 4
+            and parts[0] == "fabric"
+            and parts[1].endswith(".SemanticModel")
+            and parts[2:] == ["definition", EXPRESSIONS_TMDL]
+        )
+        matches = list(FOLDER_PARAM_RE.finditer(text)) if eligible else []
+        remaining = text
+        names = set()
+        for ordinal, match in enumerate(matches):
+            value = match["value"]
+            tail_parts = re.split(r"[\\/]", value.rstrip("\\/"))
+            pathish = flavour(value) is not None or value.startswith("<") or "data" in tail_parts
+            if not pathish:
+                continue
+            if not text[text.rfind("\n", 0, match.start()) + 1 : match.start()].strip() == "" or match["name"] in names:
+                raise _BindingRefusal("binding_parameter_ambiguous")
+            names.add(match["name"])
+            relative = _binding_relative(package, root, value, match["name"])
+            if not pfs.is_canonical_key(relative) or not (relative == DATA_DIR or relative.startswith(f"{DATA_DIR}/")):
+                raise _BindingRefusal("binding_tail_unsafe")
+            trailing = value.endswith(("\\", "/"))
+            portable = flavour_join(PACKAGE_ROOT_TOKEN, relative, trailing=trailing)
+            # Both canonical producer flavours are portable. All published local values use the
+            # root's native flavour; do not let a foreign/relative value masquerade as a bound one.
+            placeholder = value in (portable.replace("\\", "/"), portable.replace("/", "\\"))
+            if not placeholder and (not is_host_native(value) or value.startswith(("\\\\", "//")) or "<" in value):
+                raise _BindingRefusal("binding_parameter_unclassified")
+            expected = flavour_join(str(root), relative, trailing=trailing)
+            exists = relative in package.directories
+            rows.append(
+                {
+                    "member": key,
+                    "parameter_ordinal": ordinal,
+                    "parameter_identity": hashlib.sha256(match["name"].encode("utf-8")).hexdigest(),
+                    "data_tail": relative,
+                    "trailing_separator": trailing,
+                    "current_root_match": value == expected,
+                    "placeholder": placeholder,
+                    "target_exists": exists,
+                    "codes": [] if exists else ["binding_target_missing"],
+                }
+            )
+            spans.setdefault(key, []).append((match.start("value"), match.end("value"), relative))
+            remaining = remaining.replace(match.group(0), "", 1)
+        if PACKAGE_ROOT_TOKEN in remaining:
+            raise _BindingRefusal("binding_parameter_unclassified")
+    return rows, spans
+
+
+def _binding_observation(package: _BindingPackage, root: Path) -> dict[str, Any]:
+    rows, _spans = _binding_expressions(package, root)
+    manifest = pfs.parse_manifest_text(package.snapshot.manifest.decode("utf-8"))
+    sources = manifest.get("data_sources")
+    if not isinstance(sources, dict) or not isinstance(sources.get("shipped"), list):
+        raise _BindingRefusal("binding_metadata_invalid")
+    if any(
+        not isinstance(row, dict) or not isinstance(row.get("path"), str) or row["path"] not in package.members
+        for row in sources["shipped"]
+    ):
+        raise _BindingRefusal("binding_shipped_member_missing", 1)
+    binding = sources.get("binding")
+    if not rows:
+        if binding is not None or sources["shipped"]:
+            raise _BindingRefusal("binding_applicability_unknown")
+        return {"applicability": "not_applicable", "parameters": [], "codes": []}
+    if binding not in (_binding_metadata("unbound"), _binding_metadata("bound")):
+        raise _BindingRefusal("binding_metadata_invalid")
+    codes = []
+    if any(not row["target_exists"] for row in rows):
+        codes.append("binding_target_missing")
+    if any(not row["current_root_match"] for row in rows):
+        codes.append("binding_not_current")
+    if binding["state"] != "bound":
+        codes.append("binding_unbound")
+    return {"applicability": "applicable", "parameters": rows, "codes": codes}
+
+
+def _binding_access(  # pylint: disable=too-many-boolean-expressions
+    package: _BindingPackage, role: pri.Phase1RoleIdentityResult, root: Path
+) -> None:
+    """Consume the authentic S2 handoff and existing projection, never earn or repair evidence."""
+    handoff = role.data_access_handoff(root)
+    if not isinstance(handoff, pri.PackageDataAccessHandoff):
+        raise _BindingRefusal("binding_s2_not_clean")
+    if handoff.migration_spec.content != package.members.get(
+        "migration-spec.json"
+    ) or handoff.data_access.content != package.members.get(DATA_ACCESS_NAME):
+        raise _BindingRefusal("binding_authority_changed")
+    assessment = package.snapshot.projection
+    if assessment is None:
+        raise _BindingRefusal("binding_projection_invalid")
+    if assessment.state in ("blocked", "cannot_establish"):
+        raise _BindingRefusal("binding_data_access_refused", 1 if assessment.state == "blocked" else 3)
+    policy = role.brief_policy
+    if policy is None or assessment.effective_scope != policy.requested_scope:
+        raise _BindingRefusal("binding_scope_mismatch")
+    direct = assessment.state != "provider_inherited"
+    # Inheritance uses the producer's existing published-only contract. A live sqlproxy is a
+    # provider reference, not a direct connection on which to earn a second source-key proof.
+    if not direct and not _published_only_sources(
+        pfs.parse_manifest_text(handoff.migration_spec.content.decode("utf-8"))
+    ):
+        raise _BindingRefusal("binding_source_facts_mismatch")
+    if direct and (
+        handoff.facts.refusal_code is not None
+        or not handoff.facts.direct_applicable
+        or handoff.facts.has_review
+        or assessment.source_keys != handoff.facts.live_source_keys
+        or (assessment.state == "local_import_ready" and not handoff.facts.all_flat)
+    ):
+        raise _BindingRefusal("binding_source_facts_mismatch")
+    if assessment.validation == "unvalidated" and policy.fallback_authorization != "model_only_unvalidated":
+        raise _BindingRefusal("binding_authorization_mismatch")
+
+
+def _binding_cohort(
+    inputs: _BindingInputs, root: Path, *, original: bool = True
+) -> tuple[pri.Phase1RoleIdentityResult, ...]:
+    """Recheck the exact original roots and every ordinal, including unselected explicit providers."""
+    roots = (*inputs.roots[:-1], root)
+    roles = pri.verify_phase1_role_identity(roots)
+    if len(roles) != len(inputs.roles):
+        raise _BindingRefusal("binding_cohort_changed")
+    for before, after in zip(inputs.roles, roles, strict=True):
+        if (
+            before != after
+            or before.brief_policy != after.brief_policy
+            or tuple((type(row.provider_ordinal), row.provider_ordinal) for row in before.dependencies)
+            != tuple((type(row.provider_ordinal), row.provider_ordinal) for row in after.dependencies)
+        ):
+            raise _BindingRefusal("binding_cohort_changed")
+    for index, package in enumerate(inputs.packages if original else inputs.packages[:-1]):
+        location = roots[index]
+        _binding_barrier(location)
+        if not _binding_matches(location, package.members, package.directories, package.snapshot.directory_id):
+            raise _BindingRefusal("binding_cohort_changed")
+    return roles
+
+
+def _binding_inputs(roots: tuple[Path, ...]) -> _BindingInputs:  # pylint: disable=too-many-boolean-expressions
+    packages = tuple(_binding_hold(root) for root in roots)
+    if len({package.snapshot.directory_id for package in packages}) != len(roots):
+        raise _BindingRefusal("binding_cohort_duplicate", 1)
+    for root, package in zip(roots, packages, strict=True):
+        _binding_budget(root, package)
+    for root, package in zip(roots[:-1], packages[:-1], strict=True):
+        role = pri.verify_phase1_role_identity((root,))[0]
+        _binding_access(package, role, root)
+        if role.kind != KIND_DATASOURCE or package.snapshot.projection.state == "provider_inherited":
+            raise _BindingRefusal("binding_provider_not_direct")
+        _binding_barrier(root)
+        if _binding_observation(package, root)["codes"]:
+            raise _BindingRefusal("binding_provider_not_bound", 1)
+    roles = pri.verify_phase1_role_identity(roots)
+    inputs = _BindingInputs(roots, packages, roles)
+    current = roles[-1]
+    _binding_access(packages[-1], current, roots[-1])
+    if current.topology == pri.TOPOLOGY_PUBLISHED_CONSUMER:
+        manifest = pfs.parse_manifest_text(packages[-1].snapshot.manifest.decode("utf-8"))
+        data_inputs = _DataAccessInputs(
+            roots, tuple(package.snapshot for package in packages), roles, manifest["data_sources"], None
+        )
+        selected, refusal = _selected_data_provider(data_inputs)
+        if refusal or selected is None:
+            raise _BindingRefusal("binding_provider_unresolved")
+        reference, provider = selected
+        inherited = packages[-1].snapshot.projection
+        if (
+            inherited.state,
+            inherited.provider_unit,
+            inherited.provider_state,
+            inherited.source_keys,
+            inherited.validation,
+            inherited.max_phase2_claim,
+        ) != (
+            "provider_inherited",
+            reference,
+            provider.state,
+            provider.source_keys,
+            provider.validation,
+            provider.max_phase2_claim,
+        ):
+            raise _BindingRefusal("binding_provider_projection_mismatch")
+    elif packages[-1].snapshot.projection.state == "provider_inherited":
+        raise _BindingRefusal("binding_provider_unresolved")
+    return inputs._replace(roles=_binding_cohort(inputs, roots[-1]))
+
+
+def _binding_inspection(inputs: _BindingInputs, observation: dict[str, Any]) -> PackageBindingInspection:
+    """Close the state only after the caller has checked the held current authorities."""
+    if observation["applicability"] == "not_applicable":
+        state, codes = "NOT_APPLICABLE", ("binding_not_applicable",)
+    elif observation["codes"]:
+        state, codes = "UNBOUND", tuple(observation["codes"])
+    else:
+        state, codes = "BOUND", ("binding_bound",)
+    return PackageBindingInspection(state, codes, tuple(deepcopy(observation["parameters"])), inputs)
+
+
+def _binding_text(raw: bytes, old: str, new: str) -> bytes:
+    variants = [(old.encode("utf-8"), new.encode("utf-8"))]
+    if "\n" in old:
+        variants.append((old.replace("\n", "\r\n").encode("utf-8"), new.replace("\n", "\r\n").encode("utf-8")))
+    matched = [(before, after) for before, after in variants if raw.count(before)]
+    if len(matched) != 1 or raw.count(matched[0][0]) != 1:
+        raise _BindingRefusal("binding_owned_text_ambiguous")
+    return raw.replace(*matched[0], 1)
+
+
+def _binding_plan(  # pylint: disable=too-many-locals
+    package: _BindingPackage,
+    root: Path,
+    sanitize: bool,
+    rewrite: Callable[[str, str], tuple[str, int, list[str]]],
+) -> dict[str, bytes]:
+    members = dict(package.members)
+    rows, spans = _binding_expressions(package, root)
+    manifest = pfs.parse_manifest_text(package.snapshot.manifest.decode("utf-8"))
+    if not rows:
+        return members
+    if any(not row["target_exists"] for row in rows):
+        raise _BindingRefusal("binding_target_missing", 1)
+    for key, values in spans.items():
+        text = members[key].decode("utf-8")
+        base = PACKAGE_ROOT_TOKEN if sanitize else str(root)
+        exact, portable = text, text
+        for start, end, relative in reversed(values):
+            replacement = flavour_join(base, relative, trailing=text[start:end].endswith(("\\", "/")))
+            exact = exact[:start] + replacement + exact[end:]
+            placeholder = flavour_join(PACKAGE_ROOT_TOKEN, relative, trailing=text[start:end].endswith(("\\", "/")))
+            portable = portable[:start] + placeholder + portable[end:]
+        rewritten, count, untouched = rewrite(portable, base)
+        if untouched or count != len(values) or rewritten != exact:
+            raise _BindingRefusal("binding_planner_delta_invalid")
+        members[key] = rewritten.encode("utf-8")
+    before = manifest["data_sources"]["binding"]["state"]
+    after = "unbound" if sanitize else "bound"
+    if before != after:
+        old_note, new_note = (_BOUND_NOTE, _UNBOUND_NOTE) if sanitize else (_UNBOUND_NOTE, _BOUND_NOTE)
+        notes = manifest.get("notes")
+        if not isinstance(notes, list) or notes.count(old_note) != 1 or new_note in notes:
+            raise _BindingRefusal("binding_owned_text_ambiguous")
+        notes[notes.index(old_note)] = new_note
+        old_text, new_text = (
+            (_BOUND_PARAGRAPH, _UNBOUND_PARAGRAPH) if sanitize else (_UNBOUND_PARAGRAPH, _BOUND_PARAGRAPH)
+        )
+        for key, old, new in (
+            ("README.md", f"\n\n{old_text}\n\n", f"\n\n{new_text}\n\n"),
+            ("handover.md", f"\nPACKAGE_NOTE text={old_note}\n", f"\nPACKAGE_NOTE text={new_note}\n"),
+        ):
+            if key not in members:
+                raise _BindingRefusal("binding_owned_text_missing")
+            members[key] = _binding_text(members[key], old, new)
+        manifest["data_sources"]["binding"] = _binding_metadata(after)
+    if members == package.members:
+        return members
+    files = dict(package.snapshot.digests)
+    files.update({key: hashlib.sha256(raw).hexdigest() for key, raw in members.items() if key != MANIFEST_NAME})
+    manifest["contents"]["files"] = files
+    members[MANIFEST_NAME] = (
+        (json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").replace("\n", os.linesep).encode("utf-8")
+    )
+    return members
+
+
+def _binding_budget(root: Path, package: _BindingPackage) -> None:
+    tails = [(KIND_FILE, key) for key in package.members]
+    tails += [(KIND_DIR, key) for key in ("", *package.directories)]
+    roots = (root, staging_dir(root.parent, root.name), retired_dir(root))
+    if any(row.length > row.ceiling for row in _measure(roots, tails, platform_limits())):
+        raise _BindingRefusal("binding_path_budget_exceeded", 1)
+
+
+def _binding_stage(inputs: _BindingInputs, expected: dict[str, bytes], staged: Path) -> tuple[int, int]:
+    package = inputs.packages[-1]
+    root = inputs.roots[-1]
+    _binding_cohort(inputs, root)
+    identity = _package_directory_id(staged)
+    shutil.copytree(root, staged, symlinks=True, dirs_exist_ok=True)
+    if identity[0] != package.snapshot.directory_id[0]:
+        raise _BindingRefusal("binding_volume_mismatch", 1)
+    if not _binding_matches(staged, package.members, package.directories, identity):
+        raise _BindingRefusal("binding_copy_changed")
+    _binding_cohort(inputs, root)
+    for key, raw in expected.items():
+        if key != MANIFEST_NAME and raw != package.members[key]:
+            (staged / key).write_bytes(raw)
+    manifest = pfs.parse_manifest_text(expected[MANIFEST_NAME].decode("utf-8"))
+    _seal_package(staged, manifest, files=dict(manifest["contents"]["files"]), verify=True)
+    if not _binding_matches(staged, expected, package.directories, identity):
+        raise _BindingRefusal("binding_candidate_changed")
+    return identity
+
+
+def _binding_final(
+    inputs: _BindingInputs, expected: dict[str, bytes], identity: tuple[int, int], sanitize: bool
+) -> PackageBindingInspection:
+    root = inputs.roots[-1]
+    fresh = _binding_hold(root)
+    if not _binding_matches(root, expected, inputs.packages[-1].directories, identity):
+        raise _BindingRefusal("binding_final_candidate_changed")
+    observation = _binding_observation(fresh, root)
+    if sanitize:
+        if observation["codes"] != ["binding_not_current", "binding_unbound"] or any(
+            not row["placeholder"] or not row["target_exists"] for row in observation["parameters"]
+        ):
+            raise _BindingRefusal("binding_sanitize_incomplete")
+    elif observation["codes"]:
+        raise _BindingRefusal("binding_final_inspection_failed", 1)
+    _binding_barrier(root)
+    roles = _binding_cohort(inputs, root, original=False)
+    _binding_access(fresh, roles[-1], root)
+    if not _binding_matches(root, expected, fresh.directories, identity):
+        raise _BindingRefusal("binding_final_candidate_changed")
+    current = inputs._replace(packages=(*inputs.packages[:-1], fresh), roles=roles)
+    return _binding_inspection(current, observation)
+
+
+def _replace_binding_dir(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    staged: Path,
+    final: Path,
+    verify: Callable[[Path], None] | None,
+    verify_staged: Callable[[], None],
+    verify_final: Callable[[], None],
+) -> tuple[str, int, str]:
+    """Binding-only extension: final inspection precedes cleanup; failure restores the directory.
+
+    No power-loss or concurrent-writer guarantee. A failed rollback retains evidence rather than
+    reconstructing an original from files. A post-inspection cleanup failure is never a clean exit.
+    """
+    retired = retired_dir(final)
+    inspected = False
+    original_id = _package_directory_id(final)
+    candidate_id = _package_directory_id(staged)
+    retiring = False
+    try:
+        if verify is None or os.path.lexists(retired):
+            raise _BindingRefusal("binding_retired_occupied", 1)
+        retiring = True
+        _rename_retrying(final, retired)
+        verify(retired)
+        verify_staged()
+        _rename_retrying(staged, final)
+        verify_final()
+        inspected = True
+        residue = _discard_scratch(retired)
+        return (
+            ("published-with-residue", 1, "binding_cleanup_incomplete") if residue else ("published", 0, "binding_ok")
+        )
+    except BaseException as error:  # pylint: disable=broad-exception-caught
+        interrupted = isinstance(error, KeyboardInterrupt)
+        if inspected:
+            outcome = "published-with-residue" if os.path.lexists(retired) else "published"
+            return (
+                outcome,
+                130 if interrupted else 1,
+                "binding_interrupted" if interrupted else "binding_cleanup_failed",
+            )
+        try:
+            if retiring and os.path.lexists(retired):
+                if _package_directory_id(retired) != original_id:
+                    raise _BindingRefusal("binding_rollback_obstructed") from error
+                if final.exists() and not staged.exists():
+                    if _package_directory_id(final) != candidate_id:
+                        raise _BindingRefusal("binding_rollback_obstructed") from error
+                    _rename_retrying(final, staged)
+                if final.exists():
+                    raise _BindingRefusal("binding_rollback_obstructed") from error
+                _rename_retrying(retired, final)
+                outcome = "rolled-back"
+            else:
+                outcome = "unchanged"
+        except BaseException as recovery:  # pylint: disable=broad-exception-caught
+            return (
+                "cannot-establish",
+                130 if interrupted or isinstance(recovery, KeyboardInterrupt) else 3,
+                "binding_rollback_failed",
+            )
+        code = error.code if isinstance(error, _BindingRefusal) else "binding_publication_failed"
+        exit_code = error.exit_code if isinstance(error, _BindingRefusal) else 3
+        return outcome, 130 if interrupted else exit_code, "binding_interrupted" if interrupted else code
+
+
+def _binding_publish(
+    inputs: _BindingInputs, expected: dict[str, bytes], sanitize: bool
+) -> tuple[tuple[str, int, str], PackageBindingInspection | None]:
+    root = inputs.roots[-1]
+    staged = staging_dir(root.parent, root.name)
+    outcome = ("unchanged", 3, "binding_staging_failed")
+    owned = False
+    identity = None
+    inspection = None
+    try:
+        failure = _binding_discovery_assessment(inputs, require_empty_scratch=True)
+        if failure is not None:
+            raise failure
+        staged.mkdir()
+        owned = True
+        identity = _binding_stage(inputs, expected, staged)
+
+        def retired_check(retired: Path) -> None:
+            _binding_barrier(retired)
+            package = inputs.packages[-1]
+            if not _binding_matches(retired, package.members, package.directories, package.snapshot.directory_id):
+                raise _BindingRefusal("binding_original_changed")
+
+        def candidate_check() -> None:
+            _binding_cohort(inputs, staged, original=False)
+            if not _binding_matches(staged, expected, inputs.packages[-1].directories, identity):
+                raise _BindingRefusal("binding_candidate_changed")
+
+        def final_check() -> None:
+            nonlocal inspection
+            inspection = _binding_final(inputs, expected, identity, sanitize)
+
+        outcome = replace_dir(
+            staged,
+            root,
+            verify=retired_check,
+            verify_staged=candidate_check,
+            verify_final=final_check,
+        )
+        if outcome[1] == 0:
+            if inspection is None:
+                outcome = ("cannot-establish", 3, "binding_final_inspection_missing")
+            else:
+                outcome = (outcome[0], 0, f"binding_{inspection.state.lower()}")
+    except KeyboardInterrupt:
+        package = inputs.packages[-1]
+        if (
+            inspection is not None
+            and identity is not None
+            and _binding_matches(root, expected, package.directories, identity)
+        ):
+            state = "published-with-residue" if os.path.lexists(retired_dir(root)) else "published"
+        else:
+            state = (
+                "unchanged"
+                if _binding_matches(root, package.members, package.directories, package.snapshot.directory_id)
+                else "cannot-establish"
+            )
+        outcome = (state, 130, "binding_interrupted" if owned else "binding_discovery_unassessable")
+    except _BindingRefusal as failure:
+        outcome = ("unchanged", failure.exit_code, failure.code)
+    except Exception:  # pylint: disable=broad-exception-caught
+        outcome = ("unchanged", 3, "binding_staging_failed" if owned else "binding_discovery_unassessable")
+    finally:
+        outcome = _binding_close_discovery(inputs, expected, inspection, outcome, discard_staged=owned)
+    if outcome[0] not in ("published", "published-with-residue"):
+        inspection = None
+    return outcome, inspection
+
+
+def _binding_checked_result(
+    outcome: tuple[str, int, str], inspection: PackageBindingInspection | None, *, read_only: bool
+) -> PackageBindingResult:
+    """The only public result constructor; provisional inspections cannot bypass discovery assessment."""
+    if inspection is not None:
+        refusal = _binding_discovery_assessment(inspection.authority)
+        if refusal is not None:
+            outcome = ("cannot-establish", refusal.exit_code, refusal.code)
+            if not read_only:
+                outcome = _binding_close_discovery(
+                    inspection.authority,
+                    inspection.authority.packages[-1].members,
+                    inspection,
+                    outcome,
+                    discard_staged=False,
+                )
+            inspection = None
+    return PackageBindingResult(outcome[0], outcome[1], (outcome[2],), inspection)
+
+
+def bind_package(
+    package_root: str,
+    *,
+    rewrite: Callable[[str, str], tuple[str, int, list[str]]],
+    inspect: bool = False,
+    sanitize: bool = False,
+    provider_packages: Sequence[str] = (),
+) -> PackageBindingResult:
+    """Public package binder/inspector. Local working bytes only; no readiness or sharing receipt."""
+    inspection = None
+    try:
+        if inspect and sanitize:
+            raise _BindingRefusal("binding_usage", 2)
+        roots = tuple(_binding_admit(str(value)) for value in (*provider_packages, package_root))
+        inputs = _binding_inputs(roots)
+        package = inputs.packages[-1]
+        observation = _binding_observation(package, roots[-1])
+        if inspect:
+            inputs = inputs._replace(roles=_binding_cohort(inputs, roots[-1]))
+            inspection = _binding_inspection(inputs, observation)
+            outcome = ("unchanged", 1 if inspection.state == "UNBOUND" else 0, inspection.codes[0])
+        else:
+            expected = _binding_plan(package, roots[-1], sanitize, rewrite)
+            if expected == package.members:
+                inputs = inputs._replace(roles=_binding_cohort(inputs, roots[-1]))
+                inspection = _binding_inspection(inputs, observation)
+                outcome = ("unchanged", 0, f"binding_{inspection.state.lower()}")
+            else:
+                outcome, inspection = _binding_publish(inputs, expected, sanitize)
+    except _BindingRefusal as error:
+        outcome = ("unchanged", error.exit_code, error.code)
+    except KeyboardInterrupt:
+        outcome = ("unchanged", 130, "binding_interrupted")
+    except Exception:  # pylint: disable=broad-exception-caught
+        outcome = ("cannot-establish", 3, "binding_cannot_establish")
+    return _binding_checked_result(outcome, inspection, read_only=inspect)
 
 
 # --------------------------------------------------------------------------------------------
