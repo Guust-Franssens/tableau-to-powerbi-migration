@@ -246,7 +246,8 @@ LOG = logging.getLogger("tableau-oracle")
 # which is what lets `artifact_stem` be an allowlist rather than one more screen.
 _LUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
-DEFAULT_WORKERS = 1
+MIN_WORKERS = 1
+DEFAULT_WORKERS = 2
 MAX_WORKERS = 4
 _MANIFEST_NAME = "oracle-manifest.json"
 
@@ -1381,12 +1382,10 @@ def _arg_workers(val: str) -> int:
         parsed = int(val)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            f"--workers must be an integer from {DEFAULT_WORKERS} through {MAX_WORKERS}, got {val!r}"
+            f"--workers must be an integer from {MIN_WORKERS} through {MAX_WORKERS}, got {val!r}"
         ) from exc
-    if not DEFAULT_WORKERS <= parsed <= MAX_WORKERS:
-        raise argparse.ArgumentTypeError(
-            f"--workers must be from {DEFAULT_WORKERS} through {MAX_WORKERS}, got {parsed}"
-        )
+    if not MIN_WORKERS <= parsed <= MAX_WORKERS:
+        raise argparse.ArgumentTypeError(f"--workers must be from {MIN_WORKERS} through {MAX_WORKERS}, got {parsed}")
     return parsed
 
 
@@ -1482,8 +1481,8 @@ def _capture_selected_views(  # pylint: disable=too-many-arguments,too-many-loca
     workers: int,
 ) -> Generator[dict[str, Any], None, None]:
     """Yield selected-order progress; closing unfinished iteration cancels and drains its workers."""
-    if not DEFAULT_WORKERS <= workers <= MAX_WORKERS:
-        raise ValueError(f"workers must be from {DEFAULT_WORKERS} through {MAX_WORKERS}, got {workers}")
+    if not MIN_WORKERS <= workers <= MAX_WORKERS:
+        raise ValueError(f"workers must be from {MIN_WORKERS} through {MAX_WORKERS}, got {workers}")
     context = _CaptureContext(session, out_dir, wants, api_overrides, max_age)
     if not views:
         return

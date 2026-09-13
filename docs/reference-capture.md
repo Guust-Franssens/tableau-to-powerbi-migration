@@ -99,10 +99,14 @@ python scripts/capture_tableau_oracle.py --out _oracle --images \
 ```
 
 `--workers N` overlaps selected views in a bounded pool inside that **one invocation** and that **one
-authenticated Tableau session**. The compatibility default is `1`; accepted values are `1..4`.
+authenticated Tableau session**. The default is `2`; accepted values are `1..4`.
 There is no workbook affinity or per-workbook restriction, and each view still does `/data` before
-its requested render legs. Keep `--workers 1` for the serial oracle until the frozen real-site
-`1`-versus-`2` acceptance run is complete.
+its requested render legs. Use `--workers 1` for serial recovery or to reduce server load;
+`--workers 4` remains opt-in, with live qualification deferred. More concurrent exports can increase
+server load even though client requests wait independently. ✅ The accepted September 12, 2026
+qualification (#619, after #627) found two workers faster than one with equivalent successful
+captures on **our nine-view lab Superstore workload**. ⚠️ That narrow result supports choosing
+default `2`, not universal safety, optimal performance or an estate-wide guarantee.
 
 There is no `--project` flag, and server-side project filtering is blocked for now: Tableau's numeric
 project id (the one in the site's own URL) has no public API mapping (issue #191). So expand the
