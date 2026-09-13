@@ -161,16 +161,19 @@ a raise is caught per unit and carried in the compatibility `failed[]` bucket wi
 reason code and code-owned traceback frames; `construction.blocked[]` projects its status, and the
 run still exits 5.
 
-For invocations admitted past the existing CLI brief checks, one terminal slot per requested
-occurrence owns construction status. The ordered compatibility
+Once the bundle and selected cohort are established, one terminal slot per requested occurrence
+owns construction status. The ordered compatibility
 buckets `units[]`, `failed[]`, `refused[]` and `unaccounted[]`, console and JSON are views of those
 slots, never separately appended outcomes. ASSEMBLED requires the candidate's native directory ID,
 actual spelling, held manifest and final integrity, with no competing transaction marker. Scratch
 that is proven nondiscoverable may leave an ASSEMBLED candidate plus a cleanup finding; the finding
 keeps the command nonzero and never creates a second failure row. Native identity is invocation-local,
 not a Unicode casefold or resolved path string. No concurrent-writer or hard-kill recovery is claimed.
-Missing/non-file and multi-unit briefs remain argparse usage errors before output preparation.
-Their occurrence reporting and stale-JSON behavior are deferred to the second #614 slice.
+An explicitly supplied brief that cannot serve the cohort is a modeled BLOCKED refusal (exit 5),
+not an argparse escape. A shared brief never broadcasts bytes; earlier identity reasons survive.
+Brief refusals create no package output, including the output root. An explicit --json still
+replaces the report; beneath --out, only that reporting path and its parents may be created.
+Ordinary syntax, missing mandatory switches, invalid bundles and unknown units remain usage exit 2.
 
 An oracle omission INSIDE a package does not BLOCK assembly: a unit whose oracle genuinely has no
 render for a page is the negative control, and it must still produce a diagnostic package whose page
@@ -778,10 +781,21 @@ def read_json_checked(path: Path) -> tuple[Any, str | None]:
         return None, f"{path.name} is present but could not be read ({type(exc).__name__})"
 
 
-def write_json(path: Path, payload: Any) -> None:
-    """Write pretty JSON, creating parents."""
+def write_json(path: Path, payload: Any, *, atomic: bool = False) -> None:
+    """Write pretty JSON, optionally replacing a batch report only after serialization completes."""
+    text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    if not atomic:
+        path.write_text(text, encoding="utf-8")
+        return
+    replacement = path.with_name(f".{uuid.uuid4().hex}.json")
+    stream = replacement.open("x", encoding="utf-8")
+    try:
+        with stream:
+            stream.write(text)
+        replacement.replace(path)
+    finally:
+        replacement.unlink(missing_ok=True)
 
 
 def sha256_of(path: Path | None) -> str | None:
@@ -2977,6 +2991,8 @@ def _prepare_brief(bundle: Path, unit: str, assets_dir: Path | None, brief: Path
     if brief is None:
         return None
     try:
+        if not brief.is_file():
+            raise OSError("the supplied brief is not a regular file")
         raw = brief.read_bytes()
         text = raw.decode("utf-8")
     except (OSError, ValueError) as exc:
@@ -6186,6 +6202,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "the dispatcher's migration-brief.md for exactly one selected unit; repeat the command "
             "per unit for a batch. Strict policy/unit/scope and whole-message privacy are checked before assembly. "
+            "Invalid/shared briefs produce BLOCKED outcomes (exit 5), with no package writes. "
             "Its bytes travel, never its external path"
         ),
     )
@@ -6201,7 +6218,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="exact previously published datasource package root (repeatable); no sibling/output discovery",
     )
-    parser.add_argument("--json", type=Path, help="write the machine-readable packaging report here")
+    parser.add_argument(
+        "--json",
+        type=Path,
+        help=(
+            "replace the construction report even on brief refusal, which permits only report-path writes beneath --out"
+        ),
+    )
     parser.add_argument("--quiet", action="store_true", help="suppress the rendered summary")
     parser.add_argument(
         "--discard-package-edits",
@@ -6342,17 +6365,11 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         parser.error(f"--bundle {args.bundle} is not a directory")
     oracle_dir = args.oracle.resolve() if args.oracle else discover_dir(bundle, ("oracle", "_oracle"))
     assets_dir = args.assets.resolve() if args.assets else discover_dir(bundle, ("assets",))
-    if args.brief is not None and not args.brief.is_file():
-        # Fail on the command line rather than in a per-unit note: a mistyped --brief would
-        # otherwise write a whole estate of packages that all silently lack the brief.
-        parser.error("--brief must be a readable file")
 
     engine_report = read_json(bundle / "report.json")
     workbooks, datasources = engine_unit_names(engine_report)
     available = bundle_units(bundle)
     units = list(args.unit) if args.unit else bundle_unit_occurrences(bundle)
-    if args.brief is not None and len(units) != 1:
-        parser.error("--brief requires exactly one unit; package each unit with its own brief")
     unknown = [unit for unit in units if unit not in available]
     if unknown:
         parser.error(f"the bundle's report.json and pbip/ know nothing of: {', '.join(sorted(unknown))}")
@@ -6369,20 +6386,28 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     interruption: AssemblyInterrupted | None = None
     try:
         _identity_preflight(slots, workbooks, datasources, out_root)
-        out_root = _prepare_out(args.out)
-        budgets = _measure_unit_budgets(bundle, slots, out_root, assets_dir)
-        _warn_shipping(budgets)
-        _package_each(
-            slots,
-            bundle,
-            out_root,
-            oracle_dir,
-            assets_dir,
-            args.discard_package_edits,
-            brief=args.brief.resolve() if args.brief else None,
-            gate_root=args.gate_root,
-            provider_packages=_external_providers(args.provider_package, out_root, requested),
-        )
+        if args.brief is not None and len(slots) != 1:
+            for slot in slots:
+                failure = PackagingError("brief_requires_one_unit")
+                failure.unit = slot.unit
+                slot.complete(_ConstructionOutcome(None, failure))
+        else:
+            # The constructor validates and holds a single brief before its first mkdir. Do not
+            # eagerly create --out here, or a refused brief would still leave package output.
+            out_root = args.out.resolve() if args.brief is not None else _prepare_out(args.out)
+            budgets = _measure_unit_budgets(bundle, slots, out_root, assets_dir)
+            _warn_shipping(budgets)
+            _package_each(
+                slots,
+                bundle,
+                out_root,
+                oracle_dir,
+                assets_dir,
+                args.discard_package_edits,
+                brief=args.brief,
+                gate_root=args.gate_root,
+                provider_packages=_external_providers(args.provider_package, out_root, requested),
+            )
     except AssemblyInterrupted as error:
         interruption = error
     except KeyboardInterrupt:
@@ -6439,7 +6464,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         "shipping_root_budget": {budget.unit: budget.shipping_budget for budget in budgets},
     }
     if args.json:
-        write_json(args.json, payload)
+        write_json(args.json, payload, atomic=True)
     for row in [*failed_rows, *refused_rows]:
         print(_blocked_line(row), file=sys.stderr)
     for finding in cleanup_findings:

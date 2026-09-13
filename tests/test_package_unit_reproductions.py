@@ -144,16 +144,114 @@ def test_input_manifest_uses_the_existing_strict_json_parser(tmp_path: Path, tai
     assert caught.value.reasons == ["input_manifest_invalid"]
 
 
-def test_single_brief_is_refused_for_a_multi_unit_command_before_writing(tmp_path: Path) -> None:
+@pytest.mark.parametrize("report_mode", ["none", "external", "under-output"])
+def test_single_brief_is_refused_for_a_multi_unit_command_before_writing(  # pylint: disable=too-many-locals
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], report_mode: str
+) -> None:
     bundle, _oracle, _objects = _bundle(tmp_path, covered=None, datasource_only=True)
     brief = _brief(tmp_path, UNIT)
+    original = brief.read_bytes()
     out = tmp_path / "packages"
+    report = out / "reporting" / "status.json" if report_mode == "under-output" else tmp_path / "status.json"
+    stale = b'{"stale_success": true}\n'
+    if report_mode == "external":
+        report.write_bytes(stale)
+    command = ["--bundle", str(bundle), "--out", str(out), "--brief", str(brief), "--quiet", "--assemble-only"]
+    if report_mode != "none":
+        command.extend(["--json", str(report)])
+    replaced = []
+    replace = Path.replace
 
-    with pytest.raises(SystemExit) as refused:
-        pkg.main(["--bundle", str(bundle), "--out", str(out), "--brief", str(brief), "--quiet"])
+    def observed_replace(path: Path, target: Path) -> Path:
+        assert target == report, "no package may be published while refusing a shared brief"
+        assert path != target and path.parent == target.parent
+        payload = json.loads(path.read_bytes())
+        assert payload["requested"] == sorted([UNIT, DS_UNIT])
+        assert payload["construction"]["totals"] == {"requested": 2, "assembled": 0, "blocked": 2}
+        if report_mode == "external":
+            assert target.read_bytes() == stale, "the prior report must remain intact until complete replacement"
+        replaced.append(path)
+        return replace(path, target)
 
-    assert refused.value.code == 2
-    assert not out.exists(), "a single typed brief must not be broadcast into any package"
+    def must_not_construct(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("one shared brief must refuse before any package construction")
+
+    monkeypatch.setattr(pkg, "package_unit", must_not_construct)
+    monkeypatch.setattr(pkg, "_prepare_out", must_not_construct)
+    monkeypatch.setattr(Path, "replace", observed_replace)
+    assert pkg.main(command) == 5
+    captured = capsys.readouterr()
+    assert captured.out.strip() == pkg.NOT_START_READY_NOTICE
+    assert captured.err.count("brief_requires_one_unit") == 2
+    assert brief.read_bytes() == original, "the caller's brief is read-only"
+    if report_mode != "none":
+        payload = json.loads(report.read_bytes())
+        assert payload["requested"] == sorted([UNIT, DS_UNIT])
+        assert payload["units"] == payload["refused"] == payload["unaccounted"] == []
+        assert [row["unit"] for row in payload["failed"]] == sorted([UNIT, DS_UNIT])
+        assert [row["reason_code"] for row in payload["failed"]] == ["brief_requires_one_unit"] * 2
+        assert [row["unit"] for row in payload["construction"]["blocked"]] == sorted([UNIT, DS_UNIT])
+        assert all(row["status"] == "BLOCKED" for row in payload["construction"]["blocked"])
+        assert payload["construction"]["totals"] == {"requested": 2, "assembled": 0, "blocked": 2}
+        assert payload["dispatch_readiness"]["status"] == "NOT_EVALUATED"
+        assert "stale_success" not in payload
+        assert len(replaced) == 1 and not replaced[0].exists()
+    else:
+        assert not replaced and not report.exists()
+    if report_mode == "under-output":
+        assert {path.relative_to(out).as_posix() for path in out.rglob("*")} == {"reporting", "reporting/status.json"}
+    else:
+        assert not out.exists(), "a single typed brief must not be broadcast into any package"
+
+
+@pytest.mark.parametrize("variant", ["shared", "wrong-unit", "wrong-scope", "unsafe-text", "missing"])
+def test_brief_refusal_preserves_existing_package_bytes_even_with_discard_edits(tmp_path: Path, variant: str) -> None:
+    """Edit-discard permission does not authorize writes after a supplied-brief refusal."""
+    bundle, oracle, _objects = _bundle(tmp_path, covered=None, datasource_only=True)
+    out = tmp_path / "packages"
+    brief = _brief(tmp_path, UNIT)
+    pkg.package_unit(bundle, UNIT, out, oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=brief)
+    edited = out / UNIT / "operator-edit.txt"
+    edited.write_bytes(b"work already invested in the existing package")
+    original = {path.relative_to(out): path.read_bytes() for path in out.rglob("*") if path.is_file()}
+    original_dirs = {path.relative_to(out) for path in out.rglob("*") if path.is_dir()}
+    if variant == "wrong-unit":
+        brief = _brief(tmp_path, "OtherUnit")
+    elif variant == "wrong-scope":
+        brief = _brief(tmp_path, UNIT, "model_only")
+    elif variant == "unsafe-text":
+        brief.write_bytes(brief.read_bytes() + b"\nX-Tableau-Auth: PRIVATE_BRIEF_CANARY\n")
+    elif variant == "missing":
+        brief = tmp_path / "absent-brief.md"
+    original_brief = brief.read_bytes() if brief.is_file() else None
+    report = tmp_path / "status.json"
+    report.write_text('{"stale_success": true}', encoding="utf-8")
+    command = [
+        "--bundle",
+        str(bundle),
+        "--out",
+        str(out),
+        "--brief",
+        str(brief),
+        "--json",
+        str(report),
+        "--discard-package-edits",
+        "--quiet",
+    ]
+    if variant != "shared":
+        command.extend(["--unit", UNIT])
+
+    assert pkg.main(command) == 5
+    payload = json.loads(report.read_bytes())
+    assert "stale_success" not in payload
+    assert payload["construction"]["totals"] == {
+        "requested": 2 if variant == "shared" else 1,
+        "assembled": 0,
+        "blocked": 2 if variant == "shared" else 1,
+    }
+    assert {path.relative_to(out): path.read_bytes() for path in out.rglob("*") if path.is_file()} == original
+    assert {path.relative_to(out) for path in out.rglob("*") if path.is_dir()} == original_dirs
+    assert (brief.read_bytes() if brief.is_file() else None) == original_brief
 
 
 @pytest.mark.parametrize(
@@ -218,8 +316,9 @@ def test_full_brief_is_refused_without_copying_redacting_or_echoing(
     assert str(brief) not in output
 
 
+@pytest.mark.parametrize("via_cli", [False, True], ids=["constructor", "cli"])
 def test_brief_copy_uses_the_same_bytes_that_passed_preassembly_validation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, via_cli: bool
 ) -> None:
     bundle, oracle, _objects = _bundle(tmp_path, covered=None)
     brief = _brief(tmp_path, UNIT)
@@ -231,9 +330,31 @@ def test_brief_copy_uses_the_same_bytes_that_passed_preassembly_validation(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(pkg, "_assemble_unit", changed_after_validation)
-    pkg.package_unit(
-        bundle, UNIT, tmp_path / "out", oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=brief
-    )
+    if via_cli:
+        assert (
+            pkg.main(
+                [
+                    "--bundle",
+                    str(bundle),
+                    "--out",
+                    str(tmp_path / "out"),
+                    "--unit",
+                    UNIT,
+                    "--oracle",
+                    str(oracle),
+                    "--assets",
+                    str(bundle.parent / "assets"),
+                    "--brief",
+                    str(brief),
+                    "--quiet",
+                ]
+            )
+            == 0
+        )
+    else:
+        pkg.package_unit(
+            bundle, UNIT, tmp_path / "out", oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=brief
+        )
 
     assert (tmp_path / "out" / UNIT / "migration-brief.md").read_bytes() == expected
     assert pkg.data_access.read_data_access(tmp_path / "out" / UNIT / "data-access.json").state == "local_import_ready"
