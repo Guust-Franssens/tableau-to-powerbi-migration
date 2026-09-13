@@ -329,7 +329,12 @@ output/report parent creation or publication, `--json` must pass read-only desti
 An address equal to `--brief` or `--out`, within a prospective selected-unit package or its
 staging/retired roots, within any existing package tree under `--out` (including unselected/nested
 packages), or sharing a protected file's native identity is **usage exit 2**, not a modeled brief
-refusal. Symlinks/reparses are not followed, and unassessable boundaries/identities fail closed.
+refusal. A damaged marker entry (including an empty or nonempty directory replacing
+`package-manifest.json`) still protects its package and native file aliases. Beneath `--out`, report
+paths may not contain a package-marker name or any reserved scratch segment (`.<digest>` or
+`.<digest>~`), whether its unit is selected, unselected or absent. This prevents reporting itself
+from creating a package boundary or transaction namespace and poisoning later ordinary reporting.
+Symlinks/reparses are not followed, and unassessable boundaries/identities fail closed.
 The generic diagnostic exposes no caller path, basename or exception text; rejection changes no
 brief, stale target, output directory or package marker.
 

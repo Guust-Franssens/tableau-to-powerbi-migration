@@ -6106,6 +6106,84 @@ def test_json_destination_collision_precedes_any_write(  # pylint: disable=too-m
     assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()} == dirs_before
 
 
+@pytest.mark.parametrize(
+    "destination",
+    [
+        "reporting-marker",
+        "reporting-marker-alias",
+        "marker-directory",
+        "other-staging",
+        "other-retired",
+        "unallocated-staging",
+        "unallocated-retired",
+        "nested-staging",
+    ],
+)
+@pytest.mark.parametrize("existing", [False, True], ids=["absent", "existing"])
+def test_json_destination_reserved_namespace_is_rejected(  # pylint: disable=too-many-locals
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    destination: str,
+    existing: bool,
+) -> None:
+    """A refused report cannot create a marker or scratch namespace and poison subsequent reporting."""
+    bundle, out = tmp_path / "bundle", tmp_path / "packages"
+    write_engine_report(bundle, workbooks=[UNIT, "Other"])
+    brief = tmp_path / "customer-sql01-password-SuperSecret.md"
+    brief.write_bytes(b"invalid supplied brief bytes must remain intact")
+    digest = hashlib.sha256(b"Other").hexdigest()[:8]
+    report = {
+        "reporting-marker": out / "reporting" / "package-manifest.json",
+        "reporting-marker-alias": out / "reporting" / "PACKAGE-MANIFEST.JSON",
+        "marker-directory": out / "reporting" / "package-manifest.json" / "status.json",
+        "other-staging": out / f".{digest}" / "package-manifest.json",
+        "other-retired": out / f".{digest}~" / "status.json",
+        "unallocated-staging": out / ".deadbeef" / "status.json",
+        "unallocated-retired": out / ".deadbeef~" / "status.json",
+        "nested-staging": out / "reporting" / ".deadbeef" / "status.json",
+    }[destination]
+    if existing:
+        report.parent.mkdir(parents=True)
+        report.write_bytes(b"prior reporting target")
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    before_dirs = {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()}
+    command = [
+        "--bundle",
+        str(bundle),
+        "--out",
+        str(out),
+        "--unit",
+        UNIT,
+        "--brief",
+        str(brief),
+        "--json",
+        str(report),
+    ]
+
+    def must_not_create(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("reserved report destination reached parent creation")
+
+    with monkeypatch.context() as guarded:
+        guarded.setattr(Path, "mkdir", must_not_create)
+        with pytest.raises(SystemExit) as refused:
+            pkg.main(command)
+    assert refused.value.code == 2
+    captured = capsys.readouterr()
+    assert "--json destination is unsafe or unassessable" in captured.err
+    assert all(value not in captured.err for value in (str(report), str(brief), brief.name))
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*") if path.is_dir()} == before_dirs
+    if not existing:
+        assert not out.exists()
+        command[-1] = str(out / "reporting" / "status.json")
+        assert pkg.main(command) == 5, "the refused marker write must not poison an ordinary report"
+        payload = json.loads(Path(command[-1]).read_bytes())
+        assert payload["construction"]["totals"] == {"requested": 1, "assembled": 0, "blocked": 1}
+        assert payload["dispatch_readiness"]["status"] == "NOT_EVALUATED"
+        assert {path.relative_to(out).as_posix() for path in out.rglob("*")} == {"reporting", "reporting/status.json"}
+
+
 @pytest.mark.parametrize("requested", [[], [UNIT], [UNIT, "Other"]], ids=["empty", "single", "batch"])
 @pytest.mark.parametrize("supplied_brief", [False, True], ids=["no-brief", "invalid-brief"])
 def test_json_output_root_collision_precedes_every_cli_write_route(

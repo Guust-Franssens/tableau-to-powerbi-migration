@@ -175,6 +175,8 @@ Brief refusals create no package output, including the output root. An admitted 
 replaces the report; beneath --out, only an ordinary non-package reporting path may be created.
 Report aliases of the brief, output root, prospective package/transaction roots or existing package
 trees are usage errors before writes. Unassessable identities and reparses are refused, not followed.
+Damaged marker entries still protect their package. Report paths beneath --out cannot contain a
+package-marker or reserved scratch segment, whether or not its unit is selected.
 Ordinary syntax, missing mandatory switches, invalid bundles and unknown units remain usage exit 2.
 
 An oracle omission INSIDE a package does not BLOCK assembly: a unit whose oracle genuinely has no
@@ -6229,7 +6231,11 @@ def _admit_report_destination(path: Path, out_root: Path, selected: Sequence[str
     report = _report_location(path)
     out_root = _report_location(out_root)
     report_id = _report_entry_identity(report)
-    if report == out_root or (report_id is not None and not stat.S_ISREG(report.lstat().st_mode)):
+    reserved = report.is_relative_to(out_root) and any(
+        part == MANIFEST_NAME or is_reserved_packaging_name(part)
+        for part in map(pfs.alias_key, report.relative_to(out_root).parts)
+    )
+    if reserved or report == out_root or (report_id is not None and not stat.S_ISREG(report.lstat().st_mode)):
         raise ValueError("report_destination_unsafe")
     if brief is not None:
         brief = _report_location(brief)
@@ -6245,11 +6251,16 @@ def _admit_report_destination(path: Path, out_root: Path, selected: Sequence[str
         raise ValueError("report_destination_unsafe")
 
     if _construction_directory(out_root) is not None:
-        walked, findings, _empty = pfs.walk_package(out_root)
+        walked, findings, empty = pfs.walk_package(out_root)
         if findings:
             raise ValueError("report_destination_unassessable")
+        # Marker directories are damaged boundaries, not ordinary reporting space. The no-follow
+        # walk covers them through either an empty directory or a descendant's parent chain.
         existing_roots = {
-            member.parent for member in walked.values() if pfs.alias_key(member.name) == pfs.alias_key(MANIFEST_NAME)
+            entry.parent
+            for member in (*walked.values(), *(out_root / relative for relative in empty))
+            for entry in (member, *member.parents)
+            if entry.parent.is_relative_to(out_root) and pfs.alias_key(entry.name) == pfs.alias_key(MANIFEST_NAME)
         }
         if any(report.is_relative_to(root) for root in existing_roots):
             raise ValueError("report_destination_unsafe")
@@ -6298,8 +6309,9 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "replace the construction report even on brief refusal; a brief/output/package/transaction collision "
-            "or an unassessable alias is a usage error before writes. Ordinary reporting directories beneath --out "
-            "and non-aliasing external reports are allowed"
+            "or an unassessable alias is a usage error before writes. Package-marker and reserved scratch segments "
+            "beneath --out are forbidden even for unselected units; ordinary reporting directories and "
+            "non-aliasing external reports are allowed"
         ),
     )
     parser.add_argument("--quiet", action="store_true", help="suppress the rendered summary")

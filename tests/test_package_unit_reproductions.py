@@ -298,6 +298,56 @@ def test_json_destination_cannot_enter_real_or_prospective_packages(  # pylint: 
         assert not out.exists(), "misuse must not manufacture a discoverable package marker"
 
 
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "nested"])
+@pytest.mark.parametrize("nonempty", [False, True], ids=["empty-marker-directory", "nonempty-marker-directory"])
+@pytest.mark.parametrize("alias", [False, True], ids=["direct-member", "external-hardlink"])
+def test_json_destination_damaged_marker_keeps_existing_package_protected(  # pylint: disable=too-many-locals
+    tmp_path: Path, nested: bool, nonempty: bool, alias: bool
+) -> None:
+    """A real package does not become writable reporting space when its marker is damaged."""
+    bundle, oracle, _objects = _bundle(tmp_path, covered=None, datasource_only=True)
+    out = tmp_path / "packages"
+    brief = _brief(tmp_path, UNIT)
+    parent = out / "batch" if nested else out
+    pkg.package_unit(bundle, UNIT, parent, oracle_dir=oracle, assets_dir=bundle.parent / "assets", brief=brief)
+    package = parent / UNIT
+    marker = package / "package-manifest.json"
+    marker.unlink()
+    marker.mkdir()
+    if nonempty:
+        (marker / "held.txt").write_bytes(b"damaged marker contents")
+    member = package / "handover.md"
+    report = tmp_path / "status.json" if alias else member
+    if alias:
+        os.link(member, report)
+        assert report.samefile(member)
+    original_report_id = report.lstat().st_ino
+    original_brief = brief.read_bytes()
+    original_files = {path.relative_to(out): path.read_bytes() for path in out.rglob("*") if path.is_file()}
+    original_dirs = {path.relative_to(out) for path in out.rglob("*") if path.is_dir()}
+    with pytest.raises(SystemExit) as refused:
+        pkg.main(
+            [
+                "--bundle",
+                str(bundle),
+                "--out",
+                str(out),
+                "--unit",
+                DS_UNIT,
+                "--brief",
+                str(brief),
+                "--json",
+                str(report),
+                "--discard-package-edits",
+            ]
+        )
+    assert refused.value.code == 2
+    assert brief.read_bytes() == original_brief
+    assert report.lstat().st_ino == original_report_id and report.samefile(member)
+    assert {path.relative_to(out): path.read_bytes() for path in out.rglob("*") if path.is_file()} == original_files
+    assert {path.relative_to(out) for path in out.rglob("*") if path.is_dir()} == original_dirs
+
+
 @pytest.mark.parametrize("protected", ["brief", "manifest", "artifact"])
 @pytest.mark.parametrize("link", ["symlink", "hardlink"])
 def test_json_destination_external_alias_cannot_replace_protected_files(  # pylint: disable=too-many-locals
