@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+from dataclasses import replace
 import subprocess
 import sys
 from pathlib import Path
@@ -256,7 +257,12 @@ def _cli_args(bundle: Path, out: Path, oracle: Path, tmp_path: Path) -> list[str
 
 
 def _binding_package(
-    parent: Path, *, datasource: bool = False, folder: bool = False, datasource_luid: str = DS_LUID
+    parent: Path,
+    *,
+    datasource: bool = False,
+    folder: bool = False,
+    datasource_luid: str = DS_LUID,
+    quoted: bool = False,
 ) -> Path:
     """Real producer output with independently inspectable CSV bytes and an accepted projection."""
     bundle, oracle, _objects = _bundle(parent, covered=None, datasource_only=datasource)
@@ -274,7 +280,19 @@ def _binding_package(
     source.write_bytes(b"value\n7\n")
     definition = bundle / "pbip" / unit / f"{unit}.SemanticModel" / "definition"
     (definition / "tables").mkdir()
-    if folder:
+    if quoted:
+        expressions = (
+            "/// Unicode Ω before the exact byte span\n"
+            'expression Caption = "data"\n'
+            'expression Server = "fixture.example"\n'
+            'expression Database = "warehouse"\n'
+            'expression HttpPath = "/sql/1.0/warehouses/fixture"\n'
+            f"""expression 'Owner''s "Archive" Root' = "{source.parent}" meta [IsParameterQuery=true, Type="Text"]\n"""
+            "\tlineageTag: 16d36c9b-49bd-45bf-969b-d27606b4e1c0\n"
+        )
+        (definition / "expressions.tmdl").write_bytes(b"\xef\xbb\xbf" + expressions.replace("\n", "\r\n").encode())
+        expression = """File.Contents(#"Owner's ""Archive"" Root" & "\\rows.csv")"""
+    elif folder:
         (definition / "expressions.tmdl").write_text(
             f'expression Caption = "ordinary"\nexpression #"Extract Folder" = "{source.parent}"\n',
             encoding="utf-8",
@@ -283,8 +301,14 @@ def _binding_package(
         expression = 'File.Contents(#"Extract Folder" & "\\rows.csv")'
     else:
         expression = f'File.Contents("{source}")'
+    source_m = f"Csv.Document({expression})"
+    if quoted:
+        source_m = (
+            "let C = Text.Length(Caption), D = Sql.Database(Server, Database), "
+            f"H = Databricks.Catalogs(Server, HttpPath), R = {source_m} in R"
+        )
     (definition / "tables" / "Rows.tmdl").write_text(
-        f"table Rows\n\tpartition Rows = m\n\t\tmode: import\n\t\tsource = Csv.Document({expression})\n",
+        f"table Rows\n\tpartition Rows = m\n\t\tmode: import\n\t\tsource = {source_m}\n",
         encoding="utf-8",
     )
     _write_receipt(bundle, [UNIT, DS_UNIT] if datasource else [UNIT])
@@ -340,8 +364,12 @@ def test_binding_root_boundary_preserves_every_later_segment(tmp_path: Path, tai
     rewritten, count, untouched = sdf._rewritten(text, str(root))
     assert rewritten == text.replace(portable, bound), "portable rewriting truncated the declared data tail"
     assert (count, untouched) == (1, [])
+    selected = pkg.interpret_folder_parameter(
+        [(key.split(".SemanticModel/", 1)[1], raw) for key, raw in held.members.items() if key.endswith(".tmdl")]
+    ).root
+    assert selected is not None
     for value in (portable, bound):
-        assert pkg._binding_relative(held, root, value, '#"Extract Folder"') == f"data/{tail}", (
+        assert pkg._binding_relative(held, root, replace(selected, value=value)) == f"data/{tail}", (
             "held-root parsing truncated the declared data tail"
         )
 
@@ -356,7 +384,7 @@ def test_binding_later_data_segments_survive_planning_inspection_and_public_life
     portable = (root / expression).read_bytes()
     value = f"<PACKAGE_ROOT>{os.sep}data{os.sep}{tail.replace('/', os.sep)}" + (os.sep if trailing else "")
     held = pkg._binding_hold(root)
-    planned = pkg._binding_plan(held, root, False, sdf._rewritten)
+    planned = pkg._binding_plan(held, root, False)
     bound = str(root / "data" / tail) + (os.sep if trailing else "")
     assert planned[expression] == portable.replace(value.encode(), bound.encode())
     before = _binding_cli(root, "--inspect")
@@ -445,6 +473,112 @@ def test_binding_inspection_tracks_parameter_identity_tail_and_separator(tmp_pat
     expression = (root / row["member"]).read_text(encoding="utf-8")
     assert f'"{root}{os.sep}data{os.sep}Extract.Data"' in expression
     assert (root / row["data_tail"] / "rows.csv").read_bytes() == b"value\n7\n"
+
+
+@pytest.mark.parametrize("datasource", [False, True])
+def test_custom_quoted_folder_uses_one_identity_through_inspect_bind_move_rebind_sanitize(
+    tmp_path: Path, datasource: bool
+) -> None:
+    root = _binding_package(tmp_path, datasource=datasource, quoted=True)
+    unit = DS_UNIT if datasource else UNIT
+    expression = f"fabric/{unit}.SemanticModel/definition/expressions.tmdl"
+    table = f"fabric/{unit}.SemanticModel/definition/tables/Rows.tmdl"
+    portable, partition = (root / expression).read_bytes(), (root / table).read_bytes()
+    value = ("<PACKAGE_ROOT>" + os.sep + "data" + os.sep + "Extract.Data").encode()
+    identity = hashlib.sha256(b"""'Owner''s "Archive" Root'""").hexdigest()
+    assert portable.startswith(b"\xef\xbb\xbf") and b"\r\n" in portable
+    assert portable.count(value) == 1 and b'expression Caption = "data"' in portable
+    source_access = (root / "data-access.json").read_bytes()
+    references = (root / "oracle" / "oracle-manifest.json").read_bytes() if not datasource else None
+    for move in (False, True):
+        if move:
+            target = tmp_path / "recipient" / "RenamedPackage"
+            target.parent.mkdir()
+            root.rename(target)
+            root = target
+        before = _binding_cli(root, "--inspect")
+        assert before["exit_code"] == 1 and before["inspection"]["state"] == "UNBOUND"
+        assert before["inspection"]["parameters"][0]["parameter_identity"] == identity
+        result = _binding_cli(root)
+        assert result["exit_code"] == 0 and result["inspection"]["state"] == "BOUND"
+        row = result["inspection"]["parameters"][0]
+        assert row["parameter_identity"] == identity and row["parameter_ordinal"] == 4
+        assert row["current_root_match"] and row["target_exists"]
+        assert (root / expression).read_bytes() == portable.replace(value, str(root / "data" / "Extract.Data").encode())
+        assert (root / table).read_bytes() == partition
+        assert (root / row["data_tail"] / "rows.csv").read_bytes() == b"value\n7\n"
+        assert _binding_cli(root, "--inspect")["inspection"]["state"] == "BOUND"
+        assert (root / "data-access.json").read_bytes() == source_access
+        if references is not None:
+            assert (root / "oracle" / "oracle-manifest.json").read_bytes() == references
+        assert result["inspection"]["validation"] == "UNVALIDATED"
+    sanitized = _binding_cli(root, "--sanitize")
+    assert sanitized["exit_code"] == 0 and sanitized["inspection"]["state"] == "UNBOUND"
+    assert sanitized["inspection"]["parameters"][0]["parameter_identity"] == identity
+    assert (root / expression).read_bytes() == portable
+    assert (root / table).read_bytes() == partition
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    assert _binding_cli(root)["exit_code"] == 0
+
+
+@pytest.mark.parametrize("mode", ["inspect", "bind", "sanitize"])
+@pytest.mark.parametrize("malformed", [False, True])
+def test_package_folder_refusal_is_clean_authority_not_a_dirty_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, malformed: bool
+) -> None:
+    root = _binding_package(tmp_path, quoted=True)
+    if mode == "sanitize":
+        assert _binding_cli(root)["exit_code"] == 0
+    definition = root / "fabric" / f"{UNIT}.SemanticModel" / "definition"
+    path = definition / "expressions.tmdl"
+    path.write_bytes(path.read_bytes() + b'expression PrivateSymbolCanary = "Q:\\PrivateValueCanary\\"\r\n')
+    use = 'File.Contents(PrivateSymbolCanary & "\\PrivateMemberCanary.csv")'
+    if malformed:
+        use += " /* PrivateMalformedCanary"
+    (definition / "tables" / "PrivateModelCanary.tmdl").write_bytes(
+        f"table Other\n\tpartition Other = m\n\t\tsource = {use}\n".encode()
+    )
+    manifest_path = root / pkg.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["contents"]["files"] = pkg.package_contents(root)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    assert pkg.pri.verify_phase1_role_identity((root,))[0].is_start_ready
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    def no_stage(*_args, **_kwargs):
+        pytest.fail("the folder decision must refuse before binding staging")
+
+    monkeypatch.setattr(pkg, "_binding_stage", no_stage)
+    result = _binding_cli(root, *(("--" + mode,) if mode != "bind" else ()))
+    assert result["exit_code"] == (3 if malformed else 1)
+    assert result["codes"] == ["folder_parameter_malformed_m" if malformed else "folder_parameter_multiple"]
+    assert result["inspection"] == {} and result["outcome"] == "unchanged"
+    for canary in ("PrivateSymbolCanary", "PrivateValueCanary", "PrivateMemberCanary", "PrivateModelCanary"):
+        assert canary not in json.dumps(result)
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize(
+    "state,code,assembly_type,binding_exit",
+    [
+        ("refused", "folder_parameter_malformed_m", pkg.PackagingError, 1),
+        ("unassessable", "folder_parameter_multiple", pkg.UnassessableInput, 3),
+    ],
+)
+def test_folder_consumers_map_state_not_code_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, code: str, assembly_type: type, binding_exit: int
+) -> None:
+    root = _binding_package(tmp_path, quoted=True)
+    decision = pkg.FolderParameterDecision(state, None, code)
+    with pytest.raises(assembly_type) as error:
+        pkg._assembly_folder_root(decision)
+    assert type(error.value) is assembly_type and error.value.reason_code == code
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    monkeypatch.setattr(pkg, "interpret_folder_parameter", lambda _documents: decision)
+    result = _binding_cli(root, "--inspect")
+    assert (result["exit_code"], result["codes"], result["inspection"]) == (binding_exit, [code], {})
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
 def test_binding_no_flags_reference_gate_stays_s1_clean(tmp_path: Path) -> None:

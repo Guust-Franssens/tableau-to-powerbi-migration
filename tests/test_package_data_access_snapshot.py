@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -74,7 +75,7 @@ def test_binding_inspection_holds_current_s1_s2_and_the_publication_callback_res
         return inspection
 
     monkeypatch.setattr(pkg, "_binding_final", capture)
-    result = pkg.bind_package(root, rewrite=sdf._rewritten, inspect=mode == "inspect", sanitize=mode == "sanitize")
+    result = pkg.bind_package(root, inspect=mode == "inspect", sanitize=mode == "sanitize")
     assert result.exit_code == 0
     inspection = result.inspection
     assert isinstance(inspection, pkg.PackageBindingInspection)
@@ -100,9 +101,7 @@ def test_binding_inspection_holds_current_s1_s2_and_the_publication_callback_res
     assert "authority" not in result.as_dict()["inspection"]
 
 
-@pytest.mark.parametrize(
-    "seam", ["planner", "digest", "unrelated", "concurrent-reseal", "directory", "empty-directory"]
-)
+@pytest.mark.parametrize("seam", ["digest", "unrelated", "concurrent-reseal", "directory", "empty-directory"])
 def test_binding_mutations_reach_their_intended_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
 ) -> None:
@@ -110,17 +109,7 @@ def test_binding_mutations_reach_their_intended_authority(
     root = _binding_package(tmp_path)
     before = _files(root)
     hits = []
-    if seam == "planner":
-        rewrite = sdf._rewritten
-
-        def disabled(text, base):
-            new, count, untouched = rewrite(text, base)
-            assert new != text and count > 0
-            hits.append(True)
-            return text, count, untouched
-
-        monkeypatch.setattr(sdf, "_rewritten", disabled)
-    elif seam == "digest":
+    if seam == "digest":
         seal = pkg._seal_package
 
         def omit_digest(dest, manifest, **kwargs):
@@ -157,7 +146,6 @@ def test_binding_mutations_reach_their_intended_authority(
     assert hits == [True]
     assert result["exit_code"] != 0
     expected_codes = {
-        "planner": "binding_planner_delta_invalid",
         "digest": "binding_staging_failed",
         "unrelated": "binding_candidate_changed",
         "concurrent-reseal": "binding_discovery_unassessable",
@@ -176,6 +164,92 @@ def test_binding_mutations_reach_their_intended_authority(
     assert result["inspection"] == {}
     assert not pkg.staging_dir(root.parent, root.name).exists()
     assert not pkg.retired_dir(root).exists()
+
+
+@pytest.mark.parametrize("mode", ["inspect", "bind", "sanitize"])
+def test_binder_only_folder_decision_bypass_fails_the_exact_identity_or_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    """Replacement for the removed checkout callback mutation; the shared interpreter stays real."""
+    root = _binding_package(tmp_path, quoted=True)
+    pristine = _files(root)
+    expression = f"fabric/{UNIT}.SemanticModel/definition/expressions.tmdl"
+    portable = ("<PACKAGE_ROOT>" + os.sep + "data" + os.sep + "Extract.Data").encode()
+    bound = str(root / "data" / "Extract.Data").encode()
+    identity = hashlib.sha256(b"""'Owner''s "Archive" Root'""").hexdigest()
+    assert pristine[expression].count(portable) == 1
+    assert b'expression Caption = "data"' in pristine[expression]
+    assert pkg.pri.verify_s1(root).integrity.is_clean
+    assert pkg.pri.verify_phase1_role_identity((root,))[0].is_start_ready
+    assert pkg.data_access.read_data_access(root / "data-access.json").state == "local_import_ready"
+    initial = pkg.bind_package(root, inspect=True)
+    assert initial.exit_code == 1 and initial.inspection is not None
+    assert initial.inspection.parameters[0]["parameter_identity"] == identity
+    assert _files(root) == pristine
+    if mode == "sanitize":
+        assert pkg.bind_package(root).exit_code == 0
+    before = _files(root)
+    expected = (
+        before[expression]
+        if mode == "inspect"
+        else before[expression].replace(bound, portable)
+        if mode == "sanitize"
+        else before[expression].replace(portable, bound)
+    )
+
+    def exercise():
+        result = pkg.bind_package(root, inspect=mode == "inspect", sanitize=mode == "sanitize")
+        assert result.exit_code == (1 if mode == "inspect" else 0), result.codes
+        assert result.inspection is not None
+        return result
+
+    def assert_selected(result):
+        if mode == "inspect":
+            assert result.inspection.parameters[0]["parameter_identity"] == identity, (
+                "binder inspection selected the unrelated Caption"
+            )
+            assert _files(root) == before
+        else:
+            assert (root / expression).read_bytes() == expected, "binder changed Caption instead of the folder value"
+
+    # A real successful control at the same public entry point, before substituting only its consumer.
+    assert_selected(exercise())
+    if mode != "inspect":
+        assert pkg.bind_package(root, sanitize=mode == "bind").exit_code == 0
+        assert _files(root) == before
+    hits = []
+    interpreter = pkg.interpret_folder_parameter
+
+    def first_data_shaped_declaration(package, current):
+        raw = package.members[expression]
+        match = re.search(rb'expression Caption = "([^"]*)"', raw)
+        assert match is not None
+        value = match[1].decode()
+        hits.append(mode)
+        # Old first/data-shaped selection mistakes Caption for the root. The remainder of the real
+        # binder still plans, publishes and inspects, so an unrelated failure cannot kill this bypass.
+        row = {
+            "member": expression,
+            "parameter_ordinal": 0,
+            "parameter_identity": hashlib.sha256(b"Caption").hexdigest(),
+            "data_tail": "data/Extract.Data",
+            "trailing_separator": False,
+            "current_root_match": value == str(current / "data" / "Extract.Data"),
+            "placeholder": value == "data" or value == portable.decode(),
+            "target_exists": "data/Extract.Data" in package.directories,
+            "codes": [],
+        }
+        return [row], {expression: [(*match.span(1), "data/Extract.Data")]}
+
+    monkeypatch.setattr(pkg, "_binding_expressions", first_data_shaped_declaration)
+    result = exercise()
+    assert hits and set(hits) == {mode}, "the intended binding consumer never ran"
+    message = "binder inspection selected" if mode == "inspect" else "binder changed Caption"
+    with pytest.raises(AssertionError, match=message):
+        assert_selected(result)
+    assert pkg.interpret_folder_parameter is interpreter
+    if mode != "inspect":
+        assert pkg.pri.verify_s1(root).integrity.is_clean, "S1 cleanliness cannot detect a wrong selected symbol"
 
 
 def test_binding_legacy_dirty_baseline_is_not_repaired(tmp_path: Path) -> None:
@@ -258,7 +332,7 @@ def test_binding_provider_cohort_is_explicit_ordered_read_only_and_independently
     assert sanitized["inspection"]["state"] == "NOT_APPLICABLE"
     assert sanitized["inspection"]["provider_ordinals"] == [1 if reverse else 0]
     assert before == [_files(path) for path in (*providers, consumer)]
-    current = pkg.bind_package(consumer, rewrite=sdf._rewritten, sanitize=True, provider_packages=providers)
+    current = pkg.bind_package(consumer, sanitize=True, provider_packages=providers)
     assert current.inspection.authority.roots == (*providers, consumer)
     assert (
         current.inspection.authority.roles[-1].data_access_handoff(consumer).data_access.content
@@ -1202,10 +1276,10 @@ def test_real_parsed_shared_provider_reaches_producer_handoff_and_binder(
     monkeypatch.setattr(pkg.data_access, "assess_data_access", forbidden)
     monkeypatch.setattr(pkg, "_assemble_unit", forbidden)
     phase[0] = "binder"
-    provider_binding = pkg.bind_package(provider, rewrite=sdf._rewritten)
+    provider_binding = pkg.bind_package(provider)
     assert provider_binding.exit_code == 0 and provider_binding.inspection.state == "NOT_APPLICABLE"
     before = [_files(root) for root in roots]
-    result = pkg.bind_package(consumer, rewrite=sdf._rewritten, inspect=True, provider_packages=(provider,))
+    result = pkg.bind_package(consumer, inspect=True, provider_packages=(provider,))
     assert (result.exit_code, result.inspection.state, result.inspection.validation) == (
         0,
         "NOT_APPLICABLE",
@@ -1260,7 +1334,7 @@ def test_producer_and_binder_propagate_the_same_canonical_refusal(
         provider_packages=(),
     )
     assert assessment == refused and seen == [True]
-    result = pkg.bind_package(package, rewrite=sdf._rewritten, inspect=True)
+    result = pkg.bind_package(package, inspect=True)
     assert (result.exit_code, result.codes, result.inspection) == (exit_code, ("binding_source_facts_mismatch",), None)
     assert seen == [True, True]
     assert _files(package) == before
