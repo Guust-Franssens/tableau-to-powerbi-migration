@@ -428,18 +428,22 @@ def test_normal_exhaustion_drains_before_manifest(monkeypatch, tmp_path):
     assert session.signouts == 1
 
 
-def test_workers_default_to_serial_and_values_outside_one_through_four_are_rejected(tmp_path, capsys):
-    """The compatibility default is one, and both bounds fail as usage errors."""
+def test_workers_default_to_two_and_values_outside_one_through_four_are_rejected(tmp_path, capsys):
+    """Omission selects two, explicit one through four stay valid, and invalid values are usage errors."""
     parser = oracle.build_parser()
-    assert parser.parse_args(["--out", str(tmp_path)]).workers == 1
+    assert parser.parse_args(["--out", str(tmp_path)]).workers == 2
+    for workers in (1, 2, 4):
+        assert parser.parse_args(["--out", str(tmp_path), "--workers", str(workers)]).workers == workers
 
-    for value in ("0", "5", "not-a-number"):
+    for value, message in (
+        ("0", "--workers must be from 1 through 4, got 0"),
+        ("5", "--workers must be from 1 through 4, got 5"),
+        ("not-a-number", "--workers must be an integer from 1 through 4, got 'not-a-number'"),
+    ):
         with pytest.raises(SystemExit) as excinfo:
             parser.parse_args(["--out", str(tmp_path), "--workers", value])
         assert excinfo.value.code == 2
-        error = capsys.readouterr().err
-        assert "--workers" in error
-        assert "1" in error and "4" in error
+        assert message in capsys.readouterr().err
 
 
 def test_workers_one_is_serial(monkeypatch, tmp_path):
@@ -621,8 +625,6 @@ def test_main_keeps_setup_serial_and_uses_one_initial_signin(monkeypatch, tmp_pa
             "--out",
             str(tmp_path / "oracle"),
             "--reference-best",
-            "--workers",
-            "2",
         ],
     )
 
