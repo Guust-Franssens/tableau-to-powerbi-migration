@@ -1219,6 +1219,67 @@ def test_folder_selector_accepts_whole_folder_and_named_files_of_the_same_root(r
 
 
 @pytest.mark.parametrize(
+    "name,reference,symbol",
+    [
+        ("ArchiveRoot", "ArchiveRoot", "ArchiveRoot"),
+        ("""'Owner''s "Archive" Root'""", """#"Owner's ""Archive"" Root" """.strip(), """Owner's "Archive" Root"""),
+    ],
+)
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "[$P = 1]",
+        "each [$P] <> null",
+        '[Outer = [$P = 1], Other = [#"File.Contents" = 2]]',
+        'each [#"File.Contents"] <> null',
+        'each [[$P], [Folder.Files], [#"Folder.Contents"]]',
+        "[Outer = [$P = 1]][Outer][$P]",
+        "[ArchiveRoot Name = 1, File.Contents Name = 2]",
+        "each [File.Contents Name]",
+        '[Field = (File.Contents($P & "rows.csv"))]',
+    ],
+)
+def test_folder_selector_field_names_are_not_executable_references(
+    name: str, reference: str, symbol: str, metadata: str
+) -> None:
+    use = (
+        f'let Metadata = {metadata.replace("$P", reference)}, Bytes = File.Contents({reference} & "rows.csv") in Bytes'
+    )
+    decision = pkg.interpret_folder_parameter(_folder_corpus(use, f'expression {name} = "Q:\\archive\\"\n'))
+    assert (decision.state, decision.code) == ("selected", "folder_parameter_selected")
+    assert decision.root is not None
+    assert (decision.root.symbol, decision.root.tails) == (symbol, ("rows.csv",))
+
+
+@pytest.mark.parametrize(
+    "name,reference",
+    [
+        ("ArchiveRoot", "ArchiveRoot"),
+        ("""'Owner''s "Archive" Root'""", """#"Owner's ""Archive"" Root" """.strip()),
+    ],
+)
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        "[Field = $P]",
+        "[$P = $P]",
+        "[Outer = [Field = $P]]",
+        "[Field = {$P}]",
+        "[Field = ($P)]",
+        "[Field = let X = 1, Alias = $P in Alias]",
+        '[Field = let X = 1, $P = "shadow" in File.Contents($P & "\\rows.csv")]',
+        "$P[Field]",
+    ],
+)
+def test_folder_selector_record_values_keep_executable_role_conflicts(name: str, reference: str, metadata: str) -> None:
+    use = (
+        f'let Metadata = {metadata.replace("$P", reference)}, Bytes = File.Contents({reference} & "rows.csv") in Bytes'
+    )
+    decision = pkg.interpret_folder_parameter(_folder_corpus(use, f'expression {name} = "Q:\\archive\\"\n'))
+    assert (decision.state, decision.root, decision.code) == ("refused", None, "folder_parameter_role_conflict")
+
+
+@pytest.mark.parametrize(
     "use",
     [
         'Text.Length(ArchiveRoot & "rows.csv")',
@@ -1263,6 +1324,10 @@ def test_folder_selector_zero_is_use_based_not_caption_value_or_proximity(use: s
         (
             'let S = File.Contents(ArchiveRoot & "rows.csv"), N = Text.Length(ArchiveRoot & "other") in S',
             "folder_parameter_role_conflict",
+        ),
+        (
+            'let R = [Field = File.Contents], S = File.Contents(ArchiveRoot & "rows.csv") in S',
+            "folder_parameter_reader_unsupported",
         ),
         ('File.Contents(ArchiveRoot & "rows.csv", [Option=ArchiveRoot])', "folder_parameter_role_conflict"),
         (
@@ -1335,11 +1400,53 @@ def test_folder_selector_refuses_duplicate_decoded_declaration_identity(duplicat
         'File.Contents(ArchiveRoot & "rows.csv") & // unfinished',
         'File.Contents(ArchiveRoot & "rows.csv") */',
         "/* comment only */",
+        *[
+            f'File.Contents(ArchiveRoot & "rows.csv") {keyword}{trivia}'
+            for keyword in ("and", "or", "as", "is", "meta", "otherwise")
+            for trivia in ("", " // trailing comment", " /* trailing comment */")
+        ],
     ],
 )
-def test_folder_selector_malformed_m_is_unassessable_never_zero(use: str) -> None:
-    decision = pkg.interpret_folder_parameter(_folder_corpus(use))
+def test_folder_selector_malformed_m_is_unassessable_never_zero(use: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("malformed M interpretation reached filesystem work")
+
+    with monkeypatch.context() as guarded:
+        for method in ("open", "exists", "is_file", "is_dir", "rglob", "stat"):
+            guarded.setattr(Path, method, forbidden)
+        decision = pkg.interpret_folder_parameter(_folder_corpus(use))
     assert (decision.state, decision.root, decision.code) == ("unassessable", None, "folder_parameter_malformed_m")
+
+
+@pytest.mark.parametrize(
+    "use",
+    [
+        'File.Contents(ArchiveRoot & "rows.csv") <> null and true',
+        'File.Contents(ArchiveRoot & "rows.csv") <> null or false',
+        'File.Contents(ArchiveRoot & "rows.csv") as binary',
+        'File.Contents(ArchiveRoot & "rows.csv") is binary',
+        'File.Contents(ArchiveRoot & "rows.csv") meta [Note = "kept"]',
+        'try File.Contents(ArchiveRoot & "rows.csv") otherwise null',
+    ],
+)
+def test_folder_selector_complete_keyword_operators_remain_supported(use: str) -> None:
+    decision = pkg.interpret_folder_parameter(_folder_corpus(use))
+    assert (decision.state, decision.code) == ("selected", "folder_parameter_selected")
+    assert decision.root is not None and decision.root.tails == ("rows.csv",)
+
+
+@pytest.mark.parametrize("keyword", ["and", "or", "as", "is", "meta", "otherwise"])
+@pytest.mark.parametrize("quoted_tail", ["", ' ""quoted""'])
+def test_folder_selector_keyword_lookalikes_in_trivia_and_quoted_tokens_are_not_operators(
+    keyword: str, quoted_tail: str
+) -> None:
+    use = (
+        f'let Note = "{keyword}", #"{keyword}{quoted_tail}" = File.Contents(ArchiveRoot & "rows.csv") '
+        f'in #"{keyword}{quoted_tail}" /* {keyword} */ // {keyword}'
+    )
+    decision = pkg.interpret_folder_parameter(_folder_corpus(use))
+    assert (decision.state, decision.code) == ("selected", "folder_parameter_selected")
+    assert decision.root is not None and decision.root.tails == ("rows.csv",)
 
 
 @pytest.mark.parametrize("closed", [False, True])
@@ -1380,14 +1487,21 @@ def test_folder_selector_cannot_drop_unextractable_or_undecodable_carriers(raw: 
     assert "private-model-canary" not in repr(decision)
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{(\"ArchiveRoot\", NAMEOF('C'[Value]), 1)}",
+        "\n\t\t\tVAR expression = { 1 }\n\t\t\tRETURN\n\t\t\t\texpression",
+    ],
+)
 def test_folder_selector_ignores_calculated_dax_and_tmdl_metadata_and_performs_no_io(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, source: str
 ) -> None:
     documents = _folder_corpus('File.Contents(ArchiveRoot & "rows.csv")')
     documents += [
         (
             "definition/tables/Calculated.tmdl",
-            b"table C\n\tpartition C = calculated\n\t\tsource = {(\"ArchiveRoot\", NAMEOF('C'[Value]), 1)}\n",
+            f"table C\n\tpartition C = calculated\n\t\tsource = {source}\n".encode(),
         ),
         ("definition/model.tmdl", b'model Model\n\tannotation Note = "File.Contents(Alias)"\n'),
     ]
@@ -1395,12 +1509,53 @@ def test_folder_selector_ignores_calculated_dax_and_tmdl_metadata_and_performs_n
     def forbidden(*_args, **_kwargs):
         pytest.fail("pure folder interpretation reached the filesystem")
 
-    for method in ("open", "exists", "is_file", "is_dir", "rglob", "stat"):
-        monkeypatch.setattr(Path, method, forbidden)
-    decision = pkg.interpret_folder_parameter(documents)
+    with monkeypatch.context() as guarded:
+        for method in ("open", "exists", "is_file", "is_dir", "rglob", "stat"):
+            guarded.setattr(Path, method, forbidden)
+        decision = pkg.interpret_folder_parameter(documents)
+        empty = pkg.interpret_folder_parameter([])
     assert decision.state == "selected" and decision.root is not None
     assert decision.root.symbol == "ArchiveRoot"
-    assert pkg.interpret_folder_parameter([]).state == "zero"
+    assert empty.state == "zero"
+
+
+@pytest.mark.parametrize("identifier", ["expression", "partition", "source"])
+@pytest.mark.parametrize("indent", ["\t", "    "])
+@pytest.mark.parametrize("following", ["none", "partition", "expression"])
+def test_folder_selector_non_m_source_body_stops_at_its_indentation_boundary(
+    monkeypatch: pytest.MonkeyPatch, identifier: str, indent: str, following: str
+) -> None:
+    dax = (
+        "table Calc\n\tpartition Calc = calculated\n\t\tsource =\n"
+        "\t\t\t/*\n"
+        '\t\t\texpression Fake = File.Contents(Missing & "not-a-reader.csv")\n'
+        "\t\t\tpartition Fake = m\n"
+        "\t\t\tsource = Folder.Files(Missing)\n"
+        "\t\t\t*/\n"
+        f"\t\t\tVAR {identifier} = {{ 1 }}\n\t\t\tRETURN\n\t\t\t\t{identifier}\n"
+    )
+    suffix = {
+        "none": "",
+        "partition": '\tpartition Later = m\n\t\tsource = File.Contents(ArchiveRoot & "later.csv")\n',
+        "expression": 'expression Later = File.Contents(ArchiveRoot & "later.csv")\n',
+    }[following]
+    documents = _folder_corpus("")
+    documents[1] = ("definition/tables/Calc.tmdl", (dax + suffix).replace("\t", indent).encode())
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("calculated source classification reached filesystem work")
+
+    with monkeypatch.context() as guarded:
+        for method in ("open", "exists", "is_file", "is_dir", "rglob", "stat"):
+            guarded.setattr(Path, method, forbidden)
+        decision = pkg.interpret_folder_parameter(documents)
+    expected = "zero" if following == "none" else "selected"
+    assert (decision.state, decision.code) == (expected, f"folder_parameter_{expected}")
+    if following != "none":
+        assert decision.root is not None
+        assert (decision.root.symbol, decision.root.tails) == ("ArchiveRoot", ("later.csv",))
+    else:
+        assert decision.root is None
 
 
 def _custom_folder_bundle(parent: Path, *, whole: str | None = None, trailing: bool = False) -> tuple[Path, Path, Path]:
@@ -1604,6 +1759,28 @@ def test_folder_assembly_maps_direction_without_enumeration_or_private_diagnosti
     emitted = outcome.read_text(encoding="utf-8") + "".join(capsys.readouterr())
     for canary in ("PrivateSymbolCanary", "PrivateValueCanary", "PrivateMemberCanary", "PrivateModelCanary"):
         assert canary not in emitted
+    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("keyword", ["and", "or", "as", "is", "meta", "otherwise"])
+def test_folder_assembly_unfinished_keyword_refuses_before_source_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keyword: str
+) -> None:
+    bundle, oracle, definition = _custom_folder_bundle(tmp_path)
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    table = definition / "tables" / "Shared.tmdl"
+    table.write_bytes(table.read_bytes().rstrip(b"\r\n") + f" {keyword}\r\n".encode())
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("unfinished keyword reached source filesystem work")
+
+    monkeypatch.setattr(pkg, "_classify_source", forbidden)
+    monkeypatch.setattr(pkg, "_shippable_members", forbidden)
+    outcome = tmp_path / "outcome.json"
+    assert pkg.main(["--bundle", str(bundle), "--out", str(_out(tmp_path)), "--json", str(outcome)]) == 6
+    assert json.loads(outcome.read_bytes())["failed"][0]["reason_code"] == "folder_parameter_malformed_m"
     assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 

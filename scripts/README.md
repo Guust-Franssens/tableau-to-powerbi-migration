@@ -282,6 +282,9 @@ separator supplied by the root or the tail. All literal pieces and mixed separat
 TMDL single-quoted names/doubled apostrophes and M quoted identifiers/doubled quotes join by decoded,
 case-sensitive identity; legacy M-quoted declarations remain supported. Only the selected value
 bytes change: names, references, metadata, BOM and line endings are not rewritten.
+Non-M partition source bodies are skipped to their TMDL indentation boundary, including DAX
+identifiers or comments that resemble M headers. Record field names and field selectors are not
+executable parameter references or reader calls; references in record **values** still count.
 
 | Decision | Assembly | Package inspect / bind / sanitize |
 |---|---|---|
@@ -300,6 +303,8 @@ decoding and unextractable carriers yield fixed `folder_parameter_malformed_m`,
 This is a finite interpretation, not a general M parser: aliases/functions, dynamic filenames,
 M character-escape expansion and unsupported enclosing layouts are not inferred or evaluated.
 Nested block comments exceed the reused lexer's contract and are unassessable, not partially scanned.
+The bounded unfinished-expression check also refuses trailing `and`, `or`, `as`, `is`, `meta` and
+`otherwise` without a right operand. Strings, comments and quoted identifiers do not trigger it.
 
 Use `python scripts\set_data_folder.py --package <absolute-package> --inspect`, bind with the same
 command without `--inspect`, then rebind after a move. Before transfer, run it with `--sanitize`

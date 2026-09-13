@@ -196,6 +196,33 @@ def test_m_partitions_are_still_read(tmp_path: Path) -> None:
     assert [f.kind for f in findings] == ["TRAILING_COMMA"]
 
 
+def test_non_m_source_body_cannot_introduce_m_headers_but_later_siblings_are_checked(tmp_path: Path) -> None:
+    text = (
+        "table Calc\n"
+        "\tpartition Calc = calculated\n"
+        "\t\tsource =\n"
+        "\t\t\t/*\n"
+        "\t\t\texpression Fake = File.Contents(Missing)\n"
+        "\t\t\tpartition Fake = m\n"
+        "\t\t\tsource = Folder.Files(Missing)\n"
+        "\t\t\t*/\n"
+        "\t\t\tVAR expression = { 1 }\n"
+        "\t\t\tRETURN\n"
+        "\t\t\t\texpression\n"
+        "\tpartition Later = m\n"
+        "\t\tsource = {1, 2,}\n"
+        'expression Caption = "kept"\n'
+    )
+    model = tmp_path / "Calc.SemanticModel"
+    path = model / "definition" / "tables" / "Calc.tmdl"
+    path.parent.mkdir(parents=True)
+    path.write_text(text, encoding="utf-8")
+    expected = [("{1, 2,}", 13, len("\t\tsource = ")), ('"kept"', 14, len("expression Caption = "))]
+    assert iter_m_blocks_text(text) == expected
+    assert _iter_m_blocks(path) == expected
+    assert [(finding.kind, finding.line) for finding in check_model(model)] == [("TRAILING_COMMA", 13)]
+
+
 def test_reported_line_points_at_the_real_line(tmp_path: Path) -> None:
     """The entire point is localisation - an off-by-N line number would waste the user's time."""
     tables = tmp_path / "L.SemanticModel" / "definition" / "tables"

@@ -263,6 +263,7 @@ def _binding_package(
     folder: bool = False,
     datasource_luid: str = DS_LUID,
     quoted: bool = False,
+    lookalikes: bool = False,
 ) -> Path:
     """Real producer output with independently inspectable CSV bytes and an accepted projection."""
     bundle, oracle, _objects = _bundle(parent, covered=None, datasource_only=datasource)
@@ -306,6 +307,16 @@ def _binding_package(
         source_m = (
             "let C = Text.Length(Caption), D = Sql.Database(Server, Database), "
             f"H = Databricks.Catalogs(Server, HttpPath), R = {source_m} in R"
+        )
+    if lookalikes:
+        source_m = (
+            """let Metadata = [#"Owner's ""Archive"" Root" = 1], Predicate = each [#"File.Contents"] <> null, """
+            f"Bytes = ({source_m}) in Bytes"
+        )
+        (definition / "tables" / "Calculated.tmdl").write_text(
+            "table Calculated\n\tpartition Calculated = calculated\n\t\tsource =\n"
+            "\t\t\tVAR expression = { 1 }\n\t\t\tRETURN\n\t\t\t\texpression\n",
+            encoding="utf-8",
         )
     (definition / "tables" / "Rows.tmdl").write_text(
         f"table Rows\n\tpartition Rows = m\n\t\tmode: import\n\t\tsource = {source_m}\n",
@@ -476,10 +487,11 @@ def test_binding_inspection_tracks_parameter_identity_tail_and_separator(tmp_pat
 
 
 @pytest.mark.parametrize("datasource", [False, True])
+@pytest.mark.parametrize("lookalikes", [False, True])
 def test_custom_quoted_folder_uses_one_identity_through_inspect_bind_move_rebind_sanitize(
-    tmp_path: Path, datasource: bool
+    tmp_path: Path, datasource: bool, lookalikes: bool
 ) -> None:
-    root = _binding_package(tmp_path, datasource=datasource, quoted=True)
+    root = _binding_package(tmp_path, datasource=datasource, quoted=True, lookalikes=lookalikes)
     unit = DS_UNIT if datasource else UNIT
     expression = f"fabric/{unit}.SemanticModel/definition/expressions.tmdl"
     table = f"fabric/{unit}.SemanticModel/definition/tables/Rows.tmdl"
@@ -522,22 +534,26 @@ def test_custom_quoted_folder_uses_one_identity_through_inspect_bind_move_rebind
 
 
 @pytest.mark.parametrize("mode", ["inspect", "bind", "sanitize"])
-@pytest.mark.parametrize("malformed", [False, True])
+@pytest.mark.parametrize("fault", ["multiple", "comment", "and", "or", "as", "is", "meta", "otherwise"])
 def test_package_folder_refusal_is_clean_authority_not_a_dirty_fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, malformed: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, fault: str
 ) -> None:
     root = _binding_package(tmp_path, quoted=True)
     if mode == "sanitize":
         assert _binding_cli(root)["exit_code"] == 0
     definition = root / "fabric" / f"{UNIT}.SemanticModel" / "definition"
-    path = definition / "expressions.tmdl"
-    path.write_bytes(path.read_bytes() + b'expression PrivateSymbolCanary = "Q:\\PrivateValueCanary\\"\r\n')
-    use = 'File.Contents(PrivateSymbolCanary & "\\PrivateMemberCanary.csv")'
-    if malformed:
-        use += " /* PrivateMalformedCanary"
-    (definition / "tables" / "PrivateModelCanary.tmdl").write_bytes(
-        f"table Other\n\tpartition Other = m\n\t\tsource = {use}\n".encode()
-    )
+    if fault in ("multiple", "comment"):
+        path = definition / "expressions.tmdl"
+        path.write_bytes(path.read_bytes() + b'expression PrivateSymbolCanary = "Q:\\PrivateValueCanary\\"\r\n')
+        use = 'File.Contents(PrivateSymbolCanary & "\\PrivateMemberCanary.csv")'
+        if fault == "comment":
+            use += " /* PrivateMalformedCanary"
+        (definition / "tables" / "PrivateModelCanary.tmdl").write_bytes(
+            f"table Other\n\tpartition Other = m\n\t\tsource = {use}\n".encode()
+        )
+    else:
+        path = definition / "tables" / "Rows.tmdl"
+        path.write_bytes(path.read_bytes().rstrip(b"\r\n") + f" {fault}\n".encode())
     manifest_path = root / pkg.MANIFEST_NAME
     manifest = json.loads(manifest_path.read_bytes())
     manifest["contents"]["files"] = pkg.package_contents(root)
@@ -547,12 +563,13 @@ def test_package_folder_refusal_is_clean_authority_not_a_dirty_fixture(
     before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
     def no_stage(*_args, **_kwargs):
-        pytest.fail("the folder decision must refuse before binding staging")
+        pytest.fail("the folder decision must refuse before binding target lookup or staging")
 
+    monkeypatch.setattr(pkg, "_binding_relative", no_stage)
     monkeypatch.setattr(pkg, "_binding_stage", no_stage)
     result = _binding_cli(root, *(("--" + mode,) if mode != "bind" else ()))
-    assert result["exit_code"] == (3 if malformed else 1)
-    assert result["codes"] == ["folder_parameter_malformed_m" if malformed else "folder_parameter_multiple"]
+    assert result["exit_code"] == (1 if fault == "multiple" else 3)
+    assert result["codes"] == ["folder_parameter_multiple" if fault == "multiple" else "folder_parameter_malformed_m"]
     assert result["inspection"] == {} and result["outcome"] == "unchanged"
     for canary in ("PrivateSymbolCanary", "PrivateValueCanary", "PrivateMemberCanary", "PrivateModelCanary"):
         assert canary not in json.dumps(result)

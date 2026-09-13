@@ -2348,9 +2348,13 @@ def _folder_blocks(text: str) -> list[tuple[str, int, int]] | None:
     starts = {start for _body, start, _col in blocks}
     covered = {line for body, start, _col in blocks for line in range(start, start + body.count("\n") + 1)}
     kind, pending = None, False
+    non_m_indent = None
     for number, line in enumerate(text.splitlines(), 1):
-        if number in covered and number not in starts:
+        if (number in covered and number not in starts) or (
+            non_m_indent is not None and (not line.strip() or len(line) - len(line.lstrip()) > non_m_indent)
+        ):
             continue
+        non_m_indent = None
         header = re.match(r"^[ \t]*(expression|partition|source|table)\b", line)
         if header is None:
             continue
@@ -2367,13 +2371,13 @@ def _folder_blocks(text: str) -> list[tuple[str, int, int]] | None:
             if not pending or number not in starts:
                 return None
             pending = False
-    if pending:
-        return None
+        else:
+            non_m_indent = len(line) - len(line.lstrip())
     for body, _start, _col in blocks:
         lines = body.split("\n")
         if (lines[0].strip() and any(line.strip() for line in lines[1:])) or body.lstrip().startswith("```"):
             return None
-    return blocks
+    return None if pending else blocks
 
 
 def _m_symbol(token: m_syntax.Token) -> str | None:
@@ -2472,6 +2476,36 @@ def _folder_first_argument(  # pylint: disable=too-many-return-statements
     return root, tail, None
 
 
+def _folder_field_names(tokens: list[m_syntax.Token]) -> set[int]:
+    """Mark only bracket field-name slots; record values remain executable tokens."""
+    names: set[int] = set()
+    frames: list[tuple[str, bool, int]] = []
+    for token in tokens:
+        if token.kind == "punct" and token.text in m_syntax.PAIRS:
+            frames.append((token.text, token.text == "[", 0))
+            continue
+        if token.kind == "punct" and token.text in m_syntax.CLOSERS:
+            frames.pop()
+            continue
+        if not frames or frames[-1][0] != "[":
+            continue
+        opener, in_name, lets = frames[-1]
+        if token.kind == "punct" and token.text == "=":
+            in_name = False
+        elif token.kind == "punct" and token.text == "," and not lets:
+            in_name = True
+        elif in_name:
+            names.add(id(token))
+        elif token.kind == "keyword":
+            # A comma inside a record's let value starts a binding, not another field.
+            if token.text == "let":
+                lets += 1
+            elif token.text == "in" and lets:
+                lets -= 1
+        frames[-1] = (opener, in_name, lets)
+    return names
+
+
 def _folder_selection(  # pylint: disable=too-many-locals,too-many-branches,too-many-return-statements,protected-access
     blocks: list[list[m_syntax.Token]],
     declarations: dict[str, FolderRoot | None],
@@ -2483,9 +2517,11 @@ def _folder_selection(  # pylint: disable=too-many-locals,too-many-branches,too-
     tail_spans: dict[str, set[tuple[str, int, int]]] = {}
     literal_root = False
     for tokens in blocks:
+        field_names = _folder_field_names(tokens)
+        allowed.update(field_names)
         for index, token in enumerate(tokens):
             reader = _m_symbol(token)
-            if reader not in _FOLDER_READERS:
+            if reader not in _FOLDER_READERS or id(token) in field_names:
                 continue
             if index + 1 == len(tokens) or tokens[index + 1].text != "(":
                 return FolderParameterDecision("refused", None, "folder_parameter_reader_unsupported")
@@ -2548,10 +2584,9 @@ def _folder_syntax_code(body: str, tokens: list[m_syntax.Token]) -> str | None:
     # pylint: disable=protected-access
     if _folder_unassessed_comments(body, tokens):
         return "folder_parameter_unextractable_m"
-    unfinished = (
-        tokens
-        and tokens[-1].kind == "punct"
-        and tokens[-1].text in {",", "&", "+", "-", "*", "/", "=", "<", ">", "|", "@", ":"}
+    unfinished = tokens and (
+        (tokens[-1].kind == "punct" and tokens[-1].text in {",", "&", "+", "-", "*", "/", "=", "<", ">", "|", "@", ":"})
+        or (tokens[-1].kind == "keyword" and tokens[-1].text in {"and", "or", "as", "is", "meta", "otherwise"})
     )
     stray_close = any(
         left.kind == right.kind == "punct" and left.text == "*" and right.text == "/"

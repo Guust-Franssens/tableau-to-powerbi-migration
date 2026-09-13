@@ -599,9 +599,7 @@ def iter_m_blocks_text(text: str) -> list[tuple[str, int, int]]:  # pylint: disa
             idx += 1
             continue
         is_source = lines[idx].lstrip().startswith("source")
-        if is_source and current_partition_kind not in (None, "m"):
-            idx += 1
-            continue
+        skip_source = is_source and current_partition_kind not in (None, "m")
         indent = len(match.group(1))
         # Column of the M text on the starter line, so a finding on it points at the real column.
         first_col = len(lines[idx]) - len(match.group(2))
@@ -613,11 +611,12 @@ def iter_m_blocks_text(text: str) -> list[tuple[str, int, int]]:  # pylint: disa
             if current.strip() and (len(current) - len(current.lstrip())) <= indent:
                 break
             metadata = metadata_re.match(current)
-            if metadata and len(metadata.group(1)) <= indent + 1:
+            if not skip_source and metadata and len(metadata.group(1)) <= indent + 1:
                 break
             body.append(current)
             idx += 1
-        blocks.append(("\n".join(body), start, first_col))
+        if not skip_source:
+            blocks.append(("\n".join(body), start, first_col))
     return blocks
 
 
