@@ -317,7 +317,7 @@ def test_binding_provider_refusals_do_not_recurse_or_modify_any_package(
         "wrong": (3, "binding_s2_not_clean"),
         "dirty": (1, "binding_s1_not_clean"),
         "blocked": (1, "binding_data_access_refused"),
-        "nested": (3, "binding_data_access_refused"),
+        "nested": (3, "binding_provider_unresolved"),
         "stale": (1, "binding_provider_not_bound"),
     }
     assert (result["exit_code"], result["codes"]) == (expected[fault][0], [expected[fault][1]])
@@ -1261,7 +1261,7 @@ def test_producer_and_binder_propagate_the_same_canonical_refusal(
     )
     assert assessment == refused and seen == [True]
     result = pkg.bind_package(package, rewrite=sdf._rewritten, inspect=True)
-    assert (result.exit_code, result.codes, result.inspection) == (exit_code, ("binding_data_access_refused",), None)
+    assert (result.exit_code, result.codes, result.inspection) == (exit_code, ("binding_source_facts_mismatch",), None)
     assert seen == [True, True]
     assert _files(package) == before
 
@@ -1282,3 +1282,48 @@ def test_binder_consumes_issued_facts_without_reparsing_or_reclassification(
     monkeypatch.setattr(pkg.data_access, "_classify_legs", forbidden)
     pkg._binding_access(inputs.packages[-1], inputs.roles[-1], package)
     assert _files(package) == before
+
+
+@pytest.mark.parametrize("change", ["projection-key", "connection-identity", "missing-connection"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_selected_provider_cannot_borrow_a_projection_key_from_another_root(
+    tmp_path: Path, root: Path, change: str, reverse: bool
+) -> None:
+    selected = producer._direct_provider(tmp_path / "selected")
+    other = producer._direct_provider(
+        tmp_path / "other", luid=s2.WB_LUID, key=authority.OTHER_KEY, connection=authority.OTHER
+    )
+    consumer = producer._provider_consumer(tmp_path, selected)
+    providers = (other, selected) if reverse else (selected, other)
+    baseline = producer._assess_candidate(consumer, root, providers=providers)
+    assert baseline.state == "provider_inherited" and baseline.source_keys == ("source-key:ab1baa4b3f77bb70",)
+    if change == "projection-key":
+        path = selected / "data-access.json"
+        payload = json.loads(path.read_bytes())
+        payload["source_keys"] = ["source-key:e625ce798a6d19bb"]
+    else:
+        path = selected / "migration-spec.json"
+        payload = json.loads(path.read_bytes())
+        if change == "connection-identity":
+            payload["data_sources"][0]["connection"]["server"] = "other.example"
+        else:
+            del payload["data_sources"][0]["connection"]
+    s2._write(path, payload)
+    producer._reseal(selected)
+    before = [_files(package) for package in (*providers, consumer)]
+    roles = pkg.pri.verify_phase1_role_identity((*providers, consumer))
+    assert all(role.is_start_ready for role in roles)
+    assert {dependency.provider_ordinal for dependency in roles[-1].dependencies} == {providers.index(selected)}
+    handoff = roles[providers.index(selected)].data_access_handoff(selected)
+    assert isinstance(handoff, pkg.pri.PackageDataAccessHandoff)
+    projection = pkg.data_access.parse_data_access(handoff.data_access.content.decode("utf-8"))
+    assert projection.state == "live_data_ok"
+    assert projection.source_keys != handoff.facts.live_source_keys
+    result = producer._assess_candidate(consumer, root, providers=providers)
+    assert (result.state, result.codes, result.source_keys, result.provider_unit) == (
+        "cannot_establish",
+        ("provider-foreign",),
+        (),
+        None,
+    )
+    assert before == [_files(package) for package in (*providers, consumer)]

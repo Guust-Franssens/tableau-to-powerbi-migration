@@ -814,12 +814,15 @@ def test_r1_small_metadata_never_rehashes_unrelated_eight_mib_asset(
     assert unrelated not in held, f"{surface} small metadata access retained unrelated asset bytes"
 
 
-def test_r1_unclassified_sqlproxy_cannot_claim_published_only() -> None:
+@pytest.mark.parametrize("target", ["unknown", "unsupported", "", None])
+def test_explicit_unresolved_sqlproxy_classification_cannot_claim_published_only(target: object) -> None:
     row = copy.deepcopy(PUBLISHED)
-    del row["connection"]["powerbi_target"]
+    row["connection"].update(server="published.example", powerbi_target=target)
     facts = gate.package_spec_facts({"data_sources": [row]})
-    assert facts.refusal_code == "source-key-invalid"
     assert not facts.published_only, "published shape cannot repair canonical uncertainty"
+    assert not facts.direct_applicable
+    if target in ("unknown", "unsupported"):
+        assert facts.has_review
 
 
 def test_r1_member_read_does_not_claim_fresh_integrity_for_unrelated_content(tmp_path: Path) -> None:
@@ -1090,9 +1093,9 @@ def test_handoff_consistency_refusal_preserves_private_policy_and_public_shapes(
     assert "HANDOFF_PRIVATE" not in serialized and str(package) not in serialized
 
 
-@pytest.mark.parametrize("target", ["live_source", "flat_file"])
+@pytest.mark.parametrize("target", ["live_source", "flat_file", None])
 @pytest.mark.parametrize("repeated", [False, True])
-def test_strict_published_references_have_no_second_direct_database_leg(target: str, repeated: bool) -> None:
+def test_strict_published_references_have_no_second_direct_database_leg(target: str | None, repeated: bool) -> None:
     row = {
         **PUBLISHED,
         "connection": {
@@ -1103,6 +1106,8 @@ def test_strict_published_references_have_no_second_direct_database_leg(target: 
             "powerbi_target": target,
         },
     }
+    if target is None:
+        del row["connection"]["powerbi_target"]
     spec = {"data_sources": [copy.deepcopy(row) for _ in range(2 if repeated else 1)]}
     original = copy.deepcopy(spec)
     assert gate.package_spec_facts(spec) == gate.PackageSpecFacts((), False, False, True, None)
@@ -1424,3 +1429,29 @@ def test_reconcile_does_not_repair_an_illegal_assessment(field: str, value: str)
     )
     assert (result.state, result.codes) == ("cannot_establish", ("projection-invalid",))
     assert getattr(invalid, field) == value
+
+
+@pytest.mark.parametrize("scope", ["model_only", "model_and_report"])
+def test_inherited_projection_cannot_be_its_own_direct_provider(scope: str) -> None:
+    facts = gate.package_spec_facts({"data_sources": source_rows(LIVE)})
+    assert facts.live_source_keys == (LIVE_KEY,) and facts.direct_applicable
+    assessment = gate.parse_data_access(json.dumps({**INHERITED_PROJECTION, "effective_scope": scope}))
+    result = gate.reconcile_package_data_access(assessment, facts, requested_scope=scope, fallback_authorization="stop")
+    assert (result.state, result.codes) == ("cannot_establish", ("provider-ambiguous",))
+
+
+def test_legacy_published_reference_cannot_hide_an_additional_direct_leg() -> None:
+    proxy = copy.deepcopy(PUBLISHED)
+    del proxy["connection"]["powerbi_target"]
+    spec = {"data_sources": [proxy]}
+    assessment = gate.parse_data_access(json.dumps(INHERITED_PROJECTION))
+    provider = (PROVIDER_REF, gate.parse_data_access(json.dumps(LIVE_PROJECTION)))
+    policy = {"requested_scope": "report_only_shared_model", "fallback_authorization": "stop", "provider": provider}
+    assert gate.reconcile_package_data_access(assessment, gate.package_spec_facts(spec), **policy) is assessment
+    spec["data_sources"].extend(source_rows(LIVE))
+    before = copy.deepcopy(spec)
+    facts = gate.package_spec_facts(spec)
+    assert not facts.published_only and facts.refusal_code == "source-key-invalid"
+    result = gate.reconcile_package_data_access(assessment, facts, **policy)
+    assert (result.state, result.codes) == ("cannot_establish", ("projection-invalid",))
+    assert facts.refusal_code == "source-key-invalid" and spec == before

@@ -4625,12 +4625,15 @@ def _provider_projection(
     ):
         return None, "projection-invalid"
     policy = provider.brief_policy
-    return data_access.reconcile_package_data_access(
+    checked = data_access.reconcile_package_data_access(
         assessment,
         handoff.facts,
         requested_scope=policy.requested_scope if policy else None,
         fallback_authorization=policy.fallback_authorization if policy else None,
-    ), None
+    )
+    if checked is not assessment:
+        return None, "provider-ambiguous" if checked.codes == ("provider-ambiguous",) else "provider-foreign"
+    return checked, None
 
 
 def _selected_data_provider(  # pylint: disable=too-many-return-statements
@@ -4645,6 +4648,8 @@ def _selected_data_provider(  # pylint: disable=too-many-return-statements
         return None, "provider-ambiguous"
     unresolved = [row for row in dependencies if row.state != pri.STATE_RESOLVED]
     if unresolved:
+        if any(row.code in (pri.CODE_DEPENDENCY_INVALID, pri.CODE_DEPENDENCY_IDENTITY) for row in unresolved):
+            return None, "projection-invalid"
         missing = {pri.CODE_PROVIDER_MISSING, pri.CODE_PROVIDER_MODEL, pri.CODE_PROVIDER_BLOCKED}
         return None, "provider-missing" if all(row.code in missing for row in unresolved) else "provider-foreign"
     ordinals = [row.provider_ordinal for row in dependencies]
@@ -5289,7 +5294,27 @@ def _binding_access(
         provider=provider,
     )
     if reconciled.state in ("blocked", "cannot_establish"):
-        raise _BindingRefusal("binding_data_access_refused", 1 if reconciled.state == "blocked" else 3)
+        code = "binding_data_access_refused"
+        if reconciled is not assessment:
+            if any(
+                finding
+                in (
+                    "projection-invalid",
+                    "spec-unreadable",
+                    "source-key-invalid",
+                    "source-key-set-changed",
+                    "unknown-target",
+                )
+                for finding in reconciled.codes
+            ):
+                code = "binding_source_facts_mismatch"
+            elif reconciled.codes == ("authorization-mismatch",):
+                code = "binding_authorization_mismatch"
+            elif reconciled.codes == ("provider-foreign",):
+                code = "binding_provider_projection_mismatch"
+            elif any(finding in ("provider-missing", "provider-ambiguous") for finding in reconciled.codes):
+                code = "binding_provider_unresolved"
+        raise _BindingRefusal(code, 1 if reconciled.state == "blocked" else 3)
 
 
 def _binding_data_provider(inputs: _BindingInputs) -> tuple[str, data_access.DataAccessAssessment] | None:

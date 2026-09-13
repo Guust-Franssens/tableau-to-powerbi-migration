@@ -371,6 +371,8 @@ returns its held bytes together with the exact spec already parsed by S2 and
 direct/published-only applicability). This is the sole package source-facts authority. A nonempty set
 of strict scalar `sqlproxy` references with valid published identity can be published-only:
 the parser's `powerbi_target=live_source` stays verbatim and is not a second direct database leg.
+Legacy references may omit that annotation: their exact `sqlproxy` class, mode and published identity
+still identify the reference. An explicit unknown/invalid annotation does not qualify.
 Direct sources retain canonical keys, including a datasource's own connection alongside
 self-publication metadata. Mixed, nested, aggregate, malformed, unknown/review or additional direct
 legs never become published-only. No provider permission is inferred. S2 binds its exact issued
@@ -467,8 +469,10 @@ Accepted assessments retain the same fields and ceiling; existing `blocked`/`can
 states and codes remain refusals. Inheritance requires the selected direct local/live provider's
 exact token, state, source keys, validation and ceiling. Missing policy, contradictory source facts,
 recursive inheritance and model-only providers serving reports cannot be repaired or authorized by
-the conjunction. The binder maps a canonical refusal to `binding_data_access_refused` (exit 1 for
-blocked, 3 for cannot-establish), without rewriting the stored projection.
+the conjunction. The binder retains `binding_data_access_refused` for stored refusals and translates
+new canonical contradictions to the existing source-facts, authorization or provider diagnostics.
+For example, a changed direct key reports `binding_source_facts_mismatch`, not a generic data refusal.
+Blocked remains exit 1 and cannot-establish exit 3; neither rewrites the stored projection.
 
 ❌ **Final consumer pending:** `check_reference_readiness.py` does not yet supply the final START_READY
 data/binding conjunction. This prerequisite adds no final START_READY verdict; BOUND remains UNVALIDATED.

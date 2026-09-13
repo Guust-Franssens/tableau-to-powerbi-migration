@@ -1595,7 +1595,7 @@ class PackageSpecFacts(NamedTuple):
 
 
 def _published_only_row(row: object) -> bool:
-    """A scalar sqlproxy reference, not an aggregate or a row hiding additional connection metadata."""
+    """A scalar sqlproxy reference; legacy annotations may be absent, never explicitly unknown."""
     if not isinstance(row, Mapping) or set(row) - {
         "id",
         "caption",
@@ -1630,10 +1630,11 @@ def _published_only_row(row: object) -> bool:
     valid_luid = not luid or re.fullmatch(
         r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", luid
     )
+    valid_target = connection.get("powerbi_target", "live_source") in ("live_source", "flat_file")
     if (
         connection.get("class") != "sqlproxy"
         or connection.get("mode") not in ("live", "extract")
-        or connection.get("powerbi_target") not in ("live_source", "flat_file")
+        or not valid_target
         or not any(isinstance(published.get(key), str) and published[key].strip() for key in ("luid", "key"))
         or not valid_luid
     ):
@@ -2061,6 +2062,12 @@ def reconcile_package_data_access(  # pylint: disable=too-many-return-statements
         return assessment
     if not isinstance(facts, PackageSpecFacts):
         return _cannot_establish("projection-invalid")
+    if assessment.state == "provider_inherited" and not facts.published_only:
+        return _cannot_establish(
+            "provider-ambiguous"
+            if facts.direct_applicable and requested_scope in DIRECT_SCOPES
+            else "projection-invalid"
+        )
     if facts.refusal_code is not None:
         return _cannot_establish(facts.refusal_code)
     if facts.has_review:
