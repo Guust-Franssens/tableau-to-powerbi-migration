@@ -682,10 +682,13 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         ["test_the_retired_package_is_never_named_after_the_package_it_retires"],
     ),
     (
-        "budget: drop an over-budget unit from outcome accounting",
+        "budget: defer an over-budget refusal until constructor invocation",
         PACKAGER,
-        "            failed.append(failure)\n        else:\n            safe.append(unit)",
-        "            pass\n        else:\n            safe.append(unit)",
+        "        if budget.refused:\n"
+        "            failure = PackagePathTooLong(budget)\n"
+        "            failure.unit = unit\n"
+        "            slot.complete(_ConstructionOutcome(None, failure))",
+        "        if budget.refused:\n            pass",
         ["test_main_accounts_for_a_too_deep_unit_without_blocking_siblings"],
     ),
     (
@@ -834,27 +837,23 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
         "#478: narrow the clause to a modelled refusal, so the FIELD failure still aborts the batch",
         PACKAGER,
         "        except Exception as error:  # pylint: disable=broad-exception-caught\n"
-        "            if failed is None:\n"
-        "                raise\n"
         "            crash = UnitCrashed(unit, error)",
         "        except PackagePathTooLong as error:  # pylint: disable=broad-exception-caught\n"
-        "            if failed is None:\n"
-        "                raise\n"
         "            crash = UnitCrashed(unit, error)",
         ["test_one_unit_raising_does_not_stop_the_units_after_it"],
     ),
     (
         "#478: stop measuring the buckets against the request, so a lost unit is never named",
         PACKAGER,
-        "    asked = Counter(requested)",
-        "    asked = Counter(_bucketed_units(results, failed, refused))",
+        "    counted = Counter(_bucketed_units(results, failed, refused))\n    asked = Counter(requested)",
+        "    counted = Counter(_bucketed_units(results, failed, refused))\n    asked = counted",
         [
             "test_an_unaccounted_unit_is_reported_and_cannot_exit_zero",
             "test_a_requested_unit_in_no_bucket_is_named_rather_than_counted_clean",
         ],
     ),
     (
-        "#478: let an unaccounted unit leave the run clean",
+        "#478: demote the unaccounted exit from cannot-assess to unit-failed",
         PACKAGER,
         "    if interruption is not None or gaps or any(isinstance(failure, UnassessableInput) for failure in failed):",
         "    if interruption is not None or any(isinstance(failure, UnassessableInput) for failure in failed):",
@@ -885,15 +884,16 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "#614: let a partial batch exit zero",
         PACKAGER,
-        "    if not failed and not refused and not gaps and interruption is None:\n        return EXIT_OK",
+        "    if not failed and not refused and not gaps and interruption is None and not cleanup_findings:\n"
+        "        return EXIT_OK",
         "    if True:\n        return EXIT_OK  # noqa",
         ["test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker"],
     ),
     (
         "#614: leave the retired package manifest discoverable after publish interruption",
         PACKAGER,
-        '        cleanup_code = _make_scratch_nondiscoverable(retired, "retired")',
-        "        cleanup_code = None  # noqa",
+        "        code = _make_scratch_nondiscoverable(root, role, preserve_tree=preserve_tree)",
+        '        code = None if role == "retired" else _make_scratch_nondiscoverable(root, role, preserve_tree=preserve_tree)',
         ["test_post_rename_line_interrupt_hides_retired_manifest_before_reporting_status"],
     ),
     (
@@ -907,15 +907,19 @@ MUTATIONS: list[tuple[str, Path, str, str, list[str]]] = [
     (
         "#478: drop the pre-assembly residue refusal, keeping only the one on the way out",
         PACKAGER,
-        "    residue = _discard_scratch(staging)\n    if residue:",
-        "    residue = None\n    if residue:",
+        "            residue = _discard_scratch(staging)\n"
+        "            if residue or _construction_directory(staging) is not None:\n"
+        '                raise PackagingError("construction_failed")\n'
+        "            staging.mkdir(parents=True, exist_ok=False)",
+        "            staging.mkdir(parents=True, exist_ok=True)",
         ["test_a_staging_tree_that_survives_cleanup_fails_its_unit_rather_than_being_assembled_into"],
     ),
     (
         "#478: raise the residue out of the finally, replacing the root cause the operator needs",
         PACKAGER,
-        "    in_flight = sys.exception()",
-        "    in_flight = None",
+        "    if error is not None and attempt.findings:\n"
+        '        error.add_note("construction cleanup or recovery could not complete")',
+        '    if attempt.findings:\n        raise PackagingError("construction_cleanup_incomplete")',
         ["test_a_residue_found_while_a_unit_is_already_failing_does_not_replace_the_root_cause"],
     ),
     (

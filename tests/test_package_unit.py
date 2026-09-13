@@ -3635,7 +3635,6 @@ def test_an_unknown_unit_is_a_usage_error_not_an_empty_package(tmp_path: Path) -
         ("repeated-request", pkg.IDENTITY_REQUEST_DUPLICATE, [UNIT, UNIT]),
         ("duplicate-engine-row", pkg.IDENTITY_ENGINE_DUPLICATE, [UNIT, UNIT]),
         ("workbook-datasource-collision", pkg.IDENTITY_ENGINE_KIND_COLLISION, [UNIT, UNIT]),
-        ("windows-destination-alias", pkg.IDENTITY_DESTINATION_ALIAS, [UNIT, UNIT.lower()]),
     ],
 )
 def test_ambiguous_unit_identities_block_every_occurrence_before_budget_or_write(
@@ -3645,7 +3644,7 @@ def test_ambiguous_unit_identities_block_every_occurrence_before_budget_or_write
     reason_code: str,
     expected_requested: list[str],
 ) -> None:
-    """Exact duplicates and Windows-canonical aliases never compete for one package directory."""
+    """Exact occurrence ambiguities are known before any native directory needs to be created."""
     bundle, _oracle = _bundle(tmp_path)
     selected: list[str] = []
     if variant == "repeated-request":
@@ -3654,8 +3653,6 @@ def test_ambiguous_unit_identities_block_every_occurrence_before_budget_or_write
         write_engine_report(bundle, workbooks=[UNIT, UNIT])
     elif variant == "workbook-datasource-collision":
         write_engine_report(bundle, workbooks=[UNIT], datasources=[UNIT])
-    else:
-        write_engine_report(bundle, workbooks=[UNIT, UNIT.lower()])
 
     def budget_must_not_run(*_args: object, **_kwargs: object) -> pkg.PathBudget:
         pytest.fail("identity validation must precede path budgeting")
@@ -3709,10 +3706,13 @@ def test_brief_cardinality_uses_the_original_request_before_identity_filtering(t
     assert payload["construction"]["totals"] == {"requested": 1, "assembled": 0, "blocked": 1}
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")
 def test_selecting_one_engine_alias_still_blocks_before_it_can_overwrite_its_sibling(tmp_path: Path) -> None:
-    """An explicit `--unit Book` cannot make the engine's separate `book` identity disappear."""
-    bundle, _oracle = _bundle(tmp_path)
+    """Native spelling rejects an existing sibling, even without an invocation-local owner yet."""
+    bundle = tmp_path / "bundle"
     write_engine_report(bundle, workbooks=[UNIT, UNIT.lower()])
+    prior = pkg.package_unit(bundle, UNIT.lower(), _out(tmp_path), oracle_dir=None, assets_dir=None)
+    before = (_out(tmp_path) / UNIT.lower() / pkg.MANIFEST_NAME).read_bytes()
     report = tmp_path / "selected-alias.json"
 
     assert (
@@ -3735,7 +3735,9 @@ def test_selecting_one_engine_alias_still_blocks_before_it_can_overwrite_its_sib
     assert payload["requested"] == [UNIT]
     assert payload["failed"][0]["reason_code"] == pkg.IDENTITY_DESTINATION_ALIAS
     assert payload["construction"]["totals"] == {"requested": 1, "assembled": 0, "blocked": 1}
-    assert not (_out(tmp_path) / UNIT).exists()
+    assert prior["unit"] == UNIT.lower()
+    assert (_out(tmp_path) / UNIT.lower() / pkg.MANIFEST_NAME).read_bytes() == before
+    assert [path.name for path in _out(tmp_path).iterdir()] == [UNIT.lower()]
 
 
 def test_write_png_is_a_real_image_so_these_fixtures_could_fail(tmp_path: Path) -> None:
@@ -5050,6 +5052,141 @@ def test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_block
     assert '"status": "packaged"' not in report.read_text(encoding="utf-8").casefold()
 
 
+def test_construction_keeps_unicode_casefold_distinct_native_directories(tmp_path: Path) -> None:
+    """Equal Python casefold keys are not evidence of one filesystem object."""
+    units = ["Strasse", "Straße"]
+    assert units[0].casefold() == units[1].casefold()
+    bundle = tmp_path / "bundle"
+    write_engine_report(bundle, workbooks=units)
+    report = tmp_path / "unicode.json"
+    out = _out(tmp_path)
+
+    assert pkg.main(["--bundle", str(bundle), "--out", str(out), "--json", str(report)]) == 0
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["construction"]["totals"] == {"requested": 2, "assembled": 2, "blocked": 0}
+    assert not (out / units[0]).samefile(out / units[1])
+    assert sorted(path.name for path in out.iterdir()) == units
+    assert all(json.loads((out / unit / pkg.MANIFEST_NAME).read_bytes())["unit"] == unit for unit in units)
+
+
+def _native_short_name(path: Path) -> str:
+    """Obtain an actual Windows alias; API errors are fixture failures, not skips."""
+    import ctypes  # pylint: disable=import-outside-toplevel
+    from ctypes import wintypes  # pylint: disable=import-outside-toplevel
+
+    get_short = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+    get_short.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    get_short.restype = wintypes.DWORD
+    size = get_short(str(path), None, 0)
+    if not size:
+        raise ctypes.WinError(ctypes.get_last_error())
+    buffer = ctypes.create_unicode_buffer(size)
+    written = get_short(str(path), buffer, size)
+    assert 0 < written < size, "GetShortPathNameW did not return a complete native witness"
+    return Path(buffer.value).name
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")
+def test_construction_blocks_a_later_real_short_alias_without_overwriting_its_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The alias is learned natively, then witnessed again after the real production rename."""
+    provider = "Provider_Long_Native_Unit"
+    out = _out(tmp_path)
+    staged = pkg.staging_dir(out, provider)
+    witness = out / provider
+    witness.mkdir(parents=True)
+    alias = _native_short_name(witness)
+    if alias == witness.name:
+        witness.rmdir()
+        pytest.skip("8.3 name generation is disabled on this volume")
+    witness.rmdir()
+    assert alias != provider and not pkg.is_reserved_packaging_name(alias)
+    bundle = tmp_path / "bundle"
+    write_engine_report(bundle, workbooks=[alias], datasources=[provider])
+    rename = pkg._rename_retrying  # pylint: disable=protected-access
+    witnessed: list[bytes] = []
+
+    def publish(source: Path, destination: Path) -> None:
+        rename(source, destination)
+        if source == staged and destination == out / provider:
+            assert _native_short_name(destination) == alias, "the predicted alias did not materialize"
+            assert destination.samefile(out / alias), "the native witness must select the same directory"
+            witnessed.append((destination / pkg.MANIFEST_NAME).read_bytes())
+
+    monkeypatch.setattr(pkg, "_rename_retrying", publish)
+    report = tmp_path / "alias.json"
+    assert pkg.main(["--bundle", str(bundle), "--out", str(out), "--json", str(report)]) != 0
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert len(witnessed) == 1, "the test must reach real construction and publication"
+    assert payload["construction"]["totals"] == {"requested": 2, "assembled": 1, "blocked": 1}
+    assert [row["unit"] for row in payload["units"]] == [provider]
+    assert [(row["unit"], row["reason_code"]) for row in payload["failed"]] == [(alias, pkg.IDENTITY_DESTINATION_ALIAS)]
+    assert (out / provider / pkg.MANIFEST_NAME).read_bytes() == witnessed[0]
+    assert [path.name for path in out.iterdir()] == [provider]
+    assert cmp.discover_package_roots(bundle, out) == [out / provider]
+
+
+def test_constructor_return_interrupt_preserves_its_terminal_occurrence_and_stops_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The caller cannot turn a completed constructor into a second, failed raw outcome."""
+    bundle, oracle = _many_unit_bundle(tmp_path, [UNIT, BATCH_LATE])
+    construct = pkg.package_unit
+    attempted = []
+
+    def returned(bundle_root: Path, unit: str, out_root: Path, **kwargs: object) -> dict:
+        attempted.append(unit)
+        result = construct(bundle_root, unit, out_root, **kwargs)
+        if unit == UNIT:
+            raise KeyboardInterrupt("after real constructor return")
+        return result
+
+    monkeypatch.setattr(pkg, "package_unit", returned)
+    report = tmp_path / "returned.json"
+    report.write_text('{"stale": true}', encoding="utf-8")
+    assert _batch_main(tmp_path, bundle, oracle, report) == pkg.EXIT_CANNOT_ASSESS
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert attempted == [UNIT] and "stale" not in payload
+    assert payload["interruption"]["published"] is True
+    assert payload["interruption"]["reason_code"] == "assembly_interrupted_after_publish"
+    assert [row["unit"] for row in payload["units"]] == [UNIT]
+    assert UNIT not in [row["unit"] for row in payload["failed"]]
+    assert [row["unit"] for row in payload["construction"]["blocked"]] == [BATCH_LATE]
+    assert payload["construction"]["totals"] == {"requested": 2, "assembled": 1, "blocked": 1}
+    assert list(_out(tmp_path).rglob(pkg.MANIFEST_NAME)) == [_out(tmp_path) / UNIT / pkg.MANIFEST_NAME]
+
+
+def test_modeled_input_details_are_typed_and_never_parsed_from_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A known input role remains actionable even when the read diagnostic is sensitive."""
+    bundle, oracle = _bundle(tmp_path)
+    handover = bundle / "handover" / f"{UNIT}.json"
+    read = pkg.read_json_checked
+    secret = "https://private-host.example/query?token=FORBIDDEN_DETAIL_CANARY"
+    reached = []
+
+    def unreadable(path: Path) -> tuple[object, str | None]:
+        if path == handover:
+            reached.append(path)
+            return None, secret
+        return read(path)
+
+    monkeypatch.setattr(pkg, "read_json_checked", unreadable)
+    report = tmp_path / "typed-details.json"
+    assert _batch_main(tmp_path, bundle, oracle, report) == pkg.EXIT_CANNOT_ASSESS
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    output = capsys.readouterr()
+    failure = payload["failed"][0]
+    assert reached
+    assert failure["details"] == {"inputs": [{"role": "handover", "basename": f"{UNIT}.json"}]}
+    assert f"input_role=handover basename={UNIT}.json" in failure["reason"]
+    assert failure["reason"] in output.out
+    assert "FORBIDDEN_DETAIL_CANARY" not in report.read_text(encoding="utf-8") + output.out + output.err
+    assert str(tmp_path) not in report.read_text(encoding="utf-8") + output.out + output.err
+
+
 def test_one_unit_raising_does_not_stop_the_units_after_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -5064,7 +5201,10 @@ def test_one_unit_raising_does_not_stop_the_units_after_it(
     _arm_boom(monkeypatch, BATCH_BOOM, attempted)
     report = tmp_path / "packaging.json"
 
-    code = _batch_main(tmp_path, bundle, oracle, report)
+    try:
+        code = _batch_main(tmp_path, bundle, oracle, report)
+    except Exception as error:  # pylint: disable=broad-exception-caught
+        pytest.fail(f"one unit's exception escaped the batch instead of preserving later units: {type(error).__name__}")
     payload = json.loads(report.read_text(encoding="utf-8"))
     summary = capsys.readouterr().out
 
@@ -5214,6 +5354,7 @@ def test_a_staging_tree_that_survives_cleanup_fails_its_unit_rather_than_being_a
     monkeypatch.setattr(pkg.shutil, "rmtree", stubborn)
     report = tmp_path / "packaging.json"
 
+    assert pkg._discard_scratch(staging) is not None  # pylint: disable=protected-access
     code = _batch_main(tmp_path, bundle, oracle, report, "--quiet")
     payload = json.loads(report.read_text(encoding="utf-8"))
 
@@ -5265,7 +5406,7 @@ def test_a_residue_found_while_a_unit_is_already_failing_does_not_replace_the_ro
     assert [item["unit"] for item in payload["construction"]["blocked"]] == [BATCH_BOOM]
     assert payload["failed"][0]["exception_class"] == "shutil.Error"
     assert "diagnostic_notes_withheld=1" in (payload["failed"][0]["traceback"] or "")
-    assert "[host location redacted]" in errors
+    assert "CLEANUP FINDING:" in errors
     assert str(staging) not in errors
     assert (_out(tmp_path) / BATCH_LATE / pkg.MANIFEST_NAME).is_file(), "the unit after the failure was skipped"
 
@@ -5438,7 +5579,7 @@ def test_post_return_line_interrupt_uses_verified_final_package_state(tmp_path: 
 
     code = _run_with_line_interrupt(
         pkg.package_unit,
-        "        if result is None:",
+        "        _complete_construction(attempt, error)",
         lambda: _batch_main(tmp_path, bundle, oracle, report),
     )
     payload = json.loads(report.read_text(encoding="utf-8"))
@@ -5472,7 +5613,7 @@ def test_post_rename_line_interrupt_hides_retired_manifest_before_reporting_stat
 
     code = _run_with_line_interrupt(
         pkg.replace_dir,
-        "            _discard_scratch(retired)",
+        "            cleanup = _discard_scratch(retired)",
         lambda: _batch_main(tmp_path, bundle, oracle, report),
         occurrence=2,
     )
@@ -5548,3 +5689,110 @@ def test_a_single_unit_run_is_unchanged_by_the_batch_contract(
     assert "BLOCKED: 0/1" in summary
     assert "1 requested = 1 ASSEMBLED + 0 BLOCKED" in summary
     assert pkg.NOT_START_READY_NOTICE in summary
+
+
+@pytest.mark.parametrize("seam", ["completed-slot", "provider-bookkeeping"])
+def test_completed_slots_survive_caller_bookkeeping_interrupts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
+) -> None:
+    """The terminal occurrence lives inside construction, before provider/result bookkeeping."""
+    bundle, oracle = _many_unit_bundle(tmp_path, [UNIT, BATCH_LATE])
+    write_engine_report(bundle, workbooks=[BATCH_LATE], datasources=[UNIT])
+    report = tmp_path / "bookkeeping.json"
+    report.write_text('{"stale": true}', encoding="utf-8")
+    completed = pkg._ConstructionSlot.complete  # pylint: disable=protected-access
+    fired = []
+
+    def interrupt_after_slot(slot, outcome) -> None:
+        completed(slot, outcome)
+        if not fired and slot.unit == UNIT and outcome.result is not None:
+            fired.append(True)
+            raise KeyboardInterrupt("after terminal slot transition")
+
+    if seam == "completed-slot":
+        monkeypatch.setattr(pkg._ConstructionSlot, "complete", interrupt_after_slot)  # pylint: disable=protected-access
+        code = _batch_main(tmp_path, bundle, oracle, report)
+        assert fired == [True]
+    else:
+        code = _run_with_line_interrupt(
+            pkg._package_each,  # pylint: disable=protected-access
+            "                providers.append(out_root / unit)",
+            lambda: _batch_main(tmp_path, bundle, oracle, report),
+        )
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert code == pkg.EXIT_CANNOT_ASSESS and "stale" not in payload
+    assert payload["interruption"]["published"] is True
+    assert payload["interruption"]["reason_code"] == "assembly_interrupted_after_publish"
+    assert [row["unit"] for row in payload["units"]] == [UNIT]
+    assert payload["failed"] == [] and payload["refused"] == []
+    assert [row["unit"] for row in payload["unaccounted"]] == [BATCH_LATE]
+    assert payload["construction"]["totals"] == {"requested": 2, "assembled": 1, "blocked": 1}
+    assert cmp.discover_package_roots(bundle, _out(tmp_path)) == [_out(tmp_path) / UNIT]
+
+
+def test_path_budget_diagnostics_keep_independent_utf16_measurements_without_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The known field-reproduction directory is the offender, not a string parsed from its error."""
+    _pin_windows(monkeypatch)
+    bundle = _pbir_bundle(tmp_path)
+    out = _padded_path(tmp_path, 170) / "private-location-\U0001f4c1"
+    report = tmp_path / "budget-details.json"
+    assert pkg.main(["--bundle", str(bundle), "--out", str(out), "--json", str(report)]) == pkg.EXIT_UNIT_FAILED
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    captured = capsys.readouterr()
+    failure = payload["failed"][0]
+    deepest = (out / _deepest_tail()).parent
+    length = len(str(deepest).encode("utf-16-le")) // 2
+    root_length = len(str(out).encode("utf-16-le")) // 2
+    expected = {
+        "path_kind": "directory",
+        "length_utf16": length,
+        "ceiling_utf16": 247,
+        "overage_utf16": length - 247,
+        "max_out_root_utf16": 247 - (length - root_length),
+        "shorten_out_by_utf16": length - 247,
+        "relative_shape_overage_utf16": 0,
+    }
+    assert failure["details"] == {"path_budget": expected}
+    assert length != len(str(deepest)), "the non-BMP witness must distinguish UTF-16 from code points"
+    assert failure["reason"] in captured.out
+    assert "private-location" not in report.read_text(encoding="utf-8") + captured.out + captured.err
+    assert str(out) not in report.read_text(encoding="utf-8") + captured.out + captured.err
+
+
+@pytest.mark.parametrize("variant", ["missing", "directory", "multi-unit"])
+def test_slice_one_preserves_brief_usage_refusal_before_output_creation(tmp_path: Path, variant: str) -> None:
+    """Rejected brief invocations retain usage exit 2 and remain outside the construction fold."""
+    bundle = tmp_path / "bundle"
+    write_engine_report(bundle, workbooks=[UNIT, "Other"] if variant == "multi-unit" else [UNIT])
+    brief = tmp_path / "supplied-brief.md"
+    if variant == "directory":
+        brief.mkdir()
+    elif variant == "multi-unit":
+        brief.write_text("cardinality refusal must precede content parsing", encoding="utf-8")
+    out, report = tmp_path / "packages", tmp_path / "prior-report.json"
+    stale = b'{"prior": "unchanged usage-error report"}\n'
+    report.write_bytes(stale)
+
+    with pytest.raises(SystemExit) as refused:
+        pkg.main(["--bundle", str(bundle), "--out", str(out), "--brief", str(brief), "--json", str(report), "--quiet"])
+    assert refused.value.code == 2
+    assert not out.exists()
+    assert report.read_bytes() == stale
+
+
+@pytest.mark.parametrize(
+    "basename",
+    ["..\\PRIVATE_BASENAME_CANARY.json", "PRIVATE_BASENAME_CANARY?token=secret", "PRIVATE_BASENAME_CANARY\nnext"],
+)
+def test_typed_input_diagnostics_withhold_unsafe_basenames(basename: str) -> None:
+    """Typed input identity is not permission to echo an unsafe basename or arbitrary reason."""
+    failure = pkg.UnassessableInput(
+        UNIT,
+        ["arbitrary PRIVATE_REASON_CANARY"],
+        inputs=[pkg._InputDetail("handover", basename)],  # pylint: disable=protected-access
+    )
+    row = pkg._failure_row(failure)  # pylint: disable=protected-access
+    assert row["details"] == {"inputs": [{"role": "handover", "basename": "<withheld>"}]}
+    assert "PRIVATE_" not in json.dumps(row)
