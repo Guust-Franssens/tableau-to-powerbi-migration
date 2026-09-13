@@ -292,7 +292,9 @@ Two gates sit on phase 2: `check_reference_readiness.py` is the **entry** gate (
 there trustworthy Tableau reference evidence to start from?) and `check_unit.py` is the **exit** gate
 (is this unit done?). ⚠️ A page the entry gate calls **`blind` is a finding, not a pass** — it means a
 fidelity bug on that page would be structurally unfalsifiable, so it exits non-zero and you deal with
-it before building.
+it before **agentic fidelity-building/review dispatch**, after deterministic emission. The authoritative
+[conversion, dispatch, and fidelity boundaries](docs/reference-readiness.md#conversion-dispatch-and-fidelity-boundaries)
+explain what each result permits, including why reference `READY` is not final package `START_READY`.
 
 ⚠️ **Both gates check the phase-2 package, not the phase-3 deliverable.** `check_unit.py` will run
 against a shipped `migrations/` folder, but it checks **less** there: measured on
