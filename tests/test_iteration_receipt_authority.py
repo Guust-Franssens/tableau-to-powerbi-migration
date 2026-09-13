@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from test_iteration_receipt import (
     _change_during_finalization,
     _code,
     _finalize,
+    _finding,
     _iterate,
     _path,
     _pending_successor,
@@ -165,18 +167,19 @@ def test_current_authority_requires_the_returned_final_token(package: Path, miss
     assert _code(lambda: receipt.read_chain(package, missing_pin)) == "FINAL_RECEIPT_MISMATCH"
     selected = receipt.read_chain(package, receipt.receipt_sha256(final))[-1]
     assert selected.receipt_bytes == receipt.receipt_bytes(final)
-    assert selected.payload["outcome"] == "incomplete"
-    assert selected.payload["generated"]["data_evidence"]["status"] == "pending"
+    assert "outcome" not in selected.payload
+    assert all(fact["status"] == "unestablished" for fact in selected.payload["generated"]["data_evidence"].values())
     assert all(
-        row["status"] == "unverified"
-        for page in selected.payload["judgement"]["pages"]
-        for row in page["numeric_results"]
+        row["status"] == "unestablished"
+        for page in selected.payload["generated"]["numeric_evidence"]
+        for row in page["visuals"]
     )
 
 
 def test_pending_allocation_and_historical_verification_remain_non_authoritative(package: Path) -> None:
     """Historical artifacts may differ, but retained predecessor receipt and PNG bytes stay pinned."""
-    first = _finalize(package, _iterate(package))
+    pending = _iterate(package)
+    first = _finalize(package, pending, review=_review(pending, findings=[_finding()]))
     first_bytes = _path(package).read_bytes()
     _change_during_finalization(package, first, "report")
     assert _code(lambda: receipt.read_chain(package, receipt.receipt_sha256(first))) == "GENERATED_CHANGED"
@@ -242,5 +245,67 @@ def test_finalize_cli_uses_the_shared_authoritative_reader(
         assert _path(package).read_bytes() == original
     else:
         assert result == capture.EXIT_OK
-        assert f"FINAL_SHA256={calls[0]}" in output and "outcome incomplete" in output
+        assert f"FINAL_SHA256={calls[0]}" in output and "evidence sealed; no success verdict" in output
+        assert "outcome" not in output and "COMPLETE" not in output
         assert reader(package, calls[0])[-1].receipt_bytes == _path(package).read_bytes()
+
+
+@pytest.mark.parametrize("relative", ["migration-brief.md", "package-manifest.json"])
+def test_current_authority_pins_brief_and_manifest_without_copying_numeric_scope(package: Path, relative: str) -> None:
+    brief = package / "migration-brief.md"
+    brief.write_bytes(b"+++\nnumeric_obligation = 'required'\n+++\n")
+    pending = _iterate(package)
+    final = _finalize(package, pending)
+    assert b"numeric_obligation" not in _path(package).read_bytes()
+    assert all(
+        row["status"] == "unestablished" for page in final["generated"]["numeric_evidence"] for row in page["visuals"]
+    )
+    token = receipt.receipt_sha256(final)
+    assert receipt.read_chain(package, token)[-1].payload == final
+    target = package / relative
+    target.write_bytes(target.read_bytes() + b"\n")
+    assert _code(lambda: receipt.read_chain(package, token)) == "GENERATED_CHANGED"
+
+
+@pytest.mark.parametrize("filename", ["certified.csv", "typed-envelope.json", "request.json"])
+def test_v3_retains_exactly_one_json_and_the_canonical_pngs(package: Path, filename: str) -> None:
+    pending = _iterate(package)
+    directory = _path(package).parent
+    expected = {receipt.RECEIPT_NAME, *(page["powerbi"]["path"] for page in pending["generated"]["pages"])}
+    assert {path.relative_to(directory).as_posix() for path in directory.rglob("*") if path.is_file()} == expected
+    extra = directory / filename
+    extra.write_bytes(b'{"status":"observed"}')
+    assert _code(lambda: _finalize(package, pending)) == "EXTRA_FILE"
+    assert receipt.read_strict_json(_path(package))["state"] == "pending"
+    extra.unlink()
+    final = _finalize(package, pending)
+    assert receipt.read_chain(package, receipt.receipt_sha256(final))[-1].payload == final
+
+
+def test_unsafe_package_root_refuses_without_touching_its_target(package: Path) -> None:
+    alias = package.parent / "linked-package"
+    original = (package / "package-manifest.json").read_bytes()
+    if os.name == "nt":
+        subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "New-Item -ItemType Junction -Path $env:R1_ALIAS -Target $env:R1_TARGET | Out-Null",
+            ],
+            env={**os.environ, "R1_ALIAS": str(alias), "R1_TARGET": str(package)},
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+    else:
+        alias.symlink_to(package, target_is_directory=True)
+    try:
+        assert _code(lambda: _iterate(alias)) == "REPARSE_POINT"
+        assert not _path(package).exists()
+        assert (package / "package-manifest.json").read_bytes() == original
+    finally:
+        if os.name == "nt":
+            alias.rmdir()
+        else:
+            alias.unlink()

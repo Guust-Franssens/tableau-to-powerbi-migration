@@ -227,9 +227,11 @@ def _review(payload: dict, *, status: str = "unverified", findings: list | None 
         row["whole_page_status"] = status
         for visual in row["visual_results"]:
             visual["status"] = status
-        for numeric in row["numeric_results"]:
-            numeric["status"] = "unverified"
-    judgement["findings"] = findings or []
+        if payload["schema_version"] == 2:
+            for numeric in row["numeric_results"]:
+                numeric["status"] = "unverified"
+    if findings is not None:
+        judgement["findings"] = findings
     return judgement
 
 
@@ -256,6 +258,10 @@ def _finding(**overrides: object) -> dict:
     }
 
 
+def _revise_report(package: Path, revision: str = "revised") -> None:
+    write_json(package / "fabric" / "Unit.Report" / "definition" / "report.json", {"revision": revision})
+
+
 def _code(callback: Callable[[], Any]) -> str:
     with pytest.raises(receipt.ReceiptError) as caught:
         callback()
@@ -276,8 +282,11 @@ def test_clean_first_iteration_has_real_images_and_honest_data_state(package: Pa
         assert facts["frames"] == 3 and facts["stable_elapsed_seconds"] == 2
     assert hashlib.sha256(_path(package).read_bytes()).hexdigest() == receipt.receipt_sha256(pending)
     final = _finalize(package, pending, review=_review(pending, status="pass"))
-    assert final["state"] == "final" and final["outcome"] == "incomplete"
-    assert final["generated"]["data_evidence"] == {"status": "pending", "reason": receipt.DATA_PENDING_REASON}
+    assert final["schema_version"] == 3 and final["state"] == "final" and "outcome" not in final
+    assert final["generated"]["data_evidence"] == {
+        key: {"status": "unestablished", "reason": "not_requested", "observation": None}
+        for key in ("binding", "refresh", "canaries", "persistence")
+    }
     assert final["judgement"]["completed_at"] is not None
     assert final["generated"] == pending["generated"]
     assert len(receipt.read_chain(package, receipt.receipt_sha256(final))) == 1
@@ -295,7 +304,7 @@ def test_valid_second_iteration_preserves_finding_identity_and_evolution(package
     assert sealed["generated"]["previous"] == {"iteration": "001", "receipt_sha256": receipt.receipt_sha256(final)}
     assert any(row["before_sha256"] != row["after_sha256"] for row in sealed["generated"]["changes_from_previous"])
     assert sealed["judgement"]["findings"] == [resolved]
-    assert sealed["outcome"] == "incomplete"  # Data is still not independently proven.
+    assert "outcome" not in sealed
     assert [item.name for item in receipt.read_chain(package, receipt.receipt_sha256(sealed))] == ["001", "002"]
 
 
@@ -320,6 +329,7 @@ def test_generated_state_forgery_is_rejected_by_the_capture_pin(package: Path, f
         forged["generated"]["data_evidence"]["status"] = "accepted"
     elif field == "unit":
         forged["generated"]["artifact"]["unit"] = "other"
+        forged["generated"]["preparation"]["artifact_before"]["unit"] = "other"
     elif field == "reviewer":
         forged["generated"]["review"]["reviewer"] = "other-reviewer"
     elif field == "time":
@@ -335,7 +345,7 @@ def test_generated_state_forgery_is_rejected_by_the_capture_pin(package: Path, f
 def test_pending_state_cannot_have_a_final_outcome(package: Path) -> None:
     payload = _iterate(package)
     payload["outcome"] = "incomplete"
-    assert _code(lambda: receipt.validate_receipt(payload)) == "STATE_INVALID"
+    assert _code(lambda: receipt.validate_receipt(payload)) == "SCHEMA"
 
 
 def test_data_state_has_no_caller_authored_accepted_form(package: Path) -> None:
@@ -630,7 +640,7 @@ def test_visual_pass_without_tableau_is_refused_at_evidence_boundary(package: Pa
         _code(lambda: _finalize(package, pending, review=_review(pending, status="pass")))
         == "COMPARISON_EVIDENCE_MISSING"
     )
-    assert _finalize(package, pending)["outcome"] == "incomplete"
+    assert "outcome" not in _finalize(package, pending)
 
 
 def test_numeric_match_requires_independent_producer_evidence(package: Path) -> None:
@@ -638,11 +648,8 @@ def test_numeric_match_requires_independent_producer_evidence(package: Path) -> 
     pending = _iterate(package)
     review = _review(pending, status="pass")
     review["pages"][0]["numeric_results"][0]["status"] = "pass"
-    assert (
-        _code(lambda: receipt._assert_judgement({**pending, "judgement": review}, None))
-        == "NUMERIC_EVIDENCE_UNAVAILABLE"
-    )
-    assert _code(lambda: _finalize(package, pending, review=review)) == "NUMERIC_EVIDENCE_UNAVAILABLE"
+    assert _code(lambda: receipt._assert_judgement({**pending, "judgement": review}, None)) == "SCHEMA"
+    assert _code(lambda: _finalize(package, pending, review=review)) == "SCHEMA"
 
 
 def test_reviewer_supplied_numeric_hashes_do_not_become_producer_evidence(package: Path) -> None:
@@ -656,7 +663,7 @@ def test_reviewer_supplied_numeric_hashes_do_not_become_producer_evidence(packag
         powerbi_query_sha256="1" * 64,
         powerbi_result_sha256="2" * 64,
     )
-    assert _code(lambda: _finalize(package, pending, review=review)) == "NUMERIC_EVIDENCE_UNAVAILABLE"
+    assert _code(lambda: _finalize(package, pending, review=review)) == "SCHEMA"
 
 
 def test_oracle_layout_match_preserves_the_numeric_and_full_visual_ceiling(package: Path) -> None:
@@ -665,14 +672,17 @@ def test_oracle_layout_match_preserves_the_numeric_and_full_visual_ceiling(packa
     assert page["tableau"]["grade"] == evidence.GRADE_ORACLE
     assert _code(lambda: receipt._assert_visual_status("pass", page)) == "COMPARISON_GRADE"
     final = _finalize(package, pending, review=_review(pending, status="layout_match"))
-    assert final["outcome"] == "incomplete"
-    assert all(row["status"] == "unverified" for page in final["judgement"]["pages"] for row in page["numeric_results"])
+    assert "outcome" not in final
+    assert all(
+        row["status"] == "unestablished" for page in final["generated"]["numeric_evidence"] for row in page["visuals"]
+    )
 
 
 @pytest.mark.parametrize("phase", ["allocation", "finalization"])
 def test_altered_prior_png_invalidates_the_chain(package: Path, phase: str) -> None:
     first = _iterate(package)
-    final = _finalize(package, first)
+    final = _finalize(package, first, review=_review(first, findings=[_finding()]))
+    _revise_report(package)
     second = _iterate(package, previous=final) if phase == "finalization" else None
     image = _path(package).parent / first["generated"]["pages"][0]["powerbi"]["path"]
     image.write_bytes(valid_png(100, 81))
@@ -708,7 +718,8 @@ def test_prior_exact_file_set_and_receipt_are_revalidated_on_allocation(package:
 
 def test_prior_receipt_mutation_after_allocation_breaks_the_pinned_link(package: Path) -> None:
     first = _iterate(package)
-    final = _finalize(package, first)
+    final = _finalize(package, first, review=_review(first, findings=[_finding()]))
+    _revise_report(package)
     second = _iterate(package, previous=final)
     _path(package).write_bytes(_path(package).read_bytes() + b" ")
     assert _code(lambda: _finalize(package, second)) == "PREVIOUS_RECEIPT_MISMATCH"
@@ -731,6 +742,7 @@ def test_finding_identity_cannot_be_reused_to_hide_a_different_finding(
     first = _iterate(package)
     finding = _finding()
     final = _finalize(package, first, review=_review(first, findings=[finding]))
+    _revise_report(package)
     second = _iterate(package, previous=final)
     changed = {**finding, "status": "resolved", field: value}
     assert (
@@ -743,12 +755,18 @@ def test_finding_disappearance_and_terminal_reopening_are_illegal(package: Path)
     first = _iterate(package)
     finding = _finding()
     final = _finalize(package, first, review=_review(first, findings=[finding]))
+    _revise_report(package)
     second = _iterate(package, previous=final)
-    assert _code(lambda: _finalize(package, second)) == "FINDING_DISAPPEARED"
+    assert _code(lambda: _finalize(package, second, review=_review(second, findings=[]))) == "FINDING_DISAPPEARED"
     resolved = dict(finding, status="resolved")
-    final2 = _finalize(package, second, review=_review(second, findings=[resolved]))
+    open_second = _finding(id="F-002", detail="legend missing")
+    final2 = _finalize(package, second, review=_review(second, findings=[resolved, open_second]))
+    _revise_report(package, "third")
     third = _iterate(package, previous=final2)
-    assert _code(lambda: _finalize(package, third, review=_review(third, findings=[finding]))) == "FINDING_TRANSITION"
+    assert (
+        _code(lambda: _finalize(package, third, review=_review(third, findings=[finding, open_second])))
+        == "FINDING_TRANSITION"
+    )
 
 
 def test_new_findings_must_reference_the_actual_inventory(package: Path) -> None:
@@ -764,6 +782,7 @@ def test_prebound_limitation_can_evolve_without_changing_identity(package: Path)
     )
     first = _iterate(package)
     final = _finalize(package, first, review=_review(first, findings=[finding]))
+    _revise_report(package)
     second = _iterate(package, previous=final)
     accepted = dict(finding, status="accepted_limitation")
     assert _finalize(package, second, review=_review(second, findings=[accepted]))["judgement"]["findings"] == [
@@ -982,7 +1001,8 @@ def test_cli_uses_external_capture_pin_and_separate_judgement(
     )
     assert capture.cmd_finalize(args, _runtime(package)) == 0
     output = capsys.readouterr().out
-    assert "outcome incomplete" in output and "FINAL_SHA256=" in output
+    assert "evidence sealed; no success verdict" in output and "FINAL_SHA256=" in output
+    assert "outcome" not in output and "COMPLETE" not in output
 
 
 @pytest.mark.parametrize("option", ["--desktop-file-path", "--data-evidence"])
@@ -995,7 +1015,7 @@ def test_cli_has_no_caller_authored_proof_flags(option: str) -> None:
 def test_subset_is_triage_and_cannot_be_promoted_by_reviewer(package: Path) -> None:
     pending = _iterate(package, options=_options(page_ids=frozenset({PAGE})))
     assert pending["mode"] == "triage" and pending["generated"]["scope"] == "subset"
-    assert _finalize(package, pending)["outcome"] == "incomplete"
+    assert "outcome" not in _finalize(package, pending)
     assert (
         _code(lambda: _iterate(package, options=_options(page_ids=frozenset({PAGE})), mode="sign_off"))
         == "SUBSET_CANNOT_SIGN_OFF"
@@ -1021,7 +1041,10 @@ def _pending_successor(package: Path) -> dict:
     cache = package / "fabric" / "Unit.SemanticModel" / ".pbi" / "cache.abf"
     cache.parent.mkdir()
     cache.write_bytes(b"original cache")
-    return _iterate(package, previous=_finalize(package, _iterate(package)))
+    first = _iterate(package)
+    previous = _finalize(package, first, review=_review(first, findings=[_finding()]))
+    _revise_report(package)
+    return _iterate(package, previous=previous)
 
 
 def _change_during_finalization(package: Path, pending: dict, kind: str) -> None:
@@ -1201,8 +1224,11 @@ def test_unchanged_publication_retains_exact_final_bytes_and_full_predecessor_ch
         predecessor,
         published[0],
     ]
-    assert final["outcome"] == "incomplete" and final["generated"]["data_evidence"]["status"] == "pending"
-    assert all(row["status"] == "unverified" for page in final["judgement"]["pages"] for row in page["numeric_results"])
+    assert "outcome" not in final
+    assert all(fact["status"] == "unestablished" for fact in final["generated"]["data_evidence"].values())
+    assert all(
+        row["status"] == "unestablished" for page in final["generated"]["numeric_evidence"] for row in page["visuals"]
+    )
     assert not (path.parent / receipt.PENDING_BACKUP_NAME).exists()
 
 
@@ -1254,3 +1280,207 @@ def test_current_receipt_swap_at_displacement_never_leaves_an_authoritative_fina
     assert not path.exists()
     assert (path.parent / receipt.PENDING_BACKUP_NAME).read_bytes() == changed
     assert _code(lambda: receipt.read_chain(package, receipt.receipt_sha256(pending))) == "INPUT_UNREADABLE"
+
+
+def _literal_v2_pending(package: Path, previous: dict | None = None) -> dict:
+    """Legacy fields/values are literal, not taken from either version's schema or defaults."""
+    captured = _iterate(package, previous=previous)
+    generated = {
+        key: copy.deepcopy(captured["generated"][key])
+        for key in (
+            "generated_at",
+            "scope",
+            "artifact",
+            "review",
+            "previous",
+            "limitations",
+            "pages",
+            "changes_from_previous",
+        )
+    }
+    generated["review"]["tool_version"] = "2.0.0"
+    generated["data_evidence"] = {
+        "status": "pending",
+        "reason": "probe_desktop_query and refresh_pbip_model do not expose trusted structured data evidence; "
+        "data and numeric fidelity remain unverified",
+    }
+    judgement = copy.deepcopy(captured["judgement"])
+    for page, measured in zip(judgement["pages"], generated["pages"]):
+        page["numeric_results"] = [
+            {
+                "visual_id": key,
+                "status": "pending",
+                "tableau_evidence_sha256": None,
+                "powerbi_query_sha256": None,
+                "powerbi_result_sha256": None,
+                "finding_ids": [],
+            }
+            for key in measured["expected_visual_ids"]
+        ]
+    literal = {
+        "schema_version": 2,
+        "iteration": captured["iteration"],
+        "mode": captured["mode"],
+        "state": "pending",
+        "outcome": None,
+        "generated": generated,
+        "judgement": judgement,
+    }
+    _path(package, captured["iteration"]).write_bytes(
+        (json.dumps(literal, indent=2, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
+    )
+    return literal
+
+
+def test_literal_v2_finalization_preserves_legacy_semantics_and_held_bytes(package: Path) -> None:
+    pending = _literal_v2_pending(package)
+    original = _path(package).read_bytes() + b" \r\n"
+    _path(package).write_bytes(original)
+    assert receipt.read_history(package)[-1].receipt_bytes == original
+    final = receipt.finalize(
+        package, hashlib.sha256(original).hexdigest(), _review(pending), state_reader=lambda _pid: _status(package)
+    )
+    assert final["schema_version"] == 2 and final["state"] == "final" and final["outcome"] == "incomplete"
+    assert final["generated"] == pending["generated"]
+    assert final["generated"]["review"]["tool_version"] == "2.0.0"
+    assert final["generated"]["data_evidence"] == {
+        "status": "pending",
+        "reason": "probe_desktop_query and refresh_pbip_model do not expose trusted structured data evidence; "
+        "data and numeric fidelity remain unverified",
+    }
+    assert all(
+        row["status"] == "unverified"
+        and all(
+            row[key] is None for key in ("tableau_evidence_sha256", "powerbi_query_sha256", "powerbi_result_sha256")
+        )
+        for page in final["judgement"]["pages"]
+        for row in page["numeric_results"]
+    )
+    held_final = _path(package).read_bytes()
+    held_token = hashlib.sha256(held_final).hexdigest()
+    assert receipt.read_chain(package, held_token)[-1].receipt_bytes == held_final
+    second = _literal_v2_pending(package, final)
+    final_second = _finalize(package, second)
+    assert final_second["outcome"] == "incomplete"
+    assert final_second["generated"]["artifact"] == final["generated"]["artifact"]
+    assert _path(package).read_bytes() == held_final
+    assert receipt.read_history(package)[0].receipt_sha256 == held_token
+
+
+@pytest.mark.parametrize("open_finding", [False, True])
+def test_exactly_one_unchanged_v2_to_v3_transition_preserves_literal_v2(package: Path, open_finding: bool) -> None:
+    legacy = _literal_v2_pending(package)
+    findings = [_finding()] if open_finding else []
+    old = _finalize(package, legacy, review=_review(legacy, findings=findings))
+    original, old_sha = _path(package).read_bytes(), receipt.receipt_sha256(old)
+    upgrade = _iterate(package, previous=old)
+    assert upgrade["schema_version"] == 3 and upgrade["generated"]["artifact"] == old["generated"]["artifact"]
+    assert upgrade["generated"]["previous"] == {"iteration": "001", "receipt_sha256": old_sha}
+    assert all(row["before_sha256"] == row["after_sha256"] for row in upgrade["generated"]["changes_from_previous"])
+    sealed = _finalize(package, upgrade)
+    assert "outcome" not in sealed and _path(package).read_bytes() == original
+    assert sealed["judgement"]["findings"] == findings
+    chain = receipt.read_chain(package, receipt.receipt_sha256(sealed))
+    assert [item.payload["schema_version"] for item in chain] == [2, 3]
+    assert chain[0].receipt_bytes == original and chain[0].receipt_sha256 == old_sha
+    assert _code(lambda: _iterate(package, previous=sealed)) == "ITERATION_UNCHANGED"
+    assert not _path(package, "003").parent.exists()
+
+
+@pytest.mark.parametrize("open_finding", [False, True])
+def test_unchanged_v3_successor_refuses_even_with_an_open_finding(package: Path, open_finding: bool) -> None:
+    pending = _iterate(package)
+    final = _finalize(package, pending, review=_review(pending, findings=[_finding()] if open_finding else []))
+    before = _path(package).read_bytes()
+    assert _code(lambda: _iterate(package, previous=final)) == "ITERATION_UNCHANGED"
+    assert _path(package).read_bytes() == before and not _path(package, "002").parent.exists()
+
+
+def test_changed_v3_successor_without_predecessor_open_finding_refuses(package: Path) -> None:
+    first = _finalize(package, _iterate(package))
+    _revise_report(package)
+    assert _code(lambda: _iterate(package, previous=first)) == "ITERATION_WITHOUT_OPEN_FINDING"
+    assert not _path(package, "002").parent.exists()
+
+
+def test_history_cannot_cycle_back_to_v2_for_another_unchanged_upgrade(package: Path) -> None:
+    pending = _iterate(package)
+    first = _finalize(package, pending, review=_review(pending, findings=[_finding()]))
+    _revise_report(package)
+    _literal_v2_pending(package, first)
+    assert _code(lambda: receipt.read_history(package)) == "SCHEMA_TRANSITION"
+
+
+@pytest.mark.parametrize("version", [None, True, 0, 1, 4, "2", "3"])
+def test_unknown_receipt_versions_are_not_reinterpreted(package: Path, version: object) -> None:
+    pending = _iterate(package)
+    pending["schema_version"] = version
+    write_json(_path(package), pending)
+    assert _code(lambda: receipt.read_history(package)) == "SCHEMA_VERSION"
+
+
+@pytest.mark.parametrize("field,value", [("outcome", "complete"), ("outcome", "incomplete"), ("COMPLETE", True)])
+def test_v3_has_no_top_level_outcome_or_complete_field(package: Path, field: str, value: object) -> None:
+    pending = _iterate(package)
+    pending[field] = value
+    assert _code(lambda: receipt.validate_receipt(pending)) == "SCHEMA"
+
+
+@pytest.mark.parametrize("state", ["pending", "final"])
+def test_literal_v2_cannot_acquire_v3_outcome_semantics(package: Path, state: str) -> None:
+    pending = _literal_v2_pending(package)
+    payload = pending if state == "pending" else _finalize(package, pending)
+    forged = copy.deepcopy(payload)
+    del forged["outcome"]
+    assert _code(lambda: receipt.validate_receipt(forged)) == "SCHEMA"
+    forged = copy.deepcopy(payload)
+    forged["outcome"] = "incomplete" if state == "pending" else None
+    assert _code(lambda: receipt.validate_receipt(forged)) == "STATE_INVALID"
+    review = _review(pending)
+    review["pages"][0]["numeric_results"][0]["status"] = "pass"
+    if state == "pending":
+        assert _code(lambda: _finalize(package, pending, review=review)) == "NUMERIC_EVIDENCE_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("status", ["unverified", "mismatch", "layout_match"])
+def test_first_v3_can_finalize_negative_or_unestablished_visual_judgement(package: Path, status: str) -> None:
+    pending = _iterate(package)
+    final = _finalize(package, pending, review=_review(pending, status=status, findings=[_finding()]))
+    assert final["state"] == "final" and "outcome" not in final
+    assert final["judgement"]["pages"][0]["whole_page_status"] == status
+    assert final["judgement"]["findings"][0]["status"] == "still_open"
+
+
+@pytest.mark.parametrize("role", ["certified_tableau_csv", "typed_dax_envelope"])
+@pytest.mark.parametrize("supplied", ["count", "observation"])
+def test_supplied_numeric_roles_refuse_before_final_publication(package: Path, role: str, supplied: str) -> None:
+    pending = _iterate(package)
+    original = _path(package).read_bytes()
+    if supplied == "count":
+        pending["generated"]["retained_roles"][role]["count"] = 1
+    else:
+        pending["generated"]["retained_roles"][role]["observation"] = {"status": "observed", "sha256": "1" * 64}
+    write_json(_path(package), pending)
+    assert _code(lambda: _finalize(package, pending)) == "SCHEMA"
+    assert not (_path(package).parent / receipt.PENDING_BACKUP_NAME).exists()
+    _path(package).write_bytes(original)
+    final = _finalize(package, json.loads(original))
+    assert final["generated"]["retained_roles"][role]["count"] == 0
+
+
+@pytest.mark.parametrize("field", ["numeric_obligation", "data_evidence", "retained_roles"])
+def test_reviewer_cannot_override_generated_evidence_or_scope(package: Path, field: str) -> None:
+    pending = _iterate(package)
+    review = _review(pending)
+    review[field] = "none" if field == "numeric_obligation" else {"status": "observed"}
+    assert _code(lambda: _finalize(package, pending, review=review)) == "SCHEMA"
+    assert receipt.read_history(package)[-1].payload["state"] == "pending"
+
+
+@pytest.mark.parametrize(
+    "option", ["--numeric-obligation", "--numeric-result", "--numeric-query", "--certified-csv", "--typed-envelope"]
+)
+def test_cli_has_no_numeric_request_or_supplied_operand_route(option: str) -> None:
+    with pytest.raises(SystemExit) as caught:
+        capture.parse_args(["iterate", "--package", "unit", "--pid", str(PID), option, "supplied"])
+    assert caught.value.code == capture.EXIT_USAGE

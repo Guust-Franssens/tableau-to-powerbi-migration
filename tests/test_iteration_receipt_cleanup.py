@@ -116,7 +116,7 @@ def test_unchanged_backup_cleanup_ends_with_snapshot_and_no_filesystem_work(  # 
         path.read_bytes(),
     ]
     assert path.read_bytes() == receipt.receipt_bytes(final)
-    assert final["state"] == "final" and final["outcome"] == "incomplete"
+    assert final["state"] == "final" and "outcome" not in final
     assert not backup.exists() and not (path.parent / ".iteration.writing").exists()
 
 
@@ -217,3 +217,30 @@ def test_post_cleanup_rollback_failure_blocks_ordinary_chain_readers(  # pylint:
     assert _code(lambda: receipt.read_chain(package, receipt.receipt_sha256(pending))) == expected
     assert _code(lambda: _finalize(package, pending)) == expected
     assert _code(lambda: receipt.allocate_iteration(package, receipt.receipt_sha256(pending))) == expected
+
+
+@pytest.mark.parametrize("role_file", ["certified.csv", "typed-envelope.json"])
+def test_numeric_role_appearing_during_cleanup_rolls_back_exact_pending(
+    package: Path, monkeypatch: pytest.MonkeyPatch, role_file: str
+) -> None:
+    pending = _pending_successor(package)
+    path = _path(package, "002")
+    original = path.read_bytes()
+    backup, extra = path.parent / receipt.PENDING_BACKUP_NAME, path.parent / role_file
+    unlink, events = Path.unlink, []
+
+    def introduce_role(target: Path, *args: Any, **kwargs: Any) -> None:
+        unlink(target, *args, **kwargs)
+        if target == backup:
+            extra.write_bytes(b"purported successful numeric evidence")
+            events.append(role_file)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "unlink", introduce_role)
+        assert _code(lambda: _finalize(package, pending)) == "FINALIZATION_CHANGED"
+    assert events == [role_file] and path.read_bytes() == original
+    assert not backup.exists() and not (path.parent / ".iteration.writing").exists()
+    assert _code(lambda: receipt.read_history(package)) == "EXTRA_FILE"
+    extra.unlink()
+    final = _finalize(package, pending)
+    assert final["state"] == "final" and "outcome" not in final

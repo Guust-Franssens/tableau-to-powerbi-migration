@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-purpose: Capture stable Power BI pages, or produce a package-local Phase-2 comparison iteration.
+purpose: Capture stable Power BI pages, or retain a neutral package-local Phase-2 evidence iteration.
 usage:   python scripts/capture_powerbi_pages.py <report.Report> <outdir> --pid PID
          python scripts/capture_powerbi_pages.py iterate --package <package> --pid PID
          python scripts/capture_powerbi_pages.py finalize --package <package> --capture-sha256 SHA
@@ -22,18 +22,40 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import math
 import shutil
 import subprocess
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import current_artifact_revision as rev
 import iteration_receipt as receipt
+
+# As in probe_live_source, import the canonical bundled APIs, not the CLI forwarding shims.
+# Neither import loads CLR or starts native work; there is no alternate implementation.
+SKILL_SCRIPTS = Path(__file__).resolve().parents[1] / ".github" / "skills" / "pbip-model-refresh" / "scripts"
+sys.path.insert(0, str(SKILL_SCRIPTS))
+from probe_desktop_query import (  # noqa: E402  # pylint: disable=wrong-import-position,no-name-in-module
+    BoundDesktop,
+    CanaryObservation,
+    ObservationUnavailable,
+    bind_desktop,
+    bound_call,
+    probe_observations,
+)
+from refresh_pbip_model import (  # noqa: E402  # pylint: disable=wrong-import-position,no-name-in-module
+    CompatRollbackError,
+    ModelLockTimeout,
+    PersistenceObservation,
+    RefreshObservation,
+    image_save,
+    refresh,
+)
 
 Screenshotter = Callable[[str, str, Path], bool]
 BRIDGE_WAIT_SECONDS = 90
@@ -248,7 +270,7 @@ def _page_ids(value: str) -> frozenset[str]:
 
 
 @dataclass(frozen=True)
-class IterationRequest:
+class IterationRequest:  # pylint: disable=too-many-instance-attributes
     """Package capture inputs; no caller-supplied Desktop path or data-success record."""
 
     package: Path
@@ -257,6 +279,116 @@ class IterationRequest:
     reviewer: str = "pbi-migration-validator"
     session_id: str | None = None
     previous_sha256: str | None = None
+    refresh: bool = False
+    persist: bool = False
+    canaries: tuple[str, ...] = ()
+
+
+def _preparation_request(request: IterationRequest) -> dict[str, Any]:
+    if type(request.canaries) is not tuple:  # pylint: disable=unidiomatic-typecheck
+        raise receipt.ReceiptError("REQUEST_INVALID", "canaries must be an explicit tuple of table names")
+    requested = {"refresh": request.refresh, "persist": request.persist, "canaries": list(request.canaries)}
+    receipt._validate(receipt.PREPARATION_REQUEST_SCHEMA, requested)  # pylint: disable=protected-access
+    if any(not name.strip() for name in request.canaries) or len({name.casefold() for name in request.canaries}) != len(
+        request.canaries
+    ):
+        raise receipt.ReceiptError("CANARIES_REQUIRED", "canaries must be nonempty, unique explicit table names")
+    return requested
+
+
+def _recheck_a1(bound: BoundDesktop | None) -> None:
+    if bound is not None:
+        try:
+            bound_call(bound, lambda _connection: None)
+        except ObservationUnavailable as error:
+            raise receipt.ReceiptError(
+                "A1_BINDING_UNESTABLISHED", "the held A1 binding could not be rechecked"
+            ) from error
+
+
+def _observe_a1(operation: Callable[[], Any], result_type: type, bound: BoundDesktop) -> dict[str, Any]:
+    """Consume this invocation's return object only; never a sink, legacy tuple or supplied result."""
+    try:
+        result = operation()
+    except ObservationUnavailable as error:
+        if len(error.args) != 1 or error.args[0] not in receipt.MEASUREMENT_REFUSALS:
+            raise receipt.ReceiptError("A1_BINDING_UNESTABLISHED", "A1 refused observation authority") from error
+        return {"status": receipt.REFUSED, "reason": error.args[0], "observation": None}
+    except ModelLockTimeout:
+        return {"status": receipt.REFUSED, "reason": "MODEL_LOCK_TIMEOUT", "observation": None}
+    except CompatRollbackError as error:
+        raise receipt.ReceiptError(
+            "A1_PERSISTENCE_UNESTABLISHED", "A1 could not restore its publication state"
+        ) from error
+    if result is None:
+        return receipt.unestablished_fact("observation_unavailable")
+    multiple = result_type is CanaryObservation
+    if multiple and type(result) is not tuple:  # pylint: disable=unidiomatic-typecheck
+        raise receipt.ReceiptError("A1_OBSERVATION_INVALID", "canary observations must be invocation-owned returns")
+    documents = []
+    for observed in result if multiple else (result,):
+        if type(observed) is not result_type:  # pylint: disable=unidiomatic-typecheck
+            raise receipt.ReceiptError("A1_OBSERVATION_INVALID", "a structured A1 observation is required")
+        if observed.identity != bound.identity or observed.catalogue != bound.catalogue:
+            raise receipt.ReceiptError("A1_BINDING_MISMATCH", "the returned observation belongs to another binding")
+        document = asdict(observed)
+        if multiple:
+            document["query_sha256"] = hashlib.sha256(observed.query.encode("utf-8")).hexdigest()
+        documents.append(document)
+    observation = documents if multiple else documents[0]
+    return {"status": receipt.OBSERVED, "reason": None, "observation": json.loads(json.dumps(observation))}
+
+
+def _prepare_a1(
+    target: receipt.PackageTarget, pid: int, requested: dict[str, Any]
+) -> tuple[dict[str, Any], BoundDesktop | None]:
+    """Optional, explicit preparation through one held Desktop/AS/catalogue binding."""
+    facts = {key: receipt.unestablished_fact() for key in ("binding", "refresh", "canaries", "persistence")}
+    if not (requested["refresh"] or requested["persist"] or requested["canaries"]):
+        return facts, None
+    try:
+        bound = bind_desktop(pid)
+    except ObservationUnavailable as error:
+        raise receipt.ReceiptError("A1_BINDING_UNESTABLISHED", "no held A1 binding was established") from error
+    if type(bound) is not BoundDesktop:  # pylint: disable=unidiomatic-typecheck
+        raise receipt.ReceiptError("A1_BINDING_UNESTABLISHED", "the A1 binding return is unavailable")
+    receipt._validate(receipt.BINDING_SCHEMA, asdict(bound))  # pylint: disable=protected-access
+    if bound.identity.pid != pid:
+        raise receipt.ReceiptError("A1_BINDING_MISMATCH", "A1 bound a different Desktop process")
+    facts["binding"] = {"status": receipt.OBSERVED, "reason": None, "observation": asdict(bound)}
+    operations = (
+        (
+            "refresh",
+            requested["refresh"],
+            lambda: refresh(
+                bound.identity.port, None, refresh_type="full", desktop_pid=pid, bound=bound, return_observation=True
+            ),
+            RefreshObservation,
+        ),
+        (
+            "canaries",
+            bool(requested["canaries"]),
+            lambda: probe_observations(bound, requested["canaries"]),
+            CanaryObservation,
+        ),
+        (
+            "persistence",
+            requested["persist"],
+            lambda: image_save(
+                bound.identity.port,
+                target.model_dir / ".pbi" / "cache.abf",
+                target.model_dir,
+                bound=bound,
+                return_observation=True,
+            ),
+            PersistenceObservation,
+        ),
+    )
+    for key, enabled, operation, result_type in operations:
+        if enabled:
+            facts[key] = _observe_a1(operation, result_type, bound)
+            _recheck_a1(bound)  # Measurement refusal is retainable only while authority still holds.
+    return facts, bound
 
 
 def _capture_pages(
@@ -296,11 +428,11 @@ def _request_review(request: IterationRequest) -> dict[str, Any]:
         "desktop_binding_matches": True,
         "reload_confirmed": True,
     }
-    receipt._validate(receipt.GENERATED_SCHEMA["properties"]["review"], review)  # pylint: disable=protected-access
+    receipt._validate(receipt.V3_GENERATED_SCHEMA["properties"]["review"], review)  # pylint: disable=protected-access
     return review
 
 
-def run_iteration(
+def run_iteration(  # pylint: disable=too-many-locals
     request: IterationRequest,
     options: CaptureOptions,
     runtime: CaptureRuntime = DEFAULT_RUNTIME,
@@ -309,6 +441,7 @@ def run_iteration(
     with receipt._named_refusals():  # pylint: disable=protected-access
         _validate_options(options, package=True)
         review = _request_review(request)
+        requested = _preparation_request(request)
         target = receipt.resolve_package(request.package)
         inventory = receipt.report_inventory(target.report_dir)
         if options.page_ids is not None and options.page_ids - {page.page_id for page in inventory}:
@@ -320,29 +453,51 @@ def run_iteration(
         if mode not in receipt.MODES or (mode == receipt.MODE_SIGN_OFF and len(selected) != len(inventory)):
             raise receipt.ReceiptError("SUBSET_CANNOT_SIGN_OFF", "sign-off must cover every current page")
         receipt.assert_shareable([{"page": page.page_id, "name": page.display_name} for page in selected])
+        history = receipt.checked_history(request.package, request.previous_sha256)
         receipt.assert_desktop_binding(target, review["desktop_pid"], runtime.state_reader)
         if runtime.reload(review["desktop_pid"]) is not True:
             raise receipt.ReceiptError("DESKTOP_UNVERIFIED", "the bound Desktop instance did not confirm reload")
         receipt.assert_desktop_binding(target, review["desktop_pid"], runtime.state_reader)
+        preparation = {"requested": requested, "artifact_before": receipt.artifact_facts(target)}
+        observations, bound = _prepare_a1(target, review["desktop_pid"], requested)
+        if (
+            receipt.resolve_package(request.package) != target
+            or receipt.report_inventory(target.report_dir) != inventory
+        ):
+            raise receipt.ReceiptError("GENERATED_CHANGED", "preparation changed the package or page binding")
+        receipt.assert_desktop_binding(target, review["desktop_pid"], runtime.state_reader)
         before = receipt.artifact_facts(target)
+        receipt.assert_iteration_progress(before, history[-1] if history else None)
         directory, previous = receipt.allocate_iteration(request.package, request.previous_sha256)
         try:
             captured = _capture_pages(selected, request.pid, directory, options, runtime)
-            generated = receipt.generated_facts(target, directory, captured, review, receipt.now_rfc3339(), previous)
+            _recheck_a1(bound)
+            receipt.assert_desktop_binding(target, review["desktop_pid"], runtime.state_reader)
+            generated = receipt.generated_facts(
+                target,
+                directory,
+                captured,
+                review,
+                receipt.now_rfc3339(),
+                previous,
+                schema_version=receipt.SCHEMA_VERSION,
+                preparation=preparation,
+                observations=observations,
+            )
             if generated["artifact"] != before:
                 raise receipt.ReceiptError("GENERATED_CHANGED", "the package changed during capture")
-            receipt.assert_desktop_binding(target, review["desktop_pid"], runtime.state_reader)
             payload = {
                 "schema_version": receipt.SCHEMA_VERSION,
                 "iteration": directory.name,
                 "mode": mode,
                 "state": receipt.STATE_PENDING,
-                "outcome": None,
                 "generated": generated,
                 "judgement": receipt.pending_judgement(selected),
             }
+            if previous:
+                payload["judgement"]["findings"] = json.loads(json.dumps(previous.payload["judgement"]["findings"]))
             receipt.write_receipt(directory, payload)
-            receipt.read_history(request.package)
+            receipt._assert_snapshot(request.package, receipt.read_history(request.package))  # pylint: disable=protected-access
             return payload
         except BaseException:
             shutil.rmtree(directory, ignore_errors=True)
@@ -358,7 +513,17 @@ def cmd_iterate(args: argparse.Namespace, runtime: CaptureRuntime = DEFAULT_RUNT
     """CLI package capture; print the immutable capture token separately from the receipt."""
     try:
         payload = run_iteration(
-            IterationRequest(args.package, args.pid, args.mode, args.reviewer, args.session_id, args.previous_sha256),
+            IterationRequest(
+                args.package,
+                args.pid,
+                args.mode,
+                args.reviewer,
+                args.session_id,
+                args.previous_sha256,
+                args.refresh,
+                args.persist,
+                tuple(args.canary_table),
+            ),
             CaptureOptions(args.poll, args.stable_seconds, args.max_wait, args.pages),
             runtime,
         )
@@ -370,7 +535,7 @@ def cmd_iterate(args: argparse.Namespace, runtime: CaptureRuntime = DEFAULT_RUNT
     )
     _emit(f"CAPTURE_SHA256={receipt.receipt_sha256(payload)}")
     _emit("Keep this checksum. Review a separate judgement object outside the package; do not edit iteration.json.")
-    _emit(f"DATA EVIDENCE PENDING: {receipt.DATA_PENDING_REASON}")
+    _emit("Evidence retained, not a measurement-success verdict. Numeric evidence: unestablished.")
     return EXIT_OK
 
 
@@ -386,7 +551,10 @@ def cmd_finalize(args: argparse.Namespace, runtime: CaptureRuntime = DEFAULT_RUN
         )
     except (receipt.ReceiptError, rev.RevisionError) as error:
         return _refused(error)
-    _emit(f"FINALIZED {payload['iteration']} ({payload['mode']}): outcome {payload['outcome']}")
+    detail = (
+        f"outcome {payload['outcome']}" if payload["schema_version"] == 2 else "evidence sealed; no success verdict"
+    )
+    _emit(f"FINALIZED {payload['iteration']} ({payload['mode']}): {detail}")
     _emit(f"FINAL_SHA256={receipt.receipt_sha256(payload)}")
     _emit("Use this returned checksum as --previous-sha256 for the next iteration.")
     return EXIT_OK
@@ -419,6 +587,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         iterate.add_argument("--reviewer", default="pbi-migration-validator")
         iterate.add_argument("--session-id")
         iterate.add_argument("--previous-sha256", help="The previous finalize command's returned checksum")
+        iterate.add_argument("--refresh", action="store_true", help="Observe a full database-scoped A1 refresh")
+        iterate.add_argument("--persist", action="store_true", help="Observe direct A1 ImageSave/readback")
+        iterate.add_argument("--canary-table", action="append", default=[], help="Explicit A1 canary table; repeatable")
         _timing_args(iterate)
         finalize = commands.add_parser("finalize", help="seal separate reviewer input against an immutable capture")
         finalize.add_argument("--package", type=Path, required=True)
