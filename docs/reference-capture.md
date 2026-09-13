@@ -35,7 +35,7 @@ as interchangeable ground truth.
 // migrations/workbooks/<slug>/reference/manifest.json   (⚠️ schema implemented; some fields still TODO)
 {
   "captured_at": "2026-07-19T20:43:01Z",
-  "source_workbook_sha256": "…",          // ties the image to an exact .twbx
+  "source_workbook_sha256": "…",          // declared source-file bytes at manifest creation, not image identity
   "dashboards": [
     {
       "name": "Price of Prosperity",
@@ -55,6 +55,11 @@ as interchangeable ground truth.
   ]
 }
 ```
+
+`source_workbook_sha256` binds the separately declared source file at manifest creation. It does
+**not** prove that the screenshot depicts that workbook, object, revision or filter state. For
+manual evidence, that attribution is a declared, attributable human assertion, not independently
+proven image identity.
 
 - **Capability flags, not a fidelity rank.** A provider advertises what its output is fit *for*:
   `layout_grade`, `text_readable`, `state_reproducible`, `revision_bound`, `validation_grade`. The
@@ -786,29 +791,15 @@ redesigns." With no declared mode they can *reasonably disagree*. Every migratio
   capture invocations. `capture_tableau_oracle.py --workers 1..4` shares one login/session inside one
   invocation; it never creates a session per worker.
 
-## Corrected pipeline ordering
+## Producer and consumer responsibilities
 
-```
-parse + triage
-        │
-        ├───────────────┐                (reference acquisition has NO TMDL dependency)
-        ▼               ▼
- reference-acquire   pbi-semantic-builder        ← run in parallel
-   (producer)              │
-        │  bundle + manifest│  model
-        └────────┬─────────┘
-                 ▼
-         pbi-report-builder     ← receives spec + model + reference bundle FROM ITS PLANNING STEP
-                 │                 (fail closed if no bundle and not structural-only)
-                 ▼
-         pbi-migration-validator ← receives the SAME immutable bundle; does NOT capture it itself
-```
+For timing and dispatch decisions, use the sole authoritative
+[conversion, dispatch, and fidelity boundaries](reference-readiness.md#conversion-dispatch-and-fidelity-boundaries).
 
-Key changes from the previous flow: acquisition moves **before report planning** (planning already
-decides page splits, chart types, layout, colour — not just field binding); the **builder gets a formal
-`Inputs you require` contract** for the reference (today only the validator has one); and **capture is
-removed from the validator's responsibilities** — it consumes an immutable artifact, it does not
-produce one.
+The capture producer supplies the reference bundle and manifest to `pbi-report-builder` and
+`pbi-migration-validator`. Both consume the **same immutable evidence**; neither may regenerate,
+crop or annotate the originals. Any per-worksheet crops are producer outputs. The validator
+**consumes the reference; it does not capture it**.
 
 ## Governance (source-data safety)
 
@@ -843,8 +834,8 @@ toolkit to migrate real customer dashboards**:
   clean one. Detecting *disabled image export / missing Read+download permissions* specifically is
   still open.
 - **Record the PAT principal** — RLS can materially change what the reference shows.
-- **Pin** workbook revision + extract-refresh time + `.twbx` SHA-256 so you never compare different data
-  snapshots.
+- **Pin** workbook revision + extract-refresh time + declared `.twbx` SHA-256 for comparison;
+  these recorded facts alone do not prove that a render depicts that snapshot.
 - **Normalize** viewport/device layout, locale, timezone, fonts, DPI to the dashboard's **declared
   size** (the parser has it) or you get false "proportion" discrepancies from capture geometry alone.
 - Treat dashboard **extensions / web objects / maps** as provider capability checks.
