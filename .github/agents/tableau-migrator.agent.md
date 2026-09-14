@@ -207,7 +207,7 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
    `limitations_encountered` as "what needs your review".
 14. **Retrospective — MANDATORY.** Read `phase-timings.json` and subagents' engine-vs-authored
     accounts, not memory. Route craft to skills/docs/tests, not personas:
-    `docs/INDEX.md#retrospective-targets`.
+    `docs/INDEX.md#retrospective-targets`; visuals → `visual-cookbook.md`.
     After published-skill edits run `scripts/build_plugin.py`. Respect the 30,000-char cap:
     merge duplicates, delete tool-covered advice, aim for net-zero growth. Run affected gates
     (`pytest -q`, `sync_agent_conventions.py --check`: sizes and cap). Report learning, destination,

@@ -464,7 +464,7 @@ e99599871043a3e3cdece5e4a013fa6d016a6531d26db65af559d95065817bf0  9. **Delegate 
 025ef045d056a7ef1db53b8473b6b18c31c182a12ad79fd22bbbe7138e6cd2fa  11. **Route each discrepancy to its owner:** numeric/DAX ~ `
 b25c79b917a4578b4baee3101562fbd90a403d9da8de77bfa8e7091632104f7c  12. **Diagnose ~ final check ~ promote.** `python scripts/ch
 0241d2f0a6d7fa4aa3f318a5775a5f9f905eb5d7c22b0edbe48d18f8047763b1  13. **Summarize for the user**: what was built (tables/measu
-f1e0387a1e7ebae6028bdc7919cc5ee04a6cb4647fb5d746c58e4f2b1577a56b  14. **Retrospective ~ MANDATORY.** Read `phase-timings.json`
+8a270e791c73802b5190b99d5b5464d17e8d742e348d21e4706b9156c65577de  14. **Retrospective ~ MANDATORY.** Read `phase-timings.json`
 760cf6e1c73de22e460d8175600b4893950b719e3a8f5de9c7e09ec0dc11bae7  15. **Final gate ~ prove nothing was built behind the creden
 3a138cb20e5ca29f388a2515f0c2780042ec3d590e4b0124ae5a42e37c4c3d65  16. **(Phase 2)** `pbi-deployer` publishes to Fabric ~ not i
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
