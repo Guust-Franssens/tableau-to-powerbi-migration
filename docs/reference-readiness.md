@@ -4,7 +4,7 @@
 the final Phase-1 `START_READY` conjunction. Ordinary bundles retain their reference-only verdict.
 
 ```
-python scripts/check_reference_readiness.py <bundle> [--require-validation-grade] [--json <file>]
+python scripts/check_reference_readiness.py <bundle> [--require-validation-grade] [--json -]
 ```
 
 ## Conversion, dispatch, and fidelity boundaries
@@ -127,8 +127,12 @@ Provider/consumer input order does not change selection. Exact S2 cohort ordinal
 names, associate each provider with its root. Every original requested occurrence remains in the
 denominator. Other workbook consumers are never passed as binder providers. Plain relative package
 paths are expanded lexically after original classification; aliases and `..` do not earn a new root.
-S2 is also asked for the inspector's datasource-prefix/target cohort against the same held bytes:
-it, not the consumer, contextualizes a provider inspected without its consuming workbook.
+Only the direct provider selected by the target's resolved, typed S2 ordinal is passed to its
+inspector. Unrelated datasources remain in the full cohort's denominator and retain their own
+findings, but cannot contaminate the selected pair or an owned model's inspection. Missing,
+ambiguous, malformed or inconsistent selections refuse; names and filesystem siblings are never
+fallbacks. S2 is also asked for the inspector's selected-provider/target cohort against the same
+held bytes: it, not the consumer, contextualizes a provider inspected without its consuming workbook.
 
 The inspector must return typed exit-0 `BOUND` or earned `NOT_APPLICABLE`. Its held roots, native
 identities, manifest/member bytes, roles, policy and mapped provider choices must still match the
@@ -137,8 +141,10 @@ composition returns `package_changed_since_integrity_check`. An unknown/malforme
 returns `package_readiness_input_invalid`, never success. Binding exit 1 maps to findings; exit 3
 or a returned interrupt/130 maps to cannot-establish, retaining the original binding exit/codes.
 
-Package invocations emit **one JSON result** (unless `--quiet`); `--json` optionally writes the same
-result to an ordinary external file. `package_readiness[]` names every target's ordinal, status,
+Package-only invocations emit **one JSON result on stdout** unless `--quiet`. Explicit `--json -`
+emits one complete serialized JSON document plus newline and flushes, **even with `--quiet`**, for
+package, ordinary and mixed invocations. Without `--json`, ordinary/mixed invocations retain human
+rendering unless quiet. `package_readiness[]` names every target's ordinal, status,
 failed stage and codes. `package_data_access[]` retains the strict stored projection and canonical
 assessment separately; `package_binding[]` retains the fresh inspection. Reference `units[]`, page
 rows, counts and grades remain subordinate evidence. Public package output redacts names/locations
@@ -148,11 +154,21 @@ retain the original attribution rows for comparison; they are not shareable diag
 Top-level target ordinals use caller order; the inspector's nested `provider_ordinals` use its
 datasource-prefix/target vector, not caller positions. Associations are checked through exact roots.
 
-Output at/below a package, including an output/parent alias into it, is usage exit 2 before writing.
-Unwritable output is `CANNOT_ESTABLISH`, stage `output`, nonzero. No atomic/durable JSON or deletion
-of an older report is promised: an old JSON file is not permanent dispatch authority. Ordinary-only
-invocations retain reference `READY`/`NOT_APPLICABLE`, flags and rendered output; mixed invocations
-check package members fully but **never** receive aggregate `START_READY`. Empty input is usage.
+**Compatibility break: file-valued `--json` is removed globally. Capture stdout instead.** Any value
+other than literal `-` is usage exit 2 with fixed `readiness_json_file_output_removed: use --json -`,
+before target classification, scanning or any output-path probe. The supplied value is never echoed;
+this gate has no file publisher in package or ordinary mode.
+
+Serialization, stdout write (including a short write), or flush failure returns exit 3 with a
+best-effort fixed `readiness_output_unwritable` diagnostic on stderr, without fallback output or a
+file write. Successfully emitted negative readiness still exits **1 for FINDINGS** or **3 for
+CANNOT_ESTABLISH**; output success does not grant readiness. Successful START_READY/ordinary success
+exits 0. KeyboardInterrupt propagates as an interrupt/130; partial stdout is possible.
+Stdout is **not atomic or durable**, and partial/captured output is not permanent dispatch authority.
+Process capture and shell redirection are the caller's operations, outside this gate's path-safety
+contract: a shell may create or truncate its destination before the checker runs.
+Ordinary-only invocations retain reference `READY`/`NOT_APPLICABLE`; mixed invocations check package
+members fully but **never** receive aggregate `START_READY`. Empty input is usage.
 
 **Ceilings are unchanged:** `BOUND` remains `UNVALIDATED`; explicit authorized model-only remains
 `unvalidated/structural_only` and cannot supply a report. Stored `data_validated` is not a new full
@@ -166,7 +182,7 @@ then rerun the final check. Existing no-follow/between-syscall race limits remai
 round-1 review of PR #428 measured it returning exit **0** on a bundle whose own output said
 *"CANNOT_ESTABLISH is NOT a pass"*. An entry gate that can be asked to say yes is not an entry gate,
 and a dispatch decision reading that exit code would launch an agent to build blind — the exact
-outcome this exists to prevent, delivered by a flag. Advisory consumers read `--json`, whose `status`
+outcome this exists to prevent, delivered by a flag. Advisory consumers read `--json -`, whose `status`
 always carries the true verdict.
 
 ---

@@ -21,6 +21,7 @@ below naming its finding number, and each is mutation-proved by
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -29,7 +30,9 @@ import subprocess
 import sys
 import zlib
 from dataclasses import replace
+from contextlib import redirect_stdout
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1152,13 +1155,12 @@ def test_a_missing_path_is_a_usage_error_not_a_verdict(tmp_path: Path) -> None:
     assert excinfo.value.code == 2
 
 
-def test_the_json_verdict_always_carries_the_true_status(bundle: Path, tmp_path: Path) -> None:
+def test_the_json_verdict_always_carries_the_true_status(bundle: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """`--json` is the advisory route now that `--warn-only` is gone; it must never soften."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    out = tmp_path / "verdict.json"
-
-    assert crr.main([str(bundle), "--quiet", "--json", str(out)]) == 1
-    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FINDINGS"
+    capsys.readouterr()
+    assert crr.main([str(bundle), "--quiet", "--json", "-"]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "FINDINGS"
 
 
 # --------------------------------------------------------------------------------------------
@@ -2699,8 +2701,9 @@ def test_package_source_override_refuses_before_is_file_or_any_legacy_helper(
 
 
 @pytest.mark.parametrize("explicit", [False, True], ids=["ancestor-source", "explicit-source"])
+@pytest.mark.parametrize("quiet", [False, True])
 def test_ordinary_source_and_ancestor_compatibility_never_enters_the_projector(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], explicit: bool, quiet: bool
 ) -> None:
     root = tmp_path / "run" / "ordinary"
     root.mkdir(parents=True)
@@ -2708,7 +2711,6 @@ def test_ordinary_source_and_ancestor_compatibility_never_enters_the_projector(
     asset = root.parent / "assets" / "Legacy.twb"
     write_handover(root, "Legacy", source_id="historical/run/assets/Legacy.twb")
     write_oracle(root.parent, [{"view_name": "Overview", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
-    output = tmp_path / "ordinary.json"
 
     def forbidden(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("ordinary source compatibility entered the package authorities")
@@ -2716,12 +2718,13 @@ def test_ordinary_source_and_ancestor_compatibility_never_enters_the_projector(
     monkeypatch.setattr(crr, "resolve_verified_package_source", forbidden)
     monkeypatch.setattr(crr, "verify_package", forbidden)
     monkeypatch.setattr(crr, "verify_phase1_role_identity", forbidden)
-    args = [str(root), "--json", str(output), "--quiet"]
+    args = [str(root), "--json", "-", *(["--quiet"] if quiet else [])]
     if explicit:
         args += ["--source", str(asset)]
 
+    capsys.readouterr()
     code = crr.main(args)
-    report = json.loads(output.read_text(encoding="utf-8"))
+    report = json.loads(capsys.readouterr().out)
 
     assert code == 0
     assert report["pages_expected"] == report["pages_ready"] == 1
@@ -2816,11 +2819,10 @@ def test_provider_consumer_command_returns_two_own_local_sources(
     _forbid_legacy_source(monkeypatch)
     monkeypatch.setattr(crr, "source_objects", parse_source)
     monkeypatch.setattr(crr, "verify_phase1_role_identity", cohort)
-    output = tmp_path / "pair.json"
-
-    code = crr.main([*(str(path) for path in targets), "--json", str(output)])
-    report = json.loads(output.read_text(encoding="utf-8"))
+    capsys.readouterr()
+    code = crr.main([*(str(path) for path in targets), "--json", "-"])
     printed = capsys.readouterr().out
+    report = json.loads(printed)
     sources = {targets[row["ordinal"]].name: row for row in report["package_source"]}
 
     assert (sources[DS_UNIT]["path"], sources[DS_UNIT]["kind"]) == (
@@ -2842,6 +2844,145 @@ def test_provider_consumer_command_returns_two_own_local_sources(
     for path in (asset, provider / "assets" / f"{DS_LUID}_{DS_UNIT}.tdsx"):
         assert str(path) not in printed
         assert str(path).replace("\\", "\\\\") not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing-target",
+        "duplicate-target",
+        "untyped-role",
+        "missing-verified",
+        "foreign-root",
+        "foreign-identity",
+        "unknown-verdict",
+        "blocked-target",
+        "unknown-topology",
+        "wrong-target-kind",
+        "owned-with-dependency",
+        "datasource-with-dependency",
+        "consumer-without-dependency",
+        "untyped-dependency",
+        "list-dependencies",
+        "ambiguous",
+        "mismatch",
+        "missing",
+        "not-applicable",
+        "bool-ordinal",
+        "negative-ordinal",
+        "out-of-range",
+        "self",
+        "string-ordinal",
+        "float-ordinal",
+        "wrong-provider-kind",
+        "wrong-provider-topology",
+        "blocked-provider",
+        "provider-with-dependency",
+        "duplicate-distinct-providers",
+    ],
+)
+def test_binding_roots_refuse_malformed_or_inconsistent_ordinal_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    provider, consumer = _shared_source_pair(tmp_path / "packages")
+    cohort = crr._precheck_cohort([provider, consumer])[1].cohort
+    assert all(role.is_start_ready for role in cohort)
+    target = consumer
+    original = cohort[1]
+    dependency = original.dependencies[0]
+    assert dependency.state == package_role_identity.STATE_RESOLVED and dependency.provider_ordinal == 0
+    before = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for root in (provider, consumer)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    if fault == "missing-target":
+        target = tmp_path / "foreign-package"
+    elif fault == "duplicate-target":
+        cohort = (*cohort, original)
+    elif fault == "untyped-role":
+        cohort = (cohort[0], SimpleNamespace(**vars(original)))
+    elif fault == "missing-verified":
+        cohort = (cohort[0], replace(original, verified=None))
+    elif fault in ("foreign-root", "foreign-identity"):
+        changes = {"root": tmp_path} if fault == "foreign-root" else {"root_identity": str(tmp_path)}
+        cohort = (cohort[0], replace(original, verified=replace(original.verified, **changes)))
+    elif fault in ("unknown-verdict", "blocked-target"):
+        cohort = (cohort[0], replace(original, verdict="future" if fault == "unknown-verdict" else "BLOCKED"))
+    elif fault in ("unknown-topology", "owned-with-dependency"):
+        cohort = (cohort[0], replace(original, topology="future" if fault == "unknown-topology" else "owned_model"))
+    elif fault == "wrong-target-kind":
+        cohort = (cohort[0], replace(original, kind="datasource"))
+    elif fault == "datasource-with-dependency":
+        target = provider
+        cohort = (replace(cohort[0], dependencies=(dependency,)), cohort[1])
+    elif fault in ("consumer-without-dependency", "untyped-dependency", "list-dependencies"):
+        rows = {
+            "consumer-without-dependency": (),
+            "untyped-dependency": (SimpleNamespace(**vars(dependency)),),
+            "list-dependencies": [dependency],
+        }[fault]
+        cohort = (cohort[0], replace(original, dependencies=rows))
+    elif fault in ("ambiguous", "mismatch", "missing", "not-applicable"):
+        state = "not_applicable" if fault == "not-applicable" else fault
+        cohort = (cohort[0], replace(original, dependencies=(replace(dependency, state=state),)))
+    elif fault in ("bool-ordinal", "negative-ordinal", "out-of-range", "self", "string-ordinal", "float-ordinal"):
+        index = {
+            "bool-ordinal": True,
+            "negative-ordinal": -1,
+            "out-of-range": len(cohort),
+            "self": 1,
+            "string-ordinal": "0",
+            "float-ordinal": 0.0,
+        }[fault]
+        cohort = (cohort[0], replace(original, dependencies=(replace(dependency, provider_ordinal=index),)))
+    elif fault in ("wrong-provider-kind", "wrong-provider-topology", "blocked-provider", "provider-with-dependency"):
+        changes = {
+            "wrong-provider-kind": {"kind": "workbook"},
+            "wrong-provider-topology": {"topology": "standalone_datasource"},
+            "blocked-provider": {"verdict": "BLOCKED"},
+            "provider-with-dependency": {"dependencies": (dependency,)},
+        }[fault]
+        cohort = (replace(cohort[0], **changes), original)
+    else:
+        other = datasource_package(tmp_path / "other" / DS_UNIT, luid="22222222-3333-4444-5555-666666666666")
+        current = crr._precheck_cohort([provider, consumer, other])[1].cohort
+        assert all(role.is_start_ready for role in current)
+        cohort = (
+            current[0],
+            replace(current[1], dependencies=(dependency, replace(dependency, provider_ordinal=2))),
+            replace(current[2], topology="published_provider"),
+        )
+        before.update(
+            {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in other.rglob("*") if path.is_file()}
+        )
+    with pytest.raises(ValueError, match="^package_root_binding_invalid$"):
+        crr._binding_roots(target, cohort)
+    _forbid_after(monkeypatch, "_scan_safe_target", "_inspect_package")
+    report = crr._reference_then_binding(
+        target, original, crr.resolve_verified_package_source(original.source_handoff()), cohort, {}, False
+    )
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert report["package_readiness"] == [
+        {
+            "ordinal": 0,
+            "status": "CANNOT_ESTABLISH",
+            "failed_stage": "binding",
+            "codes": ["package_root_binding_invalid"],
+        }
+    ]
+    assert before == {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in before}
+
+
+def test_binding_roots_allow_repeated_resolved_rows_only_for_the_same_provider(tmp_path: Path) -> None:
+    provider, consumer = _shared_source_pair(tmp_path / "packages")
+    cohort = crr._precheck_cohort([consumer, provider])[0].cohort
+    original = cohort[0]
+    assert original.dependencies[0].provider_ordinal == 1
+    repeated = (replace(original, dependencies=original.dependencies * 2), cohort[1])
+    assert crr._binding_roots(consumer, repeated) == (provider, consumer)
+    assert crr._binding_roots(provider, cohort) == (provider,)
 
 
 def test_ambiguous_provider_stops_consumer_before_source_or_evidence(
@@ -2904,11 +3045,10 @@ def test_unparseable_package_source_never_prints_its_absolute_path(
     provenance.write_text(json.dumps(payload), encoding="utf-8")
     seal_package(package, "Minimal")
     _forbid_legacy_source(monkeypatch)
-    output = tmp_path / "parse-failure.json"
-
-    code = crr.main([str(package), "--json", str(output)])
-    report = json.loads(output.read_text(encoding="utf-8"))
+    capsys.readouterr()
+    code = crr.main([str(package), "--json", "-"])
     printed = capsys.readouterr().out
+    report = json.loads(printed)
 
     assert code == 3
     assert report["package_source"][0]["state"] == "resolved", "parsing happens after source selection"
@@ -3097,7 +3237,12 @@ def test_start_ready_strict_held_projection_refuses_before_reference(
     "state,code,exit_code", [("blocked", "unknown-target", 1), ("cannot_establish", "source-key-set-changed", 3)]
 )
 def test_start_ready_consumes_canonical_refusal_without_repair_or_local_matrix(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, code: str, exit_code: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+    code: str,
+    exit_code: int,
 ) -> None:
     root = _packaged_unit(tmp_path)
     refused = crr.data_access.parse_data_access(
@@ -3122,9 +3267,9 @@ def test_start_ready_consumes_canonical_refusal_without_repair_or_local_matrix(
 
     monkeypatch.setattr(crr.data_access, "reconcile_package_data_access", reject)
     _forbid_after(monkeypatch, "_scan_safe_target", "_inspect_package")
-    output = tmp_path / "refused.json"
-    assert crr.main([str(root), "--json", str(output), "--quiet"]) == exit_code
-    report = json.loads(output.read_bytes())
+    capsys.readouterr()
+    assert crr.main([str(root), "--json", "-", "--quiet"]) == exit_code
+    report = json.loads(capsys.readouterr().out)
     assert calls == [True]
     row = report["package_data_access"][0]
     assert row["stored"] == LOCAL_PROJECTION
@@ -3299,7 +3444,9 @@ def test_start_ready_returned_interrupt_keeps_original_binding_exit(
 
 
 @pytest.mark.parametrize("reverse", [False, True])
-def test_start_ready_aggregate_keeps_original_denominator_and_unknown_count(tmp_path: Path, reverse: bool) -> None:
+def test_start_ready_aggregate_keeps_original_denominator_and_unknown_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], reverse: bool
+) -> None:
     good = _packaged_unit(tmp_path / "good")
     damaged = _packaged_unit(tmp_path / "damaged")
     (damaged / "data-access.json").unlink()
@@ -3308,9 +3455,9 @@ def test_start_ready_aggregate_keeps_original_denominator_and_unknown_count(tmp_
     roots = [damaged, good, blind]
     if reverse:
         roots.reverse()
-    output = tmp_path / "aggregate.json"
-    assert crr.main([*map(str, roots), "--json", str(output), "--quiet"]) == 1
-    report = json.loads(output.read_bytes())
+    capsys.readouterr()
+    assert crr.main([*map(str, roots), "--json", "-", "--quiet"]) == 1
+    report = json.loads(capsys.readouterr().out)
     assert report["status"] == "FINDINGS"
     assert report["packages_scanned"] == len(report["package_readiness"]) == 3
     assert report["packages_cannot_establish"] == 1
@@ -3321,51 +3468,367 @@ def test_start_ready_aggregate_keeps_original_denominator_and_unknown_count(tmp_
 
 
 def test_start_ready_relative_paths_and_mixed_ordinary_compatibility(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     root = _packaged_unit(tmp_path)
     monkeypatch.chdir(tmp_path)
-    output = tmp_path / "relative.json"
-    assert crr.main([str(root.relative_to(tmp_path)), "--json", str(output), "--quiet"]) == 0
-    assert json.loads(output.read_bytes())["status"] == "START_READY"
+    capsys.readouterr()
+    assert crr.main([str(root.relative_to(tmp_path)), "--json", "-", "--quiet"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "START_READY"
     ordinary = tmp_path / "ordinary"
     shutil.copytree(root, ordinary)
     (ordinary / bundle_corpus.PACKAGE_MARKER).unlink()
-    assert crr.main([str(ordinary), str(root), "--json", str(output), "--quiet"]) == 0
-    report = json.loads(output.read_bytes())
+    assert crr.main([str(ordinary), str(root), "--json", "-", "--quiet"]) == 0
+    report = json.loads(capsys.readouterr().out)
     assert report["status"] == "READY"
     assert report["packages_start_ready"] == 1
 
 
-@pytest.mark.parametrize("location", ["root", "member", "new-child", "linked-output", "linked-parent"])
-def test_start_ready_json_cannot_write_package_bytes_or_aliases(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
+@pytest.mark.parametrize("quiet", [False, True])
+@pytest.mark.parametrize("status,exit_code", [("START_READY", 0), ("FINDINGS", 1), ("CANNOT_ESTABLISH", 3)])
+def test_explicit_json_stdout_is_one_public_document_with_the_true_exit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], quiet: bool, status: str, exit_code: int
 ) -> None:
-    from test_package_filesystem import link_directory
-
     root = _packaged_unit(tmp_path)
-    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
-    if location == "linked-parent":
-        alias = tmp_path / "alias"
-        link_directory(alias, root)
-        output = alias / "readiness.json"
-    elif location == "linked-output":
-        output = tmp_path / "linked.json"
-        os.link(root / "data-access.json", output)
+    if status == "FINDINGS":
+        _blind_reference_fixture(root)
+    elif status == "CANNOT_ESTABLISH":
+        (root / "data-access.json").unlink()
+    before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*") if path.is_file()}
+    capsys.readouterr()
+    assert crr.main([str(root), "--json", "-", *(["--quiet"] if quiet else [])]) == exit_code
+    captured = capsys.readouterr()
+    report, end = json.JSONDecoder().raw_decode(captured.out)
+    assert captured.out[end:] == "\n"
+    assert captured.err == ""
+    assert report["status"] == report["package_readiness"][0]["status"] == status
+    assert report["identities_redacted"] is True
+    assert str(tmp_path) not in captured.out
+    assert before == {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+@pytest.mark.parametrize("mode", ["ordinary", "package", "mixed"])
+def test_default_rendering_keeps_package_json_and_ordinary_mixed_human_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], quiet: bool, mode: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    ordinary = tmp_path / "ordinary"
+    shutil.copytree(root, ordinary)
+    (ordinary / bundle_corpus.PACKAGE_MARKER).unlink()
+    roots = [root] if mode == "package" else [ordinary] if mode == "ordinary" else [ordinary, root]
+    capsys.readouterr()
+    assert crr.main([*map(str, roots), *(["--quiet"] if quiet else [])]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if quiet:
+        assert captured.out == ""
+    elif mode == "package":
+        assert json.loads(captured.out)["status"] == "START_READY"
     else:
-        output = (
-            root if location == "root" else root / ("data-access.json" if location == "member" else "readiness.json")
-        )
-    _forbid_after(monkeypatch, "_precheck_cohort")
-    with pytest.raises(SystemExit) as failure:
-        crr.main([str(root), "--json", str(output), "--quiet"])
-    assert failure.value.code == 2
-    assert before == {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+        heading = "REFERENCE READINESS" if mode == "ordinary" else "PHASE-1 PACKAGE READINESS"
+        assert captured.out.startswith(f"{heading}: READY")
 
 
-def test_start_ready_unwritable_json_is_not_success(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["ordinary", "package", "mixed"])
+def test_json_file_values_are_fixed_usage_refusals_before_any_path_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: str
+) -> None:
+    ordinary = tmp_path / "private-ordinary"
+    package = tmp_path / "packages" / "private-package"
+    roots = [ordinary] if mode == "ordinary" else [package] if mode == "package" else [ordinary, package]
+    values = ["", ".", "..", " ", "NUL", "--quiet", "–", str(package), str(tmp_path / "private-output.json")]
+    diagnostics = []
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("file-valued --json performed downstream or filesystem work")
+
+    capsys.readouterr()
+    with monkeypatch.context() as patches:
+        patches.setattr(sys, "argv", ["check_reference_readiness.py"])
+        for name in ("_classify", "_precheck_cohort", "scan"):
+            patches.setattr(crr, name, forbidden)
+        for name in ("resolve", "stat", "lstat", "is_dir", "is_file", "exists", "open", "write_text", "write_bytes"):
+            patches.setattr(Path, name, forbidden)
+        patches.setattr(os, "replace", forbidden)
+        for value in values:
+            with pytest.raises(SystemExit) as failure:
+                crr.main([*map(str, roots), f"--json={value}", "--quiet"])
+            assert failure.value.code == 2
+            captured = capsys.readouterr()
+            assert captured.out == ""
+            diagnostics.append(captured.err)
+    assert len(set(diagnostics)) == 1
+    assert diagnostics[0].endswith(
+        "check_reference_readiness.py: error: readiness_json_file_output_removed: use --json -\n"
+    )
+    assert "private-" not in diagnostics[0] and str(tmp_path) not in diagnostics[0]
+
+
+@pytest.mark.parametrize("alias_kind", ["junction" if os.name == "nt" else "directory-symlink"])
+def test_json_file_value_external_directory_alias_is_rejected_before_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], alias_kind: str
+) -> None:
     root = _packaged_unit(tmp_path)
-    assert crr.main([str(root), "--json", str(tmp_path / "absent-parent" / "report.json"), "--quiet"]) == 3
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "sentinel.json"
+    original = b"external sentinel must survive\n"
+    sentinel.write_bytes(original)
+    identity = (sentinel.stat().st_dev, sentinel.stat().st_ino)
+    before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*") if path.is_file()}
+    alias = tmp_path / "private-alias"
+    if alias_kind == "junction":
+        linked = subprocess.run(
+            ["cmd.exe", "/c", "mklink", "/J", str(alias), str(external)], capture_output=True, check=False
+        )
+        assert linked.returncode == 0, "the real Windows junction control must execute"
+    else:
+        alias.symlink_to(external, target_is_directory=True)
+    try:
+        assert (alias / sentinel.name).samefile(sentinel)
+        _forbid_after(monkeypatch, "_classify", "_precheck_cohort", "scan")
+        capsys.readouterr()
+        with pytest.raises(SystemExit) as failure:
+            crr.main([str(root), "--json", str(alias / sentinel.name), "--quiet"])
+        assert failure.value.code == 2
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err.endswith("error: readiness_json_file_output_removed: use --json -\n")
+        assert str(tmp_path) not in captured.err and "private-alias" not in captured.err
+        assert sentinel.read_bytes() == (alias / sentinel.name).read_bytes() == original
+        assert identity == (sentinel.stat().st_dev, sentinel.stat().st_ino)
+        assert before == {
+            path: hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*") if path.is_file()
+        }
+    finally:
+        if alias_kind == "junction":
+            alias.rmdir()
+        else:
+            alias.unlink()
+
+
+@pytest.mark.parametrize("peer", ["external", "package-member"])
+def test_json_file_value_hardlink_preserves_both_names_and_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], peer: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    sentinel = root / "data-access.json" if peer == "package-member" else tmp_path / "external-sentinel.json"
+    if peer == "external":
+        sentinel.write_bytes(b"external hardlink sentinel\n")
+    alias = tmp_path / "private-hardlink.json"
+    os.link(sentinel, alias)
+    assert alias.samefile(sentinel)
+    before = {
+        path: (path.read_bytes(), path.stat().st_dev, path.stat().st_ino, path.stat().st_nlink)
+        for path in (*[member for member in root.rglob("*") if member.is_file()], sentinel, alias)
+    }
+    _forbid_after(monkeypatch, "_classify", "_precheck_cohort", "scan")
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as failure:
+        crr.main([str(root), "--json", str(alias), "--quiet"])
+    assert failure.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.endswith("error: readiness_json_file_output_removed: use --json -\n")
+    assert str(tmp_path) not in captured.err and "private-hardlink" not in captured.err
+    assert before == {
+        path: (path.read_bytes(), path.stat().st_dev, path.stat().st_ino, path.stat().st_nlink) for path in before
+    }
+    assert alias.samefile(sentinel)
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["package-default", "explicit-quiet"])
+def test_json_stdout_uses_one_write_and_flush_without_a_file_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool
+) -> None:
+    root = _packaged_unit(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    writes, flushes = [], []
+    output = io.StringIO()
+
+    def write(document):
+        writes.append(document)
+        return output.write(document)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("stdout JSON entered a file writer")
+
+    for name in ("write_text", "write_bytes"):
+        monkeypatch.setattr(Path, name, forbidden)
+    monkeypatch.setattr(os, "replace", forbidden)
+    with redirect_stdout(SimpleNamespace(write=write, flush=lambda: flushes.append(True))):
+        assert crr.main([str(root), *(["--json", "-", "--quiet"] if explicit else [])]) == 0
+    assert writes == [output.getvalue()] and flushes == [True]
+    report, end = json.JSONDecoder().raw_decode(output.getvalue())
+    assert output.getvalue()[end:] == "\n"
+    assert report["status"] == "START_READY"
+    assert before == {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "serialization-type",
+        "serialization-value",
+        "serialization-recursion",
+        "write-oserror",
+        "broken-pipe",
+        "closed-stream",
+        "missing-stream",
+        "short-write",
+        "flush",
+    ],
+)
+def test_json_stdout_failures_have_fixed_stderr_exit_three_and_no_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fault: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    output, writes, flushes = io.StringIO(), [], []
+    message = "private-customer-output-path"
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("failed stdout publication entered a file writer")
+
+    def serialize(_report, **_kwargs):
+        error = {
+            "serialization-type": TypeError,
+            "serialization-value": ValueError,
+            "serialization-recursion": RecursionError,
+        }[fault]
+        raise error(message)
+
+    def write(document):
+        writes.append(document)
+        if fault in ("write-oserror", "broken-pipe", "closed-stream"):
+            raise {"write-oserror": OSError, "broken-pipe": BrokenPipeError, "closed-stream": ValueError}[fault](
+                message
+            )
+        if fault == "short-write":
+            return output.write(document[:5])
+        return output.write(document)
+
+    def flush():
+        flushes.append(True)
+        if fault == "flush":
+            raise OSError(message)
+
+    for name in ("write_text", "write_bytes"):
+        monkeypatch.setattr(Path, name, forbidden)
+    monkeypatch.setattr(os, "replace", forbidden)
+    if fault.startswith("serialization-"):
+        monkeypatch.setattr(crr, "json", SimpleNamespace(dumps=serialize))
+    capsys.readouterr()
+    with redirect_stdout(None if fault == "missing-stream" else SimpleNamespace(write=write, flush=flush)):
+        assert crr.main([str(root), "--json", "-", "--quiet"]) == 3
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == "readiness_output_unwritable\n"
+    assert message not in output.getvalue()
+    assert len(writes) == (0 if fault.startswith("serialization-") or fault == "missing-stream" else 1)
+    assert len(flushes) == (1 if fault == "flush" else 0)
+    if fault == "flush":
+        assert json.loads(output.getvalue())["status"] == "START_READY", "post-write failure may leave complete stdout"
+    else:
+        assert output.getvalue() == (writes[0][:5] if fault == "short-write" else "")
+    assert before == {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+def test_json_stdout_error_diagnostic_is_best_effort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _packaged_unit(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    def unavailable(*_args, **_kwargs):
+        raise BrokenPipeError("private-stream-diagnostic")
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("an unwritable diagnostic entered a file writer")
+
+    for name in ("write_text", "write_bytes"):
+        monkeypatch.setattr(Path, name, forbidden)
+    monkeypatch.setattr(os, "replace", forbidden)
+    with monkeypatch.context() as patches:
+        stream = SimpleNamespace(write=unavailable, flush=unavailable)
+        patches.setattr(sys, "stdout", stream)
+        patches.setattr(sys, "stderr", stream)
+        assert crr.main([str(root), "--json", "-"]) == 3
+    assert before == {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("stderr_closed", [False, True], ids=["closed-stdout", "both-streams-closed"])
+def test_json_stdout_real_broken_pipe_keeps_exit_three_through_shutdown(tmp_path: Path, stderr_closed: bool) -> None:
+    root = _packaged_unit(tmp_path)
+    assert crr.scan(root)["status"] == "START_READY"
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    # Release the real CLI only after the pipe reader is closed; no scheduler race is credited as proof.
+    entry = (
+        "import runpy, sys; sys.stdin.read(1); "
+        "sys.argv = ['check_reference_readiness.py', *sys.argv[1:]]; "
+        "runpy.run_path('check_reference_readiness.py', run_name='__main__')"
+    )
+    with subprocess.Popen(
+        [sys.executable, "-c", entry, str(root), "--json", "-", "--quiet"],
+        cwd=Path(__file__).resolve().parents[1] / "scripts",
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as process:
+        process.stdout.close()
+        process.stdout = None
+        if stderr_closed:
+            process.stderr.close()
+            process.stderr = None
+        try:
+            output, diagnostic = process.communicate("\n", timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            pytest.fail("the closed-pipe CLI did not finish")
+        assert process.returncode == 3
+    assert output is None
+    assert diagnostic == (None if stderr_closed else "readiness_output_unwritable\n")
+    assert before == {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("seam", ["scan", "serialization", "write", "flush"])
+def test_json_stdout_keyboard_interrupt_propagates_without_file_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], seam: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    output = io.StringIO()
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("interrupt handling entered a file writer")
+
+    def write(document):
+        if seam == "write":
+            output.write(document[:5])
+            raise KeyboardInterrupt
+        return output.write(document)
+
+    for name in ("write_text", "write_bytes"):
+        monkeypatch.setattr(Path, name, forbidden)
+    monkeypatch.setattr(os, "replace", forbidden)
+    if seam == "scan":
+        monkeypatch.setattr(crr, "scan", interrupt)
+    elif seam == "serialization":
+        monkeypatch.setattr(crr, "json", SimpleNamespace(dumps=interrupt))
+    capsys.readouterr()
+    with redirect_stdout(SimpleNamespace(write=write, flush=interrupt if seam == "flush" else lambda: None)):
+        with pytest.raises(KeyboardInterrupt):
+            crr.main([str(root), "--json", "-", "--quiet"])
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    if seam == "flush":
+        assert json.loads(output.getvalue())["status"] == "START_READY"
+    else:
+        assert output.getvalue() == ('{\n  "' if seam == "write" else "")
+    assert before == {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
 def test_start_ready_library_verdict_is_as_private_as_the_cli(tmp_path: Path) -> None:
@@ -3423,7 +3886,12 @@ def test_start_ready_numeric_obligation_remains_metadata_not_a_phase2_decision(t
     "state,code,exit_code", [("blocked", "probe-no-credential", 1), ("cannot_establish", "audit-missing", 3)]
 )
 def test_start_ready_stored_refusals_remain_the_canonical_refusal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, code: str, exit_code: int
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+    code: str,
+    exit_code: int,
 ) -> None:
     root = _packaged_unit(tmp_path)
     stored = {
@@ -3437,9 +3905,9 @@ def test_start_ready_stored_refusals_remain_the_canonical_refusal(
     (root / "data-access.json").write_text(json.dumps(stored), encoding="utf-8")
     _reseal_start_fixture(root)
     _forbid_after(monkeypatch, "_scan_safe_target", "_inspect_package")
-    output = tmp_path / "stored.json"
-    assert crr.main([str(root), "--json", str(output), "--quiet"]) == exit_code
-    report = json.loads(output.read_bytes())
+    capsys.readouterr()
+    assert crr.main([str(root), "--json", "-", "--quiet"]) == exit_code
+    report = json.loads(capsys.readouterr().out)
     assert report["package_data_access"][0]["stored"] == report["package_data_access"][0]["assessment"] == stored
 
 
@@ -3516,7 +3984,7 @@ def test_start_ready_competing_binding_candidate_refuses_without_cleanup(tmp_pat
     ],
 )
 def test_start_ready_unassessable_calls_have_fixed_code_diagnostics(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: str, stage: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], arm: str, stage: str
 ) -> None:
     root = _packaged_unit(tmp_path)
 
@@ -3524,11 +3992,12 @@ def test_start_ready_unassessable_calls_have_fixed_code_diagnostics(
         raise OSError("private-customer-server exception text")
 
     monkeypatch.setattr(crr, arm, unavailable)
-    output = tmp_path / "unavailable.json"
-    assert crr.main([str(root), "--json", str(output), "--quiet"]) == 3
-    report = json.loads(output.read_bytes())
+    capsys.readouterr()
+    assert crr.main([str(root), "--json", "-", "--quiet"]) == 3
+    printed = capsys.readouterr().out
+    report = json.loads(printed)
     assert report["package_readiness"][0]["failed_stage"] == stage
-    assert "private-customer-server" not in output.read_text(encoding="utf-8")
+    assert "private-customer-server" not in printed
 
 
 @pytest.mark.parametrize(

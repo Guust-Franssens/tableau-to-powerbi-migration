@@ -3,7 +3,7 @@ purpose: ENTRY gate - before an agent starts building, prove there is legible, A
          evidence of the Tableau source object behind every page the engine emitted, and name the grade.
 usage:   python scripts/check_reference_readiness.py <bundle-or-unit> [...]
                 [--source <workbook.twb|.twbx>] [--reference <dir>] [--oracle <dir>]
-                [--require-validation-grade] [--json <file>] [--quiet] [--verbose]
+                [--require-validation-grade] [--json -] [--quiet] [--verbose]
 
 Every other gate in this toolkit is an EXIT gate. `check_unit.py`'s own header says it answers
 "whether one migration unit is **done**", so the visual-evidence question was asked *after* the work
@@ -43,7 +43,8 @@ The 0/1/2/3 shape is `check_connection_fidelity.py:160-163`'s, adopted rather th
 WARNING: **There is deliberately NO `--warn-only`.** Every sibling gate has one; this gate had one until
 round-1 review measured it returning exit 0 on a bundle whose own output said "CANNOT_ESTABLISH is
 NOT a pass". An entry gate that can be asked to say yes is not an entry gate. Advisory consumers read
-`--json`, whose `status` always carries the true verdict.
+`--json -`, whose `status` always carries the true verdict. File-valued `--json` is removed:
+capture stdout instead. Explicit JSON is emitted even with `--quiet`; stdout is not atomic or durable.
 
 WARNING: `NOT_APPLICABLE` is EARNED from the engine's own `report.json` - never inferred from "I found
 no pages" and never from "some semantic model exists", both of which were measured granting a clean
@@ -1561,14 +1562,48 @@ def _binding_association(  # pylint: disable=too-many-locals,too-many-return-sta
 
 
 def _binding_roots(root: Path, cohort: tuple[Phase1RoleIdentityResult, ...]) -> tuple[Path, ...]:
-    return (
-        *(
-            role.verified.root
-            for role in cohort
-            if role.kind == pri.KIND_DATASOURCE and role.verified.root_identity != str(root)
-        ),
-        root,
-    )
+    """Transport only this exact target's typed S2 provider ordinal, never the whole datasource set."""
+    if type(cohort) is not tuple or any(
+        type(role) is not Phase1RoleIdentityResult or type(role.verified) is not VerifiedPackage for role in cohort
+    ):
+        raise ValueError(CODE_ROOT_BINDING_INVALID)
+    identities = tuple(role.verified.root_identity for role in cohort)
+    bound = bind_root_results(identities, cohort, lambda role: verified_root_binding(role.verified))
+    role = bound.get(str(root)) if bound is not None else None
+    if role is None or not _typed_roles(role) or not role.is_start_ready or type(role.topology) is not str:
+        raise ValueError(CODE_ROOT_BINDING_INVALID)
+    if role.topology in (pri.TOPOLOGY_STANDALONE_DATASOURCE, pri.TOPOLOGY_PUBLISHED_PROVIDER):
+        if role.kind != pri.KIND_DATASOURCE or role.dependencies:
+            raise ValueError(CODE_ROOT_BINDING_INVALID)
+        return (root,)
+    if role.kind != pri.KIND_WORKBOOK:
+        raise ValueError(CODE_ROOT_BINDING_INVALID)
+    if role.topology == pri.TOPOLOGY_OWNED_MODEL:
+        if role.dependencies:
+            raise ValueError(CODE_ROOT_BINDING_INVALID)
+        return (root,)
+    if role.topology != pri.TOPOLOGY_PUBLISHED_CONSUMER or not role.dependencies:
+        raise ValueError(CODE_ROOT_BINDING_INVALID)
+    ordinals = [row.provider_ordinal for row in role.dependencies]
+    if (
+        any(row.state != pri.STATE_RESOLVED for row in role.dependencies)
+        or any(
+            type(index) is not int or not 0 <= index < len(cohort) or identities[index] == str(root)
+            for index in ordinals
+        )
+        or len(set(ordinals)) != 1
+    ):
+        raise ValueError(CODE_ROOT_BINDING_INVALID)
+    provider = cohort[ordinals[0]]
+    if (
+        not _typed_roles(provider)
+        or not provider.is_start_ready
+        or provider.kind != pri.KIND_DATASOURCE
+        or provider.topology != pri.TOPOLOGY_PUBLISHED_PROVIDER
+        or provider.dependencies
+    ):
+        raise ValueError(CODE_ROOT_BINDING_INVALID)
+    return provider.verified.root, root
 
 
 def _binding_baseline(
@@ -2152,18 +2187,27 @@ def _public_package_report(report: dict[str, Any]) -> dict[str, Any]:
     return public
 
 
-def _admit_json_output(output: Path, roots: list[Path]) -> None:
-    """Bounded output-path check only; an output alias must never mutate a supplied package."""
+def _emit_json_stdout(report: dict[str, Any]) -> bool:
+    """Serialize before emission; failures disclose only a fixed code and never open a file."""
+    emitting = False
     try:
-        destination = output.resolve()
-        for root in roots:
-            if destination.is_relative_to(root.resolve()):
-                raise ValueError("package_json_output_forbidden")
-        # A hard-linked output can overwrite a member even though neither lexical path is inside.
-        if output.exists() and (not output.is_file() or output.stat().st_nlink != 1):
-            raise ValueError("package_json_output_forbidden")
-    except (OSError, RuntimeError) as error:
-        raise ValueError("package_json_output_unassessable") from error
+        document = json.dumps(report, indent=2) + "\n"
+        emitting = True
+        if sys.stdout is None or sys.stdout.write(document) != len(document):
+            raise OSError("incomplete stdout write")
+        sys.stdout.flush()
+    except (TypeError, ValueError, OverflowError, RecursionError, OSError):
+        # A shutdown retry of the failed buffered stream must not replace exit 3 or leak native errors.
+        if emitting:
+            sys.stdout = None
+        try:
+            if sys.stderr is not None:
+                sys.stderr.write("readiness_output_unwritable\n")
+                sys.stderr.flush()
+        except (OSError, ValueError):
+            sys.stderr = None
+        return False
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-branches
@@ -2178,11 +2222,13 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
         action="store_true",
         help="treat anything below validation_grade as a finding (default: layout/text grade is enough to start)",
     )
-    parser.add_argument("--json", type=Path, help="write the machine-readable verdict here")
-    parser.add_argument("--quiet", action="store_true", help="suppress the rendered verdict")
+    parser.add_argument("--json", metavar="-", help="emit JSON on stdout; only '-' is accepted (no file output)")
+    parser.add_argument("--quiet", action="store_true", help="suppress default rendering, not explicit --json -")
     parser.add_argument("--verbose", action="store_true", help="also list the pages that are ready")
     args = parser.parse_args(argv)
 
+    if args.json is not None and args.json != "-":
+        parser.error("readiness_json_file_output_removed: use --json -")
     if not args.paths:
         parser.error("give a bundle or migration-unit path")
 
@@ -2192,11 +2238,6 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
     package_roots = [
         path for path, classification in zip(args.paths, classifications, strict=True) if classification.is_package
     ]
-    if args.json and package_roots:
-        try:
-            _admit_json_output(args.json, package_roots)
-        except ValueError:
-            parser.error("package_json_output_forbidden: choose a separate ordinary output file")
     # Keep original classifications and caller order, expanding plain relative package paths without resolving aliases.
     paths = [
         Path.cwd() / path if classification.declares_self_contained and not path.is_absolute() else path
@@ -2237,25 +2278,11 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-bran
     merged = reports[0] if len(reports) == 1 else _merge_scans(reports)
     if package_roots:
         merged = _public_package_report(merged)
-    if args.json:
-        try:
-            if package_roots:
-                _admit_json_output(args.json, package_roots)
-            args.json.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
-        except (OSError, ValueError):
-            if not args.quiet:
-                print(
-                    json.dumps(
-                        {
-                            "status": STATUS_CANNOT_ESTABLISH,
-                            "failed_stage": "output",
-                            "codes": ["readiness_output_unwritable"],
-                        }
-                    )
-                )
+    if args.json == "-" or (package_roots and len(package_roots) == len(paths) and not args.quiet):
+        if not _emit_json_stdout(merged):
             return EXIT_CANNOT_ESTABLISH
-    if not args.quiet:
-        print(json.dumps(merged, indent=2) if package_roots else render(merged, verbose=args.verbose))
+    elif not args.quiet:
+        print(render(merged, verbose=args.verbose))
     # There is deliberately no --warn-only: see the module docstring. An entry gate that can be asked
     # to say yes is not an entry gate, and the flag was measured returning 0 on CANNOT_ESTABLISH.
     if merged["status"] == STATUS_FINDINGS:
