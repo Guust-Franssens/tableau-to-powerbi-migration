@@ -5374,6 +5374,239 @@ def test_r2_numeric_authority_does_not_erase_raw_coverage(
     assert (R2_WAIVER in cu.render(report)) == (numeric == "none")
 
 
+@pytest.mark.parametrize("empty_refusal_diagnostic", [False, True], ids=["production-envelope", "empty-diagnostic"])
+def test_r2_numeric_waiver_never_clears_zero_page_oracle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    r2_gate_runtime: list,
+    capsys: pytest.CaptureFixture,
+    empty_refusal_diagnostic: bool,
+) -> None:
+    """Signed parity can pass while the real oracle denominator is empty and the review unverified."""
+    package = _r2_package(tmp_path)
+    page_path = f"{R2_REPORT}/definition/pages/p1/page.json"
+    page = json.loads((package / page_path).read_bytes())
+    page["displayName"] = "Other"
+    _r2_put(package, page_path, page)
+    _write_exemptions(
+        package,
+        [{"check": "page-parity", "item": "dash"}, {"check": "page-parity", "item": "extra:Other"}],
+    )
+    _r2_declare(package, page_path, cu.EXEMPTIONS_FILE)
+    token, final, _ = _r2_seal(package, monkeypatch, review_status="unverified")
+    assert final["schema_version"] == 3 and final["state"] == "final"
+    assert final["judgement"]["pages"][0]["whole_page_status"] == "unverified"
+    assert cu.check_page_parity(package, cu.load_exemptions(package))["status"] == "PASS"
+    not_assessable = cu._oracle_not_assessable
+    observed = []
+
+    def observe(*args, **kwargs):
+        row = not_assessable(*args, **kwargs)
+        assert "refused_evidence" not in row
+        # An optional empty diagnostic must not change the production zero-page refusal.
+        if empty_refusal_diagnostic:
+            row["refused_evidence"] = []
+        observed.append(copy.deepcopy(row))
+        return row
+
+    monkeypatch.setattr(cu, "_oracle_not_assessable", observe)
+    raw = cu.check_oracle_coverage(package, None, None)
+    assert (raw["status"], raw["pages"], raw["visual_present"], raw["numeric_present"]) == ("NOT_CHECKED", 0, 0, 0)
+    assert raw["visual_missing"] == raw["numeric_missing"] == raw["contested_names"] == raw["rows"] == []
+    assert [row["name"] for row in raw["excluded_omissions"]] == ["Executive"]
+    before = {path.relative_to(package): path.read_bytes() for path in package.rglob("*") if path.is_file()}
+    capsys.readouterr()
+    try:
+        report = cu.run_all(package, receipt_sha256=token)
+        output = tmp_path / "zero-page-check.json"
+        code = cu.main([str(package), "--scope", "all", "--receipt-sha256", token, "--json", str(output)])
+    except (KeyError, TypeError) as error:
+        pytest.fail(f"zero-page oracle must return typed non-success, not raise {error!r}")
+    cli_report = json.loads(output.read_bytes())
+    assert code == 2 and cli_report == report
+    assert report["status"] == "NOT_CHECKED" and report["exit_code"] == 2
+    coverage = _r2_check(report, "oracle-coverage")
+    assert coverage["status"] == "NOT_CHECKED", "a numeric waiver cannot clear an empty oracle denominator"
+    assert {key: coverage[key] for key in raw} == raw, "waiving numeric comparison must preserve raw oracle facts"
+    assert len(observed) == 3 and all(row == raw for row in observed)
+    assert _r2_check(report, "visual-comparison-done")["code"] == "visual_comparison_not_pass"
+    final_row = _r2_check(report, "finalized")
+    assert (final_row["status"], final_row["stage"], final_row["code"]) == (
+        "NOT_CHECKED",
+        "OBLIGATIONS",
+        "required_obligations_not_satisfied",
+    )
+    assert not any(row["id"] == "finalized" and row["status"] == "PASS" for row in report["checks"])
+    text = capsys.readouterr().out
+    assert "CANNOT_ESTABLISH(OBLIGATIONS)" in text and "Phase-2 COMPLETE was not established." in text
+    assert R2_DISCLAIMER not in text and "AMO-boundary" in r2_gate_runtime
+    assert before == {path.relative_to(package): path.read_bytes() for path in package.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        *[
+            pytest.param(field, ..., id=f"missing-{field}")
+            for field in ("pages", "visual_present", "visual_missing", "contested_names", "refused_evidence")
+        ],
+        *[
+            pytest.param(field, value, id=f"{field}-{type(value).__name__}")
+            for field in ("visual_missing", "contested_names", "refused_evidence")
+            for value in (None, False, 0, "", {}, ())
+        ],
+        *[
+            pytest.param(field, value, id=f"{field}-{value!r}")
+            for field in ("pages", "visual_present")
+            for value in (None, False, True, 0, -1, 1.0, "1")
+        ],
+        ("visual_missing", [{"name": "Executive"}]),
+        ("contested_names", ["Executive"]),
+        ("refused_evidence", ["ambiguous"]),
+        ("status", "FINDINGS"),
+        ("status", "PRECONDITION_FAILED"),
+        ("status", "ERROR"),
+    ],
+)
+def test_r2_numeric_waiver_requires_measured_visual_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, field: str, value: object
+) -> None:
+    """Vary one field of a real measured row; absent/falsey diagnostics are not clean defaults."""
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    coverage = cu.check_oracle_coverage
+    observed = []
+
+    def changed(*args, **kwargs):
+        row = coverage(*args, **kwargs)
+        assert (row["status"], row["pages"], row["visual_present"], row["numeric_present"]) == (
+            "NOT_CHECKED",
+            1,
+            1,
+            0,
+        )
+        if value is ...:
+            row.pop(field)
+        else:
+            row[field] = value
+        observed.append(copy.deepcopy(row))
+        return row
+
+    monkeypatch.setattr(cu, "check_oracle_coverage", changed)
+    try:
+        report = cu.run_all(package, receipt_sha256=token)
+    except (KeyError, TypeError) as error:
+        pytest.fail(f"unestablished oracle facts must return typed non-success, not raise {error!r}")
+    row = _r2_check(report, "oracle-coverage")
+    assert row["status"] == (value if field == "status" else "NOT_CHECKED"), "only measured numeric gaps may be waived"
+    assert len(observed) == 1 and {key: row[key] for key in observed[0]} == observed[0]
+    if value is ...:
+        assert field not in row, "do not manufacture missing coverage facts"
+    expected_code = {"FINDINGS": 1, "PRECONDITION_FAILED": 4}.get(row["status"], 2)
+    assert report["exit_code"] == expected_code and report["status"] != "COMPLETE"
+    assert _r2_check(report, "finalized")["code"] == "required_obligations_not_satisfied"
+    assert "AMO-boundary" in r2_gate_runtime
+
+
+@pytest.mark.parametrize("flag", ["--reference-dir", "--oracle-dir"])
+@pytest.mark.parametrize("numeric", ["required", "none"])
+@pytest.mark.parametrize("entrypoint", ["run-all", "cli"])
+@pytest.mark.parametrize("brief", ["current", "malformed", "stale"])
+def test_r2_reference_override_retains_safe_numeric_obligation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    r2_gate_runtime: list,
+    capsys: pytest.CaptureFixture,
+    flag: str,
+    numeric: str,
+    entrypoint: str,
+    brief: str,
+) -> None:
+    package = _r2_package(tmp_path, numeric=numeric)
+    if brief != "current":
+        content = (package / "migration-brief.md").read_text()
+        content = (
+            content.replace(f'"{numeric}"', f'"{numeric}') if brief == "malformed" else content + "Stale digest.\n"
+        )
+        _r2_put(package, "migration-brief.md", content.encode())
+        if brief == "malformed":
+            _r2_declare(package, "migration-brief.md")
+    token, _, _ = _r2_seal(package, monkeypatch)
+    override = tmp_path / "unread-override"
+    before = {path.relative_to(package): path.read_bytes() for path in package.rglob("*") if path.is_file()}
+    capsys.readouterr()
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("a refused reference override must not reach later discovery, gates or completion")
+
+    with monkeypatch.context() as guard:
+        for name in ("load_exemptions", "check_oracle_coverage", "_finish_completion", "inspect_brownfield"):
+            guard.setattr(cu, name, forbidden)
+        for method in ("open", "stat", "lstat", "resolve", "iterdir", "glob", "rglob"):
+            original = getattr(Path, method)
+
+            def guarded(path, *args, _original=original, **kwargs):
+                assert path != override and override not in path.parents, "supplied override path must remain unread"
+                return _original(path, *args, **kwargs)
+
+            guard.setattr(Path, method, guarded)
+        if entrypoint == "cli":
+            output = tmp_path / "override-check.json"
+            code = cu.main(
+                [str(package), "--scope", "all", "--receipt-sha256", token, flag, str(override), "--json", str(output)]
+            )
+            report = json.loads(output.read_bytes())
+            text = capsys.readouterr().out
+        else:
+            report = cu.run_all(package, receipt_sha256=token, **{flag[2:].replace("-", "_"): override})
+            code, text = report["exit_code"], cu.render(report)
+    assert before == {path.relative_to(package): path.read_bytes() for path in package.rglob("*") if path.is_file()}
+    assert r2_gate_runtime == []
+    assert code == 2 and report["status"] == "NOT_CHECKED", "an override refusal must never confer COMPLETE"
+    numeric_rows = [row for row in report["checks"] if row["id"] == "numeric-obligation"]
+    assert len(numeric_rows) == 1, "the safely known numeric obligation must remain machine-visible on refusal"
+    row = numeric_rows[0]
+    final_row = _r2_check(report, "finalized")
+    if brief == "current":
+        assert [check["id"] for check in report["checks"] if check["status"] == "PASS"] == [
+            "iteration-history",
+            "current-source-data",
+            "current-working-namespace",
+            "model-class",
+        ]
+        assert (final_row["stage"], final_row["code"]) == ("REFERENCE", "external_evidence_override_not_supported")
+        assert row["numeric_obligation"] == numeric
+        assert row["code"] == (
+            "numeric_required_unsupported" if numeric == "required" else "numeric_waiver_not_applied"
+        )
+    else:
+        if brief == "malformed":
+            assert [check["id"] for check in report["checks"]] == ["numeric-obligation", "finalized"]
+            assert (final_row["stage"], final_row["code"], row["code"]) == (
+                "NUMERIC",
+                "brief_frontmatter_unparseable",
+                "brief_frontmatter_unparseable",
+            )
+        else:
+            assert [check["id"] for check in report["checks"]] == [
+                "current-source-data",
+                "numeric-obligation",
+                "finalized",
+            ]
+            assert (final_row["stage"], final_row["code"], row["code"]) == (
+                "SOURCE_DATA",
+                "package_file_digest_mismatch",
+                "numeric_authority_unestablished",
+            )
+        assert row["numeric_obligation"] is None
+        assert "external_evidence_override_not_supported" not in json.dumps(report)
+    assert row["status"] == "NOT_CHECKED" and row["stage"] == "NUMERIC" and row["numeric_evidence"] == "unestablished"
+    assert final_row["status"] == "NOT_CHECKED"
+    assert "CANNOT_ESTABLISH(NUMERIC)" in text and "Phase-2 COMPLETE was not established." in text
+    assert "CANNOT_ESTABLISH(NUMERIC)" in json.dumps(report)
+    assert R2_DISCLAIMER not in text and R2_WAIVER not in text
+
+
 @pytest.mark.parametrize("scope", ["model", "report", "integration"])
 def test_r2_layer_scopes_never_claim_complete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, scope: str

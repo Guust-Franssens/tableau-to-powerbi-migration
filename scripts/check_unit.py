@@ -3654,6 +3654,12 @@ def run_all(  # pylint: disable=too-many-branches
                 discovery=False,
             )
         if reference_dir is not None or oracle_dir is not None:
+            checks.append(
+                _numeric_check(
+                    snapshot.policy,
+                    None if snapshot.policy.numeric_obligation == "required" else "numeric_waiver_not_applied",
+                )
+            )
             checks.append(_completion_row("finalized", "REFERENCE", "external_evidence_override_not_supported"))
             return _finalize(target, checks, {"path": None, "entries": [], "invalid": []}, scope, discovery=False)
     exemptions = load_exemptions(target)
@@ -3724,7 +3730,18 @@ def _finish_completion(target: Path, snapshot: _PinnedSnapshot | None, checks: l
             if check["id"] == "oracle-coverage" and "visual_missing" in check:
                 check["numeric_obligation"] = "none"
                 check["numeric_waiver"] = NUMERIC_WAIVER
-                if not check["visual_missing"] and not check["contested_names"] and not check["refused_evidence"]:
+                # An empty or unknown denominator is not a measured numeric-only shortfall.
+                pages, visual_present = check.get("pages"), check.get("visual_present")
+                if type(pages) is not int or type(visual_present) is not int:  # pylint: disable=unidiomatic-typecheck
+                    continue
+                if (
+                    check["status"] == STATUS_NOT_CHECKED
+                    and pages > 0
+                    and visual_present == pages
+                    and all(
+                        check.get(field) == [] for field in ("visual_missing", "contested_names", "refused_evidence")
+                    )
+                ):
                     check["status"] = STATUS_PASS
     if all(check["status"] == STATUS_PASS for check in checks):
         checks.append(
