@@ -3734,6 +3734,12 @@ def _finish_completion(target: Path, snapshot: _PinnedSnapshot | None, checks: l
                 pages, visual_present = check.get("pages"), check.get("visual_present")
                 if type(pages) is not int or type(visual_present) is not int:  # pylint: disable=unidiomatic-typecheck
                     continue
+                numeric_present = check.get("numeric_present")
+                numeric_missing, rows = check.get("numeric_missing"), check.get("rows")
+                if (type(numeric_present), type(numeric_missing), type(rows)) != (int, list, list):
+                    continue
+                if numeric_present < 0 or len(rows) != pages or numeric_present + len(numeric_missing) != pages:
+                    continue
                 if (
                     check["status"] == STATUS_NOT_CHECKED
                     and pages > 0

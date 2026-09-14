@@ -5366,10 +5366,13 @@ def test_r2_numeric_authority_does_not_erase_raw_coverage(
 ) -> None:
     package = _r2_package(tmp_path, numeric=numeric)
     token, _, _ = _r2_seal(package, monkeypatch)
+    raw = cu.check_oracle_coverage(package, None, None)
     report = cu.run_all(package, receipt_sha256=token)
     assert report["exit_code"] == (0 if numeric == "none" else 2), cu.render(report)
     coverage = _r2_check(report, "oracle-coverage")
     assert coverage["numeric_present"] == 0 and len(coverage["numeric_missing"]) == 1
+    for field in ("numeric_present", "numeric_missing", "rows"):
+        assert coverage[field] == raw[field] and type(coverage[field]) is type(raw[field])
     assert ("CANNOT_ESTABLISH(NUMERIC)" in cu.render(report)) == (numeric == "required")
     assert (R2_WAIVER in cu.render(report)) == (numeric == "none")
 
@@ -5448,11 +5451,20 @@ def test_r2_numeric_waiver_never_clears_zero_page_oracle(
     [
         *[
             pytest.param(field, ..., id=f"missing-{field}")
-            for field in ("pages", "visual_present", "visual_missing", "contested_names", "refused_evidence")
+            for field in (
+                "pages",
+                "visual_present",
+                "visual_missing",
+                "contested_names",
+                "refused_evidence",
+                "numeric_present",
+                "numeric_missing",
+                "rows",
+            )
         ],
         *[
             pytest.param(field, value, id=f"{field}-{type(value).__name__}")
-            for field in ("visual_missing", "contested_names", "refused_evidence")
+            for field in ("visual_missing", "contested_names", "refused_evidence", "numeric_missing", "rows")
             for value in (None, False, 0, "", {}, ())
         ],
         *[
@@ -5460,6 +5472,16 @@ def test_r2_numeric_waiver_never_clears_zero_page_oracle(
             for field in ("pages", "visual_present")
             for value in (None, False, True, 0, -1, 1.0, "1")
         ],
+        *[
+            pytest.param("numeric_present", value, id=f"numeric_present-{value!r}")
+            for value in (None, False, True, -1, 0.0, "0", 1, 2)
+        ],
+        pytest.param("numeric_missing", ("missing",), id="numeric_missing-coherent-tuple"),
+        pytest.param("rows", ("row",), id="rows-coherent-tuple"),
+        pytest.param("numeric_missing", [], id="numeric_missing-short"),
+        pytest.param("numeric_missing", [{}, {}], id="numeric_missing-long"),
+        pytest.param("rows", [], id="rows-short"),
+        pytest.param("rows", [{}, {}], id="rows-long"),
         ("visual_missing", [{"name": "Executive"}]),
         ("contested_names", ["Executive"]),
         ("refused_evidence", ["ambiguous"]),
@@ -5471,11 +5493,12 @@ def test_r2_numeric_waiver_never_clears_zero_page_oracle(
 def test_r2_numeric_waiver_requires_measured_visual_coverage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, field: str, value: object
 ) -> None:
-    """Vary one field of a real measured row; absent/falsey diagnostics are not clean defaults."""
+    """The exact-H CLI cannot waive a malformed measured row; inspect raw types before JSON encoding."""
     package = _r2_package(tmp_path)
     token, _, _ = _r2_seal(package, monkeypatch)
     coverage = cu.check_oracle_coverage
     observed = []
+    returned = []
 
     def changed(*args, **kwargs):
         row = coverage(*args, **kwargs)
@@ -5490,21 +5513,69 @@ def test_r2_numeric_waiver_requires_measured_visual_coverage(
         else:
             row[field] = value
         observed.append(copy.deepcopy(row))
+        returned.append(row)
         return row
 
     monkeypatch.setattr(cu, "check_oracle_coverage", changed)
+    output = tmp_path / "malformed-coverage-check.json"
     try:
-        report = cu.run_all(package, receipt_sha256=token)
+        code = cu.main([str(package), "--scope", "all", "--receipt-sha256", token, "--json", str(output), "--quiet"])
     except (KeyError, TypeError) as error:
         pytest.fail(f"unestablished oracle facts must return typed non-success, not raise {error!r}")
-    row = _r2_check(report, "oracle-coverage")
+    report = json.loads(output.read_bytes())
+    assert len(returned) == 1
+    row = returned[0]
     assert row["status"] == (value if field == "status" else "NOT_CHECKED"), "only measured numeric gaps may be waived"
     assert len(observed) == 1 and {key: row[key] for key in observed[0]} == observed[0]
+    assert all(type(row[key]) is type(observed[0][key]) for key in observed[0]), "do not normalize raw coverage types"
+    assert _r2_check(report, "oracle-coverage") == json.loads(json.dumps(row))
     if value is ...:
         assert field not in row, "do not manufacture missing coverage facts"
     expected_code = {"FINDINGS": 1, "PRECONDITION_FAILED": 4}.get(row["status"], 2)
-    assert report["exit_code"] == expected_code and report["status"] != "COMPLETE"
-    assert _r2_check(report, "finalized")["code"] == "required_obligations_not_satisfied"
+    assert code == report["exit_code"] == expected_code and report["status"] != "COMPLETE"
+    final_row = _r2_check(report, "finalized")
+    assert (final_row["status"], final_row["stage"], final_row["code"]) == (
+        "NOT_CHECKED",
+        "OBLIGATIONS",
+        "required_obligations_not_satisfied",
+    )
+    assert "CANNOT_ESTABLISH(OBLIGATIONS)" in final_row["detail"] and R2_DISCLAIMER not in json.dumps(report)
+    assert "AMO-boundary" in r2_gate_runtime
+
+
+def test_r2_numeric_waiver_rejects_negative_count_with_coherent_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    """A coherent sum must not mask the independently required nonnegative numeric count."""
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    coverage = cu.check_oracle_coverage
+    observed = []
+
+    def negative(*args, **kwargs):
+        row = coverage(*args, **kwargs)
+        assert (row["pages"], row["numeric_present"], len(row["numeric_missing"]), len(row["rows"])) == (1, 0, 1, 1)
+        row["numeric_present"] = -1
+        row["numeric_missing"] *= 2
+        observed.append(copy.deepcopy(row))
+        return row
+
+    monkeypatch.setattr(cu, "check_oracle_coverage", negative)
+    output = tmp_path / "negative-numeric-check.json"
+    code = cu.main([str(package), "--scope", "all", "--receipt-sha256", token, "--json", str(output), "--quiet"])
+    report = json.loads(output.read_bytes())
+    row = _r2_check(report, "oracle-coverage")
+    assert row["numeric_present"] + len(row["numeric_missing"]) == row["pages"] == len(row["rows"]) == 1
+    assert row["status"] == "NOT_CHECKED", "a coherent sum must never waive a negative numeric count"
+    assert len(observed) == 1 and {key: row[key] for key in observed[0]} == observed[0]
+    assert code == report["exit_code"] == 2 and report["status"] == "NOT_CHECKED"
+    final_row = _r2_check(report, "finalized")
+    assert (final_row["status"], final_row["stage"], final_row["code"]) == (
+        "NOT_CHECKED",
+        "OBLIGATIONS",
+        "required_obligations_not_satisfied",
+    )
+    assert "CANNOT_ESTABLISH(OBLIGATIONS)" in final_row["detail"] and R2_DISCLAIMER not in json.dumps(report)
     assert "AMO-boundary" in r2_gate_runtime
 
 
