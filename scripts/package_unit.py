@@ -1075,40 +1075,58 @@ def _walk_asset_candidates(bases: list[Path | None], name: str) -> list[Path]:
     return list(found.values())
 
 
-def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | None) -> AssetResolution:
+def resolve_asset(  # pylint: disable=too-many-branches
+    bundle: Path, unit: str, handover: Any, assets_dir: Path | None
+) -> AssetResolution:
     """Select exactly one source and retain its selecting row through digest validation.
 
-    The handover basename is portable in either separator flavour. Without a handover, the engine's
-    exact raw or transfer-UUID-stripped stem selects an input row. Neither route chooses the first of
-    several rows or existing candidates. A foreign-flavour staged path is never interpreted locally.
+    The logical unit selects the row; its native staged path supplies the physical basename. A raw
+    handover's portable source leaf must agree with both. Filename-only legacy rows remain supported;
+    neither route chooses the first of several rows or candidates or interprets a foreign staged path.
+    An absent optional manifest retains the legacy handover-only diagnostic route.
     """
     workbook = handover.get("workbook") if isinstance(handover, dict) else None
     source_id = workbook.get("source_id") if isinstance(workbook, dict) else None
-    name = leaf(source_id) if isinstance(source_id, str) and source_id.strip() else None
+    if (
+        isinstance(workbook, dict)
+        and "source_id" in workbook
+        and (not isinstance(source_id, str) or not source_id.strip())
+    ):
+        raise PackagingError("input_manifest_name_invalid")
+    name = leaf(source_id) if source_id is not None else None
+    if name is not None and (not pfs.is_canonical_key(name) or "/" in name):
+        raise PackagingError("input_manifest_name_invalid")
     rows = _input_asset_rows(bundle, unit)
-    matches = (
-        [row for row in rows if leaf(row["name"]) == name]
-        if name
-        else [row for row in rows if _names_unit(row["name"], unit)]
-    )
+    matches = [row for row in rows if _names_unit(row["name"], unit)]
     if len(matches) > 1:
         raise PackagingError("source_asset_row_ambiguous")
     row = matches[0] if matches else None
+    if rows and row is None:
+        raise PackagingError("input_manifest_name_mismatch")
     if name is None and row is None:
         return AssetResolution(None, "unresolved", None)
     route = "handover.workbook.source_id" if name is not None else "input_manifest.staged_input_path"
-    name = name or leaf(row["name"])
-    if not pfs.is_canonical_key(name) or "/" in name:
+    if row is not None and (not pfs.is_canonical_key(row["name"]) or "/" in row["name"]):
         raise PackagingError("input_manifest_name_invalid")
     bases = [assets_dir, bundle / "assets", bundle.parent / "assets"]
-    staged = row.get("staged_input_path") if row else None
-    if staged is not None:
-        if not isinstance(staged, str) or not staged.strip():
+    if row is not None and "staged_input_path" in row:
+        staged = row["staged_input_path"]
+        if not isinstance(staged, str) or flavour(staged) is None or not pfs.is_canonical_key(leaf(staged)):
             raise PackagingError("input_manifest_path_invalid")
-        if leaf(staged) != name:
+        if not _names_unit(leaf(staged), unit) or (name is not None and leaf(staged) != name):
             raise PackagingError("input_manifest_path_mismatch")
-        if is_host_native(staged):
-            bases.append(Path(staged).parent)
+        if not is_host_native(staged):
+            return AssetResolution(None, "unresolved", row)
+        name = leaf(staged)
+        bases.append(Path(staged).parent)
+    else:
+        if row is not None and name is not None and name != row["name"]:
+            raise PackagingError("input_manifest_name_mismatch")
+        name = name or leaf(row["name"])
+    if not pfs.is_canonical_key(name) or "/" in name:
+        raise PackagingError("input_manifest_name_invalid")
+    if row is not None and not _names_unit(name, unit):
+        raise PackagingError("input_manifest_name_mismatch")
     candidates = _walk_asset_candidates(bases, name)
     if len(candidates) > 1:
         raise PackagingError("source_asset_candidate_ambiguous")
@@ -1116,24 +1134,24 @@ def resolve_asset(bundle: Path, unit: str, handover: Any, assets_dir: Path | Non
 
 
 def _names_unit(declared: str, unit: str) -> bool:
-    """Whether a staged asset's own filename is the one the engine derived ``unit`` from.
+    """Whether a logical name or physical filename identifies the engine's exact ``unit``.
 
-    Two spellings, both the engine's own: the raw stem, and the stem with a leading canonical-UUID
-    transfer prefix removed (`harvest_estate_assets.asset_path` writes it; the engine's
+    Besides the logical name itself, two filename spellings are the engine's own: the raw stem and
+    the stem with a leading canonical-UUID transfer prefix removed (`harvest_estate_assets.asset_path`
+    writes it; the engine's
     `strip_transfer_uuid` removes it). Nothing else - a partial, fuzzy or case-insensitive name match
     would be a display-name join, and this repository does not admit one as an identity anywhere.
     """
     stem = PurePosixPath(leaf(declared)).stem
-    return unit in (stem, _LUID_PREFIX.sub("", stem, count=1))
+    return unit in (declared, stem, _LUID_PREFIX.sub("", stem, count=1))
 
 
 def assert_declared_digest(unit: str, resolved: AssetResolution) -> None:
     """Validate the selecting row directly; never look it up again by the candidate's basename."""
-    del unit
     row, asset = resolved.row, resolved.path
     if row is None or asset is None:
         return
-    if leaf(row["name"]) != asset.name:
+    if not _names_unit(row["name"], unit) or leaf(row.get("staged_input_path", row["name"])) != asset.name:
         raise PackagingError("input_manifest_name_mismatch")
     declared = row.get("sha256")
     if declared is None:
@@ -3627,14 +3645,10 @@ def _discard_scratch(path: Path) -> str | None:
 def _predicted_asset(bundle: Path, unit: str, assets_dir: Path | None) -> Path | None:
     """The asset :func:`_stage_asset` will copy in, resolved through the SAME two calls it makes.
 
-    ⚠️ **Not a re-implementation.** The writer reads `handover/<unit>.json`, scopes it, and asks
-    :func:`resolve_asset`; so does this. Guessing the packaged name from the bundle directly would be
-    a second rule that could drift from the first, which is the failure mode this whole projection
-    is being made exhaustive to avoid.
+    Both use the raw operational handover. Shipping redaction belongs only to :func:`_stage_handover`;
+    feeding its lossy output back into resolution would turn an absolute source locator into a marker.
     """
     handover = read_json(bundle / "handover" / f"{unit}.json")
-    if isinstance(handover, dict):
-        handover, _redactions = scope_handover(handover, unit)
     return resolve_asset(bundle, unit, handover, assets_dir)[0]
 
 
@@ -4772,17 +4786,18 @@ def _data_source_notes(data_sources: dict[str, Any]) -> list[str]:
     return notes
 
 
-def _stage_asset(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    bundle: Path, unit: str, dest: Path, handover: Any, assets_dir: Path | None, report_name: str | None
+def _stage_asset(
+    bundle: Path, unit: str, dest: Path, assets_dir: Path | None, report_name: str | None
 ) -> tuple[Path | None, str, str | None]:
     """`(packaged asset, route, note)` - copy the source in, or refuse when its absence blinds a gate.
 
     ⚠️ **A report with pages and no source is UNASSESSABLE, not merely incomplete.** `check_unit`
     cannot derive an expected page set without it (#443) and the entry gate returns
     CANNOT_ESTABLISH, so every per-page verdict such a package would produce is "I do not know" -
-    and this used to report `exit 0  OK Book`. A unit with no report (every datasource-only unit,
-    18 of 67 in the reference run) makes no page claim, so its missing asset stays a recorded note.
+    and this used to report `exit 0  OK Book`. A report-free unit with no declared source retains the
+    legacy absence note; a declared source that cannot be resolved always refuses.
     """
+    handover = read_json(bundle / "handover" / f"{unit}.json")
     resolved = resolve_asset(bundle, unit, handover, assets_dir)
     asset, route = resolved.path, resolved.route
     if asset is not None:
@@ -4790,6 +4805,8 @@ def _stage_asset(  # pylint: disable=too-many-arguments,too-many-positional-argu
         (dest / "assets").mkdir(parents=True, exist_ok=True)
         shutil.copy2(asset, dest / "assets" / asset.name)
         return dest / "assets" / asset.name, route, None
+    if resolved.row is not None:
+        raise UnassessableInput(unit, ["source_asset_unresolved"])
     pages = _report_pages(dest, report_name)
     if pages:
         raise UnassessableInput(
@@ -5188,12 +5205,12 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     data_sources = _localize_data_sources(dest, final, model_name)
     notes.extend(_data_source_notes(data_sources))
 
+    asset, asset_route, asset_note = _stage_asset(bundle, unit, dest, assets_dir, report_name)
+    if asset_note:
+        notes.append(asset_note)
     handover, redactions, handover_note = _stage_handover(bundle, unit, dest)
     if handover_note:
         notes.append(handover_note)
-    asset, asset_route, asset_note = _stage_asset(bundle, unit, dest, handover, assets_dir, report_name)
-    if asset_note:
-        notes.append(asset_note)
 
     _payload, entries = scope_provenance(read_json(bundle / "source-provenance.json"), sha256_of(asset))
     # #480 round 6, the SECOND untrusted document, contained at its own intake for the same reason as

@@ -318,8 +318,12 @@ assembly remains **ASSEMBLED**, and applicable binding inspections remain **UNVA
 `package_unit.py --brief` requires **one selected unit**; use a separate invocation and brief per
 unit, not one brief broadcast over an estate. The typed unit/scope and whole-message host-location
 and credential containment checks run before assembly. Unsafe text is refused without copying,
-redacting or echoing it. Datasource resolution retains the unique selecting input-manifest row with
-its walked path and validates that row's basename/path/digest; ambiguous rows or candidates refuse.
+redacting or echoing it. Source resolution selects one input-manifest row by logical unit identity,
+then derives its physical basename from the native `staged_input_path` (a filename-shaped `name` is
+the legacy fallback only when that path is absent). The raw handover's portable source leaf must
+agree before the separate shipped handover is redacted. The selecting row stays attached to the
+walked path through digest validation; wrong/foreign paths, unresolved declared assets and ambiguous
+rows or candidates refuse.
 
 ### Construction status (#614)
 
