@@ -11,6 +11,10 @@ and the selected provider's input ordinal travel only in memory. No source Path,
 evidence grade, final START_READY fold or package writes here.
 read_current_brief_policy() independently rechecks the current brief role/digest without requiring
 the working model/report to retain their packaging-time bytes. It grants no completion verdict.
+read_current_source_data_handoff() binds current immutable roles to a caller-pinned working revision,
+not to original commissioning. Coherent current declarations/roles with a newly accepted revision
+are a new reviewed snapshot. No token authentication, latest-ever history, full working integrity,
+S1/S2 renewal, data-success judgment or COMPLETE authority is provided by that read.
 Full contract and limitations: docs/reference-readiness.md, S2.
 """
 
@@ -18,11 +22,12 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sys
 import tomllib
 import weakref
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -35,7 +40,13 @@ from bundle_corpus import (  # noqa: E402  # pylint: disable=wrong-import-positi
     TargetClassification,
     classify_target,
 )
-from credential_gate import PackageSpecFacts, package_spec_facts  # noqa: E402  # pylint: disable=wrong-import-position
+from credential_gate import (  # noqa: E402  # pylint: disable=wrong-import-position
+    DataAccessAssessment,
+    DataAccessProjectionError,
+    PackageSpecFacts,
+    package_spec_facts,
+    parse_data_access,
+)
 from host_paths import discloses_host_location  # noqa: E402  # pylint: disable=wrong-import-position
 from package_source import (  # noqa: E402  # pylint: disable=wrong-import-position
     CODE_HANDOFF_INVALID,
@@ -185,6 +196,10 @@ CODE_PROVIDER_KEY_CONTRADICTION = "provider_key_contradiction"
 CODE_PROVIDER_BINDING = "provider_binding_mismatch"
 CODE_PROVIDER_MODEL = "provider_model_unresolved"
 CODE_PROVIDER_BLOCKED = "provider_not_s2_clean"
+CODE_WORKING_REVISION_INVALID = "working_revision_invalid"
+CODE_WORKING_REVISION_MISMATCH = "working_revision_mismatch"
+CODE_WORKING_TOPOLOGY = "working_topology_unsupported"
+CODE_WORKING_HANDOFF_INVALID = "working_handoff_invalid"
 
 
 @dataclass(frozen=True)
@@ -224,7 +239,7 @@ class RoleResult:
 
 @dataclass(frozen=True)
 class SourceIdentity:
-    """S1's source digest, this kind's Tableau LUID (None for local), and exact published key."""
+    """The held source digest, this kind's Tableau LUID (None for local), and exact published key."""
 
     kind: PackageKind
     sha256: str | None
@@ -303,6 +318,42 @@ class PackageDataAccessHandoff:
     migration_spec: pfs.HeldVerifiedMember = field(repr=False)
     facts: PackageSpecFacts
     data_access: pfs.HeldVerifiedMember = field(repr=False)
+
+
+@dataclass(frozen=True, repr=False)
+class _CurrentWorkingRoleSnapshot:
+    """Private current bytes/physical identities, never an S1 namespace or a commissioning anchor."""
+
+    boundary: tuple[tuple[int, ...], ...]
+    manifest: bytes
+    # Name, walk-produced address, ordinary identity, current digest, small bytes (assets are streamed).
+    members: tuple[tuple[str, str, tuple[int, int, int], str, bytes | None], ...]
+
+
+@dataclass(frozen=True, repr=False)
+class CurrentWorkingSourceDataHandoff:  # pylint: disable=too-many-instance-attributes
+    """One issued current-snapshot role read; stored data limits are not reconciled or upgraded."""
+
+    package_root: Path = field(repr=False, compare=False)
+    root_identity: str = field(repr=False)
+    package_working_revision: str
+    current_manifest_sha256: str
+    unit: str
+    kind: Literal["workbook"]
+    topology: Literal["owned_model"]
+    source_asset_path: str
+    report_path: str
+    model_path: str
+    pbip_path: str
+    declared_paths: tuple[str, ...]
+    source_identity: SourceIdentity
+    facts: PackageSpecFacts
+    stored_data_access: DataAccessAssessment
+    _snapshot: _CurrentWorkingRoleSnapshot = field(repr=False, compare=False)
+    _authority: Callable[[object], bool] | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __repr__(self) -> str:
+        return "CurrentWorkingSourceDataHandoff()"
 
 
 @dataclass(frozen=True)
@@ -516,8 +567,8 @@ def verified_root_binding(value: VerifiedPackage | None) -> tuple[Path, str] | N
 
 
 @dataclass
-class _Facts:  # pylint: disable=too-many-instance-attributes,attribute-defined-outside-init
-    """Everything one package says about itself, read once from S1-verified bytes."""
+class _RoleContext:  # pylint: disable=too-many-instance-attributes
+    """Pure role inputs, without an S1 result, policy, provider authority or filesystem reader."""
 
     root: Path
     unit: str
@@ -526,35 +577,46 @@ class _Facts:  # pylint: disable=too-many-instance-attributes,attribute-defined-
     artifacts: dict[str, Any]
     digests: dict[str, str]
     walked: dict[str, Path]
-    verified: VerifiedPackage
+    source_key: str | None = None
+    source_sha: str | None = None
+    source_luid: str | None = None
+    declared_dependencies: tuple[DeclaredDependency, ...] = ()
+    model_role: str | None = None
+    documents: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def keys(self) -> frozenset[str]:
+        """Every candidate content key supplied by the owning read lifecycle."""
+        return frozenset(self.walked)
+
+    def under(self, prefix: str) -> list[str]:
+        """Sorted candidate keys beneath a package-relative directory."""
+        return sorted(key for key in self.walked if key.startswith(f"{prefix}/"))
+
+    def json(self, key: str | None) -> Any:
+        """Only already-held role documents; this pure context never opens a file."""
+        return self.documents.get(key)
+
+
+@dataclass
+class _Facts(_RoleContext):  # pylint: disable=too-many-instance-attributes,attribute-defined-outside-init
+    """Everything one package says about itself, read once from S1-verified bytes."""
+
+    verified: VerifiedPackage = field(kw_only=True)
     roles: list[RoleResult] = field(default_factory=list)
     blockers: list[str] = field(default_factory=list)
     limitations: list[str] = field(default_factory=list)
     dependencies: list[DependencyResult] = field(default_factory=list)
     evidence: list[PackageEvidence] = field(default_factory=list)
     topology: str | None = None
-    source_key: str | None = None
-    source_sha: str | None = None
-    source_luid: str | None = None
     source_revision: str = REVISION_UNCONFIRMED
     published_key: str | None = None
-    declared_dependencies: tuple[DeclaredDependency, ...] = ()
-    model_role: str | None = None
     provider_ready: bool = False
     ordinal: int | None = None
     brief_policy: BriefPolicy | None = None
     spec_document: dict[str, Any] | None = None
     spec_member: pfs.HeldVerifiedMember | None = None
     spec_facts: PackageSpecFacts | None = None
-
-    @property
-    def keys(self) -> frozenset[str]:
-        """Every S1-verified content key in this package."""
-        return frozenset(self.walked)
-
-    def under(self, prefix: str) -> list[str]:
-        """Every verified content key inside ``prefix`` (a package-relative directory), sorted."""
-        return sorted(key for key in self.walked if key.startswith(f"{prefix}/"))
 
     def json(self, key: str | None) -> Any:
         """A declared key's JSON payload, read from the path the WALK produced, or ``None``."""
@@ -771,12 +833,17 @@ def _declared_role(  # pylint: disable=too-many-return-statements
     return _role(role, STATE_RESOLVED, cardinality, [declared])
 
 
-def _fabric_directories(facts: _Facts, suffix: str) -> list[str]:
+def _has_fabric_suffix(name: str, suffix: str | None = None) -> bool:
+    """Fold target suffix classification only, never the selected path or its identity."""
+    return name.casefold().endswith(suffix.casefold() if suffix is not None else (".report", ".semanticmodel"))
+
+
+def _fabric_directories(facts: _RoleContext, suffix: str) -> list[str]:
     """Every ``fabric/<Name><suffix>`` directory the verified key set proves exists."""
     found: set[str] = set()
     for key in facts.under("fabric"):
         head = key.split("/")[1] if key.count("/") >= 2 else ""
-        if head.endswith(suffix):
+        if _has_fabric_suffix(head, suffix):
             found.add(f"fabric/{head}")
     return sorted(found)
 
@@ -792,7 +859,7 @@ def _scope_unit(payload: Any) -> str | None:
 # ---------------------------------------------------------------------------------------------
 
 
-def _package_scope_role(facts: _Facts) -> RoleResult:
+def _package_scope_role(facts: _RoleContext) -> RoleResult:
     """Unit and kind must agree with the engine's own classification of this unit, exactly once."""
     report = facts.json("report.json")
     if not isinstance(report, dict):
@@ -816,7 +883,7 @@ def _names(rows: Any) -> list[str]:
     return [row["name"] for row in rows]
 
 
-def _source_asset_role(facts: _Facts) -> RoleResult:
+def _source_asset_role(facts: _RoleContext) -> RoleResult:
     """Exactly one source file, in ``assets/``, with an extension this package's KIND may carry."""
     extensions = SOURCE_EXTENSIONS[facts.kind]
     candidates = [key for key in facts.under("assets") if key.lower().endswith(extensions)]
@@ -831,7 +898,9 @@ def _source_asset_role(facts: _Facts) -> RoleResult:
     return result
 
 
-def _provenance_role(facts: _Facts) -> tuple[RoleResult, dict[str, Any] | None]:  # pylint: disable=too-many-return-statements
+def _provenance_role(  # pylint: disable=too-many-return-statements
+    facts: _RoleContext,
+) -> tuple[RoleResult, dict[str, Any] | None]:
     """Exactly one provenance row, and it must be about the source role's own bytes."""
     payload = facts.json("source-provenance.json")
     if not isinstance(payload, dict):
@@ -869,7 +938,7 @@ def _provenance_role(facts: _Facts) -> tuple[RoleResult, dict[str, Any] | None]:
     return _role(ROLE_SOURCE_PROVENANCE, STATE_RESOLVED, "1 row", ["source-provenance.json"]), row
 
 
-def _source_identity_role(facts: _Facts, row: dict[str, Any] | None) -> RoleResult:
+def _source_identity_role(facts: _RoleContext, row: dict[str, Any] | None) -> RoleResult:
     """The same-byte cross-checks: provenance filename and spec filename name the source role."""
     if facts.source_key is None or row is None:
         return _role(ROLE_SOURCE_IDENTITY, STATE_MISSING, "1 sha256", [], CODE_SOURCE_SHA_MISSING)
@@ -892,7 +961,9 @@ def _source_identity_role(facts: _Facts, row: dict[str, Any] | None) -> RoleResu
 LUID_FIELD = {KIND_WORKBOOK: "workbook_luid", KIND_DATASOURCE: "datasource_luid"}
 
 
-def _server_identity_role(facts: _Facts, row: dict[str, Any] | None) -> RoleResult:  # pylint: disable=too-many-return-statements
+def _server_identity_role(  # pylint: disable=too-many-return-statements
+    facts: _RoleContext, row: dict[str, Any] | None
+) -> RoleResult:
     """The Tableau Server LUID, when one exists - and an EARNED ``not_applicable`` when none does."""
     if row is None or facts.source_key is None:
         return _role(ROLE_SERVER_IDENTITY, STATE_MISSING, "0..1 luid", [], CODE_SOURCE_SHA_MISSING)
@@ -1468,7 +1539,7 @@ def _identify(facts: _Facts) -> None:
     facts.roles.append(_server_identity_role(facts, row))
 
 
-def _required_fabric(facts: _Facts, topology: str) -> tuple[list[RoleResult], dict[str, str]]:
+def _required_fabric(facts: _RoleContext, topology: str) -> tuple[list[RoleResult], dict[str, str]]:
     """The report/model/PBIP roles for this topology, plus the paths a receipt must account for."""
     reports = _fabric_directories(facts, ".Report")
     models = _fabric_directories(facts, ".SemanticModel")
@@ -1714,3 +1785,352 @@ def _oracle_role(facts: _Facts) -> RoleResult:
     if not present:
         return _role(ROLE_TABLEAU_ORACLE, STATE_MISMATCH, "0..1 dir", [], CODE_ROLE_NOT_VERIFIED)
     return _evidence_role(facts, ROLE_TABLEAU_ORACLE, present[0], "oracle-manifest.json")
+
+
+# Current-working reads deliberately share only the pure role rules above, never _Facts or S1/S2.
+# pylint: disable=protected-access
+
+
+def _working_boundary(root: Path) -> tuple[tuple[int, ...], ...]:
+    boundary, findings = pfs._boundary_identity(root)
+    if findings:
+        raise _IdentityError(findings[0].code)
+    ancestors = []
+    for ancestor in root.absolute().parents:
+        try:
+            info = os.lstat(ancestor)
+        except (OSError, ValueError) as exc:
+            raise _IdentityError(pfs.CODE_ROOT_UNREADABLE) from exc
+        if pfs.is_reparse_entry(info):
+            raise _IdentityError(CODE_UNSAFE_TARGET)
+        ancestors.append((info.st_dev, info.st_ino))
+    return (*boundary, *ancestors)
+
+
+def _working_identity(path: Path) -> tuple[int, int, int]:
+    identity, code = pfs._regular_identity(path)
+    if code is not None:
+        raise _IdentityError(code)
+    return identity
+
+
+def _working_member(
+    path: Path, name: str, *, expected: str | None = None, retain: bool = True
+) -> tuple[str, str, tuple[int, int, int], str, bytes | None]:
+    before = _working_identity(path)
+    try:
+        raw = path.read_bytes() if retain else None
+    except (OSError, ValueError) as exc:
+        raise _IdentityError(pfs.CODE_FILE_UNREADABLE) from exc
+    digest = hashlib.sha256(raw).hexdigest() if raw is not None else revision.sha256_of_file(path)
+    if _working_identity(path) != before:
+        raise _IdentityError(pfs.CODE_MEMBER_REPLACED)
+    if expected is not None and digest != expected:
+        raise _IdentityError(pfs.CODE_DIGEST_MISMATCH)
+    return name, str(path), before, digest, raw
+
+
+def _working_declaration(root: Path) -> tuple[_RoleContext, tuple, bytes, set[str]]:
+    walked, directories = revision.tree_files(root)
+    if pfs.PACKAGE_MARKER not in walked:
+        raise _IdentityError(CODE_NOT_A_PACKAGE)
+    boundary = _working_boundary(root)
+    raw = _working_member(walked[pfs.PACKAGE_MARKER], pfs.PACKAGE_MARKER)[4]
+    manifest = pfs.parse_manifest_text(raw.decode("utf-8"))
+    digests, findings = pfs._declared_digests(pfs.declared_files(manifest))
+    if findings:
+        raise _IdentityError(findings[0].code)
+    unit, kind = _declared_string(manifest, "unit"), _declared_string(manifest, "kind")
+    if unit is None:
+        raise _IdentityError(CODE_UNIT_MISSING)
+    if not pfs.is_canonical_key(unit) or "/" in unit:
+        raise _IdentityError(CODE_IDENTITY_TYPE)
+    if kind not in (KIND_WORKBOOK, KIND_DATASOURCE):
+        raise _IdentityError(CODE_KIND_UNCLASSIFIED)
+    if kind != KIND_WORKBOOK:
+        raise _IdentityError(CODE_WORKING_TOPOLOGY)
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise _IdentityError(CODE_IDENTITY_TYPE)
+    source = _declared_string(artifacts, "asset")
+    context = _RoleContext(root, unit, kind, manifest, artifacts, digests, walked)
+    context.source_key, context.source_sha = source, digests.get(source)
+    return context, boundary, raw, directories
+
+
+def _require_working_roles(roles: Iterable[RoleResult]) -> None:
+    for role_result in roles:
+        if role_result.blocks:
+            raise _IdentityError(role_result.code or CODE_ROLE_MISSING)
+
+
+def _require_one_working_target(
+    walked: Mapping[str, Path], directories: set[str], target: tuple[str, str, str]
+) -> None:
+    """Empty target directories do not move R, so reapply this rule during held validation."""
+    report, model, pbip = target
+    if any(
+        _has_fabric_suffix(name) and name not in (report, model) and not name.startswith("validation/iterations/")
+        for name in directories
+    ) or any(
+        name.lower().endswith(".pbip") and name != pbip and not name.startswith("validation/iterations/")
+        for name in walked
+    ):
+        raise _IdentityError(CODE_WORKING_TOPOLOGY)
+
+
+def _working_role_paths(context: _RoleContext, directories: set[str]) -> tuple[tuple[str, ...], tuple[str, str, str]]:
+    roles, required = _required_fabric(context, TOPOLOGY_OWNED_MODEL)
+    _require_working_roles([_source_asset_role(context), *roles])
+    report, model, pbip = (required[key] for key in (ROLE_FABRIC_REPORT, ROLE_FABRIC_MODEL, ROLE_PBIP_ENTRYPOINT))
+    _require_one_working_target(context.walked, directories, (report, model, pbip))
+    immutable = [context.source_key, "source-provenance.json", "report.json"]
+    for role_name, canonical in (
+        (ROLE_MIGRATION_SPEC, SPEC_NAME),
+        (ROLE_MIGRATION_SPEC_SCHEMA, "migration-spec.schema.json"),
+        ("data_access", DATA_ACCESS_NAME),
+        (ROLE_MIGRATION_BRIEF, BRIEF_NAME),
+    ):
+        declared = _declared_string(context.artifacts, role_name)
+        candidates = [canonical] if canonical in context.walked else []
+        _require_working_roles([_declared_role(role_name, "1 file", declared, candidates, context.digests)])
+        immutable.append(canonical)
+    for name in (*immutable, pbip, f"{report}/definition.pbir", f"{model}/definition/model.tmdl"):
+        if name not in context.digests:
+            raise _IdentityError(CODE_ROLE_NOT_VERIFIED)
+        if name not in context.walked:
+            raise _IdentityError(pfs.CODE_FILE_MISSING)
+        _working_identity(context.walked[name])
+    return tuple(immutable), (report, model, pbip)
+
+
+def _working_target_binding(context: _RoleContext, content: dict[str, bytes], target: tuple[str, str, str]) -> None:
+    report, model, pbip = target
+    binding = pfs.parse_manifest_text(content[f"{report}/definition.pbir"].decode("utf-8"))
+    expected = f"../{PurePosixPath(model).name}"
+    summary = context.manifest.get("model_binding")
+    if (
+        context.json(pbip).get("artifacts") != [{"report": {"path": PurePosixPath(report).name}}]
+        or binding.get("datasetReference") != {"byPath": {"path": expected}}
+        or not isinstance(summary, dict)
+        or (summary.get("kind"), summary.get("path")) != ("byPath", expected)
+        or summary.get("resolves_in_package") is not True
+    ):
+        raise _IdentityError(CODE_PROVIDER_BINDING)
+
+
+def _working_source_data(
+    context: _RoleContext, snapshot: _CurrentWorkingRoleSnapshot, target: tuple[str, str, str]
+) -> tuple[SourceIdentity, PackageSpecFacts, DataAccessAssessment]:
+    content = {row[0]: row[4] for row in snapshot.members}
+    for name in (SPEC_NAME, "migration-spec.schema.json", "source-provenance.json", "report.json", target[2]):
+        context.documents[name] = pfs.parse_manifest_text(content[name].decode("utf-8"))
+    _working_target_binding(context, content, target)
+    context.declared_dependencies = _spec_dependencies(context.json(SPEC_NAME))
+    if any(row.code for row in context.declared_dependencies):
+        raise _IdentityError(CODE_DEPENDENCY_INVALID)
+    if _topology(context.kind, context.declared_dependencies) != TOPOLOGY_OWNED_MODEL:
+        raise _IdentityError(CODE_WORKING_TOPOLOGY)
+    provenance, row = _provenance_role(context)
+    _require_working_roles(
+        [
+            provenance,
+            _package_scope_role(context),
+            _source_identity_role(context, row),
+            _server_identity_role(context, row),
+        ]
+    )
+    facts = package_spec_facts(context.json(SPEC_NAME))
+    if type(facts) is not PackageSpecFacts:
+        raise _IdentityError(CODE_IDENTITY_TYPE)
+    if facts.refusal_code is not None:
+        raise _IdentityError(facts.refusal_code)
+    if not facts.direct_applicable:
+        raise _IdentityError(CODE_WORKING_TOPOLOGY)
+    try:
+        stored = parse_data_access(content[DATA_ACCESS_NAME].decode("utf-8"))
+    except UnicodeError as exc:
+        raise _IdentityError(DataAccessProjectionError.code) from exc
+    if type(stored) is not DataAccessAssessment:
+        raise _IdentityError(DataAccessProjectionError.code)
+    identity = SourceIdentity(
+        KIND_WORKBOOK, context.source_sha, context.source_luid, None, revision_status(row.get("origin", {}), [row])
+    )
+    return identity, facts, stored
+
+
+def _require_working_revision(root: Path, model: Path, expected: str) -> None:
+    if revision.package_working_revision(root, model) != expected:
+        raise _IdentityError(CODE_WORKING_REVISION_MISMATCH)
+
+
+def _recheck_working_handoff(root: Path, handoff: CurrentWorkingSourceDataHandoff) -> None:
+    snapshot = handoff._snapshot
+    walked, directories = revision.tree_files(root)
+    if _working_boundary(root) != snapshot.boundary:
+        raise _IdentityError(pfs.CODE_ROOT_REPLACED)
+    _require_one_working_target(walked, directories, (handoff.report_path, handoff.model_path, handoff.pbip_path))
+    for name, address, identity, _digest, _content in snapshot.members:
+        if name not in walked:
+            raise _IdentityError(pfs.CODE_FILE_MISSING)
+        if str(walked[name]) != address or _working_identity(walked[name]) != identity:
+            raise _IdentityError(pfs.CODE_MEMBER_REPLACED)
+    model = walked[f"{handoff.model_path}/definition/model.tmdl"].parent.parent
+    _require_working_revision(root, model, handoff.package_working_revision)
+    marker = _working_member(walked[pfs.PACKAGE_MARKER], pfs.PACKAGE_MARKER)
+    if marker[4] != snapshot.manifest or marker[3] != handoff.current_manifest_sha256:
+        raise _IdentityError(pfs.CODE_DIGEST_MISMATCH)
+    for name, address, identity, digest, content in snapshot.members:
+        if _working_identity(walked[name]) != identity:
+            raise _IdentityError(pfs.CODE_MEMBER_REPLACED)
+        current = _working_member(walked[name], name, expected=digest, retain=content is not None)
+        if current != (name, address, identity, digest, content):
+            raise _IdentityError(pfs.CODE_MEMBER_REPLACED)
+    if _working_boundary(root) != snapshot.boundary:
+        raise _IdentityError(pfs.CODE_ROOT_REPLACED)
+    if any(_working_identity(walked[row[0]]) != row[2] for row in snapshot.members):
+        raise _IdentityError(pfs.CODE_MEMBER_REPLACED)
+
+
+def _working_state(value: object) -> tuple:
+    """Hold typed leaf values, not live dataclass references that would change with their owner."""
+    if type(value) in (CurrentWorkingSourceDataHandoff, _CurrentWorkingRoleSnapshot, SourceIdentity):
+        return type(value), tuple(
+            _working_state(getattr(value, item.name)) for item in fields(value) if item.name != "_authority"
+        )
+    if type(value) in (tuple, PackageSpecFacts, DataAccessAssessment):
+        return type(value), tuple(_working_state(item) for item in value)
+    if type(value) is type(Path()):
+        return type(value), str(value)
+    if type(value) in (str, bytes, int, bool, type(None)):
+        return type(value), value
+    raise _IdentityError(CODE_WORKING_HANDOFF_INVALID)
+
+
+def _current_working_api() -> tuple[Callable, Callable]:
+    """Private issuance; weak capabilities also release owners after cyclic state mutations."""
+    issued: weakref.WeakValueDictionary[int, Callable[[object], bool]] = weakref.WeakValueDictionary()
+    # pylint: disable=redefined-outer-name  # Export the closures under their public names.
+
+    def read_current_source_data_handoff(  # pylint: disable=too-many-locals,too-many-return-statements
+        root: Path, *, expected_package_working_revision: str
+    ) -> tuple[str | None, CurrentWorkingSourceDataHandoff | None]:
+        """Hold current source/data roles under exact R, not a receipt or original packaging history.
+
+        Changed report/model bytes are allowed; iteration/cache, ordinary files and brief semantics
+        remain other owners' judgments. Only this exact issued object can validate, not a copied
+        capability. Hostile closure/code rewriting and between-syscall writer isolation are not promised.
+        """
+        if type(root) is not type(Path()):
+            return pfs.CODE_ROOT_BINDING, None
+        if type(expected_package_working_revision) is not str or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", expected_package_working_revision, re.ASCII
+        ):
+            return CODE_WORKING_REVISION_INVALID, None
+        try:
+            context, boundary, raw, directories = _working_declaration(root)
+            immutable, target = _working_role_paths(context, directories)
+            report, model, pbip = target
+            names = (*immutable, pbip, f"{report}/definition.pbir", f"{model}/definition/model.tmdl")
+            identities = {name: _working_identity(context.walked[name]) for name in names}
+            model_dir = context.walked[f"{model}/definition/model.tmdl"].parent.parent
+            _require_working_revision(root, model_dir, expected_package_working_revision)
+            members = tuple(
+                _working_member(
+                    context.walked[name],
+                    name,
+                    expected=context.digests[name] if name in immutable else None,
+                    retain=name not in (context.source_key, f"{model}/definition/model.tmdl"),
+                )
+                for name in names
+            )
+            if any(row[2] != identities[row[0]] for row in members):
+                raise _IdentityError(pfs.CODE_MEMBER_REPLACED)
+            snapshot = _CurrentWorkingRoleSnapshot(boundary, raw, members)
+            identity, facts, stored = _working_source_data(context, snapshot, target)
+            result = CurrentWorkingSourceDataHandoff(
+                root,
+                str(root),
+                expected_package_working_revision,
+                hashlib.sha256(raw).hexdigest(),
+                context.unit,
+                KIND_WORKBOOK,
+                TOPOLOGY_OWNED_MODEL,
+                context.source_key,
+                report,
+                model,
+                pbip,
+                tuple(sorted(context.digests)),
+                identity,
+                facts,
+                stored,
+                snapshot,
+            )
+            _recheck_working_handoff(root, result)
+            owner, state = weakref.ref(result), _working_state(result)
+            held = {
+                name: getattr(result, name) for name in ("_snapshot", "source_identity", "facts", "stored_data_access")
+            }
+
+            def owns(candidate: object) -> bool:
+                return (
+                    owner() is candidate
+                    and all(getattr(candidate, name) is value for name, value in held.items())
+                    and _working_state(candidate) == state
+                )
+
+            object.__setattr__(result, "_authority", owns)
+            issued[id(result)] = owns
+            return None, result
+        except _IdentityError as exc:
+            return str(exc), None
+        except (pfs._ManifestError, DataAccessProjectionError) as exc:
+            return exc.code, None
+        except revision.RevisionError:
+            return CODE_UNSAFE_TARGET, None
+        except UnicodeError:
+            return pfs.CODE_MANIFEST_NOT_UTF8, None
+        except (OSError, ValueError):
+            return pfs.CODE_FILE_UNREADABLE, None
+
+    def validate_current_source_data_handoff(  # pylint: disable=too-many-return-statements
+        root: Path, handoff: CurrentWorkingSourceDataHandoff, *, expected_package_working_revision: str
+    ) -> str | None:
+        """Revalidate only the original issued read, including typed state and current physical bytes."""
+        if type(root) is not type(Path()):
+            return pfs.CODE_ROOT_BINDING
+        if type(expected_package_working_revision) is not str or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", expected_package_working_revision, re.ASCII
+        ):
+            return CODE_WORKING_REVISION_INVALID
+        try:
+            authority = issued.get(id(handoff))
+            if (
+                type(handoff) is not CurrentWorkingSourceDataHandoff
+                or authority is None
+                or handoff._authority is not authority
+                or not authority(handoff)
+            ):
+                return CODE_WORKING_HANDOFF_INVALID
+            if str(root) != handoff.root_identity or not exact_root_matches(
+                handoff.package_root, handoff.root_identity
+            ):
+                return pfs.CODE_ROOT_BINDING
+            if handoff.package_working_revision != expected_package_working_revision:
+                return CODE_WORKING_REVISION_MISMATCH
+            _recheck_working_handoff(root, handoff)
+        except _IdentityError as exc:
+            return str(exc)
+        except revision.RevisionError:
+            return CODE_UNSAFE_TARGET
+        except (AttributeError, RecursionError, TypeError, ValueError):
+            return CODE_WORKING_HANDOFF_INVALID
+        except OSError:
+            return pfs.CODE_FILE_UNREADABLE
+        return None
+
+    return read_current_source_data_handoff, validate_current_source_data_handoff
+
+
+read_current_source_data_handoff, validate_current_source_data_handoff = _current_working_api()
+del _current_working_api
