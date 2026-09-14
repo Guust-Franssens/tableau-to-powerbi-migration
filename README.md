@@ -288,13 +288,18 @@ The PBIP project a customer opens in Power BI Desktop. The current phase-2 → p
 `python scripts/promote_unit.py --package <package> --slug <slug> ...`; manual copying remains only
 as a fallback/reference for operators who need to understand the mechanics by hand.
 
-Two gates sit on phase 2: `check_reference_readiness.py` is the **entry** gate (per report page, is
-there trustworthy Tableau reference evidence to start from?) and `check_unit.py` is the **exit** gate
+Two gates sit on phase 2: `check_reference_readiness.py` is the **entry** gate. After construction
+and applicable binding, it returns final Phase-1 **`START_READY / 0`** only for a complete current
+package/provider cohort: boundary, bytes, roles, v2 brief, source, canonical data access, reference
+evidence and fresh binding must all agree. It is read-only; `BOUND` stays `UNVALIDATED`.
+`check_unit.py` is the **exit** gate
 (is this unit done?). ⚠️ A page the entry gate calls **`blind` is a finding, not a pass** — it means a
 fidelity bug on that page would be structurally unfalsifiable, so it exits non-zero and you deal with
 it before **agentic fidelity-building/review dispatch**, after deterministic emission. The authoritative
 [conversion, dispatch, and fidelity boundaries](docs/reference-readiness.md#conversion-dispatch-and-fidelity-boundaries)
-explain what each result permits, including why reference `READY` is not final package `START_READY`.
+explain what each result permits. Ordinary bundles retain reference-only `READY`/`NOT_APPLICABLE`;
+neither is package START_READY. Follow the [package/bind/check commands](docs/reference-readiness.md#final-package-start_ready-562-622);
+readiness does not establish fidelity sign-off or Phase-2 COMPLETE.
 
 ⚠️ **Both gates check the phase-2 package, not the phase-3 deliverable.** `check_unit.py` will run
 against a shipped `migrations/` folder, but it checks **less** there: measured on

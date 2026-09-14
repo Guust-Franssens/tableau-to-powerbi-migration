@@ -21,6 +21,7 @@ below naming its finding number, and each is mutation-proved by
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -29,7 +30,9 @@ import subprocess
 import sys
 import zlib
 from dataclasses import replace
-from pathlib import Path
+from contextlib import redirect_stdout
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -46,9 +49,9 @@ from test_package_role_identity import (  # noqa: E402
     PUBLISHED_KEY,
     WB_LUID,
     WB_UNIT,
-    datasource_package,
+    datasource_package as s2_datasource_package,
     seal,
-    workbook_package,
+    workbook_package as s2_workbook_package,
 )
 
 # Page ids observed in the real engine bundle
@@ -63,6 +66,66 @@ MERIDIAN_PAGE_IDS = {
 # Verified: only 8 md5 hex digits survive `_sanitize`, so these two distinct worksheet names both
 # produce `page-ws-Collisioc5d9dc9d`.
 COLLIDING_NAMES = ("Collision030344", "Collision079370")
+
+LOCAL_PROJECTION = {
+    "schema": "phase1-data-access/v1",
+    "state": "local_import_ready",
+    "source_keys": [],
+    "provider_unit": None,
+    "provider_state": None,
+    "validation": "validated",
+    "effective_scope": "model_and_report",
+    "max_phase2_claim": "data_validated",
+    "codes": ["all-flat-file", "package-self-contained"],
+}
+
+
+def _complete_data_fixture(package: Path) -> Path:
+    """Extend the old S2-only fixture with literal current brief/data facts; no verdict is mocked."""
+    manifest = json.loads((package / bundle_corpus.PACKAGE_MARKER).read_bytes())
+    unit = manifest["unit"]
+    spec = json.loads((package / "migration-spec.json").read_bytes())
+    published = manifest["kind"] == "workbook" and any(row.get("published_datasource") for row in spec["data_sources"])
+    scope = (
+        "report_only_shared_model"
+        if published
+        else "model_only"
+        if manifest["kind"] == "datasource"
+        else "model_and_report"
+    )
+    for row in spec["data_sources"]:
+        row["connection"] = (
+            {**row.get("connection", {}), "powerbi_target": "live_source"}
+            if published
+            else {"class": "textscan", "powerbi_target": "flat_file"}
+        )
+    (package / "migration-spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    (package / "migration-brief.md").write_text(
+        f'+++\nschema = "phase1-start-ready/v2"\nunit = "{unit}"\nscope = "{scope}"\n'
+        'fallback_authorization = "stop"\nnumeric_obligation = "required"\n+++\n',
+        encoding="utf-8",
+    )
+    projection = {**LOCAL_PROJECTION, "effective_scope": scope}
+    if published:
+        projection.update(
+            state="provider_inherited",
+            provider_state="local_import_ready",
+            codes=["provider-exact"],
+            provider_unit="provider-ref:v1:sha256:"
+            + hashlib.sha256(b"phase1-data-access/provider-unit/v1\0" + DS_UNIT.encode()).hexdigest(),
+        )
+    (package / "data-access.json").write_text(json.dumps(projection), encoding="utf-8")
+    manifest["artifacts"]["data_access"] = "data-access.json"
+    manifest["data_sources"] = {"shipped": [], "self_contained": True}
+    return seal(package, **manifest)
+
+
+def datasource_package(root: Path, **kwargs: Any) -> Path:
+    return _complete_data_fixture(s2_datasource_package(root, **kwargs))
+
+
+def workbook_package(root: Path, **kwargs: Any) -> Path:
+    return _complete_data_fixture(s2_workbook_package(root, **kwargs))
 
 
 def write_png(path: Path, width: int = 320, height: int = 240) -> Path:
@@ -338,13 +401,21 @@ def build_package(  # pylint: disable=too-many-locals
     (package / "assets").mkdir(exist_ok=True)
     shutil.copy2(asset, package / "assets" / asset.name)
     (package / "migration-spec.json").write_text(
-        json.dumps({"source": {"file_name": asset.name}, "data_sources": []}), encoding="utf-8"
+        json.dumps(
+            {
+                "source": {"file_name": asset.name},
+                "data_sources": [{"connection": {"class": "textscan", "powerbi_target": "flat_file"}}],
+            }
+        ),
+        encoding="utf-8",
     )
     (package / "migration-spec.schema.json").write_text(json.dumps({"$id": "migration-spec"}), encoding="utf-8")
     (package / "migration-brief.md").write_text(
-        f'+++\nschema = "phase1-start-ready/v1"\nunit = "{unit}"\nscope = "model_and_report"\n+++\n\nMigrate it.\n',
+        f'+++\nschema = "phase1-start-ready/v2"\nunit = "{unit}"\nscope = "model_and_report"\n'
+        'fallback_authorization = "stop"\nnumeric_obligation = "required"\n+++\n\nMigrate it.\n',
         encoding="utf-8",
     )
+    (package / "data-access.json").write_text(json.dumps(LOCAL_PROJECTION), encoding="utf-8")
     _stamp_scope(package / "report.json", unit)
     _stamp_scope(package / "source-provenance.json", unit)
     _stamp_scope(package / "handover" / f"{unit}.json", unit)
@@ -386,12 +457,14 @@ def seal_package(package: Path, unit: str) -> Path:
             "migration_spec": "migration-spec.json",
             "migration_spec_schema": "migration-spec.schema.json",
             "migration_brief": "migration-brief.md",
+            "data_access": "data-access.json",
             "asset": f"assets/{unit}.twb",
             "report": f"fabric/{unit}.Report",
             "model": f"fabric/{unit}.SemanticModel",
             "handover": f"handover/{unit}.json",
         },
         model_binding={"kind": "byPath", "path": f"../{unit}.SemanticModel", "resolves_in_package": True},
+        data_sources={"shipped": [], "self_contained": True},
     )
 
 
@@ -1082,13 +1155,12 @@ def test_a_missing_path_is_a_usage_error_not_a_verdict(tmp_path: Path) -> None:
     assert excinfo.value.code == 2
 
 
-def test_the_json_verdict_always_carries_the_true_status(bundle: Path, tmp_path: Path) -> None:
+def test_the_json_verdict_always_carries_the_true_status(bundle: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """`--json` is the advisory route now that `--warn-only` is gone; it must never soften."""
     build_unit(bundle, "WB", worksheets=["Revenue Trend"])
-    out = tmp_path / "verdict.json"
-
-    assert crr.main([str(bundle), "--quiet", "--json", str(out)]) == 1
-    assert json.loads(out.read_text(encoding="utf-8"))["status"] == "FINDINGS"
+    capsys.readouterr()
+    assert crr.main([str(bundle), "--quiet", "--json", "-"]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "FINDINGS"
 
 
 # --------------------------------------------------------------------------------------------
@@ -1805,7 +1877,7 @@ def test_a_SAFE_package_continues_into_the_current_behaviour_unchanged(tmp_path:
 
     report = crr.scan(unit)
 
-    assert report["status"] == crr.STATUS_READY
+    assert report["status"] == crr.STATUS_START_READY
     assert report["pages_ready"] == report["pages_expected"] == 1
     # A clean package RECORDS its verification rather than leaving the field absent: "not a package"
     # and "a package that verified clean" must not share one representation.
@@ -1917,7 +1989,7 @@ def test_the_package_verifier_runs_exactly_once_for_a_safe_package(
 
     monkeypatch.setattr(crr, "verify_package", counted)
 
-    assert crr.scan(unit)["status"] == crr.STATUS_READY
+    assert crr.scan(unit)["status"] == crr.STATUS_START_READY
     assert calls == [bundle_corpus.CODE_PACKAGE_BOUNDARY_OK]
 
 
@@ -2037,7 +2109,7 @@ def test_invalid_datasource_topology_stops_before_reference_assessment(
 ) -> None:
     """Malformed topology is an S2 finding, never READY or an empty reference denominator."""
     unit = _packaged_unit(tmp_path)
-    assert crr.scan(unit)["status"] == "READY"
+    assert crr.scan(unit)["status"] == "START_READY"
     path = unit / "migration-spec.json"
     spec = json.loads(path.read_text(encoding="utf-8"))
     if change == "missing-sources":
@@ -2209,7 +2281,7 @@ def test_package_evidence_consumes_only_walked_paths_and_ignores_external_overri
     package = _packaged_unit(tmp_path)
     outside = tmp_path / "external-evidence"
     outside.mkdir()
-    walked = {}
+    walked = []
     renders = []
     discoveries = []
     original_walk = package_filesystem.walk_package
@@ -2218,7 +2290,7 @@ def test_package_evidence_consumes_only_walked_paths_and_ignores_external_overri
 
     def walk(root: Path):
         files, findings, empty = original_walk(root)
-        walked.update(files)
+        walked.extend(files.values())
         return files, findings, empty
 
     def build(cls, **kwargs):
@@ -2235,11 +2307,11 @@ def test_package_evidence_consumes_only_walked_paths_and_ignores_external_overri
 
     report = crr.scan(package, reference_dir=outside, oracle_dir=outside)
 
-    assert report["status"] == "READY"
+    assert report["status"] == "START_READY"
     assert report["pages_ready"] == report["pages_expected"] == 1
     assert discoveries == [], "package evidence must not be rediscovered or overridden"
     assert len(renders) == 1
-    assert any(renders[0] is path for path in walked.values()), "the renderer must receive the walk's own Path"
+    assert any(renders[0] is path for path in walked), "the renderer must receive the walk's own Path"
 
 
 def test_the_role_refusal_carries_stable_codes_and_no_host_path(tmp_path: Path) -> None:
@@ -2320,11 +2392,11 @@ def test_a_clean_first_target_does_not_hide_a_damaged_SECOND_one(tmp_path: Path)
         package_filesystem.STATUS_FINDINGS,
     ]
     assert [row["code"] for row in blocks[1]["findings"]] == [package_filesystem.CODE_FILE_UNDECLARED]
-    assert blocks[1]["findings"][0]["path"] == "stray.txt"
+    assert "path" not in blocks[1]["findings"][0]
 
 
 def test_two_damaged_targets_each_keep_their_OWN_codes_and_relative_evidence(tmp_path: Path) -> None:
-    """Two blocks, two reasons, two package-relative paths - not one overwriting the other.
+    """Two blocks and two reasons remain distinct without publishing package-relative names.
 
     The damage differs on purpose: an extra file and a changed byte produce different codes, so a
     merge that kept one block twice, or kept the first twice, is distinguishable from one that kept
@@ -2340,9 +2412,9 @@ def test_two_damaged_targets_each_keep_their_OWN_codes_and_relative_evidence(tmp
     assert [block["ordinal"] for block in blocks] == [0, 1]
     assert [row["code"] for row in blocks[0]["findings"]] == [package_filesystem.CODE_FILE_UNDECLARED]
     assert [row["code"] for row in blocks[1]["findings"]] == [package_filesystem.CODE_DIGEST_MISMATCH]
-    assert blocks[0]["findings"][0]["path"] == "stray.txt"
-    assert blocks[1]["findings"][0]["path"] == "report.json"
-    assert all(block["unit"] == "Minimal" for block in blocks)
+    assert "path" not in blocks[0]["findings"][0]
+    assert "path" not in blocks[1]["findings"][0]
+    assert "Minimal" not in json.dumps(blocks)
 
 
 def test_an_ORDINARY_target_contributes_no_integrity_block(tmp_path: Path) -> None:
@@ -2386,7 +2458,8 @@ def test_the_integrity_blocks_carry_no_target_path_in_either_shape(tmp_path: Pat
     for rendered in (json.dumps(single["package_integrity"]), json.dumps(merged["package_integrity"])):
         assert "customer-secret-server" not in rendered
         assert str(tmp_path) not in rendered
-        assert "stray.txt" in rendered
+        assert "stray.txt" not in rendered
+        assert "package_file_undeclared" in rendered
 
 
 def test_the_merged_integrity_evidence_is_deterministic(tmp_path: Path) -> None:
@@ -2443,6 +2516,13 @@ def test_redacted_package_source_matches_the_historical_explicit_page_denominato
     seal_package(package, "Minimal")
     parsed: list[Path] = []
     original = crr.source_objects
+    references = []
+    reference_scan = crr._scan_safe_target
+
+    def record_reference(*args, **kwargs):
+        report = reference_scan(*args, **kwargs)
+        references.append(report)
+        return report
 
     def parse(path: Path) -> list[crr.SourceObject] | None:
         parsed.append(path)
@@ -2450,24 +2530,27 @@ def test_redacted_package_source_matches_the_historical_explicit_page_denominato
 
     _forbid_legacy_source(monkeypatch)
     monkeypatch.setattr(crr, "source_objects", parse)
+    monkeypatch.setattr(crr, "_scan_safe_target", record_reference)
 
     report = crr.scan(package)
 
     assert parsed == [asset], "only the declared package-local source may reach the parser"
-    assert report["status"] == historical["status"] == "READY"
+    assert report["status"] == "START_READY"
+    assert report["units"][0]["status"] == historical["status"] == "READY"
     assert report["pages_expected"] == historical["pages_expected"] == 4
     assert report["pages_ready"] == historical["pages_ready"] == 4
-    assert {page["source_object"] for unit in report["units"] for page in unit["pages"]} == set(names)
-    assert [(page["page_id"], page["source_type"], page["source_object"]) for page in report["units"][0]["pages"]] == [
-        (page["page_id"], page["source_type"], page["source_object"]) for page in historical["units"][0]["pages"]
-    ]
-    assert report["units"][0]["source"] == "assets/Minimal.twb"
+    reference = references[0]
+    assert {page["source_object"] for unit in reference["units"] for page in unit["pages"]} == set(names)
+    assert [
+        (page["page_id"], page["source_type"], page["source_object"]) for page in reference["units"][0]["pages"]
+    ] == [(page["page_id"], page["source_type"], page["source_object"]) for page in historical["units"][0]["pages"]]
+    assert report["units"][0]["source"] is None
     assert report["package_source"] == [
         {
             "ordinal": 0,
-            "unit": "Minimal",
+            "unit": "package-0",
             "state": "resolved",
-            "path": "assets/Minimal.twb",
+            "path": None,
             "kind": "workbook",
             "sha256": digest,
             "codes": [],
@@ -2504,7 +2587,7 @@ def test_package_projection_precedes_every_source_report_and_reference_reader(
 
     assert order[:4] == ["boundary", "s1", "s2", "source"], order
     assert set(order[4:]) == {"evidence", "engine-report", "reports", "handover", "parse"}
-    assert report["status"] == "READY"
+    assert report["status"] == "START_READY"
 
 
 @pytest.mark.parametrize(
@@ -2618,8 +2701,9 @@ def test_package_source_override_refuses_before_is_file_or_any_legacy_helper(
 
 
 @pytest.mark.parametrize("explicit", [False, True], ids=["ancestor-source", "explicit-source"])
+@pytest.mark.parametrize("quiet", [False, True])
 def test_ordinary_source_and_ancestor_compatibility_never_enters_the_projector(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], explicit: bool, quiet: bool
 ) -> None:
     root = tmp_path / "run" / "ordinary"
     root.mkdir(parents=True)
@@ -2627,7 +2711,6 @@ def test_ordinary_source_and_ancestor_compatibility_never_enters_the_projector(
     asset = root.parent / "assets" / "Legacy.twb"
     write_handover(root, "Legacy", source_id="historical/run/assets/Legacy.twb")
     write_oracle(root.parent, [{"view_name": "Overview", "view_type": "worksheet", "workbook_luid": UNIT_LUID}])
-    output = tmp_path / "ordinary.json"
 
     def forbidden(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("ordinary source compatibility entered the package authorities")
@@ -2635,12 +2718,13 @@ def test_ordinary_source_and_ancestor_compatibility_never_enters_the_projector(
     monkeypatch.setattr(crr, "resolve_verified_package_source", forbidden)
     monkeypatch.setattr(crr, "verify_package", forbidden)
     monkeypatch.setattr(crr, "verify_phase1_role_identity", forbidden)
-    args = [str(root), "--json", str(output), "--quiet"]
+    args = [str(root), "--json", "-", *(["--quiet"] if quiet else [])]
     if explicit:
         args += ["--source", str(asset)]
 
+    capsys.readouterr()
     code = crr.main(args)
-    report = json.loads(output.read_text(encoding="utf-8"))
+    report = json.loads(capsys.readouterr().out)
 
     assert code == 0
     assert report["pages_expected"] == report["pages_ready"] == 1
@@ -2677,15 +2761,16 @@ def test_datasource_source_resolves_before_reference_not_applicable(
 
     report = crr.scan(package)
 
-    assert report["status"] == "NOT_APPLICABLE"
+    assert report["status"] == "START_READY"
     assert report["units_not_applicable"] == 1
     assert report["pages_expected"] == 0
-    assert report["units"][0]["source"] == f"assets/local-source{extension}"
+    assert report["units"][0]["source"] is None
+    assert projected[0].relative_path.as_posix() == f"assets/local-source{extension}"
     assert report["package_source"][0] == {
         "ordinal": 0,
-        "unit": DS_UNIT,
+        "unit": "package-0",
         "state": "resolved",
-        "path": f"assets/local-source{extension}",
+        "path": None,
         "kind": "datasource",
         "sha256": digest,
         "codes": [],
@@ -2734,29 +2819,170 @@ def test_provider_consumer_command_returns_two_own_local_sources(
     _forbid_legacy_source(monkeypatch)
     monkeypatch.setattr(crr, "source_objects", parse_source)
     monkeypatch.setattr(crr, "verify_phase1_role_identity", cohort)
-    output = tmp_path / "pair.json"
-
-    code = crr.main([*(str(path) for path in targets), "--json", str(output)])
-    report = json.loads(output.read_text(encoding="utf-8"))
+    capsys.readouterr()
+    code = crr.main([*(str(path) for path in targets), "--json", "-"])
     printed = capsys.readouterr().out
-    sources = {row["unit"]: row for row in report["package_source"]}
+    report = json.loads(printed)
+    sources = {targets[row["ordinal"]].name: row for row in report["package_source"]}
 
     assert (sources[DS_UNIT]["path"], sources[DS_UNIT]["kind"]) == (
-        f"assets/{DS_LUID}_{DS_UNIT}.tdsx",
+        None,
         "datasource",
     )
     assert (sources[WB_UNIT]["path"], sources[WB_UNIT]["kind"]) == (
-        f"assets/{WB_LUID}_{WB_UNIT}.twb",
+        None,
         "workbook",
     ), "the consumer must return its own workbook, not its provider's datasource"
     assert parsed == [asset], "only the consumer workbook supplies Tableau page expectations"
     assert code == 0
+    assert report["status"] == "START_READY"
+    assert report["identities_redacted"] is True
+    assert len({row["sha256"] for row in sources.values()}) == 2
     assert report["units_not_applicable"] == report["units_ready"] == 1
     assert report["pages_expected"] == report["pages_ready"] == 1
     assert [row["ordinal"] for row in report["package_source"]] == [0, 1]
     for path in (asset, provider / "assets" / f"{DS_LUID}_{DS_UNIT}.tdsx"):
         assert str(path) not in printed
         assert str(path).replace("\\", "\\\\") not in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing-target",
+        "duplicate-target",
+        "untyped-role",
+        "missing-verified",
+        "foreign-root",
+        "foreign-identity",
+        "unknown-verdict",
+        "blocked-target",
+        "unknown-topology",
+        "wrong-target-kind",
+        "owned-with-dependency",
+        "datasource-with-dependency",
+        "consumer-without-dependency",
+        "untyped-dependency",
+        "list-dependencies",
+        "ambiguous",
+        "mismatch",
+        "missing",
+        "not-applicable",
+        "bool-ordinal",
+        "negative-ordinal",
+        "out-of-range",
+        "self",
+        "string-ordinal",
+        "float-ordinal",
+        "wrong-provider-kind",
+        "wrong-provider-topology",
+        "blocked-provider",
+        "provider-with-dependency",
+        "duplicate-distinct-providers",
+    ],
+)
+def test_binding_roots_refuse_malformed_or_inconsistent_ordinal_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    provider, consumer = _shared_source_pair(tmp_path / "packages")
+    cohort = crr._precheck_cohort([provider, consumer])[1].cohort
+    assert all(role.is_start_ready for role in cohort)
+    target = consumer
+    original = cohort[1]
+    dependency = original.dependencies[0]
+    assert dependency.state == package_role_identity.STATE_RESOLVED and dependency.provider_ordinal == 0
+    before = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for root in (provider, consumer)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    if fault == "missing-target":
+        target = tmp_path / "foreign-package"
+    elif fault == "duplicate-target":
+        cohort = (*cohort, original)
+    elif fault == "untyped-role":
+        cohort = (cohort[0], SimpleNamespace(**vars(original)))
+    elif fault == "missing-verified":
+        cohort = (cohort[0], replace(original, verified=None))
+    elif fault in ("foreign-root", "foreign-identity"):
+        changes = {"root": tmp_path} if fault == "foreign-root" else {"root_identity": str(tmp_path)}
+        cohort = (cohort[0], replace(original, verified=replace(original.verified, **changes)))
+    elif fault in ("unknown-verdict", "blocked-target"):
+        cohort = (cohort[0], replace(original, verdict="future" if fault == "unknown-verdict" else "BLOCKED"))
+    elif fault in ("unknown-topology", "owned-with-dependency"):
+        cohort = (cohort[0], replace(original, topology="future" if fault == "unknown-topology" else "owned_model"))
+    elif fault == "wrong-target-kind":
+        cohort = (cohort[0], replace(original, kind="datasource"))
+    elif fault == "datasource-with-dependency":
+        target = provider
+        cohort = (replace(cohort[0], dependencies=(dependency,)), cohort[1])
+    elif fault in ("consumer-without-dependency", "untyped-dependency", "list-dependencies"):
+        rows = {
+            "consumer-without-dependency": (),
+            "untyped-dependency": (SimpleNamespace(**vars(dependency)),),
+            "list-dependencies": [dependency],
+        }[fault]
+        cohort = (cohort[0], replace(original, dependencies=rows))
+    elif fault in ("ambiguous", "mismatch", "missing", "not-applicable"):
+        state = "not_applicable" if fault == "not-applicable" else fault
+        cohort = (cohort[0], replace(original, dependencies=(replace(dependency, state=state),)))
+    elif fault in ("bool-ordinal", "negative-ordinal", "out-of-range", "self", "string-ordinal", "float-ordinal"):
+        index = {
+            "bool-ordinal": False,
+            "negative-ordinal": -1,
+            "out-of-range": len(cohort),
+            "self": 1,
+            "string-ordinal": "0",
+            "float-ordinal": 0.0,
+        }[fault]
+        cohort = (cohort[0], replace(original, dependencies=(replace(dependency, provider_ordinal=index),)))
+    elif fault in ("wrong-provider-kind", "wrong-provider-topology", "blocked-provider", "provider-with-dependency"):
+        changes = {
+            "wrong-provider-kind": {"kind": "workbook"},
+            "wrong-provider-topology": {"topology": "standalone_datasource"},
+            "blocked-provider": {"verdict": "BLOCKED"},
+            "provider-with-dependency": {"dependencies": (dependency,)},
+        }[fault]
+        cohort = (replace(cohort[0], **changes), original)
+    else:
+        other = datasource_package(tmp_path / "other" / DS_UNIT, luid="22222222-3333-4444-5555-666666666666")
+        current = crr._precheck_cohort([provider, consumer, other])[1].cohort
+        assert all(role.is_start_ready for role in current)
+        cohort = (
+            current[0],
+            replace(current[1], dependencies=(dependency, replace(dependency, provider_ordinal=2))),
+            replace(current[2], topology="published_provider"),
+        )
+        before.update(
+            {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in other.rglob("*") if path.is_file()}
+        )
+    with pytest.raises(ValueError, match="^package_root_binding_invalid$"):
+        crr._binding_roots(target, cohort)
+    _forbid_after(monkeypatch, "_scan_safe_target", "_inspect_package")
+    report = crr._reference_then_binding(
+        target, original, crr.resolve_verified_package_source(original.source_handoff()), cohort, {}, False
+    )
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert report["package_readiness"] == [
+        {
+            "ordinal": 0,
+            "status": "CANNOT_ESTABLISH",
+            "failed_stage": "binding",
+            "codes": ["package_root_binding_invalid"],
+        }
+    ]
+    assert before == {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in before}
+
+
+def test_binding_roots_allow_repeated_resolved_rows_only_for_the_same_provider(tmp_path: Path) -> None:
+    provider, consumer = _shared_source_pair(tmp_path / "packages")
+    cohort = crr._precheck_cohort([consumer, provider])[0].cohort
+    original = cohort[0]
+    assert original.dependencies[0].provider_ordinal == 1
+    repeated = (replace(original, dependencies=original.dependencies * 2), cohort[1])
+    assert crr._binding_roots(consumer, repeated) == (provider, consumer)
+    assert crr._binding_roots(provider, cohort) == (provider,)
 
 
 def test_ambiguous_provider_stops_consumer_before_source_or_evidence(
@@ -2819,15 +3045,1067 @@ def test_unparseable_package_source_never_prints_its_absolute_path(
     provenance.write_text(json.dumps(payload), encoding="utf-8")
     seal_package(package, "Minimal")
     _forbid_legacy_source(monkeypatch)
-    output = tmp_path / "parse-failure.json"
-
-    code = crr.main([str(package), "--json", str(output)])
-    report = json.loads(output.read_text(encoding="utf-8"))
+    capsys.readouterr()
+    code = crr.main([str(package), "--json", "-"])
     printed = capsys.readouterr().out
+    report = json.loads(printed)
 
     assert code == 3
     assert report["package_source"][0]["state"] == "resolved", "parsing happens after source selection"
-    assert report["units"][0]["source"] == "assets/Minimal.twb"
-    assert "source workbook could not be parsed: assets/Minimal.twb" in printed
+    assert report["units"][0]["source"] is None
+    assert report["package_readiness"][0]["failed_stage"] == "reference"
+    assert "reference_cannot_establish" in printed
     assert str(asset) not in printed
     assert str(asset).replace("\\", "\\\\") not in json.dumps(report)
+
+
+def _reseal_start_fixture(root: Path) -> None:
+    seal(root, **json.loads((root / bundle_corpus.PACKAGE_MARKER).read_bytes()))
+
+
+def _blind_reference_fixture(root: Path) -> None:
+    """Keep valid same-workbook evidence, but remove coverage of this page only."""
+    path = root / "_oracle" / "oracle-manifest.json"
+    payload = json.loads(path.read_bytes())
+    for view in payload["views"]:
+        view["view_name"] = "Uncaptured object"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _reseal_start_fixture(root)
+    assert package_role_identity.verify_phase1_role_identity((root,))[0].is_start_ready
+
+
+def _forbid_after(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("a refused START_READY stage invoked prohibited later work")
+
+    for name in names:
+        monkeypatch.setattr(crr, name, forbidden)
+
+
+@pytest.mark.parametrize(
+    "damage,code",
+    [
+        ("changed", "package_file_digest_mismatch"),
+        ("deleted", "package_file_missing"),
+        ("extra", "package_file_undeclared"),
+        ("duplicate-json", "package_manifest_duplicate_key"),
+    ],
+)
+def test_start_ready_s1_refusal_precedes_all_later_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str, code: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    assert crr.scan(root)["status"] == "START_READY"
+    path = root / "data-access.json"
+    if damage == "changed":
+        path.write_bytes(path.read_bytes() + b"\n")
+    elif damage == "deleted":
+        path.unlink()
+    elif damage == "extra":
+        (root / "unexpected").write_bytes(b"extra")
+    else:
+        marker = root / bundle_corpus.PACKAGE_MARKER
+        marker.write_bytes(marker.read_bytes().replace(b'"contents":', b'"contents": {}, "contents":', 1))
+    _forbid_after(
+        monkeypatch,
+        "verify_phase1_role_identity",
+        "resolve_verified_package_source",
+        "_scan_safe_target",
+        "_inspect_package",
+    )
+    report = crr.scan(root)
+    assert report["package_readiness"][0] == {
+        "ordinal": 0,
+        "status": "CANNOT_ESTABLISH",
+        "failed_stage": "integrity",
+        "codes": [code],
+    }
+    assert report["package_data_access"] == report["package_binding"] == []
+
+
+@pytest.mark.parametrize(
+    "damage,code",
+    [
+        ("missing-role", "role_declaration_absent"),
+        ("luid", "server_luid_contradiction"),
+        ("duplicate-model", "role_ambiguous"),
+    ],
+)
+def test_start_ready_role_refusal_is_not_a_later_data_or_reference_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str, code: str
+) -> None:
+    root = workbook_package(tmp_path / "package") if damage == "luid" else _packaged_unit(tmp_path)
+    marker = root / bundle_corpus.PACKAGE_MARKER
+    manifest = json.loads(marker.read_bytes())
+    if damage == "missing-role":
+        manifest["artifacts"]["asset"] = None
+        marker.write_text(json.dumps(manifest), encoding="utf-8")
+    elif damage == "luid":
+        path = root / "source-provenance.json"
+        payload = json.loads(path.read_bytes())
+        payload["inputs"][0]["origin"]["workbook_luid"] = OTHER_LUID
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        _reseal_start_fixture(root)
+    else:
+        shutil.copytree(root / "fabric" / "Minimal.SemanticModel", root / "fabric" / "Other.SemanticModel")
+        _reseal_start_fixture(root)
+    assert package_role_identity.verify_s1(root).integrity.is_clean
+    _forbid_after(
+        monkeypatch, "resolve_verified_package_source", "_read_package_data", "_scan_safe_target", "_inspect_package"
+    )
+    report = crr.scan(root)
+    assert report["status"] == "FINDINGS"
+    assert report["package_readiness"][0]["failed_stage"] == "role_identity"
+    assert code in report["package_readiness"][0]["codes"]
+
+
+@pytest.mark.parametrize(
+    "damage,stage,code",
+    [
+        ("absent", "role_identity", "role_declaration_not_a_verified_file"),
+        ("legacy", "brief", "brief_numeric_obligation_unknown"),
+        ("plain", "brief", "brief_numeric_obligation_unknown"),
+        ("malformed", "role_identity", "brief_policy_invalid"),
+        ("foreign", "role_identity", "brief_unit_mismatch"),
+        ("scope", "role_identity", "brief_scope_mismatch"),
+        ("stale", "integrity", "package_file_digest_mismatch"),
+    ],
+)
+def test_start_ready_requires_current_package_bound_v2_before_source_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str, stage: str, code: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    path = root / "migration-brief.md"
+    text = path.read_text(encoding="utf-8")
+    if damage == "absent":
+        path.unlink()
+    elif damage == "legacy":
+        path.write_text(text.replace("/v2", "/v1").replace('numeric_obligation = "required"\n', ""), encoding="utf-8")
+    elif damage == "plain":
+        path.write_text("Migrate this unit.", encoding="utf-8")
+    elif damage == "malformed":
+        path.write_text(
+            text.replace('numeric_obligation = "required"', 'numeric_obligation = "future"'), encoding="utf-8"
+        )
+    elif damage == "foreign":
+        path.write_text(text.replace('unit = "Minimal"', 'unit = "Other"'), encoding="utf-8")
+    elif damage == "scope":
+        path.write_text(text.replace('"model_and_report"', '"model_only"'), encoding="utf-8")
+    else:
+        path.write_bytes(path.read_bytes() + b"\n")
+    if damage != "stale":
+        _reseal_start_fixture(root)
+    _forbid_after(
+        monkeypatch, "resolve_verified_package_source", "_read_package_data", "_scan_safe_target", "_inspect_package"
+    )
+    report = crr.scan(root)
+    assert report["status"] != "START_READY"
+    assert report["package_readiness"][0]["failed_stage"] == stage
+    assert code in report["package_readiness"][0]["codes"]
+
+
+@pytest.mark.parametrize(
+    "raw,reason",
+    [
+        (b"\xff", "unreadable"),
+        (b"{", "malformed-json"),
+        (b'{"schema":1,"schema":2}', "duplicate-key"),
+        (json.dumps({**LOCAL_PROJECTION, "unexpected": "private-value"}).encode(), "unknown-field"),
+        (json.dumps({**LOCAL_PROJECTION, "state": "future"}).encode(), "unknown-value"),
+    ],
+)
+def test_start_ready_strict_held_projection_refuses_before_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: bytes, reason: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    (root / "data-access.json").write_bytes(raw)
+    _reseal_start_fixture(root)
+    assert package_role_identity.verify_phase1_role_identity((root,))[0].is_start_ready
+    _forbid_after(monkeypatch, "_scan_safe_target", "_inspect_package")
+    report = crr.scan(root)
+    row = report["package_data_access"][0]
+    assert (report["status"], row["failed_stage"], row["codes"], row["reason"]) == (
+        "CANNOT_ESTABLISH",
+        "data_access",
+        ["projection-invalid"],
+        reason,
+    )
+    assert report["pages_expected"] == 0
+
+
+@pytest.mark.parametrize(
+    "state,code,exit_code", [("blocked", "unknown-target", 1), ("cannot_establish", "source-key-set-changed", 3)]
+)
+def test_start_ready_consumes_canonical_refusal_without_repair_or_local_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+    code: str,
+    exit_code: int,
+) -> None:
+    root = _packaged_unit(tmp_path)
+    refused = crr.data_access.parse_data_access(
+        json.dumps(
+            {
+                **LOCAL_PROJECTION,
+                "state": state,
+                "codes": [code],
+                "validation": "not_established",
+                "effective_scope": None,
+                "max_phase2_claim": "none",
+            }
+        )
+    )
+    calls = []
+
+    def reject(stored, facts, **kwargs):
+        assert stored.state == "local_import_ready" and facts.all_flat
+        assert kwargs["requested_scope"] == "model_and_report"
+        calls.append(True)
+        return refused
+
+    monkeypatch.setattr(crr.data_access, "reconcile_package_data_access", reject)
+    _forbid_after(monkeypatch, "_scan_safe_target", "_inspect_package")
+    capsys.readouterr()
+    assert crr.main([str(root), "--json", "-", "--quiet"]) == exit_code
+    report = json.loads(capsys.readouterr().out)
+    assert calls == [True]
+    row = report["package_data_access"][0]
+    assert row["stored"] == LOCAL_PROJECTION
+    assert row["assessment"] == refused.to_json()
+    assert row["codes"] == [code] and row["failed_stage"] == "data_access"
+
+
+@pytest.mark.parametrize("change", ["copy", "policy", "graft", "projection", "spec"])
+def test_start_ready_rejects_copied_or_changed_issued_data_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    checked = crr._precheck(root)
+    if change in ("copy", "policy", "graft"):
+        changes = {}
+        if change == "policy":
+            changes["brief_policy"] = package_role_identity.BriefPolicy(
+                "model_and_report", "model_only_unvalidated", "required"
+            )
+        if change == "graft":
+            changes["verified"] = package_role_identity.verify_s1(root)
+        checked = replace(checked, roles=replace(checked.roles, **changes))
+    else:
+        path = root / ("data-access.json" if change == "projection" else "migration-spec.json")
+        path.write_bytes(path.read_bytes() + b"\n")
+        _reseal_start_fixture(root)
+    _forbid_after(monkeypatch, "_scan_safe_target", "_inspect_package")
+    report = crr.scan(root, prechecked=checked)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert report["package_readiness"][0]["failed_stage"] == "data_access"
+    assert report["package_readiness"][0]["codes"] in (
+        ["package_member_not_verified"],
+        ["package_root_binding_invalid"],
+        ["package_file_digest_mismatch"],
+    )
+
+
+@pytest.mark.parametrize(
+    "arm", ["boundary", "integrity", "roles", "source", "data", "reference", "reference-unit", "binding"]
+)
+@pytest.mark.parametrize("malformed", [False, True], ids=["unknown", "missing-shape"])
+def test_start_ready_unknown_or_malformed_conjunction_inputs_never_fall_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: str, malformed: bool
+) -> None:
+    root = _packaged_unit(tmp_path)
+    initial = crr._precheck(root)
+    source = crr.resolve_verified_package_source(initial.roles.source_handoff())
+    reference = crr._scan_safe_target(
+        root,
+        explicit_source=None,
+        reference_dir=None,
+        oracle_dir=None,
+        require_validation_grade=False,
+        package_roles=initial.roles,
+        package_source=source,
+    )
+    stage = {"roles": "root_binding", "data": "data_access", "reference-unit": "reference"}.get(arm, arm)
+    if arm == "boundary":
+        value = None if malformed else replace(initial.classification, kind="future")
+        monkeypatch.setattr(crr, "classify_target", lambda _root: value)
+    elif arm == "integrity":
+        value = None if malformed else package_filesystem.PackageFilesystemResult("future")
+        monkeypatch.setattr(crr, "verify_package", lambda *_args: value)
+    elif arm == "roles":
+        value = None if malformed else (replace(initial.roles, verdict="future"),)
+        if not malformed:
+            stage = "role_identity"
+        monkeypatch.setattr(crr, "verify_phase1_role_identity", lambda *_args, **_kwargs: value)
+    elif arm == "source":
+        value = None if malformed else replace(source, state="future")
+        monkeypatch.setattr(crr, "resolve_verified_package_source", lambda _value: value)
+    elif arm == "data":
+        value = (
+            None
+            if malformed
+            else crr.data_access.parse_data_access(json.dumps(LOCAL_PROJECTION))._replace(state="future")
+        )
+        monkeypatch.setattr(crr.data_access, "reconcile_package_data_access", lambda *_args, **_kwargs: value)
+    elif arm.startswith("reference"):
+        if arm == "reference-unit":
+            reference["units"][0]["status"] = None if malformed else "future"
+            value = reference
+        else:
+            value = None if malformed else {**reference, "status": "future"}
+        monkeypatch.setattr(crr, "_scan_safe_target", lambda *_args, **_kwargs: value)
+    else:
+        value = None if malformed else crr.binding.PackageBindingResult("unchanged", 0, ("binding_future",))
+        monkeypatch.setattr(crr.binding, "bind_package", lambda *_args, **_kwargs: value)
+    report = crr.scan(root)
+    assert report["status"] == "CANNOT_ESTABLISH", arm
+    assert report["package_readiness"][0]["failed_stage"] == stage, report["package_readiness"]
+
+
+@pytest.mark.parametrize("change", ["reseal", "directory", "foreign-inspection"])
+def test_start_ready_fresh_binding_must_match_earlier_bytes_and_native_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    root = _packaged_unit(tmp_path / "original")
+    original = crr._scan_safe_target
+    hits = []
+    if change == "foreign-inspection":
+        other = _packaged_unit(tmp_path / "other")
+        foreign = crr.binding.bind_package(str(other), inspect=True)
+        assert foreign.exit_code == 0 and foreign.inspection is not None
+        monkeypatch.setattr(crr.binding, "bind_package", lambda *_args, **_kwargs: foreign)
+    else:
+
+        def changed_after_reference(*args, **kwargs):
+            report = original(*args, **kwargs)
+            assert report["status"] == "READY"
+            if change == "reseal":
+                (root / "README.md").write_bytes(b"changed after reference")
+                _reseal_start_fixture(root)
+            else:
+                replacement = root.with_name("replacement")
+                shutil.copytree(root, replacement)
+                old_id = root.stat().st_ino
+                root.rename(root.with_name("previous"))
+                replacement.rename(root)
+                assert root.stat().st_ino != old_id
+            assert package_role_identity.verify_s1(root).integrity.is_clean
+            hits.append(True)
+            return report
+
+        monkeypatch.setattr(crr, "_scan_safe_target", changed_after_reference)
+    report = crr.scan(root)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert report["package_readiness"][0]["failed_stage"] == "binding"
+    assert report["package_readiness"][0]["codes"] == [
+        "package_root_binding_invalid" if change == "foreign-inspection" else "package_changed_since_integrity_check"
+    ]
+    assert report["package_binding"][0]["exit_code"] == 0, "a fresh successful inspection alone is insufficient"
+    assert hits == ([] if change == "foreign-inspection" else [True])
+
+
+@pytest.mark.parametrize(
+    "state,code,expected",
+    [
+        ("blocked", "physical_marker_blocked", "FINDINGS"),
+        ("cannot_establish", "physical_acl_unassessable", "CANNOT_ESTABLISH"),
+    ],
+)
+def test_start_ready_physical_stop_is_owned_by_fresh_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, code: str, expected: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    reached = []
+
+    def barrier(_root):
+        reached.append(True)
+        return state, code
+
+    monkeypatch.setattr(crr.data_access, "inspect_physical_barrier", barrier)
+    report = crr.scan(root)
+    assert reached
+    assert report["status"] == expected
+    assert report["package_readiness"][0]["failed_stage"] == "binding"
+    assert report["package_binding"][0]["codes"] == [code]
+    assert report["pages_ready"] == report["pages_expected"] == 1
+
+
+def test_start_ready_returned_interrupt_keeps_original_binding_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _packaged_unit(tmp_path)
+    value = crr.binding.PackageBindingResult("unchanged", 130, ("binding_interrupted",))
+    monkeypatch.setattr(crr.binding, "bind_package", lambda *_args, **_kwargs: value)
+    report = crr.scan(root)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert report["package_binding"][0]["exit_code"] == 130
+    assert report["package_readiness"][0]["codes"] == ["binding_interrupted"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_start_ready_aggregate_keeps_original_denominator_and_unknown_count(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], reverse: bool
+) -> None:
+    good = _packaged_unit(tmp_path / "good")
+    damaged = _packaged_unit(tmp_path / "damaged")
+    (damaged / "data-access.json").unlink()
+    blind = _packaged_unit(tmp_path / "blind")
+    _blind_reference_fixture(blind)
+    roots = [damaged, good, blind]
+    if reverse:
+        roots.reverse()
+    capsys.readouterr()
+    assert crr.main([*map(str, roots), "--json", "-", "--quiet"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "FINDINGS"
+    assert report["packages_scanned"] == len(report["package_readiness"]) == 3
+    assert report["packages_cannot_establish"] == 1
+    assert report["packages_start_ready"] == 1
+    stages = {roots[row["ordinal"]]: row["failed_stage"] for row in report["package_readiness"]}
+    assert stages == {good: None, damaged: "integrity", blind: "reference"}
+    assert report["units_cannot_establish"] == 1
+
+
+def test_start_ready_relative_paths_and_mixed_ordinary_compatibility(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _packaged_unit(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    capsys.readouterr()
+    assert crr.main([str(root.relative_to(tmp_path)), "--json", "-", "--quiet"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "START_READY"
+    ordinary = tmp_path / "ordinary"
+    shutil.copytree(root, ordinary)
+    (ordinary / bundle_corpus.PACKAGE_MARKER).unlink()
+    assert crr.main([str(ordinary), str(root), "--json", "-", "--quiet"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "READY"
+    assert report["packages_start_ready"] == 1
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+@pytest.mark.parametrize("status,exit_code", [("START_READY", 0), ("FINDINGS", 1), ("CANNOT_ESTABLISH", 3)])
+def test_explicit_json_stdout_is_one_public_document_with_the_true_exit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], quiet: bool, status: str, exit_code: int
+) -> None:
+    root = _packaged_unit(tmp_path)
+    if status == "FINDINGS":
+        _blind_reference_fixture(root)
+    elif status == "CANNOT_ESTABLISH":
+        (root / "data-access.json").unlink()
+    before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*") if path.is_file()}
+    capsys.readouterr()
+    assert crr.main([str(root), "--json", "-", *(["--quiet"] if quiet else [])]) == exit_code
+    captured = capsys.readouterr()
+    report, end = json.JSONDecoder().raw_decode(captured.out)
+    assert captured.out[end:] == "\n"
+    assert captured.err == ""
+    assert report["status"] == report["package_readiness"][0]["status"] == status
+    assert report["identities_redacted"] is True
+    assert str(tmp_path) not in captured.out
+    assert before == {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+@pytest.mark.parametrize("mode", ["ordinary", "package", "mixed"])
+def test_default_rendering_keeps_package_json_and_ordinary_mixed_human_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], quiet: bool, mode: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    ordinary = tmp_path / "ordinary"
+    shutil.copytree(root, ordinary)
+    (ordinary / bundle_corpus.PACKAGE_MARKER).unlink()
+    roots = [root] if mode == "package" else [ordinary] if mode == "ordinary" else [ordinary, root]
+    capsys.readouterr()
+    assert crr.main([*map(str, roots), *(["--quiet"] if quiet else [])]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if quiet:
+        assert captured.out == ""
+    elif mode == "package":
+        assert json.loads(captured.out)["status"] == "START_READY"
+    else:
+        heading = "REFERENCE READINESS" if mode == "ordinary" else "PHASE-1 PACKAGE READINESS"
+        assert captured.out.startswith(f"{heading}: READY")
+
+
+@pytest.mark.parametrize("mode", ["ordinary", "package", "mixed"])
+def test_json_file_values_are_fixed_usage_refusals_before_any_path_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: str
+) -> None:
+    ordinary = tmp_path / "private-ordinary"
+    package = tmp_path / "packages" / "private-package"
+    roots = [ordinary] if mode == "ordinary" else [package] if mode == "package" else [ordinary, package]
+    values = ["", ".", "..", " ", "NUL", "--quiet", "–", str(package), str(tmp_path / "private-output.json")]
+    diagnostics = []
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("file-valued --json performed downstream or filesystem work")
+
+    capsys.readouterr()
+    with monkeypatch.context() as patches:
+        patches.setattr(sys, "argv", ["check_reference_readiness.py"])
+        for name in ("_classify", "_precheck_cohort", "scan"):
+            patches.setattr(crr, name, forbidden)
+        for name in ("resolve", "stat", "lstat", "is_dir", "is_file", "exists", "open", "write_text", "write_bytes"):
+            patches.setattr(Path, name, forbidden)
+        patches.setattr(os, "replace", forbidden)
+        for value in values:
+            with pytest.raises(SystemExit) as failure:
+                crr.main([*map(str, roots), f"--json={value}", "--quiet"])
+            assert failure.value.code == 2
+            captured = capsys.readouterr()
+            assert captured.out == ""
+            diagnostics.append(captured.err)
+    assert len(set(diagnostics)) == 1
+    assert diagnostics[0].endswith(
+        "check_reference_readiness.py: error: readiness_json_file_output_removed: use --json -\n"
+    )
+    assert "private-" not in diagnostics[0] and str(tmp_path) not in diagnostics[0]
+
+
+@pytest.mark.parametrize("alias_kind", ["junction" if os.name == "nt" else "directory-symlink"])
+def test_json_file_value_external_directory_alias_is_rejected_before_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], alias_kind: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "sentinel.json"
+    original = b"external sentinel must survive\n"
+    sentinel.write_bytes(original)
+    identity = (sentinel.stat().st_dev, sentinel.stat().st_ino)
+    before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*") if path.is_file()}
+    alias = tmp_path / "private-alias"
+    if alias_kind == "junction":
+        linked = subprocess.run(
+            ["cmd.exe", "/c", "mklink", "/J", str(alias), str(external)], capture_output=True, check=False
+        )
+        assert linked.returncode == 0, "the real Windows junction control must execute"
+    else:
+        alias.symlink_to(external, target_is_directory=True)
+    try:
+        assert (alias / sentinel.name).samefile(sentinel)
+        _forbid_after(monkeypatch, "_classify", "_precheck_cohort", "scan")
+        capsys.readouterr()
+        with pytest.raises(SystemExit) as failure:
+            crr.main([str(root), "--json", str(alias / sentinel.name), "--quiet"])
+        assert failure.value.code == 2
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err.endswith("error: readiness_json_file_output_removed: use --json -\n")
+        assert str(tmp_path) not in captured.err and "private-alias" not in captured.err
+        assert sentinel.read_bytes() == (alias / sentinel.name).read_bytes() == original
+        assert identity == (sentinel.stat().st_dev, sentinel.stat().st_ino)
+        assert before == {
+            path: hashlib.sha256(path.read_bytes()).hexdigest() for path in root.rglob("*") if path.is_file()
+        }
+    finally:
+        if alias_kind == "junction":
+            alias.rmdir()
+        else:
+            alias.unlink()
+
+
+@pytest.mark.parametrize("peer", ["external", "package-member"])
+def test_json_file_value_hardlink_preserves_both_names_and_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], peer: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    sentinel = root / "data-access.json" if peer == "package-member" else tmp_path / "external-sentinel.json"
+    if peer == "external":
+        sentinel.write_bytes(b"external hardlink sentinel\n")
+    alias = tmp_path / "private-hardlink.json"
+    os.link(sentinel, alias)
+    assert alias.samefile(sentinel)
+    before = {
+        path: (path.read_bytes(), path.stat().st_dev, path.stat().st_ino, path.stat().st_nlink)
+        for path in (*[member for member in root.rglob("*") if member.is_file()], sentinel, alias)
+    }
+    _forbid_after(monkeypatch, "_classify", "_precheck_cohort", "scan")
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as failure:
+        crr.main([str(root), "--json", str(alias), "--quiet"])
+    assert failure.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.endswith("error: readiness_json_file_output_removed: use --json -\n")
+    assert str(tmp_path) not in captured.err and "private-hardlink" not in captured.err
+    assert before == {
+        path: (path.read_bytes(), path.stat().st_dev, path.stat().st_ino, path.stat().st_nlink) for path in before
+    }
+    assert alias.samefile(sentinel)
+
+
+@pytest.mark.parametrize("explicit", [False, True], ids=["package-default", "explicit-quiet"])
+def test_json_stdout_uses_one_write_and_flush_without_a_file_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit: bool
+) -> None:
+    root = _packaged_unit(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    writes, flushes = [], []
+    output = io.StringIO()
+
+    def write(document):
+        writes.append(document)
+        return output.write(document)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("stdout JSON entered a file writer")
+
+    for name in ("write_text", "write_bytes"):
+        monkeypatch.setattr(Path, name, forbidden)
+    monkeypatch.setattr(os, "replace", forbidden)
+    with redirect_stdout(SimpleNamespace(write=write, flush=lambda: flushes.append(True))):
+        assert crr.main([str(root), *(["--json", "-", "--quiet"] if explicit else [])]) == 0
+    assert writes == [output.getvalue()] and flushes == [True]
+    report, end = json.JSONDecoder().raw_decode(output.getvalue())
+    assert output.getvalue()[end:] == "\n"
+    assert report["status"] == "START_READY"
+    assert before == {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "serialization-type",
+        "serialization-value",
+        "serialization-recursion",
+        "write-oserror",
+        "broken-pipe",
+        "closed-stream",
+        "missing-stream",
+        "short-write",
+        "flush",
+    ],
+)
+def test_json_stdout_failures_have_fixed_stderr_exit_three_and_no_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], fault: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    output, writes, flushes = io.StringIO(), [], []
+    message = "private-customer-output-path"
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("failed stdout publication entered a file writer")
+
+    def serialize(_report, **_kwargs):
+        error = {
+            "serialization-type": TypeError,
+            "serialization-value": ValueError,
+            "serialization-recursion": RecursionError,
+        }[fault]
+        raise error(message)
+
+    def write(document):
+        writes.append(document)
+        if fault in ("write-oserror", "broken-pipe", "closed-stream"):
+            raise {"write-oserror": OSError, "broken-pipe": BrokenPipeError, "closed-stream": ValueError}[fault](
+                message
+            )
+        if fault == "short-write":
+            return output.write(document[:5])
+        return output.write(document)
+
+    def flush():
+        flushes.append(True)
+        if fault == "flush":
+            raise OSError(message)
+
+    for name in ("write_text", "write_bytes"):
+        monkeypatch.setattr(Path, name, forbidden)
+    monkeypatch.setattr(os, "replace", forbidden)
+    if fault.startswith("serialization-"):
+        monkeypatch.setattr(crr, "json", SimpleNamespace(dumps=serialize))
+    capsys.readouterr()
+    with redirect_stdout(None if fault == "missing-stream" else SimpleNamespace(write=write, flush=flush)):
+        assert crr.main([str(root), "--json", "-", "--quiet"]) == 3
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == "readiness_output_unwritable\n"
+    assert message not in output.getvalue()
+    assert len(writes) == (0 if fault.startswith("serialization-") or fault == "missing-stream" else 1)
+    assert len(flushes) == (1 if fault == "flush" else 0)
+    if fault == "flush":
+        assert json.loads(output.getvalue())["status"] == "START_READY", "post-write failure may leave complete stdout"
+    else:
+        assert output.getvalue() == (writes[0][:5] if fault == "short-write" else "")
+    assert before == {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+def test_json_stdout_error_diagnostic_is_best_effort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _packaged_unit(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    def unavailable(*_args, **_kwargs):
+        raise BrokenPipeError("private-stream-diagnostic")
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("an unwritable diagnostic entered a file writer")
+
+    for name in ("write_text", "write_bytes"):
+        monkeypatch.setattr(Path, name, forbidden)
+    monkeypatch.setattr(os, "replace", forbidden)
+    with monkeypatch.context() as patches:
+        stream = SimpleNamespace(write=unavailable, flush=unavailable)
+        patches.setattr(sys, "stdout", stream)
+        patches.setattr(sys, "stderr", stream)
+        assert crr.main([str(root), "--json", "-"]) == 3
+    assert before == {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("stderr_closed", [False, True], ids=["closed-stdout", "both-streams-closed"])
+def test_json_stdout_real_broken_pipe_keeps_exit_three_through_shutdown(tmp_path: Path, stderr_closed: bool) -> None:
+    root = _packaged_unit(tmp_path)
+    assert crr.scan(root)["status"] == "START_READY"
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    # Release the real CLI only after the pipe reader is closed; no scheduler race is credited as proof.
+    entry = (
+        "import runpy, sys; sys.stdin.read(1); "
+        "sys.argv = ['check_reference_readiness.py', *sys.argv[1:]]; "
+        "runpy.run_path('check_reference_readiness.py', run_name='__main__')"
+    )
+    with subprocess.Popen(
+        [sys.executable, "-c", entry, str(root), "--json", "-", "--quiet"],
+        cwd=Path(__file__).resolve().parents[1] / "scripts",
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as process:
+        process.stdout.close()
+        process.stdout = None
+        if stderr_closed:
+            process.stderr.close()
+            process.stderr = None
+        try:
+            output, diagnostic = process.communicate("\n", timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            pytest.fail("the closed-pipe CLI did not finish")
+        assert process.returncode == 3
+    assert output is None
+    assert diagnostic == (None if stderr_closed else "readiness_output_unwritable\n")
+    assert before == {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize("seam", ["scan", "serialization", "write", "flush"])
+def test_json_stdout_keyboard_interrupt_propagates_without_file_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], seam: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    output = io.StringIO()
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("interrupt handling entered a file writer")
+
+    def write(document):
+        if seam == "write":
+            output.write(document[:5])
+            raise KeyboardInterrupt
+        return output.write(document)
+
+    for name in ("write_text", "write_bytes"):
+        monkeypatch.setattr(Path, name, forbidden)
+    monkeypatch.setattr(os, "replace", forbidden)
+    if seam == "scan":
+        monkeypatch.setattr(crr, "scan", interrupt)
+    elif seam == "serialization":
+        monkeypatch.setattr(crr, "json", SimpleNamespace(dumps=interrupt))
+    capsys.readouterr()
+    with redirect_stdout(SimpleNamespace(write=write, flush=interrupt if seam == "flush" else lambda: None)):
+        with pytest.raises(KeyboardInterrupt):
+            crr.main([str(root), "--json", "-", "--quiet"])
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    if seam == "flush":
+        assert json.loads(output.getvalue())["status"] == "START_READY"
+    else:
+        assert output.getvalue() == ('{\n  "' if seam == "write" else "")
+    assert before == {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+def test_start_ready_library_verdict_is_as_private_as_the_cli(tmp_path: Path) -> None:
+    root = _packaged_unit(tmp_path / "customer-private-project")
+    report = crr.scan(root)
+    assert report["status"] == "START_READY"
+    encoded = json.dumps(report)
+    for private in (str(tmp_path), "customer-private-project", "Minimal", "Revenue", UNIT_LUID):
+        assert private not in encoded
+    assert report["identities_redacted"] is True
+    assert report["package_readiness"][0]["ordinal"] == 0
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("path", None),
+        ("relative_path", None),
+        ("relative_path", PurePosixPath("assets/other.twb")),
+        ("kind", "datasource"),
+        ("sha256", "0" * 64),
+        ("codes", ("unexpected",)),
+    ],
+)
+def test_start_ready_malformed_resolved_source_stops_before_data_or_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    root = _packaged_unit(tmp_path)
+    role = crr._precheck(root).roles
+    source = crr.resolve_verified_package_source(role.source_handoff())
+    monkeypatch.setattr(crr, "resolve_verified_package_source", lambda _value: replace(source, **{field: value}))
+    _forbid_after(monkeypatch, "_read_package_data", "_scan_safe_target", "_binding_baseline", "_inspect_package")
+    report = crr.scan(root)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert report["package_readiness"][0]["failed_stage"] == "source"
+    assert report["package_source"][0]["codes"] == ["source_handoff_invalid"]
+    assert report["package_data_access"] == report["package_binding"] == []
+
+
+@pytest.mark.parametrize("obligation", ["none", "required"])
+def test_start_ready_numeric_obligation_remains_metadata_not_a_phase2_decision(tmp_path: Path, obligation: str) -> None:
+    root = _packaged_unit(tmp_path)
+    path = root / "migration-brief.md"
+    path.write_text(path.read_text(encoding="utf-8").replace('"required"', f'"{obligation}"'), encoding="utf-8")
+    _reseal_start_fixture(root)
+    before = path.read_bytes()
+    assert crr.main([str(root), "--quiet"]) == 0
+    report = crr.scan(root)
+    assert report["status"] == "START_READY"
+    assert path.read_bytes() == before
+    assert report["package_binding"][0]["inspection"]["state"] == "NOT_APPLICABLE"
+
+
+@pytest.mark.parametrize(
+    "state,code,exit_code", [("blocked", "probe-no-credential", 1), ("cannot_establish", "audit-missing", 3)]
+)
+def test_start_ready_stored_refusals_remain_the_canonical_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+    code: str,
+    exit_code: int,
+) -> None:
+    root = _packaged_unit(tmp_path)
+    stored = {
+        **LOCAL_PROJECTION,
+        "state": state,
+        "codes": [code],
+        "validation": "not_established",
+        "effective_scope": None,
+        "max_phase2_claim": "none",
+    }
+    (root / "data-access.json").write_text(json.dumps(stored), encoding="utf-8")
+    _reseal_start_fixture(root)
+    _forbid_after(monkeypatch, "_scan_safe_target", "_inspect_package")
+    capsys.readouterr()
+    assert crr.main([str(root), "--json", "-", "--quiet"]) == exit_code
+    report = json.loads(capsys.readouterr().out)
+    assert report["package_data_access"][0]["stored"] == report["package_data_access"][0]["assessment"] == stored
+
+
+@pytest.mark.parametrize(
+    "fault,stage,code",
+    [
+        ("missing-provider", "role_identity", "provider_missing"),
+        ("wrong-model", "role_identity", "provider_binding_mismatch"),
+        ("foreign-token", "data_access", "provider-foreign"),
+        ("model-only-provider", "data_access", "provider-model-only"),
+    ],
+)
+def test_start_ready_provider_refusals_use_existing_s2_and_canonical_owners(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, stage: str, code: str
+) -> None:
+    from test_package_start_handoffs import LIVE, MODEL_ONLY_PROJECTION
+
+    provider, consumer = _shared_source_pair(tmp_path / "packages")
+    if fault == "wrong-model":
+        path = consumer / "fabric" / f"{WB_UNIT}.Report" / "definition.pbir"
+        payload = json.loads(path.read_bytes())
+        payload["datasetReference"]["byPath"]["path"] = "../Missing.SemanticModel"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        _reseal_start_fixture(consumer)
+    elif fault == "foreign-token":
+        path = consumer / "data-access.json"
+        payload = json.loads(path.read_bytes())
+        payload["provider_unit"] = "provider-ref:v1:sha256:" + "0" * 64
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        _reseal_start_fixture(consumer)
+    elif fault == "model-only-provider":
+        path = provider / "migration-spec.json"
+        payload = json.loads(path.read_bytes())
+        payload["data_sources"][0]["connection"] = LIVE
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        (provider / "data-access.json").write_text(json.dumps(MODEL_ONLY_PROJECTION), encoding="utf-8")
+        brief = provider / "migration-brief.md"
+        brief.write_text(
+            brief.read_text(encoding="utf-8").replace('"stop"', '"model_only_unvalidated"'), encoding="utf-8"
+        )
+        _reseal_start_fixture(provider)
+    checked = crr._precheck_cohort([consumer] if fault == "missing-provider" else [consumer, provider])[0]
+    _forbid_after(monkeypatch, "_scan_safe_target", "_inspect_package")
+    report = crr.scan(consumer, prechecked=checked)
+    assert report["status"] != "START_READY"
+    assert report["package_readiness"][0]["failed_stage"] == stage
+    assert code in report["package_readiness"][0]["codes"]
+
+
+def test_start_ready_competing_binding_candidate_refuses_without_cleanup(tmp_path: Path) -> None:
+    root = _packaged_unit(tmp_path)
+    competing = crr.binding.staging_dir(root.parent, root.name)
+    shutil.copytree(root, competing)
+    before = {path: path.read_bytes() for tree in (root, competing) for path in tree.rglob("*") if path.is_file()}
+    report = crr.scan(root)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert report["package_readiness"][0]["failed_stage"] == "binding"
+    assert report["package_binding"][0]["codes"] == ["binding_discovery_unassessable"]
+    assert report["package_binding"][0]["inspection"] is None
+    assert before == {
+        path: path.read_bytes() for tree in (root, competing) for path in tree.rglob("*") if path.is_file()
+    }
+
+
+@pytest.mark.parametrize(
+    "arm,stage",
+    [
+        ("classify_target", "boundary"),
+        ("verify_package", "integrity"),
+        ("verify_phase1_role_identity", "root_binding"),
+        ("resolve_verified_package_source", "source"),
+        ("_scan_safe_target", "reference"),
+        ("_inspect_package", "binding"),
+    ],
+)
+def test_start_ready_unassessable_calls_have_fixed_code_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], arm: str, stage: str
+) -> None:
+    root = _packaged_unit(tmp_path)
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("private-customer-server exception text")
+
+    monkeypatch.setattr(crr, arm, unavailable)
+    capsys.readouterr()
+    assert crr.main([str(root), "--json", "-", "--quiet"]) == 3
+    printed = capsys.readouterr().out
+    report = json.loads(printed)
+    assert report["package_readiness"][0]["failed_stage"] == stage
+    assert "private-customer-server" not in printed
+
+
+@pytest.mark.parametrize(
+    "arm",
+    [
+        "integrity",
+        "role_identity",
+        "brief",
+        "source",
+        "source-result",
+        "data_access",
+        "reference",
+        "binding",
+        "freshness",
+    ],
+)
+def test_start_ready_each_conjunction_arm_has_an_independent_bypass_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: str
+) -> None:
+    """Each real negative passes first; a one-arm bypass must fail the named assertion, not setup."""
+    from test_package_unit_gates import _binding_package, _binding_cli
+
+    root = _binding_package(tmp_path) if arm == "binding" else _packaged_unit(tmp_path)
+    if arm == "binding":
+        assert _binding_cli(root)["exit_code"] == 0
+    checked = crr._precheck(root)
+    ready = crr.scan(root)
+    assert ready["status"] == "START_READY"
+    source = crr.resolve_verified_package_source(checked.roles.source_handoff())
+    source_refused = crr.PackageSourceResult("cannot_establish", codes=("source_handoff_invalid",))
+    if arm == "integrity":
+        (root / "unexpected").write_bytes(b"not declared")
+    elif arm == "role_identity":
+        marker = root / bundle_corpus.PACKAGE_MARKER
+        payload = json.loads(marker.read_bytes())
+        payload["artifacts"]["asset"] = None
+        marker.write_text(json.dumps(payload), encoding="utf-8")
+    elif arm == "brief":
+        path = root / "migration-brief.md"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("/v2", "/v1").replace('numeric_obligation = "required"\n', ""),
+            encoding="utf-8",
+        )
+        _reseal_start_fixture(root)
+    elif arm == "source":
+        monkeypatch.setattr(crr, "resolve_verified_package_source", lambda _value: source_refused)
+    elif arm == "source-result":
+        monkeypatch.setattr(crr, "resolve_verified_package_source", lambda _value: replace(source, path=None))
+    elif arm == "data_access":
+        refused = crr.data_access.parse_data_access(
+            json.dumps(
+                {
+                    **LOCAL_PROJECTION,
+                    "state": "blocked",
+                    "validation": "not_established",
+                    "effective_scope": None,
+                    "max_phase2_claim": "none",
+                    "codes": ["unknown-target"],
+                }
+            )
+        )
+        monkeypatch.setattr(crr.data_access, "reconcile_package_data_access", lambda *_args, **_kwargs: refused)
+    elif arm == "reference":
+        _blind_reference_fixture(root)
+    elif arm == "binding":
+        assert _binding_cli(root, "--sanitize")["exit_code"] == 0
+    else:
+        reference = crr._scan_safe_target
+        revisions = []
+
+        def change_after_reference(*args, **kwargs):
+            report = reference(*args, **kwargs)
+            revisions.append(True)
+            (root / "README.md").write_text(f"revision-{len(revisions)}", encoding="utf-8")
+            _reseal_start_fixture(root)
+            return report
+
+        monkeypatch.setattr(crr, "_scan_safe_target", change_after_reference)
+    expected = {"freshness": "binding", "source-result": "source"}.get(arm, arm)
+
+    def obligation():
+        report = crr.scan(root)
+        assert report["package_readiness"][0]["failed_stage"] == expected, f"{arm} consumer arm bypassed"
+        if arm == "freshness":
+            assert report["package_readiness"][0]["codes"] == ["package_changed_since_integrity_check"]
+
+    obligation()
+    if arm in ("integrity", "role_identity"):
+        monkeypatch.setattr(crr, "_precheck", lambda *_args: checked)
+    elif arm == "brief":
+        monkeypatch.setattr(crr, "_brief_code", lambda _role: None)
+    elif arm == "source":
+        monkeypatch.setattr(crr, "resolve_verified_package_source", lambda _value: source)
+    elif arm == "source-result":
+        monkeypatch.setattr(crr, "_source_associated", lambda *_args: True)
+    elif arm == "data_access":
+
+        def bypass(role, _provider=None):
+            held = role.data_access_handoff(root)
+            stored = crr.data_access.parse_data_access(held.data_access.content.decode("utf-8"))
+            return crr._PackageData("READY", None, (), held, stored, stored)
+
+        monkeypatch.setattr(crr, "_read_package_data", bypass)
+    elif arm == "reference":
+        monkeypatch.setattr(crr, "_scan_safe_target", lambda *_args, **_kwargs: {**ready, "status": "READY"})
+    elif arm == "binding":
+        monkeypatch.setattr(crr, "_inspect_package", lambda *_args: ("READY", (), {"ordinal": 0, "inspection": None}))
+    else:
+        monkeypatch.setattr(crr, "_binding_association", lambda *_args: None)
+    with pytest.raises(AssertionError, match=f"{arm} consumer arm bypassed"):
+        obligation()

@@ -1,10 +1,10 @@
 # Reference readiness — the entry gate (issue #421)
 
-`scripts/check_reference_readiness.py` is the **reference entry** gate: is there enough visual
-evidence to start the requested agentic fidelity work on an already-emitted bundle?
+`scripts/check_reference_readiness.py` is the **entry** gate. For a package-only cohort it returns
+the final Phase-1 `START_READY` conjunction. Ordinary bundles retain their reference-only verdict.
 
 ```
-python scripts/check_reference_readiness.py <bundle> [--require-validation-grade] [--json <file>]
+python scripts/check_reference_readiness.py <bundle> [--require-validation-grade] [--json -]
 ```
 
 ## Conversion, dispatch, and fidelity boundaries
@@ -25,7 +25,7 @@ for the routes linked from `docs/INDEX.md`.
    manual image can meet the default reference bar without meeting a validation-grade request.
    For self-contained packages, this is one prerequisite of final Phase-1 `START_READY`, not a
    substitute for its package, source, data-access and binding authorities. The
-   [final package consumer is still pending](#package-data-access-producer--final-consumer-still-pending-562):
+   [final package consumer](#final-package-start_ready-562-622) now consumes those authorities:
    ordinary reference `READY` or engine-earned `NOT_APPLICABLE` is not final package `START_READY`
    or permission to dispatch that package.
 3. **Fidelity claims require comparison, not just readiness.** Claims are limited to the accepted
@@ -76,18 +76,113 @@ is precisely the failure this gate exists to prevent.
 
 | exit | status | meaning |
 |---|---|---|
-| 0 | `READY` / `NOT_APPLICABLE` | every expected page has usable, attributable evidence — or the unit is a datasource-only migration with no Tableau views at all |
-| 1 | `FINDINGS` | a page is blind, its evidence is unusable/unattributable/stale, it was dropped with no engine explanation, its grade is below the required bar, a workbook shipped no report, **or a package's required roles / identity claims do not hold** (#562 S2) |
+| 0 | `START_READY` | every supplied package passes the complete current-package conjunction below |
+| 0 | `READY` / `NOT_APPLICABLE` | ordinary reference-only behavior; never a final package dispatch verdict |
+| 1 | `FINDINGS` | an established role/identity, canonical data, reference or binding refusal |
 | 2 | — | usage error (argparse). A missing path never produces a verdict |
 | 3 | `CANNOT_ESTABLISH` | the expectation or the page mapping could not be derived, so the gate has no opinion — **do not read that as a pass** |
 
-Findings outrank cannot-establish, and both counts always print so neither hides the other.
+Findings outrank cannot-establish; every target's failed stage, codes and cannot-establish count
+survive aggregation. Neither a later success nor a reference grade warning hides an earlier failure.
+
+## Final package START_READY (#562, #622)
+
+✅ For a **nonempty, explicitly supplied package-only cohort**, the public check is read-only:
+
+```text
+original package boundary -> current S1 bytes -> S2 roles/cohort/brief/provider
+ -> exact package source -> canonical data access -> reference readiness
+ -> fresh binding inspection of those same held packages -> START_READY
+```
+
+It consumes the existing no-follow classifier, S1/S2 issued handoffs,
+`credential_gate.reconcile_package_data_access`, reference policy, and
+`package_unit.bind_package(..., inspect=True, sanitize=False)`. It does not reparse a spec, select
+a provider by name, rebind, sanitize, reseal, earn credentials, or write package bytes.
+S2's internal `START_READY`, construction `ASSEMBLED`, and binding `BOUND` are necessary inputs,
+not substitutes for this final verdict. Applicable folder binding must be current; genuine
+binding `NOT_APPLICABLE` is earned by the inspector. Custom quoted folder parameters use the same
+existing use-based selector as assembly and binding (#616).
+
+The **current issued v2 brief** must match the package's exact unit and topology. Both
+`numeric_obligation = "none"` and `"required"` are accepted Phase-1 metadata; neither value
+establishes a numeric comparison or Phase-2 completion. Valid v1 retains the older producer/S2
+policy behavior but cannot supply this final v2 contract. Missing, legacy, malformed, mismatched
+or stale policy never becomes inferred permission.
+
+After construction and the original data proof have succeeded, bind separately, then check:
+
+```powershell
+# Owned package, when local-folder binding applies:
+python scripts\set_data_folder.py --package <absolute-package>
+python scripts\check_reference_readiness.py <package>
+
+# Shared model: construct each unit with its own brief; bind provider before consumer.
+python scripts\set_data_folder.py --package <absolute-provider>
+python scripts\set_data_folder.py --package <absolute-consumer> --provider-package <absolute-provider>
+python scripts\check_reference_readiness.py <provider-package> <consumer-package>
+```
+
+Provider/consumer input order does not change selection. Exact S2 cohort ordinals, not display
+names, associate each provider with its root. Every original requested occurrence remains in the
+denominator. Other workbook consumers are never passed as binder providers. Plain relative package
+paths are expanded lexically after original classification; aliases and `..` do not earn a new root.
+Only the direct provider selected by the target's resolved, typed S2 ordinal is passed to its
+inspector. Unrelated datasources remain in the full cohort's denominator and retain their own
+findings, but cannot contaminate the selected pair or an owned model's inspection. Missing,
+ambiguous, malformed or inconsistent selections refuse; names and filesystem siblings are never
+fallbacks. S2 is also asked for the inspector's selected-provider/target cohort against the same
+held bytes: it, not the consumer, contextualizes a provider inspected without its consuming workbook.
+
+The inspector must return typed exit-0 `BOUND` or earned `NOT_APPLICABLE`. Its held roots, native
+identities, manifest/member bytes, roles, policy and mapped provider choices must still match the
+earlier observations. A missing/foreign association returns `package_root_binding_invalid`; changed
+composition returns `package_changed_since_integrity_check`. An unknown/malformed authority result
+returns `package_readiness_input_invalid`, never success. Binding exit 1 maps to findings; exit 3
+or a returned interrupt/130 maps to cannot-establish, retaining the original binding exit/codes.
+
+Package-only invocations emit **one JSON result on stdout** unless `--quiet`. Explicit `--json -`
+emits one complete serialized JSON document plus newline and flushes, **even with `--quiet`**, for
+package, ordinary and mixed invocations. Without `--json`, ordinary/mixed invocations retain human
+rendering unless quiet. `package_readiness[]` names every target's ordinal, status,
+failed stage and codes. `package_data_access[]` retains the strict stored projection and canonical
+assessment separately; `package_binding[]` retains the fresh inspection. Reference `units[]`, page
+rows, counts and grades remain subordinate evidence. Public package output redacts names/locations
+to ordinal labels (`identities_redacted: true`), never raw source values, host paths or exceptions.
+The public `scan()` library result has the same privacy projection. Private reference-policy helpers
+retain the original attribution rows for comparison; they are not shareable diagnostic output.
+Top-level target ordinals use caller order; the inspector's nested `provider_ordinals` use its
+datasource-prefix/target vector, not caller positions. Associations are checked through exact roots.
+
+**Compatibility break: file-valued `--json` is removed globally. Capture stdout instead.** Any value
+other than literal `-` is usage exit 2 with fixed `readiness_json_file_output_removed: use --json -`,
+before target classification, scanning or any output-path probe. The supplied value is never echoed;
+this gate has no file publisher in package or ordinary mode.
+
+Serialization, stdout write (including a short write), or flush failure returns exit 3 with a
+best-effort fixed `readiness_output_unwritable` diagnostic on stderr, without fallback output or a
+file write. Successfully emitted negative readiness still exits **1 for FINDINGS** or **3 for
+CANNOT_ESTABLISH**; output success does not grant readiness. Successful START_READY/ordinary success
+exits 0. KeyboardInterrupt propagates as an interrupt/130; partial stdout is possible.
+Stdout is **not atomic or durable**, and partial/captured output is not permanent dispatch authority.
+Process capture and shell redirection are the caller's operations, outside this gate's path-safety
+contract: a shell may create or truncate its destination before the checker runs.
+Ordinary-only invocations retain reference `READY`/`NOT_APPLICABLE`; mixed invocations check package
+members fully but **never** receive aggregate `START_READY`. Empty input is usage.
+
+**Ceilings are unchanged:** `BOUND` remains `UNVALIDATED`; explicit authorized model-only remains
+`unvalidated/structural_only` and cannot supply a report. Stored `data_validated` is not a new full
+model refresh. Reference readiness may remain layout/text grade. Preserve `limitations_encountered`
+and each reference provider's ceiling. No COMPLETE, fidelity PASS, sign-off, deployment, portability,
+transfer approval, anti-rollback history or permanent credential clearance is established.
+Moving/sanitizing invalidates applicable binding: sanitize before transfer, bind at the recipient,
+then rerun the final check. Existing no-follow/between-syscall race limits remain.
 
 ⚠️ **There is deliberately NO `--warn-only`.** Every sibling gate has one, and this gate had one until
 round-1 review of PR #428 measured it returning exit **0** on a bundle whose own output said
 *"CANNOT_ESTABLISH is NOT a pass"*. An entry gate that can be asked to say yes is not an entry gate,
 and a dispatch decision reading that exit code would launch an agent to build blind — the exact
-outcome this exists to prevent, delivered by a flag. Advisory consumers read `--json`, whose `status`
+outcome this exists to prevent, delivered by a flag. Advisory consumers read `--json -`, whose `status`
 always carries the true verdict.
 
 ---
@@ -543,7 +638,7 @@ and `tests/test_package_unit_gates.py`. The correction controls are in
 `tests/test_check_reference_readiness.py`, including both `[clean, blocked]` and `[blocked, clean]`
 target orders and the exact structured S2 finding.
 
-### Package data-access producer — final consumer still pending (#562)
+### Package data-access producer (#562)
 
 Every newly published package declares `artifacts.data_access = "data-access.json"` and hashes
 its final UTF-8/LF bytes in `contents.files`. Assembly writes a strict non-accepted provisional file,
@@ -557,17 +652,16 @@ Provider projection bytes are held and parsed once before S2, bound to the provi
 declared digest. Changed provider bytes/root or final provider ordinal/policy drift refuse rather
 than silently selecting a new baseline.
 
-⚠️ This is **not** the final START_READY consumer. `check_reference_readiness.py` does not yet fold
-the projection. Construction success, its internal S2 `START_READY`, and reference `READY` do not
-authorize Phase-2 dispatch or clear a credential gate. Handover, README and packaging output expose
-the actual closed data state and this pending step. `construction_status = "ASSEMBLED"` means only
+⚠️ Production is **not** the final START_READY check. Construction success, internal S2
+`START_READY`, and reference `READY` alone do not authorize Phase-2 dispatch or clear a credential
+gate. Handover, README and packaging output expose the actual closed data state.
+`construction_status = "ASSEMBLED"` means only
 that a diagnostic package directory was constructed; `has_engine_working_copy` and `self_contained`
-remain separate limitations. `dispatch_readiness.status = "NOT_EVALUATED"` is explicit until #622
-and the final #562 consumer establish the later decision.
+remain separate limitations. Stored `dispatch_readiness.status = "NOT_EVALUATED"` remains unchanged
+even after the read-only final consumer returns `START_READY`.
 
 See [credential gate](credential-gate.md#package-data-access-projection) for gate-root, provider and
-scope limits. The final consumer remains a separate PR; S1 stays byte authority, not a semantic
-interpreter of `artifacts.data_access`.
+scope limits. S1 stays byte authority, not a semantic interpreter of `artifacts.data_access`.
 
 ## Package-local source return (issue #558)
 
