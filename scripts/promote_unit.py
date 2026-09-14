@@ -7,7 +7,8 @@ purpose: ship one finished migration unit - the phase 2 -> phase 3 hop that had 
          report and model have real CONTENT, and recording what promoted what.
 usage:   python scripts/promote_unit.py --package <_runs/NNN-slug/packages/<batch>/<Unit>>
              --slug <slug> [--datasource-slug <ds-slug>] [--kind workbook|datasource]
-             [--bundle <bundle>] [--dry-run] [--force] [--json <file>] [--migrations-root <dir>]
+             [--bundle <bundle>] [--dry-run] [--force | --receipt-sha256 <H>]
+             [--json <file>] [--migrations-root <dir>]
 
 Why each guard exists (all of these are measured failures, not hypotheses)
 --------------------------------------------------------------------------
@@ -123,7 +124,7 @@ EXIT_USAGE = 64
 # check_unit.py's own documented exits, kept here so the record says what the number MEANT rather
 # than only what it was. Anything unlisted is reported verbatim as an unknown code.
 CHECK_UNIT_EXITS = {
-    0: "AUTOMATED_CHECKS_PASS",
+    0: "COMPLETE",
     1: "FINDINGS",
     2: "NOT_FULLY_CHECKED",
     4: "PAGE_PARITY_PRECONDITION_FAILED",
@@ -131,6 +132,7 @@ CHECK_UNIT_EXITS = {
 }
 
 CHECK_UNIT_TIMEOUT_SECONDS = 600
+FORCED_WARNING = "PROMOTED unchecked; Phase-2 COMPLETE was not established."
 
 # Windows reserved device names: a destination called `NUL` is a device, not a directory.
 _RESERVED_DEVICE_NAMES = frozenset(
@@ -968,13 +970,23 @@ def content_checks(shape_report: Path | None, shape_model: Path | None, where: s
     return merged
 
 
-def run_check_unit(package: Path, repo_root: Path) -> dict[str, Any]:
+def _checker_output(raw: bytes | str | None, package: Path, repo_root: Path) -> str:
+    """Keep the public disclosures while preserving the existing record's host-path privacy boundary."""
+    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else (raw or "")
+    for path, label in ((package, "<package>"), (repo_root, "<repo>")):
+        text = text.replace(str(path), label).replace(path.as_posix(), label)
+    return redact_host_paths(text).strip()
+
+
+def run_check_unit(package: Path, repo_root: Path, receipt_sha256: str | None = None) -> dict[str, Any]:
     """Run `check_unit.py` on the package and report its exit code and what that code means.
 
     A timeout is a REFUSAL, not a pass: it is recorded with `exit_code: null` and a status the
     caller treats exactly like a finding.
     """
-    command = [sys.executable, str(Path(__file__).resolve().parent / "check_unit.py"), str(package), "--quiet"]
+    command = [sys.executable, str(Path(__file__).resolve().parent / "check_unit.py"), str(package), "--scope", "all"]
+    if receipt_sha256 is not None:
+        command.extend(["--receipt-sha256", receipt_sha256])
     try:
         completed = subprocess.run(
             command,
@@ -983,13 +995,15 @@ def run_check_unit(package: Path, repo_root: Path) -> dict[str, Any]:
             capture_output=True,
             timeout=CHECK_UNIT_TIMEOUT_SECONDS,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as error:
         return {
             "ran": True,
             "exit_code": None,
             "status": "TIMEOUT",
             "timeout_seconds": CHECK_UNIT_TIMEOUT_SECONDS,
             "passed": False,
+            "stdout": _checker_output(error.stdout, package, repo_root),
+            "stderr": _checker_output(error.stderr, package, repo_root),
         }
     code = completed.returncode
     return {
@@ -997,6 +1011,8 @@ def run_check_unit(package: Path, repo_root: Path) -> dict[str, Any]:
         "exit_code": code,
         "status": CHECK_UNIT_EXITS.get(code, f"UNKNOWN_EXIT_{code}"),
         "passed": code == 0,
+        "stdout": _checker_output(completed.stdout, package, repo_root),
+        "stderr": _checker_output(completed.stderr, package, repo_root),
     }
 
 
@@ -1361,7 +1377,10 @@ def build_record(
         "kind_source": plan.shape.kind_source,
         "shape": "shared_datasource" if args.datasource_slug else f"model_per_{plan.shape.kind}",
         "check_unit": gate,
+        "supplied_receipt_sha256": args.receipt_sha256,
+        "receipt_linkage": "Observed caller input for this invocation only; never authority for a later run.",
         "forced": bool(args.force),
+        "warning": FORCED_WARNING if args.force else None,
         "copied": copied,
         **extra,
     }
@@ -1414,12 +1433,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "recorded, and it can never contradict a manifest that does declare one",
     )
     parser.add_argument("--dry-run", action="store_true", help="print the plan and file count; change nothing")
-    parser.add_argument(
+    authority = parser.add_mutually_exclusive_group()
+    authority.add_argument(
         "--force",
         action="store_true",
         help="promote even though check_unit.py failed; the override and the exit code are recorded. It "
         "overrides THAT GATE ONLY - not the content checks, and not the external-data-path refusal (#461), "
         "which has no sanitized artifact to ship",
+    )
+    authority.add_argument(
+        "--receipt-sha256",
+        help="forward this exact caller-held final-receipt SHA-256 to check_unit --scope all; no token discovery",
     )
     parser.add_argument("--json", dest="json_path", type=Path, default=None, help="write the machine-readable envelope")
     parser.add_argument(
@@ -1429,6 +1453,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="override the migrations/ root (tests and rehearsals); defaults to <repo>/migrations",
     )
     args = parser.parse_args(argv)
+    # Copy planning uses resolved paths; the public checker must still classify the original
+    # supplied boundary, not a junction's destination. Absolute spelling also preserves caller CWD.
+    args.check_target = args.package.expanduser().absolute()
     args.package = args.package.expanduser().resolve()
     args.migrations_root = (args.migrations_root or (REPO_ROOT / "migrations")).expanduser().resolve()
     if args.bundle is not None:
@@ -1611,6 +1638,8 @@ def _verify_and_record(
     envelope["record_paths"] = [_destination_display(p, plan, REPO_ROOT) for p in written]
     _emit(envelope, args)
     print(f"PROMOTE: PROMOTED {args.package.name} -> {args.slug} ({plan.file_count} files)")
+    if args.force:
+        print(FORCED_WARNING)
     for path in written:
         print(f"  record  {_destination_display(path, plan, REPO_ROOT)}")
     return EXIT_OK
@@ -1642,8 +1671,11 @@ def assess(args: argparse.Namespace, envelope: dict[str, Any]) -> tuple[PackageS
     if source.findings:
         return None, {}, _refuse(envelope, args, "REFUSED_CONTENT", source.findings, EXIT_REFUSED_CONTENT)
 
-    gate = run_check_unit(args.package, REPO_ROOT)
+    gate = run_check_unit(args.check_target, REPO_ROOT, args.receipt_sha256)
     envelope["check_unit"] = gate
+    for stream in ("stdout", "stderr"):
+        if gate.get(stream):
+            print(gate[stream], file=sys.stderr if stream == "stderr" else sys.stdout)
     if not gate["passed"] and not args.force:
         findings = [f"check_unit.py exited {gate['exit_code']} ({gate['status']}); --force overrides and is recorded"]
         return None, gate, _refuse(envelope, args, "REFUSED_BY_GATE", findings, EXIT_REFUSED_BY_GATE)

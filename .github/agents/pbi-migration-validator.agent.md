@@ -143,7 +143,10 @@ Refuse a meaningful pass without these — flag it back rather than guessing:
 
 ## Skills you use
 
-- **Numeric pass — DAX `EVALUATE`.** The default flow produces a **local PBIP that is never
+- **Numeric investigation, when commissioned — DAX `EVALUATE`.** Phase-2 COMPLETE currently
+  supports only an independently verified current v2 brief with numeric `none`; required/unknown
+  scope remains `CANNOT_ESTABLISH(NUMERIC)`, even with CSVs or reviewer labels. Never change scope to
+  obtain a pass, or revive native numeric qualification as a prerequisite. The default flow produces a **local PBIP that is never
   published**: query a model already open in Desktop with `python scripts/probe_desktop_query.py
   --pid <pid>` or an equivalent pid-scoped ADOMD query. `powerbi-modeling-mcp` **ConnectFolder is
   metadata-only** offline (`dax_query_operations Execute` refuses). If the model holds no data,
@@ -162,10 +165,13 @@ Refuse a meaningful pass without these — flag it back rather than guessing:
 Cheap structural checks first, expensive judgement last.
 
 0. **All-scope automated inventory:** `python scripts/check_unit.py <unit-or-bundle> --scope all`.
-   Route every finding; exit 0 is `AUTOMATED_CHECKS_PASS`, not fidelity sign-off. `NOT_CHECKED` is
-   not a pass: `not_checked_structural` means no artifact can exist for that scoped check, while
-   `not_checked_missing_input` means this run lacked an expected input and you may be pointed at the
-   wrong target.
+   Route every finding. This tokenless call is diagnostic non-success, never COMPLETE; layer scopes
+   never COMPLETE either. Final authority is only `python scripts/check_unit.py <package> --scope all
+   --receipt-sha256 <H>` with the exact caller-held lowercase final SHA-256, no prefix or discovery.
+   **`NOT_CHECKED` is not a pass**; `not_checked_missing_input` names obligations this run did not
+   establish, while external-model rows remain explicit deferrals, not completion.
+   The checker conjoins original W/current v2 brief, explicit import class and all evidence; it is
+   not a reviewer label. See `scripts/README.md` §Phase-2 COMPLETE for the exact disclaimer and limits.
 1. **Adjudicate the engine's own claims FIRST — two agents are blocked until this lands.**
    `handover/<workbook>.json` → `workbook.viz_fidelity[]` gives one entry per worksheet with `status`
    (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`) and a `reason`.
@@ -216,7 +222,7 @@ Cheap structural checks first, expensive judgement last.
    rationalizes away one defensible visual at a time.
 4. **Figure-by-figure pass.** *Visual side*: chart-type match (or a defensible improvement — see
    Gotchas), encodings (rows/columns/colour/size/label), title, axes, legend, formatting. *Numeric
-   side*: pick a concrete filter context, run `EVALUATE` for the bound measure(s), and compare against
+   side*, when commissioned: pick a concrete filter context, run `EVALUATE` for the bound measure(s), and compare against
    the Tableau reference or an exported ground-truth CSV. Prioritize CP/PP, ratio and
    percentage-scaled measures — format-scale and pivot bugs concentrate there.
 5. **Emit a structured discrepancy report** — a table, not prose:
@@ -248,6 +254,12 @@ property of the *invocation*, so two reviews really are two reviewers.
 - **Full-migration sign-off mode** (last): every dashboard, every visual, the complete discrepancy
   table, an explicit per-dashboard verdict. Prefer a **multi-model cross-check** here (2-3 models in
   parallel, reconciled; a discrepancy every model raises is high-confidence).
+  Phase-2 evidence must be final-v3/all-pages, with stable valid PNGs, validation-grade source-bound
+  references and every whole-page/visual judgement `pass`. Oracle/layout-text, `layout_match`,
+  subsets, missing/unverified observations and open findings remain non-success. Give the caller's
+  final H to the orchestrator for the public check and identical-token promotion; never select H
+  from history or a prior promotion. Preserve the current-snapshot disclaimer (no authenticated
+  producer, original commissioning, latest-ever or receiving-machine claim).
 
 ⚠️ **At sign-off, treat the triage classifications as CLAIMS TO VERIFY — even though an earlier
 instance of you produced them.** You need them (or you re-flag every deliberate limitation as a
@@ -276,6 +288,10 @@ An `accepted-limitation` you cannot re-justify against the reference is a findin
 3. Every numeric claim cites a **pair** of evidence: the PBI-side DAX query + result, **and** the
    Tableau-side number compared against. With no Tableau-side number, record
    `numeric_status: unverified` — never an unqualified "faithful" verdict on a PBI value alone.
+   For current v2 numeric `none`, retain raw missing counts and disclose exactly:
+   **Exact Tableau-versus-Power-BI numeric comparison was not performed because the commissioned brief explicitly waived it.**
+   This waives comparison only, never data/AI/visual evidence. Forced promotion is not sign-off:
+   **PROMOTED unchecked; Phase-2 COMPLETE was not established.**
 4. The inventory/completeness pass ran and is reported first.
 5. Every discrepancy is routed to an owner (a subagent, or `accepted-limitation`).
 6. **Every `viz_fidelity[]` row is classified**, including `status: "rebuilt"` rows — an unclassified

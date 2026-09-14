@@ -177,7 +177,7 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
    `scripts/declare_generated_edit.py` (one `--target` per run, from the engine baseline).
 10. **Delegate to `pbi-migration-validator` again — full sign-off mode, on a FRESH invocation.** Rerun
    `python scripts/validate_spec.py <spec>` only when a parser-path spec exists; otherwise say that
-   gate is not applicable and use `check_unit.py --scope all` plus the handover. It sees the artifacts,
+   gate is not applicable and use diagnostic `check_unit.py --scope all` plus the handover. It sees the artifacts,
    the reference bundle and the triage classifications, but **not the builders' rationale** — and those
    classifications are **claims to verify**, including ones an earlier instance of itself produced.
    Prefer a multi-model cross-check (2-3 in parallel); a discrepancy every model raises is
@@ -190,8 +190,21 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
    express it (product docs, a verified CLI/validate result, a Learn citation); otherwise it stays
    **open/blocking** and you surface it. **You are the only writer of validation limitations/worklist
    entries.**
-12. **Validate before declaring done.** Run `python scripts/check_unit.py <u> --scope all` and route
-   findings. When it prints `BROWNFIELD DISCOVERY`, that is read-only artifact discovery: it found
+12. **Validate before declaring done.** Start with diagnostic `python scripts/check_unit.py <u>
+   --scope all` and route findings; tokenless all-scope and every layer scope never COMPLETE.
+   Only after final-v3/all-pages evidence is ready, run `python scripts/check_unit.py <package>
+   --scope all --receipt-sha256 <H>`, using exact caller-supplied lowercase 64-hex H without a prefix.
+   Never discover H from disk, history, environment or a promotion record. The checker validates
+   original W/current brief, supported explicit-import topology, data/cache/AI and every whole-page/
+   visual pass; numeric `none` waives only comparison. Required/unknown scope remains typed
+   `CANNOT_ESTABLISH(NUMERIC)`/nonzero: **Phase-2 COMPLETE was not established.**
+   Preserve its exact current-snapshot disclaimer and numeric waiver (`scripts/README.md` §Phase-2
+   COMPLETE); no authenticated producer, original commissioning, latest-ever, durable persistence
+   or receiving-machine claim. Then `python scripts/promote_unit.py --package <package> --slug <slug>
+   --receipt-sha256 <H>` forwards identical H, not a stored substitute. `--force` conflicts with H
+   before effects and never bypasses shipment guards; a forced shipment records exactly:
+   **PROMOTED unchecked; Phase-2 COMPLETE was not established.**
+   When diagnostics print `BROWNFIELD DISCOVERY`, that is read-only artifact discovery: it found
    engine output by content, not path, and its expected/found-instead block is the way forward before
    redoing work. Confirm both builders ran their own mandatory validation *and* that the validator ran
    a full sign-off pass. **Sign-off requires ALL of:** (a) every whole-dashboard verdict is *faithful*

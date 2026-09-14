@@ -1,16 +1,16 @@
 """
 purpose: answer whether one migration unit is done by aggregating existing gates without merging them.
 usage:   python scripts/check_unit.py <unit-or-bundle> [--scope {model,report,integration,all}] [--json <file>]
-         [--reference-dir <dir>] [--oracle-dir <dir>]
+         [--reference-dir <dir>] [--oracle-dir <dir>] [--receipt-sha256 <lowercase-final-SHA256>]
 
 Exit codes are intentionally coarser than the native gates, while preserving each native exit in the
 JSON payload:
 
-| 0  | AUTOMATED_CHECKS_PASS: all automated checks in the selected scope are clean |
+| 0  | COMPLETE for caller-pinned all scope; AUTOMATED_CHECKS_PASS for layer scopes only |
 | 1  | at least one finding remains in the selected scope |
 | 2  | one or more selected checks could not be fully checked (SKIPPED/ERROR/NOT_CHECKED) and no finding won |
 | 4  | page-count parity precondition failed; page-level oracle checks are not meaningful |
-| 64 | usage error |
+| 2/64 | argparse usage error / target is not a directory |
 
 The command is a facade, not a merge: the existing gates remain independently runnable and their
 native statuses/exit codes are recorded under ``checks[].native_*``. Page parity and oracle coverage
@@ -36,7 +36,12 @@ from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 import check_desktop_orphans as check_desktop_orphans_module
+import check_empty_model as empty_model
+import credential_gate
+import current_artifact_revision as revision
+import iteration_receipt
 import object_identity as oid
+import package_role_identity as roles
 import read_handover
 import tableau_oracle_manifest
 from bundle_corpus import (
@@ -52,6 +57,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 STATUS_PASS = "PASS"
+STATUS_COMPLETE = "COMPLETE"
 STATUS_AUTOMATED_PASS = "AUTOMATED_CHECKS_PASS"
 STATUS_FINDINGS = "FINDINGS"
 STATUS_NOT_CHECKED = "NOT_CHECKED"
@@ -60,8 +66,20 @@ STATUS_PRECONDITION_FAILED = "PRECONDITION_FAILED"
 # A model check that is deferred to another unit is neither a PASS nor a missing input. It is tagged
 # so the summary bucket and _is_blocking_not_checked can tell "model lives elsewhere, by design" apart
 # from "this unit has no model" - the two demand opposite actions (issue #317).
-VERIFICATION_CLAIMED_ONLY = "CLAIMED_ONLY"
 VERIFICATION_EXTERNAL = "EXTERNAL"
+
+COMPLETE_DISCLAIMER = (
+    "Phase-2 COMPLETE at this check for the package snapshot pinned by the supplied final-receipt SHA-256, "
+    "under the documented Phase-2 evidence contract. This checker does not authenticate the token's producer "
+    "or establish that this is the latest snapshot ever produced."
+)
+NUMERIC_WAIVER = (
+    "Exact Tableau-versus-Power-BI numeric comparison was not performed because the commissioned brief "
+    "explicitly waived it."
+)
+NOT_COMPLETE = "Phase-2 COMPLETE was not established."
+_TARGET_FIELDS = ("unit", "kind", "report_path", "model_path", "pbip_path")
+_IMPORT_CATEGORIES = frozenset({"file_ok", "remote_import", "inline"})
 
 # Where a report unit's semantic model actually lives, resolved via definition.pbir byPath.
 MODEL_LOC_LOCAL = "LOCAL"
@@ -162,7 +180,22 @@ MODEL_CHECK_IDS = frozenset(
 REPORT_CHECK_IDS = frozenset({"pbir-valid", "pbir-layout", "page-parity", "oracle-coverage", "occlusion"})
 INTEGRATION_CHECK_IDS = frozenset({"blank-placeholders", "field-bindings", "connection-fidelity"})
 ALL_ONLY_CHECK_IDS = frozenset(
-    {"engine-receipt", "desktop-orphans", "path-ceiling", "visual-layer-done", "visual-comparison-done", "finalized"}
+    {
+        "engine-receipt",
+        "desktop-orphans",
+        "path-ceiling",
+        "visual-layer-done",
+        "visual-comparison-done",
+        "iteration-history",
+        "current-source-data",
+        "current-working-namespace",
+        "model-class",
+        "data-evidence",
+        "iteration-findings",
+        "current-snapshot",
+        "numeric-obligation",
+        "finalized",
+    }
 )
 
 OWNER_HINTS = {
@@ -188,6 +221,22 @@ OWNER_HINTS = {
     "desktop-orphans": "orchestrator",
     "path-ceiling": "orchestrator (install root length + engine-side name duplication; not a layer defect)",
     PACKAGE_BOUNDARY_CHECK_ID: "orchestrator (the target handed to this gate, not a layer defect)",
+    **{
+        key: "orchestrator (caller-pinned current package evidence)"
+        for key in (
+            "iteration-history",
+            "current-source-data",
+            "current-working-namespace",
+            "model-class",
+            "data-evidence",
+            "iteration-findings",
+            "current-snapshot",
+            "numeric-obligation",
+            "visual-layer-done",
+            "visual-comparison-done",
+            "finalized",
+        )
+    },
 }
 
 
@@ -2986,28 +3035,364 @@ def check_cache_freshness(target: Path) -> dict[str, Any]:
     }
 
 
-def claimed_only_checks() -> list[dict[str, Any]]:
-    """Phases #271 says are not machine-verifiable today."""
+@dataclass(frozen=True)
+class _PinnedSnapshot:
+    """Invocation-local inputs, never an issued credential or a second completion authority."""
+
+    token: str
+    chain: list[iteration_receipt.Iteration]
+    working_revision: str
+    target_tuple: tuple[str, ...]
+    handoff: roles.CurrentWorkingSourceDataHandoff
+    policy: roles.BriefPolicy
+
+
+def _completion_row(check_id: str, stage: str, code: str, status: str = STATUS_NOT_CHECKED) -> dict[str, Any]:
+    verdict = "FINDINGS" if status == STATUS_FINDINGS else "CANNOT_ESTABLISH"
+    return {
+        "id": check_id,
+        "status": status,
+        "stage": stage,
+        "code": code,
+        "detail": code if status == STATUS_PASS else f"{verdict}({stage}): {code}. {NOT_COMPLETE}",
+    }
+
+
+def _numeric_check(policy: roles.BriefPolicy | None, code: str | None = None) -> dict[str, Any]:
+    if code is None and policy is not None and policy.numeric_obligation == "none":
+        return {
+            "id": "numeric-obligation",
+            "status": STATUS_PASS,
+            "numeric_obligation": "none",
+            "numeric_evidence": "unestablished",
+            "detail": NUMERIC_WAIVER,
+        }
+    return {
+        **_completion_row("numeric-obligation", "NUMERIC", code or "numeric_required_unsupported"),
+        "numeric_obligation": policy.numeric_obligation if policy else None,
+        "numeric_evidence": "unestablished",
+    }
+
+
+def _working_namespace(snapshot: _PinnedSnapshot, target: Path) -> dict[str, Any]:
+    """Join names only: W's current declaration, exact validated iterations and the admitted cache."""
+    allowed = set(snapshot.handoff.declared_paths) | {"package-manifest.json"}
+    for item in snapshot.chain:
+        prefix = item.directory.relative_to(target).as_posix()
+        allowed.add(f"{prefix}/{iteration_receipt.RECEIPT_NAME}")
+        allowed.update(f"{prefix}/{page['powerbi']['path']}" for page in item.payload["generated"]["pages"])
+    artifact = snapshot.chain[-1].payload["generated"]["artifact"]
+    if artifact["cache_sha256"] is not None and artifact["cache_byte_count"] > 0:
+        allowed.add(f"{snapshot.handoff.model_path}/.pbi/cache.abf")
+    try:
+        current, _ = revision.tree_files(target)
+    except revision.RevisionError as error:
+        return _completion_row("current-working-namespace", "NAMESPACE", error.code)
+    missing, extra = sorted(allowed - current.keys()), sorted(current.keys() - allowed)
+    return {
+        **_completion_row(
+            "current-working-namespace",
+            "NAMESPACE",
+            "current_working_namespace_mismatch" if missing or extra else "exact",
+            STATUS_NOT_CHECKED if missing or extra else STATUS_PASS,
+        ),
+        "missing": missing,
+        "extra": extra,
+    }
+
+
+_TABLE_NAME = r"(?:'(?:[^']|'')+'|[A-Za-z_][A-Za-z0-9_]*)"
+
+
+def _explicit_import_partitions(text: str, model: Path, params: dict[str, str]) -> tuple[str, list[dict[str, Any]]]:
+    """Narrow canonical accounting around the existing classifier, not another TMDL parser."""
+    headers = re.findall(r"^table (" + _TABLE_NAME + r")\s*$", text, re.MULTILINE)
+    if len(headers) != 1 or len(re.findall(r"^[ \t]*table\b", text, re.MULTILINE)) != 1:
+        raise ValueError("table_declaration_unaccounted")
+    # Counting literal candidates separately catches declarations the existing scoped reader omits.
+    candidates = [index + 1 for index, line in enumerate(text.splitlines()) if re.match(r"^[ \t]*partition\b", line)]
+    blocks = empty_model._partition_blocks(text)  # pylint: disable=protected-access
+    if not blocks or [block["line"] for block in blocks] != candidates:
+        raise ValueError("partition_unaccounted")
+    seen: set[str] = set()
+    results = []
+    for block in blocks:
+        head = text.splitlines()[block["line"] - 1]
+        if not re.fullmatch(r"\tpartition " + _TABLE_NAME + r" = m", head) or block["kind"] != "m":
+            raise ValueError("partition_kind_unsupported")
+        if block["partition"].casefold() in seen:
+            raise ValueError("partition_duplicate")
+        seen.add(block["partition"].casefold())
+        body = block["body"]
+        modes = re.findall(r"^[ \t]*mode\b[^\r\n]*", body, re.MULTILINE)
+        if modes != ["\t\tmode: import"]:
+            raise ValueError("partition_mode_not_explicit_import")
+        if len(re.findall(r"^\t\tsource =[ \t]*$", body, re.MULTILINE)) != 1:
+            raise ValueError("partition_source_unaccounted")
+        classified = empty_model.classify_partition(block, model, params)
+        if (
+            any(classified.get(key) != block[key] for key in ("partition", "kind", "line"))
+            or classified.get("mode") != "import"
+            or classified.get("category") not in _IMPORT_CATEGORIES
+        ):
+            raise ValueError("partition_category_unsupported")
+        results.append({key: classified[key] for key in ("partition", "kind", "line", "mode", "category")})
+    return headers[0], results
+
+
+def _import_model_class(target: Path, model_path: str) -> dict[str, Any]:
+    """Admit every table/partition, with strict reads and no implicit/default storage modes."""
+    model = target / model_path
+    tables: dict[str, list[dict[str, Any]]] = {}
+    try:
+        files, directories = revision.tree_files(model)
+        prefix = "definition/tables/"
+        table_files = {name: path for name, path in files.items() if name.startswith(prefix)}
+        if (
+            not table_files
+            or any("/" in name[len(prefix) :] or not name.endswith(".tmdl") for name in table_files)
+            or any(name.startswith(prefix) for name in directories)
+        ):
+            raise ValueError("table_set_not_canonical")
+        texts = {
+            name: path.read_bytes().decode("utf-8") for name, path in files.items() if name.lower().endswith(".tmdl")
+        }
+        if any("\ufeff" in text for text in texts.values()):
+            raise ValueError("model_text_unreadable")
+        if any(
+            re.search(r"^[ \t]*(?:table|partition)\b", text, re.MULTILINE)
+            for name, text in texts.items()
+            if name not in table_files
+        ):
+            raise ValueError("table_partition_outside_canonical_file")
+        params = empty_model.model_parameters(model)
+        for name in table_files:
+            table, partitions = _explicit_import_partitions(texts[name], model, params)
+            if table in tables or Path(name).stem != table.strip("'").replace("''", "'"):
+                raise ValueError("table_identity_unaccounted")
+            tables[table] = partitions
+        references = re.findall(
+            r"^\tref table (" + _TABLE_NAME + r")\s*$", texts["definition/model.tmdl"], re.MULTILINE
+        )
+        if (
+            len(references) != len(set(references))
+            or set(references) != set(tables)
+            or len(re.findall(r"^[ \t]*ref table\b", texts["definition/model.tmdl"], re.MULTILINE)) != len(references)
+        ):
+            raise ValueError("table_reference_unaccounted")
+    except (OSError, UnicodeError, revision.RevisionError, KeyError):
+        return _completion_row("model-class", "MODEL_CLASS", "model_class_unreadable")
+    except ValueError as error:
+        return _completion_row("model-class", "MODEL_CLASS", str(error))
+    return {
+        **_completion_row("model-class", "MODEL_CLASS", "explicit_import", STATUS_PASS),
+        "model_path": model_path,
+        "tables": tables,
+        "partition_count": sum(len(partitions) for partitions in tables.values()),
+    }
+
+
+def _current_source_data(snapshot: _PinnedSnapshot, target: Path) -> dict[str, Any]:
+    code = roles.validate_current_source_data_handoff(
+        target, snapshot.handoff, expected_package_working_revision=snapshot.working_revision
+    )
+    if code is not None:
+        return _completion_row("current-source-data", "SOURCE_DATA", code)
+    assessment = credential_gate.reconcile_package_data_access(
+        snapshot.handoff.stored_data_access,
+        snapshot.handoff.facts,
+        requested_scope=snapshot.policy.requested_scope,
+        fallback_authorization=snapshot.policy.fallback_authorization,
+        provider=None,
+    )
+    eligible = (
+        assessment.state in ("local_import_ready", "live_data_ok")
+        and assessment.validation == "validated"
+        and assessment.effective_scope == "model_and_report"
+        and assessment.max_phase2_claim == "data_validated"
+        and assessment.provider_unit is None
+    )
+    return {
+        **_completion_row(
+            "current-source-data",
+            "SOURCE_DATA",
+            "current_data_validated" if eligible else "data_access_not_validated",
+            STATUS_PASS if eligible else STATUS_NOT_CHECKED,
+        ),
+        "assessment": assessment.to_json(),
+    }
+
+
+def _completion_inputs(  # pylint: disable=too-many-return-statements
+    target: Path, token: str, classification: TargetClassification
+) -> tuple[_PinnedSnapshot | None, list[dict[str, Any]]]:
+    """Acquire the pinned chain, original W, independent brief, namespace and positive import class."""
+    if not classification.is_package:
+        return None, [_completion_row("finalized", "PACKAGE", "ordinary_package_root_required")]
+    if type(token) is not str or not re.fullmatch(r"[0-9a-f]{64}", token, re.ASCII):  # pylint: disable=unidiomatic-typecheck
+        return None, [_completion_row("finalized", "TOKEN", "receipt_token_invalid")]
+    try:
+        chain = iteration_receipt.read_chain(target, token)
+    except iteration_receipt.ReceiptError as error:
+        return None, [_completion_row("finalized", "RECEIPT", error.code)]
+    head = chain[-1]
+    if (
+        head.payload["schema_version"],
+        head.payload["state"],
+        head.payload["mode"],
+        head.payload["generated"]["scope"],
+    ) != (3, "final", "sign_off", "all_pages"):
+        return None, [_completion_row("finalized", "RECEIPT", "final_v3_all_pages_sign_off_required")]
+    artifact = head.payload["generated"]["artifact"]
+    target_tuple = tuple(artifact[key] for key in _TARGET_FIELDS)
+    code, handoff = roles.read_current_source_data_handoff(
+        target, expected_package_working_revision=artifact["package_revision"]
+    )
+    if code is not None or type(handoff) is not roles.CurrentWorkingSourceDataHandoff:  # pylint: disable=unidiomatic-typecheck
+        return None, [
+            _completion_row("current-source-data", "SOURCE_DATA", code or "working_handoff_invalid"),
+            _numeric_check(None, "numeric_authority_unestablished"),
+            _completion_row("finalized", "SOURCE_DATA", code or "working_handoff_invalid"),
+        ]
+    if tuple(getattr(handoff, key) for key in _TARGET_FIELDS) != target_tuple:
+        return None, [_completion_row("finalized", "SOURCE_DATA", "working_target_mismatch")]
+    code, policy = roles.read_current_brief_policy(target)
+    if code is not None or policy is None:
+        return None, [
+            _numeric_check(None, code or "numeric_authority_unestablished"),
+            _completion_row("finalized", "NUMERIC", code or "numeric_authority_unestablished"),
+        ]
+    snapshot = _PinnedSnapshot(token, chain, artifact["package_revision"], target_tuple, handoff, policy)
+    checks = [_completion_row("iteration-history", "HISTORY", "current_final_v3", STATUS_PASS)]
+    check = _current_source_data(snapshot, target)
+    checks.append(check)
+    if check["status"] != STATUS_PASS:
+        return None, [
+            *checks,
+            _numeric_check(policy, None if policy.numeric_obligation == "required" else "numeric_waiver_not_applied"),
+            _completion_row("finalized", "SOURCE_DATA", check["code"]),
+        ]
+    for check_func in (
+        lambda: _working_namespace(snapshot, target),
+        lambda: _import_model_class(target, handoff.model_path),
+    ):
+        check = check_func()
+        checks.append(check)
+        if check["status"] != STATUS_PASS:
+            return None, [
+                *checks,
+                _numeric_check(
+                    policy, None if policy.numeric_obligation == "required" else "numeric_waiver_not_applied"
+                ),
+                _completion_row("finalized", check["stage"], check["code"]),
+            ]
+    return snapshot, checks
+
+
+def _data_observations(generated: dict[str, Any]) -> dict[str, Any]:
+    """Final-v3 validates identity/readback combinations; positive admission still owes actual observations."""
+    requested, facts = generated["preparation"]["requested"], generated["data_evidence"]
+    code = "a1_observed"
+    if not requested["refresh"] or not requested["persist"] or not requested["canaries"]:
+        code = "a1_full_refresh_persistence_named_canaries_required"
+    else:
+        for name, fact in facts.items():
+            if fact["status"] != "observed":
+                code = f"a1_{name}_{fact['status']}"
+                break
+    status = STATUS_PASS if code == "a1_observed" else STATUS_NOT_CHECKED
+    rows = facts["canaries"]["observation"]
+    if rows is not None and any(row["returned_rows"] == 0 for row in rows):
+        status, code = STATUS_FINDINGS, "a1_zero_returned_rows"
+    return {
+        **_completion_row("data-evidence", "DATA", code, status),
+        "requested": requested,
+        "observations": facts,
+        "persistence_limit": (
+            "ImageSave/readback software observations only; persistence commitment remains UNESTABLISHED."
+        ),
+    }
+
+
+def _receipt_obligations(snapshot: _PinnedSnapshot) -> list[dict[str, Any]]:
+    payload = snapshot.chain[-1].payload
+    generated, judgement = payload["generated"], payload["judgement"]
+    stable = all(page["powerbi"]["capture"]["converged"] and page["expected_visual_ids"] for page in generated["pages"])
+    grades = all(page["tableau"] and page["tableau"]["grade"] == "validation-grade" for page in generated["pages"])
+    statuses = [
+        status
+        for page in judgement["pages"]
+        for status in (page["whole_page_status"], *(visual["status"] for visual in page["visual_results"]))
+    ]
+    visual_status = STATUS_PASS if grades and all(status == "pass" for status in statuses) else STATUS_NOT_CHECKED
+    if "mismatch" in statuses:
+        visual_status = STATUS_FINDINGS
+    open_findings = [finding for finding in judgement["findings"] if finding["status"] == "still_open"]
+    # The receipt reader checks limitation hashes at finalization; revalidate the same references
+    # against today's spec as well. A newly sealed coherent rewrite still owes that current link.
+    limitation_status, limitation_code = STATUS_PASS, "resolved_or_bound_limitations"
+    covered = {
+        row["limitation_ref"]["pointer"]
+        for row in judgement["findings"]
+        if row["status"] in ("resolved", "accepted_limitation") and row["limitation_ref"] is not None
+    }
+    if covered != {f"/limitations_encountered/{index}" for index in range(generated["limitations"]["entry_count"])}:
+        limitation_status, limitation_code = STATUS_NOT_CHECKED, "limitations_unadjudicated"
+    try:
+        iteration_receipt._assert_limitations(snapshot.handoff.package_root, payload)  # pylint: disable=protected-access
+    except iteration_receipt.ReceiptError as error:
+        limitation_status, limitation_code = STATUS_NOT_CHECKED, error.code
+    if open_findings:
+        limitation_status, limitation_code = STATUS_FINDINGS, "open_findings"
     return [
+        _data_observations(generated),
+        _completion_row(
+            "visual-layer-done",
+            "VISUAL",
+            "stable_complete_inventory" if stable else "visual_capture_unestablished",
+            STATUS_PASS if stable else STATUS_NOT_CHECKED,
+        ),
+        _completion_row(
+            "visual-comparison-done",
+            "VISUAL",
+            "every_page_and_visual_pass" if visual_status == STATUS_PASS else "visual_comparison_not_pass",
+            visual_status,
+        ),
         {
-            "id": "visual-layer-done",
-            "status": STATUS_NOT_CHECKED,
-            "verification": "CLAIMED_ONLY",
-            "detail": "no machine-readable completion artifact exists",
-        },
-        {
-            "id": "visual-comparison-done",
-            "status": STATUS_NOT_CHECKED,
-            "verification": "CLAIMED_ONLY",
-            "detail": "validator judgement is not a gate artifact today",
-        },
-        {
-            "id": "finalized",
-            "status": STATUS_NOT_CHECKED,
-            "verification": "CLAIMED_ONLY",
-            "detail": "sign-off is not represented by a verifiable artifact today",
+            **_completion_row("iteration-findings", "FINDINGS", limitation_code, limitation_status),
+            "findings": judgement["findings"],
+            "limitations": generated["limitations"],
         },
     ]
+
+
+def _same_snapshot(snapshot: _PinnedSnapshot, target: Path) -> dict[str, Any]:
+    """Never select a new snapshot: re-read the same H and validate the ORIGINAL issued W."""
+    try:
+        chain = iteration_receipt.read_chain(target, snapshot.token)
+    except iteration_receipt.ReceiptError as error:
+        return _completion_row("current-snapshot", "SNAPSHOT", error.code)
+    head = chain[-1]
+    artifact = head.payload["generated"]["artifact"]
+    if (
+        head.receipt_bytes != snapshot.chain[-1].receipt_bytes
+        or head.name != snapshot.chain[-1].name
+        or artifact["package_revision"] != snapshot.working_revision
+        or tuple(artifact[key] for key in _TARGET_FIELDS) != snapshot.target_tuple
+    ):
+        return _completion_row("current-snapshot", "SNAPSHOT", "final_snapshot_changed")
+    code = roles.validate_current_source_data_handoff(
+        target, snapshot.handoff, expected_package_working_revision=snapshot.working_revision
+    )
+    if code is not None:
+        return _completion_row("current-snapshot", "SNAPSHOT", code)
+    code, policy = roles.read_current_brief_policy(target)
+    if code is not None or policy != snapshot.policy:
+        return _completion_row("current-snapshot", "NUMERIC", code or "current_brief_changed")
+    for checked in (_working_namespace(snapshot, target), _import_model_class(target, snapshot.handoff.model_path)):
+        if checked["status"] != STATUS_PASS:
+            return _completion_row("current-snapshot", checked["stage"], checked["code"])
+    return _completion_row("current-snapshot", "SNAPSHOT", "same_caller_pinned_snapshot", STATUS_PASS)
 
 
 def check_desktop_orphans(target: Path) -> dict[str, Any]:
@@ -3021,12 +3406,12 @@ def check_desktop_orphans(target: Path) -> dict[str, Any]:
     else:
         status, native_exit = STATUS_NOT_CHECKED, check_desktop_orphans_module.EXIT_ERROR
     return {
+        **result,
         "id": "desktop-orphans",
         "status": status,
         "native_status": native_status,
         "native_exit": native_exit,
         "native_command": _command_text([sys.executable, str(SCRIPT_DIR / "check_desktop_orphans.py"), str(target)]),
-        **result,
     }
 
 
@@ -3206,11 +3591,12 @@ def _refused_boundary_report(classification: TargetClassification, scope: str) -
     }
 
 
-def run_all(
+def run_all(  # pylint: disable=too-many-branches
     target: Path,
     reference_dir: Path | None = None,
     oracle_dir: Path | None = None,
     scope: str = SCOPE_ALL,
+    receipt_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Run checks for one persona-owned scope, returning a normalized envelope.
 
@@ -3227,8 +3613,8 @@ def run_all(
     able to supply - one path's answer would clear a different path. Re-classifying the same original
     path is a few microseconds and is bound to the argument by construction.
 
-    A **safe** ordinary bundle or package continues into the existing behaviour completely
-    unchanged.
+    Safe ordinary targets retain diagnostics. COMPLETE additionally requires an ordinary package
+    root, the caller's H, current final-v3 evidence, original W and the independent current brief.
 
     ✅ **The direct per-check helpers now carry the same ordering, each on its own argument.**
     ``load_exemptions``, ``page_expectation``, ``check_page_parity``, ``check_oracle_coverage`` and
@@ -3245,8 +3631,8 @@ def run_all(
     were deliberately not widened here; making every function in this module safe standalone is a
     different consumer class and a separate API-hardening issue.
 
-    Verifying that a package's manifest still describes the bytes on disk is a later slice of #562;
-    this is the boundary ordering only.
+    Phase-2 uses current working revisions and the current name/role join, never S1 baseline
+    revalidation of editable TMDL/PBIR. Only the final all-scope fold can confer COMPLETE.
     """
     if scope not in SCOPES:
         raise ValueError(f"unknown scope: {scope}")
@@ -3254,9 +3640,24 @@ def run_all(
     if not classification.is_safe:
         return _refused_boundary_report(classification, scope)
     target = _cleared_target(target, classification)
+    snapshot = None
+    checks: list[dict[str, Any]] = []
+    if scope == SCOPE_ALL and receipt_sha256 is not None:
+        snapshot, checks = _completion_inputs(target, receipt_sha256, classification)
+        if snapshot is None:
+            return _finalize(
+                target,
+                checks,
+                {"path": None, "entries": [], "invalid": []},
+                scope,
+                stopped_after=checks[-1]["stage"],
+                discovery=False,
+            )
+        if reference_dir is not None or oracle_dir is not None:
+            checks.append(_completion_row("finalized", "REFERENCE", "external_evidence_override_not_supported"))
+            return _finalize(target, checks, {"path": None, "entries": [], "invalid": []}, scope, discovery=False)
     exemptions = load_exemptions(target)
     model_loc = _model_location(target)
-    checks: list[dict[str, Any]] = []
     if exemptions["invalid"]:
         checks.append(
             {
@@ -3270,7 +3671,19 @@ def run_all(
         page = check_page_parity(target, exemptions)
         checks.append(page)
         if page["status"] == STATUS_PRECONDITION_FAILED:
-            return _finalize(target, checks, exemptions, scope=scope, stopped_after="page-parity")
+            if scope == SCOPE_ALL:
+                checks.append(
+                    _numeric_check(
+                        snapshot.policy if snapshot else None,
+                        "numeric_waiver_not_applied"
+                        if snapshot and snapshot.policy.numeric_obligation == "none"
+                        else None,
+                    )
+                )
+                checks.append(_completion_row("finalized", "PRECONDITION", "page_parity_failed"))
+            return _finalize(
+                target, checks, exemptions, scope=scope, stopped_after="page-parity", discovery=snapshot is None
+            )
     if _in_scope("oracle-coverage", scope):
         checks.append(check_oracle_coverage(target, reference_dir, oracle_dir))
     if _in_scope("engine-receipt", scope):
@@ -3286,21 +3699,60 @@ def run_all(
     if _in_scope("desktop-orphans", scope):
         checks.append(check_desktop_orphans(target))
     if scope == SCOPE_ALL:
-        checks.extend(claimed_only_checks())
-    return _finalize(target, checks, exemptions, scope=scope)
+        _finish_completion(target, snapshot, checks)
+    return _finalize(target, checks, exemptions, scope=scope, discovery=snapshot is None)
+
+
+def _finish_completion(target: Path, snapshot: _PinnedSnapshot | None, checks: list[dict[str, Any]]) -> None:
+    """Finish the one public fold only after all ordinary gates and the same-snapshot rereads."""
+    if snapshot is None:
+        checks.extend(
+            _completion_row(check_id, "TOKEN", "receipt_token_required")
+            for check_id in ("visual-layer-done", "visual-comparison-done", "finalized")
+        )
+        return
+    checks.extend(_receipt_obligations(snapshot))
+    current = _same_snapshot(snapshot, target)
+    checks.append(current)
+    numeric = _numeric_check(
+        snapshot.policy, None if current["status"] == STATUS_PASS else "current_numeric_authority_unestablished"
+    )
+    checks.append(numeric)
+    if numeric["status"] == STATUS_PASS:
+        # Preserve the original facts verbatim; only numeric coverage is waived by current v2 none.
+        for check in checks:
+            if check["id"] == "oracle-coverage" and "visual_missing" in check:
+                check["numeric_obligation"] = "none"
+                check["numeric_waiver"] = NUMERIC_WAIVER
+                if not check["visual_missing"] and not check["contested_names"] and not check["refused_evidence"]:
+                    check["status"] = STATUS_PASS
+    if all(check["status"] == STATUS_PASS for check in checks):
+        checks.append(
+            {
+                "id": "finalized",
+                "status": STATUS_PASS,
+                "detail": COMPLETE_DISCLAIMER,
+                "receipt_sha256": snapshot.token,
+                "package_revision": snapshot.working_revision,
+            }
+        )
+    else:
+        checks.append(_completion_row("finalized", "OBLIGATIONS", "required_obligations_not_satisfied"))
 
 
 def _is_blocking_not_checked(check: dict[str, Any]) -> bool:
     """Whether a NOT_CHECKED row blocks exit 0 for the selected scope."""
-    return check["status"] == STATUS_NOT_CHECKED and check.get("verification") != "CLAIMED_ONLY"
+    return check["status"] == STATUS_NOT_CHECKED
 
 
-def _finalize(
+def _finalize(  # pylint: disable=too-many-arguments
     target: Path,
     checks: list[dict[str, Any]],
     exemptions: dict[str, Any],
     scope: str,
     stopped_after: str | None = None,
+    *,
+    discovery: bool = True,
 ) -> dict[str, Any]:
     statuses = [check["status"] for check in checks]
     if STATUS_PRECONDITION_FAILED in statuses:
@@ -3313,7 +3765,7 @@ def _finalize(
         status = STATUS_NOT_CHECKED
         exit_code = EXIT_NOT_CHECKED
     else:
-        status = STATUS_AUTOMATED_PASS
+        status = STATUS_COMPLETE if scope == SCOPE_ALL else STATUS_AUTOMATED_PASS
         exit_code = EXIT_OK
     return {
         "version": 1,
@@ -3329,7 +3781,7 @@ def _finalize(
             "invalid": len(exemptions["invalid"]),
         },
         "checks": checks,
-        "brownfield": inspect_brownfield(target),
+        "brownfield": inspect_brownfield(target) if discovery else {},
     }
 
 
@@ -3451,15 +3903,12 @@ def _blocking_count(report: dict[str, Any]) -> int:
     )
 
 
-def _summary_counts(report: dict[str, Any]) -> tuple[dict[str, int], int, int, int]:
+def _summary_counts(report: dict[str, Any]) -> tuple[dict[str, int], int, int]:
     """Counts behind the stable summary line and shape-guidance trigger.
 
-    NOT_CHECKED rows split three ways so a deferred-to-another-unit model no longer inflates
-    ``missing_input`` (issue #317): structural (claimed-only, not machine-verifiable), external (this
-    unit's model lives elsewhere, by design), and missing_input (a genuinely absent input).
+    A deferred-to-another-unit model is external, not a missing local input. Both remain non-success.
     """
     owner_findings: dict[str, int] = {}
-    structural = 0
     missing_input = 0
     external = 0
     for check in report["checks"]:
@@ -3468,18 +3917,16 @@ def _summary_counts(report: dict[str, Any]) -> tuple[dict[str, int], int, int, i
             owner_findings[owner] = owner_findings.get(owner, 0) + 1
         if check["status"] == STATUS_NOT_CHECKED:
             verification = check.get("verification")
-            if verification == VERIFICATION_CLAIMED_ONLY:
-                structural += 1
-            elif verification == VERIFICATION_EXTERNAL:
+            if verification == VERIFICATION_EXTERNAL:
                 external += 1
             else:
                 missing_input += 1
-    return owner_findings, structural, missing_input, external
+    return owner_findings, missing_input, external
 
 
 def _summary_line(report: dict[str, Any]) -> str:
     """Stable one-line aggregate for comparing repeated gate runs."""
-    owner_findings, structural, missing_input, external = _summary_counts(report)
+    owner_findings, missing_input, external = _summary_counts(report)
     findings = ",".join(f"{owner}={count}" for owner, count in sorted(owner_findings.items())) or "none"
     return (
         "SUMMARY: "
@@ -3487,7 +3934,6 @@ def _summary_line(report: dict[str, Any]) -> str:
         f"compromises={_compromise_count(report)}; "
         f"compromises_not_evaluated={_compromise_not_evaluated_count(report)}; "
         f"findings_by_owner={findings}; "
-        f"not_checked_structural={structural}; "
         f"not_checked_external={external}; "
         f"not_checked_missing_input={missing_input}; "
         f"ladder={report['status']} exit={report['exit_code']}"
@@ -3502,7 +3948,7 @@ def _render_brownfield(report: dict[str, Any]) -> list[str]:
     # block there would claim a look that never happened. `inspect_brownfield` always returns keys.
     if not brownfield:
         return []
-    _, _, missing_input, _ = _summary_counts(report)
+    _, missing_input, _ = _summary_counts(report)
     if brownfield.get("recognized_target_shape") and not brownfield.get("plan") and missing_input == 0:
         return []
     if missing_input == 0 and not brownfield.get("found_count"):
@@ -3635,6 +4081,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("target", type=Path, help="migration unit, fabric folder, or engine bundle")
     parser.add_argument("--scope", choices=SCOPES, default=SCOPE_ALL, help="persona layer to check (default: all)")
+    parser.add_argument(
+        "--receipt-sha256",
+        help="caller-held exact lowercase final-receipt SHA-256 (no prefix); required for all-scope COMPLETE",
+    )
     parser.add_argument("--json", type=Path, help="write the normalized unit-check envelope here")
     parser.add_argument("--reference-dir", type=Path, help="override reference/ directory containing manifest.json")
     parser.add_argument(
@@ -3652,10 +4102,24 @@ def main(argv: list[str] | None = None) -> int:
     # shape lives here. This verdict guards ONLY that pre-check and is deliberately NOT passed on:
     # `run_all` classifies the same original path itself, because a boundary verdict a caller can
     # supply is a verdict a caller can supply for a different path (PR #593, round-1 review).
-    if classify_target(args.target).is_safe and not args.target.is_dir():
+    original = classify_target(args.target)
+    if original.is_safe and not args.target.is_dir():
         print(f"ERROR: not a directory: {args.target}", file=sys.stderr)
         return EXIT_USAGE
-    report = run_all(args.target, reference_dir=args.reference_dir, oracle_dir=args.oracle_dir, scope=args.scope)
+    if original.is_safe and args.receipt_sha256 is not None and args.scope == SCOPE_ALL and args.json is not None:
+        # A verdict file written into the pinned package would invalidate the claim we just checked.
+        # Keep existing file-valued diagnostic JSON, but never mutate this snapshot to emit its result.
+        if args.json.absolute().is_relative_to(args.target.absolute()) or args.json.resolve().is_relative_to(
+            args.target.resolve()
+        ):
+            parser.error("--json output must be outside the caller-pinned package")
+    report = run_all(
+        args.target,
+        reference_dir=args.reference_dir,
+        oracle_dir=args.oracle_dir,
+        scope=args.scope,
+        receipt_sha256=args.receipt_sha256,
+    )
     if args.json:
         _write_json(args.json, report)
     if not args.quiet:

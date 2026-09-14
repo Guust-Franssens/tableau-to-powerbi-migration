@@ -2016,13 +2016,28 @@ README = """# {unit}
 Diagnostic handover package for one migration unit ({kind}). It may carry imported rows, reference
 evidence, source bytes and engine output; `package-manifest.json` names what is present and every
 omission. If it carries a location placeholder it is **not bound to a location**, so do this FIRST,
-wherever this folder now is, before opening the model. Then the two gates, each of which takes THIS
-FOLDER'S PATH as its only argument - a bare unit name is a usage error, never a verdict (exit 2 from
-`check_reference_readiness.py`, exit 64 from `check_unit.py`, both with a message on stderr):
+wherever this folder now is, before opening the model. Use THIS FOLDER'S PATH, never a bare unit name.
+The order is bind, public stdout-only START_READY, diagnostic work, caller-pinned final check, then
+identical-token promotion:
 
     python scripts/set_data_folder.py --package <path-to-this-folder>
-    python scripts/check_reference_readiness.py <path-to-this-folder>
+    python scripts/check_reference_readiness.py <path-to-this-folder> --json -
     python scripts/check_unit.py <path-to-this-folder>
+    python scripts/check_unit.py <path-to-this-folder> --scope all --receipt-sha256 <caller-held-final-sha256>
+    python scripts/promote_unit.py --package <path-to-this-folder> --slug <delivery-slug> --receipt-sha256 <caller-held-final-sha256>
+
+Run the last two commands only AFTER the commissioned work and final-v3 evidence are ready, using
+the identical final token supplied by the caller: exactly 64 lowercase hex characters, no prefix.
+Do not compute, discover or recover a token from package files, history, environment or a promotion
+record. Tokenless all-scope is diagnostic CANNOT_ESTABLISH/nonzero; layer scopes never COMPLETE.
+Only the pinned all-scope checker can establish COMPLETE for that current package snapshot.
+It does not authenticate the token's producer, prove original commissioning or identify latest-ever
+history. Required/unknown numeric comparison remains CANNOT_ESTABLISH(NUMERIC); current strict v2
+numeric `none` waives only that comparison and the checker discloses it explicitly.
+`--force` conflicts with the token before any effects. A forced shipment records exactly:
+**PROMOTED unchecked; Phase-2 COMPLETE was not established.**
+Shipment containment/content/data/host-path/transaction guards still apply. Public evidence contract:
+`scripts/README.md` (Phase-2 COMPLETE); promotion is not deployment or receiving-machine proof.
 
 Why binding is a step rather than something already done for you: Power Query rejects a relative
 `File.Contents` argument outright, so a folder parameter has to name an ABSOLUTE directory, and the
