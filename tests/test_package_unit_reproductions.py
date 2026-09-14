@@ -32,7 +32,7 @@ def selected_input(root: Path) -> tuple[Path, Path, dict[str, Any]]:
     asset.parent.mkdir()
     asset.write_text("<datasource/>", encoding="utf-8")
     row = {
-        "name": asset.name,
+        "name": DS_UNIT,
         "staged_input_path": str(asset),
         "sha256": hashlib.sha256(asset.read_bytes()).hexdigest(),
     }
@@ -66,8 +66,11 @@ def test_datasource_selection_returns_the_unique_row_and_walked_path(
     pkg.assert_declared_digest(DS_UNIT, selected)
 
 
-def test_staged_input_path_cannot_change_the_selecting_rows_basename(tmp_path: Path) -> None:
+@pytest.mark.parametrize("logical_name", [False, True], ids=["filename-name", "logical-name"])
+def test_staged_input_path_cannot_change_the_selecting_rows_basename(tmp_path: Path, logical_name: bool) -> None:
     bundle, asset, row = selected_input(tmp_path)
+    if not logical_name:
+        row["name"] = asset.name
     other = asset.with_name("Other.tds")
     other.write_text("<different/>", encoding="utf-8")
     row["staged_input_path"] = str(other)
@@ -99,8 +102,9 @@ def test_datasource_rows_never_choose_the_first_match(tmp_path: Path, distinct: 
         second["staged_input_path"] = str(copied)
     write_rows(bundle, [row, second])
 
-    with pytest.raises(pkg.PackagingError, match="^source_asset_row_ambiguous$"):
-        pkg.resolve_asset(bundle, DS_UNIT, {}, asset.parent)
+    for handover in ({}, {"workbook": {"source_id": asset.name}}):
+        with pytest.raises(pkg.PackagingError, match="^source_asset_row_ambiguous$"):
+            pkg.resolve_asset(bundle, DS_UNIT, handover, asset.parent)
 
 
 def test_datasource_candidates_never_choose_the_first_directory(tmp_path: Path) -> None:
@@ -111,6 +115,101 @@ def test_datasource_candidates_never_choose_the_first_directory(tmp_path: Path) 
 
     with pytest.raises(pkg.PackagingError, match="^source_asset_candidate_ambiguous$"):
         pkg.resolve_asset(bundle, DS_UNIT, {}, asset.parent)
+
+
+@pytest.mark.parametrize("locator", ["absolute", "basename", "other-separator"])
+def test_source_leaf_selects_the_logical_row_without_using_redaction_as_identity(tmp_path: Path, locator: str) -> None:
+    bundle, asset, row = selected_input(tmp_path)
+    source_id = str(asset) if locator == "absolute" else asset.name
+    if locator == "other-separator":
+        separator = "/" if os.name == "nt" else "\\"
+        source_id = separator.join(("staged", "assets", asset.name))
+    raw = {"workbook": {"source_id": source_id}}
+    shipped, redactions = pkg.scope_handover(raw, DS_UNIT)
+
+    selected = pkg.resolve_asset(bundle, DS_UNIT, raw, asset.parent)
+    assert selected.path == asset and selected.row == row
+    assert selected.route == "handover.workbook.source_id"
+    pkg.assert_declared_digest(DS_UNIT, selected)
+    assert raw["workbook"]["source_id"] == source_id
+    if locator == "absolute":
+        assert redactions and shipped["workbook"]["source_id"] != source_id
+        with pytest.raises(pkg.PackagingError, match="^input_manifest_name_invalid$"):
+            pkg.resolve_asset(bundle, DS_UNIT, shipped, asset.parent)
+    else:
+        assert not redactions
+        assert pkg.resolve_asset(bundle, DS_UNIT, shipped, asset.parent) == selected
+
+
+@pytest.mark.parametrize("handover_present", [False, True])
+def test_legacy_filename_only_row_keeps_its_digest_and_exact_source(tmp_path: Path, handover_present: bool) -> None:
+    bundle, asset, row = selected_input(tmp_path)
+    row["name"] = asset.name
+    del row["staged_input_path"]
+    write_rows(bundle, [row])
+    handover = {"workbook": {"source_id": asset.name}} if handover_present else {}
+
+    selected = pkg.resolve_asset(bundle, DS_UNIT, handover, asset.parent)
+    assert selected.path == asset and selected.row == row
+    pkg.assert_declared_digest(DS_UNIT, selected)
+
+
+@pytest.mark.parametrize("staged", [None, True, [], {}, "", " ", "<redacted: host path>"])
+def test_present_invalid_staged_path_never_falls_back_to_the_filename(tmp_path: Path, staged: Any) -> None:
+    bundle, asset, row = selected_input(tmp_path)
+    row["name"] = asset.name
+    row["staged_input_path"] = staged
+    write_rows(bundle, [row])
+
+    with pytest.raises(pkg.PackagingError, match="^input_manifest_path_invalid$"):
+        pkg.resolve_asset(bundle, DS_UNIT, {"workbook": {"source_id": asset.name}}, asset.parent)
+
+
+@pytest.mark.parametrize("source_id", [None, True, [], "", " ", "<redacted: host path>"])
+def test_present_invalid_handover_identity_never_falls_back_to_the_row(tmp_path: Path, source_id: Any) -> None:
+    bundle, asset, _row = selected_input(tmp_path)
+    with pytest.raises(pkg.PackagingError, match="^input_manifest_name_invalid$"):
+        pkg.resolve_asset(bundle, DS_UNIT, {"workbook": {"source_id": source_id}}, asset.parent)
+
+
+@pytest.mark.parametrize("fault", ["row-unit", "source-unit", "source-prefix", "source-case", "arbitrary-prefix"])
+def test_handover_physical_leaf_cannot_bypass_logical_or_staged_identity(tmp_path: Path, fault: str) -> None:
+    bundle, asset, row = selected_input(tmp_path)
+    source_id = asset.name
+    if fault == "row-unit":
+        row["name"] = "Other"
+    elif fault == "source-unit":
+        source_id = "Other.tds"
+    elif fault == "source-prefix":
+        source_id = f"99999999-2222-3333-4444-555555555555_{DS_UNIT}.tds"
+    elif fault == "source-case":
+        source_id = asset.name.lower()
+    else:
+        source_id = f"export_{DS_UNIT}.tds"
+    write_rows(bundle, [row])
+
+    with pytest.raises(pkg.PackagingError, match="^input_manifest_(name|path)_mismatch$"):
+        pkg.resolve_asset(bundle, DS_UNIT, {"workbook": {"source_id": source_id}}, asset.parent)
+
+
+@pytest.mark.parametrize("handover_present", [False, True])
+def test_foreign_staged_path_cannot_be_rescued_by_a_local_same_named_asset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, handover_present: bool
+) -> None:
+    bundle, asset, row = selected_input(tmp_path)
+    row["staged_input_path"] = (
+        f"/foreign/assets/{asset.name}" if os.name == "nt" else f"C:\\foreign\\assets\\{asset.name}"
+    )
+    write_rows(bundle, [row])
+    assert not pkg.is_host_native(row["staged_input_path"])
+
+    def must_not_walk(_base: Path) -> None:
+        pytest.fail("a foreign staged locator cannot authorize fallback source bytes")
+
+    monkeypatch.setattr(pkg.pfs, "walk_package", must_not_walk)
+    handover = {"workbook": {"source_id": asset.name}} if handover_present else {}
+    selected = pkg.resolve_asset(bundle, DS_UNIT, handover, asset.parent)
+    assert selected.path is None and selected.route == "unresolved" and selected.row == row
 
 
 @pytest.mark.parametrize("digest", [True, [], {}, "", "not-a-digest"])
@@ -1266,6 +1365,131 @@ def _package_command(bundle: Path, oracle: Path, out: Path, unit: str, brief: Pa
         str(brief),
         "--quiet",
     ]
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected_exit", "reason"),
+    [
+        (None, 0, None),
+        ("wrong-basename", 5, "input_manifest_path_mismatch"),
+        ("duplicate-row", 5, "source_asset_row_ambiguous"),
+        ("duplicate-candidate", 5, "source_asset_candidate_ambiguous"),
+        ("changed-digest", 5, "input_manifest_digest_mismatch"),
+        ("foreign-path", 6, "unassessable_input"),
+        ("missing-candidate", 6, "unassessable_input"),
+    ],
+    ids=[
+        "valid",
+        "wrong-basename",
+        "duplicate-row",
+        "duplicate-candidate",
+        "changed-digest",
+        "foreign-path",
+        "missing",
+    ],
+)
+def test_canonical_datasource_model_only_package_publishes_from_staged_input(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], fault: str | None, expected_exit: int, reason: str | None
+) -> None:
+    bundle, oracle = _shared_bundle(tmp_path)
+    asset = bundle.parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
+    (asset.parent / f"{DS_UNIT}.tds").rename(asset)
+    row = {"name": DS_UNIT, "staged_input_path": str(asset), "sha256": hashlib.sha256(asset.read_bytes()).hexdigest()}
+    rows = [row]
+    if fault == "wrong-basename":
+        other = asset.with_name("Other.tds")
+        shutil.copyfile(asset, other)
+        row["staged_input_path"] = str(other)
+    elif fault == "duplicate-row":
+        rows.append(dict(row))
+    elif fault == "duplicate-candidate":
+        second = bundle / "assets" / asset.name
+        second.parent.mkdir()
+        shutil.copyfile(asset, second)
+    elif fault == "changed-digest":
+        asset.write_text("<datasource/>", encoding="utf-8")
+    elif fault == "foreign-path":
+        row["staged_input_path"] = (
+            f"/foreign/assets/{asset.name}" if os.name == "nt" else f"C:\\foreign\\assets\\{asset.name}"
+        )
+    elif fault == "missing-candidate":
+        asset.unlink()
+    write_rows(bundle, rows)
+    brief = _brief(tmp_path, DS_UNIT, "model_only", numeric_obligation="none")
+    out = tmp_path / "out"
+
+    assert pkg.main(_package_command(bundle, oracle, out, DS_UNIT, brief)) == expected_exit
+    package = out / DS_UNIT
+    if fault is not None:
+        assert reason in capsys.readouterr().err
+        assert not package.exists(), "a refused source cannot publish a diagnostic package"
+        assert not pkg.staging_dir(out, DS_UNIT).exists()
+        return
+    manifest = json.loads((package / "package-manifest.json").read_bytes())
+    assert manifest["construction_status"] == pkg.STATUS_ASSEMBLED
+    assert manifest["artifacts"]["asset"] == f"assets/{asset.name}"
+    assert (package / "assets" / asset.name).read_bytes() == asset.read_bytes()
+    assert (package / "migration-brief.md").read_bytes() == brief.read_bytes()
+    assert pkg.data_access.read_data_access(package / "data-access.json").effective_scope == "model_only"
+    assert pkg.pri.verify_s1(package).integrity.is_clean
+    assert pkg.pri.verify_phase1_role_identity([package])[0].is_start_ready
+
+
+@pytest.mark.parametrize("locator", ["absolute", "basename"])
+def test_canonical_shared_packages_resolve_raw_sources_and_ship_redacted_handover(tmp_path: Path, locator: str) -> None:
+    bundle, oracle = _shared_bundle(tmp_path)
+    assets = bundle.parent / "assets"
+    consumer = next(assets.glob(f"*_{UNIT}.twb"))
+    provider = assets / f"{DS_UNIT}.tds"
+    write_rows(
+        bundle,
+        [
+            {"name": unit, "staged_input_path": str(asset), "sha256": hashlib.sha256(asset.read_bytes()).hexdigest()}
+            for unit, asset in ((DS_UNIT, provider), (UNIT, consumer))
+        ],
+    )
+    handover_path = bundle / "handover" / f"{UNIT}.json"
+    raw = json.loads(handover_path.read_bytes())
+    source_id = str(consumer) if locator == "absolute" else consumer.name
+    raw["workbook"]["source_id"] = source_id
+    private_path = str(tmp_path / "private-host-canary" / "unshipped.txt")
+    raw["workbook"]["private_path"] = private_path
+    s2._write(handover_path, raw)
+    original_handover = handover_path.read_bytes()
+
+    assert pkg._brief_scope(bundle, DS_UNIT, assets) == "model_only"
+    assert pkg._brief_scope(bundle, UNIT, assets) == "report_only_shared_model"
+    assert pkg._predicted_asset(bundle, DS_UNIT, assets) == provider
+    assert pkg._predicted_asset(bundle, UNIT, assets) == consumer
+    out = tmp_path / "out"
+    for unit, asset, scope in (
+        (DS_UNIT, provider, "model_only"),
+        (UNIT, consumer, "report_only_shared_model"),
+    ):
+        brief = _brief(tmp_path, unit, scope, numeric_obligation="none")
+        command = _package_command(bundle, oracle, out, unit, brief)
+        if unit == UNIT:
+            command.extend(["--provider-package", str(out / DS_UNIT)])
+        assert pkg.main(command) == 0, f"canonical {scope} source must publish"
+        package = out / unit
+        manifest = json.loads((package / "package-manifest.json").read_bytes())
+        assert manifest["construction_status"] == pkg.STATUS_ASSEMBLED
+        assert manifest["artifacts"]["asset"] == f"assets/{asset.name}"
+        assert (package / "assets" / asset.name).read_bytes() == asset.read_bytes()
+        assert (package / "migration-brief.md").read_bytes() == brief.read_bytes()
+        assert pkg.data_access.read_data_access(package / "data-access.json").effective_scope == scope
+        assert pkg.pri.verify_s1(package).integrity.is_clean
+    assert all(result.is_start_ready for result in pkg.pri.verify_phase1_role_identity([out / DS_UNIT, out / UNIT]))
+    assert handover_path.read_bytes() == original_handover
+    shipped_text = (out / UNIT / "handover" / f"{UNIT}.json").read_text(encoding="utf-8")
+    shipped = json.loads(shipped_text)
+    assert shipped["scope"] == {"unit": UNIT}
+    assert "private-host-canary" not in shipped_text and private_path not in shipped["workbook"].values()
+    assert json.dumps(str(assets))[1:-1] not in shipped_text
+    if locator == "absolute":
+        assert shipped["workbook"]["source_id"] != source_id
+    else:
+        assert shipped["workbook"]["source_id"] == source_id
 
 
 def test_explicit_separate_provider_command_and_no_retroactive_or_sibling_rescue(tmp_path: Path) -> None:
