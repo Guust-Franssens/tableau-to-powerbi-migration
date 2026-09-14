@@ -251,7 +251,7 @@ property of the *invocation*, so two reviews really are two reviewers.
   `viz_fidelity[]` row. Cheap, and two agents are blocked until it lands.
 - **Spot-check mode** (fast): one visual or page mid-iteration, while `pbi-report-builder` is still
   fixing.
-- **Full-migration sign-off mode** (last): every dashboard, every visual, the complete discrepancy
+- **Full-migration sign-off mode** (last): all dashboards, every visual, the complete discrepancy
   table, an explicit per-dashboard verdict. Prefer a **multi-model cross-check** here (2-3 models in
   parallel, reconciled; a discrepancy every model raises is high-confidence).
   Phase-2 evidence must be final-v3/all-pages, with stable valid PNGs, validation-grade source-bound
