@@ -143,17 +143,11 @@ Refuse a meaningful pass without these — flag it back rather than guessing:
 
 ## Skills you use
 
-- **Numeric investigation, when commissioned — DAX `EVALUATE`.** Phase-2 COMPLETE currently
-  supports only an independently verified current v2 brief with numeric `none`; required/unknown
-  scope remains `CANNOT_ESTABLISH(NUMERIC)`, even with CSVs or reviewer labels. Never change scope to
-  obtain a pass, or revive native numeric qualification as a prerequisite. The default flow produces a **local PBIP that is never
-  published**: query a model already open in Desktop with `python scripts/probe_desktop_query.py
-  --pid <pid>` or an equivalent pid-scoped ADOMD query. `powerbi-modeling-mcp` **ConnectFolder is
-  metadata-only** offline (`dax_query_operations Execute` refuses). If the model holds no data,
-  refresh with `python scripts/refresh_pbip_model.py --pid <pid> --no-save`; **`--no-save` is not
-  optional for you** — persisting is that script's default and rewrites `database.tmdl`, mutating the
-  artifact you are judging. `powerbi-remote` (`GetSemanticModelSchema`/`ExecuteQuery`) applies only
-  to a published model.
+- **Commissioned numeric investigation — DAX `EVALUATE`.** Local unpublished PBIP: query Desktop
+  with `python scripts/probe_desktop_query.py --pid <pid>` or PID-scoped ADOMD.
+  `powerbi-modeling-mcp` ConnectFolder is metadata-only; offline DAX Execute refuses. Empty model:
+  `python scripts/refresh_pbip_model.py --pid <pid> --no-save` (mandatory: default persistence
+  rewrites `database.tmdl`). `powerbi-remote` GetSemanticModelSchema/ExecuteQuery is published-only.
 - **`powerbi-report-gotchas`** — invoke **by name** whenever you judge a visual, a deferral or a
   render artifact; it owns the craft this file deliberately does not repeat.
 - **`powerbi-report-authoring`** — Desktop Bridge screenshot/reload commands; run `check-updates`
@@ -164,14 +158,13 @@ Refuse a meaningful pass without these — flag it back rather than guessing:
 
 Cheap structural checks first, expensive judgement last.
 
-0. **All-scope automated inventory:** `python scripts/check_unit.py <unit-or-bundle> --scope all`.
-   Route every finding. This tokenless call is diagnostic non-success, never COMPLETE; layer scopes
-   never COMPLETE either. Final authority is only `python scripts/check_unit.py <package> --scope all
-   --receipt-sha256 <H>` with the exact caller-held lowercase final SHA-256, no prefix or discovery.
-   **`NOT_CHECKED` is not a pass**; `not_checked_missing_input` names obligations this run did not
-   establish, while external-model rows remain explicit deferrals, not completion.
-   The checker conjoins original W/current v2 brief, explicit import class and all evidence; it is
-   not a reviewer label. See `scripts/README.md` §Phase-2 COMPLETE for the exact disclaimer and limits.
+0. **Diagnostic, never COMPLETE:** `python scripts/check_unit.py <unit-or-bundle> --scope all`
+   is tokenless/nonzero; layers never COMPLETE. Route every finding; `NOT_CHECKED`,
+   `not_checked_missing_input` and external-model deferrals are not passes.
+   Final: `python scripts/check_unit.py <package> --scope all --receipt-sha256 <H>` — exact caller-held
+   lowercase ASCII 64-hex H; no prefix/normalization. Never discover H from files/history/environment/promotion.
+   Apply `scripts/README.md` §Phase-2 COMPLETE and `docs/migration-phases.md` §The two gates:
+   ALL data/cache/AI/visual/history/finding obligations still block.
 1. **Adjudicate the engine's own claims FIRST — two agents are blocked until this lands.**
    `handover/<workbook>.json` → `workbook.viz_fidelity[]` gives one entry per worksheet with `status`
    (`rebuilt`/`warned`), `tier` (`rebuilt`/`rebuilt_with_deferrals`/`degraded`/`empty`) and a `reason`.
@@ -203,28 +196,20 @@ Cheap structural checks first, expensive judgement last.
      *after* aggregation and HIDES marks; re-adding it as an ordinary filter silently re-scopes the
      other table calcs sharing that view and changes **other visuals' numbers**. Mechanism and
      verbatim entry: invoke `powerbi-report-gotchas` **by name**.
-2. **Inventory/completeness pass.** Scope each dashboard to **its own** worksheets: from that
-   `dashboards[]` entry's zone tree derive the worksheets it references, and confirm a PBI page
-   exists with a visual for each. **Do NOT require every workbook worksheet on every dashboard** —
-   sheets 1-3 on Dashboard A and 4-6 on Dashboard B is correct, and a global check false-fails both;
-   list dashboard-less worksheets as workbook-level inventory. If one Tableau dashboard was split
-   across several PBI pages, give per-page verdicts **and** one composite dashboard verdict. A
-   silently-dropped worksheet is a total-fidelity failure.
-   `powerbi-report-author preview-pages|preview-visuals <report>` emits this inventory as JSON.
-   `python scripts/check_unit.py <bundle> --scope integration` resolves every PBIR field reference
-   against the TMDL; report `field-bindings` in **two classes, because they route to different
-   owners**: **case-only** mismatches are a mechanical rename for `pbi-report-builder`; **genuinely
-   missing** columns/measures are a modelling gap for `pbi-semantic-builder`. A broken binding renders
-   blank on a report that `validate` passes clean.
-3. **Whole-dashboard pass — BEFORE drilling into visuals.** Compare full-page screenshots as a
-   gestalt: layout density and proportions, visual hierarchy, colour, spacing, whether a repeated
-   composite pattern reads as the same *kind* of thing. This is the drift a visual-by-visual pass
-   rationalizes away one defensible visual at a time.
-4. **Figure-by-figure pass.** *Visual side*: chart-type match (or a defensible improvement — see
-   Gotchas), encodings (rows/columns/colour/size/label), title, axes, legend, formatting. *Numeric
-   side*, when commissioned: pick a concrete filter context, run `EVALUATE` for the bound measure(s), and compare against
-   the Tableau reference or an exported ground-truth CSV. Prioritize CP/PP, ratio and
-   percentage-scaled measures — format-scale and pivot bugs concentrate there.
+2. **Inventory/completeness:** each dashboard's `dashboards[]` zone tree defines its worksheets;
+   require a visual for each on its PBI page, never all workbook sheets on all dashboards.
+   List dashboard-less sheets separately; split dashboards need per-page AND composite verdicts.
+   Dropped sheet = total-fidelity failure. Inventory JSON: `powerbi-report-author preview-pages|preview-visuals <report>`.
+   `python scripts/check_unit.py <bundle> --scope integration` checks PBIR→TMDL `field-bindings`:
+   case-only → `pbi-report-builder`; missing columns/measures → `pbi-semantic-builder`.
+   Broken bindings render blank despite clean `validate`.
+3. **Whole-dashboard BEFORE figures:** compare full-page screenshots for density/proportions,
+   hierarchy, colour, spacing and whether repeated composite patterns read as the same kind.
+   Judge the whole, not individually defensible visuals.
+4. **Figure-by-figure:** chart type (or defensible improvement; Gotchas), rows/columns/colour/
+   size/label, title, axes, legend, formatting. When commissioned, compare bound-measure
+   `EVALUATE` in a concrete filter context with Tableau/reference CSV; prioritize CP/PP,
+   ratios and percentage scales (format-scale/pivot bugs).
 5. **Emit a structured discrepancy report** — a table, not prose:
 
    | Dashboard / Visual | Discrepancy | Kind | Severity | Suspected owner | Suggested fix |
@@ -235,12 +220,9 @@ Cheap structural checks first, expensive judgement last.
    parameters) — route those to `limitations_encountered`, never to a subagent as "fix this".
 6. **Give each dashboard an explicit verdict**: does it, as a whole, read as a faithful migration —
    yes or no? A pile of "minor" discrepancies can still add up to "no".
-7. **Advisory improvement scan — a SEPARATE section that never blocks sign-off.** Emit
-   `improvement_opportunities[]` labelled **"future direction, not a defect"**: incremental refresh,
-   snowflake → star collapses, aggregations, a marked date table, pruned columns. ⚠️ **Keep it rigidly
-   out of `fidelity_findings[]` and let it influence no verdict.** *"Differs from Tableau"* and
-   *"could be better"* are different claims, **like-for-like is the contract**, and mixed together the
-   second corrupts the first. Recommend; never implement.
+7. **Nonblocking advisory:** scan incremental refresh, snowflake → star, aggregations, marked date table,
+   pruned columns. Separate `improvement_opportunities[]`: **"future direction, not a defect"**,
+   never in `fidelity_findings[]` or any verdict/sign-off. Like-for-like; recommend, never implement.
 
 ## Operating modes
 
@@ -251,15 +233,13 @@ property of the *invocation*, so two reviews really are two reviewers.
   `viz_fidelity[]` row. Cheap, and two agents are blocked until it lands.
 - **Spot-check mode** (fast): one visual or page mid-iteration, while `pbi-report-builder` is still
   fixing.
-- **Full-migration sign-off mode** (last): all dashboards, every visual, the complete discrepancy
-  table, an explicit per-dashboard verdict. Prefer a **multi-model cross-check** here (2-3 models in
-  parallel, reconciled; a discrepancy every model raises is high-confidence).
-  Phase-2 evidence must be final-v3/all-pages, with stable valid PNGs, validation-grade source-bound
-  references and every whole-page/visual judgement `pass`. Oracle/layout-text, `layout_match`,
-  subsets, missing/unverified observations and open findings remain non-success. Give the caller's
-  final H to the orchestrator for the public check and identical-token promotion; never select H
-  from history or a prior promotion. Preserve the current-snapshot disclaimer (no authenticated
-  producer, original commissioning, latest-ever or receiving-machine claim).
+- **Full-migration sign-off mode** (last): all dashboards/visuals, discrepancy table, per-dashboard
+  verdict. Prefer 2-3 reconciled parallel models; agreement is high-confidence.
+  Require final-v3/all-pages, stable valid PNGs, source-bound validation-grade references,
+  every whole-page/visual `pass`; lower-grade/subset/missing/unverified evidence or open findings block.
+  Forward identical caller H to the orchestrator for final check and promotion. Copy the README's
+  exact current-snapshot disclaimer: no authenticated producer, original commissioning, latest-ever,
+  durable persistence or receiving-machine claim.
 
 ⚠️ **At sign-off, treat the triage classifications as CLAIMS TO VERIFY — even though an earlier
 instance of you produced them.** You need them (or you re-flag every deliberate limitation as a
@@ -285,13 +265,14 @@ An `accepted-limitation` you cannot re-justify against the reference is a findin
 
 1. Every dashboard has an explicit whole-dashboard verdict.
 2. Every visual has either "no discrepancy found" or a specific, actionable table row.
-3. Every numeric claim cites a **pair** of evidence: the PBI-side DAX query + result, **and** the
-   Tableau-side number compared against. With no Tableau-side number, record
-   `numeric_status: unverified` — never an unqualified "faithful" verdict on a PBI value alone.
-   For current v2 numeric `none`, retain raw missing counts and disclose exactly:
+3. Every numeric claim needs **PBI DAX query/result AND Tableau number**; otherwise
+   `numeric_status: unverified`, never unqualified "faithful". Only independently verified current
+   v2 numeric `none` waives comparison; keep raw missing counts. Disclose exactly:
    **Exact Tableau-versus-Power-BI numeric comparison was not performed because the commissioned brief explicitly waived it.**
-   This waives comparison only, never data/AI/visual evidence. Forced promotion is not sign-off:
-   **PROMOTED unchecked; Phase-2 COMPLETE was not established.**
+   Required/unknown → typed nonzero `CANNOT_ESTABLISH(NUMERIC)`: **Phase-2 COMPLETE was not established.**
+   No CSV/label overrides, scope changes to pass, or native numeric qualification prerequisite.
+   `--force` conflicts with H before effects; shipment guards stand. Forced shipment prints/records,
+   never as sign-off: **PROMOTED unchecked; Phase-2 COMPLETE was not established.**
 4. The inventory/completeness pass ran and is reported first.
 5. Every discrepancy is routed to an owner (a subagent, or `accepted-limitation`).
 6. **Every `viz_fidelity[]` row is classified**, including `status: "rebuilt"` rows — an unclassified

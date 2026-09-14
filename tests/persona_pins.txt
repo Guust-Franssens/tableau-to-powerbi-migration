@@ -150,7 +150,7 @@ ca3b734fcd76e0c13055e53e4d822e839f5b68a50dcb8152adbbe78126efbbfd  4. **The seman
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 4788b3fab4787493d9cd4edba4f93dc90ee2dbff3e0a32c659709e0b1c700ac4  ## Skills you use
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-62e9afa6c2a9bfe0c0a8ddafb1f86a2e296e6e715f3d577b32ca969d1ed93d44  - **Numeric investigation, when commissioned ~ DAX `EVALUATE
+c7808a315e5d78fdcfdfdc8379757e100609a3f3dedf9cb2013c5ffa2d2c61a6  - **Commissioned numeric investigation ~ DAX `EVALUATE`.** L
 80baf511ac3c725221b93704a90dc8ed49c25d42c28def35cfa448e62fc5d50b  - **`powerbi-report-gotchas`** ~ invoke **by name** whenever
 efdd02d18841d3c6c715dbedd0017ba96443a0057785bd86e8dece79addaeadc  - **`powerbi-report-authoring`** ~ Desktop Bridge screenshot
 57666be140c4096bb304f2330fbf7e773ba49cb318fd88f4806e72e87c8250dd  - Playwright via the shell, only if no Tableau reference ima
@@ -159,7 +159,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 9cb0186a08e86a5208abb6dfb535a243b2fc2d7822eb15bd6761cecb2371d5b8  Cheap structural checks first, expensive judgement last.
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-2d7e00d60403e22b67853932352d7984c51daced0992a581cfc72cae107d6459  0. **All-scope automated inventory:** `python scripts/check_
+299cd98640d66f49d5baa809634f3e05fcb9c5b56b6ddfdfc779d357ce0d2a0c  0. **Diagnostic, never COMPLETE:** `python scripts/check_uni
 f35e9d8fbbcbd3e19c7e01563e465729d4ef242416e62ef29c8075e7b611ab39  1. **Adjudicate the engine's own claims FIRST ~ two agents a
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 ab07428a9f303fd58ac99d4a29b5763c53902419a88d22c4e187b4059d17110e  | class | meaning | who acts |
@@ -173,9 +173,9 @@ a8ba94b9f8f4076f13ddf3906335ce9328da8e449e597491206eeaeedb31dfaa  - **`openabili
 6b34bdc8b5760dd6797122837ec87c57c7add5e9d6abfabbceced4052cbf911b  - **Adjudicate each claim against the Tableau source/referen
 1d626ba4b43163f5d07b8ebe35e893a1c47e629ed5fa9b45bbc8637cce74267c  - **Classify the `status: "rebuilt"` rows too.** If the engi
 a5eaa6e3150ed62450332ccbc01438cf9df5a3e0fdf51038083dc3cc2119d2ca  - **Some deferrals must NOT be reversed, and only you can te
-9dd78cc3c32dbd175542aa31ddbac68c437e8621f3125ac89495abd712a88bed  2. **Inventory/completeness pass.** Scope each dashboard to 
-bb134ff529ec370465185e453d3e24bbbc96a5daff7605a586f9854781ec08ec  3. **Whole-dashboard pass ~ BEFORE drilling into visuals.** 
-e26bafc2037a8cd33bf0067bcc58a39df00841772ff3599f9f930a4c31b71cae  4. **Figure-by-figure pass.** *Visual side*: chart-type matc
+2ab83d2dd1151af2ea27e41daa84adda9a0abe155691aeb2779bf4cbc95df0ed  2. **Inventory/completeness:** each dashboard's `dashboards[
+394a5232442d24d5629ce6acdea08c599f87ea3d2f97a841c29c864f7ced7dfc  3. **Whole-dashboard BEFORE figures:** compare full-page scr
+7dff272ef2798ae4fd06878f1ac26217dba975a846ac685acb3ddea2dd2a2cbe  4. **Figure-by-figure:** chart type (or defensible improveme
 2e1337307bfb9ebdd846027839973d6685db5d60c48ab6d108a5095162e375d5  5. **Emit a structured discrepancy report** ~ a table, not p
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 44ac8c0b2aa8fb71ced8625ded6dfb0b20d224ea54b04833c8d927aa5fd04998  | Dashboard / Visual | Discrepancy | Kind | Severity | Suspe
@@ -184,7 +184,7 @@ caf469b8231321769bbbf46220ffb61a0325f384c091c404304e369a22d41375  | ... | ... | 
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 6a3052aa2ad74b409ab6b7fcf3559811860aba7933baa624a09aa91662ff8b9f  `Kind: structural-gap` is for what Power BI genuinely cannot
 2afff60ac378741c6a498a61b0dbe5d45d2e2c9b915f60043ebab6fcfcd90ca4  6. **Give each dashboard an explicit verdict**: does it, as 
-d95b6245d4a367bca824693d6e8fb694ebdb45148a89372c2e612b00c2a64b57  7. **Advisory improvement scan ~ a SEPARATE section that nev
+e6b5a39b164665d1fd71684c945de6b0282385a691fe9c589a04a6cd84d9a7df  7. **Nonblocking advisory:** scan incremental refresh, snowf
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 90e48a7f751783169d5e801f211330144685188ec27ea465b4e6e633a858f180  ## Operating modes
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -192,7 +192,7 @@ dc1e72efe152c6d07aa9adbd4d6bb9026b17ee685a8cf4aabc69f9b37b29e87b  You are invoke
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 eec0cf522571a44ab0a54404705f7723193cb824628746738c3e0796d8cf6c67  - **Triage mode** (first, before any builder acts): workflow
 90b2875c1d18c9af1a198a984cbfdce4ce1949103d4954956d03a854d8ae35b0  - **Spot-check mode** (fast): one visual or page mid-iterati
-c60d18ffea2cc58c3dd151b69be0c33788a171f67d09bb10d0f90b7451ea98c5  - **Full-migration sign-off mode** (last): all dashboards, e
+46fd53029aa3c1c8b5a8131bff65213d9dea41f78dfb10752ac6fab1924a9c56  - **Full-migration sign-off mode** (last): all dashboards/vi
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 af6b685e34de3bb1e9f40d40a85a6520af80354c74cae6d24bc699c149880881  ~~ **At sign-off, treat the triage classifications as CLAIMS
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -208,7 +208,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 a20d0c3a5c11de753e3b7b9753111622f1c1f005bfe4bb61f1dd945f13b140f9  1. Every dashboard has an explicit whole-dashboard verdict.
 7de9f339f12fa43310269487b98a3545ed019088dd2ee67fbbaf8139ba3ad6ff  2. Every visual has either "no discrepancy found" or a speci
-0b092f8e75940a428adaf9c84f847b0c63261accf843599744929af6e322d016  3. Every numeric claim cites a **pair** of evidence: the PBI
+0c8246d03984f84d076c3bf803d39cbf16f995ad9f3e27bb6c99b6c43f3a8004  3. Every numeric claim needs **PBI DAX query/result AND Tabl
 b7033145b57f01e43a53d834359dbb50e2a141e5deb4bf75c7db3d6b24c75078  4. The inventory/completeness pass ran and is reported first
 5442ecd3c5584c9f7fbe8f4cda5aaaa5324ccce2f6f788e66c3d95145a705d93  5. Every discrepancy is routed to an owner (a subagent, or `
 aefdcc49f4c456b5c1ae0c85c43b560259b6029549f8cd5dc8d76b7e405e259c  6. **Every `viz_fidelity[]` row is classified**, including `
@@ -460,11 +460,11 @@ eab88770d84c9792c0c605ea43999de3cd2097c5b8d0236d7c1259f3781f4413  8. **Delegate 
 2b5de341fdc8d077c85bf19931a750f7a7f6b58fefb7b5c7a168540a2caa09a5  - **The landing re-run is a BARRIER**: it deletes and recrea
 e99599871043a3e3cdece5e4a013fa6d016a6531d26db65af559d95065817bf0  9. **Delegate to `pbi-report-builder`** ~ only AFTER step 8'
 72fe64f785bc5ffbeabbc24ad8f7baeea0db26ab5854bf00d31d30f5c9de2f1c  8. Give it the handover slice, the step-7 classification, th
-293deb2641f9ce459fa2bbdfe56a58af49c9e04e5a03498188a246cb2ec35b99  10. **Delegate to `pbi-migration-validator` again ~ full sig
-f36be1171385e5403e855f2e472111be71a7b54d5c1207ebc9758b24a99519be  11. **Route every discrepancy back to its owning subagent** 
-41d46f37fc88b720e9638102b945b08d9d25ace255879ce94558f5419141cac0  12. **Validate before declaring done.** Start with diagnosti
+75876f8abd203cc651a4bdfd8e9b6dab27e5e4af73dcf5fcd231fbc1c1ee243b  10. **Fresh `pbi-migration-validator`, full sign-off mode.**
+025ef045d056a7ef1db53b8473b6b18c31c182a12ad79fd22bbbe7138e6cd2fa  11. **Route each discrepancy to its owner:** numeric/DAX ~ `
+b25c79b917a4578b4baee3101562fbd90a403d9da8de77bfa8e7091632104f7c  12. **Diagnose ~ final check ~ promote.** `python scripts/ch
 0241d2f0a6d7fa4aa3f318a5775a5f9f905eb5d7c22b0edbe48d18f8047763b1  13. **Summarize for the user**: what was built (tables/measu
-8b11693f765ba3215081d24ab391d876a2ad76c0f12c78cb27bc6fccbfc0df00  14. **Retrospective ~ MANDATORY.** Each migration must leave
+f1e0387a1e7ebae6028bdc7919cc5ee04a6cb4647fb5d746c58e4f2b1577a56b  14. **Retrospective ~ MANDATORY.** Read `phase-timings.json`
 760cf6e1c73de22e460d8175600b4893950b719e3a8f5de9c7e09ec0dc11bae7  15. **Final gate ~ prove nothing was built behind the creden
 3a138cb20e5ca29f388a2515f0c2780042ec3d590e4b0124ae5a42e37c4c3d65  16. **(Phase 2)** `pbi-deployer` publishes to Fabric ~ not i
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
