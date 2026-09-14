@@ -2929,7 +2929,7 @@ def test_binding_roots_refuse_malformed_or_inconsistent_ordinal_transport(
         cohort = (cohort[0], replace(original, dependencies=(replace(dependency, state=state),)))
     elif fault in ("bool-ordinal", "negative-ordinal", "out-of-range", "self", "string-ordinal", "float-ordinal"):
         index = {
-            "bool-ordinal": True,
+            "bool-ordinal": False,
             "negative-ordinal": -1,
             "out-of-range": len(cohort),
             "self": 1,
