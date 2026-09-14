@@ -27,6 +27,7 @@ import shutil
 from dataclasses import replace
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from contextlib import redirect_stdout
 
@@ -131,13 +132,22 @@ def _write_input_manifest(bundle: Path, assets: list[Path]) -> None:
     )
 
 
-def _brief(tmp_path: Path, unit: str, scope: str = "model_and_report", fallback_authorization: str = "stop") -> Path:
+def _brief(
+    tmp_path: Path,
+    unit: str,
+    scope: str = "model_and_report",
+    fallback_authorization: str = "stop",
+    *,
+    numeric_obligation: str | None = None,
+) -> Path:
     """The dispatcher's brief - the file `--brief` copies into every package it writes."""
     path = tmp_path / "briefs" / f"{unit}-migration-brief.md"
     path.parent.mkdir(parents=True, exist_ok=True)
+    schema = "v1" if numeric_obligation is None else "v2"
+    numeric = "" if numeric_obligation is None else f'numeric_obligation = "{numeric_obligation}"\n'
     path.write_text(
-        f'+++\nschema = "phase1-start-ready/v1"\nunit = "{unit}"\nscope = "{scope}"\n'
-        f'fallback_authorization = "{fallback_authorization}"\n+++\n\nFaithful re-creation.\n',
+        f'+++\nschema = "phase1-start-ready/{schema}"\nunit = "{unit}"\nscope = "{scope}"\n'
+        f'fallback_authorization = "{fallback_authorization}"\n{numeric}+++\n\nFaithful re-creation.\n',
         encoding="utf-8",
     )
     return path
@@ -224,7 +234,7 @@ def _package(tmp_path: Path, bundle: Path, oracle: Path, unit: str = UNIT, scope
         tmp_path / "out",
         oracle_dir=oracle,
         assets_dir=bundle.parent / "assets",
-        brief=_brief(tmp_path, unit, scope),
+        brief=_brief(tmp_path, unit, scope, numeric_obligation="required"),
     )
     return tmp_path / "out" / unit
 
@@ -251,7 +261,7 @@ def _cli_args(bundle: Path, out: Path, oracle: Path, tmp_path: Path) -> list[str
         "--oracle",
         str(oracle),
         "--brief",
-        str(_brief(tmp_path, UNIT)),
+        str(_brief(tmp_path, UNIT, numeric_obligation="required")),
         "--quiet",
     ]
 
@@ -264,6 +274,7 @@ def _binding_package(
     datasource_luid: str = DS_LUID,
     quoted: bool = False,
     lookalikes: bool = False,
+    asset_extension: str = ".tds",
 ) -> Path:
     """Real producer output with independently inspectable CSV bytes and an accepted projection."""
     bundle, oracle, _objects = _bundle(parent, covered=None, datasource_only=datasource)
@@ -275,6 +286,11 @@ def _binding_package(
         asset.write_text(text.replace("class='postgres'", "class='textscan'"), encoding="utf-8")
         if datasource_luid != DS_LUID:
             asset.rename(asset.with_name(f"{datasource_luid}_{DS_UNIT}.tds"))
+            asset = asset.with_name(f"{datasource_luid}_{DS_UNIT}.tds")
+        if asset_extension == ".tdsx":
+            with zipfile.ZipFile(asset.with_suffix(".tdsx"), "w") as archive:
+                archive.writestr("Data/source.tds", asset.read_bytes())
+            asset.unlink()
         _write_input_manifest(bundle, sorted((bundle.parent / "assets").iterdir()))
     source = parent / "Extract.Data" / "rows.csv"
     source.parent.mkdir()
@@ -340,6 +356,235 @@ def _binding_cli(root: str | Path, *flags: str) -> dict:
     assert str(root) not in output.getvalue()
     assert "START_READY" not in output.getvalue()
     return result
+
+
+def _shared_ready_cohort(parent: Path) -> tuple[Path, Path]:
+    """Real parsed published source, producer projections, source-named pages and genuine renders."""
+    from test_package_unit_reproductions import _shared_bundle
+    from test_check_reference_readiness import write_report
+
+    bundle, _old_oracle = _shared_bundle(parent)
+    source = bundle.parent / "assets" / f"{WB_LUID}_{UNIT}.twb"
+    assert source.read_bytes() == (Path(__file__).parent / "fixtures" / "published_datasource.twb").read_bytes()
+    objects = crr.source_objects(source)
+    assert objects
+    pages = bundle / "pbip" / UNIT / f"{UNIT}.Report" / "definition" / "pages"
+    shutil.rmtree(pages)
+    write_report(bundle, UNIT, [obj.page_id for obj in objects])
+    _write_receipt(bundle, [UNIT, DS_UNIT])
+    oracle = write_oracle(
+        parent / "source-capture",
+        [
+            {
+                "view_name": obj.name,
+                "view_type": obj.kind,
+                "workbook_luid": WB_LUID,
+                "workbook_name": UNIT,
+                "view_luid": f"{index:08d}-0000-0000-0000-000000000000",
+            }
+            for index, obj in enumerate(objects)
+        ],
+    )
+    out = parent / "out"
+    provider, consumer = out / DS_UNIT, out / UNIT
+    for unit, scope in ((DS_UNIT, "model_only"), (UNIT, "report_only_shared_model")):
+        pkg.package_unit(
+            bundle,
+            unit,
+            out,
+            assets_dir=bundle.parent / "assets",
+            oracle_dir=oracle,
+            brief=_brief(parent, unit, scope, numeric_obligation="required"),
+            provider_packages=(provider,) if unit == UNIT else (),
+        )
+    assert _binding_cli(provider)["exit_code"] == 0
+    assert _binding_cli(consumer, "--provider-package", str(provider))["exit_code"] == 0
+    return provider, consumer
+
+
+@pytest.mark.parametrize("quoted", [False, True], ids=["literal-localized", "custom-quoted"])
+def test_start_ready_public_owned_package_is_read_only_and_keeps_ceilings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], quoted: bool
+) -> None:
+    root = _binding_package(tmp_path, quoted=quoted)
+    assert _binding_cli(root)["exit_code"] == 0
+    before = {
+        str(path.relative_to(root)): (path.read_bytes(), path.stat().st_ino)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    root_id = root.stat().st_ino
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("START_READY attempted a mutation or an original data proof")
+
+    for name in ("_assemble_unit", "_binding_plan", "_binding_publish", "_seal_package", "_write_data_access_final"):
+        monkeypatch.setattr(pkg, name, forbidden)
+    for name in ("assess_data_access", "apply_block", "clear_block", "authorize", "_audit"):
+        monkeypatch.setattr(pkg.data_access, name, forbidden)
+    capsys.readouterr()
+    assert crr.main([str(root)]) == 0
+    output = capsys.readouterr().out
+    report = json.loads(output)
+    assert report["status"] == "START_READY"
+    assert report["package_readiness"] == [{"ordinal": 0, "status": "START_READY", "failed_stage": None, "codes": []}]
+    assert report["package_data_access"][0]["assessment"]["state"] == "local_import_ready"
+    inspection = report["package_binding"][0]["inspection"]
+    assert (inspection["state"], inspection["validation"]) == ("BOUND", "UNVALIDATED")
+    if quoted:
+        expected = hashlib.sha256(b"""'Owner''s "Archive" Root'""").hexdigest()
+        assert inspection["parameters"][0]["parameter_identity"] == expected
+    assert report["grades_present"] == ["layout/text only (oracle capture, default view state)"]
+    assert report["pages_expected"] == report["pages_ready"] == 4
+    assert not report["all_evidence_validation_grade"]
+    for private in (str(tmp_path), UNIT, WB_LUID, "Owner", "Archive", "Extract.Data", "fixture.example"):
+        assert private not in output
+    assert before == {
+        str(path.relative_to(root)): (path.read_bytes(), path.stat().st_ino)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    assert root.stat().st_ino == root_id
+    code, strict = _readiness(root, tmp_path)
+    assert code == 0 and strict["status"] == "START_READY"
+    assert crr.main([str(root), "--require-validation-grade", "--quiet"]) == 1
+
+
+@pytest.mark.parametrize("extension", [".tds", ".tdsx"])
+def test_start_ready_real_datasource_extensions_keep_earned_reference_not_applicable(
+    tmp_path: Path, extension: str
+) -> None:
+    root = _binding_package(tmp_path, datasource=True, asset_extension=extension)
+    assert _binding_cli(root)["exit_code"] == 0
+    code, report = _readiness(root, tmp_path)
+    assert (code, report["status"]) == (0, "START_READY")
+    assert report["units"][0]["status"] == "NOT_APPLICABLE"
+    assert report["pages_expected"] == 0
+    assert report["package_source"][0]["kind"] == "datasource"
+    assert json.loads((root / "package-manifest.json").read_bytes())["artifacts"]["asset"].endswith(extension)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("extra_provider", [False, True], ids=["pair", "equal-name-unselected-provider"])
+def test_start_ready_real_shared_report_only_cohort_uses_exact_roots(
+    tmp_path: Path, reverse: bool, extra_provider: bool
+) -> None:
+    provider, consumer = _shared_ready_cohort(tmp_path / "shared")
+    roots = [provider, consumer]
+    if extra_provider:
+        other = _binding_package(
+            tmp_path / "other", datasource=True, datasource_luid="22222222-3333-4444-5555-666666666666"
+        )
+        assert other.name == provider.name and str(other) != str(provider)
+        assert _binding_cli(other)["exit_code"] == 0
+        roots.insert(0, other)
+    if reverse:
+        roots.reverse()
+    spec = json.loads((consumer / "migration-spec.json").read_bytes())
+    assert (
+        spec["data_sources"][0]["connection"]["class"],
+        spec["data_sources"][0]["connection"]["powerbi_target"],
+    ) == ("sqlproxy", "live_source")
+    before = [
+        {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()} for root in roots
+    ]
+    output = tmp_path / "cohort.json"
+    assert crr.main([*map(str, roots), "--json", str(output), "--quiet"]) == 0
+    report = json.loads(output.read_bytes())
+    assert report["status"] == "START_READY"
+    assert report["packages_start_ready"] == report["packages_scanned"] == len(roots)
+    assert [row["ordinal"] for row in report["package_readiness"]] == list(range(len(roots)))
+    inherited = report["package_data_access"][roots.index(consumer)]["assessment"]
+    assert (inherited["state"], inherited["provider_state"], inherited["effective_scope"]) == (
+        "provider_inherited",
+        "local_import_ready",
+        "report_only_shared_model",
+    )
+    assert (
+        inherited["provider_unit"]
+        == "provider-ref:v1:sha256:"
+        + hashlib.sha256(b"phase1-data-access/provider-unit/v1\0Shared_Extract").hexdigest()
+    )
+    assert report["pages_ready"] == report["pages_expected"] > 0
+    assert before == [
+        {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()} for root in roots
+    ]
+    assert crr.main([str(consumer), "--quiet"]) == 1, "a report-only consumer cannot discover its provider"
+
+
+def test_start_ready_move_sanitize_and_rebind_are_separate_public_steps(tmp_path: Path) -> None:
+    root = _binding_package(tmp_path, quoted=True)
+    assert _readiness(root, tmp_path)[0] == 1
+    assert _binding_cli(root)["exit_code"] == 0
+    assert _readiness(root, tmp_path)[1]["status"] == "START_READY"
+    moved = root.with_name("Moved")
+    root.rename(moved)
+    code, report = _readiness(moved, tmp_path)
+    assert code == 1
+    assert report["package_readiness"][0]["failed_stage"] == "binding"
+    assert report["package_binding"][0]["inspection"]["codes"] == ["binding_not_current"]
+    assert _binding_cli(moved)["exit_code"] == 0
+    assert _readiness(moved, tmp_path)[1]["status"] == "START_READY"
+    assert _binding_cli(moved, "--sanitize")["exit_code"] == 0
+    assert _readiness(moved, tmp_path)[0] == 1
+    assert _binding_cli(moved)["exit_code"] == 0
+    assert _readiness(moved, tmp_path)[1]["status"] == "START_READY"
+
+
+@pytest.mark.parametrize("authorized", [False, True], ids=["keyed-live-proof", "explicit-model-only"])
+def test_start_ready_original_proof_and_explicit_authorization_keep_their_own_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, authorized: bool
+) -> None:
+    """Real proof/authorization and package producers; only external Desktop/network/ACL primitives are stubbed."""
+    import test_data_access_contract as authority
+
+    proof = tmp_path / "proof"
+    proof.mkdir()
+    original = authority._root_fixture.__wrapped__(proof, monkeypatch)
+    authority._desktop_fixture.__wrapped__(monkeypatch)
+    if authorized:
+        authority._authorize(original)
+    else:
+        authority._earn(original)
+    bundle, oracle, _ = _bundle(tmp_path / "source", covered=None, datasource_only=True)
+    asset = bundle.parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
+    asset.write_text(
+        "<datasource name='Shared'><connection class='sqlserver' server='source.example' dbname='db'>"
+        "<relation name='Rows' table='[Rows]' type='table'/></connection></datasource>",
+        encoding="utf-8",
+    )
+    _write_input_manifest(bundle, sorted((bundle.parent / "assets").iterdir()))
+    out = tmp_path / "out"
+    pkg.package_unit(
+        bundle,
+        DS_UNIT,
+        out,
+        oracle_dir=oracle,
+        assets_dir=bundle.parent / "assets",
+        gate_root=original,
+        brief=_brief(
+            tmp_path,
+            DS_UNIT,
+            "model_only",
+            "model_only_unvalidated" if authorized else "stop",
+            numeric_obligation="required",
+        ),
+    )
+    package = out / DS_UNIT
+    stored = json.loads((package / "data-access.json").read_bytes())
+    assert stored["source_keys"] == ["source-key:ab1baa4b3f77bb70"]
+    assert stored["state"] == ("authorized_model_only" if authorized else "live_data_ok")
+    assert _binding_cli(package)["exit_code"] == 0
+    before = {str(path.relative_to(original)): path.read_bytes() for path in original.rglob("*") if path.is_file()}
+    code, report = _readiness(package, tmp_path)
+    assert (code, report["status"]) == (0, "START_READY")
+    assert report["package_data_access"][0]["stored"] == report["package_data_access"][0]["assessment"] == stored
+    assert (stored["validation"], stored["max_phase2_claim"]) == (
+        ("unvalidated", "structural_only") if authorized else ("validated", "data_validated")
+    )
+    assert before == {
+        str(path.relative_to(original)): path.read_bytes() for path in original.rglob("*") if path.is_file()
+    }
 
 
 def _binding_tail_package(parent: Path, tail: str, trailing: bool) -> Path:
@@ -601,10 +846,13 @@ def test_folder_consumers_map_state_not_code_spelling(
 def test_binding_no_flags_reference_gate_stays_s1_clean(tmp_path: Path) -> None:
     root = _binding_package(tmp_path)
     before = _readiness(root, tmp_path)
-    assert before[0] == 0
+    assert before[0] == 1
+    assert before[1]["package_readiness"][0]["failed_stage"] == "binding"
     assert _binding_cli(root)["exit_code"] == 0
     after = _readiness(root, tmp_path)
     assert after[0] == 0, after
+    assert after[1]["status"] == "START_READY"
+    assert after[1]["package_binding"][0]["inspection"]["validation"] == "UNVALIDATED"
     for key in ("pages_ready", "pages_expected", "units_ready", "pages_blind"):
         assert before[1][key] == after[1][key]
     result = subprocess.run(
@@ -646,7 +894,7 @@ def test_the_engine_working_copy_alone_has_no_expected_page_set(tmp_path: Path) 
 def test_readiness_needs_no_flags_on_a_package_and_reports_every_page_ready(tmp_path: Path) -> None:
     bundle, oracle, objects = _bundle(tmp_path, covered=None)
     code, payload = _readiness(_package(tmp_path, bundle, oracle), tmp_path)
-    assert (code, payload["status"]) == (0, "READY")
+    assert (code, payload["status"]) == (0, "START_READY")
     assert payload["pages_ready"] == payload["pages_expected"] == len(objects)
     assert payload["pages_blind"] == 0
 
@@ -776,13 +1024,14 @@ def test_the_documented_check_unit_command_refuses_a_legacy_capture_as_numeric_e
 
 def test_a_datasource_only_unit_packages_and_neither_gate_crashes(tmp_path: Path) -> None:
     """18 of 67 units in the reference run are datasource-only; a model, no report, no oracle."""
-    bundle, oracle, _ = _bundle(tmp_path, covered=None, datasource_only=True)
-    unit = _package(tmp_path, bundle, oracle, unit=DS_UNIT, scope="model_only")
+    unit = _binding_package(tmp_path, datasource=True)
+    assert _binding_cli(unit)["exit_code"] == 0
 
     assert (unit / "fabric" / f"{DS_UNIT}.SemanticModel").is_dir()
     assert not (unit / "oracle").exists()
     code, payload = _readiness(unit, tmp_path)
-    assert (code, payload["status"]) == (0, "NOT_APPLICABLE")
+    assert (code, payload["status"]) == (0, "START_READY")
+    assert payload["units"][0]["status"] == "NOT_APPLICABLE"
     parity = check_unit.check_page_parity(unit, check_unit.load_exemptions(unit))
     assert parity["status"] in {check_unit.STATUS_NOT_CHECKED, check_unit.STATUS_PASS}
 
@@ -874,7 +1123,7 @@ def test_the_packaged_brief_carries_the_bytes_and_not_the_dispatchers_path(tmp_p
         json.loads(manifest)["contents"]["files"]["migration-brief.md"]
         == hashlib.sha256(source.read_bytes()).hexdigest()
     )
-    assert pri.read_current_brief_policy(package) == ("brief_numeric_obligation_unknown", None)
+    assert pri.read_current_brief_policy(package) == (None, pri.BriefPolicy("model_and_report", "stop", "required"))
 
 
 @pytest.mark.parametrize("numeric_obligation", ["none", "required"])
@@ -1165,7 +1414,7 @@ def test_completed_flat_out_dir_layout_is_accepted_and_gates_pass(tmp_path: Path
     assert (unit / "package-manifest.json").is_file()
 
     code, payload = _readiness(unit, tmp_path)
-    assert (code, payload["status"]) == (0, "READY")
+    assert (code, payload["status"]) == (0, "START_READY")
     assert payload["pages_ready"] == len(objects)
 
     parity = check_unit.check_page_parity(unit, check_unit.load_exemptions(unit))
@@ -1269,7 +1518,7 @@ def test_nested_batch_out_dir_compatibility_is_preserved(tmp_path: Path) -> None
     assert (unit / "package-manifest.json").is_file()
 
     code, payload = _readiness(unit, tmp_path)
-    assert (code, payload["status"]) == (0, "READY")
+    assert (code, payload["status"]) == (0, "START_READY")
     assert payload["pages_ready"] == len(objects)
 
     parity = check_unit.check_page_parity(unit, check_unit.load_exemptions(unit))
@@ -1304,7 +1553,7 @@ def test_a_scoped_estate_report_still_earns_every_page_ready(tmp_path: Path) -> 
     bundle, oracle, objects = _bundle(tmp_path, covered=None)
     _plant_estate_report(bundle, UNIT, datasources=[])
     code, payload = _readiness(_package(tmp_path, bundle, oracle), tmp_path)
-    assert (code, payload["status"]) == (0, "READY")
+    assert (code, payload["status"]) == (0, "START_READY")
     assert payload["pages_ready"] == payload["pages_expected"] == len(objects)
 
 
@@ -1315,6 +1564,11 @@ def test_a_scoped_estate_report_still_earns_a_datasource_unit_its_not_applicable
     and this unit stops being a datasource and starts being a broken workbook - exit 3, not exit 0.
     """
     bundle, oracle, _ = _bundle(tmp_path, covered=None, datasource_only=True)
+    asset = bundle.parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
+    asset.write_text(
+        asset.read_text(encoding="utf-8").replace("class='postgres'", "class='textscan'"), encoding="utf-8"
+    )
+    _write_input_manifest(bundle, sorted((bundle.parent / "assets").iterdir()))
     _plant_estate_report(bundle, UNIT, datasources=[DS_UNIT])
     unit = _package(tmp_path, bundle, oracle, unit=DS_UNIT, scope="model_only")
 
@@ -1325,7 +1579,8 @@ def test_a_scoped_estate_report_still_earns_a_datasource_unit_its_not_applicable
     assert check_unit._is_engine_report(unit / "report.json")  # pylint: disable=protected-access
 
     code, payload = _readiness(unit, tmp_path)
-    assert (code, payload["status"]) == (0, "NOT_APPLICABLE")
+    assert (code, payload["status"]) == (0, "START_READY")
+    assert payload["units"][0]["status"] == "NOT_APPLICABLE"
 
 
 # --------------------------------------------------------------------------------------------

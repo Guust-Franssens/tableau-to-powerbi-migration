@@ -120,11 +120,21 @@ opaque references, never endpoints, source/provider names, credentials, host pat
 This privacy claim concerns the projection and its new diagnostics, not existing source/spec/model
 content. S1 hashes the exact UTF-8/LF file; it does not interpret its semantics.
 
-❌ **The final START_READY consumer is pending.** Construction success and reference `READY`
-do not authorize Phase-2 dispatch or clear the existing credential stop. Every package and its CLI
-summary expose that ceiling and the actual closed data state. Audit/spec reads are not an atomic
-cross-file snapshot, and projected evidence can age after packaging; no post-publication lifecycle
-is added here.
+✅ **Final START_READY consumption is read-only.** `check_reference_readiness.py` uses S2's
+issued current v2 brief/spec/projection handoff and the sole
+`reconcile_package_data_access` assessment, then existing reference policy and fresh package binding
+inspection. It does not read another audit, reclassify source legs, reauthorize model-only or copy
+the provider/data policy matrix. Stored and canonical refusals stay distinct and nonzero.
+The exact S2-selected provider is checked against its own facts before inheritance.
+
+The binding inspector owns the physical marker/ACL check. A physical block remains findings;
+unassessable physical evidence remains cannot-establish, including for an authorized model-only
+package. Construction success, reference `READY` and `BOUND` alone do not clear that stop.
+`BOUND` remains `UNVALIDATED`; explicit model-only remains `unvalidated/structural_only`.
+Projected proof can age after packaging: this check is not a new live probe, full-model refresh,
+atomic cross-file snapshot or permanent credential clearance. See
+[final START_READY](reference-readiness.md#final-package-start_ready-562-622) for the single public
+decision and the unchanged reference evidence ceilings.
 
 ### Engine-produced bundles: detection, not prevention
 

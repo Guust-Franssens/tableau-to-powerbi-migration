@@ -27,7 +27,8 @@ The pipeline has three locations, and the direction is one-way:
             ▼
    _runs/<NNN>-<slug>/packages/<Unit>/
        one diagnostic folder per migration unit; BOTH gates accept it with NO flags
-            │            entry gate: check_reference_readiness.py   (ready / blind)
+            │            bind separately when applicable, then:
+            │            entry gate: check_reference_readiness.py   (START_READY / nonzero)
             │            exit  gate: check_unit.py                  (is this unit done?)
             │
             │  PHASE 3 — ship   (scripts/promote_unit.py, #458/#462) — FROM the package,
@@ -241,9 +242,13 @@ Authorized model-only is limited to a model-only datasource, authentic same-root
 explicit fallback policy. No owned-workbook scope downgrade or published-plus-direct aggregate is
 invented; a report cannot inherit an authorized-unvalidated model-only provider.
 
-❌ **Final START_READY data-access consumption remains a separate PR.** Packaging exit 0 still
-means construction, not authorization to dispatch Phase 2. Handover/README/output state the actual
-blocked/cannot-establish/authorized-unvalidated result and the pending consumer; no gate is cleared.
+✅ **Final Phase-1 START_READY is a separate read-only check.** Packaging exit 0 still means
+construction (`ASSEMBLED`), not dispatch. Bind applicable folder parameters, then run
+`check_reference_readiness.py` on the complete current package/provider cohort. It consumes the
+issued **v2** brief and canonical data result, preserves reference policy, and freshly inspects
+binding before returning `START_READY / 0`. Both numeric-obligation values remain metadata here;
+v1's earlier producer/S2 behavior does not establish this final v2 contract. No gate is cleared,
+and `BOUND` remains `UNVALIDATED`. The command does not rewrite stored `NOT_EVALUATED`.
 
 ⚠️ **The oracle kind directories are SINGULAR on purpose** — `dashboard/`, `worksheet/`, `unknown/`
 are `object_identity`'s `KIND_*` values *verbatim*, never a pluralised copy. `unknown/` is carried
@@ -267,10 +272,14 @@ packaging; after it, work in the package. See phase 3 below for the promotion me
 
 ```powershell
 python scripts\package_unit.py --bundle _runs\<NNN>-<slug>\bundle `
+    --unit <Unit> --brief <unit-specific-v2-brief> `
     --out _runs\<NNN>-<slug>\packages `
     --json _runs\<NNN>-<slug>\packages\packaging.json
-# then, per unit, with NO flags at all:
+# After original data proof and construction, bind separately when applicable:
+python scripts\set_data_folder.py --package <absolute-package>
+# Final Phase-1 decision, with NO flags (include provider roots for shared models):
 python scripts\check_reference_readiness.py _runs\<NNN>-<slug>\packages\<Unit>
+# Later, after agentic work:
 python scripts\check_unit.py                _runs\<NNN>-<slug>\packages\<Unit>
 ```
 
@@ -337,18 +346,19 @@ package's `package-manifest.json` still describes exactly the bytes on disk (#56
 does not) and that the package carries every role its kind and topology require with agreeing
 identities (#562 S2, exit 1 when it does not) — see
 [`docs/reference-readiness.md`](reference-readiness.md). `check_unit.py` still performs the boundary
-check alone. The package-local source return (#558) and data-access producer are available; the
-final START_READY data-access fold remains a separate slice.
+check alone. The final entry consumer also checks the current v2 brief, package-local source,
+canonical data access and fresh binding, without reimplementing those authorities.
 
 ### The two gates
 
 The entry check is **post-emission, before agentic fidelity work**, not before engine conversion.
 Use the authoritative [conversion, dispatch, and fidelity boundaries](reference-readiness.md#conversion-dispatch-and-fidelity-boundaries)
-for the transition, including the pending final package consumer; the lifecycle above is unchanged.
+for the transition. The order is **ASSEMBLED → applicable binding → START_READY → agentic work**;
+none of these input checks establishes Phase-2 COMPLETE or changes the later promotion lifecycle.
 
 | gate | question | verdicts |
 |---|---|---|
-| [`check_reference_readiness.py`](../scripts/check_reference_readiness.py) — the **ENTRY** gate | per report page, is there trustworthy Tableau reference evidence to *start from*? | exit 0 ready / 1 findings / 3 `CANNOT_ESTABLISH`; a page is `ready`, `blind`, `unverifiable`, or below the required grade. Neither 1 nor 3 is a pass |
+| [`check_reference_readiness.py`](../scripts/check_reference_readiness.py) — the **ENTRY** gate | are all current package/cohort inputs internally consistent, with adequate reference evidence and current binding? | package-only `START_READY / 0`; ordinary reference `READY`/`NOT_APPLICABLE` unchanged; 1 findings / 3 `CANNOT_ESTABLISH`. Neither 1 nor 3 is a pass |
 | [`check_unit.py`](../scripts/check_unit.py) — the **EXIT** gate | *"answer whether one migration unit is done by aggregating existing gates without merging them"* (`check_unit.py:2`) | per-scope `model` / `report` / `integration` / `all` |
 
 A **blind** page means an equivalent fidelity bug there is *structurally unfalsifiable*, not merely

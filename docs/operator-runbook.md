@@ -875,15 +875,37 @@ me where the workbook is"* (issue #446).
 
 This handoff is **after deterministic emission**; conversion output is not agentic dispatch
 readiness. Apply the authoritative [conversion, dispatch, and fidelity boundaries](reference-readiness.md#conversion-dispatch-and-fidelity-boundaries),
-including the current final-package-consumer limitation, before handing off the constructed package.
+before handing off the constructed package. Construction is only `ASSEMBLED`; final Phase-1
+dispatch requires the current package-only `START_READY` result.
 
 ```powershell
-python scripts\package_unit.py --bundle _bundle --out _runs\<NNN>-<slug>\packages `
+python scripts\package_unit.py --bundle _bundle --unit <Unit> --brief <unit-specific-v2-brief> `
+    --out _runs\<NNN>-<slug>\packages `
     --json _runs\<NNN>-<slug>\packages\packaging.json
-# then, per unit, with NO flags at all:
+# After construction and original data proof, bind separately when applicable:
+python scripts\set_data_folder.py --package <absolute-package>
+# Final Phase-1 readiness, with NO flags:
 python scripts\check_reference_readiness.py _runs\<NNN>-<slug>\packages\<Unit>
+# Later, after the commissioned agentic work:
 python scripts\check_unit.py _runs\<NNN>-<slug>\packages\<Unit>
 ```
+
+For a shared datasource, construct **each unit separately with its own current v2 brief**. The
+consumer construction command also receives `--provider-package <absolute-provider>`. Then:
+
+```powershell
+python scripts\set_data_folder.py --package <absolute-provider>
+python scripts\set_data_folder.py --package <absolute-consumer> --provider-package <absolute-provider>
+python scripts\check_reference_readiness.py <provider-package> <consumer-package>
+```
+
+The final command emits one privacy-safe JSON result and never performs those mutations for you.
+Only whole-cohort `START_READY / 0` permits dispatch; inspect every ordinal's `failed_stage`/codes
+on exits 1 or 3. Reference `READY` or `NOT_APPLICABLE`, assembly JSON and stored binding success
+are insufficient. `BOUND` remains `UNVALIDATED`. Keep each reference grade/ceiling in
+`limitations_encountered`. Sanitize **before** transfer, bind at the recipient, then rerun the
+final check; moving a bound package invalidates applicable binding. Detailed
+[authority/exit contract](reference-readiness.md#final-package-start_ready-562-622).
 
 **`--out` now names the canonical `packages/` directory itself.** Each unit lands directly at
 `packages/<Unit>/`. Both gates recognize a target beneath `packages/` as package-shaped even if an

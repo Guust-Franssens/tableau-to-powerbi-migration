@@ -33,7 +33,7 @@ Exit codes
 The 0/1/2/3 shape is `check_connection_fidelity.py:160-163`'s, adopted rather than invented; its
 `:165` comment records issue #366, where nine unexamined workbooks read as a clean bill of health.
 
-| 0 | READY, or NOT_APPLICABLE (a datasource-only unit with no Tableau views). |
+| 0 | START_READY for a complete current package-only cohort; ordinary targets retain READY/N/A. |
 | 1 | FINDINGS: a page is blind, unverifiable, stale, dropped with no engine explanation, below the
       required grade, or its workbook shipped no report at all. |
 | 2 | usage error (argparse) - a missing path never produces a verdict. |
@@ -55,10 +55,10 @@ drop explanation must match in KIND as well as name, the cryptographic page-iden
 collision limit, the evidence scope table, and the grade ceiling.
 """
 
-# pylint: disable=too-many-lines
+# pylint: disable=too-many-lines,unidiomatic-typecheck
 # ⚠️ Over the 1,400-line budget by design of the ENTRY gate's composition, not by accretion: this
-# module now folds four typed authorities (boundary, package bytes, package roles/identity, evidence
-# and grade) into one verdict, and each of the first three lives in its own module. Splitting the
+# module folds existing package, source, data-access, reference and binding authorities into one
+# verdict. Each authority stays with its existing owner. Splitting the
 # fold itself would create a second place a verdict is decided, which is the defect the composition
 # exists to remove.
 
@@ -71,11 +71,16 @@ import re
 import sys
 import zipfile
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from xml.etree import ElementTree
+import bundle_corpus as corpus
 from bundle_corpus import TargetClassification, classify_target, evidence_dirs, shipping_reports
+import credential_gate as data_access
 import object_identity as oid
+import package_filesystem as pfs
+import package_role_identity as pri
+import package_unit as binding
 import reference_evidence as evidence_reader
 from object_identity import AMBIGUOUS
 from package_filesystem import PackageFilesystemResult, verify_package
@@ -87,12 +92,15 @@ from package_role_identity import (
     verified_root_binding,
 )
 from package_source import (
+    CODE_HANDOFF_INVALID,
     CODE_ROOT_BINDING_INVALID,
+    PackageSourceInput,
     PackageSourceResult,
     bind_root_results,
     exact_root_matches,
     resolve_verified_package_source,
     unique_root_identities,
+    valid_source_codes,
 )
 from reference_evidence import (
     MANUAL_KIND_HINT,
@@ -147,6 +155,7 @@ __all__ = [
 REPORT_NAME = "reference-readiness-check.json"
 
 STATUS_READY = "READY"
+STATUS_START_READY = "START_READY"
 STATUS_FINDINGS = "FINDINGS"
 STATUS_NOT_APPLICABLE = "NOT_APPLICABLE"
 STATUS_CANNOT_ESTABLISH = "CANNOT_ESTABLISH"
@@ -155,6 +164,12 @@ EXIT_OK = 0
 EXIT_FINDINGS = 1
 EXIT_USAGE = 2
 EXIT_CANNOT_ESTABLISH = 3
+
+CODE_CHANGED = "package_changed_since_integrity_check"
+CODE_INPUT_INVALID = "package_readiness_input_invalid"
+_REFERENCE_SUCCESS = (STATUS_READY, STATUS_NOT_APPLICABLE)
+_REFERENCE_STATES = (*_REFERENCE_SUCCESS, STATUS_FINDINGS, STATUS_CANNOT_ESTABLISH)
+_SHAPE_ERRORS = (OSError, ValueError, TypeError, AttributeError, KeyError, IndexError, RuntimeError, RecursionError)
 
 
 PAGE_EMITTED = "emitted"
@@ -989,7 +1004,9 @@ def _unsafe_target(root: Path, classification: TargetClassification) -> dict[str
         f"{classification.code}: {classification.detail} - this gate refuses to fall back to "
         "ordinary bundle handling and forms NO opinion, which is NOT a pass"
     )
-    return _merge(root, [_cannot(unit, detail)], [], [])
+    return _package_verdict(
+        _merge(root, [_cannot(unit, detail)], [], []), STATUS_CANNOT_ESTABLISH, "boundary", (classification.code,)
+    )
 
 
 def _integrity_block(classification: TargetClassification, integrity: PackageFilesystemResult) -> dict[str, Any]:
@@ -1038,7 +1055,7 @@ def _damaged_package(
     )
     report = _merge(root, [_cannot(unit, detail)], [], [])
     report["package_integrity"] = [_integrity_block(classification, integrity)]
-    return report
+    return _package_verdict(report, STATUS_CANNOT_ESTABLISH, "integrity", integrity.codes())
 
 
 def _role_identity_block(
@@ -1083,7 +1100,7 @@ def _role_blocked(
     if integrity is not None:
         report["package_integrity"] = [_integrity_block(classification, integrity)]
     report["role_identity"] = [_role_identity_block(classification, roles)]
-    return report
+    return _package_verdict(report, STATUS_FINDINGS, "role_identity", roles.codes())
 
 
 @dataclass(frozen=True)
@@ -1102,6 +1119,26 @@ class _Prechecked:
     integrity: PackageFilesystemResult | None
     roles: Phase1RoleIdentityResult | None
     binding_valid: bool = True
+    cohort: tuple[Phase1RoleIdentityResult, ...] = field(default=(), repr=False)
+
+
+def _package_verdict(
+    report: dict[str, Any], status: str, stage: str | None, codes: tuple[str, ...] = ()
+) -> dict[str, Any]:
+    """Keep the dispatch verdict separate from the unmodified reference rows and counters."""
+    report["status"] = status
+    report["package_readiness"] = [{"ordinal": 0, "status": status, "failed_stage": stage, "codes": list(codes)}]
+    report["packages_scanned"] = 1
+    report["packages_start_ready"] = int(status == STATUS_START_READY)
+    report["packages_cannot_establish"] = int(status == STATUS_CANNOT_ESTABLISH)
+    return report
+
+
+def _package_refusal(
+    root: Path, stage: str, codes: tuple[str, ...], status: str = STATUS_CANNOT_ESTABLISH
+) -> dict[str, Any]:
+    report = _merge(root, [UnitResult(root.name, status, f"{stage}: {', '.join(codes)}")], [], [])
+    return _package_verdict(report, status, stage, codes)
 
 
 def _root_binding_refused(root: Path) -> dict[str, Any]:
@@ -1109,10 +1146,62 @@ def _root_binding_refused(root: Path) -> dict[str, Any]:
     source = PackageSourceResult("cannot_establish", codes=(CODE_ROOT_BINDING_INVALID,))
     report = _merge(root, [_cannot(root.name, f"{CODE_ROOT_BINDING_INVALID} - no source or evidence was read")], [], [])
     report["package_source"] = [{"ordinal": 0, "unit": root.name, **source.as_dict()}]
-    return report
+    return _package_verdict(report, STATUS_CANNOT_ESTABLISH, "root_binding", (CODE_ROOT_BINDING_INVALID,))
+
+
+def _classify(root: Path) -> TargetClassification:
+    try:
+        result = classify_target(root)
+        if type(result) is TargetClassification and result.kind in (
+            corpus.TARGET_ORDINARY,
+            corpus.TARGET_PACKAGE,
+            corpus.TARGET_PACKAGE_DAMAGED,
+            corpus.TARGET_UNSAFE_ROOT,
+        ):
+            return result
+    except _SHAPE_ERRORS:
+        pass
+    return TargetClassification(
+        corpus.TARGET_UNSAFE_ROOT, CODE_INPUT_INVALID, "boundary unassessable", "none", "target"
+    )
+
+
+def _typed_roles(role: Phase1RoleIdentityResult) -> bool:
+    states = (pri.STATE_RESOLVED, pri.STATE_NOT_APPLICABLE, pri.STATE_MISSING, pri.STATE_AMBIGUOUS, pri.STATE_MISMATCH)
+    return (
+        type(role.verdict) is str
+        and role.verdict in (pri.VERDICT_START_READY, pri.VERDICT_BLOCKED)
+        and type(role.roles) is tuple
+        and all(type(row) is pri.RoleResult and row.state in states for row in role.roles)
+        and type(role.dependencies) is tuple
+        and all(type(row) is pri.DependencyResult and row.state in states for row in role.dependencies)
+        and (role.source_identity is None or type(role.source_identity) is pri.SourceIdentity)
+        and valid_source_codes(role.blockers)
+    )
 
 
 def scan(  # pylint: disable=too-many-arguments
+    root: Path,
+    *,
+    explicit_source: Path | None = None,
+    reference_dir: Path | None = None,
+    oracle_dir: Path | None = None,
+    require_validation_grade: bool = False,
+    prechecked: _Prechecked | None = None,
+) -> dict[str, Any]:
+    """Public read-only verdict; package diagnostics are ordinal-addressed, including library calls."""
+    report = _scan_target(
+        root,
+        explicit_source=explicit_source,
+        reference_dir=reference_dir,
+        oracle_dir=oracle_dir,
+        require_validation_grade=require_validation_grade,
+        prechecked=prechecked,
+    )
+    return _public_package_report(report) if report["package_readiness"] else report
+
+
+def _scan_target(  # pylint: disable=too-many-arguments,too-many-return-statements,too-many-branches
     root: Path,
     *,
     explicit_source: Path | None = None,
@@ -1151,7 +1240,14 @@ def scan(  # pylint: disable=too-many-arguments
     A role-resolved package projects its own source from the root-bound S1/S2 result before any
     source parsing, report discovery or reference grading. It never reaches legacy source discovery.
     """
-    checked = prechecked if prechecked is not None else _precheck(root)
+    if prechecked is None:
+        classification = _classify(root)
+        # Classify the caller's spelling first. Joining CWD is lexical; ".." remains for the binder to refuse.
+        if classification.declares_self_contained and not root.is_absolute():
+            root = Path.cwd() / root
+        checked = _precheck(root, classification)
+    else:
+        checked = prechecked
     if (
         not checked.binding_valid
         or not exact_root_matches(root, checked.root_identity)
@@ -1159,21 +1255,37 @@ def scan(  # pylint: disable=too-many-arguments
     ):
         return _root_binding_refused(root)
     classification = checked.classification
+    if type(classification) is not TargetClassification:  # pylint: disable=unidiomatic-typecheck
+        return _package_refusal(root, "boundary", (CODE_INPUT_INVALID,))
     if not classification.is_safe:
         return _unsafe_target(root, classification)
     integrity = checked.integrity
     roles = checked.roles
     if roles is not None:
-        if roles.verified is None or not roles.verified.is_bound_to(checked.root_identity):
+        if type(roles) is not Phase1RoleIdentityResult:  # pylint: disable=unidiomatic-typecheck
+            return _package_refusal(root, "role_identity", (CODE_INPUT_INVALID,))
+        if type(roles.verified) is not VerifiedPackage or not roles.verified.is_bound_to(checked.root_identity):
             return _root_binding_refused(root)
         # S2 rechecks S1 at its read seam; its bound observation supersedes the earlier one.
         integrity = roles.verified.integrity
-    if integrity is not None and not integrity.is_clean:
-        return _damaged_package(root, classification, integrity)
+    if classification.declares_self_contained:
+        if type(integrity) is not PackageFilesystemResult:  # pylint: disable=unidiomatic-typecheck
+            return _package_refusal(root, "integrity", (CODE_INPUT_INVALID,))
+        if integrity.status not in (pfs.STATUS_CLEAN, pfs.STATUS_FINDINGS, pfs.STATUS_UNASSESSABLE):
+            return _package_refusal(root, "integrity", (CODE_INPUT_INVALID,))
+        if not integrity.is_clean:
+            return _damaged_package(root, classification, integrity)
+        if roles is None or not _typed_roles(roles):
+            return _package_refusal(root, "role_identity", (CODE_INPUT_INVALID,))
     if roles is not None and not roles.is_start_ready:
         return _role_blocked(root, classification, integrity, roles)
+    if classification.declares_self_contained and _brief_code(roles) is not None:
+        report = _package_refusal(root, "brief", (_brief_code(roles),))
+        report["package_integrity"] = [_integrity_block(classification, integrity)]
+        report["role_identity"] = [_role_identity_block(classification, roles)]
+        return report
     report = (
-        _scan_verified_package(root, checked.root_identity, roles, require_validation_grade)
+        _scan_verified_package(root, checked.root_identity, roles, require_validation_grade, cohort=checked.cohort)
         if classification.declares_self_contained
         else _scan_safe_target(
             root,
@@ -1192,8 +1304,25 @@ def scan(  # pylint: disable=too-many-arguments
 
 def _precheck(root: Path, classification: TargetClassification | None = None) -> _Prechecked:
     """Boundary, then bytes, then roles - for one target, as a cohort of one."""
-    classification = classify_target(root) if classification is None else classification
+    classification = _classify(root) if classification is None else classification
     return _precheck_cohort([root], [classification])[0]
+
+
+def _entry_integrity(root: Path, classification: TargetClassification) -> PackageFilesystemResult:
+    try:
+        result = verify_package(root, classification)
+        if (
+            type(result) is PackageFilesystemResult
+            and type(result.status) is str
+            and result.status in (pfs.STATUS_CLEAN, pfs.STATUS_FINDINGS, pfs.STATUS_UNASSESSABLE)
+            and not (result.is_clean and (result.findings or result.unassessable))
+        ):
+            return result
+    except _SHAPE_ERRORS:
+        pass
+    return PackageFilesystemResult(
+        pfs.STATUS_UNASSESSABLE, unassessable=(pfs.Finding(CODE_INPUT_INVALID, "integrity unassessable"),)
+    )
 
 
 def _precheck_cohort(paths: list[Path], classifications: list[TargetClassification] | None = None) -> list[_Prechecked]:
@@ -1204,7 +1333,7 @@ def _precheck_cohort(paths: list[Path], classifications: list[TargetClassificati
     ``check_reference_readiness.py <provider> <consumer>`` is still one operator action, and a
     consumer supplied alone is refused rather than assumed to have a provider somewhere.
     """
-    classifications = [classify_target(path) for path in paths] if classifications is None else classifications
+    classifications = [_classify(path) for path in paths] if classifications is None else classifications
     checked = [
         _Prechecked(path, str(path), classification, None, None)
         for path, classification in zip(paths, classifications, strict=True)
@@ -1212,17 +1341,24 @@ def _precheck_cohort(paths: list[Path], classifications: list[TargetClassificati
     if not unique_root_identities([entry.root_identity for entry in checked]):
         return [replace(entry, binding_valid=False) for entry in checked]
     checked = [
-        replace(entry, integrity=verify_package(entry.root, entry.classification))
-        if entry.classification.is_safe and entry.classification.declares_self_contained
+        replace(entry, integrity=_entry_integrity(entry.root, entry.classification))
+        if type(entry.classification) is TargetClassification
+        and entry.classification.is_safe
+        and entry.classification.declares_self_contained
         else entry
         for entry in checked
     ]
     cohort = [
         VerifiedPackage(entry.root, entry.classification, entry.integrity, entry.root_identity)
         for entry in checked
-        if entry.integrity is not None and entry.integrity.is_clean
+        if type(entry.integrity) is PackageFilesystemResult and entry.integrity.is_clean
     ]
-    results = verify_phase1_role_identity([entry.root for entry in cohort], verified=cohort) if cohort else ()
+    try:
+        results = verify_phase1_role_identity([entry.root for entry in cohort], verified=cohort) if cohort else ()
+    except _SHAPE_ERRORS:
+        results = ()
+    if not isinstance(results, (tuple, list)):
+        results = ()
     verdicts = bind_root_results(
         [entry.root_identity for entry in cohort],
         results,
@@ -1234,23 +1370,381 @@ def _precheck_cohort(paths: list[Path], classifications: list[TargetClassificati
     )
     if verdicts is None:
         return [replace(entry, binding_valid=False) for entry in checked]
-    return [replace(entry, roles=verdicts.get(entry.root_identity)) for entry in checked]
+    ordered = tuple(verdicts[entry.root_identity] for entry in cohort)
+    return [replace(entry, roles=verdicts.get(entry.root_identity), cohort=ordered) for entry in checked]
+
+
+@dataclass(frozen=True)
+class _PackageData:
+    """Only already-issued inputs and the canonical answer, not a second data-access authority."""
+
+    status: str
+    stage: str | None
+    codes: tuple[str, ...]
+    handoff: pri.PackageDataAccessHandoff | None = field(default=None, repr=False)
+    stored: data_access.DataAccessAssessment | None = None
+    assessment: data_access.DataAccessAssessment | None = None
+    reason: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        """Closed data projection; never the held spec, source values or provider display name."""
+        return {
+            "ordinal": 0,
+            "status": self.status,
+            "failed_stage": self.stage,
+            "codes": list(self.codes),
+            "reason": self.reason,
+            "stored": self.stored.to_json() if self.stored is not None else None,
+            "assessment": self.assessment.to_json() if self.assessment is not None else None,
+        }
+
+
+def _brief_code(role: Phase1RoleIdentityResult) -> str | None:
+    policy = role.brief_policy
+    if (
+        type(policy) is not pri.BriefPolicy
+        or type(policy.numeric_obligation) is not str
+        or policy.numeric_obligation not in ("none", "required")
+    ):
+        return pri.CODE_BRIEF_NUMERIC_UNKNOWN
+    return None
+
+
+def _read_package_data(
+    role: Phase1RoleIdentityResult, provider: tuple[str, data_access.DataAccessAssessment] | None = None
+) -> _PackageData:
+    """Consume S2's held facts and strict v2 policy; never reopen/reclassify a spec or earn proof."""
+    policy = role.brief_policy
+    if _brief_code(role) is not None:
+        return _PackageData(STATUS_CANNOT_ESTABLISH, "brief", (pri.CODE_BRIEF_NUMERIC_UNKNOWN,))
+    handoff = role.data_access_handoff(role.verified.root)
+    if type(handoff) is PackageFilesystemResult:
+        return _PackageData(STATUS_CANNOT_ESTABLISH, "data_access", handoff.codes() or (CODE_INPUT_INVALID,))
+    if type(handoff) is not pri.PackageDataAccessHandoff:
+        return _PackageData(STATUS_CANNOT_ESTABLISH, "data_access", (CODE_INPUT_INVALID,))
+    stored = None
+    try:
+        stored = data_access.parse_data_access(handoff.data_access.content.decode("utf-8"))
+        if type(stored) is not data_access.DataAccessAssessment:
+            raise data_access.DataAccessProjectionError("bad-type")
+        assessment = data_access.reconcile_package_data_access(
+            stored,
+            handoff.facts,
+            requested_scope=policy.requested_scope,
+            fallback_authorization=policy.fallback_authorization,
+            provider=provider,
+        )
+        if type(assessment) is not data_access.DataAccessAssessment or not data_access._is_data_access_assessment(  # pylint: disable=protected-access
+            assessment
+        ):  # pylint: disable=protected-access
+            raise data_access.DataAccessProjectionError("bad-type")
+    except UnicodeError:
+        return _PackageData(STATUS_CANNOT_ESTABLISH, "data_access", ("projection-invalid",), reason="unreadable")
+    except data_access.DataAccessProjectionError as error:
+        reason = error.reason if error.reason in data_access.DATA_ACCESS_REJECTIONS else "unknown-value"
+        return _PackageData(
+            STATUS_CANNOT_ESTABLISH, "data_access", ("projection-invalid",), stored=stored, reason=reason
+        )
+    status = {
+        **dict.fromkeys((*data_access.DIRECT_ACCEPTED_STATES, "provider_inherited"), STATUS_READY),
+        "blocked": STATUS_FINDINGS,
+        "cannot_establish": STATUS_CANNOT_ESTABLISH,
+    }[assessment.state]
+    return _PackageData(
+        status, None if status == STATUS_READY else "data_access", assessment.codes, handoff, stored, assessment
+    )
+
+
+def _data_for_cohort(
+    role: Phase1RoleIdentityResult, cohort: tuple[Phase1RoleIdentityResult, ...]
+) -> dict[str, _PackageData]:
+    """Transport S2's exact ordinal-selected direct provider; no name join or recursive discovery."""
+    reads: dict[str, _PackageData] = {}
+    provider = None
+    if role.dependencies:
+        ordinals = [row.provider_ordinal for row in role.dependencies]
+        if any(type(index) is not int or not 0 <= index < len(cohort) for index in ordinals) or len(set(ordinals)) != 1:
+            return {
+                role.verified.root_identity: _PackageData(
+                    STATUS_CANNOT_ESTABLISH, "root_binding", (CODE_ROOT_BINDING_INVALID,)
+                )
+            }
+        selected = cohort[ordinals[0]]
+        if selected.kind != pri.KIND_DATASOURCE or selected.dependencies or not selected.is_start_ready:
+            return {
+                role.verified.root_identity: _PackageData(
+                    STATUS_CANNOT_ESTABLISH, "root_binding", (CODE_ROOT_BINDING_INVALID,)
+                )
+            }
+        source = resolve_verified_package_source(selected.source_handoff())
+        if type(source) is not PackageSourceResult or source.state != "resolved":
+            return {
+                role.verified.root_identity: _PackageData(
+                    STATUS_CANNOT_ESTABLISH, "source", (CODE_ROOT_BINDING_INVALID,)
+                )
+            }
+        read = _read_package_data(selected)
+        reads[selected.verified.root_identity] = read
+        if read.status == STATUS_READY:
+            provider = (data_access.provider_reference(selected.unit), read.assessment)
+    reads[role.verified.root_identity] = _read_package_data(role, provider)
+    return reads
+
+
+def _dependency_roots(role: Phase1RoleIdentityResult, roots: tuple[str, ...]) -> tuple[str, ...] | None:
+    ordinals = [row.provider_ordinal for row in role.dependencies]
+    if any(type(index) is not int or not 0 <= index < len(roots) for index in ordinals):
+        return None
+    return tuple(roots[index] for index in ordinals)
+
+
+def _same_integrity(before: PackageFilesystemResult, after: PackageFilesystemResult) -> bool:
+    """Compare the existing held authority fields that dataclass equality deliberately omits."""
+    return (
+        type(after) is PackageFilesystemResult
+        and before.has_read_authority()
+        and after.has_read_authority()
+        and before == after
+        and before.root_identity == after.root_identity
+        and before.boundary_identity == after.boundary_identity
+        and before.manifest == after.manifest
+        and before.verified_files == after.verified_files
+    )
+
+
+def _binding_association(  # pylint: disable=too-many-locals,too-many-return-statements
+    inspection: binding.PackageBindingInspection,
+    roots: tuple[Path, ...],
+    cohort: tuple[Phase1RoleIdentityResult, ...],
+    reads: dict[str, _PackageData],
+) -> str | None:
+    """A fresh BOUND of different bytes/roots cannot validate the earlier reference observation."""
+    held = inspection.authority
+    identities = tuple(str(root) for root in roots)
+    original_roots = tuple(role.verified.root_identity for role in cohort)
+    if (
+        type(held) is not binding._BindingInputs  # pylint: disable=protected-access
+        or tuple(str(root) for root in held.roots) != identities
+        or len(held.packages) != len(roots)
+    ):
+        return CODE_ROOT_BINDING_INVALID
+    fresh = bind_root_results(identities, held.roles, lambda role: verified_root_binding(role.verified))
+    original = bind_root_results(original_roots, cohort, lambda role: verified_root_binding(role.verified))
+    if fresh is None or original is None or any(identity not in original for identity in identities):
+        return CODE_ROOT_BINDING_INVALID
+    for identity, package in zip(identities, held.packages, strict=True):
+        before, after = original[identity], fresh[identity]
+        snapshot = package.snapshot
+        if not snapshot.verified.is_bound_to(identity):
+            return CODE_ROOT_BINDING_INVALID
+        if not all(
+            (
+                _same_integrity(before.verified.integrity, after.verified.integrity),
+                _same_integrity(before.verified.integrity, snapshot.verified.integrity),
+                before == after,
+                before.brief_policy == after.brief_policy,
+                before.evidence == after.evidence,
+                _dependency_roots(before, original_roots) == _dependency_roots(after, identities),
+                snapshot.manifest == before.verified.integrity.manifest.content,
+            )
+        ):
+            return CODE_CHANGED
+        read = reads.get(identity)
+        if read is not None and (
+            read.handoff is None
+            or read.handoff.migration_spec.content != snapshot.spec
+            or read.handoff.data_access.content != package.members.get(pri.DATA_ACCESS_NAME)
+            or read.stored != snapshot.projection
+        ):
+            return CODE_CHANGED
+    return None
+
+
+def _binding_roots(root: Path, cohort: tuple[Phase1RoleIdentityResult, ...]) -> tuple[Path, ...]:
+    return (
+        *(
+            role.verified.root
+            for role in cohort
+            if role.kind == pri.KIND_DATASOURCE and role.verified.root_identity != str(root)
+        ),
+        root,
+    )
+
+
+def _binding_baseline(
+    root: Path, cohort: tuple[Phase1RoleIdentityResult, ...]
+) -> tuple[Phase1RoleIdentityResult, ...] | None:
+    """Ask S2 for the inspector's reduced cohort, while retaining the original bytes and edge choices.
+
+    S2 contextualizes a datasource as published_provider only when a consumer is present. The
+    inspector must not receive workbook consumers as providers, so copying that topology comparison
+    here would be a second S2 policy. Reuse S2, then bind its observation to the original snapshot.
+    """
+    roots = _binding_roots(root, cohort)
+    identities = tuple(map(str, roots))
+    originals = {role.verified.root_identity: role for role in cohort}
+    results = pri.verify_phase1_role_identity(roots, verified=[originals[key].verified for key in identities])
+    mapped = bind_root_results(identities, results, lambda role: verified_root_binding(role.verified))
+    if mapped is None:
+        return None
+    original_roots = tuple(role.verified.root_identity for role in cohort)
+    for identity, current in mapped.items():
+        before = originals[identity]
+        if not all(
+            (
+                _same_integrity(before.verified.integrity, current.verified.integrity),
+                before.roles == current.roles,
+                before.source_identity == current.source_identity,
+                before.brief_policy == current.brief_policy,
+                before.authorized_limitations == current.authorized_limitations,
+                _dependency_roots(before, original_roots) == _dependency_roots(current, identities),
+            )
+        ):
+            return None
+    return tuple(mapped[key] for key in identities)
+
+
+def _inspect_package(
+    root: Path, cohort: tuple[Phase1RoleIdentityResult, ...], reads: dict[str, _PackageData]
+) -> tuple[str, tuple[str, ...], dict[str, Any]]:
+    """Inspect only: never bind, sanitize, rewrite, publish or trust a stored successful inspection."""
+    providers = _binding_roots(root, cohort)[:-1]
+    result = binding.bind_package(str(root), inspect=True, sanitize=False, provider_packages=tuple(map(str, providers)))
+    if (
+        type(result) is not binding.PackageBindingResult
+        or type(result.exit_code) is not int
+        or result.exit_code not in (0, 1, 3, 130)
+        or not valid_source_codes(result.codes)
+    ):
+        return STATUS_CANNOT_ESTABLISH, (CODE_INPUT_INVALID,), {"ordinal": 0, "codes": [CODE_INPUT_INVALID]}
+    row = {"ordinal": 0, "exit_code": result.exit_code, "codes": list(result.codes), "inspection": None}
+    inspection = result.inspection
+    if type(inspection) is binding.PackageBindingInspection and inspection.state in (
+        "BOUND",
+        "UNBOUND",
+        "NOT_APPLICABLE",
+    ):
+        row["inspection"] = inspection.as_dict()
+    if result.exit_code:
+        status = STATUS_FINDINGS if result.exit_code == 1 else STATUS_CANNOT_ESTABLISH
+        return status, result.codes, row
+    if (
+        type(inspection) is not binding.PackageBindingInspection
+        or inspection.state not in ("BOUND", "NOT_APPLICABLE")
+        or result.outcome != "unchanged"
+        or inspection.codes != (f"binding_{inspection.state.lower()}",)
+    ):
+        return STATUS_CANNOT_ESTABLISH, (CODE_INPUT_INVALID,), row
+    code = _binding_association(inspection, (*providers, root), cohort, reads)
+    return (STATUS_CANNOT_ESTABLISH, (code,), row) if code else (STATUS_READY, (), row)
+
+
+def _source_associated(root: Path, handoff: PackageSourceInput, source: PackageSourceResult) -> bool:
+    """The returned source must still be the issued raw role, not just carry a resolved label."""
+    return all(
+        (
+            type(source.relative_path) is PurePosixPath,
+            not source.codes and valid_source_codes(source.codes),
+            source.kind == handoff.kind,
+            source.sha256 == handoff.asset_sha256,
+        )
+    ) and (
+        source.relative_path.as_posix() == handoff.asset_path
+        and exact_root_matches(source.path, str(root.joinpath(*source.relative_path.parts)))
+    )
 
 
 def _scan_verified_package(
-    root: Path, root_identity: str, roles: Phase1RoleIdentityResult | None, require_validation_grade: bool
+    root: Path,
+    root_identity: str,
+    roles: Phase1RoleIdentityResult | None,
+    require_validation_grade: bool,
+    *,
+    cohort: tuple[Phase1RoleIdentityResult, ...] = (),
 ) -> dict[str, Any]:
     """Project the bound source before entering any source, report or evidence reader."""
-    handoff = roles.source_handoff() if roles is not None else None
-    if not exact_root_matches(root, root_identity) or handoff is not None and handoff.root_identity != root_identity:
-        return _root_binding_refused(root)
-    source = resolve_verified_package_source(handoff)
+    try:
+        handoff = roles.source_handoff() if roles is not None else None
+        if (
+            not exact_root_matches(root, root_identity)
+            or handoff is not None
+            and handoff.root_identity != root_identity
+        ):
+            return _root_binding_refused(root)
+        source = resolve_verified_package_source(handoff)
+    except _SHAPE_ERRORS:
+        return _package_refusal(root, "source", (CODE_INPUT_INVALID,))
     unit = roles.unit if roles is not None and roles.unit is not None else root.name
+    if type(source) is not PackageSourceResult or source.state not in ("resolved", "blocked", "cannot_establish"):
+        return _package_refusal(root, "source", (CODE_INPUT_INVALID,))
+    if source.state == "resolved" and not _source_associated(root, handoff, source):
+        source = PackageSourceResult("cannot_establish", codes=(CODE_HANDOFF_INVALID,))
     if source.state != "resolved":
         status = STATUS_FINDINGS if source.state == "blocked" else STATUS_CANNOT_ESTABLISH
         detail = f"package source {source.state}: {', '.join(source.codes)} - no source or evidence was read"
         report = _merge(root, [UnitResult(unit=unit, status=status, detail=detail)], [], [])
+        _package_verdict(report, status, "source", source.codes)
     else:
+        report = _scan_package_source(root, roles, source, cohort or (roles,), require_validation_grade)
+    report["package_source"] = [{"ordinal": 0, "unit": unit, **source.as_dict()}]
+    return report
+
+
+def _typed_reference(report: dict[str, Any]) -> bool:
+    """Validate the existing result vocabulary, never substitute another evidence/grade policy."""
+    if type(report) is not dict or report.get("status") not in _REFERENCE_STATES:
+        return False
+    units = report.get("units")
+    if type(units) is not list or not units:
+        return False
+    return all(
+        type(unit) is dict
+        and unit.get("status") in _REFERENCE_STATES
+        and type(unit.get("pages")) is list
+        and all(
+            type(page) is dict and page.get("readiness") in (READY, BLIND, UNVERIFIABLE, INSUFFICIENT_GRADE)
+            for page in unit["pages"]
+        )
+        for unit in units
+    )
+
+
+def _scan_package_source(
+    root: Path,
+    roles: Phase1RoleIdentityResult,
+    source: PackageSourceResult,
+    cohort: tuple[Phase1RoleIdentityResult, ...],
+    require_validation_grade: bool,
+) -> dict[str, Any]:
+    try:
+        reads = _data_for_cohort(roles, cohort)
+        read = reads[str(root)]
+        projection = read.as_dict()
+    except _SHAPE_ERRORS:
+        return _package_refusal(root, "data_access", (CODE_INPUT_INVALID,))
+    if read.status != STATUS_READY:
+        report = _package_refusal(root, read.stage, read.codes, read.status)
+    else:
+        report = _reference_then_binding(root, roles, source, cohort, reads, require_validation_grade)
+    report["package_data_access"] = [projection]
+    return report
+
+
+def _reference_then_binding(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    root: Path,
+    roles: Phase1RoleIdentityResult,
+    source: PackageSourceResult,
+    cohort: tuple[Phase1RoleIdentityResult, ...],
+    reads: dict[str, _PackageData],
+    require_validation_grade: bool,
+) -> dict[str, Any]:
+    try:
+        baseline = _binding_baseline(root, cohort)
+        if baseline is None:
+            return _package_refusal(root, "binding", (CODE_CHANGED,))
+    except _SHAPE_ERRORS:
+        return _package_refusal(root, "binding", (CODE_ROOT_BINDING_INVALID,))
+    try:
         report = _scan_safe_target(
             root,
             explicit_source=None,
@@ -1260,8 +1754,23 @@ def _scan_verified_package(
             package_roles=roles,
             package_source=source,
         )
-    report["package_source"] = [{"ordinal": 0, "unit": unit, **source.as_dict()}]
-    return report
+        if not _typed_reference(report):
+            return _package_refusal(root, "reference", (CODE_INPUT_INVALID,))
+    except _SHAPE_ERRORS:
+        return _package_refusal(root, "reference", (CODE_INPUT_INVALID,))
+    if report["status"] not in _REFERENCE_SUCCESS:
+        return _package_verdict(report, report["status"], "reference", (f"reference_{report['status'].lower()}",))
+    try:
+        status, codes, inspection = _inspect_package(root, baseline, reads)
+    except _SHAPE_ERRORS:
+        status, codes, inspection = STATUS_CANNOT_ESTABLISH, (CODE_INPUT_INVALID,), {"ordinal": 0, "inspection": None}
+    report["package_binding"] = [inspection]
+    return _package_verdict(
+        report,
+        STATUS_START_READY if status == STATUS_READY else status,
+        None if status == STATUS_READY else "binding",
+        codes,
+    )
 
 
 def _scan_safe_target(  # pylint: disable=too-many-arguments
@@ -1369,6 +1878,12 @@ def _merge(
         # entry means "not a package" rather than "a package with nothing wrong".
         "role_identity": [],
         "package_source": [],
+        "package_data_access": [],
+        "package_binding": [],
+        "package_readiness": [],
+        "packages_scanned": 0,
+        "packages_start_ready": 0,
+        "packages_cannot_establish": 0,
         "units_scanned": len(units),
         "units_ready": sum(1 for unit in units if unit.status == STATUS_READY),
         "units_not_applicable": sum(1 for unit in units if unit.status == STATUS_NOT_APPLICABLE),
@@ -1439,6 +1954,21 @@ GRADE_CEILING_NOTE = (
 
 def render(report: dict[str, Any], *, verbose: bool = False) -> str:
     """Human-readable verdict, matching the sibling offline gates."""
+    if report.get("package_readiness"):
+        lines = [f"PHASE-1 PACKAGE READINESS: {report['status']}"]
+        for row in report["package_readiness"]:
+            lines.append(
+                f"  target {row['ordinal']}: {row['status']}; stage={row['failed_stage'] or 'complete'}; "
+                f"codes={','.join(row['codes']) or 'none'}"
+            )
+        lines.append(
+            f"  Reference: {report['pages_ready']}/{report['pages_expected']} pages; "
+            f"cannot-establish packages={report['packages_cannot_establish']}. "
+            "START_READY is input readiness, not COMPLETE or fidelity sign-off. BOUND remains UNVALIDATED."
+        )
+        if report["pages_expected"] and not report["all_evidence_validation_grade"]:
+            lines.append(GRADE_CEILING_NOTE)
+        return "\n".join(lines)
     lines = [
         f"REFERENCE READINESS: {report['status']} - {report['pages_ready']}/{report['pages_expected']} "
         f"expected page(s) ready across {report['units_scanned']} unit(s); "
@@ -1520,7 +2050,123 @@ def _render_page(page: dict[str, Any]) -> str:
     return f"{label}: ready [{page['grade']}] via {page['matched_by']}"
 
 
-def main(argv: list[str] | None = None) -> int:
+def _public_package_report(report: dict[str, Any]) -> dict[str, Any]:
+    """Retain reference rows/grades/counts, but never publish package/customer names or host locations."""
+    public = dict(report, target="package", identities_redacted=True)
+    public["units"] = [
+        {
+            **unit,
+            "unit": f"unit-{index}",
+            "detail": ", ".join(report["package_readiness"][0]["codes"])
+            if len(report["package_readiness"]) == 1 and report["package_readiness"][0]["codes"]
+            else f"reference_{unit['status'].lower()}",
+            "report": None,
+            "source": None,
+            "pages": [
+                {
+                    **{
+                        key: page[key]
+                        for key in (
+                            "readiness",
+                            "grade",
+                            "evidence",
+                            "page_status",
+                            "source_type",
+                            "revision",
+                            "render_key",
+                        )
+                        if key in page
+                    },
+                    "page_id": f"page-{ordinal}",
+                    "source_object": f"object-{ordinal}",
+                }
+                for ordinal, page in enumerate(unit["pages"])
+            ],
+        }
+        for index, unit in enumerate(report["units"])
+    ]
+    public["evidence_untyped_names"] = [f"record-{index}" for index, _ in enumerate(report["evidence_untyped_names"])]
+    public["evidence_rejected"] = [
+        {"name": f"record-{index}", "origin": row["origin"], "path": None, "reason": "reference_evidence_rejected"}
+        for index, row in enumerate(report["evidence_rejected"])
+    ]
+    public["package_source"] = [
+        {**row, "unit": f"package-{row['ordinal']}", "path": None} for row in report["package_source"]
+    ]
+    public["package_integrity"] = [
+        {
+            **row,
+            "unit": f"package-{row['ordinal']}",
+            **{
+                key: [
+                    {field: finding[field] for field in ("code", "ordinal") if field in finding} for finding in row[key]
+                ]
+                for key in ("findings", "unassessable")
+            },
+        }
+        for row in report["package_integrity"]
+    ]
+    public["role_identity"] = [
+        {
+            **row,
+            "unit": f"package-{row['ordinal']}",
+            "roles": [
+                {**role, "paths": [f"member-{index}" for index, _ in enumerate(role["paths"])]} for role in row["roles"]
+            ],
+            "source_identity": {key: row["source_identity"][key] for key in ("kind", "sha256")}
+            if row["source_identity"] is not None
+            else None,
+            "dependencies": [
+                {"state": dependency["state"], "code": dependency["code"]} for dependency in row["dependencies"]
+            ],
+        }
+        for row in report["role_identity"]
+    ]
+    public["package_binding"] = [
+        {
+            **row,
+            "inspection": {
+                **row["inspection"],
+                "parameters": [
+                    {
+                        key: parameter[key]
+                        for key in (
+                            "parameter_ordinal",
+                            "parameter_identity",
+                            "trailing_separator",
+                            "current_root_match",
+                            "placeholder",
+                            "target_exists",
+                            "codes",
+                        )
+                        if key in parameter
+                    }
+                    for parameter in row["inspection"]["parameters"]
+                ],
+            }
+            if row.get("inspection") is not None
+            else None,
+        }
+        for row in report["package_binding"]
+    ]
+    return public
+
+
+def _admit_json_output(output: Path, roots: list[Path]) -> None:
+    """Bounded output-path check only; an output alias must never mutate a supplied package."""
+    try:
+        destination = output.resolve()
+        for root in roots:
+            if destination.is_relative_to(root.resolve()):
+                raise ValueError("package_json_output_forbidden")
+        # A hard-linked output can overwrite a member even though neither lexical path is inside.
+        if output.exists() and (not output.is_file() or output.stat().st_nlink != 1):
+            raise ValueError("package_json_output_forbidden")
+    except (OSError, RuntimeError) as error:
+        raise ValueError("package_json_output_unassessable") from error
+
+
+def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-branches
     """CLI entry point."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="*", type=Path, help="engine bundle folder(s) or migration unit(s)")
@@ -1540,9 +2186,22 @@ def main(argv: list[str] | None = None) -> int:
     if not args.paths:
         parser.error("give a bundle or migration-unit path")
 
-    classifications = [classify_target(path) for path in args.paths]
+    classifications = [_classify(path) for path in args.paths]
     if args.source is not None and any(classification.is_package for classification in classifications):
         parser.error("--source is supported only for ordinary non-package targets")
+    package_roots = [
+        path for path, classification in zip(args.paths, classifications, strict=True) if classification.is_package
+    ]
+    if args.json and package_roots:
+        try:
+            _admit_json_output(args.json, package_roots)
+        except ValueError:
+            parser.error("package_json_output_forbidden: choose a separate ordinary output file")
+    # Keep original classifications and caller order, expanding plain relative package paths without resolving aliases.
+    paths = [
+        Path.cwd() / path if classification.declares_self_contained and not path.is_absolute() else path
+        for path, classification in zip(args.paths, classifications, strict=True)
+    ]
     refusals = {
         index: _unsafe_target(path, classification)
         for index, (path, classification) in enumerate(zip(args.paths, classifications, strict=True))
@@ -1562,7 +2221,7 @@ def main(argv: list[str] | None = None) -> int:
     # ⚠️ The whole cohort is pre-checked HERE, in one pass, before any target is scanned: roles and
     # published-provider closure are properties of the SET, so judging them one target at a time
     # would make `<provider> <consumer>` mean something different from two separate commands.
-    prechecked = _precheck_cohort(list(args.paths), classifications)
+    prechecked = _precheck_cohort(paths, classifications)
     reports = [
         refusals.get(index)
         or scan(
@@ -1573,20 +2232,37 @@ def main(argv: list[str] | None = None) -> int:
             require_validation_grade=args.require_validation_grade,
             prechecked=prechecked[index],
         )
-        for index, path in enumerate(args.paths)
+        for index, path in enumerate(paths)
     ]
     merged = reports[0] if len(reports) == 1 else _merge_scans(reports)
+    if package_roots:
+        merged = _public_package_report(merged)
     if args.json:
-        args.json.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+        try:
+            if package_roots:
+                _admit_json_output(args.json, package_roots)
+            args.json.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+        except (OSError, ValueError):
+            if not args.quiet:
+                print(
+                    json.dumps(
+                        {
+                            "status": STATUS_CANNOT_ESTABLISH,
+                            "failed_stage": "output",
+                            "codes": ["readiness_output_unwritable"],
+                        }
+                    )
+                )
+            return EXIT_CANNOT_ESTABLISH
     if not args.quiet:
-        print(render(merged, verbose=args.verbose))
+        print(json.dumps(merged, indent=2) if package_roots else render(merged, verbose=args.verbose))
     # There is deliberately no --warn-only: see the module docstring. An entry gate that can be asked
     # to say yes is not an entry gate, and the flag was measured returning 0 on CANNOT_ESTABLISH.
     if merged["status"] == STATUS_FINDINGS:
         return EXIT_FINDINGS
     if merged["status"] == STATUS_CANNOT_ESTABLISH:
         return EXIT_CANNOT_ESTABLISH
-    return EXIT_OK
+    return EXIT_OK if merged["status"] in (*_REFERENCE_SUCCESS, STATUS_START_READY) else EXIT_CANNOT_ESTABLISH
 
 
 def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1622,11 +2298,10 @@ def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
     merged["role_identity"] = [
         {**block, "ordinal": index} for index, report in enumerate(reports) for block in report.get("role_identity", [])
     ]
-    merged["package_source"] = [
-        {**block, "ordinal": index}
-        for index, report in enumerate(reports)
-        for block in report.get("package_source", [])
-    ]
+    for key in ("package_source", "package_data_access", "package_binding", "package_readiness"):
+        merged[key] = [
+            {**block, "ordinal": index} for index, report in enumerate(reports) for block in report.get(key, [])
+        ]
     for key, value in reports[0].items():
         if isinstance(value, bool) or not isinstance(value, int):
             continue
@@ -1640,8 +2315,10 @@ def _merge_scans(reports: list[dict[str, Any]]) -> dict[str, Any]:
     statuses = {report["status"] for report in reports}
     if STATUS_FINDINGS in statuses:
         merged["status"] = STATUS_FINDINGS
-    elif STATUS_CANNOT_ESTABLISH in statuses:
+    elif STATUS_CANNOT_ESTABLISH in statuses or not statuses <= {*_REFERENCE_STATES, STATUS_START_READY}:
         merged["status"] = STATUS_CANNOT_ESTABLISH
+    elif statuses == {STATUS_START_READY}:
+        merged["status"] = STATUS_START_READY
     elif statuses == {STATUS_NOT_APPLICABLE}:
         merged["status"] = STATUS_NOT_APPLICABLE
     else:
