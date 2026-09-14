@@ -14,9 +14,14 @@ have kept passing through each of the mutations at the bottom of this file.
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import inspect
 import json
+import os
+import shutil
 import sys
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -1298,3 +1303,1147 @@ def test_selected_provider_ordinal_survives_duplicate_units_and_filtered_roots(t
     assert roots[selected.provider_ordinal] == first
     assert selected.provider_unit == "Shared"
     assert "provider_ordinal" not in selected.as_dict()
+
+
+# W (#363): literal current snapshots, not packager/receipt output or original-history credentials.
+# pylint: disable=protected-access,unidiomatic-typecheck
+_W_ASSET = f"assets/{WB_LUID}_Revenue.twb"
+_W_REPORT = "fabric/Revenue.Report"
+_W_MODEL = "fabric/Revenue.SemanticModel"
+_W_PBIP = "fabric/Revenue.pbip"
+_W_CACHE = f"{_W_MODEL}/.pbi/cache.abf"
+_W_LOCAL = {
+    "schema": "phase1-data-access/v1",
+    "state": "local_import_ready",
+    "source_keys": [],
+    "provider_unit": None,
+    "provider_state": None,
+    "validation": "validated",
+    "effective_scope": "model_and_report",
+    "max_phase2_claim": "data_validated",
+    "codes": ["all-flat-file", "package-self-contained"],
+}
+_W_LIVE_CONNECTION = {
+    "class": "sqlserver",
+    "server": "source.example",
+    "database": "db",
+    "powerbi_target": "live_source",
+}
+_W_LIVE_KEY = "source-key:ab1baa4b3f77bb70"  # Literal independent endpoint-JSON digest.
+_W_OTHER_KEY = "source-key:e625ce798a6d19bb"
+_W_IMMUTABLE = (
+    _W_ASSET,
+    "migration-spec.json",
+    "migration-spec.schema.json",
+    "data-access.json",
+    "source-provenance.json",
+    "report.json",
+    "migration-brief.md",
+)
+
+
+class _WorkingString(str):
+    """Equal text is not the exact native revision/identity scalar."""
+
+
+class _WorkingPath(type(Path())):
+    """Equal paths cannot supply a native-Path boundary."""
+
+
+def _w_json(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8") + b"\n"
+
+
+def _w_put(package: Path, name: str, raw: bytes) -> None:
+    path = package.joinpath(*name.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+
+
+def _w_package(root: Path, *, live: bool = False, projection: dict | None = None) -> tuple[Path, dict[str, bytes]]:
+    """Independent names/bytes/digests; opaque model bytes intentionally prove no import eligibility."""
+    source = b"<workbook name='Revenue'/>\n"
+    raw = {
+        _W_ASSET: source,
+        "migration-spec.json": _w_json(
+            {
+                "source": {"file_name": _W_ASSET.split("/")[-1]},
+                "data_sources": [
+                    {
+                        "id": "orders",
+                        "tables": [],
+                        "fields": [],
+                        "connection": _W_LIVE_CONNECTION
+                        if live
+                        else {"class": "excel-direct", "powerbi_target": "flat_file"},
+                    }
+                ],
+            }
+        ),
+        "migration-spec.schema.json": b'{"type":"object","required":["source","data_sources"]}\n',
+        "data-access.json": _w_json(projection if projection is not None else _W_LOCAL),
+        "source-provenance.json": _w_json(
+            {
+                "scope": {"unit": "Revenue"},
+                "inputs": [
+                    {
+                        "input": {"file": _W_ASSET.split("/")[-1], "sha256": hashlib.sha256(source).hexdigest()},
+                        "origin": {"workbook_luid": WB_LUID},
+                    }
+                ],
+            }
+        ),
+        "report.json": b'{"scope":{"unit":"Revenue"},"workbooks":[{"name":"Revenue"}],"datasources":[]}\n',
+        "migration-brief.md": numeric_brief_text("Revenue", "model_and_report", "none").encode("utf-8"),
+        _W_PBIP: b'{"version":"1.0","artifacts":[{"report":{"path":"Revenue.Report"}}]}\n',
+        f"{_W_REPORT}/definition.pbir": b'{"version":"4.0","datasetReference":{"byPath":{"path":"../Revenue.SemanticModel"}}}\n',
+        f"{_W_REPORT}/definition/pages/pages.json": b'{"pageOrder":[]}\n',
+        f"{_W_MODEL}/definition/model.tmdl": b"model Model\n",
+        "data/orders.csv": b"id,amount\n1,7\n",
+    }
+    manifest = {
+        "unit": "Revenue",
+        "kind": "workbook",
+        "artifacts": {
+            "asset": _W_ASSET,
+            "migration_spec": "migration-spec.json",
+            "migration_spec_schema": "migration-spec.schema.json",
+            "data_access": "data-access.json",
+            "migration_brief": "migration-brief.md",
+            "report": _W_REPORT,
+            "model": _W_MODEL,
+        },
+        "model_binding": {"kind": "byPath", "path": "../Revenue.SemanticModel", "resolves_in_package": True},
+        "contents": {"files": {name: hashlib.sha256(content).hexdigest() for name, content in raw.items()}},
+    }
+    raw["package-manifest.json"] = _w_json(manifest)
+    for name, content in raw.items():
+        _w_put(root, name, content)
+    return root, raw
+
+
+def _w_bytes(package: Path) -> dict[str, bytes]:
+    """Test-only reads of the synthetic ordinary tree, never used after introducing a link."""
+    return {path.relative_to(package).as_posix(): path.read_bytes() for path in package.rglob("*") if path.is_file()}
+
+
+def _w_revision(raw: dict[str, bytes], cache: str = _W_CACHE) -> str:
+    """Literal independent R oracle over retained fixture bytes, not the production revision reader."""
+    digest = hashlib.sha256()
+    for name, content in sorted(raw.items()):
+        if name != cache and not name.startswith("validation/iterations/"):
+            digest.update(name.encode("utf-8") + b"\0" + hashlib.sha256(content).hexdigest().encode("ascii") + b"\n")
+    return "sha256:" + digest.hexdigest()
+
+
+def _w_redeclare(package: Path, *names: str) -> None:
+    """Explicit test co-edit, never silently discover/reseal the rest of the package."""
+    manifest = json.loads((package / "package-manifest.json").read_bytes())
+    for name in names:
+        manifest["contents"]["files"][name] = hashlib.sha256(
+            package.joinpath(*name.split("/")).read_bytes()
+        ).hexdigest()
+    (package / "package-manifest.json").write_bytes(_w_json(manifest))
+
+
+def _w_read(package: Path, current: str) -> pri.CurrentWorkingSourceDataHandoff:
+    code, handoff = pri.read_current_source_data_handoff(package, expected_package_working_revision=current)
+    assert code is None, code
+    assert type(handoff) is pri.CurrentWorkingSourceDataHandoff
+    assert pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current) is None
+    return handoff
+
+
+def test_current_working_public_interface_has_only_the_approved_required_inputs() -> None:
+    """No historical digest, token, receipt, provider or policy substitution channel."""
+    for function, expected in (
+        (pri.read_current_source_data_handoff, ("root", "expected_package_working_revision")),
+        (pri.validate_current_source_data_handoff, ("root", "handoff", "expected_package_working_revision")),
+    ):
+        parameters = inspect.signature(function).parameters
+        assert tuple(parameters) == expected
+        assert parameters["expected_package_working_revision"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert all(parameter.default is inspect.Parameter.empty for parameter in parameters.values())
+
+
+def test_current_working_baseline_holds_exact_literal_roles_and_canonical_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real role/spec/data parsing, with retained bytes and literal field assertions as oracles."""
+    package, raw = _w_package(tmp_path / "Unit")
+    revision_value = _w_revision(raw)
+    assert pri.revision.package_working_revision(package, package / _W_MODEL) == revision_value
+    facts_parser, data_parser = pri.package_spec_facts, pri.parse_data_access
+    parsed_facts, parsed_data, inputs = [], [], []
+
+    def facts(document: object) -> pri.PackageSpecFacts:
+        inputs.append(document)
+        result = facts_parser(document)
+        parsed_facts.append(result)
+        return result
+
+    def data(text: str) -> pri.DataAccessAssessment:
+        inputs.append(text)
+        result = data_parser(text)
+        parsed_data.append(result)
+        return result
+
+    monkeypatch.setattr(pri, "package_spec_facts", facts)
+    monkeypatch.setattr(pri, "parse_data_access", data)
+    handoff = _w_read(package, revision_value)
+    assert parsed_facts == [handoff.facts] and handoff.facts is parsed_facts[0]
+    assert parsed_data == [handoff.stored_data_access] and handoff.stored_data_access is parsed_data[0]
+    assert inputs == [json.loads(raw["migration-spec.json"]), raw["data-access.json"].decode("utf-8")]
+    assert tuple(handoff.facts) == ((), False, True, False, None)
+    assert handoff.stored_data_access.to_json() == _W_LOCAL
+    assert (handoff.unit, handoff.kind, handoff.topology) == ("Revenue", "workbook", "owned_model")
+    assert (handoff.report_path, handoff.model_path, handoff.pbip_path) == (_W_REPORT, _W_MODEL, _W_PBIP)
+    assert handoff.source_asset_path == _W_ASSET
+    assert handoff.source_identity.sha256 == hashlib.sha256(raw[_W_ASSET]).hexdigest()
+    assert handoff.source_identity.tableau_luid == WB_LUID
+    assert handoff.source_identity.kind == "workbook" and handoff.source_identity.published_key is None
+    assert handoff.current_manifest_sha256 == hashlib.sha256(raw["package-manifest.json"]).hexdigest()
+    assert handoff.package_working_revision == revision_value and handoff.root_identity == str(package)
+    assert handoff.declared_paths == tuple(sorted(set(raw) - {"package-manifest.json"}))
+    snapshot = handoff._snapshot
+    assert snapshot.manifest == raw["package-manifest.json"]
+    for name, address, identity, digest, content in snapshot.members:
+        assert address == str(package.joinpath(*name.split("/")))
+        info = os.lstat(address)
+        assert identity == (info.st_dev, info.st_ino, 1)
+        assert digest == hashlib.sha256(raw[name]).hexdigest()
+        assert content == (None if name in (_W_ASSET, f"{_W_MODEL}/definition/model.tmdl") else raw[name])
+    assert repr(handoff) == "CurrentWorkingSourceDataHandoff()"
+    assert not any(hasattr(handoff, name) for name in ("verdict", "is_start_ready", "complete", "brief_policy"))
+    assert {item.name for item in fields(handoff)} == {
+        "package_root",
+        "root_identity",
+        "package_working_revision",
+        "current_manifest_sha256",
+        "unit",
+        "kind",
+        "topology",
+        "source_asset_path",
+        "report_path",
+        "model_path",
+        "pbip_path",
+        "declared_paths",
+        "source_identity",
+        "facts",
+        "stored_data_access",
+        "_snapshot",
+        "_authority",
+    }
+
+
+def test_current_working_edits_and_arbitrary_iteration_cache_bytes_are_not_s1_or_evidence(tmp_path: Path) -> None:
+    package, raw = _w_package(tmp_path / "Unit")
+    baseline = _w_read(package, _w_revision(raw))
+    for name, content in {
+        f"{_W_MODEL}/definition/model.tmdl": b"model Edited\n",
+        f"{_W_REPORT}/definition/pages/pages.json": b'{"pageOrder":["edited"]}\n',
+        _W_PBIP: raw[_W_PBIP] + b" \n",
+        "validation/iterations/arbitrary/not-a-receipt.json": b"not receipt JSON",
+        "validation/iterations/arbitrary/render.png": b"not PNG",
+        "validation/iterations/arbitrary/ignored.pbip": b"not a working target",
+        "validation/iterations/arbitrary/ignored.Report/definition.pbir": b"not a working target",
+        _W_CACHE: b"not a qualified cache",
+    }.items():
+        _w_put(package, name, content)
+    edited = _w_bytes(package)
+    current = _w_revision(edited)
+    assert current != _w_revision(raw)
+    handoff = _w_read(package, current)
+    assert all(edited[name] == raw[name] for name in _W_IMMUTABLE)
+    assert handoff.facts == baseline.facts and handoff.stored_data_access == baseline.stored_data_access
+    assert handoff.current_manifest_sha256 == baseline.current_manifest_sha256
+    assert handoff.declared_paths == baseline.declared_paths
+    assert pri.read_current_source_data_handoff(
+        package, expected_package_working_revision=baseline.package_working_revision
+    ) == ("working_revision_mismatch", None)
+    assert (
+        pri.validate_current_source_data_handoff(
+            package, baseline, expected_package_working_revision=baseline.package_working_revision
+        )
+        == "working_revision_mismatch"
+    )
+    # These namespaces carry no W evidence and do not invalidate a held W object by their content.
+    _w_put(package, _W_CACHE, b"different still-unqualified cache")
+    _w_put(package, "validation/iterations/arbitrary/render.png", b"still not PNG")
+    assert pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        True,
+        1,
+        b"sha256:" + b"a" * 64,
+        "",
+        "a" * 64,
+        "sha256:" + "a" * 63,
+        "sha256:" + "g" * 64,
+        "SHA256:" + "a" * 64,
+        "sha256:" + "A" * 64,
+        " sha256:" + "a" * 64,
+        "sha256:" + "a" * 64 + "\n",
+        _WorkingString("sha256:" + "a" * 64),
+    ],
+)
+def test_current_working_revision_arguments_are_exact_before_any_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: object
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("invalid arguments reached the filesystem")
+
+    monkeypatch.setattr(pri.revision, "tree_files", forbidden)
+    assert pri.read_current_source_data_handoff(tmp_path, expected_package_working_revision=value) == (
+        "working_revision_invalid",
+        None,
+    )
+    assert (
+        pri.validate_current_source_data_handoff(tmp_path, None, expected_package_working_revision=value)
+        == "working_revision_invalid"
+    )
+
+
+def test_current_working_foreign_and_wrong_selected_cache_revision_refuse(tmp_path: Path) -> None:
+    package, raw = _w_package(tmp_path / "Unit")
+    _w_put(package, _W_CACHE, b"cache")
+    _w_put(package, f"{_W_MODEL}/.pbi/unappliedChanges.json", b"working bytes")
+    current_raw = _w_bytes(package)
+    current = _w_revision(current_raw)
+    _w_read(package, current)
+    foreign = _w_revision({**current_raw, "data/orders.csv": b"foreign"})
+    wrong_cache = _w_revision(current_raw, cache=f"{_W_MODEL}/.pbi/unappliedChanges.json")
+    for value in (_w_revision(raw), foreign, wrong_cache, "sha256:" + "0" * 64):
+        assert value != current
+        assert pri.read_current_source_data_handoff(package, expected_package_working_revision=value) == (
+            "working_revision_mismatch",
+            None,
+        )
+
+
+@pytest.mark.parametrize("name", _W_IMMUTABLE)
+def test_current_working_stale_immutable_declarations_refuse_with_matching_new_r(tmp_path: Path, name: str) -> None:
+    package, raw = _w_package(tmp_path / "Unit")
+    _w_put(package, name, raw[name] + b"\n")
+    assert pri.read_current_source_data_handoff(
+        package, expected_package_working_revision=_w_revision(_w_bytes(package))
+    ) == ("package_file_digest_mismatch", None)
+
+
+def test_current_working_coherent_role_rewrite_is_a_new_snapshot_not_original_commissioning(tmp_path: Path) -> None:
+    package, raw = _w_package(tmp_path / "Unit")
+    original = _w_read(package, _w_revision(raw))
+    source = b"<workbook name='Revenue' revised='yes'/>\n"
+    spec = json.loads(raw["migration-spec.json"])
+    spec["data_sources"][0]["connection"] = _W_LIVE_CONNECTION
+    provenance = json.loads(raw["source-provenance.json"])
+    provenance["inputs"][0]["input"]["sha256"] = hashlib.sha256(source).hexdigest()
+    projection = {
+        **_W_LOCAL,
+        "state": "live_data_ok",
+        "source_keys": [_W_LIVE_KEY],
+        "codes": ["probe-cleared", "probe-data-ok"],
+    }
+    for name, content in {
+        _W_ASSET: source,
+        "migration-spec.json": _w_json(spec),
+        "source-provenance.json": _w_json(provenance),
+        "data-access.json": _w_json(projection),
+        "migration-brief.md": numeric_brief_text("Revenue", "model_and_report", "required").encode(),
+    }.items():
+        _w_put(package, name, content)
+    _w_redeclare(
+        package, _W_ASSET, "migration-spec.json", "source-provenance.json", "data-access.json", "migration-brief.md"
+    )
+    revised = _w_bytes(package)
+    assert pri.read_current_source_data_handoff(
+        package, expected_package_working_revision=original.package_working_revision
+    ) == ("working_revision_mismatch", None)
+    handoff = _w_read(package, _w_revision(revised))
+    assert handoff.current_manifest_sha256 != original.current_manifest_sha256
+    assert handoff.source_identity.sha256 == hashlib.sha256(source).hexdigest()
+    assert handoff.facts.live_source_keys == (_W_LIVE_KEY,)
+    assert handoff.stored_data_access.to_json() == projection
+    assert pri.read_current_brief_policy(package) == (None, pri.BriefPolicy("model_and_report", "stop", "required"))
+    assert "commissioned_manifest_sha256" not in inspect.signature(pri.read_current_source_data_handoff).parameters
+
+
+@pytest.mark.parametrize(
+    "state", ["local_import_ready", "live_data_ok", "authorized_model_only", "blocked", "cannot_establish"]
+)
+def test_current_working_canonical_states_and_ceilings_are_preserved(tmp_path: Path, state: str) -> None:
+    projection = dict(_W_LOCAL)
+    if state in ("live_data_ok", "authorized_model_only"):
+        projection.update(state=state, source_keys=[_W_LIVE_KEY], codes=["probe-cleared", "probe-data-ok"])
+    if state == "authorized_model_only":
+        projection.update(
+            validation="unvalidated",
+            effective_scope="model_only",
+            max_phase2_claim="structural_only",
+            codes=["brief-model-only", "human-authorize"],
+        )
+    if state in ("blocked", "cannot_establish"):
+        projection.update(
+            state=state,
+            validation="not_established",
+            effective_scope=None,
+            max_phase2_claim="none",
+            codes=["probe-no-credential"] if state == "blocked" else ["spec-unreadable"],
+        )
+    package, raw = _w_package(tmp_path / "Unit", live=state != "local_import_ready", projection=projection)
+    handoff = _w_read(package, _w_revision(raw))
+    assert handoff.stored_data_access.to_json() == projection
+    assert (handoff.stored_data_access.state, handoff.stored_data_access.max_phase2_claim) == (
+        state,
+        projection["max_phase2_claim"],
+    )
+
+
+def test_current_working_wrong_live_keys_are_retained_for_later_canonical_reconciliation(tmp_path: Path) -> None:
+    import credential_gate as gate
+
+    projection = {
+        **_W_LOCAL,
+        "state": "live_data_ok",
+        "source_keys": [_W_OTHER_KEY],
+        "codes": ["probe-cleared", "probe-data-ok"],
+    }
+    package, raw = _w_package(tmp_path / "Unit", live=True, projection=projection)
+    handoff = _w_read(package, _w_revision(raw))
+    assert handoff.facts.live_source_keys == (_W_LIVE_KEY,)
+    assert handoff.stored_data_access.source_keys == (_W_OTHER_KEY,)
+    reconciled = gate.reconcile_package_data_access(
+        handoff.stored_data_access,
+        handoff.facts,
+        requested_scope="model_and_report",
+        fallback_authorization="stop",
+        provider=None,
+    )
+    assert (reconciled.state, reconciled.max_phase2_claim, reconciled.codes) == (
+        "cannot_establish",
+        "none",
+        ("source-key-set-changed",),
+    )
+
+
+def test_current_working_rogue_ordinary_file_changes_r_but_is_not_granted_integrity(tmp_path: Path) -> None:
+    package, raw = _w_package(tmp_path / "Unit")
+    baseline = _w_read(package, _w_revision(raw))
+    _w_put(package, "rogue.bin", b"not a declared or admitted role")
+    current = _w_revision(_w_bytes(package))
+    assert current != baseline.package_working_revision
+    handoff = _w_read(package, current)
+    assert handoff.declared_paths == baseline.declared_paths and "rogue.bin" not in handoff.declared_paths
+    assert not hasattr(handoff, "complete") and not hasattr(handoff, "is_clean")
+
+
+@pytest.mark.parametrize("brief", [b"Plain historical prose\n", b'+++\nnumeric_obligation = "unknown"\n+++\n', b"\xff"])
+def test_current_working_brief_is_physical_only_and_semantic_policy_remains_independent(
+    tmp_path: Path, brief: bytes
+) -> None:
+    package, _ = _w_package(tmp_path / "Unit")
+    _w_put(package, "migration-brief.md", brief)
+    _w_redeclare(package, "migration-brief.md")
+    handoff = _w_read(package, _w_revision(_w_bytes(package)))
+    assert next(row[4] for row in handoff._snapshot.members if row[0] == "migration-brief.md") == brief
+    code, policy = pri.read_current_brief_policy(package)
+    assert code is not None and policy is None
+    assert not hasattr(handoff, "brief_policy")
+
+
+@pytest.mark.parametrize(
+    "change,code",
+    [
+        ("not-utf8", "package_manifest_not_utf8"),
+        ("not-json", "package_manifest_not_json"),
+        ("not-object", "package_manifest_not_object"),
+        ("duplicate", "package_manifest_duplicate_key"),
+        ("nonfinite", "package_manifest_non_finite_number"),
+        ("overflow", "package_manifest_non_finite_number"),
+        ("files-type", "package_contents_files_not_object"),
+        ("no-contents", "package_contents_missing"),
+        ("unsafe-key", "package_declared_key_unsafe"),
+        ("alias", "package_declared_keys_collide"),
+        ("self-key", "package_declared_key_aliases_the_manifest"),
+        ("digest-type", "package_declared_digest_not_a_string"),
+        ("digest-case", "package_declared_digest_malformed"),
+        ("artifacts-type", "identity_type_invalid"),
+        ("unit-type", "identity_type_invalid"),
+        ("unit-path", "identity_type_invalid"),
+        ("kind-type", "identity_type_invalid"),
+        ("unknown-kind", "package_kind_unclassified"),
+    ],
+)
+def test_current_working_strict_manifest_refusals_are_fixed_and_shareable(
+    tmp_path: Path, change: str, code: str
+) -> None:
+    """The malformed current declaration cannot acquire a handoff even with a matching current R."""
+    package, raw = _w_package(tmp_path / "private-root")
+    manifest = json.loads(raw["package-manifest.json"])
+    malformed = {
+        "not-utf8": b"\xffprivate-text",
+        "not-json": b'{"private-text":',
+        "not-object": b"[]",
+        "duplicate": b'{"private-text":0,"private-text":1}',
+        "nonfinite": b'{"private-text":NaN}',
+        "overflow": b'{"private-text":1e999}',
+    }
+    if change not in malformed:
+        if change == "files-type":
+            manifest["contents"]["files"] = []
+        elif change == "no-contents":
+            del manifest["contents"]
+        elif change in ("unsafe-key", "alias", "self-key"):
+            key = {
+                "unsafe-key": "../private-outside",
+                "alias": "MIGRATION-SPEC.JSON",
+                "self-key": "package-manifest.json",
+            }[change]
+            manifest["contents"]["files"][key] = "0" * 64
+        elif change in ("digest-type", "digest-case"):
+            manifest["contents"]["files"]["migration-spec.json"] = 1 if change == "digest-type" else "A" * 64
+        elif change == "artifacts-type":
+            manifest["artifacts"] = []
+        elif change in ("unit-type", "unit-path"):
+            manifest["unit"] = True if change == "unit-type" else "../private-unit"
+        else:
+            manifest["kind"] = True if change == "kind-type" else "private-unknown"
+    content = malformed[change] if change in malformed else _w_json(manifest)
+    _w_put(package, "package-manifest.json", content)
+    result = pri.read_current_source_data_handoff(
+        package, expected_package_working_revision=_w_revision({**raw, "package-manifest.json": content})
+    )
+    assert result == (code, None)
+    assert "private" not in repr(result) and str(tmp_path) not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "name", ["migration-spec.json", "migration-spec.schema.json", "source-provenance.json", "report.json"]
+)
+@pytest.mark.parametrize(
+    "content,code",
+    [
+        (b'{"duplicate":0,"duplicate":1}', "package_manifest_duplicate_key"),
+        (b'{"notfinite":NaN}', "package_manifest_non_finite_number"),
+        (b'{"overflow":1e999}', "package_manifest_non_finite_number"),
+        (b"\xff", "package_manifest_not_utf8"),
+        (b"[", "package_manifest_not_json"),
+    ],
+)
+def test_current_working_held_json_uses_strict_current_semantics(
+    tmp_path: Path, name: str, content: bytes, code: str
+) -> None:
+    """A digest-matching current member still owes strict parsing."""
+    package, _ = _w_package(tmp_path / "Unit")
+    _w_put(package, name, content)
+    _w_redeclare(package, name)
+    assert pri.read_current_source_data_handoff(
+        package, expected_package_working_revision=_w_revision(_w_bytes(package))
+    ) == (code, None)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"\xff",
+        b'{"schema":"phase1-data-access/v1","schema":"private"}',
+        b'{"state":NaN}',
+        b'{"state":1e999}',
+        b'{"state":"unknown"}',
+        b"[]",
+        b'{"private":',
+    ],
+)
+def test_current_working_bad_projection_never_falls_back(tmp_path: Path, content: bytes) -> None:
+    """Only the canonical projection parser owns its typed refusal."""
+    package, _ = _w_package(tmp_path / "Unit")
+    _w_put(package, "data-access.json", content)
+    _w_redeclare(package, "data-access.json")
+    assert pri.read_current_source_data_handoff(
+        package, expected_package_working_revision=_w_revision(_w_bytes(package))
+    ) == ("projection-invalid", None)
+
+
+@pytest.mark.parametrize(
+    "declaration", ["asset", "migration_spec", "migration_spec_schema", "data_access", "migration_brief"]
+)
+@pytest.mark.parametrize("change", ["absent", "wrong-path", "no-digest"])
+def test_current_working_roles_are_exact_declarations_not_name_discovery(
+    tmp_path: Path, declaration: str, change: str
+) -> None:
+    """Tempting correctly named files never restore a missing or foreign role declaration."""
+    package, raw = _w_package(tmp_path / "Unit")
+    manifest = json.loads(raw["package-manifest.json"])
+    name = manifest["artifacts"][declaration]
+    if change == "absent":
+        del manifest["artifacts"][declaration]
+        code = "role_declaration_absent"
+    elif change == "wrong-path":
+        manifest["artifacts"][declaration] = "data/orders.csv"
+        code = "role_declaration_not_an_admissible_candidate"
+    else:
+        del manifest["contents"]["files"][name]
+        code = "role_declaration_not_a_verified_file"
+    _w_put(package, "package-manifest.json", _w_json(manifest))
+    assert pri.read_current_source_data_handoff(
+        package, expected_package_working_revision=_w_revision(_w_bytes(package))
+    ) == (code, None)
+
+
+@pytest.mark.parametrize(
+    "change,code",
+    [
+        ("classification-scope", "package_scope_mismatch"),
+        ("classification-kind", "engine_classification_membership"),
+        ("classification-duplicate", "engine_classification_membership"),
+        ("provenance-scope", "package_scope_mismatch"),
+        ("provenance-row", "provenance_row_cardinality"),
+        ("provenance-digest", "provenance_sha_disagrees_with_source"),
+        ("provenance-file", "provenance_file_disagrees_with_source"),
+        ("spec-file", "spec_file_disagrees_with_source"),
+        ("luid-namespace", "luid_namespace_mismatch"),
+        ("luid-mismatch", "server_luid_contradiction"),
+        ("luid-missing", "server_luid_unrepresented"),
+        ("source-extension", "role_declaration_not_an_admissible_candidate"),
+        ("source-extra", "role_ambiguous"),
+    ],
+)
+def test_current_working_pure_identity_rules_refuse_coherent_digests_with_wrong_roles(
+    tmp_path: Path, change: str, code: str
+) -> None:
+    """Current digests alone cannot replace source/provenance/LUID/classification agreement."""
+    package, raw = _w_package(tmp_path / "Unit")
+    name = "report.json" if change.startswith("classification") else "source-provenance.json"
+    payload = json.loads(raw[name])
+    if change == "classification-scope":
+        payload["scope"]["unit"] = "Other"
+    elif change == "classification-kind":
+        payload["datasources"], payload["workbooks"] = payload["workbooks"], []
+    elif change == "classification-duplicate":
+        payload["workbooks"] *= 2
+    elif change == "provenance-scope":
+        payload["scope"]["unit"] = "Other"
+    elif change == "provenance-row":
+        payload["inputs"] *= 2
+    elif change == "provenance-digest":
+        payload["inputs"][0]["input"]["sha256"] = "0" * 64
+    elif change == "provenance-file":
+        payload["inputs"][0]["input"]["file"] = "Other.twb"
+    elif change == "spec-file":
+        name, payload = "migration-spec.json", json.loads(raw["migration-spec.json"])
+        payload["source"]["file_name"] = "Other.twb"
+    elif change == "luid-namespace":
+        payload["inputs"][0]["origin"]["datasource_luid"] = DS_LUID
+    elif change == "luid-mismatch":
+        payload["inputs"][0]["origin"]["workbook_luid"] = DS_LUID
+    elif change == "luid-missing":
+        payload["inputs"][0]["origin"] = {}
+    elif change == "source-extra":
+        _w_put(package, "assets/extra.bin", b"extra")
+        _w_redeclare(package, "assets/extra.bin")
+    else:
+        name = "package-manifest.json"
+        payload = json.loads(raw[name])
+        replacement = _W_ASSET.removesuffix(".twb") + ".tds"
+        package.joinpath(*_W_ASSET.split("/")).rename(package.joinpath(*replacement.split("/")))
+        payload["artifacts"]["asset"] = replacement
+        payload["contents"]["files"][replacement] = payload["contents"]["files"].pop(_W_ASSET)
+    if change != "source-extra":
+        _w_put(package, name, _w_json(payload))
+        if name != "package-manifest.json":
+            _w_redeclare(package, name)
+    assert pri.read_current_source_data_handoff(
+        package, expected_package_working_revision=_w_revision(_w_bytes(package))
+    ) == (code, None)
+
+
+@pytest.mark.parametrize(
+    "change,code",
+    [
+        ("datasource", "working_topology_unsupported"),
+        ("provider", "working_topology_unsupported"),
+        ("shared-dependency", "working_topology_unsupported"),
+        ("unidentified-dependency", "published_dependency_invalid"),
+        ("report-free", "role_declaration_absent"),
+        ("multiple-model", "role_ambiguous"),
+        ("multiple-report", "role_ambiguous"),
+        ("multiple-pbip", "role_ambiguous"),
+        ("external-binding", "provider_binding_mismatch"),
+        ("byConnection", "provider_binding_mismatch"),
+        ("pbip-target", "provider_binding_mismatch"),
+        ("pbip-targets", "provider_binding_mismatch"),
+        ("summary-target", "provider_binding_mismatch"),
+        ("summary-local", "provider_binding_mismatch"),
+        ("model-path", "role_declaration_not_a_verified_file"),
+        ("unowned-sqlproxy", "source-key-invalid"),
+        ("empty-second-model", "working_topology_unsupported"),
+        ("nested-model", "working_topology_unsupported"),
+        ("nested-report", "working_topology_unsupported"),
+        ("nested-pbip", "working_topology_unsupported"),
+        ("root-pbip", "working_topology_unsupported"),
+    ],
+)
+def test_current_working_unsupported_or_incoherent_targets_never_issue(tmp_path: Path, change: str, code: str) -> None:
+    """Only the single owned report/model/PBIP target is in W's success topology."""
+    package, raw = _w_package(tmp_path / "Unit")
+    manifest = json.loads(raw["package-manifest.json"])
+    if change in ("datasource", "provider"):
+        manifest["kind"] = "datasource"
+    elif change in ("shared-dependency", "unidentified-dependency", "unowned-sqlproxy"):
+        spec = json.loads(raw["migration-spec.json"])
+        spec["data_sources"][0]["connection"] = {"class": "sqlproxy", "mode": "live"}
+        if change != "unowned-sqlproxy":
+            spec["data_sources"][0]["published_datasource"] = {"luid": DS_LUID} if change == "shared-dependency" else {}
+        _w_put(package, "migration-spec.json", _w_json(spec))
+        manifest["contents"]["files"]["migration-spec.json"] = hashlib.sha256(_w_json(spec)).hexdigest()
+    elif change == "report-free":
+        manifest["artifacts"]["report"] = None
+    elif change.startswith("multiple"):
+        name = {
+            "multiple-model": "fabric/Other.SemanticModel/definition/model.tmdl",
+            "multiple-report": "fabric/Other.Report/definition.pbir",
+            "multiple-pbip": "fabric/Other.pbip",
+        }[change]
+        _w_put(package, name, b"other")
+        manifest["contents"]["files"][name] = hashlib.sha256(b"other").hexdigest()
+    elif change == "empty-second-model":
+        (package / "fabric" / "Other.SemanticModel").mkdir()
+    elif change in ("nested-model", "nested-report", "nested-pbip", "root-pbip"):
+        name = {
+            "nested-model": "fabric/nested/Other.SemanticModel/definition/model.tmdl",
+            "nested-report": "fabric/nested/Other.Report/definition.pbir",
+            "nested-pbip": "fabric/nested/Other.pbip",
+            "root-pbip": "Other.pbip",
+        }[change]
+        _w_put(package, name, b"other target")
+    elif change in ("external-binding", "byConnection"):
+        reference = (
+            {"byPath": {"path": "../../../external.SemanticModel"}}
+            if change == "external-binding"
+            else {"byConnection": {}}
+        )
+        _w_put(package, f"{_W_REPORT}/definition.pbir", _w_json({"datasetReference": reference}))
+    elif change in ("pbip-target", "pbip-targets"):
+        artifacts = (
+            [{"report": {"path": "Other.Report"}}]
+            if change == "pbip-target"
+            else [
+                {"report": {"path": "Revenue.Report"}},
+                {"report": {"path": "Revenue.Report"}},
+            ]
+        )
+        _w_put(package, _W_PBIP, _w_json({"artifacts": artifacts}))
+    elif change in ("summary-target", "summary-local"):
+        manifest["model_binding"]["path" if change == "summary-target" else "resolves_in_package"] = (
+            "../Other.SemanticModel" if change == "summary-target" else False
+        )
+    else:
+        manifest["artifacts"]["model"] = "fabric/Other.SemanticModel"
+    _w_put(package, "package-manifest.json", _w_json(manifest))
+    assert pri.read_current_source_data_handoff(
+        package, expected_package_working_revision=_w_revision(_w_bytes(package))
+    ) == (code, None)
+
+
+@pytest.mark.parametrize("mode", ["string", "subclass", "bool"])
+def test_current_working_root_arguments_are_exact_native_paths(tmp_path: Path, mode: str) -> None:
+    """No argument coercion, normalization or filesystem fallback."""
+    root = str(tmp_path) if mode == "string" else _WorkingPath(tmp_path) if mode == "subclass" else True
+    assert pri.read_current_source_data_handoff(root, expected_package_working_revision="sha256:" + "0" * 64) == (
+        "package_root_binding_invalid",
+        None,
+    )
+    assert (
+        pri.validate_current_source_data_handoff(root, None, expected_package_working_revision="sha256:" + "0" * 64)
+        == "package_root_binding_invalid"
+    )
+
+
+@pytest.mark.parametrize("mode", ["copy", "deepcopy", "replace", "reconstruct", "reconstruct-with-authority"])
+def test_current_working_only_the_original_issued_object_validates(tmp_path: Path, mode: str) -> None:
+    """Equal field values cannot carry the issuing object's authority to another object."""
+    package, raw = _w_package(tmp_path / "Unit")
+    current = _w_revision(raw)
+    handoff = _w_read(package, current)
+    if mode in ("copy", "deepcopy"):
+        candidate = getattr(copy, mode)(handoff)
+    elif mode == "replace":
+        candidate = replace(handoff)
+    else:
+        candidate = pri.CurrentWorkingSourceDataHandoff(
+            **{item.name: getattr(handoff, item.name) for item in fields(handoff) if item.init}
+        )
+        if mode == "reconstruct-with-authority":
+            object.__setattr__(candidate, "_authority", handoff._authority)
+    assert candidate is not handoff
+    assert (
+        pri.validate_current_source_data_handoff(package, candidate, expected_package_working_revision=current)
+        == "working_handoff_invalid"
+    )
+    assert pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current) is None
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "package_root",
+        "root_identity",
+        "package_working_revision",
+        "current_manifest_sha256",
+        "unit",
+        "kind",
+        "topology",
+        "source_asset_path",
+        "report_path",
+        "model_path",
+        "pbip_path",
+        "declared_paths",
+        "source_identity",
+        "facts",
+        "stored_data_access",
+        "_snapshot",
+        "_authority",
+        "source-value",
+        "member-value",
+        "manifest-value",
+        "boundary-value",
+        "scalar-subclass",
+        "member-subclass",
+        "permissive-authority",
+        "cycle-scalar",
+        "cycle-source",
+        "cycle-members",
+    ],
+)
+def test_current_working_issued_state_mutations_and_grafts_refuse(tmp_path: Path, field_name: str) -> None:
+    """Mutating even the original frozen object cannot silently change the held authority."""
+    package, raw = _w_package(tmp_path / "Unit")
+    current = _w_revision(raw)
+    handoff = _w_read(package, current)
+    other = _w_read(package, current)
+    if field_name in ("source_identity", "facts", "stored_data_access", "_snapshot"):
+        replacement = getattr(other, field_name)
+    elif field_name == "package_root":
+        replacement = tmp_path
+    elif field_name == "declared_paths":
+        replacement = (*handoff.declared_paths, "rogue.bin")
+    elif field_name == "_authority":
+        replacement = None
+    elif field_name == "permissive-authority":
+        field_name, replacement = "_authority", lambda _candidate: True
+    elif field_name == "source-value":
+        object.__setattr__(handoff.source_identity, "sha256", "0" * 64)
+        replacement = None
+    elif field_name == "cycle-scalar":
+        object.__setattr__(handoff, "unit", handoff)
+        replacement = None
+    elif field_name == "cycle-source":
+        object.__setattr__(handoff.source_identity, "kind", handoff.source_identity)
+        replacement = None
+    elif field_name == "cycle-members":
+        object.__setattr__(handoff._snapshot, "members", (handoff._snapshot,))
+        replacement = None
+    elif field_name in ("member-value", "manifest-value", "boundary-value"):
+        snapshot = handoff._snapshot
+        attribute, value = {
+            "member-value": ("members", snapshot.members[:-1]),
+            "manifest-value": ("manifest", snapshot.manifest + b"\n"),
+            "boundary-value": ("boundary", ()),
+        }[field_name]
+        object.__setattr__(snapshot, attribute, value)
+        replacement = None
+    elif field_name == "scalar-subclass":
+        field_name, replacement = "unit", _WorkingString(handoff.unit)
+    elif field_name == "member-subclass":
+        field_name, replacement = "declared_paths", tuple(_WorkingString(name) for name in handoff.declared_paths)
+    else:
+        replacement = "private-mutated-text"
+    if replacement is not None or field_name == "_authority":
+        object.__setattr__(handoff, field_name, replacement)
+    assert (
+        pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current)
+        == "working_handoff_invalid"
+    )
+    assert "private-mutated-text" not in repr(handoff)
+
+
+def test_current_working_root_and_revision_grafts_refuse_but_fresh_transfers_are_snapshots(tmp_path: Path) -> None:
+    """The same bytes can be freshly reviewed elsewhere, never by borrowing another root's object."""
+    package, raw = _w_package(tmp_path / "Unit")
+    current = _w_revision(raw)
+    handoff = _w_read(package, current)
+    destination = tmp_path / "Copy"
+    shutil.copytree(package, destination)
+    assert _w_bytes(destination) == raw
+    assert (
+        pri.validate_current_source_data_handoff(destination, handoff, expected_package_working_revision=current)
+        == "package_root_binding_invalid"
+    )
+    _w_read(destination, current)
+    assert (
+        pri.validate_current_source_data_handoff(
+            package, handoff, expected_package_working_revision="sha256:" + "0" * 64
+        )
+        == "working_revision_mismatch"
+    )
+    with pytest.raises(AttributeError):
+        handoff.facts.live_source_keys = (_W_OTHER_KEY,)
+    with pytest.raises(AttributeError):
+        handoff.stored_data_access.max_phase2_claim = "structural_only"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "fabric/Other.Report",
+        "fabric/Other.SemanticModel",
+        "nested/Other.Report",
+        "nested/Other.SemanticModel",
+    ],
+)
+def test_current_working_held_target_cardinality_is_rechecked_when_r_does_not_move(tmp_path: Path, extra: str) -> None:
+    """Empty directories do not move R, but another current target still invalidates W."""
+    package, raw = _w_package(tmp_path / "Unit")
+    current = _w_revision(raw)
+    handoff = _w_read(package, current)
+    (package / "validation" / "iterations" / "ignored.Report").mkdir(parents=True)
+    assert pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current) is None
+    package.joinpath(*extra.split("/")).mkdir(parents=True)
+    assert _w_bytes(package) == raw
+    assert pri.revision.package_working_revision(package, package / _W_MODEL) == current
+    assert pri.read_current_source_data_handoff(package, expected_package_working_revision=current) == (
+        "working_topology_unsupported",
+        None,
+    )
+    assert (
+        pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current)
+        == "working_topology_unsupported"
+    )
+
+
+@pytest.mark.parametrize("name", ["package-manifest.json", *_W_IMMUTABLE, _W_PBIP, f"{_W_REPORT}/definition.pbir"])
+def test_current_working_same_byte_replacement_after_issue_refuses(tmp_path: Path, name: str) -> None:
+    """R is unchanged, so the physical member identity assertion must be the refusal."""
+    package, raw = _w_package(tmp_path / "Unit")
+    current = _w_revision(raw)
+    handoff = _w_read(package, current)
+    path = package.joinpath(*name.split("/"))
+    previous = os.lstat(path).st_ino
+    path.rename(tmp_path / "retired")
+    path.write_bytes(raw[name])
+    assert os.lstat(path).st_ino != previous and _w_revision(_w_bytes(package)) == current
+    expected = "package_root_replaced" if name == "package-manifest.json" else "package_member_replaced"
+    assert (
+        pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current)
+        == expected
+    )
+
+
+def test_current_working_same_byte_root_replacement_after_issue_refuses(tmp_path: Path) -> None:
+    """A copied root has the same R but not the issued boundary identity."""
+    package, raw = _w_package(tmp_path / "Unit")
+    handoff = _w_read(package, _w_revision(raw))
+    retired = tmp_path / "retired"
+    package.rename(retired)
+    shutil.copytree(retired, package)
+    assert _w_bytes(package) == raw
+    assert (
+        pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=_w_revision(raw))
+        == "package_root_replaced"
+    )
+
+
+@pytest.mark.parametrize("boundary", ["root", "ancestor", "asset-directory", "marker", "spec", "projection"])
+def test_current_working_links_refuse_before_any_content_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str
+) -> None:
+    """Real NTFS junctions/POSIX symlinks; only the existing governed capability skips apply."""
+    package, raw = _w_package(tmp_path / "outside" / "Unit")
+    if boundary in ("root", "ancestor"):
+        link = tmp_path / "alias"
+        link_directory(link, package if boundary == "root" else package.parent)
+        package = link if boundary == "root" else link / package.name
+    elif boundary == "asset-directory":
+        path = package / "assets"
+        target = tmp_path / "retired-assets"
+        path.rename(target)
+        link_directory(path, target)
+    else:
+        name = {"marker": "package-manifest.json", "spec": "migration-spec.json", "projection": "data-access.json"}[
+            boundary
+        ]
+        path = package / name
+        target = tmp_path / "retired-file"
+        path.rename(target)
+        link_file(path, target)
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a reparse boundary was opened")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(pri.pfs, "_hash_file", forbidden)
+    assert pri.read_current_source_data_handoff(package, expected_package_working_revision=_w_revision(raw)) == (
+        "package_boundary_unsafe",
+        None,
+    )
+
+
+@pytest.mark.parametrize("name", ["package-manifest.json", *_W_IMMUTABLE])
+def test_current_working_hardlinks_refuse_before_role_bytes_are_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """The ordinary-single-link primitive closes the gap left by a no-follow walk alone."""
+    package, raw = _w_package(tmp_path / "Unit")
+    path = package.joinpath(*name.split("/"))
+    os.link(path, tmp_path / "another-name")
+    assert os.lstat(path).st_nlink == 2
+    read, stream = Path.read_bytes, pri.pfs._hash_file
+
+    def checked_read(candidate: Path) -> bytes:
+        assert candidate != path, "hardlinked role bytes were opened"
+        return read(candidate)
+
+    def checked_hash(candidate: Path) -> str:
+        assert candidate != path, "hardlinked role bytes were hashed"
+        return stream(candidate)
+
+    monkeypatch.setattr(Path, "read_bytes", checked_read)
+    monkeypatch.setattr(pri.pfs, "_hash_file", checked_hash)
+    code = "package_marker_replaced" if name == "package-manifest.json" else "package_member_replaced"
+    assert pri.read_current_source_data_handoff(package, expected_package_working_revision=_w_revision(raw)) == (
+        code,
+        None,
+    )
+
+
+@pytest.mark.parametrize("when", [1, 2])
+@pytest.mark.parametrize("change", ["replace-member", "edit-member", "replace-marker", "edit-marker", "edit-report"])
+def test_current_working_revision_read_seams_recheck_held_identity_and_current_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, when: int, change: str
+) -> None:
+    """A returning revision value cannot conceal the named change during the held-read interval."""
+    package, raw = _w_package(tmp_path / "Unit")
+    current = _w_revision(raw)
+    revision_reader = pri.revision.package_working_revision
+    calls = []
+    name = "package-manifest.json" if change.endswith("marker") else "migration-spec.json"
+    if change == "edit-report":
+        name = f"{_W_REPORT}/definition/pages/pages.json"
+    path = package.joinpath(*name.split("/"))
+
+    def change_at_return(root: Path, model: Path | None = None) -> str:
+        result = revision_reader(root, model)
+        calls.append(result)
+        if len(calls) == when:
+            if change.startswith("replace"):
+                path.rename(tmp_path / "retired")
+                path.write_bytes(raw[name])
+            else:
+                path.write_bytes(raw[name] + b"\n")
+        return result
+
+    monkeypatch.setattr(pri.revision, "package_working_revision", change_at_return)
+    code, handoff = pri.read_current_source_data_handoff(package, expected_package_working_revision=current)
+    assert len(calls) >= when and calls[0] == current
+    if change == "edit-report" and when == 2:
+        # No guarantee about a non-held mutable file changed AFTER the final revision read.
+        # A subsequent consumer validation must still refuse the old object/revision.
+        assert code is None and handoff is not None
+        assert (
+            pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current)
+            == "working_revision_mismatch"
+        )
+    else:
+        assert handoff is None
+        expected = (
+            "package_root_replaced"
+            if change == "replace-marker"
+            else "package_member_replaced"
+            if change == "replace-member"
+            else "working_revision_mismatch"
+            if change == "edit-report" or (change == "edit-marker" and when == 1)
+            else "package_file_digest_mismatch"
+        )
+        assert code == expected
+
+
+def test_current_working_reader_invokes_no_baseline_gate_receipt_probe_policy_or_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forbidden-owner sentinels surround a real positive and its real revalidation."""
+    import subprocess
+
+    import check_reference_readiness as readiness
+    import credential_gate as gate
+    import iteration_receipt as receipts
+
+    package, raw = _w_package(tmp_path / "Unit")
+    _w_put(package, f"{_W_REPORT}/definition/pages/pages.json", b'{"pageOrder":["working"]}')
+    _w_put(package, "validation/iterations/anything.bin", b"not evidence")
+    _w_put(package, _W_CACHE, b"not evidence")
+    before = _w_bytes(package)
+    current = _w_revision(before)
+    reads = Path.read_bytes
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("W invoked a forbidden authority or writer")
+
+    def small_reads(path: Path) -> bytes:
+        assert path != package.joinpath(*_W_ASSET.split("/")), "large source assets must be streaming-hashed"
+        return reads(path)
+
+    for module, names in (
+        (
+            pri,
+            (
+                "verify_s1",
+                "verify_phase1_role_identity",
+                "_facts",
+                "_verdict",
+                "_resolve_cohort",
+                "VerifiedPackage",
+                "_Facts",
+                "Phase1RoleIdentityResult",
+                "PackageDataAccessHandoff",
+                "parse_brief_policy",
+                "read_current_brief_policy",
+            ),
+        ),
+        (pri.pfs, ("verify_package", "read_verified_member", "HeldVerifiedMember")),
+        (readiness, ("scan", "_entry_integrity")),
+        (receipts, ("read_chain", "read_history", "write_receipt", "finalize")),
+        (gate, ("verify", "authorize", "_audit", "reconcile_package_data_access")),
+        (subprocess, ("run", "Popen")),
+        (Path, ("write_bytes", "write_text", "mkdir")),
+    ):
+        for name in names:
+            monkeypatch.setattr(module, name, forbidden)
+    monkeypatch.setattr(Path, "read_bytes", small_reads)
+    handoff = _w_read(package, current)
+    assert handoff.current_manifest_sha256 == hashlib.sha256(raw["package-manifest.json"]).hexdigest()
+    monkeypatch.undo()
+    assert _w_bytes(package) == before
+
+
+@pytest.mark.parametrize("name", ["package-manifest.json", "migration-spec.json", "data-access.json"])
+def test_current_working_unreadable_small_roles_return_no_exception_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """IO failures have fixed reasons, without dumping a filename or the original exception."""
+    package, raw = _w_package(tmp_path / "Unit")
+    read_bytes = Path.read_bytes
+
+    def deny(path: Path) -> bytes:
+        if path.name == name:
+            raise OSError("private source location and diagnostic")
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", deny)
+    assert pri.read_current_source_data_handoff(package, expected_package_working_revision=_w_revision(raw)) == (
+        "package_file_unreadable",
+        None,
+    )
