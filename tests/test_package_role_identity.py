@@ -15,12 +15,16 @@ have kept passing through each of the mutations at the bottom of this file.
 from __future__ import annotations
 
 import copy
+import gc
 import hashlib
 import inspect
 import json
 import os
+import pickle
 import shutil
 import sys
+import types
+import weakref
 from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
@@ -32,6 +36,7 @@ from test_package_filesystem import link_directory, link_file
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-import-position
+import bundle_corpus  # noqa: E402  # pylint: disable=wrong-import-position
 
 WB_UNIT = "Revenue"
 WB_LUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -2087,6 +2092,191 @@ def test_current_working_only_the_original_issued_object_validates(tmp_path: Pat
     assert pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current) is None
 
 
+@pytest.mark.parametrize("change", ["equal", "assessment", "facts", "source", "scalar", "snapshot"])
+def test_current_working_module_cannot_remint_reconstructed_or_upgraded_handoffs(tmp_path: Path, change: str) -> None:
+    """The review's module-factory attack must not upgrade a real held blocked projection."""
+    blocked = {
+        **_W_LOCAL,
+        "state": "blocked",
+        "validation": "not_established",
+        "effective_scope": None,
+        "max_phase2_claim": "none",
+        "codes": ["probe-no-credential"],
+    }
+    package, raw = _w_package(tmp_path / "Unit", live=True, projection=blocked)
+    current = _w_revision(raw)
+    handoff = _w_read(package, current)
+    assert handoff.stored_data_access.to_json() == blocked
+    values = {item.name: getattr(handoff, item.name) for item in fields(handoff) if item.init}
+    if change == "assessment":
+        values["stored_data_access"] = pri.parse_data_access(
+            json.dumps(
+                {
+                    **_W_LOCAL,
+                    "state": "live_data_ok",
+                    "source_keys": [_W_LIVE_KEY],
+                    "codes": ["probe-cleared", "probe-data-ok"],
+                }
+            )
+        )
+        assert values["stored_data_access"].max_phase2_claim == "data_validated"
+    elif change == "facts":
+        values["facts"] = handoff.facts._replace(live_source_keys=())
+    elif change == "source":
+        values["source_identity"] = replace(handoff.source_identity, sha256="0" * 64)
+    elif change == "scalar":
+        values["unit"] = "Other"
+    elif change == "snapshot":
+        values["_snapshot"] = copy.deepcopy(handoff._snapshot)
+    candidate = pri.CurrentWorkingSourceDataHandoff(**values)
+    assert candidate is not handoff
+    assert (
+        pri.validate_current_source_data_handoff(package, candidate, expected_package_working_revision=current)
+        == "working_handoff_invalid"
+    )
+    factory = getattr(pri, "_working_authority", None)
+    if factory is not None:
+        object.__setattr__(candidate, "_authority", factory(candidate))
+    actual = pri.validate_current_source_data_handoff(package, candidate, expected_package_working_revision=current)
+    assert actual == "working_handoff_invalid", (
+        change,
+        handoff.stored_data_access.state,
+        candidate.stored_data_access.state,
+        actual,
+    )
+    assert pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current) is None
+
+
+def test_current_working_issuance_has_no_module_factory_or_global_registry() -> None:
+    """Read-only introspection checks the supported module surface, not hostile closure rewriting."""
+    assert not hasattr(pri, "_working_authority")
+    assert not hasattr(pri, "_WORKING_AUTHORITY_CODE")
+    assert not hasattr(pri, "_current_working_api")
+    issuing = inspect.getclosurevars(pri.read_current_source_data_handoff).nonlocals["issued"]
+    validating = inspect.getclosurevars(pri.validate_current_source_data_handoff).nonlocals["issued"]
+    assert issuing is validating and isinstance(issuing, weakref.WeakValueDictionary)
+    assert all(value is not issuing for value in vars(pri).values())
+
+
+@pytest.mark.parametrize("mode", ["lambda", "callable", "copied-code"])
+def test_current_working_replacement_capabilities_are_not_invoked(tmp_path: Path, mode: str) -> None:
+    package, raw = _w_package(tmp_path / "Unit")
+    current = _w_revision(raw)
+    handoff = _w_read(package, current)
+
+    class Permissive:
+        def __call__(self, _candidate: object) -> bool:
+            pytest.fail("validation invoked a caller-supplied capability")
+
+    authority = handoff._authority
+    replacement = (
+        (lambda _candidate: True)
+        if mode == "lambda"
+        else Permissive()
+        if mode == "callable"
+        else types.FunctionType(authority.__code__, authority.__globals__, closure=authority.__closure__)
+    )
+    object.__setattr__(handoff, "_authority", replacement)
+    assert (
+        pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current)
+        == "working_handoff_invalid"
+    )
+
+
+def test_current_working_serialization_cannot_carry_issuance(tmp_path: Path) -> None:
+    package, raw = _w_package(tmp_path / "Unit")
+    current = _w_revision(raw)
+    handoff = _w_read(package, current)
+    with pytest.raises((AttributeError, TypeError, pickle.PicklingError)):
+        pickle.dumps(handoff)
+    candidate = pickle.loads(pickle.dumps(replace(handoff)))
+    assert candidate is not handoff
+    assert (
+        pri.validate_current_source_data_handoff(package, candidate, expected_package_working_revision=current)
+        == "working_handoff_invalid"
+    )
+
+
+@pytest.mark.parametrize("cycle", ["none", "scalar", "members"])
+def test_current_working_disposed_issuance_and_cycles_are_collectible(tmp_path: Path, cycle: str) -> None:
+    package, raw = _w_package(tmp_path / "Unit")
+    current = _w_revision(raw)
+    handoff = _w_read(package, current)
+    candidate = copy.deepcopy(replace(handoff))
+    owner, capability = weakref.ref(handoff), weakref.ref(handoff._authority)
+    key = id(handoff)
+    issued = inspect.getclosurevars(pri.read_current_source_data_handoff).nonlocals["issued"]
+    assert issued[key] is handoff._authority
+    if cycle != "none":
+        if cycle == "scalar":
+            object.__setattr__(handoff, "unit", handoff)
+        else:
+            object.__setattr__(handoff._snapshot, "members", (handoff,))
+        assert (
+            pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current)
+            == "working_handoff_invalid"
+        )
+    del handoff
+    gc.collect()
+    assert owner() is None and capability() is None and key not in issued
+    for _ in range(256):
+        allocated = replace(candidate)
+        assert (
+            pri.validate_current_source_data_handoff(package, allocated, expected_package_working_revision=current)
+            == "working_handoff_invalid"
+        )
+    _w_read(package, current)
+
+
+def test_current_working_retained_capability_cannot_authorize_reused_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Force the stale id bucket; correctness must not depend on the allocator reusing it naturally."""
+    package, raw = _w_package(tmp_path / "Unit")
+    current = _w_revision(raw)
+    handoff = _w_read(package, current)
+    candidate, owner, key = copy.copy(handoff), weakref.ref(handoff), id(handoff)
+    issued = inspect.getclosurevars(pri.read_current_source_data_handoff).nonlocals["issued"]
+    del handoff
+    gc.collect()
+    assert owner() is None and issued[key] is candidate._authority
+    monkeypatch.setattr(pri, "id", lambda _value: key, raising=False)
+    assert (
+        pri.validate_current_source_data_handoff(package, candidate, expected_package_working_revision=current)
+        == "working_handoff_invalid"
+    )
+
+
+def test_current_working_separate_issuances_cannot_swap_roots_revisions_or_capabilities(tmp_path: Path) -> None:
+    first, first_raw = _w_package(tmp_path / "First")
+    second, second_raw = _w_package(tmp_path / "Second")
+    second_raw[f"{_W_MODEL}/definition/model.tmdl"] = b"model Edited\n"
+    _w_put(second, f"{_W_MODEL}/definition/model.tmdl", second_raw[f"{_W_MODEL}/definition/model.tmdl"])
+    first_r, second_r = _w_revision(first_raw), _w_revision(second_raw)
+    assert first_r != second_r
+    left, right = _w_read(first, first_r), _w_read(second, second_r)
+    for root, own, foreign, current, other_r in (
+        (first, left, right, first_r, second_r),
+        (second, right, left, second_r, first_r),
+    ):
+        assert (
+            pri.validate_current_source_data_handoff(root, foreign, expected_package_working_revision=other_r)
+            == "package_root_binding_invalid"
+        )
+        assert (
+            pri.validate_current_source_data_handoff(root, own, expected_package_working_revision=other_r)
+            == "working_revision_mismatch"
+        )
+        authority = own._authority
+        object.__setattr__(own, "_authority", foreign._authority)
+        assert (
+            pri.validate_current_source_data_handoff(root, own, expected_package_working_revision=current)
+            == "working_handoff_invalid"
+        )
+        object.__setattr__(own, "_authority", authority)
+        assert pri.validate_current_source_data_handoff(root, own, expected_package_working_revision=current) is None
+
+
 @pytest.mark.parametrize(
     "field_name",
     [
@@ -2223,6 +2413,114 @@ def test_current_working_held_target_cardinality_is_rechecked_when_r_does_not_mo
         pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current)
         == "working_topology_unsupported"
     )
+
+
+@pytest.mark.parametrize(
+    "suffix", [".report", ".REPORT", ".rEpOrT", ".semanticmodel", ".SEMANTICMODEL", ".sEmAnTiCmOdEl"]
+)
+@pytest.mark.parametrize("parent", ["fabric", "nested"])
+@pytest.mark.parametrize("populated", [False, True], ids=["empty", "nonempty"])
+def test_current_working_suffix_variants_refuse_fresh_reads_with_matching_r(
+    tmp_path: Path, suffix: str, parent: str, populated: bool
+) -> None:
+    package, raw = _w_package(tmp_path / "Unit")
+    extra = f"{parent}/Other{suffix}"
+    package.joinpath(*extra.split("/")).mkdir(parents=True)
+    if populated:
+        raw[f"{extra}/payload.bin"] = b"other target"
+        _w_put(package, f"{extra}/payload.bin", raw[f"{extra}/payload.bin"])
+    current = _w_revision(raw)
+    assert pri.revision.package_working_revision(package, package / _W_MODEL) == current
+    if sys.platform == "win32":
+        discover = bundle_corpus.shipping_reports if suffix.casefold() == ".report" else bundle_corpus.shipping_models
+        selected = "Revenue.Report" if suffix.casefold() == ".report" else "Revenue.SemanticModel"
+        assert {path.name for path in discover(package)} == {selected, f"Other{suffix}"}
+    expected = "role_ambiguous" if populated and parent == "fabric" else "working_topology_unsupported"
+    assert pri.read_current_source_data_handoff(package, expected_package_working_revision=current) == (expected, None)
+
+
+@pytest.mark.parametrize(
+    "suffix", [".report", ".REPORT", ".rEpOrT", ".semanticmodel", ".SEMANTICMODEL", ".sEmAnTiCmOdEl"]
+)
+@pytest.mark.parametrize("parent", ["fabric", "nested"])
+@pytest.mark.parametrize("populated", [False, True], ids=["empty", "nonempty"])
+def test_current_working_suffix_variants_refuse_held_validation_at_its_own_r(
+    tmp_path: Path, suffix: str, parent: str, populated: bool
+) -> None:
+    """Nonempty additions must fail on topology before stale bytes could incidentally refuse."""
+    package, raw = _w_package(tmp_path / "Unit")
+    current = _w_revision(raw)
+    handoff = _w_read(package, current)
+    extra = f"{parent}/Other{suffix}"
+    package.joinpath(*extra.split("/")).mkdir(parents=True)
+    if populated:
+        _w_put(package, f"{extra}/payload.bin", b"other target")
+    else:
+        assert _w_bytes(package) == raw
+        assert pri.revision.package_working_revision(package, package / _W_MODEL) == current
+    assert handoff.package_working_revision == current
+    assert (
+        pri.validate_current_source_data_handoff(package, handoff, expected_package_working_revision=current)
+        == "working_topology_unsupported"
+    )
+
+
+@pytest.mark.parametrize(
+    "name", ["Other.report.backup", "Other.REPORT.old", "Other.semanticmodel.backup", "Other.SEMANTICMODEL.old"]
+)
+@pytest.mark.parametrize("populated", [False, True], ids=["empty", "nonempty"])
+def test_current_working_suffix_substrings_remain_ordinary_directories(
+    tmp_path: Path, name: str, populated: bool
+) -> None:
+    package, raw = _w_package(tmp_path / "Unit")
+    original = _w_read(package, _w_revision(raw))
+    (package / "fabric" / name).mkdir()
+    if populated:
+        raw[f"fabric/{name}/payload.bin"] = b"ordinary bytes"
+        _w_put(package, f"fabric/{name}/payload.bin", raw[f"fabric/{name}/payload.bin"])
+    else:
+        assert (
+            pri.validate_current_source_data_handoff(
+                package, original, expected_package_working_revision=original.package_working_revision
+            )
+            is None
+        )
+    _w_read(package, _w_revision(raw))
+
+
+@pytest.mark.parametrize("role", ["report", "model"])
+@pytest.mark.parametrize("part", ["suffix", "stem"])
+def test_current_working_suffix_classification_does_not_fold_selected_path_identity(
+    tmp_path: Path, role: str, part: str
+) -> None:
+    package, raw = _w_package(tmp_path / "Unit")
+    manifest = json.loads(raw["package-manifest.json"])
+    selected = manifest["artifacts"][role]
+    manifest["artifacts"][role] = (
+        selected.rsplit(".", 1)[0] + "." + selected.rsplit(".", 1)[1].upper()
+        if part == "suffix"
+        else selected.replace("Revenue", "revenue")
+    )
+    raw["package-manifest.json"] = _w_json(manifest)
+    _w_put(package, "package-manifest.json", raw["package-manifest.json"])
+    assert pri.read_current_source_data_handoff(package, expected_package_working_revision=_w_revision(raw)) == (
+        "role_declaration_not_a_verified_file",
+        None,
+    )
+
+
+@pytest.mark.parametrize("suffix", [".Report", ".SemanticModel"])
+def test_current_working_target_key_spellings_do_not_collapse(tmp_path: Path, suffix: str) -> None:
+    """Two input key spellings stay distinct even on a host that cannot store both on disk."""
+    package, _ = _w_package(tmp_path / "Unit")
+    context, _, _, directories = pri._working_declaration(package)
+    variant = f"fabric/Revenue{suffix.lower()}"
+    key = f"{variant}/payload.bin"
+    context.walked[key] = package.joinpath(*key.split("/"))
+    assert pri._fabric_directories(context, suffix) == sorted([f"fabric/Revenue{suffix}", variant])
+    directories.add(variant)
+    with pytest.raises(pri._IdentityError, match="^working_topology_unsupported$"):
+        pri._require_one_working_target(context.walked, directories, (_W_REPORT, _W_MODEL, _W_PBIP))
 
 
 @pytest.mark.parametrize("name", ["package-manifest.json", *_W_IMMUTABLE, _W_PBIP, f"{_W_REPORT}/definition.pbir"])

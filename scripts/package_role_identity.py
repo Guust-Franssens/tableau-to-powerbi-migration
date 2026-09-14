@@ -833,12 +833,17 @@ def _declared_role(  # pylint: disable=too-many-return-statements
     return _role(role, STATE_RESOLVED, cardinality, [declared])
 
 
+def _has_fabric_suffix(name: str, suffix: str | None = None) -> bool:
+    """Fold target suffix classification only, never the selected path or its identity."""
+    return name.casefold().endswith(suffix.casefold() if suffix is not None else (".report", ".semanticmodel"))
+
+
 def _fabric_directories(facts: _RoleContext, suffix: str) -> list[str]:
     """Every ``fabric/<Name><suffix>`` directory the verified key set proves exists."""
     found: set[str] = set()
     for key in facts.under("fabric"):
         head = key.split("/")[1] if key.count("/") >= 2 else ""
-        if head.endswith(suffix):
+        if _has_fabric_suffix(head, suffix):
             found.add(f"fabric/{head}")
     return sorted(found)
 
@@ -1865,9 +1870,7 @@ def _require_one_working_target(
     """Empty target directories do not move R, so reapply this rule during held validation."""
     report, model, pbip = target
     if any(
-        name.endswith((".Report", ".SemanticModel"))
-        and name not in (report, model)
-        and not name.startswith("validation/iterations/")
+        _has_fabric_suffix(name) and name not in (report, model) and not name.startswith("validation/iterations/")
         for name in directories
     ) or any(
         name.lower().endswith(".pbip") and name != pbip and not name.startswith("validation/iterations/")
@@ -2004,130 +2007,130 @@ def _working_state(value: object) -> tuple:
     raise _IdentityError(CODE_WORKING_HANDOFF_INVALID)
 
 
-def _working_authority(result: CurrentWorkingSourceDataHandoff | None) -> Callable[[object], bool]:
-    owner, state = weakref.ref(result) if result is not None else None, _working_state(result)
-    held = (result._snapshot, result.source_identity, result.facts, result.stored_data_access) if result else ()
+def _current_working_api() -> tuple[Callable, Callable]:
+    """Private issuance; weak capabilities also release owners after cyclic state mutations."""
+    issued: weakref.WeakValueDictionary[int, Callable[[object], bool]] = weakref.WeakValueDictionary()
+    # pylint: disable=redefined-outer-name  # Export the closures under their public names.
 
-    def owns(candidate: object) -> bool:
-        return (
-            owner is not None
-            and owner() is candidate
-            and candidate._authority is owns
-            and all(
-                original is current
-                for original, current in zip(
-                    held,
-                    (candidate._snapshot, candidate.source_identity, candidate.facts, candidate.stored_data_access),
-                )
-            )
-            and _working_state(candidate) == state
-        )
+    def read_current_source_data_handoff(  # pylint: disable=too-many-locals,too-many-return-statements
+        root: Path, *, expected_package_working_revision: str
+    ) -> tuple[str | None, CurrentWorkingSourceDataHandoff | None]:
+        """Hold current source/data roles under exact R, not a receipt or original packaging history.
 
-    return owns
-
-
-# Only this closure implementation may be invoked; a caller-replaced callback is not authority.
-_WORKING_AUTHORITY_CODE = _working_authority(None).__code__
-
-
-def read_current_source_data_handoff(  # pylint: disable=too-many-locals,too-many-return-statements
-    root: Path, *, expected_package_working_revision: str
-) -> tuple[str | None, CurrentWorkingSourceDataHandoff | None]:
-    """Hold current source/data roles under exact R, not a receipt or the original packaging history.
-
-    Changed declared report/model bytes are allowed. Iteration/cache evidence, undeclared ordinary
-    files and brief semantics remain other owners' judgments. Only this issued object can validate.
-    No claim of hostile between-syscall writer isolation is made.
-    """
-    if type(root) is not type(Path()):
-        return pfs.CODE_ROOT_BINDING, None
-    if type(expected_package_working_revision) is not str or not re.fullmatch(
-        r"sha256:[0-9a-f]{64}", expected_package_working_revision, re.ASCII
-    ):
-        return CODE_WORKING_REVISION_INVALID, None
-    try:
-        context, boundary, raw, directories = _working_declaration(root)
-        immutable, target = _working_role_paths(context, directories)
-        report, model, pbip = target
-        names = (*immutable, pbip, f"{report}/definition.pbir", f"{model}/definition/model.tmdl")
-        identities = {name: _working_identity(context.walked[name]) for name in names}
-        model_dir = context.walked[f"{model}/definition/model.tmdl"].parent.parent
-        _require_working_revision(root, model_dir, expected_package_working_revision)
-        members = tuple(
-            _working_member(
-                context.walked[name],
-                name,
-                expected=context.digests[name] if name in immutable else None,
-                retain=name not in (context.source_key, f"{model}/definition/model.tmdl"),
-            )
-            for name in names
-        )
-        if any(row[2] != identities[row[0]] for row in members):
-            raise _IdentityError(pfs.CODE_MEMBER_REPLACED)
-        snapshot = _CurrentWorkingRoleSnapshot(boundary, raw, members)
-        identity, facts, stored = _working_source_data(context, snapshot, target)
-        result = CurrentWorkingSourceDataHandoff(
-            root,
-            str(root),
-            expected_package_working_revision,
-            hashlib.sha256(raw).hexdigest(),
-            context.unit,
-            KIND_WORKBOOK,
-            TOPOLOGY_OWNED_MODEL,
-            context.source_key,
-            report,
-            model,
-            pbip,
-            tuple(sorted(context.digests)),
-            identity,
-            facts,
-            stored,
-            snapshot,
-        )
-        _recheck_working_handoff(root, result)
-        object.__setattr__(result, "_authority", _working_authority(result))
-        return None, result
-    except _IdentityError as exc:
-        return str(exc), None
-    except (pfs._ManifestError, DataAccessProjectionError) as exc:
-        return exc.code, None
-    except revision.RevisionError:
-        return CODE_UNSAFE_TARGET, None
-    except UnicodeError:
-        return pfs.CODE_MANIFEST_NOT_UTF8, None
-    except (OSError, ValueError):
-        return pfs.CODE_FILE_UNREADABLE, None
-
-
-def validate_current_source_data_handoff(  # pylint: disable=too-many-return-statements
-    root: Path, handoff: CurrentWorkingSourceDataHandoff, *, expected_package_working_revision: str
-) -> str | None:
-    """Revalidate only the original issued read, including its typed state and current physical bytes."""
-    if type(root) is not type(Path()):
-        return pfs.CODE_ROOT_BINDING
-    if type(expected_package_working_revision) is not str or not re.fullmatch(
-        r"sha256:[0-9a-f]{64}", expected_package_working_revision, re.ASCII
-    ):
-        return CODE_WORKING_REVISION_INVALID
-    try:
-        if (
-            type(handoff) is not CurrentWorkingSourceDataHandoff
-            or type(handoff._authority) is not type(_working_authority)
-            or handoff._authority.__code__ is not _WORKING_AUTHORITY_CODE
-            or not handoff._authority(handoff)
+        Changed report/model bytes are allowed; iteration/cache, ordinary files and brief semantics
+        remain other owners' judgments. Only this exact issued object can validate, not a copied
+        capability. Hostile closure/code rewriting and between-syscall writer isolation are not promised.
+        """
+        if type(root) is not type(Path()):
+            return pfs.CODE_ROOT_BINDING, None
+        if type(expected_package_working_revision) is not str or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", expected_package_working_revision, re.ASCII
         ):
-            return CODE_WORKING_HANDOFF_INVALID
-        if str(root) != handoff.root_identity or not exact_root_matches(handoff.package_root, handoff.root_identity):
+            return CODE_WORKING_REVISION_INVALID, None
+        try:
+            context, boundary, raw, directories = _working_declaration(root)
+            immutable, target = _working_role_paths(context, directories)
+            report, model, pbip = target
+            names = (*immutable, pbip, f"{report}/definition.pbir", f"{model}/definition/model.tmdl")
+            identities = {name: _working_identity(context.walked[name]) for name in names}
+            model_dir = context.walked[f"{model}/definition/model.tmdl"].parent.parent
+            _require_working_revision(root, model_dir, expected_package_working_revision)
+            members = tuple(
+                _working_member(
+                    context.walked[name],
+                    name,
+                    expected=context.digests[name] if name in immutable else None,
+                    retain=name not in (context.source_key, f"{model}/definition/model.tmdl"),
+                )
+                for name in names
+            )
+            if any(row[2] != identities[row[0]] for row in members):
+                raise _IdentityError(pfs.CODE_MEMBER_REPLACED)
+            snapshot = _CurrentWorkingRoleSnapshot(boundary, raw, members)
+            identity, facts, stored = _working_source_data(context, snapshot, target)
+            result = CurrentWorkingSourceDataHandoff(
+                root,
+                str(root),
+                expected_package_working_revision,
+                hashlib.sha256(raw).hexdigest(),
+                context.unit,
+                KIND_WORKBOOK,
+                TOPOLOGY_OWNED_MODEL,
+                context.source_key,
+                report,
+                model,
+                pbip,
+                tuple(sorted(context.digests)),
+                identity,
+                facts,
+                stored,
+                snapshot,
+            )
+            _recheck_working_handoff(root, result)
+            owner, state = weakref.ref(result), _working_state(result)
+            held = {
+                name: getattr(result, name) for name in ("_snapshot", "source_identity", "facts", "stored_data_access")
+            }
+
+            def owns(candidate: object) -> bool:
+                return (
+                    owner() is candidate
+                    and all(getattr(candidate, name) is value for name, value in held.items())
+                    and _working_state(candidate) == state
+                )
+
+            object.__setattr__(result, "_authority", owns)
+            issued[id(result)] = owns
+            return None, result
+        except _IdentityError as exc:
+            return str(exc), None
+        except (pfs._ManifestError, DataAccessProjectionError) as exc:
+            return exc.code, None
+        except revision.RevisionError:
+            return CODE_UNSAFE_TARGET, None
+        except UnicodeError:
+            return pfs.CODE_MANIFEST_NOT_UTF8, None
+        except (OSError, ValueError):
+            return pfs.CODE_FILE_UNREADABLE, None
+
+    def validate_current_source_data_handoff(  # pylint: disable=too-many-return-statements
+        root: Path, handoff: CurrentWorkingSourceDataHandoff, *, expected_package_working_revision: str
+    ) -> str | None:
+        """Revalidate only the original issued read, including typed state and current physical bytes."""
+        if type(root) is not type(Path()):
             return pfs.CODE_ROOT_BINDING
-        if handoff.package_working_revision != expected_package_working_revision:
-            return CODE_WORKING_REVISION_MISMATCH
-        _recheck_working_handoff(root, handoff)
-    except _IdentityError as exc:
-        return str(exc)
-    except revision.RevisionError:
-        return CODE_UNSAFE_TARGET
-    except (AttributeError, RecursionError, TypeError, ValueError):
-        return CODE_WORKING_HANDOFF_INVALID
-    except OSError:
-        return pfs.CODE_FILE_UNREADABLE
-    return None
+        if type(expected_package_working_revision) is not str or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", expected_package_working_revision, re.ASCII
+        ):
+            return CODE_WORKING_REVISION_INVALID
+        try:
+            authority = issued.get(id(handoff))
+            if (
+                type(handoff) is not CurrentWorkingSourceDataHandoff
+                or authority is None
+                or handoff._authority is not authority
+                or not authority(handoff)
+            ):
+                return CODE_WORKING_HANDOFF_INVALID
+            if str(root) != handoff.root_identity or not exact_root_matches(
+                handoff.package_root, handoff.root_identity
+            ):
+                return pfs.CODE_ROOT_BINDING
+            if handoff.package_working_revision != expected_package_working_revision:
+                return CODE_WORKING_REVISION_MISMATCH
+            _recheck_working_handoff(root, handoff)
+        except _IdentityError as exc:
+            return str(exc)
+        except revision.RevisionError:
+            return CODE_UNSAFE_TARGET
+        except (AttributeError, RecursionError, TypeError, ValueError):
+            return CODE_WORKING_HANDOFF_INVALID
+        except OSError:
+            return pfs.CODE_FILE_UNREADABLE
+        return None
+
+    return read_current_source_data_handoff, validate_current_source_data_handoff
+
+
+read_current_source_data_handoff, validate_current_source_data_handoff = _current_working_api()
+del _current_working_api
