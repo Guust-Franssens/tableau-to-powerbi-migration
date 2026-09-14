@@ -20,7 +20,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import io
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,6 +34,14 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 # pylint: disable=wrong-import-position
 import promote_unit as pu
 import set_data_folder as sdf
+import check_unit as cu
+from test_check_unit import (
+    R2_DISCLAIMER,
+    R2_WAIVER,
+    _r2_package,
+    _r2_seal,
+    r2_gate_runtime as r2_gate_runtime,
+)
 
 PASSING_GATE = {"ran": True, "exit_code": 0, "status": "AUTOMATED_CHECKS_PASS", "passed": True}
 
@@ -102,7 +113,7 @@ def migrations_fixture(tmp_path: Path) -> Path:
 @pytest.fixture(name="pass_gate")
 def pass_gate_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub `check_unit.py` to a PASS so tests can reach the code that runs after it."""
-    monkeypatch.setattr(pu, "run_check_unit", lambda package, repo_root: dict(PASSING_GATE))
+    monkeypatch.setattr(pu, "run_check_unit", lambda package, repo_root, receipt_sha256=None: dict(PASSING_GATE))
 
 
 def run(package: Path, migrations: Path, *extra: str) -> int:
@@ -200,7 +211,7 @@ def test_a_failing_check_unit_refuses_the_promotion_and_ships_nothing(
     monkeypatch.setattr(
         pu,
         "run_check_unit",
-        lambda p, r: {"ran": True, "exit_code": 1, "status": "FINDINGS", "passed": False},
+        lambda p, r, receipt_sha256=None: {"ran": True, "exit_code": 1, "status": "FINDINGS", "passed": False},
     )
     assert run(package, migrations) == pu.EXIT_REFUSED_BY_GATE
     assert not migrations.exists(), "a refused promotion must not create the deliverable"
@@ -2195,3 +2206,147 @@ def test_round4_high1_a_shared_datasource_half_may_still_name_the_other_half(vis
     assert run(package, migrations, "--datasource-slug", "shared-ds") == pu.EXIT_OK
     assert (migrations / "datasources" / "shared-ds" / "fabric" / "Model.SemanticModel").is_dir()
     assert (migrations / "workbooks" / "wb" / "fabric" / "Wb.Report").is_dir()
+
+
+FORCED_R2_WARNING = "PROMOTED unchecked; Phase-2 COMPLETE was not established."
+
+
+@pytest.fixture
+def r2_public_checker(monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list) -> list:
+    """Run the real public CLI/fold inside the subprocess transport seam; never mock COMPLETE."""
+    calls = []
+
+    def invoke(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        assert command[:2] == [sys.executable, str(REPO_ROOT / "scripts" / "check_unit.py")]
+        assert command[3:5] == ["--scope", "all"] and "--quiet" not in command
+        assert kwargs == {
+            "cwd": REPO_ROOT,
+            "check": False,
+            "capture_output": True,
+            "timeout": pu.CHECK_UNIT_TIMEOUT_SECONDS,
+        }
+        calls.append(command)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = cu.main(command[2:])
+        return subprocess.CompletedProcess(command, code, stdout.getvalue().encode(), stderr.getvalue().encode())
+
+    monkeypatch.setattr(pu, "subprocess", SimpleNamespace(run=invoke, TimeoutExpired=subprocess.TimeoutExpired))
+    return calls
+
+
+@pytest.mark.parametrize("numeric", ["none", "required"])
+def test_r2_promotion_forwards_exact_pin_and_preserves_public_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    r2_public_checker: list,
+    capsys: pytest.CaptureFixture,
+    numeric: str,
+) -> None:
+    package = _r2_package(tmp_path, numeric=numeric)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    migrations = tmp_path / "migrations"
+    output = tmp_path / "promotion.json"
+    code = run(package, migrations, "--receipt-sha256", token, "--json", str(output))
+    envelope = json.loads(output.read_bytes())
+    assert r2_public_checker == [
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "check_unit.py"),
+            str(package),
+            "--scope",
+            "all",
+            "--receipt-sha256",
+            token,
+        ]
+    ]
+    text = capsys.readouterr()
+    public = text.out + text.err
+    if numeric == "none":
+        assert code == 0, public
+        record = json.loads((migrations / "workbooks/wb/promotion-record.json").read_bytes())
+        assert record["supplied_receipt_sha256"] == token
+        assert record["check_unit"]["exit_code"] == 0 and record["check_unit"]["status"] == "COMPLETE"
+        for disclosure in (R2_DISCLAIMER, R2_WAIVER):
+            assert disclosure in public and disclosure in json.dumps(record) and disclosure in json.dumps(envelope)
+        assert str(package) not in json.dumps(record), "public disclosures must not reintroduce host paths"
+        assert not list((migrations / "workbooks/wb").rglob("cache.abf"))
+    else:
+        assert code == pu.EXIT_REFUSED_BY_GATE and not migrations.exists()
+        assert envelope["check_unit"]["exit_code"] == 2
+        assert "CANNOT_ESTABLISH(NUMERIC)" in public and "CANNOT_ESTABLISH(NUMERIC)" in json.dumps(envelope)
+        assert "Phase-2 COMPLETE was not established." in public
+        assert R2_DISCLAIMER not in public
+
+
+@pytest.mark.parametrize("order", [False, True])
+def test_r2_force_token_conflict_precedes_every_side_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: bool
+) -> None:
+    ledger = []
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        ledger.append("effect")
+        pytest.fail("force/token conflict reached a resolver, checker, output writer or shipment")
+
+    for name in ("assess", "run_check_unit", "_emit", "execute_plan", "write_records"):
+        monkeypatch.setattr(pu, name, forbidden)
+    monkeypatch.setattr(Path, "resolve", forbidden)
+    flags = ["--force", "--receipt-sha256", "A" * 64] if order else ["--receipt-sha256", "A" * 64, "--force"]
+    with pytest.raises(SystemExit) as error:
+        pu.main(
+            [
+                "--package",
+                str(tmp_path / "missing"),
+                "--slug",
+                "wb",
+                "--json",
+                str(tmp_path / "out/report.json"),
+                *flags,
+            ]
+        )
+    assert error.value.code == 64 and ledger == []
+    assert not (tmp_path / "out").exists()
+
+
+def test_r2_forced_shipment_records_exact_unchecked_warning(
+    tmp_path: Path, r2_public_checker: list, capsys: pytest.CaptureFixture
+) -> None:
+    package = _r2_package(tmp_path)
+    migrations = tmp_path / "migrations"
+    assert run(package, migrations, "--force") == 0
+    record = json.loads((migrations / "workbooks/wb/promotion-record.json").read_bytes())
+    assert r2_public_checker[0][-2:] == ["--scope", "all"]
+    assert record["forced"] is True and record["supplied_receipt_sha256"] is None
+    assert record["warning"] == FORCED_R2_WARNING
+    assert FORCED_R2_WARNING in capsys.readouterr().out
+    assert record["check_unit"]["passed"] is False
+
+
+def test_r2_previous_promotion_token_is_observation_not_future_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_public_checker: list
+) -> None:
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    migrations = tmp_path / "migrations"
+    assert run(package, migrations, "--receipt-sha256", token) == 0
+    before = {path.relative_to(migrations): path.read_bytes() for path in migrations.rglob("*") if path.is_file()}
+    monkeypatch.setenv("RECEIPT_SHA256", token)
+    assert run(package, migrations) == pu.EXIT_REFUSED_BY_GATE
+    assert r2_public_checker[-1][-2:] == ["--scope", "all"]
+    assert before == {
+        path.relative_to(migrations): path.read_bytes() for path in migrations.rglob("*") if path.is_file()
+    }
+
+
+def test_r2_promoter_cannot_follow_an_alias_before_the_public_boundary_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_public_checker: list
+) -> None:
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    alias = tmp_path / "alias"
+    _link_directory(alias, package)
+    migrations = tmp_path / "migrations"
+    assert run(alias, migrations, "--receipt-sha256", token) == pu.EXIT_REFUSED_BY_GATE
+    assert r2_public_checker[0][2] == str(alias)
+    assert not migrations.exists()

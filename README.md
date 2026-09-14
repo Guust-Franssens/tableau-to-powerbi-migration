@@ -277,7 +277,8 @@ migration order), `assets/` (the downloads), `bundle/` (the engine's conversion 
 **2. Package for the agent** → `_runs/<NNN>-<slug>/packages/<Unit>/`
 
 [`scripts/package_unit.py`](scripts/package_unit.py) emits one diagnostic folder per migration
-unit which **both gates accept with no flags**. Source, rows, engine output, handover and reference
+unit which both gates accept for **diagnostics**. COMPLETE additionally requires caller-pinned
+final evidence. Source, rows, engine output, handover and reference
 evidence are copied when available; omissions remain explicit in `package-manifest.json`. The
 command targets the `packages/` directory itself; nested
 `packages/<batch>/<Unit>/` remains supported for compatibility, not as the default.
@@ -285,7 +286,8 @@ command targets the `packages/` directory itself; nested
 **3. Ship** → `migrations/{workbooks,datasources}/<slug>/fabric/`
 
 The PBIP project a customer opens in Power BI Desktop. The current phase-2 → phase-3 path is
-`python scripts/promote_unit.py --package <package> --slug <slug> ...`; manual copying remains only
+`python scripts/promote_unit.py --package <package> --slug <slug> --receipt-sha256 <H>`; it forwards
+the identical caller H to the public checker. Manual copying remains only
 as a fallback/reference for operators who need to understand the mechanics by hand.
 
 Two gates sit on phase 2: `check_reference_readiness.py` is the **entry** gate. After construction
@@ -300,6 +302,17 @@ it before **agentic fidelity-building/review dispatch**, after deterministic emi
 explain what each result permits. Ordinary bundles retain reference-only `READY`/`NOT_APPLICABLE`;
 neither is package START_READY. Follow the [package/bind/check commands](docs/reference-readiness.md#final-package-start_ready-562-622);
 readiness does not establish fidelity sign-off or Phase-2 COMPLETE.
+
+**Sole COMPLETE command:** `python scripts/check_unit.py <package> --scope all --receipt-sha256 <H>`.
+H is caller-supplied, exact lowercase 64 hex, no prefix; never discover it from disk or a previous
+record. Tokenless all-scope is diagnostic non-success; layer scopes never COMPLETE. The supported
+owned/import package must satisfy current W/brief/data/AI/visual/history evidence. Current v2
+numeric `none` waives only exact numeric comparison, with explicit disclosure; required/unknown
+numeric authority remains `CANNOT_ESTABLISH(NUMERIC)`. This is a current-snapshot check, not
+producer authentication, original commissioning, latest-ever history or receiving-machine proof.
+See the [exact evidence contract and disclaimer](scripts/README.md#phase-2-complete--one-caller-pinned-current-snapshot-check).
+`--force` conflicts with H before effects, preserves shipment guards, and records exactly:
+**PROMOTED unchecked; Phase-2 COMPLETE was not established.**
 
 ⚠️ **Both gates check the phase-2 package, not the phase-3 deliverable.** `check_unit.py` will run
 against a shipped `migrations/` folder, but it checks **less** there: measured on

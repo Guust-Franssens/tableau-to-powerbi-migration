@@ -175,46 +175,43 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
    8. Give it the handover slice, the step-7 classification, the model location and the reference
    bundle; its edits must land as re-runnable `_build/fix_*.py` run through
    `scripts/declare_generated_edit.py` (one `--target` per run, from the engine baseline).
-10. **Delegate to `pbi-migration-validator` again — full sign-off mode, on a FRESH invocation.** Rerun
-   `python scripts/validate_spec.py <spec>` only when a parser-path spec exists; otherwise say that
-   gate is not applicable and use `check_unit.py --scope all` plus the handover. It sees the artifacts,
-   the reference bundle and the triage classifications, but **not the builders' rationale** — and those
-   classifications are **claims to verify**, including ones an earlier instance of itself produced.
-   Prefer a multi-model cross-check (2-3 in parallel); a discrepancy every model raises is
-   high-confidence.
-11. **Route every discrepancy back to its owning subagent** — numeric/DAX to `pbi-semantic-builder`,
-   visual/layout to `pbi-report-builder`, genuine capability gaps to `limitations_encountered` (not a
-   fix request to anyone). **Never fix a validator finding yourself.** Re-run the validator
-   (spot-check) after each fix round; cap **autonomous retries** at 2-3 rounds. **A retry cap is not a
-   correctness waiver:** an item becomes a capability gap only with *evidence* that Power BI cannot
-   express it (product docs, a verified CLI/validate result, a Learn citation); otherwise it stays
-   **open/blocking** and you surface it. **You are the only writer of validation limitations/worklist
-   entries.**
-12. **Validate before declaring done.** Run `python scripts/check_unit.py <u> --scope all` and route
-   findings. When it prints `BROWNFIELD DISCOVERY`, that is read-only artifact discovery: it found
-   engine output by content, not path, and its expected/found-instead block is the way forward before
-   redoing work. Confirm both builders ran their own mandatory validation *and* that the validator ran
-   a full sign-off pass. **Sign-off requires ALL of:** (a) every whole-dashboard verdict is *faithful*
-   — a "no" blocks sign-off **even when every discrepancy is only low/medium**; (b) no open
-   high-severity discrepancies; (c) any remaining item is an *evidenced* accepted limitation. "The
-   subagents reported success" is not "it was validated."
+10. **Fresh `pbi-migration-validator`, full sign-off mode.** Parser spec: rerun `python
+   scripts/validate_spec.py <spec>`; otherwise mark N/A and use diagnostic `check_unit.py --scope all`
+   plus handover. Send artifacts, reference and triage claims to re-verify (including its own),
+   never builders' rationale. Prefer 2-3 parallel models; agreement is high-confidence.
+11. **Route each discrepancy to its owner:** numeric/DAX → `pbi-semantic-builder`, visual/layout
+   → `pbi-report-builder`, evidenced capability gaps → `limitations_encountered`, not fix requests.
+   Never fix findings yourself. Spot-check after each fix; cap autonomous retries at 2-3 rounds,
+   never waive correctness: gaps need product docs, verified CLI/validate or Learn evidence;
+   otherwise surface them as open/blocking. Only you write validation limitations/worklist entries.
+12. **Diagnose → final check → promote.** `python scripts/check_unit.py <u> --scope all`:
+   tokenless diagnostic nonzero, never COMPLETE; layers never COMPLETE. Route every finding.
+   Require both builders' gates and full validator sign-off: all dashboards faithful (a "no"
+   blocks even low/medium-only findings), no open high severity, other items evidenced accepted limitations.
+   Final only: `python scripts/check_unit.py <package> --scope all --receipt-sha256 <H>`.
+   Exact caller-held lowercase ASCII 64-hex H; no prefix/normalization. Never discover H from
+   files, history, environment or promotion. Require final-v3/all-pages, original W/current v2
+   brief, explicit-import class and ALL data/cache/AI/whole-page/visual/history/finding obligations.
+   Numeric `none` waives comparison only; required/unknown → typed nonzero `CANNOT_ESTABLISH(NUMERIC)`:
+   **Phase-2 COMPLETE was not established.** Copy exact numeric-waiver/current-snapshot disclosures
+   from `scripts/README.md` §Phase-2 COMPLETE; no authenticated producer, original commissioning,
+   latest-ever, durable persistence or receiving-machine claim.
+   Then `python scripts/promote_unit.py --package <package> --slug <slug> --receipt-sha256 <H>`
+   forwards identical H. `--force` conflicts with H before effects; shipment guards stand.
+   Forced shipment prints/records: **PROMOTED unchecked; Phase-2 COMPLETE was not established.**
+   `BROWNFIELD DISCOVERY`: read-only by content, not path; use expected/found-instead before rework.
+   Details: `docs/migration-phases.md`. Self-reported success is not validation.
 13. **Summarize for the user**: what was built (tables/measures/pages/visuals counts), what was
    *simplified* rather than transliterated (e.g. parameter-equality filters → slicers — positive
    findings, present them as such), what sign-off found and how it was resolved, and
    `limitations_encountered` as "what needs your review".
-14. **Retrospective — MANDATORY.** Each migration must leave the toolkit better than it found it.
-    Start from the **evidence, not memory** — `phase-timings.json` from `run_estate.py`, plus each
-    subagent's account of what it authored versus what the engine did. **Route each learning to
-    its home**: craft belongs in skills/docs/tests, never back in a persona, and
-    `docs/INDEX.md#retrospective-targets` owns the destination table (covering
-    `sync_agent_conventions.py`, `visual-cookbook.md` and the rest); after editing a published skill
-    bundle re-run `scripts/build_plugin.py` or preflight flags the drift. **Pay for what you add** —
-    GitHub's **30,000-char** prompt cap makes a retrospective curation, not accumulation: merge
-    duplicates, delete what a tool now catches, aim for **net-zero growth**
-    (`sync_agent_conventions.py --check` prints each size and fails over cap). Then re-run the gates
-    you touched (`pytest -q`, `sync_agent_conventions.py --check`) and tell the user what you learned,
-    where you put it, what you deleted to make room, and what you deliberately did NOT record.
-    "Nothing worth recording" is a legitimate outcome.
+14. **Retrospective — MANDATORY.** Read `phase-timings.json` and subagents' engine-vs-authored
+    accounts, not memory. Route craft to skills/docs/tests, not personas:
+    `docs/INDEX.md#retrospective-targets`; visuals → `visual-cookbook.md`.
+    After published-skill edits run `scripts/build_plugin.py`. Respect the 30,000-char cap:
+    merge duplicates, delete tool-covered advice, aim for net-zero growth. Run affected gates
+    (`pytest -q`, `sync_agent_conventions.py --check`: sizes and cap). Report learning, destination,
+    what made room and what stayed out. "Nothing worth recording" is valid.
 15. **Final gate — prove nothing was built behind the credential stop.** With any live source, run
     `python scripts/credential_gate.py verify <bundle>` — the **`<bundle>`** from step 6, where the
     audit history lives (parser path: the migration/spec dir) — and paste the verdict. Exit 1 =

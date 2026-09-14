@@ -1395,12 +1395,15 @@ def test_the_documented_check_unit_command_runs_on_a_package(tmp_path: Path) -> 
 USAGE_EXITS = {
     "scripts/check_reference_readiness.py": (crr.EXIT_USAGE,),
     "scripts/check_unit.py": (2, check_unit.EXIT_USAGE),
+    "scripts/promote_unit.py": (64,),
 }
 
 #: The one placeholder the package README puts where a caller must substitute the package's path.
 #: The command is executed with ONLY this token replaced, so any other malformed argument the README
 #: might grow is executed AS PRINTED and fails.
 PATH_PLACEHOLDER = "<path-to-this-folder>"
+TOKEN_PLACEHOLDER = "<caller-held-final-sha256>"
+SLUG_PLACEHOLDER = "<delivery-slug>"
 
 #: The command the package README leads with. Not a gate - it has no verdict and no usage-exit map -
 #: so it is checked by RUNNING it and reading its effect, not by its exit classification.
@@ -1446,10 +1449,27 @@ def test_every_command_the_readme_prints_produces_a_verdict_not_a_usage_error(tm
     unmapped = [command[1] for command in commands if command[1] not in {*USAGE_EXITS, BIND_SCRIPT}]
     assert not unmapped, f"the README prints a command whose usage exit is unknown here: {unmapped}"
     gates = [command for command in commands if command[1] in USAGE_EXITS]
-    assert len(gates) == 2, f"expected both gate commands in the package README, got {commands}"
+    assert len(gates) == 4, f"expected entry, diagnostic, pinned final check and promotion, got {commands}"
+    assert [command[1] for command in commands] == [
+        BIND_SCRIPT,
+        "scripts/check_reference_readiness.py",
+        "scripts/check_unit.py",
+        "scripts/check_unit.py",
+        "scripts/promote_unit.py",
+    ]
+    assert commands[1][-2:] == ["--json", "-"], "START_READY is stdout-only; never restore file-valued JSON"
+    assert all("--force" not in command for command in commands)
+    substitutions = {
+        PATH_PLACEHOLDER: str(unit),
+        TOKEN_PLACEHOLDER: "c" * 64,  # Explicit caller input, not a receipt discovered in the fixture.
+        SLUG_PLACEHOLDER: "r2-command-rehearsal",
+    }
+    assert [command[-1] for command in commands if "--receipt-sha256" in command] == [TOKEN_PLACEHOLDER] * 2
+    binding = _run_gate(BIND_SCRIPT, ["--package", str(unit)], tmp_path)
+    assert binding.returncode == 0, binding.stdout + binding.stderr
 
     for _python, script, *arguments in gates:
-        as_printed = [argument.replace(PATH_PLACEHOLDER, str(unit)) for argument in arguments]
+        as_printed = [substitutions.get(argument, argument) for argument in arguments]
         by_doc = _run_gate(script, as_printed, tmp_path)
         assert not _rejected_the_argument(script, by_doc), (
             f"the README's own command `{script} {' '.join(arguments)}` returned no verdict: "
@@ -1537,7 +1557,12 @@ def test_the_readme_command_that_BINDS_the_package_actually_binds_it(tmp_path: P
 def _run_gate(script: str, arguments: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     """Run one README command line, from a directory where the bare unit name resolves to nothing."""
     return subprocess.run(  # noqa: S603
-        [sys.executable, str(SCRIPTS.parent / script), *arguments, "--quiet"],
+        [
+            sys.executable,
+            str(SCRIPTS.parent / script),
+            *arguments,
+            *(["--quiet"] if script in ("scripts/check_unit.py", "scripts/check_reference_readiness.py") else []),
+        ],
         capture_output=True,
         text=True,
         check=False,

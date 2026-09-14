@@ -277,10 +277,13 @@ python scripts\package_unit.py --bundle _runs\<NNN>-<slug>\bundle `
     --json _runs\<NNN>-<slug>\packages\packaging.json
 # After original data proof and construction, bind separately when applicable:
 python scripts\set_data_folder.py --package <absolute-package>
-# Final Phase-1 decision, with NO flags (include provider roots for shared models):
-python scripts\check_reference_readiness.py _runs\<NNN>-<slug>\packages\<Unit>
-# Later, after agentic work:
+# Final Phase-1 decision, stdout only (include provider roots for shared models):
+python scripts\check_reference_readiness.py _runs\<NNN>-<slug>\packages\<Unit> --json -
+# Diagnostic work:
 python scripts\check_unit.py                _runs\<NNN>-<slug>\packages\<Unit>
+# Final-v3 current snapshot, then identical-token promotion:
+python scripts\check_unit.py <package> --scope all --receipt-sha256 <caller-held-final-sha256>
+python scripts\promote_unit.py --package <package> --slug <slug> --receipt-sha256 <caller-held-final-sha256>
 ```
 
 `--out` directly targets `_runs/<NNN>-<slug>/packages` (flat layout, creating `packages/<Unit>/`).
@@ -345,8 +348,9 @@ evidence, and only `check_reference_readiness.py` performs the other two: it ver
 package's `package-manifest.json` still describes exactly the bytes on disk (#562 S1, exit 3 when it
 does not) and that the package carries every role its kind and topology require with agreeing
 identities (#562 S2, exit 1 when it does not) — see
-[`docs/reference-readiness.md`](reference-readiness.md). `check_unit.py` still performs the boundary
-check alone. The final entry consumer also checks the current v2 brief, package-local source,
+[`docs/reference-readiness.md`](reference-readiness.md). Phase-2 `check_unit.py` instead binds current
+working bytes to caller H and the original W handoff; it never rehashes mutable files against S1.
+The final entry consumer also checks the current v2 brief, package-local source,
 canonical data access and fresh binding, without reimplementing those authorities.
 
 ### The two gates
@@ -359,7 +363,18 @@ none of these input checks establishes Phase-2 COMPLETE or changes the later pro
 | gate | question | verdicts |
 |---|---|---|
 | [`check_reference_readiness.py`](../scripts/check_reference_readiness.py) — the **ENTRY** gate | are all current package/cohort inputs internally consistent, with adequate reference evidence and current binding? | package-only `START_READY / 0`; ordinary reference `READY`/`NOT_APPLICABLE` unchanged; 1 findings / 3 `CANNOT_ESTABLISH`. Neither 1 nor 3 is a pass |
-| [`check_unit.py`](../scripts/check_unit.py) — the **EXIT** gate | *"answer whether one migration unit is done by aggregating existing gates without merging them"* (`check_unit.py:2`) | per-scope `model` / `report` / `integration` / `all` |
+| [`check_unit.py`](../scripts/check_unit.py) — the **EXIT** gate | are all obligations satisfied for the exact caller-pinned current package? | sole COMPLETE/0: `--scope all --receipt-sha256 H`; tokenless all-scope nonzero; layer scopes never COMPLETE |
+
+H is supplied by the caller, exactly lowercase ASCII 64 hex with no prefix — never discovered from
+history, environment or a promotion record. The initial COMPLETE class is one owned/import
+workbook model/report/PBIP, literal final-v3 all-pages sign-off, current strict v2 brief, exact
+namespace, canonical data access, positive A1 canaries/cache readback, AI and validation-grade
+whole-page/every-visual passes. Unsupported/shared/report-free classes remain non-success.
+Numeric `none` waives **only** comparison; raw missing counts survive. Required/unknown numeric
+authority remains `CANNOT_ESTABLISH(NUMERIC)`, never warning-only COMPLETE. The exact
+[disclosures, precedence and limits](../scripts/README.md#phase-2-complete--one-caller-pinned-current-snapshot-check)
+are authoritative: current snapshot only, not original commissioning, producer authentication,
+latest-ever history, native qualification, durable persistence or receiving-machine proof.
 
 A **blind** page means an equivalent fidelity bug there is *structurally unfalsifiable*, not merely
 unverified. Detail: [`docs/reference-readiness.md`](reference-readiness.md).
@@ -379,6 +394,12 @@ The deliverable lands in `migrations/workbooks/<slug>/fabric/` (a workbook's rep
 ship step and is the current path for promotion. Manual copy remains only as a clearly labelled
 fallback/reference for understanding the mechanics or for a hand-checked promotion when the tool is
 not available.
+
+Checked promotion forwards identical caller H to the public all-scope checker and retains its
+result/disclosures; the promotion record's H is linkage, never a later credential. `--force` and H
+conflict before side effects. Force alone cannot confer COMPLETE or deployment eligibility; existing
+non-forceable shipment guards remain, and the exact successful forced-shipment warning is:
+**PROMOTED unchecked; Phase-2 COMPLETE was not established.**
 
 The copy is still a high-risk hop for one evidenced reason: `definition.pbir`'s `byPath` can stop
 resolving after the move, and the validator must inspect the shipped PBIP rather than assume the

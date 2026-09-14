@@ -85,7 +85,9 @@ python scripts\check_unit.py <unit-or-bundle> --scope integration
 python scripts\check_unit.py <unit-or-bundle> --scope all
 ```
 
-Exit 0 is `AUTOMATED_CHECKS_PASS`, not unit completion; scoped runs print omitted checks.
+Layer exit 0 is `AUTOMATED_CHECKS_PASS`, not unit completion; scoped runs print omitted checks.
+Tokenless all-scope is diagnostic non-success. Only `check_unit.py <package> --scope all
+--receipt-sha256 <H>` may return Phase-2 COMPLETE/0; see the caller-pinned route below.
 
 ---
 
@@ -884,11 +886,25 @@ python scripts\package_unit.py --bundle _bundle --unit <Unit> --brief <unit-spec
     --json _runs\<NNN>-<slug>\packages\packaging.json
 # After construction and original data proof, bind separately when applicable:
 python scripts\set_data_folder.py --package <absolute-package>
-# Final Phase-1 readiness, with NO flags:
-python scripts\check_reference_readiness.py _runs\<NNN>-<slug>\packages\<Unit>
-# Later, after the commissioned agentic work:
+# Final Phase-1 readiness (stdout-only JSON; never a file-valued --json):
+python scripts\check_reference_readiness.py _runs\<NNN>-<slug>\packages\<Unit> --json -
+# Diagnostic work, not COMPLETE:
 python scripts\check_unit.py _runs\<NNN>-<slug>\packages\<Unit>
+# After final-v3 evidence: H is supplied by the caller, never discovered on disk.
+python scripts\check_unit.py <package> --scope all --receipt-sha256 <caller-held-final-sha256>
+python scripts\promote_unit.py --package <package> --slug <slug> --receipt-sha256 <caller-held-final-sha256>
 ```
+
+The last two commands use **identical exact lowercase 64-hex H**, without a prefix. Only the
+all-scope checker may return COMPLETE/0; tokenless all-scope and every layer scope are not COMPLETE.
+It judges the current pinned owned/import package, original W, current v2 brief and all remaining
+data/AI/visual/history evidence. Current v2 numeric `none` waives comparison only, with the exact
+numeric disclosure; required/unknown scope remains `CANNOT_ESTABLISH(NUMERIC)`/nonzero.
+Preserve the checker's current-snapshot disclaimer: no authenticated producer, original commissioning,
+latest-ever snapshot, durable persistence or receiving-machine proof. Full
+[Phase-2 contract and disclosures](../scripts/README.md#phase-2-complete--one-caller-pinned-current-snapshot-check).
+`--force` conflicts with H before effects; force never overrides shipment guards and records exactly:
+**PROMOTED unchecked; Phase-2 COMPLETE was not established.**
 
 For a shared datasource, construct **each unit separately with its own current v2 brief**. The
 consumer construction command also receives `--provider-package <absolute-provider>`. Then:

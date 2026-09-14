@@ -9,6 +9,9 @@ exit code and output shape rather than any non-zero result.
 from __future__ import annotations
 
 import importlib.util
+import importlib
+import copy
+import io
 import hashlib
 import inspect
 import json
@@ -19,6 +22,8 @@ import subprocess
 import sys
 from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
+from contextlib import redirect_stdout, redirect_stderr
+from dataclasses import fields
 
 import pytest
 
@@ -258,8 +263,10 @@ def _write_oracle_manifest(  # pylint: disable=too-many-arguments,too-many-posit
 
 
 @pytest.fixture(autouse=True)
-def no_native_gates(monkeypatch: pytest.MonkeyPatch) -> None:
+def no_native_gates(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
     """Most tests isolate check_unit's new logic; native gate wiring is tested separately."""
+    if request.node.name.startswith("test_r2_"):
+        return
     monkeypatch.setattr(cu, "GATES", ())
     monkeypatch.setattr(cu, "check_engine_receipt", lambda _target: {"id": "engine-receipt", "status": cu.STATUS_PASS})
     monkeypatch.setattr(cu, "check_occlusion", lambda *_args: {"id": "occlusion", "status": cu.STATUS_PASS})
@@ -272,7 +279,6 @@ def no_native_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cu, "check_cache_freshness", lambda _target: {"id": "cache-freshness", "status": cu.STATUS_PASS}
     )
-    monkeypatch.setattr(cu, "claimed_only_checks", lambda: [])
 
 
 def test_brownfield_empty_folder_says_expected_shape(tmp_path: Path) -> None:
@@ -1833,7 +1839,7 @@ def test_page_count_mismatch_is_a_precondition_and_stops_before_oracle(tmp_path:
     assert report["status"] == cu.STATUS_PRECONDITION_FAILED
     assert report["exit_code"] == cu.EXIT_PRECONDITION_FAILED
     assert report["stopped_after"] == "page-parity"
-    assert [check["id"] for check in report["checks"]] == ["page-parity"]
+    assert [check["id"] for check in report["checks"]] == ["page-parity", "numeric-obligation", "finalized"]
 
 
 def test_early_stop_marks_compromise_channel_not_evaluated(tmp_path: Path) -> None:
@@ -1985,19 +1991,12 @@ def test_summary_line_counts_findings_and_not_checked_classes(tmp_path: Path, mo
             "native_exit": 1,
         },
     )
-    monkeypatch.setattr(
-        cu,
-        "claimed_only_checks",
-        lambda: [{"id": "finalized", "status": cu.STATUS_NOT_CHECKED, "verification": "CLAIMED_ONLY"}],
-    )
-
     rendered = cu.render(cu.run_all(tmp_path))
 
-    # not_checked_external is a third bucket (issue #317) so a model deferred to its datasource unit
-    # stops inflating missing_input; here nothing is external, so the bucket is 0.
-    assert rendered.splitlines()[-1] == (
-        "SUMMARY: blockers=1; compromises=0; compromises_not_evaluated=0; findings_by_owner=model=1; "
-        "not_checked_structural=1; not_checked_external=0; not_checked_missing_input=0; ladder=FINDINGS exit=1"
+    summary = next(line for line in rendered.splitlines() if line.startswith("SUMMARY:"))
+    assert summary == (
+        "SUMMARY: blockers=4; compromises=0; compromises_not_evaluated=0; findings_by_owner=model=1; "
+        "not_checked_external=0; not_checked_missing_input=3; ladder=FINDINGS exit=1"
     )
 
 
@@ -2394,28 +2393,15 @@ def test_actual_pages_counts_zero_visuals_for_a_page_with_none(tmp_path: Path) -
     assert [page["visuals"] for page in cu.actual_pages(tmp_path)] == [0]
 
 
-def test_clean_input_exits_zero_even_with_claimed_only_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Exit 0 must be reachable when only structurally-unverifiable claimed-only phases remain."""
+def test_clean_diagnostics_without_a_pin_cannot_complete(tmp_path: Path) -> None:
+    """Clean ordinary gates cannot substitute for caller-pinned final evidence."""
     _write_spec(tmp_path, ["Executive"])
     _write_report(tmp_path, ["Executive"])
     _write_reference_manifest(tmp_path, ["Executive"])
-    monkeypatch.setattr(
-        cu,
-        "claimed_only_checks",
-        lambda: [
-            {
-                "id": "finalized",
-                "status": cu.STATUS_NOT_CHECKED,
-                "verification": "CLAIMED_ONLY",
-                "detail": "no machine-readable completion artifact exists",
-            }
-        ],
-    )
-
     report = cu.run_all(tmp_path)
 
-    assert report["status"] == cu.STATUS_AUTOMATED_PASS
-    assert report["exit_code"] == cu.EXIT_OK
+    assert report["status"] == cu.STATUS_NOT_CHECKED
+    assert report["exit_code"] == cu.EXIT_NOT_CHECKED
     assert [check["id"] for check in report["checks"]][-1] == "finalized"
 
 
@@ -2483,7 +2469,7 @@ def test_scope_report_runs_only_report_layer_checks(tmp_path: Path, monkeypatch:
 
 
 def test_scope_all_keeps_model_report_and_orchestration_checks(tmp_path: Path) -> None:
-    """The default scope preserves the historical aggregate view plus all-only claimed phases."""
+    """The default scope preserves ordinary diagnostics and blocking final evidence requirements."""
     _write_spec(tmp_path, ["Executive"])
     _write_report(tmp_path, ["Executive"])
     _write_reference_manifest(tmp_path, ["Executive"])
@@ -2792,7 +2778,21 @@ def test_external_resolves_scope_model_matches_golden() -> None:
     result = _run_unit(target, "model")
 
     assert result.returncode == cu.EXIT_NOT_CHECKED, result.stdout + result.stderr
-    assert _normalize_unit_stdout(result.stdout, target) == golden.read_text(encoding="utf-8")
+    expected = golden.read_text(encoding="utf-8")
+    old = "omitted checks: desktop-orphans, engine-receipt, finalized,"
+    new = (
+        "omitted checks: current-snapshot, current-source-data, current-working-namespace, data-evidence, "
+        "desktop-orphans, engine-receipt, finalized, iteration-findings, iteration-history, model-class, numeric-obligation,"
+    )
+    assert old in expected
+    actual = _normalize_unit_stdout(result.stdout, target)
+    assert next(line for line in actual.splitlines() if line.startswith("SUMMARY:")) == (
+        "SUMMARY: blockers=2; compromises=0; compromises_not_evaluated=1; findings_by_owner=none; "
+        "not_checked_external=9; not_checked_missing_input=2; ladder=NOT_CHECKED exit=2"
+    )
+    assert [line for line in actual.splitlines() if not line.startswith("SUMMARY:")] == [
+        line for line in expected.replace(old, new).splitlines() if not line.startswith("SUMMARY:")
+    ]
 
 
 # --- path-ceiling: whole-unit shippability, wired into the facade (refs #235) -------------------
@@ -4845,3 +4845,1789 @@ def test_the_cli_refuses_an_aliased_target_without_printing_any_supplied_compone
         assert supplied not in everywhere, supplied
     assert "Traceback" not in everywhere
     assert "ERROR: not a directory" not in everywhere
+
+
+# R2 composes the real authorities here. Existing clean/skeleton fixtures are intentionally not
+# promoted to completion evidence, and the C fixture keeps its independently commissioned "required".
+R2_DISCLAIMER = (
+    "Phase-2 COMPLETE at this check for the package snapshot pinned by the supplied final-receipt SHA-256, "
+    "under the documented Phase-2 evidence contract. This checker does not authenticate the token's producer "
+    "or establish that this is the latest snapshot ever produced."
+)
+R2_WAIVER = "Exact Tableau-versus-Power-BI numeric comparison was not performed because the commissioned brief explicitly waived it."
+R2_MODEL = "fabric/Book.SemanticModel"
+R2_REPORT = "fabric/Book.Report"
+R2_TABLE = f"{R2_MODEL}/definition/tables/Sales.tmdl"
+R2_SQL = (
+    "\tpartition Sales = m\n"
+    "\t\tmode: import\n"
+    "\t\tsource =\n"
+    "\t\t\tlet\n"
+    '\t\t\t    Source = Sql.Database("source.example", "db"),\n'
+    '\t\t\t    Sales = Source{[Schema="dbo", Item="Sales"]}[Data]\n'
+    "\t\t\tin\n"
+    "\t\t\t    Sales\n"
+)
+
+
+def _r2_put(package: Path, name: str, content: object) -> None:
+    path = package / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(
+        content if isinstance(content, bytes) else (json.dumps(content, ensure_ascii=True) + "\n").encode("utf-8")
+    )
+
+
+def _r2_declare(package: Path, *names: str) -> None:
+    """An explicit fixture commissioning/co-edit, never a production token or manifest repair."""
+    manifest = json.loads((package / "package-manifest.json").read_bytes())
+    for name in names:
+        manifest["contents"]["files"][name] = _sha256(package / name)
+    _r2_put(package, "package-manifest.json", manifest)
+
+
+def _r2_package(root: Path, *, numeric: str = "none") -> Path:
+    from png_fixtures import valid_png
+
+    package = root / "packages" / "Book"
+    asset = f"assets/{UNIT_LUID}_Book.twb"
+    _r2_put(package, asset, b"<workbook name='Book'/>\n")
+    _r2_put(
+        package,
+        "migration-spec.json",
+        {
+            "source": {"file_name": asset.split("/")[-1]},
+            "data_sources": [
+                {
+                    "id": "Sales",
+                    "name": "Sales",
+                    "connection": {
+                        "class": "sqlserver",
+                        "server": "source.example",
+                        "database": "db",
+                        "powerbi_target": "live_source",
+                    },
+                    "tables": [{"name": "Sales"}],
+                    "fields": [],
+                }
+            ],
+            "dashboards": [{"id": "dash", "name": "Executive"}],
+            "worksheets": [],
+            "limitations_encountered": [],
+        },
+    )
+    _r2_put(package, "migration-spec.schema.json", {"type": "object", "required": ["source", "data_sources"]})
+    _r2_put(
+        package,
+        "data-access.json",
+        {
+            "schema": "phase1-data-access/v1",
+            "state": "live_data_ok",
+            "source_keys": ["source-key:ab1baa4b3f77bb70"],
+            "provider_unit": None,
+            "provider_state": None,
+            "validation": "validated",
+            "effective_scope": "model_and_report",
+            "max_phase2_claim": "data_validated",
+            "codes": ["probe-cleared", "probe-data-ok"],
+        },
+    )
+    _r2_put(
+        package,
+        "source-provenance.json",
+        {
+            "scope": {"unit": "Book"},
+            "inputs": [
+                {
+                    "input": {"file": asset.split("/")[-1], "sha256": _sha256(package / asset)},
+                    "origin": {"workbook_luid": UNIT_LUID, "matched_by": "luid", "revision_match": "same"},
+                }
+            ],
+        },
+    )
+    _r2_put(
+        package,
+        "report.json",
+        {
+            "scope": {"unit": "Book"},
+            "workbooks": [{"name": "Book", "model_translation_handoff": {"requests": []}}],
+            "datasources": [],
+        },
+    )
+    _r2_put(package, "engine-output-receipt.json", {"engine": {"version": "2.368.0", "canonical": True}})
+    _r2_put(
+        package,
+        "migration-brief.md",
+        (
+            '+++\nschema = "phase1-start-ready/v2"\nunit = "Book"\nscope = "model_and_report"\n'
+            f'fallback_authorization = "stop"\nnumeric_obligation = "{numeric}"\n+++\n'
+        ).encode(),
+    )
+    _r2_put(package, "fabric/Book.pbip", {"version": "1.0", "artifacts": [{"report": {"path": "Book.Report"}}]})
+    _r2_put(
+        package,
+        f"{R2_REPORT}/definition.pbir",
+        {"version": "4.0", "datasetReference": {"byPath": {"path": "../Book.SemanticModel"}}},
+    )
+    _r2_put(package, f"{R2_REPORT}/definition/pages/pages.json", {"pageOrder": ["p1"]})
+    _r2_put(
+        package,
+        f"{R2_REPORT}/definition/pages/p1/page.json",
+        {"name": "p1", "displayName": "Executive", "width": 1280, "height": 720, "displayOption": "FitToPage"},
+    )
+    _r2_put(
+        package,
+        f"{R2_REPORT}/definition/pages/p1/visuals/v1/visual.json",
+        {
+            "name": "v1",
+            "position": {"x": 0, "y": 0, "z": 0, "width": 600, "height": 300, "tabOrder": 0},
+            "visual": {
+                "visualType": "card",
+                "query": {
+                    "queryState": {
+                        "Values": {
+                            "projections": [
+                                {
+                                    "field": {
+                                        "Measure": {
+                                            "Expression": {"SourceRef": {"Entity": "Sales"}},
+                                            "Property": "Total",
+                                        }
+                                    },
+                                    "queryRef": "Sales.Total",
+                                    "nativeQueryRef": "Total",
+                                }
+                            ]
+                        }
+                    }
+                },
+            },
+        },
+    )
+    _r2_put(package, f"{R2_MODEL}/definition/database.tmdl", b"database\n\tcompatibilityLevel: 1604\n")
+    _r2_put(
+        package,
+        f"{R2_MODEL}/definition/model.tmdl",
+        b"model Model\n\tculture: en-US\n\tref table Sales\n\tref cultureInfo en-US\n",
+    )
+    _r2_put(
+        package,
+        R2_TABLE,
+        (
+            "/// One row per sale.\ntable Sales\n"
+            "\t/// One of: Open, Closed.\n\tcolumn Status\n\t\tdataType: string\n\t\tsourceColumn: Status\n\t\tsummarizeBy: none\n"
+            "\t/// Sale amount in USD.\n\tcolumn Amount\n\t\tdataType: double\n\t\tsourceColumn: Amount\n"
+            "\t/// Sales amount total in USD.\n\tmeasure Total = SUM(Sales[Amount])\n\t\tformatString: 0.00\n" + R2_SQL
+        ).encode(),
+    )
+    instructions = "Sales totals use [Total]. Default to all rows of 'Sales'. Never invent a time window."
+    _r2_put(
+        package,
+        f"{R2_MODEL}/definition/cultures/en-US.tmdl",
+        (
+            "cultureInfo en-US\n\tlinguisticMetadata = "
+            + json.dumps({"Version": "2.0.0", "Language": "en-US", "CustomInstructions": instructions})
+            + "\n\t\tcontentType: json\n"
+        ).encode(),
+    )
+    _r2_put(package, f"{R2_MODEL}/definition.pbism", {"version": "4.2", "settings": {"qnaEnabled": True}})
+    blob = valid_png(320, 240)
+    _r2_put(package, "reference/tableau-Executive.png", blob)
+    _r2_put(
+        package,
+        "reference/manifest.json",
+        {
+            "source_workbook_sha256": _sha256(package / asset),
+            "dashboards": [
+                {
+                    "name": "Executive",
+                    "view_type": "dashboard",
+                    "states": [
+                        {
+                            "provider": "manual",
+                            "image": "tableau-Executive.png",
+                            "sha256": hashlib.sha256(blob).hexdigest(),
+                            "bytes": len(blob),
+                            "dimensions": {"w": 320, "h": 240},
+                            "capabilities": ["layout_grade", "text_readable", "validation_grade"],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    _r2_put(
+        package,
+        "package-manifest.json",
+        {
+            "unit": "Book",
+            "kind": "workbook",
+            "artifacts": {
+                "asset": asset,
+                "migration_spec": "migration-spec.json",
+                "migration_spec_schema": "migration-spec.schema.json",
+                "data_access": "data-access.json",
+                "migration_brief": "migration-brief.md",
+                "report": R2_REPORT,
+                "model": R2_MODEL,
+            },
+            "model_binding": {"kind": "byPath", "path": "../Book.SemanticModel", "resolves_in_package": True},
+            "contents": {
+                "files": {
+                    path.relative_to(package).as_posix(): _sha256(path) for path in package.rglob("*") if path.is_file()
+                }
+            },
+        },
+    )
+    return package
+
+
+def _r2_expand_report(package: Path) -> None:
+    """A literal two-page/three-visual denominator, so first-only/any-pass folds are killable."""
+    from png_fixtures import valid_png
+
+    p1 = f"{R2_REPORT}/definition/pages/p1"
+    p2 = f"{R2_REPORT}/definition/pages/p2"
+    visual = json.loads((package / p1 / "visuals/v1/visual.json").read_bytes())
+    visual["name"], visual["position"]["x"] = "v2", 650
+    _r2_put(package, f"{p1}/visuals/v2/visual.json", visual)
+    visual["name"], visual["position"]["x"] = "v3", 0
+    _r2_put(package, f"{p2}/visuals/v3/visual.json", visual)
+    _r2_put(
+        package,
+        f"{p2}/page.json",
+        {
+            "name": "p2",
+            "displayName": "Details",
+            "width": 1280,
+            "height": 720,
+            "displayOption": "FitToPage",
+        },
+    )
+    _r2_put(package, f"{R2_REPORT}/definition/pages/pages.json", {"pageOrder": ["p1", "p2"]})
+    spec = json.loads((package / "migration-spec.json").read_bytes())
+    spec["dashboards"].append({"id": "details", "name": "Details"})
+    _r2_put(package, "migration-spec.json", spec)
+    blob = valid_png(321, 240)
+    _r2_put(package, "reference/tableau-Details.png", blob)
+    reference = json.loads((package / "reference/manifest.json").read_bytes())
+    reference["dashboards"].append(
+        {
+            "name": "Details",
+            "view_type": "dashboard",
+            "states": [
+                {
+                    "provider": "manual",
+                    "image": "tableau-Details.png",
+                    "sha256": hashlib.sha256(blob).hexdigest(),
+                    "bytes": len(blob),
+                    "dimensions": {"w": 321, "h": 240},
+                    "capabilities": ["layout_grade", "text_readable", "validation_grade"],
+                }
+            ],
+        }
+    )
+    _r2_put(package, "reference/manifest.json", reference)
+    _r2_declare(
+        package,
+        "migration-spec.json",
+        f"{R2_REPORT}/definition/pages/pages.json",
+        f"{p1}/visuals/v2/visual.json",
+        f"{p2}/visuals/v3/visual.json",
+        f"{p2}/page.json",
+        "reference/manifest.json",
+        "reference/tableau-Details.png",
+    )
+
+
+def _r2_seal(
+    package: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    requests: dict | None = None,
+    rows: int = 1,
+    review_status: str = "pass",
+    findings: list | None = None,
+    previous: str | None = None,
+    unavailable: str | None = None,
+    page_ids: frozenset[str] | None = None,
+) -> tuple[str, dict, list]:
+    """Exercise real capture/finalization with separate invocation-owned A1 software observations."""
+    import capture_powerbi_pages as capture
+    import iteration_receipt as receipt
+    from probe_desktop_query import DesktopIdentity
+    from png_fixtures import valid_png
+    from refresh_pbip_model import ImageObservation
+
+    events = []
+    bound = capture.BoundDesktop(
+        DesktopIdentity(1234, "100", 1235, "101", 55001), "11111111-2222-3333-4444-555555555555"
+    )
+
+    def status(_pid: int) -> dict:
+        return {
+            "status": "ready",
+            "instances": [
+                {
+                    "pid": 1234,
+                    "bridgeStatus": "connected",
+                    "currentFilePath": str(package / "fabric" / "Book.pbip"),
+                    "hasUnsavedChanges": False,
+                }
+            ],
+        }
+
+    def refresh(port: int, tables: object, **kwargs: object) -> object:
+        assert (port, tables, kwargs) == (
+            55001,
+            None,
+            {"refresh_type": "full", "desktop_pid": 1234, "bound": bound, "return_observation": True},
+        )
+        events.append("full-database-refresh")
+        if unavailable == "refresh":
+            raise capture.ObservationUnavailable("TOOL_UNAVAILABLE")
+        return capture.RefreshObservation(bound.catalogue, "full", "database", (), bound.identity)
+
+    def canaries(held: object, names: list[str]) -> object:
+        assert held is bound and names == ["Sales"]
+        events.append("named-canary")
+        if unavailable == "canaries":
+            return None
+        return (capture.CanaryObservation(bound.catalogue, "Sales", "EVALUATE TOPN(1, 'Sales')", rows, bound.identity),)
+
+    def persist(port: int, cache: Path, model: Path, **kwargs: object) -> object:
+        assert port == 55001 and kwargs == {"bound": bound, "return_observation": True}
+        assert model == package / R2_MODEL and cache == package / R2_MODEL / ".pbi" / "cache.abf"
+        events.append("image-readback")
+        if unavailable == "persistence":
+            raise capture.ObservationUnavailable("TOOL_UNAVAILABLE")
+        blob = b"R2 synthetic A1 cache bytes; software observations, not native ABF qualification."
+        cache.parent.mkdir(exist_ok=True)
+        cache.write_bytes(blob)
+        digest = hashlib.sha256(blob).hexdigest()
+        return capture.PersistenceObservation(
+            bound.catalogue, 1604, ImageObservation(digest, len(blob), digest, len(blob)), bound.identity
+        )
+
+    clock = [0.0]
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    def shot(page: str, pid: str, dest: Path) -> bool:
+        assert page in ("p1", "p2") and pid == "1234"
+        events.append("frame")
+        dest.write_bytes(valid_png(320, 240 if page == "p1" else 241))
+        return True
+
+    def recheck(held: object, operation) -> None:
+        assert held is bound and operation(object()) is None
+
+    with monkeypatch.context() as native:
+        native.setattr(capture, "bind_desktop", lambda pid: bound if pid == 1234 else pytest.fail("wrong PID"))
+        native.setattr(capture, "bound_call", recheck)
+        native.setattr(capture, "refresh", refresh)
+        native.setattr(capture, "probe_observations", canaries)
+        native.setattr(capture, "image_save", persist)
+        pending = capture.run_iteration(
+            capture.IterationRequest(
+                package,
+                "1234",
+                previous_sha256=previous,
+                **({"refresh": True, "persist": True, "canaries": ("Sales",)} if requests is None else requests),
+            ),
+            capture.CaptureOptions(1.0, 2.0, 10.0, page_ids),
+            capture.CaptureRuntime(shot, sleep, lambda: clock[0], status, lambda _pid: True),
+        )
+    judgement = copy.deepcopy(pending["judgement"])
+    for page in judgement["pages"]:
+        page["whole_page_status"] = review_status
+        for visual in page["visual_results"]:
+            visual["status"] = review_status
+    judgement["findings"] = findings or []
+    final = receipt.finalize(package, receipt.receipt_sha256(pending), judgement, state_reader=status)
+    token = receipt.receipt_sha256(final)
+    held = (package / "validation/iterations" / final["iteration"] / receipt.RECEIPT_NAME).read_bytes()
+    assert hashlib.sha256(held).hexdigest() == token
+    return token, final, events
+
+
+@pytest.fixture
+def r2_gate_runtime(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Keep every registered gate and its real main; double only AMO, schema CLI and installed engine."""
+    datamodel = importlib.import_module("check_datamodel")
+    pbir = importlib.import_module("check_pbir_valid")
+    engine = importlib.import_module("check_engine_receipts")
+    events = []
+
+    def amo(models: list[Path]) -> tuple:
+        assert len(models) == 1 and models[0].name == "Book.SemanticModel"
+        events.append("AMO-boundary")
+        return [], 1
+
+    def schema(report: Path, _cli: str) -> dict:
+        assert report.name == "Book.Report"
+        events.append("PBIR-schema-boundary")
+        return {"report": str(report), "status": "valid", "exit_code": 0, "codes": [], "errors": 0, "warnings": 0}
+
+    monkeypatch.setattr(datamodel, "check_models", amo)
+    monkeypatch.setattr(pbir, "find_cli", lambda _explicit=None: "fixture-schema-cli")
+    monkeypatch.setattr(pbir, "validate_one", schema)
+    monkeypatch.setattr(engine, "engine_root", lambda: REPO_ROOT)
+    monkeypatch.setattr(engine, "engine_version", lambda _root: "2.368.0")
+
+    def invoke(argv: list[str], _timeout: int = 300) -> CompletedProcess:
+        script = Path(argv[1])
+        events.append(script.name)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr), monkeypatch.context() as process:
+            process.setattr(sys, "argv", argv[1:])
+            if script.name == "set_ai_instructions.py":
+                spec = importlib.util.spec_from_file_location(
+                    "r2_ai_instructions",
+                    REPO_ROOT / ".github/skills/powerbi-ai-readiness/scripts/set_ai_instructions.py",
+                )
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+            else:
+                module = importlib.import_module(script.stem)
+            try:
+                code = module.main(argv[2:]) if inspect.signature(module.main).parameters else module.main()
+            except SystemExit as exit_error:
+                code = exit_error.code
+        return CompletedProcess(argv, code, stdout.getvalue(), stderr.getvalue())
+
+    monkeypatch.setattr(cu, "_run_simple", invoke)
+    return events
+
+
+def _r2_check(report: dict, name: str) -> dict:
+    return next(row for row in report["checks"] if row["id"] == name)
+
+
+def test_r2_complete_reaches_every_gate_with_exact_pin_and_no_numeric_csv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, capsys: pytest.CaptureFixture
+) -> None:
+    import iteration_receipt as receipt
+    from PIL import Image
+
+    package = _r2_package(tmp_path)
+    _r2_expand_report(package)
+    token, final, events = _r2_seal(package, monkeypatch)
+    assert events == ["full-database-refresh", "named-canary", "image-readback", *["frame"] * 6]
+    assert [(page["page_id"], page["expected_visual_ids"]) for page in final["generated"]["pages"]] == [
+        ("p1", ["v1", "v2"]),
+        ("p2", ["v3"]),
+    ]
+    head = receipt.read_chain(package, token)[-1]
+    assert head.receipt_bytes == (head.directory / receipt.RECEIPT_NAME).read_bytes()
+    assert final["generated"]["data_evidence"]["persistence"]["observation"]["image"]["commitment"] == "UNESTABLISHED"
+    with Image.open(package / "reference/tableau-Executive.png") as image:
+        image.load()
+        assert image.size == (320, 240)
+    output = tmp_path / "checked.json"
+    code = cu.main([str(package), "--scope", "all", "--receipt-sha256", token, "--json", str(output)])
+    report = json.loads(output.read_bytes())
+    assert code == 0, cu.render(report)
+    assert report["status"] == "COMPLETE" and _r2_check(report, "finalized")["status"] == "PASS"
+    text = capsys.readouterr().out
+    assert R2_DISCLAIMER in text and R2_WAIVER in text
+    assert R2_DISCLAIMER in json.dumps(report) and R2_WAIVER in json.dumps(report)
+    assert {gate.check_id for gate in ORIGINAL_GATES} <= {row["id"] for row in report["checks"]}
+    assert all(row["status"] == "PASS" for row in report["checks"])
+    coverage = _r2_check(report, "oracle-coverage")
+    assert coverage["numeric_present"] == 0 and len(coverage["numeric_missing"]) == 2
+    assert coverage["visual_present"] == 2 and not list(package.rglob("*.csv"))
+    assert "AMO-boundary" in r2_gate_runtime and "PBIR-schema-boundary" in r2_gate_runtime
+    assert _r2_check(report, "connection-fidelity")["payload"]["status"] == "OK"
+
+
+@pytest.mark.parametrize(
+    "token", [None, "", "f" * 64, "A" * 64, " " + "a" * 64, "a" * 64 + "\n", "g" * 64, "sha256:" + "a" * 64]
+)
+def test_r2_token_is_exact_caller_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, token: str | None
+) -> None:
+    package = _r2_package(tmp_path)
+    _r2_seal(package, monkeypatch)
+    report = cu.run_all(package, scope="all", receipt_sha256=token)
+    assert report["exit_code"] == 2
+    assert _r2_check(report, "finalized")["status"] == "NOT_CHECKED"
+    assert "Phase-2 COMPLETE was not established." in cu.render(report)
+    if token is not None:
+        assert not r2_gate_runtime, "bad caller authority must stop before native/gate operations"
+    else:
+        assert "check_connection_fidelity.py" in r2_gate_runtime, "tokenless checks remain useful diagnostics"
+
+
+@pytest.mark.parametrize("numeric", ["none", "required"])
+def test_r2_numeric_authority_does_not_erase_raw_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, numeric: str
+) -> None:
+    package = _r2_package(tmp_path, numeric=numeric)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    raw = cu.check_oracle_coverage(package, None, None)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == (0 if numeric == "none" else 2), cu.render(report)
+    coverage = _r2_check(report, "oracle-coverage")
+    assert coverage["numeric_present"] == 0 and len(coverage["numeric_missing"]) == 1
+    for field in ("numeric_present", "numeric_missing", "rows"):
+        assert coverage[field] == raw[field] and type(coverage[field]) is type(raw[field])
+    assert ("CANNOT_ESTABLISH(NUMERIC)" in cu.render(report)) == (numeric == "required")
+    assert (R2_WAIVER in cu.render(report)) == (numeric == "none")
+
+
+@pytest.mark.parametrize("empty_refusal_diagnostic", [False, True], ids=["production-envelope", "empty-diagnostic"])
+def test_r2_numeric_waiver_never_clears_zero_page_oracle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    r2_gate_runtime: list,
+    capsys: pytest.CaptureFixture,
+    empty_refusal_diagnostic: bool,
+) -> None:
+    """Signed parity can pass while the real oracle denominator is empty and the review unverified."""
+    package = _r2_package(tmp_path)
+    page_path = f"{R2_REPORT}/definition/pages/p1/page.json"
+    page = json.loads((package / page_path).read_bytes())
+    page["displayName"] = "Other"
+    _r2_put(package, page_path, page)
+    _write_exemptions(
+        package,
+        [{"check": "page-parity", "item": "dash"}, {"check": "page-parity", "item": "extra:Other"}],
+    )
+    _r2_declare(package, page_path, cu.EXEMPTIONS_FILE)
+    token, final, _ = _r2_seal(package, monkeypatch, review_status="unverified")
+    assert final["schema_version"] == 3 and final["state"] == "final"
+    assert final["judgement"]["pages"][0]["whole_page_status"] == "unverified"
+    assert cu.check_page_parity(package, cu.load_exemptions(package))["status"] == "PASS"
+    not_assessable = cu._oracle_not_assessable
+    observed = []
+
+    def observe(*args, **kwargs):
+        row = not_assessable(*args, **kwargs)
+        assert "refused_evidence" not in row
+        # An optional empty diagnostic must not change the production zero-page refusal.
+        if empty_refusal_diagnostic:
+            row["refused_evidence"] = []
+        observed.append(copy.deepcopy(row))
+        return row
+
+    monkeypatch.setattr(cu, "_oracle_not_assessable", observe)
+    raw = cu.check_oracle_coverage(package, None, None)
+    assert (raw["status"], raw["pages"], raw["visual_present"], raw["numeric_present"]) == ("NOT_CHECKED", 0, 0, 0)
+    assert raw["visual_missing"] == raw["numeric_missing"] == raw["contested_names"] == raw["rows"] == []
+    assert [row["name"] for row in raw["excluded_omissions"]] == ["Executive"]
+    before = {path.relative_to(package): path.read_bytes() for path in package.rglob("*") if path.is_file()}
+    capsys.readouterr()
+    try:
+        report = cu.run_all(package, receipt_sha256=token)
+        output = tmp_path / "zero-page-check.json"
+        code = cu.main([str(package), "--scope", "all", "--receipt-sha256", token, "--json", str(output)])
+    except (KeyError, TypeError) as error:
+        pytest.fail(f"zero-page oracle must return typed non-success, not raise {error!r}")
+    cli_report = json.loads(output.read_bytes())
+    assert code == 2 and cli_report == report
+    assert report["status"] == "NOT_CHECKED" and report["exit_code"] == 2
+    coverage = _r2_check(report, "oracle-coverage")
+    assert coverage["status"] == "NOT_CHECKED", "a numeric waiver cannot clear an empty oracle denominator"
+    assert {key: coverage[key] for key in raw} == raw, "waiving numeric comparison must preserve raw oracle facts"
+    assert len(observed) == 3 and all(row == raw for row in observed)
+    assert _r2_check(report, "visual-comparison-done")["code"] == "visual_comparison_not_pass"
+    final_row = _r2_check(report, "finalized")
+    assert (final_row["status"], final_row["stage"], final_row["code"]) == (
+        "NOT_CHECKED",
+        "OBLIGATIONS",
+        "required_obligations_not_satisfied",
+    )
+    assert not any(row["id"] == "finalized" and row["status"] == "PASS" for row in report["checks"])
+    text = capsys.readouterr().out
+    assert "CANNOT_ESTABLISH(OBLIGATIONS)" in text and "Phase-2 COMPLETE was not established." in text
+    assert R2_DISCLAIMER not in text and "AMO-boundary" in r2_gate_runtime
+    assert before == {path.relative_to(package): path.read_bytes() for path in package.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        *[
+            pytest.param(field, ..., id=f"missing-{field}")
+            for field in (
+                "pages",
+                "visual_present",
+                "visual_missing",
+                "contested_names",
+                "refused_evidence",
+                "numeric_present",
+                "numeric_missing",
+                "rows",
+            )
+        ],
+        *[
+            pytest.param(field, value, id=f"{field}-{type(value).__name__}")
+            for field in ("visual_missing", "contested_names", "refused_evidence", "numeric_missing", "rows")
+            for value in (None, False, 0, "", {}, ())
+        ],
+        *[
+            pytest.param(field, value, id=f"{field}-{value!r}")
+            for field in ("pages", "visual_present")
+            for value in (None, False, True, 0, -1, 1.0, "1")
+        ],
+        *[
+            pytest.param("numeric_present", value, id=f"numeric_present-{value!r}")
+            for value in (None, False, True, -1, 0.0, "0", 1, 2)
+        ],
+        pytest.param("numeric_missing", ("missing",), id="numeric_missing-coherent-tuple"),
+        pytest.param("rows", ("row",), id="rows-coherent-tuple"),
+        pytest.param("numeric_missing", [], id="numeric_missing-short"),
+        pytest.param("numeric_missing", [{}, {}], id="numeric_missing-long"),
+        pytest.param("rows", [], id="rows-short"),
+        pytest.param("rows", [{}, {}], id="rows-long"),
+        ("visual_missing", [{"name": "Executive"}]),
+        ("contested_names", ["Executive"]),
+        ("refused_evidence", ["ambiguous"]),
+        ("status", "FINDINGS"),
+        ("status", "PRECONDITION_FAILED"),
+        ("status", "ERROR"),
+    ],
+)
+def test_r2_numeric_waiver_requires_measured_visual_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, field: str, value: object
+) -> None:
+    """The exact-H CLI cannot waive a malformed measured row; inspect raw types before JSON encoding."""
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    coverage = cu.check_oracle_coverage
+    observed = []
+    returned = []
+
+    def changed(*args, **kwargs):
+        row = coverage(*args, **kwargs)
+        assert (row["status"], row["pages"], row["visual_present"], row["numeric_present"]) == (
+            "NOT_CHECKED",
+            1,
+            1,
+            0,
+        )
+        if value is ...:
+            row.pop(field)
+        else:
+            row[field] = value
+        observed.append(copy.deepcopy(row))
+        returned.append(row)
+        return row
+
+    monkeypatch.setattr(cu, "check_oracle_coverage", changed)
+    output = tmp_path / "malformed-coverage-check.json"
+    try:
+        code = cu.main([str(package), "--scope", "all", "--receipt-sha256", token, "--json", str(output), "--quiet"])
+    except (KeyError, TypeError) as error:
+        pytest.fail(f"unestablished oracle facts must return typed non-success, not raise {error!r}")
+    report = json.loads(output.read_bytes())
+    assert len(returned) == 1
+    row = returned[0]
+    assert row["status"] == (value if field == "status" else "NOT_CHECKED"), "only measured numeric gaps may be waived"
+    assert len(observed) == 1 and {key: row[key] for key in observed[0]} == observed[0]
+    assert all(type(row[key]) is type(observed[0][key]) for key in observed[0]), "do not normalize raw coverage types"
+    assert _r2_check(report, "oracle-coverage") == json.loads(json.dumps(row))
+    if value is ...:
+        assert field not in row, "do not manufacture missing coverage facts"
+    expected_code = {"FINDINGS": 1, "PRECONDITION_FAILED": 4}.get(row["status"], 2)
+    assert code == report["exit_code"] == expected_code and report["status"] != "COMPLETE"
+    final_row = _r2_check(report, "finalized")
+    assert (final_row["status"], final_row["stage"], final_row["code"]) == (
+        "NOT_CHECKED",
+        "OBLIGATIONS",
+        "required_obligations_not_satisfied",
+    )
+    assert "CANNOT_ESTABLISH(OBLIGATIONS)" in final_row["detail"] and R2_DISCLAIMER not in json.dumps(report)
+    assert "AMO-boundary" in r2_gate_runtime
+
+
+def test_r2_numeric_waiver_rejects_negative_count_with_coherent_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    """A coherent sum must not mask the independently required nonnegative numeric count."""
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    coverage = cu.check_oracle_coverage
+    observed = []
+
+    def negative(*args, **kwargs):
+        row = coverage(*args, **kwargs)
+        assert (row["pages"], row["numeric_present"], len(row["numeric_missing"]), len(row["rows"])) == (1, 0, 1, 1)
+        row["numeric_present"] = -1
+        row["numeric_missing"] *= 2
+        observed.append(copy.deepcopy(row))
+        return row
+
+    monkeypatch.setattr(cu, "check_oracle_coverage", negative)
+    output = tmp_path / "negative-numeric-check.json"
+    code = cu.main([str(package), "--scope", "all", "--receipt-sha256", token, "--json", str(output), "--quiet"])
+    report = json.loads(output.read_bytes())
+    row = _r2_check(report, "oracle-coverage")
+    assert row["numeric_present"] + len(row["numeric_missing"]) == row["pages"] == len(row["rows"]) == 1
+    assert row["status"] == "NOT_CHECKED", "a coherent sum must never waive a negative numeric count"
+    assert len(observed) == 1 and {key: row[key] for key in observed[0]} == observed[0]
+    assert code == report["exit_code"] == 2 and report["status"] == "NOT_CHECKED"
+    final_row = _r2_check(report, "finalized")
+    assert (final_row["status"], final_row["stage"], final_row["code"]) == (
+        "NOT_CHECKED",
+        "OBLIGATIONS",
+        "required_obligations_not_satisfied",
+    )
+    assert "CANNOT_ESTABLISH(OBLIGATIONS)" in final_row["detail"] and R2_DISCLAIMER not in json.dumps(report)
+    assert "AMO-boundary" in r2_gate_runtime
+
+
+@pytest.mark.parametrize("flag", ["--reference-dir", "--oracle-dir"])
+@pytest.mark.parametrize("numeric", ["required", "none"])
+@pytest.mark.parametrize("entrypoint", ["run-all", "cli"])
+@pytest.mark.parametrize("brief", ["current", "malformed", "stale"])
+def test_r2_reference_override_retains_safe_numeric_obligation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    r2_gate_runtime: list,
+    capsys: pytest.CaptureFixture,
+    flag: str,
+    numeric: str,
+    entrypoint: str,
+    brief: str,
+) -> None:
+    package = _r2_package(tmp_path, numeric=numeric)
+    if brief != "current":
+        content = (package / "migration-brief.md").read_text()
+        content = (
+            content.replace(f'"{numeric}"', f'"{numeric}') if brief == "malformed" else content + "Stale digest.\n"
+        )
+        _r2_put(package, "migration-brief.md", content.encode())
+        if brief == "malformed":
+            _r2_declare(package, "migration-brief.md")
+    token, _, _ = _r2_seal(package, monkeypatch)
+    override = tmp_path / "unread-override"
+    before = {path.relative_to(package): path.read_bytes() for path in package.rglob("*") if path.is_file()}
+    capsys.readouterr()
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("a refused reference override must not reach later discovery, gates or completion")
+
+    with monkeypatch.context() as guard:
+        for name in ("load_exemptions", "check_oracle_coverage", "_finish_completion", "inspect_brownfield"):
+            guard.setattr(cu, name, forbidden)
+        for method in ("open", "stat", "lstat", "resolve", "iterdir", "glob", "rglob"):
+            original = getattr(Path, method)
+
+            def guarded(path, *args, _original=original, **kwargs):
+                assert path != override and override not in path.parents, "supplied override path must remain unread"
+                return _original(path, *args, **kwargs)
+
+            guard.setattr(Path, method, guarded)
+        if entrypoint == "cli":
+            output = tmp_path / "override-check.json"
+            code = cu.main(
+                [str(package), "--scope", "all", "--receipt-sha256", token, flag, str(override), "--json", str(output)]
+            )
+            report = json.loads(output.read_bytes())
+            text = capsys.readouterr().out
+        else:
+            report = cu.run_all(package, receipt_sha256=token, **{flag[2:].replace("-", "_"): override})
+            code, text = report["exit_code"], cu.render(report)
+    assert before == {path.relative_to(package): path.read_bytes() for path in package.rglob("*") if path.is_file()}
+    assert r2_gate_runtime == []
+    assert code == 2 and report["status"] == "NOT_CHECKED", "an override refusal must never confer COMPLETE"
+    numeric_rows = [row for row in report["checks"] if row["id"] == "numeric-obligation"]
+    assert len(numeric_rows) == 1, "the safely known numeric obligation must remain machine-visible on refusal"
+    row = numeric_rows[0]
+    final_row = _r2_check(report, "finalized")
+    if brief == "current":
+        assert [check["id"] for check in report["checks"] if check["status"] == "PASS"] == [
+            "iteration-history",
+            "current-source-data",
+            "current-working-namespace",
+            "model-class",
+        ]
+        assert (final_row["stage"], final_row["code"]) == ("REFERENCE", "external_evidence_override_not_supported")
+        assert row["numeric_obligation"] == numeric
+        assert row["code"] == (
+            "numeric_required_unsupported" if numeric == "required" else "numeric_waiver_not_applied"
+        )
+    else:
+        if brief == "malformed":
+            assert [check["id"] for check in report["checks"]] == ["numeric-obligation", "finalized"]
+            assert (final_row["stage"], final_row["code"], row["code"]) == (
+                "NUMERIC",
+                "brief_frontmatter_unparseable",
+                "brief_frontmatter_unparseable",
+            )
+        else:
+            assert [check["id"] for check in report["checks"]] == [
+                "current-source-data",
+                "numeric-obligation",
+                "finalized",
+            ]
+            assert (final_row["stage"], final_row["code"], row["code"]) == (
+                "SOURCE_DATA",
+                "package_file_digest_mismatch",
+                "numeric_authority_unestablished",
+            )
+        assert row["numeric_obligation"] is None
+        assert "external_evidence_override_not_supported" not in json.dumps(report)
+    assert row["status"] == "NOT_CHECKED" and row["stage"] == "NUMERIC" and row["numeric_evidence"] == "unestablished"
+    assert final_row["status"] == "NOT_CHECKED"
+    assert "CANNOT_ESTABLISH(NUMERIC)" in text and "Phase-2 COMPLETE was not established." in text
+    assert "CANNOT_ESTABLISH(NUMERIC)" in json.dumps(report)
+    assert R2_DISCLAIMER not in text and R2_WAIVER not in text
+
+
+@pytest.mark.parametrize("scope", ["model", "report", "integration"])
+def test_r2_layer_scopes_never_claim_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, scope: str
+) -> None:
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    report = cu.run_all(package, scope=scope, receipt_sha256=token)
+    assert report["status"] != "COMPLETE"
+    assert "finalized" in report["omitted_checks"]
+    assert R2_DISCLAIMER not in cu.render(report) and R2_WAIVER not in cu.render(report)
+
+
+@pytest.mark.parametrize("category", ["file_ok", "remote_import", "inline"])
+def test_r2_import_class_has_three_positive_categories(tmp_path: Path, category: str) -> None:
+    package = _r2_package(tmp_path)
+    partition = R2_SQL
+    if category != "remote_import":
+        expression = (
+            'Csv.Document(File.Contents("sales.csv"))' if category == "file_ok" else '#table({"Amount"}, {{7}})'
+        )
+        partition = (
+            "\tpartition Sales = m\n\t\tmode: import\n\t\tsource =\n"
+            f"\t\t\tlet\n\t\t\t    Source = {expression}\n\t\t\tin\n\t\t\t    Source\n"
+        )
+        _r2_put(package, f"{R2_MODEL}/sales.csv", b"Amount\n7\n")
+    table = (package / R2_TABLE).read_text()
+    _r2_put(package, R2_TABLE, table.replace(R2_SQL, partition).encode())
+    result = cu._import_model_class(package, R2_MODEL)
+    assert result["status"] == "PASS" and result["partition_count"] == 1, result
+    assert result["tables"]["Sales"][0]["category"] == category
+
+
+@pytest.mark.parametrize(
+    "partition,code",
+    [
+        (R2_SQL.replace("mode: import", "mode: directQuery"), "partition_mode_not_explicit_import"),
+        (R2_SQL.replace("mode: import", "mode: dual"), "partition_mode_not_explicit_import"),
+        (R2_SQL.replace("mode: import", "mode: directLake"), "partition_mode_not_explicit_import"),
+        (R2_SQL.replace("mode: import", "mode: unknown"), "partition_mode_not_explicit_import"),
+        (R2_SQL.replace("\t\tmode: import\n", ""), "partition_mode_not_explicit_import"),
+        (R2_SQL.replace("mode: import", "mode: import\n\t\tmode: import"), "partition_mode_not_explicit_import"),
+        (R2_SQL.replace("mode: import", "mode: import\n\t\tmode: directQuery"), "partition_mode_not_explicit_import"),
+        (
+            R2_SQL.replace("\t\tmode: import\n", "").replace("\t\t\tlet", "\t\t\tlet\n\t\t\t    mode: import"),
+            "partition_mode_not_explicit_import",
+        ),
+        (R2_SQL.replace("Sales = m", "Sales = calculated"), "partition_kind_unsupported"),
+        (R2_SQL.replace("Sales = m", "Sales = entity"), "partition_kind_unsupported"),
+        (R2_SQL.replace("Sales = m", "Sales"), "partition_unaccounted"),
+        (R2_SQL.replace("Sql.Database", "Mystery.Database"), "partition_category_unsupported"),
+        (
+            R2_SQL + R2_SQL.replace("partition Sales", "partition Other").replace("mode: import", "mode: dual"),
+            "partition_mode_not_explicit_import",
+        ),
+        ("", "partition_unaccounted"),
+    ],
+    ids=[
+        "direct-query",
+        "dual",
+        "direct-lake",
+        "unknown-mode",
+        "absent-mode",
+        "duplicate-import",
+        "duplicate-mixed",
+        "expression-only-mode",
+        "calculated",
+        "implicit-entity",
+        "unrecognized-partition",
+        "unknown-category",
+        "mixed-storage",
+        "zero-partitions",
+    ],
+)
+def test_r2_unsupported_partition_refuses_before_other_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, partition: str, code: str
+) -> None:
+    package = _r2_package(tmp_path)
+    _r2_put(package, R2_TABLE, (package / R2_TABLE).read_text().replace(R2_SQL, partition).encode())
+    token, _, _ = _r2_seal(package, monkeypatch)
+    result = cu.run_all(package, receipt_sha256=token)
+    assert result["exit_code"] == 2
+    assert _r2_check(result, "model-class")["code"] == code, result
+    assert r2_gate_runtime == [] and _r2_check(result, "finalized")["status"] == "NOT_CHECKED"
+
+
+@pytest.mark.parametrize(
+    "change,code",
+    [
+        ("unreadable", "model_class_unreadable"),
+        ("omitted", "partition_unaccounted"),
+        ("wrong-ref", "table_reference_unaccounted"),
+        ("duplicate-ref", "table_reference_unaccounted"),
+        ("unrecognized-table", "table_declaration_unaccounted"),
+        ("zero-tables", "table_set_not_canonical"),
+        ("nested", "table_set_not_canonical"),
+    ],
+)
+def test_r2_complete_partition_accounting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str, code: str
+) -> None:
+    package = _r2_package(tmp_path)
+    model_text = package / R2_MODEL / "definition/model.tmdl"
+    if change == "unreadable":
+        _r2_put(package, R2_TABLE, b"\xff")
+    elif change == "omitted":
+        monkeypatch.setattr(cu.empty_model, "_partition_blocks", lambda _text: [])
+    elif change in ("wrong-ref", "duplicate-ref"):
+        text = model_text.read_text()
+        _r2_put(
+            package,
+            f"{R2_MODEL}/definition/model.tmdl",
+            (
+                text.replace("ref table Sales", "ref table Other")
+                if change == "wrong-ref"
+                else text + "\tref table Sales\n"
+            ).encode(),
+        )
+    elif change == "unrecognized-table":
+        _r2_put(package, R2_TABLE, (package / R2_TABLE).read_text().replace("table Sales", "table Sales = ?").encode())
+    elif change == "zero-tables":
+        (package / R2_TABLE).unlink()
+    else:
+        _r2_put(package, f"{R2_MODEL}/definition/tables/nested/Other.tmdl", b"table Other\n")
+    result = cu._import_model_class(package, R2_MODEL)
+    assert result["status"] == "NOT_CHECKED" and result["code"] == code, result
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "rogue.txt",
+        "validation/loose.png",
+        f"{R2_MODEL}/.pbi/unappliedChanges.json",
+        f"{R2_REPORT}/.pbi/rogue.json",
+    ],
+)
+def test_r2_namespace_rejects_extra_files_even_with_current_valid_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, path: str
+) -> None:
+    import iteration_receipt as receipt
+
+    package = _r2_package(tmp_path)
+    _r2_put(package, path, b"rogue\n")
+    token, _, _ = _r2_seal(package, monkeypatch)
+    assert receipt.read_chain(package, token)[-1].receipt_sha256 == token
+    report = cu.run_all(package, receipt_sha256=token)
+    row = _r2_check(report, "current-working-namespace")
+    assert report["exit_code"] == 2 and row["extra"] == [path] and row["missing"] == []
+    assert not r2_gate_runtime
+
+
+def test_r2_namespace_missing_declared_file_is_not_a_new_smaller_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    package = _r2_package(tmp_path)
+    (package / R2_TABLE).unlink()
+    token, _, _ = _r2_seal(package, monkeypatch)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert _r2_check(report, "current-working-namespace")["missing"] == [R2_TABLE]
+    assert report["exit_code"] == 2 and r2_gate_runtime == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "validation/iterations/loose.png",
+        "validation/iterations/001/loose.png",
+        "validation/iterations/003/iteration.json",
+    ],
+)
+def test_r2_loose_iteration_files_never_gain_wildcard_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, path: str
+) -> None:
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    _r2_put(package, path, b"loose")
+    report = cu.run_all(package, receipt_sha256=token)
+    final = _r2_check(report, "finalized")
+    assert report["exit_code"] == 2 and final["stage"] == "RECEIPT"
+    assert final["code"] == ("ITERATION_GAP" if "003" in path else "EXTRA_FILE")
+    assert r2_gate_runtime == []
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "required",
+        "v1",
+        "plain",
+        "missing-field",
+        "malformed",
+        "duplicate",
+        "unknown",
+        "scope",
+        "unit",
+        "stale",
+        "missing-brief",
+    ],
+)
+def test_r2_current_brief_is_the_only_numeric_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, change: str
+) -> None:
+    package = _r2_package(tmp_path)
+    original = (package / "migration-brief.md").read_text()
+    variants = {
+        "required": original.replace('"none"', '"required"'),
+        "v1": original.replace("/v2", "/v1").replace('numeric_obligation = "none"\n', ""),
+        "plain": "Numeric comparison waived in prose only.\n",
+        "missing-field": original.replace('numeric_obligation = "none"\n', ""),
+        "malformed": original.replace('"none"', '"none'),
+        "duplicate": original.replace(
+            'numeric_obligation = "none"', 'numeric_obligation = "none"\nnumeric_obligation = "none"'
+        ),
+        "unknown": original.replace('"none"', '"optional"'),
+        "scope": original.replace('"model_and_report"', '"model_only"'),
+        "unit": original.replace('"Book"', '"Other"'),
+        "stale": original + "Stale digest.\n",
+        "missing-brief": "",
+    }
+    _r2_put(package, "migration-brief.md", variants[change].encode())
+    if change == "missing-brief":
+        (package / "migration-brief.md").unlink()
+    elif change != "stale":
+        _r2_declare(package, "migration-brief.md")
+    token, _, _ = _r2_seal(package, monkeypatch)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 2, cu.render(report)
+    row = _r2_check(report, "numeric-obligation")
+    assert row["status"] == "NOT_CHECKED"
+    assert "CANNOT_ESTABLISH(NUMERIC)" in cu.render(report) and "Phase-2 COMPLETE was not established." in cu.render(
+        report
+    )
+    assert R2_DISCLAIMER not in cu.render(report) and R2_WAIVER not in cu.render(report)
+    if change != "required":
+        assert not r2_gate_runtime
+
+
+def test_r2_numeric_csv_presence_never_overrides_required_brief(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    package = _r2_package(tmp_path, numeric="required")
+    _r2_put(package, "reference/tableau-values.csv", b"Amount\n7\n")
+    reference = json.loads((package / "reference/manifest.json").read_bytes())
+    reference["dashboards"][0]["states"][0]["numeric_oracle"] = "tableau-values.csv"
+    _r2_put(package, "reference/manifest.json", reference)
+    _r2_declare(package, "reference/tableau-values.csv")
+    token, _, _ = _r2_seal(package, monkeypatch)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert _r2_check(report, "oracle-coverage")["numeric_present"] == 1
+    assert _r2_check(report, "numeric-obligation")["status"] == "NOT_CHECKED"
+    assert report["exit_code"] == 2 and report["status"] != "COMPLETE"
+
+
+@pytest.mark.parametrize(
+    "change,code",
+    [
+        ("zero", "a1_zero_returned_rows"),
+        ("canaries", "a1_canaries_unestablished"),
+        ("refresh", "a1_refresh_refused"),
+        ("persistence", "a1_persistence_refused"),
+        ("no-refresh", "a1_full_refresh_persistence_named_canaries_required"),
+        ("no-canaries", "a1_full_refresh_persistence_named_canaries_required"),
+        ("no-persist", "a1_full_refresh_persistence_named_canaries_required"),
+    ],
+)
+def test_r2_neutral_a1_observations_do_not_mean_positive_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, change: str, code: str
+) -> None:
+    package = _r2_package(tmp_path)
+    requests = {"refresh": True, "persist": True, "canaries": ("Sales",)}
+    if change.startswith("no-"):
+        requests[change[3:]] = () if change == "no-canaries" else False
+    token, _, _ = _r2_seal(
+        package,
+        monkeypatch,
+        requests=requests,
+        rows=0 if change == "zero" else 1,
+        unavailable=change if change in ("refresh", "canaries", "persistence") else None,
+    )
+    report = cu.run_all(package, receipt_sha256=token)
+    assert _r2_check(report, "data-evidence")["code"] == code, cu.render(report)
+    assert report["exit_code"] == (1 if change == "zero" else 2)
+    assert _r2_check(report, "finalized")["status"] == "NOT_CHECKED"
+
+
+@pytest.mark.parametrize("state", ["blocked", "cannot_establish", "authorized_model_only", "wrong-source"])
+def test_r2_canonical_data_reconciliation_preserves_negative_state_and_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, state: str
+) -> None:
+    package = _r2_package(tmp_path)
+    projection = json.loads((package / "data-access.json").read_bytes())
+    if state == "wrong-source":
+        projection["source_keys"] = ["source-key:e625ce798a6d19bb"]
+    elif state == "authorized_model_only":
+        projection.update(
+            state=state,
+            validation="unvalidated",
+            effective_scope="model_only",
+            max_phase2_claim="structural_only",
+            codes=["brief-model-only", "human-authorize"],
+        )
+    else:
+        projection.update(
+            state=state,
+            validation="not_established",
+            effective_scope=None,
+            max_phase2_claim="none",
+            codes=["probe-no-credential"] if state == "blocked" else ["spec-unreadable"],
+        )
+        if state == "cannot_establish":
+            projection["source_keys"] = []
+    _r2_put(package, "data-access.json", projection)
+    _r2_declare(package, "data-access.json")
+    token, _, _ = _r2_seal(package, monkeypatch)
+    report = cu.run_all(package, receipt_sha256=token)
+    assessed = _r2_check(report, "current-source-data")["assessment"]
+    assert report["exit_code"] == 2 and r2_gate_runtime == []
+    if state in ("blocked", "cannot_establish"):
+        assert assessed == projection
+    else:
+        assert assessed["codes"] == ["source-key-set-changed" if state == "wrong-source" else "authorization-mismatch"]
+        assert assessed["max_phase2_claim"] == "none"
+
+
+@pytest.mark.parametrize("variant", ["missing", "refused", "copied", "reconstructed", "grafted", "tuple", "revision"])
+def test_r2_w_must_be_the_original_issued_object_for_this_exact_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, variant: str
+) -> None:
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    original = cu.roles.read_current_source_data_handoff
+    calls = []
+
+    def issue(root: Path, *, expected_package_working_revision: str) -> tuple:
+        calls.append(expected_package_working_revision)
+        if variant == "revision":
+            _r2_put(root, R2_TABLE, (root / R2_TABLE).read_bytes() + b"\n")
+        code, handoff = original(root, expected_package_working_revision=expected_package_working_revision)
+        if variant == "revision":
+            assert code == "working_revision_mismatch" and handoff is None
+            return code, handoff
+        assert code is None and handoff is not None
+        if variant == "missing":
+            return None, None
+        if variant == "refused":
+            return "working_handoff_invalid", None
+        if variant == "copied":
+            return None, copy.copy(handoff)
+        if variant in ("reconstructed", "grafted"):
+            other = cu.roles.CurrentWorkingSourceDataHandoff(
+                **{field.name: getattr(handoff, field.name) for field in fields(handoff) if field.init}
+            )
+            if variant == "grafted":
+                object.__setattr__(other, "_authority", handoff._authority)
+            return None, other
+        object.__setattr__(handoff, "unit", "Other")
+        return None, handoff
+
+    monkeypatch.setattr(cu.roles, "read_current_source_data_handoff", issue)
+    reconcile = []
+    real_reconcile = cu.credential_gate.reconcile_package_data_access
+    monkeypatch.setattr(
+        cu.credential_gate,
+        "reconcile_package_data_access",
+        lambda *args, **kwargs: (reconcile.append(True), real_reconcile(*args, **kwargs))[1],
+    )
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 2 and len(calls) == 1 and reconcile == [] and r2_gate_runtime == []
+    assert _r2_check(report, "finalized")["code"] == (
+        "working_revision_mismatch"
+        if variant == "revision"
+        else "working_target_mismatch"
+        if variant == "tuple"
+        else "working_handoff_invalid"
+    )
+
+
+def _r2_rewrite_receipt(package: Path, payload: dict) -> str:
+    """Negative control: caller pins these exact changed bytes, without claiming producer authenticity."""
+    import iteration_receipt as receipt
+
+    raw = receipt.receipt_bytes(payload)
+    path = package / "validation/iterations" / payload["iteration"] / receipt.RECEIPT_NAME
+    path.write_bytes(raw)
+    return hashlib.sha256(raw).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "change,code",
+    [
+        ("binding", "A1_BINDING_MISMATCH"),
+        ("catalogue", "A1_BINDING_MISMATCH"),
+        ("image", "A1_CACHE_MISMATCH"),
+        ("readback", "A1_CACHE_MISMATCH"),
+        ("commitment", "SCHEMA"),
+        ("empty-canary", "A1_CANARY_SET"),
+        ("refused-canary", "a1_canaries_refused"),
+        ("page-judgment", "JUDGEMENT_PAGE_SET"),
+        ("visual-judgment", "JUDGEMENT_VISUAL_SET"),
+        ("numeric-label", "SCHEMA"),
+    ],
+)
+def test_r2_receipt_observations_and_denominators_cannot_be_relabelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, change: str, code: str
+) -> None:
+    package = _r2_package(tmp_path)
+    _, payload, _ = _r2_seal(package, monkeypatch)
+    facts = payload["generated"]["data_evidence"]
+    if change == "binding":
+        facts["canaries"]["observation"][0]["identity"]["port"] += 1
+    elif change == "catalogue":
+        facts["refresh"]["observation"]["catalogue"] = OTHER_LUID
+    elif change in ("image", "readback", "commitment"):
+        image = facts["persistence"]["observation"]["image"]
+        image[{"image": "intended_sha256", "readback": "installed_sha256", "commitment": "commitment"}[change]] = (
+            "ESTABLISHED" if change == "commitment" else "f" * 64
+        )
+    elif change == "empty-canary":
+        facts["canaries"]["observation"] = []
+    elif change == "refused-canary":
+        facts["canaries"] = {"status": "refused", "reason": "TOOL_UNAVAILABLE", "observation": None}
+    elif change == "page-judgment":
+        payload["judgement"]["pages"] = []
+    elif change == "visual-judgment":
+        payload["judgement"]["pages"][0]["visual_results"] = []
+    else:
+        payload["judgement"]["pages"][0]["numeric_results"][0]["status"] = "pass"
+    token = _r2_rewrite_receipt(package, payload)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 2
+    if change == "refused-canary":
+        assert _r2_check(report, "data-evidence")["code"] == code
+    else:
+        assert _r2_check(report, "finalized")["code"] == code
+        assert r2_gate_runtime == []
+    assert R2_DISCLAIMER not in cu.render(report)
+
+
+@pytest.mark.parametrize(
+    "change,code",
+    [
+        ("pending", "NO_FINAL_ITERATION"),
+        ("triage", "final_v3_all_pages_sign_off_required"),
+        ("v2", "final_v3_all_pages_sign_off_required"),
+        ("revision", "GENERATED_CHANGED"),
+        ("tuple", "GENERATED_CHANGED"),
+    ],
+)
+def test_r2_terminal_receipt_must_be_current_final_v3_sign_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, change: str, code: str
+) -> None:
+    import iteration_receipt as receipt
+
+    package = _r2_package(tmp_path)
+    _, payload, _ = _r2_seal(package, monkeypatch)
+    generated = payload["generated"]
+    if change == "pending":
+        payload["state"] = "pending"
+        payload["judgement"]["completed_at"] = None
+    elif change == "triage":
+        payload["mode"] = "triage"
+    elif change in ("tuple", "revision"):
+        field = "unit" if change == "tuple" else "package_revision"
+        value = "Other" if change == "tuple" else "sha256:" + "f" * 64
+        generated["artifact"][field] = value
+        generated["preparation"]["artifact_before"][field] = value
+    else:
+        payload.update(schema_version=2, outcome="incomplete")
+        generated["review"]["tool_version"] = "2.0.0"
+        for name in ("preparation", "numeric_evidence", "retained_roles"):
+            del generated[name]
+        generated["data_evidence"] = {"status": "pending", "reason": receipt.DATA_PENDING_REASON}
+        for page in payload["judgement"]["pages"]:
+            for numeric in page["numeric_results"]:
+                numeric.update(
+                    status="unverified",
+                    tableau_evidence_sha256=None,
+                    powerbi_query_sha256=None,
+                    powerbi_result_sha256=None,
+                )
+    token = _r2_rewrite_receipt(package, payload)
+    if change in ("triage", "v2"):
+        assert receipt.read_chain(package, token)[-1].payload["state"] == "final"
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 2 and _r2_check(report, "finalized")["code"] == code
+    assert r2_gate_runtime == []
+
+
+@pytest.mark.parametrize("change", ["cache", "missing-cache", "invalid-png", "missing-page", "missing-visual"])
+def test_r2_current_bytes_remain_pinned_after_finalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, change: str
+) -> None:
+    import iteration_receipt as receipt
+
+    package = _r2_package(tmp_path)
+    token, final, _ = _r2_seal(package, monkeypatch)
+    if change in ("cache", "missing-cache"):
+        cache = package / R2_MODEL / ".pbi/cache.abf"
+        if change == "cache":
+            cache.write_bytes(b"different-cache")
+        else:
+            cache.unlink()
+        expected = "GENERATED_CHANGED"
+    elif change == "invalid-png":
+        path = package / "validation/iterations/001" / final["generated"]["pages"][0]["powerbi"]["path"]
+        path.write_bytes(b"\x89PNG\r\n\x1a\njunk")
+        expected = "SCREENSHOT_NOT_PNG"
+    else:
+        name = "page.json" if change == "missing-page" else "visuals/v1/visual.json"
+        (package / R2_REPORT / "definition/pages/p1" / name).unlink()
+        expected = "PAGE_DEFINITION_MISSING" if change == "missing-page" else "VISUAL_DEFINITION_MISSING"
+    with pytest.raises(receipt.ReceiptError) as error:
+        receipt.read_chain(package, token)
+    assert error.value.code == expected
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 2 and _r2_check(report, "finalized")["code"] == expected
+    assert r2_gate_runtime == []
+
+
+@pytest.mark.parametrize("status", ["unverified", "mismatch", "layout_match"])
+def test_r2_every_page_and_visual_requires_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, status: str
+) -> None:
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch, review_status=status)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == (1 if status == "mismatch" else 2)
+    assert _r2_check(report, "visual-comparison-done")["code"] == "visual_comparison_not_pass"
+    assert _r2_check(report, "finalized")["status"] == "NOT_CHECKED"
+
+
+@pytest.mark.parametrize("change", ["low-grade", "wrong-source", "unstable"])
+def test_r2_reference_grade_attribution_and_capture_stability_are_not_numeric(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, change: str
+) -> None:
+    package = _r2_package(tmp_path)
+    reference = json.loads((package / "reference/manifest.json").read_bytes())
+    if change == "low-grade":
+        reference["dashboards"][0]["states"][0]["capabilities"] = ["layout_grade", "text_readable"]
+    elif change == "wrong-source":
+        reference["source_workbook_sha256"] = "f" * 64
+    _r2_put(package, "reference/manifest.json", reference)
+    token, payload, _ = _r2_seal(package, monkeypatch, review_status="unverified")
+    if change == "unstable":
+        payload["generated"]["pages"][0]["powerbi"]["capture"]["converged"] = False
+        token = _r2_rewrite_receipt(package, payload)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 2, cu.render(report)
+    assert _r2_check(report, "visual-comparison-done")["status"] == "NOT_CHECKED"
+    if change == "unstable":
+        assert _r2_check(report, "visual-layer-done")["status"] == "NOT_CHECKED"
+    assert R2_DISCLAIMER not in cu.render(report)
+
+
+@pytest.mark.parametrize(
+    "change,check_id",
+    [
+        ("description", "ai-descriptions"),
+        ("domain", "ai-descriptions"),
+        ("instructions", "ai-instructions"),
+        ("qna", "ai-instructions"),
+    ],
+)
+def test_r2_existing_ai_gaps_stay_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, change: str, check_id: str
+) -> None:
+    package = _r2_package(tmp_path)
+    if change in ("description", "domain"):
+        text = (package / R2_TABLE).read_text()
+        text = (
+            text.replace("/// One row per sale.\n", "")
+            if change == "description"
+            else text.replace("One of: Open, Closed.", "Sale workflow status.")
+        )
+        _r2_put(package, R2_TABLE, text.encode())
+    elif change == "instructions":
+        path = f"{R2_MODEL}/definition/cultures/en-US.tmdl"
+        _r2_put(package, path, (package / path).read_text().replace("CustomInstructions", "NoInstructions").encode())
+    else:
+        _r2_put(package, f"{R2_MODEL}/definition.pbism", {"version": "4.2", "settings": {"qnaEnabled": False}})
+    token, _, _ = _r2_seal(package, monkeypatch)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 1, cu.render(report)
+    assert _r2_check(report, check_id)["status"] == "FINDINGS"
+    assert R2_DISCLAIMER not in cu.render(report)
+
+
+def _r2_finding(**changes: object) -> dict:
+    return {
+        "id": "F-001",
+        "page_id": "p1",
+        "visual_id": "v1",
+        "kind": "visual",
+        "severity": "high",
+        "status": "still_open",
+        "detail": "Missing title",
+        "limitation_ref": None,
+        **changes,
+    }
+
+
+def test_r2_real_history_old_head_refuses_current_head_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    import iteration_receipt as receipt
+
+    package = _r2_package(tmp_path)
+    old, _, _ = _r2_seal(package, monkeypatch, findings=[_r2_finding()])
+    first = cu.run_all(package, receipt_sha256=old)
+    assert first["exit_code"] == 1 and _r2_check(first, "iteration-findings")["code"] == "open_findings"
+    _r2_put(package, R2_TABLE, (package / R2_TABLE).read_bytes() + b"\n")
+    token, _, _ = _r2_seal(package, monkeypatch, previous=old, findings=[_r2_finding(status="resolved")])
+    assert [item.name for item in receipt.read_chain(package, token)] == ["001", "002"]
+    r2_gate_runtime.clear()
+    refused = cu.run_all(package, receipt_sha256=old)
+    assert refused["exit_code"] == 2 and _r2_check(refused, "finalized")["code"] == "FINAL_RECEIPT_MISMATCH"
+    assert r2_gate_runtime == []
+    current = cu.run_all(package, receipt_sha256=token)
+    assert current["exit_code"] == 0, cu.render(current)
+    assert _r2_check(current, "current-working-namespace")["extra"] == []
+
+
+@pytest.mark.parametrize("change", ["receipt", "revision", "brief", "namespace", "class", "w-identity"])
+def test_r2_after_gate_changes_refuse_without_selecting_new_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, change: str
+) -> None:
+    package = _r2_package(tmp_path)
+    token, final, _ = _r2_seal(package, monkeypatch)
+    calls, originals = [], []
+    reader, validator = cu.roles.read_current_source_data_handoff, cu.roles.validate_current_source_data_handoff
+
+    def issued(*args, **kwargs):
+        code, original = reader(*args, **kwargs)
+        originals.append(original)
+        return code, original
+
+    def validate(root, original, **kwargs):
+        assert original is originals[0], "the ORIGINAL W must survive, never a successful second issuance"
+        calls.append(kwargs["expected_package_working_revision"])
+        return validator(root, original, **kwargs)
+
+    monkeypatch.setattr(cu.roles, "read_current_source_data_handoff", issued)
+    monkeypatch.setattr(cu.roles, "validate_current_source_data_handoff", validate)
+    orphan = cu.check_desktop_orphans
+
+    def changed(root: Path) -> dict:
+        row = orphan(root)
+        if change == "receipt":
+            final["judgement"]["pages"][0]["whole_page_status"] = "unverified"
+            _r2_rewrite_receipt(root, final)
+        elif change == "brief":
+            _r2_put(
+                root,
+                "migration-brief.md",
+                (root / "migration-brief.md").read_text().replace('"none"', '"required"').encode(),
+            )
+        elif change == "namespace":
+            _r2_put(root, "rogue.txt", b"extra")
+        elif change == "w-identity":
+            # Bytes and R stay identical, but the original held member's physical interval changed.
+            path = root / "report.json"
+            staged = root / "replacement.json"
+            staged.write_bytes(path.read_bytes())
+            os.replace(staged, path)
+        else:
+            text = (root / R2_TABLE).read_text()
+            _r2_put(
+                root,
+                R2_TABLE,
+                (text + "\n" if change == "revision" else text.replace("mode: import", "mode: dual")).encode(),
+            )
+        return row
+
+    monkeypatch.setattr(cu, "check_desktop_orphans", changed)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 2 and len(originals) == 1, cu.render(report)
+    assert _r2_check(report, "current-snapshot")["status"] == "NOT_CHECKED"
+    assert len(calls) == (2 if change == "w-identity" else 1)
+    assert R2_DISCLAIMER not in cu.render(report)
+
+
+def test_r2_old_pinned_snapshot_and_byte_identical_transfer_are_not_latest_ever_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    old = tmp_path / "transfer/Book"
+    shutil.copytree(package, old)
+    other = _r2_package(tmp_path / "other")
+    _r2_put(other, R2_TABLE, (other / R2_TABLE).read_bytes() + b"\n")
+    new, _, _ = _r2_seal(other, monkeypatch)
+    assert new != token
+    refused = cu.run_all(other, receipt_sha256=token)
+    assert _r2_check(refused, "finalized")["code"] == "FINAL_RECEIPT_MISMATCH"
+    accepted = cu.run_all(old, receipt_sha256=token)
+    assert accepted["exit_code"] == 0, cu.render(accepted)
+    assert R2_DISCLAIMER in cu.render(accepted)
+
+
+def test_r2_obsolete_completion_escape_hatch_is_absent(tmp_path: Path, r2_gate_runtime: list) -> None:
+    package = _r2_package(tmp_path)
+    source = (REPO_ROOT / "scripts/check_unit.py").read_text(encoding="utf-8")
+    forbidden = "CLAIMED" + "_ONLY"
+    assert forbidden not in source and ("claimed" + "_only_checks") not in source
+    assert forbidden not in cu.render(cu.run_all(package))
+
+
+def test_r2_json_output_cannot_invalidate_the_snapshot_it_claims(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    original = (package / "package-manifest.json").read_bytes()
+    with pytest.raises(SystemExit) as error:
+        cu.main(
+            [
+                str(package),
+                "--scope",
+                "all",
+                "--receipt-sha256",
+                token,
+                "--json",
+                str(package / "package-manifest.json"),
+            ]
+        )
+    assert error.value.code == 2 and (package / "package-manifest.json").read_bytes() == original
+    assert r2_gate_runtime == []
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        f"assets/{UNIT_LUID}_Book.twb",
+        "migration-spec.json",
+        "migration-spec.schema.json",
+        "data-access.json",
+        "source-provenance.json",
+        "report.json",
+        "migration-brief.md",
+    ],
+)
+def test_r2_immutable_roles_cannot_hide_behind_a_new_working_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, role: str
+) -> None:
+    package = _r2_package(tmp_path)
+    _r2_put(package, role, (package / role).read_bytes() + b"\n")
+    # For a changed asset, use an unverified judgement: the source-bound reference correctly no
+    # longer matches. Receipt publication remains neutral; immutable digest admission still refuses.
+    token, _, _ = _r2_seal(package, monkeypatch, review_status="unverified" if role.startswith("assets/") else "pass")
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 2 and r2_gate_runtime == []
+    assert _r2_check(report, "current-source-data")["code"] == "package_file_digest_mismatch"
+
+
+@pytest.mark.parametrize("disposition", ["unadjudicated", "accepted", "stale"])
+def test_r2_current_limitations_require_current_bound_adjudication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, disposition: str
+) -> None:
+    import iteration_receipt as receipt
+
+    package = _r2_package(tmp_path)
+    spec = json.loads((package / "migration-spec.json").read_bytes())
+    limitation = {"item": "Executive", "issue": "Font substitution", "severity": "low", "stage": "report"}
+    spec["limitations_encountered"] = [limitation]
+    _r2_put(package, "migration-spec.json", spec)
+    _r2_declare(package, "migration-spec.json")
+    ref = {"pointer": "/limitations_encountered/0", "sha256": receipt.limitation_entry_sha256(limitation)}
+    findings = [] if disposition == "unadjudicated" else [_r2_finding(status="accepted_limitation", limitation_ref=ref)]
+    token, payload, _ = _r2_seal(package, monkeypatch, findings=findings)
+    if disposition == "stale":
+        payload["judgement"]["findings"][0]["limitation_ref"]["sha256"] = "f" * 64
+        token = _r2_rewrite_receipt(package, payload)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == (0 if disposition == "accepted" else 2), cu.render(report)
+    row = _r2_check(report, "iteration-findings")
+    assert (
+        row["code"]
+        == {
+            "accepted": "resolved_or_bound_limitations",
+            "unadjudicated": "limitations_unadjudicated",
+            "stale": "ACCEPTED_LIMITATION_UNBOUND",
+        }[disposition]
+    )
+
+
+def test_r2_required_numeric_reason_survives_higher_priority_page_precondition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    package = _r2_package(tmp_path, numeric="required")
+    spec = json.loads((package / "migration-spec.json").read_bytes())
+    spec["dashboards"].append({"id": "missing", "name": "Missing"})
+    _r2_put(package, "migration-spec.json", spec)
+    _r2_declare(package, "migration-spec.json")
+    token, _, _ = _r2_seal(package, monkeypatch)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 4 and report["stopped_after"] == "page-parity"
+    assert "CANNOT_ESTABLISH(NUMERIC)" in cu.render(report) and "numeric_required_unsupported" in cu.render(report)
+    assert r2_gate_runtime == []
+
+
+def test_r2_newly_accepted_coherent_snapshot_is_not_original_commissioning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    package = _r2_package(tmp_path)
+    old, _, _ = _r2_seal(package, monkeypatch)
+    asset = f"assets/{UNIT_LUID}_Book.twb"
+    _r2_put(package, asset, b"<workbook name='Book' revision='new'/>\n")
+    provenance = json.loads((package / "source-provenance.json").read_bytes())
+    provenance["inputs"][0]["input"]["sha256"] = _sha256(package / asset)
+    _r2_put(package, "source-provenance.json", provenance)
+    reference = json.loads((package / "reference/manifest.json").read_bytes())
+    reference["source_workbook_sha256"] = _sha256(package / asset)
+    _r2_put(package, "reference/manifest.json", reference)
+    _r2_declare(package, asset, "source-provenance.json", "reference/manifest.json")
+    refused = cu.run_all(package, receipt_sha256=old)
+    assert refused["exit_code"] == 2
+    # Explicit threat-model control: replace BOTH package authority/history and the caller's H.
+    # There is deliberately no claim of original commissioning or authenticated/latest-ever history.
+    shutil.rmtree(package / "validation")
+    new, _, _ = _r2_seal(package, monkeypatch)
+    assert old != new
+    accepted = cu.run_all(package, receipt_sha256=new)
+    assert accepted["exit_code"] == 0, cu.render(accepted)
+    assert R2_DISCLAIMER in cu.render(accepted)
+
+
+def test_r2_both_chain_reads_use_the_same_caller_pin_and_original_w(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    chain_reader = cu.iteration_receipt.read_chain
+    w_reader = cu.roles.read_current_source_data_handoff
+    w_validator = cu.roles.validate_current_source_data_handoff
+    chains, issued, validated = [], [], []
+
+    def read_chain(root, supplied):
+        chains.append((root, supplied))
+        return chain_reader(root, supplied)
+
+    def issue(root, **kwargs):
+        code, handoff = w_reader(root, **kwargs)
+        issued.append(handoff)
+        return code, handoff
+
+    def validate(root, handoff, **kwargs):
+        validated.append(handoff)
+        return w_validator(root, handoff, **kwargs)
+
+    monkeypatch.setattr(cu.iteration_receipt, "read_chain", read_chain)
+    monkeypatch.setattr(cu.roles, "read_current_source_data_handoff", issue)
+    monkeypatch.setattr(cu.roles, "validate_current_source_data_handoff", validate)
+    assert cu.run_all(package, receipt_sha256=token)["exit_code"] == 0
+    assert chains == [(package, token), (package, token)]
+    assert len(issued) == 1 and len(validated) == 2 and all(value is issued[0] for value in validated)
+
+
+@pytest.mark.parametrize("change", ["upper", "leading", "trailing", "prefix"])
+def test_r2_even_the_correct_token_cannot_be_normalized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, change: str
+) -> None:
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    supplied = {"upper": token.upper(), "leading": " " + token, "trailing": token + "\n", "prefix": "sha256:" + token}[
+        change
+    ]
+    assert supplied != token
+    reads = []
+    reader = cu.iteration_receipt.read_chain
+
+    def counted(root, value):
+        reads.append(value)
+        return reader(root, value)
+
+    monkeypatch.setattr(cu.iteration_receipt, "read_chain", counted)
+    report = cu.run_all(package, receipt_sha256=supplied)
+    assert report["exit_code"] == 2 and _r2_check(report, "finalized")["code"] == "receipt_token_invalid"
+    assert reads == [] and r2_gate_runtime == []
+
+
+def test_r2_import_category_never_replaces_actual_connection_fidelity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    package = _r2_package(tmp_path)
+    bare = '\tpartition Sales = m\n\t\tmode: import\n\t\tsource =\n\t\t\tSql.Database("source.example", "db")\n'
+    _r2_put(package, R2_TABLE, (package / R2_TABLE).read_text().replace(R2_SQL, bare).encode())
+    token, _, _ = _r2_seal(package, monkeypatch)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert _r2_check(report, "model-class")["status"] == "PASS"
+    assert _r2_check(report, "connection-fidelity")["status"] == "NOT_CHECKED"
+    assert report["exit_code"] == 2 and _r2_check(report, "finalized")["status"] == "NOT_CHECKED"
+
+
+def test_r2_terminal_fold_does_not_restart_mutable_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    package = _r2_package(tmp_path)
+    token, _, _ = _r2_seal(package, monkeypatch)
+    monkeypatch.setattr(cu, "inspect_brownfield", lambda *_: pytest.fail("discovery after pinned authority"))
+    assert cu.run_all(package, receipt_sha256=token)["exit_code"] == 0
+
+
+@pytest.mark.parametrize("slot", ["second-page", "second-visual", "last-visual"])
+def test_r2_one_nonpass_judgement_cannot_hide_among_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, slot: str
+) -> None:
+    package = _r2_package(tmp_path)
+    _r2_expand_report(package)
+    _, final, _ = _r2_seal(package, monkeypatch)
+    pages = final["judgement"]["pages"]
+    if slot == "second-page":
+        pages[1]["whole_page_status"] = "unverified"
+    else:
+        pages[0 if slot == "second-visual" else 1]["visual_results"][1 if slot == "second-visual" else 0]["status"] = (
+            "unverified"
+        )
+    token = _r2_rewrite_receipt(package, final)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 2 and _r2_check(report, "visual-comparison-done")["status"] == "NOT_CHECKED"
+    assert _r2_check(report, "visual-layer-done")["status"] == "PASS"
+
+
+def test_r2_real_subset_receipt_cannot_complete_an_entire_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list
+) -> None:
+    import iteration_receipt as receipt
+
+    package = _r2_package(tmp_path)
+    _r2_expand_report(package)
+    token, final, _ = _r2_seal(package, monkeypatch, page_ids=frozenset({"p1"}))
+    assert final["mode"] == "triage" and final["generated"]["scope"] == "subset"
+    assert len(receipt.read_chain(package, token)) == 1
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 2
+    assert _r2_check(report, "finalized")["code"] == "final_v3_all_pages_sign_off_required"
+    assert r2_gate_runtime == []
+
+
+@pytest.mark.parametrize("change", ["datasource", "extra-model", "extra-report"])
+def test_r2_only_one_owned_workbook_target_can_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, change: str
+) -> None:
+    package = _r2_package(tmp_path)
+    if change == "datasource":
+        manifest = json.loads((package / "package-manifest.json").read_bytes())
+        manifest["kind"] = "datasource"
+        _r2_put(package, "package-manifest.json", manifest)
+    else:
+        (package / "fabric" / ("Other.SemanticModel" if change == "extra-model" else "Other.Report")).mkdir()
+    token, _, _ = _r2_seal(package, monkeypatch)
+    report = cu.run_all(package, receipt_sha256=token)
+    assert report["exit_code"] == 2 and _r2_check(report, "finalized")["code"] == "working_topology_unsupported"
+    assert r2_gate_runtime == []
