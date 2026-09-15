@@ -337,6 +337,7 @@ _WORKER_ERROR_CODES = (
             "local-fingerprint-failed",
             "published-assessment-unavailable",
             "published-authority-unavailable",
+            "published-identity-redacted",
             "live-lookup-refused",
             "live-lookup-failed",
             prov.MSG_INVENTORY_FAILED,
@@ -885,7 +886,7 @@ def _enum(value: object, allowed) -> None:
 
 
 def _text(value: object, maximum: int = 1024) -> None:
-    _require(type(value) is str and len(value) <= maximum and all(ord(char) >= 32 for char in value))
+    _require(type(value) is str and len(value) <= maximum and not prov.has_identity_controls(value))
 
 
 def _digest(value: object, length: int = 64) -> None:
@@ -950,8 +951,9 @@ def _validated_occurrences(rows: object) -> None:
 
 
 def _validated_workbook_identity(identity: object) -> None:
-    _require(type(identity) is dict and identity.keys() == {"file_sha256", "workbook_luid_sha256"})
+    _require(type(identity) is dict and identity.keys() == {"file_sha256", "basename_sha256", "workbook_luid_sha256"})
     _digest(identity["file_sha256"])
+    _digest(identity["basename_sha256"])
     if identity["workbook_luid_sha256"] is not None:
         _digest(identity["workbook_luid_sha256"])
 
@@ -1037,34 +1039,60 @@ def _validated_published_dependencies(origin: dict, local: dict) -> None:
     )
     _require(block["schema"] == prov.PUBLISHED_DEPENDENCIES_SCHEMA)
     _validated_dependency_match(block, origin, local)
-    rows = block["rows"]
+    _validated_dependency_rows(block["rows"], block["source_match"])
+
+
+def _validated_dependency_rows(rows: object, source_match: str, *, private: bool = False) -> None:
+    """The same strict outcome contract applies before and after public authority construction."""
     _require(type(rows) is list and 0 < len(rows) <= PROVENANCE_MAX_MEMBERS)
+    key = "published_key_sha256" if private else "published_key"
+    luid_key = "datasource_luid_sha256" if private else "datasource_luid"
     previous = -1
     for row in rows:
-        required = {"source_ordinal", "published_key", "state", "candidate_count"}
-        _require(type(row) is dict and required <= row.keys() <= required | {"datasource_luid"})
+        required = {"source_ordinal", key, "state", "candidate_count"}
+        _require(type(row) is dict and required <= row.keys() <= required | {luid_key})
         ordinal, count = row["source_ordinal"], row["candidate_count"]
         _require(_is_count(ordinal) and ordinal > previous)
         previous = ordinal
-        _text(row["published_key"])
-        _require(bool(row["published_key"].strip()))
+        if private:
+            _digest(row[key])
+        else:
+            _text(row[key])
+            _require(prov.valid_published_key(row[key]))
         _enum(row["state"], {"resolved", "missing", "ambiguous", "cannot_establish"})
         _require(count is None or _is_count(count))
         if row["state"] == "cannot_establish":
-            _require(count is None and "datasource_luid" not in row)
+            _require(count is None and luid_key not in row)
         else:
-            _require(block["source_match"] != "unestablished" and count is not None)
+            _require(source_match != "unestablished" and count is not None)
             if row["state"] == "resolved":
-                luid = row.get("datasource_luid")
-                _require(count == 1 and type(luid) is str and prov.LUID_RE.fullmatch(luid) is not None)
+                _require(count == 1)
+                if private:
+                    _digest(row.get(luid_key))
+                else:
+                    luid = row.get(luid_key)
+                    _require(type(luid) is str and prov.LUID_RE.fullmatch(luid) is not None)
             else:
-                _require("datasource_luid" not in row)
+                _require(luid_key not in row)
                 _require(count == 0 if row["state"] == "missing" else count > 1)
+
+
+def _validated_published_evidence(evidence: object) -> None:
+    _require(
+        type(evidence) is dict
+        and evidence.keys() == {"identity", "source_sha256", "current_sha256", "source_match", "rows"}
+    )
+    _validated_workbook_identity(evidence["identity"])
+    _digest(evidence["source_sha256"])
+    if evidence["current_sha256"] is not None:
+        _digest(evidence["current_sha256"])
+    _enum(evidence["source_match"], {"sha256", "revision_same", "unestablished"})
+    _validated_dependency_rows(evidence["rows"], evidence["source_match"], private=True)
 
 
 def _validated_basename(value: object) -> None:
     """Bounded platform-native basename syntax only; pure paths never perform filesystem I/O."""
-    _require(type(value) is str and 0 < len(value) <= 255 and "\0" not in value)
+    _require(type(value) is str and 0 < len(value) <= 255 and not prov.has_identity_controls(value))
     _require(value not in {".", ".."})
     windows = _BASENAME_PLATFORM == "nt"
     path = (PureWindowsPath if windows else PurePosixPath)(value)
@@ -1103,7 +1131,7 @@ def _validated_result_record(record: object) -> dict:
     if "origin_note" in record:
         _text(record["origin_note"])
         origin = record.get("origin")
-        notes = {prov.WITHHELD_NOTE, prov.NO_ORIGIN_NOTE, prov.INCOMPLETE_INVENTORY_NOTE}
+        notes = {prov.WITHHELD_NOTE, prov.IDENTITY_WITHHELD_NOTE, prov.NO_ORIGIN_NOTE, prov.INCOMPLETE_INVENTORY_NOTE}
         if origin:
             notes.add(
                 f"matched by {origin['matched_by']}, but the bytes DIFFER from the site copy - "
@@ -1131,7 +1159,8 @@ def _validated_dependency_history(record: dict, checkpoint: dict, success: bool)
     _require("published_occurrences" in checkpoint)
     expected = checkpoint["published_occurrences"]
     identity = checkpoint.get("resolved_identity")
-    if origin is not None and identity is not None:
+    if origin is not None:
+        _require(identity is not None)
         _require(type(origin["workbook_luid"]) is str)
         _require(identity["workbook_luid_sha256"] == prov.workbook_luid_digest(origin["workbook_luid"]))
     if block is None:
@@ -1142,6 +1171,26 @@ def _validated_dependency_history(record: dict, checkpoint: dict, success: bool)
     if block["source_match"] != "unestablished" and launched_luid is not None:
         _require(identity["workbook_luid_sha256"] == launched_luid)
     _require(prov.published_occurrence_checkpoint(block["rows"]) == expected)
+    filename = record["input"].get("file")
+    _require(type(filename) is str)
+    _require(
+        prov.workbook_identity_checkpoint(Path(filename), None)["basename_sha256"]
+        == checkpoint["launch_identity"]["basename_sha256"]
+    )
+    evidence = checkpoint.get("published_evidence")
+    _require(evidence is not None)
+    source_match = (
+        evidence["source_match"] if evidence["current_sha256"] == evidence["source_sha256"] else "unestablished"
+    )
+    _require(block["source_match"] == source_match)
+    outcomes = evidence["rows"]
+    if source_match == "unestablished":
+        outcomes = [
+            {key: row[key] for key in ("source_ordinal", "published_key_sha256")}
+            | {"state": "cannot_establish", "candidate_count": None}
+            for row in outcomes
+        ]
+    _require(prov.published_outcome_checkpoint(block["rows"]) == outcomes)
 
 
 def _validated_result(result: object, total: int, checkpoints: dict[int, dict]) -> dict:
@@ -1192,8 +1241,10 @@ def _validated_message(message: object) -> dict:
     _require(type(message) is dict and len(message) <= 4)
     kind, keys = message.get("kind"), set(message)
     if kind == prov.MSG_INPUTS_DISCOVERED:
-        _require(keys == {"kind", "total"} and _is_count(message["total"]))
+        _require({"kind", "total"} <= keys <= {"kind", "total", "protocol"} and _is_count(message["total"]))
         _require(message["total"] <= PROVENANCE_MAX_INPUTS)
+        if "protocol" in message:
+            _enum(message["protocol"], {prov.WORKER_PROTOCOL})
     elif kind == prov.MSG_OPERATION:
         _require(keys == {"kind", "operation", "completed", "total"})
         _enum(message["operation"], prov.WORKER_OPERATIONS)
@@ -1205,6 +1256,9 @@ def _validated_message(message: object) -> dict:
     elif kind == prov.MSG_WORKBOOK_IDENTITY:
         _require(keys == {"kind", "index", "identity"} and _is_count(message["index"]))
         _validated_workbook_identity(message["identity"])
+    elif kind == prov.MSG_PUBLISHED_EVIDENCE:
+        _require(keys == {"kind", "index", "evidence"} and _is_count(message["index"]))
+        _validated_published_evidence(message["evidence"])
     elif kind == prov.MSG_LOOKUP_INTENT:
         _require(keys == {"kind", "requested"} and type(message["requested"]) is bool)
     elif kind == prov.MSG_INVENTORY_FACTS:
@@ -1226,8 +1280,18 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
     recorded here, so a worker that finishes late cannot make a preempted phase look successful.
     """
 
-    def __init__(self, emit=emit_provenance_progress) -> None:
+    def __init__(
+        self,
+        emit=emit_provenance_progress,
+        *,
+        input_dir: Path | None = None,
+        launch_inputs: tuple[Path, ...] | None = None,
+    ) -> None:
         self._emit = emit
+        self.input_dir = input_dir
+        self.require_current = input_dir is not None or launch_inputs is not None
+        self.current_protocol = False
+        self.launches = None if launch_inputs is None else self._launch_identities(launch_inputs)
         self.total: int | None = None
         self.checkpoints: dict[int, dict] = {}
         self.snapshot: dict | None = None
@@ -1251,18 +1315,15 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
         candidate.messages += 1
         kind = message["kind"]
         if kind == prov.MSG_INPUTS_DISCOVERED:
-            _require(self.total is None and self.operation == prov.OP_COLLECT_INPUTS)
-            candidate.total = message["total"]
+            candidate.prepare_discovery(message)
         elif kind == prov.MSG_OPERATION:
             candidate.prepare_operation(message)
         elif kind == prov.MSG_CHECKPOINT:
-            _require(self.total is not None and message["index"] == len(self.checkpoints) < self.total)
-            _require(
-                self.operation == prov.OP_FINGERPRINT and self.counters.get(prov.OP_FINGERPRINT) == message["index"] + 1
-            )
-            candidate.checkpoints = {**self.checkpoints, message["index"]: message["record"]}
+            candidate.prepare_checkpoint(message)
         elif kind == prov.MSG_WORKBOOK_IDENTITY:
             candidate.prepare_workbook_identity(message)
+        elif kind == prov.MSG_PUBLISHED_EVIDENCE:
+            candidate.prepare_published_evidence(message)
         elif kind == prov.MSG_LOOKUP_INTENT:
             _require(self.live_requested is None and self.total is not None and self.total > 0)
             _require(self.operation == prov.OP_FINGERPRINT and len(self.checkpoints) == self.total)
@@ -1298,16 +1359,70 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
                 )
         return candidate
 
-    def prepare_workbook_identity(self, message: dict) -> None:
-        """Bind one independent observation to the currently open physical input, never a sibling."""
-        index = message["index"]
+    @staticmethod
+    def _launch_identities(inputs: tuple[Path, ...]) -> tuple[dict, ...]:
+        _require(len(inputs) <= PROVENANCE_MAX_INPUTS)
+        return tuple(prov.workbook_identity_checkpoint(path, prov.split_harvest_stem(path.stem)[0]) for path in inputs)
+
+    def prepare_discovery(self, message: dict) -> None:
+        """Bind the current worker to parent-discovered inputs, never to swappable child claims."""
+        _require(self.total is None and self.operation == prov.OP_COLLECT_INPUTS)
+        if self.require_current:
+            _require(message.get("protocol") == prov.WORKER_PROTOCOL)
+            _require(self.counters.get(prov.OP_COLLECT_INPUTS) == 0)
+            if self.launches is None:
+                # Runs in the existing bounded transport/validation thread, not on the deadline owner.
+                self.launches = self._launch_identities(tuple(prov.collect_inputs(self.input_dir)))
+            _require(message["total"] == len(self.launches))
+        self.current_protocol = "protocol" in message
+        self.total = message["total"]
+
+    def prepare_checkpoint(self, message: dict) -> None:
+        """A current checkpoint cannot drop its assessment or move to another parent-launched input."""
+        index, record = message["index"], message["record"]
+        _require(self.total is not None and index == len(self.checkpoints) < self.total)
+        _require(self.operation == prov.OP_FINGERPRINT and self.counters.get(prov.OP_FINGERPRINT) == index + 1)
+        if self.current_protocol:
+            _require({"published_occurrences", "launch_identity"} <= record.keys())
+        # Legacy injected transport controls have no launch set and may never issue P authority.
+        if self.launches is not None or record.get("published_occurrences"):
+            _require(self.launches is not None and record.get("launch_identity") == self.launches[index])
+        self.checkpoints = {**self.checkpoints, index: record}
+
+    def _content_checkpoint(self, index: int) -> dict:
         _require(self.operation == prov.OP_CONTENT and self.content_open and index in self.checkpoints)
         usable = [key for key, value in self.checkpoints.items() if "status" not in value["input"]]
         _require(self.content_inputs < len(usable) and index == usable[self.content_inputs])
-        checkpoint = self.checkpoints[index]
+        return self.checkpoints[index]
+
+    def prepare_workbook_identity(self, message: dict) -> None:
+        """Bind one independent observation to the currently open physical input, never a sibling."""
+        index = message["index"]
+        checkpoint = self._content_checkpoint(index)
         _require("launch_identity" in checkpoint and "resolved_identity" not in checkpoint)
-        _require(message["identity"]["file_sha256"] == checkpoint["launch_identity"]["file_sha256"])
+        _require(
+            all(
+                message["identity"][key] == checkpoint["launch_identity"][key]
+                for key in ("file_sha256", "basename_sha256")
+            )
+        )
         self.checkpoints = {**self.checkpoints, index: {**checkpoint, "resolved_identity": message["identity"]}}
+
+    def prepare_published_evidence(self, message: dict) -> None:
+        """Retain one input-bound acquisition envelope before its content phase can close."""
+        index, evidence = message["index"], message["evidence"]
+        checkpoint = self._content_checkpoint(index)
+        _require("published_evidence" not in checkpoint and evidence["identity"] == checkpoint.get("resolved_identity"))
+        _require(evidence["source_sha256"] == checkpoint["input"].get("sha256"))
+        _require(
+            [{key: row[key] for key in ("source_ordinal", "published_key_sha256")} for row in evidence["rows"]]
+            == checkpoint.get("published_occurrences")
+        )
+        if evidence["source_match"] != "unestablished":
+            _require(self.inventory is not None and self.inventory.status == "complete")
+            launched_luid = checkpoint["launch_identity"]["workbook_luid_sha256"]
+            _require(launched_luid is None or evidence["identity"]["workbook_luid_sha256"] == launched_luid)
+        self.checkpoints = {**self.checkpoints, index: {**checkpoint, "published_evidence": evidence}}
 
     def validate_result_history(self, result: dict, *, terminal: bool) -> None:
         """Every terminal reconciles observed work; success additionally requires its whole live path."""
@@ -1362,7 +1477,13 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
         returned = self.inventory.returned_count if self.inventory is not None else 0
         _require(len(matched) <= self.matched_count <= returned)
         _require(len(matched) <= self.counters.get(prov.OP_CONTENT, 0) <= self.matched_count)
-        withheld = {prov.CANCELLED_CODE, prov.DEADLINE_CODE, "scrub-failed", "build-failed"}
+        withheld = {
+            prov.CANCELLED_CODE,
+            prov.DEADLINE_CODE,
+            "scrub-failed",
+            "published-identity-redacted",
+            "build-failed",
+        }
         if not any(error["code"] in withheld for error in result["phase"]["errors"]):
             unread = sum(record.get("origin") is None and "lookup_error" in record for record in result["inputs"])
             _require(self.matched_count <= len(matched) + unread)
@@ -1691,6 +1812,8 @@ def collect_provenance(
     timeout_sec: float = PROVENANCE_TIMEOUT_DEFAULT_SEC,
     entry=None,
     env_path: Path | None = None,
+    *,
+    launch_inputs: tuple[Path, ...] | None = None,
 ) -> ProvenanceOutcome:
     """Run the whole provenance computation in one leaf worker under one absolute deadline.
 
@@ -1703,7 +1826,10 @@ def collect_provenance(
     NOT in this function.
     """
     deadline_at = time.monotonic() + timeout_sec
-    state = _ProvenanceState()
+    state = _ProvenanceState(
+        input_dir=input_dir if entry is None or entry is prov.provenance_worker else None,
+        launch_inputs=launch_inputs,
+    )
     process = receiver = recv = send = cancel = None
     worker_pid = None
     attempted = False

@@ -404,10 +404,13 @@ def _wire(message: dict) -> bytes:
     return struct.pack("!I", len(payload)) + payload
 
 
-def _receive(raw: bytes) -> tuple[str | None, estate._ProvenanceState]:
+def _receive(
+    raw: bytes, *, launch_inputs: tuple[Path, ...] | None = None
+) -> tuple[str | None, estate._ProvenanceState]:
     """Drive the real channel/decoder/state machine without paying for a spawn per malformed field."""
     left, right = socket.socketpair()
-    receiver = estate._ProvenanceReceiver(prov.ProvenanceChannel(left), _state())
+    state = estate._ProvenanceState(emit=lambda *_args: None, launch_inputs=launch_inputs)
+    receiver = estate._ProvenanceReceiver(prov.ProvenanceChannel(left), state)
     receiver.start()
     try:
         right.sendall(raw)
@@ -900,10 +903,10 @@ def test_local_intent_cannot_start_any_live_operation(stage: str) -> None:
 
 @pytest.mark.parametrize(
     "basename",
-    ["Sales:Q3.twb", r"Sales\Q3.twb", "unit.twb.", "unit.twb ", "CON.twb", "COM¹.twb", "unit\x01.twb"],
+    ["Sales:Q3.twb", r"Sales\Q3.twb", "unit.twb.", "unit.twb ", "CON.twb", "COM¹.twb"],
 )
 def test_posix_basename_rules_do_not_inherit_windows_restrictions(monkeypatch, basename: str) -> None:
-    """POSIX rejects NUL and slash, not Windows punctuation, device stems, controls or trailing rules."""
+    """Legal POSIX punctuation, device stems and trailing rules remain distinct from identity controls."""
     monkeypatch.setattr(estate, "_BASENAME_PLATFORM", "posix")
     try:
         estate._validated_basename(basename)
@@ -912,9 +915,24 @@ def test_posix_basename_rules_do_not_inherit_windows_restrictions(monkeypatch, b
 
 
 @pytest.mark.parametrize("platform", ["nt", "posix"])
-@pytest.mark.parametrize("basename", ["", ".", "..", "dir/unit.twb", "/unit.twb", "unit\0.twb", "x" * 256, True])
+@pytest.mark.parametrize(
+    "basename",
+    [
+        "",
+        ".",
+        "..",
+        "dir/unit.twb",
+        "/unit.twb",
+        "unit\0.twb",
+        "unit\x01.twb",
+        "unit\x7f.twb",
+        "unit\x85.twb",
+        "x" * 256,
+        True,
+    ],
+)
 def test_basename_common_rejections_are_lexical_and_bounded(monkeypatch, platform: str, basename: object) -> None:
-    """Every flavour refuses paths, dot segments, NUL, non-text and over-bound names."""
+    """Every flavour refuses paths, dot segments, C0/DEL/C1 identity controls, non-text and over-bound names."""
     monkeypatch.setattr(estate, "_BASENAME_PLATFORM", platform)
     with pytest.raises(estate.ProvenanceProtocolError):
         estate._validated_basename(basename)
@@ -974,10 +992,14 @@ def test_legal_basenames_are_accepted_without_filesystem_access(monkeypatch, pla
         estate._validated_basename(basename)
 
 
+P_INPUT = Path("11111111-1111-4111-8111-111111111111_Consumer.twb")
+
+
 def _published_result() -> dict:
     result = _result()
     result["phase"]["status"] = "success"
     local = result["inputs"][0]["input"]
+    local["file"] = P_INPUT.name
     local["revision_key"] = {"algo": "tableau-xml-v1", "value": "c" * 64}
     result["inputs"][0]["origin"] = {
         "server": "https://fixture.invalid",
@@ -1020,11 +1042,12 @@ def _published_checkpoint(result: dict) -> dict:
     record = result["inputs"][0]
     # An independent fixture projection, not the production projection being tested.
     identity = {
-        "file_sha256": "d" * 64,
+        "file_sha256": hashlib.sha256(str(P_INPUT.absolute()).encode()).hexdigest(),
+        "basename_sha256": hashlib.sha256(P_INPUT.name.encode()).hexdigest(),
         "workbook_luid_sha256": hashlib.sha256(record["origin"]["workbook_luid"].lower().encode()).hexdigest(),
     }
-    return {
-        "input": copy.deepcopy(record["input"]),
+    checkpoint = {
+        "input": {key: copy.deepcopy(value) for key, value in record["input"].items() if key != "file"},
         "launch_identity": dict(identity),
         "resolved_identity": dict(identity),
         "published_occurrences": [
@@ -1035,6 +1058,23 @@ def _published_checkpoint(result: dict) -> dict:
             for row in record["origin"]["published_dependencies"]["rows"]
         ],
     }
+    block = record["origin"]["published_dependencies"]
+    checkpoint["published_evidence"] = {
+        "identity": dict(identity),
+        "source_sha256": record["input"]["sha256"],
+        "current_sha256": record["input"]["sha256"],
+        "source_match": block["source_match"],
+        "rows": [
+            dict(occurrence, state=row["state"], candidate_count=row["candidate_count"])
+            | (
+                {"datasource_luid_sha256": hashlib.sha256(row["datasource_luid"].lower().encode()).hexdigest()}
+                if "datasource_luid" in row
+                else {}
+            )
+            for occurrence, row in zip(checkpoint["published_occurrences"], block["rows"])
+        ],
+    }
+    return checkpoint
 
 
 @pytest.mark.parametrize("source_match", ["sha256", "revision_same", "unestablished"])
@@ -1224,9 +1264,10 @@ def test_published_new_authority_requires_assessment_but_existing_legacy_artifac
 def _published_messages(result: dict) -> list[dict]:
     checkpoint = _published_checkpoint(result)
     identity = checkpoint.pop("resolved_identity")
+    evidence = checkpoint.pop("published_evidence")
     messages = [
         {"kind": "operation", "operation": "collect-inputs", "completed": 0, "total": 1},
-        _discovery(),
+        {**_discovery(), "protocol": prov.WORKER_PROTOCOL},
         {"kind": "operation", "operation": "collect-inputs", "completed": 1, "total": 1},
         {"kind": "operation", "operation": "fingerprint", "completed": 1, "total": 1},
         {"kind": "checkpoint", "index": 0, "record": checkpoint},
@@ -1240,6 +1281,7 @@ def _published_messages(result: dict) -> list[dict]:
             messages.append(_facts(returned_count=1, total_available=1))
         if operation == "content":
             messages.append({"kind": prov.MSG_WORKBOOK_IDENTITY, "index": 0, "identity": identity})
+            messages.append({"kind": prov.MSG_PUBLISHED_EVIDENCE, "index": 0, "evidence": evidence})
         messages.append({"kind": "operation", "operation": operation, "completed": 1, "total": 1})
     messages.append({"kind": "safe-snapshot", "result": copy.deepcopy(result)})
     messages.extend(
@@ -1249,12 +1291,16 @@ def _published_messages(result: dict) -> list[dict]:
     return messages
 
 
+def _receive_published(messages: list[dict]) -> tuple[str | None, estate._ProvenanceState]:
+    return _receive(b"".join(_wire(message) for message in messages), launch_inputs=(P_INPUT,))
+
+
 def test_published_authority_survives_real_wire_and_publication_without_private_checkpoint_fields(
     tmp_path: Path,
 ) -> None:
     result = _published_result()
     messages = _published_messages(result)
-    code, state = _receive(b"".join(_wire(message) for message in messages))
+    code, state = _receive_published(messages)
     assert code is None and state.terminal == result
     path = estate.write_source_provenance(tmp_path, state.terminal)
     assert path is not None and json.loads(path.read_text(encoding="utf-8")) == result
@@ -1264,6 +1310,8 @@ def test_published_authority_survives_real_wire_and_publication_without_private_
             "published_occurrences",
             "launch_identity",
             "resolved_identity",
+            "published_evidence",
+            "basename_sha256",
             "file_sha256",
             "workbook_luid_sha256",
         )
@@ -1279,7 +1327,7 @@ def test_published_malformed_child_authority_is_a_protocol_fault_not_a_clean_pro
             message["result"]["inputs"][0]["origin"]["published_dependencies"]["private-catalog"] = (
                 "private-reflected-secret"
             )
-    code, state = _receive(b"".join(_wire(message) for message in messages))
+    code, state = _receive_published(messages)
     assert code == estate.PROVENANCE_PROTOCOL_CODE, "P_NESTED_VALIDATION"
     document = state.document(code)
     assert document["inputs"][0]["input"]["sha256"] == "a" * 64
@@ -1306,7 +1354,7 @@ def test_published_catalog_and_detail_remain_inside_existing_absolute_deadline(t
     root.mkdir()
     source = root / f"{P_WORKBOOK}_Consumer.twb"
     source.write_bytes(_published_xml())
-    outcome = estate.collect_provenance(root, timeout_sec=3.0, entry=_hanging_published_worker)
+    outcome = estate.collect_provenance(root, timeout_sec=3.0, entry=_hanging_published_worker, launch_inputs=(source,))
     assert outcome.expired and outcome.worker_alive is False
     assert outcome.result["phase"]["status"] == "partial"
     assert outcome.result["phase"]["errors"][-1] == {"code": "deadline-expired", "operation": "content"}
@@ -1319,15 +1367,15 @@ def test_published_both_final_workbook_luids_cannot_replace_independent_inventor
     result["inputs"][0]["input"]["file"] = "11111111-1111-4111-8111-111111111111_Consumer.twb"
     messages = _published_messages(result)
     # The actual local checkpoint is derived-only; the scrubbed filename remains unchanged.
-    messages[4]["record"]["input"].pop("file")
-    code, state = _receive(b"".join(_wire(message) for message in messages))
+    messages[4]["record"]["input"].pop("file", None)
+    code, state = _receive_published(messages)
     assert code is None and state.terminal == result, "P_WORKBOOK_TRANSPLANT_POSITIVE"
     for message in messages:
         if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
             origin = message["result"]["inputs"][0]["origin"]
             origin["workbook_luid"] = "33333333-3333-4333-8333-333333333333"
             origin["published_dependencies"]["workbook_luid"] = origin["workbook_luid"]
-    code, state = _receive(b"".join(_wire(message) for message in messages))
+    code, state = _receive_published(messages)
     assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, "P_RESOLVED_WORKBOOK_BINDING"
     assert state.document(code)["inputs"][0]["input"]["sha256"] == "a" * 64
 
@@ -1356,7 +1404,7 @@ def test_published_independent_identity_event_binds_the_launched_input_and_conte
         messages.insert(at + 2, messages.pop(at))
     else:
         identity["index"] = 1
-    code, state = _receive(b"".join(_wire(message) for message in messages))
+    code, state = _receive_published(messages)
     assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, f"P_LAUNCH_BINDING_{defect}"
     document = state.document(code)
     assert document["inputs"][0]["input"]["sha256"] == "a" * 64
@@ -1369,7 +1417,7 @@ def test_published_independent_identity_event_binds_the_launched_input_and_conte
 def test_published_current_checkpoint_cannot_drop_half_its_assessment(field: str) -> None:
     messages = _published_messages(_published_result())
     del messages[4]["record"][field]
-    code, state = _receive(b"".join(_wire(message) for message in messages))
+    code, state = _receive_published(messages)
     assert code == estate.PROVENANCE_PROTOCOL_CODE and not state.checkpoints, "P_ASSESSMENT_ENVELOPE"
 
 
@@ -1377,7 +1425,7 @@ def test_published_current_checkpoint_cannot_drop_half_its_assessment(field: str
 def test_published_authority_must_not_be_invented_after_an_empty_or_unknown_assessment(assessment: list | None) -> None:
     messages = _published_messages(_published_result())
     messages[4]["record"]["published_occurrences"] = assessment
-    code, state = _receive(b"".join(_wire(message) for message in messages))
+    code, state = _receive_published(messages)
     assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, "P_ASSESSMENT_NO_INVENTION"
 
 
@@ -1389,12 +1437,12 @@ def test_published_full_wire_cannot_claim_success_without_assessed_authority(ass
     for message in messages:
         if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
             del message["result"]["inputs"][0]["origin"]["published_dependencies"]
-    code, state = _receive(b"".join(_wire(message) for message in messages))
+    code, state = _receive_published(messages)
     assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, "P_ASSESSMENT_SUCCESS_BINDING"
 
 
 @pytest.mark.parametrize("where", ["launch", "resolved"])
-@pytest.mark.parametrize("field", ["file_sha256", "workbook_luid_sha256"])
+@pytest.mark.parametrize("field", ["file_sha256", "basename_sha256", "workbook_luid_sha256"])
 @pytest.mark.parametrize(
     "value", ["private-filename.twb", "f" * 63, "F" * 64, True, [], {"source": "private-host-path"}]
 )
@@ -1406,6 +1454,144 @@ def test_published_private_identity_fields_remain_strict_bounded_digests(where: 
         else next(message["identity"] for message in messages if message["kind"] == prov.MSG_WORKBOOK_IDENTITY)
     )
     identity[field] = value
-    code, state = _receive(b"".join(_wire(message) for message in messages))
+    code, state = _receive_published(messages)
     assert code == estate.PROVENANCE_PROTOCOL_CODE, "P_PRIVATE_IDENTITY_TYPES"
     assert "private-" not in json.dumps(state.document(code))
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing",
+        "duplicate",
+        "before-identity",
+        "after-content",
+        "index",
+        "file",
+        "source-sha",
+        "current-sha",
+        "missing-current",
+        "reordered-rows",
+        "duplicate-row",
+        "key",
+        "surplus",
+        "bool-count",
+        "non-object",
+    ],
+)
+def test_r2_published_acquisition_envelope_is_closed_and_phase_bound(tmp_path: Path, monkeypatch, defect: str) -> None:
+    from test_stamp_tableau_provenance import (
+        LIVE_ENV,
+        _published_capture,
+        _published_replay,
+        _published_setup,
+        _published_xml,
+    )
+
+    path, site = _published_setup(tmp_path, monkeypatch, _published_xml("SalesFeed", "SalesFeed"))
+    result, messages = _published_capture(path, LIVE_ENV)
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "R2_ENVELOPE_POSITIVE"
+    assert len(site.queries()) == site.detail_count() == 1
+    at = next(index for index, message in enumerate(messages) if message["kind"] == prov.MSG_PUBLISHED_EVIDENCE)
+    message = messages[at]
+    if defect == "missing":
+        messages.pop(at)
+    elif defect == "duplicate":
+        messages.insert(at + 1, copy.deepcopy(message))
+    elif defect == "before-identity":
+        messages.insert(at - 1, messages.pop(at))
+    elif defect == "after-content":
+        messages.insert(at + 1, messages.pop(at))
+    elif defect == "index":
+        message["index"] = 1
+    elif defect == "file":
+        message["evidence"]["identity"]["file_sha256"] = "e" * 64
+    elif defect in ("source-sha", "current-sha"):
+        message["evidence"]["source_sha256" if defect == "source-sha" else "current_sha256"] = "e" * 64
+    elif defect == "missing-current":
+        del message["evidence"]["current_sha256"]
+    elif defect == "reordered-rows":
+        message["evidence"]["rows"].reverse()
+    elif defect == "duplicate-row":
+        message["evidence"]["rows"][1] = copy.deepcopy(message["evidence"]["rows"][0])
+    elif defect == "key":
+        message["evidence"]["rows"][0]["published_key_sha256"] = "e" * 64
+    elif defect == "surplus":
+        message["evidence"]["catalog"] = "private-response-only"
+    elif defect == "bool-count":
+        message["evidence"]["rows"][0]["candidate_count"] = True
+    else:
+        message["evidence"] = None
+    code, state = _published_replay(messages)
+    assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, f"R2_ENVELOPE_{defect}"
+    document = state.document(code)
+    assert document["inputs"][0]["input"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert all(field not in json.dumps(document) for field in ("published_evidence", "private-response-only"))
+
+
+@pytest.mark.parametrize("char", ["\x00", "\x1f", "\x7f", "\x80", "\x85", "\x9f", "é", "漢"])
+def test_r2_published_wire_text_uses_the_same_control_predicate(tmp_path: Path, monkeypatch, char: str) -> None:
+    from test_stamp_tableau_provenance import LIVE_ENV, _published_capture, _published_replay, _published_setup
+
+    path, _site = _published_setup(tmp_path, monkeypatch)
+    _result_value, messages = _published_capture(path, LIVE_ENV)
+    assert _published_replay(messages)[0] is None, "R2_WIRE_TEXT_POSITIVE"
+    for message in messages:
+        if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            message["result"]["inputs"][0]["origin"]["workbook_name"] = "Sales" + char + "Feed"
+    code, state = _published_replay(messages)
+    if char in ("é", "漢"):
+        assert code is None and prov.is_success(state.terminal), "R2_WIRE_UNICODE"
+    else:
+        assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, "R2_WIRE_CONTROL"
+
+
+def test_r2_published_authority_is_never_admitted_by_an_unseeded_transport_seam(tmp_path: Path, monkeypatch) -> None:
+    from test_stamp_tableau_provenance import LIVE_ENV, _published_capture, _published_replay, _published_setup
+
+    path, _site = _published_setup(tmp_path, monkeypatch)
+    _result_value, messages = _published_capture(path, LIVE_ENV)
+    assert _published_replay(messages)[0] is None, "R2_SEEDED_POSITIVE"
+    code, state = _receive(b"".join(_wire(message) for message in messages))
+    assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, "R2_SEED_REQUIRED"
+
+
+def test_r2_shipping_parent_requires_current_protocol_even_if_worker_sends_legacy(monkeypatch, tmp_path: Path) -> None:
+    import provenance_workers
+
+    (tmp_path / "unit.twb").write_bytes(b"<workbook/>")
+    monkeypatch.setattr(prov, "provenance_worker", provenance_workers.succeeds)
+    outcome = estate.collect_provenance(tmp_path, timeout_sec=3)
+    assert outcome.result["phase"]["errors"][0]["code"] == estate.PROVENANCE_PROTOCOL_CODE, "R2_PARENT_PROTOCOL_PIN"
+    assert outcome.worker_alive is False and not prov.is_success(outcome.result)
+
+
+@pytest.mark.timing
+def test_r2_parent_launch_discovery_cannot_extend_the_existing_deadline(monkeypatch, tmp_path: Path) -> None:
+    entered, release = threading.Event(), threading.Event()
+
+    def stalled_discovery(_target):
+        entered.set()
+        release.wait(5)
+        return []
+
+    monkeypatch.setattr(prov, "collect_inputs", stalled_discovery)
+    left, right = socket.socketpair()
+    state = estate._ProvenanceState(emit=lambda *_args: None, input_dir=tmp_path)
+    receiver = estate._ProvenanceReceiver(prov.ProvenanceChannel(left), state)
+    receiver.start()
+    started = time.monotonic()
+    try:
+        right.sendall(_wire({"kind": "operation", "operation": "collect-inputs", "completed": 0, "total": 1}))
+        right.sendall(_wire({"kind": "inputs-discovered", "protocol": prov.WORKER_PROTOCOL, "total": 0}))
+        code = estate._drain_worker(receiver, started + 0.1, state)
+        assert entered.is_set(), "parent discovery was not reached"
+        assert code == estate.PROVENANCE_DEADLINE_CODE, "R2_PARENT_DISCOVERY_DEADLINE"
+        assert state.total is None and state.launches is None, "R2_PARENT_DISCOVERY_LATE_EVIDENCE"
+    finally:
+        release.set()
+        receiver.close()
+        right.close()
+    assert time.monotonic() - started < 0.6, "R2_PARENT_DISCOVERY_DEADLINE"
+    assert not receiver.thread.is_alive()

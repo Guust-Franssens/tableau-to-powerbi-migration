@@ -235,7 +235,8 @@ only in the scrubbed result, never in progress or error diagnostics.
 Scrubbed input names are bounded to 255 characters and validated as basenames for the executing
 platform, using lexical pure paths only: no open, stat, resolve or other filesystem lookup. POSIX
 permits `:` and literal backslash; Windows alone applies its punctuation, device-name and trailing
-space/period restrictions. Both reject paths, NUL, empty names and dot segments. Names remain in the
+space/period restrictions. Both reject paths, C0/DEL/C1 controls, empty names and dot segments. The
+control rejection is a provenance-identity ceiling, not a claim about POSIX filename legality. Names remain in the
 artifact, never in protocol diagnostics or progress.
 
 Spawn/setup is charged to the computation budget; start failures are typed failures. Cooperative
@@ -299,7 +300,8 @@ malformed, unsupported or unparseable content is `null` in the private checkpoin
 the existing typed unavailable-input result. Known occurrences without origin/lookup authority produce
 `published-authority-unavailable`, also non-success, retaining safe local evidence. A missing, empty,
 overlong or control-containing parser key likewise cannot produce a successful standalone capture;
-supervision refuses the malformed key rather than sanitizing it into another datasource identity.
+the producer withholds that block, and supervision refuses any malformed authority that still
+arrives, rather than sanitizing the key into another datasource identity.
 
 REST uses only the **case-preserved, decoded `derived-from` content URL segment**, on the matching
 source site/server. Accepted routes are `<base>/datasources/<content-url>` and
@@ -335,23 +337,62 @@ Catalog/detail successes and failures are cached only inside this provenance run
 
 The private fingerprint checkpoint always binds assessment, even when empty or unassessable, alongside
 original ordinals and **digests** of parser keys. A paired `launch_identity` binds digests of the launched
-absolute file identity and any harvested workbook LUID **before live work**. After inventory selection,
+absolute file identity, basename and any harvested workbook LUID **before live work**. The shipping
+parent requires the explicit `tableau-provenance-worker/2` capability on discovery. It independently
+collects the ordered input paths once, in the existing deadline-bounded transport/validation thread,
+and binds each checkpoint to that **parent-owned** launch set before accepting it. It does not derive
+the launch set from a second worker message. Tests may supply the same fixed tuple directly.
+Swapping checkpoints and all corresponding private payloads therefore cannot move authority between
+two physical inputs, even when their bytes are identical. A public authority also requires the
+scrubbed basename to retain its parent-bound identity.
+
+After inventory selection,
 one private `workbook-identity` event binds the independently observed workbook LUID digest to that
 same launched input, before download and origin construction. The supervisor checks the event's
 ordinal, phase, uniqueness and file digest, then reconciles the final LUID against this observation
 and any confirmed harvested LUID. Altering both final LUID fields does not alter that evidence, even
 when two different workbooks have identical bytes.
 
+Each assessed, valid nonempty association emits one `published-evidence` envelope **before** public
+block construction, inside that input's content phase and after its identity event. It retains the
+held-source SHA, the actual final-path rehash (null when unreadable), pre-rehash source-match state,
+and each occurrence's ordered key digest, state, count and selected **LUID digest**. No URL, path,
+catalog row, copied name, credential or response/exception text is included. The parent validates
+the closed shape and input/index/phase binding, derives the rehash downgrade itself, and requires
+the final public outcomes to reconcile exactly. Editing only snapshot/terminal source-match,
+outcome/count or selected LUID cannot supersede the earlier acquisition evidence. This is not a
+second REST client or an atomic server snapshot.
+
 The supervisor reconciles the complete ordered row sequence against the checkpoint and validates
 the nested closed shape, SHA, identity, revision evidence and state/cardinality contract. Presence is
 bidirectional: a block cannot invent rows after empty/unassessable assessment, and a successful result
 cannot lose a known occurrence or an unassessable assessment into legacy absence.
 Missing, surplus, duplicate-ordinal, reordered, malformed or unknown nested rows/fields are protocol
-faults, not cleaned legacy origins. An occurrence with no valid parser key is retained as incomplete
-by standalone capture and refused by supervision rather than filled from another identity hint.
-Checkpoint-only fields never enter the published artifact, including on interruption. Historical
-derived-only checkpoints remain legacy observations, cannot issue the new authority, and are not
-produced by the current worker; paired current assessment/launch evidence cannot lose either half.
+faults, not cleaned legacy origins. An occurrence with no valid parser key remains in the private
+assessment, with a typed non-success error and no public dependency authority; it is never filled
+from another identity hint. Checkpoint-only fields never enter the published artifact, including
+on interruption. Legacy artifact normalization remains compatible separately. Explicitly injected
+legacy transport stand-ins remain observation-only and cannot issue P authority without parent
+input bindings. They are not a fallback for the current shipping worker: deleting its protocol
+marker or either/both assessment fields is a protocol fault, not a legacy downgrade.
+
+Configured server URLs are validated **before client construction copies a public origin and before
+any live request**. Userinfo, query/fragment delimiters (even empty), malformed origins, unsupported
+schemes and ambiguous base paths produce a typed lookup refusal without copying the URL to output.
+HTTP loopback, Server/Cloud, decoded base paths and explicit/default ports have controls; real urllib
+loopback tests verify both supported calls and zero calls for refused configuration. One C0/DEL/C1
+predicate is shared by decoded URL segments, producer keys and supervisor text/identity validation,
+without banning ordinary Unicode. All authority-bearing REST JSON (sign-in, inventory, user,
+catalog and detail) uses one decoder that rejects duplicate object keys, NaN/Infinity and numeric
+overflow to nonfinite floats before consuming any identity.
+
+Before scrub, the producer retains digests of authority-bearing identities and source fields.
+After scrub it reconciles them before sending a safe snapshot or publishing standalone output.
+Redaction may change display metadata; it may not turn a parser key, workbook/datasource LUID,
+server/site or source identity into a different successful association. Such a collision withholds
+the live origin and records `published-identity-redacted` as non-success; redaction is never weakened
+to keep an identity. The standalone CLI publishes normalized nonempty evidence and returns exit 1
+for a non-success phase, including cleanup failures, rather than returning 0 merely for writing a file.
 
 Catalog permission errors, timeouts and unreadable replies produce `cannot_establish` without
 destroying otherwise valid origin evidence or copying catalog rows/exception text into diagnostics.
@@ -363,6 +404,11 @@ associations, not an atomic server snapshot or proof against a subsequent source
 **Claim ceiling:** P does not thin consumer models, rewrite PBIR, choose a provider package, transport
 the association through packaging, make consumers `START_READY`, support `COMPLETE`, or change
 promotion. Consumer binding/transport C remains separate and blocked on P; promotion remains #57.
+Under the B-refined boundary, the temporary **whole-estate exit 11 stays in place** for known
+published occurrences without authority. Narrowing that stop belongs to a separate stacked C/S2
+consumer change, not P. The unchanged offline E2E fixture still expects its former exit-0 behavior;
+that integration control is explicitly red until the separately scoped consumer/harness work lands.
+Passing P's direct suites is not a green whole-repository CI or an integration-readiness claim.
 
 ### Package folder identification (#616)
 
