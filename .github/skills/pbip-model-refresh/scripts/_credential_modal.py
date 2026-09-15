@@ -57,9 +57,16 @@ no authority either: measured, it is a Z-ORDER answer (see :func:`main_frame`).
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import re
+import struct
+import subprocess
+import sys
+import threading
 import time
+import uuid
+import zlib
 from ctypes import wintypes
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -1227,3 +1234,375 @@ def join_with_credential_poll(
 
 
 # pylint: enable=too-many-arguments
+
+
+IMAGE_CAPTURE_SECONDS = 8.0
+IMAGE_LIFETIME_SECONDS = 60.0
+_IMAGE_NAME = re.compile(r"_ui-image-[1-9a-fx]{32}\.png")
+_IMAGE_RESULTS = {
+    "ACQUIRED",
+    "TARGET_CHANGED",
+    "BLANK_OR_INCOMPLETE",
+    "CAPTURE_FAILED",
+    "WRITE_FAILED",
+    "UNSUPPORTED",
+    "CAPTURE_CLEANUP_FAILED",
+}
+
+
+class _ImageUnavailable(RuntimeError):
+    """A closed, content-free acquisition result; never a dialog classification."""
+
+
+def _same_image_target(user32: ctypes.CDLL, pid: int, window: DesktopWindow) -> bool:
+    """Recheck the detected HWND/PID/owner, not a newly selected window."""
+    target_pid = wintypes.DWORD()
+    owner_pid = wintypes.DWORD()
+    target_thread = user32.GetWindowThreadProcessId(window.hwnd, ctypes.byref(target_pid))
+    owner_thread = user32.GetWindowThreadProcessId(window.owner_hwnd, ctypes.byref(owner_pid))
+    return bool(
+        target_thread
+        and owner_thread
+        and target_pid.value == pid
+        and owner_pid.value == pid
+        and window.hwnd != window.owner_hwnd
+        and user32.IsWindowVisible(window.hwnd)
+        and _hwnd_value(user32.GetWindow(window.hwnd, GW_OWNER)) == window.owner_hwnd
+        and not user32.IsWindowEnabled(window.owner_hwnd)
+    )
+
+
+def _image_user32() -> ctypes.CDLL:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _configure_user32(user32)
+    user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+    user32.PrintWindow.restype = wintypes.BOOL
+    return user32
+
+
+def _image_extent(user32: ctypes.CDLL, hwnd: int) -> tuple[int, int]:
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+        raise _ImageUnavailable("TARGET_CHANGED")
+    width, height = rect.right - rect.left, rect.bottom - rect.top
+    # Allocation bounds only. Neither size nor successful rasterisation establishes a prompt.
+    if width <= 0 or height <= 0 or width * height > 4_000_000:
+        raise _ImageUnavailable("BLANK_OR_INCOMPLETE")
+    return width, height
+
+
+def _render_exact_window(user32: ctypes.CDLL, hwnd: int) -> tuple[int, int, bytes]:
+    """Print ONE HWND into a memory DIB. No screen DC, foreground, restore or activation."""
+    # The GDI handles and selected object must live until after the synchronous PrintWindow.
+    # pylint: disable=too-many-locals
+    width, height = _image_extent(user32, hwnd)
+    gdi = ctypes.WinDLL("gdi32", use_last_error=True)
+    for name, arguments, result in (
+        ("CreateCompatibleDC", [wintypes.HDC], wintypes.HDC),
+        (
+            "CreateDIBSection",
+            [
+                wintypes.HDC,
+                ctypes.c_void_p,
+                wintypes.UINT,
+                ctypes.POINTER(ctypes.c_void_p),
+                wintypes.HANDLE,
+                wintypes.DWORD,
+            ],
+            wintypes.HBITMAP,
+        ),
+        ("SelectObject", [wintypes.HDC, wintypes.HANDLE], wintypes.HANDLE),
+        ("DeleteObject", [wintypes.HANDLE], wintypes.BOOL),
+        ("DeleteDC", [wintypes.HDC], wintypes.BOOL),
+        ("GdiFlush", [], wintypes.BOOL),
+    ):
+        function = getattr(gdi, name)
+        function.argtypes, function.restype = arguments, result
+    dc = gdi.CreateCompatibleDC(None)
+    bitmap = previous = None
+    try:
+        if not dc:
+            raise _ImageUnavailable("CAPTURE_FAILED")
+        header = ctypes.create_string_buffer(struct.pack("<IiiHHIIiiII", 40, width, -height, 1, 32, 0, 0, 0, 0, 0, 0))
+        bits = ctypes.c_void_p()
+        bitmap = gdi.CreateDIBSection(dc, header, 0, ctypes.byref(bits), None, 0)
+        if not bitmap or not bits.value:
+            raise _ImageUnavailable("CAPTURE_FAILED")
+        previous = gdi.SelectObject(dc, bitmap)
+        if not previous or previous == ctypes.c_void_p(-1).value:
+            previous = None
+            raise _ImageUnavailable("CAPTURE_FAILED")
+        # Untouched pixels expose a partial/no-op renderer instead of publishing that as evidence.
+        sentinel = b"\xad\x53\xc7\x00"
+        ctypes.memmove(bits, sentinel * (width * height), width * height * 4)
+        if not user32.PrintWindow(hwnd, dc, 2):  # PW_RENDERFULLCONTENT, never a different HWND
+            raise _ImageUnavailable("CAPTURE_FAILED")
+        if not gdi.GdiFlush():
+            raise _ImageUnavailable("CAPTURE_FAILED")
+        if _image_extent(user32, hwnd) != (width, height):
+            raise _ImageUnavailable("TARGET_CHANGED")
+        raw = ctypes.string_at(bits, width * height * 4)
+        rgb = bytearray(width * height * 3)
+        rgb[0::3], rgb[1::3], rgb[2::3] = raw[2::4], raw[1::4], raw[0::4]
+        if rgb == rgb[:3] * (width * height) or any(
+            rgb[index : index + 3] == b"\xc7\x53\xad" for index in range(0, len(rgb), 3)
+        ):
+            raise _ImageUnavailable("BLANK_OR_INCOMPLETE")
+        return width, height, bytes(rgb)
+    finally:
+        if previous:
+            gdi.SelectObject(dc, previous)
+        released = [bool(gdi.DeleteObject(bitmap)) if bitmap else True, bool(gdi.DeleteDC(dc)) if dc else True]
+        if not all(released):
+            raise _ImageUnavailable("CAPTURE_CLEANUP_FAILED")
+
+
+def _image_png(width: int, height: int, rgb: bytes) -> bytes:
+    """Encode the memory raster using only the standard library."""
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    rows = b"".join(b"\0" + rgb[row * width * 3 : (row + 1) * width * 3] for row in range(height))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _write_private_image(path: Path, data: bytes) -> None:
+    """CreateNew with a protected owner-only DACL, before any pixel bytes reach disk."""
+    # Windows-only import and native handle transfer; no optional Python dependency.
+    # pylint: disable=import-outside-toplevel
+    import msvcrt
+
+    class SecurityAttributes(ctypes.Structure):  # pylint: disable=too-few-public-methods
+        """SECURITY_ATTRIBUTES for atomic private file creation."""
+
+        _fields_ = [("length", wintypes.DWORD), ("descriptor", ctypes.c_void_p), ("inherit", wintypes.BOOL)]
+
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+    ]
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(SecurityAttributes),
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.LocalFree.argtypes, kernel.LocalFree.restype = [ctypes.c_void_p], ctypes.c_void_p
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [wintypes.HANDLE], wintypes.BOOL
+    descriptor = ctypes.c_void_p()
+    handle = None
+    try:
+        if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            "D:P(A;;FA;;;OW)", 1, ctypes.byref(descriptor), None
+        ):
+            raise _ImageUnavailable("WRITE_FAILED")
+        attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+        handle = kernel.CreateFileW(str(path), 0x40000000, 7, ctypes.byref(attributes), 1, 0x100, None)
+        if handle == ctypes.c_void_p(-1).value:
+            handle = None
+            raise _ImageUnavailable("WRITE_FAILED")
+        descriptor_fd = msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
+        handle = None  # the file descriptor now owns it
+        with os.fdopen(descriptor_fd, "wb") as image:
+            image.write(data)
+    finally:
+        if handle:
+            kernel.CloseHandle(handle)
+        if descriptor:
+            kernel.LocalFree(descriptor)
+
+
+def _capture_exact_image(pid: int, window: DesktopWindow, path: Path) -> None:
+    """Acquisition only. Checks bracket PrintWindow AND the write, without reading any UI text."""
+    if sys.platform != "win32":
+        raise _ImageUnavailable("UNSUPPORTED")
+    user32 = _image_user32()
+    if not _same_image_target(user32, pid, window):
+        raise _ImageUnavailable("TARGET_CHANGED")
+    width, height, rgb = _render_exact_window(user32, window.hwnd)
+    if not _same_image_target(user32, pid, window):
+        raise _ImageUnavailable("TARGET_CHANGED")
+    try:
+        _write_private_image(path, _image_png(width, height, rgb))
+    except OSError:
+        raise _ImageUnavailable("WRITE_FAILED") from None
+    if not _same_image_target(user32, pid, window):
+        raise _ImageUnavailable("TARGET_CHANGED")
+
+
+def _image_child(arguments: list[str]) -> int:
+    """Same-file killable child, like the arbiter's harvest child; stdout is a CLOSED code only."""
+    try:
+        pid, hwnd, owner = (int(value) for value in arguments[:3])
+        if len(arguments) != 4 or min(pid, hwnd, owner) <= 0 or not _IMAGE_NAME.fullmatch(arguments[3]):
+            raise _ImageUnavailable("CAPTURE_FAILED")
+        window = DesktopWindow("", "", 0, 0, hwnd=hwnd, owner_hwnd=owner, owner_enabled=False)
+        _capture_exact_image(pid, window, Path(arguments[3]))
+    except _ImageUnavailable as exc:
+        code = str(exc) if str(exc) in _IMAGE_RESULTS else "CAPTURE_FAILED"
+    except BaseException:  # pylint: disable=broad-exception-caught
+        # Never forward native exceptions, file paths, UI text or image bytes into a transcript.
+        code = "CAPTURE_FAILED"
+    else:
+        code = "ACQUIRED"
+    print(code, flush=True)
+    return 0 if code == "ACQUIRED" else 4
+
+
+@dataclass
+class _ImageRequest:
+    """One bounded child and the file it alone may produce."""
+
+    path: Path
+    child: subprocess.Popen[bytes]
+    expiry: threading.Timer | None = None
+
+
+class ModalVisualEvidence:
+    """Invocation-private, one-shot asynchronous evidence. Never mutates a detection or its deadline."""
+
+    def __init__(self) -> None:
+        self._attempted: set[tuple[int, int]] = set()
+        self._requests: list[_ImageRequest] = []
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def __enter__(self) -> ModalVisualEvidence:
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    @staticmethod
+    def _notice(status: str, path: Path | None = None) -> None:
+        payload = {"event": "owned_modal_image", "status": status}
+        if path is not None:
+            payload["path"] = path.name
+        if status == "ACQUIRED":
+            payload["expires_in_seconds"] = IMAGE_LIFETIME_SECONDS
+        print("LOCAL_IMAGE " + json.dumps(payload, separators=(",", ":")), flush=True)
+
+    @classmethod
+    def _remove(cls, path: Path) -> bool:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            cls._notice("CLEANUP_FAILED", path)
+            return False
+        return True
+
+    def observe(self, pid: int, state: CredentialDetection) -> None:
+        """Start at most once for this HWND, and only for an already-detected unreadable owned modal."""
+        if state.modal is not None or state.dialog is None or state.dialog.verdict != VERDICT_DIALOG_UNREADABLE:
+            return
+        window = state.dialog.window
+        if not window.hwnd or not window.owner_hwnd or window.owner_enabled is not False:
+            return
+        with self._lock:
+            key = (pid, window.hwnd)
+            if self._closed or key in self._attempted:
+                return
+            self._attempted.add(key)
+            if sys.platform != "win32":
+                self._notice("UNSUPPORTED")
+                return
+            # No caller-controlled path and no '0': even numeric free-text markers (10054/403) must
+            # not be manufactured by a random filename. No PID/HWND/title is printed for that reason.
+            try:
+                path = Path.cwd() / f"_ui-image-{uuid.uuid4().hex.replace('0', 'x')}.png"
+                child = subprocess.Popen(  # pylint: disable=consider-using-with
+                    [
+                        sys.executable,
+                        str(Path(__file__).resolve()),
+                        str(pid),
+                        str(window.hwnd),
+                        str(window.owner_hwnd),
+                        path.name,
+                    ],
+                    cwd=path.parent,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            except OSError:
+                self._notice("CAPTURE_FAILED")
+                return
+            request = _ImageRequest(path, child)
+            self._requests.append(request)
+            try:
+                threading.Thread(target=self._watch, args=(request,), name="window-image", daemon=True).start()
+            except RuntimeError:
+                self._stop(request)
+                self._remove(path)
+                self._notice("CAPTURE_FAILED")
+
+    def _watch(self, request: _ImageRequest) -> None:
+        try:
+            output, _ = request.child.communicate(timeout=IMAGE_CAPTURE_SECONDS)
+            code = output.decode("ascii").strip()
+            if code not in _IMAGE_RESULTS or (code == "ACQUIRED" and request.child.returncode != 0):
+                code = "CAPTURE_FAILED"
+        except subprocess.TimeoutExpired:
+            code = "CAPTURE_TIMEOUT"
+            self._stop(request)
+        except (OSError, UnicodeError):
+            code = "CAPTURE_FAILED"
+            self._stop(request)
+        with self._lock:
+            if self._closed:
+                return
+            try:
+                # Even a failed write can leave a partial file whose first deletion is refused.
+                request.expiry = threading.Timer(IMAGE_LIFETIME_SECONDS, self._expire, args=(request,))
+                request.expiry.daemon = True
+                request.expiry.start()
+                if code == "ACQUIRED" and request.path.is_file():
+                    self._notice(code, request.path)
+                    return
+            except (OSError, RuntimeError):
+                code = "CAPTURE_FAILED"
+            if self._remove(request.path) and request.expiry is not None:
+                request.expiry.cancel()
+            self._notice(code if code != "ACQUIRED" else "WRITE_FAILED")
+
+    def _expire(self, request: _ImageRequest) -> None:
+        with self._lock:
+            self._remove(request.path)
+
+    @classmethod
+    def _stop(cls, request: _ImageRequest) -> None:
+        try:
+            if request.child.poll() is None:
+                request.child.kill()
+                request.child.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            cls._notice("CAPTURE_CLEANUP_FAILED", request.path)
+
+    def close(self) -> None:
+        """End acquisition before deleting; a late child must not recreate an already-cleaned image."""
+        with self._lock:
+            self._closed = True
+            for request in self._requests:
+                self._stop(request)
+                removed = self._remove(request.path)
+                if removed and request.expiry is not None:
+                    request.expiry.cancel()
+
+
+if __name__ == "__main__":
+    raise SystemExit(_image_child(sys.argv[1:]))

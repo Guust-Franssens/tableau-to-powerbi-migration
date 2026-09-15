@@ -90,6 +90,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -159,6 +160,7 @@ from _credential_modal import (
     DesktopUnreadyError,
     DialogFinding,
     DialogFoundError,
+    ModalVisualEvidence,
     describe_dialog_finding,
     describe_modal,
     dialog_guidance,
@@ -402,6 +404,38 @@ def _join_refresh_worker(
     progress_monitor: RefreshProgressMonitor | None,
     observation_mode: bool = False,
 ) -> bool:
+    """Attach non-verdict visual evidence to the actual in-flight callback in BOTH wait branches."""
+    with ModalVisualEvidence() as evidence:
+
+        def detector(pid: int) -> CredentialDetection:
+            state = _in_flight_credential_state(pid)
+            if worker.is_alive():
+                evidence.observe(pid, state)
+            return state
+
+        return _wait_refresh_worker(
+            worker,
+            desktop_pid=desktop_pid,
+            source_hint=source_hint,
+            initial_state=initial_state,
+            total_timeout=total_timeout,
+            progress_monitor=progress_monitor,
+            observation_mode=observation_mode,
+            detector=detector,
+        )
+
+
+def _wait_refresh_worker(
+    worker: threading.Thread,
+    *,
+    desktop_pid: int | None,
+    source_hint: str | None,
+    initial_state: CredentialDetection | None,
+    total_timeout: float,
+    progress_monitor: RefreshProgressMonitor | None,
+    observation_mode: bool,
+    detector: Callable[[int], CredentialDetection],
+) -> bool:
     """Wait for the refresh thread, with credential polling and optional progress liveness.
 
     Both branches use the IN-FLIGHT detector and latch non-terminal findings until the deadline
@@ -422,7 +456,7 @@ def _join_refresh_worker(
             heartbeat_seconds=REFRESH_HEARTBEAT_SECONDS,
             poll_seconds=REFRESH_CREDENTIAL_POLL_SECONDS,
             source_hint=source_hint,
-            detector=_in_flight_credential_state,
+            detector=detector,
             initial_state=initial_state,
         )
 
@@ -446,7 +480,7 @@ def _join_refresh_worker(
         )
         worker.join(max(0.01, wait_for))
         if desktop_pid is not None:
-            state = _in_flight_credential_state(desktop_pid)
+            state = detector(desktop_pid)
             raise_terminal_detection(desktop_pid, state, source_hint)
             if state.dialog is not None and latched_dialog is None:
                 latched_dialog = state.dialog

@@ -57,6 +57,69 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B
                                      [--ui-save]
 ```
 
+### Inspect an unreadable in-flight dialog without stealing focus (#146)
+
+**An image is evidence to inspect, never a deterministic verdict.** On the first in-flight
+`DIALOG_UNREADABLE` finding for an owned window, the refresh's actual detector callback starts one
+killable child. It calls **`PrintWindow(PW_RENDERFULLCONTENT)` on that exact HWND**, checking the
+target PID, HWND and direct owner relationship before and after rendering and after writing.
+An invisible/destroyed window, changed PID/owner, enabled owner, failed capture/write, uniform image
+or untouched raster pixels refuses acquisition. Size only bounds allocation (four million pixels);
+neither size nor ownership nor a successful capture classifies the dialog.
+
+✅ **Precedent:** the two independent September 15, 2026 controls recorded on issue #146 acquired
+readable Snowflake forms while their Desktop owners stayed minimized, without foreground or restore.
+That is evidence for trying background capture first, **not qualification of this implementation on
+every connector**. This implementation never foregrounds, restores, activates or screen-captures.
+Foreground is neither the default nor a proven universal fallback for incomplete captures.
+
+**Exact local agent workflow:**
+
+1. Run the **refresh command asynchronously, attached to the session**, with an explicit PID and
+   a known local working directory. Keep the usual `--no-save` for read-only work. Read its live
+   stdout early and repeatedly while it runs; do not wait for completion or use a wrapper that
+   buffers all output until exit. The repository's buffered `probe_live_source` wrapper cannot
+   provide this interactive inspection workflow. This notice is refresh-only; the standalone
+   PowerShell arbiter, t=0 checks and read-only query probe keep their existing behavior.
+2. On the one flushed machine-readable notice below, resolve **only its `path` against that
+   command's original working directory**, then open only that file in the local image viewer.
+   Do not take a desktop screenshot, select a foreground window, or copy pixels/base64 into a
+   transcript, log, receipt or handover.
+
+   ```text
+   LOCAL_IMAGE {"event":"owned_modal_image","status":"ACQUIRED","path":"_ui-image-<opaque-id>.png","expires_in_seconds":60.0}
+   ```
+
+3. **Positively classify what the pixels actually show**, if possible. A clearly identified
+   sign-in/approval request uses the existing corresponding human-action handoff; report the
+   category without copying field values, source names or private dialog text. Do not enter a
+   credential or approve a prompt. An incomplete, blank, ambiguous or expired image establishes
+   nothing: preserve uncertainty. Never classify from dimensions, class, a disabled owner or
+   capture success. No automatic image/OCR classifier or external-verdict ingestion was added;
+   do not forge the refresh's exit code or a gate receipt from your visual assessment.
+4. **Delete that exact image immediately after inspection**, for example
+   `Remove-Item -LiteralPath <notice-path>`. It is created with an owner-only protected Windows
+   DACL, a random component-free filename, and no durable receipt. The refresh deletes it on
+   normal/error wait exit and at **60 seconds after acquisition** if still running. Capturing is
+   separately bounded at **8 seconds**, off the refresh thread; failed attempts do not rearm on
+   the next poll. A new HWND gets its own validation and at most one attempt.
+5. Other `LOCAL_IMAGE` statuses are **non-semantic acquisition/cleanup diagnostics**, never
+   authentication verdicts. `CLEANUP_FAILED` names only the same relative private file: close a
+   viewer holding it and delete it locally. A pending expiry retries failed exit deletion; a
+   permanent OS refusal or forced interpreter termination cannot promise deletion. Never publish
+   the file to explain a cleanup error.
+
+The existing Win32 semantic detector remains authoritative. This small acquisition change adds no
+second modal detector or UIA classifier, and does not run the standalone PowerShell arbiter or invoke
+another refresh. Its existing bounded UIA harvest remains available separately. **Without positive
+semantic evidence, the original `DIALOG_UNREADABLE` latch/deadline and successful-worker behavior
+are unchanged.** The image deadline never changes the refresh's XMLA or wall-clock deadline.
+
+⚠️ **Limits:** nonuniform/fully-painted pixels do not prove complete, current, legible content; the
+viewer must decide that. Identity checks are snapshots, not a lock on Windows: destruction and reuse
+with identical PID/HWND/owner values between checks cannot be distinguished. Native synthetic-window
+controls exercise the acquisition path; real Desktop/connector qualification remains separate.
+
 **`--calculate-only` / `--measures-only` is an opt-in DAX-only shortcut, not the default.** It sends
 TMSL refresh type `calculate`, which recalculates formulas, relationships and hierarchies without
 re-reading source rows. Use it only when the caller knows the pending edit was measure/DAX-only; after

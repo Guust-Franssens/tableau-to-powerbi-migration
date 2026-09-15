@@ -14,8 +14,10 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
+from types import SimpleNamespace
 from ctypes import wintypes
 from pathlib import Path
 
@@ -39,6 +41,311 @@ from _credential_modal import (
     join_with_credential_poll,
 )
 from refresh_pbip_model import CredentialMissingError, refresh
+
+
+class _NativeCall:
+    """Injectable native function with ctypes' assignable argtypes/restype."""
+
+    def __init__(self, function) -> None:
+        self.function = function
+
+    def __call__(self, *args):
+        return self.function(*args)
+
+
+class _ImageWin32:
+    """Only the OS boundary is fake: production does identity, DIB, PNG and callback/lifecycle work."""
+
+    def __init__(self) -> None:
+        self.pid = 111
+        self.owner_pid = 111
+        self.owner = MAIN_HWND
+        self.visible = True
+        self.owner_enabled = False
+        self.thread = 7
+        self.extent = (2, 2)
+        self.render_mode = "paint"
+        self.after_render = lambda: None
+        self.after_write = lambda: None
+        self.buffer = None
+        self.captures = []
+        self.writes = []
+        self.cleanup_ok = True
+        self.gdi = SimpleNamespace(
+            CreateCompatibleDC=_NativeCall(lambda _dc: 31),
+            CreateDIBSection=_NativeCall(self.create_dib),
+            SelectObject=_NativeCall(lambda *_args: 33),
+            DeleteObject=_NativeCall(lambda _handle: self.cleanup_ok),
+            DeleteDC=_NativeCall(lambda _handle: self.cleanup_ok),
+            GdiFlush=_NativeCall(lambda: True),
+        )
+
+    def GetWindowThreadProcessId(self, hwnd, pointer):
+        pointer._obj.value = self.owner_pid if hwnd == MAIN_HWND else self.pid
+        return self.thread
+
+    def GetWindow(self, _hwnd, flag):
+        assert flag == _credential_modal.GW_OWNER
+        return self.owner
+
+    def GetForegroundWindow(self):
+        return 0x33333  # a sibling: the capture path must never consult it
+
+    def IsWindowVisible(self, _hwnd):
+        return self.visible
+
+    def IsWindowEnabled(self, _hwnd):
+        return self.owner_enabled
+
+    def GetWindowRect(self, _hwnd, pointer):
+        rect = pointer._obj
+        rect.left = rect.top = 0
+        rect.right, rect.bottom = self.extent
+        return True
+
+    def create_dib(self, _dc, header, _colors, pointer, _section, _offset):
+        _size, width, height = struct.unpack_from("<Iii", header.raw)
+        assert (width, height) == (2, -2), "production must request a top-down, full-sized DIB"
+        self.buffer = ctypes.create_string_buffer(16)
+        pointer._obj.value = ctypes.addressof(self.buffer)
+        return 32
+
+    def PrintWindow(self, hwnd, dc, flags):
+        self.captures.append((hwnd, dc, flags))
+        if self.render_mode == "false":
+            return False
+        if self.render_mode == "paint":
+            self.buffer.raw = b"\x00\x00\x00\x00" * 2 + b"\xff\xff\xff\x00" * 2
+        elif self.render_mode == "blank":
+            self.buffer.raw = b"\xff\xff\xff\x00" * 4
+        elif self.render_mode == "partial":
+            ctypes.memmove(self.buffer, b"\xff\xff\xff\x00", 4)
+        self.after_render()
+        return True
+
+    def write(self, path: Path, data: bytes) -> None:
+        self.writes.append(path)
+        path.write_bytes(data)
+        self.after_write()
+
+
+@pytest.fixture(name="visual_runtime")
+def visual_runtime(monkeypatch, tmp_path):
+    """Exercise the production child body without a real window; record flushed in-flight notices."""
+    api = _ImageWin32()
+    noticed = threading.Event()
+    records = []
+    children = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(_credential_modal.sys, "platform", "win32")
+    monkeypatch.setattr(_credential_modal, "_image_user32", lambda: api)
+    monkeypatch.setattr(_credential_modal.ctypes, "WinDLL", lambda *_a, **_k: api.gdi, raising=False)
+    monkeypatch.setattr(_credential_modal, "_write_private_image", api.write)
+    monkeypatch.setattr(_credential_modal.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    real_print = print
+
+    def observe_print(message, **kwargs):
+        real_print(message, **kwargs)
+        if message.startswith("LOCAL_IMAGE "):
+            records.append((json.loads(message.removeprefix("LOCAL_IMAGE ")), kwargs))
+            noticed.set()
+
+    monkeypatch.setattr(_credential_modal, "print", observe_print, raising=False)
+
+    class ImageChild:
+        """Popen boundary double; communicate runs the real exact-target acquisition body."""
+
+        def __init__(self, argv, **kwargs) -> None:
+            assert Path(argv[1]) == Path(_credential_modal.__file__).resolve()
+            assert kwargs["creationflags"] == 0x08000000
+            assert kwargs["stderr"] == subprocess.DEVNULL
+            self.argv = argv
+            self.cwd = Path(kwargs["cwd"])
+            self.returncode = None
+            self.finished = threading.Event()
+            self.killed = False
+            children.append(self)
+
+        def communicate(self, timeout):
+            assert timeout == _credential_modal.IMAGE_CAPTURE_SECONDS
+            pid, hwnd, owner = map(int, self.argv[2:5])
+            window = DesktopWindow("", "", 0, 0, hwnd=hwnd, owner_hwnd=owner, owner_enabled=False)
+            try:
+                _credential_modal._capture_exact_image(pid, window, self.cwd / self.argv[5])
+            except _credential_modal._ImageUnavailable as exc:
+                code = str(exc)
+            else:
+                code = "ACQUIRED"
+            self.returncode = 0 if code == "ACQUIRED" else 4
+            self.finished.set()
+            return code.encode("ascii"), None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -1
+            self.finished.set()
+
+        def wait(self, timeout):
+            assert self.finished.wait(timeout), "child teardown must rendezvous before image cleanup"
+            return self.returncode
+
+    monkeypatch.setattr(_credential_modal.subprocess, "Popen", ImageChild)
+    return SimpleNamespace(api=api, noticed=noticed, records=records, children=children, root=tmp_path)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native protected file DACL is Windows-only")
+def test_visual_native_file_is_private_readable_and_never_overwrites(tmp_path) -> None:
+    """The OS, not the writer's return value, proves atomic owner-only ACL and CreateNew semantics."""
+    path = tmp_path / "_ui-image-native.png"
+    expected = b"synthetic image control"
+    try:
+        _credential_modal._write_private_image(path, expected)
+        assert path.read_bytes() == expected
+        escaped = str(path).replace("'", "''")
+        command = (
+            f"$ErrorActionPreference='Stop'; $path = '{escaped}'; "
+            "$a = if ($PSVersionTable.PSEdition -eq 'Core') { "
+            "[System.IO.FileSystemAclExtensions]::GetAccessControl([System.IO.FileInfo]::new($path)) "
+            "} else { [System.IO.File]::GetAccessControl($path) }; "
+            "$rules = @($a.GetAccessRules($true,$false,[System.Security.Principal.SecurityIdentifier])); "
+            "[ordered]@{protected=$a.AreAccessRulesProtected; "
+            "sids=@($rules | ForEach-Object {$_.IdentityReference.Value}); "
+            "inherited=@($rules | ForEach-Object {$_.IsInherited})} | ConvertTo-Json -Compress"
+        )
+        done = subprocess.run(
+            [_powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert done.returncode == 0, "native ACL read failed"
+        actual = json.loads(done.stdout)
+        assert actual == {"protected": True, "sids": ["S-1-3-4"], "inherited": [False]}
+        with pytest.raises(_credential_modal._ImageUnavailable, match="WRITE_FAILED"):
+            _credential_modal._write_private_image(path, b"must not overwrite")
+        assert path.read_bytes() == expected
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_visual_child_bad_arguments_cannot_echo_private_data_or_create_a_file(tmp_path) -> None:
+    done = subprocess.run(
+        [sys.executable, str(Path(_credential_modal.__file__)), "PRIVATE authentication C:\\source"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert done.returncode == 4
+    assert done.stdout.strip() == "CAPTURE_FAILED"
+    assert done.stderr == ""
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+@pytest.mark.skipif(sys.platform != "win32", reason="native PrintWindow control is Windows-only")
+def test_visual_native_background_capture_reaches_production_without_focus(monkeypatch, tmp_path) -> None:
+    """Real child/GDI/ACL/PNG, against off-screen NOACTIVATE controls; never launch Desktop."""
+    image_decoder = pytest.importorskip("PIL.Image", reason="independent PNG decoder is a repo dev extra")
+    native = _NativeWindowProbe("ImageOnly")
+    ui = native.user32
+    ui.EnableWindow.argtypes, ui.EnableWindow.restype = [wintypes.HWND, wintypes.BOOL], wintypes.BOOL
+    ui.GetForegroundWindow.argtypes, ui.GetForegroundWindow.restype = [], wintypes.HWND
+    ui.PeekMessageW.argtypes = [
+        ctypes.POINTER(wintypes.MSG),
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.UINT,
+        wintypes.UINT,
+    ]
+    ui.PeekMessageW.restype = wintypes.BOOL
+    ui.TranslateMessage.argtypes, ui.TranslateMessage.restype = [ctypes.POINTER(wintypes.MSG)], wintypes.BOOL
+    ui.DispatchMessageW.argtypes, ui.DispatchMessageW.restype = [ctypes.POINTER(wintypes.MSG)], ctypes.c_longlong
+    before = ui.GetForegroundWindow()
+    released = threading.Event()
+    notices = []
+    outcome = {}
+    thread = None
+    real_print = print
+
+    def record(message, **kwargs):
+        real_print(message, **kwargs)
+        if message.startswith("LOCAL_IMAGE "):
+            notices.append(json.loads(message.removeprefix("LOCAL_IMAGE ")))
+
+    def pump():
+        message = wintypes.MSG()
+        while ui.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
+            ui.TranslateMessage(ctypes.byref(message))
+            ui.DispatchMessageW(ctypes.byref(message))
+
+    try:
+        # STATIC's built-in paint handler supplies a complete white surface plus a black child.
+        # WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, off-screen: acquisition never touches foreground.
+        owner = ui.CreateWindowExW(
+            0x08000080, "STATIC", "", 0x90000006, -30000, -30000, 100, 80, None, None, None, None
+        )
+        assert owner
+        native.created.append(owner)
+        hwnd = ui.CreateWindowExW(0x08000080, "STATIC", "", 0x90000006, -30000, -30000, 80, 60, owner, None, None, None)
+        assert hwnd
+        native.created.append(hwnd)
+        assert ui.CreateWindowExW(0, "STATIC", "", 0x50000004, 5, 5, 20, 20, hwnd, None, None, None)
+        ui.EnableWindow(owner, False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(_credential_modal, "print", record, raising=False)
+        monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: ParkedConnection(released))
+        monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-native")
+        monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.02)
+
+        def state(pid, *, in_flight=False):
+            return inspect_credential_modal(pid, operation_in_flight=True) if in_flight else CredentialDetection()
+
+        monkeypatch.setattr(refresh_pbip_model, "_credential_state", state)
+
+        def run():
+            try:
+                outcome["result"] = refresh(
+                    port=1234, tables=None, desktop_pid=os.getpid(), progress_enabled=False, timeout_sec=20
+                )
+            except BaseException as exc:
+                outcome["error"] = type(exc).__name__
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 12
+        while not notices and time.monotonic() < deadline:
+            pump()
+            time.sleep(0.005)
+        assert notices and notices[0]["status"] == "ACQUIRED", "native acquisition never produced usable evidence"
+        assert thread.is_alive()
+        assert ui.GetForegroundWindow() == before, "capture must not alter foreground"
+        with image_decoder.open(tmp_path / notices[0]["path"]) as image:
+            assert image.size == (80, 60)
+            # These themed STATIC controls are a two-colour rectangle oracle, not fixed RGBs.
+            outside, inside = image.getpixel((0, 0)), image.getpixel((10, 10))
+            assert inside != outside, "the modal has a child rectangle; its owner is uniformly filled"
+            for y in range(60):
+                for x in range(80):
+                    expected = inside if 5 <= x < 25 and 5 <= y < 25 else outside
+                    assert image.getpixel((x, y)) == expected
+    finally:
+        released.set()
+        if thread is not None:
+            deadline = time.monotonic() + 3
+            while thread.is_alive() and time.monotonic() < deadline:
+                # The production Win32 text check can send messages to this test's UI thread too.
+                pump()
+                thread.join(0.005)
+        native.close()
+    assert outcome.get("result", (False,))[0] is True, outcome
+    assert not list(tmp_path.glob("_ui-image-*.png"))
 
 
 class ParkedConnection:
