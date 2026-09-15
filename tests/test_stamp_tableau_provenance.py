@@ -12,7 +12,9 @@ The rule these tests exist to enforce: **a same-named workbook is not the same w
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import html
 import io
 import json
 import multiprocessing
@@ -20,6 +22,7 @@ import sys
 import urllib.error
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -290,10 +293,10 @@ def test_one_failed_local_fingerprint_keeps_the_completed_sibling(tmp_path, monk
     _twbx(tmp_path, "Healthy")
     real_fingerprint = prov.fingerprint
 
-    def fingerprint(path):
+    def fingerprint(path, raw=None):
         if path.stem == "Broken":
             raise OSError(5, str(path))
-        return real_fingerprint(path)
+        return real_fingerprint(path, raw)
 
     monkeypatch.setattr(prov, "fingerprint", fingerprint)
     result = prov.build(tmp_path, {})
@@ -1154,9 +1157,18 @@ class RecordingReporter(prov.NullReporter):
         if self._cancel_after == operation and self._cancel_completed == completed:
             self.cancelled = True
 
-    def checkpoint(self, index, record, dependencies=None):
+    def checkpoint(self, index, record, source=None):
         self.messages.append(
-            {"kind": prov.MSG_CHECKPOINT, "index": index, "record": prov.checkpoint_record(record, dependencies)}
+            {"kind": prov.MSG_CHECKPOINT, "index": index, "record": prov.checkpoint_record(record, source)}
+        )
+
+    def workbook_identity(self, index, source, luid):
+        self.messages.append(
+            {
+                "kind": prov.MSG_WORKBOOK_IDENTITY,
+                "index": index,
+                "identity": prov.workbook_identity_checkpoint(source.path, luid),
+            }
         )
 
     def lookup_intent(self, requested):
@@ -1442,9 +1454,9 @@ def test_cancellation_is_checked_at_every_expensive_boundary(
     fingerprint_calls, scrub_calls, discovery_calls = [], [], []
     fingerprint, scrub, discover = prov.fingerprint, prov.scrub_tree, prov.collect_inputs
 
-    def counted_fingerprint(path):
+    def counted_fingerprint(path, raw=None):
         fingerprint_calls.append(True)
-        return fingerprint(path)
+        return fingerprint(path, raw)
 
     def counted_scrub(*args):
         scrub_calls.append(True)
@@ -2026,8 +2038,8 @@ def _published_xml(*segments: str, site: str = "site", server: str = "https://x.
 class PublishedSite(RecordingSite):
     """A complete independent catalog, user detail, and datasource detail behind real client code."""
 
-    def __init__(self, payload: bytes) -> None:
-        super().__init__(LIVE_ENV, workbooks=[{"id": P_WORKBOOK, "name": "Consumer"}])
+    def __init__(self, payload: bytes, env: dict | None = None) -> None:
+        super().__init__(LIVE_ENV if env is None else env, workbooks=[{"id": P_WORKBOOK, "name": "Consumer"}])
         self.remote_bytes = payload
         self.user = {"id": P_USER, "siteRole": "SiteAdministratorCreator"}
         candidate = {
@@ -2075,10 +2087,12 @@ class PublishedSite(RecordingSite):
         return sum("/datasources/" in path for _method, path in self.calls)
 
 
-def _published_setup(tmp_path: Path, monkeypatch, payload: bytes | None = None) -> tuple[Path, PublishedSite]:
+def _published_setup(
+    tmp_path: Path, monkeypatch, payload: bytes | None = None, env: dict | None = None
+) -> tuple[Path, PublishedSite]:
     path = tmp_path / f"{P_WORKBOOK}_Consumer.twb"
     path.write_bytes(payload if payload is not None else _published_xml())
-    return path, _install(monkeypatch, PublishedSite(path.read_bytes()))
+    return path, _install(monkeypatch, PublishedSite(path.read_bytes(), env))
 
 
 def _association(result: dict) -> dict:
@@ -2374,9 +2388,13 @@ def test_published_cancellation_retains_only_safe_partial_provenance(
 def test_published_missing_parser_key_is_retained_not_filled_from_a_provider(tmp_path: Path, monkeypatch) -> None:
     payload = b'<workbook><datasources><datasource name="sql"><connection class="sqlproxy"/></datasource></datasources></workbook>'
     path, site = _published_setup(tmp_path, monkeypatch, payload)
-    row = _association(prov.build(path, LIVE_ENV))["rows"][0]
+    result, messages = _published_capture(path, LIVE_ENV)
+    row = _association(result)["rows"][0]
     assert row == {"source_ordinal": 0, "published_key": None, "state": "cannot_establish", "candidate_count": None}
     assert site.queries() == []
+    assert not prov.is_success(result), "P_INVALID_PARSER_KEY_STATUS"
+    code, state = _published_replay(messages)
+    assert code == "worker-protocol-invalid" and not prov.is_success(state.document(code)), "P_INVALID_PARSER_KEY_WIRE"
 
 
 @pytest.mark.parametrize("state", ["resolved", "missing", "ambiguous", "cannot_establish"])
@@ -2403,3 +2421,703 @@ def test_published_real_producer_messages_reconcile_with_supervisor(tmp_path: Pa
         {"source_ordinal": 1, "published_key_sha256": hashlib.sha256(b'"site/salesfeed"').hexdigest()}
     ]
     assert "published_occurrences" not in json.dumps(result)
+
+
+def _published_capture(path: Path, env: dict) -> tuple[dict, list[dict]]:
+    """Capture the production reporter, preserving the same copy boundary as a real JSON channel."""
+    messages = []
+    reporter = prov.WorkerReporter(SimpleNamespace(send=lambda message: messages.append(copy.deepcopy(message))))
+    result = prov.build(path, env, reporter)
+    reporter.terminal(result)
+    return result, messages
+
+
+def _published_replay(messages: list[dict]):
+    from test_provenance_supervisor import _receive, _wire  # pylint: disable=import-outside-toplevel
+
+    return _receive(b"".join(_wire(message) for message in messages))
+
+
+@pytest.mark.parametrize("harvested", [True, False], ids=["harvest-luid", "plain-name"])
+def test_published_identical_bytes_do_not_allow_swapping_both_final_workbook_identities(
+    tmp_path: Path, monkeypatch, harvested: bool
+) -> None:
+    other_luid = "33333333-3333-4333-8333-333333333333"
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if not harvested:
+        path = path.rename(tmp_path / "Consumer.twb")
+    other = tmp_path / (f"{other_luid}_Other.twb" if harvested else "Other.twb")
+    other.write_bytes(path.read_bytes())
+    site._site_workbooks.append({"id": other_luid, "name": "Other"})  # pylint: disable=protected-access
+    result, messages = _published_capture(tmp_path, LIVE_ENV)
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result and prov.is_success(result), "P_IDENTITY_POSITIVE"
+    assert len({record["input"]["sha256"] for record in result["inputs"]}) == 1
+    identities = [record["origin"]["workbook_luid"] for record in result["inputs"]]
+    assert len(set(identities)) == 2
+    checkpoints = [message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT]
+    assert len({record["launch_identity"]["file_sha256"] for record in checkpoints}) == 2, "P_LAUNCHED_FILE"
+    for message in messages:
+        if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            for record, other_identity in zip(message["result"]["inputs"], reversed(identities)):
+                record["origin"]["workbook_luid"] = other_identity
+                record["origin"]["published_dependencies"]["workbook_luid"] = other_identity
+    code, rejected = _published_replay(messages)
+    assert code == "worker-protocol-invalid" and rejected.terminal is None, "P_RESOLVED_WORKBOOK_BINDING"
+    document = rejected.document(code)
+    assert not prov.is_success(document) and len(document["inputs"]) == 2
+    assert all(record["input"]["sha256"] == result["inputs"][0]["input"]["sha256"] for record in document["inputs"])
+    assert all(
+        key not in json.dumps(document) for key in ("launch_identity", "resolved_identity", "published_occurrences")
+    )
+
+
+def test_published_authority_cannot_disappear_from_successful_producer_wire(tmp_path: Path, monkeypatch) -> None:
+    path, _site = _published_setup(tmp_path, monkeypatch)
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert _published_replay(messages)[0] is None and prov.is_success(result), "P_AUTHORITY_POSITIVE"
+    for message in messages:
+        if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            del message["result"]["inputs"][0]["origin"]["published_dependencies"]
+    code, state = _published_replay(messages)
+    assert code == "worker-protocol-invalid" and state.terminal is None, "P_AUTHORITY_PRESENCE"
+    assert state.document(code)["inputs"][0]["input"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_published_identity_observations_cannot_move_between_equal_byte_input_phases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    other_luid = "33333333-3333-4333-8333-333333333333"
+    (tmp_path / f"{other_luid}_Other.twb").write_bytes(path.read_bytes())
+    site._site_workbooks.append({"id": other_luid, "name": "Other"})  # pylint: disable=protected-access
+    result, messages = _published_capture(tmp_path, LIVE_ENV)
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "P_IDENTITY_PHASE_POSITIVE"
+    first, second = [index for index, message in enumerate(messages) if message["kind"] == prov.MSG_WORKBOOK_IDENTITY]
+    messages[first], messages[second] = messages[second], messages[first]
+    code, state = _published_replay(messages)
+    assert code == "worker-protocol-invalid" and state.terminal is None, "P_IDENTITY_INPUT_PHASE"
+    assert not prov.is_success(state.document(code))
+
+
+@pytest.mark.parametrize("live", [False, True], ids=["offline", "live"])
+def test_published_complete_empty_assessment_allows_legacy_absence(tmp_path: Path, monkeypatch, live: bool) -> None:
+    path, _site = _published_setup(tmp_path, monkeypatch, b"<workbook/>")
+    result, messages = _published_capture(path, LIVE_ENV if live else {})
+    checkpoint = next(message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT)
+    assert checkpoint["published_occurrences"] == [], "P_EMPTY_ASSESSMENT_BOUND"
+    assert "published_dependencies" not in (result["inputs"][0].get("origin") or {})
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result and prov.is_success(result), "P_COMPLETE_EMPTY_SUCCESS"
+
+
+@pytest.mark.parametrize("reason", ["offline", "no-origin", "invalid-origin"])
+def test_published_occurrences_without_origin_authority_are_explicit_non_success(
+    tmp_path: Path, monkeypatch, reason: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if reason == "no-origin":
+        site._site_workbooks = []  # pylint: disable=protected-access
+    elif reason == "invalid-origin":
+        site._site_workbooks[0]["id"] = "not-a-luid"  # pylint: disable=protected-access
+    result, messages = _published_capture(path, {} if reason == "offline" else LIVE_ENV)
+    checkpoint = next(message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT)
+    assert len(checkpoint["published_occurrences"]) == 1
+    assert not prov.is_success(result), "P_UNAVAILABLE_AUTHORITY_STATUS"
+    assert {"code": "published-authority-unavailable", "operation": "lookup-origin"} in result["phase"]["errors"]
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result
+    assert result["inputs"][0]["input"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ["truncated-xml", "bad-zip", "no-workbook-member", "wrong-root", "doctype", "parser-failure", "read-failure"],
+)
+@pytest.mark.parametrize("live", [False, True], ids=["offline", "live"])
+def test_published_unassessable_input_preserves_fingerprint_without_claiming_empty(
+    tmp_path: Path, monkeypatch, defect: str, live: bool
+) -> None:
+    payload = _published_xml()
+    if defect == "truncated-xml":
+        payload = payload[:-12]
+    elif defect == "wrong-root":
+        payload = b"<datasource/>"
+    elif defect == "doctype":
+        payload = b'<!DOCTYPE workbook [<!ENTITY source "untrusted">]><workbook/>'
+    elif defect == "bad-zip":
+        payload = b"PK incomplete archive"
+    elif defect == "no-workbook-member":
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("not-a-workbook.txt", b"unassessable")
+        payload = buffer.getvalue()
+    path, _site = _published_setup(tmp_path, monkeypatch, payload)
+    if defect in ("bad-zip", "no-workbook-member"):
+        path = path.rename(path.with_suffix(".twbx"))
+    if defect == "parser-failure":
+
+        def fail_parser(*_args):
+            raise ValueError("private-parser-diagnostic")
+
+        monkeypatch.setattr(prov.parse_tableau, "_parse_published_datasource", fail_parser)
+    elif defect == "read-failure":
+        original = Path.read_bytes
+
+        def fail_read(current):
+            if current == path:
+                raise PermissionError("private-read-diagnostic")
+            return original(current)
+
+        monkeypatch.setattr(Path, "read_bytes", fail_read)
+    result, messages = _published_capture(path, LIVE_ENV if live else {})
+    checkpoint = next(message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT)
+    assert "published_occurrences" in checkpoint and checkpoint["published_occurrences"] is None, "P_ASSESSMENT_UNKNOWN"
+    assert not prov.is_success(result), "P_UNASSESSABLE_STATUS"
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result
+    if defect == "read-failure":
+        assert result["inputs"][0]["input"] == {"status": "unavailable"}
+    else:
+        assert result["inputs"][0]["input"]["sha256"] == hashlib.sha256(payload).hexdigest()
+        assert {"code": "published-assessment-unavailable", "operation": "fingerprint"} in result["phase"]["errors"]
+    assert "private-parser-diagnostic" not in json.dumps(messages) and "private-read-diagnostic" not in json.dumps(
+        messages
+    )
+
+
+@pytest.mark.parametrize("assessment", ["published", "unassessable"])
+def test_published_incomplete_assessment_cannot_be_relabelled_local_success(
+    tmp_path: Path, monkeypatch, assessment: str
+) -> None:
+    payload = _published_xml() if assessment == "published" else _published_xml()[:-12]
+    path, _site = _published_setup(tmp_path, monkeypatch, payload)
+    result, messages = _published_capture(path, {})
+    assert not prov.is_success(result) and _published_replay(messages)[0] is None
+    messages[-1]["result"]["phase"] = {"status": "local_only", "errors": []}
+    code, _state = _published_replay(messages)
+    assert code == "worker-protocol-invalid", "P_ASSESSMENT_SUCCESS_BINDING"
+
+
+@pytest.mark.parametrize("archive", [False, True], ids=["twb", "twbx"])
+def test_published_fingerprint_and_parse_share_one_retained_buffer(tmp_path: Path, monkeypatch, archive: bool) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if archive:
+        path.unlink()
+        path = _twbx(tmp_path, f"{P_WORKBOOK}_Consumer", _published_xml())
+        site.remote_bytes = path.read_bytes()
+    original = Path.read_bytes
+    raw = original(path)
+    phases = []
+    live = False
+    real_sign_in = site.sign_in
+
+    def sign_in():
+        nonlocal live
+        live = True
+        return real_sign_in()
+
+    def second_read_only(current):
+        if current == path:
+            phases.append("live" if live else "local")
+            if len(phases) == 2:
+                return b"<workbook/>"
+        return original(current)
+
+    monkeypatch.setattr(site, "sign_in", sign_in)
+    monkeypatch.setattr(Path, "read_bytes", second_read_only)
+    result, messages = _published_capture(path, LIVE_ENV)
+    checkpoint = next(message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT)
+    assert checkpoint["published_occurrences"] == [
+        {"source_ordinal": 1, "published_key_sha256": hashlib.sha256(b'"site/salesfeed"').hexdigest()}
+    ], "P_RETAINED_BYTES"
+    assert phases == ["local", "live"], "P_ONE_LOCAL_READ"
+    block = _association(result)
+    assert block["source_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert block["source_match"] == "unestablished" and block["rows"][0]["state"] == "cannot_establish", (
+        "P_FINAL_REHASH"
+    )
+    assert _published_replay(messages)[0] is None
+
+
+def test_published_archive_member_fingerprint_uses_the_supplied_buffer(tmp_path: Path) -> None:
+    path = _twbx(tmp_path, payload=_published_xml())
+    raw = path.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        expected = [
+            {"name": info.filename, "size_bytes": info.file_size, "crc32": f"{info.CRC:08x}"}
+            for info in sorted(archive.infolist(), key=lambda member: member.filename)
+        ]
+    path.write_bytes(b"not the fingerprinted archive")
+    actual = prov.fingerprint(path, raw)
+    assert actual["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert actual["members"] == expected, "P_ARCHIVE_BUFFER"
+
+
+def test_published_archive_path_replacement_cannot_rewrite_held_member_evidence(tmp_path: Path, monkeypatch) -> None:
+    path = _twbx(tmp_path, f"{P_WORKBOOK}_Consumer", _published_xml())
+    raw = path.read_bytes()
+    _install(monkeypatch, PublishedSite(raw))
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        expected = [
+            {"name": info.filename, "size_bytes": info.file_size, "crc32": f"{info.CRC:08x}"}
+            for info in sorted(archive.infolist(), key=lambda member: member.filename)
+        ]
+    fingerprint = prov.fingerprint
+
+    def replaced_path(source, held=None):
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("replacement.twb", b"<workbook/>")
+        return fingerprint(source, held)
+
+    monkeypatch.setattr(prov, "fingerprint", replaced_path)
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert result["inputs"][0]["input"]["members"] == expected, "P_ARCHIVE_HELD_MEMBER_EVIDENCE"
+    block = _association(result)
+    assert block["source_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert block["source_match"] == "unestablished" and len(block["rows"]) == 1, "P_ARCHIVE_PATH_REHASH"
+    assert _published_replay(messages)[0] is None
+
+
+@pytest.mark.parametrize("published_first", [True, False])
+def test_published_multi_member_archive_uses_actual_parser_first_member_rule(
+    tmp_path: Path, monkeypatch, published_first: bool
+) -> None:
+    path = tmp_path / f"{P_WORKBOOK}_Consumer.twbx"
+    first, second = (_published_xml(), b"<workbook/>") if published_first else (b"<workbook/>", _published_xml())
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("z-first.TWB", first)
+        archive.writestr("a-second.twb", second)
+    root, _files = prov.parse_tableau.load_twb_root(path)
+    assert (root.find("datasources/datasource/repository-location") is not None) == published_first
+    _install(monkeypatch, PublishedSite(path.read_bytes()))
+    result, messages = _published_capture(path, LIVE_ENV)
+    checkpoint = next(message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT)
+    assert len(checkpoint["published_occurrences"]) == int(published_first), "P_ARCHIVE_SELECTION_PARITY"
+    assert ("published_dependencies" in result["inputs"][0]["origin"]) == published_first
+    assert _published_replay(messages)[0] is None and prov.is_success(result)
+
+
+def test_published_malformed_first_archive_member_is_unknown_not_an_empty_or_later_workbook(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / f"{P_WORKBOOK}_Consumer.twbx"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("z-first.twb", _published_xml()[:-12])
+        archive.writestr("a-second.twb", b"<workbook/>")
+    with pytest.raises(prov.parse_tableau.etree.XMLSyntaxError):
+        prov.parse_tableau.load_twb_root(path)
+    _install(monkeypatch, PublishedSite(path.read_bytes()))
+    result, messages = _published_capture(path, LIVE_ENV)
+    checkpoint = next(message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT)
+    assert checkpoint["published_occurrences"] is None, "P_ARCHIVE_UNASSESSABLE"
+    assert not prov.is_success(result) and _published_replay(messages)[0] is None
+    assert {"code": "published-assessment-unavailable", "operation": "fingerprint"} in result["phase"]["errors"]
+
+
+@pytest.mark.parametrize(
+    "base,address,source_site,lookup_site,content_url,accepted",
+    [
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed?rev=4",
+            "site",
+            "site",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/t/site/datasources/SalesFeed?rev=1.0",
+            "site",
+            "site",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com:443/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "https://x.online.tableau.com:443",
+            "https://x.online.tableau.com/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "http://tableau.example:80",
+            "http://tableau.example/datasources/SalesFeed?rev=1.0",
+            "",
+            "",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "https://tableau.example:8443/tableau",
+            "https://tableau.example:8443/tableau/t/site/datasources/Sales%20Feed?rev=2.1",
+            "site",
+            "site",
+            "Sales Feed",
+            True,
+        ),
+        (
+            "https://tableau.example/tableau/",
+            "https://tableau.example/tableau/datasources/SalesFeed/",
+            "site",
+            "site",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/t/si%74e/datasources/Sales%C3%A9Feed",
+            "site",
+            "site",
+            "SaleséFeed",
+            True,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "http://x.online.tableau.com/datasources/SalesFeed?rev=4",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com:80/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/not-datasources/SalesFeed?rev=4",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://tableau.example/tableau",
+            "https://tableau.example/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://tableau.example/tableau",
+            "https://tableau.example/tableau2/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://tableau.example/tableau",
+            "https://tableau.example/elsewhere/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://tableau.example/tableau",
+            "https://tableau.example/Tableau/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/t/other/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/t/site/datasources/SalesFeed",
+            "other",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/t/site/datasources/SalesFeed",
+            "site",
+            "other",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://user:secret@x.online.tableau.com/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://user:secret@x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed?other=1",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed?rev=1&rev=2",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed?rev=1#other",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com?other=1",
+            "https://x.online.tableau.com/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com#other",
+            "https://x.online.tableau.com/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://other.online.tableau.com/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://tableau.example",
+            "https://tableau.example/datasources/SalesFeed",
+            None,
+            "",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed",
+            None,
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed",
+            "",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com:0",
+            "https://x.online.tableau.com:0/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com:65536/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://tableau.example/proxy/%74ableau",
+            "https://tableau.example/proxy/tableau/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "ftp://tableau.example",
+            "ftp://tableau.example/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+    ],
+    ids=[
+        "cloud-unqualified",
+        "cloud-site-route",
+        "explicit-default-port",
+        "configured-default-port",
+        "server-default-site",
+        "server-base-and-port",
+        "server-base-trailing-slash",
+        "decoded-unicode-and-site",
+        "wrong-scheme",
+        "wrong-effective-port",
+        "unrelated-route",
+        "missing-base",
+        "base-prefix-collision",
+        "cross-base",
+        "base-case",
+        "url-site-mismatch",
+        "source-site-mismatch",
+        "lookup-site-mismatch",
+        "source-url-credentials",
+        "configured-url-credentials",
+        "unsupported-query",
+        "duplicate-revision-query",
+        "fragment",
+        "configured-query",
+        "configured-fragment",
+        "foreign-host",
+        "omitted-default-site",
+        "omitted-nondefault-site",
+        "empty-nondefault-site",
+        "zero-port",
+        "invalid-port",
+        "decoded-multisegment-base",
+        "unsupported-scheme",
+    ],
+)
+def test_published_url_origin_route_and_site_are_independently_required(
+    tmp_path: Path,
+    monkeypatch,
+    base: str,
+    address: str,
+    source_site: str | None,
+    lookup_site: str,
+    content_url: str,
+    accepted: bool,
+) -> None:
+    env = {**LIVE_ENV, "TABLEAU_SERVER_URL": base, "TABLEAU_SITE": lookup_site}
+    payload = _published_xml(site=source_site or "").replace(
+        b"https://x.online.tableau.com/datasources/SalesFeed?rev=4", html.escape(address, quote=True).encode()
+    )
+    if source_site is None:
+        payload = payload.replace(b' site=""', b"")
+    path, site = _published_setup(tmp_path, monkeypatch, payload, env)
+    site.catalog["datasources"]["datasource"][0]["contentUrl"] = content_url
+    site.detail["datasource"]["contentUrl"] = content_url
+    result, messages = _published_capture(path, env)
+    row = _association(result)["rows"][0]
+    assert row["state"] == ("resolved" if accepted else "cannot_establish"), "P_URL_AUTHORITY"
+    assert len(site.queries()) == int(accepted) and site.detail_count() == int(accepted), "P_URL_PRE_LOOKUP"
+    if accepted:
+        assert site.queries()[0]["filter"] == [f"contentUrl:eq:{content_url}"]
+    else:
+        assert row["candidate_count"] is None and "datasource_luid" not in row
+    assert _published_replay(messages)[0] is None
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "datasources/Sales%2FFeed",
+        "datasources/Sales%5CFeed",
+        "datasources/Sales%252FFeed",
+        "datasources/Sales%23Feed",
+        "datasources/Sales%3FFeed",
+        "datasources/Sales%7FFeed",
+        "datasources/Sales%0AFeed",
+        "datasources/Sales%ZZFeed",
+        "datasources/Sales%FFFeed",
+        "datasources/%2e%2e",
+        "datasources/SalesFeed/extra",
+        "datasources//SalesFeed",
+        "other/../datasources/SalesFeed",
+        "datasources/SalesFeed;extra",
+        "Datasources/SalesFeed",
+    ],
+)
+def test_published_malformed_or_ambiguous_url_segments_cannot_select_even_a_matching_catalog_row(
+    tmp_path: Path, monkeypatch, suffix: str
+) -> None:
+    address = f"https://x.online.tableau.com/{suffix}"
+    payload = _published_xml().replace(
+        b"https://x.online.tableau.com/datasources/SalesFeed?rev=4", html.escape(address, quote=True).encode()
+    )
+    path, site = _published_setup(tmp_path, monkeypatch, payload)
+    source = prov._published_source(path, payload)  # pylint: disable=protected-access
+    parsed_url = source.dependencies[0]["content_url"]
+    site.catalog["datasources"]["datasource"][0]["contentUrl"] = parsed_url
+    site.detail["datasource"]["contentUrl"] = parsed_url
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert _association(result)["rows"][0]["state"] == "cannot_establish", "P_URL_SEGMENT"
+    assert site.queries() == [] and site.detail_count() == 0
+    code, state = _published_replay(messages)
+    if suffix == "datasources/Sales%0AFeed":
+        assert not prov.is_success(result), "P_INVALID_PARSER_KEY_STATUS"
+        assert code == "worker-protocol-invalid" and state.terminal is None, "P_INVALID_PARSER_KEY_WIRE"
+        assert state.document(code)["inputs"][0]["input"]["sha256"] == hashlib.sha256(payload).hexdigest()
+    else:
+        assert code is None
+
+
+def test_published_url_segment_must_equal_the_decoded_parser_content_url(tmp_path: Path, monkeypatch) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    parse = prov.parse_tableau._parse_published_datasource  # pylint: disable=protected-access
+
+    def inconsistent_parser(*args):
+        parsed = parse(*args)
+        return {**parsed, "id": "UnrelatedFeed"} if parsed is not None else None
+
+    monkeypatch.setattr(prov.parse_tableau, "_parse_published_datasource", inconsistent_parser)
+    site.catalog["datasources"]["datasource"][0]["contentUrl"] = "UnrelatedFeed"
+    site.detail["datasource"]["contentUrl"] = "UnrelatedFeed"
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert _association(result)["rows"][0]["state"] == "cannot_establish", "P_URL_PARSER_AGREEMENT"
+    assert site.queries() == [] and _published_replay(messages)[0] is None
+
+
+def test_published_overlong_parser_key_is_explicit_non_success_and_preserves_local_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch, _published_xml("S" * 1025))
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert not prov.is_success(result), "P_INVALID_PARSER_KEY_STATUS"
+    assert {"code": "published-authority-unavailable", "operation": "lookup-origin"} in result["phase"]["errors"]
+    assert site.queries() == [] and _association(result)["rows"][0]["state"] == "cannot_establish"
+    code, state = _published_replay(messages)
+    assert code == "worker-protocol-invalid" and state.terminal is None, "P_INVALID_PARSER_KEY_WIRE"
+    assert state.document(code)["inputs"][0]["input"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()

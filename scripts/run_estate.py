@@ -323,7 +323,7 @@ PROVENANCE_START_CODE = "worker-start-failed"
 #: (sizes, digests, CRCs) because checkpoints are emitted BEFORE scrub has run; the parent refuses
 #: anything else, so a message carrying a filename, a member name or an exception message is a
 #: protocol violation rather than evidence.
-_CHECKPOINT_KEYS = frozenset({"input", "fingerprint_error", "published_occurrences"})
+_CHECKPOINT_KEYS = frozenset({"input", "fingerprint_error", "published_occurrences", "launch_identity"})
 _CHECKPOINT_INPUT_KEYS = frozenset({"size_bytes", "sha256", "revision_key", "members", "status"})
 _CHECKPOINT_MEMBER_KEYS = frozenset({"size_bytes", "crc32"})
 _CHECKPOINT_REVISION_KEYS = frozenset({"algo", "value"})
@@ -335,6 +335,8 @@ _WORKER_ERROR_CODES = (
             "collect-inputs-failed",
             "empty-input",
             "local-fingerprint-failed",
+            "published-assessment-unavailable",
+            "published-authority-unavailable",
             "live-lookup-refused",
             "live-lookup-failed",
             prov.MSG_INVENTORY_FAILED,
@@ -937,7 +939,7 @@ def _validated_revision(revision: object) -> None:
 
 def _validated_occurrences(rows: object) -> None:
     """Private checkpoint identities are derived-only; physical multiplicity may not collapse."""
-    _require(type(rows) is list and 0 < len(rows) <= PROVENANCE_MAX_MEMBERS)
+    _require(type(rows) is list and len(rows) <= PROVENANCE_MAX_MEMBERS)
     previous = -1
     for row in rows:
         _require(type(row) is dict and row.keys() == {"source_ordinal", "published_key_sha256"})
@@ -945,6 +947,13 @@ def _validated_occurrences(rows: object) -> None:
         _require(_is_count(ordinal) and ordinal > previous)
         _digest(row["published_key_sha256"])
         previous = ordinal
+
+
+def _validated_workbook_identity(identity: object) -> None:
+    _require(type(identity) is dict and identity.keys() == {"file_sha256", "workbook_luid_sha256"})
+    _digest(identity["file_sha256"])
+    if identity["workbook_luid_sha256"] is not None:
+        _digest(identity["workbook_luid_sha256"])
 
 
 def _validated_checkpoint(record: object) -> dict:
@@ -966,9 +975,12 @@ def _validated_checkpoint(record: object) -> dict:
             _digest(member["crc32"], 8)
     if "revision_key" in local:
         _validated_revision(local["revision_key"])
-    if "published_occurrences" in record:
-        _require("status" not in local)
-        _validated_occurrences(record["published_occurrences"])
+    if {"published_occurrences", "launch_identity"} & record.keys():
+        _require({"published_occurrences", "launch_identity"} <= record.keys())
+        _validated_workbook_identity(record["launch_identity"])
+        if record["published_occurrences"] is not None:
+            _require("status" not in local)
+            _validated_occurrences(record["published_occurrences"])
     if "fingerprint_error" in record:
         _validated_error(record["fingerprint_error"])
         _require(local == {"status": "unavailable"})
@@ -1109,6 +1121,29 @@ def _validated_result_record(record: object) -> dict:
     return reduced
 
 
+def _validated_dependency_history(record: dict, checkpoint: dict, success: bool) -> None:
+    """Final fields cannot certify each other or erase a held-byte assessment into legacy absence."""
+    origin = record.get("origin")
+    block = origin.get("published_dependencies") if origin is not None else None
+    if "launch_identity" not in checkpoint:
+        _require(block is None)
+        return
+    _require("published_occurrences" in checkpoint)
+    expected = checkpoint["published_occurrences"]
+    identity = checkpoint.get("resolved_identity")
+    if origin is not None and identity is not None:
+        _require(type(origin["workbook_luid"]) is str)
+        _require(identity["workbook_luid_sha256"] == prov.workbook_luid_digest(origin["workbook_luid"]))
+    if block is None:
+        _require(not success or expected == [])
+        return
+    _require(expected is not None and identity is not None)
+    launched_luid = checkpoint["launch_identity"]["workbook_luid_sha256"]
+    if block["source_match"] != "unestablished" and launched_luid is not None:
+        _require(identity["workbook_luid_sha256"] == launched_luid)
+    _require(prov.published_occurrence_checkpoint(block["rows"]) == expected)
+
+
 def _validated_result(result: object, total: int, checkpoints: dict[int, dict]) -> dict:
     _require(type(result) is dict and result.keys() == {"schema", "stamped_at", "input_count", "inputs", "phase"})
     _require(result["schema"] == prov.SCHEMA)
@@ -1124,21 +1159,17 @@ def _validated_result(result: object, total: int, checkpoints: dict[int, dict]) 
     _require(_is_count(result["input_count"]) and result["input_count"] == total)
     records = result["inputs"]
     _require(type(records) is list and len(records) == total)
+    phase = result["phase"]
+    _require(type(phase) is dict and phase.keys() == {"status", "errors"})
+    _enum(phase["status"], prov.RESULT_STATUSES)
     for index, record in enumerate(records):
         reduced = _validated_result_record(record)
         if index in checkpoints:
             checkpoint = checkpoints[index]
             _require(reduced == prov.checkpoint_record(checkpoint))
-            origin = record.get("origin")
-            if origin is not None and "published_dependencies" in origin:
-                expected = checkpoint.get("published_occurrences")
-                _require(expected is not None)
-                _require(prov.published_occurrence_checkpoint(origin["published_dependencies"]["rows"]) == expected)
+            _validated_dependency_history(record, checkpoint, phase["status"] in prov.SUCCESS_STATUSES)
         else:
             _require(reduced["input"] == {"status": "unavailable"})
-    phase = result["phase"]
-    _require(type(phase) is dict and phase.keys() == {"status", "errors"})
-    _enum(phase["status"], prov.RESULT_STATUSES)
     errors = phase["errors"]
     _require(type(errors) is list and len(errors) <= 2 * PROVENANCE_MAX_INPUTS + 8)
     for error in errors:
@@ -1171,6 +1202,9 @@ def _validated_message(message: object) -> dict:
     elif kind == prov.MSG_CHECKPOINT:
         _require(keys == {"kind", "index", "record"} and _is_count(message["index"]))
         _validated_checkpoint(message["record"])
+    elif kind == prov.MSG_WORKBOOK_IDENTITY:
+        _require(keys == {"kind", "index", "identity"} and _is_count(message["index"]))
+        _validated_workbook_identity(message["identity"])
     elif kind == prov.MSG_LOOKUP_INTENT:
         _require(keys == {"kind", "requested"} and type(message["requested"]) is bool)
     elif kind == prov.MSG_INVENTORY_FACTS:
@@ -1227,6 +1261,8 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
                 self.operation == prov.OP_FINGERPRINT and self.counters.get(prov.OP_FINGERPRINT) == message["index"] + 1
             )
             candidate.checkpoints = {**self.checkpoints, message["index"]: message["record"]}
+        elif kind == prov.MSG_WORKBOOK_IDENTITY:
+            candidate.prepare_workbook_identity(message)
         elif kind == prov.MSG_LOOKUP_INTENT:
             _require(self.live_requested is None and self.total is not None and self.total > 0)
             _require(self.operation == prov.OP_FINGERPRINT and len(self.checkpoints) == self.total)
@@ -1261,6 +1297,17 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
                     or candidate.terminal["phase"]["status"] == prior["status"]
                 )
         return candidate
+
+    def prepare_workbook_identity(self, message: dict) -> None:
+        """Bind one independent observation to the currently open physical input, never a sibling."""
+        index = message["index"]
+        _require(self.operation == prov.OP_CONTENT and self.content_open and index in self.checkpoints)
+        usable = [key for key, value in self.checkpoints.items() if "status" not in value["input"]]
+        _require(self.content_inputs < len(usable) and index == usable[self.content_inputs])
+        checkpoint = self.checkpoints[index]
+        _require("launch_identity" in checkpoint and "resolved_identity" not in checkpoint)
+        _require(message["identity"]["file_sha256"] == checkpoint["launch_identity"]["file_sha256"])
+        self.checkpoints = {**self.checkpoints, index: {**checkpoint, "resolved_identity": message["identity"]}}
 
     def validate_result_history(self, result: dict, *, terminal: bool) -> None:
         """Every terminal reconciles observed work; success additionally requires its whole live path."""

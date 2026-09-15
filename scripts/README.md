@@ -270,7 +270,9 @@ finding. This remains exactly one inventory request, not multi-page fetching.
 
 **Published dependency association — partial #562 prerequisite P.** The only published authority is
 the optional `origin.published_dependencies` block inside the existing `source-provenance.json`.
-No provider package, spec addition, sidecar or registry participates. Legacy absence remains absence.
+No provider package, spec addition, sidecar or registry participates. Existing legacy artifacts remain
+readable without inventing this block. A newly assessed input may omit it on success **only when the
+held-byte assessment completed with zero published occurrences**.
 
 The block has exactly `schema: "tableau-published-dependencies/v1"`, `source_sha256` (the outer
 `input.sha256`), `workbook_luid` (the outer origin LUID), `source_match`
@@ -288,10 +290,34 @@ non-boolean integers; only `cannot_establish` has a null count.
 | `ambiguous` | Confirmed source and complete catalog with more than one candidate, including duplicate rows; no chosen LUID. |
 | `cannot_establish` | Source identity/revision, visibility, completeness or detail cannot be established; null count, no LUID. |
 
-The stamper parses fingerprint-equal **held bytes** with the existing parser identity helpers, not a
-second name normalizer. REST uses only the **case-preserved, decoded `derived-from` content URL
-segment**, on the matching source site/server. Normalized keys, display names, captions, repository
-IDs, connection-name fallbacks and provider choices never become catalog queries. After acquisition,
+The stamper fingerprints and parses **one retained immutable byte buffer**, including archive member
+fingerprints, with the existing parser identity helpers, not a second name normalizer. A `.twbx`
+selects the first `.twb` in archive order, exactly as `parse_tableau.load_twb_root` does; it does not
+sort members or silently drop a multi-member workbook. A completed empty assessment is `[]`; unreadable,
+malformed, unsupported or unparseable content is `null` in the private checkpoint and a typed
+`published-assessment-unavailable` phase error, never clean absence. A physical read failure retains
+the existing typed unavailable-input result. Known occurrences without origin/lookup authority produce
+`published-authority-unavailable`, also non-success, retaining safe local evidence. A missing, empty,
+overlong or control-containing parser key likewise cannot produce a successful standalone capture;
+supervision refuses the malformed key rather than sanitizing it into another datasource identity.
+
+REST uses only the **case-preserved, decoded `derived-from` content URL segment**, on the matching
+source site/server. Accepted routes are `<base>/datasources/<content-url>` and
+`<base>/t/<site>/datasources/<content-url>`, with no query or a numeric `rev` query (including dotted
+revisions). The source site and any URL site must match the lookup site; an omitted/empty source site
+is usable only for the configured default site. Scheme, hostname, **effective** port and the full
+case-sensitive configured base-path segments must agree. Default ports may be explicit or implicit.
+Segments are decoded once and must equal the parser's content URL; malformed escapes, encoded
+separators, traversal, double encoding, credentials in URLs, fragments, unrelated routes and unknown
+query forms cannot trigger a catalog lookup. Unsupported shapes remain `cannot_establish`, not a
+provider/display-name fallback. The unqualified `derived-from` form with a separate `site` attribute
+is documented in Tableau/Salesforce
+[Downloading a Published Extract Using Tabcmd](https://help.salesforce.com/s/articleView?id=001458254&language=en_US&type=1).
+The explicit site route and configured-base variants have synthetic production-path controls, not a
+claim of live qualification on every server/proxy topology.
+
+Normalized keys, display names, captions, repository IDs, connection-name fallbacks and provider
+choices never become catalog queries. After acquisition,
 the held source path is rehashed before any association is issued. Changed/unreadable bytes retain
 the original occurrences as `unestablished` / `cannot_establish`; stale or incomparable revisions
 and ambiguous workbook matches also cannot acquire an association.
@@ -307,13 +333,25 @@ The selected datasource detail must agree exactly on ID, content URL, name and u
 REST search-index freshness is not guaranteed; missing, renamed or stale detail therefore refuses.
 Catalog/detail successes and failures are cached only inside this provenance run.
 
-The private fingerprint checkpoint transports only original ordinals and **digests** of parser keys.
-The supervisor reconciles the complete ordered row sequence against that checkpoint and validates
-the nested closed shape, SHA, workbook identity, revision evidence and state/cardinality contract.
+The private fingerprint checkpoint always binds assessment, even when empty or unassessable, alongside
+original ordinals and **digests** of parser keys. A paired `launch_identity` binds digests of the launched
+absolute file identity and any harvested workbook LUID **before live work**. After inventory selection,
+one private `workbook-identity` event binds the independently observed workbook LUID digest to that
+same launched input, before download and origin construction. The supervisor checks the event's
+ordinal, phase, uniqueness and file digest, then reconciles the final LUID against this observation
+and any confirmed harvested LUID. Altering both final LUID fields does not alter that evidence, even
+when two different workbooks have identical bytes.
+
+The supervisor reconciles the complete ordered row sequence against the checkpoint and validates
+the nested closed shape, SHA, identity, revision evidence and state/cardinality contract. Presence is
+bidirectional: a block cannot invent rows after empty/unassessable assessment, and a successful result
+cannot lose a known occurrence or an unassessable assessment into legacy absence.
 Missing, surplus, duplicate-ordinal, reordered, malformed or unknown nested rows/fields are protocol
 faults, not cleaned legacy origins. An occurrence with no valid parser key is retained as incomplete
 by standalone capture and refused by supervision rather than filled from another identity hint.
-Checkpoint-only fields never enter the published artifact, including on interruption.
+Checkpoint-only fields never enter the published artifact, including on interruption. Historical
+derived-only checkpoints remain legacy observations, cannot issue the new authority, and are not
+produced by the current worker; paired current assessment/launch evidence cannot lose either half.
 
 Catalog permission errors, timeouts and unreadable replies produce `cannot_establish` without
 destroying otherwise valid origin evidence or copying catalog rows/exception text into diagnostics.

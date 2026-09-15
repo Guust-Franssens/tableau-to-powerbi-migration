@@ -59,8 +59,8 @@ import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any, Literal, NamedTuple
-from urllib.parse import urlencode, urlsplit
+from typing import Any, Callable, Literal, NamedTuple
+from urllib.parse import unquote, urlencode, urlsplit
 
 from lxml import etree
 
@@ -98,6 +98,7 @@ UNASSESSABLE_STATUS = "failed"
 MSG_INPUTS_DISCOVERED = "inputs-discovered"
 MSG_OPERATION = "operation"
 MSG_CHECKPOINT = "checkpoint"
+MSG_WORKBOOK_IDENTITY = "workbook-identity"
 MSG_LOOKUP_INTENT = "lookup-intent"
 MSG_INVENTORY_FACTS = "inventory-facts"
 MSG_INVENTORY_FAILED = "inventory-failed"
@@ -348,7 +349,7 @@ def unavailable_input(code: str, operation: str = OP_FINGERPRINT) -> dict[str, A
     return {"input": {"status": "unavailable"}, "fingerprint_error": _error(code, operation)}
 
 
-def checkpoint_record(record: dict[str, Any], dependencies: list[dict] | None = None) -> dict[str, Any]:
+def checkpoint_record(record: dict[str, Any], source: _PublishedSource | None = None) -> dict[str, Any]:
     """One completed input reduced to what this module DERIVED, ready to cross a process boundary.
 
     A checkpoint is emitted BEFORE the live half has been scrubbed, so it may carry nothing copied
@@ -360,9 +361,25 @@ def checkpoint_record(record: dict[str, Any], dependencies: list[dict] | None = 
     reduced: dict[str, Any] = {"input": derived or {"status": "unavailable"}}
     if isinstance(record.get("fingerprint_error"), dict):
         reduced["fingerprint_error"] = record["fingerprint_error"]
-    if dependencies:
-        reduced["published_occurrences"] = published_occurrence_checkpoint(dependencies)
+    if source is not None:
+        reduced["published_occurrences"] = (
+            None if source.dependencies is None else published_occurrence_checkpoint(source.dependencies)
+        )
+        reduced["launch_identity"] = workbook_identity_checkpoint(source.path, split_harvest_stem(source.path.stem)[0])
     return reduced
+
+
+def workbook_identity_checkpoint(path: Path, luid: str | None) -> dict:
+    """Bind the launched path and independently observed workbook without transmitting either."""
+    return {
+        "file_sha256": hashlib.sha256(str(path.absolute()).encode("utf-8", errors="surrogatepass")).hexdigest(),
+        "workbook_luid_sha256": workbook_luid_digest(luid) if isinstance(luid, str) else None,
+    }
+
+
+def workbook_luid_digest(luid: str) -> str:
+    """Private case-insensitive identity evidence; never a copied REST response value."""
+    return hashlib.sha256(luid.lower().encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
 def published_occurrence_checkpoint(rows: list[dict]) -> list[dict]:
@@ -393,8 +410,11 @@ class NullReporter:
     def operation(self, operation: str, completed: int, total: int | None = None) -> None:
         """Ignore an operation counter."""
 
-    def checkpoint(self, index: int, record: dict[str, Any], dependencies: list[dict] | None = None) -> None:
+    def checkpoint(self, index: int, record: dict[str, Any], source: _PublishedSource | None = None) -> None:
         """Ignore a completed-input checkpoint."""
+
+    def workbook_identity(self, index: int, source: _PublishedSource, luid: str | None) -> None:
+        """Ignore an independently observed workbook identity."""
 
     def lookup_intent(self, requested: bool) -> None:
         """Ignore whether the completed local pass is followed by live work."""
@@ -460,9 +480,15 @@ class WorkerReporter(NullReporter):
             }
         )
 
-    def checkpoint(self, index: int, record: dict[str, Any], dependencies: list[dict] | None = None) -> None:
+    def checkpoint(self, index: int, record: dict[str, Any], source: _PublishedSource | None = None) -> None:
         """Derived-only evidence for one completed input, addressed by ordinal."""
-        self._send({"kind": MSG_CHECKPOINT, "index": int(index), "record": checkpoint_record(record, dependencies)})
+        self._send({"kind": MSG_CHECKPOINT, "index": int(index), "record": checkpoint_record(record, source)})
+
+    def workbook_identity(self, index: int, source: _PublishedSource, luid: str | None) -> None:
+        """Emit the inventory selection before download, origin construction or association issuance."""
+        self._send(
+            {"kind": MSG_WORKBOOK_IDENTITY, "index": index, "identity": workbook_identity_checkpoint(source.path, luid)}
+        )
 
     def lookup_intent(self, requested: bool) -> None:
         """Declare live intent before sign-in without sending any credential or host identity."""
@@ -487,7 +513,7 @@ class WorkerReporter(NullReporter):
         self._send({"kind": MSG_TERMINAL, "result": result})
 
 
-def fingerprint(path: Path) -> dict[str, Any]:
+def fingerprint(path: Path, raw: bytes | None = None) -> dict[str, Any]:
     """Size + sha256 + a reproducible REVISION KEY, plus per-member CRCs for a ``.twbx``.
 
     The members matter more than the outer hash: a ``.twbx`` is a zip, and zip metadata (timestamps,
@@ -499,7 +525,7 @@ def fingerprint(path: Path) -> dict[str, Any]:
     :func:`object_identity.revision_key` is the content-normalised digest that makes the comparison
     reproducible, and it is recorded on both sides so a consumer never has to guess which it holds.
     """
-    raw = path.read_bytes()
+    raw = path.read_bytes() if raw is None else raw
     record: dict[str, Any] = {
         "file": path.name,
         "size_bytes": len(raw),
@@ -508,8 +534,8 @@ def fingerprint(path: Path) -> dict[str, Any]:
     key = revision_key(raw)
     if key is not None:
         record["revision_key"] = key.as_json()
-    if path.suffix.lower() == ".twbx" and zipfile.is_zipfile(path):
-        with zipfile.ZipFile(path) as archive:
+    if path.suffix.lower() == ".twbx" and zipfile.is_zipfile(io.BytesIO(raw)):
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             record["members"] = [
                 {"name": info.filename, "size_bytes": info.file_size, "crc32": f"{info.CRC:08x}"}
                 for info in sorted(archive.infolist(), key=lambda i: i.filename)
@@ -522,19 +548,19 @@ class _PublishedSource(NamedTuple):
     dependencies: list[dict] | None
 
 
-def _published_source(path: Path, local: dict) -> _PublishedSource:
-    """Read a held, fingerprint-equal workbook; reuse the parser's occurrence and identity rules."""
-    if local.get("status") == "unavailable":
+def _published_source(path: Path, raw: bytes | None) -> _PublishedSource:
+    """Assess the SAME immutable bytes as fingerprinting; None is unassessable, [] is proven empty."""
+    if raw is None:
         return _PublishedSource(path, None)
     try:
-        raw = path.read_bytes()
-        if hashlib.sha256(raw).hexdigest() != local.get("sha256") or path.suffix.lower() not in WORKBOOK_SUFFIXES:
+        if path.suffix.lower() not in WORKBOOK_SUFFIXES:
             return _PublishedSource(path, None)
         if path.suffix.lower() == ".twbx":
             with zipfile.ZipFile(io.BytesIO(raw)) as archive:
                 members = [name for name in archive.namelist() if name.lower().endswith(".twb")]
-                if len(members) != 1:
+                if not members:
                     return _PublishedSource(path, None)
+                # load_twb_root selects the first member in archive order, not sorted filename order.
                 raw = archive.read(members[0])
         root = etree.fromstring(raw, etree.XMLParser(resolve_entities=False, no_network=True))
         if root.tag != "workbook" or root.getroottree().docinfo.doctype:
@@ -1037,7 +1063,12 @@ class _WorkbookIndex:
         return None, []
 
 
-def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict[str, Any] | None:
+def find_origin(
+    lookup: TableauLookup,
+    stem: str,
+    local: dict[str, Any],
+    on_identity: Callable[[str | None], None] | None = None,
+) -> dict[str, Any] | None:
     """Identify a local workbook on the site by LUID or name, then CONFIRM by content hash.
 
     Returns ``None`` when no workbook matches. When one does, ``matched_by`` records *how it was
@@ -1064,9 +1095,10 @@ def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict
     bytes DIFFER from a copy nobody had seen: a drift verdict manufactured out of a failed download.
     ``content_unavailable`` carries the sanitized reason, and both digests stay ``None``.
     """
-    luid, name_part = split_harvest_stem(stem)
     index = _WorkbookIndex(lookup.workbooks())
-    matched_by, candidates = index.match(luid, name_part)
+    matched_by, candidates = index.match(*split_harvest_stem(stem))
+    if on_identity is not None:
+        on_identity(candidates[0].get("id") if candidates else None)
     if not candidates:
         return None
 
@@ -1131,20 +1163,67 @@ def _dependency_source_match(lookup: TableauLookup, source: _PublishedSource, lo
     return "unestablished"
 
 
+def _dependency_url_path(path: str) -> list[str]:
+    """Decode each segment once, refusing ambiguous separators, traversal and malformed escapes."""
+    if path in ("", "/"):
+        return []
+    if not path.startswith("/") or re.search(r"%(?![0-9a-fA-F]{2})", path):
+        raise ValueError("unassessable datasource URL path")
+    parts = [unquote(part, errors="strict") for part in path[1:].removesuffix("/").split("/")]
+    if any(
+        part in ("", ".", "..") or part != part.strip() or re.search(r"[/\\%?#;\x00-\x1f\x7f]", part) for part in parts
+    ):
+        raise ValueError("unassessable datasource URL segment")
+    return parts
+
+
+def _dependency_url_paths(derived_from: str, configured: str) -> tuple[list[str], list[str]]:
+    """Require one complete origin, not merely the same hostname; return unambiguous path segments."""
+    addresses = (derived_from, configured)
+    if any(
+        not isinstance(address, str) or not 0 < len(address) <= 4096 or re.search(r"[\x00-\x20\x7f\\#]", address)
+        for address in addresses
+    ):
+        raise ValueError("unassessable datasource URL")
+    derived, base = map(urlsplit, addresses)
+    if (
+        base.scheme not in ("http", "https")
+        or derived.scheme != base.scheme
+        or not base.hostname
+        or derived.hostname != base.hostname
+    ):
+        raise ValueError("different datasource URL origin")
+    if (
+        any(url.username is not None or url.password is not None or url.netloc.endswith(":") for url in (derived, base))
+        or "?" in configured
+        or re.fullmatch(r"(?:rev=[0-9]+(?:\.[0-9]+)*)?", derived.query) is None
+    ):
+        raise ValueError("unsupported datasource URL credentials or parameters")
+    default_port = 443 if base.scheme == "https" else 80
+    ports = [url.port if url.port is not None else default_port for url in (derived, base)]
+    if ports[0] != ports[1] or ports[0] == 0:
+        raise ValueError("different datasource URL port")
+    return _dependency_url_path(derived.path), _dependency_url_path(base.path)
+
+
 def _dependency_query_allowed(dependency: dict, lookup: TableauLookup) -> bool:
+    """Accept only a datasource route inside the configured origin/base and the same source site."""
     segment = dependency["content_url"]
-    if not isinstance(segment, str) or re.fullmatch(r"[^,:\x00-\x1f/?#\\]{1,1024}", segment) is None:
+    if not isinstance(segment, str) or re.fullmatch(r"[^,:\x00-\x1f\x7f/?#\\%]{1,1024}", segment) is None:
         return False
     try:
-        derived, base = urlsplit(dependency["derived_from"]), urlsplit(lookup.base)
-        return (
-            dependency["site"] == lookup.site
-            and derived.scheme in ("http", "https")
-            and derived.hostname == base.hostname
-            and derived.port == base.port
-            and derived.username is None
-            and derived.password is None
-        )
+        source_site = dependency["site"]
+        if (source_site is not None and not isinstance(source_site, str)) or (source_site or "") != lookup.site:
+            return False
+        path, base_path = _dependency_url_paths(dependency["derived_from"], lookup.base)
+        if path[: len(base_path)] != base_path:
+            return False
+        route = path[len(base_path) :]
+        if len(route) == 4 and route[0] == "t":
+            if route[1] != lookup.site:
+                return False
+            route = route[2:]
+        return route == ["datasources", segment]
     except (TypeError, ValueError):
         return False
 
@@ -1256,6 +1335,18 @@ def _complete_provenance(
     if reporter.cancelled:
         return _cancelled_result(records, len(inputs), OP_CONTENT if lookup is not None else OP_SIGN_IN, errors)
 
+    for source, record in zip(inputs, records):
+        if source.dependencies and (
+            "published_dependencies" not in (record.get("origin") or {})
+            or any(
+                not isinstance(row["published_key"], str)
+                or not row["published_key"].strip()
+                or len(row["published_key"]) > 1024
+                or any(ord(char) < 32 for char in row["published_key"])
+                for row in source.dependencies
+            )
+        ):
+            errors.append(_error("published-authority-unavailable", "lookup-origin"))
     usable = sum(record["input"].get("status") != "unavailable" for record in records)
     status = "failed" if not usable else ("partial" if errors else ("success" if live_requested else "local_only"))
     result = _result(records, status, errors)
@@ -1274,22 +1365,23 @@ def _fingerprint_pass(
         reporter.operation(OP_FINGERPRINT, index, len(inputs))
         if reporter.cancelled:
             break
+        raw = None
         try:
-            local = fingerprint(path)
+            raw = path.read_bytes()
+            local = fingerprint(path, raw)
         except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
             error = _error("local-fingerprint-failed", OP_FINGERPRINT, exc)
             errors.append(error)
             record: dict[str, Any] = {"input": {"status": "unavailable"}, "fingerprint_error": error}
         else:
             record = {"input": local}
-        source = _published_source(path, record["input"])
+        source = _published_source(path, raw if "fingerprint_error" not in record else None)
+        if source.dependencies is None and "fingerprint_error" not in record:
+            errors.append(_error("published-assessment-unavailable", OP_FINGERPRINT))
         sources.append(source)
         records.append(record)
         reporter.operation(OP_FINGERPRINT, len(records), len(inputs))
-        if source.dependencies:
-            reporter.checkpoint(index, record, source.dependencies)
-        else:
-            reporter.checkpoint(index, record)
+        reporter.checkpoint(index, record, source)
     return records, sources
 
 
@@ -1341,22 +1433,27 @@ def _origin_pass(
             errors.append(finding)
     reporter.operation(OP_INVENTORY, 1, 1)
 
-    for source, record in zip(inputs, records):
+    for index, (source, record) in enumerate(zip(inputs, records)):
         if record["input"].get("status") == "unavailable":
             continue
         reporter.operation(OP_CONTENT, lookup.content_attempts(), len(lookup.matched_luids))
         if reporter.cancelled:
             break
-        _attach_origin(record, lookup, source, errors)
+        _attach_origin(record, lookup, source, errors, index)
         reporter.operation(OP_CONTENT, lookup.content_attempts(), len(lookup.matched_luids))
 
 
 def _attach_origin(
-    record: dict[str, Any], lookup: TableauLookup, source: _PublishedSource, errors: list[dict[str, Any]]
+    record: dict[str, Any], lookup: TableauLookup, source: _PublishedSource, errors: list[dict[str, Any]], index: int
 ) -> None:
     """One input's site half, or the typed reason there is none."""
     try:
-        origin = find_origin(lookup, source.path.stem, record["input"])
+        origin = find_origin(
+            lookup,
+            source.path.stem,
+            record["input"],
+            lambda luid: lookup.reporter.workbook_identity(index, source, luid),
+        )
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         origin = None
         record["lookup_error"] = _error("live-lookup-failed", "lookup-origin", exc)

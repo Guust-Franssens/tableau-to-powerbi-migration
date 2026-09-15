@@ -1019,8 +1019,14 @@ def _published_result() -> dict:
 def _published_checkpoint(result: dict) -> dict:
     record = result["inputs"][0]
     # An independent fixture projection, not the production projection being tested.
+    identity = {
+        "file_sha256": "d" * 64,
+        "workbook_luid_sha256": hashlib.sha256(record["origin"]["workbook_luid"].lower().encode()).hexdigest(),
+    }
     return {
         "input": copy.deepcopy(record["input"]),
+        "launch_identity": dict(identity),
+        "resolved_identity": dict(identity),
         "published_occurrences": [
             {
                 "source_ordinal": row["source_ordinal"],
@@ -1200,24 +1206,30 @@ def test_published_association_cannot_be_transplanted_between_input_rows(axis: s
         estate._validated_result(result, 2, checkpoints)
 
 
-def test_published_new_authority_requires_occurrence_checkpoint_but_legacy_absence_stays_absent() -> None:
+def test_published_new_authority_requires_assessment_but_existing_legacy_artifacts_stay_compatible() -> None:
     result = _published_result()
     checkpoint = _published_checkpoint(result)
     del checkpoint["published_occurrences"]
     with pytest.raises(estate.ProvenanceProtocolError):
         estate._validated_result(result, 1, {0: checkpoint})
     del result["inputs"][0]["origin"]["published_dependencies"]
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_result(result, 1, {0: checkpoint})
+    checkpoint["published_occurrences"] = []
     accepted = estate._validated_result(result, 1, {0: checkpoint})
     assert "published_dependencies" not in accepted["inputs"][0]["origin"]
+    assert prov.is_success(prov.normalize_result(result)), "P_LEGACY_ARTIFACT_COMPATIBILITY"
 
 
 def _published_messages(result: dict) -> list[dict]:
+    checkpoint = _published_checkpoint(result)
+    identity = checkpoint.pop("resolved_identity")
     messages = [
         {"kind": "operation", "operation": "collect-inputs", "completed": 0, "total": 1},
         _discovery(),
         {"kind": "operation", "operation": "collect-inputs", "completed": 1, "total": 1},
         {"kind": "operation", "operation": "fingerprint", "completed": 1, "total": 1},
-        {"kind": "checkpoint", "index": 0, "record": _published_checkpoint(result)},
+        {"kind": "checkpoint", "index": 0, "record": checkpoint},
         {"kind": "lookup-intent", "requested": True},
     ]
     for operation in ("sign-in", "inventory", "content", "scrub"):
@@ -1226,6 +1238,8 @@ def _published_messages(result: dict) -> list[dict]:
         )
         if operation == "inventory":
             messages.append(_facts(returned_count=1, total_available=1))
+        if operation == "content":
+            messages.append({"kind": prov.MSG_WORKBOOK_IDENTITY, "index": 0, "identity": identity})
         messages.append({"kind": "operation", "operation": operation, "completed": 1, "total": 1})
     messages.append({"kind": "safe-snapshot", "result": copy.deepcopy(result)})
     messages.extend(
@@ -1244,7 +1258,16 @@ def test_published_authority_survives_real_wire_and_publication_without_private_
     assert code is None and state.terminal == result
     path = estate.write_source_provenance(tmp_path, state.terminal)
     assert path is not None and json.loads(path.read_text(encoding="utf-8")) == result
-    assert "published_occurrences" not in path.read_text(encoding="utf-8")
+    assert all(
+        field not in path.read_text(encoding="utf-8")
+        for field in (
+            "published_occurrences",
+            "launch_identity",
+            "resolved_identity",
+            "file_sha256",
+            "workbook_luid_sha256",
+        )
+    )
     interrupted = state.document(prov.DEADLINE_CODE)
     assert interrupted["inputs"] == result["inputs"] and interrupted["phase"]["status"] == "partial"
 
@@ -1275,7 +1298,6 @@ def _hanging_published_worker(conn, cancel_event, payload) -> None:
     prov.provenance_worker(conn, cancel_event, payload)
 
 
-@pytest.mark.timing
 @pytest.mark.parametrize("boundary", ["catalog", "detail"])
 def test_published_catalog_and_detail_remain_inside_existing_absolute_deadline(tmp_path: Path, boundary: str) -> None:
     from test_stamp_tableau_provenance import P_WORKBOOK, _published_xml
@@ -1290,3 +1312,100 @@ def test_published_catalog_and_detail_remain_inside_existing_absolute_deadline(t
     assert outcome.result["phase"]["errors"][-1] == {"code": "deadline-expired", "operation": "content"}
     assert outcome.result["inputs"][0]["input"]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
     assert "origin" not in outcome.result["inputs"][0] and "published_occurrences" not in outcome.result["inputs"][0]
+
+
+def test_published_both_final_workbook_luids_cannot_replace_independent_inventory_identity() -> None:
+    result = _published_result()
+    result["inputs"][0]["input"]["file"] = "11111111-1111-4111-8111-111111111111_Consumer.twb"
+    messages = _published_messages(result)
+    # The actual local checkpoint is derived-only; the scrubbed filename remains unchanged.
+    messages[4]["record"]["input"].pop("file")
+    code, state = _receive(b"".join(_wire(message) for message in messages))
+    assert code is None and state.terminal == result, "P_WORKBOOK_TRANSPLANT_POSITIVE"
+    for message in messages:
+        if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            origin = message["result"]["inputs"][0]["origin"]
+            origin["workbook_luid"] = "33333333-3333-4333-8333-333333333333"
+            origin["published_dependencies"]["workbook_luid"] = origin["workbook_luid"]
+    code, state = _receive(b"".join(_wire(message) for message in messages))
+    assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, "P_RESOLVED_WORKBOOK_BINDING"
+    assert state.document(code)["inputs"][0]["input"]["sha256"] == "a" * 64
+
+
+@pytest.mark.parametrize("defect", ["file", "luid-and-result", "missing", "duplicate", "early", "late", "index"])
+def test_published_independent_identity_event_binds_the_launched_input_and_content_phase(defect: str) -> None:
+    messages = _published_messages(_published_result())
+    at = next(index for index, message in enumerate(messages) if message["kind"] == prov.MSG_WORKBOOK_IDENTITY)
+    identity = messages[at]
+    if defect == "file":
+        identity["identity"]["file_sha256"] = "e" * 64
+    elif defect == "luid-and-result":
+        other = "33333333-3333-4333-8333-333333333333"
+        identity["identity"]["workbook_luid_sha256"] = hashlib.sha256(other.encode()).hexdigest()
+        for message in messages:
+            if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+                origin = message["result"]["inputs"][0]["origin"]
+                origin["workbook_luid"] = origin["published_dependencies"]["workbook_luid"] = other
+    elif defect == "missing":
+        messages.pop(at)
+    elif defect == "duplicate":
+        messages.insert(at + 1, copy.deepcopy(identity))
+    elif defect == "early":
+        messages.insert(5, messages.pop(at))
+    elif defect == "late":
+        messages.insert(at + 2, messages.pop(at))
+    else:
+        identity["index"] = 1
+    code, state = _receive(b"".join(_wire(message) for message in messages))
+    assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, f"P_LAUNCH_BINDING_{defect}"
+    document = state.document(code)
+    assert document["inputs"][0]["input"]["sha256"] == "a" * 64
+    assert all(
+        field not in json.dumps(document) for field in ("launch_identity", "resolved_identity", "published_occurrences")
+    )
+
+
+@pytest.mark.parametrize("field", ["published_occurrences", "launch_identity"])
+def test_published_current_checkpoint_cannot_drop_half_its_assessment(field: str) -> None:
+    messages = _published_messages(_published_result())
+    del messages[4]["record"][field]
+    code, state = _receive(b"".join(_wire(message) for message in messages))
+    assert code == estate.PROVENANCE_PROTOCOL_CODE and not state.checkpoints, "P_ASSESSMENT_ENVELOPE"
+
+
+@pytest.mark.parametrize("assessment", [None, []], ids=["unknown", "complete-empty"])
+def test_published_authority_must_not_be_invented_after_an_empty_or_unknown_assessment(assessment: list | None) -> None:
+    messages = _published_messages(_published_result())
+    messages[4]["record"]["published_occurrences"] = assessment
+    code, state = _receive(b"".join(_wire(message) for message in messages))
+    assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, "P_ASSESSMENT_NO_INVENTION"
+
+
+@pytest.mark.parametrize("assessment", [None, "known"], ids=["unknown", "nonempty"])
+def test_published_full_wire_cannot_claim_success_without_assessed_authority(assessment: str | None) -> None:
+    messages = _published_messages(_published_result())
+    if assessment is None:
+        messages[4]["record"]["published_occurrences"] = None
+    for message in messages:
+        if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            del message["result"]["inputs"][0]["origin"]["published_dependencies"]
+    code, state = _receive(b"".join(_wire(message) for message in messages))
+    assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, "P_ASSESSMENT_SUCCESS_BINDING"
+
+
+@pytest.mark.parametrize("where", ["launch", "resolved"])
+@pytest.mark.parametrize("field", ["file_sha256", "workbook_luid_sha256"])
+@pytest.mark.parametrize(
+    "value", ["private-filename.twb", "f" * 63, "F" * 64, True, [], {"source": "private-host-path"}]
+)
+def test_published_private_identity_fields_remain_strict_bounded_digests(where: str, field: str, value: object) -> None:
+    messages = _published_messages(_published_result())
+    identity = (
+        messages[4]["record"]["launch_identity"]
+        if where == "launch"
+        else next(message["identity"] for message in messages if message["kind"] == prov.MSG_WORKBOOK_IDENTITY)
+    )
+    identity[field] = value
+    code, state = _receive(b"".join(_wire(message) for message in messages))
+    assert code == estate.PROVENANCE_PROTOCOL_CODE, "P_PRIVATE_IDENTITY_TYPES"
+    assert "private-" not in json.dumps(state.document(code))
