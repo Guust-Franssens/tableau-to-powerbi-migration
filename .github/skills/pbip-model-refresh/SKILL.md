@@ -59,66 +59,90 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B
 
 ### Inspect an unreadable in-flight dialog without stealing focus (#146)
 
-**An image is evidence to inspect, never a deterministic verdict.** On the first in-flight
-`DIALOG_UNREADABLE` finding for an owned window, the refresh's actual detector callback starts one
-killable child. It calls **`PrintWindow(PW_RENDERFULLCONTENT)` on that exact HWND**, checking the
-target PID, HWND and direct owner relationship before and after rendering and after writing.
-An invisible/destroyed window, changed PID/owner, enabled owner, failed capture/write, uniform image
-or untouched raster pixels refuses acquisition. Size only bounds allocation (four million pixels);
-neither size nor ownership nor a successful capture classifies the dialog.
+**Phase-1 seam: acquisition plus a metadata record, not pixel classification.** The first in-flight
+`DIALOG_UNREADABLE` owned finding gets one bounded exact-HWND
+**`PrintWindow(PW_RENDERFULLCONTENT)`** attempt. PID, visibility, direct owner, owner PID and disabled
+owner are checked before rendering, after rendering and after writing. Failure, blank/unpainted
+pixels, changed identity or incomplete metadata cannot become a semantic verdict. The existing
+unreadable latch, refresh deadline and successful-worker behavior remain unchanged.
 
-✅ **Precedent:** the two independent September 15, 2026 controls recorded on issue #146 acquired
-readable Snowflake forms while their Desktop owners stayed minimized, without foreground or restore.
-That is evidence for trying background capture first, **not qualification of this implementation on
-every connector**. This implementation never foregrounds, restores, activates or screen-captures.
-Foreground is neither the default nor a proven universal fallback for incomplete captures.
+**Configure caller-owned private scratch explicitly.** Supply
+`--evidence-dir <existing-local-run-scratch>` or export **`PBIP_EVIDENCE_DIR`** before invoking a
+probe that launches this refresh. The Python API also accepts `refresh(..., evidence_dir=Path(...))`;
+the explicit argument overrides the environment. A suitable location is the allocated run's
+`scratch` directory, never a package, deliverable, model or report directory. When inside a checkout
+the destination must be positively Git-ignored. Remote/reparse locations and artifact trees are
+refused. The directory must already exist. **There is no image fallback to the working directory.**
+An unconfigured/unusable directory emits a non-verdict diagnostic and preserves the wait.
 
-**Exact local agent workflow:**
+Run the refresh **asynchronously, attached to the session**, with its explicit PID and the usual
+`--no-save` for read-only work. Read live stdout early; do not wait for the final exit. The stable
+wire interface is a line beginning **`LOCAL_IMAGE `**, followed by one JSON object:
 
-1. Run the **refresh command asynchronously, attached to the session**, with an explicit PID and
-   a known local working directory. Keep the usual `--no-save` for read-only work. Read its live
-   stdout early and repeatedly while it runs; do not wait for completion or use a wrapper that
-   buffers all output until exit. The repository's buffered `probe_live_source` wrapper cannot
-   provide this interactive inspection workflow. This notice is refresh-only; the standalone
-   PowerShell arbiter, t=0 checks and read-only query probe keep their existing behavior.
-2. On the one flushed machine-readable notice below, resolve **only its `path` against that
-   command's original working directory**, then open only that file in the local image viewer.
-   Do not take a desktop screenshot, select a foreground window, or copy pixels/base64 into a
-   transcript, log, receipt or handover.
+| Field | v1 meaning |
+|---|---|
+| `schema`, `event` | `pbip.window-image.v1`, `owned_modal_image` |
+| `capture_id`, `status` | Opaque per-attempt ID; one `ACQUIRED` notice per stable HWND, followed by cleanup updates using the same marker/ID |
+| `timestamp_utc`, `captured_at_utc` | UTC notice time; publication time after verified acquisition (`null` when not acquired) |
+| `desktop_pid`, `main_hwnd`, `dialog_hwnd`, `owner_hwnd` | Decimal **strings**. `main_hwnd` is the existing enumerator's root snapshot, or `null` when ambiguous; ownership checks attest the dialog/direct-owner relationship, not an invented main-window identity |
+| `ownership_checks` | `before`, `after_render`, `after_write`: real Booleans or `null` for a check not established |
+| `dimensions`, `capture_success`, `capture_method` | Captured width/height as decimal strings, success Boolean, `PrintWindow_PW_RENDERFULLCONTENT` |
+| `image_basename`, `path`, `sha256` | Same random basename/relative locator, and SHA-256 of the PNG, checked against the observer's pinned file handle; never a host path |
+| `expires_at_utc`, `cleanup_state` | Planned expiry; `not_created`, `pending`, `removed_externally`, `expired`, `removed_on_exit`, `removed`, or `cleanup_failed` |
+| `classification_provenance` | `null`: deterministic acquisition has not reviewed the pixels. A visual reviewer records its own provenance separately |
 
-   ```text
-   LOCAL_IMAGE {"event":"owned_modal_image","status":"ACQUIRED","path":"_ui-image-<opaque-id>.png","expires_in_seconds":60.0}
-   ```
+**Parse JSON before interpreting fields.** Wire strings escape zero as `\u0030`: that preserves the
+decoded PID/HWND/hash/timestamp while preventing numeric substrings such as `10054` or `403` from
+tripping legacy free-text failure classifiers. Numeric values are intentionally strings, not JSON
+numbers. Do not feed re-serialized metadata into an authentication-text scanner.
 
-3. **Positively classify what the pixels actually show**, if possible. A clearly identified
-   sign-in/approval request uses the existing corresponding human-action handoff; report the
-   category without copying field values, source names or private dialog text. Do not enter a
-   credential or approve a prompt. An incomplete, blank, ambiguous or expired image establishes
-   nothing: preserve uncertainty. Never classify from dimensions, class, a disabled owner or
-   capture success. No automatic image/OCR classifier or external-verdict ingestion was added;
-   do not forge the refresh's exit code or a gate receipt from your visual assessment.
-4. **Delete that exact image immediately after inspection**, for example
-   `Remove-Item -LiteralPath <notice-path>`. It is created with an owner-only protected Windows
-   DACL, a random component-free filename, and no durable receipt. The refresh deletes it on
-   normal/error wait exit and at **60 seconds after acquisition** if still running. Capturing is
-   separately bounded at **8 seconds**, off the refresh thread; failed attempts do not rearm on
-   the next poll. A new HWND gets its own validation and at most one attempt.
-5. Other `LOCAL_IMAGE` statuses are **non-semantic acquisition/cleanup diagnostics**, never
-   authentication verdicts. `CLEANUP_FAILED` names only the same relative private file: close a
-   viewer holding it and delete it locally. A pending expiry retries failed exit deletion; a
-   permanent OS refusal or forced interpreter termination cannot promise deletion. Never publish
-   the file to explain a cleanup error.
+**Exact local reviewer workflow:**
 
-The existing Win32 semantic detector remains authoritative. This small acquisition change adds no
-second modal detector or UIA classifier, and does not run the standalone PowerShell arbiter or invoke
-another refresh. Its existing bounded UIA harvest remains available separately. **Without positive
-semantic evidence, the original `DIALOG_UNREADABLE` latch/deadline and successful-worker behavior
-are unchanged.** The image deadline never changes the refresh's XMLA or wall-clock deadline.
+1. Match `schema`, `capture_id` and the expected Desktop PID. Require `status: ACQUIRED`,
+   `capture_success: true`, all three ownership checks `true`, `cleanup_state: pending` and an
+   unexpired record. Resolve **only the basename against the configured evidence directory**,
+   never against the process working directory. Read only that file and verify its SHA-256 before
+   reviewing pixels. Neither hash nor geometry identifies a prompt.
+2. Use a reader that permits **`FILE_SHARE_DELETE`**. The image is held under a protected owner-only
+   DACL and a kernel **delete-on-close** lease. Node/libuv readers are verified; ordinary Python
+   `open(path)` does not share deletion on Windows. A Python image decoder can use
+   `_open_private_image(path, existing=True)` as a shared-delete stream and decode it in memory.
+   Do not copy pixels to another file to work around an incompatible viewer, and never print
+   bytes/base64 or put images in a log, receipt, Git tree, package or deliverable.
+3. A **positively identified username/password form** may be routed by the visual reviewer to the
+   existing credential stop; a **positively identified native-query approval prompt** to
+   operator-required. Record only category, reviewer/method, review time, `capture_id` and image
+   hash as classification provenance—not field values, source names or dialog text. Do not enter
+   credentials, approve a prompt, forge the refresh's exit code, or clear a gate from metadata alone.
+   Absent positive review, preserve `DIALOG_UNREADABLE` and the existing wait/success semantics.
+4. **Delete the exact file immediately after handling and close the viewer.** For example, remove
+   `Join-Path $env:PBIP_EVIDENCE_DIR $record.image_basename` with `Remove-Item -LiteralPath`.
+   The observer notices external deletion without inferring who deleted it or what was classified.
+   It also deletes at **60 seconds**, normal/error wait exit and process exit. Kernel handle cleanup
+   covers forced termination too; the native control observed a 5–6 ms delay after process signalling.
+   Readers holding their own open handles may delay final deallocation, so close them promptly.
+5. `CLEANED`/`CLEANUP_FAILED` updates retain metadata/hash only. Other statuses are closed,
+   non-semantic diagnostics. A cleanup refusal must not replace the original refresh result;
+   close a holding viewer and remove the same private file locally. Never publish pixels to explain
+   a cleanup failure. Durable logs may retain the safe record and external review provenance only.
 
-⚠️ **Limits:** nonuniform/fully-painted pixels do not prove complete, current, legible content; the
-viewer must decide that. Identity checks are snapshots, not a lock on Windows: destruction and reuse
-with identical PID/HWND/owner values between checks cannot be distinguished. Native synthetic-window
-controls exercise the acquisition path; real Desktop/connector qualification remains separate.
+**Follow-up seam, deliberately not wired here:** `probe_live_source.py` currently buffers the
+refresh's output. Its Phase-1 consumer must forward/stream `LOCAL_IMAGE` lines, supply the run-owned
+`PBIP_EVIDENCE_DIR`, perform the schema/PID/hash/lifetime checks above, and route a separate positive
+visual review. That orchestration requires a file outside this change's closed surface. The
+standalone PowerShell arbiter, t=0 checks and read-only query probe retain their existing behavior;
+no automatic UIA enrichment, OCR or external-verdict ingestion was added.
+
+✅ **Precedent:** the two independent September 15, 2026 controls on #146 acquired readable
+Snowflake forms with their owners minimized and without foreground/restore. This implementation
+never foregrounds, restores, activates or screen-captures. Foreground is neither the default nor a
+proven universal fallback.
+
+⚠️ **Limits:** identity checks are snapshots; identical PID/HWND/owner destruction/reuse entirely
+between checks cannot be distinguished. Painted/nonuniform pixels do not prove current, complete or
+legible connector content. Native synthetic controls exercise the implementation; real
+Desktop/connector qualification remains separate. The capture child's eight-second budget and the
+image's lifetime never change the refresh's XMLA or wall-clock deadline.
 
 **`--calculate-only` / `--measures-only` is an opt-in DAX-only shortcut, not the default.** It sends
 TMSL refresh type `calculate`, which recalculates formulas, relationships and hierarchies without

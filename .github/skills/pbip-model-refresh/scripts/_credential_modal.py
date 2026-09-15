@@ -56,10 +56,13 @@ no authority either: measured, it is a Z-ORDER answer (see :func:`main_frame`).
 
 from __future__ import annotations
 
+import atexit
 import ctypes
+import hashlib
 import json
 import os
 import re
+import stat
 import struct
 import subprocess
 import sys
@@ -70,7 +73,9 @@ import zlib
 from ctypes import wintypes
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import BinaryIO
 
 # Sibling module, resolved once the caller puts this scripts/ dir on sys.path (probe, refresh, and the
 # test conftest all do). Reused rather than reimplemented for issue #158's zero-window liveness split:
@@ -1238,7 +1243,11 @@ def join_with_credential_poll(
 
 IMAGE_CAPTURE_SECONDS = 8.0
 IMAGE_LIFETIME_SECONDS = 60.0
+IMAGE_DIRECTORY_ENV = "PBIP_EVIDENCE_DIR"
+IMAGE_SCHEMA = "pbip.window-image.v1"
+_MAX_IMAGE_BYTES = 20_000_000
 _IMAGE_NAME = re.compile(r"_ui-image-[1-9a-fx]{32}\.png")
+_IMAGE_CHECKS = ("before", "after_render", "after_write")
 _IMAGE_RESULTS = {
     "ACQUIRED",
     "TARGET_CHANGED",
@@ -1252,6 +1261,10 @@ _IMAGE_RESULTS = {
 
 class _ImageUnavailable(RuntimeError):
     """A closed, content-free acquisition result; never a dialog classification."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.checks: dict[str, bool | None] = dict.fromkeys(_IMAGE_CHECKS)
 
 
 def _same_image_target(user32: ctypes.CDLL, pid: int, window: DesktopWindow) -> bool:
@@ -1372,8 +1385,12 @@ def _image_png(width: int, height: int, rgb: bytes) -> bytes:
     )
 
 
-def _write_private_image(path: Path, data: bytes) -> None:
-    """CreateNew with a protected owner-only DACL, before any pixel bytes reach disk."""
+def _open_private_image(path: Path, *, existing: bool = False, delete_on_close: bool = False) -> BinaryIO:
+    """Open a shared-delete stream; new files get an atomic protected owner-only DACL.
+
+    The observer retains the delete-on-close handle. Kernel handle cleanup therefore removes the
+    image even when the observer is forcibly terminated. Readers must allow FILE_SHARE_DELETE.
+    """
     # Windows-only import and native handle transfer; no optional Python dependency.
     # pylint: disable=import-outside-toplevel
     import msvcrt
@@ -1412,14 +1429,15 @@ def _write_private_image(path: Path, data: bytes) -> None:
         ):
             raise _ImageUnavailable("WRITE_FAILED")
         attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
-        handle = kernel.CreateFileW(str(path), 0x40000000, 7, ctypes.byref(attributes), 1, 0x100, None)
+        access = 0xC0000000 | (0x10000 if delete_on_close else 0)
+        flags = 0x100 | (0x04000000 if delete_on_close else 0)
+        handle = kernel.CreateFileW(str(path), access, 7, ctypes.byref(attributes), 3 if existing else 1, flags, None)
         if handle == ctypes.c_void_p(-1).value:
             handle = None
             raise _ImageUnavailable("WRITE_FAILED")
-        descriptor_fd = msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
+        descriptor_fd = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY | os.O_NOINHERIT)
         handle = None  # the file descriptor now owns it
-        with os.fdopen(descriptor_fd, "wb") as image:
-            image.write(data)
+        return os.fdopen(descriptor_fd, "r+b")
     finally:
         if handle:
             kernel.CloseHandle(handle)
@@ -1427,41 +1445,148 @@ def _write_private_image(path: Path, data: bytes) -> None:
             kernel.LocalFree(descriptor)
 
 
-def _capture_exact_image(pid: int, window: DesktopWindow, path: Path) -> None:
+def _write_private_image(path: Path, data: bytes, *, existing: bool = False) -> None:
+    """Write only the reserved image in production; CreateNew remains the standalone default."""
+    with _open_private_image(path, existing=existing) as image:
+        image.write(data)
+        image.truncate()
+
+
+def _capture_exact_image(pid: int, window: DesktopWindow, path: Path, *, existing: bool = False) -> dict:
     """Acquisition only. Checks bracket PrintWindow AND the write, without reading any UI text."""
     if sys.platform != "win32":
         raise _ImageUnavailable("UNSUPPORTED")
     user32 = _image_user32()
-    if not _same_image_target(user32, pid, window):
-        raise _ImageUnavailable("TARGET_CHANGED")
-    width, height, rgb = _render_exact_window(user32, window.hwnd)
-    if not _same_image_target(user32, pid, window):
-        raise _ImageUnavailable("TARGET_CHANGED")
+    checks = dict.fromkeys(_IMAGE_CHECKS)
     try:
-        _write_private_image(path, _image_png(width, height, rgb))
-    except OSError:
-        raise _ImageUnavailable("WRITE_FAILED") from None
-    if not _same_image_target(user32, pid, window):
-        raise _ImageUnavailable("TARGET_CHANGED")
+        checks["before"] = _same_image_target(user32, pid, window)
+        if not checks["before"]:
+            raise _ImageUnavailable("TARGET_CHANGED")
+        width, height, rgb = _render_exact_window(user32, window.hwnd)
+        checks["after_render"] = _same_image_target(user32, pid, window)
+        if not checks["after_render"]:
+            raise _ImageUnavailable("TARGET_CHANGED")
+        png = _image_png(width, height, rgb)
+        try:
+            _write_private_image(path, png, existing=existing)
+        except OSError:
+            raise _ImageUnavailable("WRITE_FAILED") from None
+        checks["after_write"] = _same_image_target(user32, pid, window)
+        if not checks["after_write"]:
+            raise _ImageUnavailable("TARGET_CHANGED")
+    except _ImageUnavailable as exc:
+        exc.checks = checks
+        raise
+    return {
+        "status": "ACQUIRED",
+        "ownership_checks": checks,
+        "dimensions": {"width": width, "height": height},
+        "sha256": hashlib.sha256(png).hexdigest(),
+    }
 
 
 def _image_child(arguments: list[str]) -> int:
-    """Same-file killable child, like the arbiter's harvest child; stdout is a CLOSED code only."""
+    """Same-file killable child. Its private pipe contains only closed acquisition metadata."""
+    payload = {}
     try:
         pid, hwnd, owner = (int(value) for value in arguments[:3])
         if len(arguments) != 4 or min(pid, hwnd, owner) <= 0 or not _IMAGE_NAME.fullmatch(arguments[3]):
             raise _ImageUnavailable("CAPTURE_FAILED")
         window = DesktopWindow("", "", 0, 0, hwnd=hwnd, owner_hwnd=owner, owner_enabled=False)
-        _capture_exact_image(pid, window, Path(arguments[3]))
+        payload = _capture_exact_image(pid, window, Path(arguments[3]), existing=True)
     except _ImageUnavailable as exc:
         code = str(exc) if str(exc) in _IMAGE_RESULTS else "CAPTURE_FAILED"
+        payload["ownership_checks"] = exc.checks
     except BaseException:  # pylint: disable=broad-exception-caught
         # Never forward native exceptions, file paths, UI text or image bytes into a transcript.
         code = "CAPTURE_FAILED"
     else:
         code = "ACQUIRED"
-    print(code, flush=True)
+    payload["status"] = code
+    print(json.dumps(payload, separators=(",", ":")), flush=True)
     return 0 if code == "ACQUIRED" else 4
+
+
+def _evidence_directory(directory: Path, basename: str) -> Path:
+    """Require explicit local scratch outside artifacts and, inside Git, positively ignored."""
+    directory = directory.absolute()
+    if sys.platform == "win32":
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetDriveTypeW.argtypes, kernel.GetDriveTypeW.restype = [wintypes.LPCWSTR], wintypes.UINT
+        if str(directory).startswith("\\\\") or kernel.GetDriveTypeW(directory.anchor) not in (3, 6):
+            raise _ImageUnavailable("UNSAFE_EVIDENCE_DIR")
+    if not directory.is_dir():
+        raise _ImageUnavailable("UNSAFE_EVIDENCE_DIR")
+    for ancestor in (directory, *directory.parents):
+        attributes = getattr(ancestor.lstat(), "st_file_attributes", 0)
+        if ancestor.is_symlink() or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
+            raise _ImageUnavailable("UNSAFE_EVIDENCE_DIR")
+    directory = directory.resolve()
+    ancestors = (directory, *directory.parents)
+    repo = next((ancestor for ancestor in ancestors if (ancestor / ".git").exists()), None)
+    forbidden = {".git", "packages", "deliverables", "fabric", "pbip", "reports", "semantic_models"}
+    for ancestor in ancestors:
+        if ancestor == repo:
+            break  # a repository may have a fabric/ sibling beside its ignored run scratch
+        name = ancestor.name.casefold()
+        if name in forbidden or name.endswith((".report", ".semanticmodel")):
+            raise _ImageUnavailable("UNSAFE_EVIDENCE_DIR")
+        if (ancestor / "definition.pbir").exists() or (ancestor / "definition.pbism").exists():
+            raise _ImageUnavailable("UNSAFE_EVIDENCE_DIR")
+        if any((ancestor / name).is_dir() for name in ("fabric", "pbip")) or any(ancestor.glob("*.pbip")):
+            raise _ImageUnavailable("UNSAFE_EVIDENCE_DIR")
+    if repo is not None:
+        checked = subprocess.run(
+            ["git", "-C", str(repo), "check-ignore", "--quiet", "--", str(directory / basename)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1,
+            check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        if checked.returncode != 0:
+            raise _ImageUnavailable("UNSAFE_EVIDENCE_DIR")
+    return directory
+
+
+def _utc_stamp(when: datetime | None = None) -> str:
+    return (when or datetime.now(timezone.utc)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _image_record(pid: int, state: CredentialDetection, window: DesktopWindow, capture_id: str) -> dict:
+    frame = main_frame(state.windows)
+    return {
+        "schema": IMAGE_SCHEMA,
+        "event": "owned_modal_image",
+        "capture_id": capture_id,
+        "timestamp_utc": _utc_stamp(),
+        "captured_at_utc": None,
+        "desktop_pid": str(pid),
+        "main_hwnd": str(frame.hwnd) if frame is not None else None,
+        "dialog_hwnd": str(window.hwnd),
+        "owner_hwnd": str(window.owner_hwnd),
+        "ownership_checks": dict.fromkeys(_IMAGE_CHECKS),
+        "dimensions": None,
+        "capture_success": False,
+        "capture_method": "PrintWindow_PW_RENDERFULLCONTENT",
+        "image_basename": None,
+        "path": None,
+        "sha256": None,
+        "expires_at_utc": None,
+        "cleanup_state": "not_created",
+        "classification_provenance": None,
+    }
+
+
+def _image_notice(record: dict, status: str) -> None:
+    """One versioned marker family, with no numeric auth-marker collisions in its wire spelling.
+
+    Identifiers/dimensions/timestamps are strings. Escaping zero preserves their decoded value while
+    ensuring a PID/hash containing 10054 or 403 cannot trip the parent's unanchored text classifier.
+    This is not a semantic verdict or an arbitrary-text redactor: the record has closed safe fields.
+    """
+    record.update(status=status, timestamp_utc=_utc_stamp())
+    print("LOCAL_IMAGE " + json.dumps(record, separators=(",", ":")).replace("0", r"\u0030"), flush=True)
 
 
 @dataclass
@@ -1470,17 +1595,22 @@ class _ImageRequest:
 
     path: Path
     child: subprocess.Popen[bytes]
+    lease: BinaryIO
+    record: dict
     expiry: threading.Timer | None = None
 
 
 class ModalVisualEvidence:
     """Invocation-private, one-shot asynchronous evidence. Never mutates a detection or its deadline."""
 
-    def __init__(self) -> None:
+    def __init__(self, directory: Path | None = None) -> None:
         self._attempted: set[tuple[int, int]] = set()
         self._requests: list[_ImageRequest] = []
         self._lock = threading.Lock()
         self._closed = False
+        configured = directory if directory is not None else os.environ.get(IMAGE_DIRECTORY_ENV)
+        self._directory = Path(configured) if configured else None
+        atexit.register(self.close)
 
     def __enter__(self) -> ModalVisualEvidence:
         return self
@@ -1489,21 +1619,18 @@ class ModalVisualEvidence:
         self.close()
 
     @staticmethod
-    def _notice(status: str, path: Path | None = None) -> None:
-        payload = {"event": "owned_modal_image", "status": status}
-        if path is not None:
-            payload["path"] = path.name
-        if status == "ACQUIRED":
-            payload["expires_in_seconds"] = IMAGE_LIFETIME_SECONDS
-        print("LOCAL_IMAGE " + json.dumps(payload, separators=(",", ":")), flush=True)
-
-    @classmethod
-    def _remove(cls, path: Path) -> bool:
+    def _remove(request: _ImageRequest, reason: str) -> bool:
         try:
-            path.unlink(missing_ok=True)
+            request.lease.close()
+            if request.path.exists():
+                request.path.unlink(missing_ok=True)
+            if request.path.exists():
+                raise OSError
         except OSError:
-            cls._notice("CLEANUP_FAILED", path)
+            request.record["cleanup_state"] = "cleanup_failed"
+            _image_notice(request.record, "CLEANUP_FAILED")
             return False
+        request.record["cleanup_state"] = reason
         return True
 
     def observe(self, pid: int, state: CredentialDetection) -> None:
@@ -1514,17 +1641,27 @@ class ModalVisualEvidence:
         if not window.hwnd or not window.owner_hwnd or window.owner_enabled is not False:
             return
         with self._lock:
+            for previous in self._requests:
+                if previous.record["cleanup_state"] == "pending" and not previous.path.exists():
+                    if self._remove(previous, "removed_externally"):
+                        _image_notice(previous.record, "CLEANED")
             key = (pid, window.hwnd)
             if self._closed or key in self._attempted:
                 return
             self._attempted.add(key)
+            capture_id = uuid.uuid4().hex.replace("0", "x")
+            record = _image_record(pid, state, window, capture_id)
             if sys.platform != "win32":
-                self._notice("UNSUPPORTED")
+                _image_notice(record, "UNSUPPORTED")
                 return
-            # No caller-controlled path and no '0': even numeric free-text markers (10054/403) must
-            # not be manufactured by a random filename. No PID/HWND/title is printed for that reason.
+            if self._directory is None:
+                _image_notice(record, "EVIDENCE_DIR_REQUIRED")
+                return
+            lease = None
             try:
-                path = Path.cwd() / f"_ui-image-{uuid.uuid4().hex.replace('0', 'x')}.png"
+                basename = f"_ui-image-{capture_id}.png"
+                path = _evidence_directory(self._directory, basename) / basename
+                lease = _open_private_image(path, delete_on_close=True)
                 child = subprocess.Popen(  # pylint: disable=consider-using-with
                     [
                         sys.executable,
@@ -1539,28 +1676,47 @@ class ModalVisualEvidence:
                     stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
-            except OSError:
-                self._notice("CAPTURE_FAILED")
+            except (OSError, subprocess.TimeoutExpired, _ImageUnavailable):
+                if lease is not None:
+                    try:
+                        lease.close()
+                    except OSError:
+                        record.update(path=path.name, cleanup_state="cleanup_failed")
+                        _image_notice(record, "CLEANUP_FAILED")
+                _image_notice(record, "EVIDENCE_STORAGE_UNAVAILABLE")
                 return
-            request = _ImageRequest(path, child)
+            record.update(image_basename=path.name, path=path.name, cleanup_state="pending")
+            request = _ImageRequest(path, child, lease, record)
             self._requests.append(request)
             try:
                 threading.Thread(target=self._watch, args=(request,), name="window-image", daemon=True).start()
             except RuntimeError:
                 self._stop(request)
-                self._remove(path)
-                self._notice("CAPTURE_FAILED")
+                self._remove(request, "removed")
+                _image_notice(record, "CAPTURE_FAILED")
 
     def _watch(self, request: _ImageRequest) -> None:
+        # Exact bools are intentional: integer 1 must not certify an ownership check.
+        # pylint: disable=unidiomatic-typecheck
         try:
             output, _ = request.child.communicate(timeout=IMAGE_CAPTURE_SECONDS)
-            code = output.decode("ascii").strip()
+            payload = json.loads(output)
+            code = payload.get("status")
             if code not in _IMAGE_RESULTS or (code == "ACQUIRED" and request.child.returncode != 0):
+                code = "CAPTURE_FAILED"
+            checks = payload.get("ownership_checks")
+            if (
+                isinstance(checks, dict)
+                and set(checks) == set(_IMAGE_CHECKS)
+                and all(value is None or type(value) is bool for value in checks.values())
+            ):
+                request.record["ownership_checks"] = checks
+            if code == "ACQUIRED" and not self._accept_image(request, payload):
                 code = "CAPTURE_FAILED"
         except subprocess.TimeoutExpired:
             code = "CAPTURE_TIMEOUT"
             self._stop(request)
-        except (OSError, UnicodeError):
+        except (OSError, UnicodeError, ValueError, TypeError, AttributeError):
             code = "CAPTURE_FAILED"
             self._stop(request)
         with self._lock:
@@ -1572,17 +1728,50 @@ class ModalVisualEvidence:
                 request.expiry.daemon = True
                 request.expiry.start()
                 if code == "ACQUIRED" and request.path.is_file():
-                    self._notice(code, request.path)
+                    acquired = datetime.now(timezone.utc)
+                    request.record.update(
+                        captured_at_utc=_utc_stamp(acquired),
+                        expires_at_utc=_utc_stamp(acquired + timedelta(seconds=IMAGE_LIFETIME_SECONDS)),
+                        capture_success=True,
+                    )
+                    _image_notice(request.record, code)
                     return
             except (OSError, RuntimeError):
                 code = "CAPTURE_FAILED"
-            if self._remove(request.path) and request.expiry is not None:
+            if self._remove(request, "removed") and request.expiry is not None:
                 request.expiry.cancel()
-            self._notice(code if code != "ACQUIRED" else "WRITE_FAILED")
+            _image_notice(request.record, code if code != "ACQUIRED" else "WRITE_FAILED")
+
+    @staticmethod
+    def _accept_image(request: _ImageRequest, payload: dict) -> bool:
+        """Validate the child metadata against the observer's pinned, shared-delete file handle."""
+        # bool is an int subclass, but is not a pixel dimension.
+        # pylint: disable=unidiomatic-typecheck
+        dimensions = payload.get("dimensions")
+        if (
+            not isinstance(dimensions, dict)
+            or set(dimensions) != {"width", "height"}
+            or not all(type(value) is int and value > 0 for value in dimensions.values())
+        ):
+            return False
+        if not all(request.record["ownership_checks"].get(stage) is True for stage in _IMAGE_CHECKS):
+            return False
+        request.lease.seek(0)
+        image = request.lease.read(_MAX_IMAGE_BYTES + 1)
+        if not 33 <= len(image) <= _MAX_IMAGE_BYTES or image[:8] != b"\x89PNG\r\n\x1a\n":
+            return False
+        if struct.unpack(">II", image[16:24]) != (dimensions["width"], dimensions["height"]):
+            return False
+        digest = hashlib.sha256(image).hexdigest()
+        if payload.get("sha256") != digest:
+            return False
+        request.record.update(dimensions={key: str(value) for key, value in dimensions.items()}, sha256=digest)
+        return True
 
     def _expire(self, request: _ImageRequest) -> None:
         with self._lock:
-            self._remove(request.path)
+            if self._remove(request, "expired"):
+                _image_notice(request.record, "CLEANED")
 
     @classmethod
     def _stop(cls, request: _ImageRequest) -> None:
@@ -1591,7 +1780,7 @@ class ModalVisualEvidence:
                 request.child.kill()
                 request.child.wait(timeout=1)
         except (OSError, subprocess.TimeoutExpired):
-            cls._notice("CAPTURE_CLEANUP_FAILED", request.path)
+            _image_notice(request.record, "CAPTURE_CLEANUP_FAILED")
 
     def close(self) -> None:
         """End acquisition before deleting; a late child must not recreate an already-cleaned image."""
@@ -1599,9 +1788,13 @@ class ModalVisualEvidence:
             self._closed = True
             for request in self._requests:
                 self._stop(request)
-                removed = self._remove(request.path)
+                previous = request.record["cleanup_state"]
+                removed = self._remove(request, "removed_on_exit")
                 if removed and request.expiry is not None:
                     request.expiry.cancel()
+                if removed and previous in ("pending", "cleanup_failed") and request.record["capture_success"]:
+                    _image_notice(request.record, "CLEANED")
+            atexit.unregister(self.close)
 
 
 if __name__ == "__main__":

@@ -13,9 +13,11 @@ a bound - it failed on this repo's own agent. These tests pin the bound into the
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -169,7 +171,15 @@ def test_default_refresh_type_is_full() -> None:
     assert args.refresh_type == "full"
 
 
-def _visual_refresh(monkeypatch, parked, *, progress: bool = False, timeout: float = 3.0):
+def _visual_refresh(
+    monkeypatch,
+    parked,
+    *,
+    progress: bool = False,
+    timeout: float = 3.0,
+    pid: int = 111,
+    evidence_dir: Path | None = None,
+):
     """Run the real refresh -> both wait branches -> detector -> acquisition callback chain."""
     _conn, released = parked
     window = {"value": owned_dialog()}
@@ -192,10 +202,11 @@ def _visual_refresh(monkeypatch, parked, *, progress: bool = False, timeout: flo
             outcome["result"] = refresh(
                 port=1234,
                 tables=["Orders"],
-                desktop_pid=111,
+                desktop_pid=pid,
                 progress_enabled=progress,
                 timeout_sec=timeout,
                 absolute_timeout_sec=timeout,
+                evidence_dir=evidence_dir,
             )
         except BaseException as exc:  # the assertion, not an unhandled thread warning, judges the result
             outcome["error"] = exc
@@ -216,8 +227,22 @@ def test_visual_notice_is_once_flushed_readable_in_flight_and_deleted_on_success
         assert visual_runtime.noticed.wait(2), "the in-flight callback never published evidence"
         payload, kwargs = visual_runtime.records[0]
         assert payload["status"] == "ACQUIRED"
+        assert payload["schema"] == "pbip.window-image.v1"
+        assert payload["desktop_pid"] == "111"
+        assert payload["main_hwnd"] == payload["owner_hwnd"] == str(MAIN_HWND)
+        assert payload["dialog_hwnd"] == str(DIALOG_HWND)
+        assert payload["ownership_checks"] == {"before": True, "after_render": True, "after_write": True}
+        assert payload["dimensions"] == {"width": "2", "height": "2"}
+        assert payload["capture_success"] is True
+        assert payload["cleanup_state"] == "pending"
+        assert payload["classification_provenance"] is None
+        start = datetime.fromisoformat(payload["captured_at_utc"])
+        end = datetime.fromisoformat(payload["expires_at_utc"])
+        assert (end - start).total_seconds() == 60
         assert kwargs["flush"] is True
         path = visual_runtime.root / payload["path"]
+        assert payload["image_basename"] == payload["path"]
+        assert payload["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
         assert thread.is_alive(), "the image must be inspectable BEFORE the refresh command returns"
         with image_decoder.open(path) as image:
             assert image.size == (2, 2)
@@ -234,6 +259,11 @@ def test_visual_notice_is_once_flushed_readable_in_flight_and_deleted_on_success
     assert not thread.is_alive()
     assert outcome.get("result", (False,))[0] is True, f"image evidence changed the refresh verdict: {outcome}"
     assert not list(visual_runtime.root.glob("_ui-image-*.png")), "normal exit must remove every image"
+    cleanup = visual_runtime.records[-1][0]
+    assert cleanup["status"] == "CLEANED"
+    assert cleanup["capture_id"] == payload["capture_id"]
+    assert cleanup["sha256"] == payload["sha256"]
+    assert cleanup["cleanup_state"] == "removed_on_exit"
 
 
 @pytest.mark.parametrize(
@@ -291,7 +321,7 @@ def test_visual_failure_never_changes_the_worker_result(
 def test_visual_write_failure_is_detail_free_and_does_not_change_the_worker(
     monkeypatch, parked, visual_runtime, capsys
 ) -> None:
-    def fail_write(path, data):
+    def fail_write(path, data, **_kwargs):
         path.write_bytes(data[:20])  # a partial output must be cleaned as well
         raise OSError("PRIVATE_DIALOG_TEXT authentication 10054 C:\\private\\source")
 
@@ -357,7 +387,8 @@ def test_visual_inspector_can_delete_early(monkeypatch, parked, visual_runtime) 
         released.set()
         thread.join(3)
     assert outcome.get("result", (False,))[0] is True
-    assert all(record[0]["status"] == "ACQUIRED" for record in visual_runtime.records)
+    assert [record[0]["status"] for record in visual_runtime.records] == ["ACQUIRED", "CLEANED"]
+    assert visual_runtime.records[-1][0]["cleanup_state"] == "removed_externally"
 
 
 def test_visual_cleanup_failure_is_loud_preserves_result_and_expiry_retries(
@@ -466,12 +497,14 @@ def test_visual_notice_and_path_cannot_trip_the_real_parent_text_classifier(
     private_cwd.mkdir()
     monkeypatch.chdir(private_cwd)
     monkeypatch.setattr(_credential_modal.uuid, "uuid4", lambda: SimpleNamespace(hex="1005403abcdef" + "0" * 20))
-    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
+    visual_runtime.api.pid = visual_runtime.api.owner_pid = 10054
+    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, pid=10054)
     try:
         assert visual_runtime.noticed.wait(2)
         payload = visual_runtime.records[0][0]
         assert payload["status"] == "ACQUIRED"
-        line = "LOCAL_IMAGE " + json.dumps(payload)
+        assert payload["desktop_pid"] == "10054", "escaping must preserve the decoded identifier"
+        line = visual_runtime.wires[0]
         assert not any(marker in line.lower() for marker in probe_live_source.CREDENTIAL_MARKERS)
         assert probe_live_source._classify_failure(line, False)[0] == "ERROR"
         assert "authentication-10054-oauth" not in line
@@ -482,6 +515,86 @@ def test_visual_notice_and_path_cannot_trip_the_real_parent_text_classifier(
         thread.join(3)
     assert outcome.get("result", (False,))[0] is True
     assert not list(private_cwd.glob("_ui-image-*.png"))
+
+
+def test_visual_requires_explicit_scratch_and_never_falls_back_to_cwd(monkeypatch, parked, visual_runtime) -> None:
+    monkeypatch.delenv(_credential_modal.IMAGE_DIRECTORY_ENV)
+    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
+    try:
+        assert visual_runtime.noticed.wait(2)
+        record = visual_runtime.records[0][0]
+        assert record["status"] == "EVIDENCE_DIR_REQUIRED"
+        assert record["capture_success"] is False
+        assert record["path"] is None
+        assert record["sha256"] is None
+        assert record["cleanup_state"] == "not_created"
+        assert visual_runtime.children == []
+    finally:
+        released.set()
+        thread.join(3)
+    assert outcome.get("result", (False,))[0] is True
+    assert not list(visual_runtime.root.glob("_ui-image-*.png"))
+
+
+def test_visual_explicit_api_scratch_overrides_environment(monkeypatch, parked, visual_runtime) -> None:
+    explicit = visual_runtime.root / "scratch"
+    explicit.mkdir()
+    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, evidence_dir=explicit)
+    try:
+        assert visual_runtime.noticed.wait(2)
+        record = visual_runtime.records[0][0]
+        assert record["status"] == "ACQUIRED"
+        assert (explicit / record["path"]).is_file()
+        assert not (visual_runtime.root / record["path"]).exists()
+        assert str(explicit) not in visual_runtime.wires[0], "only a relative locator belongs in the record"
+    finally:
+        released.set()
+        thread.join(3)
+    assert outcome.get("result", (False,))[0] is True
+    assert not list(explicit.glob("_ui-image-*.png"))
+
+
+@pytest.mark.parametrize("bad_field", ["hash", "dimensions", "boolean_check", "missing_check"])
+def test_visual_rejects_incomplete_or_unbound_child_metadata(monkeypatch, parked, visual_runtime, bad_field) -> None:
+    acquire = _credential_modal._capture_exact_image
+
+    def damaged(*args, **kwargs):
+        result = acquire(*args, **kwargs)
+        if bad_field == "hash":
+            result["sha256"] = "f" * 64
+        elif bad_field == "dimensions":
+            result["dimensions"]["width"] = 1
+        elif bad_field == "boolean_check":
+            result["ownership_checks"]["before"] = 1
+        else:
+            result["ownership_checks"].pop("after_write")
+        return result
+
+    monkeypatch.setattr(_credential_modal, "_capture_exact_image", damaged)
+    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
+    try:
+        assert visual_runtime.noticed.wait(2)
+        record = visual_runtime.records[0][0]
+        assert record["status"] == "CAPTURE_FAILED", "unbound metadata cannot publish successful acquisition"
+        assert record["capture_success"] is False
+        assert not list(visual_runtime.root.glob("_ui-image-*.png"))
+    finally:
+        released.set()
+        thread.join(3)
+    assert outcome.get("result", (False,))[0] is True
+
+
+def test_visual_cli_scratch_is_forwarded_to_the_refresh_api(monkeypatch, tmp_path) -> None:
+    seen = []
+
+    def invoked(_port, _tables, _timeout, *, evidence_dir=None):
+        seen.append(evidence_dir)
+        return True, "synthetic refresh"
+
+    args = refresh_pbip_model._build_arg_parser().parse_args(["--no-save", "--evidence-dir", str(tmp_path)])
+    monkeypatch.setattr(refresh_pbip_model, "refresh", invoked)
+    refresh_pbip_model._refresh_and_save(111, 1234, None, args)
+    assert seen == [tmp_path], "the CLI flag must reach the production refresh API, not just its parser"
 
 
 def test_visual_parent_classifier_is_optional_in_a_shallow_copy(monkeypatch, parked, visual_runtime) -> None:

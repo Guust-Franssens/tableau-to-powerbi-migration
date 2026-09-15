@@ -9,6 +9,7 @@ from __future__ import annotations
 import threading
 import time
 import ctypes
+import hashlib
 import inspect
 import json
 import os
@@ -123,7 +124,7 @@ class _ImageWin32:
         self.after_render()
         return True
 
-    def write(self, path: Path, data: bytes) -> None:
+    def write(self, path: Path, data: bytes, **_kwargs) -> None:
         self.writes.append(path)
         path.write_bytes(data)
         self.after_write()
@@ -135,8 +136,11 @@ def visual_runtime(monkeypatch, tmp_path):
     api = _ImageWin32()
     noticed = threading.Event()
     records = []
+    wire_records = []
     children = []
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(_credential_modal.IMAGE_DIRECTORY_ENV, str(tmp_path))
+    monkeypatch.setattr(_credential_modal, "_evidence_directory", lambda directory, _name: directory)
     monkeypatch.setattr(_credential_modal.sys, "platform", "win32")
     monkeypatch.setattr(_credential_modal, "_image_user32", lambda: api)
     monkeypatch.setattr(_credential_modal.ctypes, "WinDLL", lambda *_a, **_k: api.gdi, raising=False)
@@ -144,10 +148,33 @@ def visual_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(_credential_modal.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
     real_print = print
 
+    class Lease:
+        """Platform-neutral stand-in for a kernel delete-on-close file handle."""
+
+        def __init__(self, path):
+            self.path = path
+            path.touch(exist_ok=False)
+
+        def seek(self, offset):
+            assert offset == 0
+
+        def read(self, size):
+            return self.path.read_bytes()[:size]
+
+        def close(self):
+            self.path.unlink(missing_ok=True)
+
+    def open_lease(path, *, delete_on_close=False):
+        assert delete_on_close is True
+        return Lease(path)
+
+    monkeypatch.setattr(_credential_modal, "_open_private_image", open_lease)
+
     def observe_print(message, **kwargs):
         real_print(message, **kwargs)
         if message.startswith("LOCAL_IMAGE "):
             records.append((json.loads(message.removeprefix("LOCAL_IMAGE ")), kwargs))
+            wire_records.append(message)
             noticed.set()
 
     monkeypatch.setattr(_credential_modal, "print", observe_print, raising=False)
@@ -171,14 +198,15 @@ def visual_runtime(monkeypatch, tmp_path):
             pid, hwnd, owner = map(int, self.argv[2:5])
             window = DesktopWindow("", "", 0, 0, hwnd=hwnd, owner_hwnd=owner, owner_enabled=False)
             try:
-                _credential_modal._capture_exact_image(pid, window, self.cwd / self.argv[5])
+                payload = _credential_modal._capture_exact_image(pid, window, self.cwd / self.argv[5], existing=True)
             except _credential_modal._ImageUnavailable as exc:
                 code = str(exc)
+                payload = {"status": code, "ownership_checks": exc.checks}
             else:
                 code = "ACQUIRED"
             self.returncode = 0 if code == "ACQUIRED" else 4
             self.finished.set()
-            return code.encode("ascii"), None
+            return json.dumps(payload).encode("ascii"), None
 
         def poll(self):
             return self.returncode
@@ -193,7 +221,9 @@ def visual_runtime(monkeypatch, tmp_path):
             return self.returncode
 
     monkeypatch.setattr(_credential_modal.subprocess, "Popen", ImageChild)
-    return SimpleNamespace(api=api, noticed=noticed, records=records, children=children, root=tmp_path)
+    return SimpleNamespace(
+        api=api, noticed=noticed, records=records, wires=wire_records, children=children, root=tmp_path
+    )
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="native protected file DACL is Windows-only")
@@ -242,16 +272,120 @@ def test_visual_child_bad_arguments_cannot_echo_private_data_or_create_a_file(tm
         check=False,
     )
     assert done.returncode == 4
-    assert done.stdout.strip() == "CAPTURE_FAILED"
+    assert json.loads(done.stdout)["status"] == "CAPTURE_FAILED"
     assert done.stderr == ""
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="kernel delete-on-close handles are Windows-only")
+def test_visual_native_lease_allows_shared_reader_and_dies_with_its_process(tmp_path) -> None:
+    """A real OS process kill, not Python finally/atexit, must remove its leased image."""
+    path = tmp_path / "_ui-image-process-exit.png"
+    script = (
+        "import sys,time; from pathlib import Path; "
+        f"sys.path.insert(0,{str(Path(_credential_modal.__file__).parent)!r}); "
+        "import _credential_modal as m; "
+        "lease=m._open_private_image(Path(sys.argv[1]),delete_on_close=True); "
+        "lease.write(m._image_png(2,2,b'\\0\\0\\0'*2+b'\\xff\\xff\\xff'*2)); lease.flush(); "
+        "print('READY',flush=True); time.sleep(60)"
+    )
+    child = subprocess.Popen(  # pylint: disable=consider-using-with
+        [sys.executable, "-c", script, str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+    )
+    deadline = threading.Timer(10, child.kill)
+    deadline.start()
+    try:
+        assert child.stdout.readline().strip() == b"READY", "native lease setup failed"
+        read = subprocess.run(
+            [
+                "node",
+                "-e",
+                "const b=require('fs').readFileSync(process.argv[1]); "
+                "console.log(JSON.stringify({bytes:b.length,sha256:require('crypto').createHash('sha256').update(b).digest('hex')}))",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        assert read.returncode == 0, "the real Node shared-delete reader must be able to inspect the image"
+        observed = json.loads(read.stdout)
+        expected = _credential_modal._image_png(2, 2, b"\0\0\0" * 2 + b"\xff\xff\xff" * 2)
+        assert observed == {"bytes": len(expected), "sha256": hashlib.sha256(expected).hexdigest()}
+        child.kill()
+        child.wait(timeout=3)
+        cleanup_deadline = time.monotonic() + 1
+        while path.exists() and time.monotonic() < cleanup_deadline:
+            time.sleep(0.005)  # native control: handle teardown followed process signalling by 5–6 ms
+        assert not path.exists(), "kernel cleanup must remove pixels on forced observer exit"
+    finally:
+        deadline.cancel()
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=3)
+        child.stdout.close()
+        path.unlink(missing_ok=True)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="shared-delete handle behavior is Windows-only")
+def test_visual_native_external_handling_marks_file_for_deletion(tmp_path) -> None:
+    path = tmp_path / "_ui-image-handled.png"
+    with _credential_modal._open_private_image(path, delete_on_close=True) as lease:
+        lease.write(b"synthetic")
+        lease.flush()
+        path.unlink()
+        assert not path.exists(), "positive handling may remove the name while the observer holds its lease"
+    assert not path.exists()
+
+
+def test_visual_directory_must_be_ignored_inside_a_checkout(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    initialized = subprocess.run(
+        ["git", "init", "--quiet", str(repo)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+    )
+    assert initialized.returncode == 0
+    (repo / ".gitignore").write_text("/scratch/\n", encoding="utf-8")
+    safe = repo / "scratch"
+    safe.mkdir()
+    (repo / "fabric").mkdir()  # a sibling artifact tree does not turn ignored run scratch into an artifact
+    tracked = repo / "source"
+    tracked.mkdir()
+    basename = "_ui-image-" + "a" * 32 + ".png"
+    assert _credential_modal._evidence_directory(safe, basename) == safe.resolve()
+    with pytest.raises(_credential_modal._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
+        _credential_modal._evidence_directory(tracked, basename)
+    assert not list(repo.rglob("*.png"))
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    ["packages", "deliverables", "fabric", "pbip", "reports", "semantic_models", "Unit.Report", "Unit.SemanticModel"],
+)
+def test_visual_directory_refuses_artifact_trees(tmp_path, artifact) -> None:
+    directory = tmp_path / artifact / "scratch"
+    directory.mkdir(parents=True)
+    with pytest.raises(_credential_modal._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
+        _credential_modal._evidence_directory(directory, "_ui-image-" + "a" * 32 + ".png")
+    assert not list(tmp_path.rglob("*.png"))
+
+
+@pytest.mark.parametrize("marker", ["definition.pbir", "definition.pbism", "unit.pbip"])
+def test_visual_directory_refuses_renamed_artifacts(tmp_path, marker) -> None:
+    unit = tmp_path / "renamed"
+    directory = unit / "scratch"
+    directory.mkdir(parents=True)
+    (unit / marker).write_text("{}", encoding="utf-8")
+    with pytest.raises(_credential_modal._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
+        _credential_modal._evidence_directory(directory, "_ui-image-" + "a" * 32 + ".png")
 
 
 @pytest.mark.gui
 @pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "win32", reason="native PrintWindow control is Windows-only")
 def test_visual_native_background_capture_reaches_production_without_focus(monkeypatch, tmp_path) -> None:
-    """Real child/GDI/ACL/PNG, against off-screen NOACTIVATE controls; never launch Desktop."""
+    """Real child/GDI/ACL/PNG against NOACTIVATE controls; never launch Desktop."""
     image_decoder = pytest.importorskip("PIL.Image", reason="independent PNG decoder is a repo dev extra")
     native = _NativeWindowProbe("ImageOnly")
     ui = native.user32
@@ -267,6 +401,35 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
     ui.PeekMessageW.restype = wintypes.BOOL
     ui.TranslateMessage.argtypes, ui.TranslateMessage.restype = [ctypes.POINTER(wintypes.MSG)], wintypes.BOOL
     ui.DispatchMessageW.argtypes, ui.DispatchMessageW.restype = [ctypes.POINTER(wintypes.MSG)], ctypes.c_longlong
+    ui.UpdateWindow.argtypes, ui.UpdateWindow.restype = [wintypes.HWND], wintypes.BOOL
+    ui.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+    ui.SetWindowLongPtrW.restype = ctypes.c_void_p
+    ui.CallWindowProcW.argtypes = [
+        ctypes.c_void_p,
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    ]
+    ui.CallWindowProcW.restype = ctypes.c_longlong
+    ui.FillRect.argtypes, ui.FillRect.restype = (
+        [wintypes.HDC, ctypes.POINTER(wintypes.RECT), wintypes.HBRUSH],
+        ctypes.c_int,
+    )
+    gdi = ctypes.WinDLL("gdi32", use_last_error=True)
+    gdi.GetStockObject.argtypes, gdi.GetStockObject.restype = [ctypes.c_int], wintypes.HANDLE
+    original_proc = [None]
+
+    @native.wndproc_type
+    def paint(window, message, dc, parameter):
+        if message in (0x0317, 0x0318):  # WM_PRINT / WM_PRINTCLIENT: independent, deterministic fixture pixels
+            whole = wintypes.RECT(0, 0, 80, 60)
+            square = wintypes.RECT(5, 5, 25, 25)
+            ui.FillRect(dc, ctypes.byref(whole), gdi.GetStockObject(0))
+            ui.FillRect(dc, ctypes.byref(square), gdi.GetStockObject(4))
+            return 0
+        return ui.CallWindowProcW(original_proc[0], window, message, dc, parameter)
+
     before = ui.GetForegroundWindow()
     released = threading.Event()
     notices = []
@@ -287,18 +450,23 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
 
     try:
         # STATIC's built-in paint handler supplies a complete white surface plus a black child.
-        # WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, off-screen: acquisition never touches foreground.
-        owner = ui.CreateWindowExW(
-            0x08000080, "STATIC", "", 0x90000006, -30000, -30000, 100, 80, None, None, None, None
-        )
+        # WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW: acquisition never touches foreground.
+        owner = ui.CreateWindowExW(0x08000080, "STATIC", "", 0x90000006, 0, 0, 100, 80, None, None, None, None)
         assert owner
         native.created.append(owner)
-        hwnd = ui.CreateWindowExW(0x08000080, "STATIC", "", 0x90000006, -30000, -30000, 80, 60, owner, None, None, None)
+        hwnd = ui.CreateWindowExW(0x08000080, "STATIC", "", 0x90000006, 0, 0, 80, 60, owner, None, None, None)
         assert hwnd
         native.created.append(hwnd)
-        assert ui.CreateWindowExW(0, "STATIC", "", 0x50000004, 5, 5, 20, 20, hwnd, None, None, None)
+        original_proc[0] = ui.SetWindowLongPtrW(hwnd, -4, ctypes.cast(paint, ctypes.c_void_p))
+        assert original_proc[0]
+        rectangle = ui.CreateWindowExW(0, "STATIC", "", 0x50000004, 5, 5, 20, 20, hwnd, None, None, None)
+        assert rectangle
         ui.EnableWindow(owner, False)
+        pump()
+        ui.UpdateWindow(hwnd)
+        ui.UpdateWindow(rectangle)
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv(_credential_modal.IMAGE_DIRECTORY_ENV, str(tmp_path))
         monkeypatch.setattr(_credential_modal, "print", record, raising=False)
         monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: ParkedConnection(released))
         monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-native")
@@ -323,12 +491,16 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
         while not notices and time.monotonic() < deadline:
             pump()
             time.sleep(0.005)
+        assert notices and notices[0]["dialog_hwnd"] == str(hwnd), "the fixture must exercise its intended dialog"
         assert notices and notices[0]["status"] == "ACQUIRED", "native acquisition never produced usable evidence"
         assert thread.is_alive()
         assert ui.GetForegroundWindow() == before, "capture must not alter foreground"
-        with image_decoder.open(tmp_path / notices[0]["path"]) as image:
+        with (
+            _credential_modal._open_private_image(tmp_path / notices[0]["path"], existing=True) as stream,
+            image_decoder.open(stream) as image,
+        ):
             assert image.size == (80, 60)
-            # These themed STATIC controls are a two-colour rectangle oracle, not fixed RGBs.
+            # The fixture's WM_PRINT handler supplies this exact rectangle independently of the encoder.
             outside, inside = image.getpixel((0, 0)), image.getpixel((10, 10))
             assert inside != outside, "the modal has a child rectangle; its owner is uniformly filled"
             for y in range(60):
