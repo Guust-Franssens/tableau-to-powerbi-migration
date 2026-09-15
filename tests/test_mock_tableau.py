@@ -13,6 +13,8 @@ import json
 import sys
 import zipfile
 from pathlib import Path
+from urllib.parse import urlencode, urlparse
+from xml.etree import ElementTree
 
 import pytest
 
@@ -20,9 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
-import assess_estate as ae  # noqa: E402
-import tableau_lineage as tl  # noqa: E402
-from mocks import estate, tableau  # noqa: E402
+import assess_estate as ae  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_lineage as tl  # noqa: E402  # pylint: disable=wrong-import-position
+from mocks import estate, tableau  # noqa: E402  # pylint: disable=wrong-import-position
 
 
 @pytest.fixture(name="site")
@@ -37,6 +39,7 @@ def _served(site):
 
 
 def signed_in(site) -> str:
+    """Authenticate through the router, retaining the actual sign-in identity assertion."""
     status, _headers, payload = site.handle(
         "POST",
         f"http://x/api/{site.rest_version}/auth/signin",
@@ -52,7 +55,20 @@ def signed_in(site) -> str:
         ).encode(),
     )
     assert status == 200
-    return json.loads(payload)["credentials"]["token"]
+    credentials = json.loads(payload)["credentials"]
+    assert credentials["user"] == {"id": "user-1"}
+    return credentials["token"]
+
+
+def rest_get(site: tableau.TableauSite, path: str, token: str = "") -> tuple[int, dict]:
+    """GET through the real router; missing tokens stay missing."""
+    status, _headers, payload = site.handle(
+        "GET",
+        f"http://x/api/{site.rest_version}{path}",
+        {"x-tableau-auth": token} if token else {},
+        b"",
+    )
+    return status, json.loads(payload)
 
 
 # ------------------------------------------------------------------ transport
@@ -78,6 +94,7 @@ def test_sign_in_requires_both_halves_of_the_pat(site):
 
 
 def test_an_unknown_site_content_url_is_a_404(site):
+    """A PAT must not sign into a different site."""
     body = json.dumps(
         {
             "credentials": {
@@ -153,6 +170,7 @@ def test_paging_actually_pages(site):
 
 
 def test_the_real_client_follows_pagination_to_the_end(served):
+    """The assessment client must read every server-capped page."""
     site, base = served
     site.page_size = 1
     client = ae.Site(tableau.env_for(site, base))
@@ -175,6 +193,235 @@ def test_usage_statistics_are_absent_unless_requested(site):
 
     assert all("usage" not in row for row in json.loads(without)["views"]["view"])
     assert any("usage" in row for row in json.loads(with_usage)["views"]["view"])
+
+
+# -------------------------------------------------------- REST authority subset
+
+
+def test_user_detail_matches_the_signed_in_admin(site: tableau.TableauSite) -> None:
+    """The signed-in identity has the least broad site-admin role admitted by provenance P."""
+    status, payload = rest_get(site, f"/sites/{site.site_id}/users/user-1", signed_in(site))
+    assert status == 200
+    assert payload == {"user": {"id": "user-1", "siteRole": "SiteAdministratorExplorer"}}
+
+
+@pytest.mark.parametrize("value, count", [("SalesMaster", 1), ("salesmaster", 0), ("SALESMASTER", 0), ("absent", 0)])
+def test_datasource_filter_selects_exact_content_url(site: tableau.TableauSite, value: str, count: int) -> None:
+    """An exact match or a complete zero, never display-name matching or a case-folded match."""
+    shared = site.datasources[0]
+    site.datasource("SalesMaster", site.projects[0], estate.FIXTURES / "standalone_datasource.tds", content_url="Other")
+    query = urlencode({"filter": f"contentUrl:eq:{value}", "pageSize": 1000, "pageNumber": 1})
+    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources?{query}", signed_in(site))
+    assert status == 200
+    assert payload["pagination"] == {"pageNumber": "1", "pageSize": "1000", "totalAvailable": str(count)}
+    rows = payload["datasources"]["datasource"]
+    assert len(rows) == count
+    if count:
+        assert {key: rows[0][key] for key in ("id", "name", "contentUrl", "updatedAt")} == {
+            "id": shared.luid,
+            "name": "Corporate Cities",
+            "contentUrl": "SalesMaster",
+            "updatedAt": "2026-02-03T04:05:06Z",
+        }
+
+
+@pytest.mark.parametrize("single_row", [False, True])
+def test_filtered_datasources_page_the_filtered_set(site: tableau.TableauSite, single_row: bool) -> None:
+    """Filter before slicing; object-shaped single rows keep the same string-valued page totals."""
+    first = site.datasources[0]
+    other = site.datasource(
+        "Other", site.projects[0], estate.FIXTURES / "standalone_datasource.tds", content_url="Other"
+    )
+    second = site.datasource("Second match", site.projects[0], estate.FIXTURES / "standalone_datasource.tds")
+    site.page_size, site.single_row_as_object = 1, single_row
+    token = signed_in(site)
+    seen = []
+    for number, expected in enumerate(([first.luid], [second.luid], []), start=1):
+        query = urlencode({"filter": "contentUrl:eq:SalesMaster", "pageSize": 1000, "pageNumber": number})
+        status, payload = rest_get(site, f"/sites/{site.site_id}/datasources?{query}", token)
+        assert status == 200
+        assert payload["pagination"] == {"pageNumber": str(number), "pageSize": "1", "totalAvailable": "2"}
+        rows = payload["datasources"]["datasource"]
+        assert isinstance(rows, dict) == (single_row and bool(expected))
+        rows = [rows] if isinstance(rows, dict) else rows
+        assert [row["id"] for row in rows] == expected
+        seen.extend(row["id"] for row in rows)
+    assert seen == [first.luid, second.luid]
+
+    site.page_size, site.single_row_as_object = None, False
+    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources", token)
+    assert status == 200
+    assert [row["id"] for row in payload["datasources"]["datasource"]] == [first.luid, other.luid, second.luid]
+    assert payload["pagination"] == {"pageNumber": "1", "pageSize": "100", "totalAvailable": "3"}
+
+
+def test_unfiltered_datasources_keep_blank_page_defaults(site: tableau.TableauSite) -> None:
+    """Retaining blank filters for rejection must not change the existing blank paging defaults."""
+    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources?pageSize=&pageNumber=", signed_in(site))
+    assert status == 200
+    assert payload["pagination"] == {"pageNumber": "1", "pageSize": "100", "totalAvailable": "1"}
+    assert payload["datasources"]["datasource"][0]["id"] == site.datasources[0].luid
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "filter",
+        "filter=",
+        "filter=name:eq:SalesMaster",
+        "filter=contenturl:eq:SalesMaster",
+        "filter=contentUrl:in:SalesMaster",
+        "filter=contentUrl:EQ:SalesMaster",
+        "filter=contentUrl:eq",
+        "filter=contentUrl:eq:",
+        "filter=contentUrl:eq:%20",
+        "filter=contentUrl:eq:SalesMaster:extra",
+        "filter=contentUrl:eq:SalesMaster,contentUrl:eq:Other",
+        "filter=contentUrl:eq:SalesMaster%26contentUrl:eq:Other",
+        "filter=contentUrl:eq:SalesMaster&filter=contentUrl:eq:Other",
+        "filter=contentUrl:eq:SalesMaster&filter=",
+        "Filter=contentUrl:eq:SalesMaster",
+    ],
+)
+def test_unsupported_datasource_filters_are_bad_requests(site: tableau.TableauSite, query: str) -> None:
+    """Unsupported syntax cannot silently become an unfiltered, apparently authoritative catalog."""
+    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources?{query}", signed_in(site))
+    assert status == 400
+    assert "error" in payload
+    assert "datasources" not in payload
+
+
+def test_datasource_detail_agrees_with_list_and_tracks_current_row(site: tableau.TableauSite) -> None:
+    """Detail/list agreement includes current identity and timestamp, not a stale copied row."""
+    shared = site.datasources[0]
+    token = signed_in(site)
+    path = f"/sites/{site.site_id}/datasources"
+    for content_url, updated_at in (("SalesMaster", shared.updated_at), ("RenamedMaster", "2026-03-04T05:06:07Z")):
+        shared.content_url, shared.updated_at = content_url, updated_at
+        status, listing = rest_get(site, path + "?" + urlencode({"filter": f"contentUrl:eq:{content_url}"}), token)
+        detail_status, detail = rest_get(site, f"{path}/{shared.luid}", token)
+        assert status == detail_status == 200
+        row = listing["datasources"]["datasource"][0]
+        assert detail == {"datasource": row}
+        assert (row["id"], row["contentUrl"], row["updatedAt"]) == (shared.luid, content_url, updated_at)
+
+
+def test_fixture_content_url_matches_preserved_workbook_authority(site: tableau.TableauSite) -> None:
+    """Independently read vendor XML: the synthetic metadata edges are not byte-level authority."""
+    fixture_names = ("minimal.twb", "federated_multi_connection.twb", "published_datasource.twb")
+    for workbook, fixture_name in zip(site.workbooks, fixture_names, strict=True):
+        with zipfile.ZipFile(io.BytesIO(workbook.content)) as archive:
+            assert archive.read(fixture_name) == (estate.FIXTURES / fixture_name).read_bytes()
+    with zipfile.ZipFile(io.BytesIO(site.workbooks[2].content)) as archive:
+        root = ElementTree.fromstring(archive.read("published_datasource.twb"))
+    location = root.find("./datasources/datasource/repository-location")
+    assert location is not None
+    content_url = urlparse(location.attrib["derived-from"]).path.rsplit("/", 1)[1]
+    assert content_url == "SalesMaster"
+    assert site.datasources[0].row()["contentUrl"] == content_url
+    assert location.attrib["id"] != content_url
+    assert site.datasources[0].name == "Corporate Cities"
+    assert site.datasources[0].downstream == ["Sales Review", "Ops Dashboard"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/sites/wrong/users/user-1",
+        "/sites/{site}/users/wrong",
+        "/sites/{site}/users/USER-1",
+        "/sites/{site}/users/user-1/extra",
+        "/sites/{site}/users//user-1",
+        "/sites/wrong/datasources",
+        "/sites/wrong/datasources/{luid}",
+        "/sites/{site}/datasources/unknown",
+        "/sites/{site}/datasources/{upper_luid}",
+        "/sites/{site}/datasources/{luid}/extra",
+        "/sites/{site}/datasources/{luid}/content/extra",
+        "/sites/{site}/datasources//{luid}",
+        "/sites/{site}-wrong/datasources/{luid}",
+        "/sites/wrong/api/{version}/sites/{site}/users/user-1",
+        "/sites/{site}/groups/{luid}/content",
+    ],
+)
+def test_authority_routes_reject_wrong_identity_or_extra_segments(site: tableau.TableauSite, path: str) -> None:
+    """Exact site, collection, user/LUID and path arity; no suffix or fallback route."""
+    luid = site.datasources[0].luid
+    path = path.format(site=site.site_id, luid=luid, upper_luid=luid.upper(), version=site.rest_version)
+    status, payload = rest_get(site, path, signed_in(site))
+    assert status == 404
+    assert "error" in payload
+
+
+@pytest.mark.parametrize(
+    "route", ["users/user-1", "datasources?filter=contentUrl:eq:SalesMaster", "datasources/{luid}"]
+)
+@pytest.mark.parametrize("state, expected", [("missing", 401), ("invalid", 401), ("expired", 401), ("forbidden", 403)])
+def test_authority_routes_keep_auth_failures(site: tableau.TableauSite, route: str, state: str, expected: int) -> None:
+    """New authority routes must still enforce the mock's token and permission controls."""
+    path = f"/sites/{site.site_id}/" + route.format(luid=site.datasources[0].luid)
+    token = signed_in(site)
+    if state in {"missing", "invalid"}:
+        token = "" if state == "missing" else "not-a-token"
+    elif state == "expired":
+        site.expire_session()
+    else:
+        site.forbid(path.split("?")[0])
+    status, payload = rest_get(site, path, token)
+    assert status == expected
+    assert "error" in payload
+    if state == "expired":
+        assert payload["error"]["code"] == "401002"
+
+
+@pytest.mark.parametrize("route", ["users/user-1", "datasources", "datasources/{luid}"])
+def test_authority_routes_do_not_accept_other_http_methods(site: tableau.TableauSite, route: str) -> None:
+    """A valid path must not turn an unsupported method into a successful read."""
+    route = route.format(luid=site.datasources[0].luid)
+    status, _headers, _body = site.handle(
+        "POST",
+        f"http://x/api/{site.rest_version}/sites/{site.site_id}/{route}",
+        {"x-tableau-auth": signed_in(site)},
+        b"",
+    )
+    assert status == 405
+
+
+def test_real_client_reaches_user_filtered_list_and_datasource_detail(served) -> None:
+    """Unmodified assess client -> urllib -> loopback HTTP -> the same strict router."""
+    site, base = served
+    shared = site.datasources[0]
+    site.datasource("SalesMaster", site.projects[0], estate.FIXTURES / "standalone_datasource.tds", content_url="Other")
+    client = ae.Site(tableau.env_for(site, base))
+    client.sign_in()
+    prefix = f"/sites/{client.site_id}"
+    user_path = f"{prefix}/users/user-1"
+    list_path = f"{prefix}/datasources?" + urlencode(
+        {"filter": "contentUrl:eq:SalesMaster", "pageSize": 1000, "pageNumber": 1}
+    )
+    detail_path = f"{prefix}/datasources/{shared.luid}"
+    assert client.get(user_path) == {"user": {"id": "user-1", "siteRole": "SiteAdministratorExplorer"}}
+    listing = client.get(list_path)
+    assert listing["pagination"] == {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "1"}
+    rows = listing["datasources"]["datasource"]
+    assert len(rows) == 1
+    assert (rows[0]["id"], rows[0]["contentUrl"], rows[0]["updatedAt"]) == (
+        shared.luid,
+        "SalesMaster",
+        "2026-02-03T04:05:06Z",
+    )
+    assert client.get(detail_path) == {"datasource": rows[0]}
+    missing = client.get(f"{prefix}/datasources?filter=contentUrl:eq:salesmaster&pageSize=1000&pageNumber=1")
+    assert missing == {
+        "pagination": {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "0"},
+        "datasources": {"datasource": []},
+    }
+    all_rows, error = client.paged(f"{prefix}/datasources", "datasources", "datasource")
+    assert error is None
+    assert len(all_rows) == 2
+    for path in (user_path, list_path, detail_path):
+        assert ("GET", f"/api/{site.rest_version}{path}") in site.requests
+    client.sign_out()
 
 
 # ------------------------------------------------------------------- download
@@ -219,7 +466,7 @@ def test_the_download_header_uses_tableaus_non_standard_name_form(site):
 def test_a_downloaded_workbook_parses_with_the_real_parser(site, tmp_path):
     """End of the honesty chain: served bytes -> file -> this repo's own parser."""
     sys.path.insert(0, str(ROOT / "scripts"))
-    from parse_tableau import parse_workbook  # noqa: PLC0415
+    from parse_tableau import parse_workbook  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
     target = tmp_path / "wb.twbx"
     target.write_bytes(site.workbooks[0].content)
@@ -228,6 +475,7 @@ def test_a_downloaded_workbook_parses_with_the_real_parser(site, tmp_path):
 
 
 def test_a_missing_luid_is_a_404_not_an_empty_download(site):
+    """Content downloads must not manufacture bytes for unknown workbook identities."""
     token = signed_in(site)
     status, _headers, _payload = site.handle(
         "GET",
@@ -307,7 +555,7 @@ def test_the_real_assessment_runs_end_to_end_against_the_mock(served, tmp_path):
 
 def test_the_estate_db_carries_the_nested_project_tree(served, tmp_path):
     """The deploy step mirrors folders FROM this table, so the nesting has to survive the write."""
-    import sqlite3  # noqa: PLC0415
+    import sqlite3  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
     site, base = served
     client = ae.Site(tableau.env_for(site, base))
@@ -325,7 +573,7 @@ def test_the_estate_db_carries_the_nested_project_tree(served, tmp_path):
 # --------------------------------------------------------------- the loud gate
 
 
-def test_running_an_engine_script_without_the_pat_variable_fails_loudly(monkeypatch):
+def test_running_an_engine_script_without_the_pat_variable_fails_loudly():
     """MEASURED, and it cost 13 minutes of a real session.
 
     ``estate_survey.py`` resolves its secret through ``credential_resolver``, whose last layer is a
@@ -356,6 +604,7 @@ def test_the_mock_never_points_at_a_real_host(site):
 
 
 def test_the_server_really_is_loopback_only(served):
+    """No externally reachable bind address is used by the HTTP fixture."""
     site, base = served
     del site
     assert base.startswith("http://127.0.0.1:")
