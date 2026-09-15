@@ -588,7 +588,7 @@ def _resolve_probe_targets(
         tables = [t for t in (source.get("tables") or []) if t.get("name")]
         tables.sort(key=_is_custom_sql)
         if not tables:
-            log.error("PROBE: ERROR source has no named table or custom SQL relation to probe")
+            log.error("PROBE: ERROR source has no table/column to probe: no named table or custom SQL relation")
             raise SystemExit(1)
     return [(name, leg, tables, "ProbeOK") for name, leg in live_legs]
 
