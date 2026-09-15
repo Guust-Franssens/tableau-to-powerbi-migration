@@ -138,16 +138,18 @@ def test_tmdl_ident_helper_quotes_and_escapes() -> None:
 
 
 def test_source_column_stays_raw_to_match_m_query() -> None:
-    """`sourceColumn:` must be the RAW column name; quoting it would break the M `SelectColumns` match."""
+    """`sourceColumn:` must match the stable M output without TMDL identifier quotes."""
     conn = {"class": "sqlserver", "server": "srv", "database": "db", "schema": "dbo"}
     m_query, _ = probe_live_source.build_m_query(conn, TABLE, COLUMN)
-    files = probe_live_source._pbip_files("Probe", m_query, TABLE, COLUMN)  # pylint: disable=protected-access
+    files = probe_live_source._pbip_files("Probe", m_query, TABLE, "ProbeOK")  # pylint: disable=protected-access
     table_lines = _lines(files[_table_key(files)])
 
-    assert f"sourceColumn: {COLUMN}" in table_lines
-    assert f"sourceColumn: '{COLUMN}'" not in table_lines
-    # The M query selects the same raw, unquoted name - that correspondence is the whole point.
-    assert f'{{"{COLUMN}"}}' in m_query
+    assert "column 'ProbeOK'" in table_lines
+    assert "sourceColumn: ProbeOK" in table_lines
+    assert "sourceColumn: 'ProbeOK'" not in table_lines
+    assert "Table.ColumnNames(tbl)" in m_query
+    assert '{{columns{0}, "ProbeOK"}}' in m_query
+    assert COLUMN not in m_query
 
 
 # --- the filename is a separate, sanitised string -------------------------------------------------

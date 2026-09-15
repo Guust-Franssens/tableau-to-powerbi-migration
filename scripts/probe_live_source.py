@@ -28,6 +28,8 @@ BI had never authenticated to it at all.
 So the probe has to go *through* Power BI, and the smallest thing Power BI can execute is a model.
 Hence: for ordinary tables, one table, `Table.FirstN(..., 1)`, refresh, require a row. That IS
 Power BI's `SELECT 1` - it just has to be spelled as a partition instead of a shell command.
+The first physical column is discovered with `Table.ColumnNames` and renamed to `ProbeOK`:
+Tableau's `internal_name` is not a remote column name. No columns means no probe rows.
 
 Custom SQL is judged by its own query
 -------------------------------------
@@ -250,6 +252,17 @@ def _m_sql_literal(sql: str) -> str:
     return " ".join("".join(without_comments).split()).replace('"', '""')
 
 
+_ORDINARY_PROJECTION = (
+    "    columns = Table.ColumnNames(tbl),\n"
+    '    probe = if List.IsEmpty(columns) then #table({"ProbeOK"}, {}) else\n'
+    "        Table.RenameColumns(\n"
+    "            Table.FirstN(Table.SelectColumns(tbl, {columns{0}}), 1),\n"
+    '            {{columns{0}, "ProbeOK"}})\n'
+    "in\n"
+    "    probe"
+)
+
+
 def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = None) -> tuple[str, str]:
     """Return (m_query, note) for a one-row read of `table`.
 
@@ -257,9 +270,11 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
     entire point - the probe must exercise the SAME credential path the real model will use, or it
     proves nothing about the real model.
 
-    `custom_sql` is that principle applied to the PBIP probe itself. The query is projected onto a
-    stable `ProbeOK` column so the probe never depends on optional Tableau schema enumeration.
+    Ordinary tables select their first physical column at runtime and rename it to `ProbeOK`.
+    `column` is retained for caller compatibility, not used as a remote identifier. Custom SQL
+    keeps its constant `ProbeOK` projection after executing the customer's query.
     """
+    del column
     klass = (conn.get("class") or "").lower()
     server = normalize_host(conn.get("server") or "")
     database = conn.get("database") or ""
@@ -291,10 +306,7 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
             return m, f"Databricks {server}{http_path} :: {database} :: custom SQL '{table}'"
         m = (
             head + f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
-            f'    tbl = sch{{[Name="{table}",Kind="Table"]}}[Data],\n'
-            f'    one = Table.FirstN(Table.SelectColumns(tbl, {{"{column}"}}), 1)\n'
-            "in\n"
-            "    one"
+            f'    tbl = sch{{[Name="{table}",Kind="Table"]}}[Data],\n' + _ORDINARY_PROJECTION
         )
         return m, f"Databricks {server}{http_path} :: {database}.{schema}.{table}"
 
@@ -313,10 +325,7 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
         m = (
             "let\n"
             f'    Source = Sql.Database("{server}", "{database}"),\n'
-            f'    tbl = Source{{[Schema="{schema}",Item="{table}"]}}[Data],\n'
-            f'    one = Table.FirstN(Table.SelectColumns(tbl, {{"{column}"}}), 1)\n'
-            "in\n"
-            "    one"
+            f'    tbl = Source{{[Schema="{schema}",Item="{table}"]}}[Data],\n' + _ORDINARY_PROJECTION
         )
         return m, f"SQL Server {server} :: {database}.{schema}.{table}"
 
@@ -347,10 +356,7 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
             return m, f"Snowflake {server} ({warehouse}) :: {database} :: custom SQL '{table}'"
         m = (
             head + f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
-            f'    tbl = sch{{[Name="{table}",Kind="Table"]}}[Data],\n'
-            f'    one = Table.FirstN(Table.SelectColumns(tbl, {{"{column}"}}), 1)\n'
-            "in\n"
-            "    one"
+            f'    tbl = sch{{[Name="{table}",Kind="Table"]}}[Data],\n' + _ORDINARY_PROJECTION
         )
         return m, f"Snowflake {server} ({warehouse}) :: {database}.{schema}.{table}"
 
@@ -545,7 +551,7 @@ def _probe_custom_sql(table: dict) -> str | None:
 def _resolve_probe_targets(
     sources: list[dict], source_index: int, migration: Path | None = None
 ) -> list[tuple[str, dict, list[dict], str]]:
-    """Pick every live connection leg, its candidate tables and a column to probe.
+    """Pick every live connection leg, its candidate tables and the stable output column.
 
     Returns ALL tables, not just the first: a "table not found" is a spec error, and the workbook
     usually names several, so the probe can move on to the next rather than declaring the whole
@@ -581,13 +587,10 @@ def _resolve_probe_targets(
     with _recorded_attempt(migration, [name for name, _leg in live_legs]):
         tables = [t for t in (source.get("tables") or []) if t.get("name")]
         tables.sort(key=_is_custom_sql)
-        fields = [f for f in source.get("fields", []) if f.get("kind") == "column"]
-        if not tables or (not fields and not any(_is_custom_sql(t) for t in tables)):
-            log.error("PROBE: ERROR source has no table/column to probe")
+        if not tables:
+            log.error("PROBE: ERROR source has no named table or custom SQL relation to probe")
             raise SystemExit(1)
-        # A custom query supplies ProbeOK; ordinary navigation requires a real parsed column.
-        column = fields[0]["internal_name"].strip("[]") if fields else "ProbeOK"
-    return [(name, leg, tables, column) for name, leg in live_legs]
+    return [(name, leg, tables, "ProbeOK") for name, leg in live_legs]
 
 
 def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict, list[dict], str] | None:
@@ -602,6 +605,7 @@ def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict,
 def _write_probe_model(migration: Path, m_query: str, table: str, column: str) -> Path:
     """Materialise the one-table probe PBIP in the migration's `_probe/` sandbox.
 
+    Both ordinary-table and custom-SQL callers supply the M output column `ProbeOK`.
     Deliberately a SIBLING of `fabric/`, never a child: the credential gate denies writes to
     `fabric/` and that deny is inherited, so a probe inside it is blocked by the very gate the probe
     exists to satisfy. Keeping the sandbox outside the denied tree needs no grant, no ordering, and
@@ -1176,10 +1180,7 @@ def _probe_one_table(
             except ValueError as exc:
                 log.error("PROBE: ERROR %s", exc)
                 return finish(1, "ERROR")
-            pbip = (
-                _write_probe_model(migration, m_query, table, "ProbeOK" if _is_custom_sql(table_spec) else column)
-                / "Probe.pbip"
-            )
+            pbip = _write_probe_model(migration, m_query, table, "ProbeOK") / "Probe.pbip"
             log.info("probe model built: %s", pbip.parent)
             log.info("target: %s", note)
             pid = _open_desktop(pbip)
