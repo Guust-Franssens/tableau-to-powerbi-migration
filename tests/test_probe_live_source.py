@@ -19,6 +19,8 @@ Two deliberate design points, both learned from that miss:
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import re
 import shutil
@@ -32,6 +34,8 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import probe_live_source  # noqa: E402  # pylint: disable=wrong-import-position
+from test_probe_live_custom_sql import DATABRICKS, SNOWFLAKE, SQLSERVER  # noqa: E402
+from test_probe_live_source_verdict import _import_skill_modules  # noqa: E402
 
 # Copied verbatim from the validator's own failure text for `definition/version.json`.
 VERSION_PATTERN = re.compile(r"^[1-9][0-9]*\.(0|[1-9][0-9]*)\.0$")
@@ -153,3 +157,52 @@ def test_project_files_carry_literal_numeric_schemas(scaffold: dict[str, str]) -
     shipped = json.loads((EXAMPLE_MODEL / "definition.pbism").read_text(encoding="utf-8"))
     assert pbism["$schema"] == shipped["$schema"]
     assert pbism["version"] == shipped["version"]
+
+
+@pytest.mark.parametrize("conn", [SNOWFLAKE, DATABRICKS, SQLSERVER], ids=["snowflake", "databricks", "sqlserver"])
+@pytest.mark.parametrize("rows", [0, 1], ids=["empty", "one-real-row"])
+def test_ordinary_probe_requires_child_row_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, conn: dict, rows: int
+) -> None:
+    """Drive resolution, emitted PBIP and real child verdicts; only external I/O is replaced."""
+    # pylint: disable=protected-access
+    child, verdict_module, _ = _import_skill_modules()
+    observed: list[str] = []
+    source = {"connection": conn, "tables": [{"name": "Orders"}]}
+
+    def _open(pbip: Path) -> int:
+        tmdl = next(pbip.parent.glob("*.SemanticModel/definition/tables/*.tmdl")).read_text(encoding="utf-8")
+        assert "column 'ProbeOK'" in tmdl
+        assert "sourceColumn: ProbeOK" in tmdl
+        assert "Table.ColumnNames(tbl)" in tmdl
+        observed.append("open")
+        return 123
+
+    def _refresh(cmd: list[str], **_kwargs) -> subprocess.CompletedProcess:
+        assert Path(cmd[1]) == probe_live_source.SKILL_SCRIPTS / "refresh_pbip_model.py"
+        args = child._build_arg_parser().parse_args(cmd[2:])
+        assert args.tables == ["Orders"] and args.no_save
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = verdict_module._emit_data_verdict(None, 0.0, args, [("Orders", rows)], implicit=False)
+        emitted = buffer.getvalue()
+        assert ("REFRESH: NO_DATA" if rows == 0 else "REFRESH: TABLES_OK 'Orders'") in emitted
+        assert code == (1 if rows == 0 else 0)
+        observed.append("refresh")
+        return subprocess.CompletedProcess(cmd, code, stdout=emitted, stderr="")
+
+    monkeypatch.setattr(probe_live_source, "_host_resolves", lambda _server: True)
+    monkeypatch.setattr(probe_live_source, "_open_desktop", _open)
+    monkeypatch.setattr(probe_live_source, "_wait_for_catalog", lambda _pid: True)
+    monkeypatch.setattr(probe_live_source, "_network_fault_observed", lambda _conn: False)
+    monkeypatch.setattr(probe_live_source, "_record_desktop_lifecycle", lambda *_args: {})
+    monkeypatch.setattr(probe_live_source, "_close", lambda _pid, _pbip: True)
+    monkeypatch.setattr(probe_live_source.subprocess, "run", _refresh)
+
+    code, verdict = probe_live_source._probe_one(tmp_path, [source], 0, 7, False)
+
+    assert observed == ["open", "refresh"]
+    if rows == 0:
+        assert code == 1 and verdict != "DATA_OK"
+    else:
+        assert (code, verdict) == (0, "DATA_OK")

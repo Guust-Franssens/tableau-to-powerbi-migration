@@ -4,8 +4,8 @@ A Tableau relation of `type='text'` is a hand-written SELECT that Tableau merely
 `Flight_Level_Query`). The parser records that as `custom_sql` on the table. The probe runs that query
 and projects a known constant, so it does not depend on optional enumerated columns.
 
-Ordinary table navigation remains covered here because that proven cheap path must not move while the
-custom-SQL path changes.
+Ordinary table navigation remains covered here; its runtime physical-column projection must not
+change the custom-SQL path.
 """
 
 from __future__ import annotations
@@ -160,27 +160,109 @@ def test_empty_custom_sql_after_a_real_table_cannot_clear_the_source(tmp_path, m
     assert attempted == ["REAL_TABLE", "EMPTY_QUERY"]
 
 
-def test_a_real_table_still_navigates_and_is_unchanged_by_the_custom_sql_work():
-    m, note = probe_live_source.build_m_query(SNOWFLAKE, "FLIGHTS", "Col")
-    expected = (
-        "let\n"
-        '    Source = Snowflake.Databases("ORG-ACCOUNT.snowflakecomputing.com", "WH", null),\n'
-        '    db = Source{[Name="DB",Kind="Database"]}[Data],\n'
-        '    sch = db{[Name="PUBLIC",Kind="Schema"]}[Data],\n'
-        '    tbl = sch{[Name="FLIGHTS",Kind="Table"]}[Data],\n'
-        '    one = Table.FirstN(Table.SelectColumns(tbl, {"Col"}), 1)\n'
-        "in\n"
-        "    one"
-    )
-    assert m == expected
+@pytest.mark.parametrize(
+    ("conn", "navigation"),
+    [
+        (
+            SNOWFLAKE,
+            '    Source = Snowflake.Databases("ORG-ACCOUNT.snowflakecomputing.com", "WH", null),\n'
+            '    db = Source{[Name="DB",Kind="Database"]}[Data],\n'
+            '    sch = db{[Name="PUBLIC",Kind="Schema"]}[Data],\n'
+            '    tbl = sch{[Name="FLIGHTS",Kind="Table"]}[Data],\n',
+        ),
+        (
+            DATABRICKS,
+            '    Source = Databricks.Catalogs("adb.example.azuredatabricks.net", "/sql/1.0/warehouses/abc", null),\n'
+            '    db = Source{[Name="hive_metastore",Kind="Database"]}[Data],\n'
+            '    sch = db{[Name="default",Kind="Schema"]}[Data],\n'
+            '    tbl = sch{[Name="FLIGHTS",Kind="Table"]}[Data],\n',
+        ),
+        *[
+            (
+                {**SQLSERVER, "class": klass, "schema": "dbo"},
+                '    Source = Sql.Database("sql.example.com", "DB"),\n'
+                '    tbl = Source{[Schema="dbo",Item="FLIGHTS"]}[Data],\n',
+            )
+            for klass in ("sqlserver", "azure_sqldb", "azure_sql_dw", "azuresqldw")
+        ],
+    ],
+    ids=["snowflake", "databricks", "sqlserver", "azure_sqldb", "azure_sql_dw", "azuresqldw"],
+)
+def test_ordinary_table_selects_a_runtime_column_without_changing_navigation(conn: dict, navigation: str) -> None:
+    """No Tableau field token may become a guessed physical column on any ordinary branch."""
+    internal_name = "[Tableau_Local_Column]"
+    m, note = probe_live_source.build_m_query(conn, "FLIGHTS", internal_name.strip("[]"))
+
+    assert internal_name.strip("[]") not in m
+    assert m.startswith("let\n" + navigation + "    columns = Table.ColumnNames(tbl),\n")
+    assert "Table.FirstN(Table.SelectColumns(tbl, {columns{0}}), 1)" in m
+    assert "Table.RenameColumns(\n" in m
+    assert '{{columns{0}, "ProbeOK"}})' in m
+    assert m.endswith("in\n    probe")
     assert "Value.NativeQuery" not in m
     assert "custom SQL" not in note
+    assert "try " not in m, "a missing table must still fail at the declared navigation key"
+
+
+@pytest.mark.parametrize("conn", [SNOWFLAKE, DATABRICKS, SQLSERVER], ids=["snowflake", "databricks", "sqlserver"])
+def test_ordinary_probe_projection_cannot_manufacture_rows_without_columns(conn: dict) -> None:
+    """A columnless source is empty evidence; zero-row sources stay empty after projection."""
+    m, _ = probe_live_source.build_m_query(conn, "FLIGHTS", "Tableau_Local_Column")
+    projection = m[m.index("    columns =") :]
+
+    assert projection == (
+        "    columns = Table.ColumnNames(tbl),\n"
+        '    probe = if List.IsEmpty(columns) then #table({"ProbeOK"}, {}) else\n'
+        "        Table.RenameColumns(\n"
+        "            Table.FirstN(Table.SelectColumns(tbl, {columns{0}}), 1),\n"
+        '            {{columns{0}, "ProbeOK"}})\n'
+        "in\n"
+        "    probe"
+    )
+
+
+@pytest.mark.parametrize(
+    ("conn", "head", "note"),
+    [
+        (
+            SNOWFLAKE,
+            '    Source = Snowflake.Databases("ORG-ACCOUNT.snowflakecomputing.com", "WH", null),\n'
+            '    db = Source{[Name="DB",Kind="Database"]}[Data],\n'
+            '    one = Table.FirstN(Value.NativeQuery(db, "SELECT a FROM t"), 1),\n',
+            "Snowflake ORG-ACCOUNT.snowflakecomputing.com (WH) :: DB :: custom SQL 'Q'",
+        ),
+        (
+            DATABRICKS,
+            '    Source = Databricks.Catalogs("adb.example.azuredatabricks.net", "/sql/1.0/warehouses/abc", null),\n'
+            '    db = Source{[Name="hive_metastore",Kind="Database"]}[Data],\n'
+            '    one = Table.FirstN(Value.NativeQuery(db, "SELECT a FROM t"), 1),\n',
+            "Databricks adb.example.azuredatabricks.net/sql/1.0/warehouses/abc :: hive_metastore :: custom SQL 'Q'",
+        ),
+        (
+            SQLSERVER,
+            '    Source = Sql.Database("sql.example.com", "DB", [Query="SELECT a FROM t"]),\n'
+            "    one = Table.FirstN(Source, 1),\n",
+            "SQL Server sql.example.com :: DB :: custom SQL 'Q'",
+        ),
+    ],
+    ids=["snowflake", "databricks", "sqlserver"],
+)
+def test_custom_sql_query_and_note_remain_byte_for_byte_unchanged(conn: dict, head: str, note: str) -> None:
+    """Pin the pre-647 custom-SQL output independently of the ordinary-table projection."""
+    m, actual_note = probe_live_source.build_m_query(conn, "Q", "Col", custom_sql="SELECT a FROM t")
+
+    assert m == "let\n" + head + "    " + PROBE_PROJECTION + "\nin\n    probe"
+    assert actual_note == note
 
 
 def test_real_table_probe_still_opens_refreshes_and_returns_data_ok(tmp_path, monkeypatch):
     events = []
 
     def _open(pbip: Path) -> int:
+        tmdl = next(pbip.parent.glob("*.SemanticModel/definition/tables/*.tmdl")).read_text(encoding="utf-8")
+        assert "column 'ProbeOK'" in tmdl
+        assert "sourceColumn: ProbeOK" in tmdl
+        assert "column 'Col'" not in tmdl
         events.append(("open", pbip.name))
         return 123
 
@@ -274,8 +356,35 @@ def test_unreachable_custom_sql_source_remains_refused(tmp_path, monkeypatch):
     assert (rc, verdict) == (1, "UNREACHABLE")
 
 
-def test_ordinary_source_without_columns_is_cannot_assess():
+@pytest.mark.parametrize("conn", [SNOWFLAKE, DATABRICKS, SQLSERVER], ids=["snowflake", "databricks", "sqlserver"])
+@pytest.mark.parametrize("fields", [None, [], [{"kind": "column"}], [{"kind": "calculated", "internal_name": "[X]"}]])
+def test_ordinary_source_without_enumerated_columns_is_resolvable(conn: dict, fields: list[dict] | None) -> None:
+    """Source column discovery belongs to Power BI, not optional Tableau field enumeration."""
     source = _source([{"name": "REAL_TABLE", "custom_sql": None}], fields=[])
+    source["connection"] = conn
+    if fields is None:
+        del source["fields"]
+    else:
+        source["fields"] = fields
+
+    _, tables, column = probe_live_source._resolve_probe_target([source], 0)  # pylint: disable=protected-access
+
+    assert [table["name"] for table in tables] == ["REAL_TABLE"]
+    assert column == "ProbeOK"
+
+
+def test_ordinary_target_ignores_tableau_internal_field_names() -> None:
+    """Even present Tableau fields do not provide a physical column identifier."""
+    source = _source([{"name": "REAL_TABLE"}])
+    _, _, column = probe_live_source._resolve_probe_target([source], 0)  # pylint: disable=protected-access
+
+    assert column == "ProbeOK"
+
+
+@pytest.mark.parametrize("tables", [[], [{}], [{"name": ""}], [{"custom_sql": "SELECT 1"}]])
+def test_source_without_a_named_table_or_custom_sql_relation_is_refused(tables: list[dict]) -> None:
+    """Dropping field admission must not drop table admission or fabricate a source."""
+    source = _source(tables)
 
     with pytest.raises(SystemExit) as raised:
         probe_live_source._resolve_probe_target([source], 0)  # pylint: disable=protected-access
