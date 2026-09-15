@@ -268,6 +268,64 @@ cancellation, failure or deadline expiry, even if the worker omits it. These out
 fingerprints and exit 11 before later phases; offline and proven-complete inventories gain no pagination
 finding. This remains exactly one inventory request, not multi-page fetching.
 
+**Published dependency association — partial #562 prerequisite P.** The only published authority is
+the optional `origin.published_dependencies` block inside the existing `source-provenance.json`.
+No provider package, spec addition, sidecar or registry participates. Legacy absence remains absence.
+
+The block has exactly `schema: "tableau-published-dependencies/v1"`, `source_sha256` (the outer
+`input.sha256`), `workbook_luid` (the outer origin LUID), `source_match`
+(`sha256`, `revision_same`, or `unestablished`), and `rows`. Every published occurrence keeps its
+zero-based ordinal in the parser's datasource sequence, including gaps for embedded sources;
+the parser's `Parameters` pseudo-source is excluded. Repeated published keys are not deduplicated.
+Each row has exactly `source_ordinal`, the parser's exact normalized `published_key`, `state`,
+`candidate_count`, and **only for `resolved`**, `datasource_luid`. Ordinals/counts are bounded,
+non-boolean integers; only `cannot_establish` has a null count.
+
+| Row state | Required evidence |
+|---|---|
+| `resolved` | Confirmed source bytes/revision and unique workbook identity; complete independently visible catalog; exactly one candidate; valid datasource LUID and matching detail. |
+| `missing` | Confirmed source and independently complete catalog with exactly zero candidates. |
+| `ambiguous` | Confirmed source and complete catalog with more than one candidate, including duplicate rows; no chosen LUID. |
+| `cannot_establish` | Source identity/revision, visibility, completeness or detail cannot be established; null count, no LUID. |
+
+The stamper parses fingerprint-equal **held bytes** with the existing parser identity helpers, not a
+second name normalizer. REST uses only the **case-preserved, decoded `derived-from` content URL
+segment**, on the matching source site/server. Normalized keys, display names, captions, repository
+IDs, connection-name fallbacks and provider choices never become catalog queries. After acquisition,
+the held source path is rehashed before any association is issued. Changed/unreadable bytes retain
+the original occurrences as `unestablished` / `cannot_establish`; stale or incomparable revisions
+and ambiguous workbook matches also cannot acquire an association.
+
+Datasource pagination is deliberately stricter than the older workbook inventory rule above:
+all first-page facts must be explicit, valid and complete. A short page alone does not suffice.
+Visibility is established separately by querying the signed-in user's matching REST identity and
+requiring a server/site administrator role. Tableau documents that non-administrators see only
+datasources they have permission to connect to: see
+[Query Data Sources](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_data_sources.htm#query_data_sources)
+and [Query User On Site](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_users_and_groups.htm#query_user_on_site).
+The selected datasource detail must agree exactly on ID, content URL, name and update timestamp.
+REST search-index freshness is not guaranteed; missing, renamed or stale detail therefore refuses.
+Catalog/detail successes and failures are cached only inside this provenance run.
+
+The private fingerprint checkpoint transports only original ordinals and **digests** of parser keys.
+The supervisor reconciles the complete ordered row sequence against that checkpoint and validates
+the nested closed shape, SHA, workbook identity, revision evidence and state/cardinality contract.
+Missing, surplus, duplicate-ordinal, reordered, malformed or unknown nested rows/fields are protocol
+faults, not cleaned legacy origins. An occurrence with no valid parser key is retained as incomplete
+by standalone capture and refused by supervision rather than filled from another identity hint.
+Checkpoint-only fields never enter the published artifact, including on interruption.
+
+Catalog permission errors, timeouts and unreadable replies produce `cannot_establish` without
+destroying otherwise valid origin evidence or copying catalog rows/exception text into diagnostics.
+The existing absolute supervisor deadline still covers acquisition; cancellation/expiry retains
+accepted safe provenance (or fingerprints before scrub) as non-success. A successful provenance
+**phase** does not imply that its dependency rows resolved. These are local observation-time
+associations, not an atomic server snapshot or proof against a subsequent source/catalog change.
+
+**Claim ceiling:** P does not thin consumer models, rewrite PBIR, choose a provider package, transport
+the association through packaging, make consumers `START_READY`, support `COMPLETE`, or change
+promotion. Consumer binding/transport C remains separate and blocked on P; promotion remains #57.
+
 ### Package folder identification (#616)
 
 Assembly and package inspect/bind/sanitize share the private, pure

@@ -13,12 +13,14 @@ The rule these tests exist to enforce: **a same-named workbook is not the same w
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import multiprocessing
 import sys
 import urllib.error
 import zipfile
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -1152,8 +1154,10 @@ class RecordingReporter(prov.NullReporter):
         if self._cancel_after == operation and self._cancel_completed == completed:
             self.cancelled = True
 
-    def checkpoint(self, index, record):
-        self.messages.append({"kind": prov.MSG_CHECKPOINT, "index": index, "record": prov.checkpoint_record(record)})
+    def checkpoint(self, index, record, dependencies=None):
+        self.messages.append(
+            {"kind": prov.MSG_CHECKPOINT, "index": index, "record": prov.checkpoint_record(record, dependencies)}
+        )
 
     def lookup_intent(self, requested):
         self.messages.append({"kind": prov.MSG_LOOKUP_INTENT, "requested": requested})
@@ -1995,3 +1999,407 @@ def test_pagination_diagnostics_and_progress_never_copy_response_text(tmp_path: 
     }
     rendered = json.dumps({"result": result, "messages": reporter.messages, "progress": emitted}, allow_nan=False)
     assert all(secret not in rendered for secret in secrets), "PAGINATION_DIAGNOSTIC_PRIVACY"
+
+
+# #562 prerequisite P. These synthetic REST fixtures record transport, not resolver method calls.
+P_WORKBOOK = _fixture_luid(710)
+P_DATASOURCE = _fixture_luid(711)
+P_SITE = _fixture_luid(712)
+P_USER = _fixture_luid(713)
+
+
+def _published_xml(*segments: str, site: str = "site", server: str = "https://x.online.tableau.com") -> bytes:
+    rows = [
+        '<datasource name="Parameters"/>',
+        '<datasource name="embedded"><connection class="textscan"/></datasource>',
+    ]
+    for index, segment in enumerate(segments or ("SalesFeed",)):
+        rows.append(
+            f'<datasource name="published-{index}" caption="DisplayOnly">'
+            f'<repository-location site="{site}" id="stale-repository-id" '
+            f'derived-from="{server}/datasources/{segment}?rev=4"/>'
+            '<connection class="sqlproxy" dbname="WrongDatabaseName"/></datasource>'
+        )
+    return f"<workbook><datasources>{''.join(rows)}</datasources></workbook>".encode()
+
+
+class PublishedSite(RecordingSite):
+    """A complete independent catalog, user detail, and datasource detail behind real client code."""
+
+    def __init__(self, payload: bytes) -> None:
+        super().__init__(LIVE_ENV, workbooks=[{"id": P_WORKBOOK, "name": "Consumer"}])
+        self.remote_bytes = payload
+        self.user = {"id": P_USER, "siteRole": "SiteAdministratorCreator"}
+        candidate = {
+            "id": P_DATASOURCE,
+            "contentUrl": "SalesFeed",
+            "name": "CatalogDisplayName",
+            "updatedAt": "2026-09-01T00:00:00Z",
+        }
+        self.catalog = {
+            "pagination": {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "1"},
+            "datasources": {"datasource": [candidate]},
+        }
+        self.detail = {"datasource": dict(candidate)}
+        self.catalog_status = self.detail_status = self.user_status = 200
+        self.catalog_error = None
+        self.before_catalog = self.before_detail = lambda: None
+
+    def _call(self, method, path, body=None, accept=None):
+        if path == "/auth/signout" or "/workbooks?" in path:
+            return super()._call(method, path, body, accept)
+        self.calls.append((method, path))
+        if path == "/auth/signin":
+            return 200, json.dumps(
+                {"credentials": {"token": "session-token", "site": {"id": P_SITE}, "user": {"id": P_USER}}}
+            ).encode()
+        if "/workbooks/" in path and "/content?" in path:
+            self.served.setdefault(P_WORKBOOK, []).append(self.remote_bytes)
+            return 200, self.remote_bytes
+        if path == f"/sites/{P_SITE}/users/{P_USER}":
+            return self.user_status, json.dumps({"user": self.user}).encode()
+        if "/datasources?" in path:
+            self.before_catalog()
+            if self.catalog_error is not None:
+                raise self.catalog_error
+            return self.catalog_status, json.dumps(self.catalog).encode()
+        if "/datasources/" in path:
+            self.before_detail()
+            return self.detail_status, json.dumps(self.detail).encode()
+        raise AssertionError("fixture received an unexpected REST route")
+
+    def queries(self) -> list[dict]:
+        return [parse_qs(urlsplit(path).query) for _method, path in self.calls if "/datasources?" in path]
+
+    def detail_count(self) -> int:
+        return sum("/datasources/" in path for _method, path in self.calls)
+
+
+def _published_setup(tmp_path: Path, monkeypatch, payload: bytes | None = None) -> tuple[Path, PublishedSite]:
+    path = tmp_path / f"{P_WORKBOOK}_Consumer.twb"
+    path.write_bytes(payload if payload is not None else _published_xml())
+    return path, _install(monkeypatch, PublishedSite(path.read_bytes()))
+
+
+def _association(result: dict) -> dict:
+    return result["inputs"][0]["origin"]["published_dependencies"]
+
+
+def test_published_dependency_resolves_only_current_case_preserved_source_and_confirmed_catalog(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    result = prov.build(path, LIVE_ENV)
+    assert _association(result) == {
+        "schema": "tableau-published-dependencies/v1",
+        "source_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "workbook_luid": P_WORKBOOK,
+        "source_match": "sha256",
+        "rows": [
+            {
+                "source_ordinal": 1,
+                "published_key": "site/salesfeed",
+                "state": "resolved",
+                "candidate_count": 1,
+                "datasource_luid": P_DATASOURCE,
+            }
+        ],
+    }, "P_SOURCE_BOUND_UNIQUE_RESOLUTION"
+    assert site.queries() == [{"filter": ["contentUrl:eq:SalesFeed"], "pageSize": ["1000"], "pageNumber": ["1"]}], (
+        "P_CASE_PRESERVED_LOOKUP"
+    )
+    assert site.detail_count() == 1 and len(site.served[P_WORKBOOK]) == 1
+    assert prov.is_success(result)
+
+
+def test_published_escaped_source_segment_uses_parser_identity_without_a_second_normalizer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch, _published_xml("Sales%20Feed"))
+    site.catalog["datasources"]["datasource"][0]["contentUrl"] = "Sales Feed"
+    site.detail["datasource"]["contentUrl"] = "Sales Feed"
+    result = prov.build(path, LIVE_ENV)
+    assert _association(result)["rows"][0]["published_key"] == "site/sales feed"
+    assert _association(result)["rows"][0]["state"] == "resolved"
+    assert site.queries()[0]["filter"] == ["contentUrl:eq:Sales Feed"], "P_CASE_PRESERVED_LOOKUP"
+
+
+@pytest.mark.parametrize(
+    "kind", ["dbname", "repository-id", "display-name", "foreign-site", "foreign-host", "filter-syntax"]
+)
+def test_published_non_authoritative_lookup_hints_never_select_a_datasource(
+    tmp_path: Path, monkeypatch, kind: str
+) -> None:
+    payload = _published_xml()
+    if kind in {"dbname", "repository-id", "display-name"}:
+        payload = payload.replace(b' derived-from="https://x.online.tableau.com/datasources/SalesFeed?rev=4"', b"")
+        if kind != "dbname":
+            payload = payload.replace(b'class="sqlproxy"', b'class="textscan"')
+        if kind == "display-name":
+            payload = payload.replace(b'id="stale-repository-id"', b'id="other-id"')
+    elif kind == "foreign-site":
+        payload = _published_xml(site="other-site")
+    elif kind == "foreign-host":
+        payload = _published_xml(server="https://other.invalid")
+    else:
+        payload = _published_xml("SalesFeed%2Cname%3Aeq%3ASalesFeed")
+    path, site = _published_setup(tmp_path, monkeypatch, payload)
+    rows = _association(prov.build(path, LIVE_ENV))["rows"]
+    assert rows[0]["state"] == "cannot_establish" and rows[0]["candidate_count"] is None
+    assert "datasource_luid" not in rows[0] and site.queries() == []
+
+
+@pytest.mark.parametrize("complete", [True, False], ids=["complete-missing", "incomplete-not-missing"])
+def test_published_zero_candidates_require_independent_complete_catalog(
+    tmp_path: Path, monkeypatch, complete: bool
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    site.catalog["datasources"]["datasource"] = []
+    site.catalog["pagination"] = {"pageNumber": 1, "pageSize": 1000, "totalAvailable": 0} if complete else {}
+    row = _association(prov.build(path, LIVE_ENV))["rows"][0]
+    assert row["state"] == ("missing" if complete else "cannot_establish"), "P_CATALOG_COMPLETENESS"
+    assert row["candidate_count"] == (0 if complete else None), "P_CATALOG_COMPLETENESS"
+    assert "datasource_luid" not in row and site.detail_count() == 0
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        {"id": P_USER, "siteRole": "Creator"},
+        {"id": _fixture_luid(999), "siteRole": "SiteAdministratorCreator"},
+        {"id": P_USER},
+        {"id": P_USER, "siteRole": ["SiteAdministratorCreator"]},
+    ],
+)
+@pytest.mark.parametrize("candidate_count", [0, 1])
+def test_published_visible_page_never_proves_unfiltered_catalog_permissions(
+    tmp_path: Path, monkeypatch, user: dict, candidate_count: int
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    site.user = user
+    if candidate_count == 0:
+        site.catalog["datasources"]["datasource"] = []
+        site.catalog["pagination"]["totalAvailable"] = 0
+    row = _association(prov.build(path, LIVE_ENV))["rows"][0]
+    assert row["state"] == "cannot_establish" and row["candidate_count"] is None, "P_CATALOG_VISIBILITY"
+    assert site.queries() == [] and site.detail_count() == 0
+
+
+@pytest.mark.parametrize("duplicate", [False, True], ids=["different-ids", "duplicate-id"])
+def test_published_two_candidates_are_ambiguous_even_when_the_rows_duplicate(
+    tmp_path: Path, monkeypatch, duplicate: bool
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    second = dict(site.catalog["datasources"]["datasource"][0])
+    if not duplicate:
+        second["id"] = _fixture_luid(799)
+    site.catalog["datasources"]["datasource"].append(second)
+    site.catalog["pagination"]["totalAvailable"] = "2"
+    row = _association(prov.build(path, LIVE_ENV))["rows"][0]
+    assert row["state"] == "ambiguous" and row["candidate_count"] == 2, "P_CANDIDATE_CARDINALITY"
+    assert "datasource_luid" not in row and site.detail_count() == 0
+
+
+@pytest.mark.parametrize("defect", ["404", "403", "id", "contentUrl", "name", "updatedAt", "missing", "non-object"])
+def test_published_detail_must_confirm_the_exact_current_candidate(tmp_path: Path, monkeypatch, defect: str) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if defect in {"404", "403"}:
+        site.detail_status = int(defect)
+    elif defect == "missing":
+        site.detail = {}
+    elif defect == "non-object":
+        site.detail = {"datasource": []}
+    else:
+        site.detail["datasource"][defect] = _fixture_luid(798) if defect == "id" else "renamed-or-new-revision"
+    result = prov.build(path, LIVE_ENV)
+    row = _association(result)["rows"][0]
+    assert row["state"] == "cannot_establish" and row["candidate_count"] is None, "P_DETAIL_CONFIRMATION"
+    assert "datasource_luid" not in row and site.detail_count() == 1
+    assert result["inputs"][0]["origin"]["match"] == "sha256" and prov.is_success(result)
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "403",
+        "timeout",
+        "non-object-row",
+        "bad-id",
+        "wrong-content-url",
+        "bad-page",
+        "bool-total",
+        "truncated",
+        "no-total",
+    ],
+)
+def test_published_catalog_failures_preserve_otherwise_valid_provenance(
+    tmp_path: Path, monkeypatch, defect: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if defect == "403":
+        site.catalog_status = 403
+    elif defect == "timeout":
+        site.catalog_error = TimeoutError("private-catalog-row reflected-session-token")
+    elif defect == "non-object-row":
+        site.catalog["datasources"]["datasource"] = ["private-catalog-row"]
+    elif defect == "bad-id":
+        site.catalog["datasources"]["datasource"][0]["id"] = "not-a-luid"
+    elif defect == "wrong-content-url":
+        site.catalog["datasources"]["datasource"][0]["contentUrl"] = "salesfeed"
+    elif defect == "bad-page":
+        site.catalog["pagination"]["pageNumber"] = 2
+    elif defect == "bool-total":
+        site.catalog["pagination"]["totalAvailable"] = True
+    elif defect == "truncated":
+        site.catalog["pagination"]["totalAvailable"] = 2
+    else:
+        del site.catalog["pagination"]["totalAvailable"]
+    result = prov.build(path, LIVE_ENV)
+    assert _association(result)["rows"][0]["state"] == "cannot_establish", "P_CATALOG_COMPLETENESS"
+    assert _association(result)["rows"][0]["candidate_count"] is None
+    assert result["inputs"][0]["origin"]["match"] == "sha256" and prov.is_success(result)
+
+
+@pytest.mark.parametrize("when", ["after-fingerprint", "during-catalog"])
+def test_published_source_is_rehashed_before_association_use(tmp_path: Path, monkeypatch, when: str) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    original_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    class ChangedSourceReporter(RecordingReporter):
+        def checkpoint(self, index, record, dependencies=None):
+            super().checkpoint(index, record, dependencies)
+            if when == "after-fingerprint":
+                path.write_bytes(_published_xml("ChangedSource"))
+
+    if when == "during-catalog":
+        site.before_catalog = lambda: path.write_bytes(_published_xml("ChangedSource"))
+    result = prov.build(path, LIVE_ENV, ChangedSourceReporter())
+    block = _association(result)
+    assert block["source_sha256"] == original_sha
+    assert block["source_match"] == "unestablished", "P_SOURCE_REHASH"
+    assert block["rows"][0]["state"] == "cannot_establish" and block["rows"][0]["candidate_count"] is None
+    assert "datasource_luid" not in block["rows"][0]
+
+
+@pytest.mark.parametrize("kind", ["stale", "incomparable"])
+def test_published_source_revision_must_be_confirmed(tmp_path: Path, monkeypatch, kind: str) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    site.remote_bytes = _published_xml("AnotherRevision")
+    if kind == "incomparable":
+        monkeypatch.setattr(site, "content_revision_key", lambda _luid: oid.RevisionKey("raw-sha256-v1", "f" * 64))
+    block = _association(prov.build(path, LIVE_ENV))
+    assert block["source_match"] == "unestablished" and block["rows"][0]["state"] == "cannot_establish"
+    assert site.queries() == []
+
+
+def test_published_repacked_equal_revision_is_independently_confirmed(tmp_path: Path, monkeypatch) -> None:
+    path = _twbx(tmp_path, f"{P_WORKBOOK}_Consumer", _published_xml())
+    remote = io.BytesIO()
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(remote, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for member in source.namelist():
+            archive.writestr(member, source.read(member))
+    site = _install(monkeypatch, PublishedSite(remote.getvalue()))
+    result = prov.build(path, LIVE_ENV)
+    assert result["inputs"][0]["origin"]["match"] == "name_only"
+    assert _association(result)["source_match"] == "revision_same"
+    assert _association(result)["rows"][0]["datasource_luid"] == P_DATASOURCE and site.detail_count() == 1
+
+
+@pytest.mark.parametrize("kind", ["duplicate-luid", "ambiguous-name", "stale-harvest-luid", "incomplete-workbooks"])
+def test_published_association_requires_a_uniquely_established_workbook(tmp_path: Path, monkeypatch, kind: str) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if kind == "duplicate-luid":
+        site._site_workbooks.append(dict(site._site_workbooks[0]))
+    elif kind == "ambiguous-name":
+        path = path.rename(tmp_path / "Consumer.twb")
+        site._site_workbooks.append({"id": _fixture_luid(799), "name": "Consumer"})
+    elif kind == "stale-harvest-luid":
+        path = path.rename(tmp_path / f"{_fixture_luid(798)}_Consumer.twb")
+    else:
+        site._inventory_document = {
+            "workbooks": {"workbook": site._site_workbooks},
+            "pagination": {"pageNumber": 1, "pageSize": 1000, "totalAvailable": 2},
+        }
+    block = _association(prov.build(path, LIVE_ENV))
+    assert block["source_match"] == "unestablished" and block["rows"][0]["candidate_count"] is None
+    assert site.queries() == []
+
+
+@pytest.mark.parametrize("detail_status", [200, 404])
+def test_published_occurrences_are_not_deduplicated_but_catalog_and_detail_are_cached_per_run(
+    tmp_path: Path, monkeypatch, detail_status: int
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch, _published_xml("SalesFeed", "SalesFeed"))
+    site.detail_status = detail_status
+    result = prov.build(path, LIVE_ENV)
+    rows = _association(result)["rows"]
+    assert [row["source_ordinal"] for row in rows] == [1, 2]
+    assert [row["published_key"] for row in rows] == ["site/salesfeed", "site/salesfeed"]
+    assert all(row["state"] == ("resolved" if detail_status == 200 else "cannot_establish") for row in rows)
+    assert len(site.queries()) == site.detail_count() == len(site.served[P_WORKBOOK]) == 1
+    fresh = _install(monkeypatch, PublishedSite(path.read_bytes()))
+    prov.build(path, LIVE_ENV)
+    assert len(fresh.queries()) == fresh.detail_count() == 1
+
+
+def test_published_catalog_private_rows_and_reflected_credentials_never_enter_diagnostics(
+    tmp_path: Path, monkeypatch, caplog, capsys
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    private = ["private-account-name", "private-catalog-description", LIVE_ENV["TABLEAU_PAT_SECRET"], "session-token"]
+    site.catalog["datasources"]["datasource"][0].update(name=private[0], description=" ".join(private))
+    site.detail["datasource"].update(name=private[0], description=" ".join(private))
+    reporter = RecordingReporter()
+    result = prov.build(path, LIVE_ENV, reporter)
+    assert _association(result)["rows"][0]["state"] == "resolved"
+    output = json.dumps({"result": result, "wire": reporter.messages}) + caplog.text + str(capsys.readouterr())
+    assert all(secret not in output for secret in private), "P_CATALOG_DIAGNOSTIC_PRIVACY"
+    early = json.dumps(reporter.of_kind(prov.MSG_CHECKPOINT))
+    assert "site/salesfeed" not in early and "SalesFeed" not in early and P_DATASOURCE not in early
+
+
+@pytest.mark.parametrize("boundary", ["catalog", "detail"])
+def test_published_cancellation_retains_only_safe_partial_provenance(
+    tmp_path: Path, monkeypatch, boundary: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    reporter = RecordingReporter()
+    setattr(site, f"before_{boundary}", lambda: setattr(reporter, "cancelled", True))
+    result = prov.build(path, LIVE_ENV, reporter)
+    assert result["phase"]["status"] == "partial" and result["phase"]["errors"][-1]["code"] == "cancelled"
+    assert result["inputs"][0]["input"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert "origin" not in result["inputs"][0] and "published_occurrences" not in result["inputs"][0]
+
+
+def test_published_missing_parser_key_is_retained_not_filled_from_a_provider(tmp_path: Path, monkeypatch) -> None:
+    payload = b'<workbook><datasources><datasource name="sql"><connection class="sqlproxy"/></datasource></datasources></workbook>'
+    path, site = _published_setup(tmp_path, monkeypatch, payload)
+    row = _association(prov.build(path, LIVE_ENV))["rows"][0]
+    assert row == {"source_ordinal": 0, "published_key": None, "state": "cannot_establish", "candidate_count": None}
+    assert site.queries() == []
+
+
+@pytest.mark.parametrize("state", ["resolved", "missing", "ambiguous", "cannot_establish"])
+def test_published_real_producer_messages_reconcile_with_supervisor(tmp_path: Path, monkeypatch, state: str) -> None:
+    import run_estate as estate  # pylint: disable=import-outside-toplevel
+
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if state == "missing":
+        site.catalog["datasources"]["datasource"] = []
+        site.catalog["pagination"]["totalAvailable"] = 0
+    elif state == "ambiguous":
+        site.catalog["datasources"]["datasource"] *= 2
+        site.catalog["pagination"]["totalAvailable"] = 2
+    elif state == "cannot_establish":
+        site.catalog_error = TimeoutError("private catalog exception")
+    reporter = RecordingReporter()
+    result = prov.build(path, LIVE_ENV, reporter)
+    reporter.terminal(result)
+    supervisor = estate._ProvenanceState(emit=lambda *_args: None)
+    for message in reporter.messages:
+        supervisor.accept(message)
+    assert supervisor.terminal == result and _association(result)["rows"][0]["state"] == state
+    assert supervisor.checkpoints[0]["published_occurrences"] == [
+        {"source_ordinal": 1, "published_key_sha256": hashlib.sha256(b'"site/salesfeed"').hexdigest()}
+    ]
+    assert "published_occurrences" not in json.dumps(result)

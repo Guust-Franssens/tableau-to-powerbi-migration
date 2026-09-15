@@ -323,7 +323,7 @@ PROVENANCE_START_CODE = "worker-start-failed"
 #: (sizes, digests, CRCs) because checkpoints are emitted BEFORE scrub has run; the parent refuses
 #: anything else, so a message carrying a filename, a member name or an exception message is a
 #: protocol violation rather than evidence.
-_CHECKPOINT_KEYS = frozenset({"input", "fingerprint_error"})
+_CHECKPOINT_KEYS = frozenset({"input", "fingerprint_error", "published_occurrences"})
 _CHECKPOINT_INPUT_KEYS = frozenset({"size_bytes", "sha256", "revision_key", "members", "status"})
 _CHECKPOINT_MEMBER_KEYS = frozenset({"size_bytes", "crc32"})
 _CHECKPOINT_REVISION_KEYS = frozenset({"algo", "value"})
@@ -935,6 +935,18 @@ def _validated_revision(revision: object) -> None:
     _digest(revision["value"])
 
 
+def _validated_occurrences(rows: object) -> None:
+    """Private checkpoint identities are derived-only; physical multiplicity may not collapse."""
+    _require(type(rows) is list and 0 < len(rows) <= PROVENANCE_MAX_MEMBERS)
+    previous = -1
+    for row in rows:
+        _require(type(row) is dict and row.keys() == {"source_ordinal", "published_key_sha256"})
+        ordinal = row["source_ordinal"]
+        _require(_is_count(ordinal) and ordinal > previous)
+        _digest(row["published_key_sha256"])
+        previous = ordinal
+
+
 def _validated_checkpoint(record: object) -> dict:
     """Strict, bounded DERIVED evidence. In particular, a string in a digest field is not a digest."""
     _require(type(record) is dict and {"input"} <= record.keys() <= _CHECKPOINT_KEYS)
@@ -954,6 +966,9 @@ def _validated_checkpoint(record: object) -> dict:
             _digest(member["crc32"], 8)
     if "revision_key" in local:
         _validated_revision(local["revision_key"])
+    if "published_occurrences" in record:
+        _require("status" not in local)
+        _validated_occurrences(record["published_occurrences"])
     if "fingerprint_error" in record:
         _validated_error(record["fingerprint_error"])
         _require(local == {"status": "unavailable"})
@@ -967,7 +982,7 @@ def _validated_checkpoint(record: object) -> dict:
 def _validated_origin(origin: object) -> None:
     if origin is None:
         return
-    _require(type(origin) is dict and origin.keys() == _ORIGIN_KEYS)
+    _require(type(origin) is dict and _ORIGIN_KEYS <= origin.keys() <= _ORIGIN_KEYS | {"published_dependencies"})
     for key in _ORIGIN_TEXT_KEYS:
         if origin[key] is not None:
             _text(origin[key])
@@ -981,6 +996,58 @@ def _validated_origin(origin: object) -> None:
     reason = origin["content_unavailable"]
     _require(reason is None or (type(reason) is str and re.fullmatch(r"HTTP [1-5][0-9]{2}", reason) is not None))
     _require(_is_count(origin["same_name_count"]))
+
+
+def _validated_dependency_match(block: dict, origin: dict, local: dict) -> None:
+    _digest(block["source_sha256"])
+    _require(block["source_sha256"] == local.get("sha256"))
+    luid = block["workbook_luid"]
+    _require(type(luid) is str and prov.LUID_RE.fullmatch(luid) is not None and luid == origin["workbook_luid"])
+    _enum(block["source_match"], {"sha256", "revision_same", "unestablished"})
+    if block["source_match"] == "unestablished":
+        return
+    _require(origin["content_unavailable"] is None and origin["revision_match"] != "differs")
+    local_key, remote_key = local.get("revision_key"), origin["remote_revision_key"]
+    if local_key is not None and remote_key is not None and local_key["algo"] == remote_key["algo"]:
+        _require(local_key == remote_key)
+    if block["source_match"] == "sha256":
+        _require(origin["match"] == "sha256" and origin["remote_sha256"] == local["sha256"])
+    else:
+        _require(origin["match"] == "name_only" and origin["remote_sha256"] not in (None, local["sha256"]))
+        _require(origin["revision_match"] == "same" and local_key is not None and local_key == remote_key)
+
+
+def _validated_published_dependencies(origin: dict, local: dict) -> None:
+    """Reject unknown/partial nested authority rather than projecting it into a clean legacy origin."""
+    block = origin["published_dependencies"]
+    _require(
+        type(block) is dict and block.keys() == {"schema", "source_sha256", "workbook_luid", "source_match", "rows"}
+    )
+    _require(block["schema"] == prov.PUBLISHED_DEPENDENCIES_SCHEMA)
+    _validated_dependency_match(block, origin, local)
+    rows = block["rows"]
+    _require(type(rows) is list and 0 < len(rows) <= PROVENANCE_MAX_MEMBERS)
+    previous = -1
+    for row in rows:
+        required = {"source_ordinal", "published_key", "state", "candidate_count"}
+        _require(type(row) is dict and required <= row.keys() <= required | {"datasource_luid"})
+        ordinal, count = row["source_ordinal"], row["candidate_count"]
+        _require(_is_count(ordinal) and ordinal > previous)
+        previous = ordinal
+        _text(row["published_key"])
+        _require(bool(row["published_key"].strip()))
+        _enum(row["state"], {"resolved", "missing", "ambiguous", "cannot_establish"})
+        _require(count is None or _is_count(count))
+        if row["state"] == "cannot_establish":
+            _require(count is None and "datasource_luid" not in row)
+        else:
+            _require(block["source_match"] != "unestablished" and count is not None)
+            if row["state"] == "resolved":
+                luid = row.get("datasource_luid")
+                _require(count == 1 and type(luid) is str and prov.LUID_RE.fullmatch(luid) is not None)
+            else:
+                _require("datasource_luid" not in row)
+                _require(count == 0 if row["state"] == "missing" else count > 1)
 
 
 def _validated_basename(value: object) -> None:
@@ -1019,6 +1086,8 @@ def _validated_result_record(record: object) -> dict:
     _validated_checkpoint(reduced)
     if "origin" in record:
         _validated_origin(record["origin"])
+        if record["origin"] is not None and "published_dependencies" in record["origin"]:
+            _validated_published_dependencies(record["origin"], local)
     if "origin_note" in record:
         _text(record["origin_note"])
         origin = record.get("origin")
@@ -1058,7 +1127,13 @@ def _validated_result(result: object, total: int, checkpoints: dict[int, dict]) 
     for index, record in enumerate(records):
         reduced = _validated_result_record(record)
         if index in checkpoints:
-            _require(reduced == checkpoints[index])
+            checkpoint = checkpoints[index]
+            _require(reduced == prov.checkpoint_record(checkpoint))
+            origin = record.get("origin")
+            if origin is not None and "published_dependencies" in origin:
+                expected = checkpoint.get("published_occurrences")
+                _require(expected is not None)
+                _require(prov.published_occurrence_checkpoint(origin["published_dependencies"]["rows"]) == expected)
         else:
             _require(reduced["input"] == {"status": "unavailable"})
     phase = result["phase"]
@@ -1347,7 +1422,12 @@ class _ProvenanceState:  # pylint: disable=too-many-instance-attributes
             return self.retain_inventory_finding(result)
         if self.total is None and not self.checkpoints:
             return prov.phase_result([], "failed", [error])
-        records = [self.checkpoints.get(index) or prov.unavailable_input(code) for index in range(self.total or 0)]
+        records = [
+            prov.checkpoint_record(self.checkpoints[index])
+            if index in self.checkpoints
+            else prov.unavailable_input(code)
+            for index in range(self.total or 0)
+        ]
         return self.retain_inventory_finding(
             prov.phase_result(records, "partial" if self.checkpoints else "failed", [error])
         )

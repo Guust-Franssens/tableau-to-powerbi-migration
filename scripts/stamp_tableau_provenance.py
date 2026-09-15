@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import logging
 import re
@@ -59,8 +60,12 @@ import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
+from urllib.parse import urlencode, urlsplit
+
+from lxml import etree
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import parse_tableau  # noqa: E402  # pylint: disable=wrong-import-position
 from object_identity import RevisionKey, revision_key  # noqa: E402  # pylint: disable=wrong-import-position
 from tableau_env import pat_secret, redact, resolve_env, scrub_tree  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -69,6 +74,8 @@ LOG = logging.getLogger("provenance")
 WORKBOOK_SUFFIXES = (".twb", ".twbx")
 SUCCESS_STATUSES = frozenset({"success", "local_only"})
 SCHEMA = "tableau-source-provenance/1"
+PUBLISHED_DEPENDENCIES_SCHEMA = "tableau-published-dependencies/v1"
+LUID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 
 #: The operation named by every fault this module records about a result's OWN SHAPE, so a consumer
 #: can tell "the site refused us" from "this result does not describe anything".
@@ -341,7 +348,7 @@ def unavailable_input(code: str, operation: str = OP_FINGERPRINT) -> dict[str, A
     return {"input": {"status": "unavailable"}, "fingerprint_error": _error(code, operation)}
 
 
-def checkpoint_record(record: dict[str, Any]) -> dict[str, Any]:
+def checkpoint_record(record: dict[str, Any], dependencies: list[dict] | None = None) -> dict[str, Any]:
     """One completed input reduced to what this module DERIVED, ready to cross a process boundary.
 
     A checkpoint is emitted BEFORE the live half has been scrubbed, so it may carry nothing copied
@@ -353,7 +360,22 @@ def checkpoint_record(record: dict[str, Any]) -> dict[str, Any]:
     reduced: dict[str, Any] = {"input": derived or {"status": "unavailable"}}
     if isinstance(record.get("fingerprint_error"), dict):
         reduced["fingerprint_error"] = record["fingerprint_error"]
+    if dependencies:
+        reduced["published_occurrences"] = published_occurrence_checkpoint(dependencies)
     return reduced
+
+
+def published_occurrence_checkpoint(rows: list[dict]) -> list[dict]:
+    """Private wire evidence: keep physical ordinals and digest keys, never copy source text."""
+    return [
+        {
+            "source_ordinal": row["source_ordinal"],
+            "published_key_sha256": hashlib.sha256(
+                json.dumps(row["published_key"], ensure_ascii=True).encode()
+            ).hexdigest(),
+        }
+        for row in rows
+    ]
 
 
 class NullReporter:
@@ -371,7 +393,7 @@ class NullReporter:
     def operation(self, operation: str, completed: int, total: int | None = None) -> None:
         """Ignore an operation counter."""
 
-    def checkpoint(self, index: int, record: dict[str, Any]) -> None:
+    def checkpoint(self, index: int, record: dict[str, Any], dependencies: list[dict] | None = None) -> None:
         """Ignore a completed-input checkpoint."""
 
     def lookup_intent(self, requested: bool) -> None:
@@ -438,9 +460,9 @@ class WorkerReporter(NullReporter):
             }
         )
 
-    def checkpoint(self, index: int, record: dict[str, Any]) -> None:
+    def checkpoint(self, index: int, record: dict[str, Any], dependencies: list[dict] | None = None) -> None:
         """Derived-only evidence for one completed input, addressed by ordinal."""
-        self._send({"kind": MSG_CHECKPOINT, "index": int(index), "record": checkpoint_record(record)})
+        self._send({"kind": MSG_CHECKPOINT, "index": int(index), "record": checkpoint_record(record, dependencies)})
 
     def lookup_intent(self, requested: bool) -> None:
         """Declare live intent before sign-in without sending any credential or host identity."""
@@ -493,6 +515,52 @@ def fingerprint(path: Path) -> dict[str, Any]:
                 for info in sorted(archive.infolist(), key=lambda i: i.filename)
             ]
     return record
+
+
+class _PublishedSource(NamedTuple):
+    path: Path
+    dependencies: list[dict] | None
+
+
+def _published_source(path: Path, local: dict) -> _PublishedSource:
+    """Read a held, fingerprint-equal workbook; reuse the parser's occurrence and identity rules."""
+    if local.get("status") == "unavailable":
+        return _PublishedSource(path, None)
+    try:
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != local.get("sha256") or path.suffix.lower() not in WORKBOOK_SUFFIXES:
+            return _PublishedSource(path, None)
+        if path.suffix.lower() == ".twbx":
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                members = [name for name in archive.namelist() if name.lower().endswith(".twb")]
+                if len(members) != 1:
+                    return _PublishedSource(path, None)
+                raw = archive.read(members[0])
+        root = etree.fromstring(raw, etree.XMLParser(resolve_entities=False, no_network=True))
+        if root.tag != "workbook" or root.getroottree().docinfo.doctype:
+            return _PublishedSource(path, None)
+        rows = []
+        sources = (source for source in root.findall("datasources/datasource") if source.get("name") != "Parameters")
+        for ordinal, source in enumerate(sources):
+            # Identity belongs to the existing parser, including its deliberately weaker fallbacks.
+            published = parse_tableau._parse_published_datasource(  # pylint: disable=protected-access
+                source,
+                parse_tableau._parse_connection(source, {}),  # pylint: disable=protected-access
+            )
+            if published is not None:
+                rows.append(
+                    {
+                        "source_ordinal": ordinal,
+                        "published_key": published["key"],
+                        "content_url": published["id"] if published["name_source"] == "derived-from" else None,
+                        "site": published["site"],
+                        "derived_from": published["derived_from"],
+                    }
+                )
+        return _PublishedSource(path, rows)
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Unreadable source identity earns no association, never an invented empty dependency list.
+        return _PublishedSource(path, None)
 
 
 class InventoryCompleteness(NamedTuple):
@@ -621,6 +689,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         self._pat = (env["TABLEAU_PAT_NAME"], pat_secret(env))
         self.token: str | None = None
         self.site_id: str | None = None
+        self.user_id: str | None = None
         self._inventory: list[dict[str, Any]] | None = None
         self._inventory_failure: Exception | None = None
         self.inventory_completeness: InventoryCompleteness | None = None
@@ -628,6 +697,9 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         self._content_cache: dict[str, bytes | None] = {}
         self._content_failure: dict[str, Exception] = {}
         self._content_unavailable: dict[str, str] = {}
+        self._catalog_visibility: bool | None = None
+        self._published_cache: dict[str, dict] = {}
+        self._datasource_details: dict[str, dict | None] = {}
         self.reporter: NullReporter = NullReporter()
 
     def _call(self, method: str, path: str, body: dict | None = None, accept: str | None = None):
@@ -666,6 +738,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
             raise RuntimeError(f"Tableau sign-in failed: HTTP {status}")
         creds = json.loads(payload)["credentials"]
         self.token, self.site_id = creds["token"], creds["site"]["id"]
+        self.user_id = (creds.get("user") or {}).get("id")
 
     def sign_out(self) -> Exception | None:
         """Best-effort release of the session - a transport failure here must cost nothing.
@@ -800,6 +873,85 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
                 self._content_unavailable[workbook_id] = f"HTTP {int(status)}"
             self._content_cache[workbook_id] = payload if status == 200 else None
         return self._content_cache[workbook_id]
+
+    def _catalog_visible(self) -> bool:
+        """Pagination counts only visible rows; an independently queried admin role is also required."""
+        if self._catalog_visibility is None:
+            self._catalog_visibility = False
+            if all(isinstance(value, str) and LUID_RE.fullmatch(value) for value in (self.site_id, self.user_id)):
+                document = self._dependency_json(f"/sites/{self.site_id}/users/{self.user_id}")
+                user = document.get("user")
+                self._catalog_visibility = (
+                    isinstance(user, dict)
+                    and user.get("id") == self.user_id
+                    and user.get("siteRole")
+                    in {"ServerAdministrator", "SiteAdministratorCreator", "SiteAdministratorExplorer"}
+                )
+        return self._catalog_visibility
+
+    def _dependency_json(self, path: str) -> dict:
+        if self.reporter.cancelled:
+            raise RuntimeError(CANCELLED_CODE)
+        status, payload = self._call("GET", path, accept="application/json")
+        if status != 200:
+            raise ValueError("published dependency request unavailable")
+        document = json.loads(payload, object_pairs_hook=_inventory_object)
+        if not isinstance(document, dict):
+            raise ValueError("invalid published dependency response")
+        return document
+
+    def _datasource_detail(self, luid: str) -> dict | None:
+        if luid not in self._datasource_details:
+            self._datasource_details[luid] = None
+            document = self._dependency_json(f"/sites/{self.site_id}/datasources/{luid}")
+            detail = document.get("datasource")
+            if isinstance(detail, dict):
+                self._datasource_details[luid] = detail
+        return self._datasource_details[luid]
+
+    def published_dependency(self, content_url: str) -> dict:
+        """Resolve the case-preserved derived-from segment, never a normalized key or provider."""
+        if content_url not in self._published_cache:
+            self._published_cache[content_url] = {"state": "cannot_establish", "candidate_count": None}
+            try:
+                if self._catalog_visible():
+                    self._published_cache[content_url] = self._query_published_dependency(content_url)
+            except Exception:  # pylint: disable=broad-exception-caught
+                # Neither response rows nor exception text belongs in diagnostics or the authority.
+                pass
+        return dict(self._published_cache[content_url])
+
+    def _query_published_dependency(self, content_url: str) -> dict:
+        query = urlencode({"filter": f"contentUrl:eq:{content_url}", "pageSize": INVENTORY_PAGE_SIZE, "pageNumber": 1})
+        document = self._dependency_json(f"/sites/{self.site_id}/datasources?{query}")
+        rows = document["datasources"].get("datasource", [])
+        rows = ([rows] if rows else []) if isinstance(rows, dict) else rows
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) or row.get("contentUrl") != content_url for row in rows
+        ):
+            raise ValueError("invalid published dependency candidates")
+        page = _inventory_completeness(len(rows), document.get("pagination"))
+        if not (
+            page.status == "complete"
+            and page.page_number == 1
+            and page.page_size == INVENTORY_PAGE_SIZE
+            and page.total_available == len(rows)
+        ):
+            raise ValueError("published dependency catalog incomplete")
+        if len(rows) != 1:
+            return {"state": "missing" if not rows else "ambiguous", "candidate_count": len(rows)}
+        selected = rows[0]
+        luid = selected.get("id")
+        if not isinstance(luid, str) or LUID_RE.fullmatch(luid) is None:
+            raise ValueError("invalid published datasource identity")
+        detail = self._datasource_detail(luid)
+        confirmed = ("id", "contentUrl", "name", "updatedAt")
+        if detail is None or any(
+            not isinstance(selected.get(key), str) or not selected[key] or selected[key] != detail.get(key)
+            for key in confirmed
+        ):
+            raise ValueError("published datasource detail unconfirmed")
+        return {"state": "resolved", "candidate_count": 1, "datasource_luid": luid}
 
 
 HARVEST_STEM_RE = re.compile(
@@ -952,6 +1104,86 @@ def find_origin(lookup: TableauLookup, stem: str, local: dict[str, Any]) -> dict
     }
 
 
+def _dependency_source_match(lookup: TableauLookup, source: _PublishedSource, local: dict, origin: dict) -> str:
+    """Association authority is stronger than the legacy first-candidate origin observation."""
+    completeness = lookup.inventory_completeness
+    if completeness is None or completeness.status != "complete" or origin["content_unavailable"] is not None:
+        return "unestablished"
+    luid, name = split_harvest_stem(source.path.stem)
+    index = _WorkbookIndex(lookup.workbooks())
+    matched_by, candidates = index.match(luid, name)
+    if (
+        len(candidates) != 1
+        or candidates[0].get("id") != origin["workbook_luid"]
+        or len(index.by_luid.get(origin["workbook_luid"].lower(), [])) != 1
+        or (luid is not None and matched_by != "luid")
+    ):
+        return "unestablished"
+    local_key = RevisionKey.from_json(local.get("revision_key"))
+    remote_key = RevisionKey.from_json(origin["remote_revision_key"])
+    agreement = local_key.agrees_with(remote_key) if local_key is not None else None
+    if agreement is False or origin["revision_match"] == "differs":
+        return "unestablished"
+    if origin["match"] == "sha256" and origin["remote_sha256"] == local["sha256"]:
+        return "sha256"
+    if origin["match"] == "name_only" and agreement is True and origin["revision_match"] == "same":
+        return "revision_same"
+    return "unestablished"
+
+
+def _dependency_query_allowed(dependency: dict, lookup: TableauLookup) -> bool:
+    segment = dependency["content_url"]
+    if not isinstance(segment, str) or re.fullmatch(r"[^,:\x00-\x1f/?#\\]{1,1024}", segment) is None:
+        return False
+    try:
+        derived, base = urlsplit(dependency["derived_from"]), urlsplit(lookup.base)
+        return (
+            dependency["site"] == lookup.site
+            and derived.scheme in ("http", "https")
+            and derived.hostname == base.hostname
+            and derived.port == base.port
+            and derived.username is None
+            and derived.password is None
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _attach_published_dependencies(record: dict, lookup: TableauLookup, source: _PublishedSource) -> None:
+    origin, local = record["origin"], record["input"]
+    if (
+        not source.dependencies
+        or not isinstance(origin["workbook_luid"], str)
+        or not LUID_RE.fullmatch(origin["workbook_luid"])
+    ):
+        return
+    source_match = _dependency_source_match(lookup, source, local, origin)
+    rows = []
+    for dependency in source.dependencies:
+        outcome = {"state": "cannot_establish", "candidate_count": None}
+        if source_match != "unestablished" and _dependency_query_allowed(dependency, lookup):
+            outcome = lookup.published_dependency(dependency["content_url"])
+        rows.append({key: dependency[key] for key in ("source_ordinal", "published_key")} | outcome)
+    try:
+        current = hashlib.sha256(source.path.read_bytes()).hexdigest() == local["sha256"]
+    except OSError:
+        current = False
+    if not current:
+        source_match = "unestablished"
+        rows = [
+            {key: row[key] for key in ("source_ordinal", "published_key")}
+            | {"state": "cannot_establish", "candidate_count": None}
+            for row in rows
+        ]
+    origin["published_dependencies"] = {
+        "schema": PUBLISHED_DEPENDENCIES_SCHEMA,
+        "source_sha256": local["sha256"],
+        "workbook_luid": origin["workbook_luid"],
+        "source_match": source_match,
+        "rows": rows,
+    }
+
+
 def collect_inputs(target: Path) -> list[Path]:
     """The workbook(s) to stamp: one file, or every workbook in a folder."""
     if target.is_file():
@@ -998,14 +1230,14 @@ def build(target: Path, env: dict[str, str], reporter: NullReporter | None = Non
         return _result([], "empty", [_error("empty-input", OP_COLLECT_INPUTS)])
 
     errors: list[dict[str, Any]] = []
-    records = _fingerprint_pass(inputs, errors, reporter)
+    records, sources = _fingerprint_pass(inputs, errors, reporter)
     if reporter.cancelled:
         return _cancelled_result(records, len(inputs), OP_FINGERPRINT, errors)
-    return _complete_provenance(inputs, records, env, reporter, errors)
+    return _complete_provenance(sources, records, env, reporter, errors)
 
 
 def _complete_provenance(
-    inputs: list[Path],
+    inputs: list[_PublishedSource],
     records: list[dict[str, Any]],
     env: dict[str, str],
     reporter: NullReporter,
@@ -1032,9 +1264,12 @@ def _complete_provenance(
     return _finish_live(result, lookup, reporter)
 
 
-def _fingerprint_pass(inputs: list[Path], errors: list[dict[str, Any]], reporter: NullReporter) -> list[dict[str, Any]]:
+def _fingerprint_pass(
+    inputs: list[Path], errors: list[dict[str, Any]], reporter: NullReporter
+) -> tuple[list[dict[str, Any]], list[_PublishedSource]]:
     """Every input's LOCAL evidence, checkpointed one by one so a later stall cannot discard it."""
     records: list[dict[str, Any]] = []
+    sources = []
     for index, path in enumerate(inputs):
         reporter.operation(OP_FINGERPRINT, index, len(inputs))
         if reporter.cancelled:
@@ -1047,10 +1282,15 @@ def _fingerprint_pass(inputs: list[Path], errors: list[dict[str, Any]], reporter
             record: dict[str, Any] = {"input": {"status": "unavailable"}, "fingerprint_error": error}
         else:
             record = {"input": local}
+        source = _published_source(path, record["input"])
+        sources.append(source)
         records.append(record)
         reporter.operation(OP_FINGERPRINT, len(records), len(inputs))
-        reporter.checkpoint(index, record)
-    return records
+        if source.dependencies:
+            reporter.checkpoint(index, record, source.dependencies)
+        else:
+            reporter.checkpoint(index, record)
+    return records, sources
 
 
 def _open_lookup(env: dict[str, str], errors: list[dict[str, Any]], reporter: NullReporter) -> TableauLookup | None:
@@ -1074,7 +1314,7 @@ def _open_lookup(env: dict[str, str], errors: list[dict[str, Any]], reporter: Nu
 
 
 def _origin_pass(
-    inputs: list[Path],
+    inputs: list[_PublishedSource],
     records: list[dict[str, Any]],
     lookup: TableauLookup,
     errors: list[dict[str, Any]],
@@ -1101,25 +1341,29 @@ def _origin_pass(
             errors.append(finding)
     reporter.operation(OP_INVENTORY, 1, 1)
 
-    for path, record in zip(inputs, records):
+    for source, record in zip(inputs, records):
         if record["input"].get("status") == "unavailable":
             continue
         reporter.operation(OP_CONTENT, lookup.content_attempts(), len(lookup.matched_luids))
         if reporter.cancelled:
             break
-        _attach_origin(record, lookup, path.stem, errors)
+        _attach_origin(record, lookup, source, errors)
         reporter.operation(OP_CONTENT, lookup.content_attempts(), len(lookup.matched_luids))
 
 
-def _attach_origin(record: dict[str, Any], lookup: TableauLookup, stem: str, errors: list[dict[str, Any]]) -> None:
+def _attach_origin(
+    record: dict[str, Any], lookup: TableauLookup, source: _PublishedSource, errors: list[dict[str, Any]]
+) -> None:
     """One input's site half, or the typed reason there is none."""
     try:
-        origin = find_origin(lookup, stem, record["input"])
+        origin = find_origin(lookup, source.path.stem, record["input"])
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         origin = None
         record["lookup_error"] = _error("live-lookup-failed", "lookup-origin", exc)
         errors.append(record["lookup_error"])
     record["origin"] = origin
+    if origin is not None:
+        _attach_published_dependencies(record, lookup, source)
     if origin is None:
         completeness = lookup.inventory_completeness
         record["origin_note"] = (

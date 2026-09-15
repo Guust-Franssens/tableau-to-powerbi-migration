@@ -5,6 +5,8 @@ from __future__ import annotations
 # These tests exercise deliberately private supervision seams, not a public application API.
 # pylint: disable=protected-access
 
+import copy
+import hashlib
 import json
 import multiprocessing
 import pickle
@@ -970,3 +972,321 @@ def test_legal_basenames_are_accepted_without_filesystem_access(monkeypatch, pla
         for name in ("stat", "resolve", "open"):
             lexical.setattr(Path, name, no_io)
         estate._validated_basename(basename)
+
+
+def _published_result() -> dict:
+    result = _result()
+    result["phase"]["status"] = "success"
+    local = result["inputs"][0]["input"]
+    local["revision_key"] = {"algo": "tableau-xml-v1", "value": "c" * 64}
+    result["inputs"][0]["origin"] = {
+        "server": "https://fixture.invalid",
+        "site": "site",
+        "workbook_luid": "11111111-1111-4111-8111-111111111111",
+        "workbook_name": "Consumer",
+        "project": None,
+        "owner_luid": None,
+        "created_at": None,
+        "updated_at": None,
+        "tableau_product_version": None,
+        "rest_api_version": "3.21",
+        "matched_by": "luid",
+        "match": "sha256",
+        "content_unavailable": None,
+        "revision_match": "same",
+        "remote_revision_key": dict(local["revision_key"]),
+        "remote_sha256": "a" * 64,
+        "same_name_count": 1,
+        "published_dependencies": {
+            "schema": "tableau-published-dependencies/v1",
+            "source_sha256": "a" * 64,
+            "workbook_luid": "11111111-1111-4111-8111-111111111111",
+            "source_match": "sha256",
+            "rows": [
+                {
+                    "source_ordinal": 1,
+                    "published_key": "site/salesfeed",
+                    "state": "resolved",
+                    "candidate_count": 1,
+                    "datasource_luid": "22222222-2222-4222-8222-222222222222",
+                }
+            ],
+        },
+    }
+    return result
+
+
+def _published_checkpoint(result: dict) -> dict:
+    record = result["inputs"][0]
+    # An independent fixture projection, not the production projection being tested.
+    return {
+        "input": copy.deepcopy(record["input"]),
+        "published_occurrences": [
+            {
+                "source_ordinal": row["source_ordinal"],
+                "published_key_sha256": hashlib.sha256(json.dumps(row["published_key"]).encode()).hexdigest(),
+            }
+            for row in record["origin"]["published_dependencies"]["rows"]
+        ],
+    }
+
+
+@pytest.mark.parametrize("source_match", ["sha256", "revision_same", "unestablished"])
+@pytest.mark.parametrize("state,count", [("resolved", 1), ("missing", 0), ("ambiguous", 2), ("cannot_establish", None)])
+def test_published_nested_authority_transports_exactly_and_only_with_consistent_source_evidence(
+    source_match: str, state: str, count: int | None
+) -> None:
+    result = _published_result()
+    origin = result["inputs"][0]["origin"]
+    block = origin["published_dependencies"]
+    block["source_match"] = source_match
+    row = block["rows"][0]
+    row.update(state=state, candidate_count=count)
+    if state != "resolved":
+        del row["datasource_luid"]
+    if source_match == "revision_same":
+        origin.update(match="name_only", remote_sha256="b" * 64)
+    checkpoints = {0: _published_checkpoint(result)}
+    if source_match == "unestablished" and state != "cannot_establish":
+        with pytest.raises(estate.ProvenanceProtocolError):
+            estate._validated_result(result, 1, checkpoints)
+    else:
+        assert estate._validated_result(result, 1, checkpoints) is result
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("schema", "tableau-published-dependencies/v2"),
+        ("source_sha256", "b" * 64),
+        ("workbook_luid", "33333333-3333-4333-8333-333333333333"),
+        ("source_match", "name_only"),
+        ("rows", None),
+        ("rows", []),
+        ("catalog", {"private-name": "private-token"}),
+    ],
+)
+def test_published_unknown_or_contradictory_nested_fields_are_not_dropped(key: str, value: object) -> None:
+    result = _published_result()
+    checkpoint = _published_checkpoint(result)
+    result["inputs"][0]["origin"]["published_dependencies"][key] = value
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_result(result, 1, {0: checkpoint})
+
+
+@pytest.mark.parametrize("key", ["schema", "source_sha256", "workbook_luid", "source_match", "rows"])
+def test_published_partial_association_is_not_a_legacy_absence(key: str) -> None:
+    result = _published_result()
+    checkpoint = _published_checkpoint(result)
+    del result["inputs"][0]["origin"]["published_dependencies"][key]
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_result(result, 1, {0: checkpoint})
+
+
+@pytest.mark.parametrize("value", [None, False, [], "private-reflected-token"])
+def test_published_non_object_association_is_refused(value: object) -> None:
+    result = _published_result()
+    checkpoint = _published_checkpoint(result)
+    result["inputs"][0]["origin"]["published_dependencies"] = value
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_result(result, 1, {0: checkpoint})
+
+
+@pytest.mark.parametrize(
+    "defect", ["duplicate", "missing", "surplus", "reordered", "non-object", "changed-key", "missing-key"]
+)
+def test_published_rows_reconcile_with_every_original_fingerprint_occurrence(defect: str) -> None:
+    result = _published_result()
+    rows = result["inputs"][0]["origin"]["published_dependencies"]["rows"]
+    rows.append({**rows[0], "source_ordinal": 3})
+    checkpoint = _published_checkpoint(result)
+    if defect == "duplicate":
+        rows[1] = dict(rows[0])
+    elif defect == "missing":
+        rows.pop()
+    elif defect == "surplus":
+        rows.append({**rows[0], "source_ordinal": 4})
+    elif defect == "reordered":
+        rows.reverse()
+    elif defect == "non-object":
+        rows[1] = "private-row"
+    elif defect == "changed-key":
+        rows[1]["published_key"] = "site/otherfeed"
+    else:
+        rows[1]["published_key"] = None
+        rows[1].update(state="cannot_establish", candidate_count=None)
+        del rows[1]["datasource_luid"]
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_result(result, 1, {0: checkpoint})
+
+
+@pytest.mark.parametrize("key", ["source_ordinal", "candidate_count"])
+@pytest.mark.parametrize("value", [True, False, -1, 1.0, "1", None, 1 << 63])
+def test_published_ordinals_and_counts_are_exact_non_boolean_integers(key: str, value: object) -> None:
+    result = _published_result()
+    checkpoint = _published_checkpoint(result)
+    result["inputs"][0]["origin"]["published_dependencies"]["rows"][0][key] = value
+    try:
+        estate._validated_result(result, 1, {0: checkpoint})
+    except estate.ProvenanceProtocolError:
+        return
+    pytest.fail("P_NESTED_VALIDATION: malformed ordinal/count was admitted")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"state": "resolved", "candidate_count": 0},
+        {"state": "resolved", "candidate_count": 2},
+        {"state": "resolved", "datasource_luid": None},
+        {"state": "resolved", "datasource_luid": "repository-id"},
+        {"state": "missing", "candidate_count": 0},
+        {"state": "ambiguous", "candidate_count": 2},
+        {"state": "cannot_establish", "candidate_count": None},
+        {"state": "unknown"},
+        {"detail": {"name": "private-catalog-name"}},
+    ],
+)
+def test_published_row_states_cannot_contradict_cardinality_or_select_a_refused_luid(changes: dict) -> None:
+    result = _published_result()
+    checkpoint = _published_checkpoint(result)
+    result["inputs"][0]["origin"]["published_dependencies"]["rows"][0].update(changes)
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_result(result, 1, {0: checkpoint})
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"match": "name_only", "remote_sha256": "b" * 64},
+        {"content_unavailable": "HTTP 404"},
+        {"revision_match": "differs"},
+        {"remote_revision_key": {"algo": "tableau-xml-v1", "value": "b" * 64}},
+    ],
+)
+def test_published_source_match_cannot_override_outer_provenance(changes: dict) -> None:
+    result = _published_result()
+    checkpoint = _published_checkpoint(result)
+    result["inputs"][0]["origin"].update(changes)
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_result(result, 1, {0: checkpoint})
+
+
+@pytest.mark.parametrize("key", [None, {"algo": "raw-sha256-v1", "value": "c" * 64}])
+def test_published_revision_same_requires_comparable_equal_checkpoint_keys(key: dict | None) -> None:
+    result = _published_result()
+    checkpoint = _published_checkpoint(result)
+    origin = result["inputs"][0]["origin"]
+    origin.update(match="name_only", remote_sha256="b" * 64, remote_revision_key=key)
+    origin["published_dependencies"]["source_match"] = "revision_same"
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_result(result, 1, {0: checkpoint})
+
+
+@pytest.mark.parametrize("axis", ["sha", "workbook"])
+def test_published_association_cannot_be_transplanted_between_input_rows(axis: str) -> None:
+    result = _published_result()
+    other = copy.deepcopy(result["inputs"][0])
+    if axis == "sha":
+        other["input"]["sha256"] = "b" * 64
+        other["origin"]["remote_sha256"] = "b" * 64
+    else:
+        other["origin"]["workbook_luid"] = "33333333-3333-4333-8333-333333333333"
+    result["inputs"].append(other)
+    result["input_count"] = 2
+    checkpoints = {0: _published_checkpoint(result)}
+    checkpoints[1] = _published_checkpoint({"inputs": [other]})
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_result(result, 2, checkpoints)
+
+
+def test_published_new_authority_requires_occurrence_checkpoint_but_legacy_absence_stays_absent() -> None:
+    result = _published_result()
+    checkpoint = _published_checkpoint(result)
+    del checkpoint["published_occurrences"]
+    with pytest.raises(estate.ProvenanceProtocolError):
+        estate._validated_result(result, 1, {0: checkpoint})
+    del result["inputs"][0]["origin"]["published_dependencies"]
+    accepted = estate._validated_result(result, 1, {0: checkpoint})
+    assert "published_dependencies" not in accepted["inputs"][0]["origin"]
+
+
+def _published_messages(result: dict) -> list[dict]:
+    messages = [
+        {"kind": "operation", "operation": "collect-inputs", "completed": 0, "total": 1},
+        _discovery(),
+        {"kind": "operation", "operation": "collect-inputs", "completed": 1, "total": 1},
+        {"kind": "operation", "operation": "fingerprint", "completed": 1, "total": 1},
+        {"kind": "checkpoint", "index": 0, "record": _published_checkpoint(result)},
+        {"kind": "lookup-intent", "requested": True},
+    ]
+    for operation in ("sign-in", "inventory", "content", "scrub"):
+        messages.append(
+            {"kind": "operation", "operation": operation, "completed": 0, "total": 0 if operation == "content" else 1}
+        )
+        if operation == "inventory":
+            messages.append(_facts(returned_count=1, total_available=1))
+        messages.append({"kind": "operation", "operation": operation, "completed": 1, "total": 1})
+    messages.append({"kind": "safe-snapshot", "result": copy.deepcopy(result)})
+    messages.extend(
+        {"kind": "operation", "operation": "sign-out", "completed": completed, "total": 1} for completed in (0, 1)
+    )
+    messages.append({"kind": "terminal", "result": copy.deepcopy(result)})
+    return messages
+
+
+def test_published_authority_survives_real_wire_and_publication_without_private_checkpoint_fields(
+    tmp_path: Path,
+) -> None:
+    result = _published_result()
+    messages = _published_messages(result)
+    code, state = _receive(b"".join(_wire(message) for message in messages))
+    assert code is None and state.terminal == result
+    path = estate.write_source_provenance(tmp_path, state.terminal)
+    assert path is not None and json.loads(path.read_text(encoding="utf-8")) == result
+    assert "published_occurrences" not in path.read_text(encoding="utf-8")
+    interrupted = state.document(prov.DEADLINE_CODE)
+    assert interrupted["inputs"] == result["inputs"] and interrupted["phase"]["status"] == "partial"
+
+
+def test_published_malformed_child_authority_is_a_protocol_fault_not_a_clean_projection() -> None:
+    messages = _published_messages(_published_result())
+    for message in messages:
+        if message["kind"] in {"safe-snapshot", "terminal"}:
+            message["result"]["inputs"][0]["origin"]["published_dependencies"]["private-catalog"] = (
+                "private-reflected-secret"
+            )
+    code, state = _receive(b"".join(_wire(message) for message in messages))
+    assert code == estate.PROVENANCE_PROTOCOL_CODE, "P_NESTED_VALIDATION"
+    document = state.document(code)
+    assert document["inputs"][0]["input"]["sha256"] == "a" * 64
+    assert "origin" not in document["inputs"][0] and "published_occurrences" not in document["inputs"][0]
+    assert "private-reflected-secret" not in json.dumps(document)
+
+
+def _hanging_published_worker(conn, cancel_event, payload) -> None:
+    from test_stamp_tableau_provenance import LIVE_ENV, PublishedSite
+
+    root = Path(payload["input"])
+    site = PublishedSite(next(root.glob("*.twb")).read_bytes())
+    setattr(site, f"before_{root.name}", lambda: time.sleep(30))
+    prov.TableauLookup = lambda _env: site
+    prov.resolve_env = lambda _path: LIVE_ENV
+    prov.provenance_worker(conn, cancel_event, payload)
+
+
+@pytest.mark.timing
+@pytest.mark.parametrize("boundary", ["catalog", "detail"])
+def test_published_catalog_and_detail_remain_inside_existing_absolute_deadline(tmp_path: Path, boundary: str) -> None:
+    from test_stamp_tableau_provenance import P_WORKBOOK, _published_xml
+
+    root = tmp_path / boundary
+    root.mkdir()
+    source = root / f"{P_WORKBOOK}_Consumer.twb"
+    source.write_bytes(_published_xml())
+    outcome = estate.collect_provenance(root, timeout_sec=3.0, entry=_hanging_published_worker)
+    assert outcome.expired and outcome.worker_alive is False
+    assert outcome.result["phase"]["status"] == "partial"
+    assert outcome.result["phase"]["errors"][-1] == {"code": "deadline-expired", "operation": "content"}
+    assert outcome.result["inputs"][0]["input"]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert "origin" not in outcome.result["inputs"][0] and "published_occurrences" not in outcome.result["inputs"][0]
