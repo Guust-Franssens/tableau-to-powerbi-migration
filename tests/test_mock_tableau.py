@@ -200,9 +200,32 @@ def test_usage_statistics_are_absent_unless_requested(site):
 
 def test_user_detail_matches_the_signed_in_admin(site: tableau.TableauSite) -> None:
     """The signed-in identity has the least broad site-admin role admitted by provenance P."""
-    status, payload = rest_get(site, f"/sites/{site.site_id}/users/user-1", signed_in(site))
+    route = "users/user-1"
+    status, payload = rest_get(site, f"/sites/{site.site_id}/{route}", signed_in(site))
     assert status == 200
     assert payload == {"user": {"id": "user-1", "siteRole": "SiteAdministratorExplorer"}}
+
+
+@pytest.mark.parametrize("route", ["users/user-1", "datasources/{luid}"])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "filter=contentUrl:eq:SalesMaster",
+        "filter=contentUrl:eq:absent",
+        "unknown=1",
+        "pageSize=1",
+        "pageNumber=1",
+        "filter=",
+        "unknown",
+        "=value",
+    ],
+)
+def test_detail_routes_reject_query_parameters(site: tableau.TableauSite, route: str, query: str) -> None:
+    """ASSUMED strict subset: detail routes support no query parameters, including list filters."""
+    route = route.format(luid=site.datasources[0].luid)
+    status, payload = rest_get(site, f"/sites/{site.site_id}/{route}?{query}", signed_in(site))
+    assert status == 400
+    assert set(payload) == {"error"}
 
 
 @pytest.mark.parametrize("value, count", [("SalesMaster", 1), ("salesmaster", 0), ("SALESMASTER", 0), ("absent", 0)])
@@ -226,41 +249,202 @@ def test_datasource_filter_selects_exact_content_url(site: tableau.TableauSite, 
 
 
 @pytest.mark.parametrize("single_row", [False, True])
-def test_filtered_datasources_page_the_filtered_set(site: tableau.TableauSite, single_row: bool) -> None:
-    """Filter before slicing; object-shaped single rows keep the same string-valued page totals."""
-    first = site.datasources[0]
-    other = site.datasource(
-        "Other", site.projects[0], estate.FIXTURES / "standalone_datasource.tds", content_url="Other"
+def test_filtered_datasources_page_the_filtered_set(single_row: bool) -> None:
+    """A unique match AFTER nonmatching rows must survive the server's one-row page cap."""
+    site = tableau.TableauSite(page_size=1, single_row_as_object=single_row)
+    project = site.project("Fixture project")
+    first = site.datasource(
+        "First unrelated", project, estate.FIXTURES / "standalone_datasource.tds", content_url="OtherFirst"
     )
-    second = site.datasource("Second match", site.projects[0], estate.FIXTURES / "standalone_datasource.tds")
-    site.page_size, site.single_row_as_object = 1, single_row
+    second = site.datasource(
+        "Second unrelated", project, estate.FIXTURES / "standalone_datasource.tds", content_url="OtherSecond"
+    )
+    matched = site.datasource(
+        "Unique match", project, estate.FIXTURES / "standalone_datasource.tds", content_url="SalesMaster"
+    )
     token = signed_in(site)
+    path = f"/sites/{site.site_id}/datasources"
+    query = urlencode({"filter": "contentUrl:eq:SalesMaster", "pageSize": 1000, "pageNumber": 1})
+    status, payload = rest_get(site, f"{path}?{query}", token)
+    assert status == 200
+    assert payload["pagination"] == {"pageNumber": "1", "pageSize": "1", "totalAvailable": "1"}
+    rows = payload["datasources"]["datasource"]
+    assert isinstance(rows, dict) == single_row
+    assert ([rows] if isinstance(rows, dict) else rows) == [matched.row()]
+    status, payload = rest_get(site, f"{path}?filter=contentUrl:eq:SalesMaster&pageNumber=2", token)
+    assert status == 400, "the filtered set has only one page, although the full catalog has three"
+    assert set(payload) == {"error"}
+
     seen = []
-    for number, expected in enumerate(([first.luid], [second.luid], []), start=1):
-        query = urlencode({"filter": "contentUrl:eq:SalesMaster", "pageSize": 1000, "pageNumber": number})
-        status, payload = rest_get(site, f"/sites/{site.site_id}/datasources?{query}", token)
+    for number, expected in enumerate((first, second, matched), start=1):
+        status, payload = rest_get(site, f"{path}?pageSize=1000&pageNumber={number}", token)
         assert status == 200
-        assert payload["pagination"] == {"pageNumber": str(number), "pageSize": "1", "totalAvailable": "2"}
+        assert payload["pagination"] == {"pageNumber": str(number), "pageSize": "1", "totalAvailable": "3"}
         rows = payload["datasources"]["datasource"]
-        assert isinstance(rows, dict) == (single_row and bool(expected))
+        assert isinstance(rows, dict) == single_row
         rows = [rows] if isinstance(rows, dict) else rows
-        assert [row["id"] for row in rows] == expected
+        assert rows == [expected.row()]
         seen.extend(row["id"] for row in rows)
-    assert seen == [first.luid, second.luid]
+    assert seen == [first.luid, second.luid, matched.luid]
+    status, payload = rest_get(site, f"{path}?pageNumber=4", token)
+    assert status == 400
+    assert set(payload) == {"error"}
 
     site.page_size, site.single_row_as_object = None, False
-    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources", token)
+    status, payload = rest_get(site, path, token)
     assert status == 200
-    assert [row["id"] for row in payload["datasources"]["datasource"]] == [first.luid, other.luid, second.luid]
+    assert [row["id"] for row in payload["datasources"]["datasource"]] == seen
     assert payload["pagination"] == {"pageNumber": "1", "pageSize": "100", "totalAvailable": "3"}
 
 
-def test_unfiltered_datasources_keep_blank_page_defaults(site: tableau.TableauSite) -> None:
-    """Retaining blank filters for rejection must not change the existing blank paging defaults."""
-    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources?pageSize=&pageNumber=", signed_in(site))
+def test_unfiltered_datasources_keep_omitted_page_defaults(site: tableau.TableauSite) -> None:
+    """Omitted parameters, unlike malformed or blank ones, retain Tableau's documented defaults."""
+    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources", signed_in(site))
     assert status == 200
     assert payload["pagination"] == {"pageNumber": "1", "pageSize": "100", "totalAvailable": "1"}
     assert payload["datasources"]["datasource"][0]["id"] == site.datasources[0].luid
+
+
+def test_additional_datasources_require_explicit_content_urls() -> None:
+    """Omission is refused even when the singleton default would not collide with an existing URL."""
+    site = tableau.TableauSite()
+    project = site.project("Fixture project")
+    site.datasource("First", project, estate.FIXTURES / "standalone_datasource.tds", content_url="Other")
+    before = [row.row() for row in site.datasources]
+    with pytest.raises(ValueError, match="explicit content_url"):
+        site.datasource("Another datasource", project, estate.FIXTURES / "standalone_datasource.tds")
+    assert [row.row() for row in site.datasources] == before
+
+
+@pytest.mark.parametrize("project_index", [0, 1])
+def test_duplicate_datasource_content_urls_are_refused_across_projects(
+    site: tableau.TableauSite, project_index: int
+) -> None:
+    """Tableau contentUrl identifies a datasource within the SITE, not only within a project."""
+    before = [row.row() for row in site.datasources]
+    with pytest.raises(ValueError, match="unique"):
+        site.datasource(
+            "Duplicate",
+            site.projects[project_index],
+            estate.FIXTURES / "standalone_datasource.tds",
+            content_url="SalesMaster",
+        )
+    assert [row.row() for row in site.datasources] == before
+
+    other = site.datasource(
+        "Corporate Cities",
+        site.projects[project_index],
+        estate.FIXTURES / "standalone_datasource.tds",
+        content_url="Other",
+    )
+    assert (other.name, other.content_url) == ("Corporate Cities", "Other")
+    assert [row.content_url for row in site.datasources] == ["SalesMaster", "Other"]
+
+
+@pytest.mark.parametrize("content_url", ["", " ", None])
+def test_explicit_datasource_content_urls_cannot_be_blank(site: tableau.TableauSite, content_url: str | None) -> None:
+    """Malformed fixture identity must not turn into a default URL or a served authority row."""
+    before = [row.row() for row in site.datasources]
+    with pytest.raises(ValueError, match="nonempty"):
+        site.datasource(
+            "No identity", site.projects[0], estate.FIXTURES / "standalone_datasource.tds", content_url=content_url
+        )
+    assert [row.row() for row in site.datasources] == before
+
+
+@pytest.mark.parametrize("field, value", [("content_url", "SalesMaster"), ("content_url", ""), ("luid", "duplicate")])
+@pytest.mark.parametrize(
+    "route",
+    [
+        "datasources",
+        "datasources?filter=contentUrl:eq:absent",
+        "datasources/{luid}",
+        "datasources/{other_luid}",
+    ],
+)
+def test_invalid_mutated_datasource_catalog_never_serves_authority(
+    site: tableau.TableauSite, field: str, value: str, route: str
+) -> None:
+    """Invalid setup is a mock error, not a service state that can earn list/detail authority."""
+    shared = site.datasources[0]
+    other = site.datasource(
+        "Other", site.projects[0], estate.FIXTURES / "standalone_datasource.tds", content_url="Other"
+    )
+    route = route.format(luid=shared.luid, other_luid=other.luid)
+    setattr(other, field, shared.luid if field == "luid" else value)
+    status, payload = rest_get(site, f"/sites/{site.site_id}/{route}", signed_in(site))
+    assert status == 500
+    assert set(payload) == {"error"}
+
+
+@pytest.mark.parametrize("key", ["pageSize", "pageNumber"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="blank"),
+        pytest.param("0", id="zero"),
+        pytest.param("-1", id="negative"),
+        pytest.param("not-an-integer", id="text"),
+        pytest.param("1.5", id="fraction"),
+        pytest.param("1_0", id="underscore"),
+        pytest.param("+1", id="signed"),
+        pytest.param(" 1", id="whitespace"),
+        pytest.param("\u0661", id="non-ascii"),
+        pytest.param("9" * 5000, id="overlong"),
+    ],
+)
+def test_malformed_pagination_is_a_structured_refusal(site: tableau.TableauSite, key: str, value: str) -> None:
+    """Strict decimal paging: no silent coercion, negative slicing, defaults or ValueError escape."""
+    query = urlencode({key: value})
+    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources?{query}", signed_in(site))
+    assert status == 400
+    assert set(payload) == {"error"}
+
+
+@pytest.mark.parametrize("key", ["pageSize", "pageNumber"])
+@pytest.mark.parametrize("values", [("1", "1"), ("1", "2"), ("2", "1"), ("", "1"), ("1", "")])
+def test_duplicate_pagination_parameters_are_refused(
+    site: tableau.TableauSite, key: str, values: tuple[str, str]
+) -> None:
+    """ASSUMED strict subset: repeated paging keys are ambiguous even when values agree."""
+    query = urlencode([(key, value) for value in values])
+    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources?{query}", signed_in(site))
+    assert status == 400
+    assert set(payload) == {"error"}
+
+
+@pytest.mark.parametrize("cap", [None, 1])
+def test_oversized_page_requests_are_refused_before_the_server_cap(site: tableau.TableauSite, cap: int | None) -> None:
+    """Tableau documents 1000 as the maximum request size; a mock cap must not rescue 1001."""
+    site.page_size = cap
+    token = signed_in(site)
+    path = f"/sites/{site.site_id}/datasources"
+    status, payload = rest_get(site, f"{path}?pageSize=1000", token)
+    assert status == 200
+    assert payload["pagination"]["pageSize"] == str(cap or 1000)
+    status, payload = rest_get(site, f"{path}?pageSize=1001", token)
+    assert status == 403
+    assert set(payload) == {"error"}
+
+
+@pytest.mark.parametrize("filter_value, total", [(None, "1"), ("SalesMaster", "1"), ("absent", "0")])
+def test_out_of_range_pages_are_refused_including_empty_filtered_sets(
+    site: tableau.TableauSite, filter_value: str | None, total: str
+) -> None:
+    """The first empty page is a complete zero; a nonexistent later page is not another success."""
+    token = signed_in(site)
+    path = f"/sites/{site.site_id}/datasources"
+    for number, expected in ((1, 200), (2, 400)):
+        query = {"pageNumber": number}
+        if filter_value is not None:
+            query["filter"] = f"contentUrl:eq:{filter_value}"
+        status, payload = rest_get(site, path + "?" + urlencode(query), token)
+        assert status == expected
+        if expected == 200:
+            assert payload["pagination"] == {"pageNumber": "1", "pageSize": "100", "totalAvailable": total}
+            assert len(payload["datasources"]["datasource"]) == int(total)
+        else:
+            assert set(payload) == {"error"}
 
 
 @pytest.mark.parametrize(
@@ -327,11 +511,11 @@ def test_fixture_content_url_matches_preserved_workbook_authority(site: tableau.
 @pytest.mark.parametrize(
     "path",
     [
-        "/sites/wrong/users/user-1",
-        "/sites/{site}/users/wrong",
-        "/sites/{site}/users/USER-1",
-        "/sites/{site}/users/user-1/extra",
-        "/sites/{site}/users//user-1",
+        "/sites/wrong/{users}/user-1",
+        "/sites/{site}/{users}/wrong",
+        "/sites/{site}/{users}/USER-1",
+        "/sites/{site}/{users}/user-1/extra",
+        "/sites/{site}/{users}//user-1",
         "/sites/wrong/datasources",
         "/sites/wrong/datasources/{luid}",
         "/sites/{site}/datasources/unknown",
@@ -340,14 +524,14 @@ def test_fixture_content_url_matches_preserved_workbook_authority(site: tableau.
         "/sites/{site}/datasources/{luid}/content/extra",
         "/sites/{site}/datasources//{luid}",
         "/sites/{site}-wrong/datasources/{luid}",
-        "/sites/wrong/api/{version}/sites/{site}/users/user-1",
+        "/sites/wrong/api/{version}/sites/{site}/{users}/user-1",
         "/sites/{site}/groups/{luid}/content",
     ],
 )
 def test_authority_routes_reject_wrong_identity_or_extra_segments(site: tableau.TableauSite, path: str) -> None:
     """Exact site, collection, user/LUID and path arity; no suffix or fallback route."""
     luid = site.datasources[0].luid
-    path = path.format(site=site.site_id, luid=luid, upper_luid=luid.upper(), version=site.rest_version)
+    path = path.format(site=site.site_id, luid=luid, upper_luid=luid.upper(), version=site.rest_version, users="users")
     status, payload = rest_get(site, path, signed_in(site))
     assert status == 404
     assert "error" in payload
@@ -395,7 +579,7 @@ def test_real_client_reaches_user_filtered_list_and_datasource_detail(served) ->
     client = ae.Site(tableau.env_for(site, base))
     client.sign_in()
     prefix = f"/sites/{client.site_id}"
-    user_path = f"{prefix}/users/user-1"
+    user_path = "/".join((prefix, "users", "user-1"))
     list_path = f"{prefix}/datasources?" + urlencode(
         {"filter": "contentUrl:eq:SalesMaster", "pageSize": 1000, "pageNumber": 1}
     )
@@ -421,6 +605,55 @@ def test_real_client_reaches_user_filtered_list_and_datasource_detail(served) ->
     assert len(all_rows) == 2
     for path in (user_path, list_path, detail_path):
         assert ("GET", f"/api/{site.rest_version}{path}") in site.requests
+    client.sign_out()
+
+
+def test_real_client_refuses_detail_query_parameters(served) -> None:
+    """Bad detail queries must be HTTP refusals over loopback, not unfiltered successful reads."""
+    site, base = served
+    client = ae.Site(tableau.env_for(site, base))
+    client.sign_in()
+    for route in ("users/user-1", f"datasources/{site.datasources[0].luid}"):
+        path = f"/sites/{client.site_id}/{route}"
+        assert client.get(path) is not None
+        for query in (
+            "filter=contentUrl:eq:SalesMaster",
+            "unknown=1",
+            "pageSize=1",
+            "pageNumber=1",
+            "filter=",
+            "=value",
+        ):
+            payload, error = client.get_checked(f"{path}?{query}")
+            assert payload is None, (route, query)
+            assert error is not None and error["status"] == 400, (route, query, error)
+            assert error["transport"] is False
+    client.sign_out()
+
+
+def test_real_client_receives_structured_pagination_refusals(served) -> None:
+    """Malformed pagination cannot crash the HTTP handler or arrive as a successful empty list."""
+    site, base = served
+    client = ae.Site(tableau.env_for(site, base))
+    client.sign_in()
+    path = f"/sites/{client.site_id}/datasources"
+    assert client.get(f"{path}?pageSize=1000&pageNumber=1") is not None
+    for query, expected in (
+        ("pageSize=0", 400),
+        ("pageNumber=0", 400),
+        ("pageSize=not-an-integer", 400),
+        ("pageNumber=not-an-integer", 400),
+        ("pageSize=", 400),
+        ("pageNumber=", 400),
+        ("pageSize=1&pageSize=1", 400),
+        ("pageNumber=1&pageNumber=1", 400),
+        ("pageNumber=2", 400),
+        ("pageSize=1001", 403),
+    ):
+        payload, error = client.get_checked(f"{path}?{query}")
+        assert payload is None, query
+        assert error is not None and error["status"] == expected, (query, error)
+        assert error["transport"] is False
     client.sign_out()
 
 

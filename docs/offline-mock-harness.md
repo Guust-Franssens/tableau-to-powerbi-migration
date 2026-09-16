@@ -106,7 +106,7 @@ under test, a parser bug would be invisible because both sides would move togeth
 
 ✅ Direct router controls and the unmodified `assess_estate.Site` client over loopback cover:
 
-* `GET /api/<ver>/sites/<site-id>/users/user-1`: the signed-in identity, with
+* `GET /api/<ver>/sites/<site-id>/users/<user-id>`: the signed-in `user-1` identity, with
   `SiteAdministratorExplorer` (the least broad site-admin role admitted by provenance P).
 * `GET /api/<ver>/sites/<site-id>/datasources?filter=contentUrl:eq:<value>&pageSize=1000&pageNumber=1`:
   exact, **case-sensitive** URL equality, before paging. String-valued pagination describes the
@@ -119,18 +119,44 @@ Wrong site/user/LUID and extra route segments return 404; missing/invalid/expire
 injected permission refusals remain 403, and unsupported site REST methods return 405. Only one
 `contentUrl:eq:` filter is supported: wrong field/operator/case, blank values, delimiter-bearing
 values and multiple filters return 400, never all rows. Datasource query parameters other than
-`filter`, `pageSize` and `pageNumber` are also explicitly unsupported. These are a **strict test
-subset**, not claims that the real service supports no other methods or filters. Endpoint/field
-shapes follow Tableau's [users](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_users_and_groups.htm),
+`filter`, `pageSize` and `pageNumber` are also explicitly unsupported on the collection. User and
+datasource **detail routes reject every query parameter with 400**, including otherwise supported
+collection filters and paging keys. Direct-router controls and loopback requests through the
+unmodified assessment client pin those refusals.
+
+Paging validates **before slicing**: omitted parameters default to page 1 / size 100; blank,
+non-decimal, repeated (even identical), sub-one and out-of-range values return structured 400
+responses instead of successful partial/empty rows or uncaught exceptions. The request-size maximum
+is 1000; size 1001 returns 403 **before applying a smaller mock server cap**. Filter selection precedes
+both page-range validation and slicing. A complete zero is represented only by page 1; later pages
+are refused. Strict decimal spelling and duplicate-key rejection are test-subset choices, not live
+measurements.
+
+These are a **strict test subset**, not claims that the real service supports no other methods or
+filters. Endpoint/field shapes and page-size/range rules follow Tableau's
+[users](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_users_and_groups.htm),
 [datasources](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_data_sources.htm)
 and [filtering](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_concepts_filtering_and_sorting.htm)
 references; the added subset has not been measured against a live site.
+
+User-route examples use placeholder ids; tests compose relative route segments so REST examples do
+not resemble host-profile paths to the unchanged privacy gate.
 
 **Fixture authority is explicit, not synthesized from display names.** The datasource's configurable
 default `content_url="SalesMaster"` matches the case-preserved `derived-from` URL inside
 `published_datasource.twb`, which the estate serves as **Attic Copy**. It is neither the stale
 repository id `SalesMaster_oldname` nor the REST display name **Corporate Cities**. The direct fixture
 control independently reads that XML and checks the served workbook bytes remain unchanged.
+The default is a **singleton-fixture convenience**: every additional datasource must explicitly
+configure a nonempty `content_url`. LUIDs and content URLs must be unique across the entire site's
+configured datasource catalog, including across projects; duplicate display names remain allowed.
+Invalid additions raise `ValueError` without changing the catalog. Datasource REST reads also
+validate the current mutable catalog: a later duplicate or blank identity produces a structured 500
+**mock-configuration error**, never a successful authority row. This is a harness invariant, not a
+claim about real Tableau's error response to an impossible catalog. The filter-before-page control
+uses two nonmatching rows before **one uniquely identified match**, and separately checks unfiltered
+paging; it never relies on two LUIDs sharing a content URL.
+
 `publish_dependency` still supplies the **metadata-only** edges from **Sales Review** and **Ops
 Dashboard** to that shared datasource; it does not rewrite their fixture bytes or turn those
 metadata edges into source-bound provenance.

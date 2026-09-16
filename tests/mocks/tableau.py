@@ -132,7 +132,7 @@ class Datasource:  # pylint: disable=too-many-instance-attributes
 
     ``SalesMaster`` is the case-preserved derived-from segment in ``published_datasource.twb``,
     NOT its stale repository id, caption, or the synthetic estate's ``Corporate Cities`` name.
-    Other fixtures can supply ``content_url``; do not infer it from display text.
+    Additional catalog rows must supply distinct ``content_url`` values; never infer display text.
     """
 
     luid: str
@@ -275,9 +275,22 @@ class TableauSite:  # pylint: disable=too-many-instance-attributes
 
     def datasource(self, name: str, project: Project, tds: Path, **kwargs) -> Datasource:
         """Add a published data source backed by a REAL ``.tds`` fixture, packaged as ``.tdsx``."""
+        if self.datasources and "content_url" not in kwargs:
+            raise ValueError("additional datasources require an explicit content_url")
         made = Datasource(luid=str(uuid.uuid4()), name=name, project=project, content=tdsx_bytes(tds), **kwargs)
+        self._validate_datasource_catalog([*self.datasources, made])
         self.datasources.append(made)
         return made
+
+    @staticmethod
+    def _validate_datasource_catalog(datasources: list[Datasource]) -> None:
+        """Reject impossible fixture identity, including mutations made after initial setup."""
+        for field_name in ("luid", "content_url"):
+            values = [getattr(datasource, field_name) for datasource in datasources]
+            if any(not isinstance(value, str) or not value.strip() for value in values):
+                raise ValueError(f"datasource {field_name} must be a nonempty string")
+            if len(set(values)) != len(values):
+                raise ValueError(f"datasource {field_name} must be unique within the site")
 
     def publish_dependency(self, workbook: Workbook, datasource: Datasource) -> None:
         """Add a METADATA-ONLY dependency on a published datasource; never rewrite workbook bytes.
@@ -404,11 +417,25 @@ class TableauSite:  # pylint: disable=too-many-instance-attributes
         )
 
     def _page(self, rows: list[dict], collection: str, item: str, query: dict) -> tuple[int, dict, bytes]:
-        """One page, with Tableau's string-valued pagination block."""
-        size = int((query.get("pageSize") or ["100"])[0] or "100")
+        """Validate paging before slicing, retaining Tableau's string-valued pagination block."""
+        paging = {}
+        for key, default in (("pageSize", "100"), ("pageNumber", "1")):
+            values = query.get(key, [default])
+            if len(values) != 1 or re.fullmatch(r"[0-9]+", values[0]) is None:
+                return self._fail(400, "400000", f"{key} must be one positive decimal integer")
+            try:
+                paging[key] = int(values[0])
+            except ValueError:
+                return self._fail(400, "400000", f"{key} is too large to parse")
+            if paging[key] < 1:
+                return self._fail(400, "400000", f"{key} must be at least one")
+        size, number = paging["pageSize"], paging["pageNumber"]
+        if size > 1000:
+            return self._fail(403, "403014", "pageSize exceeds the maximum of 1000")
         if self.page_size:
             size = min(size, self.page_size)
-        number = int((query.get("pageNumber") or ["1"])[0] or "1")
+        if number > max(1, (len(rows) + size - 1) // size):
+            return self._fail(400, "400006", "pageNumber exceeds the final page")
         window = rows[(number - 1) * size : number * size]
         payload = window[0] if (self.single_row_as_object and len(window) == 1) else window
         return self._json(
@@ -427,11 +454,18 @@ class TableauSite:  # pylint: disable=too-many-instance-attributes
         if not segments[0]:
             return self._fail(404, "404000", "no collection named")
         collection = segments[0]
+        if collection == "datasources":
+            try:
+                self._validate_datasource_catalog(self.datasources)
+            except ValueError as exc:
+                return self._fail(500, "500000", f"invalid mock datasource catalog: {exc}")
 
         if len(segments) == 1:
             return self._collection(collection, query)
         luid = segments[1]
         if len(segments) == 2:
+            if query:
+                return self._fail(400, "400000", "detail routes do not support query parameters")
             return self._detail(collection, luid)
         if len(segments) != 3:
             return self._fail(404, "404000", f"no route for {path}")
