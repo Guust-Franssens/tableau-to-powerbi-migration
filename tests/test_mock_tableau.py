@@ -12,6 +12,7 @@ import io
 import json
 import sys
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 from xml.etree import ElementTree
@@ -254,13 +255,13 @@ def test_filtered_datasources_page_the_filtered_set(single_row: bool) -> None:
     site = tableau.TableauSite(page_size=1, single_row_as_object=single_row)
     project = site.project("Fixture project")
     first = site.datasource(
-        "First unrelated", project, estate.FIXTURES / "standalone_datasource.tds", content_url="OtherFirst"
+        "Regional Totals", project, estate.FIXTURES / "standalone_datasource.tds", content_url="OtherFirst"
     )
     second = site.datasource(
-        "Second unrelated", project, estate.FIXTURES / "standalone_datasource.tds", content_url="OtherSecond"
+        "Inventory Snapshot", project, estate.FIXTURES / "standalone_datasource.tds", content_url="OtherSecond"
     )
     matched = site.datasource(
-        "Unique match", project, estate.FIXTURES / "standalone_datasource.tds", content_url="SalesMaster"
+        "City Reference", project, estate.FIXTURES / "standalone_datasource.tds", content_url="SalesMaster"
     )
     token = signed_in(site)
     path = f"/sites/{site.site_id}/datasources"
@@ -332,13 +333,56 @@ def test_duplicate_datasource_content_urls_are_refused_across_projects(
     assert [row.row() for row in site.datasources] == before
 
     other = site.datasource(
-        "Corporate Cities",
+        "Regional Totals",
         site.projects[project_index],
         estate.FIXTURES / "standalone_datasource.tds",
         content_url="Other",
     )
-    assert (other.name, other.content_url) == ("Corporate Cities", "Other")
+    assert (other.name, other.content_url) == ("Regional Totals", "Other")
     assert [row.content_url for row in site.datasources] == ["SalesMaster", "Other"]
+
+
+@pytest.mark.parametrize("name", ["Corporate Cities", "CORPORATE CITIES", "corporate cities"])
+@pytest.mark.parametrize("copy_project", [False, True])
+def test_duplicate_datasource_display_names_are_refused_within_project(
+    site: tableau.TableauSite, name: str, copy_project: bool
+) -> None:
+    """Tableau's documented name conflict is case-insensitive and scoped to the project LUID."""
+    project = replace(site.projects[0]) if copy_project else site.projects[0]
+    before = [row.row() for row in site.datasources]
+    with pytest.raises(ValueError, match="display names must be unique within each project"):
+        site.datasource(name, project, estate.FIXTURES / "standalone_datasource.tds", content_url="Other")
+    assert [row.row() for row in site.datasources] == before
+
+
+@pytest.mark.parametrize("name", ["Corporate Cities", "CORPORATE CITIES", "corporate cities"])
+@pytest.mark.parametrize("same_project_name", [False, True])
+def test_datasource_display_names_can_repeat_only_in_distinct_projects(
+    site: tableau.TableauSite, name: str, same_project_name: bool
+) -> None:
+    """Documented cross-project names stay valid; moving into the same project creates a conflict."""
+    shared = site.datasources[0]
+    project = site.project("Finance", parent=site.projects[2]) if same_project_name else site.projects[1]
+    other = site.datasource(name, project, estate.FIXTURES / "standalone_datasource.tds", content_url="Other")
+    assert project.luid != shared.project.luid
+    token = signed_in(site)
+    path = f"/sites/{site.site_id}/datasources"
+    status, listing = rest_get(site, path, token)
+    assert status == 200
+    assert [
+        (row["id"], row["name"], row["contentUrl"], row["project"]["id"])
+        for row in listing["datasources"]["datasource"]
+    ] == [
+        (shared.luid, "Corporate Cities", "SalesMaster", shared.project.luid),
+        (other.luid, name, "Other", project.luid),
+    ]
+    other.project = replace(shared.project)
+    for suffix in ("", "?filter=contentUrl:eq:absent", f"/{shared.luid}", f"/{other.luid}"):
+        status, payload = rest_get(site, path + suffix, token)
+        assert status == 500
+        assert set(payload) == {"error"}
+    other.project = project
+    assert rest_get(site, path, token) == (200, listing)
 
 
 @pytest.mark.parametrize("content_url", ["", " ", None])
@@ -352,7 +396,17 @@ def test_explicit_datasource_content_urls_cannot_be_blank(site: tableau.TableauS
     assert [row.row() for row in site.datasources] == before
 
 
-@pytest.mark.parametrize("field, value", [("content_url", "SalesMaster"), ("content_url", ""), ("luid", "duplicate")])
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("content_url", "SalesMaster"),
+        ("content_url", ""),
+        ("luid", "duplicate"),
+        ("name", "Corporate Cities"),
+        ("name", "CORPORATE CITIES"),
+        ("name", "corporate cities"),
+    ],
+)
 @pytest.mark.parametrize(
     "route",
     [

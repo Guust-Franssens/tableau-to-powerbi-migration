@@ -149,13 +149,22 @@ repository id `SalesMaster_oldname` nor the REST display name **Corporate Cities
 control independently reads that XML and checks the served workbook bytes remain unchanged.
 The default is a **singleton-fixture convenience**: every additional datasource must explicitly
 configure a nonempty `content_url`. LUIDs and content URLs must be unique across the entire site's
-configured datasource catalog, including across projects; duplicate display names remain allowed.
+configured datasource catalog, including across projects. Display names must be unique
+**case-insensitively within each project LUID**, even when content URLs differ. Distinct projects
+may reuse display names. These constraints follow the datasource REST reference above, Tableau's
+[same-project overwrite behaviour](https://help.tableau.com/current/pro/desktop/en-us/qs_revision_history.htm)
+and [same-name datasources in different projects](https://kb.tableau.com/HowTo?id=kA060000000LEDV);
+they have not been measured against a live site here.
+
 Invalid additions raise `ValueError` without changing the catalog. Datasource REST reads also
-validate the current mutable catalog: a later duplicate or blank identity produces a structured 500
+validate the current mutable catalog: a later duplicate/blank LUID or content URL, or a same-project
+display-name collision after renaming or moving a datasource, produces a structured 500
 **mock-configuration error**, never a successful authority row. This is a harness invariant, not a
-claim about real Tableau's error response to an impossible catalog. The filter-before-page control
-uses two nonmatching rows before **one uniquely identified match**, and separately checks unfiltered
-paging; it never relies on two LUIDs sharing a content URL.
+claim about real Tableau's error response to an impossible catalog. Positive controls preserve
+same-named datasources in distinct projects, including projects with the same display name but
+different LUIDs. The filter-before-page control uses three distinct display names unrelated to the
+content URLs, with two nonmatching rows before **one uniquely identified match**, and separately
+checks unfiltered paging; it never relies on two LUIDs sharing a content URL.
 
 `publish_dependency` still supplies the **metadata-only** edges from **Sales Review** and **Ops
 Dashboard** to that shared datasource; it does not rewrite their fixture bytes or turn those

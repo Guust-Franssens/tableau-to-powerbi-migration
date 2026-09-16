@@ -133,6 +133,7 @@ class Datasource:  # pylint: disable=too-many-instance-attributes
     ``SalesMaster`` is the case-preserved derived-from segment in ``published_datasource.twb``,
     NOT its stale repository id, caption, or the synthetic estate's ``Corporate Cities`` name.
     Additional catalog rows must supply distinct ``content_url`` values; never infer display text.
+    Display names must be unique case-insensitively within each project, not across the site.
     """
 
     luid: str
@@ -291,6 +292,9 @@ class TableauSite:  # pylint: disable=too-many-instance-attributes
                 raise ValueError(f"datasource {field_name} must be a nonempty string")
             if len(set(values)) != len(values):
                 raise ValueError(f"datasource {field_name} must be unique within the site")
+        project_names = [(datasource.project.luid, datasource.name.casefold()) for datasource in datasources]
+        if len(set(project_names)) != len(project_names):
+            raise ValueError("datasource display names must be unique within each project (case-insensitive)")
 
     def publish_dependency(self, workbook: Workbook, datasource: Datasource) -> None:
         """Add a METADATA-ONLY dependency on a published datasource; never rewrite workbook bytes.
