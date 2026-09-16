@@ -22,6 +22,8 @@ import sys
 import threading
 import urllib.error
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -2139,7 +2141,7 @@ def test_published_dependency_resolves_only_current_case_preserved_source_and_co
     assert site.queries() == [{"filter": ["contentUrl:eq:SalesFeed"], "pageSize": ["1000"], "pageNumber": ["1"]}], (
         "P_CASE_PRESERVED_LOOKUP"
     )
-    assert site.detail_count() == 1 and len(site.served[P_WORKBOOK]) == 1
+    assert site.detail_count() == 1 and len(site.served[P_WORKBOOK]) == 2
     assert prov.is_success(result)
 
 
@@ -2180,17 +2182,20 @@ def test_published_non_authoritative_lookup_hints_never_select_a_datasource(
     assert "datasource_luid" not in rows[0] and site.queries() == []
 
 
-@pytest.mark.parametrize("complete", [True, False], ids=["complete-missing", "incomplete-not-missing"])
-def test_published_zero_candidates_require_independent_complete_catalog(
+@pytest.mark.parametrize("complete", [True, False], ids=["complete-filtered", "incomplete-filtered"])
+def test_published_zero_candidates_never_certify_absence_from_filtered_catalog(
     tmp_path: Path, monkeypatch, complete: bool
 ) -> None:
     path, site = _published_setup(tmp_path, monkeypatch)
     site.catalog["datasources"]["datasource"] = []
     site.catalog["pagination"] = {"pageNumber": 1, "pageSize": 1000, "totalAvailable": 0} if complete else {}
+    status, payload = site._call("GET", f"/sites/{P_SITE}/datasources/{P_DATASOURCE}")
+    assert status == 200 and json.loads(payload)["datasource"]["contentUrl"] == "SalesFeed"
+    details_before = site.detail_count()
     row = _association(prov.build(path, LIVE_ENV))["rows"][0]
-    assert row["state"] == ("missing" if complete else "cannot_establish"), "P_CATALOG_COMPLETENESS"
-    assert row["candidate_count"] == (0 if complete else None), "P_CATALOG_COMPLETENESS"
-    assert "datasource_luid" not in row and site.detail_count() == 0
+    assert row["state"] == "cannot_establish", "P_FILTERED_ZERO_IS_NOT_ABSENCE"
+    assert row["candidate_count"] is None, "P_FILTERED_ZERO_IS_NOT_ABSENCE"
+    assert "datasource_luid" not in row and site.detail_count() == details_before, "P_NO_INVENTED_DETAIL_IDENTITY"
 
 
 @pytest.mark.parametrize(
@@ -2312,6 +2317,125 @@ def test_published_source_is_rehashed_before_association_use(tmp_path: Path, mon
     assert "datasource_luid" not in block["rows"][0]
 
 
+@pytest.mark.parametrize("boundary", ["catalog", "detail"])
+def test_published_remote_content_change_during_lookup_refuses_authority(
+    tmp_path: Path, monkeypatch, boundary: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    held = path.read_bytes()
+    changed = _published_xml("ChangedRemoteSource")
+    setattr(site, f"before_{boundary}", lambda: setattr(site, "remote_bytes", changed))
+    result, messages = _published_capture(path, LIVE_ENV)
+    block = _association(result)
+    assert block["source_match"] == "unestablished", "P_REMOTE_CURRENT_MATCH"
+    assert block["rows"][0] == {
+        "source_ordinal": 1,
+        "published_key": "site/salesfeed",
+        "state": "cannot_establish",
+        "candidate_count": None,
+    }, "P_REMOTE_CURRENT_OUTCOME"
+    assert path.read_bytes() == held and site.served[P_WORKBOOK] == [held, changed]
+    assert result["inputs"][0]["origin"]["remote_sha256"] == hashlib.sha256(held).hexdigest()
+    evidence = next(message["evidence"] for message in messages if message["kind"] == prov.MSG_PUBLISHED_EVIDENCE)
+    assert evidence["current_remote"]["sha256"] == hashlib.sha256(changed).hexdigest()
+    assert evidence["rows"][0]["state"] == "resolved", "the catalog/detail lookup succeeded before the recheck"
+    assert site.calls[-2][1] == f"/sites/{P_SITE}/workbooks/{P_WORKBOOK}/content?includeExtract=True"
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "P_REMOTE_CURRENT_WIRE"
+
+
+def test_published_repeated_input_rechecks_remote_content_after_each_lookup(tmp_path: Path, monkeypatch) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    held = path.read_bytes()
+    (tmp_path / f"{P_WORKBOOK}_Later.twb").write_bytes(held)
+    changed = _published_xml("ChangedRemoteSource")
+    call = site._call
+
+    def advance_remote(method, route, body=None, accept=None):
+        answer = call(method, route, body, accept)
+        if "/content?" in route and len(site.served[P_WORKBOOK]) == 2:
+            site.remote_bytes = changed
+        return answer
+
+    monkeypatch.setattr(site, "_call", advance_remote)
+    result, messages = _published_capture(tmp_path, LIVE_ENV)
+    blocks = [record["origin"]["published_dependencies"] for record in result["inputs"]]
+    assert blocks[0]["rows"][0]["state"] == "resolved", "P_REMOTE_REPEATED_POSITIVE"
+    assert blocks[1]["source_match"] == "unestablished", "P_REMOTE_REPEATED_RECHECK"
+    assert blocks[1]["rows"][0]["state"] == "cannot_establish" and "datasource_luid" not in blocks[1]["rows"][0]
+    assert site.served[P_WORKBOOK] == [held, held, changed], "P_REMOTE_DISTINCT_INITIAL_PLUS_TWO_RECHECKS"
+    assert len(site.queries()) == site.detail_count() == 1
+    assert _published_replay(messages)[0] is None
+
+
+@pytest.mark.parametrize("failure", [403, 404, 304, "timeout", "uncomparable"])
+def test_published_unavailable_remote_recheck_cannot_reuse_initial_content(
+    tmp_path: Path, monkeypatch, failure: int | str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    call = site._call
+    attempts = []
+
+    def unavailable(method, route, body=None, accept=None):
+        if "/content?" in route:
+            attempts.append(route)
+            if len(attempts) == 2:
+                if failure == "timeout":
+                    raise TimeoutError("private-current-remote-response")
+                if failure == "uncomparable":
+                    return 200, b"PK\x03\x04broken-archive"
+                return failure, b"private-current-remote-response"
+        return call(method, route, body, accept)
+
+    monkeypatch.setattr(site, "_call", unavailable)
+    result, messages = _published_capture(path, LIVE_ENV)
+    block = _association(result)
+    assert block["source_match"] == "unestablished", "P_REMOTE_RECHECK_REQUIRED"
+    assert block["rows"][0]["state"] == "cannot_establish" and "datasource_luid" not in block["rows"][0]
+    assert len(attempts) == 2 and site.detail_count() == 1
+    assert "private-current-remote-response" not in json.dumps(messages)
+    assert _published_replay(messages)[0] is None
+
+
+def test_published_fresh_remote_repacking_preserves_revision_authority(tmp_path: Path, monkeypatch) -> None:
+    path = _twbx(tmp_path, f"{P_WORKBOOK}_Consumer", _published_xml())
+    held = path.read_bytes()
+    repacked = _repack(path)
+    assert repacked != held and oid.revision_key(held).agrees_with(oid.revision_key(repacked))
+    site = _install(monkeypatch, PublishedSite(held))
+    site.before_detail = lambda: setattr(site, "remote_bytes", repacked)
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert _association(result)["rows"][0]["datasource_luid"] == P_DATASOURCE, "P_REMOTE_REPACK_POSITIVE"
+    assert site.served[P_WORKBOOK] == [held, repacked], "P_REMOTE_REPACK_FETCHED"
+    evidence = next(message["evidence"] for message in messages if message["kind"] == prov.MSG_PUBLISHED_EVIDENCE)
+    assert evidence["current_remote"]["sha256"] == hashlib.sha256(repacked).hexdigest()
+    assert evidence["current_remote"]["revision_key"] == result["inputs"][0]["input"]["revision_key"]
+    assert _published_replay(messages)[0] is None
+
+
+@pytest.mark.parametrize("observation", ["held", "initial"])
+@pytest.mark.parametrize("defect", ["different", "contradiction", "missing-key", "incomparable-key"])
+def test_published_current_remote_requires_agreement_with_each_prior_observation(observation: str, defect: str) -> None:
+    current = {"sha256": "a" * 64, "revision_key": {"algo": "tableau-xml-v1", "value": "b" * 64}}
+    local = copy.deepcopy(current)
+    origin = {"remote_sha256": current["sha256"], "remote_revision_key": copy.deepcopy(current["revision_key"])}
+    assert prov.published_remote_agrees(current, local, origin), "P_REMOTE_THREE_WAY_POSITIVE"
+    changed = copy.deepcopy(current)
+    if defect != "contradiction":
+        changed["sha256"] = "c" * 64
+    if defect in ("different", "contradiction"):
+        changed["revision_key"]["value"] = "d" * 64
+    elif defect == "missing-key":
+        changed["revision_key"] = None
+    else:
+        changed["revision_key"]["algo"] = "raw-sha256-v1"
+    if observation == "held":
+        local = changed
+    else:
+        origin = {"remote_sha256": changed["sha256"], "remote_revision_key": changed["revision_key"]}
+    assert not prov.published_remote_agrees(current, local, origin), f"P_REMOTE_AGREEMENT_{observation}"
+
+
 @pytest.mark.parametrize("kind", ["stale", "incomparable"])
 def test_published_source_revision_must_be_confirmed(tmp_path: Path, monkeypatch, kind: str) -> None:
     path, site = _published_setup(tmp_path, monkeypatch)
@@ -2367,7 +2491,7 @@ def test_published_occurrences_are_not_deduplicated_but_catalog_and_detail_are_c
     assert [row["source_ordinal"] for row in rows] == [1, 2]
     assert [row["published_key"] for row in rows] == ["site/salesfeed", "site/salesfeed"]
     assert all(row["state"] == ("resolved" if detail_status == 200 else "cannot_establish") for row in rows)
-    assert len(site.queries()) == site.detail_count() == len(site.served[P_WORKBOOK]) == 1
+    assert len(site.queries()) == site.detail_count() == 1 and len(site.served[P_WORKBOOK]) == 2
     fresh = _install(monkeypatch, PublishedSite(path.read_bytes()))
     prov.build(path, LIVE_ENV)
     assert len(fresh.queries()) == fresh.detail_count() == 1
@@ -2417,18 +2541,18 @@ def test_published_missing_parser_key_is_retained_not_filled_from_a_provider(tmp
     assert code is None and state.terminal == result and not prov.is_success(result), "P_INVALID_PARSER_KEY_WIRE"
 
 
-@pytest.mark.parametrize("state", ["resolved", "missing", "ambiguous", "cannot_establish"])
-def test_published_real_producer_messages_reconcile_with_supervisor(tmp_path: Path, monkeypatch, state: str) -> None:
+@pytest.mark.parametrize("case", ["resolved", "empty-filtered", "ambiguous", "cannot_establish"])
+def test_published_real_producer_messages_reconcile_with_supervisor(tmp_path: Path, monkeypatch, case: str) -> None:
     import run_estate as estate  # pylint: disable=import-outside-toplevel
 
     path, site = _published_setup(tmp_path, monkeypatch)
-    if state == "missing":
+    if case == "empty-filtered":
         site.catalog["datasources"]["datasource"] = []
         site.catalog["pagination"]["totalAvailable"] = 0
-    elif state == "ambiguous":
+    elif case == "ambiguous":
         site.catalog["datasources"]["datasource"] *= 2
         site.catalog["pagination"]["totalAvailable"] = 2
-    elif state == "cannot_establish":
+    elif case == "cannot_establish":
         site.catalog_error = TimeoutError("private catalog exception")
     reporter = RecordingReporter()
     result = prov.build(path, LIVE_ENV, reporter)
@@ -2436,7 +2560,8 @@ def test_published_real_producer_messages_reconcile_with_supervisor(tmp_path: Pa
     supervisor = estate._ProvenanceState(emit=lambda *_args: None, launch_inputs=(path,))
     for message in reporter.messages:
         supervisor.accept(message)
-    assert supervisor.terminal == result and _association(result)["rows"][0]["state"] == state
+    expected = "cannot_establish" if case == "empty-filtered" else case
+    assert supervisor.terminal == result and _association(result)["rows"][0]["state"] == expected
     assert supervisor.checkpoints[0]["published_occurrences"] == [
         {"source_ordinal": 1, "published_key_sha256": hashlib.sha256(b'"site/salesfeed"').hexdigest()}
     ]
@@ -3181,7 +3306,7 @@ def test_r2_published_final_fields_cannot_replace_acquisition_evidence(
     evidence = next(message["evidence"] for message in messages if message["kind"] == prov.MSG_PUBLISHED_EVIDENCE)
     assert evidence["source_sha256"] == held_sha
     assert evidence["current_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
-    assert evidence["rows"][0]["candidate_count"] == (0 if defect == "outcome-only" else 1)
+    assert evidence["rows"][0]["candidate_count"] == (None if defect == "outcome-only" else 1)
     if defect == "changed-source":
         assert _association(result)["source_match"] == "unestablished"
         assert _association(result)["rows"][0]["state"] == "cannot_establish"
@@ -3296,10 +3421,10 @@ def test_r2_published_current_worker_cannot_downgrade_to_legacy(tmp_path: Path, 
     assert prov.is_success(prov.normalize_result(legacy)), "R2_LEGACY_ARTIFACT_READER"
 
 
-@pytest.fixture
-def published_http_site():
+@contextmanager
+def _published_http_server() -> Iterator[dict]:
     """Real urllib transport to a recording loopback responder, including the old query-URL escape."""
-    served = {"fixture": None, "requests": 0}
+    served = {"fixture": None, "requests": 0, "observed": [], "redirect": lambda _route: None}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -3315,8 +3440,19 @@ def published_http_site():
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
             served["requests"] += 1
             route = self.path.split("/api/3.21", 1)[1]
-            status, body = served["fixture"]._call(self.command, route)
+            served["observed"].append(
+                {
+                    "route": route,
+                    "auth": self.headers.get("X-Tableau-Auth"),
+                    "cache_control": self.headers.get("Cache-Control"),
+                    "pragma": self.headers.get("Pragma"),
+                }
+            )
+            redirect = served["redirect"](route)
+            status, body = (redirect[0], b"") if redirect else served["fixture"]._call(self.command, route)
             self.send_response(status)
+            if redirect:
+                self.send_header("Location", redirect[1] + self.path)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -3334,6 +3470,76 @@ def published_http_site():
         assert not thread.is_alive()
 
 
+@pytest.fixture
+def published_http_site() -> Iterator[dict]:
+    with _published_http_server() as served:
+        yield served
+
+
+@pytest.mark.parametrize("status", range(300, 400))
+@pytest.mark.parametrize("same_origin", [False, True], ids=["foreign-origin", "same-origin"])
+def test_published_every_redirect_status_is_refused_without_resending_auth(
+    published_http_site, status: int, same_origin: bool
+) -> None:
+    with _published_http_server() as foreign:
+        foreign["fixture"] = PublishedSite(_published_xml())
+        destination = published_http_site["base"] if same_origin else foreign["base"]
+        published_http_site["redirect"] = lambda _route: (status, destination)
+        lookup = prov.TableauLookup(dict(LIVE_ENV, TABLEAU_SERVER_URL=published_http_site["base"]))
+        lookup.token = "synthetic-redirect-session"
+        observed_status, _body = lookup._call("GET", f"/sites/{P_SITE}/datasources/{P_DATASOURCE}")
+        assert foreign["observed"] == [], "P_REDIRECT_NO_CREDENTIAL_RESEND"
+        assert published_http_site["requests"] == 1, "P_REDIRECT_NO_REPEAT"
+        assert observed_status == status, "P_REDIRECT_STATUS_REFUSED"
+        assert published_http_site["observed"][0]["auth"] == "synthetic-redirect-session"
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["signin", "inventory", "initial-content", "user", "catalog", "detail", "catalog-and-detail", "current-content"],
+)
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_published_authority_redirect_never_resolves_foreign_evidence(
+    tmp_path: Path, published_http_site, endpoint: str, status: int
+) -> None:
+    base = published_http_site["base"]
+    raw = _published_xml(server=base)
+    path = tmp_path / f"{P_WORKBOOK}_Consumer.twb"
+    path.write_bytes(raw)
+    site = published_http_site["fixture"] = PublishedSite(raw)
+    with _published_http_server() as foreign:
+        foreign_site = foreign["fixture"] = PublishedSite(raw)
+        forged_luid = "99999999-9999-4999-8999-999999999999"
+        foreign_site.catalog["datasources"]["datasource"][0]["id"] = forged_luid
+        foreign_site.detail["datasource"]["id"] = forged_luid
+
+        def redirect(route: str) -> tuple[int, str] | None:
+            matches = {
+                "signin": route == "/auth/signin",
+                "inventory": "/workbooks?" in route,
+                "initial-content": "/content?" in route and not site.served.get(P_WORKBOOK),
+                "current-content": "/content?" in route and bool(site.served.get(P_WORKBOOK)),
+                "user": "/users/" in route,
+                "catalog": "/datasources?" in route,
+                "detail": "/datasources/" in route,
+                "catalog-and-detail": "/datasources" in route,
+            }
+            return (status, foreign["base"]) if matches[endpoint] else None
+
+        published_http_site["redirect"] = redirect
+        result, messages = _published_capture(path, dict(LIVE_ENV, TABLEAU_SERVER_URL=base))
+        origin = result["inputs"][0].get("origin") or {}
+        block = origin.get("published_dependencies")
+        if endpoint != "catalog-and-detail":
+            assert foreign["observed"] == [], "P_AUTHORITY_REDIRECT_NO_FOREIGN_REQUEST"
+        assert block is None or all(row["state"] == "cannot_establish" for row in block["rows"]), (
+            "P_AUTHORITY_REDIRECT_NO_RESOLUTION"
+        )
+        assert foreign["observed"] == [], "P_AUTHORITY_REDIRECT_NO_FOREIGN_REQUEST"
+        assert forged_luid not in json.dumps(result)
+        assert _published_replay(messages)[0] is None
+
+
 @pytest.mark.parametrize("base_path", ["", "/gateway", "/gateway/front", "/gate%77ay/front/"])
 def test_r2_published_valid_configured_base_uses_real_urllib(
     tmp_path: Path, published_http_site, base_path: str
@@ -3345,7 +3551,9 @@ def test_r2_published_valid_configured_base_uses_real_urllib(
     published_http_site["fixture"] = PublishedSite(payload)
     result, messages = _published_capture(path, dict(LIVE_ENV, TABLEAU_SERVER_URL=base))
     assert _association(result)["rows"][0]["datasource_luid"] == P_DATASOURCE, "R2_URL_POSITIVE"
-    assert published_http_site["requests"] == 7
+    assert published_http_site["requests"] == 8
+    downloads = [row for row in published_http_site["observed"] if "/content?" in row["route"]]
+    assert len(downloads) == 2 and all(row["cache_control"] == row["pragma"] == "no-cache" for row in downloads)
     assert _published_replay(messages)[0] is None and prov.is_success(result)
 
 

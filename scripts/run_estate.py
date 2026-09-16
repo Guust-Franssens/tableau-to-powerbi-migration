@@ -1080,12 +1080,18 @@ def _validated_dependency_rows(rows: object, source_match: str, *, private: bool
 def _validated_published_evidence(evidence: object) -> None:
     _require(
         type(evidence) is dict
-        and evidence.keys() == {"identity", "source_sha256", "current_sha256", "source_match", "rows"}
+        and evidence.keys() == {"identity", "source_sha256", "current_sha256", "current_remote", "source_match", "rows"}
     )
     _validated_workbook_identity(evidence["identity"])
     _digest(evidence["source_sha256"])
     if evidence["current_sha256"] is not None:
         _digest(evidence["current_sha256"])
+    current = evidence["current_remote"]
+    if current is not None:
+        _require(type(current) is dict and current.keys() == {"sha256", "revision_key"})
+        _digest(current["sha256"])
+        if current["revision_key"] is not None:
+            _validated_revision(current["revision_key"])
     _enum(evidence["source_match"], {"sha256", "revision_same", "unestablished"})
     _validated_dependency_rows(evidence["rows"], evidence["source_match"], private=True)
 
@@ -1179,9 +1185,11 @@ def _validated_dependency_history(record: dict, checkpoint: dict, success: bool)
     )
     evidence = checkpoint.get("published_evidence")
     _require(evidence is not None)
-    source_match = (
-        evidence["source_match"] if evidence["current_sha256"] == evidence["source_sha256"] else "unestablished"
-    )
+    source_match = evidence["source_match"]
+    if evidence["current_sha256"] != evidence["source_sha256"] or not prov.published_remote_agrees(
+        evidence["current_remote"], checkpoint["input"], origin
+    ):
+        source_match = "unestablished"
     _require(block["source_match"] == source_match)
     outcomes = evidence["rows"]
     if source_match == "unestablished":

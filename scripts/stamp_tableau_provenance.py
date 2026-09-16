@@ -738,11 +738,22 @@ def _rest_json(payload: bytes) -> Any:
     )
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Authority and credentials belong to the configured endpoint, never to a redirect target."""
+
+    def redirect_request(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> None:
+        raise urllib.error.HTTPError(req.full_url, code, "Tableau redirect refused", headers, fp)
+
+
 class TableauLookup:  # pylint: disable=too-many-instance-attributes
     """Minimal read-only REST client, used only to identify a workbook we already hold.
 
-    Every remote answer is fetched **at most once per instance**, because one instance is one
-    provenance run. Measured 2026-09-09 against a recording loopback site on the pre-cache code, 66
+    Initial remote answers are fetched **at most once per instance**, because one instance is one
+    provenance run. Published associations additionally revalidate remote content just before issuance;
+    the initial observation's cache cannot establish freshness after catalog/detail acquisition.
+    Measured 2026-09-09 against a recording loopback site on the pre-cache code, 66
     harvested inputs cost **200** remote calls -- ``2 + N + 2M``: one site-wide inventory listing per
     input, and *two* full downloads of every matched workbook, because
     :meth:`content_sha256` and :meth:`content_revision_key` each fetched independently. The bytes were
@@ -775,6 +786,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         self._catalog_visibility: bool | None = None
         self._published_cache: dict[str, dict] = {}
         self._datasource_details: dict[str, dict | None] = {}
+        self._opener = urllib.request.build_opener(_NoRedirectHandler())
         self.reporter: NullReporter = NullReporter()
 
     def _call(self, method: str, path: str, body: dict | None = None, accept: str | None = None):
@@ -789,11 +801,15 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
             request.add_header("Content-Type", "application/json")
         if self.token:
             request.add_header("X-Tableau-Auth", self.token)
+        if method == "GET":
+            request.add_header("Cache-Control", "no-cache")
+            request.add_header("Pragma", "no-cache")
         try:
-            with urllib.request.urlopen(request, timeout=180) as response:
+            with self._opener.open(request, timeout=180) as response:
                 return response.status, response.read()
         except urllib.error.HTTPError as exc:
-            return exc.code, exc.read()
+            with exc:
+                return exc.code, exc.read()
 
     def sign_in(self) -> None:
         """Exchange the PAT for a session token."""
@@ -914,8 +930,8 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
     def content_attempts(self) -> int:
         """How many DISTINCT workbooks this run actually asked the site for.
 
-        A cache hit is not an attempt: two inputs resolving to one LUID are one download (#582), and
-        progress that counted them twice would report remote work that never happened.
+        A cache hit is not a new identity attempt (#582). Published-source revalidation may download
+        that same workbook again, but it does not increase this distinct-workbook counter.
         """
         return len(self._content_cache) + len(self._content_failure)
 
@@ -948,6 +964,25 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
                 self._content_unavailable[workbook_id] = f"HTTP {int(status)}"
             self._content_cache[workbook_id] = payload if status == 200 else None
         return self._content_cache[workbook_id]
+
+    def current_content(self, workbook_id: str) -> dict | None:
+        """One uncached, cancellable recheck; never overwrite the initial content observation."""
+        if self.reporter.cancelled:
+            return None
+        try:
+            status, payload = self._call(
+                "GET", f"/sites/{self.site_id}/workbooks/{workbook_id}/content?includeExtract=True"
+            )
+            if status != 200:
+                return None
+            key = revision_key(payload)
+            return {
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "revision_key": key.as_json() if key is not None else None,
+            }
+        except Exception:  # pylint: disable=broad-exception-caught
+            # A failed recheck earns no current authority; never reflect its response or exception.
+            return None
 
     def _catalog_visible(self) -> bool:
         """Pagination counts only visible rows; an independently queried admin role is also required."""
@@ -1013,8 +1048,11 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
             and page.total_available == len(rows)
         ):
             raise ValueError("published dependency catalog incomplete")
+        if not rows:
+            # A filtered search can lag a current datasource even for an administrator.
+            return {"state": "cannot_establish", "candidate_count": None}
         if len(rows) != 1:
-            return {"state": "missing" if not rows else "ambiguous", "candidate_count": len(rows)}
+            return {"state": "ambiguous", "candidate_count": len(rows)}
         selected = rows[0]
         luid = selected.get("id")
         if not isinstance(luid, str) or LUID_RE.fullmatch(luid) is None:
@@ -1212,6 +1250,21 @@ def _dependency_source_match(lookup: TableauLookup, source: _PublishedSource, lo
     return "unestablished"
 
 
+def published_remote_agrees(current: dict | None, local: dict, origin: dict) -> bool:
+    """Require fresh content to agree with BOTH the held source and the initial remote observation."""
+    if current is None:
+        return False
+    current_key = RevisionKey.from_json(current["revision_key"])
+    for observed_sha, observed_key in (
+        (local["sha256"], RevisionKey.from_json(local.get("revision_key"))),
+        (origin["remote_sha256"], RevisionKey.from_json(origin["remote_revision_key"])),
+    ):
+        agreement = current_key.agrees_with(observed_key) if current_key is not None else None
+        if agreement is False or (current["sha256"] != observed_sha and agreement is not True):
+            return False
+    return True
+
+
 def _dependency_url_path(path: str) -> list[str]:
     """Decode each segment once, refusing ambiguous separators, traversal and malformed escapes."""
     if path in ("", "/"):
@@ -1316,6 +1369,7 @@ def _attach_published_dependencies(record: dict, lookup: TableauLookup, source: 
         if source_match != "unestablished" and _dependency_query_allowed(dependency, lookup):
             outcome = lookup.published_dependency(dependency["content_url"])
         rows.append({key: dependency[key] for key in ("source_ordinal", "published_key")} | outcome)
+    current_remote = lookup.current_content(origin["workbook_luid"]) if source_match != "unestablished" else None
     try:
         current_sha256 = hashlib.sha256(source.path.read_bytes()).hexdigest()
     except OSError:
@@ -1326,11 +1380,12 @@ def _attach_published_dependencies(record: dict, lookup: TableauLookup, source: 
             "identity": workbook_identity_checkpoint(source.path, origin["workbook_luid"]),
             "source_sha256": local["sha256"],
             "current_sha256": current_sha256,
+            "current_remote": current_remote,
             "source_match": source_match,
             "rows": published_outcome_checkpoint(rows),
         },
     )
-    if current_sha256 != local["sha256"]:
+    if current_sha256 != local["sha256"] or not published_remote_agrees(current_remote, local, origin):
         source_match = "unestablished"
         rows = [
             {key: row[key] for key in ("source_ordinal", "published_key")}

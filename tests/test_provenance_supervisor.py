@@ -1063,6 +1063,10 @@ def _published_checkpoint(result: dict) -> dict:
         "identity": dict(identity),
         "source_sha256": record["input"]["sha256"],
         "current_sha256": record["input"]["sha256"],
+        "current_remote": {
+            "sha256": record["origin"]["remote_sha256"],
+            "revision_key": copy.deepcopy(record["origin"]["remote_revision_key"]),
+        },
         "source_match": block["source_match"],
         "rows": [
             dict(occurrence, state=row["state"], candidate_count=row["candidate_count"])
@@ -1471,6 +1475,12 @@ def test_published_private_identity_fields_remain_strict_bounded_digests(where: 
         "source-sha",
         "current-sha",
         "missing-current",
+        "missing-current-remote",
+        "unreadable-current-remote",
+        "changed-current-remote",
+        "bad-current-remote",
+        "partial-current-remote",
+        "bad-current-remote-revision",
         "reordered-rows",
         "duplicate-row",
         "key",
@@ -1511,6 +1521,21 @@ def test_r2_published_acquisition_envelope_is_closed_and_phase_bound(tmp_path: P
         message["evidence"]["source_sha256" if defect == "source-sha" else "current_sha256"] = "e" * 64
     elif defect == "missing-current":
         del message["evidence"]["current_sha256"]
+    elif defect == "missing-current-remote":
+        del message["evidence"]["current_remote"]
+    elif defect == "unreadable-current-remote":
+        message["evidence"]["current_remote"] = None
+    elif defect == "changed-current-remote":
+        message["evidence"]["current_remote"] = {
+            "sha256": "e" * 64,
+            "revision_key": {"algo": "tableau-xml-v1", "value": "e" * 64},
+        }
+    elif defect == "bad-current-remote":
+        message["evidence"]["current_remote"] = "private-response-only"
+    elif defect == "partial-current-remote":
+        del message["evidence"]["current_remote"]["sha256"]
+    elif defect == "bad-current-remote-revision":
+        message["evidence"]["current_remote"]["revision_key"] = {"algo": "unknown", "value": "e" * 64}
     elif defect == "reordered-rows":
         message["evidence"]["rows"].reverse()
     elif defect == "duplicate-row":
@@ -1528,6 +1553,36 @@ def test_r2_published_acquisition_envelope_is_closed_and_phase_bound(tmp_path: P
     document = state.document(code)
     assert document["inputs"][0]["input"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
     assert all(field not in json.dumps(document) for field in ("published_evidence", "private-response-only"))
+
+
+def test_published_remote_recheck_downgrade_cannot_be_relabelled_by_final_fields(tmp_path: Path, monkeypatch) -> None:
+    from test_stamp_tableau_provenance import (
+        LIVE_ENV,
+        P_DATASOURCE,
+        _association,
+        _published_capture,
+        _published_replay,
+        _published_setup,
+        _published_xml,
+    )
+
+    path, site = _published_setup(tmp_path, monkeypatch)
+    held_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    site.before_detail = lambda: setattr(site, "remote_bytes", _published_xml("ChangedRemoteSource"))
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert _association(result)["source_match"] == "unestablished", "P_REMOTE_PRODUCER_DOWNGRADE"
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "P_REMOTE_EVIDENCE_POSITIVE"
+    evidence = next(message["evidence"] for message in messages if message["kind"] == prov.MSG_PUBLISHED_EVIDENCE)
+    assert evidence["current_remote"]["sha256"] != held_sha == evidence["current_sha256"]
+    for message in messages:
+        if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            block = _association(message["result"])
+            block["source_match"] = "sha256"
+            block["rows"][0].update(state="resolved", candidate_count=1, datasource_luid=P_DATASOURCE)
+    code, state = _published_replay(messages)
+    assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, "P_REMOTE_EVIDENCE_BINDING"
+    assert state.document(code)["inputs"][0]["input"]["sha256"] == held_sha
 
 
 @pytest.mark.parametrize("char", ["\x00", "\x1f", "\x7f", "\x80", "\x85", "\x9f", "é", "漢"])

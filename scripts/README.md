@@ -286,8 +286,8 @@ non-boolean integers; only `cannot_establish` has a null count.
 
 | Row state | Required evidence |
 |---|---|
-| `resolved` | Confirmed source bytes/revision and unique workbook identity; complete independently visible catalog; exactly one candidate; valid datasource LUID and matching detail. |
-| `missing` | Confirmed source and independently complete catalog with exactly zero candidates. |
+| `resolved` | Confirmed held, initial remote and freshly rechecked remote bytes/revision; unique workbook identity; complete independently visible catalog; exactly one candidate; valid datasource LUID and matching detail. |
+| `missing` | Retained schema/legacy representation, requiring independently corroborated absence. The current filtered-catalog acquisition cannot establish this state and never emits it. |
 | `ambiguous` | Confirmed source and complete catalog with more than one candidate, including duplicate rows; no chosen LUID. |
 | `cannot_establish` | Source identity/revision, visibility, completeness or detail cannot be established; null count, no LUID. |
 
@@ -319,13 +319,30 @@ The explicit site route and configured-base variants have synthetic production-p
 claim of live qualification on every server/proxy topology.
 
 Normalized keys, display names, captions, repository IDs, connection-name fallbacks and provider
-choices never become catalog queries. After acquisition,
-the held source path is rehashed before any association is issued. Changed/unreadable bytes retain
-the original occurrences as `unestablished` / `cannot_establish`; stale or incomparable revisions
-and ambiguous workbook matches also cannot acquire an association.
+choices never become catalog queries. Immediately after catalog/detail acquisition and before the
+evidence envelope or public block, the remote workbook content is fetched again without using or
+overwriting the initial content cache. Its SHA/revision must agree with **both** the held source and
+the initial remote observation; comparable contradictory revisions refuse even if a raw SHA agrees.
+The existing revision-key comparison accepts unchanged repacked archives. The held source path is
+then rehashed, after the last remote request. Changed, unreadable or uncomparable current content
+retains the original occurrences as `unestablished` / `cannot_establish`, with no selected LUID.
+An initially unestablished source does not trigger this extra request. Eligible physical published
+inputs each need one recheck, including repeated inputs of the same LUID; the existing progress
+counter still measures **distinct workbook identities attempted**, not total HTTP downloads.
+
+The existing urllib client uses one non-redirecting opener for every request, including sign-in,
+inventory, content, visibility, catalog and detail. **Every 3xx is refused, including same-origin
+redirects**; neither the PAT body nor `X-Tableau-Auth` is resent to a redirect target. GET requests
+send `Cache-Control: no-cache` and `Pragma: no-cache` to require cache revalidation. Real two-server
+loopback controls cover all 300–399 statuses and both token forwarding and forged catalog/detail
+authority; they do not substitute a second HTTP client.
 
 Datasource pagination is deliberately stricter than the older workbook inventory rule above:
 all first-page facts must be explicit, valid and complete. A short page alone does not suffice.
+Even an explicitly complete **empty filtered** page is `cannot_establish` with a null count, never
+certified `missing`: search-index lag can hide a current matching datasource. There is no existing
+independent authoritative absence lookup in this acquisition path, so it does not invent a detail
+LUID from another hint or add a fallback enumeration.
 Visibility is established separately by querying the signed-in user's matching REST identity and
 requiring a server/site administrator role. Tableau documents that non-administrators see only
 datasources they have permission to connect to: see
@@ -355,10 +372,13 @@ when two different workbooks have identical bytes.
 
 Each assessed, valid nonempty association emits one `published-evidence` envelope **before** public
 block construction, inside that input's content phase and after its identity event. It retains the
-held-source SHA, the actual final-path rehash (null when unreadable), pre-rehash source-match state,
+held-source SHA, the actual final-path rehash (null when unreadable), `current_remote` (fresh
+`sha256` and nullable `revision_key`, or null when the recheck was unavailable/not applicable),
+the initial source-match state,
 and each occurrence's ordered key digest, state, count and selected **LUID digest**. No URL, path,
 catalog row, copied name, credential or response/exception text is included. The parent validates
-the closed shape and input/index/phase binding, derives the rehash downgrade itself, and requires
+the closed shape and input/index/phase binding, independently compares the fresh remote observation
+to the checkpoint's held source and the initial origin, derives both remote/local downgrades, and requires
 the final public outcomes to reconcile exactly. Editing only snapshot/terminal source-match,
 outcome/count or selected LUID cannot supersede the earlier acquisition evidence. This is not a
 second REST client or an atomic server snapshot.
@@ -399,7 +419,9 @@ destroying otherwise valid origin evidence or copying catalog rows/exception tex
 The existing absolute supervisor deadline still covers acquisition; cancellation/expiry retains
 accepted safe provenance (or fingerprints before scrub) as non-success. A successful provenance
 **phase** does not imply that its dependency rows resolved. These are local observation-time
-associations, not an atomic server snapshot or proof against a subsequent source/catalog change.
+associations, not an atomic server snapshot or proof against a change after the final recheck.
+Catalog/detail caches remain run-local, not continuously refreshed, and an uncooperative intermediary
+or server that ignores revalidation is outside this observation-time guarantee.
 
 **Claim ceiling:** P does not thin consumer models, rewrite PBIR, choose a provider package, transport
 the association through packaging, make consumers `START_READY`, support `COMPLETE`, or change
