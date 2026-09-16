@@ -500,8 +500,14 @@ convention — see §7 for which ones actually are.
 | 2 | `python scripts/assess_estate.py --out _assessment --survey _assessment/estate_survey.json` | ⚠️ ~34 s | `report.md`, `assessment.json`, `estate.db` |
 | 3 | `python scripts/tableau_lineage.py --plan --survey _assessment/estate_survey.json` | seconds | model-first order — **survey edges override the Metadata API** |
 | 4 | `python scripts/harvest_estate_assets.py --out _sweep` | ✅ **120 s / 55 assets** | `_sweep/assets/*`, `parse-sweep.md` |
-| 5 | `python scripts/run_estate.py --input _sweep/assets --output _bundle` | ✅ **81.7 s of recorded phases** (engine 41.3 s, provenance 38.7 s) | `_bundle/` |
+| 5 | `python scripts/run_estate.py --input _sweep/assets --output _bundle [--storage-decision <file.json>]` | ✅ **81.7 s of recorded phases** (engine 41.3 s, provenance 38.7 s) | `_bundle/` |
 | 6 | `python scripts/deploy_estate.py --bundle _bundle --workspace <workspace-id> --tenant <tenant-id> --estate-db _assessment/estate.db --journal _bundle/deploy-journal.jsonl` | ⚠️ **~25 s per item** — budget 30 min for 75 items | items in the landing zone |
+
+When an operator supplies `--storage-decision`, keep that JSON file outside the destructive bundle
+output tree. `run_estate.py` checks only that the original path token names a readable file and
+forwards that token to the engine; it does not parse, normalize, receipt, or prove the policy applies
+to every datasource. `--dry-run` shows the intended JSON argv and does not validate policy content;
+the engine validates it only during execution.
 
 > ⚠️ **`--out _sweep`, not `_harvest`** — the previous edition said `_harvest`, which `.gitignore`
 > reserves for a **different** tool. See §7: choosing an unignored name here stages real customer
