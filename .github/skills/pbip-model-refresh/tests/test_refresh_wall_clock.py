@@ -379,8 +379,10 @@ def test_visual_inspector_can_delete_early(monkeypatch, parked, visual_runtime) 
     try:
         assert visual_runtime.noticed.wait(2)
         path = visual_runtime.root / visual_runtime.records[0][0]["path"]
+        visual_runtime.noticed.clear()
         path.unlink()
-        time.sleep(0.03)
+        assert visual_runtime.noticed.wait(2), "the observer must acknowledge external deletion while refresh is alive"
+        assert thread.is_alive()
         assert not path.exists()
         assert len(visual_runtime.children) == 1
     finally:
@@ -610,11 +612,12 @@ def test_visual_parent_classifier_is_optional_in_a_shallow_copy(monkeypatch, par
 def test_visual_acquisition_timeout_kills_only_its_child_and_preserves_refresh(
     monkeypatch, parked, visual_runtime
 ) -> None:
+    """Inject the child timeout after startup; the separate startup control owns the real watchdog."""
     child_type = _credential_modal.subprocess.Popen
-    monkeypatch.setattr(_credential_modal, "IMAGE_CAPTURE_SECONDS", 0.02)
 
     def never_returns(child, timeout):
-        assert not child.finished.wait(timeout)
+        assert 0 < timeout <= _credential_modal.IMAGE_CAPTURE_SECONDS
+        assert not child.finished.is_set()
         raise subprocess.TimeoutExpired(child.argv, timeout)
 
     monkeypatch.setattr(child_type, "communicate", never_returns)
@@ -669,6 +672,237 @@ def test_visual_cleanup_preserves_an_exception_from_the_refresh_worker(monkeypat
         released.set()
         thread.join(3)
     assert outcome.get("error") is failure, "image teardown cannot replace the worker's original exception"
+    assert not list(visual_runtime.root.glob("_ui-image-*.png"))
+
+
+@pytest.mark.parametrize("mode", ["legacy", "progress", "observation"])
+@pytest.mark.parametrize("completed_at", [0.5, 1.0, 2.0], ids=["before-deadline", "at-deadline", "after-deadline"])
+@pytest.mark.parametrize("unreadable", [False, True], ids=["healthy", "unreadable"])
+def test_wait_completion_must_be_observed_before_the_original_deadline(
+    monkeypatch, mode, completed_at, unreadable
+) -> None:
+    """A delayed observation/join must not launder a late completion into success in either branch."""
+    clock = _FakeClock()
+    monkeypatch.setattr(refresh_pbip_model, "time", clock)
+    monkeypatch.setattr(_credential_modal, "time", clock)
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.1)
+    state = _credential_modal.CredentialDetection()
+    if unreadable:
+        state = _credential_modal.inspect_credential_modal(111, lambda _pid: [owned_dialog(), main_window()])
+
+    class Worker:
+        def is_alive(self):
+            return clock.now < completed_at
+
+        def join(self, timeout):
+            clock.now += min(timeout, 0.1)
+
+    def delayed_inspection(_pid):
+        clock.now = completed_at
+        return state
+
+    monkeypatch.setattr(refresh_pbip_model, "_in_flight_credential_state", delayed_inspection)
+    arguments = dict(
+        desktop_pid=111,
+        source_hint=None,
+        initial_state=_credential_modal.CredentialDetection(),
+        total_timeout=1.0,
+        progress_monitor=_FakeProgressMonitor() if mode == "progress" else None,
+        observation_mode=mode == "observation",
+    )
+    if unreadable and completed_at >= 1.0:
+        with pytest.raises(_credential_modal.DialogFoundError) as error:
+            refresh_pbip_model._join_refresh_worker(Worker(), **arguments)
+        assert error.value.finding.verdict == "DIALOG_UNREADABLE"
+    else:
+        completed = refresh_pbip_model._join_refresh_worker(Worker(), **arguments)
+        assert completed is (completed_at < 1.0), "completion at/after the original deadline is not success"
+    assert clock.now == completed_at
+
+
+@pytest.mark.parametrize("progress", [False, True])
+def test_evidence_worker_construction_cannot_restart_the_refresh_deadline(monkeypatch, progress) -> None:
+    clock = _FakeClock()
+    evidence_type = _credential_modal.ModalVisualEvidence
+    monkeypatch.setattr(refresh_pbip_model, "time", clock)
+    monkeypatch.setattr(_credential_modal, "time", clock)
+
+    def delayed_construction(*args, **kwargs):
+        clock.now = 2.0
+        return evidence_type(*args, **kwargs)
+
+    monkeypatch.setattr(refresh_pbip_model, "ModalVisualEvidence", delayed_construction)
+    worker = SimpleNamespace(is_alive=lambda: clock.now < 1.5)
+    completed = refresh_pbip_model._join_refresh_worker(
+        worker,
+        desktop_pid=111,
+        source_hint=None,
+        initial_state=_credential_modal.CredentialDetection(),
+        total_timeout=1.0,
+        progress_monitor=_FakeProgressMonitor() if progress else None,
+    )
+    assert completed is False, "background-worker construction must consume, not reset, the original budget"
+
+
+def test_no_pid_join_cannot_accept_a_completion_after_its_deadline(monkeypatch) -> None:
+    clock = _FakeClock()
+    monkeypatch.setattr(refresh_pbip_model, "time", clock)
+
+    def delayed_join(_timeout):
+        clock.now = 2.0
+
+    worker = SimpleNamespace(is_alive=lambda: clock.now < 1.5, join=delayed_join)
+    completed = refresh_pbip_model._join_refresh_worker(
+        worker,
+        desktop_pid=None,
+        source_hint=None,
+        initial_state=None,
+        total_timeout=1.0,
+        progress_monitor=None,
+    )
+    assert completed is False, "the uninspected branch must enforce the same original deadline"
+
+
+@pytest.mark.parametrize("completed", [False, True], ids=["missed-deadline", "timely-completion"])
+def test_refresh_honors_the_wait_verdict_even_if_the_worker_finishes_during_teardown(
+    monkeypatch, parked, completed
+) -> None:
+    _conn, released = parked
+
+    def finish_during_teardown(worker, **_kwargs):
+        released.set()
+        worker.join(2)
+        assert not worker.is_alive(), "control requires completion after the wait made its decision"
+        return completed
+
+    monkeypatch.setattr(refresh_pbip_model, "_wait_refresh_worker", finish_during_teardown)
+    if completed:
+        assert refresh(port=1234, tables=["Orders"], progress_enabled=False)[0] is True
+    else:
+        with pytest.raises(TimeoutError, match="refresh did not return within"):
+            refresh(port=1234, tables=["Orders"], progress_enabled=False)
+
+
+@pytest.mark.timing
+@pytest.mark.parametrize("progress", [False, True])
+@pytest.mark.parametrize("finishes", [False, True], ids=["deadline", "healthy-completion"])
+def test_delayed_observer_never_blocks_refresh_wait_or_teardown(monkeypatch, parked, progress, finishes) -> None:
+    entered, resume, observed = threading.Event(), threading.Event(), threading.Event()
+    seen = []
+
+    def delayed_observation(_self, pid, state, **_kwargs):
+        seen.append((pid, state))
+        entered.set()
+        resume.wait(5)
+        observed.set()
+
+    monkeypatch.setattr(_credential_modal.ModalVisualEvidence, "observe", delayed_observation)
+    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, progress=progress, timeout=0.5)
+    try:
+        assert entered.wait(2), "the observer never received the queued target"
+        if finishes:
+            released.set()
+        thread.join(2)
+        assert not thread.is_alive(), "the refresh wait/teardown blocked behind evidence observation"
+        assert not observed.is_set(), "control requires the evidence observer still to be delayed"
+        assert seen[0][0] == 111 and seen[0][1].dialog.window.hwnd == DIALOG_HWND
+        if finishes:
+            assert outcome.get("result", (False,))[0] is True, "optional evidence must not reject a timely refresh"
+        else:
+            assert isinstance(outcome.get("error"), _credential_modal.DialogFoundError), outcome
+            assert outcome["error"].finding.verdict == "DIALOG_UNREADABLE"
+    finally:
+        released.set()
+        resume.set()
+        thread.join(3)
+        assert observed.wait(2), "release the background control before undoing its monkeypatches"
+
+
+@pytest.mark.timing
+@pytest.mark.parametrize("phase", ["directory", "lease", "process"])
+def test_delayed_evidence_startup_cannot_hold_the_deadline_or_publish_after_exit(
+    monkeypatch, parked, visual_runtime, phase
+) -> None:
+    entered, resume, observed = threading.Event(), threading.Event(), threading.Event()
+    target, name = {
+        "directory": (_credential_modal, "_evidence_directory"),
+        "lease": (_credential_modal, "_open_private_image"),
+        "process": (_credential_modal.subprocess, "Popen"),
+    }[phase]
+    original = getattr(target, name)
+    observe = _credential_modal.ModalVisualEvidence.observe
+
+    def delayed_startup(*args, **kwargs):
+        entered.set()
+        resume.wait(5)
+        return original(*args, **kwargs)
+
+    def observe_until_clean(self, *args, **kwargs):
+        try:
+            return observe(self, *args, **kwargs)
+        finally:
+            observed.set()
+
+    monkeypatch.setattr(target, name, delayed_startup)
+    monkeypatch.setattr(_credential_modal.ModalVisualEvidence, "observe", observe_until_clean)
+    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, timeout=0.25)
+    try:
+        assert entered.wait(2), "the startup control never reached the requested boundary"
+        thread.join(2)
+        assert not thread.is_alive(), "evidence startup held the refresh deadline"
+        assert isinstance(outcome.get("error"), _credential_modal.DialogFoundError), outcome
+        assert outcome["error"].finding.verdict == "DIALOG_UNREADABLE"
+        assert not observed.is_set(), "control requires startup still to be delayed at refresh exit"
+    finally:
+        released.set()
+        resume.set()
+        thread.join(3)
+        assert observed.wait(2)
+    assert visual_runtime.api.captures == [], "a startup returning after exit must never acquire pixels"
+    assert all(child.killed for child in visual_runtime.children), "even a late process handle must be reclaimed"
+    assert not list(visual_runtime.root.glob("_ui-image-*.png"))
+    assert all(record[0]["status"] != "ACQUIRED" for record in visual_runtime.records)
+
+
+@pytest.mark.timing
+def test_process_startup_uses_the_acquisition_budget_without_stopping_refresh(
+    monkeypatch, parked, visual_runtime
+) -> None:
+    entered, resume, observed = threading.Event(), threading.Event(), threading.Event()
+    popen = _credential_modal.subprocess.Popen
+    observe = _credential_modal.ModalVisualEvidence.observe
+    monkeypatch.setattr(_credential_modal, "IMAGE_CAPTURE_SECONDS", 0.1)
+
+    def delayed_process(*args, **kwargs):
+        entered.set()
+        resume.wait(5)
+        return popen(*args, **kwargs)
+
+    def observe_until_clean(self, *args, **kwargs):
+        try:
+            return observe(self, *args, **kwargs)
+        finally:
+            observed.set()
+
+    monkeypatch.setattr(_credential_modal.subprocess, "Popen", delayed_process)
+    monkeypatch.setattr(_credential_modal.ModalVisualEvidence, "observe", observe_until_clean)
+    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
+    try:
+        assert entered.wait(2)
+        assert visual_runtime.noticed.wait(2), "startup must be inside the acquisition watchdog, not before it"
+        assert visual_runtime.records[0][0]["status"] == "CAPTURE_TIMEOUT"
+        assert thread.is_alive(), "an acquisition timeout must not end a healthy refresh"
+        assert not observed.is_set() and not list(visual_runtime.root.glob("_ui-image-*.png"))
+        resume.set()
+        assert observed.wait(2)
+        assert len(visual_runtime.children) == 1 and visual_runtime.children[0].killed
+        assert visual_runtime.api.captures == []
+    finally:
+        resume.set()
+        released.set()
+        thread.join(3)
+        assert observed.wait(2)
+    assert outcome.get("result", (False,))[0] is True
     assert not list(visual_runtime.root.glob("_ui-image-*.png"))
 
 

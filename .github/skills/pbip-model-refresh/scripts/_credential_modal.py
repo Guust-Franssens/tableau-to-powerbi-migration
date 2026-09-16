@@ -61,6 +61,7 @@ import ctypes
 import hashlib
 import json
 import os
+import queue
 import re
 import stat
 import struct
@@ -72,7 +73,7 @@ import uuid
 import zlib
 from ctypes import wintypes
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO
@@ -787,7 +788,7 @@ def _enumerate_pid_windows_with_count(pid: int) -> tuple[list[DesktopWindow], in
         visited += 1
         try:
             hwnd_int = _hwnd_value(hwnd)
-            owner_pid = wintypes.DWORD()
+            owner_pid = wintypes.DWORD(0)
             user32.GetWindowThreadProcessId(hwnd_int, ctypes.byref(owner_pid))
             if owner_pid.value != pid or not user32.IsWindowVisible(hwnd_int):
                 return True
@@ -1151,6 +1152,7 @@ def join_with_credential_poll(
     source_hint: str | None = None,
     detector: Callable[[int], CredentialDetection] = inspect_credential_modal_in_flight,
     initial_state: CredentialDetection | None = None,
+    deadline: float | None = None,
 ) -> bool:
     """Wait for ``worker`` while polling for a late credential dialog.
 
@@ -1200,7 +1202,8 @@ def join_with_credential_poll(
     # wait must not lose (unknown / desktop-unready / dialog). Folding the latches into a container
     # would hide exactly the thing this function exists to keep visible.
     # pylint: disable=too-many-locals
-    started = time.monotonic()
+    deadline = time.monotonic() + total_timeout if deadline is None else deadline
+    started = deadline - total_timeout
     next_heartbeat = heartbeat_seconds
     latched_unknown = initial_state.unknown_reason if initial_state else None
     latched_desktop_unready = initial_state.desktop_unready if initial_state else None
@@ -1225,7 +1228,7 @@ def join_with_credential_poll(
         if elapsed >= next_heartbeat and worker.is_alive():
             print_refresh_heartbeat(elapsed, total_timeout)
             next_heartbeat += heartbeat_seconds
-    if worker.is_alive():
+    if worker.is_alive() or time.monotonic() >= deadline:
         state = detector(pid)
         _raise_detection(pid, state, source_hint)
         raise_latched_verdict(
@@ -1269,8 +1272,8 @@ class _ImageUnavailable(RuntimeError):
 
 def _same_image_target(user32: ctypes.CDLL, pid: int, window: DesktopWindow) -> bool:
     """Recheck the detected HWND/PID/owner, not a newly selected window."""
-    target_pid = wintypes.DWORD()
-    owner_pid = wintypes.DWORD()
+    target_pid = wintypes.DWORD(0)
+    owner_pid = wintypes.DWORD(0)
     target_thread = user32.GetWindowThreadProcessId(window.hwnd, ctypes.byref(target_pid))
     owner_thread = user32.GetWindowThreadProcessId(window.owner_hwnd, ctypes.byref(owner_pid))
     return bool(
@@ -1391,9 +1394,16 @@ def _open_private_image(path: Path, *, existing: bool = False, delete_on_close: 
     The observer retains the delete-on-close handle. Kernel handle cleanup therefore removes the
     image even when the observer is forcibly terminated. Readers must allow FILE_SHARE_DELETE.
     """
+    if sys.platform != "win32":
+        raise _ImageUnavailable("UNSUPPORTED")
     # Windows-only import and native handle transfer; no optional Python dependency.
     # pylint: disable=import-outside-toplevel
-    import msvcrt
+    try:
+        import msvcrt
+
+        descriptor_flags = os.O_RDWR | getattr(os, "O_BINARY") | getattr(os, "O_NOINHERIT")
+    except (ImportError, AttributeError):
+        raise _ImageUnavailable("UNSUPPORTED") from None
 
     class SecurityAttributes(ctypes.Structure):  # pylint: disable=too-few-public-methods
         """SECURITY_ATTRIBUTES for atomic private file creation."""
@@ -1435,7 +1445,7 @@ def _open_private_image(path: Path, *, existing: bool = False, delete_on_close: 
         if handle == ctypes.c_void_p(-1).value:
             handle = None
             raise _ImageUnavailable("WRITE_FAILED")
-        descriptor_fd = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY | os.O_NOINHERIT)
+        descriptor_fd = msvcrt.open_osfhandle(handle, descriptor_flags)
         handle = None  # the file descriptor now owns it
         return os.fdopen(descriptor_fd, "r+b")
     finally:
@@ -1526,14 +1536,14 @@ def _evidence_directory(directory: Path, basename: str) -> Path:
     repo = next((ancestor for ancestor in ancestors if (ancestor / ".git").exists()), None)
     forbidden = {".git", "packages", "deliverables", "fabric", "pbip", "reports", "semantic_models"}
     for ancestor in ancestors:
-        if ancestor == repo:
-            break  # a repository may have a fabric/ sibling beside its ignored run scratch
         name = ancestor.name.casefold()
         if name in forbidden or name.endswith((".report", ".semanticmodel")):
             raise _ImageUnavailable("UNSAFE_EVIDENCE_DIR")
-        if (ancestor / "definition.pbir").exists() or (ancestor / "definition.pbism").exists():
+        if any(
+            (ancestor / marker).exists() for marker in ("definition.pbir", "definition.pbism", "package-manifest.json")
+        ):
             raise _ImageUnavailable("UNSAFE_EVIDENCE_DIR")
-        if any((ancestor / name).is_dir() for name in ("fabric", "pbip")) or any(ancestor.glob("*.pbip")):
+        if any(ancestor.glob("*.pbip")):
             raise _ImageUnavailable("UNSAFE_EVIDENCE_DIR")
     if repo is not None:
         checked = subprocess.run(
@@ -1591,26 +1601,36 @@ def _image_notice(record: dict, status: str) -> None:
 
 @dataclass
 class _ImageRequest:
-    """One bounded child and the file it alone may produce."""
+    """One bounded launch/capture and its lease, registered BEFORE process creation."""
 
     path: Path
-    child: subprocess.Popen[bytes]
     lease: BinaryIO
     record: dict
+    child: subprocess.Popen[bytes] | None = None
+    ready: threading.Event = field(default_factory=threading.Event)
+    cancelled: bool = False
     expiry: threading.Timer | None = None
 
 
 class ModalVisualEvidence:
     """Invocation-private, one-shot asynchronous evidence. Never mutates a detection or its deadline."""
 
-    def __init__(self, directory: Path | None = None) -> None:
+    def __init__(self, directory: Path | None = None, *, deadline: float = float("inf")) -> None:
         self._attempted: set[tuple[int, int]] = set()
         self._requests: list[_ImageRequest] = []
         self._lock = threading.Lock()
         self._closed = False
+        self._deadline = deadline
+        self._pending: queue.Queue[tuple[int, CredentialDetection, float] | None] = queue.Queue(maxsize=1)
         configured = directory if directory is not None else os.environ.get(IMAGE_DIRECTORY_ENV)
         self._directory = Path(configured) if configured else None
         atexit.register(self.close)
+        observer = threading.Thread(target=self._consume, name="window-image-observer", daemon=True)
+        try:
+            observer.start()
+        except RuntimeError:
+            # Evidence is optional; failure to start its worker cannot change a refresh verdict.
+            self._closed = True
 
     def __enter__(self) -> ModalVisualEvidence:
         return self
@@ -1633,86 +1653,149 @@ class ModalVisualEvidence:
         request.record["cleanup_state"] = reason
         return True
 
-    def observe(self, pid: int, state: CredentialDetection) -> None:
-        """Start at most once for this HWND, and only for an already-detected unreadable owned modal."""
+    def enqueue(self, pid: int, state: CredentialDetection) -> None:
+        """Nonblocking handoff of an immutable detection; no filesystem, subprocess or thread startup."""
         if state.modal is not None or state.dialog is None or state.dialog.verdict != VERDICT_DIALOG_UNREADABLE:
             return
         window = state.dialog.window
-        if not window.hwnd or not window.owner_hwnd or window.owner_enabled is not False:
+        if self._closed or not window.hwnd or not window.owner_hwnd or window.owner_enabled is not False:
             return
+        deadline = min(self._deadline, time.monotonic() + IMAGE_CAPTURE_SECONDS)
+        try:
+            self._pending.put_nowait((pid, state, deadline))
+        except queue.Full:
+            # One pending exact snapshot is enough; later detector polls can offer a newer HWND.
+            pass
+
+    def _consume(self) -> None:
+        while not self._closed:
+            pending = self._pending.get()
+            if pending is None or self._closed:
+                return
+            pid, state, deadline = pending
+            if time.monotonic() < deadline:
+                try:
+                    self.observe(pid, state, deadline=deadline)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    # Background tracebacks can expose OS paths/UI text just as child stderr can.
+                    record = _image_record(pid, state, state.dialog.window, uuid.uuid4().hex.replace("0", "x"))
+                    self._notice(record, "CAPTURE_FAILED")
+
+    def observe(self, pid: int, state: CredentialDetection, *, deadline: float) -> None:
+        """Background-only acquisition. Startup and capture share the queued attempt's deadline."""
+        window = state.dialog.window
         with self._lock:
-            for previous in self._requests:
-                if previous.record["cleanup_state"] == "pending" and not previous.path.exists():
-                    if self._remove(previous, "removed_externally"):
-                        _image_notice(previous.record, "CLEANED")
             key = (pid, window.hwnd)
-            if self._closed or key in self._attempted:
-                return
+            repeated = key in self._attempted
+            previous_requests = tuple(self._requests)
             self._attempted.add(key)
-            capture_id = uuid.uuid4().hex.replace("0", "x")
-            record = _image_record(pid, state, window, capture_id)
-            if sys.platform != "win32":
-                _image_notice(record, "UNSUPPORTED")
-                return
-            if self._directory is None:
-                _image_notice(record, "EVIDENCE_DIR_REQUIRED")
-                return
-            lease = None
-            try:
-                basename = f"_ui-image-{capture_id}.png"
-                path = _evidence_directory(self._directory, basename) / basename
-                lease = _open_private_image(path, delete_on_close=True)
-                child = subprocess.Popen(  # pylint: disable=consider-using-with
+        for previous in previous_requests:
+            if previous.record["cleanup_state"] == "pending" and not previous.path.exists():
+                if self._remove(previous, "removed_externally"):
+                    self._notice(previous.record, "CLEANED")
+        if self._closed or repeated:
+            return
+        capture_id = uuid.uuid4().hex.replace("0", "x")
+        record = _image_record(pid, state, window, capture_id)
+        if sys.platform != "win32":
+            self._notice(record, "UNSUPPORTED")
+            return
+        if self._directory is None:
+            self._notice(record, "EVIDENCE_DIR_REQUIRED")
+            return
+        request = self._prepare_image(record, deadline)
+        if request is None:
+            return
+        try:
+            if not self._closed and not request.cancelled and time.monotonic() < deadline:
+                request.child = subprocess.Popen(  # pylint: disable=consider-using-with
                     [
                         sys.executable,
                         str(Path(__file__).resolve()),
                         str(pid),
                         str(window.hwnd),
                         str(window.owner_hwnd),
-                        path.name,
+                        request.path.name,
                     ],
-                    cwd=path.parent,
+                    cwd=request.path.parent,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
-            except (OSError, subprocess.TimeoutExpired, _ImageUnavailable):
-                if lease is not None:
-                    try:
-                        lease.close()
-                    except OSError:
-                        record.update(path=path.name, cleanup_state="cleanup_failed")
-                        _image_notice(record, "CLEANUP_FAILED")
-                _image_notice(record, "EVIDENCE_STORAGE_UNAVAILABLE")
-                return
+        except OSError:
+            pass  # the watcher publishes a closed failure, never the native exception or its paths
+        finally:
+            request.ready.set()
+        if self._closed or request.cancelled:
+            self._stop(request)
+            self._remove(request, "removed")
+
+    def _prepare_image(self, record: dict, deadline: float) -> _ImageRequest | None:
+        request = None
+        try:
+            basename = f"_ui-image-{record['capture_id']}.png"
+            path = _evidence_directory(self._directory, basename) / basename
+            if self._closed or time.monotonic() >= deadline:
+                self._notice(record, "CAPTURE_TIMEOUT")
+                return None
+            lease = _open_private_image(path, delete_on_close=True)
             record.update(image_basename=path.name, path=path.name, cleanup_state="pending")
-            request = _ImageRequest(path, child, lease, record)
-            self._requests.append(request)
-            try:
-                threading.Thread(target=self._watch, args=(request,), name="window-image", daemon=True).start()
-            except RuntimeError:
+            request = _ImageRequest(path, lease, record)
+            with self._lock:
+                if not self._closed:
+                    self._requests.append(request)
+            if self._closed or time.monotonic() >= deadline:
+                self._remove(request, "removed")
+                self._notice(record, "CAPTURE_TIMEOUT")
+                return None
+            # The watcher bounds even Popen startup. A late handle is stopped below; its child can
+            # only open this reserved name, which timeout/close has already removed.
+            threading.Thread(target=self._watch, args=(request, deadline), name="window-image", daemon=True).start()
+            return request
+        except (OSError, subprocess.TimeoutExpired, _ImageUnavailable, RuntimeError):
+            if request is not None:
                 self._stop(request)
                 self._remove(request, "removed")
-                _image_notice(record, "CAPTURE_FAILED")
+            self._notice(record, "EVIDENCE_STORAGE_UNAVAILABLE")
+            return None
 
-    def _watch(self, request: _ImageRequest) -> None:
+    def _notice(self, record: dict, status: str) -> None:
+        with self._lock:
+            if not self._closed:
+                _image_notice(record, status)
+
+    def _capture_result(self, request: _ImageRequest, deadline: float) -> str | None:
         # Exact bools are intentional: integer 1 must not certify an ownership check.
         # pylint: disable=unidiomatic-typecheck
+        if not request.ready.wait(max(0.0, deadline - time.monotonic())):
+            raise subprocess.TimeoutExpired("window-image", IMAGE_CAPTURE_SECONDS)
+        if self._closed or request.cancelled:
+            return None
+        if request.child is None:
+            raise OSError
+        output, _ = request.child.communicate(timeout=max(0.0, deadline - time.monotonic()))
+        payload = json.loads(output)
+        code = payload.get("status")
+        if code not in _IMAGE_RESULTS or (code == "ACQUIRED" and request.child.returncode != 0):
+            code = "CAPTURE_FAILED"
+        checks = payload.get("ownership_checks")
+        if (
+            isinstance(checks, dict)
+            and set(checks) == set(_IMAGE_CHECKS)
+            and all(value is None or type(value) is bool for value in checks.values())
+        ):
+            request.record["ownership_checks"] = checks
+        if code == "ACQUIRED" and not self._accept_image(request, payload):
+            code = "CAPTURE_FAILED"
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired("window-image", IMAGE_CAPTURE_SECONDS)
+        return code
+
+    def _watch(self, request: _ImageRequest, deadline: float) -> None:
         try:
-            output, _ = request.child.communicate(timeout=IMAGE_CAPTURE_SECONDS)
-            payload = json.loads(output)
-            code = payload.get("status")
-            if code not in _IMAGE_RESULTS or (code == "ACQUIRED" and request.child.returncode != 0):
-                code = "CAPTURE_FAILED"
-            checks = payload.get("ownership_checks")
-            if (
-                isinstance(checks, dict)
-                and set(checks) == set(_IMAGE_CHECKS)
-                and all(value is None or type(value) is bool for value in checks.values())
-            ):
-                request.record["ownership_checks"] = checks
-            if code == "ACQUIRED" and not self._accept_image(request, payload):
-                code = "CAPTURE_FAILED"
+            code = self._capture_result(request, deadline)
+            if code is None:
+                return
         except subprocess.TimeoutExpired:
             code = "CAPTURE_TIMEOUT"
             self._stop(request)
@@ -1775,26 +1858,33 @@ class ModalVisualEvidence:
 
     @classmethod
     def _stop(cls, request: _ImageRequest) -> None:
+        request.cancelled = True
+        request.ready.set()
         try:
-            if request.child.poll() is None:
+            if request.child is not None and request.child.poll() is None:
                 request.child.kill()
                 request.child.wait(timeout=1)
         except (OSError, subprocess.TimeoutExpired):
             _image_notice(request.record, "CAPTURE_CLEANUP_FAILED")
 
     def close(self) -> None:
-        """End acquisition before deleting; a late child must not recreate an already-cleaned image."""
+        """Cancel without joining the observer or waiting for its filesystem/process startup."""
         with self._lock:
             self._closed = True
-            for request in self._requests:
-                self._stop(request)
-                previous = request.record["cleanup_state"]
-                removed = self._remove(request, "removed_on_exit")
-                if removed and request.expiry is not None:
-                    request.expiry.cancel()
-                if removed and previous in ("pending", "cleanup_failed") and request.record["capture_success"]:
-                    _image_notice(request.record, "CLEANED")
-            atexit.unregister(self.close)
+            requests = tuple(self._requests)
+        try:
+            self._pending.put_nowait(None)
+        except queue.Full:
+            pass
+        for request in requests:
+            self._stop(request)
+            previous = request.record["cleanup_state"]
+            removed = self._remove(request, "removed_on_exit")
+            if removed and request.expiry is not None:
+                request.expiry.cancel()
+            if removed and previous in ("pending", "cleanup_failed") and request.record["capture_success"]:
+                _image_notice(request.record, "CLEANED")
+        atexit.unregister(self.close)
 
 
 if __name__ == "__main__":

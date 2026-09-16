@@ -406,12 +406,13 @@ def _join_refresh_worker(
     evidence_dir: Path | None = None,
 ) -> bool:
     """Attach non-verdict visual evidence to the actual in-flight callback in BOTH wait branches."""
-    with ModalVisualEvidence(evidence_dir) as evidence:
+    deadline = time.monotonic() + total_timeout
+    with ModalVisualEvidence(evidence_dir, deadline=deadline) as evidence:
 
         def detector(pid: int) -> CredentialDetection:
             state = _in_flight_credential_state(pid)
             if worker.is_alive():
-                evidence.observe(pid, state)
+                evidence.enqueue(pid, state)
             return state
 
         return _wait_refresh_worker(
@@ -423,6 +424,7 @@ def _join_refresh_worker(
             progress_monitor=progress_monitor,
             observation_mode=observation_mode,
             detector=detector,
+            deadline=deadline,
         )
 
 
@@ -436,6 +438,7 @@ def _wait_refresh_worker(
     progress_monitor: RefreshProgressMonitor | None,
     observation_mode: bool,
     detector: Callable[[int], CredentialDetection],
+    deadline: float,
 ) -> bool:
     """Wait for the refresh thread, with credential polling and optional progress liveness.
 
@@ -448,8 +451,8 @@ def _wait_refresh_worker(
     """
     if progress_monitor is None and not observation_mode:
         if desktop_pid is None:
-            worker.join(total_timeout)
-            return not worker.is_alive()
+            worker.join(max(0.0, deadline - time.monotonic()))
+            return not worker.is_alive() and time.monotonic() < deadline
         return join_with_credential_poll(
             worker,
             pid=desktop_pid,
@@ -459,9 +462,10 @@ def _wait_refresh_worker(
             source_hint=source_hint,
             detector=detector,
             initial_state=initial_state,
+            deadline=deadline,
         )
 
-    started = time.monotonic()
+    started = deadline - total_timeout
     next_heartbeat = REFRESH_HEARTBEAT_SECONDS
     latched_unknown = initial_state.unknown_reason if initial_state else None
     latched_desktop_unready = initial_state.desktop_unready if initial_state else None
@@ -479,7 +483,7 @@ def _wait_refresh_worker(
             REFRESH_CREDENTIAL_POLL_SECONDS,
             max(0.0, next_heartbeat - elapsed),
         )
-        worker.join(max(0.01, wait_for))
+        worker.join(min(absolute_remaining, max(0.01, wait_for)))
         if desktop_pid is not None:
             state = detector(desktop_pid)
             raise_terminal_detection(desktop_pid, state, source_hint)
@@ -498,7 +502,7 @@ def _wait_refresh_worker(
             if progress_monitor is not None:
                 progress_monitor.print_evidence_heartbeat(elapsed, total_timeout)
             next_heartbeat += REFRESH_HEARTBEAT_SECONDS
-    if worker.is_alive():
+    if worker.is_alive() or time.monotonic() >= deadline:
         # The latches used to be computed here and DISCARDED, so this branch always degraded to the
         # caller's bare TimeoutError - which the parent classifier blames on a slow source. Raise them
         # exactly as `join_with_credential_poll` does, from the same shared helper.
@@ -742,7 +746,7 @@ def _refresh(
         worker.start()
         if progress_monitor is not None:
             progress_monitor.mark_refresh_started()
-        _join_refresh_worker(
+        completed = _join_refresh_worker(
             worker,
             desktop_pid=desktop_pid,
             source_hint=source_hint,
@@ -752,7 +756,7 @@ def _refresh(
             observation_mode=return_observation,
             evidence_dir=evidence_dir,
         )
-        if worker.is_alive():
+        if not completed or worker.is_alive():
             if desktop_pid is not None:
                 # The FINAL check, and it is in-flight too (#376 review, finding 1): by here the
                 # refresh is ours, so a proven-benign progress dialog is ours and must not decide the

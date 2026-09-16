@@ -59,20 +59,37 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B
 
 ### Inspect an unreadable in-flight dialog without stealing focus (#146)
 
-**Phase-1 seam: acquisition plus a metadata record, not pixel classification.** The first in-flight
-`DIALOG_UNREADABLE` owned finding gets one bounded exact-HWND
+**Phase-1 seam: acquisition plus a metadata record, not pixel classification.** An in-flight
+`DIALOG_UNREADABLE` owned finding is offered to a background worker for one bounded exact-HWND
 **`PrintWindow(PW_RENDERFULLCONTENT)`** attempt. PID, visibility, direct owner, owner PID and disabled
 owner are checked before rendering, after rendering and after writing. Failure, blank/unpainted
 pixels, changed identity or incomplete metadata cannot become a semantic verdict. The existing
 unreadable latch, refresh deadline and successful-worker behavior remain unchanged.
+
+**The wait only queues an immutable exact-target snapshot.** Its single pending slot never waits
+for storage validation, Git, file/process creation or acquisition. A busy slot can drop an
+observation; later polls can offer it again. At most one attempt per PID/HWND is started.
+The original monotonic refresh deadline is pinned before evidence-worker construction and checked
+before accepting completion in both wait branches, including after a delayed inspection. A worker
+finishing after that deadline cannot overwrite a timeout or latched dialog result during cleanup.
+Timely success remains success even while optional evidence is delayed.
+
+Queueing, startup and capture share an **8-second** attempt budget, capped by the remaining refresh
+deadline. A late storage check cannot start acquisition. The acquisition watcher starts **before**
+`Popen`; timeout/exit closes the reserved delete-on-close lease, and a process handle returned late
+is killed without publishing an image. Native process creation itself cannot always be interrupted:
+it runs on a daemon observer, never on the refresh wait thread, and teardown does not join that
+observer. This is not a guarantee that a wedged OS call returns; its eventual result is discarded.
 
 **Configure caller-owned private scratch explicitly.** Supply
 `--evidence-dir <existing-local-run-scratch>` or export **`PBIP_EVIDENCE_DIR`** before invoking a
 probe that launches this refresh. The Python API also accepts `refresh(..., evidence_dir=Path(...))`;
 the explicit argument overrides the environment. A suitable location is the allocated run's
 `scratch` directory, never a package, deliverable, model or report directory. When inside a checkout
-the destination must be positively Git-ignored. Remote/reparse locations and artifact trees are
-refused. The directory must already exist. **There is no image fallback to the working directory.**
+the destination must be positively Git-ignored. Remote/reparse locations, actual artifact ancestry
+and artifact/package markers (including `package-manifest.json`) are refused, even at a Git root.
+An ancestor's unrelated `fabric` or `pbip` sibling alone does **not** classify the scratch directory.
+The directory must already exist. **There is no image fallback to the working directory.**
 An unconfigured/unusable directory emits a non-verdict diagnostic and preserves the wait.
 
 Run the refresh **asynchronously, attached to the session**, with its explicit PID and the usual

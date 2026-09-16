@@ -20,6 +20,7 @@ import subprocess
 import sys
 from types import SimpleNamespace
 from ctypes import wintypes
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
@@ -194,7 +195,7 @@ def visual_runtime(monkeypatch, tmp_path):
             children.append(self)
 
         def communicate(self, timeout):
-            assert timeout == _credential_modal.IMAGE_CAPTURE_SECONDS
+            assert 0 < timeout <= _credential_modal.IMAGE_CAPTURE_SECONDS
             pid, hwnd, owner = map(int, self.argv[2:5])
             window = DesktopWindow("", "", 0, 0, hwnd=hwnd, owner_hwnd=owner, owner_enabled=False)
             try:
@@ -339,6 +340,50 @@ def test_visual_native_external_handling_marks_file_for_deletion(tmp_path) -> No
     assert not path.exists()
 
 
+@pytest.mark.parametrize("missing", ["platform", "O_BINARY", "O_NOINHERIT"])
+def test_visual_private_stream_requires_real_windows_support(monkeypatch, tmp_path, missing) -> None:
+    def no_native_call(*_args, **_kwargs):
+        pytest.fail("unsupported private-file flags must refuse before any Windows API call")
+
+    monkeypatch.setattr(_credential_modal.ctypes, "WinDLL", no_native_call, raising=False)
+    if missing == "platform":
+        monkeypatch.setattr(_credential_modal.sys, "platform", "linux")
+    else:
+        monkeypatch.setattr(_credential_modal.sys, "platform", "win32")
+        monkeypatch.delattr(_credential_modal.os, missing, raising=False)
+    with pytest.raises(_credential_modal._ImageUnavailable, match="UNSUPPORTED"):
+        _credential_modal._open_private_image(tmp_path / "_ui-image-unsupported.png")
+    assert not list(tmp_path.iterdir())
+
+
+def test_visual_enqueue_is_bounded_immutable_and_has_no_acquisition_side_effects(monkeypatch, tmp_path) -> None:
+    # Freeze the consumer at its startup boundary so the queue, not a scheduler race, is the oracle.
+    monkeypatch.setattr(_credential_modal.threading.Thread, "start", lambda _self: None)
+    evidence = _credential_modal.ModalVisualEvidence(tmp_path)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("enqueue must not traverse storage, inspect pixels, launch a process or start a thread")
+
+    monkeypatch.setattr(_credential_modal, "_evidence_directory", forbidden)
+    monkeypatch.setattr(_credential_modal, "_image_user32", forbidden)
+    monkeypatch.setattr(_credential_modal.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(_credential_modal.threading.Thread, "start", forbidden)
+    original = inspect_credential_modal(111, lambda _pid: [owned_dialog(), main_window()])
+    replacement = inspect_credential_modal(111, lambda _pid: [owned_dialog(hwnd=DIALOG_HWND + 9), main_window()])
+    try:
+        evidence.enqueue(111, original)
+        evidence.enqueue(222, replacement)
+        assert evidence._pending.qsize() == 1, "a blocked observer must not accumulate an unbounded queue"
+        pid, state, _deadline = evidence._pending.get_nowait()
+        assert pid == 111 and state is original, "the queued exact target must not follow a later detector state"
+        assert (state.dialog.window.hwnd, state.dialog.window.owner_hwnd) == (DIALOG_HWND, MAIN_HWND)
+        with pytest.raises(FrozenInstanceError):
+            state.dialog.window.hwnd = DIALOG_HWND + 9
+        assert not list(tmp_path.iterdir())
+    finally:
+        evidence.close()
+
+
 def test_visual_directory_must_be_ignored_inside_a_checkout(tmp_path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -359,6 +404,25 @@ def test_visual_directory_must_be_ignored_inside_a_checkout(tmp_path) -> None:
     assert not list(repo.rglob("*.png"))
 
 
+@pytest.mark.parametrize("sibling", ["fabric", "pbip"])
+def test_visual_directory_accepts_scratch_with_unrelated_ancestor_siblings(tmp_path, sibling) -> None:
+    # Reproduces a drive root with C:\pbip beside C:\Users\...\scratch, without touching the drive root.
+    drive = tmp_path / "drive"
+    safe = drive / "Users" / "operator" / "scratch"
+    safe.mkdir(parents=True)
+    unrelated = drive / sibling
+    unrelated.mkdir()
+    basename = "_ui-image-" + "a" * 32 + ".png"
+    assert _credential_modal._evidence_directory(safe, basename) == safe.resolve(), (
+        "an unrelated ancestor sibling must not make private scratch an artifact"
+    )
+    contained = unrelated / "scratch"
+    contained.mkdir()
+    with pytest.raises(_credential_modal._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
+        _credential_modal._evidence_directory(contained, basename)
+    assert not list(tmp_path.rglob("*.png"))
+
+
 @pytest.mark.parametrize(
     "artifact",
     ["packages", "deliverables", "fabric", "pbip", "reports", "semantic_models", "Unit.Report", "Unit.SemanticModel"],
@@ -371,14 +435,20 @@ def test_visual_directory_refuses_artifact_trees(tmp_path, artifact) -> None:
     assert not list(tmp_path.rglob("*.png"))
 
 
-@pytest.mark.parametrize("marker", ["definition.pbir", "definition.pbism", "unit.pbip"])
-def test_visual_directory_refuses_renamed_artifacts(tmp_path, marker) -> None:
+@pytest.mark.parametrize("marker", ["definition.pbir", "definition.pbism", "unit.pbip", "package-manifest.json"])
+@pytest.mark.parametrize("checkout", [False, True], ids=["ordinary-root", "git-root"])
+def test_visual_directory_refuses_renamed_artifacts(tmp_path, marker, checkout) -> None:
     unit = tmp_path / "renamed"
     directory = unit / "scratch"
     directory.mkdir(parents=True)
     (unit / marker).write_text("{}", encoding="utf-8")
-    with pytest.raises(_credential_modal._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
-        _credential_modal._evidence_directory(directory, "_ui-image-" + "a" * 32 + ".png")
+    if checkout:
+        result = subprocess.run(["git", "init", "--quiet", str(unit)], capture_output=True, check=False)
+        assert result.returncode == 0
+        (unit / ".gitignore").write_text("/scratch/\n", encoding="utf-8")
+    for destination in (unit, directory):
+        with pytest.raises(_credential_modal._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
+            _credential_modal._evidence_directory(destination, "_ui-image-" + "a" * 32 + ".png")
 
 
 @pytest.mark.gui
