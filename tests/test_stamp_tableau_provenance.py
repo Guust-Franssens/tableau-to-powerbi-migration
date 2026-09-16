@@ -2364,7 +2364,7 @@ def test_published_repeated_input_rechecks_remote_content_after_each_lookup(tmp_
     assert blocks[1]["source_match"] == "unestablished", "P_REMOTE_REPEATED_RECHECK"
     assert blocks[1]["rows"][0]["state"] == "cannot_establish" and "datasource_luid" not in blocks[1]["rows"][0]
     assert site.served[P_WORKBOOK] == [held, held, changed], "P_REMOTE_DISTINCT_INITIAL_PLUS_TWO_RECHECKS"
-    assert len(site.queries()) == site.detail_count() == 1
+    assert len(site.queries()) == site.detail_count() == 2
     assert _published_replay(messages)[0] is None
 
 
@@ -3551,7 +3551,8 @@ def test_r2_published_valid_configured_base_uses_real_urllib(
     published_http_site["fixture"] = PublishedSite(payload)
     result, messages = _published_capture(path, dict(LIVE_ENV, TABLEAU_SERVER_URL=base))
     assert _association(result)["rows"][0]["datasource_luid"] == P_DATASOURCE, "R2_URL_POSITIVE"
-    assert published_http_site["requests"] == 8
+    assert published_http_site["requests"] == 9
+    assert sum("/workbooks?" in row["route"] for row in published_http_site["observed"]) == 2
     downloads = [row for row in published_http_site["observed"] if "/content?" in row["route"]]
     assert len(downloads) == 2 and all(row["cache_control"] == row["pragma"] == "no-cache" for row in downloads)
     assert _published_replay(messages)[0] is None and prov.is_success(result)
@@ -3730,3 +3731,119 @@ def test_r2_published_every_authority_response_uses_strict_json(
         assert "datasource_luid" not in row
     assert _published_replay(messages)[0] is None
     assert "response-private" not in json.dumps(messages)
+
+
+def _published_between_inputs(tmp_path: Path, monkeypatch, change: str) -> tuple:
+    """Change the REST authority only after the first physical input's acquisition completes."""
+    path, site = _published_setup(tmp_path, monkeypatch, _published_xml("SalesFeed", "SalesFeed"))
+    (tmp_path / "Consumer.twb").write_bytes(path.read_bytes())
+    messages = PublishedMessages(tuple(prov.collect_inputs(tmp_path)))
+    boundary = []
+
+    def send(message: dict) -> None:
+        messages.append(copy.deepcopy(message))
+        if message["kind"] != prov.MSG_PUBLISHED_EVIDENCE or message["index"] != 0:
+            return
+        boundary.append(len(site.calls))
+        if change == "catalog-empty":
+            site.catalog["datasources"]["datasource"] = []
+            site.catalog["pagination"]["totalAvailable"] = 0
+        elif change == "catalog-ambiguous":
+            site.catalog["datasources"]["datasource"] *= 2
+            site.catalog["pagination"]["totalAvailable"] = 2
+        elif change == "detail-404":
+            site.detail_status = 404
+        elif change == "detail-changed":
+            site.detail["datasource"]["updatedAt"] = "2026-09-16T20:00:00Z"
+        elif change == "visibility":
+            site.user["siteRole"] = "Creator"
+        elif change == "workbook-ambiguous":
+            site._site_workbooks.append({"id": _fixture_luid(799), "name": "Consumer"})
+        elif change == "workbook-identity":
+            site._site_workbooks[0]["id"] = _fixture_luid(799)
+        elif change == "workbook-failed":
+            site._inventory_status = 404
+        elif change == "workbook-truncated":
+            site._inventory_document = {
+                "workbooks": {"workbook": site._site_workbooks},
+                "pagination": {"pageNumber": 1, "pageSize": 1000, "totalAvailable": 2},
+            }
+
+    reporter = prov.WorkerReporter(SimpleNamespace(send=send))
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+    reporter.terminal(result)
+    assert len(boundary) == 1, "P_CURRENT_INPUT_BOUNDARY_REACHED"
+    return result, messages, site, site.calls[boundary[0] :]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "unchanged",
+        "catalog-empty",
+        "catalog-ambiguous",
+        "detail-404",
+        "detail-changed",
+        "visibility",
+        "workbook-ambiguous",
+        "workbook-identity",
+        "workbook-failed",
+        "workbook-truncated",
+    ],
+)
+def test_published_authority_is_reacquired_for_each_physical_input(tmp_path: Path, monkeypatch, change: str) -> None:
+    result, messages, site, later_calls = _published_between_inputs(tmp_path, monkeypatch, change)
+    first, second = [record["origin"]["published_dependencies"] for record in result["inputs"]]
+    assert all(row["state"] == "resolved" for row in first["rows"]), "P_CURRENT_INPUT_POSITIVE"
+    expected = {"unchanged": "resolved", "catalog-ambiguous": "ambiguous"}.get(change, "cannot_establish")
+    assert [row["state"] for row in second["rows"]] == [expected, expected], f"P_CURRENT_INPUT_AUTHORITY_{change}"
+    assert second["source_match"] == ("unestablished" if change.startswith("workbook-") else "sha256")
+    assert all(("datasource_luid" in row) == (expected == "resolved") for row in second["rows"])
+    assert site.count("inventory") == 3, "P_CURRENT_INPUT_INVENTORY_REQUESTS"
+    assert sum("/workbooks?" in route for _, route in later_calls) == 1
+    visible = not change.startswith("workbook-")
+    catalog = visible and change != "visibility"
+    detail = catalog and change not in ("catalog-empty", "catalog-ambiguous")
+    assert sum("/users/" in route for _, route in later_calls) == int(visible), "P_CURRENT_INPUT_VISIBILITY_REQUESTS"
+    assert len(site.queries()) == 1 + int(catalog), "P_CURRENT_INPUT_CATALOG_REQUESTS"
+    assert site.detail_count() == 1 + int(detail), "P_CURRENT_INPUT_DETAIL_REQUESTS"
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "P_CURRENT_INPUT_OBSERVATIONS_RECONCILE"
+    assert all(
+        field not in json.dumps(result)
+        for field in ("current_workbook", "acquisition", "candidate_sha256", "detail_sha256")
+    ), "P_CURRENT_INPUT_PRIVATE_OBSERVATIONS"
+
+
+@pytest.mark.parametrize("change", ["unchanged", "detail-404", "visibility"])
+def test_published_distinct_associations_reacquire_visibility_and_detail_within_one_input(
+    tmp_path: Path, monkeypatch, change: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch, _published_xml("SalesFeed", "OtherFeed", "OtherFeed"))
+    call = site._call
+
+    def change_association(
+        method: str, route: str, body: dict | None = None, accept: str | None = None
+    ) -> tuple[int, bytes]:
+        if "/datasources?" in route and "OtherFeed" in parse_qs(urlsplit(route).query).get("filter", [""])[0]:
+            site.catalog["datasources"]["datasource"][0]["contentUrl"] = "OtherFeed"
+            site.detail["datasource"]["contentUrl"] = "OtherFeed"
+        answer = call(method, route, body, accept)
+        if "/datasources/" in route and site.detail_count() == 1:
+            if change == "detail-404":
+                site.detail_status = 404
+            elif change == "visibility":
+                site.user["siteRole"] = "Creator"
+        return answer
+
+    monkeypatch.setattr(site, "_call", change_association)
+    result, messages = _published_capture(path, LIVE_ENV)
+    rows = _association(result)["rows"]
+    assert rows[0]["state"] == "resolved", "P_CURRENT_ASSOCIATION_POSITIVE"
+    expected = "resolved" if change == "unchanged" else "cannot_establish"
+    assert [row["state"] for row in rows[1:]] == [expected, expected], "P_CURRENT_ASSOCIATION_AUTHORITY"
+    assert site.detail_count() == len(site.queries()) == (1 if change == "visibility" else 2), (
+        "P_CURRENT_ASSOCIATION_REQUESTS"
+    )
+    assert sum("/users/" in route for _, route in site.calls) == 2, "P_CURRENT_ASSOCIATION_VISIBILITY"
+    assert _published_replay(messages)[0] is None

@@ -1042,6 +1042,37 @@ def _validated_published_dependencies(origin: dict, local: dict) -> None:
     _validated_dependency_rows(block["rows"], block["source_match"])
 
 
+def _validated_dependency_acquisition(row: dict) -> None:
+    """Current catalog outcomes need the input-bound visibility, page and selected-detail facts."""
+    acquired = row["acquisition"]
+    if acquired is None:
+        _require(row["state"] == "cannot_establish")
+        return
+    _require(
+        type(acquired) is dict
+        and acquired.keys() == {"visible", "catalog", "candidate_luid_sha256", "candidate_sha256", "detail_sha256"}
+    )
+    _require(type(acquired["visible"]) is bool)
+    if acquired["catalog"] is not None:
+        _validated_inventory_facts(acquired["catalog"])
+    for key in ("candidate_luid_sha256", "candidate_sha256", "detail_sha256"):
+        if acquired[key] is not None:
+            _digest(acquired[key])
+    if row["state"] == "cannot_establish":
+        return
+    _require(acquired["visible"] and acquired["catalog"] is not None)
+    page = prov.classify_inventory(acquired["catalog"])
+    _require(
+        page.status == "complete"
+        and page.page_number == 1
+        and page.page_size == prov.INVENTORY_PAGE_SIZE
+        and page.total_available == page.returned_count == row["candidate_count"]
+    )
+    if row["state"] == "resolved":
+        _require(acquired["candidate_luid_sha256"] == row["datasource_luid_sha256"])
+        _require(acquired["candidate_sha256"] is not None and acquired["candidate_sha256"] == acquired["detail_sha256"])
+
+
 def _validated_dependency_rows(rows: object, source_match: str, *, private: bool = False) -> None:
     """The same strict outcome contract applies before and after public authority construction."""
     _require(type(rows) is list and 0 < len(rows) <= PROVENANCE_MAX_MEMBERS)
@@ -1049,7 +1080,7 @@ def _validated_dependency_rows(rows: object, source_match: str, *, private: bool
     luid_key = "datasource_luid_sha256" if private else "datasource_luid"
     previous = -1
     for row in rows:
-        required = {"source_ordinal", key, "state", "candidate_count"}
+        required = {"source_ordinal", key, "state", "candidate_count"} | ({"acquisition"} if private else set())
         _require(type(row) is dict and required <= row.keys() <= required | {luid_key})
         ordinal, count = row["source_ordinal"], row["candidate_count"]
         _require(_is_count(ordinal) and ordinal > previous)
@@ -1059,7 +1090,7 @@ def _validated_dependency_rows(rows: object, source_match: str, *, private: bool
         else:
             _text(row[key])
             _require(prov.valid_published_key(row[key]))
-        _enum(row["state"], {"resolved", "missing", "ambiguous", "cannot_establish"})
+        _enum(row["state"], {"resolved", "ambiguous", "cannot_establish"})
         _require(count is None or _is_count(count))
         if row["state"] == "cannot_establish":
             _require(count is None and luid_key not in row)
@@ -1074,18 +1105,36 @@ def _validated_dependency_rows(rows: object, source_match: str, *, private: bool
                     _require(type(luid) is str and prov.LUID_RE.fullmatch(luid) is not None)
             else:
                 _require(luid_key not in row)
-                _require(count == 0 if row["state"] == "missing" else count > 1)
+                _require(count > 1)
+        if private:
+            _validated_dependency_acquisition(row)
+
+
+def _validated_current_workbook(current: object) -> None:
+    if current is None:
+        return
+    _require(
+        type(current) is dict
+        and current.keys() == {"inventory", "candidate_count", "luid_count", "workbook_luid_sha256"}
+    )
+    _validated_inventory_facts(current["inventory"])
+    for key in ("candidate_count", "luid_count"):
+        _require(_is_count(current[key]) and current[key] <= current["inventory"]["returned_count"])
+    if current["workbook_luid_sha256"] is not None:
+        _digest(current["workbook_luid_sha256"])
 
 
 def _validated_published_evidence(evidence: object) -> None:
     _require(
         type(evidence) is dict
-        and evidence.keys() == {"identity", "source_sha256", "current_sha256", "current_remote", "source_match", "rows"}
+        and evidence.keys()
+        == {"identity", "source_sha256", "current_sha256", "current_remote", "current_workbook", "source_match", "rows"}
     )
     _validated_workbook_identity(evidence["identity"])
     _digest(evidence["source_sha256"])
     if evidence["current_sha256"] is not None:
         _digest(evidence["current_sha256"])
+    _validated_current_workbook(evidence["current_workbook"])
     current = evidence["current_remote"]
     if current is not None:
         _require(type(current) is dict and current.keys() == {"sha256", "revision_key"})
@@ -1186,12 +1235,14 @@ def _validated_dependency_history(record: dict, checkpoint: dict, success: bool)
     evidence = checkpoint.get("published_evidence")
     _require(evidence is not None)
     source_match = evidence["source_match"]
-    if evidence["current_sha256"] != evidence["source_sha256"] or not prov.published_remote_agrees(
-        evidence["current_remote"], checkpoint["input"], origin
+    if (
+        not prov.published_workbook_agrees(evidence["current_workbook"], identity)
+        or evidence["current_sha256"] != evidence["source_sha256"]
+        or not prov.published_remote_agrees(evidence["current_remote"], checkpoint["input"], origin)
     ):
         source_match = "unestablished"
     _require(block["source_match"] == source_match)
-    outcomes = evidence["rows"]
+    outcomes = [{key: value for key, value in row.items() if key != "acquisition"} for row in evidence["rows"]]
     if source_match == "unestablished":
         outcomes = [
             {key: row[key] for key in ("source_ordinal", "published_key_sha256")}

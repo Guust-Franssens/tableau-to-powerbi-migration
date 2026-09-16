@@ -1067,9 +1067,35 @@ def _published_checkpoint(result: dict) -> dict:
             "sha256": record["origin"]["remote_sha256"],
             "revision_key": copy.deepcopy(record["origin"]["remote_revision_key"]),
         },
+        "current_workbook": {
+            "inventory": _facts(returned_count=1, total_available=1)["facts"],
+            "candidate_count": 1,
+            "luid_count": 1,
+            "workbook_luid_sha256": identity["workbook_luid_sha256"],
+        },
         "source_match": block["source_match"],
         "rows": [
-            dict(occurrence, state=row["state"], candidate_count=row["candidate_count"])
+            dict(
+                occurrence,
+                state=row["state"],
+                candidate_count=row["candidate_count"],
+                acquisition={
+                    "visible": True,
+                    "catalog": _facts(
+                        returned_count=row["candidate_count"] or 0,
+                        total_available=row["candidate_count"] or 0,
+                        page_number=1,
+                        page_size=1000,
+                    )["facts"],
+                    "candidate_luid_sha256": (
+                        hashlib.sha256(row["datasource_luid"].lower().encode()).hexdigest()
+                        if "datasource_luid" in row
+                        else None
+                    ),
+                    "candidate_sha256": "d" * 64 if row["state"] == "resolved" else None,
+                    "detail_sha256": "d" * 64 if row["state"] == "resolved" else None,
+                },
+            )
             | (
                 {"datasource_luid_sha256": hashlib.sha256(row["datasource_luid"].lower().encode()).hexdigest()}
                 if "datasource_luid" in row
@@ -1097,7 +1123,7 @@ def test_published_nested_authority_transports_exactly_and_only_with_consistent_
     if source_match == "revision_same":
         origin.update(match="name_only", remote_sha256="b" * 64)
     checkpoints = {0: _published_checkpoint(result)}
-    if source_match == "unestablished" and state != "cannot_establish":
+    if state == "missing" or (source_match == "unestablished" and state != "cannot_establish"):
         with pytest.raises(estate.ProvenanceProtocolError):
             estate._validated_result(result, 1, checkpoints)
     else:
@@ -1650,3 +1676,170 @@ def test_r2_parent_launch_discovery_cannot_extend_the_existing_deadline(monkeypa
         right.close()
     assert time.monotonic() - started < 0.6, "R2_PARENT_DISCOVERY_DEADLINE"
     assert not receiver.thread.is_alive()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "catalog-empty",
+        "catalog-ambiguous",
+        "detail-404",
+        "detail-changed",
+        "visibility",
+        "workbook-ambiguous",
+        "workbook-identity",
+        "workbook-failed",
+        "workbook-truncated",
+    ],
+)
+def test_published_current_input_observations_cannot_be_overruled_by_final_fields(
+    tmp_path: Path, monkeypatch, change: str
+) -> None:
+    from test_stamp_tableau_provenance import P_DATASOURCE, _published_between_inputs, _published_replay
+
+    result, messages, _site, _calls = _published_between_inputs(tmp_path, monkeypatch, change)
+    second = result["inputs"][1]["origin"]["published_dependencies"]
+    assert all(row["state"] != "resolved" for row in second["rows"]), "P_CURRENT_HISTORY_PRODUCER_CONTROL"
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "P_CURRENT_HISTORY_WIRE_CONTROL"
+    for message in messages:
+        if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            block = message["result"]["inputs"][1]["origin"]["published_dependencies"]
+            block["source_match"] = "sha256"
+            for row in block["rows"]:
+                row.update(state="resolved", candidate_count=1, datasource_luid=P_DATASOURCE)
+    code, state = _published_replay(messages)
+    assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, f"P_CURRENT_HISTORY_BINDING_{change}"
+    assert len(state.document(code)["inputs"]) == 2
+    assert all(
+        field not in json.dumps(state.document(code)) for field in ("current_workbook", "acquisition", "detail_sha256")
+    )
+
+
+@pytest.mark.parametrize(
+    "observation",
+    [
+        "workbook-unavailable",
+        "workbook-count",
+        "workbook-luid-count",
+        "workbook-identity",
+        "workbook-page",
+        "visibility",
+        "catalog-unavailable",
+        "catalog-zero",
+        "catalog-page",
+        "candidate-identity",
+        "candidate-unavailable",
+        "detail-unavailable",
+        "detail-mismatch",
+    ],
+)
+def test_published_current_authority_observations_independently_constrain_consistent_rows(
+    tmp_path: Path, monkeypatch, observation: str
+) -> None:
+    from test_stamp_tableau_provenance import _published_between_inputs, _published_replay
+
+    result, messages, _site, _calls = _published_between_inputs(tmp_path, monkeypatch, "unchanged")
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "P_CURRENT_FACTS_POSITIVE"
+    evidence = next(
+        message["evidence"]
+        for message in messages
+        if message["kind"] == prov.MSG_PUBLISHED_EVIDENCE and message["index"] == 1
+    )
+    current = evidence["current_workbook"]
+    acquired = evidence["rows"][0]["acquisition"]
+    if observation == "workbook-unavailable":
+        evidence["current_workbook"] = None
+    elif observation == "workbook-count":
+        current["candidate_count"] = 2
+        current["inventory"]["returned_count"] = 2
+    elif observation == "workbook-luid-count":
+        current["luid_count"] = 2
+        current["inventory"]["returned_count"] = 2
+    elif observation == "workbook-identity":
+        current["workbook_luid_sha256"] = "e" * 64
+    elif observation == "workbook-page":
+        current["inventory"]["total_available"] = 2
+    elif observation == "visibility":
+        acquired["visible"] = False
+    elif observation == "catalog-unavailable":
+        acquired["catalog"] = None
+    elif observation == "catalog-zero":
+        acquired["catalog"].update(returned_count=0, total_available=0)
+    elif observation == "catalog-page":
+        acquired["catalog"]["page_number"] = 2
+    elif observation == "candidate-identity":
+        acquired["candidate_luid_sha256"] = "e" * 64
+    elif observation == "candidate-unavailable":
+        acquired["candidate_sha256"] = None
+    elif observation == "detail-unavailable":
+        acquired["detail_sha256"] = None
+    else:
+        acquired["detail_sha256"] = "e" * 64
+    code, state = _published_replay(messages)
+    assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, f"P_CURRENT_FACTS_BINDING_{observation}"
+
+
+def test_published_current_framed_protocol_rejects_consistently_forged_missing_rows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from test_stamp_tableau_provenance import LIVE_ENV, _published_capture, _published_replay, _published_setup
+
+    path, _site = _published_setup(tmp_path, monkeypatch)
+    result, messages = _published_capture(path, LIVE_ENV)
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result and prov.is_success(result), "P_CURRENT_MISSING_POSITIVE"
+    for message in messages:
+        if message["kind"] == prov.MSG_PUBLISHED_EVIDENCE:
+            for row in message["evidence"]["rows"]:
+                row.update(state="missing", candidate_count=0)
+                row.pop("datasource_luid_sha256", None)
+                row["acquisition"].update(candidate_luid_sha256=None, candidate_sha256=None, detail_sha256=None)
+                row["acquisition"]["catalog"].update(returned_count=0, total_available=0)
+        elif message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            for row in message["result"]["inputs"][0]["origin"]["published_dependencies"]["rows"]:
+                row.update(state="missing", candidate_count=0)
+                row.pop("datasource_luid", None)
+    code, state = _published_replay(messages)
+    assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, "P_CURRENT_MISSING_REFUSED"
+    assert not prov.is_success(state.document(code))
+    legacy = next(message["result"] for message in messages if message["kind"] == prov.MSG_TERMINAL)
+    assert prov.is_success(prov.normalize_result(legacy)), "P_LEGACY_MISSING_READER_UNCHANGED"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        (("current_workbook",), []),
+        (("current_workbook", "candidate_count"), True),
+        (("current_workbook", "luid_count"), -1),
+        (("current_workbook", "workbook_luid_sha256"), "private-workbook-identity"),
+        (("current_workbook", "inventory"), {}),
+        (("current_workbook", "private-url"), "private-host"),
+        (("rows", 0, "acquisition"), None),
+        (("rows", 0, "acquisition"), []),
+        (("rows", 0, "acquisition", "visible"), 1),
+        (("rows", 0, "acquisition", "catalog"), {}),
+        (("rows", 0, "acquisition", "candidate_luid_sha256"), "private-luid"),
+        (("rows", 0, "acquisition", "candidate_sha256"), True),
+        (("rows", 0, "acquisition", "detail_sha256"), "F" * 64),
+        (("rows", 0, "acquisition", "private-detail"), {"name": "private-name"}),
+    ],
+)
+def test_published_current_observation_shapes_remain_closed_and_derived_only(
+    tmp_path: Path, monkeypatch, field: tuple, value: object
+) -> None:
+    from test_stamp_tableau_provenance import LIVE_ENV, _published_capture, _published_replay, _published_setup
+
+    path, _site = _published_setup(tmp_path, monkeypatch)
+    result, messages = _published_capture(path, LIVE_ENV)
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "P_CURRENT_SHAPE_POSITIVE"
+    target = next(message["evidence"] for message in messages if message["kind"] == prov.MSG_PUBLISHED_EVIDENCE)
+    for key in field[:-1]:
+        target = target[key]
+    target[field[-1]] = value
+    code, state = _published_replay(messages)
+    assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, "P_CURRENT_SHAPE_REFUSED"
+    assert "private-" not in json.dumps(state.document(code)), "P_CURRENT_SHAPE_PRIVACY"

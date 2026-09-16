@@ -751,8 +751,9 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
     """Minimal read-only REST client, used only to identify a workbook we already hold.
 
     Initial remote answers are fetched **at most once per instance**, because one instance is one
-    provenance run. Published associations additionally revalidate remote content just before issuance;
-    the initial observation's cache cannot establish freshness after catalog/detail acquisition.
+    provenance run. Published associations separately acquire current workbook identity and uncached
+    visibility/catalog/detail, then revalidate remote content just before issuance. Only duplicate
+    occurrences within one physical input share an association acquisition.
     Measured 2026-09-09 against a recording loopback site on the pre-cache code, 66
     harvested inputs cost **200** remote calls -- ``2 + N + 2M``: one site-wide inventory listing per
     input, and *two* full downloads of every matched workbook, because
@@ -783,9 +784,6 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         self._content_cache: dict[str, bytes | None] = {}
         self._content_failure: dict[str, Exception] = {}
         self._content_unavailable: dict[str, str] = {}
-        self._catalog_visibility: bool | None = None
-        self._published_cache: dict[str, dict] = {}
-        self._datasource_details: dict[str, dict | None] = {}
         self._opener = urllib.request.build_opener(_NoRedirectHandler())
         self.reporter: NullReporter = NullReporter()
 
@@ -858,10 +856,8 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
     def workbooks(self) -> list[dict[str, Any]]:
         """The first inventory page, cached **once per run** with its completeness or failure.
 
-        The listing does not vary between inputs, so asking again for the second and every later
-        input bought nothing and cost one round trip each (66 of 66 measured). Latching the failure
-        matters just as much: a dead site answered 66 identical errors, ~9 s apiece on a real host.
-        The cached exception is re-raised so each input still records its own redacted reason.
+        This is the legacy origin observation, not current published-association authority.
+        Latching its failure also avoids repeating a dead initial listing for every input.
         """
         if self._inventory_failure is not None:
             raise self._inventory_failure
@@ -875,6 +871,11 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         return self._inventory
 
     def _fetch_workbooks(self) -> list[dict[str, Any]]:
+        rows, self.inventory_completeness = self._workbook_inventory()
+        self.reporter.inventory_facts(self.inventory_completeness.facts())
+        return rows
+
+    def _workbook_inventory(self) -> tuple[list[dict[str, Any]], InventoryCompleteness]:
         if self.reporter.cancelled:
             raise RuntimeError(CANCELLED_CODE)
         status, payload = self._call(
@@ -889,9 +890,24 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         rows = ([rows] if rows else []) if isinstance(rows, dict) else rows
         if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
             raise ValueError("invalid workbook inventory rows")
-        self.inventory_completeness = _inventory_completeness(len(rows), document.get("pagination", {}))
-        self.reporter.inventory_facts(self.inventory_completeness.facts())
-        return rows
+        return rows, _inventory_completeness(len(rows), document.get("pagination", {}))
+
+    def current_workbook(self, stem: str) -> dict | None:
+        """Reacquire this input's identity/uniqueness without changing the legacy inventory event."""
+        try:
+            rows, completeness = self._workbook_inventory()
+            index = _WorkbookIndex(rows)
+            _, candidates = index.match(*split_harvest_stem(stem))
+            luid = candidates[0].get("id") if candidates else None
+            valid = isinstance(luid, str) and LUID_RE.fullmatch(luid) is not None
+            return {
+                "inventory": completeness.facts(),
+                "candidate_count": len(candidates),
+                "luid_count": len(index.by_luid.get(luid.lower(), [])) if valid else 0,
+                "workbook_luid_sha256": workbook_luid_digest(luid) if valid else None,
+            }
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
 
     def content_sha256(self, workbook_id: str) -> str | None:
         """sha256 of the workbook as the server would hand it to us, or ``None`` if it cannot be read.
@@ -986,18 +1002,15 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
 
     def _catalog_visible(self) -> bool:
         """Pagination counts only visible rows; an independently queried admin role is also required."""
-        if self._catalog_visibility is None:
-            self._catalog_visibility = False
-            if all(isinstance(value, str) and LUID_RE.fullmatch(value) for value in (self.site_id, self.user_id)):
-                document = self._dependency_json(f"/sites/{self.site_id}/users/{self.user_id}")
-                user = document.get("user")
-                self._catalog_visibility = (
-                    isinstance(user, dict)
-                    and user.get("id") == self.user_id
-                    and user.get("siteRole")
-                    in {"ServerAdministrator", "SiteAdministratorCreator", "SiteAdministratorExplorer"}
-                )
-        return self._catalog_visibility
+        if not all(isinstance(value, str) and LUID_RE.fullmatch(value) for value in (self.site_id, self.user_id)):
+            return False
+        document = self._dependency_json(f"/sites/{self.site_id}/users/{self.user_id}")
+        user = document.get("user")
+        return (
+            isinstance(user, dict)
+            and user.get("id") == self.user_id
+            and user.get("siteRole") in {"ServerAdministrator", "SiteAdministratorCreator", "SiteAdministratorExplorer"}
+        )
 
     def _dependency_json(self, path: str) -> dict:
         if self.reporter.cancelled:
@@ -1011,27 +1024,30 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         return document
 
     def _datasource_detail(self, luid: str) -> dict | None:
-        if luid not in self._datasource_details:
-            self._datasource_details[luid] = None
-            document = self._dependency_json(f"/sites/{self.site_id}/datasources/{luid}")
-            detail = document.get("datasource")
-            if isinstance(detail, dict):
-                self._datasource_details[luid] = detail
-        return self._datasource_details[luid]
+        document = self._dependency_json(f"/sites/{self.site_id}/datasources/{luid}")
+        detail = document.get("datasource")
+        return detail if isinstance(detail, dict) else None
 
-    def published_dependency(self, content_url: str) -> dict:
-        """Resolve the case-preserved derived-from segment, never a normalized key or provider."""
-        if content_url not in self._published_cache:
-            self._published_cache[content_url] = {"state": "cannot_establish", "candidate_count": None}
-            try:
-                if self._catalog_visible():
-                    self._published_cache[content_url] = self._query_published_dependency(content_url)
-            except Exception:  # pylint: disable=broad-exception-caught
-                # Neither response rows nor exception text belongs in diagnostics or the authority.
-                pass
-        return dict(self._published_cache[content_url])
+    def published_dependency(self, content_url: str) -> tuple[dict, dict]:
+        """Acquire one current association and its private facts, never a run-cached answer."""
+        outcome = {"state": "cannot_establish", "candidate_count": None}
+        acquisition = {
+            "visible": False,
+            "catalog": None,
+            "candidate_luid_sha256": None,
+            "candidate_sha256": None,
+            "detail_sha256": None,
+        }
+        try:
+            acquisition["visible"] = self._catalog_visible()
+            if acquisition["visible"]:
+                outcome = self._query_published_dependency(content_url, acquisition)
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Neither response rows nor exception text belongs in diagnostics or the authority.
+            pass
+        return outcome, acquisition
 
-    def _query_published_dependency(self, content_url: str) -> dict:
+    def _query_published_dependency(self, content_url: str, acquisition: dict) -> dict:
         query = urlencode({"filter": f"contentUrl:eq:{content_url}", "pageSize": INVENTORY_PAGE_SIZE, "pageNumber": 1})
         document = self._dependency_json(f"/sites/{self.site_id}/datasources?{query}")
         rows = document["datasources"].get("datasource", [])
@@ -1041,6 +1057,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         ):
             raise ValueError("invalid published dependency candidates")
         page = _inventory_completeness(len(rows), document.get("pagination"))
+        acquisition["catalog"] = page.facts()
         if not (
             page.status == "complete"
             and page.page_number == 1
@@ -1057,14 +1074,20 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         luid = selected.get("id")
         if not isinstance(luid, str) or LUID_RE.fullmatch(luid) is None:
             raise ValueError("invalid published datasource identity")
-        detail = self._datasource_detail(luid)
-        confirmed = ("id", "contentUrl", "name", "updatedAt")
-        if detail is None or any(
-            not isinstance(selected.get(key), str) or not selected[key] or selected[key] != detail.get(key)
-            for key in confirmed
-        ):
+        acquisition["candidate_luid_sha256"] = workbook_luid_digest(luid)
+        acquisition["candidate_sha256"] = _published_candidate_sha256(selected)
+        acquisition["detail_sha256"] = _published_candidate_sha256(self._datasource_detail(luid))
+        if acquisition["candidate_sha256"] is None or acquisition["candidate_sha256"] != acquisition["detail_sha256"]:
             raise ValueError("published datasource detail unconfirmed")
         return {"state": "resolved", "candidate_count": 1, "datasource_luid": luid}
+
+
+def _published_candidate_sha256(candidate: dict | None) -> str | None:
+    """Digest the exact independently acquired candidate/detail fields without transmitting text."""
+    fields = ("id", "contentUrl", "name", "updatedAt")
+    if candidate is None or any(not isinstance(candidate.get(key), str) or not candidate[key] for key in fields):
+        return None
+    return hashlib.sha256(json.dumps([candidate[key] for key in fields], ensure_ascii=True).encode()).hexdigest()
 
 
 HARVEST_STEM_RE = re.compile(
@@ -1096,9 +1119,8 @@ class _WorkbookIndex:
     """The site inventory keyed by the three EXACT rules :func:`find_origin` matches on.
 
     Buckets keep inventory order, so ``candidates[0]`` and ``same_name_count`` mean precisely what
-    they meant when each rule was a separate scan of the whole list. Building the index is local CPU
-    over an inventory that is now fetched once per run; the cost this module cares about is round
-    trips, and there is exactly one.
+    they meant when each rule was a separate scan of the whole list. The legacy origin inventory is
+    fetched once per run; published associations build a separate index over each input's fresh page.
 
     ⚠️ **Only a real string is a name.** An earlier revision of this index kept a malformed ``name``
     hashable by keying it on ``repr``, which invented identity out of nothing: a response whose
@@ -1265,6 +1287,16 @@ def published_remote_agrees(current: dict | None, local: dict, origin: dict) -> 
     return True
 
 
+def published_workbook_agrees(current: dict | None, identity: dict) -> bool:
+    """Fresh inventory must uniquely select the same workbook as the input-bound observation."""
+    return (
+        current is not None
+        and classify_inventory(current["inventory"]).status == "complete"
+        and current["candidate_count"] == current["luid_count"] == 1
+        and current["workbook_luid_sha256"] == identity["workbook_luid_sha256"]
+    )
+
+
 def _dependency_url_path(path: str) -> list[str]:
     """Decode each segment once, refusing ambiguous separators, traversal and malformed escapes."""
     if path in ("", "/"):
@@ -1353,6 +1385,23 @@ def _dependency_query_allowed(dependency: dict, lookup: TableauLookup) -> bool:
         return False
 
 
+def _published_rows(lookup: TableauLookup, dependencies: list[dict], confirmed: bool) -> tuple[list[dict], list[dict]]:
+    """Only duplicate occurrences in this physical input may share current catalog/detail reads."""
+    acquired = {}
+    rows, evidence = [], []
+    for dependency in dependencies:
+        outcome, acquisition = {"state": "cannot_establish", "candidate_count": None}, None
+        if confirmed and _dependency_query_allowed(dependency, lookup):
+            content_url = dependency["content_url"]
+            if content_url not in acquired:
+                acquired[content_url] = lookup.published_dependency(content_url)
+            outcome, acquisition = acquired[content_url]
+        row = {key: dependency[key] for key in ("source_ordinal", "published_key")} | outcome
+        rows.append(row)
+        evidence.append(published_outcome_checkpoint([row])[0] | {"acquisition": acquisition})
+    return rows, evidence
+
+
 def _attach_published_dependencies(record: dict, lookup: TableauLookup, source: _PublishedSource, index: int) -> None:
     origin, local = record["origin"], record["input"]
     if (
@@ -1363,13 +1412,11 @@ def _attach_published_dependencies(record: dict, lookup: TableauLookup, source: 
     ):
         return
     source_match = _dependency_source_match(lookup, source, local, origin)
-    rows = []
-    for dependency in source.dependencies:
-        outcome = {"state": "cannot_establish", "candidate_count": None}
-        if source_match != "unestablished" and _dependency_query_allowed(dependency, lookup):
-            outcome = lookup.published_dependency(dependency["content_url"])
-        rows.append({key: dependency[key] for key in ("source_ordinal", "published_key")} | outcome)
-    current_remote = lookup.current_content(origin["workbook_luid"]) if source_match != "unestablished" else None
+    identity = workbook_identity_checkpoint(source.path, origin["workbook_luid"])
+    current_workbook = lookup.current_workbook(source.path.stem) if source_match != "unestablished" else None
+    confirmed = published_workbook_agrees(current_workbook, identity)
+    rows, evidence = _published_rows(lookup, source.dependencies, confirmed)
+    current_remote = lookup.current_content(origin["workbook_luid"]) if confirmed else None
     try:
         current_sha256 = hashlib.sha256(source.path.read_bytes()).hexdigest()
     except OSError:
@@ -1377,15 +1424,16 @@ def _attach_published_dependencies(record: dict, lookup: TableauLookup, source: 
     lookup.reporter.published_evidence(
         index,
         {
-            "identity": workbook_identity_checkpoint(source.path, origin["workbook_luid"]),
+            "identity": identity,
             "source_sha256": local["sha256"],
             "current_sha256": current_sha256,
             "current_remote": current_remote,
+            "current_workbook": current_workbook,
             "source_match": source_match,
-            "rows": published_outcome_checkpoint(rows),
+            "rows": evidence,
         },
     )
-    if current_sha256 != local["sha256"] or not published_remote_agrees(current_remote, local, origin):
+    if not confirmed or current_sha256 != local["sha256"] or not published_remote_agrees(current_remote, local, origin):
         source_match = "unestablished"
         rows = [
             {key: row[key] for key in ("source_ordinal", "published_key")}

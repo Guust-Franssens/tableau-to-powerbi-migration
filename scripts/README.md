@@ -267,7 +267,9 @@ page-number/page-size fields are considered. Malformed or contradictory facts ne
 The parent retains a typed `inventory-truncated` or `inventory-cannot-establish` finding through later
 cancellation, failure or deadline expiry, even if the worker omits it. These outcomes preserve local
 fingerprints and exit 11 before later phases; offline and proven-complete inventories gain no pagination
-finding. This remains exactly one inventory request, not multi-page fetching.
+finding. This legacy origin observation remains one inventory request, not multi-page fetching.
+Published inputs acquire separate current pages inside their existing content phases, as described
+below; these do not overwrite the initial inventory facts or distinct-workbook progress counters.
 
 **Published dependency association — partial #562 prerequisite P.** The only published authority is
 the optional `origin.published_dependencies` block inside the existing `source-provenance.json`.
@@ -287,7 +289,7 @@ non-boolean integers; only `cannot_establish` has a null count.
 | Row state | Required evidence |
 |---|---|
 | `resolved` | Confirmed held, initial remote and freshly rechecked remote bytes/revision; unique workbook identity; complete independently visible catalog; exactly one candidate; valid datasource LUID and matching detail. |
-| `missing` | Retained schema/legacy representation, requiring independently corroborated absence. The current filtered-catalog acquisition cannot establish this state and never emits it. |
+| `missing` | Legacy artifact-reader representation only. The current acquisition has no independently validated absence mode: neither the producer nor the current worker protocol admits this state, even with consistent private/public zero counts. |
 | `ambiguous` | Confirmed source and complete catalog with more than one candidate, including duplicate rows; no chosen LUID. |
 | `cannot_establish` | Source identity/revision, visibility, completeness or detail cannot be established; null count, no LUID. |
 
@@ -319,7 +321,12 @@ The explicit site route and configured-base variants have synthetic production-p
 claim of live qualification on every server/proxy topology.
 
 Normalized keys, display names, captions, repository IDs, connection-name fallbacks and provider
-choices never become catalog queries. Immediately after catalog/detail acquisition and before the
+choices never become catalog queries. Each eligible physical input first acquires a **fresh workbook
+inventory**, rechecking matching-candidate and LUID uniqueness against its input-bound workbook identity.
+A new same-named candidate, changed identity, incomplete page or failed read withholds published
+authority; matching content alone cannot override those observations. The run-cached legacy origin
+remains an initial observation, not a substitute for this current page.
+Immediately after catalog/detail acquisition and before the
 evidence envelope or public block, the remote workbook content is fetched again without using or
 overwriting the initial content cache. Its SHA/revision must agree with **both** the held source and
 the initial remote observation; comparable contradictory revisions refuse even if a raw SHA agrees.
@@ -350,7 +357,10 @@ datasources they have permission to connect to: see
 and [Query User On Site](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_users_and_groups.htm#query_user_on_site).
 The selected datasource detail must agree exactly on ID, content URL, name and update timestamp.
 REST search-index freshness is not guaranteed; missing, renamed or stale detail therefore refuses.
-Catalog/detail successes and failures are cached only inside this provenance run.
+Visibility, filtered catalog and selected detail are reacquired for each distinct association.
+Only duplicate occurrences **within the same physical input block** share that acquisition, including
+its failure; a second input or a different content URL makes fresh requests even for the same
+datasource LUID. There is no run-global published cache or cache-invalidation state machine.
 
 The private fingerprint checkpoint always binds assessment, even when empty or unassessable, alongside
 original ordinals and **digests** of parser keys. A paired `launch_identity` binds digests of the launched
@@ -374,14 +384,23 @@ Each assessed, valid nonempty association emits one `published-evidence` envelop
 block construction, inside that input's content phase and after its identity event. It retains the
 held-source SHA, the actual final-path rehash (null when unreadable), `current_remote` (fresh
 `sha256` and nullable `revision_key`, or null when the recheck was unavailable/not applicable),
-the initial source-match state,
-and each occurrence's ordered key digest, state, count and selected **LUID digest**. No URL, path,
+`current_workbook` (fresh numeric pagination facts, matching-candidate/LUID counts and selected
+workbook LUID digest, or null on an unavailable/inapplicable read), the initial source-match state,
+and each occurrence's ordered key digest, state, count and selected **LUID digest**.
+Each private row also carries its `acquisition`: the visibility result, numeric catalog pagination
+facts, candidate LUID digest, and independent digests of the candidate/detail ID, content URL, name
+and update timestamp. Unavailable observations remain null; an unattempted association has null
+acquisition. No URL, path,
 catalog row, copied name, credential or response/exception text is included. The parent validates
 the closed shape and input/index/phase binding, independently compares the fresh remote observation
-to the checkpoint's held source and the initial origin, derives both remote/local downgrades, and requires
-the final public outcomes to reconcile exactly. Editing only snapshot/terminal source-match,
+to the checkpoint's held source and the initial origin, checks current workbook identity/uniqueness,
+and independently requires complete visible catalog facts and agreeing candidate/detail digests for
+each resolved private row. It derives workbook/remote/local downgrades and requires the final public
+outcomes to reconcile exactly. Editing only snapshot/terminal source-match,
 outcome/count or selected LUID cannot supersede the earlier acquisition evidence. This is not a
-second REST client or an atomic server snapshot.
+second REST client or an atomic server snapshot: a later server change still requires another capture.
+Legacy artifact reading remains separate and unchanged; it does not grant an old `missing` row entry
+to the current framed worker protocol. These changes do not add package or START_READY consumers.
 
 The supervisor reconciles the complete ordered row sequence against the checkpoint and validates
 the nested closed shape, SHA, identity, revision evidence and state/cardinality contract. Presence is
