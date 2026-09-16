@@ -19,6 +19,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1282,10 +1283,128 @@ def test_manual_data_only_failure_stays_request_free_across_ordinary_regroup(tmp
         assert handoff["rows"] == []
 
 
+@pytest.mark.parametrize("second_leg", ["data", "image"])
+@pytest.mark.parametrize("reference_required", [False, True])
+def test_manual_mixed_recovery_requests_only_render_selected_views(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_leg: str, reference_required: bool
+) -> None:
+    """The producer's per-view recovery selection, not its union, determines the screenshot request."""
+    views = [
+        _view(LUID, "Visual Gap", data="transient", image="transient", captured_at=STAMP),
+        _view(
+            OTHER,
+            "Second View",
+            data="transient",
+            image="transient" if second_leg == "image" else None,
+            captured_at=STAMP,
+        ),
+    ]
+    views[0].pop("data")
+    if second_leg == "image":
+        views[1].pop("data")
+    recovery = {
+        "requested_renders": ["png"],
+        "max_age_minutes": 1,
+        "selected_legs_by_view": {LUID: ["image"], OTHER: [second_leg]},
+    }
+    batch = tmp_path / "oracle" / "recovery"
+    capture = verdict.CaptureRun(
+        SimpleNamespace(reauth_count=0, retry_count=0, redact_text=str),
+        {"TABLEAU_SERVER_URL": "https://example.online.tableau.com", "TABLEAU_SITE": "acme"},
+        batch,
+        0.0,
+        reference_required=reference_required,
+    )
+    assert verdict.write_manifest(views, capture, recovery=recovery) == (5 if reference_required else 3)
+    original = (batch / grp.MANIFEST_NAME).read_bytes()
+    migrations = _migrations(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["group", "--oracle", str(batch), "--migrations", str(migrations), "--manual-reference-handoff"],
+    )
+
+    assert grp.main() == 0
+
+    report_path = batch / grp.UNMATCHED_REPORT
+    report = json.loads(report_path.read_bytes())
+    handoff = report["manual_reference_handoff"]
+    assert handoff["status"] == "REQUEST_REQUIRED"
+    assert handoff["repair_gaps"] == []
+    assert [row["view_luid"] for row in handoff["rows"]] == ([LUID] if second_leg == "data" else [LUID, OTHER])
+    assert all(row["render_reasons"] == {"png": "transient"} for row in handoff["rows"])
+    grouped = _grouped(migrations)
+    assert grouped["requested_renders"] == ["png"], "capture-wide intent is not narrowed by the manual handoff"
+    assert grouped["reference_required"] is reference_required
+    assert set(_by_luid(grouped)) == {LUID, OTHER}
+    if second_leg == "data":
+        assert _by_luid(grouped)[OTHER]["data"]["status"] == "transient"
+        assert "image" not in _by_luid(grouped)[OTHER]
+        assert "Second View" not in handoff["request"]
+    handoff["rows"][0]["manual_origin"] = "user-supplied original Tableau screenshot"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    assert grp.main() == 0
+    repeated = json.loads(report_path.read_bytes())["manual_reference_handoff"]
+    assert repeated == {**handoff, "status": "ALREADY_REQUESTED"}
+    assert (batch / grp.MANIFEST_NAME).read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "recovery",
+    [
+        pytest.param(None, id="null-recovery"),
+        pytest.param([], id="non-object-recovery"),
+        pytest.param({}, id="missing-selector"),
+        pytest.param({"selected_legs_by_view": []}, id="non-object-selector"),
+        pytest.param({"selected_legs_by_view": {OTHER: ["image"]}}, id="missing-view"),
+        pytest.param({"selected_legs_by_view": {LUID: []}}, id="empty-legs"),
+        pytest.param({"selected_legs_by_view": {LUID: "data"}}, id="non-list-legs"),
+        pytest.param({"selected_legs_by_view": {LUID: ["data", "png"]}}, id="unknown-leg"),
+        pytest.param({"selected_legs_by_view": {LUID: [{"image": True}]}}, id="non-string-leg"),
+    ],
+)
+@pytest.mark.parametrize("requested", [[], ["png"]], ids=["no-union", "visual-union"])
+def test_manual_unestablished_recovery_selector_is_a_named_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    recovery: dict | list | None,
+    requested: list[str],
+) -> None:
+    """An unreadable selection must neither waive a visual gap nor borrow another view's union."""
+    batch = _batch(
+        tmp_path / "oracle",
+        "recovery",
+        [_view(LUID, "Unassessable", data="transient", image=None, captured_at=STAMP)],
+        requested_renders=requested,
+    )
+    path = batch / grp.MANIFEST_NAME
+    manifest = json.loads(path.read_bytes())
+    manifest["recovery"] = recovery
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    original = path.read_bytes()
+    migrations = _migrations(tmp_path)
+
+    with pytest.raises(grp.MalformedCaptureManifest, match=r"recovery\.selected_legs_by_view is unestablished"):
+        grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["group", "--oracle", str(batch), "--migrations", str(migrations), "--manual-reference-handoff"],
+    )
+    assert grp.main() == 2
+    assert "recovery.selected_legs_by_view is unestablished" in caplog.text
+    assert not (batch / grp.UNMATCHED_REPORT).exists()
+    assert path.read_bytes() == original
+
+
 @pytest.mark.parametrize("intent", ["png", "required-without-tier"])
 @pytest.mark.parametrize("same_view_retry", [False, True])
+@pytest.mark.parametrize("recovery_retry", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
 def test_manual_intent_is_per_view_and_survives_a_data_only_retry(
-    tmp_path: Path, intent: str, same_view_retry: bool
+    tmp_path: Path, intent: str, same_view_retry: bool, recovery_retry: bool, reverse: bool
 ) -> None:
     """A distinct data-only view must not inherit another view's visual request."""
     first = _batch(
@@ -1310,6 +1429,15 @@ def test_manual_intent_is_per_view_and_survives_a_data_only_retry(
         captured_at="2026-09-16T00:00:00Z",
         requested_renders=[],
     )
+    if recovery_retry:
+        path = later / grp.MANIFEST_NAME
+        payload = json.loads(path.read_bytes())
+        payload["recovery"] = {
+            "requested_renders": [],
+            "max_age_minutes": 1,
+            "selected_legs_by_view": {view["view_luid"]: ["data"] for view in later_views},
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
     original = {
         path: hashlib.sha256(path.read_bytes()).hexdigest()
         for batch in (first, later)
@@ -1317,17 +1445,18 @@ def test_manual_intent_is_per_view_and_survives_a_data_only_retry(
         if path.is_file()
     }
     migrations = _migrations(tmp_path)
+    batches = [later, first] if reverse else [first, later]
 
-    assert grp.run([first, later], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    assert grp.run(batches, migrations, dry_run=False, manual_reference_handoff=True) == 0
 
-    handoff = json.loads((later / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    handoff = json.loads((batches[-1] / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
     assert handoff["status"] == "REQUEST_REQUIRED"
     assert [row["view_luid"] for row in handoff["rows"]] == [LUID]
     assert handoff["rows"][0]["render_reasons"] == ({"png": "transient"} if intent == "png" else {})
     assert "Data Only" not in handoff["request"]
     assert set(_by_luid(_grouped(migrations))) == {LUID, OTHER}, "data-only records must still be grouped"
-    assert grp.run([later, first], migrations, dry_run=False, manual_reference_handoff=True) == 0
-    repeated = json.loads((first / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert grp.run(batches[::-1], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    repeated = json.loads((batches[0] / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
     assert repeated == {**handoff, "status": "ALREADY_REQUESTED"}
     assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in original.items())
 
@@ -2806,6 +2935,8 @@ UNTYPED_ON_PURPOSE = {
     "context": "validated as original UNKNOWN context; supplied declarations belong in the response fields",
     "delivery_status": "must remain UNKNOWN in _validate_prior_handoff; printing is never proof of delivery",
     "oracle_dirs": "validated by _prior_handoff as the exact order-insensitive cohort; never dereferenced",
+    "recovery": "validated by _manual_render_intent only when needed for a manual verdict; ordinary merge is unchanged",
+    "selected_legs_by_view": "per-view list validated against producer legs by _manual_render_intent",
     # Read, but no JSON type it could carry changes the answer.
     "reference_required": "read for truthiness only -- every JSON type is meaningfully truthy or not",
     "selected_tier": "typed and closed by tableau_oracle_manifest.validated_render_capability before policy merging",

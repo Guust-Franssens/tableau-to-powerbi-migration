@@ -1931,8 +1931,34 @@ def _prior_handoff(inputs: _RunInputs) -> dict[str, Any] | None:  # pylint: disa
     return merged
 
 
+def _manual_render_intent(batch: _Batch, view_luid: str) -> tuple[frozenset[str], bool]:
+    """Read this view's selected recovery legs without borrowing the capture-wide render union."""
+    if "recovery" not in batch.manifest:
+        return (
+            frozenset(batch.manifest.get("requested_renders") or []),
+            bool(batch.manifest.get("reference_required")),
+        )
+    recovery = batch.manifest.get("recovery")
+    selected = recovery.get("selected_legs_by_view") if isinstance(recovery, dict) else None
+    legs = selected.get(view_luid) if isinstance(selected, dict) else None
+    # The producer's tolerant selector parser drops malformed entries; a manual verdict cannot.
+    if (
+        not isinstance(legs, list)
+        or not legs
+        or any(not isinstance(leg, str) or leg not in tableau_oracle_manifest.LEG_TO_KIND for leg in legs)
+    ):
+        raise MalformedCaptureManifest(
+            f"{batch.directory / MANIFEST_NAME}: recovery.selected_legs_by_view is unestablished for a view; "
+            "restore its recorded selected legs before requesting screenshots."
+        )
+    return (
+        frozenset(tableau_oracle_manifest.LEG_TO_KIND[leg] for leg in legs if leg != "data"),
+        False,
+    )
+
+
 def _manual_residuals(views: list[dict[str, Any]], batches: list[_Batch]) -> list[dict[str, Any]]:
-    """Union intent only from accepted batches containing this view, then reuse the producer census."""
+    """Union each view's ordinary and selected recovery intent, then reuse the producer census."""
     missing = []
     for view in views:
         if any((view.get(leg) or {}).get("status") == "ok" for leg in ("image", "svg", "pdf")):
@@ -1942,11 +1968,11 @@ def _manual_residuals(views: list[dict[str, Any]], batches: list[_Batch]) -> lis
             for batch in batches
             if any(record.get("view_luid") == view.get("view_luid") for record in batch.manifest.get("views", []))
         ]
-        intent = _merge_render_intent(covering, [view])
-        requested = frozenset(intent["requested_renders"])
+        intents = [_manual_render_intent(batch, view["view_luid"]) for batch in covering]
+        requested = frozenset(kind for kinds, _required in intents for kind in kinds)
         if requested:
             missing.extend(render_unestablished([view], requested))
-        elif intent["reference_required"]:
+        elif any(required for _kinds, required in intents):
             missing.append(
                 {
                     "view_luid": view.get("view_luid"),
