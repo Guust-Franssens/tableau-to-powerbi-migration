@@ -238,6 +238,40 @@ def test_stored_complete_remains_last_observed_after_file_edit(tmp_path: Path) -
     assert second["units"][0]["package"]["integrity_status"] == "findings"
 
 
+def test_unbound_package_next_action_names_existing_binding_command(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+    _write_json(run / "bundle" / "report.json", {"workbooks": [{"name": "Book"}], "datasources": []})
+    _package(run / "packages" / "Book", "Book", "workbook", oracle={"complete": True})
+
+    result = _invoke(run, "--json")
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["next_action"]["headline"].startswith("Bind retained packages")
+    assert payload["next_action"]["affected_units"] == ["Book"]
+
+
+def test_partial_reference_next_action_names_readiness_command_without_paths(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+    _write_json(run / "bundle" / "report.json", {"workbooks": [{"name": "Book"}], "datasources": []})
+    _package(
+        run / "packages" / "Book",
+        "Book",
+        "workbook",
+        self_contained=True,
+        model_binding={"state": "bound"},
+        oracle={"reference_required": True, "partial": True},
+    )
+
+    result = _invoke(run, "--json")
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert "check_reference_readiness.py <provider-package> <consumer-package>" in payload["next_action"]["headline"]
+    assert payload["next_action"]["affected_units"] == ["Book"]
+    assert str(tmp_path) not in payload["next_action"]["headline"]
+
+
 def test_run_status_source_has_no_process_network_or_write_calls() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     forbidden = ["subprocess", "socket", "requests", "urllib", ".write_text(", ".write_bytes(", "open("]

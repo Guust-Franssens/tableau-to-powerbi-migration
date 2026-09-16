@@ -492,13 +492,12 @@ def _assemble_units(
             matched_unit.package = package
         else:
             package.scope = "UNSCOPED_PACKAGE"
-            code = (
-                "PACKAGE_ONLY_WORK"
-                if report_scope == "established" and not matched_unit
-                else "PACKAGE_UNSCOPED_IN_UNESTABLISHED_INVENTORY"
-                if report_scope != "established" and not matched_unit
-                else "AMBIGUOUS_PACKAGE_IDENTITY"
-            )
+            if matched_unit is None and report_scope == "established":
+                code = "PACKAGE_ONLY_WORK"
+            elif matched_unit is None:
+                code = "PACKAGE_UNSCOPED_IN_UNESTABLISHED_INVENTORY"
+            else:
+                code = "AMBIGUOUS_PACKAGE_IDENTITY"
             findings.append(
                 Finding(code, "package cannot be associated unambiguously; preserve and inspect it", unit=package.unit)
             )
@@ -596,8 +595,9 @@ def _next_action(
     if partial_refs:
         return {
             "headline": (
-                "Consolidate existing reference batches or run the real readiness check "
-                "with an explicit provider cohort."
+                "Consolidate existing reference batches or run "
+                "`python scripts/check_reference_readiness.py <provider-package> <consumer-package>` "
+                "with explicit package paths."
             ),
             "affected_units": sorted(partial_refs),
             "details": [],
