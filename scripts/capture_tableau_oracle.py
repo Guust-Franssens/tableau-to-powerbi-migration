@@ -1827,6 +1827,8 @@ def _eligible_legs(source: RecoverySource, view: dict[str, Any]) -> frozenset[st
         status = entry.get("status")
         if status not in RECOVERY_ELIGIBLE_STATUSES:
             continue
+        if leg == "data" and status == "truncated":
+            continue
         if leg != "data" and kind not in requested:
             raise OracleRecoveryRefusal(
                 f"{source.path}: view {view.get('view_luid')!r} {leg} is retry-eligible but the grouped "
@@ -2061,6 +2063,7 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
         named_records.sort(key=lambda record: selected_order.get(record.get("view_luid"), len(selected_order)))
 
         try:
+            server_info = None if recovery_mode else _advertised_ceiling(session, env, capability_report, wants)
             return write_manifest(
                 named_records,
                 CaptureRun(
@@ -2074,7 +2077,7 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
                     recovery=recovery_metadata,
                 ),
                 capability_report,
-                _advertised_ceiling(session, env, capability_report, wants),
+                server_info,
             )
         except BaseException:
             manifest_path.unlink(missing_ok=True)

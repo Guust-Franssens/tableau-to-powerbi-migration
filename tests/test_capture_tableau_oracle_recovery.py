@@ -102,7 +102,14 @@ def _failed(status: str = "transient") -> dict:
     return {"status": status, "detail": "HTTP 0: read operation timed out", "retry_reasons": ["old failure"]}
 
 
-def _grouped_reference(root: Path, views: list[dict], *, server: str = "https://example.test") -> Path:
+def _grouped_reference(
+    root: Path,
+    views: list[dict],
+    *,
+    server: str = "https://example.test",
+    requested_renders: list[str] | None = None,
+    render_capability: dict | None = None,
+) -> Path:
     ref = root / "reference"
     (ref / "data").mkdir(parents=True)
     (ref / "images").mkdir()
@@ -120,8 +127,12 @@ def _grouped_reference(root: Path, views: list[dict], *, server: str = "https://
         "workbook_name": "Workbook",
         "workbook_luid": WB_1,
         "view_count": len(views),
-        "requested_renders": ["png"],
-        "render_capability": {"selected_tier": "png_high", "selected_api_version": None},
+        "requested_renders": ["png"] if requested_renders is None else requested_renders,
+        "render_capability": (
+            {"selected_tier": "png_high", "selected_api_version": None}
+            if render_capability is None
+            else render_capability
+        ),
         "views": views,
     }
     (ref / grp.MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -247,6 +258,60 @@ def test_zero_eligible_recovery_does_not_sign_in_or_create_batch(monkeypatch, tm
 
     assert session.signins == 0
     assert not out.exists()
+
+
+def test_data_truncated_is_not_a_recovery_target(monkeypatch, tmp_path):
+    run = _run_dir(tmp_path)
+    grouped = _grouped_reference(
+        tmp_path / "migrations" / "workbooks" / "workbook",
+        [_view(LUID_1, data=_failed("truncated"))],
+    )
+    out = run / "oracle-retry"
+    session = _Session()
+    _configure(monkeypatch, tmp_path, session, grouped, out, run)
+
+    assert oracle.main() == 0
+
+    assert session.signins == 0
+    assert not out.exists()
+
+
+def test_svg_recovery_uses_recorded_api_override_without_serverinfo_probe(monkeypatch, tmp_path):
+    run = _run_dir(tmp_path)
+    view = _view(LUID_1, data=_ok_data(LUID_1))
+    view["svg"] = _failed()
+    grouped = _grouped_reference(
+        tmp_path / "migrations" / "workbooks" / "workbook",
+        [view],
+        requested_renders=["svg"],
+        render_capability={"selected_tier": "svg", "selected_api_version": "3.29"},
+    )
+    out = run / "oracle-retry"
+    session = _Session()
+    render_calls = []
+
+    def no_serverinfo(*_args, **_kwargs):
+        pytest.fail("recovery must not call server_info/capability probing")
+
+    def render(_session, view_luid, path, kind, options):
+        render_calls.append((view_luid, kind, options.api))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"<svg></svg>")
+        return {
+            "status": "ok",
+            "format": kind,
+            "path": f"images/{path.name}",
+            "sha256": __import__("hashlib").sha256(b"<svg></svg>").hexdigest(),
+            "elapsed_sec": 0.0,
+            "max_age_minutes": options.max_age,
+        }
+
+    _configure(monkeypatch, tmp_path, session, grouped, out, run)
+    monkeypatch.setattr(oracle.capability, "server_info", no_serverinfo)
+    monkeypatch.setattr(oracle, "_capture_render", render)
+
+    assert oracle.main() == 3
+    assert render_calls == [(LUID_1, "svg", "3.29")]
 
 
 @pytest.mark.parametrize(
