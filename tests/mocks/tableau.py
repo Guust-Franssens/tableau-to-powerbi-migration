@@ -18,6 +18,7 @@ What it serves
 ``POST /api/<ver>/auth/signin`` and ``/auth/signout``; the paged site collections
 (``workbooks``, ``views``, ``datasources``, ``projects``, ``groups``, ``flows``, ``subscriptions``,
 ``dataAlerts``, ``customviews``), ``groups/<id>/users``, ``<object>/<id>/permissions``,
+``users/user-1``, exact ``datasources?filter=contentUrl:eq:<value>`` and datasource detail,
 ``workbooks/<luid>/connections``, ``workbooks|datasources/<luid>/content`` (real ``.twbx``/``.tdsx``
 bytes), and ``POST /api/metadata/graphql``.
 
@@ -97,7 +98,7 @@ class Project:
 
 
 @dataclass
-class Workbook:
+class Workbook:  # pylint: disable=too-many-instance-attributes
     """A published workbook, including the bytes the site will hand back on download."""
 
     luid: str
@@ -126,8 +127,14 @@ class Workbook:
 
 
 @dataclass
-class Datasource:
-    """A published data source."""
+class Datasource:  # pylint: disable=too-many-instance-attributes
+    """A published data source with explicitly configured REST identity.
+
+    ``SalesMaster`` is the case-preserved derived-from segment in ``published_datasource.twb``,
+    NOT its stale repository id, caption, or the synthetic estate's ``Corporate Cities`` name.
+    Additional catalog rows must supply distinct ``content_url`` values; never infer display text.
+    Display names must be unique case-insensitively within each project, not across the site.
+    """
 
     luid: str
     name: str
@@ -137,12 +144,16 @@ class Datasource:
     has_extracts: bool = False
     extract_last_refresh: str | None = None
     downstream: list[str] = field(default_factory=list)
+    content_url: str = "SalesMaster"
+    updated_at: str = "2026-02-03T04:05:06Z"
 
     def row(self) -> dict[str, Any]:
         """REST shape."""
         return {
             "id": self.luid,
             "name": self.name,
+            "contentUrl": self.content_url,
+            "updatedAt": self.updated_at,
             "type": "sqlproxy" if self.has_extracts else "excel-direct",
             "isCertified": self.is_certified,
             "project": {"id": self.project.luid, "name": self.project.name},
@@ -198,7 +209,7 @@ class Grant:
     mode: str = "Allow"
 
 
-class TableauSite:
+class TableauSite:  # pylint: disable=too-many-instance-attributes
     """The estate this fake serves, plus the switches a test needs to make it misbehave."""
 
     def __init__(
@@ -265,15 +276,31 @@ class TableauSite:
 
     def datasource(self, name: str, project: Project, tds: Path, **kwargs) -> Datasource:
         """Add a published data source backed by a REAL ``.tds`` fixture, packaged as ``.tdsx``."""
+        if self.datasources and "content_url" not in kwargs:
+            raise ValueError("additional datasources require an explicit content_url")
         made = Datasource(luid=str(uuid.uuid4()), name=name, project=project, content=tdsx_bytes(tds), **kwargs)
+        self._validate_datasource_catalog([*self.datasources, made])
         self.datasources.append(made)
         return made
 
-    def publish_dependency(self, workbook: Workbook, datasource: Datasource) -> None:
-        """Make ``workbook`` depend on a PUBLISHED ``datasource``.
+    @staticmethod
+    def _validate_datasource_catalog(datasources: list[Datasource]) -> None:
+        """Reject impossible fixture identity, including mutations made after initial setup."""
+        for field_name in ("luid", "content_url"):
+            values = [getattr(datasource, field_name) for datasource in datasources]
+            if any(not isinstance(value, str) or not value.strip() for value in values):
+                raise ValueError(f"datasource {field_name} must be a nonempty string")
+            if len(set(values)) != len(values):
+                raise ValueError(f"datasource {field_name} must be unique within the site")
+        project_names = [(datasource.project.luid, datasource.name.casefold()) for datasource in datasources]
+        if len(set(project_names)) != len(project_names):
+            raise ValueError("datasource display names must be unique within each project (case-insensitive)")
 
-        This is the shape that makes a workbook's own calc count understate its real complexity: the
-        calculated fields live in the data source, so the workbook alone reports fewer than it has.
+    def publish_dependency(self, workbook: Workbook, datasource: Datasource) -> None:
+        """Add a METADATA-ONLY dependency on a published datasource; never rewrite workbook bytes.
+
+        The synthetic estate uses this for the shared-source migration-order exercise. It is not
+        evidence of a ``repository-location`` inside the independently served fixture workbook.
         """
         workbook.connections.append(
             {
@@ -316,8 +343,9 @@ class TableauSite:
 
     def handle(self, method: str, url: str, headers: dict[str, str], body: bytes) -> tuple[int, dict, bytes]:
         """Route one request. Transport-agnostic, so it can be driven with or without a socket."""
+        # pylint: disable=too-many-return-statements
         parsed = urlparse(url)
-        path, query = parsed.path, parse_qs(parsed.query)
+        path, query = parsed.path, parse_qs(parsed.query, keep_blank_values=True)
         self.requests.append((method, path + (f"?{parsed.query}" if parsed.query else "")))
 
         if path.endswith("/auth/signin") and method == "POST":
@@ -337,9 +365,11 @@ class TableauSite:
         if path.endswith("/api/metadata/graphql"):
             return self._graphql(body)
         marker = f"/api/{self.rest_version}/sites/{self.site_id}"
-        if marker not in path:
+        if not path.startswith(marker + "/"):
             return self._fail(404, "404000", f"no route for {path}")
-        return self._rest(path.split(marker, 1)[1], query)
+        if method != "GET":
+            return self._fail(405, "405000", "site REST routes only support GET")
+        return self._rest(path[len(marker) :], query)
 
     def call(self, path: str) -> dict[str, Any]:
         """The in-process seam the engine's ``survey_site(call, site_id)`` takes.
@@ -391,11 +421,25 @@ class TableauSite:
         )
 
     def _page(self, rows: list[dict], collection: str, item: str, query: dict) -> tuple[int, dict, bytes]:
-        """One page, with Tableau's string-valued pagination block."""
-        size = int((query.get("pageSize") or ["100"])[0])
+        """Validate paging before slicing, retaining Tableau's string-valued pagination block."""
+        paging = {}
+        for key, default in (("pageSize", "100"), ("pageNumber", "1")):
+            values = query.get(key, [default])
+            if len(values) != 1 or re.fullmatch(r"[0-9]+", values[0]) is None:
+                return self._fail(400, "400000", f"{key} must be one positive decimal integer")
+            try:
+                paging[key] = int(values[0])
+            except ValueError:
+                return self._fail(400, "400000", f"{key} is too large to parse")
+            if paging[key] < 1:
+                return self._fail(400, "400000", f"{key} must be at least one")
+        size, number = paging["pageSize"], paging["pageNumber"]
+        if size > 1000:
+            return self._fail(403, "403014", "pageSize exceeds the maximum of 1000")
         if self.page_size:
             size = min(size, self.page_size)
-        number = int((query.get("pageNumber") or ["1"])[0])
+        if number > max(1, (len(rows) + size - 1) // size):
+            return self._fail(400, "400006", "pageNumber exceeds the final page")
         window = rows[(number - 1) * size : number * size]
         payload = window[0] if (self.single_row_as_object and len(window) == 1) else window
         return self._json(
@@ -409,14 +453,27 @@ class TableauSite:
     # ------------------------------------------------------------------ REST
 
     def _rest(self, path: str, query: dict) -> tuple[int, dict, bytes]:
-        segments = [s for s in path.split("?")[0].strip("/").split("/") if s]
-        if not segments:
+        # pylint: disable=too-many-return-statements
+        segments = path.removeprefix("/").split("/")
+        if not segments[0]:
             return self._fail(404, "404000", "no collection named")
         collection = segments[0]
+        if collection == "datasources":
+            try:
+                self._validate_datasource_catalog(self.datasources)
+            except ValueError as exc:
+                return self._fail(500, "500000", f"invalid mock datasource catalog: {exc}")
 
         if len(segments) == 1:
             return self._collection(collection, query)
-        luid, action = segments[1], (segments[2] if len(segments) > 2 else "")
+        luid = segments[1]
+        if len(segments) == 2:
+            if query:
+                return self._fail(400, "400000", "detail routes do not support query parameters")
+            return self._detail(collection, luid)
+        if len(segments) != 3:
+            return self._fail(404, "404000", f"no route for {path}")
+        action = segments[2]
         if action == "permissions":
             return self._permissions(collection.rstrip("s"), luid)
         if collection == "groups" and action == "users":
@@ -428,9 +485,18 @@ class TableauSite:
             if workbook is None:
                 return self._fail(404, "404011", "workbook not found")
             return self._json(200, {"connections": {"connection": workbook.connections}})
-        if action == "content":
+        if action == "content" and collection in {"workbooks", "datasources"}:
             return self._content(collection, luid)
         return self._fail(404, "404000", f"no route for {path}")
+
+    def _detail(self, collection: str, luid: str) -> tuple[int, dict, bytes]:
+        if collection == "users" and luid == "user-1":
+            return self._json(200, {"user": {"id": "user-1", "siteRole": "SiteAdministratorExplorer"}})
+        if collection == "datasources":
+            found = next((d for d in self.datasources if d.luid == luid), None)
+            if found is not None:
+                return self._json(200, {"datasource": found.row()})
+        return self._fail(404, "404000", f"{collection}/{luid} not found")
 
     def _collection(self, collection: str, query: dict) -> tuple[int, dict, bytes]:
         table: dict[str, tuple[list[dict], str, str]] = {
@@ -457,6 +523,15 @@ class TableauSite:
         if collection not in table:
             return self._fail(404, "404000", f"unknown collection {collection!r}")
         rows, key, item = table[collection]
+        if collection == "datasources":
+            if query.keys() - {"filter", "pageSize", "pageNumber"}:
+                return self._fail(400, "400000", "unsupported datasource query parameter")
+            if "filter" in query:
+                filters = query["filter"]
+                match = re.fullmatch(r"contentUrl:eq:([^:,&\s]+)", filters[0]) if len(filters) == 1 else None
+                if match is None:
+                    return self._fail(400, "400000", "unsupported datasource filter; use one contentUrl:eq:<value>")
+                rows = [row for row in rows if row["contentUrl"] == match[1]]
         return self._page(rows, key, item, query)
 
     def _permissions(self, object_type: str, luid: str) -> tuple[int, dict, bytes]:
@@ -611,7 +686,7 @@ class _Handler(BaseHTTPRequestHandler):
     do_PUT = _serve
     do_DELETE = _serve
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+    def log_message(self, format: str, *args: Any) -> None:  # pylint: disable=redefined-builtin
         """Silence the default stderr access log; ``site.requests`` is the record that matters."""
 
 

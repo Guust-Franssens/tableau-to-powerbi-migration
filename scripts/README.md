@@ -28,6 +28,19 @@ If recovery is allowed, retry the **exact originating command and arguments**: r
 | `parse_tableau.py` | The deterministic parser: `.twb`/`.twbx`/`.tds`/`.tdsx` → `migration-spec.json`, validated against `docs/migration-spec.schema.json`. The contract every downstream agent reads. It flags prompt-injection-shaped untrusted workbook text in `limitations_encountered`; content is disclosed, never silently rewritten. | Once per workbook, before any agent work |
 | `prompt_injection.py` | Scans untrusted Tableau-derived contract text for high-precision prompt-injection shapes and returns high-severity disclosure limitations. Detection is deliberately not sanitisation, preserving customer source evidence. | Called by `parse_tableau.py` |
 
+### Run setup
+
+For each new site/folder/workbook/datasource, before stage writes run
+`python -B scripts\work_dirs.py <slug> --json`; external roots add
+`--runs-parent <parent>` (`--repo-root` alias). Allocation auto-attempts ignored
+`_MIGRATION.md`; a warning does not undo success.
+
+For an accepted existing/resumed run, setup runs
+`python -B scripts\work_dirs.py --select-run <absolute-existing-run>`. It migrates
+nothing. Never infer selection from the note, reselect at handoffs, or reallocate
+on refusal. Preserve collisions; lost markers need explicit recovery.
+Do not ask the human to generate the note.
+
 ## Migration pipeline
 
 | Script | What it does | Called by |
@@ -42,7 +55,8 @@ If recovery is allowed, retry the **exact originating command and arguments**: r
 | `detect_occlusion.py` | Statically finds visuals hidden behind a higher-z image (typically a carried-over Tableau background), reading `visual.json` only - no Desktop, no model, no data. Exits 1 on detection, so it works as a build gate. `powerbi-report-author validate` has no occlusion rule and returns `errorCount: 0` over a fully occluded report. Run after any deterministic-tier build. |
 | `check_blank_placeholders.py` | Correlates deterministic-engine handover fallback entries (`report.json` → `workbooks[].model_translation_handoff`, with `handover/*.json` slices as a fallback for bundles that have no usable `report.json`) with TMDL columns/measures whose body is a bare `BLANK()`, then cross-references shipping PBIR filters and visual field bindings. Exit 0 clean / 1 placeholder only documented and unreferenced / 2 report depends on it / 3 incomplete scope (null or absent handoff, or BLANK() owners outside `workbooks[]`). An input it cannot read is counted (`handover_unreadable`) and reported, never raised. Wired into `run_estate.py` as a blocking gate only for report-referenced placeholders. |
 | `probe_bundle.py` | Rewrites an emitted PBIP bundle into a ONE-ROW probe variant (wraps each M partition's final expression in `Table.FirstN(..., 1)`, flips DirectQuery to import) so a credential can be proven against the SAME M the real model uses. If emitted M contains `Value.NativeQuery`, it still writes the probe artifact but exits `PROBE: OPERATOR_REQUIRED` (4) before any refresh is attempted. `--check-only` runs the M-parameter check alone; `--unwrap` and `--assert-clean` reverse it and prove a shipping bundle is probe-free. |
-| `run_estate.py` | **The tier-2 entry point for a whole folder of workbooks.** Runs the deterministic tier's `migrate_estate.py`, then supplies the three things its output contract does not: (1) a **real exit code** — the engine prints `[FAIL] Definition of done` and returns `0` anyway (`# Soft-but-loud: exit stays 0`), so a consumer gating on the exit code silently accepts a failed migration; (2) an **`--approved-dax` collision check** — that map is estate-GLOBAL and name-keyed, so one approval for a calc called `Calculation2` (Tableau's auto-generated default) lands in *every* model that reuses the name, and a differing formula is a wrong-DAX landing that never errors; (3) **per-workbook handover slices**, measured 83.4 KB → 5.7-24.5 KB, so the raw estate report never enters a subagent's context. Also writes `engine-output-receipt.json` (path/size/hash receipt for native engine artifacts, **plus the resolved engine root, `VERSION` and whether it was the canonical plugin** - so a bundle answers "what built me?" without the machine that built it) and `phase-timings.json`. The engine is not a parameter you normally pass: it resolves to the installed plugin via `engine_source.py`, and a `--engine` pointing anywhere else is refused unless `--allow-noncanonical-engine` acknowledges it. Source provenance runs in one supervised leaf worker under `--provenance-timeout-sec` (default 120, finite and > 0 - `0` is a usage error, not a disable switch); expiry, a worker crash or a failed publication publishes an honest partial/failed `source-provenance.json` and exits 11 without adjudicating. Emits no model content, by test. |
+| `run_estate.py` | **The tier-2 entry point for a whole folder of workbooks.** Runs the deterministic tier's `migrate_estate.py`, then supplies the three things its output contract does not: (1) a **real exit code** — the engine prints `[FAIL] Definition of done` and returns `0` anyway (`# Soft-but-loud: exit stays 0`), so a consumer gating on the exit code silently accepts a failed migration; (2) an **`--approved-dax` collision check** — that map is estate-GLOBAL and name-keyed, so one approval for a calc called `Calculation2` (Tableau's auto-generated default) lands in *every* model that reuses the name, and a differing formula is a wrong-DAX landing that never errors; (3) **per-workbook handover slices**, measured 83.4 KB → 5.7-24.5 KB, so the raw estate report never enters a subagent's context. `--storage-decision <file.json>` confirms only that the supplied file is readable, then forwards its original token to the engine; the engine alone validates its JSON and policy. Also writes `engine-output-receipt.json` (path/size/hash receipt for native engine artifacts, **plus the resolved engine root, `VERSION` and whether it was the canonical plugin** - so a bundle answers "what built me?" without the machine that built it) and `phase-timings.json`. The engine is not a parameter you normally pass: it resolves to the installed plugin via `engine_source.py`, and a `--engine` pointing anywhere else is refused unless `--allow-noncanonical-engine` acknowledges it. Source provenance runs in one supervised leaf worker under `--provenance-timeout-sec` (default 120, finite and > 0 - `0` is a usage error, not a disable switch); expiry, a worker crash or a failed publication publishes an honest partial/failed `source-provenance.json` and exits 11 without adjudicating. Emits no model content, by test. |
+| `run_status.py` | Read-only, non-certifying inventory for one explicitly supplied absolute **local** run (Refs #469). Invoke with **`python -B`**, including for `--json`, to prevent import-bytecode writes. Prints absolute toolkit/run/bundle/oracle/package locations that distinguish the standard expected location from what was observed, preserves engine/working-copy occurrences and unscoped packages, reports integrity codes and safe last-observed fields, and gives one non-destructive next action. Both outputs contain the same normalized records, including multiplicity and action details. Exit 0 means assessable diagnostics, never readiness; malformed/unreadable inputs or rejected boundaries exit nonzero. No allocation, root discovery, process/network operation, repair, promotion or current START_READY/COMPLETE. See [read-only run status](#read-only-run-status). | operator diagnostics after a selected run exists |
 | `derive_connection_templates.py` | Derives committable connection **templates** from REAL Tableau exports (`.tds`/`.tdsx`/`.twb`/`.twbx`), replacing only endpoint VALUES with placeholders so the attribute SHAPE stays verbatim. Shape fidelity is the point: a hand-written connection element encodes what we *think* Tableau writes, and that guess was wrong in a way that mattered - the Databricks HTTP path is spelled `_.fcp.DatabricksCatalog.true...v-http-path`, which two parsers read as `None`. Writes `tests/fixtures/connection-templates/<class>.xml`. |
 | `make_live_source_fixture.py` | Builds a `.twbx` whose single federated datasource spans several LIVE systems (Databricks + Snowflake + Azure SQL), from the templates above plus `PROBE_*` environment variables. The generator carries no hostnames and is committable; the generated workbook does, so `tests/fixtures/live/` is gitignored and `tests/test_live_multisource.py` skips when it is absent. |
 | `make_refresh_fixture.py` | Generates the deterministic, credential-free input for `fixtures/large-refresh`: a tunable local `orders.csv` plus the machine-local `expressions.tmdl` binding that points the model's `SourceFolder` parameter at it. The payload and binding are gitignored; same rows + seed produce byte-identical CSV bytes, so refresh timing changes mean the model changed rather than the data. | Issue #262 refresh-behaviour reproduction |
@@ -539,6 +553,71 @@ authorization remains unvalidated and cannot be inherited by a report. Construct
 The v2 numeric obligation is metadata, not a Phase-2 decision. Full workflow, codes and unchanged
 reference ceilings: [final START_READY](../docs/reference-readiness.md#final-package-start_ready-562-622).
 
+## Read-only run status
+
+```powershell
+python -B scripts\run_status.py --run C:\short\_runs\001-estate
+python -B scripts\run_status.py --run C:\short\_runs\001-estate --json
+```
+
+Select the actual existing local run; there is no latest-run search or allocation. **`-B` is part
+of the read-only entrypoint**, not an optional optimization: without Python's startup flag, imports
+may create `.pyc` files outside the selected run before script-level controls can take effect.
+
+The reader rejects UNC/device/network spellings lexically before filesystem access, checks local
+ancestors and entries without following reparse points (including Windows junctions), and never
+reads below a rejected boundary. It reuses `work_dirs.check_run_location` and
+`package_filesystem.verify_package`; it does not run readiness gates. Both engine-report collections
+(`workbooks` and `datasources`) must exist and be lists. Explicit empty lists mean an empty
+diagnostic inventory, **not** readiness. Unestablished report scope does not discard retained
+working copies or package-only observations.
+
+Both outputs begin with the same `LOCATIONS` projection: absolute paths for the toolkit checkout,
+the selected run, its standard `bundle/`, `oracle/` and `packages/` roots, and each already-discovered
+package plus that package's fixed `fabric/` working copy. Human output prints each path once on its
+own `path:` line with native separators, so it can be copied without JSON's doubled backslashes;
+JSON carries the identical records. `expected` marks the standard documented location (or a
+`discovered` package directory) and never asserts existence; `observed` is the only existence claim
+and is closed to `present`, `missing` and `cannot_establish`, with the detailed unassessable state
+and its finding retained in `canonical_subdirs`/`findings`. Nothing is created.
+The toolkit root comes from this script's own checkout location, never the caller's working
+directory or the run's recorded metadata, and the derived roots always follow the accepted selected
+run. `relationship` uses whole-component containment, so a lookalike name prefix remains
+`outside_toolkit`; it explains spelling only and is not an identity, safety or readiness authority.
+An unestablished or unsafe selection yields only the toolkit location plus a `cannot_establish`
+selected run with no path; a path that could carry control characters is withheld. Location safety
+is independent of package seal integrity in both directions. See the
+[layout explanation](../_runs/README.md#where-the-toolkit-and-the-selected-run-actually-are) for the
+optional VS Code **File > Add Folder to Workspace…** display of the active run; this command never
+launches an editor, writes a workspace file or relocates a run.
+
+Package discovery stops at each marker, including malformed markers, and ignores ordinary files in
+grouping directories. It supports flat packages and retained grouping layouts up to three directory
+levels below `packages`. Unmarked directories are not inferred to be completed packages. Handover
+JSON is matched by **unique exact embedded workbook identity**, never by guessing a sanitized
+filename. Duplicate identities are reported; when a producer overwrote a colliding filename, only
+the retained identity is observable and the other unit remains missing.
+
+All statuses are closed projections. Arbitrary manifest prose, commands, exception text and nested
+readiness objects are not echoed. Stored readiness is a list of **last-observed** records with
+validated timestamps; every current certification remains `NOT_CHECKED`. The actual packager's
+`oracle.objects`/`omissions` record presence, missing/omitted evidence or an unassessable shape;
+object counts do not prove coverage or fidelity. A recorded report-free datasource can be reference
+`not_applicable`. Human output uses escaped, record-per-line JSON values under readable headings,
+so it carries exactly the JSON output's observations without control-character line spoofing.
+
+Exit **0** means the consumed diagnostic inputs were assessable, including known pending binding,
+missing references and recorded package edits. Exit **1** means some requested evidence could not
+be assessed; other retained observations are still shown. Exit **2** rejects an unsafe/nonlocal or
+relative input spelling (and is argparse's usage exit). Missing optional evidence is distinguished
+from malformed, unreadable and non-directory evidence.
+
+Limits: this is a read-time diagnostic, not an atomic filesystem snapshot. It inherits the package
+reader's documented `lstat`/read replacement-race limit, does not identify overwritten history,
+inspect unmarked package trees or prove that a local drive/mount is physically local, and makes no
+claim about interpreter activity before `-B` takes effect. It never changes run files, invokes
+processes/network clients, opens Desktop, refreshes, promotes, deploys or cleans up.
+
 ## Phase-2 COMPLETE — one caller-pinned current-snapshot check
 
 After binding and public START_READY, use tokenless/layer checks for diagnostic work. The only
@@ -684,7 +763,7 @@ dialog and can make a healthy bridge look broken.
 | `sync_engine_plugin.py` | Brings the **installed engine plugin** up to date **in place, mid-session** from a checkout, when `copilot plugin update` is blocked by a running session's file lock. Content of `skills/tableau-migration` only — the plugin's own manifest/version still needs a real `plugin update` between sessions. **Refuses a downgrade** unless `--allow-downgrade`: walking the canonical engine backwards turns a cleanup into a map-output regression. `--check` reports drift and exits 1. |
 | `sync_installed_skills.py` | Brings the **installed** plugin's bundles up to date **in place, mid-session** — the fix when `copilot plugin update` returns `Access is denied. (os error 5)`. The reference is built from the locally available merged/default-branch ref (`origin/master` by default), never from the caller's feature worktree; use the loud `--from-worktree` opt-in only to test unmerged skill content deliberately. That lock only blocks renaming the top two plugin directories; files inside stay writable, and `plugin update` fails solely because it swaps the directory. Content only: a manifest/version/MCP change still needs a real `plugin update` between sessions. `--check` reports drift and exits 1. |
 | `update_playbook_plugin.ps1` | The between-sessions path: kills every Copilot CLI process (and its children) so the plugin directory unlocks, then runs `marketplace update` + `plugin update` and verifies with `preflight.ps1`. **Run from a plain PowerShell window, not from inside Copilot** — it kills the session you would be typing into. Prefer `sync_installed_skills.py` when only bundle content changed. |
-| `work_dirs.py` | **The one place a pre-bundle working path is resolved**, the same rule as `engine_source.py` and `skill_plugin_source.py`. Allocates `_runs/<NNN>-<slug>/{assessment,assets,bundle,oracle,deliverables,scratch}/` so scripts stop inventing their own root — measured on a customer machine, 14 `_*` roots plus loose files accumulated because nothing said where `<bundle>` itself should sit, and one empty `fabric/` was created by a CWD-relative path resolving against the repo root. `deliverables/` is separate from `scratch/` deliberately: an operator-facing output naming real customer servers has a different lifecycle from a probe (issue #322). Covered by `.gitignore`'s root-anchored `/_*`, so everything under it is ignored by construction. Library first, CLI second (`python scripts/work_dirs.py <unit> [--json]`). `--runs-parent PATH` is a same-plumbing alias for `--repo-root` (issue #479): it allocates the identical canonical tree, just rooted under a short EXTERNAL parent instead of the repo, for when the repo-local root itself projects over Desktop's `run_estate.py` path ceiling; need not be a git checkout, and the two flags are mutually exclusive. Issues #291 (gaps 1 and 3) and #234. | any script needing a run-scoped path |
+| `work_dirs.py` | **The single run-path authority and CLI setup step.** `python -B scripts/work_dirs.py <slug> --json` allocates the canonical `_runs/<NNN>-<slug>/` tree and automatically attempts to write the ignored, checkout-local `_MIGRATION.md` navigation snapshot. Allocation can succeed with a navigation warning; do not reallocate for it. `--select-run ABSOLUTE-EXISTING-RUN` validates one explicit local/no-reparse existing run and refreshes that note without allocation or migration. Paths derive from `RunPaths`, not caller CWD; display controls are visibly escaped without changing filesystem identities or JSON paths. The note lists expected bundle/oracle/package destinations and the portable `<package>\fabric` convention; it is not status, readiness, liveness or current-run authority. Library allocation/listing and `--verify` do not write it. Unmarked collisions, including an empty/partial note with a lost generator marker, are preserved: inspect and preserve the file, then explicitly clear the collision before setup reselects the existing run. `--runs-parent PATH` and `--repo-root PATH` are mutually exclusive aliases for an external run parent. Repo-local runs are covered by this checkout's `/_*` rule; an external run does not inherit that protection. `deliverables/` remains lazy and separate from disposable `scratch/`. | any script needing a run-scoped path |
 | `probe_lab.py` | Agent-behaviour test harness. `make` generates **minimal** Tableau fixtures (one live source, two columns, no calculations) so the "probe the source before building" decision is reached in ~2 min instead of ~20; `watch` polls a running migration and returns PASS/FAIL/TIMEOUT so a deviation can be killed on sight. Writes to the gitignored `_probe-lab/`. Use when changing any instruction whose effect is only visible in agent behaviour. |
 
 ## Corpus harvesting (occasional, not part of a migration)
