@@ -958,6 +958,39 @@ What to check in the output:
   **zero** — measured, **four** worksheets in that workbook (`Hired By Year`, `Terminated By Year`,
   `Age Groups`, `Education Levels`) — so absence of text is not absence of content; fall back to the
   PNG.
+- **Oracle recovery is local and leg-selective.** After grouping completed batches, retry only
+  eligible gaps from the grouped workbook evidence, then consolidate again:
+  `python scripts\capture_tableau_oracle.py --run C:\...\_runs\123-unit --retry-failed-from migrations\workbooks\<slug>\reference --out C:\...\_runs\123-unit\oracle-retry-1`
+  followed by `python scripts\group_oracle_by_workbook.py --oracle-root C:\...\_runs\123-unit`.
+  Recovery accepts only grouped `tableau-oracle-workbook/1` manifests from the configured server/site,
+  requires an intact absolute `--run`, and writes an absent/empty `--out` below that run. It retries
+  only final `transient`, exhausted `session_lost`, and render `truncated` legs; a successful data leg
+  never recaptures because the render failed, and a successful render never recaptures because data
+  failed. A grouped success whose artifact is missing or digest-mismatched means **re-run grouping**,
+  not metered recovery. `--workbook`, `--limit`, global render flags and `--reference-best` conflict
+  with recovery; worker/timeout/attempt/budget tuning remains available. The freshness ceiling is the
+  published view's `updatedAt` metadata only, not datasource or extract freshness.
+  - Use local, non-reparse paths. Recovery rejects remote/device spellings before filesystem access,
+    and checks the run, source/artifact paths and output ancestors without following junctions or
+    symlinks. Do not replace/relink files during these snapshot checks; no locking/atomicity is claimed.
+  - After changing capture tooling, **re-merge first** so each selected leg carries its own API policy.
+    A newer data-only batch's top-level `max_age_minutes` is not the older failed render's cache policy.
+    New captures record the effective API, including the unpinned **3.21** default. Legacy null/missing
+    API pins use their own capture's capability configuration or the established producer default;
+    `rest_api_version_source: legacy_producer_default` names an inference, not historical proof.
+    Missing or incompatible selected API/cache evidence refuses before sign-in; do not fill it from
+    an unrelated batch. A selected data leg's API must also match trusted configuration.
+  - Reused capability reports say `probe_performed: false` and retain `reused_from_grouped` provenance.
+    Their probe counts are historical, not fresh probes. Different tier/API reports do not block
+    ordinary per-leg grouping: ambiguous aggregate reports become null, without losing leg evidence.
+    Only incompatible **selected failed-leg** policies constrain a retry, not an older probe or an
+    unrelated successful leg. No capability probing occurs in recovery. Reused warnings are validated
+    as string arrays and redacted before bounded console output; full manifest scrubbing remains active.
+  - A render-only success prints its attempted leg (`svg=ok`), not a synthetic data failure. Unknown
+    statuses or malformed consumed fields refuse before a no-work verdict. Read refusal positions
+    against the numbered input manifests/views; diagnostic text deliberately omits unchecked values.
+    The [recovery contract](reference-capture.md#local-recovery-retries-start-from-grouped-evidence)
+    lists the precise policy, path and freshness boundaries.
 - **Three files in the package are load-bearing rather than incidental**, and the package's own
   `README.md` now names them: `report.json` (this unit's engine classification — what earns a
   datasource-only unit its `NOT_APPLICABLE`), `source-provenance.json` (the only trusted route to a

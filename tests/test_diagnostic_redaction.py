@@ -58,6 +58,9 @@ from xml.etree import ElementTree
 
 import pytest
 
+# Preserve published regression IDs and the single existing certification inventory.
+# pylint: disable=invalid-name,too-many-lines
+
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
@@ -169,7 +172,7 @@ VIEW = {"id": "eb00995d-1ff1-4a42-9ac9-28846f861d31", "name": "HR | Summary", "w
 ENV = {"TABLEAU_SERVER_URL": "https://s", "TABLEAU_SITE": "site", "TABLEAU_REST_API_VERSION": "3.29"}
 
 
-class _Counter:
+class _Counter:  # pylint: disable=too-few-public-methods
     """A `run.session` stand-in. It carries a REAL redactor on purpose.
 
     `write_manifest` scrubs the whole manifest through `run.session.redact_text` immediately before
@@ -184,6 +187,7 @@ class _Counter:
         self._redact = _Session(secret).redact_text if secret else (lambda text: text)
 
     def redact_text(self, text: str) -> str:
+        """Apply the real session redactor carried by this protocol double."""
         return self._redact(text)
 
 
@@ -206,7 +210,10 @@ class _Session(oracle.TableauSession):
         self.data_reply = (*data_reply, {}) if data_reply and len(data_reply) == 2 else data_reply
         self.token, self.site_id = "tok", "sid"
 
-    def _request(self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None):  # noqa: ARG002
+    # The double must preserve the real transport signature.
+    def _request(  # pylint: disable=too-many-arguments
+        self, method, path, *, body=None, accept=None, authed=True, api=None, deadline=None
+    ):  # noqa: ARG002
         if path.split("?")[0].endswith("/data"):
             status, payload, headers = self.data_reply or (200, b"a\n1\n", {})
             headers = dict(headers)
@@ -261,10 +268,12 @@ def site_classify_probe_error_detail(secret, _tmp, _mp):
 
 
 def site_format_matches_body(secret, _tmp, _mp):
+    """Exercise a reflected wrong-format body."""
     return cap.format_matches("svg", (secret + " <html>").encode(), None, redactor=_r(secret))[1]
 
 
 def site_format_matches_content_type(secret, _tmp, _mp):
+    """Exercise a reflected Content-Type diagnostic."""
     return cap.format_matches("svg", SVG_BODY, f"image/{secret}", redactor=_r(secret))[1]
 
 
@@ -286,6 +295,7 @@ def site_sign_in_failure(secret, _tmp, _mp):
 
 
 def site_get_json_failure(secret, _tmp, _mp):
+    """Inspect the exception from an authenticated metadata request."""
     session = _Session(secret, (400, _reflected(secret), {}))
     with pytest.raises(RuntimeError) as excinfo:
         session.get_json("/sites/sid/views")
@@ -293,6 +303,7 @@ def site_get_json_failure(secret, _tmp, _mp):
 
 
 def site_export_failure(secret, _tmp, _mp):
+    """Inspect both export exception text and its classified detail."""
     session = _Session(secret, (400, _reflected(secret), {}))
     with pytest.raises(oracle.ExportFailed) as excinfo:
         session.export("/sites/sid/views/v/image?format=svg")
@@ -323,11 +334,110 @@ def site_export_session_lost_fallback(secret, _tmp, _mp):
 
 
 def site_capture_render_record(secret, tmp_path, _mp):
+    """Inspect the serialized record of a wrong-format render."""
     session = _Session(secret, (200, (secret + " and then some html").encode(), {}))
     return json.dumps(oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"})))
 
 
-def _capture_and_read_everything(secret, tmp_path, reply, wants, data_reply=None, session=None):
+def site_recovery_refusals(secret, tmp_path, monkeypatch):
+    """No redactor exists at this read boundary: report positions/reasons, never manifest values."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / "oracle-manifest.json"
+    clean = {
+        "schema": verdict.GROUPED_SCHEMA,
+        "server": "https://example.test",
+        "site": "site",
+        "workbook_luid": "wb",
+        "view_count": 1,
+        "requested_renders": [],
+        "max_age_minutes": 1,
+        "views": [
+            {
+                "view_luid": VIEW["id"],
+                "workbook_luid": "wb",
+                "updated_at": "2026-09-01T00:00:00Z",
+                "data": {"status": "transient", "max_age_minutes": 1},
+            }
+        ],
+    }
+    messages = []
+    for field in ("schema", "view_count", "status", "duplicate", "artifact", "digest", "api"):
+        manifest = json.loads(json.dumps(clean))
+        view = manifest["views"][0]
+        if field in {"schema", "view_count"}:
+            manifest[field] = secret
+        elif field == "duplicate":
+            view["view_luid"] = secret
+            manifest["views"].append(dict(view))
+            manifest["view_count"] = 2
+        elif field == "status":
+            view["data"]["status"] = secret
+        elif field == "api":
+            manifest["render_capability"] = {"selected_tier": "svg", "selected_api_version": secret}
+        else:
+            (tmp_path / "data.csv").write_bytes(b"value\n1\n")
+            view["data"] = {
+                "status": "ok",
+                "path": secret if field == "artifact" else "data.csv",
+                "sha256": secret,
+            }
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        with pytest.raises(verdict.OracleRecoveryRefusal) as excinfo:
+            verdict.read_recovery_sources([path])
+        messages.append(str(excinfo.value))
+    path.write_text(json.dumps(clean), encoding="utf-8")
+
+    def unreadable(_path):
+        raise OSError(secret)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", unreadable)
+        with pytest.raises(verdict.OracleRecoveryRefusal) as excinfo:
+            verdict.read_recovery_sources([path])
+        assert excinfo.value.__suppress_context__, "a fixed refusal must also suppress the raw I/O exception"
+        messages.append(str(excinfo.value))
+    return "\n".join(messages)
+
+
+def site_recovery_metadata_and_progress(secret, tmp_path, _mp):
+    """The selected-leg logger and the real sink scrub identities, reused policy and recovery keys."""
+    session = _Session(secret, (200, SVG_BODY, {}))
+    view = {**VIEW, "name": secret, "contentUrl": secret, "project": {"name": secret}, "updatedAt": secret}
+    record = oracle.capture_recovery_view(session, view, tmp_path, frozenset({"svg"}))
+    assert record["svg"]["status"] == "ok" and "data" not in record
+    record["workbook_name"] = secret
+    recovery = {
+        "sources": {"inputs": [{"path": secret, "workbook_luid": secret}], secret: secret},
+        "selected_legs_by_view": {VIEW["id"]: ["svg"]},
+        "requested_renders": ["svg"],
+        "max_age_minutes": 1,
+    }
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    oracle.LOG.addHandler(handler)
+    try:
+        # A failed attempt still uses the same redaction boundary, including an unexpected status.
+        oracle.log_progress(
+            1,
+            1,
+            {**record, "svg": {"status": secret, "detail": secret}},
+            session.redact_text,
+            selected_legs=frozenset({"svg"}),
+        )
+        oracle.write_manifest(
+            [record],
+            oracle.CaptureRun(_Counter(secret), ENV, tmp_path, 0.0, frozenset({"svg"})),
+            {"probe_view_name": secret, "selected_tier": "svg", "selected_api_version": "3.29", "warnings": [secret]},
+            recovery=recovery,
+        )
+    finally:
+        oracle.LOG.removeHandler(handler)
+    return stream.getvalue() + (tmp_path / "oracle-manifest.json").read_text(encoding="utf-8")
+
+
+def _capture_and_read_everything(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    secret, tmp_path, reply, wants, data_reply=None, session=None
+):
     """Run one capture and return the manifest text PLUS the bytes of every file it wrote.
 
     ⚠️ Reading the FILES, not only the manifest, is the round-5 lesson. A successful `/data` body is
@@ -466,6 +576,8 @@ SITES = {
     "export": site_export_failure,
     "export/session-lost fallback": site_export_session_lost_fallback,
     "capture_view record": site_capture_render_record,
+    "recovery pre-session refusals": site_recovery_refusals,
+    "recovery metadata and progress": site_recovery_metadata_and_progress,
     "written manifest (render)": site_written_manifest,
     "written manifest (data)": site_written_manifest_from_a_failed_data_leg,
     "written artifacts (successful /data)": site_successful_csv,
@@ -580,6 +692,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # through `redacted_note` before anything formats them, which is why that function needs no
     # certification of its own.
     ("scripts/tableau_render_capability.py", "svg_gate_advice"): {"gate"},
+    ("scripts/tableau_render_capability.py", "api_tuple"): {"version"},
     # `capture_tableau_oracle.main()` hands `resolve_and_stamp` the `/views` listing it just parsed.
     # ⚠️ Not optional bookkeeping: without it the boundary check fails outright, and `stamp` then
     # writes onto dicts the analyser believes are clean, so the manifest key it stamps arrives
@@ -594,8 +707,15 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # responses, and `log_progress` one record per view. Both cross a module boundary, so propagation
     # cannot carry the taint and the seeds are irreducible -- without them the manifest sink and every
     # console line in that module would be analysed as clean.
-    ("scripts/tableau_oracle_manifest.py", "write_manifest"): {"records", "capability_report", "server_info"},
-    ("scripts/tableau_oracle_manifest.py", "log_progress"): {"record", "index", "total"},
+    # Recovery's policy and raw provenance cross separately; run still holds only trusted CLI context.
+    ("scripts/tableau_oracle_manifest.py", "write_manifest"): {
+        "records",
+        "capability_report",
+        "server_info",
+        "recovery",
+    },
+    ("scripts/tableau_oracle_manifest.py", "log_progress"): {"record", "index", "total", "selected_legs"},
+    ("scripts/tableau_oracle_manifest.py", "validated_render_capability"): {"value"},
     # `_capture_data` hands the verdict layer the `certify_csv` result -- a closed vocabulary, but it
     # crosses a module boundary, so it is declared rather than assumed. ⚠️ `stem` is deliberately NOT
     # seeded: it is untainted TODAY (`artifact_stem` of a validated LUID), and seeding it would make
@@ -732,6 +852,11 @@ _INTO_THE_MANIFEST = (
     "SCRUBBED-AT-SINK: Tableau metadata copied into the manifest record; `scrub_tree` covers it, "
     "values and keys, immediately before serialisation -- and it never reaches a path or a raw log line"
 )
+_RECOVERY_FIELD_POSITION = (
+    "FIXED-VOCABULARY: a field name authored by this module, optionally prefixed by the one-based "
+    "manifest/view position from enumerate; never a path, identifier, digest, status value or exception. "
+    "site_recovery_refusals exercises these rejection branches without a redactor."
+)
 
 _SVG_CAUSE = (
     "FIXED-VOCABULARY: one of `svg_gate_advice`'s three cause literals -- `server_meets_floor`, "
@@ -746,13 +871,18 @@ _SVG_REMEDY = (
 
 CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     ("scripts/tableau_lineage.py", "_post_json"): {
-        "headers": "OUTBOUND: request headers, including the session credential, are sent to Tableau and never persisted",
+        "headers": (
+            "OUTBOUND: request headers, including the session credential, are sent to Tableau and never persisted"
+        ),
     },
     ("scripts/tableau_lineage.py", "fetch_lineage"): {
         "session.base": "OUTBOUND: the configured Tableau server URL is used only to build the request",
         "session.token": "OUTBOUND: the session token is sent only in the request header",
         "result['errors']": "REDACTED-UPSTREAM: redacted_note receives the complete response value before formatting",
-        "'Metadata API returned errors: ' + redacted_note(json.dumps(result['errors']), lambda text: redact(text, session.pat_name, session.pat_secret, session.token), limit=400)": "REDACTED-UPSTREAM: the only raised response text is the redacted_note result",
+        "'Metadata API returned errors: ' + redacted_note(json.dumps(result['errors']), lambda text: "
+        "redact(text, session.pat_name, session.pat_secret, session.token), limit=400)": (
+            "REDACTED-UPSTREAM: the only raised response text is the redacted_note result"
+        ),
     },
     ("scripts/tableau_lineage.py", "download_datasource"): {
         "session.base": "OUTBOUND: configured Tableau server URL used only to build the request",
@@ -763,33 +893,73 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "dest": "SHAPE-VERIFIED: main constructs the destination from the full UUID returned by _download_stem",
     },
     ("scripts/tableau_lineage.py", "_entry"): {
-        "{_norm(w): w for w in survey_workbooks or []}": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
-        "dedup_key(site, name)": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
-        "downstream": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "{_norm(w): w for w in survey_workbooks or []}": (
+            "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; "
+            "main scrubs the complete plan before print_plan"
+        ),
+        "dedup_key(site, name)": (
+            "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; "
+            "main scrubs the complete plan before print_plan"
+        ),
+        "downstream": (
+            "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; "
+            "main scrubs the complete plan before print_plan"
+        ),
         "evidence": "FIXED-VOCABULARY: one of the module-authored source labels",
         "len(downstream)": "NOT-A-STRING: an integer edge count",
         "len(metadata_keys)": "NOT-A-STRING: an integer edge count",
         "len(survey_keys)": "NOT-A-STRING: an integer edge count",
         "matched_via": "FIXED-VOCABULARY: Survey.match returns only module-authored match labels",
-        "name": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
-        "sorted((seen[k] for k in metadata_keys - survey_keys), key=str.lower)": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
-        "sorted((seen[k] for k in survey_keys - metadata_keys), key=str.lower)": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "name": (
+            "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; "
+            "main scrubs the complete plan before print_plan"
+        ),
+        "sorted((seen[k] for k in metadata_keys - survey_keys), key=str.lower)": (
+            "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; "
+            "main scrubs the complete plan before print_plan"
+        ),
+        "sorted((seen[k] for k in survey_keys - metadata_keys), key=str.lower)": (
+            "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; "
+            "main scrubs the complete plan before print_plan"
+        ),
         "source.get('has_extracts')": "NOT-A-STRING: a boolean or null response field",
-        "source.get('luid')": "SHAPE-VERIFIED: a LUID is used for a request only after _download_stem validates a full UUID",
-        "source.get('project')": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "source.get('luid')": (
+            "SHAPE-VERIFIED: a LUID is used for a request only after _download_stem validates a full UUID"
+        ),
+        "source.get('project')": (
+            "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; "
+            "main scrubs the complete plan before print_plan"
+        ),
         "survey_workbooks is not None": "NOT-A-STRING: a boolean presence check",
-        "{seen[key]: _origin(key, metadata_keys, survey_keys) for key in seen}": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "{seen[key]: _origin(key, metadata_keys, survey_keys) for key in seen}": (
+            "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; "
+            "main scrubs the complete plan before print_plan"
+        ),
     },
     ("scripts/tableau_lineage.py", "_survey_only_rows"): {
-        "row": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "row": (
+            "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; "
+            "main scrubs the complete plan before print_plan"
+        ),
     },
     ("scripts/tableau_lineage.py", "build_plan"): {
-        "entry": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "entry": (
+            "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; "
+            "main scrubs the complete plan before print_plan"
+        ),
         "survey_key": "SHAPE-VERIFIED: used only to look up the in-memory survey map",
         "datasource.get('hasExtracts')": "NOT-A-STRING: a boolean or null response field",
-        "datasource.get('luid')": "SHAPE-VERIFIED: a LUID is used for a request only after _download_stem validates a full UUID",
-        "datasource.get('projectName')": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
-        "name": "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; main scrubs the complete plan before print_plan",
+        "datasource.get('luid')": (
+            "SHAPE-VERIFIED: a LUID is used for a request only after _download_stem validates a full UUID"
+        ),
+        "datasource.get('projectName')": (
+            "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; "
+            "main scrubs the complete plan before print_plan"
+        ),
+        "name": (
+            "SCRUBBED-AT-SINK: raw plan identities remain in memory for matching; "
+            "main scrubs the complete plan before print_plan"
+        ),
     },
     ("scripts/tableau_lineage.py", "main"): {
         "len(datasources)": "NOT-A-STRING: integer count of returned datasource records",
@@ -797,8 +967,14 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "len(plan)": "NOT-A-STRING: integer count of in-memory plan rows",
         "luid": "SHAPE-VERIFIED: _download_stem accepts only a full UUID before filename construction",
         "dest": "SHAPE-VERIFIED: destination is constructed from the full UUID returned by _download_stem",
-        "scrub_tree({'site': site, 'datasources': datasources}, lambda text: redact(text, pat_name, pat_secret, session.token))[0]": "SCRUBBED-AT-SINK: whole save payload is scrubbed before json.dumps serializes it",
-        "json.dumps(scrub_tree({'site': site, 'datasources': datasources}, lambda text: redact(text, pat_name, pat_secret, session.token))[0], indent=2)": "SCRUBBED-AT-SINK: json.dumps receives only the whole-tree scrub result",
+        "scrub_tree({'site': site, 'datasources': datasources}, lambda text: "
+        "redact(text, pat_name, pat_secret, session.token))[0]": (
+            "SCRUBBED-AT-SINK: whole save payload is scrubbed before json.dumps serializes it"
+        ),
+        "json.dumps(scrub_tree({'site': site, 'datasources': datasources}, lambda text: "
+        "redact(text, pat_name, pat_secret, session.token))[0], indent=2)": (
+            "SCRUBBED-AT-SINK: json.dumps receives only the whole-tree scrub result"
+        ),
     },
     ("scripts/capture_tableau_oracle.py", "classify_export_error"): {
         "match.group(1)": "REDACTED-UPSTREAM: the regex runs on `safe`, the redacted copy, never on `text`",
@@ -954,8 +1130,9 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "server-controlled text; the credential-reflection probe pins that property."
         ),
     },
-    ("scripts/capture_tableau_oracle.py", "capture_view"): {
-        "view_luid": _LUID_OK,
+    ("scripts/capture_tableau_oracle.py", "_base_view_record"): {
+        # This identity is copied BEFORE artifact_stem validates it; only the sink certifies the copy.
+        "view['id']": _INTO_THE_MANIFEST,
         "view.get(tableau_view_types.VIEW_TYPE_KEY, tableau_view_types.UNKNOWN)": (
             "FIXED-VOCABULARY: exactly one of tableau_view_types' three module constants - "
             "'dashboard', 'worksheet' or 'unknown'. The `view` dict IS response-derived, so the gate "
@@ -971,11 +1148,46 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "view.get('updatedAt')": _INTO_THE_MANIFEST,
         "(view.get('project') or {}).get('name')": _INTO_THE_MANIFEST,
         "workbook.get('id')": _INTO_THE_MANIFEST,
+    },
+    ("scripts/capture_tableau_oracle.py", "capture_view"): {
         "_capture_data(session, view_luid, out_dir, stem, max_age=max_age)": (
             "SCRUBBED-AT-SINK: the returned leg record, whose own fields are certified in "
             "_capture_data; `stem` comes only from `artifact_stem` and `out_dir` is the CLI's "
             "capture root, so neither argument is response-derived"
         ),
+    },
+    ("scripts/capture_tableau_oracle.py", "capture_recovery_view"): {
+        "leg": (
+            "FIXED-VOCABULARY: selected from LEG_TO_KIND, never from manifest keys; recovery validates "
+            "the final status and request intent before selecting it"
+        ),
+        "_capture_data(session, view_luid, out_dir, stem, max_age=max_age)": (
+            "SCRUBBED-AT-SINK: the same data writer and validated artifact_stem as ordinary capture; "
+            "the independently mutated recovery PATH arm guards the filename boundary"
+        ),
+    },
+    ("scripts/capture_tableau_oracle.py", "_build_recovery_plan"): {
+        "current": _INTO_THE_MANIFEST_AGGREGATE,
+        "sum((len(legs_by_luid[view['id']]) for view in selected))": _A_COUNT,
+        "{view['id']: sorted(legs_by_luid[view['id']]) for view in selected}": _INTO_THE_MANIFEST_AGGREGATE,
+        "{key: value for key, value in workbook_names.items() if key in "
+        "{v.get('workbook', {}).get('id') for v in selected}}": _INTO_THE_MANIFEST_AGGREGATE,
+    },
+    ("scripts/capture_tableau_oracle.py", "_recovery_source_metadata"): {
+        "str(source.path)": _INTO_THE_MANIFEST,
+        "source.digest": "DERIVED-IRREVERSIBLY: SHA-256 of the source bytes, computed by read_recovery_sources",
+        "source.manifest.get('schema')": "FIXED-VOCABULARY: GROUPED_SCHEMA, checked before the source is returned",
+        "source.manifest.get('view_count')": (
+            "NOT-A-STRING: checked as an integer equal to len(views), explicitly refusing booleans"
+        ),
+        "source.manifest.get('workbook_luid')": _INTO_THE_MANIFEST,
+        "[{'path': str(source.path), 'sha256': source.digest, 'schema': source.manifest.get('schema'), "
+        "'workbook_luid': source.manifest.get('workbook_luid'), 'view_count': source.manifest.get('view_count')} "
+        "for source in sources]": _INTO_THE_MANIFEST_AGGREGATE,
+    },
+    ("scripts/capture_tableau_oracle.py", "_reused_capability"): {
+        "reports[0]": _INTO_THE_MANIFEST_AGGREGATE,
+        "_recovery_source_metadata(sources)": _INTO_THE_MANIFEST_AGGREGATE,
     },
     ("scripts/capture_tableau_oracle.py", "_capture_renders"): {
         "data_status": _A_STATUS_LITERAL,
@@ -991,8 +1203,10 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
             "above as one of two self-authored sentences), and an integer maxAge value"
         ),
         "{'status': data_status, 'attempted': False, 'reason': 'the data leg was blocked at the source, and every "
-        "render route comes from the same VizQL render, so no render could have succeeded', 'max_age_minutes': max_age}": (
-            "FIXED-VOCABULARY: a status literal, a bool, a sentence this module authors, and an integer maxAge value -- "
+        "render route comes from the same VizQL render, so no render could have succeeded', "
+        "'max_age_minutes': max_age}": (
+            "FIXED-VOCABULARY: a status literal, a bool, a sentence this module authors, "
+            "and an integer maxAge value -- "
             "nothing in it came off the wire, so the credential-inheriting skip carries no response text"
         ),
         "_capture_render(session, record['view_luid'], targets.out_dir / 'images' / "
@@ -1028,6 +1242,32 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         ),
         "data['reauths']": "NOT-A-STRING: an integer counter",
         "data['retries']": "NOT-A-STRING: an integer counter",
+    },
+    ("scripts/tableau_oracle_manifest.py", "_log_recovery_progress"): {
+        "index": "NOT-A-STRING: an integer completion position",
+        "total": _A_COUNT,
+    },
+    ("scripts/tableau_oracle_manifest.py", "_require_str"): {"where": _RECOVERY_FIELD_POSITION},
+    ("scripts/tableau_oracle_manifest.py", "_optional_api"): {"where": _RECOVERY_FIELD_POSITION},
+    ("scripts/tableau_oracle_manifest.py", "capture_api_policy"): {
+        "source": (
+            "FIXED-VOCABULARY: one of four provenance labels authored in capture_api_policy; "
+            "no label is read from the input manifest"
+        ),
+        "version.strip()": (
+            "SHAPE-VERIFIED: a recorded version accepted by _optional_api through capability.api_tuple, "
+            "or the established producer default; this names an owning capture's API policy, not raw diagnostics"
+        ),
+    },
+    ("scripts/tableau_oracle_manifest.py", "_optional_positive_int"): {"where": _RECOVERY_FIELD_POSITION},
+    ("scripts/tableau_oracle_manifest.py", "_validate_recovery_view"): {"where": _RECOVERY_FIELD_POSITION},
+    ("scripts/tableau_oracle_manifest.py", "_verify_ok_artifact"): {"where": _RECOVERY_FIELD_POSITION},
+    ("scripts/tableau_oracle_manifest.py", "read_recovery_sources"): {
+        "index": "NOT-A-STRING: one-based position from enumerate(views, 1), never a recorded count",
+        "RecoverySource(path=path, root=root, manifest=manifest, digest=hashlib.sha256(data).hexdigest())": (
+            "SCRUBBED-AT-SINK: an internal source container, not a diagnostic. Copied recovery provenance "
+            "reaches write_manifest's whole-tree sink; refusals quote only field positions, tested separately"
+        ),
     },
     ("scripts/capture_tableau_oracle.py", "_capture_data"): {
         "view_luid": _LUID_OK,
@@ -1277,6 +1517,15 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "workbook_names.get(record['workbook_luid'])": _INTO_THE_MANIFEST,
     },
     ("scripts/tableau_oracle_manifest.py", "write_manifest"): {
+        "recovery": _INTO_THE_MANIFEST_AGGREGATE,
+        "max_age": (
+            "NOT-A-STRING: positive integer from ordinary validate_max_age or the selected-leg policy "
+            "validation; grouped-policy runtime controls reject boolean, absent and incompatible values"
+        ),
+        "sorted(requested_renders)": (
+            "FIXED-VOCABULARY: png/svg/pdf from CLI flags or the capability ladder in ordinary mode, "
+            "and LEG_TO_KIND over validated selected legs in recovery"
+        ),
         "manifest": _INTO_THE_MANIFEST_AGGREGATE,
         "capability_report": _INTO_THE_MANIFEST_AGGREGATE,
         "records": _INTO_THE_MANIFEST_AGGREGATE,
@@ -1315,12 +1564,11 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         "ok": _INTO_THE_MANIFEST_AGGREGATE,
         "[r for r in ok if empty_classification(r)]": _INTO_THE_MANIFEST_AGGREGATE,
         "[r for r in ok if unassessable_reason(r)]": _INTO_THE_MANIFEST_AGGREGATE,
-        "[r for r in records if r.get('data', {}).get('status') == 'ok' and (not unassessable_reason(r)) and "
-        "all((s == 'ok' for s in _render_statuses(r, requested)))]": _INTO_THE_MANIFEST_AGGREGATE,
-        "[r for r in records if 'source_credential' in {r.get('data', {}).get('status'), "
-        "*_render_statuses(r, requested)}]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in records if statuses[id(r)] and all((status == 'ok' for status in statuses[id(r)])) "
+        "and (not unassessable_reason(r))]": _INTO_THE_MANIFEST_AGGREGATE,
+        "[r for r in records if 'source_credential' in statuses[id(r)]]": _INTO_THE_MANIFEST_AGGREGATE,
         "[r for r in records if any((status not in {'ok', 'source_credential'} for status in "
-        "(r.get('data', {}).get('status'), *_render_statuses(r, requested))))]": _INTO_THE_MANIFEST_AGGREGATE,
+        "statuses[id(r)]))]": _INTO_THE_MANIFEST_AGGREGATE,
     },
     # #471. `flag_empty` copies a record and adds a per-view flag; `data_empty_views` names the
     # views a numeric-fidelity finding cannot be made from. Both build values that land in the
@@ -1430,7 +1678,6 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         ),
     },
     ("scripts/tableau_oracle_manifest.py", "_log_blocked_and_stale"): {
-        "warning": _PROBE_VERDICT,
         "len(blocked)": _A_COUNT,
         "len(stale_api)": _A_COUNT,
         "advice.cause": _SVG_CAUSE,
@@ -1537,7 +1784,10 @@ def _bind(targets, tainted: set[str]) -> None:
                 tainted.add(base.id)
 
 
-def taint_module(source: str, module: str) -> dict[str, set[str]]:
+# Keep the existing analyzer intact rather than changing proof machinery for a style limit.
+def taint_module(  # pylint: disable=too-many-locals,too-many-branches,too-many-boolean-expressions
+    source: str, module: str
+) -> dict[str, set[str]]:
     """Tainted names per function, propagated ACROSS calls within the module to a fixpoint."""
     tree = ast.parse(source)
     functions = {f.name: f for f in _functions(tree)}
@@ -1601,7 +1851,7 @@ def taint_module(source: str, module: str) -> dict[str, set[str]]:
     return tainted
 
 
-def sink_expressions(func: ast.AST) -> list[tuple[str, ast.AST]]:
+def sink_expressions(func: ast.AST) -> list[tuple[str, ast.AST]]:  # pylint: disable=too-many-branches
     """Every place a value can leave this function as persisted or emitted text.
 
     Derived from the EXITS -- write/log/print/raise -- and from every construction that can carry a
@@ -1646,7 +1896,7 @@ def uncertified_sinks(source: str, module: str) -> list[str]:
             continue
         certified = CERTIFIED.get((module, func.name), {})
         for kind, expr in sink_expressions(func):
-            if _called(expr) in UNTAINTING or not (_roots(expr) & local):
+            if _called(expr) in UNTAINTING or not _roots(expr) & local:
                 continue
             text = ast.unparse(expr)
             if text not in certified:
@@ -2073,6 +2323,7 @@ def test_no_credential_handling_script_sits_outside_the_gate_unwaived():
 
 
 def test_every_waiver_and_gap_names_a_reason_and_a_file_that_exists():
+    """Every existing exception to the inventory must remain attributable and current."""
     for script, reason in {**GATE_WAIVERS, **NON_HTTP_CREDENTIAL_SCRIPTS, **KNOWN_GAPS}.items():
         assert (REPO / script).is_file(), f"an excuse for a script that no longer exists: {script}"
         assert len(reason) > 25, f"{script} is excused with no real reason: {reason!r}"
@@ -2168,7 +2419,7 @@ def test_every_cross_module_call_carrying_tainted_data_lands_on_a_declared_seed(
     )
 
 
-def undeclared_boundary_crossings(source: str, module: str) -> list[str]:
+def undeclared_boundary_crossings(source: str, module: str) -> list[str]:  # pylint: disable=too-many-locals
     """Tainted arguments this module hands to a cross-module parameter with no declared seed.
 
     Extracted from the test above so the round-6 regression test can measure the SAME check. A
@@ -2208,7 +2459,8 @@ def undeclared_boundary_crossings(source: str, module: str) -> list[str]:
     return sorted(set(undeclared))
 
 
-def test_the_static_gate_would_now_catch_the_round_6_PATH_defect(tmp_path):
+@pytest.mark.parametrize("arm", ["capture_view", "capture_recovery_view"])
+def test_the_static_gate_would_now_catch_the_round_6_PATH_defect(tmp_path, arm):
     """⚠️ Round 6 was caught only by the RUNTIME battery. The static gate was blind to it.
 
     Measured before `view` was seeded: reintroducing `safe_slug(view["name"])` as the artifact stem
@@ -2228,10 +2480,14 @@ def test_the_static_gate_would_now_catch_the_round_6_PATH_defect(tmp_path):
     module = "scripts/capture_tableau_oracle.py"
     source = (REPO / module).read_text(encoding="utf-8")
     anchor = "        stem = artifact_stem(view_luid)"
-    assert source.count(anchor) == 1, "the anchor moved; this test would otherwise mutate nothing"
-    regressed = source.replace(
+    function = next(func for func in _functions(ast.parse(source)) if func.name == arm)
+    lines = source.splitlines(keepends=True)
+    body = "".join(lines[function.lineno - 1 : function.end_lineno])
+    assert body.count(anchor) == 1, "the selected arm's anchor moved; do not mutate another arm"
+    changed = body.replace(
         anchor, '        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", view.get("name", "")).strip("_")[:60]'
     )
+    regressed = "".join(lines[: function.lineno - 1]) + changed + "".join(lines[function.end_lineno :])
     new = set(uncertified_sinks(regressed, module)) - set(uncertified_sinks(source, module))
     assert {"_capture_render() write-path: path", "_capture_renders() f-string: targets.stem"} <= new, sorted(new)
 
@@ -2282,6 +2538,7 @@ def test_the_certification_list_has_no_stale_entries(module):
 
 
 def test_every_certification_names_a_category_rather_than_arguing_in_prose():
+    """Require a recognized category on every exact certification."""
     for (module, func), entries in CERTIFIED.items():
         for expression, reason in entries.items():
             assert reason.startswith(CATEGORIES), f"{module}:{func} {expression!r} -> {reason!r}"
@@ -2521,6 +2778,7 @@ def test_a_reflected_credential_arriving_as_a_PRODUCT_VERSION_reaches_the_log_on
 
 
 def test_scrub_tree_scrubs_dict_KEYS_not_only_values():
+    """A reflected dictionary key must be scrubbed as well as its value."""
     tree = {"format_hints": {"SECRET_COLUMN_42": "percent"}}
     scrubbed, hits = scrub_tree(tree, lambda t: t.replace("SECRET_COLUMN_42", "[R]"))
     assert scrubbed == {"format_hints": {"[R]": "percent"}}
@@ -2579,6 +2837,7 @@ def _one_request_server(status: int, reason: str, body: bytes):
 
     class _Handler(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
+            """Drain the request and return the chosen synthetic response."""
             self.rfile.read(int(self.headers.get("Content-Length") or 0))
             self.send_response(status, reason)
             self.send_header("Content-Length", str(len(body)))
@@ -2621,7 +2880,7 @@ def test_the_signin_reason_phrase_never_carries_a_credential(shape, planted):
     raised: BaseException | None = None
     try:
         cap.sign_in(f"http://127.0.0.1:{server.server_port}", "site", pat_name, pat_secret_value, "3.29")
-    except BaseException as exc:  # noqa: BLE001  # ANY escape is in scope -- that is the finding
+    except BaseException as exc:  # pylint: disable=broad-exception-caught  # ANY escape is the specimen
         raised = exc
     finally:
         server.shutdown()
@@ -2640,7 +2899,7 @@ def test_the_signin_error_BODY_is_redacted_too_and_the_reason_still_reads():
     raised: BaseException | None = None
     try:
         cap.sign_in(f"http://127.0.0.1:{server.server_port}", "site", "a-long-pat-name", secret, "3.29")
-    except BaseException as exc:  # noqa: BLE001
+    except BaseException as exc:  # pylint: disable=broad-exception-caught  # ANY escape is the specimen
         raised = exc
     finally:
         server.shutdown()
@@ -2661,7 +2920,7 @@ def _signin_message(reason: str, body: bytes, secret: str) -> str:
     raised: BaseException | None = None
     try:
         cap.sign_in(f"http://127.0.0.1:{server.server_port}", "site", "a-long-enough-pat-name", secret, "3.29")
-    except BaseException as exc:  # noqa: BLE001
+    except BaseException as exc:  # pylint: disable=broad-exception-caught  # ANY escape is the specimen
         raised = exc
     finally:
         server.shutdown()
@@ -2812,7 +3071,7 @@ def test_a_server_controlled_status_line_or_redirect_cannot_escape_signin_with_a
     raised: BaseException | None = None
     try:
         cap.sign_in(base, "site", "an-unrelated-long-pat-name", ROUND9_SECRET, "3.29")
-    except BaseException as exc:  # noqa: BLE001  # ANY escape is in scope -- that is the finding
+    except BaseException as exc:  # pylint: disable=broad-exception-caught  # ANY escape is the specimen
         raised = exc
     finally:
         close()
@@ -2872,7 +3131,7 @@ def test_the_oracle_session_reaches_the_identical_verdict_on_the_identical_shape
     raised: BaseException | None = None
     try:
         session.sign_in()
-    except BaseException as exc:  # noqa: BLE001
+    except BaseException as exc:  # pylint: disable=broad-exception-caught  # ANY escape is the specimen
         raised = exc
     finally:
         close()
@@ -2892,13 +3151,14 @@ def test_the_shared_primitive_guards_the_ERROR_BODY_read_as_well_as_the_request(
     the substituted body must be redacted like any other string this module authors.
     """
 
-    class _TornBody(urllib.error.HTTPError):
+    class _TornBody(urllib.error.HTTPError):  # pylint: disable=too-many-ancestors
         """A 503 whose body read tears mid-stream, as one does over a flaky link."""
 
         def __init__(self):
             super().__init__("http://127.0.0.1/x", 503, "Service Unavailable", {"Content-Type": "text/plain"}, None)
 
         def read(self, *_args, **_kwargs):
+            """Model an HTTP error whose body tears while being read."""
             raise http.client.IncompleteRead(b"", 99)
 
     def _raise(*_args, **_kwargs):
@@ -2928,11 +3188,12 @@ def test_the_error_body_read_failure_is_redacted_not_merely_caught(monkeypatch):
     class _EchoingReadFailure(http.client.HTTPException):
         """A body-read failure whose message quotes what it managed to read."""
 
-    class _TornWithEcho(urllib.error.HTTPError):
+    class _TornWithEcho(urllib.error.HTTPError):  # pylint: disable=too-many-ancestors
         def __init__(self):
             super().__init__("http://127.0.0.1/x", 503, "Service Unavailable", {}, None)
 
         def read(self, *_args, **_kwargs):
+            """Model a body-read exception containing response text."""
             raise _EchoingReadFailure(f"torn mid-stream after: {ROUND9_SECRET}")
 
     def _raise(*_args, **_kwargs):
@@ -3117,8 +3378,9 @@ def test_the_provision_signin_gap_is_still_real_and_still_uncaught(tmp_path):
     """
     prov = importlib.import_module("provision_tableau_estate")
 
-    class _Refusing:
+    class _Refusing:  # pylint: disable=too-few-public-methods
         def sign_in(self, _auth):
+            """Preserve the separate producer's known unsafe exception for its gap control."""
             raise RuntimeError(f"401001: Signin Error\n\t\techo {PROVISION_SECRET}")
 
     server = SimpleNamespace(auth=_Refusing())
@@ -3217,6 +3479,7 @@ def test_redacted_note_redacts_before_it_truncates():
 
 
 def test_redacted_note_redacts_before_it_strips():
+    """Leading whitespace is part of the secret until redaction has run."""
     secret = "  SYNTHETIC_SECRET_42"
     assert "SYNTHETIC" not in redacted_note(secret + "!", lambda t: t.replace(secret, "[R]"), limit=80)
 
@@ -3229,6 +3492,7 @@ def test_redacted_note_quotes_after_redacting_not_before():
 
 
 def test_redacted_note_output_is_ascii_safe_for_a_cp1252_console():
+    """The diagnostic representation must remain printable on the operator's console."""
     redacted_note(PNG_BODY, None, limit=16, quote=True).encode("cp1252")
 
 

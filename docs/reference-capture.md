@@ -134,6 +134,87 @@ It **copies** (never moves) each workbook's views into `<slug>/reference/{images
 per-workbook `oracle-manifest.json` subset beside them, with the per-workbook counts recomputed so a
 partial capture cannot read as complete.
 
+### Local recovery retries start from grouped evidence
+
+When a completed grouping still shows retry-eligible gaps, do **not** re-run the whole workbook or
+hand-maintain a queue. Recovery consumes the grouped per-workbook manifest that
+`group_oracle_by_workbook.py` already produced, then writes a fresh ordinary flat capture batch
+containing only the legs it actually retried:
+
+```
+python scripts/capture_tableau_oracle.py \
+    --run /absolute/path/to/_runs/123-unit \
+    --retry-failed-from migrations/workbooks/<slug>/reference \
+    --out /absolute/path/to/_runs/123-unit/oracle-retry-1
+python scripts/group_oracle_by_workbook.py --oracle-root /absolute/path/to/_runs/123-unit
+```
+
+`--retry-failed-from` is repeatable, but the inputs must be disjoint grouped workbook manifests from
+the same configured Tableau server/site. `--run` is mandatory and must be an intact allocated run;
+`--out` must be absent or empty, must stay below that run, and must be distinct from all grouped
+evidence directories. A grouped manifest with **zero** eligible legs is explicit no-work: no sign-in,
+no export and no new batch. That verdict follows validation of the complete final-status vocabulary,
+request intent and consumed field types/counts: an unknown status is a refusal, **not** empty work.
+
+✅ Recovery rejects UNC, device and remote path spellings lexically, before filesystem access, and
+checks existing path components root-first with no-follow `lstat` and the shared reparse predicate.
+This includes the selected run and its ancestors, `run.json`, source manifests, referenced artifacts,
+and every existing output ancestor. A junction/symlink/reparse entry is refused rather than resolved
+and then read through. ⚠️ These are **snapshot checks**, not race-free handles or locking: do not
+move, replace or relink the tree while recovery is running.
+
+Only final leg statuses `transient`, exhausted `session_lost`, and render `truncated` are selected.
+Successful sibling legs suppress their own re-export even when another leg on the same view failed;
+`retry_reasons` are history, not selection input. Before any network work, recovery verifies every
+grouped `ok` artifact is still contained in the grouped evidence root and still matches its recorded
+SHA-256 digest. Missing, changed or undigestible successes are a **re-merge** action, not a metered
+retry target.
+
+✅ API/cache policy belongs to the **selected failed leg**, not the newest batch's top-level
+metadata. Grouping preserves the winning leg's `rest_api_version`, deriving it from that capture's
+configuration and selected-tier override when the leg predates the field. New ordinary captures
+record their effective configured API, including **3.21 when no environment pin was supplied**.
+For legacy captures with a null/missing pin, grouping uses that capture's recorded capability
+configuration, or the producer's established 3.21 default. A derived leg's `rest_api_version_source`
+distinguishes `capture_configuration`, `selected_render_api`, `capability_configuration` and
+`legacy_producer_default`. ⚠️ The last is an inference, not proof of historical configuration,
+freshness or authenticity. Re-merge original batches to repair older grouped null/missing policies;
+never infer a leg's API from an unrelated newest batch. Recovery requires each
+selected leg's recorded `max_age_minutes`; it never substitutes another batch's value. Missing or
+incompatible selected policies refuse **before sign-in**. If original batches never recorded the
+cache policy, recovery cannot establish it. A data leg must match the trusted configured
+API; render legs reuse their recorded API overrides. One invocation does not split incompatible
+policies into a new scheduler.
+
+Ordinary same-source, same-revision batches still consolidate per leg when their selected tiers or
+APIs differ. An unambiguous prior `render_capability` report survives a partial or data-only batch;
+otherwise the aggregate report is null, while original reports remain in their source batches and
+each leg retains its API provenance. A retained probe is not authority over a later leg's policy.
+Recovery likewise omits ambiguous reports rather than blocking retries whose **selected failed-leg**
+policies can be honored; unrelated successful-leg policies do not constrain the retry.
+Recovery marks a reused report with `probe_performed: false` and `reused_from_grouped`
+provenance. Its tier, original probe counts and other capability metadata remain **prior observations**,
+not a new capability probe. Repeated recovery/grouping retains this distinction in the package-facing
+grouped manifest.
+
+Reused warnings must be an array of strings, not assumed fixed vocabulary. Every emitted warning
+passes through the existing session redactor before the console note is bounded to 1,000 characters;
+the full metadata still passes through whole-manifest scrubbing.
+
+Progress reports only the selected recovery legs (`svg=ok`, for example), including their redacted
+failure details; it never invents a new successful data leg for render-only work. Ordinary capture's
+row-oriented progress is unchanged. Completions remain visible immediately, while the final manifest
+retains deterministic selected-view order. Refusals identify numbered manifests/views and field
+names rather than echoing unchecked values, paths or exception text.
+
+Recovery reuses the current trusted Tableau configuration for the server destination. The prior
+manifest's server/site, view LUID, workbook LUID and published-view `updated_at` must match current
+metadata before exports; the revision ceiling is only Tableau's published-view metadata, not an
+underlying datasource/extract revision or atomic server-snapshot claim. `--workbook`, `--limit`, `--images`, `--svg`,
+`--pdf`, and `--reference-best` conflict with recovery; existing worker, timeout, attempt and retry
+budget tuning remains available. Consolidation and packaging still consume only ordinary grouped
+evidence; there is no new recovery manifest family.
+
 Why a post-step rather than a `--group-by-workbook` flag on the capture:
 
 - it re-runs against an **existing** capture at **zero REST cost**. Tableau meters
