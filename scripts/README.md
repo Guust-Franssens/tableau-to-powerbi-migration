@@ -94,6 +94,29 @@ If recovery is allowed, retry the **exact originating command and arguments**: r
 | `current_artifact_revision.py` | **Library, no CLI.** Reuses `package_filesystem` for strict JSON, no-follow traversal and canonical portable names; no competing filesystem walker. The working revision covers every package file except `validation/iterations` and the declared model's **exact** separately hashed `.pbi/cache.abf`. All other `.pbi` files remain covered. Artifact revisions distinguish report, model and cache changes. The PBIR denominator enumerates immediate canonical page/visual directories, requires each definition with folder/name agreement, and requires unique nonempty string `pageOrder` entries without coercion. The packaging-time `contents.files` baseline is not used to reject legitimate Phase-2 edits. |
 | `build_synthetic_reference.py` | Renders an **honestly-labeled SYNTHETIC** reference (HTML/CSS bar chart from real queried data, screenshotted via Playwright) when no real Tableau capture exists - e.g. the `_probe-lab/` credential-gate fixtures, whose `.twb` is a generated skeleton with nothing to screenshot. Tagged `provider: synthetic_data_chart`, `capabilities: []`, `synthetic: true` - never claims layout/validation fidelity. Deliberately **not** wired into `capture_tableau_reference.py`'s fail-closed provider chain (see its docstring). | manual / test-harness use only |
 
+### Manual visual-reference handoff and fresh package input
+
+After bounded automatic visual recovery, add `--manual-reference-handoff` to the existing
+`group_oracle_by_workbook.py` invocation. It records and renders the residual original-Tableau
+image request in `oracle-grouping-report.json`; successful visual siblings and data-only
+failures are not screenshot requests. Matching request/response context is retained by source,
+view and revision, not by caption. Unknown context and uncertain delivery remain explicit.
+The caller must actually inspect supplied images and record their manual origin; file presence,
+PNG structure and hashes do not prove visual inspection.
+
+`package_unit.py --reference <reference-directory>` accepts the existing manual provider's
+`manifest.json` and only its declared image members for exactly one selected workbook.
+Admission happens in a **fresh target before normal sealing**, declares
+`artifacts.reference = "reference"`, and leaves existing source/grade/readiness checks in charge.
+An existing package, including one appearing during assembly, is not replaced; this option
+cannot be combined with `--discard-package-edits`. No external override, forged REST record,
+source-hash rewrite or edited-package reseal is provided.
+
+The generated package README reports the actual brief's numeric obligation: explicitly `none`
+does not make optional numeric comparison a prerequisite to permitted visual work; `required`
+remains owed and unknown stays unknown. Images or missing CSV never imply a waiver.
+See [reference capture](../docs/reference-capture.md) for the complete handoff and admission route.
+
 ### Package-local review iteration commands
 
 ```text
