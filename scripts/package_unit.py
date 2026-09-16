@@ -2120,13 +2120,17 @@ def _stage_reference(reference_dir: Path, dest: Path) -> dict[str, Any]:  # pyli
         payload = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise PackagingError("reference_manifest_unreadable") from error
-    dashboards = payload.get("dashboards") if isinstance(payload, dict) else None
-    if not isinstance(dashboards, list) or not dashboards:
+    if not isinstance(payload, dict) or not isinstance(payload.get("dashboards"), list):
+        raise PackagingError("reference_manifest_malformed")
+    dashboards = payload["dashboards"]
+    if not dashboards:
         raise PackagingError("reference_manifest_empty")
     members: dict[str, Path] = {}
     for dashboard in dashboards:
-        states = dashboard.get("states") if isinstance(dashboard, dict) else None
-        if not isinstance(states, list) or not states:
+        if not isinstance(dashboard, dict) or not isinstance(dashboard.get("states"), list):
+            raise PackagingError("reference_manifest_malformed")
+        states = dashboard["states"]
+        if not states:
             raise PackagingError("reference_manifest_empty")
         for state in states:
             image = state.get("image") if isinstance(state, dict) else None

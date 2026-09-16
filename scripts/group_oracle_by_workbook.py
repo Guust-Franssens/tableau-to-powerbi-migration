@@ -1732,6 +1732,7 @@ _RESPONSE_FIELDS = (
     "image_inspection_note",
     "response_recorded_at",
 )
+_MAX_HANDOFF_LABEL = 160
 
 
 def _safe_label(value: Any) -> str:
@@ -1739,7 +1740,9 @@ def _safe_label(value: Any) -> str:
     if not isinstance(value, str):
         return "UNKNOWN"
     clean = " ".join(value.split())
-    return clean[:160] if clean and all(char.isprintable() for char in clean) else "UNKNOWN"
+    if not clean or not all(char.isprintable() for char in clean):
+        return "UNKNOWN"
+    return clean if len(clean) <= _MAX_HANDOFF_LABEL else clean[: _MAX_HANDOFF_LABEL - 3] + "..."
 
 
 def _handoff_key(row: dict[str, Any]) -> tuple[str, ...]:

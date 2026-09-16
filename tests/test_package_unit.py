@@ -377,6 +377,30 @@ def test_reference_refuses_discard_override_and_unsafe_or_missing_members(tmp_pa
     assert not (_out(tmp_path) / UNIT).exists()
 
 
+@pytest.mark.parametrize(
+    ("dashboards", "reason"),
+    [([{"states": "not-a-list"}], "reference_manifest_malformed"), ([], "reference_manifest_empty")],
+)
+def test_reference_distinguishes_malformed_and_empty_manifests(
+    tmp_path: Path, dashboards: list[dict], reason: str
+) -> None:
+    bundle, oracle = _bundle(tmp_path, worksheets=("Sales",))
+    reference, _raw = _manual_reference(bundle)
+    (reference / "manifest.json").write_text(json.dumps({"dashboards": dashboards}), encoding="utf-8")
+
+    with pytest.raises(pkg.PackagingError, match=reason):
+        pkg.package_unit(
+            bundle,
+            UNIT,
+            _out(tmp_path),
+            oracle_dir=oracle,
+            assets_dir=bundle.parent / "assets",
+            reference_dir=reference,
+        )
+
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
 def test_reference_target_appearing_before_publication_is_not_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

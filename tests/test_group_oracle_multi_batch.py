@@ -954,6 +954,13 @@ def test_malformed_grouped_view_is_a_repair_gap_not_an_uncaught_error(tmp_path):
     ]
 
 
+def test_manual_handoff_marks_a_truncated_readable_label() -> None:
+    label = grp._safe_label("x" * 200)  # pylint: disable=protected-access
+
+    assert len(label) == 160
+    assert label.endswith("...")
+
+
 # ------------------------------------------------------------- batch identity must be unambiguous
 
 
