@@ -134,6 +134,42 @@ It **copies** (never moves) each workbook's views into `<slug>/reference/{images
 per-workbook `oracle-manifest.json` subset beside them, with the per-workbook counts recomputed so a
 partial capture cannot read as complete.
 
+### Local recovery retries start from grouped evidence
+
+When a completed grouping still shows retry-eligible gaps, do **not** re-run the whole workbook or
+hand-maintain a queue. Recovery consumes the grouped per-workbook manifest that
+`group_oracle_by_workbook.py` already produced, then writes a fresh ordinary flat capture batch
+containing only the legs it actually retried:
+
+```
+python scripts/capture_tableau_oracle.py \
+    --run /absolute/path/to/_runs/123-unit \
+    --retry-failed-from migrations/workbooks/<slug>/reference \
+    --out /absolute/path/to/_runs/123-unit/oracle-retry-1
+python scripts/group_oracle_by_workbook.py --oracle-root /absolute/path/to/_runs/123-unit
+```
+
+`--retry-failed-from` is repeatable, but the inputs must be disjoint grouped workbook manifests from
+the same configured Tableau server/site. `--run` is mandatory and must be an intact allocated run;
+`--out` must be absent or empty, must stay below that run, and must be distinct from all grouped
+evidence directories. A grouped manifest with **zero** eligible legs is explicit no-work: no sign-in,
+no export and no new batch.
+
+Only final leg statuses `transient`, exhausted `session_lost`, and render `truncated` are selected.
+Successful sibling legs suppress their own re-export even when another leg on the same view failed;
+`retry_reasons` are history, not selection input. Before any network work, recovery verifies every
+grouped `ok` artifact is still contained in the grouped evidence root and still matches its recorded
+SHA-256 digest. Missing, changed or undigestable successes are a **re-merge** action, not a metered
+retry target.
+
+Recovery reuses the current trusted Tableau configuration for the server destination. The prior
+manifest's server/site, view LUID, workbook LUID and published-view `updated_at` must match current
+metadata before exports; the revision ceiling is only Tableau's published-view metadata, not an
+underlying datasource or extract freshness claim. `--workbook`, `--limit`, `--images`, `--svg`,
+`--pdf`, and `--reference-best` conflict with recovery; existing worker, timeout, attempt and retry
+budget tuning remains available. Consolidation and packaging still consume only ordinary grouped
+evidence; there is no new recovery manifest family.
+
 Why a post-step rather than a `--group-by-workbook` flag on the capture:
 
 - it re-runs against an **existing** capture at **zero REST cost**. Tableau meters
