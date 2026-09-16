@@ -1,6 +1,6 @@
 """
 purpose: print a read-only, non-certifying status slice for one explicitly selected run.
-usage:   python scripts/run_status.py --run <absolute-run-directory> [--json]
+cli:     python scripts/run_status.py --run <absolute-run-directory> [--json]
 
 This command reports the selected run's recorded allocation status, post-conversion inventory,
 retained package/generated work, recorded phase failures, and the next non-destructive action. It
