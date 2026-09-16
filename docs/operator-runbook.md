@@ -975,11 +975,17 @@ What to check in the output:
     symlinks. Do not replace/relink files during these snapshot checks; no locking/atomicity is claimed.
   - After changing capture tooling, **re-merge first** so each selected leg carries its own API policy.
     A newer data-only batch's top-level `max_age_minutes` is not the older failed render's cache policy.
+    New captures record the effective API, including the unpinned **3.21** default. Legacy null/missing
+    API pins use their own capture's capability configuration or the established producer default;
+    `rest_api_version_source: legacy_producer_default` names an inference, not historical proof.
     Missing or incompatible selected API/cache evidence refuses before sign-in; do not fill it from
     an unrelated batch. A selected data leg's API must also match trusted configuration.
   - Reused capability reports say `probe_performed: false` and retain `reused_from_grouped` provenance.
-    Their probe counts are historical, not fresh probes. Grouping preserves compatible reports and
-    refuses incompatible render/API policies before copying. No capability probing occurs in recovery.
+    Their probe counts are historical, not fresh probes. Different tier/API reports do not block
+    ordinary per-leg grouping: ambiguous aggregate reports become null, without losing leg evidence.
+    Only incompatible **selected failed-leg** policies constrain a retry, not an older probe or an
+    unrelated successful leg. No capability probing occurs in recovery. Reused warnings are validated
+    as string arrays and redacted before bounded console output; full manifest scrubbing remains active.
   - A render-only success prints its attempted leg (`svg=ok`), not a synthetic data failure. Unknown
     statuses or malformed consumed fields refuse before a no-work verdict. Read refusal positions
     against the numbered input manifests/views; diagnostic text deliberately omits unchecked values.

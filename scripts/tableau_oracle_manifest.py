@@ -84,6 +84,10 @@ NOT_ATTEMPTED = "not_attempted"
 # output, not raw capture batches, so the existing merger remains the only cross-batch winner policy.
 GROUPED_SCHEMA = "tableau-oracle-workbook/1"
 
+# The ordinary producer's effective client policy when no REST pin is configured. Legacy captures
+# wrote null instead; grouping may infer this default, but must label that inference on each leg.
+DEFAULT_REST_API_VERSION = "3.21"
+
 # Final leg statuses that represent retryable transport/render failures in a completed grouped
 # manifest. Deliberately excludes source_credential, failed, format_mismatch, unsupported_api_version,
 # not_attempted, absent and ok; retry_reasons are history and are never selection input.
@@ -223,7 +227,13 @@ def _optional_positive_int(where: str, mapping: dict[str, Any], key: str) -> Non
 
 
 def _optional_api(where: str, value: Any) -> None:
-    if value is not None and (not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,3}\.[0-9]{1,3}", value)):
+    if value is None:
+        return
+    try:
+        valid = isinstance(value, str) and capability.api_tuple(value) is not None
+    except ValueError:
+        valid = False
+    if not valid:
         raise OracleRecoveryRefusal(f"{where} must be a numeric REST API version")
 
 
@@ -239,6 +249,9 @@ def validated_render_capability(value: Any) -> dict[str, Any] | None:
     for key in ("selected_api_version", "configured_api_version", "advertised_api_version"):
         _optional_api(key, value.get(key))
     _optional_positive_int("render_capability.max_age_minutes", value, "max_age_minutes")
+    warnings = value.get("warnings", [])
+    if not isinstance(warnings, list) or any(not isinstance(warning, str) for warning in warnings):
+        raise OracleRecoveryRefusal("render_capability.warnings must be an array of strings")
     server = value.get("server")
     if server is not None:
         if not isinstance(server, dict):
@@ -256,15 +269,21 @@ def validated_render_capability(value: Any) -> dict[str, Any] | None:
     return value
 
 
-def capture_api_version(manifest: dict[str, Any], leg: str) -> str | None:
-    """The actual API used by a leg in an ordinary capture, not a newer batch's configuration."""
+def capture_api_policy(manifest: dict[str, Any], leg: str) -> dict[str, str]:
+    """Derive one owning capture's leg policy, naming recorded versus legacy-inferred evidence."""
     version = manifest.get("rest_api_version")
     _optional_api("rest_api_version", version)
     report = validated_render_capability(manifest.get("render_capability")) or {}
     selected_leg = {"png_high": "image", "svg": "svg", "pdf": "pdf"}.get(report.get("selected_tier"))
     if leg == selected_leg and report.get("selected_api_version") is not None:
-        return report["selected_api_version"]
-    return version
+        version, source = report["selected_api_version"], "selected_render_api"
+    elif version is not None:
+        source = "capture_configuration"
+    elif report.get("configured_api_version") is not None:
+        version, source = report["configured_api_version"], "capability_configuration"
+    else:
+        version, source = DEFAULT_REST_API_VERSION, "legacy_producer_default"
+    return {"rest_api_version": version.strip(), "rest_api_version_source": source}
 
 
 def _validate_recovery_view(where: str, view: Any, root: Path) -> str:
@@ -337,7 +356,7 @@ def read_recovery_sources(paths: list[Path]) -> list[RecoverySource]:  # pylint:
         ):
             raise OracleRecoveryRefusal(f"{where}: requested_renders must be an array of known render kinds")
         _optional_positive_int(f"{where} max_age_minutes", manifest, "max_age_minutes")
-        capture_api_version(manifest, "data")
+        capture_api_policy(manifest, "data")
         root = path.parent
         for index, view in enumerate(views, 1):
             luid = _validate_recovery_view(f"{where} view {index}", view, root)
@@ -1056,14 +1075,15 @@ def write_manifest(  # pylint: disable=too-many-locals
     reference_missing = run.reference_required and rendered == 0 and not credential_only
     unestablished = render_unestablished(records, requested_renders, recovery_selected)
     empty_views = data_empty_views(records)
-    gate = svg_gate(capability_report, server_info, run.env.get("TABLEAU_REST_API_VERSION"))
+    configured_api = run.env.get("TABLEAU_REST_API_VERSION", DEFAULT_REST_API_VERSION)
+    gate = svg_gate(capability_report, server_info, configured_api)
     _stamp_svg_gate(records, gate, run.session.redact_text)
     manifest = {
         "schema": "tableau-oracle/1",
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "server": run.env["TABLEAU_SERVER_URL"],
         "site": run.env["TABLEAU_SITE"],
-        "rest_api_version": run.env.get("TABLEAU_REST_API_VERSION"),
+        "rest_api_version": configured_api,
         "max_age_minutes": max_age,
         # The OTHER two numbers of the three-number reconciliation, so the evidence file answers
         # "could this site have done SVG at all?" on its own. `rest_api_version` above is the CLIENT
@@ -1406,4 +1426,4 @@ def _log_blocked_and_stale(
             advice.remedy,
         )
     for warning in (capability_report or {}).get("warnings", []):
-        LOG.warning("! %s", warning)
+        LOG.warning("! %s", redacted_note(warning, redactor, limit=1000))

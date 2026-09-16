@@ -344,6 +344,77 @@ def test_svg_recovery_uses_recorded_api_override_without_serverinfo_probe(monkey
     assert render_calls == [(LUID_1, "svg", "3.29")]
 
 
+def test_recovery_redacts_reused_warnings_in_actual_logs_and_manifest(monkeypatch, tmp_path, caplog):
+    """Reused strings are untrusted, even when shaped like an ordinary capability warning."""
+    pat = "SYNTHETIC_R2_PAT_77499d0419a14e33913aa1d6"
+    token = "SYNTHETIC_R2_SESSION_7c6d3ed0ba8d4e07858032af"
+    guidance = "The selected tier is provisional; inspect the retained probe before treating it as a ceiling."
+    session = oracle.TableauSession(
+        oracle.SiteCredentials("https://example.test", "site", "synthetic-pat-name", pat, "3.29")
+    )
+    session.token, session.site_id = token, "fixture-site"
+    run = _run_dir(tmp_path)
+    view = _view(LUID_1, data=_ok_data(LUID_1))
+    view["svg"] = _failed()
+    grouped = _grouped_reference(
+        tmp_path / "input",
+        [view],
+        requested_renders=["svg"],
+        render_capability={
+            "selected_tier": "svg",
+            "selected_api_version": "3.29",
+            "warnings": [guidance, f"Unrecognised prior warning containing {pat} and {token}"],
+        },
+    )
+    out = run / "retry"
+    _configure(monkeypatch, tmp_path, session, grouped, out, run)
+    monkeypatch.setattr(session, "sign_in", lambda: None)
+    monkeypatch.setattr(session, "sign_out", lambda: None)
+    monkeypatch.setattr(session, "export", lambda _path, **_kwargs: (SVG, 0.01, {}))
+
+    with caplog.at_level(logging.INFO, logger=oracle.LOG.name):
+        assert oracle.main() == 0
+
+    written = (out / grp.MANIFEST_NAME).read_text(encoding="utf-8")
+    for secret in (pat, token):
+        assert secret not in caplog.text, "reused warning leaked a current credential through the actual recovery log"
+        assert secret not in written, "whole-manifest scrubbing must remain active"
+    assert f"! {guidance}" in caplog.messages
+    assert guidance in written
+    assert any("! Unrecognised prior warning containing [REDACTED]" in message for message in caplog.messages)
+    assert json.loads(written)["render_capability"]["probe_performed"] is False
+
+
+@pytest.mark.parametrize("warnings", [None, REFUSAL_VALUE, 17, {REFUSAL_VALUE: 1}, [REFUSAL_VALUE, {}], [None]])
+def test_malformed_reused_warnings_refuse_before_signin(monkeypatch, tmp_path, caplog, warnings):
+    """No list/string coercion may turn malformed warning metadata into raw diagnostic text."""
+    run = _run_dir(tmp_path)
+    grouped = _grouped_reference(
+        tmp_path / "input",
+        [_view(LUID_1, data=_failed())],
+        render_capability={"warnings": warnings},
+    )
+    session = _Session()
+    _configure(monkeypatch, tmp_path, session, grouped, run / "retry", run)
+    with pytest.raises(oracle.OracleRecoveryRefusal, match="warnings must be an array of strings") as excinfo:
+        oracle.main()
+    assert REFUSAL_VALUE not in caplog.text + "".join(traceback.format_exception(excinfo.value))
+    assert session.signins == 0 and not (run / "retry").exists()
+
+
+@pytest.mark.parametrize("version", ["3.29", "3.29.1", "3.30.0.2", " 3.29.1 ", "3", "3.29-beta", REFUSAL_VALUE])
+def test_recovery_api_grammar_is_the_capability_grammar(version):
+    """Use the existing parser, including patch components, rather than a recovery-only grammar."""
+    if oracle.capability.api_tuple(version) is not None:
+        assert oracle.validated_render_capability({"configured_api_version": version}) == {
+            "configured_api_version": version
+        }
+    else:
+        with pytest.raises(oracle.OracleRecoveryRefusal, match="numeric REST API version") as excinfo:
+            oracle.validated_render_capability({"configured_api_version": version})
+        assert version not in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -412,20 +483,25 @@ class _ExportSession(_Session):
         )
 
 
-def _pipeline_cli(monkeypatch, session: _ExportSession, views: list[dict], args: list[str]) -> int:
+def _pipeline_cli(
+    monkeypatch, session: _ExportSession, views: list[dict], args: list[str], *, api_pin: str | None = "3.21"
+) -> int:
     """Exercise main(), not a manually assembled capture manifest."""
-    monkeypatch.setattr(
-        oracle,
-        "resolve_env",
-        lambda _path: {
-            "TABLEAU_SERVER_URL": "https://example.test",
-            "TABLEAU_SITE": "site",
-            "TABLEAU_PAT_NAME": "synthetic-pat",
-            "TABLEAU_PAT_SECRET": "synthetic-secret",
-            "TABLEAU_REST_API_VERSION": session.version,
-        },
-    )
-    monkeypatch.setattr(oracle, "TableauSession", lambda *_args, **_kwargs: session)
+    env = {
+        "TABLEAU_SERVER_URL": "https://example.test",
+        "TABLEAU_SITE": "site",
+        "TABLEAU_PAT_NAME": "synthetic-pat",
+        "TABLEAU_PAT_SECRET": "synthetic-secret",
+    }
+    if api_pin is not None:
+        env["TABLEAU_REST_API_VERSION"] = api_pin
+
+    def configured_session(creds, *_args, **_kwargs):
+        session.version = creds.version
+        return session
+
+    monkeypatch.setattr(oracle, "resolve_env", lambda _path: env)
+    monkeypatch.setattr(oracle, "TableauSession", configured_session)
     monkeypatch.setattr(oracle, "select_views", lambda *_args, **_kwargs: (views, {WB_1: "Workbook"}))
     monkeypatch.setattr(oracle.tableau_view_types, "resolve_and_stamp", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sys, "argv", ["capture_tableau_oracle.py", "--workers", "1", *args])
@@ -433,7 +509,7 @@ def _pipeline_cli(monkeypatch, session: _ExportSession, views: list[dict], args:
 
 
 def _ordinary_batch(  # pylint: disable=too-many-arguments
-    monkeypatch, run: Path, name: str, outcomes: dict, *, age: int = 5, renders=True
+    monkeypatch, run: Path, name: str, outcomes: dict, *, age: int = 5, renders=True, svg_api: str = "3.29"
 ) -> Path:
     batch = run / name
     session = _ExportSession(outcomes)
@@ -441,7 +517,7 @@ def _ordinary_batch(  # pylint: disable=too-many-arguments
     report = {
         "configured_api_version": "3.21",
         "selected_tier": "svg",
-        "selected_api_version": "3.29",
+        "selected_api_version": svg_api,
         "capability_complete": True,
         "max_age_minutes": age,
         "probe_views_tried": 1,
@@ -455,7 +531,7 @@ def _ordinary_batch(  # pylint: disable=too-many-arguments
     assert _pipeline_cli(monkeypatch, session, views, args) in {0, 1, 3, 5}
     manifest = json.loads((batch / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
     assert manifest["schema"] == "tableau-oracle/1"
-    assert all(call[2:] == (("3.21" if call[1] == "data" else "3.29"), age) for call in session.calls)
+    assert all(call[2:] == (("3.21" if call[1] == "data" else svg_api), age) for call in session.calls)
     return batch
 
 
@@ -466,7 +542,9 @@ def _merge_batches(tmp_path: Path, batches: list[Path]) -> Path:
     return migrations / "workbook" / "reference"
 
 
-def _retry_batch(monkeypatch, run: Path, grouped: Path, name: str, outcomes: dict) -> tuple[int, _ExportSession]:
+def _retry_batch(  # pylint: disable=too-many-arguments
+    monkeypatch, run: Path, grouped: Path, name: str, outcomes: dict, *, api_pin: str | None = "3.21"
+) -> tuple[int, _ExportSession]:
     def no_probe(*_args, **_kwargs):
         pytest.fail("recovery must reuse recorded policy, never probe capability or serverinfo")
 
@@ -478,8 +556,174 @@ def _retry_batch(monkeypatch, run: Path, grouped: Path, name: str, outcomes: dic
         session,
         [_current_view(LUID_1), _current_view(LUID_2)],
         ["--run", str(run), "--retry-failed-from", str(grouped), "--out", str(run / name)],
+        api_pin=api_pin,
     )
     return code, session
+
+
+@pytest.mark.parametrize("api_pin", [None, "3.29", "3.29.1"])
+def test_ordinary_effective_api_survives_grouping_and_recovery(monkeypatch, tmp_path, api_pin):
+    """An omitted pin really exports at 3.21; explicit and patch-version pins retain their value."""
+    run = _run_dir(tmp_path)
+    initial = run / "initial"
+    session = _ExportSession({(LUID_1, "data"): "transient"})
+    expected = "3.21" if api_pin is None else api_pin
+    assert (
+        _pipeline_cli(
+            monkeypatch, session, [_current_view(LUID_1)], ["--out", str(initial), "--max-age", "5"], api_pin=api_pin
+        )
+        == 3
+    )
+    assert session.calls == [(LUID_1, "data", expected, 5)]
+    captured = json.loads((initial / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert captured["rest_api_version"] == expected, "the producer lost its effective client API"
+    grouped = _merge_batches(tmp_path, [initial])
+    policy = json.loads((grouped / grp.MANIFEST_NAME).read_text(encoding="utf-8"))["views"][0]["data"]
+    assert policy["rest_api_version"] == expected
+    assert policy["rest_api_version_source"] == "capture_configuration"
+    code, retried = _retry_batch(monkeypatch, run, grouped, "retry", {(LUID_1, "data"): "ok"}, api_pin=api_pin)
+    assert code == 0 and retried.calls == [(LUID_1, "data", expected, 5)]
+
+
+@pytest.mark.parametrize("missing", [False, True])
+@pytest.mark.parametrize("capability_config", [None, "3.28"])
+def test_legacy_null_or_missing_api_is_derived_from_its_own_capture(monkeypatch, tmp_path, missing, capability_config):
+    """Legacy inference is labelled, and a recorded capability pin wins over the producer default."""
+    run = _run_dir(tmp_path)
+    initial = run / "initial"
+    outcomes = {(LUID_1, "data"): "transient"}
+    args = ["--out", str(initial), "--max-age", "5"]
+    if capability_config is not None:
+        outcomes[LUID_1, "svg"] = "transient"
+        args.append("--reference-best")
+        monkeypatch.setattr(
+            oracle.capability,
+            "probe_render_capability",
+            lambda *_args, **_kwargs: {
+                "configured_api_version": capability_config,
+                "selected_tier": "svg",
+                "selected_api_version": "3.29",
+                "probe_views_tried": 1,
+            },
+        )
+    assert _pipeline_cli(
+        monkeypatch, _ExportSession(outcomes), [_current_view(LUID_1)], args, api_pin=capability_config
+    ) in {3, 5}
+    path = initial / grp.MANIFEST_NAME
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if missing:
+        manifest.pop("rest_api_version")
+    else:
+        manifest["rest_api_version"] = None
+        manifest["views"][0]["data"]["rest_api_version"] = None
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    grouped = _merge_batches(tmp_path, [initial])
+    view = json.loads((grouped / grp.MANIFEST_NAME).read_text(encoding="utf-8"))["views"][0]
+    expected = capability_config or "3.21"
+    assert view["data"]["rest_api_version"] == expected
+    assert view["data"]["rest_api_version_source"] == (
+        "capability_configuration" if capability_config else "legacy_producer_default"
+    )
+    if capability_config:
+        assert view["svg"]["rest_api_version"] == "3.29"
+        assert view["svg"]["rest_api_version_source"] == "selected_render_api"
+    code, retried = _retry_batch(
+        monkeypatch, run, grouped, "retry", dict.fromkeys(outcomes, "ok"), api_pin=capability_config
+    )
+    assert code == 0
+    assert retried.calls[0] == (LUID_1, "data", expected, 5)
+    if capability_config:
+        assert retried.calls[1] == (LUID_1, "svg", "3.29", 5)
+
+
+@pytest.mark.parametrize("sibling_status", ["ok", "transient"])
+def test_only_selected_failed_leg_api_differences_can_block_recovery(monkeypatch, tmp_path, sibling_status):
+    """Ordinary grouping is per leg; only selected incompatible policies constrain a retry."""
+    run = _run_dir(tmp_path)
+    first = _ordinary_batch(monkeypatch, run, "first", {(LUID_1, "data"): "ok", (LUID_1, "svg"): "transient"})
+    later = _ordinary_batch(
+        monkeypatch,
+        run,
+        "later",
+        {(LUID_2, "data"): "ok", (LUID_2, "svg"): sibling_status},
+        svg_api="3.30",
+    )
+    grouped = _merge_batches(tmp_path, [first, later])
+    manifest = json.loads((grouped / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert manifest["render_capability"] is None, "differing prior reports must not become one authoritative policy"
+    by_luid = {view["view_luid"]: view for view in manifest["views"]}
+    assert by_luid[LUID_1]["svg"]["rest_api_version"] == "3.29"
+    assert by_luid[LUID_2]["svg"]["rest_api_version"] == "3.30"
+    if sibling_status == "transient":
+        monkeypatch.setattr(_ExportSession, "sign_in", lambda _self: pytest.fail("policy refusal must precede sign-in"))
+        with pytest.raises(oracle.OracleRecoveryRefusal, match="incompatible REST API"):
+            _retry_batch(monkeypatch, run, grouped, "retry", {})
+        assert not (run / "retry").exists()
+        return
+    code, retried = _retry_batch(monkeypatch, run, grouped, "retry", {(LUID_1, "svg"): "transient"})
+    assert code == 3 and retried.calls == [(LUID_1, "svg", "3.29", 5)]
+    grouped = _merge_batches(tmp_path, [first, later, run / "retry"])
+    code, retried = _retry_batch(monkeypatch, run, grouped, "retry-2", {(LUID_1, "svg"): "ok"})
+    assert code == 0 and retried.calls == [(LUID_1, "svg", "3.29", 5)]
+
+
+def test_failed_leg_overrides_an_older_unambiguous_probe_report(monkeypatch, tmp_path):
+    """A retained probe describes its own capture, not a later explicit SVG export."""
+    run = _run_dir(tmp_path)
+    first = _ordinary_batch(monkeypatch, run, "first", {(LUID_1, "data"): "ok", (LUID_1, "svg"): "transient"})
+    later = run / "later"
+    session = _ExportSession({(LUID_1, "data"): "ok", (LUID_1, "svg"): "transient"})
+    monkeypatch.setattr(oracle.capability, "server_info", lambda *_args, **_kwargs: {})
+    assert (
+        _pipeline_cli(
+            monkeypatch,
+            session,
+            [_current_view(LUID_1)],
+            ["--out", str(later), "--svg", "--max-age", "5"],
+            api_pin="3.30",
+        )
+        == 3
+    )
+    grouped = _merge_batches(tmp_path, [first, later])
+    manifest = json.loads((grouped / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert manifest["render_capability"]["selected_api_version"] == "3.29"
+    assert manifest["views"][0]["svg"]["rest_api_version"] == "3.30"
+    code, retried = _retry_batch(monkeypatch, run, grouped, "retry", {(LUID_1, "svg"): "ok"})
+    assert code == 0 and retried.calls == [(LUID_1, "svg", "3.30", 5)]
+
+
+def test_recovery_omits_different_prior_reports_without_blocking_compatible_selected_legs(monkeypatch, tmp_path):
+    """Different historical client pins across workbooks need not constrain identical SVG retries."""
+    run = _run_dir(tmp_path)
+    views, args = [], ["--run", str(run), "--out", str(run / "retry")]
+    for index, luid in enumerate((LUID_1, LUID_2)):
+        view = _view(luid, data=_ok_data(luid))
+        view["svg"] = _failed()
+        grouped = _grouped_reference(
+            tmp_path / f"workbook-{index}",
+            [view],
+            requested_renders=["svg"],
+            render_capability={
+                "selected_tier": "svg",
+                "selected_api_version": "3.29",
+                "configured_api_version": "3.21" if index == 0 else "3.28",
+            },
+        )
+        path = grouped / grp.MANIFEST_NAME
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        workbook = WB_1 if index == 0 else "22222222-2222-4222-8222-222222222222"
+        manifest["workbook_luid"] = manifest["views"][0]["workbook_luid"] = workbook
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        current = _current_view(luid)
+        current["workbook"]["id"] = workbook
+        views.append(current)
+        args.extend(["--retry-failed-from", str(grouped)])
+    session = _ExportSession({(LUID_1, "svg"): "ok", (LUID_2, "svg"): "ok"})
+    assert _pipeline_cli(monkeypatch, session, views, args) == 0
+    assert session.calls == [(LUID_1, "svg", "3.29", 17), (LUID_2, "svg", "3.29", 17)]
+    manifest = json.loads((run / "retry" / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert manifest["render_capability"] is None
+    assert manifest["captured_complete"] == 2
 
 
 def test_ordinary_group_retry_group_retry_retains_svg_policy_and_success_bytes(monkeypatch, tmp_path):

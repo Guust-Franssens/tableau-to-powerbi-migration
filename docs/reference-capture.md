@@ -172,19 +172,34 @@ retry target.
 
 ✅ API/cache policy belongs to the **selected failed leg**, not the newest batch's top-level
 metadata. Grouping preserves the winning leg's `rest_api_version`, deriving it from that capture's
-configuration and selected-tier override when the leg predates the field. Recovery requires each
+configuration and selected-tier override when the leg predates the field. New ordinary captures
+record their effective configured API, including **3.21 when no environment pin was supplied**.
+For legacy captures with a null/missing pin, grouping uses that capture's recorded capability
+configuration, or the producer's established 3.21 default. A derived leg's `rest_api_version_source`
+distinguishes `capture_configuration`, `selected_render_api`, `capability_configuration` and
+`legacy_producer_default`. ⚠️ The last is an inference, not proof of historical configuration,
+freshness or authenticity. Re-merge original batches to repair older grouped null/missing policies;
+never infer a leg's API from an unrelated newest batch. Recovery requires each
 selected leg's recorded `max_age_minutes`; it never substitutes another batch's value. Missing or
-incompatible selected policies refuse **before sign-in**. Re-merge original batches first; if they
-never recorded the policy, recovery cannot establish it. A data leg must match the trusted configured
+incompatible selected policies refuse **before sign-in**. If original batches never recorded the
+cache policy, recovery cannot establish it. A data leg must match the trusted configured
 API; render legs reuse their recorded API overrides. One invocation does not split incompatible
 policies into a new scheduler.
 
-Compatible prior `render_capability` evidence survives grouping after a partial or data-only batch;
-incompatible render/API reports refuse instead of silently choosing metadata that misdescribes the
-legs. Recovery marks a reused report with `probe_performed: false` and `reused_from_grouped`
+Ordinary same-source, same-revision batches still consolidate per leg when their selected tiers or
+APIs differ. An unambiguous prior `render_capability` report survives a partial or data-only batch;
+otherwise the aggregate report is null, while original reports remain in their source batches and
+each leg retains its API provenance. A retained probe is not authority over a later leg's policy.
+Recovery likewise omits ambiguous reports rather than blocking retries whose **selected failed-leg**
+policies can be honored; unrelated successful-leg policies do not constrain the retry.
+Recovery marks a reused report with `probe_performed: false` and `reused_from_grouped`
 provenance. Its tier, original probe counts and other capability metadata remain **prior observations**,
 not a new capability probe. Repeated recovery/grouping retains this distinction in the package-facing
 grouped manifest.
+
+Reused warnings must be an array of strings, not assumed fixed vocabulary. Every emitted warning
+passes through the existing session redactor before the console note is bounded to 1,000 characters;
+the full metadata still passes through whole-manifest scrubbing.
 
 Progress reports only the selected recovery legs (`svg=ok`, for example), including their redacted
 failure details; it never invents a new successful data leg for render-only work. Ordinary capture's

@@ -169,6 +169,7 @@ from tableau_env import (  # noqa: E402  # pylint: disable=wrong-import-position
 # The verdict layer: records -> manifest -> exit code. It imports nothing from here, so the pair is
 # acyclic; it takes the session duck-typed for its two counters and the redactor.
 from tableau_oracle_manifest import (  # noqa: E402  # pylint: disable=wrong-import-position
+    DEFAULT_REST_API_VERSION,
     LEG_TO_KIND,
     NOT_ATTEMPTED,
     RECOVERY_ELIGIBLE_STATUSES,
@@ -1854,8 +1855,6 @@ def _recovery_api_overrides(
 ) -> dict[str, str]:
     overrides: dict[str, str] = {}
     for source in sources:
-        report = validated_render_capability(source.manifest.get("render_capability")) or {}
-        selected_leg = {"png_high": "image", "svg": "svg", "pdf": "pdf"}.get(report.get("selected_tier"))
         for view in source.manifest["views"]:
             for leg in selected.get(view["view_luid"], frozenset()):
                 api = view[leg].get("rest_api_version")
@@ -1863,11 +1862,7 @@ def _recovery_api_overrides(
                     raise OracleRecoveryRefusal(
                         "selected leg REST API policy is unestablished; re-merge the original capture batches"
                     )
-                if (
-                    leg == selected_leg
-                    and (report.get("selected_api_version") or report.get("configured_api_version")) != api
-                ):
-                    raise OracleRecoveryRefusal("selected leg API disagrees with its retained render capability policy")
+                api = api.strip()
                 if leg == "data":
                     if api != configured:
                         raise OracleRecoveryRefusal(
@@ -1982,7 +1977,7 @@ def _reused_capability(sources: list[RecoverySource]) -> dict[str, Any] | None:
         )
         for report in reports[1:]
     ):
-        raise OracleRecoveryRefusal("recovery inputs carry incompatible render capability policies")
+        return None
     return {
         **reports[0],
         "probe_performed": False,
@@ -2038,7 +2033,7 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
             )
         recovery_targets = _recovery_targets(recovery_sources)
         api_overrides = _recovery_api_overrides(
-            recovery_sources, recovery_targets[0], env.get("TABLEAU_REST_API_VERSION", "3.21")
+            recovery_sources, recovery_targets[0], env.get("TABLEAU_REST_API_VERSION", DEFAULT_REST_API_VERSION)
         )
         preliminary_legs = recovery_targets[0]
         if not preliminary_legs:
@@ -2061,7 +2056,7 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
             site=env["TABLEAU_SITE"],
             pat_name=env["TABLEAU_PAT_NAME"],
             pat_secret=pat_secret(env),
-            version=env.get("TABLEAU_REST_API_VERSION", "3.21"),
+            version=env.get("TABLEAU_REST_API_VERSION", DEFAULT_REST_API_VERSION),
         ),
         build_retry_policy(args.max_attempts, args.retry_budget, args.rest_timeout),
         timeout_sec=args.rest_timeout,

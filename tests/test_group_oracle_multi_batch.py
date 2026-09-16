@@ -206,24 +206,36 @@ def test_group_retains_winning_leg_api_instead_of_newest_configuration(tmp_path)
     assert grouped["views"][0]["data"]["rest_api_version"] == "3.29"
 
 
-def test_group_refuses_incompatible_render_policies_before_copying(tmp_path):
-    """Do not silently flatten incompatible policy evidence into one package-facing report."""
+@pytest.mark.parametrize("later_tier", ["png_high", "svg"])
+def test_group_consolidates_different_render_policies_per_leg(tmp_path, later_tier):
+    """Different API/tier observations cannot reject otherwise compatible ordinary batches."""
     batches = _three_batches(tmp_path)
-    for batch, api in zip(batches[:2], ("3.21", "3.29")):
+    for index, (batch, api) in enumerate(zip(batches, ("3.21", "3.29", "3.29"))):
         path = batch / grp.MANIFEST_NAME
         manifest = json.loads(path.read_text(encoding="utf-8"))
         manifest["rest_api_version"] = api
-        manifest["render_capability"] = {
-            "selected_tier": "png_high",
-            "selected_api_version": None,
-            "configured_api_version": api,
-        }
+        if index < 2:
+            manifest["render_capability"] = {
+                "selected_tier": "png_high" if index == 0 else later_tier,
+                "selected_api_version": None,
+                "configured_api_version": api,
+            }
+        if index == 1 and later_tier == "svg":
+            manifest["requested_renders"].append("svg")
+            manifest["views"][0]["svg"] = {"status": "transient", "max_age_minutes": 1}
         path.write_text(json.dumps(manifest), encoding="utf-8")
     original = {path: path.read_bytes() for batch in batches for path in batch.rglob("*") if path.is_file()}
     migrations = _migrations(tmp_path)
-    with pytest.raises(verdict.OracleRecoveryRefusal, match="incompatible render/API"):
-        grp.run(batches, migrations, dry_run=False)
-    assert not (migrations / "airborne-services" / "reference").exists()
+    assert grp.run(batches, migrations, dry_run=False) == 0
+    grouped = _grouped(migrations)
+    assert grouped["render_capability"] is None
+    views = _by_luid(grouped)
+    assert views[LUID]["image"]["rest_api_version"] == "3.29"
+    assert views[OTHER]["image"]["rest_api_version"] == "3.21"
+    if later_tier == "svg":
+        assert views[LUID]["svg"]["rest_api_version"] == "3.29"
+        assert views[LUID]["svg"]["source_batch"] == batches[1].name
+    assert (migrations / "airborne-services" / "reference" / "images" / f"{OTHER}.png").read_bytes() == PNG
     assert all(path.read_bytes() == payload for path, payload in original.items())
 
 

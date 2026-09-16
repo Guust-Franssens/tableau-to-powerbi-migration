@@ -1027,8 +1027,8 @@ def _merge_one_view(  # pylint: disable=too-many-locals
         merged[kind] = {**view[kind], "source_batch": batch.label}
         # Preserve the winner's actual API, including a capability-selected SVG override.
         # Recovery cannot reconstruct this from the unrelated newest batch's top-level metadata.
-        if "rest_api_version" not in merged[kind]:
-            merged[kind]["rest_api_version"] = tableau_oracle_manifest.capture_api_version(batch.manifest, kind)
+        if merged[kind].get("rest_api_version") is None:
+            merged[kind].update(tableau_oracle_manifest.capture_api_policy(batch.manifest, kind))
     return merged, ties, stale
 
 
@@ -1077,7 +1077,7 @@ def _merge_render_intent(batches: list[_Batch], views: list[dict[str, Any]]) -> 
 
 
 def _merge_render_capability(batches: list[_Batch]) -> dict[str, Any] | None:
-    """Retain a compatible prior probe when a later partial/data-only batch did not probe."""
+    """Retain an unambiguous prior probe; differing reports never block a per-leg merge."""
     reports = [
         (batch, report)
         for batch in sorted(batches, key=lambda item: (item.captured_at, item.order), reverse=True)
@@ -1087,23 +1087,23 @@ def _merge_render_capability(batches: list[_Batch]) -> dict[str, Any] | None:
     policies = {
         (
             report.get("selected_tier"),
-            tableau_oracle_manifest.capture_api_version(
+            tableau_oracle_manifest.capture_api_policy(
                 batch.manifest, {"png_high": "image"}.get(report.get("selected_tier"), report.get("selected_tier"))
-            ),
+            )["rest_api_version"],
         )
         for batch, report in reports
     }
     if len(policies) > 1:
-        raise tableau_oracle_manifest.OracleRecoveryRefusal(
-            "capture batches carry incompatible render/API policies; regroup compatible inputs"
-        )
+        return None
     if not reports:
         return None
     batch, report = reports[0]
     retained = {**report, "source_batch": batch.label}
     if report.get("selected_tier") is not None:
         leg = {"png_high": "image"}.get(report["selected_tier"], report["selected_tier"])
-        retained["selected_api_version"] = tableau_oracle_manifest.capture_api_version(batch.manifest, leg)
+        retained["selected_api_version"] = tableau_oracle_manifest.capture_api_policy(batch.manifest, leg)[
+            "rest_api_version"
+        ]
     return retained
 
 
@@ -1113,7 +1113,8 @@ def merge_batches(batches: list[_Batch]) -> tuple[dict[str, Any], dict[str, Path
     Returns ``(merged manifest, label -> directory, the basis the ordering used)``.
 
     The newest batch supplies the top-level provenance fields. Each leg retains its own API/cache
-    policy; a compatible prior capability report survives a later batch that did not probe.
+    policy; an unambiguous prior capability report survives a later batch that did not probe.
+    Differing report policies omit the aggregate report without discarding any leg evidence.
     `batches` records every input in newest-first order.
 
     ⚠️ Render INTENT is the exception and is unioned instead -- see :func:`_merge_render_intent`.
@@ -1170,8 +1171,7 @@ def merge_batches(batches: list[_Batch]) -> tuple[dict[str, Any], dict[str, Path
     merged["merge_order_ties"] = ties
     merged["merge_stale_candidates"] = stale
     merged.update(_merge_render_intent(batches, views))
-    if capability_report is not None:
-        merged["render_capability"] = capability_report
+    merged["render_capability"] = capability_report
     return merged, roots, basis
 
 

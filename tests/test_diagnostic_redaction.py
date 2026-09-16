@@ -427,7 +427,7 @@ def site_recovery_metadata_and_progress(secret, tmp_path, _mp):
         oracle.write_manifest(
             [record],
             oracle.CaptureRun(_Counter(secret), ENV, tmp_path, 0.0, frozenset({"svg"})),
-            {"probe_view_name": secret, "selected_tier": "svg", "selected_api_version": "3.29"},
+            {"probe_view_name": secret, "selected_tier": "svg", "selected_api_version": "3.29", "warnings": [secret]},
             recovery=recovery,
         )
     finally:
@@ -692,6 +692,7 @@ TAINT_SEEDS: dict[tuple[str, str], set[str]] = {
     # through `redacted_note` before anything formats them, which is why that function needs no
     # certification of its own.
     ("scripts/tableau_render_capability.py", "svg_gate_advice"): {"gate"},
+    ("scripts/tableau_render_capability.py", "api_tuple"): {"version"},
     # `capture_tableau_oracle.main()` hands `resolve_and_stamp` the `/views` listing it just parsed.
     # ⚠️ Not optional bookkeeping: without it the boundary check fails outright, and `stamp` then
     # writes onto dicts the analyser believes are clean, so the manifest key it stamps arrives
@@ -1248,6 +1249,16 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
     },
     ("scripts/tableau_oracle_manifest.py", "_require_str"): {"where": _RECOVERY_FIELD_POSITION},
     ("scripts/tableau_oracle_manifest.py", "_optional_api"): {"where": _RECOVERY_FIELD_POSITION},
+    ("scripts/tableau_oracle_manifest.py", "capture_api_policy"): {
+        "source": (
+            "FIXED-VOCABULARY: one of four provenance labels authored in capture_api_policy; "
+            "no label is read from the input manifest"
+        ),
+        "version.strip()": (
+            "SHAPE-VERIFIED: a recorded version accepted by _optional_api through capability.api_tuple, "
+            "or the established producer default; this names an owning capture's API policy, not raw diagnostics"
+        ),
+    },
     ("scripts/tableau_oracle_manifest.py", "_optional_positive_int"): {"where": _RECOVERY_FIELD_POSITION},
     ("scripts/tableau_oracle_manifest.py", "_validate_recovery_view"): {"where": _RECOVERY_FIELD_POSITION},
     ("scripts/tableau_oracle_manifest.py", "_verify_ok_artifact"): {"where": _RECOVERY_FIELD_POSITION},
@@ -1667,7 +1678,6 @@ CERTIFIED: dict[tuple[str, str], dict[str, str]] = {
         ),
     },
     ("scripts/tableau_oracle_manifest.py", "_log_blocked_and_stale"): {
-        "warning": _PROBE_VERDICT,
         "len(blocked)": _A_COUNT,
         "len(stale_api)": _A_COUNT,
         "advice.cause": _SVG_CAUSE,
