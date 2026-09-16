@@ -2112,10 +2112,74 @@ can NEVER exit 0 from this package alone. Log it; this does not waive the data-a
 # --------------------------------------------------------------------------------------------
 
 
-def _stage_reference(reference_dir: Path, dest: Path) -> dict[str, Any]:  # pylint: disable=too-many-locals
-    """Copy one explicit current-format reference manifest and only the image members it declares."""
-    manifest_path = reference_dir / "manifest.json"
+def _require_reference_local(path: Path) -> None:
     try:
+        tableau_oracle_manifest.require_local_recovery_path(path)
+    except tableau_oracle_manifest.OracleRecoveryRefusal as error:
+        raise PackagingError("reference_path_unsafe") from error
+
+
+def _reference_location(path: Path) -> Path:
+    _require_reference_local(path)
+    try:
+        return _report_location(path)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise PackagingError("reference_path_unsafe") from error
+
+
+def _admit_reference_root(reference_dir: Path, out_root: Path, unit: str) -> Path:
+    """Reject links and lexical/native overlap before opening a reference or touching working trees."""
+    reference = _reference_location(reference_dir)
+    locations = tuple(_reference_location(root) for root in (out_root, *package_roots(out_root, unit)))
+    try:
+        if _construction_directory(reference) is None:
+            raise PackagingError("reference_path_unsafe")
+        source_identity = _report_entry_identity(reference)
+        source_ancestors = {_report_entry_identity(parent) for parent in reference.parents}
+        observations = [
+            (
+                location,
+                _report_entry_identity(location),
+                {_report_entry_identity(parent) for parent in location.parents},
+            )
+            for location in locations
+        ]
+    except (OSError, RuntimeError, ValueError) as error:
+        raise PackagingError("reference_path_unsafe") from error
+    for location, identity, ancestors in observations:
+        if (
+            reference.is_relative_to(location)
+            or location.is_relative_to(reference)
+            or (identity is not None and identity in {source_identity, *source_ancestors})
+            or source_identity in ancestors
+        ):
+            raise PackagingError("reference_source_overlap")
+    return reference
+
+
+def _reference_image(reference_dir: Path, image: Any) -> Path:
+    if not isinstance(image, str) or not pfs.is_canonical_key(image) or pfs.alias_key(image) == "manifest.json":
+        raise PackagingError("reference_image_path_unsafe")
+    origin = _reference_location(reference_dir / PurePosixPath(image))
+    if not origin.is_relative_to(reference_dir):
+        raise PackagingError("reference_path_unsafe")
+    try:
+        regular = stat.S_ISREG(origin.lstat().st_mode)
+    except OSError:
+        regular = False
+    if not regular:
+        raise PackagingError(f"reference_image_missing_or_unsafe: {image}: capture path does not resolve to a file")
+    return origin
+
+
+def _read_reference(reference_dir: Path) -> dict[str, bytes]:  # pylint: disable=too-many-locals
+    """Admit the manifest before reading it, then all declared regular members before construction."""
+    manifest_path = _reference_location(reference_dir / "manifest.json")
+    if not manifest_path.is_relative_to(reference_dir):
+        raise PackagingError("reference_path_unsafe")
+    try:
+        if not stat.S_ISREG(manifest_path.lstat().st_mode):
+            raise PackagingError("reference_path_unsafe")
         raw = manifest_path.read_bytes()
         payload = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -2134,20 +2198,27 @@ def _stage_reference(reference_dir: Path, dest: Path) -> dict[str, Any]:  # pyli
             raise PackagingError("reference_manifest_empty")
         for state in states:
             image = state.get("image") if isinstance(state, dict) else None
-            if not isinstance(image, str) or not pfs.is_canonical_key(image) or image == "manifest.json":
+            origin = _reference_image(reference_dir, image)
+            if any(pfs.alias_key(image) == pfs.alias_key(other) and image != other for other in members):
                 raise PackagingError("reference_image_path_unsafe")
-            origin, refusal = _resolve_capture_file(reference_dir, image)
-            if origin is None:
-                raise PackagingError(f"reference_image_missing_or_unsafe: {image}: {refusal or 'unknown reason'}")
             members[image] = origin
+    try:
+        content = {relative: origin.read_bytes() for relative, origin in members.items()}
+    except OSError as error:
+        raise PackagingError("reference_image_unreadable") from error
+    return {"manifest.json": raw, **content}
+
+
+def _stage_reference(reference: dict[str, bytes] | None, dest: Path) -> None:
+    """Copy only the admitted original bytes, never re-open an input after scratch cleanup."""
+    if reference is None:
+        return
     target = dest / "reference"
     target.mkdir(parents=True, exist_ok=True)
-    for relative, origin in members.items():
+    for relative, content in reference.items():
         landing = target / PurePosixPath(relative)
         landing.parent.mkdir(parents=True, exist_ok=True)
-        landing.write_bytes(origin.read_bytes())
-    (target / "manifest.json").write_bytes(raw)
-    return payload
+        landing.write_bytes(content)
 
 
 def _copy_fabric(bundle: Path, unit: str, dest: Path) -> tuple[str | None, str | None]:
@@ -4082,13 +4153,18 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
     error: BaseException | None = None
     try:
         try:
+            if reference_dir is not None:
+                _require_reference_local(reference_dir)
             limits = platform_limits() if limits is None else limits
+            reference = None
+            if reference_dir is not None:
+                if discard_edits:
+                    raise PackagingError("reference_conflicts_with_discard_package_edits")
+                reference_dir = _admit_reference_root(reference_dir, out_root, unit)
             final = assert_package_destination(out_root, unit)
             attempt.final = final
             if reference_dir is not None:
                 attempt.fresh_target_only = True
-                if discard_edits:
-                    raise PackagingError("reference_conflicts_with_discard_package_edits")
                 if os.path.lexists(final):
                     raise PackagingError("reference_requires_fresh_target")
                 engine_report = read_json(bundle / "report.json")
@@ -4097,6 +4173,7 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
                 workbooks, _datasources = engine_unit_names(engine_report)
                 if unit not in workbooks:
                     raise PackagingError("reference_requires_one_workbook_unit")
+                reference = _read_reference(reference_dir)
             prepared_brief = _prepare_brief(bundle, unit, assets_dir, brief)
             budget = path_budget(bundle, unit, out_root, limits=limits, assets_dir=assets_dir)
             if budget.refused:
@@ -4121,7 +4198,7 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
                 final=final,
                 oracle_dir=oracle_dir,
                 assets_dir=assets_dir,
-                reference_dir=reference_dir,
+                reference=reference,
                 brief=prepared_brief,
                 gate_root=gate_root,
                 provider_packages=_external_providers(provider_packages, out_root, [unit]),
@@ -5233,7 +5310,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     final: Path,
     oracle_dir: Path | None,
     assets_dir: Path | None,
-    reference_dir: Path | None = None,
+    reference: dict[str, bytes] | None = None,
     brief: bytes | None = None,
     gate_root: Path | None = None,
     provider_packages: Sequence[Path] = (),
@@ -5304,7 +5381,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
         write_json(dest / "engine-output-receipt.json", receipt)
 
     oracle = _attach_oracle(oracle_dir, oracle_identity, dest, unit)
-    reference = _stage_reference(reference_dir, dest) if reference_dir is not None else None
+    _stage_reference(reference, dest)
     spec, spec_note = _write_spec(asset, dest)
     if spec_note:
         notes.append(spec_note)
@@ -6853,6 +6930,11 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    if args.reference is not None:
+        try:
+            _require_reference_local(args.reference)
+        except PackagingError:
+            parser.error("--reference requires a local ordinary reference directory")
     bundle = args.bundle.resolve()
     if not bundle.is_dir():
         parser.error(f"--bundle {args.bundle} is not a directory")
@@ -6898,7 +6980,10 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         else:
             # The constructor validates and holds a single brief before its first mkdir. Do not
             # eagerly create --out here, or a refused brief would still leave package output.
-            out_root = args.out.resolve() if args.brief is not None else _prepare_out(args.out)
+            if args.reference is not None:
+                out_root = args.out.absolute()
+            else:
+                out_root = args.out.resolve() if args.brief is not None else _prepare_out(args.out)
             budgets = _measure_unit_budgets(bundle, slots, out_root, assets_dir)
             _warn_shipping(budgets)
             _package_each(

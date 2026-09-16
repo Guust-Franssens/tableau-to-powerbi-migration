@@ -10,6 +10,7 @@ user tries.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import struct
 import sys
@@ -19,6 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import capture_tableau_reference as capture  # noqa: E402  # pylint: disable=wrong-import-position
+from test_check_reference_readiness import write_png, write_workbook  # noqa: E402  # pylint: disable=wrong-import-position
 
 
 def _png(path: Path, width: int = 1440, height: int = 900, payload: int = 900) -> Path:
@@ -199,6 +201,30 @@ def test_existing_manifest_noop_does_not_admit_a_new_manual_image(tmp_path: Path
     assert manifest_path.read_bytes() == prior
     recorded = json.loads(prior)
     assert [row["name"] for row in recorded["dashboards"]] == ["tableau-Detail"]
+
+
+def test_manual_capture_keeps_original_bytes_source_identity_and_grade_ceiling(tmp_path: Path) -> None:
+    """The public manual provider associates real source/image bytes without claiming image inspection."""
+    slug_dir = tmp_path / "workbook"
+    _spec(slug_dir, dashboards=(), worksheets=("Sales",))
+    source = write_workbook(slug_dir / "source" / "Book.twb", worksheets=["Sales"])
+    image = write_png(slug_dir / "reference" / "tableau-Sales.png")
+    source_bytes, image_bytes = source.read_bytes(), image.read_bytes()
+
+    assert capture.main([str(slug_dir)]) == 0
+    manifest = json.loads((slug_dir / "reference" / "manifest.json").read_bytes())
+    state = manifest["dashboards"][0]["states"][0]
+    assert source.read_bytes() == source_bytes
+    assert image.read_bytes() == image_bytes
+    assert manifest["source_workbook_sha256"] == hashlib.sha256(source_bytes).hexdigest()
+    assert state["sha256"] == hashlib.sha256(image_bytes).hexdigest()
+    assert state["provider"] == "manual"
+    assert state["view_type"] == "worksheet"
+    assert state["image"] == image.name
+    assert set(state["capabilities"]) == {"layout_grade", "text_readable"}
+    assert state["state"] == {}
+    assert state["numeric_oracle"] is None
+    assert "image_inspection_note" not in state
 
 
 def test_every_rejected_candidate_is_named_with_a_reason(tmp_path: Path) -> None:

@@ -175,24 +175,39 @@ retry target.
 After the bounded automatic recovery above is exhausted, project the remaining visual gaps from the
 same completed batches:
 
-```
-python scripts/group_oracle_by_workbook.py --oracle-root /absolute/path/to/_runs/123-unit \
+```powershell
+python scripts\group_oracle_by_workbook.py --oracle-root C:\runs\123-unit\oracle `
     --manual-reference-handoff
 ```
 
 This opt-in writes `manual_reference_handoff` into the existing
-`oracle-grouping-report.json` beside the last enumerated batch and prints its single consolidated
-request. It asks only for residual original Tableau screenshots: successful visual legs and
-data-only failures do not enlarge the list. Unknown identity and failed local copies remain named
-repair gaps instead of guessed screenshot targets. The request initially records filter, parameter
+`oracle-grouping-report.json` beside **each accepted batch**, not a second ledger, and prints one
+consolidated request. The copies prevent a smaller cohort that omits the last batch from erasing the
+request. Ordinary initial grouping still writes only beside the last batch and creates no handoff.
+The request includes only residual original Tableau screenshots: any successful visual sibling
+satisfies it, and data-only failures do not enlarge it. A required reference with no selected render
+tier still needs an original; its request says **tier not selected**, without inventing a tier.
+Missing `updated_at`, unknown/conflicting identity and failed local copies remain named repair gaps,
+not guessed screenshot targets. A repair-only handoff is `REPAIR_REQUIRED`, never a clean no-gap
+claim. Kind and render reasons use bounded vocabularies; unsafe readable labels become `UNKNOWN`.
+The request initially records filter, parameter
 and period context as `UNKNOWN`; supplied declarations belong in the caller-recorded response
 context. An empty manual-capture `state` is not proof of filter state.
 
 Present that exact request once. `requested_at` records creation, while `delivery_status: UNKNOWN`
-correctly avoids claiming that console output reached a person. On later invocations, reports beside
-only the enumerated batches preserve matching request and response context by server, site, workbook
-LUID, view LUID and revision; captions are never identity. Changed, malformed or conflicting state
-refuses instead of silently resetting or repeating the request.
+correctly avoids claiming that console output reached a person. Reuse requires the **exact,
+order-independent accepted `oracle_dirs` cohort** and server/site/workbook/view/**revision** identity.
+Repeat, reordered and ordinary unflagged regrouping preserve the exact original request text,
+timestamp and responses; a caption change never rewrites what was originally prepared. Added or
+removed batches, changed identity and malformed/conflicting request state refuse at the handoff
+boundary rather than silently resetting or repeating it. This does not change ordinary capture
+merging when no handoff exists. Only reports beside already enumerated batches are read; prior
+`oracle_dirs` strings and response paths are never dereferenced.
+
+⚠️ Retain the original complete cohort when upgrading an older **last-batch-only** handoff. A report
+outside the enumerated inputs, or one whose copies were deleted, cannot be discovered without an
+additional scan/ledger; neither is provided. A successful local write does not prove human delivery
+or protect against concurrent editing of these unsigned report files.
 
 When screenshots arrive, the caller records `supplied_context`, retained reference/image paths,
 source-file SHA-256, `manual_origin`, the actual image-inspection note and `response_recorded_at` in

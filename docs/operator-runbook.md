@@ -903,10 +903,19 @@ python scripts\promote_unit.py --package <package> --slug <slug> --receipt-sha25
 ```
 
 `--reference` is optional and accepts one existing manual-capture `reference\` directory for exactly
-one selected workbook unit. It reads the existing `manifest.json`, copies its original bytes and only
-the image members declared there, and declares `artifacts.reference` before the normal package seals.
-It never restamps hashes, raises grades or forges oracle evidence. Malformed/empty manifests and
-missing, unsafe, unsupported or identity-mismatched members refuse explicitly.
+one selected workbook unit. Before any reference read, it checks the source root, ancestors and
+manifest through the existing local no-follow boundary; declared image members must also be regular
+non-reparse files. UNC/device spellings, junctions and symlinks are refused, not resolved through.
+The source must be disjoint by path and native identity from `--out` and the final, staging and
+retired package locations — **do not put the reference under `--out`**. These checks and holding the
+declared original bytes precede any constructor mkdir or scratch cleanup, for both CLI and direct
+calls. This is snapshot admission, not a concurrent-filesystem-adversary guarantee.
+
+It copies only the existing manifest and its declared images, and declares `artifacts.reference`
+before the normal package seals. It never restamps hashes, raises grades or forges oracle evidence.
+Malformed/empty manifests and missing/unsafe members refuse construction without changing originals
+or old targets. Unsupported evidence or mismatched source/image identity remains subject to the
+existing role/readiness refusals; successful construction does not establish its admissibility.
 
 This admission path is **fresh-target only**. If `packages\<Unit>` already exists — clean, sealed or
 edited — retain the screenshots outside it rather than selecting a replacement directory and losing
@@ -1005,8 +1014,14 @@ What to check in the output:
     `--manual-reference-handoff`. Present the exact consolidated request in
     `oracle-grouping-report.json`, not a separately assembled list. Record supplied context, retained
     paths, source SHA-256, manual origin and the actual image-inspection note back into those rows.
-    Repeat/reordered grouping preserves matching request/response context and refuses conflicts; it
-    does not claim that printing proved delivery.
+    Required visuals still need originals when no render tier was selected; missing revisions and
+    local-copy/identity problems are named repair gaps. The handoff is retained in the existing
+    report beside each accepted batch. Repeat, reordered **and ordinary unflagged** regrouping of
+    that exact cohort preserves the original request text, timestamp and response fields. Added or
+    removed batches and malformed/conflicting immutable state refuse instead of resetting the
+    request. Do not edit the original request rows except their documented response fields; captions
+    are not identity. For older last-batch-only reports, enumerate their complete original cohort.
+    Printing still does not prove delivery.
   - Reused capability reports say `probe_performed: false` and retain `reused_from_grouped` provenance.
     Their probe counts are historical, not fresh probes. Different tier/API reports do not block
     ordinary per-leg grouping: ambiguous aggregate reports become null, without losing leg evidence.

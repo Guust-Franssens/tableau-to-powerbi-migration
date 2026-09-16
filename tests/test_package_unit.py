@@ -30,6 +30,7 @@ import re
 import shutil
 import sys
 import time
+import types as reference_types
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -47,6 +48,7 @@ import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-positio
 import path_flavour as pf  # noqa: E402  # pylint: disable=wrong-import-position
 import reference_evidence as rev  # noqa: E402  # pylint: disable=wrong-import-position
 import set_data_folder as sdf  # noqa: E402  # pylint: disable=wrong-import-position
+import test_package_filesystem as reference_filesystem  # noqa: E402  # pylint: disable=wrong-import-position
 from test_package_unit_gates import _binding_cli, _binding_package  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import KEEP, REPORT_ALLOW, Rows, project  # noqa: E402  # pylint: disable=wrong-import-position
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
@@ -225,6 +227,7 @@ def test_only_this_workbooks_views_are_copied_in(tmp_path: Path) -> None:
 
 
 def test_public_fresh_package_admits_only_declared_reference_bytes_before_sealing(tmp_path: Path) -> None:
+    """Real manual capture reaches final package readiness without modifying source or image bytes."""
     import check_reference_readiness as crr  # pylint: disable=import-outside-toplevel
 
     bundle, _oracle = _bundle(tmp_path, worksheets=("Sales",))
@@ -257,8 +260,10 @@ def test_public_fresh_package_admits_only_declared_reference_bytes_before_sealin
     )
     reference = bundle / "reference"
     source_image_path = write_png(reference / "tableau-Sales.png")
+    (reference / "not-declared.txt").write_bytes(b"retain outside the package")
     assert capture.main([str(bundle)]) == 0
     manifest_raw = (reference / "manifest.json").read_bytes()
+    original_reference = _reference_hashes(reference)
     assert crr.scan(bundle)["status"] == crr.STATUS_READY
     brief = tmp_path / "brief.md"
     brief.write_text(
@@ -291,6 +296,8 @@ def test_public_fresh_package_admits_only_declared_reference_bytes_before_sealin
     assert (root / "reference" / "manifest.json").read_bytes() == manifest_raw
     assert (root / "reference" / "tableau-Sales.png").read_bytes() == source_image
     assert not (root / "reference" / "not-declared.txt").exists()
+    assert _reference_hashes(reference) == original_reference
+    assert set(_reference_hashes(root / "reference")) == {"manifest.json", "tableau-Sales.png"}
     assert "reference/manifest.json" in package_manifest["contents"]["files"]
     role = next(
         row
@@ -425,6 +432,230 @@ def test_reference_target_appearing_before_publication_is_not_replaced(
             reference_dir=reference,
         )
     assert (_out(tmp_path) / UNIT / "owner.txt").read_bytes() == sentinel
+
+
+def _reference_hashes(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def _refuse_reference(entrypoint: str, bundle: Path, out: Path, reference: Path, reason: str) -> None:
+    if entrypoint == "constructor":
+        with pytest.raises(pkg.PackagingError, match=reason):
+            pkg.package_unit(
+                bundle, UNIT, out, oracle_dir=None, assets_dir=bundle.parent / "assets", reference_dir=reference
+            )
+    else:
+        report = bundle.parent / "refusal.json"
+        assert (
+            pkg.main(
+                [
+                    "--bundle",
+                    str(bundle),
+                    "--unit",
+                    UNIT,
+                    "--out",
+                    str(out),
+                    "--assets",
+                    str(bundle.parent / "assets"),
+                    "--reference",
+                    str(reference),
+                    "--json",
+                    str(report),
+                    "--quiet",
+                ]
+            )
+            == 5
+        )
+        blocked = json.loads(report.read_bytes())["construction"]["blocked"]
+        assert len(blocked) == 1
+        assert re.fullmatch(reason, blocked[0]["reason_code"])
+
+
+@pytest.mark.parametrize("entrypoint", ["constructor", "cli"])
+@pytest.mark.parametrize("overlap", ["out", "final", "staging", "retired", "staging-child", "out-ancestor"])
+def test_reference_source_overlap_preserves_every_source_and_old_target_byte(
+    tmp_path: Path, entrypoint: str, overlap: str
+) -> None:
+    """Admission must precede scratch deletion, including a reference stored at the scratch root."""
+    bundle, _oracle = _bundle(tmp_path, worksheets=("Sales",))
+    original, _raw = _manual_reference(bundle)
+    out = _out(tmp_path)
+    locations = {
+        "out": out,
+        "final": out / UNIT,
+        "staging": pkg.staging_dir(out, UNIT),
+        "retired": pkg.retired_dir(out / UNIT),
+        "staging-child": pkg.staging_dir(out, UNIT) / "nested",
+        "out-ancestor": tmp_path / "enclosure",
+    }
+    reference = locations[overlap]
+    reference.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(original), str(reference))
+    if overlap == "out-ancestor":
+        out = reference / "packages"
+    for location in (pkg.staging_dir(out, UNIT), pkg.retired_dir(out / UNIT), out / "other-owner"):
+        if not location.exists():
+            location.mkdir(parents=True)
+        (location / "old-owner.bin").write_bytes(f"original:{location.name}".encode())
+    before_source = _reference_hashes(reference)
+    before_targets = _reference_hashes(out)
+
+    _refuse_reference(entrypoint, bundle, out, reference, "reference_source_overlap")
+
+    assert _reference_hashes(reference) == before_source
+    assert _reference_hashes(out) == before_targets
+
+
+def _directory_reparse_reference(bundle: Path, location: str) -> tuple[Path, Path]:
+    tmp_path = bundle.parent
+    original, _raw = _manual_reference(bundle)
+    reference = original
+    if location == "root":
+        reference = tmp_path / "reference-link"
+        reference_filesystem.link_directory(reference, original)
+    elif location == "ancestor":
+        ancestor = tmp_path / "reference-parent-link"
+        container = tmp_path / "source-container"
+        container.mkdir()
+        shutil.move(str(original), str(container / "reference"))
+        original = container / "reference"
+        reference_filesystem.link_directory(ancestor, container)
+        reference = ancestor / "reference"
+    else:
+        source_images = tmp_path / "original-images"
+        source_images.mkdir()
+        shutil.move(str(original / "tableau-Sales.png"), str(source_images / "tableau-Sales.png"))
+        reference_filesystem.link_directory(original / "images", source_images)
+        payload = json.loads((original / "manifest.json").read_bytes())
+        payload["dashboards"][0]["states"][0]["image"] = "images/tableau-Sales.png"
+        (original / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    source_root = original if location != "member-directory" else tmp_path / "original-images"
+    return reference, source_root
+
+
+@pytest.mark.parametrize("entrypoint", ["constructor", "cli"])
+@pytest.mark.parametrize("location", ["root", "ancestor", "member-directory"])
+def test_reference_directory_reparse_refuses_before_read_or_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str, location: str
+) -> None:
+    """Real NTFS junctions (POSIX symlinks) are dead ends, including source ancestors."""
+    bundle, _oracle = _bundle(tmp_path, worksheets=("Sales",))
+    reference, source_root = _directory_reparse_reference(bundle, location)
+    before = (_reference_hashes(reference), _reference_hashes(source_root))
+    out = _out(tmp_path)
+    out.mkdir(parents=True)
+    (out / "old-target.bin").write_bytes(b"unrelated output")
+    old_target = _reference_hashes(out)
+    read_bytes = Path.read_bytes
+    forbidden = reference / ("manifest.json" if location != "member-directory" else "images/tableau-Sales.png")
+
+    def checked_read(path: Path) -> bytes:
+        assert path != forbidden, "reference input was read before no-follow admission"
+        return read_bytes(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", checked_read)
+        _refuse_reference(entrypoint, bundle, out, reference, "reference_path_unsafe")
+    assert (_reference_hashes(reference), _reference_hashes(source_root)) == before
+    assert _reference_hashes(out) == old_target
+
+
+def _link_reference_file(path: Path, outside: Path) -> None:
+    path.rename(outside)
+    try:
+        path.symlink_to(outside)
+    except OSError as error:
+        if os.name == "nt" and error.winerror == 1314:
+            pytest.skip("this platform/account cannot create symlinks without elevation")
+        raise
+
+
+@pytest.mark.parametrize("entrypoint", ["constructor", "cli"])
+@pytest.mark.parametrize("member", ["manifest.json", "tableau-Sales.png"])
+@pytest.mark.parametrize("genuine", [False, True], ids=["file-reparse-seam", "file-symlink"])
+def test_reference_file_reparse_is_refused_before_reading_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str, member: str, genuine: bool
+) -> None:
+    """Exercise file reparse admission even on accounts that cannot create genuine file symlinks."""
+    bundle = _bundle(tmp_path, worksheets=("Sales",))[0]
+    reference = _manual_reference(bundle)[0]
+    path = reference / member
+    outside = tmp_path / f"original-{member}"
+    if genuine:
+        _link_reference_file(path, outside)
+    out = _out(tmp_path)
+    out.mkdir(parents=True)
+    (out / "old-target.bin").write_bytes(b"retain output")
+    before = (_reference_hashes(reference), (outside if genuine else path).read_bytes(), _reference_hashes(out))
+
+    def reparse_lstat(candidate: Path, original_lstat=Path.lstat):
+        info = original_lstat(candidate)
+        if candidate != path or genuine:
+            return info
+        return reference_types.SimpleNamespace(
+            st_mode=info.st_mode, st_file_attributes=0x400, st_ino=info.st_ino, st_dev=info.st_dev
+        )
+
+    def checked_read(candidate: Path, original_read=Path.read_bytes) -> bytes:
+        assert candidate not in (path, outside), "reparse member was read before no-follow admission"
+        return original_read(candidate)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "lstat", reparse_lstat)
+        patch.setattr(Path, "read_bytes", checked_read)
+        _refuse_reference(entrypoint, bundle, out, reference, "reference_path_unsafe")
+    assert (_reference_hashes(reference), (outside if genuine else path).read_bytes(), _reference_hashes(out)) == before
+
+
+@pytest.mark.parametrize("entrypoint", ["constructor", "cli"])
+@pytest.mark.parametrize(
+    "reference", [r"\\uncontacted.invalid\share\reference", r"\\?\C:\reference", r"\\.\C:\reference"]
+)
+def test_reference_unc_and_device_spellings_are_intercepted_before_any_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str, reference: str
+) -> None:
+    """No remote share or device is contacted, even to resolve the bundle or check existence."""
+    bundle, _oracle = _bundle(tmp_path, worksheets=("Sales",))
+
+    def no_io(*_args, **_kwargs):
+        pytest.fail("reference spelling admission must precede filesystem I/O")
+
+    with monkeypatch.context() as patch:
+        for operation in ("resolve", "lstat", "stat", "read_bytes", "read_text", "mkdir"):
+            patch.setattr(Path, operation, no_io)
+        if entrypoint == "constructor":
+            with pytest.raises(pkg.PackagingError, match="reference_path_unsafe"):
+                pkg.package_unit(
+                    bundle, UNIT, _out(tmp_path), oracle_dir=None, assets_dir=None, reference_dir=Path(reference)
+                )
+        else:
+            with pytest.raises(SystemExit) as refused:
+                pkg.main(
+                    ["--bundle", str(bundle), "--unit", UNIT, "--out", str(_out(tmp_path)), "--reference", reference]
+                )
+            assert refused.value.code == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")
+@pytest.mark.parametrize("entrypoint", ["constructor", "cli"])
+def test_reference_native_short_alias_of_output_preserves_original_bytes(tmp_path: Path, entrypoint: str) -> None:
+    """Different input/output spellings of one real Windows directory cannot bypass overlap admission."""
+    bundle, _oracle = _bundle(tmp_path, worksheets=("Sales",))
+    reference, _raw = _manual_reference(bundle)
+    short_name = _native_short_name(reference)
+    if short_name == reference.name:
+        pytest.skip("8.3 name generation is disabled on this volume")
+    out = reference.parent / short_name
+    assert out != reference and os.path.samefile(out, reference)
+    before = _reference_hashes(reference)
+
+    _refuse_reference(entrypoint, bundle, out, reference, "reference_source_overlap")
+
+    assert _reference_hashes(reference) == before
 
 
 @pytest.mark.parametrize("fault", ["source-sha", "luid", "name", "kind", "unreadable"])
