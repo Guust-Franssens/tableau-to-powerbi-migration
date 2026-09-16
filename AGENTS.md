@@ -196,6 +196,8 @@ workbook against a plan someone else made. Deciding **what** to migrate, **in wh
 where** happens up here: **the dispatcher decides and writes the brief; `tableau-migrator` reads the
 brief and executes.**
 
+First: [run setup](scripts/README.md#run-setup).
+
 ### Step 1 — work out what you are actually pointing at
 
 Do not ask "which workbook?" until you know what kind of thing you were handed. The four input shapes
