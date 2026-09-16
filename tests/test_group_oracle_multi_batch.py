@@ -112,7 +112,7 @@ def _batch(
         if (view.get("image") or {}).get("status") == "ok":
             (directory / "images" / f"{view['view_luid']}.png").write_bytes(PNG)
     renders = ["png"] if requested_renders is None else requested_renders
-    manifest: dict = {"schema": "tableau-oracle/1", "requested_renders": renders, "views": views}
+    manifest: dict = {"schema": "tableau-oracle/1", "max_age_minutes": 1, "requested_renders": renders, "views": views}
     if captured_at is not None:
         manifest["captured_at"] = captured_at
     if server is not None:
@@ -271,6 +271,7 @@ def test_an_ordinary_recovery_batch_with_only_attempted_legs_preserves_prior_suc
     assert set(views) == {LUID, OTHER}
     assert (views[LUID]["data"]["status"], views[LUID]["data"]["source_batch"]) == ("ok", "full")
     assert (views[LUID]["image"]["status"], views[LUID]["image"]["source_batch"]) == ("ok", "recovery")
+    assert _grouped(migrations)["max_age_minutes"] == 1
 
 
 def test_a_partial_re_run_cannot_overwrite_a_view_it_never_captured(tmp_path):

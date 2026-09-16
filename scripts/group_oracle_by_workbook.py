@@ -552,6 +552,7 @@ _MANIFEST_TYPES: tuple[_Typed, ...] = (
     # Normalized (`.strip().casefold()`) for the cross-tenant identity check.
     _Typed("server", str),
     _Typed("site", str),
+    _Typed("max_age_minutes", int),
     # `sorted()` over mixed element types raises, and the union feeds the render-intent report.
     _Typed("requested_renders", list, items=str),
 )
@@ -1264,6 +1265,7 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
         "server": manifest.get("server"),
         "site": manifest.get("site"),
         "rest_api_version": manifest.get("rest_api_version"),
+        "max_age_minutes": manifest.get("max_age_minutes"),
         "workbook_name": workbook,
         "workbook_luid": next((v.get("workbook_luid") for v in views if v.get("workbook_luid")), None),
         "view_count": len(views),
