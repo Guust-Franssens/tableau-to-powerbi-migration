@@ -888,6 +888,7 @@ dispatch requires the current package-only `START_READY` result.
 
 ```powershell
 python scripts\package_unit.py --bundle _bundle --unit <Unit> --brief <unit-specific-v2-brief> `
+    --reference migrations\workbooks\<slug>\reference `
     --out _runs\<NNN>-<slug>\packages `
     --json _runs\<NNN>-<slug>\packages\packaging.json
 # After construction and original data proof, bind separately when applicable:
@@ -900,6 +901,43 @@ python scripts\check_unit.py _runs\<NNN>-<slug>\packages\<Unit>
 python scripts\check_unit.py <package> --scope all --receipt-sha256 <caller-held-final-sha256>
 python scripts\promote_unit.py --package <package> --slug <slug> --receipt-sha256 <caller-held-final-sha256>
 ```
+
+`--reference` is optional and accepts one existing manual-capture `reference\` directory for exactly
+one unambiguous workbook occurrence in the engine report, with no workbook/datasource kind collision.
+Both CLI and direct construction enforce that identity before reading reference contents.
+Before any reference read, it checks the source root, ancestors and
+manifest through the existing local no-follow boundary; declared image members must also be regular
+non-reparse files. UNC/device spellings, junctions and symlinks are refused, not resolved through.
+The source must be disjoint by path and native identity from `--out` and the final, staging and
+retired package locations — **do not put the reference under `--out`**. A `--json` destination must
+also be outside the reference tree and must not be a native alias of any retained member, including
+the manifest or an image. Unsafe or unassessable reporting aliases are usage refusals before reference
+reads or output creation; even a refusal report must not overwrite an original. These checks and holding the
+declared original bytes precede any constructor mkdir or scratch cleanup, for both CLI and direct
+calls. This is snapshot admission, not a concurrent-filesystem-adversary guarantee.
+
+It copies only the existing manifest and its declared images, and declares `artifacts.reference`
+before the normal package seals. It never restamps hashes, raises grades or forges oracle evidence.
+Before copying, the closed capture contract rejects unknown fields, validation-grade capabilities,
+non-null numeric or filter-state assertions, malformed typed metadata and recognized private paths
+or credentials. It requires default/empty state, `numeric_oracle: null` and the provider's existing
+layout/text ceiling; unsupported input is refused, never rewritten or silently stripped. See the
+[manual-reference contract](reference-capture.md#one-manual-request-after-bounded-recovery).
+Malformed/empty manifests and missing/unsafe members also refuse construction without changing
+originals or old targets. Mismatched source/image identity remains subject to the existing
+role/readiness refusals; successful construction does not establish its admissibility.
+
+This admission path is **fresh-target only**. If `packages\<Unit>` already exists — clean, sealed or
+edited — retain the screenshots outside it rather than selecting a replacement directory and losing
+prior work. `--discard-package-edits` cannot be combined with `--reference`, and a target that appears
+during assembly is not replaced. A cached `capture_tableau_reference.py` no-op does not admit newly
+dropped files: only members already declared by its preserved manifest can enter the package.
+Construction remains diagnostic; all ordinary binding, role-identity and final package
+`START_READY` obligations still apply.
+
+❌ **Final manual completion remains blocked by #664:** `check_unit` still interprets canonical
+manual names/types differently from the reference/readiness authority. The producer/grouper fix in
+PR #658 does not fix that consumer or make an entry-ready manual package final-complete.
 
 The last two commands use **identical exact lowercase 64-hex H**, without a prefix. Only the
 all-scope checker may return COMPLETE/0; tokenless all-scope and every layer scope are not COMPLETE.
@@ -986,6 +1024,18 @@ What to check in the output:
     `rest_api_version_source: legacy_producer_default` names an inference, not historical proof.
     Missing or incompatible selected API/cache evidence refuses before sign-in; do not fill it from
     an unrelated batch. A selected data leg's API must also match trusted configuration.
+  - Once bounded recovery is exhausted, run the same grouper with
+    `--manual-reference-handoff`. Present the exact consolidated request in
+    `oracle-grouping-report.json`, not a separately assembled list. Record supplied context, retained
+    paths, source SHA-256, manual origin and the actual image-inspection note back into those rows.
+    Required visuals still need originals when no render tier was selected; missing revisions and
+    local-copy/identity problems are named repair gaps. The handoff is retained in the existing
+    report beside each accepted batch. Repeat, reordered **and ordinary unflagged** regrouping of
+    that exact cohort preserves the original request text, timestamp and response fields. Added or
+    removed batches and malformed/conflicting immutable state refuse instead of resetting the
+    request. Do not edit the original request rows except their documented response fields; captions
+    are not identity. For older last-batch-only reports, enumerate their complete original cohort.
+    Printing still does not prove delivery.
   - Reused capability reports say `probe_performed: false` and retain `reused_from_grouped` provenance.
     Their probe counts are historical, not fresh probes. Different tier/API reports do not block
     ordinary per-leg grouping: ambiguous aggregate reports become null, without losing leg evidence.

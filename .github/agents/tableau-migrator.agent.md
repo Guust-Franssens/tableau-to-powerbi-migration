@@ -151,13 +151,14 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
    **one** attempt, so stop and ask. Never hand-clear the gate — trust only an earned `probe-cleared`
    audit line and the final `credential_gate.py verify` verdict. With no live source, record the skip
    and continue.
-7. **Delegate to `pbi-migration-validator` FIRST, in triage mode.** It classifies every
+7. **Delegate to `pbi-migration-validator` FIRST for triage.** It classifies every
    `viz_fidelity[]` row `fixable` / `accepted-limitation` / `false-claim`, and **both builders consume
    that classification**; a builder sent at the raw list repairs a deliberate deferral — measured, one
    such row would silently re-scope six other table calcs. Give it the handover slice, the active
    contract and the reference bundle (path/tool/grade from the brief; default
    `migrations/workbooks/<name>/reference/`). **Name the mode** — triage / spot-check / sign-off are
-   different jobs.
+   different jobs. After bounded recovery, follow the
+   [manual-reference handoff](../../docs/reference-capture.md#one-manual-request-after-bounded-recovery).
 8. **Delegate to `pbi-semantic-builder`** with: the handover slice (its `requests[]` is the work
    queue), the emitted model path, the active contract (parser specs carry table-calc addressing in
    `worksheets[].encodings`) and the validator's model-side findings. Its job: prove the model loads,

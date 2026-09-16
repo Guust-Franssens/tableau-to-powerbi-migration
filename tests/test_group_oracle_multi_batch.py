@@ -13,10 +13,13 @@ with a failure from a batch that only covered some views.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,9 +31,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import group_oracle_by_workbook as grp  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
+import test_package_filesystem as filesystem  # noqa: E402  # pylint: disable=wrong-import-position
 
 LUID = "0979a4f9-1111-2222-3333-444444444444"
 OTHER = "0979a4f9-5555-6666-7777-888888888888"
+WB_LUID = "11111111-2222-3333-4444-555555555555"
+OTHER_WB_LUID = "99999999-8888-7777-6666-555555555555"
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 64
 CSV = "region,sales\nEast,12\n"
 # The view's own last-modified stamp, as Tableau reports it. ⚠️ NOT `captured_at`: that says when WE
@@ -65,7 +71,7 @@ def _view(  # pylint: disable=too-many-arguments
     view: dict = {
         "view_luid": luid,
         "view_name": name,
-        "workbook_luid": "wb-1",
+        "workbook_luid": WB_LUID,
         "workbook_name": "airborne services",
         "captured_at": captured_at,
         "updated_at": updated_at,
@@ -803,6 +809,1141 @@ def test_a_workbook_whose_renders_all_landed_reports_zero_unestablished(tmp_path
     grouped = _grouped(migrations)
     assert grouped["render_unestablished"] == 0
     assert grouped["render_unestablished_views"] == []
+
+
+def test_public_manual_handoff_requests_only_residual_visuals_once_and_preserves_response(
+    tmp_path, monkeypatch, caplog
+):
+    """Two missing originals produce one request; reorder preserves human response instead of asking again."""
+    root = tmp_path / "_oracle"
+    first = _batch(
+        root,
+        "first",
+        [
+            _view(LUID, "Missing One", data="ok", image="transient", captured_at="2026-08-18T14:00:00Z"),
+            _view(OTHER, "Successful", data="ok", image="ok", captured_at="2026-08-18T14:00:00Z"),
+            _view(
+                "0979a4f9-9999-2222-3333-444444444444",
+                "Data Failure Only",
+                data="transient",
+                image="ok",
+                captured_at="2026-08-18T14:00:00Z",
+            ),
+        ],
+        captured_at="2026-08-18T14:00:00Z",
+    )
+    second_luid = "0979a4f9-aaaa-2222-3333-444444444444"
+    second = _batch(
+        root,
+        "second",
+        [_view(second_luid, "Missing Two", data="ok", image="transient", captured_at=STAMP)],
+        captured_at=STAMP,
+    )
+    migrations = _migrations(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "group",
+            "--oracle",
+            str(first),
+            "--oracle",
+            str(second),
+            "--migrations",
+            str(migrations),
+            "--manual-reference-handoff",
+        ],
+    )
+    assert grp.main() == 0
+    report_path = second / grp.UNMATCHED_REPORT
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    handoff = report["manual_reference_handoff"]
+    assert handoff["status"] == "REQUEST_REQUIRED"
+    assert handoff["delivery_status"] == "UNKNOWN"
+    assert [row["view_luid"] for row in handoff["rows"]] == [LUID, second_luid]
+    assert all(
+        value == {"status": "UNKNOWN", "value": None} for row in handoff["rows"] for value in row["context"].values()
+    )
+    assert handoff["request"].count("\n- ") == 2
+
+    handoff["rows"][0].update(
+        {
+            "retained_reference_paths": ["reference"],
+            "retained_image_paths": ["reference/tableau-Missing One.png"],
+            "source_file_sha256": "a" * 64,
+            "manual_origin": "user-supplied original Tableau screenshot",
+            "image_inspection_note": "inspected actual pixels in an image-capable session",
+        }
+    )
+    handoff["rows"].reverse()
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    caplog.clear()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "group",
+            "--oracle",
+            str(second),
+            "--oracle",
+            str(first),
+            "--migrations",
+            str(migrations),
+            "--manual-reference-handoff",
+        ],
+    )
+    assert grp.main() == 0
+    repeated = json.loads((first / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))["manual_reference_handoff"]
+    assert repeated["status"] == "ALREADY_REQUESTED"
+    assert repeated["requested_at"] == handoff["requested_at"]
+    assert repeated["rows"][0]["source_file_sha256"] == "a" * 64
+    assert "Please supply" not in caplog.text
+    assert "was not repeated" in caplog.text
+    assert grp.run([first, second], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    third = json.loads((second / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))["manual_reference_handoff"]
+    assert third["status"] == "ALREADY_REQUESTED"
+    assert third["requested_at"] == handoff["requested_at"]
+    assert third["rows"][0]["source_file_sha256"] == "a" * 64
+
+
+def test_manual_handoff_refuses_malformed_prior_state_instead_of_resetting_it(tmp_path):
+    """A damaged carrier must not silently become a new request."""
+    batch = _batch(
+        tmp_path / "_oracle",
+        "only",
+        [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)],
+    )
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    report_path = batch / grp.UNMATCHED_REPORT
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["manual_reference_handoff"]["rows"] = "lost"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(grp.ManualHandoffConflict):
+        grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True)
+
+
+@pytest.mark.parametrize("requested", ["png", "svg"])
+def test_not_copied_render_is_a_repair_gap_not_a_screenshot_target(tmp_path, requested):
+    """A missing local copy needs repair, not a second original from the human."""
+    view = _view(LUID, "Locally Missing", data="ok", image="ok", captured_at=STAMP)
+    if requested == "svg":
+        view["svg"] = {"status": "transient"}
+    batch = _batch(
+        tmp_path / "_oracle",
+        "only",
+        [view],
+        requested_renders=[requested],
+    )
+    (batch / "images" / f"{LUID}.png").unlink()
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 1
+    handoff = json.loads((batch / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))["manual_reference_handoff"]
+    assert handoff["status"] == "REPAIR_REQUIRED"
+    assert handoff["request"] == ""
+    assert handoff["rows"] == []
+    assert handoff["repair_gaps"] == [{"reason": "incomplete", "workbook_luid": WB_LUID, "view_luid": None}]
+
+
+def test_malformed_grouped_view_is_a_repair_gap_not_an_uncaught_error(tmp_path):
+    """A damaged internal row is named without guessing its identity."""
+    batch_dir = tmp_path / "_oracle"
+    batch_dir.mkdir()
+    inputs = grp._RunInputs(  # pylint: disable=protected-access
+        [grp._Batch(batch_dir, {}, "only", 0)],  # pylint: disable=protected-access
+        tmp_path / "migrations",
+        "captured_at",
+        False,
+        manifest={"server": "https://tableau.example", "site": "site", "requested_renders": ["png_high"]},
+        manual_reference_handoff=True,
+    )
+    outcomes = {bucket: [] for bucket in grp.OUTCOME_BUCKETS}
+    outcomes["grouped"].append({"workbook_luid": WB_LUID, "_grouped_views": [None]})
+
+    handoff = grp._manual_handoff(inputs, outcomes)  # pylint: disable=protected-access
+
+    assert not handoff["rows"]
+    assert handoff["repair_gaps"] == [
+        {"reason": "residual_view_record_malformed", "workbook_luid": WB_LUID, "view_luid": None}
+    ]
+
+
+def test_manual_handoff_marks_a_truncated_readable_label() -> None:
+    """A bounded readable label discloses that its suffix was omitted."""
+    label = grp._safe_label("x" * 200)  # pylint: disable=protected-access
+
+    assert len(label) == 160
+    assert label.endswith("...")
+
+
+@pytest.mark.parametrize("successful_sibling", [False, True])
+def test_manual_required_reference_without_selected_tier_is_not_clean(tmp_path, successful_sibling):
+    """Required visual intent survives a failed capability ladder without inventing a tier."""
+    view = _view(LUID, "Missing Original", data="ok", image=None, captured_at=STAMP)
+    batch = _batch(tmp_path / "_oracle", "only", [view], requested_renders=[])
+    path = batch / grp.MANIFEST_NAME
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["reference_required"] = True
+    if successful_sibling:
+        (batch / "images" / "original.svg").write_text("<svg/>", encoding="utf-8")
+        manifest["views"][0]["svg"] = {"status": "ok", "path": "images/original.svg"}
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert grp.run([batch], _migrations(tmp_path), dry_run=False, manual_reference_handoff=True) == 0
+    handoff = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    if successful_sibling:
+        assert handoff["status"] == "NO_VISUAL_GAPS"
+        assert handoff["rows"] == []
+    else:
+        assert handoff["status"] == "REQUEST_REQUIRED"
+        assert [row["view_luid"] for row in handoff["rows"]] == [LUID]
+        assert handoff["rows"][0]["render_reasons"] == {}, "no selected tier may be invented"
+        assert "ORIGINAL" in handoff["request"]
+        assert "tier not selected" in handoff["request"]
+
+
+def test_manual_successful_unrequested_visual_sibling_never_inflates_request(tmp_path):
+    """An actual successful visual satisfies the manual request even outside the requested tier."""
+    batch = _batch(
+        tmp_path / "_oracle",
+        "only",
+        [_view(LUID, "Already Visual", data="transient", image="transient", captured_at=STAMP)],
+    )
+    (batch / "images" / "original.svg").write_text("<svg/>", encoding="utf-8")
+    path = batch / grp.MANIFEST_NAME
+    manifest = json.loads(path.read_bytes())
+    manifest["views"][0]["svg"] = {"status": "ok", "path": "images/original.svg"}
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert grp.run([batch], _migrations(tmp_path), dry_run=False, manual_reference_handoff=True) == 0
+    handoff = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["rows"] == []
+    assert handoff["request"] == ""
+
+
+@pytest.mark.parametrize("missing", ["omitted", "null"])
+def test_manual_missing_revision_is_a_named_repair_gap(tmp_path, missing):
+    """Revision is request identity, not optional display context."""
+    view = _view(LUID, "Missing Revision", data="ok", image="transient", captured_at=STAMP, updated_at=None)
+    if missing == "omitted":
+        view.pop("updated_at")
+    batch = _batch(
+        tmp_path / "_oracle",
+        "only",
+        [view],
+    )
+    assert grp.run([batch], _migrations(tmp_path), dry_run=False, manual_reference_handoff=True) == 0
+    handoff = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["status"] == "REPAIR_REQUIRED"
+    assert handoff["rows"] == []
+    assert handoff["request"] == ""
+    assert handoff["repair_gaps"] == [
+        {"reason": "screenshot_revision_unestablished", "workbook_luid": WB_LUID, "view_luid": LUID}
+    ]
+
+
+def test_manual_request_projects_only_bounded_reasons_and_safe_labels(tmp_path, caplog):
+    """Capture-controlled strings cannot become arbitrary lines of a human screenshot request."""
+    view = _view(
+        LUID,
+        "Daily\nINJECTED_PRIVATE_NAME",
+        data="ok",
+        image="transient\nINJECTED_PRIVATE_TEXT",
+        captured_at=STAMP,
+    )
+    view["view_type"] = "dashboard\nINJECTED_PRIVATE_KIND"
+    batch = _batch(tmp_path / "_oracle", "only", [view])
+    assert grp.run([batch], _migrations(tmp_path), dry_run=False, manual_reference_handoff=True) == 0
+    handoff = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert "INJECTED_PRIVATE" not in json.dumps(handoff)
+    assert "INJECTED_PRIVATE" not in caplog.text
+    assert handoff["rows"][0]["render_reasons"] == {"png": "UNKNOWN"}
+    assert handoff["rows"][0]["kind"] == "UNKNOWN"
+    assert handoff["rows"][0]["view_name"] == "UNKNOWN"
+
+
+def test_manual_ordinary_regroup_preserves_original_request_timestamp_and_response(tmp_path, caplog):
+    """An ordinary regroup between opt-ins must not erase request-once state."""
+    batch = _batch(
+        tmp_path / "_oracle", "only", [_view(LUID, "Original Caption", data="ok", image="transient", captured_at=STAMP)]
+    )
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    report_path = batch / grp.UNMATCHED_REPORT
+    report = json.loads(report_path.read_bytes())
+    original = report["manual_reference_handoff"]
+    original["rows"][0]["image_inspection_note"] = "not inspected; retained for an image-capable operator"
+    original["rows"][0]["retained_image_paths"] = ["reference/tableau-Original Caption.png"]
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    manifest_path = batch / grp.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["views"][0]["view_name"] = "Changed Caption"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    caplog.clear()
+
+    assert grp.run([batch], migrations, dry_run=False) == 0
+    ordinary = json.loads(report_path.read_bytes())
+    assert "manual_reference_handoff" in ordinary, "ordinary regroup must not erase the request"
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    repeated = json.loads(report_path.read_bytes())["manual_reference_handoff"]
+    assert repeated["status"] == "ALREADY_REQUESTED"
+    assert repeated["requested_at"] == original["requested_at"]
+    assert repeated["request"] == original["request"], "keep the exact text actually prepared, not today's caption"
+    assert repeated["rows"] == original["rows"]
+    assert "Please supply" not in caplog.text
+
+
+def test_manual_caption_change_keeps_exact_original_request_bytes(tmp_path):
+    """A renamed view does not rewrite the text associated with the old request timestamp."""
+    batch = _batch(
+        tmp_path / "_oracle", "only", [_view(LUID, "Original Caption", data="ok", image="transient", captured_at=STAMP)]
+    )
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    original = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    path = batch / grp.MANIFEST_NAME
+    manifest = json.loads(path.read_bytes())
+    manifest["views"][0]["view_name"] = "A New Caption"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    repeated = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert repeated["request"].encode() == original["request"].encode()
+    assert repeated["requested_at"] == original["requested_at"]
+    assert repeated["rows"] == original["rows"]
+
+
+@pytest.mark.parametrize("cohort_change", ["larger", "smaller-with-carrier", "smaller-without-last-carrier"])
+@pytest.mark.parametrize("opt_in", [False, True])
+def test_manual_request_refuses_a_changed_accepted_cohort(tmp_path, cohort_change, opt_in):
+    """An added or excluded accepted batch cannot reuse or silently reset the old request."""
+    views = [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    first = _batch(tmp_path / "_oracle", "first", views)
+    second = _batch(tmp_path / "_oracle", "second", views)
+    migrations = _migrations(tmp_path)
+    assert grp.run([first, second], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    prior_reports = {
+        path: path.read_bytes()
+        for path in (first / grp.UNMATCHED_REPORT, second / grp.UNMATCHED_REPORT)
+        if path.exists()
+    }
+    if cohort_change == "larger":
+        extra = _batch(tmp_path / "separate-root", "third", views, requested_renders=[])
+        selected, excluded = [first, second, extra], []
+    elif cohort_change == "smaller-with-carrier":
+        selected, excluded = [second], [first]
+    else:
+        selected, excluded = [first], [second]
+
+    with pytest.raises(grp.ManualHandoffConflict, match="cohort"):
+        grp.run(selected, migrations, dry_run=False, exclude=excluded, manual_reference_handoff=opt_in)
+    assert all(path.read_bytes() == raw for path, raw in prior_reports.items())
+
+
+@pytest.mark.parametrize("missing", ["request", "requested_at", "updated_at", "oracle_dirs", "delivery_status"])
+@pytest.mark.parametrize("opt_in", [False, True])
+def test_manual_missing_immutable_state_is_not_reset(tmp_path, missing, opt_in):
+    """Missing identity or original request fields refuse even on ordinary regroup."""
+    batch = _batch(
+        tmp_path / "_oracle", "only", [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    )
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    path = batch / grp.UNMATCHED_REPORT
+    report = json.loads(path.read_bytes())
+    if missing == "oracle_dirs":
+        report.pop(missing)
+    elif missing == "updated_at":
+        report["manual_reference_handoff"]["rows"][0].pop(missing)
+    else:
+        report["manual_reference_handoff"].pop(missing)
+    raw = json.dumps(report).encode()
+    path.write_bytes(raw)
+
+    with pytest.raises(grp.ManualHandoffConflict):
+        grp.run([batch], migrations, dry_run=False, manual_reference_handoff=opt_in)
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("field", ["server", "site", "workbook_luid", "view_luid", "updated_at"])
+def test_manual_changed_current_identity_cannot_relabel_an_existing_request(tmp_path, field):
+    """Same input paths do not authorize rebinding an existing request to a different source/revision."""
+    batch = _batch(
+        tmp_path / "_oracle", "only", [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    )
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    report_path = batch / grp.UNMATCHED_REPORT
+    original = report_path.read_bytes()
+    path = batch / grp.MANIFEST_NAME
+    manifest = json.loads(path.read_bytes())
+    changes = {
+        "server": "https://other.example",
+        "site": "other",
+        "workbook_luid": OTHER_WB_LUID,
+        "view_luid": OTHER,
+        "updated_at": "2026-07-02T00:00:00Z",
+    }
+    target = manifest if field in ("server", "site") else manifest["views"][0]
+    target[field] = changes[field]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(grp.ManualHandoffConflict, match="residual identities differ"):
+        grp.run([batch], migrations, dry_run=False)
+    assert report_path.read_bytes() == original
+
+
+@pytest.mark.parametrize("earlier_revision", [REVISION, "2026-06-30T00:00:00Z"])
+def test_manual_conflicting_input_identity_is_repaired_without_changing_ordinary_merge_policy(
+    tmp_path: Path, earlier_revision: str
+) -> None:
+    """Manual admission is stricter about immutable identity; it does not replace the ordinary merger."""
+    first_view = _view(
+        LUID, "Missing", data="transient", image="transient", captured_at=STAMP, updated_at=earlier_revision
+    )
+    second_view = {**first_view, "workbook_luid": OTHER_WB_LUID, "updated_at": REVISION}
+    first = _batch(tmp_path / "_oracle", "first", [first_view])
+    second = _batch(tmp_path / "_oracle", "second", [second_view])
+    migrations = _migrations(tmp_path)
+    assert grp.run([first, second], migrations, dry_run=False) == 0
+    assert "manual_reference_handoff" not in json.loads((second / grp.UNMATCHED_REPORT).read_bytes())
+    assert grp.run([first, second], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    handoff = json.loads((second / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["status"] == "REPAIR_REQUIRED"
+    assert handoff["rows"] == []
+    assert handoff["repair_gaps"] == [
+        {"reason": "screenshot_identity_conflicting", "workbook_luid": OTHER_WB_LUID, "view_luid": LUID}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("first_site", "second_site"), [("Acme", "acme"), ("acme", "Acme"), ("ACME", "aCmE"), ("", "")]
+)
+def test_manual_handoff_case_equivalent_sites_request_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, first_site: str, second_site: str
+) -> None:
+    """Source equality survives admission and a tied-batch reorder without rewriting the request."""
+    views = [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    first = _batch(tmp_path / "_oracle", "first", views, site=first_site)
+    second = _batch(tmp_path / "_oracle", "second", views, site=second_site)
+    batches = [first, second]
+    originals = {batch: (batch / grp.MANIFEST_NAME).read_bytes() for batch in batches}
+    migrations = _migrations(tmp_path)
+
+    assert grp.run(batches, migrations, dry_run=False) == 0
+    assert "manual_reference_handoff" not in json.loads((second / grp.UNMATCHED_REPORT).read_bytes())
+    assert grp.run(batches, migrations, dry_run=False, manual_reference_handoff=True) == 0
+    handoff = json.loads((second / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["status"] == "REQUEST_REQUIRED", "case-equivalent sites must not create an identity repair gap"
+    assert handoff["repair_gaps"] == []
+    assert [row["view_luid"] for row in handoff["rows"]] == [LUID]
+    assert handoff["rows"][0]["site"] == second_site
+    assert handoff["request"].count("\n- ") == 1
+
+    for selected, opt_in in ((batches, False), (list(reversed(batches)), True)):
+        caplog.clear()
+        assert grp.run(selected, migrations, dry_run=False, manual_reference_handoff=opt_in) == 0
+        repeated = json.loads((selected[-1] / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+        assert repeated["status"] == "ALREADY_REQUESTED"
+        assert repeated["repair_gaps"] == []
+        assert repeated["rows"] == handoff["rows"]
+        assert repeated["request"] == handoff["request"]
+        assert repeated["requested_at"] == handoff["requested_at"]
+        assert "Please supply" not in caplog.text
+    assert all((batch / grp.MANIFEST_NAME).read_bytes() == original for batch, original in originals.items())
+
+
+@pytest.mark.parametrize(
+    ("server", "site"),
+    [
+        ("https://example.online.tableau.com", "other"),
+        ("https://example.online.tableau.com", "acme-other"),
+        ("https://example.online.tableau.com", ""),
+        ("https://other.online.tableau.com", "acme"),
+        ("http://example.online.tableau.com", "acme"),
+        ("https://example.online.tableau.com:443", "acme"),
+    ],
+)
+def test_manual_handoff_different_sources_stay_refused(tmp_path: Path, server: str, site: str) -> None:
+    """Identical view/revision IDs never excuse a different site, server, scheme or explicit port."""
+    views = [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    first = _batch(tmp_path / "_oracle", "first", views, site="Acme")
+    second = _batch(tmp_path / "_oracle", "second", views, server=server, site=site)
+    batches = grp.load_batches([first, second])
+    row = {**views[0], "server": "https://example.online.tableau.com", "site": "Acme"}
+    assert grp._handoff_identity_problem(row, batches) == "screenshot_identity_conflicting"
+
+    with pytest.raises(grp.IncompatibleBatchSources, match="different Tableau sources"):
+        grp.run([first, second], _migrations(tmp_path), dry_run=False, manual_reference_handoff=True)
+    assert all(not (batch / grp.UNMATCHED_REPORT).exists() for batch in (first, second))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("site", " acme"),
+        ("site", "acme "),
+        ("site", "acme\n"),
+        ("server", "https://example.online.tableau.com/"),
+        ("server", "https://Example.online.tableau.com"),
+        ("server", "https://example.online.tableau.com "),
+    ],
+)
+def test_manual_handoff_normalization_does_not_admit_invalid_source_shapes(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """A valid merged row cannot hide an earlier source spelling outside the strict handoff schema."""
+    views = [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    first = _batch(tmp_path / "_oracle", "first", views, **{field: value})
+    second = _batch(tmp_path / "_oracle", "second", views)
+    migrations = _migrations(tmp_path)
+    assert grp.run([first, second], migrations, dry_run=False) == 0
+    assert grp.run([first, second], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    handoff = json.loads((second / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["status"] == "REPAIR_REQUIRED"
+    assert handoff["rows"] == []
+    assert handoff["request"] == ""
+    assert handoff["repair_gaps"] == [
+        {"reason": "screenshot_identity_conflicting", "workbook_luid": WB_LUID, "view_luid": LUID}
+    ]
+
+
+@pytest.mark.parametrize("fault", ["null-handoff", "unsafe-status", "unsafe-reason", "unsafe-repair", "request-text"])
+def test_manual_malformed_or_conflicting_immutable_carrier_is_never_overwritten(tmp_path, fault):
+    """Malformed current carriers refuse by the intended state assertion, not a type error."""
+    batch = _batch(
+        tmp_path / "_oracle", "only", [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    )
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    path = batch / grp.UNMATCHED_REPORT
+    report = json.loads(path.read_bytes())
+    handoff = report["manual_reference_handoff"]
+    if fault == "null-handoff":
+        report["manual_reference_handoff"] = None
+    elif fault == "unsafe-status":
+        handoff["status"] = {}
+    elif fault == "unsafe-reason":
+        handoff["rows"][0]["render_reasons"]["png"] = {}
+    elif fault == "unsafe-repair":
+        handoff["repair_gaps"] = [{"reason": "transient\nINJECTED_PRIVATE_TEXT"}]
+    else:
+        handoff["request"] += "\nNot the original request"
+    raw = json.dumps(report).encode()
+    path.write_bytes(raw)
+    with pytest.raises(grp.ManualHandoffConflict):
+        grp.run([batch], migrations, dry_run=False)
+    assert path.read_bytes() == raw
+
+
+def test_manual_prior_cohort_paths_are_compared_never_dereferenced(tmp_path, monkeypatch):
+    """A fabricated prior cohort may only cause refusal, never a new filesystem input."""
+    batch = _batch(
+        tmp_path / "_oracle", "only", [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    )
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    path = batch / grp.UNMATCHED_REPORT
+    report = json.loads(path.read_bytes())
+    report["oracle_dirs"] = [r"\\uncontacted.invalid\private\capture"]
+    path.write_text(json.dumps(report), encoding="utf-8")
+    for operation in ("resolve", "stat", "lstat", "read_text", "read_bytes"):
+        original = getattr(Path, operation)
+
+        def no_prior_io(candidate, *args, _original=original, **kwargs):
+            assert "uncontacted.invalid" not in str(candidate), "prior report paths must not be dereferenced"
+            return _original(candidate, *args, **kwargs)
+
+        monkeypatch.setattr(Path, operation, no_prior_io)
+    with pytest.raises(grp.ManualHandoffConflict, match="cohort"):
+        grp.run([batch], migrations, dry_run=False)
+
+
+def test_manual_data_only_failure_stays_request_free_across_ordinary_regroup(tmp_path):
+    """No required reference and no render intent means no screenshot request or request timestamp."""
+    batch = _batch(
+        tmp_path / "_oracle",
+        "only",
+        [_view(LUID, "Data Only", data="transient", image=None, captured_at=STAMP)],
+        requested_renders=[],
+    )
+    migrations = _migrations(tmp_path)
+    for opt_in in (True, False, True):
+        assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=opt_in) == 0
+        handoff = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+        assert handoff["status"] == "NO_VISUAL_GAPS"
+        assert handoff["requested_at"] is None
+        assert handoff["request"] == ""
+        assert handoff["rows"] == []
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_manual_recovery_keeps_selected_visual_legs_per_view(tmp_path: Path, reverse: bool) -> None:
+    """A recovery batch's aggregate PNG request must not turn its data-only view into a visual gap."""
+    batch = _batch(
+        tmp_path / "_oracle",
+        "recovered",
+        [
+            _view(LUID, "Visual Failure", data="ok", image="transient", captured_at=STAMP),
+            _view(OTHER, "Data Only", data="transient", image=None, captured_at=STAMP),
+        ],
+    )
+    path = batch / grp.MANIFEST_NAME
+    manifest = json.loads(path.read_bytes())
+    manifest["recovery"] = {
+        "selected_legs_by_view": {LUID: ["image"], OTHER: ["data"]},
+        "requested_renders": ["png"],
+    }
+    if reverse:
+        manifest["views"].reverse()
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    assert grp.run([batch], _migrations(tmp_path), dry_run=False, manual_reference_handoff=True) == 0
+
+    handoff = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert [row["view_luid"] for row in handoff["rows"]] == [LUID], "data-only recovery is not a screenshot request"
+    assert handoff["rows"][0]["render_reasons"] == {"png": "transient"}
+    assert handoff["repair_gaps"] == []
+    assert "Data Only" not in handoff["request"]
+
+
+def test_manual_unreconciled_foreign_image_is_a_repair_gap(tmp_path: Path) -> None:
+    batch = _batch(
+        tmp_path / "_oracle", "only", [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    )
+    migrations = _migrations(tmp_path)
+    foreign = migrations / "airborne-services" / "reference" / "images" / "foreign.png"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_bytes(PNG)
+
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 1
+
+    handoff = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["status"] == "REPAIR_REQUIRED", "an ungrouped workbook cannot earn a screenshot request"
+    assert handoff["rows"] == []
+    assert handoff["request"] == ""
+    assert handoff["repair_gaps"] == [{"reason": "unreconciled", "workbook_luid": WB_LUID, "view_luid": None}]
+    assert foreign.read_bytes() == PNG
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("server", r"Q:\private\SYNTHETIC"),
+        ("server", "https://example.online.tableau.com/path"),
+        ("server", "https://example.online.tableau.com/?token=SYNTHETIC"),
+        ("server", "https://[fe80::1%SYNTHETIC]"),
+        ("site", "../SYNTHETIC"),
+        ("workbook_luid", "SYNTHETIC-not-a-uuid"),
+        ("view_luid", "SYNTHETIC-not-a-uuid"),
+    ],
+)
+def test_manual_current_identity_is_repaired_without_echoing_unsafe_values(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, field: str, value: str
+) -> None:
+    view = _view(LUID, "Missing", data="transient", image="transient", captured_at=STAMP)
+    if field in ("workbook_luid", "view_luid"):
+        view[field] = value
+    identity = {field: value} if field in ("server", "site") else {}
+    batch = _batch(tmp_path / "_oracle", "only", [view], **identity)
+
+    assert grp.run([batch], _migrations(tmp_path), dry_run=False, manual_reference_handoff=True) == 0
+
+    handoff = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["status"] == "REPAIR_REQUIRED"
+    assert handoff["rows"] == []
+    assert handoff["request"] == ""
+    assert handoff["repair_gaps"][0]["reason"] == "screenshot_identity_unestablished"
+    assert "SYNTHETIC" not in json.dumps(handoff)
+    assert "SYNTHETIC" not in caplog.text
+
+
+@pytest.mark.parametrize("server", ["http://localhost:8080", "https://[2001:db8::1]", "https://example.tableau.com"])
+def test_manual_server_identity_accepts_canonical_authorities(server: str) -> None:
+    assert grp._handoff_server(server)
+
+
+@pytest.mark.parametrize(
+    "selected",
+    [None, [], {}, {OTHER: ["image"]}, {LUID: ["unexpected"]}, {LUID: "image"}, {LUID: ["image", "image"]}],
+)
+def test_manual_malformed_recovery_selection_cannot_create_a_request(tmp_path: Path, selected: object) -> None:
+    batch = _batch(
+        tmp_path / "_oracle", "only", [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    )
+    path = batch / grp.MANIFEST_NAME
+    manifest = json.loads(path.read_bytes())
+    manifest["recovery"] = {"selected_legs_by_view": selected}
+    raw = json.dumps(manifest).encode()
+    path.write_bytes(raw)
+
+    with pytest.raises(grp.MalformedCaptureManifest, match=r"recovery\.selected_legs_by_view is unestablished"):
+        grp.run([batch], _migrations(tmp_path), dry_run=False, manual_reference_handoff=True)
+
+    assert path.read_bytes() == raw
+    assert not (batch / grp.UNMATCHED_REPORT).exists()
+
+
+def test_manual_default_site_and_typed_response_round_trip(tmp_path: Path) -> None:
+    batch = _batch(
+        tmp_path / "_oracle",
+        "default",
+        [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)],
+        site="",
+    )
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    path = batch / grp.UNMATCHED_REPORT
+    report = json.loads(path.read_bytes())
+    handoff = report["manual_reference_handoff"]
+    assert handoff["status"] == "REQUEST_REQUIRED", "the documented Default site is not missing identity"
+    row = handoff["rows"][0]
+    assert row["site"] == ""
+    row.update(
+        {
+            "supplied_context": {
+                "filters": {"status": "SUPPLIED", "value": "Region is West"},
+                "parameters": {"status": "UNKNOWN", "value": None},
+                "period": {"status": "SUPPLIED", "value": "September 2026"},
+            },
+            "retained_reference_paths": ["reference"],
+            "retained_image_paths": ["reference/tableau-Missing.png"],
+            "source_file_sha256": "a" * 64,
+            "manual_origin": "user-supplied original Tableau screenshot",
+            "image_inspection_note": "inspected original pixels; no numeric or filter-state verification",
+            "response_recorded_at": "2026-09-16T00:00:00Z",
+        }
+    )
+    path.write_text(json.dumps(report), encoding="utf-8")
+    assert grp.run([batch], migrations, dry_run=False) == 0
+    repeated = json.loads(path.read_bytes())["manual_reference_handoff"]
+    assert repeated["status"] == "ALREADY_REQUESTED"
+    assert repeated["rows"] == handoff["rows"]
+    assert repeated["request"] == handoff["request"]
+    assert repeated["requested_at"] == handoff["requested_at"]
+
+
+@pytest.mark.parametrize(
+    ("location", "field", "value"),
+    [
+        ("handoff", "unexpected", {"private_path": r"Q:\private\SYNTHETIC.txt"}),
+        ("handoff", "requested_at", "not-a-timestamp"),
+        ("handoff", "requested_at", "2026-09-16"),
+        ("handoff", "requested_at", "2026-09-16T00:00:00+00:00"),
+        ("row", "unexpected", {"secret": "SYNTHETIC_SECRET"}),
+        ("row", "server", r"Q:\private\SYNTHETIC"),
+        ("row", "server", "https://user:SYNTHETIC@example.online.tableau.com"),
+        ("row", "server", "https://example.online.tableau.com/?token=SYNTHETIC"),
+        ("row", "server", "https://example.online.tableau.com/path"),
+        ("row", "site", "../SYNTHETIC"),
+        ("row", "workbook_luid", "not-a-uuid"),
+        ("row", "view_luid", "relative/SYNTHETIC.png"),
+        ("row", "view_luid", " " + LUID),
+        ("row", "updated_at", "not-a-revision"),
+        ("row", "source_file_sha256", True),
+        ("row", "source_file_sha256", "A" * 64),
+        ("row", "source_file_sha256", "a" * 63),
+        ("row", "retained_reference_paths", ["../SYNTHETIC"]),
+        ("row", "retained_reference_paths", ["/var/lib/SYNTHETIC"]),
+        ("row", "retained_image_paths", [r"Q:\private\SYNTHETIC.png"]),
+        ("row", "retained_image_paths", ["reference//SYNTHETIC.png"]),
+        ("row", "retained_image_paths", ["reference/SYNTHETIC.png", "reference/synthetic.png"]),
+        ("row", "retained_image_paths", ["Q%3A%5Cprivate%5CSYNTHETIC.png"]),
+        ("row", "retained_image_paths", "reference/SYNTHETIC.png"),
+        ("row", "retained_image_paths", [None]),
+        ("row", "manual_origin", "token=SYNTHETIC_SECRET"),
+        ("row", "image_inspection_note", r"Inspected at Q:\private\SYNTHETIC.png"),
+        ("row", "image_inspection_note", "SYNTHETIC\nsecond line"),
+        ("row", "image_inspection_note", "x" * 513),
+        ("row", "response_recorded_at", "2026-09-16"),
+        ("row", "supplied_context", {"unknown": "SYNTHETIC"}),
+        (
+            "row",
+            "supplied_context",
+            {
+                "filters": {"status": "UNKNOWN", "value": "SYNTHETIC"},
+                "parameters": {"status": "UNKNOWN", "value": None},
+                "period": {"status": "UNKNOWN", "value": None},
+            },
+        ),
+        (
+            "row",
+            "supplied_context",
+            {
+                "filters": {"status": "SUPPLIED", "value": "token=SYNTHETIC"},
+                "parameters": {"status": "UNKNOWN", "value": None},
+                "period": {"status": "UNKNOWN", "value": None},
+            },
+        ),
+        (
+            "row",
+            "supplied_context",
+            {
+                "filters": {"status": "SUPPLIED", "value": {"token": "SYNTHETIC"}},
+                "parameters": {"status": "UNKNOWN", "value": None},
+                "period": {"status": "UNKNOWN", "value": None},
+            },
+        ),
+    ],
+)
+def test_manual_prior_contract_refuses_unsafe_fields_without_echo_or_rewrite(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, location: str, field: str, value: object
+) -> None:
+    batch = _batch(
+        tmp_path / "_oracle", "only", [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    )
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    path = batch / grp.UNMATCHED_REPORT
+    report = json.loads(path.read_bytes())
+    handoff = report["manual_reference_handoff"]
+    target = handoff if location == "handoff" else handoff["rows"][0]
+    old_value = target.get(field)
+    target[field] = value
+    if field in ("view_luid", "updated_at"):
+        handoff["request"] = handoff["request"].replace(old_value, value)
+    raw = json.dumps(report).encode()
+    path.write_bytes(raw)
+    caplog.clear()
+
+    with pytest.raises(grp.ManualHandoffConflict):
+        grp._validate_prior_handoff(handoff)
+
+    with pytest.raises(grp.ManualHandoffConflict) as refused:
+        grp.run([batch], migrations, dry_run=False)
+
+    assert "SYNTHETIC" not in str(refused.value)
+    assert "SYNTHETIC" not in caplog.text
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize("second_leg", ["data", "image"])
+@pytest.mark.parametrize("reference_required", [False, True])
+def test_manual_mixed_recovery_requests_only_render_selected_views(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, second_leg: str, reference_required: bool
+) -> None:
+    """The producer's per-view recovery selection, not its union, determines the screenshot request."""
+    views = [
+        _view(LUID, "Visual Gap", data="transient", image="transient", captured_at=STAMP),
+        _view(
+            OTHER,
+            "Second View",
+            data="transient",
+            image="transient" if second_leg == "image" else None,
+            captured_at=STAMP,
+        ),
+    ]
+    views[0].pop("data")
+    if second_leg == "image":
+        views[1].pop("data")
+    recovery = {
+        "requested_renders": ["png"],
+        "max_age_minutes": 1,
+        "selected_legs_by_view": {LUID: ["image"], OTHER: [second_leg]},
+    }
+    batch = tmp_path / "oracle" / "recovery"
+    capture = verdict.CaptureRun(
+        SimpleNamespace(reauth_count=0, retry_count=0, redact_text=str),
+        {"TABLEAU_SERVER_URL": "https://example.online.tableau.com", "TABLEAU_SITE": "acme"},
+        batch,
+        0.0,
+        reference_required=reference_required,
+    )
+    assert verdict.write_manifest(views, capture, recovery=recovery) == (5 if reference_required else 3)
+    original = (batch / grp.MANIFEST_NAME).read_bytes()
+    migrations = _migrations(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["group", "--oracle", str(batch), "--migrations", str(migrations), "--manual-reference-handoff"],
+    )
+
+    assert grp.main() == 0
+
+    report_path = batch / grp.UNMATCHED_REPORT
+    report = json.loads(report_path.read_bytes())
+    handoff = report["manual_reference_handoff"]
+    assert handoff["status"] == "REQUEST_REQUIRED"
+    assert handoff["repair_gaps"] == []
+    assert [row["view_luid"] for row in handoff["rows"]] == ([LUID] if second_leg == "data" else [LUID, OTHER])
+    assert all(row["render_reasons"] == {"png": "transient"} for row in handoff["rows"])
+    grouped = _grouped(migrations)
+    assert grouped["requested_renders"] == ["png"], "capture-wide intent is not narrowed by the manual handoff"
+    assert grouped["reference_required"] is reference_required
+    assert set(_by_luid(grouped)) == {LUID, OTHER}
+    if second_leg == "data":
+        assert _by_luid(grouped)[OTHER]["data"]["status"] == "transient"
+        assert "image" not in _by_luid(grouped)[OTHER]
+        assert "Second View" not in handoff["request"]
+    handoff["rows"][0]["manual_origin"] = "user-supplied original Tableau screenshot"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    assert grp.main() == 0
+    repeated = json.loads(report_path.read_bytes())["manual_reference_handoff"]
+    assert repeated == {**handoff, "status": "ALREADY_REQUESTED"}
+    assert (batch / grp.MANIFEST_NAME).read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "recovery",
+    [
+        pytest.param(None, id="null-recovery"),
+        pytest.param([], id="non-object-recovery"),
+        pytest.param({}, id="missing-selector"),
+        pytest.param({"selected_legs_by_view": []}, id="non-object-selector"),
+        pytest.param({"selected_legs_by_view": {OTHER: ["image"]}}, id="missing-view"),
+        pytest.param({"selected_legs_by_view": {LUID: []}}, id="empty-legs"),
+        pytest.param({"selected_legs_by_view": {LUID: "data"}}, id="non-list-legs"),
+        pytest.param({"selected_legs_by_view": {LUID: ["data", "png"]}}, id="unknown-leg"),
+        pytest.param({"selected_legs_by_view": {LUID: [{"image": True}]}}, id="non-string-leg"),
+    ],
+)
+@pytest.mark.parametrize("requested", [[], ["png"]], ids=["no-union", "visual-union"])
+def test_manual_unestablished_recovery_selector_is_a_named_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    recovery: dict | list | None,
+    requested: list[str],
+) -> None:
+    """An unreadable selection must neither waive a visual gap nor borrow another view's union."""
+    batch = _batch(
+        tmp_path / "oracle",
+        "recovery",
+        [_view(LUID, "Unassessable", data="transient", image=None, captured_at=STAMP)],
+        requested_renders=requested,
+    )
+    path = batch / grp.MANIFEST_NAME
+    manifest = json.loads(path.read_bytes())
+    manifest["recovery"] = recovery
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    original = path.read_bytes()
+    migrations = _migrations(tmp_path)
+
+    with pytest.raises(grp.MalformedCaptureManifest, match=r"recovery\.selected_legs_by_view is unestablished"):
+        grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["group", "--oracle", str(batch), "--migrations", str(migrations), "--manual-reference-handoff"],
+    )
+    assert grp.main() == 2
+    assert "recovery.selected_legs_by_view is unestablished" in caplog.text
+    assert not (batch / grp.UNMATCHED_REPORT).exists()
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("intent", ["png", "required-without-tier"])
+@pytest.mark.parametrize("same_view_retry", [False, True])
+@pytest.mark.parametrize("recovery_retry", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_manual_intent_is_per_view_and_survives_a_data_only_retry(
+    tmp_path: Path, intent: str, same_view_retry: bool, recovery_retry: bool, reverse: bool
+) -> None:
+    """A distinct data-only view must not inherit another view's visual request."""
+    first = _batch(
+        tmp_path / "oracle",
+        "first",
+        [_view(LUID, "Missing Original", data="ok", image="transient", captured_at=STAMP)],
+        requested_renders=["png"] if intent == "png" else [],
+    )
+    if intent == "required-without-tier":
+        path = first / grp.MANIFEST_NAME
+        payload = json.loads(path.read_bytes())
+        payload["reference_required"] = True
+        payload["views"][0].pop("image")
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    later_views = [_view(OTHER, "Data Only", data="transient", image=None, captured_at="2026-09-16T00:00:00Z")]
+    if same_view_retry:
+        later_views.append(_view(LUID, "Missing Original", data="ok", image=None, captured_at="2026-09-16T00:00:00Z"))
+    later = _batch(
+        tmp_path / "oracle",
+        "later",
+        later_views,
+        captured_at="2026-09-16T00:00:00Z",
+        requested_renders=[],
+    )
+    if recovery_retry:
+        path = later / grp.MANIFEST_NAME
+        payload = json.loads(path.read_bytes())
+        payload["recovery"] = {
+            "requested_renders": [],
+            "max_age_minutes": 1,
+            "selected_legs_by_view": {view["view_luid"]: ["data"] for view in later_views},
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    original = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for batch in (first, later)
+        for path in batch.rglob("*")
+        if path.is_file()
+    }
+    migrations = _migrations(tmp_path)
+    batches = [later, first] if reverse else [first, later]
+
+    assert grp.run(batches, migrations, dry_run=False, manual_reference_handoff=True) == 0
+
+    handoff = json.loads((batches[-1] / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["status"] == "REQUEST_REQUIRED"
+    assert [row["view_luid"] for row in handoff["rows"]] == [LUID]
+    assert handoff["rows"][0]["render_reasons"] == ({"png": "transient"} if intent == "png" else {})
+    assert "Data Only" not in handoff["request"]
+    assert set(_by_luid(_grouped(migrations))) == {LUID, OTHER}, "data-only records must still be grouped"
+    assert grp.run(batches[::-1], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    repeated = json.loads((batches[0] / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert repeated == {**handoff, "status": "ALREADY_REQUESTED"}
+    assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in original.items())
+
+
+def test_manual_current_revision_can_request_an_original_despite_a_historic_render(tmp_path: Path) -> None:
+    """An old successful image stays stale; only the merged current revision is requested."""
+    old_revision = "2026-09-13T00:00:00Z"
+    current_revision = "2026-09-15T00:00:00Z"
+    first = _batch(
+        tmp_path / "oracle",
+        "first",
+        [
+            _view(
+                LUID,
+                "Missing Original",
+                data="ok",
+                image="ok",
+                captured_at="2026-09-14T00:00:00Z",
+                updated_at=old_revision,
+            )
+        ],
+        captured_at="2026-09-14T00:00:00Z",
+    )
+    later = _batch(
+        tmp_path / "oracle",
+        "later",
+        [
+            _view(
+                LUID,
+                "Missing Original",
+                data="ok",
+                image="transient",
+                captured_at="2026-09-16T00:00:00Z",
+                updated_at=current_revision,
+            )
+        ],
+        captured_at="2026-09-16T00:00:00Z",
+    )
+    original = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for batch in (first, later)
+        for path in batch.rglob("*")
+        if path.is_file()
+    }
+    migrations = _migrations(tmp_path)
+
+    assert grp.run([first, later], migrations, dry_run=False, manual_reference_handoff=True) == 1
+
+    handoff = json.loads((later / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["status"] == "REQUEST_REQUIRED"
+    assert handoff["repair_gaps"] == []
+    assert [(row["view_luid"], row["updated_at"]) for row in handoff["rows"]] == [(LUID, current_revision)]
+    assert handoff["rows"][0]["render_reasons"] == {"png": "transient"}
+    assert old_revision not in handoff["request"]
+    grouped = _grouped(migrations)
+    assert grouped["merge_stale_candidates"]
+    assert grouped["views"][0]["image"]["status"] == "transient"
+    assert not list((migrations / "airborne-services" / "reference").glob("images/*.png"))
+    assert grp.run([later, first], migrations, dry_run=False, manual_reference_handoff=True) == 1
+    repeated = json.loads((first / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert repeated == {**handoff, "status": "ALREADY_REQUESTED"}
+    assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in original.items())
+
+
+@pytest.mark.parametrize("carrier_index", [0, 1], ids=["non-last", "last"])
+@pytest.mark.parametrize("source_member", ["manifest", "image"])
+@pytest.mark.parametrize("hardlink", [False, True], ids=["separate-carrier", "hardlink"])
+def test_manual_carrier_publication_preserves_source_and_all_prior_outputs(
+    tmp_path: Path, carrier_index: int, source_member: str, hardlink: bool
+) -> None:
+    """Native aliases refuse before any grouping; ordinary independent carriers still publish."""
+    first = _batch(
+        tmp_path / "oracle",
+        "first",
+        [_view(LUID, "Missing One", data="ok", image="transient", captured_at="2026-09-15T00:00:00Z")],
+        captured_at="2026-09-15T00:00:00Z",
+    )
+    second = _batch(
+        tmp_path / "oracle",
+        "second",
+        [_view(OTHER, "Missing Two", data="ok", image="transient", captured_at="2026-09-16T00:00:00Z")],
+        captured_at="2026-09-16T00:00:00Z",
+    )
+    batches = [first, second]
+    source = batches[carrier_index] / grp.MANIFEST_NAME
+    if source_member == "image":
+        source = batches[carrier_index] / "images" / "retained.png"
+        source.write_bytes(PNG)
+    for batch in batches:
+        (batch / grp.UNMATCHED_REPORT).write_text('{"schema": "tableau-oracle-grouping/1"}', encoding="utf-8")
+    carrier = batches[carrier_index] / grp.UNMATCHED_REPORT
+    if hardlink:
+        carrier.unlink()
+        os.link(source, carrier)
+    assert carrier.samefile(source) is hardlink
+    original = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for batch in batches
+        for path in batch.rglob("*")
+        if path.is_file() and path.name != grp.UNMATCHED_REPORT
+    }
+    prior_reports = {
+        path: (path.read_bytes(), path.stat().st_ino) for path in (batch / grp.UNMATCHED_REPORT for batch in batches)
+    }
+    migrations = _migrations(tmp_path)
+
+    if hardlink:
+        with pytest.raises(grp.ManualHandoffConflict, match="grouping report.*hard-linked"):
+            grp.run(batches, migrations, dry_run=False, manual_reference_handoff=True)
+        assert all((path.read_bytes(), path.stat().st_ino) == previous for path, previous in prior_reports.items())
+        assert not (migrations / "airborne-services" / "reference").exists()
+    else:
+        assert grp.run(batches, migrations, dry_run=False, manual_reference_handoff=True) == 0
+        for batch in batches:
+            report = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())
+            assert report["schema"] == "tableau-oracle-grouping/1"
+            assert [row["view_luid"] for row in report["manual_reference_handoff"]["rows"]] == [LUID, OTHER]
+            assert (batch / grp.UNMATCHED_REPORT).stat().st_ino != prior_reports[batch / grp.UNMATCHED_REPORT][1]
+            assert {path.name for path in batch.iterdir()} == {
+                "data",
+                "images",
+                grp.MANIFEST_NAME,
+                grp.UNMATCHED_REPORT,
+            }
+    assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in original.items())
+
+
+@pytest.mark.parametrize("fault", ["unreadable", "junction"])
+def test_manual_carriers_are_all_admitted_before_any_grouping(tmp_path: Path, fault: str) -> None:
+    """A rejected later carrier must not leave an earlier carrier or grouped tree changed."""
+    views = [_view(LUID, "Missing Original", data="ok", image="transient", captured_at=STAMP)]
+    first = _batch(tmp_path / "oracle", "first", views)
+    second = _batch(tmp_path / "oracle", "second", views)
+    prior = first / grp.UNMATCHED_REPORT
+    prior.write_text('{"schema": "tableau-oracle-grouping/1"}', encoding="utf-8")
+    carrier = second / grp.UNMATCHED_REPORT
+    if fault == "junction":
+        retained = tmp_path / "retained-report"
+        retained.mkdir()
+        (retained / "original.txt").write_bytes(b"retain these original bytes")
+        filesystem.link_directory(carrier, retained)
+        failure, reason = verdict.OracleRecoveryRefusal, "junction"
+    else:
+        carrier.write_bytes(b'{"unfinished":')
+        failure, reason = grp.ManualHandoffConflict, "existing grouping report is unreadable"
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    migrations = _migrations(tmp_path)
+
+    with pytest.raises(failure, match=reason):
+        grp.run([first, second], migrations, dry_run=False, manual_reference_handoff=True)
+
+    assert all(path.read_bytes() == raw for path, raw in before.items())
+    assert not (migrations / "airborne-services" / "reference").exists()
 
 
 # ------------------------------------------------------------- batch identity must be unambiguous
@@ -2117,6 +3258,19 @@ UNTYPED_ON_PURPOSE = {
     "requested_renders_by_batch": "written by _merge_render_intent",
     "source_batch": "stamped by _merge_one_view onto every surviving leg before anything reads it",
     "refusal": "an outcome record built by this script",
+    "_grouped_views": "an internal outcome field built by this script and removed before report publication",
+    "manual_reference_handoff": "read only from this script's existing grouping report",
+    "rows": "validated as a list while reading this script's existing grouping report",
+    "requested_at": "validated as a canonical UTC timestamp by _validate_prior_handoff",
+    "request": "validated against the original safe rows by _validate_prior_handoff, never read from capture input",
+    "repair_gaps": "validated as bounded code/identity rows by _validate_prior_handoff in the existing carrier",
+    "render_reasons": "closed producer-status vocabulary in _validate_prior_handoff, not a new capture field",
+    "kind": "closed worksheet/dashboard/UNKNOWN vocabulary in _validate_prior_handoff",
+    "context": "validated as original UNKNOWN context; supplied declarations belong in the response fields",
+    "delivery_status": "must remain UNKNOWN in _validate_prior_handoff; printing is never proof of delivery",
+    "oracle_dirs": "validated by _prior_handoff as the exact order-insensitive cohort; never dereferenced",
+    "recovery": "validated by _manual_render_intent only when needed for a manual verdict; ordinary merge is unchanged",
+    "selected_legs_by_view": "exact covering view set with nonempty unique known-leg lists in _manual_render_intent",
     # Read, but no JSON type it could carry changes the answer.
     "reference_required": "read for truthiness only -- every JSON type is meaningfully truthy or not",
     "selected_tier": "typed and closed by tableau_oracle_manifest.validated_render_capability before policy merging",
