@@ -903,11 +903,16 @@ python scripts\promote_unit.py --package <package> --slug <slug> --receipt-sha25
 ```
 
 `--reference` is optional and accepts one existing manual-capture `reference\` directory for exactly
-one selected workbook unit. Before any reference read, it checks the source root, ancestors and
+one unambiguous workbook occurrence in the engine report, with no workbook/datasource kind collision.
+Both CLI and direct construction enforce that identity before reading reference contents.
+Before any reference read, it checks the source root, ancestors and
 manifest through the existing local no-follow boundary; declared image members must also be regular
 non-reparse files. UNC/device spellings, junctions and symlinks are refused, not resolved through.
 The source must be disjoint by path and native identity from `--out` and the final, staging and
-retired package locations — **do not put the reference under `--out`**. These checks and holding the
+retired package locations — **do not put the reference under `--out`**. A `--json` destination must
+also be outside the reference tree and must not be a native alias of any retained member, including
+the manifest or an image. Unsafe or unassessable reporting aliases are usage refusals before reference
+reads or output creation; even a refusal report must not overwrite an original. These checks and holding the
 declared original bytes precede any constructor mkdir or scratch cleanup, for both CLI and direct
 calls. This is snapshot admission, not a concurrent-filesystem-adversary guarantee.
 

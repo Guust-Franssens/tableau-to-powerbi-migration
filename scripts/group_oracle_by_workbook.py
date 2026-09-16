@@ -139,7 +139,9 @@ import json
 import logging
 import re
 import shutil
+import stat
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1846,22 +1848,35 @@ def _validate_prior_handoff(handoff: Any) -> None:  # pylint: disable=too-many-b
             raise ManualHandoffConflict("existing manual-reference repair gaps are malformed")
 
 
+def _read_grouping_report(path: Path) -> dict[str, Any] | None:
+    """Admit a carrier without following aliases before reading or publishing any request state."""
+    tableau_oracle_manifest.check_recovery_path(path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise ManualHandoffConflict(f"{path}: existing grouping report cannot be inspected") from error
+    if info.st_nlink > 1:
+        raise ManualHandoffConflict(f"{path}: existing grouping report is hard-linked")
+    if not stat.S_ISREG(info.st_mode):
+        raise ManualHandoffConflict(f"{path}: existing grouping report is not a regular file")
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ManualHandoffConflict(f"{path}: existing grouping report is unreadable") from error
+    if not isinstance(report, dict):
+        raise ManualHandoffConflict("existing grouping report is malformed")
+    return report
+
+
 def _prior_handoff(inputs: _RunInputs) -> dict[str, Any] | None:  # pylint: disable=too-many-locals,too-many-branches
     """Read request context only beside already enumerated input batches."""
     found: list[dict[str, Any]] = []
     cohort = {str(batch.directory) for batch in inputs.batches}
     for batch in inputs.batches:
-        path = batch.directory / UNMATCHED_REPORT
-        tableau_oracle_manifest.check_recovery_path(path)
-        if not path.exists():
-            continue
-        try:
-            report = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ManualHandoffConflict(f"{path}: existing grouping report is unreadable") from error
-        if not isinstance(report, dict):
-            raise ManualHandoffConflict("existing grouping report is malformed")
-        if "manual_reference_handoff" not in report:
+        report = _read_grouping_report(batch.directory / UNMATCHED_REPORT)
+        if report is None or "manual_reference_handoff" not in report:
             continue
         handoff = report.get("manual_reference_handoff")
         directories = report.get("oracle_dirs")
@@ -1916,29 +1931,33 @@ def _prior_handoff(inputs: _RunInputs) -> dict[str, Any] | None:  # pylint: disa
     return merged
 
 
-def _manual_residuals(views: list[dict[str, Any]], manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    """Reuse the producer census; required/no-tier intent has no selected render enum to invent."""
-    missing = [
-        view
-        for view in views
-        if not any((view.get(leg) or {}).get("status") == "ok" for leg in ("image", "svg", "pdf"))
-    ]
-    requested = frozenset(manifest.get("requested_renders") or [])
-    if requested:
-        return render_unestablished(missing, requested)
-    if not manifest.get("reference_required"):
-        return []
-    return [
-        {
-            "view_luid": view.get("view_luid"),
-            "renders": {
-                kind: (view.get(leg) or {}).get("status")
-                for kind, leg in (("png", "image"), ("svg", "svg"), ("pdf", "pdf"))
-                if leg in view
-            },
-        }
-        for view in missing
-    ]
+def _manual_residuals(views: list[dict[str, Any]], batches: list[_Batch]) -> list[dict[str, Any]]:
+    """Union intent only from accepted batches containing this view, then reuse the producer census."""
+    missing = []
+    for view in views:
+        if any((view.get(leg) or {}).get("status") == "ok" for leg in ("image", "svg", "pdf")):
+            continue
+        covering = [
+            batch
+            for batch in batches
+            if any(record.get("view_luid") == view.get("view_luid") for record in batch.manifest.get("views", []))
+        ]
+        intent = _merge_render_intent(covering, [view])
+        requested = frozenset(intent["requested_renders"])
+        if requested:
+            missing.extend(render_unestablished([view], requested))
+        elif intent["reference_required"]:
+            missing.append(
+                {
+                    "view_luid": view.get("view_luid"),
+                    "renders": {
+                        kind: (view.get(leg) or {}).get("status")
+                        for kind, leg in (("png", "image"), ("svg", "svg"), ("pdf", "pdf"))
+                        if leg in view
+                    },
+                }
+            )
+    return missing
 
 
 def _handoff_identity_problem(row: dict[str, Any], batches: list[_Batch]) -> str | None:
@@ -1951,7 +1970,8 @@ def _handoff_identity_problem(row: dict[str, Any], batches: list[_Batch]) -> str
             if view.get("view_luid") != row["view_luid"]:
                 continue
             identity = {**view, **{field: batch.manifest.get(field) for field in ("server", "site")}}
-            if _handoff_key(identity) != _handoff_key(row):
+            # The merger owns the current revision; historic revisions do not change stable identity.
+            if any(identity.get(field) != row[field] for field in _HANDOFF_IDENTITY if field != "updated_at"):
                 return "screenshot_identity_conflicting"
     return None
 
@@ -1986,7 +2006,7 @@ def _manual_handoff(  # pylint: disable=too-many-locals,too-many-branches
                     }
                 )
             by_luid = {view.get("view_luid"): view for view in valid_views}
-            for residual in _manual_residuals(valid_views, manifest):
+            for residual in _manual_residuals(valid_views, inputs.batches):
                 view = by_luid.get(residual.get("view_luid"))
                 if not isinstance(view, dict):
                     repair_gaps.append(
@@ -2064,7 +2084,7 @@ def _manual_handoff(  # pylint: disable=too-many-locals,too-many-branches
 
 
 def _write_grouping_report(
-    inputs: _RunInputs, outcomes: dict[str, list[dict[str, Any]]]
+    inputs: _RunInputs, outcomes: dict[str, list[dict[str, Any]]], prior: dict[str, Any] | None
 ) -> tuple[Path, dict[str, Any]]:
     """Write the run report beside the LAST capture given, and return that directory.
 
@@ -2089,7 +2109,6 @@ def _write_grouping_report(
         **{f"workbooks_{bucket}": len(outcomes[bucket]) for bucket in OUTCOME_BUCKETS},
         **public_outcomes,
     }
-    prior = _prior_handoff(inputs)
     if inputs.manual_reference_handoff or prior is not None:
         report["manual_reference_handoff"] = _manual_handoff(inputs, outcomes, prior)
     if not inputs.dry_run:
@@ -2099,7 +2118,15 @@ def _write_grouping_report(
         )
         for directory in carriers:
             payload = {**report, "oracle_dir": str(directory)}
-            (directory / UNMATCHED_REPORT).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            replacement = tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=directory, prefix=f".{UNMATCHED_REPORT}.", delete=False
+            )
+            try:
+                with replacement:
+                    replacement.write(json.dumps(payload, indent=2) + "\n")
+                Path(replacement.name).replace(directory / UNMATCHED_REPORT)
+            finally:
+                Path(replacement.name).unlink(missing_ok=True)
     return report_dir, report
 
 
@@ -2217,21 +2244,13 @@ def run(  # pylint: disable=too-many-locals,too-many-arguments
             ),
         )
 
+    inputs = _RunInputs(
+        batches, migrations_root, basis, dry_run, excluded, oracle_root, manifest, manual_reference_handoff
+    )
+    prior = _prior_handoff(inputs)
     ctx = _Context(manifest=manifest, destinations=destinations, roots=roots, dry_run=dry_run)
     outcomes = _group_all(buckets, ctx)
-    report_dir, grouping_report = _write_grouping_report(
-        _RunInputs(
-            batches,
-            migrations_root,
-            basis,
-            dry_run,
-            excluded,
-            oracle_root,
-            manifest,
-            manual_reference_handoff,
-        ),
-        outcomes,
-    )
+    report_dir, grouping_report = _write_grouping_report(inputs, outcomes, prior)
     if manual_reference_handoff:
         handoff = grouping_report["manual_reference_handoff"]
         if handoff["status"] == "REQUEST_REQUIRED":

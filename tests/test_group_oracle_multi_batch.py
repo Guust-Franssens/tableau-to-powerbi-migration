@@ -13,7 +13,9 @@ with a failure from a batch that only covered some views.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -28,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import group_oracle_by_workbook as grp  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
+import test_package_filesystem as filesystem  # noqa: E402  # pylint: disable=wrong-import-position
 
 LUID = "0979a4f9-1111-2222-3333-444444444444"
 OTHER = "0979a4f9-5555-6666-7777-888888888888"
@@ -1187,10 +1190,15 @@ def test_manual_changed_current_identity_cannot_relabel_an_existing_request(tmp_
     assert report_path.read_bytes() == original
 
 
-def test_manual_conflicting_input_identity_is_repaired_without_changing_ordinary_merge_policy(tmp_path):
+@pytest.mark.parametrize("earlier_revision", [REVISION, "2026-06-30T00:00:00Z"])
+def test_manual_conflicting_input_identity_is_repaired_without_changing_ordinary_merge_policy(
+    tmp_path: Path, earlier_revision: str
+) -> None:
     """Manual admission is stricter about immutable identity; it does not replace the ordinary merger."""
-    first_view = _view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)
-    second_view = {**first_view, "workbook_luid": "wb-other"}
+    first_view = _view(
+        LUID, "Missing", data="transient", image="transient", captured_at=STAMP, updated_at=earlier_revision
+    )
+    second_view = {**first_view, "workbook_luid": "wb-other", "updated_at": REVISION}
     first = _batch(tmp_path / "_oracle", "first", [first_view])
     second = _batch(tmp_path / "_oracle", "second", [second_view])
     migrations = _migrations(tmp_path)
@@ -1272,6 +1280,207 @@ def test_manual_data_only_failure_stays_request_free_across_ordinary_regroup(tmp
         assert handoff["requested_at"] is None
         assert handoff["request"] == ""
         assert handoff["rows"] == []
+
+
+@pytest.mark.parametrize("intent", ["png", "required-without-tier"])
+@pytest.mark.parametrize("same_view_retry", [False, True])
+def test_manual_intent_is_per_view_and_survives_a_data_only_retry(
+    tmp_path: Path, intent: str, same_view_retry: bool
+) -> None:
+    """A distinct data-only view must not inherit another view's visual request."""
+    first = _batch(
+        tmp_path / "oracle",
+        "first",
+        [_view(LUID, "Missing Original", data="ok", image="transient", captured_at=STAMP)],
+        requested_renders=["png"] if intent == "png" else [],
+    )
+    if intent == "required-without-tier":
+        path = first / grp.MANIFEST_NAME
+        payload = json.loads(path.read_bytes())
+        payload["reference_required"] = True
+        payload["views"][0].pop("image")
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    later_views = [_view(OTHER, "Data Only", data="transient", image=None, captured_at="2026-09-16T00:00:00Z")]
+    if same_view_retry:
+        later_views.append(_view(LUID, "Missing Original", data="ok", image=None, captured_at="2026-09-16T00:00:00Z"))
+    later = _batch(
+        tmp_path / "oracle",
+        "later",
+        later_views,
+        captured_at="2026-09-16T00:00:00Z",
+        requested_renders=[],
+    )
+    original = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for batch in (first, later)
+        for path in batch.rglob("*")
+        if path.is_file()
+    }
+    migrations = _migrations(tmp_path)
+
+    assert grp.run([first, later], migrations, dry_run=False, manual_reference_handoff=True) == 0
+
+    handoff = json.loads((later / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["status"] == "REQUEST_REQUIRED"
+    assert [row["view_luid"] for row in handoff["rows"]] == [LUID]
+    assert handoff["rows"][0]["render_reasons"] == ({"png": "transient"} if intent == "png" else {})
+    assert "Data Only" not in handoff["request"]
+    assert set(_by_luid(_grouped(migrations))) == {LUID, OTHER}, "data-only records must still be grouped"
+    assert grp.run([later, first], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    repeated = json.loads((first / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert repeated == {**handoff, "status": "ALREADY_REQUESTED"}
+    assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in original.items())
+
+
+def test_manual_current_revision_can_request_an_original_despite_a_historic_render(tmp_path: Path) -> None:
+    """An old successful image stays stale; only the merged current revision is requested."""
+    old_revision = "2026-09-13T00:00:00Z"
+    current_revision = "2026-09-15T00:00:00Z"
+    first = _batch(
+        tmp_path / "oracle",
+        "first",
+        [
+            _view(
+                LUID,
+                "Missing Original",
+                data="ok",
+                image="ok",
+                captured_at="2026-09-14T00:00:00Z",
+                updated_at=old_revision,
+            )
+        ],
+        captured_at="2026-09-14T00:00:00Z",
+    )
+    later = _batch(
+        tmp_path / "oracle",
+        "later",
+        [
+            _view(
+                LUID,
+                "Missing Original",
+                data="ok",
+                image="transient",
+                captured_at="2026-09-16T00:00:00Z",
+                updated_at=current_revision,
+            )
+        ],
+        captured_at="2026-09-16T00:00:00Z",
+    )
+    original = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for batch in (first, later)
+        for path in batch.rglob("*")
+        if path.is_file()
+    }
+    migrations = _migrations(tmp_path)
+
+    assert grp.run([first, later], migrations, dry_run=False, manual_reference_handoff=True) == 1
+
+    handoff = json.loads((later / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["status"] == "REQUEST_REQUIRED"
+    assert handoff["repair_gaps"] == []
+    assert [(row["view_luid"], row["updated_at"]) for row in handoff["rows"]] == [(LUID, current_revision)]
+    assert handoff["rows"][0]["render_reasons"] == {"png": "transient"}
+    assert old_revision not in handoff["request"]
+    grouped = _grouped(migrations)
+    assert grouped["merge_stale_candidates"]
+    assert grouped["views"][0]["image"]["status"] == "transient"
+    assert not list((migrations / "airborne-services" / "reference").glob("images/*.png"))
+    assert grp.run([later, first], migrations, dry_run=False, manual_reference_handoff=True) == 1
+    repeated = json.loads((first / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert repeated == {**handoff, "status": "ALREADY_REQUESTED"}
+    assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in original.items())
+
+
+@pytest.mark.parametrize("carrier_index", [0, 1], ids=["non-last", "last"])
+@pytest.mark.parametrize("source_member", ["manifest", "image"])
+@pytest.mark.parametrize("hardlink", [False, True], ids=["separate-carrier", "hardlink"])
+def test_manual_carrier_publication_preserves_source_and_all_prior_outputs(
+    tmp_path: Path, carrier_index: int, source_member: str, hardlink: bool
+) -> None:
+    """Native aliases refuse before any grouping; ordinary independent carriers still publish."""
+    first = _batch(
+        tmp_path / "oracle",
+        "first",
+        [_view(LUID, "Missing One", data="ok", image="transient", captured_at="2026-09-15T00:00:00Z")],
+        captured_at="2026-09-15T00:00:00Z",
+    )
+    second = _batch(
+        tmp_path / "oracle",
+        "second",
+        [_view(OTHER, "Missing Two", data="ok", image="transient", captured_at="2026-09-16T00:00:00Z")],
+        captured_at="2026-09-16T00:00:00Z",
+    )
+    batches = [first, second]
+    source = batches[carrier_index] / grp.MANIFEST_NAME
+    if source_member == "image":
+        source = batches[carrier_index] / "images" / "retained.png"
+        source.write_bytes(PNG)
+    for batch in batches:
+        (batch / grp.UNMATCHED_REPORT).write_text('{"schema": "tableau-oracle-grouping/1"}', encoding="utf-8")
+    carrier = batches[carrier_index] / grp.UNMATCHED_REPORT
+    if hardlink:
+        carrier.unlink()
+        os.link(source, carrier)
+    assert carrier.samefile(source) is hardlink
+    original = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for batch in batches
+        for path in batch.rglob("*")
+        if path.is_file() and path.name != grp.UNMATCHED_REPORT
+    }
+    prior_reports = {
+        path: (path.read_bytes(), path.stat().st_ino) for path in (batch / grp.UNMATCHED_REPORT for batch in batches)
+    }
+    migrations = _migrations(tmp_path)
+
+    if hardlink:
+        with pytest.raises(grp.ManualHandoffConflict, match="grouping report.*hard-linked"):
+            grp.run(batches, migrations, dry_run=False, manual_reference_handoff=True)
+        assert all((path.read_bytes(), path.stat().st_ino) == previous for path, previous in prior_reports.items())
+        assert not (migrations / "airborne-services" / "reference").exists()
+    else:
+        assert grp.run(batches, migrations, dry_run=False, manual_reference_handoff=True) == 0
+        for batch in batches:
+            report = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())
+            assert report["schema"] == "tableau-oracle-grouping/1"
+            assert [row["view_luid"] for row in report["manual_reference_handoff"]["rows"]] == [LUID, OTHER]
+            assert (batch / grp.UNMATCHED_REPORT).stat().st_ino != prior_reports[batch / grp.UNMATCHED_REPORT][1]
+            assert {path.name for path in batch.iterdir()} == {
+                "data",
+                "images",
+                grp.MANIFEST_NAME,
+                grp.UNMATCHED_REPORT,
+            }
+    assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in original.items())
+
+
+@pytest.mark.parametrize("fault", ["unreadable", "junction"])
+def test_manual_carriers_are_all_admitted_before_any_grouping(tmp_path: Path, fault: str) -> None:
+    """A rejected later carrier must not leave an earlier carrier or grouped tree changed."""
+    views = [_view(LUID, "Missing Original", data="ok", image="transient", captured_at=STAMP)]
+    first = _batch(tmp_path / "oracle", "first", views)
+    second = _batch(tmp_path / "oracle", "second", views)
+    prior = first / grp.UNMATCHED_REPORT
+    prior.write_text('{"schema": "tableau-oracle-grouping/1"}', encoding="utf-8")
+    carrier = second / grp.UNMATCHED_REPORT
+    if fault == "junction":
+        retained = tmp_path / "retained-report"
+        retained.mkdir()
+        (retained / "original.txt").write_bytes(b"retain these original bytes")
+        filesystem.link_directory(carrier, retained)
+        failure, reason = verdict.OracleRecoveryRefusal, "junction"
+    else:
+        carrier.write_bytes(b'{"unfinished":')
+        failure, reason = grp.ManualHandoffConflict, "existing grouping report is unreadable"
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    migrations = _migrations(tmp_path)
+
+    with pytest.raises(failure, match=reason):
+        grp.run([first, second], migrations, dry_run=False, manual_reference_handoff=True)
+
+    assert all(path.read_bytes() == raw for path, raw in before.items())
+    assert not (migrations / "airborne-services" / "reference").exists()
 
 
 # ------------------------------------------------------------- batch identity must be unambiguous

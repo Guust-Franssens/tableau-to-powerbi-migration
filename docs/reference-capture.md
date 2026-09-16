@@ -185,11 +185,15 @@ This opt-in writes `manual_reference_handoff` into the existing
 consolidated request. The copies prevent a smaller cohort that omits the last batch from erasing the
 request. Ordinary initial grouping still writes only beside the last batch and creates no handoff.
 The request includes only residual original Tableau screenshots: any successful visual sibling
-satisfies it, and data-only failures do not enlarge it. A required reference with no selected render
+satisfies it. Intent is unioned only across accepted batches containing that view: a later data-only
+retry cannot retract an earlier visual request, and distinct data-only views do not inherit it.
+A required reference with no selected render
 tier still needs an original; its request says **tier not selected**, without inventing a tier.
 Missing `updated_at`, unknown/conflicting identity and failed local copies remain named repair gaps,
 not guessed screenshot targets. A repair-only handoff is `REPAIR_REQUIRED`, never a clean no-gap
-claim. Kind and render reasons use bounded vocabularies; unsafe readable labels become `UNKNOWN`.
+claim. Valid historic revisions do not conflict with the authoritative merged current revision;
+server/site/workbook/view identity must still agree across the accepted records. Kind and render
+reasons use bounded vocabularies; unsafe readable labels become `UNKNOWN`.
 The request initially records filter, parameter
 and period context as `UNKNOWN`; supplied declarations belong in the caller-recorded response
 context. An empty manual-capture `state` is not proof of filter state.
@@ -202,7 +206,9 @@ timestamp and responses; a caption change never rewrites what was originally pre
 removed batches, changed identity and malformed/conflicting request state refuse at the handoff
 boundary rather than silently resetting or repeating it. This does not change ordinary capture
 merging when no handoff exists. Only reports beside already enumerated batches are read; prior
-`oracle_dirs` strings and response paths are never dereferenced.
+`oracle_dirs` strings and response paths are never dereferenced. Every carrier is admitted before
+grouping writes begin; hard-linked or reparse carriers refuse without changing captures or prior
+outputs. Admitted reports are published by replacement, never by truncating an existing file.
 
 ⚠️ Retain the original complete cohort when upgrading an older **last-batch-only** handoff. A report
 outside the enumerated inputs, or one whose copies were deleted, cannot be discovered without an

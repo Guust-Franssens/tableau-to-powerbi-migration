@@ -442,6 +442,207 @@ def _reference_hashes(root: Path) -> dict[str, str]:
     }
 
 
+@pytest.mark.parametrize(
+    ("workbooks", "datasources", "reason"),
+    [
+        ([UNIT, UNIT], [], "duplicate_engine_identity"),
+        ([UNIT], [UNIT], "engine_kind_collision"),
+    ],
+)
+def test_reference_constructor_requires_one_unambiguous_workbook_before_reference_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workbooks: list[str], datasources: list[str], reason: str
+) -> None:
+    """Direct construction shares the public caller's exact engine identity preflight."""
+    bundle, oracle = _bundle(tmp_path, worksheets=("Sales",))
+    write_engine_report(bundle, workbooks=workbooks, datasources=datasources)
+    reference, _raw = _manual_reference(bundle)
+    before = _reference_hashes(tmp_path)
+    reads = []
+    original_read = Path.read_bytes
+
+    def track_reference_read(path: Path) -> bytes:
+        if path.is_relative_to(reference):
+            reads.append(path)
+        return original_read(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", track_reference_read)
+        with pytest.raises(pkg.IdentityBlocked) as refused:
+            pkg.package_unit(
+                bundle,
+                UNIT,
+                _out(tmp_path),
+                oracle_dir=oracle,
+                assets_dir=bundle.parent / "assets",
+                reference_dir=reference,
+            )
+
+    assert refused.value.reason_codes == (reason,)
+    assert not reads
+    assert _reference_hashes(tmp_path) == before
+    assert not _out(tmp_path).exists()
+
+
+def test_reference_constructor_accepts_one_workbook_beside_a_distinct_datasource(tmp_path: Path) -> None:
+    """Unrelated engine identities do not prevent fresh construction or change original bytes."""
+    bundle, oracle = _bundle(tmp_path, worksheets=("Sales",), datasources=("Other",))
+    reference, raw = _manual_reference(bundle)
+    before = _reference_hashes(reference)
+
+    result = pkg.package_unit(
+        bundle,
+        UNIT,
+        _out(tmp_path),
+        oracle_dir=oracle,
+        assets_dir=bundle.parent / "assets",
+        reference_dir=reference,
+    )
+
+    assert result["unit"] == UNIT
+    assert result["kind"] == "workbook"
+    assert result["artifacts"]["reference"] == "reference"
+    assert (_out(tmp_path) / UNIT / "reference" / "manifest.json").read_bytes() == raw
+    assert _reference_hashes(reference) == before
+    assert _reference_hashes(_out(tmp_path) / UNIT / "reference") == {
+        name: before[name] for name in ("manifest.json", "tableau-Sales.png")
+    }
+
+
+@pytest.mark.parametrize("member", ["manifest.json", "tableau-Sales.png"])
+@pytest.mark.parametrize("alias", ["lexical", "hardlink", "junction"])
+def test_reference_json_destination_cannot_alias_original_members_before_reads_or_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], member: str, alias: str
+) -> None:
+    """The report destination must not overwrite an original or reach construction first."""
+    bundle = _bundle(tmp_path, worksheets=("Sales",))[0]
+    reference = _manual_reference(bundle)[0]
+    report = reference / member
+    if alias == "hardlink":
+        report = tmp_path / "report.json"
+        os.link(reference / member, report)
+        assert report.samefile(reference / member)
+    elif alias == "junction":
+        reference_filesystem.link_directory(tmp_path / "reference-alias", reference)
+        report = tmp_path / "reference-alias" / member
+        assert report.samefile(reference / member)
+    out = _out(tmp_path)
+    out.mkdir(parents=True)
+    (out / "prior-target.txt").write_bytes(b"retain prior output")
+    before = _reference_hashes(tmp_path)
+    reads = []
+
+    def track_reference_read(path: Path, original_read: Callable[[Path], bytes] = Path.read_bytes) -> bytes:
+        if path.is_relative_to(reference):
+            reads.append(path)
+        return original_read(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", track_reference_read)
+        with pytest.raises(SystemExit) as refused:
+            pkg.main(
+                [
+                    "--bundle",
+                    str(bundle),
+                    "--out",
+                    str(out),
+                    "--unit",
+                    UNIT,
+                    "--assets",
+                    str(bundle.parent / "assets"),
+                    "--reference",
+                    str(reference),
+                    "--json",
+                    str(report),
+                    "--quiet",
+                ]
+            )
+
+    assert refused.value.code == 2
+    assert "--json destination is unsafe or unassessable" in capsys.readouterr().err
+    assert not reads, "report admission must finish before any original reference is read"
+    assert _reference_hashes(tmp_path) == before
+    assert set(out.iterdir()) == {out / "prior-target.txt"}
+
+
+def test_reference_json_destination_cannot_create_an_undeclared_source_member(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A fresh report filename under the source root is still an overlap, not reporting space."""
+    bundle, _oracle = _bundle(tmp_path, worksheets=("Sales",))
+    reference, _raw = _manual_reference(bundle)
+    report = reference / "new" / "report.json"
+    before = _reference_hashes(tmp_path)
+
+    with pytest.raises(SystemExit) as refused:
+        pkg.main(
+            [
+                "--bundle",
+                str(bundle),
+                "--out",
+                str(_out(tmp_path)),
+                "--unit",
+                UNIT,
+                "--assets",
+                str(bundle.parent / "assets"),
+                "--reference",
+                str(reference),
+                "--json",
+                str(report),
+                "--quiet",
+            ]
+        )
+
+    assert refused.value.code == 2
+    assert "--json destination is unsafe or unassessable" in capsys.readouterr().err
+    assert _reference_hashes(tmp_path) == before
+    assert not report.parent.exists()
+    assert not _out(tmp_path).exists()
+
+
+@pytest.mark.parametrize("hardlink", [False, True], ids=["separate-report", "unrelated-hardlink"])
+def test_reference_json_nonoverlap_constructs_without_changing_originals(tmp_path: Path, hardlink: bool) -> None:
+    """A real independent report remains writable, including an unrelated native hard link."""
+    bundle, _oracle = _bundle(tmp_path, worksheets=("Sales",))
+    reference, _raw = _manual_reference(bundle)
+    before = _reference_hashes(reference)
+    prior, report = tmp_path / "prior.json", tmp_path / "report.json"
+    prior.write_bytes(b'{"prior": true}\n')
+    if hardlink:
+        os.link(prior, report)
+        assert report.samefile(prior)
+
+    assert (
+        pkg.main(
+            [
+                "--bundle",
+                str(bundle),
+                "--out",
+                str(_out(tmp_path)),
+                "--unit",
+                UNIT,
+                "--assets",
+                str(bundle.parent / "assets"),
+                "--reference",
+                str(reference),
+                "--json",
+                str(report),
+                "--quiet",
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(report.read_bytes())
+    assert payload["construction"]["totals"] == {"requested": 1, "assembled": 1, "blocked": 0}
+    assert payload["dispatch_readiness"]["status"] == "NOT_EVALUATED"
+    assert _reference_hashes(reference) == before
+    assert _reference_hashes(_out(tmp_path) / UNIT / "reference") == {
+        name: before[name] for name in ("manifest.json", "tableau-Sales.png")
+    }
+    assert prior.read_bytes() == b'{"prior": true}\n'
+    assert not report.samefile(prior)
+
+
 def _refuse_reference(entrypoint: str, bundle: Path, out: Path, reference: Path, reason: str) -> None:
     if entrypoint == "constructor":
         with pytest.raises(pkg.PackagingError, match=reason):
@@ -540,26 +741,31 @@ def _directory_reparse_reference(bundle: Path, location: str) -> tuple[Path, Pat
 @pytest.mark.parametrize("entrypoint", ["constructor", "cli"])
 @pytest.mark.parametrize("location", ["root", "ancestor", "member-directory"])
 def test_reference_directory_reparse_refuses_before_read_or_output(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str, location: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], entrypoint: str, location: str
 ) -> None:
     """Real NTFS junctions (POSIX symlinks) are dead ends, including source ancestors."""
-    bundle, _oracle = _bundle(tmp_path, worksheets=("Sales",))
+    bundle = _bundle(tmp_path, worksheets=("Sales",))[0]
     reference, source_root = _directory_reparse_reference(bundle, location)
     before = (_reference_hashes(reference), _reference_hashes(source_root))
     out = _out(tmp_path)
     out.mkdir(parents=True)
     (out / "old-target.bin").write_bytes(b"unrelated output")
     old_target = _reference_hashes(out)
-    read_bytes = Path.read_bytes
     forbidden = reference / ("manifest.json" if location != "member-directory" else "images/tableau-Sales.png")
 
-    def checked_read(path: Path) -> bytes:
+    def checked_read(path: Path, read_bytes: Callable[[Path], bytes] = Path.read_bytes) -> bytes:
         assert path != forbidden, "reference input was read before no-follow admission"
         return read_bytes(path)
 
     with monkeypatch.context() as patch:
         patch.setattr(Path, "read_bytes", checked_read)
-        _refuse_reference(entrypoint, bundle, out, reference, "reference_path_unsafe")
+        if entrypoint == "cli" and location in ("root", "ancestor"):
+            with pytest.raises(SystemExit) as refused:
+                _refuse_reference(entrypoint, bundle, out, reference, "reference_path_unsafe")
+            assert refused.value.code == 2
+            assert "--json destination is unsafe or unassessable" in capsys.readouterr().err
+        else:
+            _refuse_reference(entrypoint, bundle, out, reference, "reference_path_unsafe")
     assert (_reference_hashes(reference), _reference_hashes(source_root)) == before
     assert _reference_hashes(out) == old_target
 

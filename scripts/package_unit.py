@@ -4170,7 +4170,11 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
                 engine_report = read_json(bundle / "report.json")
                 if not isinstance(engine_report, dict):
                     raise PackagingError("reference_report_unreadable")
-                workbooks, _datasources = engine_unit_names(engine_report)
+                workbooks, datasources = engine_unit_names(engine_report)
+                identity = _ConstructionSlot(unit)
+                _identity_preflight((identity,), workbooks, datasources, out_root)
+                if identity.outcome is not None and identity.outcome.failure is not None:
+                    raise identity.outcome.failure
                 if unit not in workbooks:
                     raise PackagingError("reference_requires_one_workbook_unit")
                 reference = _read_reference(reference_dir)
@@ -6702,8 +6706,25 @@ def _report_entry_identity(path: Path) -> tuple[int, int] | None:
     return identity
 
 
-def _admit_report_destination(path: Path, out_root: Path, selected: Sequence[str], brief: Path | None) -> Path:
-    """Keep the caller's report outside held brief/package addresses before any mkdir or publication."""
+def _admit_report_reference(report: Path, report_id: tuple[int, int] | None, reference_dir: Path | None) -> None:
+    """Prove report/source disjointness without reading any reference contents."""
+    if reference_dir is None:
+        return
+    reference = _reference_location(reference_dir)
+    if report.is_relative_to(reference):
+        raise ValueError("report_destination_unsafe")
+    if report_id is not None:
+        members, findings, _empty = pfs.walk_package(reference)
+        if findings:
+            raise ValueError("report_destination_unassessable")
+        if any(_report_entry_identity(member) == report_id for member in members.values()):
+            raise ValueError("report_destination_unsafe")
+
+
+def _admit_report_destination(
+    path: Path, out_root: Path, selected: Sequence[str], brief: Path | None, reference_dir: Path | None = None
+) -> Path:
+    """Keep reports outside brief/reference/package addresses before any input read or publication."""
     report = _report_location(path)
     out_root = _report_location(out_root)
     report_id = _report_entry_identity(report)
@@ -6713,6 +6734,7 @@ def _admit_report_destination(path: Path, out_root: Path, selected: Sequence[str
     )
     if reserved or report == out_root or (report_id is not None and not stat.S_ISREG(report.lstat().st_mode)):
         raise ValueError("report_destination_unsafe")
+    _admit_report_reference(report, report_id, reference_dir)
     if brief is not None:
         brief = _report_location(brief)
         if report == brief or (report_id is not None and report_id == _report_entry_identity(brief)):
@@ -6721,8 +6743,7 @@ def _admit_report_destination(path: Path, out_root: Path, selected: Sequence[str
     roots = []
     for unit in selected:
         if unit_name_problem(unit) is None:
-            final = out_root / unit
-            roots.extend(_report_location(root) for root in (final, staging_dir(out_root, unit), retired_dir(final)))
+            roots.extend(_report_location(root) for root in package_roots(out_root, unit))
     if any(report.is_relative_to(root) for root in roots):
         raise ValueError("report_destination_unsafe")
 
@@ -6789,7 +6810,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json",
         type=Path,
         help=(
-            "replace the construction report even on brief refusal; a brief/output/package/transaction collision "
+            "replace the construction report even on brief refusal; a reference/brief/output/package/transaction "
+            "collision "
             "or an unassessable alias is a usage error before writes. Package-marker and reserved scratch segments "
             "beneath --out are forbidden even for unselected units; ordinary reporting directories and "
             "non-aliasing external reports are allowed"
@@ -6956,7 +6978,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
 
     if args.json is not None:
         try:
-            args.json = _admit_report_destination(args.json, args.out, units, args.brief)
+            args.json = _admit_report_destination(args.json, args.out, units, args.brief, args.reference)
         except (OSError, RuntimeError, ValueError, PackagingError):
             parser.error("--json destination is unsafe or unassessable; choose a separate ordinary report file")
 
