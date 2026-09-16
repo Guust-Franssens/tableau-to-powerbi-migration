@@ -1192,6 +1192,7 @@ def _versioned_engine(root: Path, version: str) -> Path:
     (scripts / "migrate_estate.py").write_text(
         """
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -1228,6 +1229,11 @@ def _safe_folder(name, used):
     return candidate
 
 if __name__ == "__main__":
+    capture = os.environ.get("RUN_ESTATE_TEST_ARGV")
+    if capture:
+        Path(capture).write_text(json.dumps(sys.argv), encoding="utf-8")
+        print(os.environ.get("RUN_ESTATE_TEST_DIAGNOSTIC", ""))
+        raise SystemExit(int(os.environ.get("RUN_ESTATE_TEST_EXIT", "0")))
     source = LocalFilesSource(sys.argv[2])
     used = set()
     names = [
@@ -1291,6 +1297,155 @@ def _landing_argv(engine: Path, src: Path, out: Path, *extra: str) -> list[str]:
         str(out),
         *extra,
     ]
+
+
+def test_storage_decision_is_forwarded_unchanged_to_a_real_engine_child(tmp_path: Path, monkeypatch) -> None:
+    """The coordinator forwards policy bytes by path; the engine remains its only JSON authority."""
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    decisions = tmp_path / "decisions"
+    decisions.mkdir()
+    decision = decisions / "café policy.json"
+    decision_bytes = b'{"Sales":"DirectQuery"}\n'
+    decision.write_bytes(decision_bytes)
+    approved_dax = tmp_path / "approved.json"
+    approved_dax.write_text("{}", encoding="utf-8")
+    captured = tmp_path / "argv.json"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RUN_ESTATE_TEST_ARGV", str(captured))
+    monkeypatch.setenv("RUN_ESTATE_TEST_EXIT", "2")
+    monkeypatch.setenv("RUN_ESTATE_TEST_DIAGNOSTIC", "invalid storage decision")
+
+    raw_decision = "decisions/café policy.json"
+    assert (
+        run_estate.main(
+            _landing_argv(
+                engine,
+                source,
+                tmp_path / "bundle",
+                "--approved-dax",
+                str(approved_dax),
+                "--storage-decision",
+                raw_decision,
+            )
+        )
+        == run_estate.EXIT_ENGINE_FAILED
+    )
+
+    child_argv = json.loads(captured.read_text(encoding="utf-8"))
+    assert child_argv.count("--approved-dax") == 1
+    assert child_argv.count("--storage-decision") == 1
+    assert child_argv[child_argv.index("--storage-decision") + 1] == raw_decision
+    assert decision.read_bytes() == decision_bytes
+
+
+def test_storage_decision_dry_run_previews_argv_without_starting_engine(tmp_path: Path, monkeypatch) -> None:
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    decision = tmp_path / "empty.json"
+    decision.write_bytes(b"")
+    captured = tmp_path / "argv.json"
+    out = tmp_path / "bundle"
+    monkeypatch.setenv("RUN_ESTATE_TEST_ARGV", str(captured))
+
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert (
+            run_estate.main(_landing_argv(engine, source, out, "--storage-decision", str(decision), "--dry-run")) == 0
+        )
+
+    assert not captured.exists()
+    assert not out.exists()
+    assert decision.read_bytes() == b""
+    preview = output.getvalue()
+    assert json.dumps("--storage-decision") in preview
+    assert str(decision) in preview
+    assert "not validated in dry-run" in preview
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    ["malformed storage-decision JSON", "storage decision must be an object", "unknown storage mode"],
+)
+def test_zero_byte_storage_decision_reaches_real_engine_and_maps_its_failure(
+    tmp_path: Path, monkeypatch, diagnostic: str
+) -> None:
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    decision = tmp_path / "empty.json"
+    decision.write_bytes(b"")
+    captured = tmp_path / "argv.json"
+    monkeypatch.setenv("RUN_ESTATE_TEST_ARGV", str(captured))
+    monkeypatch.setenv("RUN_ESTATE_TEST_EXIT", "2")
+    monkeypatch.setenv("RUN_ESTATE_TEST_DIAGNOSTIC", diagnostic)
+
+    assert (
+        run_estate.main(_landing_argv(engine, source, tmp_path / "bundle", "--storage-decision", str(decision)))
+        == run_estate.EXIT_ENGINE_FAILED
+    )
+    assert json.loads(captured.read_text(encoding="utf-8"))[-2:] == ["--storage-decision", str(decision)]
+
+
+@pytest.mark.parametrize("decision_kind", ["empty", "missing", "directory", "unreadable"])
+def test_storage_decision_usage_failures_precede_engine_and_rewrite(
+    tmp_path: Path, monkeypatch, decision_kind: str
+) -> None:
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    decision = tmp_path / "decision.json"
+    if decision_kind == "directory":
+        decision.mkdir()
+    elif decision_kind == "unreadable":
+        decision.write_text("{}", encoding="utf-8")
+        original_open = Path.open
+        monkeypatch.setattr(
+            Path,
+            "open",
+            lambda path, *args, **kwargs: (
+                (_ for _ in ()).throw(PermissionError()) if path == decision else original_open(path, *args, **kwargs)
+            ),
+        )
+    token = "" if decision_kind == "empty" else str(decision)
+    captured = tmp_path / "argv.json"
+    monkeypatch.setenv("RUN_ESTATE_TEST_ARGV", str(captured))
+
+    assert run_estate.main(_landing_argv(engine, source, tmp_path / "bundle", "--storage-decision", token)) == 2
+    assert not captured.exists()
+    assert not (tmp_path / "bundle" / run_estate.BUNDLE_REWRITE_RECORD).exists()
+
+
+def test_storage_decision_conflicts_with_slice_only_before_engine_resolution(tmp_path: Path) -> None:
+    decision = tmp_path / "decision.json"
+    decision.write_text("{}", encoding="utf-8")
+
+    assert (
+        run_estate.main(["--slice-only", "--output", str(tmp_path / "bundle"), "--storage-decision", str(decision)])
+        == run_estate.EXIT_USAGE
+    )
+
+
+def test_storage_decision_absence_preserves_engine_argv(tmp_path: Path, monkeypatch) -> None:
+    engine = _versioned_engine(tmp_path / "engine", "2.339.0")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "unit.twb").write_text("<workbook />", encoding="utf-8")
+    captured = tmp_path / "argv.json"
+    monkeypatch.setenv("RUN_ESTATE_TEST_ARGV", str(captured))
+    monkeypatch.setenv("RUN_ESTATE_TEST_EXIT", "2")
+    assert run_estate.main(_landing_argv(engine, source, tmp_path / "bundle")) == run_estate.EXIT_ENGINE_FAILED
+
+    assert (
+        json.loads(captured.read_text(encoding="utf-8"))
+        == run_estate.engine_argv(engine, source, tmp_path / "bundle", None)[1:]
+    )
 
 
 def _first_run(tmp_path: Path, monkeypatch, version: str = "2.339.0") -> tuple[Path, Path, Path]:
