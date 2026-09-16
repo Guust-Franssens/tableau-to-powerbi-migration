@@ -364,6 +364,17 @@ def test_reference_refuses_discard_override_and_unsafe_or_missing_members(tmp_pa
             reference_dir=reference,
         )
     assert not (_out(tmp_path) / UNIT).exists()
+    (bundle / "report.json").unlink()
+    with pytest.raises(pkg.PackagingError, match="reference_report_unreadable"):
+        pkg.package_unit(
+            bundle,
+            UNIT,
+            _out(tmp_path),
+            oracle_dir=oracle,
+            assets_dir=bundle.parent / "assets",
+            reference_dir=reference,
+        )
+    assert not (_out(tmp_path) / UNIT).exists()
 
 
 def test_reference_target_appearing_before_publication_is_not_replaced(

@@ -1818,6 +1818,7 @@ def _manual_handoff(  # pylint: disable=too-many-locals,too-many-branches
                         {
                             "reason": outcome.get("refusal") or bucket,
                             "workbook_luid": outcome.get("workbook_luid"),
+                            "view_luid": None,
                         }
                     )
                 continue
@@ -1881,7 +1882,7 @@ def _manual_handoff(  # pylint: disable=too-many-locals,too-many-branches
         prior_rows = prior["rows"]
         if not all(isinstance(row, dict) for row in prior_rows):
             raise ManualHandoffConflict("existing manual-reference rows are malformed")
-        if [_handoff_key(row) for row in prior_rows] != [_handoff_key(row) for row in rows]:
+        if sorted(_handoff_key(row) for row in prior_rows) != [_handoff_key(row) for row in rows]:
             raise ManualHandoffConflict(
                 "current residual identities differ from the already-recorded request; delivery is uncertain, "
                 "so the request was not reset or repeated"
@@ -1927,7 +1928,9 @@ def _manual_handoff(  # pylint: disable=too-many-locals,too-many-branches
     }
 
 
-def _write_grouping_report(inputs: _RunInputs, outcomes: dict[str, list[dict[str, Any]]]) -> Path:
+def _write_grouping_report(
+    inputs: _RunInputs, outcomes: dict[str, list[dict[str, Any]]]
+) -> tuple[Path, dict[str, Any]]:
     """Write the run report beside the LAST capture given, and return that directory.
 
     ``oracle_dirs`` and ``merge_order_basis`` are new (#423): with several batches folded together,
@@ -1955,7 +1958,7 @@ def _write_grouping_report(inputs: _RunInputs, outcomes: dict[str, list[dict[str
         report["manual_reference_handoff"] = _manual_handoff(inputs, outcomes)
     if not inputs.dry_run:
         (report_dir / UNMATCHED_REPORT).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    return report_dir
+    return report_dir, report
 
 
 def _incomplete(outcomes: dict[str, list[dict[str, Any]]], manifest: dict[str, Any]) -> bool:
@@ -2074,7 +2077,7 @@ def run(  # pylint: disable=too-many-locals,too-many-arguments
 
     ctx = _Context(manifest=manifest, destinations=destinations, roots=roots, dry_run=dry_run)
     outcomes = _group_all(buckets, ctx)
-    report_dir = _write_grouping_report(
+    report_dir, grouping_report = _write_grouping_report(
         _RunInputs(
             batches,
             migrations_root,
@@ -2088,7 +2091,7 @@ def run(  # pylint: disable=too-many-locals,too-many-arguments
         outcomes,
     )
     if manual_reference_handoff:
-        handoff = json.loads((report_dir / UNMATCHED_REPORT).read_text(encoding="utf-8"))["manual_reference_handoff"]
+        handoff = grouping_report["manual_reference_handoff"]
         if handoff["status"] == "REQUEST_REQUIRED":
             LOG.warning("%s", handoff["request"])
         elif handoff["status"] == "ALREADY_REQUESTED":

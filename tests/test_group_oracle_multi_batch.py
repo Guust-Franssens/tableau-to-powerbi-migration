@@ -869,6 +869,7 @@ def test_public_manual_handoff_requests_only_residual_visuals_once_and_preserves
             "image_inspection_note": "inspected actual pixels in an image-capable session",
         }
     )
+    handoff["rows"].reverse()
     report_path.write_text(json.dumps(report), encoding="utf-8")
     caplog.clear()
     monkeypatch.setattr(

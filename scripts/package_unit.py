@@ -4082,14 +4082,17 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
             final = assert_package_destination(out_root, unit)
             attempt.final = final
             if reference_dir is not None:
-                workbooks, _datasources = engine_unit_names(read_json(bundle / "report.json"))
                 attempt.fresh_target_only = True
                 if discard_edits:
                     raise PackagingError("reference_conflicts_with_discard_package_edits")
-                if unit not in workbooks:
-                    raise PackagingError("reference_requires_one_workbook_unit")
                 if os.path.lexists(final):
                     raise PackagingError("reference_requires_fresh_target")
+                engine_report = read_json(bundle / "report.json")
+                if not isinstance(engine_report, dict):
+                    raise PackagingError("reference_report_unreadable")
+                workbooks, _datasources = engine_unit_names(engine_report)
+                if unit not in workbooks:
+                    raise PackagingError("reference_requires_one_workbook_unit")
             prepared_brief = _prepare_brief(bundle, unit, assets_dir, brief)
             budget = path_budget(bundle, unit, out_root, limits=limits, assets_dir=assets_dir)
             if budget.refused:
