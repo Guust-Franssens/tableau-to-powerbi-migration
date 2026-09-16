@@ -196,11 +196,14 @@ original dashboards belongs to their respective Tableau Public authors.
 
 ### Where are my migration files?
 
-After the dispatcher creates or explicitly resumes a run, open the checkout-root
-`_MIGRATION.md`. It is an automatically generated, Git-ignored pointer to that selected run's
-expected bundle, Tableau-reference and package locations. It is only a local navigation snapshot:
-empty destinations are not generated artifacts, it is not a readiness/current-run authority, and a
-collision with human-owned content prevents the note from being replaced.
+When the dispatcher creates or explicitly resumes a run, setup automatically attempts to write the
+checkout-root `_MIGRATION.md`: a Git-ignored pointer to that selected run's expected bundle,
+Tableau-reference and package locations. A successful allocation can carry a navigation warning,
+leaving the note stale or absent; do not reallocate for it. It is only a local navigation snapshot,
+not readiness/current-run authority, and empty destinations are not generated artifacts.
+Unmarked collisions, including an empty/partial note whose generator marker was lost, are preserved
+and need explicit recovery: inspect and preserve the file, then deliberately clear the collision
+before setup reselects the existing run.
 
 ## The three-phase pipeline
 

@@ -198,14 +198,14 @@ brief and executes.**
 
 ### Step 0 — setup
 
-Every **new** site/folder/workbook/datasource runs `python -B scripts/work_dirs.py <slug>
---json` before stage writes; add `--runs-parent <short-parent>` (or `--repo-root <parent>`) for an
-external root. Success refreshes ignored `_MIGRATION.md`; do not ask the human to generate it.
+For each new site/folder/workbook/datasource, before stage writes run `python -B
+scripts/work_dirs.py <slug> --json`; external roots add `--runs-parent <parent>` (`--repo-root` alias).
+Allocation auto-attempts ignored `_MIGRATION.md`; a warning does not undo success.
 
-Before dispatching an accepted existing/resumed run, run `python -B
-scripts/work_dirs.py --select-run <absolute-existing-run>`. It validates that local run and
-refreshes navigation, but migrates nothing. Never select/infer from the note or reselect
-at each handoff. On refusal preserve it, resolve the path; do not allocate a replacement.
+For an accepted existing/resumed run, setup runs `python -B scripts/work_dirs.py --select-run
+<absolute-existing-run>`. It migrates nothing. Never infer selection from the note, reselect at
+handoffs, or reallocate on refusal. Preserve collisions; lost markers need explicit recovery.
+Do not ask the human to generate the note.
 
 ### Step 1 — work out what you are actually pointing at
 

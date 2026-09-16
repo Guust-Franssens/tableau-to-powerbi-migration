@@ -1099,17 +1099,22 @@ def verify_exit_code(counts: dict[str, int]) -> int:
     return 0
 
 
+def _display_path(value: str | Path) -> str:
+    """Escape non-printing characters for display only; keep ordinary native paths copyable."""
+    return "".join(char if char.isprintable() else ascii(char)[1:-1] for char in str(value))
+
+
 def _print_verify_text(runs: list[dict[str, Any]], counts: dict[str, int], root: Path) -> None:
     """Human-readable `--verify` report. The STATE is printed in caps and first on every line, so a
     subordinate `derived name check` or `path check` hint can never be mistaken for the verdict.
     """
-    print(f"_runs/ location check: {root}")
+    print(f"_runs/ location check: {_display_path(root)}")
     if not runs:
         print("  (no run directories found)")
     for run in runs:
         check = run.get("location_check", {})
-        print(f"  {check.get('state', '?').upper():<13} {check.get('actual_dir_name', '?')}")
-        print(f"                {check.get('detail', '')}")
+        print(f"  {check.get('state', '?').upper():<13} {_display_path(check.get('actual_dir_name', '?'))}")
+        print(f"                {_display_path(check.get('detail', ''))}")
     summary = ", ".join(f"{counts.get(state, 0)} {state}" for state in RUN_LOCATION_STATES)
     print(f"{len(runs)} run(s): {summary}")
     if counts.get(RUN_LOCATION_UNVERIFIABLE):
@@ -1193,7 +1198,16 @@ def _navigation_note_is_private() -> tuple[bool, str]:
             capture_output=True,
         )
         tracked = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "ls-files", "--error-unmatch", "--", _NAVIGATION_NOTE],
+            # Git's default pathspec misses tracked case aliases on case-insensitive filesystems.
+            [
+                "git",
+                "-C",
+                str(REPO_ROOT),
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                f":(top,icase,literal){_NAVIGATION_NOTE}",
+            ],
             check=False,
             capture_output=True,
         )
@@ -1224,24 +1238,27 @@ def _render_navigation_note(run: RunPaths) -> str:
         f"- Generated (UTC): {generated}\n"
         f"- Selected context: {relation}\n"
         "- Toolkit root:\n\n"
-        f"    {toolkit_root}\n\n"
+        f"    {_display_path(toolkit_root)}\n\n"
         "- Selected run root:\n\n"
-        f"    {run_root}\n\n"
+        f"    {_display_path(run_root)}\n\n"
         "## Expected destinations\n\n"
         "These are paths only. Their existence, including as allocated empty directories, does not "
         "mean artifacts were generated.\n\n"
         "- Power BI bundle:\n\n"
-        f"    {Path(os.path.abspath(str(run.bundle)))}\n\n"
+        f"    {_display_path(Path(os.path.abspath(str(run.bundle))))}\n\n"
         "- Tableau reference captures:\n\n"
-        f"    {Path(os.path.abspath(str(run.oracle)))}\n\n"
+        f"    {_display_path(Path(os.path.abspath(str(run.oracle))))}\n\n"
         "- Agent package root:\n\n"
-        f"    {Path(os.path.abspath(str(run.packages)))}\n\n"
+        f"    {_display_path(Path(os.path.abspath(str(run.packages))))}\n\n"
         "- Portable package working convention: `<package>\\fabric` (not an observed per-unit path)\n\n"
         "## Limits\n\n"
         "This generated file is a navigation snapshot only. It is not current-run authority, a "
         "liveness signal, or a readiness verdict. Tools must never read it to select a run. "
         "Concurrent selections or a crash can leave it stale or incomplete; the next explicit "
-        "setup refreshes it. It is not refreshed after every package operation.\n"
+        "setup attempts a refresh. A missing or damaged first-line generator marker, including "
+        "an empty or partial note, is protected as human-owned content: inspect and preserve the "
+        "file, then explicitly clear the collision before setup reselects the existing run. "
+        "Do not reallocate for a navigation warning. It is not refreshed after every package operation.\n"
     )
 
 
@@ -1333,9 +1350,11 @@ def main() -> int:
             parser.error("--select-run is mutually exclusive with unit, --repo-root/--runs-parent and --json")
         updated, detail = _select_run_for_navigation(args.select_run)
         if not updated:
-            print(f"navigation note not updated: {detail}", file=sys.stderr)
+            print(f"navigation note not updated: {_display_path(detail)}", file=sys.stderr)
             return 1
-        print(f"updated {REPO_ROOT / _NAVIGATION_NOTE} for selected run {args.select_run}")
+        print(
+            f"updated {_display_path(REPO_ROOT / _NAVIGATION_NOTE)} for selected run {_display_path(args.select_run)}"
+        )
         return 0
 
     if args.verify:
@@ -1352,13 +1371,16 @@ def main() -> int:
     try:
         run = allocate_run(args.unit, repo_root=args.repo_root)
     except OSError as exc:
-        print(f"cannot allocate a run under {runs_root(args.repo_root)}: {exc}", file=sys.stderr)
+        print(
+            f"cannot allocate a run under {_display_path(runs_root(args.repo_root))}: {_display_path(str(exc))}",
+            file=sys.stderr,
+        )
         return 1
     selected_root = Path(os.path.abspath(str(run.root)))
     updated, detail = _select_run_for_navigation(selected_root)
     if not updated:
         print(
-            f"warning: run allocation succeeded, but navigation note was not updated: {detail}",
+            f"warning: run allocation succeeded, but navigation note was not updated: {_display_path(detail)}",
             file=sys.stderr,
         )
     subdirs = {name: str(run.subdir(name)) for name in CANONICAL_SUBDIRS}
@@ -1369,9 +1391,9 @@ def main() -> int:
             )
         )
     else:
-        print(f"allocated run {run.run_number} for {run.unit_key!r} at {run.root}")
+        print(f"allocated run {run.run_number} for {run.unit_key!r} at {_display_path(run.root)}")
         for name, path in subdirs.items():
-            print(f"  {name}: {path}")
+            print(f"  {name}: {_display_path(path)}")
     return 0
 
 
