@@ -244,11 +244,15 @@ def _relationship(path: Path | None) -> str:
 
 
 def _location(name: str, path: Path | None, expected: str, observed: str, relative_path: str | None = None) -> Location:
+    """`observed` is a closed three-value vocabulary. Anything a directory reader could not settle
+    collapses to `cannot_establish` here; the detailed canonical state and its finding are retained
+    unchanged in `canonical_subdirs` and `findings`.
+    """
     return Location(
         name=name,
         path=None if path is None else _printable(path),
         expected=expected,
-        observed=observed,
+        observed=observed if observed in {"present", "missing"} else LOCATION_UNOBSERVED,
         relationship=_relationship(path),
         relative_path=relative_path,
     )

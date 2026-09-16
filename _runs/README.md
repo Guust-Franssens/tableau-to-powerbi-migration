@@ -71,8 +71,10 @@ LOCATIONS: 7
 
 - **`expected`** says only that the path is the standard documented location for that role
   (`discovered` marks a package directory the bounded package search already found). **`observed`**
-  is the only existence claim: `present`, `missing`, `unassessable:<why>`, or `cannot_establish`.
-  A displayed path is never proof that the directory exists, and the command never creates it.
+  is the only existence claim, and it is closed to `present`, `missing` and `cannot_establish`
+  (anything a directory reader could not settle, such as a file where the directory belongs; the
+  detailed state and its finding stay in `canonical_subdirs`/`findings`). A displayed path is
+  never proof that the directory exists, and the command never creates it.
 - **`relationship`** (`is_toolkit` / `inside_toolkit` / `outside_toolkit` / `cannot_establish`) is
   computed from the toolkit checkout this script was run from — not the caller's working directory
   and not anything recorded inside the run. It compares whole path components, so a sibling

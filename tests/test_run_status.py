@@ -959,6 +959,32 @@ def test_locations_follow_the_selected_run_and_stay_outside_the_toolkit(tmp_path
     assert str(other) not in machine.stdout and str(other) not in human.stdout
 
 
+@pytest.mark.parametrize("relative", ["oracle", "packages/Book/fabric"])
+def test_an_unsettled_directory_is_cannot_establish_not_present_or_missing(tmp_path: Path, relative: str) -> None:
+    run = _run(tmp_path)
+    _report(run)
+    _package(run / "packages" / "Book")
+    path = run.joinpath(*relative.split("/"))
+    if path.is_dir():
+        path.rmdir()
+    path.write_text("retained non-directory entry", encoding="utf-8")
+
+    payload = _both(run, 1 if relative == "oracle" else 0)
+
+    name = "oracle" if relative == "oracle" else "package_working_copy"
+    row = next(row for row in payload["locations"] if row["name"] == name)
+    assert row["observed"] == "cannot_establish", "a computed path is never present, and a file is not absence"
+    assert row["path"] == str(path)
+    if relative == "oracle":
+        assert payload["canonical_subdirs"]["oracle"] == "unassessable:not_directory"
+        assert any(finding["reason"] == "not_directory" for finding in payload["findings"])
+    else:
+        # Location safety and package seal integrity stay separate observations: the package root
+        # is still safely located while its seal reports the retained extra bytes.
+        assert next(row for row in payload["locations"] if row["name"] == "package")["observed"] == "present"
+        assert payload["units"][0]["package"]["integrity_codes"] == ["package_file_undeclared"]
+
+
 def test_containment_is_component_aware_not_a_string_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     toolkit = tmp_path / "toolkit"
     inside = _run(toolkit)

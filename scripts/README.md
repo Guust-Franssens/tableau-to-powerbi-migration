@@ -564,8 +564,9 @@ the selected run, its standard `bundle/`, `oracle/` and `packages/` roots, and e
 package plus that package's fixed `fabric/` working copy. Human output prints each path once on its
 own `path:` line with native separators, so it can be copied without JSON's doubled backslashes;
 JSON carries the identical records. `expected` marks the standard documented location (or a
-`discovered` package directory) and never asserts existence; `observed` (`present`, `missing`,
-`unassessable:<why>`, `cannot_establish`) is the only existence claim, and nothing is created.
+`discovered` package directory) and never asserts existence; `observed` is the only existence claim
+and is closed to `present`, `missing` and `cannot_establish`, with the detailed unassessable state
+and its finding retained in `canonical_subdirs`/`findings`. Nothing is created.
 The toolkit root comes from this script's own checkout location, never the caller's working
 directory or the run's recorded metadata, and the derived roots always follow the accepted selected
 run. `relationship` uses whole-component containment, so a lookalike name prefix remains
