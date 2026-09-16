@@ -252,14 +252,13 @@ def test_public_fresh_package_admits_only_declared_reference_bytes_before_sealin
         encoding="utf-8",
     )
     source = next((bundle.parent / "assets").glob("*.twb"))
-    source_dir = bundle / "source"
-    source_dir.mkdir()
-    shutil.copy2(source, source_dir / source.name)
+    (bundle / "source").mkdir()
+    shutil.copy2(source, bundle / "source" / source.name)
     (bundle / "migration-spec.json").write_text(
         json.dumps({"dashboards": [], "worksheets": [{"name": "Sales"}]}), encoding="utf-8"
     )
     reference = bundle / "reference"
-    source_image_path = write_png(reference / "tableau-Sales.png")
+    write_png(reference / "tableau-Sales.png")
     (reference / "not-declared.txt").write_bytes(b"retain outside the package")
     assert capture.main([str(bundle)]) == 0
     manifest_raw = (reference / "manifest.json").read_bytes()
@@ -271,25 +270,27 @@ def test_public_fresh_package_admits_only_declared_reference_bytes_before_sealin
         'fallback_authorization = "stop"\nnumeric_obligation = "required"\n+++\n',
         encoding="utf-8",
     )
-    source_image = source_image_path.read_bytes()
-    code = pkg.main(
-        [
-            "--bundle",
-            str(bundle),
-            "--out",
-            str(_out(tmp_path)),
-            "--unit",
-            UNIT,
-            "--assets",
-            str(bundle.parent / "assets"),
-            "--reference",
-            str(reference),
-            "--brief",
-            str(brief),
-            "--quiet",
-        ]
+    source_image = (reference / "tableau-Sales.png").read_bytes()
+    assert (
+        pkg.main(
+            [
+                "--bundle",
+                str(bundle),
+                "--out",
+                str(_out(tmp_path)),
+                "--unit",
+                UNIT,
+                "--assets",
+                str(bundle.parent / "assets"),
+                "--reference",
+                str(reference),
+                "--brief",
+                str(brief),
+                "--quiet",
+            ]
+        )
+        == 0
     )
-    assert code == 0
     root = _out(tmp_path) / UNIT
     package_manifest = json.loads((root / pkg.MANIFEST_NAME).read_bytes())
     assert package_manifest["artifacts"]["reference"] == "reference"
@@ -311,6 +312,7 @@ def test_public_fresh_package_admits_only_declared_reference_bytes_before_sealin
 
 @pytest.mark.parametrize("edited", [False, True])
 def test_reference_never_replaces_an_existing_package(tmp_path: Path, edited: bool) -> None:
+    """Reference admission preserves an existing package, including operator edits."""
     bundle, oracle = _bundle(tmp_path, worksheets=("Sales",))
     _package(tmp_path, bundle, oracle)
     root = _out(tmp_path) / UNIT
@@ -331,6 +333,7 @@ def test_reference_never_replaces_an_existing_package(tmp_path: Path, edited: bo
 
 
 def test_reference_refuses_discard_override_and_unsafe_or_missing_members(tmp_path: Path) -> None:
+    """An override or invalid image member cannot weaken reference admission."""
     bundle, oracle = _bundle(tmp_path, worksheets=("Sales",))
     reference, _raw = _manual_reference(bundle)
     with pytest.raises(pkg.PackagingError, match="reference_conflicts_with_discard"):
@@ -391,6 +394,7 @@ def test_reference_refuses_discard_override_and_unsafe_or_missing_members(tmp_pa
 def test_reference_distinguishes_malformed_and_empty_manifests(
     tmp_path: Path, dashboards: list[dict], reason: str
 ) -> None:
+    """Malformed and empty reference inputs retain their distinct refusal reasons."""
     bundle, oracle = _bundle(tmp_path, worksheets=("Sales",))
     reference, _raw = _manual_reference(bundle)
     (reference / "manifest.json").write_text(json.dumps({"dashboards": dashboards}), encoding="utf-8")
@@ -411,6 +415,7 @@ def test_reference_distinguishes_malformed_and_empty_manifests(
 def test_reference_target_appearing_before_publication_is_not_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A target created during assembly remains owned by its original writer."""
     bundle, oracle = _bundle(tmp_path, worksheets=("Sales",))
     reference, _raw = _manual_reference(bundle)
     original = pkg.replace_dir
@@ -866,6 +871,7 @@ def test_reference_native_short_alias_of_output_preserves_original_bytes(tmp_pat
 
 @pytest.mark.parametrize("fault", ["source-sha", "luid", "name", "kind", "unreadable"])
 def test_reference_identity_and_content_faults_remain_non_admitting(tmp_path: Path, fault: str) -> None:
+    """Reference identity and content faults remain blocking after construction."""
     import check_reference_readiness as crr  # pylint: disable=import-outside-toplevel
 
     bundle, oracle = _bundle(tmp_path, worksheets=("Sales",))
