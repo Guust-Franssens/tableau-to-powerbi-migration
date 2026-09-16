@@ -272,20 +272,24 @@ def _unestablished_locations() -> list[Location]:
 
 
 def _locations(run: Path, states: dict[str, str], packages: list[tuple[Path, PackageObservation]]) -> list[Location]:
-    """Standard roots of the ACCEPTED selected run, plus already-discovered package directories."""
+    """Standard roots of the ACCEPTED selected run, plus already-discovered package directories.
+
+    Children of package roots not observed present stay unobserved; this is not an atomic snapshot.
+    """
     rows = [
         _toolkit_location(),
         _location("selected_run", run, "standard", "present"),
         *(_location(name, run / name, "standard", states[name]) for name in ("bundle", "oracle", "packages")),
     ]
     for path, observation in packages:
-        rows.append(_location("package", path, "discovered", _dir_state(path), observation.relative_path))
+        package_state = _dir_state(path)
+        rows.append(_location("package", path, "discovered", package_state, observation.relative_path))
         rows.append(
             _location(
                 "package_working_copy",
                 path / PACKAGE_EDIT_SUBDIR,
                 "standard",
-                _dir_state(path / PACKAGE_EDIT_SUBDIR),
+                _dir_state(path / PACKAGE_EDIT_SUBDIR) if package_state == "present" else LOCATION_UNOBSERVED,
                 observation.relative_path,
             )
         )

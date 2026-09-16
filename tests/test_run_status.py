@@ -917,6 +917,70 @@ def _locations(payload: dict) -> dict[tuple[str, str | None], dict]:
     return rows
 
 
+@pytest.mark.parametrize("replacement", ["missing", "reparse"])
+def test_locations_stop_below_a_discovered_package_that_is_no_longer_present(
+    tmp_path: Path, replacement: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = _run(tmp_path)
+    package = run / "packages" / "Book"
+    _package(package)
+    (package / "fabric").mkdir()
+    discovered = rs._package_observations(run, [])
+    assert len(discovered) == 1 and discovered[0][0] == package
+    retained = package.rename(tmp_path / "retained-package")
+    lstat = os.lstat
+    reads: list[Path] = []
+
+    def no_descendant(path: Path | str, *args: Any, **kwargs: Any) -> os.stat_result:
+        reads.append(Path(path))
+        assert package not in Path(path).parents, "location reader crossed a rejected package parent"
+        return lstat(path, *args, **kwargs)
+
+    try:
+        if replacement == "reparse":
+            _link_directory(package, retained)
+        with monkeypatch.context() as context:
+            context.setattr(rs.os, "lstat", no_descendant)
+            rows = rs._locations(run, dict.fromkeys(("bundle", "oracle", "packages"), "present"), discovered)
+        assert reads == [package], "the package root is observed once and its child is not read"
+        assert [(row.name, row.path, row.expected, row.observed, row.relative_path) for row in rows[-2:]] == [
+            (
+                "package",
+                str(package),
+                "discovered",
+                "missing" if replacement == "missing" else "cannot_establish",
+                "packages/Book",
+            ),
+            ("package_working_copy", str(package / "fabric"), "standard", "cannot_establish", "packages/Book"),
+        ]
+    finally:
+        if os.path.lexists(package):
+            if sys.platform == "win32":
+                package.rmdir()
+            else:
+                package.unlink()
+        retained.rename(package)
+
+
+def test_locations_observe_a_present_working_copy_without_scoping_or_certifying_its_package(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+    _report(run, ())
+    package = run / "packages" / "Recovered"
+    _package(package, "Recovered")
+    (package / "fabric").mkdir()
+    before = _hash_tree(run)
+
+    payload = _both(run, 0)
+
+    rows = _locations(payload)
+    assert rows[("package", "packages/Recovered")]["observed"] == "present"
+    assert rows[("package_working_copy", "packages/Recovered")]["observed"] == "present"
+    assert rows[("package_working_copy", "packages/Recovered")]["path"] == str(package / "fabric")
+    assert payload["units"] == []
+    assert payload["unscoped_packages"][0]["scope"] == "UNSCOPED_PACKAGE"
+    assert before == _hash_tree(run)
+
+
 @pytest.mark.parametrize("from_toolkit", [True, False])
 def test_locations_follow_the_selected_run_and_stay_outside_the_toolkit(tmp_path: Path, from_toolkit: bool) -> None:
     # A lookalike parent carrying the toolkit's own directory name is still outside the toolkit.
