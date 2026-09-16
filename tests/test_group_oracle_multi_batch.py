@@ -925,6 +925,8 @@ def test_not_copied_render_is_a_repair_gap_not_a_screenshot_target(tmp_path):
     migrations = _migrations(tmp_path)
     assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 1
     handoff = json.loads((batch / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))["manual_reference_handoff"]
+    assert handoff["status"] == "NO_VISUAL_GAPS"
+    assert handoff["request"] == ""
     assert handoff["rows"] == []
     assert handoff["repair_gaps"] == [{"reason": "render_not_copied", "workbook_luid": "wb-1", "view_luid": LUID}]
 

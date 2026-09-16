@@ -1825,7 +1825,13 @@ def _manual_handoff(  # pylint: disable=too-many-locals,too-many-branches
             for residual in render_unestablished(views, requested):
                 view = by_luid.get(residual.get("view_luid"))
                 if not isinstance(view, dict):
-                    repair_gaps.append({"reason": "residual_view_identity_ambiguous"})
+                    repair_gaps.append(
+                        {
+                            "reason": "residual_view_identity_ambiguous",
+                            "workbook_luid": outcome.get("workbook_luid"),
+                            "view_luid": residual.get("view_luid"),
+                        }
+                    )
                     continue
                 if any(status == NOT_COPIED_STATUS for status in residual["renders"].values()):
                     repair_gaps.append(
@@ -1884,19 +1890,23 @@ def _manual_handoff(  # pylint: disable=too-many-locals,too-many-branches
     else:
         requested_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z") if rows else None
         status = "REQUEST_REQUIRED" if rows else "NO_VISUAL_GAPS"
-    request = "\n".join(
-        [
-            "Please supply the missing ORIGINAL Tableau screenshots for these views:",
-            *[
-                (
-                    f"- {row['workbook_name']} / {row['view_name']} ({row['kind']}), "
-                    f"view LUID {row['view_luid']}, revision {row['updated_at'] or 'UNKNOWN'}; "
-                    "filters=UNKNOWN, parameters=UNKNOWN, period=UNKNOWN; "
-                    + ", ".join(f"{kind}={reason or 'UNKNOWN'}" for kind, reason in row["render_reasons"].items())
-                )
-                for row in rows
-            ],
-        ]
+    request = (
+        "\n".join(
+            [
+                "Please supply the missing ORIGINAL Tableau screenshots for these views:",
+                *[
+                    (
+                        f"- {row['workbook_name']} / {row['view_name']} ({row['kind']}), "
+                        f"view LUID {row['view_luid']}, revision {row['updated_at'] or 'UNKNOWN'}; "
+                        "filters=UNKNOWN, parameters=UNKNOWN, period=UNKNOWN; "
+                        + ", ".join(f"{kind}={reason or 'UNKNOWN'}" for kind, reason in row["render_reasons"].items())
+                    )
+                    for row in rows
+                ],
+            ]
+        )
+        if rows
+        else ""
     )
     return {
         "status": status,

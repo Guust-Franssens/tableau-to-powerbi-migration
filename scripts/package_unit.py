@@ -2137,11 +2137,11 @@ def _stage_reference(reference_dir: Path, dest: Path) -> dict[str, Any]:  # pyli
                 raise PackagingError(f"reference_image_missing_or_unsafe: {image}: {refusal or 'unknown reason'}")
             members[image] = origin
     target = dest / "reference"
+    target.mkdir(parents=True, exist_ok=True)
     for relative, origin in members.items():
         landing = target / PurePosixPath(relative)
         landing.parent.mkdir(parents=True, exist_ok=True)
         landing.write_bytes(origin.read_bytes())
-    target.mkdir(parents=True, exist_ok=True)
     (target / "manifest.json").write_bytes(raw)
     return payload
 
