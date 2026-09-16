@@ -248,8 +248,53 @@ def test_first_view_progress_is_visible_while_later_sibling_is_blocked(  # pylin
     assert session.signouts == 1
 
 
+def _enable_recovery(monkeypatch, tmp_path: Path, views: list[dict]) -> Path:
+    """Select two render-only gaps through the real recovery reader and main() coordinator."""
+    run = tmp_path / "_runs" / "001-parallel"
+    run.mkdir(parents=True)
+    (run / "run.json").write_text(
+        json.dumps({"run": 1, "unit_key": "parallel", "allocated_dir_name": run.name, "allocated_abs_path": str(run)}),
+        encoding="utf-8",
+    )
+    source = tmp_path / "reference"
+    source.mkdir()
+    for view in views:
+        view["workbook"]["id"] = WB_1
+        view["updatedAt"] = "2026-09-01T00:00:00Z"
+    (source / "oracle-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "tableau-oracle-workbook/1",
+                "server": _main_env()["TABLEAU_SERVER_URL"],
+                "site": "site",
+                "workbook_luid": WB_1,
+                "view_count": len(views),
+                "requested_renders": ["svg"],
+                "views": [
+                    {
+                        "view_luid": view["id"],
+                        "workbook_luid": WB_1,
+                        "updated_at": view["updatedAt"],
+                        "svg": {"status": "transient", "max_age_minutes": 1, "rest_api_version": "3.29"},
+                    }
+                    for view in views
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_dir = run / "retry"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["capture_tableau_oracle.py", "--out", str(out_dir), "--run", str(run), "--retry-failed-from", str(source)],
+    )
+    return out_dir
+
+
+@pytest.mark.parametrize("recovery", [False, True])
 def test_later_worker_completion_is_visible_before_slow_selected_first_view(  # pylint: disable=too-many-locals
-    monkeypatch, tmp_path, caplog
+    monkeypatch, tmp_path, caplog, recovery
 ):
     """Completion progress must not stay hidden behind a slow earlier selected view."""
     session = _MainSession()
@@ -267,16 +312,22 @@ def test_later_worker_completion_is_visible_before_slow_selected_first_view(  # 
             assert release_first.wait(HANG_GUARD_SEC)
         else:
             assert first_started.wait(HANG_GUARD_SEC)
-        return _record(view)
+        record = _record(view)
+        if recovery:
+            record.pop("data")
+            record["svg"] = {"status": "ok"}
+        return record
 
-    def observe_progress(index, total, record, redactor):
-        real_progress(index, total, record, redactor)
+    def observe_progress(index, total, record, redactor, **kwargs):
+        real_progress(index, total, record, redactor, **kwargs)
         progress.append(record["view_luid"])
         if record["view_luid"] == LUID_2:
             later_progress.set()
 
     _configure_main(monkeypatch, session, views, out_dir)
-    monkeypatch.setattr(oracle, "capture_view", capture)
+    if recovery:
+        out_dir = _enable_recovery(monkeypatch, tmp_path, views)
+    monkeypatch.setattr(oracle, "capture_recovery_view" if recovery else "capture_view", capture)
     monkeypatch.setattr(oracle, "log_progress", observe_progress)
 
     with caplog.at_level(logging.INFO, logger=oracle.LOG.name), ThreadPoolExecutor(max_workers=1) as harness:
@@ -292,6 +343,10 @@ def test_later_worker_completion_is_visible_before_slow_selected_first_view(  # 
     manifest = json.loads((out_dir / "oracle-manifest.json").read_text(encoding="utf-8"))
     assert progress == [LUID_2, LUID_1]
     assert [view["view_luid"] for view in manifest["views"]] == [LUID_1, LUID_2]
+    if recovery:
+        assert all("data" not in view for view in manifest["views"])
+        assert any("Fast later" in message and "svg=ok" in message for message in caplog.messages)
+        assert not any("FAILED (None)" in message for message in caplog.messages)
 
 
 @pytest.mark.parametrize("fault_site", ["enrichment", "log_progress"])

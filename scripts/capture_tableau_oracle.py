@@ -129,6 +129,7 @@ import json
 import logging
 import math
 import re
+import stat
 import sys
 import threading
 import time
@@ -177,9 +178,12 @@ from tableau_oracle_manifest import (  # noqa: E402  # pylint: disable=wrong-imp
     CaptureRun,
     OracleRecoveryRefusal,
     RecoverySource,
+    check_recovery_path,
     data_leg_fields,
     log_progress,
     read_recovery_sources,
+    require_local_recovery_path,
+    validated_render_capability,
     write_manifest,
 )
 from work_dirs import RUN_LOCATION_INTACT, check_run_location  # noqa: E402  # pylint: disable=wrong-import-position
@@ -1011,20 +1015,15 @@ def capture_recovery_view(  # pylint: disable=too-many-arguments,too-many-positi
         record["data"] = _capture_data(session, view_luid, out_dir, stem, max_age=max_age)
     render_kinds = frozenset(LEG_TO_KIND[leg] for leg in legs if leg != "data")
     if render_kinds:
-        synthetic_data = "data" not in record
-        if synthetic_data:
-            # `_capture_renders` reads the data status only to decide salvage/shared-root-cause policy.
-            # A render-only recovery target has a satisfied prior data leg, so "ok" is the exact
-            # precondition that prevents recapturing data while still using the existing render writer.
-            record["data"] = {"status": "ok"}
         _capture_renders(
             session,
             record,
             render_kinds,
             _RenderTargets(out_dir, stem, api_overrides or {}, max_age=max_age),
         )
-        if synthetic_data:
-            record.pop("data", None)
+    for leg, kind in LEG_TO_KIND.items():
+        if leg in record:
+            record[leg]["rest_api_version"] = (api_overrides or {}).get(kind, session.version)
     return record
 
 
@@ -1120,7 +1119,8 @@ def _capture_renders(
     "not requested" and nothing else -- before this, absent meant that OR "never attempted", and a
     view with no establishable image was indistinguishable from a data-only capture.
     """
-    data_status = record["data"]["status"]
+    # A render-only recovery has no newly attempted data leg; it must not invent one.
+    data_status = (record.get("data") or {}).get("status", "ok")
     if not wants:
         return
     max_age = validate_max_age(targets.max_age)
@@ -1774,39 +1774,50 @@ class _RecoveryPlan:
 
 
 def _read_run_manifest(run_dir: Path) -> dict[str, Any]:
-    path = run_dir / "run.json"
+    path = check_recovery_path(run_dir / "run.json")
     try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise OracleRecoveryRefusal("--run run.json is not a regular file")
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise OracleRecoveryRefusal(f"--run {run_dir} does not have a readable run.json ({exc})") from exc
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        raise OracleRecoveryRefusal("--run does not have a readable run.json; inspect the selected run") from None
     check = check_run_location(payload, run_dir)
     if check.state != RUN_LOCATION_INTACT:
-        raise OracleRecoveryRefusal(f"--run {run_dir} is not an intact allocated run: {check.detail}")
+        raise OracleRecoveryRefusal("--run is not an intact allocated run; inspect its run.json location fields")
     return payload
 
 
 def _same_or_beneath(child: Path, parent: Path) -> bool:
     try:
-        child.resolve().relative_to(parent.resolve())
+        child.absolute().relative_to(parent.absolute())
     except ValueError:
         return False
     return True
 
 
-def _validate_recovery_paths(run_dir: Path, out_dir: Path, sources: list[RecoverySource]) -> None:
+def _validate_recovery_paths(run_dir: Path, out_dir: Path, sources: list[Path]) -> None:
+    for path in (run_dir, out_dir, *sources):
+        require_local_recovery_path(path)
     if not run_dir.is_absolute():
         raise OracleRecoveryRefusal("--run is required in recovery and must be an absolute path")
+    check_recovery_path(run_dir)
+    resolved_out = check_recovery_path(out_dir)
+    source_roots = [
+        check_recovery_path(path).parent if path.name == _MANIFEST_NAME else check_recovery_path(path)
+        for path in sources
+    ]
     _read_run_manifest(run_dir)
-    resolved_out = out_dir.resolve()
-    if not _same_or_beneath(resolved_out, run_dir):
-        raise OracleRecoveryRefusal(f"--out {out_dir} must be below the selected --run {run_dir}")
-    source_roots = [source.root.resolve() for source in sources]
+    if resolved_out == run_dir.absolute() or not _same_or_beneath(resolved_out, run_dir):
+        raise OracleRecoveryRefusal("--out must be below the selected --run")
     if resolved_out in source_roots or any(
         root in resolved_out.parents or resolved_out in root.parents for root in source_roots
     ):
         raise OracleRecoveryRefusal("--out must be distinct from every grouped evidence directory")
-    if out_dir.exists() and any(out_dir.iterdir()):
-        raise OracleRecoveryRefusal(f"--out {out_dir} already exists and is not empty; recovery never deletes evidence")
+    try:
+        if out_dir.exists() and (not out_dir.is_dir() or any(out_dir.iterdir())):
+            raise OracleRecoveryRefusal("--out already exists and is not empty; recovery never deletes evidence")
+    except OSError:
+        raise OracleRecoveryRefusal("--out cannot be inspected; recovery never replaces existing evidence") from None
 
 
 def _source_matches_env(source: RecoverySource, env: dict[str, str]) -> bool:
@@ -1819,9 +1830,7 @@ def _source_matches_env(source: RecoverySource, env: dict[str, str]) -> bool:
 
 
 def _eligible_legs(source: RecoverySource, view: dict[str, Any]) -> frozenset[str]:
-    requested = source.manifest.get("requested_renders")
-    if not isinstance(requested, list) or any(not isinstance(kind, str) for kind in requested):
-        raise OracleRecoveryRefusal(f"{source.path}: requested_renders is required and must be a list of strings")
+    requested = source.manifest["requested_renders"]
     selected: set[str] = set()
     for leg, kind in LEG_TO_KIND.items():
         entry = view.get(leg)
@@ -1834,31 +1843,38 @@ def _eligible_legs(source: RecoverySource, view: dict[str, Any]) -> frozenset[st
             continue
         if leg != "data" and kind not in requested:
             raise OracleRecoveryRefusal(
-                f"{source.path}: view {view.get('view_luid')!r} {leg} is retry-eligible but the grouped "
-                "manifest does not record that render kind as requested"
+                "a retry-eligible render has no recorded request intent; inspect requested_renders and re-merge"
             )
         selected.add(leg)
     return frozenset(selected)
 
 
-def _recovery_api_overrides(sources: list[RecoverySource], wanted: set[str]) -> dict[str, str]:
+def _recovery_api_overrides(
+    sources: list[RecoverySource], selected: dict[str, frozenset[str]], configured: str
+) -> dict[str, str]:
     overrides: dict[str, str] = {}
     for source in sources:
-        report = source.manifest.get("render_capability") or {}
-        if not isinstance(report, dict):
-            raise OracleRecoveryRefusal(f"{source.path}: render_capability must be an object when present")
-        tier = report.get("selected_tier")
-        api = report.get("selected_api_version")
-        if tier is None:
-            continue
-        kind = {"png_high": "png"}.get(tier, tier)
-        if kind not in wanted or api is None:
-            continue
-        if not isinstance(api, str) or not api.strip():
-            raise OracleRecoveryRefusal(f"{source.path}: selected_api_version must be a string when present")
-        previous = overrides.setdefault(kind, api)
-        if previous != api:
-            raise OracleRecoveryRefusal(f"recovery inputs disagree on the API override for {kind}: {previous} vs {api}")
+        report = validated_render_capability(source.manifest.get("render_capability")) or {}
+        selected_leg = {"png_high": "image", "svg": "svg", "pdf": "pdf"}.get(report.get("selected_tier"))
+        for view in source.manifest["views"]:
+            for leg in selected.get(view["view_luid"], frozenset()):
+                api = view[leg].get("rest_api_version")
+                if not api:
+                    raise OracleRecoveryRefusal(
+                        "selected leg REST API policy is unestablished; re-merge the original capture batches"
+                    )
+                if (
+                    leg == selected_leg
+                    and (report.get("selected_api_version") or report.get("configured_api_version")) != api
+                ):
+                    raise OracleRecoveryRefusal("selected leg API disagrees with its retained render capability policy")
+                if leg == "data":
+                    if api != configured:
+                        raise OracleRecoveryRefusal(
+                            "selected data leg API differs from trusted configuration; restore its recorded API"
+                        )
+                elif overrides.setdefault(LEG_TO_KIND[leg], api) != api:
+                    raise OracleRecoveryRefusal("selected legs carry incompatible REST API policies")
     return overrides
 
 
@@ -1867,18 +1883,21 @@ def _recovery_targets(sources: list[RecoverySource]) -> tuple[dict[str, frozense
     wants: set[str] = set()
     max_ages: set[int] = set()
     for source in sources:
-        max_age = source.manifest.get("max_age_minutes")
-        if not isinstance(max_age, int) or max_age < 1:
-            raise OracleRecoveryRefusal(f"{source.path}: max_age_minutes is required for recovery")
-        max_ages.add(max_age)
         for view in source.manifest["views"]:
             legs = _eligible_legs(source, view)
             if not legs:
                 continue
+            for leg in legs:
+                max_age = view[leg].get("max_age_minutes")
+                if max_age is None:
+                    raise OracleRecoveryRefusal(
+                        "selected leg max_age_minutes is unestablished; re-merge the original capture batches"
+                    )
+                max_ages.add(max_age)
             by_luid[view["view_luid"]] = legs
             wants.update(LEG_TO_KIND[leg] for leg in legs if leg != "data")
     if len(max_ages) > 1:
-        raise OracleRecoveryRefusal(f"recovery inputs carry different max_age_minutes values: {sorted(max_ages)}")
+        raise OracleRecoveryRefusal("selected legs carry incompatible max_age_minutes policies")
     return by_luid, wants, next(iter(max_ages), DEFAULT_MAX_AGE_MINUTES)
 
 
@@ -1886,6 +1905,7 @@ def _build_recovery_plan(  # pylint: disable=too-many-locals
     session: TableauSession,
     sources: list[RecoverySource],
     targets: tuple[dict[str, frozenset[str]], set[str], int],
+    api_overrides: dict[str, str],
 ) -> _RecoveryPlan:
     legs_by_luid, wants, max_age = targets
     if not legs_by_luid:
@@ -1893,7 +1913,7 @@ def _build_recovery_plan(  # pylint: disable=too-many-locals
     views, workbook_names = select_views(session, None, 0)
     by_luid = {view.get("id"): view for view in views if isinstance(view.get("id"), str)}
     selected = []
-    problems = []
+    problems = 0
     expected = {
         view["view_luid"]: (view["workbook_luid"], view["updated_at"])
         for source in sources
@@ -1904,18 +1924,19 @@ def _build_recovery_plan(  # pylint: disable=too-many-locals
         current = by_luid.get(luid)
         current_workbook = (current.get("workbook") or {}).get("id") if current else None
         if current is None or current_workbook != workbook_luid or current.get("updatedAt") != updated_at:
-            problems.append(luid)
+            problems += 1
             continue
         selected.append(current)
     if problems:
         raise OracleRecoveryRefusal(
             "recovery target(s) do not match current Tableau metadata by view LUID, workbook LUID and published "
-            f"updatedAt; refusing before metered exports: {', '.join(problems)}"
+            f"updatedAt; refusing before metered exports ({problems} mismatches). Inspect the selected grouped views."
         )
     _ensure_unique_output_identities(selected)
-    api_overrides = _recovery_api_overrides(sources, wants)
     metadata = {
         "sources": _recovery_source_metadata(sources),
+        "max_age_minutes": max_age,
+        "requested_renders": sorted(wants),
         "eligible_views": len(selected),
         "eligible_legs": sum(len(legs_by_luid[view["id"]]) for view in selected),
         "selected_legs_by_view": {view["id"]: sorted(legs_by_luid[view["id"]]) for view in selected},
@@ -1944,6 +1965,31 @@ def _recovery_source_metadata(sources: list[RecoverySource]) -> dict[str, Any]:
     }
 
 
+def _reused_capability(sources: list[RecoverySource]) -> dict[str, Any] | None:
+    reports = [
+        report
+        for source in sources
+        if (report := validated_render_capability(source.manifest.get("render_capability"))) is not None
+    ]
+    if not reports:
+        return None
+    if any(
+        (report.get("selected_tier"), report.get("selected_api_version"), report.get("configured_api_version"))
+        != (
+            reports[0].get("selected_tier"),
+            reports[0].get("selected_api_version"),
+            reports[0].get("configured_api_version"),
+        )
+        for report in reports[1:]
+    ):
+        raise OracleRecoveryRefusal("recovery inputs carry incompatible render capability policies")
+    return {
+        **reports[0],
+        "probe_performed": False,
+        "reused_from_grouped": _recovery_source_metadata(sources),
+    }
+
+
 def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     """Capture the oracle for every selected view.
 
@@ -1960,6 +2006,8 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
     recovery_sources: list[RecoverySource] = []
     recovery_targets: tuple[dict[str, frozenset[str]], set[str], int] | None = None
     api_overrides: dict[str, str] = {}
+    wants: set[str] = set()
+    capability_report = None
     recovery_mode = bool(args.retry_failed_from)
     if args.run and not recovery_mode:
         raise OracleRecoveryRefusal("--run is only valid with --retry-failed-from recovery")
@@ -1981,15 +2029,17 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
             raise OracleRecoveryRefusal("--retry-failed-from conflicts with " + ", ".join(conflicts))
         if args.run is None or not args.run.is_absolute():
             raise OracleRecoveryRefusal("--run is required in recovery and must be an absolute path")
+        _validate_recovery_paths(args.run, args.out, args.retry_failed_from)
         recovery_sources = read_recovery_sources(args.retry_failed_from)
-        _validate_recovery_paths(args.run, args.out, recovery_sources)
-        invalid_sources = [str(source.path) for source in recovery_sources if not _source_matches_env(source, env)]
-        if invalid_sources:
+        if any(not _source_matches_env(source, env) for source in recovery_sources):
             raise OracleRecoveryRefusal(
                 "recovery evidence does not match the configured Tableau server/site; refusing before sign-in or "
-                "exports: " + ", ".join(invalid_sources)
+                "exports. Inspect the selected grouped manifests."
             )
         recovery_targets = _recovery_targets(recovery_sources)
+        api_overrides = _recovery_api_overrides(
+            recovery_sources, recovery_targets[0], env.get("TABLEAU_REST_API_VERSION", "3.21")
+        )
         preliminary_legs = recovery_targets[0]
         if not preliminary_legs:
             LOG.info(
@@ -1998,6 +2048,13 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
                 len(recovery_sources),
             )
             return 0
+        capability_report = _reused_capability(
+            [
+                source
+                for source in recovery_sources
+                if any(view["view_luid"] in preliminary_legs for view in source.manifest["views"])
+            ]
+        )
     session = TableauSession(
         SiteCredentials(
             base=env["TABLEAU_SERVER_URL"],
@@ -2017,7 +2074,7 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
         if recovery_mode:
             if recovery_targets is None:
                 raise RuntimeError("recovery targets were not computed before sign-in")
-            plan = _build_recovery_plan(session, recovery_sources, recovery_targets)
+            plan = _build_recovery_plan(session, recovery_sources, recovery_targets, api_overrides)
             views = plan.views
             workbook_names = {
                 (view.get("workbook") or {}).get("id"): (view.get("workbook") or {}).get("name")
@@ -2031,8 +2088,8 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
             recovery_metadata = plan.metadata
         else:
             views, workbook_names = select_views(session, args.workbook, args.limit)
-            max_age = validate_max_age(args.max_age)
-            wants = {kind for kind, on in (("png", args.images), ("svg", args.svg), ("pdf", args.pdf)) if on}
+            ordinary_max_age = validate_max_age(args.max_age)
+            max_age = ordinary_max_age
             recovery_legs = None
         _ensure_unique_output_identities(views)
         out_dir: Path = args.out
@@ -2042,12 +2099,28 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
         manifest_path.unlink(missing_ok=True)
         LOG.info("capturing %d view(s) with %d worker(s) -> %s", len(views), args.workers, out_dir)
 
-        capability_report = None
-        if args.reference_best and views:
-            capability_report = capability.probe_render_capability(session, env, views, max_age=max_age)
-            capability.apply_selected_tier(capability_report, wants, api_overrides, env)
+        if not recovery_mode:
+            ordinary_wants = {kind for kind, on in (("png", args.images), ("svg", args.svg), ("pdf", args.pdf)) if on}
+            ordinary_overrides: dict[str, str] = {}
+            if args.reference_best and views:
+                capability_report = capability.probe_render_capability(session, env, views, max_age=ordinary_max_age)
+                capability.apply_selected_tier(capability_report, ordinary_wants, ordinary_overrides, env)
+            wants, api_overrides = ordinary_wants, ordinary_overrides
 
         started = time.perf_counter()
+        # Only CLI-controlled provenance enters CaptureRun. Recovery's validated policy travels with
+        # its separately seeded metadata, rather than tainting the session/redactor/output-root bundle.
+        capture_run = CaptureRun(session, env, out_dir, started)
+        if not recovery_mode:
+            capture_run = CaptureRun(
+                session,
+                env,
+                out_dir,
+                started,
+                frozenset(ordinary_wants),
+                bool(args.reference_best),
+                max_age_minutes=ordinary_max_age,
+            )
         # Resolved ONCE for the whole run - one Metadata API call for the site, not one per view - and
         # stamped onto each view so `capture_view` needs no extra argument. A failure is not fatal: every
         # record then reads `unknown`, and the reason is warned at the seam rather than carried as a
@@ -2069,7 +2142,12 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
             for index, record in enumerate(records, 1):
                 record["workbook_name"] = workbook_names.get(record["workbook_luid"])
                 named_records.append(record)
-                log_progress(index, len(views), record, session.redact_text)
+                if recovery_legs is None:
+                    log_progress(index, len(views), record, session.redact_text)
+                else:
+                    log_progress(
+                        index, len(views), record, session.redact_text, selected_legs=recovery_legs[record["view_luid"]]
+                    )
         finally:
             records.close()
         named_records.sort(key=lambda record: selected_order.get(record.get("view_luid"), len(selected_order)))
@@ -2078,18 +2156,10 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
             server_info = None if recovery_mode else _advertised_ceiling(session, env, capability_report, wants)
             return write_manifest(
                 named_records,
-                CaptureRun(
-                    session,
-                    env,
-                    out_dir,
-                    started,
-                    frozenset(wants),
-                    bool(args.reference_best),
-                    max_age_minutes=max_age,
-                    recovery=recovery_metadata,
-                ),
+                capture_run,
                 capability_report,
                 server_info,
+                recovery=recovery_metadata,
             )
         except BaseException:
             manifest_path.unlink(missing_ok=True)

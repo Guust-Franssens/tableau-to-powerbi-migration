@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
+import os
+import subprocess
 import sys
+import traceback
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -20,6 +25,8 @@ WB_1 = "11111111-1111-4111-8111-111111111111"
 UPDATED = "2026-09-01T00:00:00Z"
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 64
 CSV = b"region,sales\nEast,12\n"
+SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><text x="1" y="12">12</text></svg>'
+REFUSAL_VALUE = "SYNTHETIC_REFUSAL_VALUE_654"
 
 
 class _Session:
@@ -33,17 +40,21 @@ class _Session:
         self.signouts = 0
 
     def sign_in(self) -> None:
+        """Count sign-in without contacting a tenant."""
         self.signins += 1
 
     def sign_out(self) -> None:
+        """Count finally-path sign-out."""
         self.signouts += 1
 
     @staticmethod
     def reflected_credential(_payload: bytes) -> None:
+        """No credentials occur in this fixture's export payloads."""
         return None
 
     @staticmethod
     def redact_text(text: str) -> str:
+        """Preserve this fixture's non-secret diagnostics."""
         return text
 
 
@@ -83,6 +94,8 @@ def _view(luid: str, *, data: dict | None = None, image: dict | None = None) -> 
 def _ok_data(luid: str) -> dict:
     return {
         "status": "ok",
+        "max_age_minutes": 17,
+        "rest_api_version": "3.29",
         "certification": "certified",
         "path": f"data/{luid}.csv",
         "sha256": hashlib.sha256(CSV).hexdigest(),
@@ -93,6 +106,8 @@ def _ok_data(luid: str) -> dict:
 def _ok_image(luid: str) -> dict:
     return {
         "status": "ok",
+        "max_age_minutes": 17,
+        "rest_api_version": "3.29",
         "format": "png",
         "path": f"images/{luid}.png",
         "sha256": hashlib.sha256(PNG).hexdigest(),
@@ -100,7 +115,13 @@ def _ok_image(luid: str) -> dict:
 
 
 def _failed(status: str = "transient") -> dict:
-    return {"status": status, "detail": "HTTP 0: read operation timed out", "retry_reasons": ["old failure"]}
+    return {
+        "status": status,
+        "detail": "HTTP 0: read operation timed out",
+        "retry_reasons": ["old failure"],
+        "max_age_minutes": 17,
+        "rest_api_version": "3.29",
+    }
 
 
 def _grouped_reference(
@@ -130,7 +151,7 @@ def _grouped_reference(
         "view_count": len(views),
         "requested_renders": ["png"] if requested_renders is None else requested_renders,
         "render_capability": (
-            {"selected_tier": "png_high", "selected_api_version": None}
+            {"selected_tier": "png_high", "selected_api_version": None, "configured_api_version": "3.29"}
             if render_capability is None
             else render_capability
         ),
@@ -150,7 +171,9 @@ def _current_view(luid: str) -> dict:
     }
 
 
-def _configure(monkeypatch, tmp_path: Path, session: _Session, grouped: Path, out: Path, run: Path) -> None:
+def _configure(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    monkeypatch, tmp_path: Path, session: _Session, grouped: Path, out: Path, run: Path
+) -> None:
     monkeypatch.setattr(
         oracle,
         "resolve_env",
@@ -186,6 +209,7 @@ def _configure(monkeypatch, tmp_path: Path, session: _Session, grouped: Path, ou
 
 
 def test_recovery_exports_only_eligible_failed_legs(monkeypatch, tmp_path):
+    """Retry independently failed legs without exporting successful siblings."""
     run = _run_dir(tmp_path)
     grouped = _grouped_reference(
         tmp_path / "migrations" / "workbooks" / "workbook",
@@ -248,6 +272,7 @@ def test_recovery_exports_only_eligible_failed_legs(monkeypatch, tmp_path):
 
 
 def test_zero_eligible_recovery_does_not_sign_in_or_create_batch(monkeypatch, tmp_path):
+    """A verified all-success grouped manifest is genuine no-work."""
     run = _run_dir(tmp_path)
     grouped = _grouped_reference(
         tmp_path / "migrations" / "workbooks" / "workbook",
@@ -264,6 +289,7 @@ def test_zero_eligible_recovery_does_not_sign_in_or_create_batch(monkeypatch, tm
 
 
 def test_data_truncated_is_not_a_recovery_target(monkeypatch, tmp_path):
+    """Only render truncation belongs to the retry-eligible vocabulary."""
     run = _run_dir(tmp_path)
     grouped = _grouped_reference(
         tmp_path / "migrations" / "workbooks" / "workbook",
@@ -280,6 +306,7 @@ def test_data_truncated_is_not_a_recovery_target(monkeypatch, tmp_path):
 
 
 def test_svg_recovery_uses_recorded_api_override_without_serverinfo_probe(monkeypatch, tmp_path):
+    """Preserve the selected SVG API without spending a capability probe."""
     run = _run_dir(tmp_path)
     view = _view(LUID_1, data=_ok_data(LUID_1))
     view["svg"] = _failed()
@@ -327,6 +354,7 @@ def test_svg_recovery_uses_recorded_api_override_without_serverinfo_probe(monkey
     ],
 )
 def test_recovery_refuses_malformed_or_transplanted_grouped_evidence(monkeypatch, tmp_path, mutate, message):
+    """Refuse malformed evidence, stale bytes and a different configured source."""
     run = _run_dir(tmp_path)
     grouped = _grouped_reference(
         tmp_path / "migrations" / "workbooks" / "workbook",
@@ -343,6 +371,7 @@ def test_recovery_refuses_malformed_or_transplanted_grouped_evidence(monkeypatch
 
 
 def test_recovery_requires_absolute_run_and_in_run_empty_output(monkeypatch, tmp_path):
+    """Reject an output outside the explicit allocated run."""
     run = _run_dir(tmp_path)
     grouped = _grouped_reference(
         tmp_path / "migrations" / "workbooks" / "workbook",
@@ -353,3 +382,387 @@ def test_recovery_requires_absolute_run_and_in_run_empty_output(monkeypatch, tmp
 
     with pytest.raises(oracle.OracleRecoveryRefusal, match="must be below"):
         oracle.main()
+
+
+class _ExportSession(_Session):
+    """Script only the export boundary; use the real capture writers and manifest sink."""
+
+    version = "3.21"
+
+    def __init__(self, outcomes: dict[tuple[str, str], str]) -> None:
+        super().__init__()
+        self.outcomes = outcomes
+        self.calls = []
+
+    def export(self, path: str, **options) -> tuple[bytes, float, dict]:
+        """Record actual API/cache arguments and return the scripted final leg outcome."""
+        route = urlsplit(path)
+        luid = route.path.split("/")[-2]
+        kind = "data" if route.path.endswith("/data") else "svg"
+        age = int(parse_qs(route.query)["maxAge"][0])
+        self.calls.append((luid, kind, options.get("api") or self.version, age))
+        assert (luid, kind) in self.outcomes, "an unselected successful sibling was exported again"
+        status = self.outcomes[luid, kind]
+        if status != "ok":
+            raise oracle.ExportFailed("synthetic export refusal", status, "synthetic final failure")
+        return (
+            CSV if kind == "data" else SVG,
+            0.01,
+            {"content_type": "text/csv", "response_framing": oracle.FRAMING_CONTENT_LENGTH},
+        )
+
+
+def _pipeline_cli(monkeypatch, session: _ExportSession, views: list[dict], args: list[str]) -> int:
+    """Exercise main(), not a manually assembled capture manifest."""
+    monkeypatch.setattr(
+        oracle,
+        "resolve_env",
+        lambda _path: {
+            "TABLEAU_SERVER_URL": "https://example.test",
+            "TABLEAU_SITE": "site",
+            "TABLEAU_PAT_NAME": "synthetic-pat",
+            "TABLEAU_PAT_SECRET": "synthetic-secret",
+            "TABLEAU_REST_API_VERSION": session.version,
+        },
+    )
+    monkeypatch.setattr(oracle, "TableauSession", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(oracle, "select_views", lambda *_args, **_kwargs: (views, {WB_1: "Workbook"}))
+    monkeypatch.setattr(oracle.tableau_view_types, "resolve_and_stamp", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", ["capture_tableau_oracle.py", "--workers", "1", *args])
+    return oracle.main()
+
+
+def _ordinary_batch(  # pylint: disable=too-many-arguments
+    monkeypatch, run: Path, name: str, outcomes: dict, *, age: int = 5, renders=True
+) -> Path:
+    batch = run / name
+    session = _ExportSession(outcomes)
+    views = [_current_view(luid) for luid in dict.fromkeys(luid for luid, _kind in outcomes)]
+    report = {
+        "configured_api_version": "3.21",
+        "selected_tier": "svg",
+        "selected_api_version": "3.29",
+        "capability_complete": True,
+        "max_age_minutes": age,
+        "probe_views_tried": 1,
+        "probe_view_luids": [views[0]["id"]],
+        "server": {"rest_api_version": "3.29"},
+    }
+    monkeypatch.setattr(oracle.capability, "probe_render_capability", lambda *_args, **_kwargs: report)
+    args = ["--out", str(batch), "--max-age", str(age)]
+    if renders:
+        args.append("--reference-best")
+    assert _pipeline_cli(monkeypatch, session, views, args) in {0, 1, 3, 5}
+    manifest = json.loads((batch / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert manifest["schema"] == "tableau-oracle/1"
+    assert all(call[2:] == (("3.21" if call[1] == "data" else "3.29"), age) for call in session.calls)
+    return batch
+
+
+def _merge_batches(tmp_path: Path, batches: list[Path]) -> Path:
+    migrations = tmp_path / "migrations" / "workbooks"
+    (migrations / "workbook").mkdir(parents=True, exist_ok=True)
+    assert grp.run(batches, migrations, dry_run=False) == 0
+    return migrations / "workbook" / "reference"
+
+
+def _retry_batch(monkeypatch, run: Path, grouped: Path, name: str, outcomes: dict) -> tuple[int, _ExportSession]:
+    def no_probe(*_args, **_kwargs):
+        pytest.fail("recovery must reuse recorded policy, never probe capability or serverinfo")
+
+    monkeypatch.setattr(oracle.capability, "probe_render_capability", no_probe)
+    monkeypatch.setattr(oracle.capability, "server_info", no_probe)
+    session = _ExportSession(outcomes)
+    code = _pipeline_cli(
+        monkeypatch,
+        session,
+        [_current_view(LUID_1), _current_view(LUID_2)],
+        ["--run", str(run), "--retry-failed-from", str(grouped), "--out", str(run / name)],
+    )
+    return code, session
+
+
+def test_ordinary_group_retry_group_retry_retains_svg_policy_and_success_bytes(monkeypatch, tmp_path):
+    """One SVG gap deliberately persists across the first recovery and regrouping."""
+    run = _run_dir(tmp_path)
+    initial = _ordinary_batch(
+        monkeypatch,
+        run,
+        "initial",
+        {(LUID_1, "data"): "ok", (LUID_1, "svg"): "transient", (LUID_2, "data"): "ok", (LUID_2, "svg"): "transient"},
+    )
+    original = {path: path.read_bytes() for path in initial.rglob("*") if path.is_file()}
+    grouped = _merge_batches(tmp_path, [initial])
+    code, first = _retry_batch(
+        monkeypatch, run, grouped, "retry-1", {(LUID_1, "svg"): "ok", (LUID_2, "svg"): "transient"}
+    )
+    assert code == 1
+    assert first.calls == [(LUID_1, "svg", "3.29", 5), (LUID_2, "svg", "3.29", 5)]
+    first_manifest = json.loads((run / "retry-1" / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert isinstance(first_manifest["render_capability"], dict), "recovery lost the reused capability policy"
+    assert first_manifest["render_capability"]["probe_performed"] is False
+    grouped = _merge_batches(tmp_path, [initial, run / "retry-1"])
+    code, second = _retry_batch(monkeypatch, run, grouped, "retry-2", {(LUID_2, "svg"): "ok"})
+    assert code == 0
+    assert second.calls == [(LUID_2, "svg", "3.29", 5)], "regrouping lost the selected SVG API override"
+    grouped = _merge_batches(tmp_path, [initial, run / "retry-1", run / "retry-2"])
+    final = json.loads((grouped / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert final["render_capability"]["selected_tier"] == "svg", "package-facing capability metadata was erased"
+    assert final["render_capability"]["selected_api_version"] == "3.29"
+    assert final["render_capability"]["probe_views_tried"] == 1
+    assert final["render_capability"]["probe_performed"] is False
+    assert final["render_capability"]["reused_from_grouped"]["inputs"]
+    assert final["requested_renders"] == ["svg"]
+    assert all(view["data"]["status"] == view["svg"]["status"] == "ok" for view in final["views"])
+    assert all(path.read_bytes() == payload for path, payload in original.items())
+    assert (grouped / "images" / f"{LUID_1}.svg").read_bytes() == SVG
+
+
+def test_grouped_retry_uses_failed_leg_max_age_not_newest_batch(monkeypatch, tmp_path):
+    """Grouping must not substitute a newer data batch's cache policy for a failed render."""
+    run = _run_dir(tmp_path)
+    initial = _ordinary_batch(monkeypatch, run, "initial", {(LUID_1, "data"): "ok", (LUID_1, "svg"): "transient"})
+    newer = _ordinary_batch(monkeypatch, run, "newer", {(LUID_1, "data"): "ok"}, age=60, renders=False)
+    grouped = _merge_batches(tmp_path, [initial, newer])
+    before = json.loads((grouped / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert before["max_age_minutes"] == 60
+    assert before["views"][0]["svg"]["max_age_minutes"] == 5
+    code, session = _retry_batch(monkeypatch, run, grouped, "retry", {(LUID_1, "svg"): "ok"})
+    assert code == 0
+    assert session.calls[0][3] == 5, "recovery substituted an unrelated newer batch's maxAge"
+    retried = json.loads((run / "retry" / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert retried["max_age_minutes"] == retried["views"][0]["svg"]["max_age_minutes"] == 5
+
+
+def test_render_only_recovery_logs_attempted_leg_success(monkeypatch, tmp_path, caplog):
+    """The real CLI reports successful SVG work without a synthetic data failure."""
+    run = _run_dir(tmp_path)
+    initial = _ordinary_batch(monkeypatch, run, "initial", {(LUID_1, "data"): "ok", (LUID_1, "svg"): "transient"})
+    grouped = _merge_batches(tmp_path, [initial])
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=oracle.LOG.name):
+        code, _session = _retry_batch(monkeypatch, run, grouped, "retry", {(LUID_1, "svg"): "ok"})
+    assert code == 0
+    progress = [message for message in caplog.messages if "1/1" in message and "View a" in message]
+    assert len(progress) == 1
+    assert "FAILED" not in progress[0], "successful render-only recovery logged a synthetic data failure"
+    assert "svg=ok" in progress[0]
+    manifest = json.loads((run / "retry" / grp.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert "data" not in manifest["views"][0]
+
+
+@pytest.mark.parametrize("status", ["mystery", 17, None, [], {}])
+def test_unknown_or_malformed_status_cannot_be_successful_no_work(monkeypatch, tmp_path, status):
+    """Unknown or malformed final statuses are refusals, never successful empty work."""
+    run = _run_dir(tmp_path)
+    initial = _ordinary_batch(monkeypatch, run, "initial", {(LUID_1, "data"): "transient"}, renders=False)
+    grouped = _merge_batches(tmp_path, [initial])
+    path = grouped / grp.MANIFEST_NAME
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["views"][0]["data"]["status"] = status
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(oracle.OracleRecoveryRefusal, match="status"):
+        _retry_batch(monkeypatch, run, grouped, "retry", {})
+    assert not (run / "retry").exists()
+
+
+def test_pre_session_manifest_refusal_never_echoes_unverified_identity(monkeypatch, tmp_path):
+    """A duplicate unverified identifier must not escape through the refusal traceback."""
+    run = _run_dir(tmp_path)
+    initial = _ordinary_batch(monkeypatch, run, "initial", {(LUID_1, "data"): "transient"}, renders=False)
+    grouped = _merge_batches(tmp_path, [initial])
+    path = grouped / grp.MANIFEST_NAME
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["views"][0]["view_luid"] = REFUSAL_VALUE
+    payload["views"].append(dict(payload["views"][0]))
+    payload["view_count"] = 2
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(oracle.OracleRecoveryRefusal) as excinfo:
+        _retry_batch(monkeypatch, run, grouped, "retry", {})
+    assert REFUSAL_VALUE not in "".join(traceback.format_exception(excinfo.value)), "refusal disclosed manifest text"
+    assert "manifest" in str(excinfo.value) and "view" in str(excinfo.value)
+
+
+def test_metadata_mismatch_refuses_before_exports_without_echoing_identity(monkeypatch, tmp_path):
+    """The post-sign-in revision check must not expose an identifier missing from current metadata."""
+    run = _run_dir(tmp_path)
+    initial = _ordinary_batch(monkeypatch, run, "initial", {(LUID_1, "data"): "transient"}, renders=False)
+    grouped = _merge_batches(tmp_path, [initial])
+    path = grouped / grp.MANIFEST_NAME
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["views"][0]["view_luid"] = REFUSAL_VALUE
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(oracle.OracleRecoveryRefusal, match="updatedAt") as excinfo:
+        _retry_batch(monkeypatch, run, grouped, "retry", {})
+    assert REFUSAL_VALUE not in "".join(traceback.format_exception(excinfo.value))
+    assert not (run / "retry").exists()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        "failed",
+        "source_credential",
+        "credential_reflected",
+        "unsupported_api_version",
+        "format_mismatch",
+        "not_attempted",
+        "not_captured",
+        "absent",
+        "stale_revision",
+        "not_copied",
+    ],
+)
+def test_known_nonretryable_statuses_ignore_retry_history(monkeypatch, tmp_path, status):
+    """Known refusals and unattempted legs remain valid no-work, even with retryable history."""
+    run = _run_dir(tmp_path)
+    view = _view(LUID_1, data={**_failed(status), "retry_reasons": ["transient", "session_lost"]})
+    grouped = _grouped_reference(tmp_path / "input", [view], requested_renders=[])
+    session = _Session()
+    _configure(monkeypatch, tmp_path, session, grouped, run / "retry", run)
+    assert oracle.main() == 0
+    assert session.signins == 0 and not (run / "retry").exists()
+
+
+@pytest.mark.parametrize("value", [None, True, 0, "5", 5.0])
+def test_selected_leg_cache_policy_requires_its_own_valid_integer(monkeypatch, tmp_path, value):
+    """A valid unrelated top-level value cannot license an absent/malformed selected-leg value."""
+    run = _run_dir(tmp_path)
+    initial = _ordinary_batch(monkeypatch, run, "initial", {(LUID_1, "data"): "transient"}, renders=False)
+    grouped = _merge_batches(tmp_path, [initial])
+    path = grouped / grp.MANIFEST_NAME
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if value is None:
+        manifest["views"][0]["data"].pop("max_age_minutes")
+    else:
+        manifest["views"][0]["data"]["max_age_minutes"] = value
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(oracle.OracleRecoveryRefusal, match="max_age_minutes"):
+        _retry_batch(monkeypatch, run, grouped, "retry", {})
+    assert not (run / "retry").exists()
+
+
+def test_actual_grouping_of_incompatible_selected_cache_policies_refuses_before_signin(monkeypatch, tmp_path):
+    """No splitting/scheduling workaround: one invocation requires one established cache policy."""
+    run = _run_dir(tmp_path)
+    first = _ordinary_batch(monkeypatch, run, "first", {(LUID_1, "data"): "transient"}, renders=False)
+    later = _ordinary_batch(monkeypatch, run, "later", {(LUID_2, "data"): "transient"}, age=60, renders=False)
+    grouped = _merge_batches(tmp_path, [first, later])
+    monkeypatch.setattr(_ExportSession, "sign_in", lambda _self: pytest.fail("policy refusal must precede sign-in"))
+    with pytest.raises(oracle.OracleRecoveryRefusal, match="incompatible max_age"):
+        _retry_batch(monkeypatch, run, grouped, "retry", {})
+
+
+@pytest.mark.parametrize("policy", ["missing-api", "wrong-api", "different-data-api", "boolean-count", "bad-intent"])
+def test_consumed_policy_or_count_uncertainty_refuses_before_network(monkeypatch, tmp_path, policy):
+    """Refuse unestablished/incompatible API policy and malformed count/intent fields."""
+    run = _run_dir(tmp_path)
+    grouped = _grouped_reference(tmp_path / "input", [_view(LUID_1, data=_failed())], requested_renders=[])
+    path = grouped / grp.MANIFEST_NAME
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if policy == "missing-api":
+        manifest["views"][0]["data"].pop("rest_api_version")
+    elif policy == "wrong-api":
+        manifest["views"][0]["data"]["rest_api_version"] = REFUSAL_VALUE
+    elif policy == "different-data-api":
+        manifest["views"][0]["data"]["rest_api_version"] = "3.21"
+    elif policy == "boolean-count":
+        manifest["view_count"] = True
+    else:
+        manifest["requested_renders"] = [REFUSAL_VALUE]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    session = _Session()
+    _configure(monkeypatch, tmp_path, session, grouped, run / "retry", run)
+    with pytest.raises(oracle.OracleRecoveryRefusal) as excinfo:
+        oracle.main()
+    assert REFUSAL_VALUE not in str(excinfo.value)
+    assert session.signins == 0 and not (run / "retry").exists()
+
+
+def test_new_source_credential_refusal_is_final_for_recovery(monkeypatch, tmp_path):
+    """A new credential refusal is not converted into another retry target."""
+    run = _run_dir(tmp_path)
+    initial = _ordinary_batch(monkeypatch, run, "initial", {(LUID_1, "data"): "transient"}, renders=False)
+    grouped = _merge_batches(tmp_path, [initial])
+    code, session = _retry_batch(monkeypatch, run, grouped, "retry", {(LUID_1, "data"): "source_credential"})
+    assert code == 2 and session.calls == [(LUID_1, "data", "3.21", 5)]
+    grouped = _merge_batches(tmp_path, [initial, run / "retry"])
+    code, session = _retry_batch(monkeypatch, run, grouped, "no-work", {})
+    assert code == 0 and session.signins == 0 and not (run / "no-work").exists()
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        r"\\synthetic.invalid\share\reference",
+        r"\\?\UNC\synthetic.invalid\share\reference",
+        r"\\.\C:\reference",
+        "https://synthetic.invalid/reference",
+    ],
+)
+def test_remote_source_is_lexically_refused_before_any_filesystem_call(monkeypatch, tmp_path, remote):
+    """Intercept remote filesystem calls so a failed guard cannot access a real remote share."""
+    run = _run_dir(tmp_path)
+    session = _Session()
+    _configure(monkeypatch, tmp_path, session, Path(remote), run / "retry", run)
+
+    def intercept(original):
+        def checked(path, *args, **kwargs):
+            assert (
+                "synthetic.invalid" not in str(path) and not str(path).startswith(r"\\.") and "https:" not in str(path)
+            ), "remote input reached a filesystem operation before lexical refusal"
+            return original(path, *args, **kwargs)
+
+        return checked
+
+    with monkeypatch.context() as guards:
+        for name in ("read_bytes", "lstat", "resolve", "exists", "is_file"):
+            guards.setattr(Path, name, intercept(getattr(Path, name)))
+        with pytest.raises(oracle.OracleRecoveryRefusal, match="local|remote|path"):
+            oracle.main()
+    assert session.signins == 0
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real local Windows junction boundary")
+@pytest.mark.parametrize("boundary", ["run", "run-ancestor", "source", "artifact", "output", "output-ancestor"])
+def test_recovery_refuses_real_junction_before_following_it(monkeypatch, tmp_path, boundary):
+    """Matching run.json and artifact bytes do not authorize following a Windows junction."""
+    run = _run_dir(tmp_path)
+    initial = _ordinary_batch(monkeypatch, run, "initial", {(LUID_1, "data"): "ok", (LUID_1, "svg"): "ok"})
+    grouped = _merge_batches(tmp_path, [initial])
+    out = run / "retry"
+    if boundary == "run":
+        alias, target = tmp_path / "001-recovery", run
+        run, out = alias, alias / "retry"
+    elif boundary == "run-ancestor":
+        alias, target = tmp_path / "alias-runs", run.parent
+        run = alias / run.name
+        out = run / "retry"
+    elif boundary == "source":
+        alias, target = tmp_path / "alias-reference", grouped
+        grouped = alias
+    elif boundary == "artifact":
+        alias, target = grouped / "images", grouped / "real-images"
+        alias.rename(target)
+    else:
+        target = run / "real-output"
+        target.mkdir()
+        alias = run / "alias-output"
+        out = alias if boundary == "output" else alias / "retry"
+    made = subprocess.run(
+        ["cmd", "/d", "/c", "mklink", "/J", str(alias), str(target)], capture_output=True, check=False
+    )
+    assert made.returncode == 0, "the local junction fixture must exist to test a no-follow boundary"
+    if boundary in {"run", "run-ancestor"}:
+        marker = target / "run.json" if boundary == "run" else target / run.name / "run.json"
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        payload["allocated_abs_path"] = str(run)
+        marker.write_text(json.dumps(payload), encoding="utf-8")
+    session = _Session()
+    _configure(monkeypatch, tmp_path, session, grouped, out, run)
+    try:
+        with pytest.raises(oracle.OracleRecoveryRefusal, match="reparse|junction"):
+            oracle.main()
+        assert session.signins == 0
+    finally:
+        alias.rmdir()

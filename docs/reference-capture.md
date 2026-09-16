@@ -153,7 +153,15 @@ python scripts/group_oracle_by_workbook.py --oracle-root /absolute/path/to/_runs
 the same configured Tableau server/site. `--run` is mandatory and must be an intact allocated run;
 `--out` must be absent or empty, must stay below that run, and must be distinct from all grouped
 evidence directories. A grouped manifest with **zero** eligible legs is explicit no-work: no sign-in,
-no export and no new batch.
+no export and no new batch. That verdict follows validation of the complete final-status vocabulary,
+request intent and consumed field types/counts: an unknown status is a refusal, **not** empty work.
+
+✅ Recovery rejects UNC, device and remote path spellings lexically, before filesystem access, and
+checks existing path components root-first with no-follow `lstat` and the shared reparse predicate.
+This includes the selected run and its ancestors, `run.json`, source manifests, referenced artifacts,
+and every existing output ancestor. A junction/symlink/reparse entry is refused rather than resolved
+and then read through. ⚠️ These are **snapshot checks**, not race-free handles or locking: do not
+move, replace or relink the tree while recovery is running.
 
 Only final leg statuses `transient`, exhausted `session_lost`, and render `truncated` are selected.
 Successful sibling legs suppress their own re-export even when another leg on the same view failed;
@@ -162,10 +170,32 @@ grouped `ok` artifact is still contained in the grouped evidence root and still 
 SHA-256 digest. Missing, changed or undigestible successes are a **re-merge** action, not a metered
 retry target.
 
+✅ API/cache policy belongs to the **selected failed leg**, not the newest batch's top-level
+metadata. Grouping preserves the winning leg's `rest_api_version`, deriving it from that capture's
+configuration and selected-tier override when the leg predates the field. Recovery requires each
+selected leg's recorded `max_age_minutes`; it never substitutes another batch's value. Missing or
+incompatible selected policies refuse **before sign-in**. Re-merge original batches first; if they
+never recorded the policy, recovery cannot establish it. A data leg must match the trusted configured
+API; render legs reuse their recorded API overrides. One invocation does not split incompatible
+policies into a new scheduler.
+
+Compatible prior `render_capability` evidence survives grouping after a partial or data-only batch;
+incompatible render/API reports refuse instead of silently choosing metadata that misdescribes the
+legs. Recovery marks a reused report with `probe_performed: false` and `reused_from_grouped`
+provenance. Its tier, original probe counts and other capability metadata remain **prior observations**,
+not a new capability probe. Repeated recovery/grouping retains this distinction in the package-facing
+grouped manifest.
+
+Progress reports only the selected recovery legs (`svg=ok`, for example), including their redacted
+failure details; it never invents a new successful data leg for render-only work. Ordinary capture's
+row-oriented progress is unchanged. Completions remain visible immediately, while the final manifest
+retains deterministic selected-view order. Refusals identify numbered manifests/views and field
+names rather than echoing unchecked values, paths or exception text.
+
 Recovery reuses the current trusted Tableau configuration for the server destination. The prior
 manifest's server/site, view LUID, workbook LUID and published-view `updated_at` must match current
 metadata before exports; the revision ceiling is only Tableau's published-view metadata, not an
-underlying datasource or extract freshness claim. `--workbook`, `--limit`, `--images`, `--svg`,
+underlying datasource/extract revision or atomic server-snapshot claim. `--workbook`, `--limit`, `--images`, `--svg`,
 `--pdf`, and `--reference-best` conflict with recovery; existing worker, timeout, attempt and retry
 budget tuning remains available. Consolidation and packaging still consume only ordinary grouped
 evidence; there is no new recovery manifest family.

@@ -970,6 +970,21 @@ What to check in the output:
   not metered recovery. `--workbook`, `--limit`, global render flags and `--reference-best` conflict
   with recovery; worker/timeout/attempt/budget tuning remains available. The freshness ceiling is the
   published view's `updatedAt` metadata only, not datasource or extract freshness.
+  - Use local, non-reparse paths. Recovery rejects remote/device spellings before filesystem access,
+    and checks the run, source/artifact paths and output ancestors without following junctions or
+    symlinks. Do not replace/relink files during these snapshot checks; no locking/atomicity is claimed.
+  - After changing capture tooling, **re-merge first** so each selected leg carries its own API policy.
+    A newer data-only batch's top-level `max_age_minutes` is not the older failed render's cache policy.
+    Missing or incompatible selected API/cache evidence refuses before sign-in; do not fill it from
+    an unrelated batch. A selected data leg's API must also match trusted configuration.
+  - Reused capability reports say `probe_performed: false` and retain `reused_from_grouped` provenance.
+    Their probe counts are historical, not fresh probes. Grouping preserves compatible reports and
+    refuses incompatible render/API policies before copying. No capability probing occurs in recovery.
+  - A render-only success prints its attempted leg (`svg=ok`), not a synthetic data failure. Unknown
+    statuses or malformed consumed fields refuse before a no-work verdict. Read refusal positions
+    against the numbered input manifests/views; diagnostic text deliberately omits unchecked values.
+    The [recovery contract](reference-capture.md#local-recovery-retries-start-from-grouped-evidence)
+    lists the precise policy, path and freshness boundaries.
 - **Three files in the package are load-bearing rather than incidental**, and the package's own
   `README.md` now names them: `report.json` (this unit's engine classification — what earns a
   datasource-only unit its `NOT_APPLICABLE`), `source-provenance.json` (the only trusted route to a

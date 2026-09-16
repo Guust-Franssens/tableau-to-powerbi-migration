@@ -20,6 +20,10 @@ from pathlib import Path
 
 import pytest
 
+# Preserve published regression IDs; these controls intentionally inspect the grouper's private seams.
+# The existing single-file regression inventory is deliberately not split during this correction.
+# pylint: disable=invalid-name,protected-access,too-many-lines
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import group_oracle_by_workbook as grp  # noqa: E402  # pylint: disable=wrong-import-position
@@ -38,7 +42,7 @@ REVISION = "2026-07-01T00:00:00Z"
 STAMP = "2026-08-18T14:46:00Z"
 
 
-def _view(
+def _view(  # pylint: disable=too-many-arguments
     luid: str, name: str, *, data: str, image: str | None, captured_at: str, updated_at: str | None = REVISION
 ) -> dict:
     """One view record, shaped exactly as `capture_tableau_oracle` writes it.
@@ -84,7 +88,7 @@ def _view(
     return view
 
 
-def _batch(
+def _batch(  # pylint: disable=too-many-arguments
     root: Path,
     name: str,
     views: list[dict],
@@ -174,6 +178,53 @@ def _three_batches(tmp_path: Path) -> list[Path]:
             captured_at="2026-08-18T14:46:00Z",
         ),
     ]
+
+
+def test_group_retains_winning_leg_api_instead_of_newest_configuration(tmp_path):
+    """An older failed render keeps its API when a newer data-only batch wins the top metadata."""
+    root = tmp_path / "captures"
+    first = _batch(
+        root, "first", [_view(LUID, "Daily Monitoring", data="failed", image="transient", captured_at=STAMP)]
+    )
+    later = _batch(
+        root,
+        "later",
+        [_view(LUID, "Daily Monitoring", data="ok", image=None, captured_at="2026-08-19T00:00:00Z")],
+        captured_at="2026-08-19T00:00:00Z",
+        requested_renders=[],
+    )
+    for batch, api in ((first, "3.21"), (later, "3.29")):
+        path = batch / grp.MANIFEST_NAME
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["rest_api_version"] = api
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+    migrations = _migrations(tmp_path)
+    assert grp.run([first, later], migrations, dry_run=False) == 0
+    grouped = _grouped(migrations)
+    assert grouped["rest_api_version"] == "3.29"
+    assert grouped["views"][0]["image"]["rest_api_version"] == "3.21"
+    assert grouped["views"][0]["data"]["rest_api_version"] == "3.29"
+
+
+def test_group_refuses_incompatible_render_policies_before_copying(tmp_path):
+    """Do not silently flatten incompatible policy evidence into one package-facing report."""
+    batches = _three_batches(tmp_path)
+    for batch, api in zip(batches[:2], ("3.21", "3.29")):
+        path = batch / grp.MANIFEST_NAME
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["rest_api_version"] = api
+        manifest["render_capability"] = {
+            "selected_tier": "png_high",
+            "selected_api_version": None,
+            "configured_api_version": api,
+        }
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+    original = {path: path.read_bytes() for batch in batches for path in batch.rglob("*") if path.is_file()}
+    migrations = _migrations(tmp_path)
+    with pytest.raises(verdict.OracleRecoveryRefusal, match="incompatible render/API"):
+        grp.run(batches, migrations, dry_run=False)
+    assert not (migrations / "airborne-services" / "reference").exists()
+    assert all(path.read_bytes() == payload for path, payload in original.items())
 
 
 def _by_luid(grouped: dict) -> dict[str, dict]:
@@ -821,6 +872,7 @@ def test_a_duplicate_capture_exits_2_rather_than_crashing(tmp_path):
 
 
 def test_the_oracle_flag_is_repeatable():
+    """The CLI retains every explicitly selected batch."""
     args = grp.build_parser().parse_args(["--oracle", "a", "--oracle", "b", "--oracle", "c"])
     assert [p.name for p in args.oracle] == ["a", "b", "c"]
 
@@ -855,6 +907,7 @@ def test_a_missing_manifest_in_ANY_batch_is_fatal_not_skipped(tmp_path):
 
 
 def test_the_grouping_report_names_every_batch_it_merged(tmp_path):
+    """The grouping report identifies the complete batch input set."""
     batches = _three_batches(tmp_path)
     grp.run(batches, _migrations(tmp_path), dry_run=False)
     report = json.loads((batches[-1] / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))
@@ -1128,7 +1181,7 @@ def test_an_older_render_of_a_DIFFERENT_revision_is_not_promoted_beside_newer_da
     assert view["image"]["source_batch"] == "new-revision", (
         "the newer revision's own FAILURE must be kept, rather than replaced by an older success"
     )
-    assert grp.render_unestablished(merged["views"], frozenset(merged["requested_renders"])) != [], (
+    assert grp.render_unestablished(merged["views"], frozenset(merged["requested_renders"])), (
         "the view reports an established render, so a fidelity defect on it would read as verified"
     )
 
@@ -1497,6 +1550,7 @@ def test_oracle_root_DISCOVERS_the_batch_nobody_listed(tmp_path):
 
 
 def test_oracle_root_DISCOVERS_canonical_run_layout(tmp_path):
+    """Discover batches beneath allocated run directories."""
     runs = tmp_path / "_runs"
     first = _batch(runs / "001", "oracle", [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)])
     second = _batch(runs / "002", "oracle", [_view(OTHER, "Summary", data="ok", image="ok", captured_at=STAMP)])
@@ -1508,6 +1562,7 @@ def test_oracle_root_DISCOVERS_canonical_run_layout(tmp_path):
 
 
 def test_listed_canonical_cousin_is_REFUSED_not_skipped(tmp_path):
+    """A known neighboring batch cannot be silently omitted."""
     runs = tmp_path / "_runs"
     first = _batch(runs / "001", "oracle", [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)])
     second = _batch(runs / "002", "oracle", [_view(OTHER, "Summary", data="ok", image="ok", captured_at=STAMP)])
@@ -1518,6 +1573,7 @@ def test_listed_canonical_cousin_is_REFUSED_not_skipped(tmp_path):
 
 
 def test_oracle_root_excludes_canonical_batch_path(tmp_path):
+    """Honor an explicitly excluded canonical batch path."""
     runs = tmp_path / "_runs"
     first = _batch(runs / "001", "oracle", [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)])
     second = _batch(runs / "002", "oracle", [_view(OTHER, "Summary", data="ok", image="ok", captured_at=STAMP)])
@@ -1539,6 +1595,7 @@ def test_a_root_that_is_ITSELF_a_capture_is_the_ordinary_layout(tmp_path):
 
 
 def test_an_artifact_outside_the_capture_batch_is_never_promoted_or_copied(tmp_path):
+    """Do not copy a referenced artifact from outside its capture root."""
     oracle = _batch(
         tmp_path,
         "outside-path",
@@ -1561,6 +1618,7 @@ def test_an_artifact_outside_the_capture_batch_is_never_promoted_or_copied(tmp_p
 
 @pytest.mark.parametrize("field", ["captured_at", "updated_at"])
 def test_blank_timestamp_is_malformed_not_a_revision_match(tmp_path, field):
+    """A blank timestamp cannot establish a cross-batch revision match."""
     batch = _batch(tmp_path, "blank-time", [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)])
     manifest_path = batch / grp.MANIFEST_NAME
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1616,6 +1674,7 @@ def test_a_non_batch_sibling_does_not_block_the_LISTED_mode(tmp_path):
 
 
 def test_the_source_flags_are_mutually_exclusive_and_one_is_required():
+    """Require exactly one batch-selection mode."""
     parser = grp.build_parser()
     args = parser.parse_args(["--oracle-root", "_oracle", "--exclude", "x", "--exclude", "y"])
     assert args.oracle_root.name == "_oracle" and [p.name for p in args.exclude] == ["x", "y"]
@@ -1626,6 +1685,7 @@ def test_the_source_flags_are_mutually_exclusive_and_one_is_required():
 
 
 def test_an_empty_discovery_root_says_so_rather_than_grouping_nothing(tmp_path):
+    """Empty discovery is explicit rather than a successful silent merge."""
     root = tmp_path / "_oracle"
     root.mkdir()
     with pytest.raises(FileNotFoundError) as excinfo:
@@ -2047,7 +2107,7 @@ UNTYPED_ON_PURPOSE = {
     "refusal": "an outcome record built by this script",
     # Read, but no JSON type it could carry changes the answer.
     "reference_required": "read for truthiness only -- every JSON type is meaningfully truthy or not",
-    "rest_api_version": "copied verbatim into the per-workbook manifest, never interpreted",
+    "selected_tier": "typed and closed by tableau_oracle_manifest.validated_render_capability before policy merging",
     # ⚠️ `data` and `row_count` used to be exempted here, each with the reason its own literal read
     # could not be decided by a type (`data` swept from RENDER_LEGS; `row_count` compared with `== 0`,
     # total over every JSON type). Since #480 neither is read by a literal `.get` in this module at

@@ -22,6 +22,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import ntpath
+import os
+import re
+import stat
 import time
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -32,6 +36,7 @@ from typing import Any
 # ladder's own numbers and the pure classifier that reads them.
 import tableau_render_capability as capability
 import tableau_view_types
+from bundle_corpus import is_reparse_entry
 from tableau_capture_policy import DEFAULT_MAX_AGE_MINUTES
 from tableau_env import redacted_note, scrub_tree
 from tableau_payload_facts import (
@@ -83,6 +88,22 @@ GROUPED_SCHEMA = "tableau-oracle-workbook/1"
 # manifest. Deliberately excludes source_credential, failed, format_mismatch, unsupported_api_version,
 # not_attempted, absent and ok; retry_reasons are history and are never selection input.
 RECOVERY_ELIGIBLE_STATUSES = frozenset({"transient", "session_lost", "truncated"})
+# Closed final vocabulary of the capture writer and the existing grouper. History is not a status.
+RECOVERY_FINAL_STATUSES = RECOVERY_ELIGIBLE_STATUSES | frozenset(
+    {
+        "ok",
+        "source_credential",
+        "failed",
+        "format_mismatch",
+        "unsupported_api_version",
+        "credential_reflected",
+        "not_attempted",
+        "not_captured",
+        "absent",
+        "stale_revision",
+        "not_copied",
+    }
+)
 
 # Tier -> the record key it is written under. `png` is spelled `image` for historical reasons: it was
 # the only render there was, and renaming the key now would orphan every manifest already captured.
@@ -105,16 +126,51 @@ class RecoverySource:
     digest: str
 
 
-def _json_type(value: Any) -> str:
-    return {dict: "object", list: "array", str: "string", int: "number", float: "number", bool: "boolean"}.get(
-        type(value), type(value).__name__
-    )
-
-
-def _require_str(path: Path, where: str, value: Any, *, allow_empty: bool = False) -> str:
+def _require_str(where: str, value: Any, *, allow_empty: bool = False) -> str:
     if not isinstance(value, str) or (not allow_empty and not value.strip()):
-        raise OracleRecoveryRefusal(f"{path}: {where} must be a JSON string, not {_json_type(value)}")
+        raise OracleRecoveryRefusal(f"{where} must be a JSON string")
     return value
+
+
+def require_local_recovery_path(path: Path) -> None:
+    """Reject remote/device spellings without touching the filesystem, including on non-Windows hosts."""
+    text = str(path).replace("\\", "/")
+    windows = PureWindowsPath(path)
+    is_reserved = getattr(ntpath, "isreserved", None)
+    reserved = is_reserved(windows) if is_reserved is not None else windows.is_reserved()
+    if any(
+        (
+            "\0" in text,
+            text.startswith(("//", "/??/", "/Device/", "/GLOBAL??/")),
+            re.match(r"^[A-Za-z][A-Za-z0-9+.-]+:", text),
+            windows.drive and (not re.fullmatch(r"[A-Za-z]:", windows.drive) or not windows.root),
+            os.name == "nt" and windows.root and not windows.drive,
+            reserved,
+            ".." in windows.parts,
+        )
+    ):
+        raise OracleRecoveryRefusal("recovery requires local paths without remote/device spelling or parent traversal")
+
+
+def check_recovery_path(path: Path) -> Path:
+    """Check every existing component root-first, without following reparse entries.
+
+    This is a snapshot check, not a handle-based or race-free filesystem guarantee.
+    """
+    require_local_recovery_path(path)
+    absolute = path.absolute()
+    for entry in reversed((absolute, *absolute.parents)):
+        try:
+            info = entry.lstat()
+        except FileNotFoundError:
+            break
+        except (OSError, ValueError):
+            raise OracleRecoveryRefusal("recovery path cannot be inspected without following it") from None
+        if is_reparse_entry(info):
+            raise OracleRecoveryRefusal("recovery path contains a junction, symlink or other reparse entry")
+        if entry != absolute and not stat.S_ISDIR(info.st_mode):
+            raise OracleRecoveryRefusal("recovery path ancestor is not a directory")
+    return absolute
 
 
 def _contained_artifact(root: Path, relative: Any) -> Path | None:
@@ -124,8 +180,8 @@ def _contained_artifact(root: Path, relative: Any) -> Path | None:
     candidate = Path(relative)
     if candidate.is_absolute() or windows.is_absolute() or windows.drive or windows.root or ".." in candidate.parts:
         return None
-    resolved_root = root.resolve()
-    resolved = (root / candidate).resolve()
+    resolved_root = check_recovery_path(root)
+    resolved = check_recovery_path(root / candidate)
     try:
         resolved.relative_to(resolved_root)
     except ValueError:
@@ -133,30 +189,104 @@ def _contained_artifact(root: Path, relative: Any) -> Path | None:
     return resolved
 
 
-def _verify_ok_artifact(path: Path, root: Path, view: dict[str, Any], leg: str) -> None:
+def _verify_ok_artifact(where: str, root: Path, view: dict[str, Any], leg: str) -> None:
     entry = view.get(leg)
     if not isinstance(entry, dict) or entry.get("status") != "ok":
         return
     relative = entry.get("path")
-    source = _contained_artifact(root, relative)
-    if source is None or not source.is_file():
+    try:
+        source = _contained_artifact(root, relative)
+        regular = source is not None and stat.S_ISREG(source.lstat().st_mode)
+    except OSError:
+        regular = False
+    if not regular:
         raise OracleRecoveryRefusal(
-            f"{path}: view {view.get('view_luid')!r} {leg} is already grouped as ok, but its artifact "
-            f"{relative!r} is missing or outside {root}. Re-run group_oracle_by_workbook before retrying; "
-            "a missing grouped success is a re-merge action, not a metered retry target."
+            f"{where} is grouped as ok, but its artifact is missing, non-regular or outside its root; "
+            "re-run group_oracle_by_workbook before retrying"
         )
     recorded = entry.get("sha256")
-    if not isinstance(recorded, str) or not recorded:
-        raise OracleRecoveryRefusal(
-            f"{path}: view {view.get('view_luid')!r} {leg} is grouped as ok but carries no sha256 digest. "
-            "Recovery cannot prove the artifact is still the success the grouped manifest names; re-merge first."
-        )
-    actual = hashlib.sha256(source.read_bytes()).hexdigest()
+    if not isinstance(recorded, str) or not re.fullmatch(r"[0-9a-f]{64}", recorded):
+        raise OracleRecoveryRefusal(f"{where} is grouped as ok but carries no usable sha256 digest; re-merge first")
+    try:
+        actual = hashlib.sha256(source.read_bytes()).hexdigest()
+    except OSError:
+        raise OracleRecoveryRefusal(f"{where} artifact is unreadable; re-merge first") from None
     if actual != recorded:
         raise OracleRecoveryRefusal(
-            f"{path}: view {view.get('view_luid')!r} {leg} artifact digest changed since grouping. "
-            "Recovery refuses before network work; re-run grouping so the evidence and digest agree."
+            f"{where} artifact digest changed since grouping; re-run grouping before any metered retry"
         )
+
+
+def _optional_positive_int(where: str, mapping: dict[str, Any], key: str) -> None:
+    if key in mapping and (not isinstance(mapping[key], int) or isinstance(mapping[key], bool) or mapping[key] < 1):
+        raise OracleRecoveryRefusal(f"{where} must be an integer of at least one")
+
+
+def _optional_api(where: str, value: Any) -> None:
+    if value is not None and (not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,3}\.[0-9]{1,3}", value)):
+        raise OracleRecoveryRefusal(f"{where} must be a numeric REST API version")
+
+
+def validated_render_capability(value: Any) -> dict[str, Any] | None:
+    """Validate the policy and the fields the verdict writer consumes before reusing a prior probe."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise OracleRecoveryRefusal("render_capability must be an object when present")
+    tier = value.get("selected_tier")
+    if tier is not None and (not isinstance(tier, str) or tier not in {"svg", "pdf", "png_high"}):
+        raise OracleRecoveryRefusal("render_capability.selected_tier is not a known tier")
+    for key in ("selected_api_version", "configured_api_version", "advertised_api_version"):
+        _optional_api(key, value.get(key))
+    _optional_positive_int("render_capability.max_age_minutes", value, "max_age_minutes")
+    server = value.get("server")
+    if server is not None:
+        if not isinstance(server, dict):
+            raise OracleRecoveryRefusal("render_capability.server must be an object")
+        for key in ("rest_api_version", "product_version"):
+            if server.get(key) is not None:
+                _require_str("render_capability.server version", server[key])
+    tiers = value.get("tiers", [])
+    if not isinstance(tiers, list) or any(not isinstance(entry, dict) for entry in tiers):
+        raise OracleRecoveryRefusal("render_capability.tiers must be an array of objects")
+    for entry in tiers:
+        reprobe = entry.get("floor_reprobe")
+        if reprobe is not None and not isinstance(reprobe, dict):
+            raise OracleRecoveryRefusal("render_capability.tiers floor_reprobe must be an object")
+    return value
+
+
+def capture_api_version(manifest: dict[str, Any], leg: str) -> str | None:
+    """The actual API used by a leg in an ordinary capture, not a newer batch's configuration."""
+    version = manifest.get("rest_api_version")
+    _optional_api("rest_api_version", version)
+    report = validated_render_capability(manifest.get("render_capability")) or {}
+    selected_leg = {"png_high": "image", "svg": "svg", "pdf": "pdf"}.get(report.get("selected_tier"))
+    if leg == selected_leg and report.get("selected_api_version") is not None:
+        return report["selected_api_version"]
+    return version
+
+
+def _validate_recovery_view(where: str, view: Any, root: Path) -> str:
+    if not isinstance(view, dict):
+        raise OracleRecoveryRefusal(f"{where} must be an object")
+    luid = _require_str(f"{where} view_luid", view.get("view_luid"))
+    _require_str(f"{where} workbook_luid", view.get("workbook_luid"))
+    _require_str(f"{where} updated_at", view.get("updated_at"))
+    _optional_positive_int(f"{where} max_age_minutes", view, "max_age_minutes")
+    for leg in LEG_TO_KIND:
+        if leg not in view:
+            continue
+        entry = view[leg]
+        if not isinstance(entry, dict):
+            raise OracleRecoveryRefusal(f"{where} {leg} leg must be an object")
+        status = _require_str(f"{where} {leg}.status", entry.get("status"))
+        if status not in RECOVERY_FINAL_STATUSES:
+            raise OracleRecoveryRefusal(f"{where} {leg}.status is not a known final status")
+        _optional_positive_int(f"{where} {leg}.max_age_minutes", entry, "max_age_minutes")
+        _optional_api(f"{where} {leg}.rest_api_version", entry.get("rest_api_version"))
+        _verify_ok_artifact(f"{where} {leg}", root, view, leg)
+    return luid
 
 
 def read_recovery_sources(paths: list[Path]) -> list[RecoverySource]:  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
@@ -167,60 +297,55 @@ def read_recovery_sources(paths: list[Path]) -> list[RecoverySource]:  # pylint:
     seen_workbooks: set[str] = set()
     seen_views: set[str] = set()
     identity: tuple[str, str] | None = None
-    for raw in paths:
-        path = raw if raw.name == "oracle-manifest.json" else raw / "oracle-manifest.json"
+    for number, raw in enumerate(paths, 1):
+        where = f"manifest {number}"
+        path = check_recovery_path(raw if raw.name == "oracle-manifest.json" else raw / "oracle-manifest.json")
         try:
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise OracleRecoveryRefusal(f"{where}: grouped recovery manifest is not a regular file")
             data = path.read_bytes()
             manifest = json.loads(data.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise OracleRecoveryRefusal(f"{path}: grouped recovery manifest is unreadable ({exc})") from exc
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            raise OracleRecoveryRefusal(f"{where}: grouped recovery manifest is unreadable") from None
         if not isinstance(manifest, dict):
-            raise OracleRecoveryRefusal(
-                f"{path}: grouped recovery manifest is a JSON {_json_type(manifest)}, not object"
-            )
+            raise OracleRecoveryRefusal(f"{where}: grouped recovery manifest must be an object")
         if manifest.get("schema") != GROUPED_SCHEMA:
-            raise OracleRecoveryRefusal(
-                f"{path}: recovery input must be grouped schema {GROUPED_SCHEMA!r}, not {manifest.get('schema')!r}"
-            )
-        server = _require_str(path, "server", manifest.get("server"))
-        site = _require_str(path, "site", manifest.get("site"), allow_empty=True)
+            raise OracleRecoveryRefusal(f"{where}: recovery input must use grouped schema tableau-oracle-workbook/1")
+        server = _require_str(f"{where} server", manifest.get("server"))
+        site = _require_str(f"{where} site", manifest.get("site"), allow_empty=True)
         current_identity = (server.strip().rstrip("/").casefold(), site.strip().casefold())
         if identity is None:
             identity = current_identity
         elif current_identity != identity:
-            raise OracleRecoveryRefusal(f"{path}: recovery inputs describe different Tableau server/site identities")
-        workbook = _require_str(path, "workbook_luid", manifest.get("workbook_luid"))
+            raise OracleRecoveryRefusal(f"{where}: recovery inputs describe different Tableau server/site identities")
+        workbook = _require_str(f"{where} workbook_luid", manifest.get("workbook_luid"))
         if workbook in seen_workbooks:
-            raise OracleRecoveryRefusal(f"{path}: workbook_luid {workbook!r} was supplied more than once")
+            raise OracleRecoveryRefusal(f"{where}: workbook_luid was supplied more than once")
         seen_workbooks.add(workbook)
         views = manifest.get("views")
         if not isinstance(views, list):
-            raise OracleRecoveryRefusal(f"{path}: grouped recovery manifest carries no views list")
-        if manifest.get("view_count") != len(views):
-            raise OracleRecoveryRefusal(
-                f"{path}: view_count {manifest.get('view_count')!r} does not match {len(views)} view record(s)"
-            )
+            raise OracleRecoveryRefusal(f"{where}: grouped recovery manifest carries no views list")
+        if (
+            not isinstance(manifest.get("view_count"), int)
+            or isinstance(manifest["view_count"], bool)
+            or manifest["view_count"] != len(views)
+        ):
+            raise OracleRecoveryRefusal(f"{where}: view_count must match the number of view records")
+        requested = manifest.get("requested_renders")
+        if not isinstance(requested, list) or any(
+            not isinstance(kind, str) or kind not in {"png", "svg", "pdf"} for kind in requested
+        ):
+            raise OracleRecoveryRefusal(f"{where}: requested_renders must be an array of known render kinds")
+        _optional_positive_int(f"{where} max_age_minutes", manifest, "max_age_minutes")
+        capture_api_version(manifest, "data")
         root = path.parent
-        for index, view in enumerate(views):
-            if not isinstance(view, dict):
-                raise OracleRecoveryRefusal(f"{path}: view {index} is a JSON {_json_type(view)}, not object")
-            luid = _require_str(path, f"view {index} view_luid", view.get("view_luid"))
+        for index, view in enumerate(views, 1):
+            luid = _validate_recovery_view(f"{where} view {index}", view, root)
+            if view["workbook_luid"] != workbook:
+                raise OracleRecoveryRefusal(f"{where} view {index}: workbook_luid disagrees with its grouped workbook")
             if luid in seen_views:
-                raise OracleRecoveryRefusal(f"{path}: view_luid {luid!r} was supplied more than once")
+                raise OracleRecoveryRefusal(f"{where} view {index}: view_luid was supplied more than once")
             seen_views.add(luid)
-            _require_str(path, f"view {index} workbook_luid", view.get("workbook_luid"))
-            _require_str(path, f"view {index} updated_at", view.get("updated_at"))
-            for leg in LEG_TO_KIND:
-                entry = view.get(leg)
-                if entry is None:
-                    continue
-                if not isinstance(entry, dict):
-                    raise OracleRecoveryRefusal(
-                        f"{path}: view {index} {leg} leg is a JSON {_json_type(entry)}, not object"
-                    )
-                _require_str(path, f"view {index} {leg}.status", entry.get("status"))
-                if entry.get("status") == "ok":
-                    _verify_ok_artifact(path, root, view, leg)
         sources.append(RecoverySource(path=path, root=root, manifest=manifest, digest=hashlib.sha256(data).hexdigest()))
     return sources
 
@@ -619,7 +744,14 @@ def data_empty_views(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return _named_views(records, empty_classification, "classification")
 
 
-def log_progress(index: int, total: int, record: dict[str, Any], redactor=None) -> None:
+def log_progress(
+    index: int,
+    total: int,
+    record: dict[str, Any],
+    redactor=None,
+    *,
+    selected_legs: frozenset[str] | None = None,
+) -> None:
     """One line per view: proof of rows captured, a loud zero, or a loud, classified failure.
 
     ⚠️ The console is the THIRD artifact, after the manifest and the files. A view NAME is response
@@ -638,6 +770,9 @@ def log_progress(index: int, total: int, record: dict[str, Any], redactor=None) 
     reports no row count, because there is none to report -- printing ``0`` would be the invented
     zero this module refuses everywhere else.
     """
+    if selected_legs is not None:
+        _log_recovery_progress(index, total, record, selected_legs, redactor)
+        return
     data = record.get("data", {})
     name = redacted_note(record.get("view_name"), redactor, limit=34)
     status = data.get("status")
@@ -681,6 +816,25 @@ def log_progress(index: int, total: int, record: dict[str, Any], redactor=None) 
         LOG.warning("  %2d/%d  %-34s FAILED (%s): %s", index, total, name, status, data.get("detail"))
 
 
+def _log_recovery_progress(index: int, total: int, record: dict[str, Any], selected: frozenset[str], redactor) -> None:
+    name = redacted_note(record.get("view_name"), redactor, limit=34)
+    summaries = []
+    complete = True
+    for leg in LEG_TO_KIND:
+        if leg not in selected:
+            continue
+        entry = record.get(leg) or {}
+        status = redacted_note(entry.get("status", ABSENT_LEG), redactor, limit=60)
+        summaries.append(f"{leg}={status}")
+        if entry.get("status") != "ok":
+            complete = False
+            summaries.append(redacted_note(entry.get("detail") or entry.get("reason"), redactor, limit=200))
+    if complete:
+        LOG.info("  %2d/%d  %-34s %s", index, total, name, "; ".join(summaries))
+    else:
+        LOG.warning("  %2d/%d  %-34s %s", index, total, name, "; ".join(summaries))
+
+
 def _render_statuses(record: dict[str, Any], requested: frozenset[str] = frozenset()) -> tuple[str, ...]:
     """Status of every RENDER leg for this view, judged against what was actually ASKED FOR.
 
@@ -719,13 +873,22 @@ def _render_statuses(record: dict[str, Any], requested: frozenset[str] = frozens
 
 
 def _partition(
-    records: list[dict[str, Any]], requested: frozenset[str] = frozenset()
+    records: list[dict[str, Any]],
+    requested: frozenset[str] = frozenset(),
+    selected: dict[str, frozenset[str]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Split records into the four sets the manifest and the exit code both read.
 
     One function so the sets cannot drift apart: they must all consult the same render legs, and the
     bug this replaces was three list comprehensions where only two had been taught about a new leg.
     """
+
+    def statuses_for(record: dict[str, Any]) -> tuple[str | None, ...]:
+        if selected is not None:
+            return tuple((record.get(leg) or {}).get("status") for leg in selected.get(record.get("view_luid"), ()))
+        return (record.get("data", {}).get("status"), *_render_statuses(record, requested))
+
+    statuses = {id(record): statuses_for(record) for record in records}
     ok = [r for r in records if r.get("data", {}).get("status") == "ok"]
     return {
         "ok": ok,
@@ -744,28 +907,16 @@ def _partition(
         "complete": [
             r
             for r in records
-            if r.get("data", {}).get("status") == "ok"
-            and not unassessable_reason(r)
-            and all(s == "ok" for s in _render_statuses(r, requested))
+            if statuses[id(r)] and all(status == "ok" for status in statuses[id(r)]) and not unassessable_reason(r)
         ],
-        "blocked": [
-            r
-            for r in records
-            if "source_credential" in {r.get("data", {}).get("status"), *_render_statuses(r, requested)}
-        ],
-        "failed": [
-            r
-            for r in records
-            if any(
-                status not in {"ok", "source_credential"}
-                for status in (r.get("data", {}).get("status"), *_render_statuses(r, requested))
-            )
-        ],
+        "blocked": [r for r in records if "source_credential" in statuses[id(r)]],
+        "failed": [r for r in records if any(status not in {"ok", "source_credential"} for status in statuses[id(r)])],
     }
 
 
-def _recovery_selected_legs(run: CaptureRun) -> dict[str, frozenset[str]]:
-    recovery = run.recovery or {}
+def _recovery_selected_legs(recovery: dict[str, Any] | None) -> dict[str, frozenset[str]] | None:
+    if recovery is None:
+        return None
     raw = recovery.get("selected_legs_by_view")
     if not isinstance(raw, dict):
         return {}
@@ -776,33 +927,11 @@ def _recovery_selected_legs(run: CaptureRun) -> dict[str, frozenset[str]]:
     }
 
 
-def _partition_recovery(
-    records: list[dict[str, Any]], selected: dict[str, frozenset[str]]
-) -> dict[str, list[dict[str, Any]]]:
-    """Split recovery records by the statuses of legs this recovery actually attempted."""
-
-    def statuses_for(record: dict[str, Any]) -> list[str | None]:
-        return [
-            (record.get(leg) or {}).get("status") for leg in selected.get(str(record.get("view_luid")), frozenset())
-        ]
-
-    statuses = {id(record): statuses_for(record) for record in records}
-    ok = [r for r in records if (r.get("data") or {}).get("status") == "ok"]
-    return {
-        "ok": ok,
-        "empty": [r for r in ok if empty_classification(r)],
-        "unassessable": [r for r in ok if unassessable_reason(r)],
-        "complete": [
-            r
-            for r in records
-            if statuses[id(r)] and all(status == "ok" for status in statuses[id(r)]) and not unassessable_reason(r)
-        ],
-        "blocked": [r for r in records if "source_credential" in statuses[id(r)]],
-        "failed": [r for r in records if any(status not in {"ok", "source_credential"} for status in statuses[id(r)])],
-    }
-
-
-def render_unestablished(records: list[dict[str, Any]], requested: frozenset[str]) -> list[dict[str, Any]]:
+def render_unestablished(
+    records: list[dict[str, Any]],
+    requested: frozenset[str],
+    selected: dict[str, frozenset[str]] | None = None,
+) -> list[dict[str, Any]]:
     """Views for which a render WAS requested and not one requested tier came back ``ok``.
 
     ⚠️ The defect class this exists for is a collapse, not a miscount: an absent ``image`` key used to
@@ -822,29 +951,15 @@ def render_unestablished(records: list[dict[str, Any]], requested: frozenset[str
         return []
     out = []
     for record in records:
-        legs = {kind: (record.get(_LEG_KEY[kind]) or {}).get("status") for kind in sorted(requested)}
-        if any(status == "ok" for status in legs.values()):
+        kinds = (
+            {LEG_TO_KIND[leg] for leg in selected.get(record.get("view_luid"), ()) if leg != "data"}
+            if selected is not None
+            else requested
+        )
+        legs = {kind: (record.get(_LEG_KEY[kind]) or {}).get("status") for kind in sorted(kinds)}
+        if not legs or any(status == "ok" for status in legs.values()):
             continue
         out.append({"view_luid": record.get("view_luid"), "view_name": record.get("view_name"), "renders": legs})
-    return out
-
-
-def render_unestablished_recovery(
-    records: list[dict[str, Any]], selected: dict[str, frozenset[str]]
-) -> list[dict[str, Any]]:
-    """Recovery render gaps, judged only against render legs selected for this retry batch."""
-    out = []
-    for record in records:
-        selected_renders = {
-            LEG_TO_KIND[leg]: (record.get(leg) or {}).get("status", ABSENT_LEG)
-            for leg in selected.get(str(record.get("view_luid")), frozenset())
-            if leg != "data"
-        }
-        if not selected_renders or any(status == "ok" for status in selected_renders.values()):
-            continue
-        out.append(
-            {"view_luid": record.get("view_luid"), "view_name": record.get("view_name"), "renders": selected_renders}
-        )
     return out
 
 
@@ -874,7 +989,6 @@ class CaptureRun:  # pylint: disable=too-many-instance-attributes
     requested_renders: frozenset[str] = frozenset()
     reference_required: bool = False
     max_age_minutes: int = DEFAULT_MAX_AGE_MINUTES
-    recovery: dict[str, Any] | None = None
 
 
 # One local over the limit, and it is `gate` -- the three version numbers that decide WHY a refused
@@ -885,6 +999,8 @@ def write_manifest(  # pylint: disable=too-many-locals
     run: CaptureRun,
     capability_report: dict[str, Any] | None = None,
     server_info: dict[str, Any] | None = None,
+    *,
+    recovery: dict[str, Any] | None = None,
 ) -> int:
     """Write the manifest and return the process exit code.
 
@@ -928,23 +1044,17 @@ def write_manifest(  # pylint: disable=too-many-locals
     # anything other than `_capture_data` must not be able to reach the manifest with uncertified
     # bytes named as evidence.
     records = withhold_uncertified_evidence(records)
-    recovery_selected = _recovery_selected_legs(run)
-    sets = (
-        _partition_recovery(records, recovery_selected)
-        if recovery_selected
-        else _partition(records, run.requested_renders)
-    )
+    recovery_selected = _recovery_selected_legs(recovery)
+    requested_renders = frozenset(recovery["requested_renders"]) if recovery is not None else run.requested_renders
+    max_age = recovery["max_age_minutes"] if recovery is not None else run.max_age_minutes
+    sets = _partition(records, requested_renders, recovery_selected)
     blocked, failed, complete = sets["blocked"], sets["failed"], sets["complete"]
     rendered = sum(1 for r in records if any(r.get(leg, {}).get("status") == "ok" for leg in ("image", "svg", "pdf")))
     # "Nothing rendered, and the credential explains ALL of it" -- the one case where an absent
     # reference is code 2's problem rather than code 5's.
     credential_only = rendered == 0 and bool(blocked) and len(blocked) == len(records)
     reference_missing = run.reference_required and rendered == 0 and not credential_only
-    unestablished = (
-        render_unestablished_recovery(records, recovery_selected)
-        if recovery_selected
-        else render_unestablished(records, run.requested_renders)
-    )
+    unestablished = render_unestablished(records, requested_renders, recovery_selected)
     empty_views = data_empty_views(records)
     gate = svg_gate(capability_report, server_info, run.env.get("TABLEAU_REST_API_VERSION"))
     _stamp_svg_gate(records, gate, run.session.redact_text)
@@ -954,7 +1064,7 @@ def write_manifest(  # pylint: disable=too-many-locals
         "server": run.env["TABLEAU_SERVER_URL"],
         "site": run.env["TABLEAU_SITE"],
         "rest_api_version": run.env.get("TABLEAU_REST_API_VERSION"),
-        "max_age_minutes": run.max_age_minutes,
+        "max_age_minutes": max_age,
         # The OTHER two numbers of the three-number reconciliation, so the evidence file answers
         # "could this site have done SVG at all?" on its own. `rest_api_version` above is the CLIENT
         # preference we sent; this is the ceiling the SERVER advertises, and `null` means it was not
@@ -988,7 +1098,7 @@ def write_manifest(  # pylint: disable=too-many-locals
         "image_ok": sum(1 for r in records if r.get("image", {}).get("status") == "ok"),
         "svg_ok": sum(1 for r in records if r.get("svg", {}).get("status") == "ok"),
         "pdf_ok": sum(1 for r in records if r.get("pdf", {}).get("status") == "ok"),
-        "requested_renders": sorted(run.requested_renders),
+        "requested_renders": sorted(requested_renders),
         "reference_required": run.reference_required,
         "reference_missing": reference_missing,
         # #423: views for which a render was REQUESTED and none was obtained. Counted AND named,
@@ -1008,8 +1118,8 @@ def write_manifest(  # pylint: disable=too-many-locals
         "elapsed_sec": round(time.perf_counter() - run.started, 1),
         "views": records,
     }
-    if run.recovery is not None:
-        manifest["recovery"] = run.recovery
+    if recovery is not None:
+        manifest["recovery"] = recovery
     manifest_path = run.out_dir / "oracle-manifest.json"
     # The manifest's own directory, ensured HERE rather than inherited as a side effect. It used to
     # exist only because `_capture_data` created `<out>/data/` before every export -- including the
