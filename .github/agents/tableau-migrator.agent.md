@@ -157,16 +157,8 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
    such row would silently re-scope six other table calcs. Give it the handover slice, the active
    contract and the reference bundle (path/tool/grade from the brief; default
    `migrations/workbooks/<name>/reference/`). **Name the mode** — triage / spot-check / sign-off are
-   different jobs. After bounded recovery, present a `REQUEST_REQUIRED` from
-   `oracle-grouping-report.json.manual_reference_handoff` exactly once, never a second list; printing
-   does not prove delivery. Required visuals with no selected tier still need originals; missing
-   revisions/local-copy/identity problems are repair gaps, never guessed targets. Keep the exact
-   accepted batch cohort: ordinary/reordered regrouping retains original request text, timestamp and
-   responses; changed cohorts or immutable state refuse, not reset. There record supplied/unknown
-   context, retained paths, source SHA, manual origin and actual image inspection. Keep pending
-   evidence outside package output/staging/retired trees; local non-reparse sources only. A
-   fresh `package_unit.py --reference <dir>` admits its unchanged manifest/hashes/kind/grade.
-   Construction is not `START_READY`.
+   different jobs. After bounded recovery, follow the
+   [manual-reference handoff](../../docs/reference-capture.md#one-manual-request-after-bounded-recovery).
 8. **Delegate to `pbi-semantic-builder`** with: the handover slice (its `requests[]` is the work
    queue), the emitted model path, the active contract (parser specs carry table-calc addressing in
    `worksheets[].encodings`) and the validator's model-side findings. Its job: prove the model loads,

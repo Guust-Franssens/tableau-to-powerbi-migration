@@ -216,6 +216,11 @@ original evidence outside an already edited/sealed package; admission is only th
 as described in the operator runbook. PNG/hash tests establish bytes and structure, **not** image
 inspection; an image-capable human/model must perform and record that qualification.
 
+Keep supplied references disjoint from package output, final, staging and retired paths; admit
+only local non-reparse roots and regular members. A fresh `package_unit.py --reference <dir>`
+preserves the original manifest, source/image hashes, kind and grade. Construction is not
+`START_READY`; the normal package checks still decide whether work may proceed.
+
 ✅ API/cache policy belongs to the **selected failed leg**, not the newest batch's top-level
 metadata. Grouping preserves the winning leg's `rest_api_version`, deriving it from that capture's
 configuration and selected-tier override when the leg predates the field. New ordinary captures

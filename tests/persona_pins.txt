@@ -454,7 +454,7 @@ d4c8d021b6e27e59433c5c23b5680b4dd0ee077ca799c1eeab2e065e33d00c6a  2. **Run the d
 288dd88f593b88c8189d493f920fa8b52c18b86dfa5a0f8e1be087062a6adf6e  4. **Triage before building.** From the spec or handover sli
 54de5766657768ca90323c5338bca867109220cca2e0b83294aed27eb2ea1060  5. **Published data source ~ resolve or preserve UNKNOWN.** 
 c3d2e1b71d53e0600a5a6c4738b1d727762d4648ce20a1c79de743ee7563e20b  6. **Live-source reachability (MANDATORY before building ~ n
-f294668718cb0d69e787159b2c6bf00660d04a13b86b2ec28b46fd611a70b207  7. **Delegate to `pbi-migration-validator` FIRST for triage.
+906402c57150652a732b6a4664cc1150a107ca6b97e76e663b6c848babdd7ef8  7. **Delegate to `pbi-migration-validator` FIRST for triage.
 eab88770d84c9792c0c605ea43999de3cd2097c5b8d0236d7c1259f3781f4413  8. **Delegate to `pbi-semantic-builder`** with: the handover
 0bd8fc440e81c24eb7090fa3abd7aeba3a0590d785b83328afd44f47e2f6c249  - Approvals land through `--approved-dax`, never by hand-edi
 2b5de341fdc8d077c85bf19931a750f7a7f6b58fefb7b5c7a168540a2caa09a5  - **The landing re-run is a BARRIER**: it deletes and recrea
