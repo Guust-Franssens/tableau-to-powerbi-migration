@@ -142,7 +142,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from datetime import datetime, timezone
 from pathlib import Path
 from pathlib import PureWindowsPath
@@ -1723,6 +1723,7 @@ class _RunInputs:  # pylint: disable=too-many-instance-attributes
     oracle_root: Path | None = None
     manifest: dict[str, Any] | None = None
     manual_reference_handoff: bool = False
+    manual_render_intents: list[dict[str, tuple[frozenset[str], bool]]] = dataclass_field(default_factory=list)
 
 
 _RESPONSE_FIELDS = (
@@ -1870,11 +1871,11 @@ def _read_grouping_report(path: Path) -> dict[str, Any] | None:
     return report
 
 
-def _prior_handoff(inputs: _RunInputs) -> dict[str, Any] | None:  # pylint: disable=too-many-locals,too-many-branches
+def _prior_handoff(batches: list[_Batch]) -> dict[str, Any] | None:  # pylint: disable=too-many-locals,too-many-branches
     """Read request context only beside already enumerated input batches."""
     found: list[dict[str, Any]] = []
-    cohort = {str(batch.directory) for batch in inputs.batches}
-    for batch in inputs.batches:
+    cohort = {str(batch.directory) for batch in batches}
+    for batch in batches:
         report = _read_grouping_report(batch.directory / UNMATCHED_REPORT)
         if report is None or "manual_reference_handoff" not in report:
             continue
@@ -1931,44 +1932,58 @@ def _prior_handoff(inputs: _RunInputs) -> dict[str, Any] | None:  # pylint: disa
     return merged
 
 
-def _manual_render_intent(batch: _Batch, view_luid: str) -> tuple[frozenset[str], bool]:
-    """Read this view's selected recovery legs without borrowing the capture-wide render union."""
+def _manual_render_intents(batch: _Batch) -> dict[str, tuple[frozenset[str], bool]]:
+    """Validate the complete selector/view relation once, before merging or skipping successful visuals."""
+    view_luids = {view["view_luid"] for view in batch.manifest["views"]}
     if "recovery" not in batch.manifest:
-        return (
-            frozenset(batch.manifest.get("requested_renders") or []),
-            bool(batch.manifest.get("reference_required")),
-        )
+        return {
+            luid: (
+                frozenset(batch.manifest.get("requested_renders") or []),
+                bool(batch.manifest.get("reference_required")),
+            )
+            for luid in view_luids
+        }
     recovery = batch.manifest.get("recovery")
     selected = recovery.get("selected_legs_by_view") if isinstance(recovery, dict) else None
-    legs = selected.get(view_luid) if isinstance(selected, dict) else None
     # The producer's tolerant selector parser drops malformed entries; a manual verdict cannot.
     if (
-        not isinstance(legs, list)
-        or not legs
-        or any(not isinstance(leg, str) or leg not in tableau_oracle_manifest.LEG_TO_KIND for leg in legs)
+        not isinstance(selected, dict)
+        or not view_luids.issubset(selected)
+        or any(
+            not isinstance(legs, list)
+            or not legs
+            or any(not isinstance(leg, str) or leg not in tableau_oracle_manifest.LEG_TO_KIND for leg in legs)
+            for legs in selected.values()
+        )
     ):
         raise MalformedCaptureManifest(
-            f"{batch.directory / MANIFEST_NAME}: recovery.selected_legs_by_view is unestablished for a view; "
+            f"{batch.directory / MANIFEST_NAME}: recovery.selected_legs_by_view is unestablished; "
             "restore its recorded selected legs before requesting screenshots."
         )
-    return (
-        frozenset(tableau_oracle_manifest.LEG_TO_KIND[leg] for leg in legs if leg != "data"),
-        False,
-    )
+    # Numeric completeness is not a visual-handoff requirement, but every render selection needs a record.
+    if any(luid not in view_luids and any(leg != "data" for leg in legs) for luid, legs in selected.items()):
+        raise MalformedCaptureManifest(
+            f"{batch.directory / MANIFEST_NAME}: recovery.selected_legs_by_view is unestablished: "
+            "a render-selected view has no view record; restore its capture record before requesting screenshots."
+        )
+    return {
+        luid: (
+            frozenset(tableau_oracle_manifest.LEG_TO_KIND[leg] for leg in selected[luid] if leg != "data"),
+            False,
+        )
+        for luid in view_luids
+    }
 
 
-def _manual_residuals(views: list[dict[str, Any]], batches: list[_Batch]) -> list[dict[str, Any]]:
-    """Union each view's ordinary and selected recovery intent, then reuse the producer census."""
+def _manual_residuals(
+    views: list[dict[str, Any]], batch_intents: list[dict[str, tuple[frozenset[str], bool]]]
+) -> list[dict[str, Any]]:
+    """Union already-validated per-view intent, then reuse the producer census."""
     missing = []
     for view in views:
         if any((view.get(leg) or {}).get("status") == "ok" for leg in ("image", "svg", "pdf")):
             continue
-        covering = [
-            batch
-            for batch in batches
-            if any(record.get("view_luid") == view.get("view_luid") for record in batch.manifest.get("views", []))
-        ]
-        intents = [_manual_render_intent(batch, view["view_luid"]) for batch in covering]
+        intents = [intent[view["view_luid"]] for intent in batch_intents if view["view_luid"] in intent]
         requested = frozenset(kind for kinds, _required in intents for kind in kinds)
         if requested:
             missing.extend(render_unestablished([view], requested))
@@ -2032,7 +2047,7 @@ def _manual_handoff(  # pylint: disable=too-many-locals,too-many-branches
                     }
                 )
             by_luid = {view.get("view_luid"): view for view in valid_views}
-            for residual in _manual_residuals(valid_views, inputs.batches):
+            for residual in _manual_residuals(valid_views, inputs.manual_render_intents):
                 view = by_luid.get(residual.get("view_luid"))
                 if not isinstance(view, dict):
                     repair_gaps.append(
@@ -2207,6 +2222,10 @@ def run(  # pylint: disable=too-many-locals,too-many-arguments
         )
     batch_dirs, excluded = resolve_batch_dirs(oracle, oracle_root, exclude)
     batches = load_batches(batch_dirs)
+    prior = _prior_handoff(batches)
+    manual_intents = (
+        [_manual_render_intents(batch) for batch in batches] if manual_reference_handoff or prior is not None else []
+    )
     manifest, roots, basis = merge_batches(batches)
     manifest["excluded_paths"] = sorted(str(path) for path in excluded)
     destinations, folder_count = index_destinations(migrations_root)
@@ -2271,9 +2290,16 @@ def run(  # pylint: disable=too-many-locals,too-many-arguments
         )
 
     inputs = _RunInputs(
-        batches, migrations_root, basis, dry_run, excluded, oracle_root, manifest, manual_reference_handoff
+        batches,
+        migrations_root,
+        basis,
+        dry_run,
+        excluded,
+        oracle_root,
+        manifest,
+        manual_reference_handoff,
+        manual_render_intents=manual_intents,
     )
-    prior = _prior_handoff(inputs)
     ctx = _Context(manifest=manifest, destinations=destinations, roots=roots, dry_run=dry_run)
     outcomes = _group_all(buckets, ctx)
     report_dir, grouping_report = _write_grouping_report(inputs, outcomes, prior)

@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import group_oracle_by_workbook as grp  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
 import test_package_filesystem as filesystem  # noqa: E402  # pylint: disable=wrong-import-position
+from png_fixtures import valid_png  # noqa: E402  # pylint: disable=wrong-import-position
 
 LUID = "0979a4f9-1111-2222-3333-444444444444"
 OTHER = "0979a4f9-5555-6666-7777-888888888888"
@@ -1350,6 +1352,143 @@ def test_manual_mixed_recovery_requests_only_render_selected_views(
 
 
 @pytest.mark.parametrize(
+    ("selected_leg", "render_kind"), [("data", None), ("image", "png"), ("svg", "svg"), ("pdf", "pdf")]
+)
+@pytest.mark.parametrize("present", ["data-only", "successful-visual", "empty"])
+@pytest.mark.parametrize("complete", [False, True], ids=["missing-record", "complete-records"])
+def test_manual_recovery_selector_record_relation_before_projection(  # pylint: disable=too-many-locals
+    tmp_path: Path, selected_leg: str, render_kind: str | None, present: str, complete: bool
+) -> None:
+    """A real failed capture cannot lose a selected visual; absent data-only records are not visual gaps."""
+    views = []
+    selected = {OTHER: [selected_leg]}
+    batch = tmp_path / "oracle" / "recovery"
+    if present != "empty":
+        views.append(
+            _view(
+                LUID,
+                "Existing View",
+                data="transient",
+                image="ok" if present == "successful-visual" else None,
+                captured_at=STAMP,
+            )
+        )
+        selected[LUID] = ["data", "image"] if present == "successful-visual" else ["data"]
+        if present == "successful-visual":
+            payload = valid_png()
+            views[0]["image"]["bytes"] = len(payload)
+            (batch / "images").mkdir(parents=True)
+            (batch / "images" / f"{LUID}.png").write_bytes(payload)
+    if complete:
+        view = _view(OTHER, "Selected View", data="transient", image=None, captured_at=STAMP)
+        if selected_leg != "data":
+            view.pop("data")
+            view[selected_leg] = {"status": "transient"}
+        views.append(view)
+    recovery = {
+        "requested_renders": sorted(
+            ({render_kind} if render_kind is not None else set())
+            | ({"png"} if present == "successful-visual" else set())
+        ),
+        "max_age_minutes": 1,
+        "selected_legs_by_view": selected,
+    }
+    capture = verdict.CaptureRun(
+        SimpleNamespace(reauth_count=0, retry_count=0, redact_text=str),
+        {"TABLEAU_SERVER_URL": "https://example.online.tableau.com", "TABLEAU_SITE": "acme"},
+        batch,
+        0.0,
+    )
+    assert verdict.write_manifest(views, capture, recovery=recovery) == (3 if views else 4)
+    original = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in batch.rglob("*") if path.is_file()}
+    migrations = _migrations(tmp_path)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(grp.__file__).resolve()),
+            "--oracle",
+            str(batch),
+            "--migrations",
+            str(migrations),
+            "--manual-reference-handoff",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    missing_render = not complete and render_kind is not None
+    assert result.returncode == (2 if missing_render else 0), result.stderr
+    if missing_render:
+        reason = r"recovery\.selected_legs_by_view is unestablished: a render-selected view has no view record"
+        assert re.search(reason, result.stderr), "a random CLI failure does not establish the named refusal"
+        with pytest.raises(grp.MalformedCaptureManifest, match=reason):
+            grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True)
+        assert not (batch / grp.UNMATCHED_REPORT).exists()
+        assert not (migrations / "airborne-services" / "reference").exists(), "refuse before grouping writes"
+    else:
+        handoff = json.loads((batch / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+        expected = [OTHER] if complete and render_kind is not None else []
+        assert [row["view_luid"] for row in handoff["rows"]] == expected
+        assert handoff["status"] == ("REQUEST_REQUIRED" if expected else "NO_VISUAL_GAPS")
+        assert handoff["repair_gaps"] == []
+        if expected:
+            assert handoff["rows"][0]["render_reasons"] == {render_kind: "transient"}
+        else:
+            assert handoff["requested_at"] is None
+            assert handoff["request"] == ""
+        if views:
+            assert set(_by_luid(_grouped(migrations))) == {view["view_luid"] for view in views}
+        if present == "successful-visual":
+            retained = migrations / "airborne-services" / "reference" / "images" / f"{LUID}.png"
+            assert retained.read_bytes() == valid_png()
+    assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in original.items())
+
+
+@pytest.mark.parametrize("opt_in", [False, True])
+def test_manual_incomplete_recovery_preserves_recorded_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, opt_in: bool
+) -> None:
+    """Revalidate before regrouping even without opt-in; never reset an existing request or response."""
+    views = [
+        _view(luid, name, data="transient", image="transient", captured_at=STAMP)
+        for luid, name in ((LUID, "First View"), (OTHER, "Second View"))
+    ]
+    recovery = {
+        "requested_renders": ["png"],
+        "max_age_minutes": 1,
+        "selected_legs_by_view": {LUID: ["image"], OTHER: ["image"]},
+    }
+    batch = tmp_path / "oracle" / "recovery"
+    capture = verdict.CaptureRun(
+        SimpleNamespace(reauth_count=0, retry_count=0, redact_text=str),
+        {"TABLEAU_SERVER_URL": "https://example.online.tableau.com", "TABLEAU_SITE": "acme"},
+        batch,
+        0.0,
+    )
+    assert verdict.write_manifest(views, capture, recovery=recovery) == 3
+    migrations = _migrations(tmp_path)
+    argv = ["group", "--oracle", str(batch), "--migrations", str(migrations)]
+    monkeypatch.setattr(sys, "argv", [*argv, "--manual-reference-handoff"])
+    assert grp.main() == 0
+    report_path = batch / grp.UNMATCHED_REPORT
+    report = json.loads(report_path.read_bytes())
+    handoff = report["manual_reference_handoff"]
+    assert [row["view_luid"] for row in handoff["rows"]] == [LUID, OTHER]
+    handoff["rows"][0]["manual_origin"] = "user-supplied original Tableau screenshot"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    assert verdict.write_manifest(views[:1], capture, recovery=recovery) == 3
+    original = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in tmp_path.rglob("*") if path.is_file()}
+    monkeypatch.setattr(sys, "argv", [*argv, "--manual-reference-handoff"] if opt_in else argv)
+    caplog.clear()
+
+    assert grp.main() == 2
+
+    assert "recovery.selected_legs_by_view is unestablished: a render-selected view has no view record" in caplog.text
+    assert all(hashlib.sha256(path.read_bytes()).hexdigest() == digest for path, digest in original.items())
+
+
+@pytest.mark.parametrize(
     "recovery",
     [
         pytest.param(None, id="null-recovery"),
@@ -1363,20 +1502,23 @@ def test_manual_mixed_recovery_requests_only_render_selected_views(
         pytest.param({"selected_legs_by_view": {LUID: [{"image": True}]}}, id="non-string-leg"),
     ],
 )
-@pytest.mark.parametrize("requested", [[], ["png"]], ids=["no-union", "visual-union"])
+@pytest.mark.parametrize("state", ["no-union", "visual-union", "successful-visual", "empty"])
 def test_manual_unestablished_recovery_selector_is_a_named_refusal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     recovery: dict | list | None,
-    requested: list[str],
+    state: str,
 ) -> None:
-    """An unreadable selection must neither waive a visual gap nor borrow another view's union."""
+    """Validate malformed selections even when no residual-view loop would run."""
+    view = _view(
+        LUID, "Unassessable", data="transient", image="ok" if state == "successful-visual" else None, captured_at=STAMP
+    )
     batch = _batch(
         tmp_path / "oracle",
         "recovery",
-        [_view(LUID, "Unassessable", data="transient", image=None, captured_at=STAMP)],
-        requested_renders=requested,
+        [] if state == "empty" else [view],
+        requested_renders=[] if state == "no-union" else ["png"],
     )
     path = batch / grp.MANIFEST_NAME
     manifest = json.loads(path.read_bytes())
@@ -1396,6 +1538,7 @@ def test_manual_unestablished_recovery_selector_is_a_named_refusal(
     assert grp.main() == 2
     assert "recovery.selected_legs_by_view is unestablished" in caplog.text
     assert not (batch / grp.UNMATCHED_REPORT).exists()
+    assert not (migrations / "airborne-services" / "reference").exists()
     assert path.read_bytes() == original
 
 
@@ -2935,8 +3078,8 @@ UNTYPED_ON_PURPOSE = {
     "context": "validated as original UNKNOWN context; supplied declarations belong in the response fields",
     "delivery_status": "must remain UNKNOWN in _validate_prior_handoff; printing is never proof of delivery",
     "oracle_dirs": "validated by _prior_handoff as the exact order-insensitive cohort; never dereferenced",
-    "recovery": "validated by _manual_render_intent only when needed for a manual verdict; ordinary merge is unchanged",
-    "selected_legs_by_view": "per-view list validated against producer legs by _manual_render_intent",
+    "recovery": "validated before merging by _manual_render_intents for a manual verdict; ordinary merge is unchanged",
+    "selected_legs_by_view": "complete selector/view relation and producer legs validated by _manual_render_intents",
     # Read, but no JSON type it could carry changes the answer.
     "reference_required": "read for truthiness only -- every JSON type is meaningfully truthy or not",
     "selected_tier": "typed and closed by tableau_oracle_manifest.validated_render_capability before policy merging",
