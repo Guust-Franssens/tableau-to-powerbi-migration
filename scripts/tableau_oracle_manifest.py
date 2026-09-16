@@ -159,7 +159,7 @@ def _verify_ok_artifact(path: Path, root: Path, view: dict[str, Any], leg: str) 
         )
 
 
-def read_recovery_sources(paths: list[Path]) -> list[RecoverySource]:
+def read_recovery_sources(paths: list[Path]) -> list[RecoverySource]:  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     """Read completed grouped workbook manifests and verify every grouped ok artifact still matches."""
     if not paths:
         raise OracleRecoveryRefusal("--retry-failed-from requires at least one grouped workbook manifest")
@@ -175,7 +175,9 @@ def read_recovery_sources(paths: list[Path]) -> list[RecoverySource]:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise OracleRecoveryRefusal(f"{path}: grouped recovery manifest is unreadable ({exc})") from exc
         if not isinstance(manifest, dict):
-            raise OracleRecoveryRefusal(f"{path}: grouped recovery manifest is a JSON {_json_type(manifest)}, not object")
+            raise OracleRecoveryRefusal(
+                f"{path}: grouped recovery manifest is a JSON {_json_type(manifest)}, not object"
+            )
         if manifest.get("schema") != GROUPED_SCHEMA:
             raise OracleRecoveryRefusal(
                 f"{path}: recovery input must be grouped schema {GROUPED_SCHEMA!r}, not {manifest.get('schema')!r}"
@@ -213,12 +215,15 @@ def read_recovery_sources(paths: list[Path]) -> list[RecoverySource]:
                 if entry is None:
                     continue
                 if not isinstance(entry, dict):
-                    raise OracleRecoveryRefusal(f"{path}: view {index} {leg} leg is a JSON {_json_type(entry)}, not object")
+                    raise OracleRecoveryRefusal(
+                        f"{path}: view {index} {leg} leg is a JSON {_json_type(entry)}, not object"
+                    )
                 _require_str(path, f"view {index} {leg}.status", entry.get("status"))
                 if entry.get("status") == "ok":
                     _verify_ok_artifact(path, root, view, leg)
         sources.append(RecoverySource(path=path, root=root, manifest=manifest, digest=hashlib.sha256(data).hexdigest()))
     return sources
+
 
 # A view whose `/data` export SUCCEEDED and carried no data rows (#471). A per-view flag and NOT a
 # status: the HTTP call genuinely succeeded, and `status` drives the exit code plus the
@@ -787,7 +792,7 @@ def render_unestablished(records: list[dict[str, Any]], requested: frozenset[str
 
 
 @dataclass(frozen=True)
-class CaptureRun:
+class CaptureRun:  # pylint: disable=too-many-instance-attributes
     """Where and when one capture happened -- the provenance half of the manifest.
 
     Bundled because ``write_manifest`` needs all four together and nothing else needs any of them

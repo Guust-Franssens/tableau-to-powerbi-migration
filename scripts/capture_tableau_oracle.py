@@ -168,7 +168,6 @@ from tableau_env import (  # noqa: E402  # pylint: disable=wrong-import-position
 # The verdict layer: records -> manifest -> exit code. It imports nothing from here, so the pair is
 # acyclic; it takes the session duck-typed for its two counters and the redactor.
 from tableau_oracle_manifest import (  # noqa: E402  # pylint: disable=wrong-import-position
-    KIND_TO_LEG,
     LEG_TO_KIND,
     NOT_ATTEMPTED,
     RECOVERY_ELIGIBLE_STATUSES,
@@ -976,7 +975,7 @@ def _base_view_record(view: dict[str, Any], max_age: int) -> dict[str, Any]:
     }
 
 
-def capture_recovery_view(
+def capture_recovery_view(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     session: TableauSession,
     view: dict[str, Any],
     out_dir: Path,
@@ -1544,7 +1543,7 @@ def _capture_worker(
                 return
 
 
-def _capture_selected_views(  # pylint: disable=too-many-arguments,too-many-locals
+def _capture_selected_views(  # pylint: disable=too-many-arguments,too-many-locals,too-many-branches
     session: TableauSession,
     views: list[dict[str, Any]],
     *,
@@ -1799,7 +1798,9 @@ def _validate_recovery_paths(run_dir: Path, out_dir: Path, sources: list[Recover
     if not _same_or_beneath(resolved_out, run_dir):
         raise OracleRecoveryRefusal(f"--out {out_dir} must be below the selected --run {run_dir}")
     source_roots = [source.root.resolve() for source in sources]
-    if resolved_out in source_roots or any(root in resolved_out.parents or resolved_out in root.parents for root in source_roots):
+    if resolved_out in source_roots or any(
+        root in resolved_out.parents or resolved_out in root.parents for root in source_roots
+    ):
         raise OracleRecoveryRefusal("--out must be distinct from every grouped evidence directory")
     if out_dir.exists() and any(out_dir.iterdir()):
         raise OracleRecoveryRefusal(f"--out {out_dir} already exists and is not empty; recovery never deletes evidence")
@@ -1876,7 +1877,7 @@ def _recovery_targets(sources: list[RecoverySource]) -> tuple[dict[str, frozense
     return by_luid, wants, next(iter(max_ages), DEFAULT_MAX_AGE_MINUTES)
 
 
-def _build_recovery_plan(session: TableauSession, sources: list[RecoverySource], env: dict[str, str]) -> _RecoveryPlan:
+def _build_recovery_plan(session: TableauSession, sources: list[RecoverySource]) -> _RecoveryPlan:  # pylint: disable=too-many-locals
     legs_by_luid, wants, max_age = _recovery_targets(sources)
     if not legs_by_luid:
         return _RecoveryPlan([], {}, wants, {}, max_age, {"sources": _recovery_source_metadata(sources)})
@@ -1908,7 +1909,11 @@ def _build_recovery_plan(session: TableauSession, sources: list[RecoverySource],
         "sources": _recovery_source_metadata(sources),
         "eligible_views": len(selected),
         "eligible_legs": sum(len(legs_by_luid[view["id"]]) for view in selected),
-        "workbook_names": {key: value for key, value in workbook_names.items() if key in {v.get('workbook', {}).get('id') for v in selected}},
+        "workbook_names": {
+            key: value
+            for key, value in workbook_names.items()
+            if key in {v.get("workbook", {}).get("id") for v in selected}
+        },
     }
     return _RecoveryPlan(selected, legs_by_luid, wants, api_overrides, max_age, metadata)
 
@@ -1929,7 +1934,7 @@ def _recovery_source_metadata(sources: list[RecoverySource]) -> dict[str, Any]:
     }
 
 
-def main() -> int:  # pylint: disable=too-many-locals
+def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     """Capture the oracle for every selected view.
 
     Exit codes: ``0`` all selected views captured, ``1`` partial non-credential failure,
@@ -1952,7 +1957,12 @@ def main() -> int:  # pylint: disable=too-many-locals
             conflicts.append("--workbook")
         if args.limit:
             conflicts.append("--limit")
-        for flag, active in (("--images", args.images), ("--svg", args.svg), ("--pdf", args.pdf), ("--reference-best", args.reference_best)):
+        for flag, active in (
+            ("--images", args.images),
+            ("--svg", args.svg),
+            ("--pdf", args.pdf),
+            ("--reference-best", args.reference_best),
+        ):
             if active:
                 conflicts.append(flag)
         if conflicts:
@@ -1970,7 +1980,8 @@ def main() -> int:  # pylint: disable=too-many-locals
         preliminary_legs, _preliminary_wants, _preliminary_max_age = _recovery_targets(recovery_sources)
         if not preliminary_legs:
             LOG.info(
-                "recovery no-work: 0 retry-eligible leg(s) in %d grouped manifest(s); no sign-in, export or batch created",
+                "recovery no-work: 0 retry-eligible leg(s) in %d grouped manifest(s); no sign-in, export "
+                "or batch created",
                 len(recovery_sources),
             )
             return 0
@@ -1991,7 +2002,7 @@ def main() -> int:  # pylint: disable=too-many-locals
 
         recovery_metadata = None
         if recovery_mode:
-            plan = _build_recovery_plan(session, recovery_sources, env)
+            plan = _build_recovery_plan(session, recovery_sources)
             views = plan.views
             workbook_names = {
                 (view.get("workbook") or {}).get("id"): (view.get("workbook") or {}).get("name")

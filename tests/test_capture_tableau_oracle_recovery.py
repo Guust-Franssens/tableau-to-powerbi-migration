@@ -151,7 +151,9 @@ def _configure(monkeypatch, tmp_path: Path, session: _Session, grouped: Path, ou
         },
     )
     monkeypatch.setattr(oracle, "TableauSession", lambda *_args, **_kwargs: session)
-    monkeypatch.setattr(oracle, "select_views", lambda *_args, **_kwargs: ([_current_view(LUID_1), _current_view(LUID_2)], {}))
+    monkeypatch.setattr(
+        oracle, "select_views", lambda *_args, **_kwargs: ([_current_view(LUID_1), _current_view(LUID_2)], {})
+    )
     monkeypatch.setattr(oracle.tableau_view_types, "resolve_and_stamp", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         sys,
@@ -190,13 +192,28 @@ def test_recovery_exports_only_eligible_failed_legs(monkeypatch, tmp_path):
         path = out_dir / "data" / f"{stem}.csv"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(CSV)
-        return {"status": "ok", "certification": "certified", "path": f"data/{stem}.csv", "sha256": __import__("hashlib").sha256(CSV).hexdigest(), "row_count": 1, "elapsed_sec": 0.0, "max_age_minutes": max_age}
+        return {
+            "status": "ok",
+            "certification": "certified",
+            "path": f"data/{stem}.csv",
+            "sha256": __import__("hashlib").sha256(CSV).hexdigest(),
+            "row_count": 1,
+            "elapsed_sec": 0.0,
+            "max_age_minutes": max_age,
+        }
 
     def render(_session, view_luid, path, kind, options):
         render_exports.append((view_luid, kind, options.max_age))
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(PNG)
-        return {"status": "ok", "format": kind, "path": f"images/{path.name}", "sha256": __import__("hashlib").sha256(PNG).hexdigest(), "elapsed_sec": 0.0, "max_age_minutes": options.max_age}
+        return {
+            "status": "ok",
+            "format": kind,
+            "path": f"images/{path.name}",
+            "sha256": __import__("hashlib").sha256(PNG).hexdigest(),
+            "elapsed_sec": 0.0,
+            "max_age_minutes": options.max_age,
+        }
 
     _configure(monkeypatch, tmp_path, session, grouped, out, run)
     monkeypatch.setattr(oracle, "_capture_data", data)
