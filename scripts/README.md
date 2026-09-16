@@ -28,6 +28,19 @@ If recovery is allowed, retry the **exact originating command and arguments**: r
 | `parse_tableau.py` | The deterministic parser: `.twb`/`.twbx`/`.tds`/`.tdsx` → `migration-spec.json`, validated against `docs/migration-spec.schema.json`. The contract every downstream agent reads. It flags prompt-injection-shaped untrusted workbook text in `limitations_encountered`; content is disclosed, never silently rewritten. | Once per workbook, before any agent work |
 | `prompt_injection.py` | Scans untrusted Tableau-derived contract text for high-precision prompt-injection shapes and returns high-severity disclosure limitations. Detection is deliberately not sanitisation, preserving customer source evidence. | Called by `parse_tableau.py` |
 
+### Run setup
+
+For each new site/folder/workbook/datasource, before stage writes run
+`python -B scripts\work_dirs.py <slug> --json`; external roots add
+`--runs-parent <parent>` (`--repo-root` alias). Allocation auto-attempts ignored
+`_MIGRATION.md`; a warning does not undo success.
+
+For an accepted existing/resumed run, setup runs
+`python -B scripts\work_dirs.py --select-run <absolute-existing-run>`. It migrates
+nothing. Never infer selection from the note, reselect at handoffs, or reallocate
+on refusal. Preserve collisions; lost markers need explicit recovery.
+Do not ask the human to generate the note.
+
 ## Migration pipeline
 
 | Script | What it does | Called by |

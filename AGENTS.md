@@ -196,16 +196,7 @@ workbook against a plan someone else made. Deciding **what** to migrate, **in wh
 where** happens up here: **the dispatcher decides and writes the brief; `tableau-migrator` reads the
 brief and executes.**
 
-### Step 0 — setup
-
-For each new site/folder/workbook/datasource, before stage writes run `python -B
-scripts/work_dirs.py <slug> --json`; external roots add `--runs-parent <parent>` (`--repo-root` alias).
-Allocation auto-attempts ignored `_MIGRATION.md`; a warning does not undo success.
-
-For an accepted existing/resumed run, setup runs `python -B scripts/work_dirs.py --select-run
-<absolute-existing-run>`. It migrates nothing. Never infer selection from the note, reselect at
-handoffs, or reallocate on refusal. Preserve collisions; lost markers need explicit recovery.
-Do not ask the human to generate the note.
+First: [run setup](scripts/README.md#run-setup).
 
 ### Step 1 — work out what you are actually pointing at
 
