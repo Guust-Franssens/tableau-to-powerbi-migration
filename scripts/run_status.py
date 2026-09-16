@@ -471,8 +471,19 @@ def _assemble_units(
         key = (package.kind, package.unit)
         candidates = units.get(key)
         if candidates is not None and key not in ambiguous_keys:
+            if candidates.package is not None:
+                package.scope = "UNSCOPED_PACKAGE"
+                findings.append(
+                    Finding(
+                        "DUPLICATE_PACKAGE_ASSOCIATION",
+                        "more than one package claims the same unambiguous unit; "
+                        "preserve and inspect the extra package",
+                        unit=package.unit,
+                    )
+                )
+                continue
             package.scope = "associated"
-            units.setdefault(key, UnitStatus(unit=package.unit, kind=package.kind)).package = package
+            candidates.package = package
         else:
             package.scope = "UNSCOPED_PACKAGE"
             code = (
@@ -562,9 +573,7 @@ def _next_action(
             "affected_units": sorted({package.unit or package.relative_path for package in unscoped}),
             "details": [package.as_dict() for package in unscoped],
         }
-    unbound = [
-        unit.unit for unit in units if unit.package is not None and unit.package.binding_state in {"unbound", "binding"}
-    ]
+    unbound = [unit.unit for unit in units if unit.package is not None and unit.package.binding_state == "unbound"]
     if unbound:
         return {
             "headline": "Bind retained packages through the existing package binding command; do not rebuild to bind.",

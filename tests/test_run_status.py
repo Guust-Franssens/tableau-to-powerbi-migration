@@ -175,6 +175,22 @@ def test_duplicate_and_kind_mismatch_do_not_safely_associate_a_package(tmp_path:
     assert any(finding["code"] == "AMBIGUOUS_UNIT_IDENTITY" for finding in payload["findings"])
 
 
+def test_duplicate_packages_for_one_unit_are_not_silently_dropped(tmp_path: Path) -> None:
+    run = _run(tmp_path)
+    _write_json(run / "bundle" / "report.json", {"workbooks": [{"name": "Book"}], "datasources": []})
+    _package(run / "packages" / "Book", "Book", "workbook", construction_status="ASSEMBLED")
+    _package(run / "packages" / "batch" / "BookCopy", "Book", "workbook", construction_status="ASSEMBLED")
+
+    result = _invoke(run, "--json")
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    scoped = next(unit for unit in payload["units"] if unit["unit"] == "Book")["package"]
+    assert scoped["relative_path"] == "packages/Book"
+    assert [package["relative_path"] for package in payload["unscoped_packages"]] == ["packages/batch/BookCopy"]
+    assert any(finding["code"] == "DUPLICATE_PACKAGE_ASSOCIATION" for finding in payload["findings"])
+
+
 def test_moved_or_malformed_run_record_is_nonzero_before_child_inventory(tmp_path: Path) -> None:
     run = _run(tmp_path, "001-original")
     moved = run.rename(run.parent / "001-moved")
