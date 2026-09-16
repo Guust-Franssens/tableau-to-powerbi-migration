@@ -1771,7 +1771,11 @@ def _safe_label(value: Any) -> str:
 
 
 def _handoff_key(row: dict[str, Any]) -> tuple[str, ...]:
-    return tuple(row.get(field) or "" for field in _HANDOFF_IDENTITY)
+    """Compare admitted identities using the merger's server/site equality without rewriting rows."""
+    source = _source_identity(row)
+    if source is None:
+        raise ManualHandoffConflict("manual-reference source identity is unestablished")
+    return (*source, *(row.get(field) or "" for field in _HANDOFF_IDENTITY[2:]))
 
 
 def _handoff_luid(value: Any) -> bool:
@@ -2118,7 +2122,11 @@ def _handoff_identity_problem(row: dict[str, Any], batches: list[_Batch]) -> str
                 continue
             identity = {**view, **{field: batch.manifest.get(field) for field in ("server", "site")}}
             # The merger owns the current revision; historic revisions do not change stable identity.
-            if any(identity.get(field) != row[field] for field in _HANDOFF_IDENTITY if field != "updated_at"):
+            if (
+                not _handoff_server(identity["server"])
+                or not _handoff_site(identity["site"])
+                or _handoff_key(identity)[:-1] != _handoff_key(row)[:-1]
+            ):
                 return "screenshot_identity_conflicting"
     return None
 

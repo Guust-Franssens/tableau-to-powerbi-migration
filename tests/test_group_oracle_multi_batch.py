@@ -1216,6 +1216,98 @@ def test_manual_conflicting_input_identity_is_repaired_without_changing_ordinary
     ]
 
 
+@pytest.mark.parametrize(
+    ("first_site", "second_site"), [("Acme", "acme"), ("acme", "Acme"), ("ACME", "aCmE"), ("", "")]
+)
+def test_manual_handoff_case_equivalent_sites_request_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, first_site: str, second_site: str
+) -> None:
+    """Source equality survives admission and a tied-batch reorder without rewriting the request."""
+    views = [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    first = _batch(tmp_path / "_oracle", "first", views, site=first_site)
+    second = _batch(tmp_path / "_oracle", "second", views, site=second_site)
+    batches = [first, second]
+    originals = {batch: (batch / grp.MANIFEST_NAME).read_bytes() for batch in batches}
+    migrations = _migrations(tmp_path)
+
+    assert grp.run(batches, migrations, dry_run=False) == 0
+    assert "manual_reference_handoff" not in json.loads((second / grp.UNMATCHED_REPORT).read_bytes())
+    assert grp.run(batches, migrations, dry_run=False, manual_reference_handoff=True) == 0
+    handoff = json.loads((second / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["status"] == "REQUEST_REQUIRED", "case-equivalent sites must not create an identity repair gap"
+    assert handoff["repair_gaps"] == []
+    assert [row["view_luid"] for row in handoff["rows"]] == [LUID]
+    assert handoff["rows"][0]["site"] == second_site
+    assert handoff["request"].count("\n- ") == 1
+
+    for selected, opt_in in ((batches, False), (list(reversed(batches)), True)):
+        caplog.clear()
+        assert grp.run(selected, migrations, dry_run=False, manual_reference_handoff=opt_in) == 0
+        repeated = json.loads((selected[-1] / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+        assert repeated["status"] == "ALREADY_REQUESTED"
+        assert repeated["repair_gaps"] == []
+        assert repeated["rows"] == handoff["rows"]
+        assert repeated["request"] == handoff["request"]
+        assert repeated["requested_at"] == handoff["requested_at"]
+        assert "Please supply" not in caplog.text
+    assert all((batch / grp.MANIFEST_NAME).read_bytes() == original for batch, original in originals.items())
+
+
+@pytest.mark.parametrize(
+    ("server", "site"),
+    [
+        ("https://example.online.tableau.com", "other"),
+        ("https://example.online.tableau.com", "acme-other"),
+        ("https://example.online.tableau.com", ""),
+        ("https://other.online.tableau.com", "acme"),
+        ("http://example.online.tableau.com", "acme"),
+        ("https://example.online.tableau.com:443", "acme"),
+    ],
+)
+def test_manual_handoff_different_sources_stay_refused(tmp_path: Path, server: str, site: str) -> None:
+    """Identical view/revision IDs never excuse a different site, server, scheme or explicit port."""
+    views = [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    first = _batch(tmp_path / "_oracle", "first", views, site="Acme")
+    second = _batch(tmp_path / "_oracle", "second", views, server=server, site=site)
+    batches = grp.load_batches([first, second])
+    row = {**views[0], "server": "https://example.online.tableau.com", "site": "Acme"}
+    assert grp._handoff_identity_problem(row, batches) == "screenshot_identity_conflicting"
+
+    with pytest.raises(grp.IncompatibleBatchSources, match="different Tableau sources"):
+        grp.run([first, second], _migrations(tmp_path), dry_run=False, manual_reference_handoff=True)
+    assert all(not (batch / grp.UNMATCHED_REPORT).exists() for batch in (first, second))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("site", " acme"),
+        ("site", "acme "),
+        ("site", "acme\n"),
+        ("server", "https://example.online.tableau.com/"),
+        ("server", "https://Example.online.tableau.com"),
+        ("server", "https://example.online.tableau.com "),
+    ],
+)
+def test_manual_handoff_normalization_does_not_admit_invalid_source_shapes(
+    tmp_path: Path, field: str, value: str
+) -> None:
+    """A valid merged row cannot hide an earlier source spelling outside the strict handoff schema."""
+    views = [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)]
+    first = _batch(tmp_path / "_oracle", "first", views, **{field: value})
+    second = _batch(tmp_path / "_oracle", "second", views)
+    migrations = _migrations(tmp_path)
+    assert grp.run([first, second], migrations, dry_run=False) == 0
+    assert grp.run([first, second], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    handoff = json.loads((second / grp.UNMATCHED_REPORT).read_bytes())["manual_reference_handoff"]
+    assert handoff["status"] == "REPAIR_REQUIRED"
+    assert handoff["rows"] == []
+    assert handoff["request"] == ""
+    assert handoff["repair_gaps"] == [
+        {"reason": "screenshot_identity_conflicting", "workbook_luid": WB_LUID, "view_luid": LUID}
+    ]
+
+
 @pytest.mark.parametrize("fault", ["null-handoff", "unsafe-status", "unsafe-reason", "unsafe-repair", "request-text"])
 def test_manual_malformed_or_conflicting_immutable_carrier_is_never_overwritten(tmp_path, fault):
     """Malformed current carriers refuse by the intended state assertion, not a type error."""
