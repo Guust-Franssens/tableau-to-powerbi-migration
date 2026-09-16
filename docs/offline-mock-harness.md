@@ -14,7 +14,7 @@ python -m pytest tests/test_mock_fabric.py tests/test_mock_tableau.py tests/test
 | [`tests/mocks/tableau.py`](../tests/mocks/tableau.py) | Tableau REST + GraphQL Metadata fake, served over a loopback socket |
 | [`tests/mocks/estate.py`](../tests/mocks/estate.py) | a synthetic estate built from this repo's real fixture workbooks, plus a stand-in for the deterministic engine |
 | [`tests/test_mock_fabric.py`](../tests/test_mock_fabric.py) | 51 fidelity self-tests for the Fabric fake |
-| [`tests/test_mock_tableau.py`](../tests/test_mock_tableau.py) | 21 fidelity self-tests for the Tableau fake |
+| [`tests/test_mock_tableau.py`](../tests/test_mock_tableau.py) | fidelity self-tests for the Tableau fake, including its narrow REST authority subset |
 | [`tests/test_e2e_offline.py`](../tests/test_e2e_offline.py) | 18 joined end-to-end tests (marked `slow`) |
 | [`tests/mutation_harness.py`](../tests/mutation_harness.py) | 22 deliberate mutations that prove those tests can fail |
 
@@ -101,6 +101,81 @@ client-side network failure that surfaces as `HTTP 0` (`drop_network`), which th
 The GraphQL structure answer is derived from the **served workbook bytes** with `xml.etree`, on
 purpose **independent of `parse_tableau`**: if the mock's expectations were produced by the parser
 under test, a parser bug would be invisible because both sides would move together.
+
+### Narrow REST authority subset (prerequisite for #562 / #649)
+
+✅ Direct router controls and the unmodified `assess_estate.Site` client over loopback cover:
+
+* `GET /api/<ver>/sites/<site-id>/users/<user-id>`: the signed-in `user-1` identity, with
+  `SiteAdministratorExplorer` (the least broad site-admin role admitted by provenance P).
+* `GET /api/<ver>/sites/<site-id>/datasources?filter=contentUrl:eq:<value>&pageSize=1000&pageNumber=1`:
+  exact, **case-sensitive** URL equality, before paging. String-valued pagination describes the
+  **filtered** set, including a complete zero. The existing unfiltered collection, server page cap
+  and optional object-shaped single row still work.
+* `GET /api/<ver>/sites/<site-id>/datasources/<luid>`: the **same current row** as the collection,
+  including nonempty `contentUrl` and `updatedAt`. This is not the separate `/content` download.
+
+Wrong site/user/LUID and extra route segments return 404; missing/invalid/expired tokens remain 401,
+injected permission refusals remain 403, and unsupported site REST methods return 405. Only one
+`contentUrl:eq:` filter is supported: wrong field/operator/case, blank values, delimiter-bearing
+values and multiple filters return 400, never all rows. Datasource query parameters other than
+`filter`, `pageSize` and `pageNumber` are also explicitly unsupported on the collection. User and
+datasource **detail routes reject every query parameter with 400**, including otherwise supported
+collection filters and paging keys. Direct-router controls and loopback requests through the
+unmodified assessment client pin those refusals.
+
+Paging validates **before slicing**: omitted parameters default to page 1 / size 100; blank,
+non-decimal, repeated (even identical), sub-one and out-of-range values return structured 400
+responses instead of successful partial/empty rows or uncaught exceptions. The request-size maximum
+is 1000; size 1001 returns 403 **before applying a smaller mock server cap**. Filter selection precedes
+both page-range validation and slicing. A complete zero is represented only by page 1; later pages
+are refused. Strict decimal spelling and duplicate-key rejection are test-subset choices, not live
+measurements.
+
+These are a **strict test subset**, not claims that the real service supports no other methods or
+filters. Endpoint/field shapes and page-size/range rules follow Tableau's
+[users](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_users_and_groups.htm),
+[datasources](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_data_sources.htm)
+and [filtering](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_concepts_filtering_and_sorting.htm)
+references; the added subset has not been measured against a live site.
+
+User-route examples use placeholder ids; tests compose relative route segments so REST examples do
+not resemble host-profile paths to the unchanged privacy gate.
+
+**Fixture authority is explicit, not synthesized from display names.** The datasource's configurable
+default `content_url="SalesMaster"` matches the case-preserved `derived-from` URL inside
+`published_datasource.twb`, which the estate serves as **Attic Copy**. It is neither the stale
+repository id `SalesMaster_oldname` nor the REST display name **Corporate Cities**. The direct fixture
+control independently reads that XML and checks the served workbook bytes remain unchanged.
+The default is a **singleton-fixture convenience**: every additional datasource must explicitly
+configure a nonempty `content_url`. LUIDs and content URLs must be unique across the entire site's
+configured datasource catalog, including across projects. Display names must be unique
+**case-insensitively within each project LUID**, even when content URLs differ. Distinct projects
+may reuse display names. These constraints follow the datasource REST reference above, Tableau's
+[same-project overwrite behaviour](https://help.tableau.com/current/pro/desktop/en-us/qs_revision_history.htm)
+and [same-name datasources in different projects](https://kb.tableau.com/HowTo?id=kA060000000LEDV);
+they have not been measured against a live site here.
+
+Invalid additions raise `ValueError` without changing the catalog. Datasource REST reads also
+validate the current mutable catalog: a later duplicate/blank LUID or content URL, or a same-project
+display-name collision after renaming or moving a datasource, produces a structured 500
+**mock-configuration error**, never a successful authority row. This is a harness invariant, not a
+claim about real Tableau's error response to an impossible catalog. Positive controls preserve
+same-named datasources in distinct projects, including projects with the same display name but
+different LUIDs. The filter-before-page control uses three distinct display names unrelated to the
+content URLs, with two nonmatching rows before **one uniquely identified match**, and separately
+checks unfiltered paging; it never relies on two LUIDs sharing a content URL.
+
+`publish_dependency` still supplies the **metadata-only** edges from **Sales Review** and **Ops
+Dashboard** to that shared datasource; it does not rewrite their fixture bytes or turn those
+metadata edges into source-bound provenance.
+
+❌ This proves **route fidelity only**, not successful production provenance, catalog completeness on
+a real site, or source identity across hosts. In particular, the unchanged E2E closes its mock before
+`run_estate` starts, its synthetic site/user ids are not UUIDs, and the published fixture's
+`https://tableau.contoso.com/t/Finance/…` origin is not the loopback site's origin. These are separate
+prerequisites for an authenticated, source-bound provenance positive control; adding REST routes
+does not waive them.
 
 ---
 
