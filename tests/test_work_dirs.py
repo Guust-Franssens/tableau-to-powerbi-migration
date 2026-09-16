@@ -1108,6 +1108,8 @@ def test_select_run_a_then_b_replaces_only_the_marked_note(tmp_path: Path) -> No
     "spelling",
     [
         "relative/_runs/001-acme",
+        r"\runs\001-acme",
+        r"\Device\HarddiskVolume1\_runs\001-acme",
         r"\\server\share\_runs\001-acme",
         r"\\?\C:\_runs\001-acme",
         "//server/share/_runs/001-acme",

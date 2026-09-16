@@ -1124,8 +1124,8 @@ def _selection_path_problem(value: str) -> str | None:
     normalized_separators = value.replace("\\", "/")
     if normalized_separators.startswith("//"):
         return "UNC, network and device paths are not accepted"
-    if not os.path.isabs(value):
-        return "the selected run path must be absolute"
+    if not _is_location_independent(value):
+        return "the selected run path must be absolute and independent of the current drive"
     if ".." in Path(value).parts:
         return "the selected run path must not contain '..' traversal"
     return None
