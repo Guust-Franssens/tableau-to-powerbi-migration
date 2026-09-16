@@ -246,6 +246,33 @@ def test_the_two_legs_may_come_from_DIFFERENT_batches(tmp_path):
     assert (view["image"]["status"], view["image"]["source_batch"]) == ("ok", "second")
 
 
+def test_an_ordinary_recovery_batch_with_only_attempted_legs_preserves_prior_successes(tmp_path):
+    """Capture recovery emits only attempted legs; grouping keeps earlier compatible winners."""
+    oracle = tmp_path / "_oracle"
+    recovery_view = _view(LUID, "Daily Monitoring", data="transient", image="ok", captured_at="2026-08-18T14:46:00Z")
+    recovery_view.pop("data")
+    batches = [
+        _batch(
+            oracle,
+            "full",
+            [
+                _view(LUID, "Daily Monitoring", data="ok", image="transient", captured_at="2026-08-17T20:17:00Z"),
+                _view(OTHER, "Availability Summary by Tail", data="ok", image="ok", captured_at="2026-08-17T20:17:00Z"),
+            ],
+            captured_at="2026-08-17T20:17:00Z",
+        ),
+        _batch(oracle, "recovery", [recovery_view], captured_at="2026-08-18T14:46:00Z"),
+    ]
+    migrations = _migrations(tmp_path)
+
+    assert grp.run(batches, migrations, dry_run=False) == 0
+
+    views = _by_luid(_grouped(migrations))
+    assert set(views) == {LUID, OTHER}
+    assert (views[LUID]["data"]["status"], views[LUID]["data"]["source_batch"]) == ("ok", "full")
+    assert (views[LUID]["image"]["status"], views[LUID]["image"]["source_batch"]) == ("ok", "recovery")
+
+
 def test_a_partial_re_run_cannot_overwrite_a_view_it_never_captured(tmp_path):
     """The destructive half. A retry batch covering ONE view used to replace the whole per-workbook
     manifest, so a sibling view's good artifacts vanished from the reference folder."""

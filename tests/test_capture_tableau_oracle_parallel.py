@@ -248,6 +248,52 @@ def test_first_view_progress_is_visible_while_later_sibling_is_blocked(  # pylin
     assert session.signouts == 1
 
 
+def test_later_worker_completion_is_visible_before_slow_selected_first_view(  # pylint: disable=too-many-locals
+    monkeypatch, tmp_path, caplog
+):
+    """Completion progress must not stay hidden behind a slow earlier selected view."""
+    session = _MainSession()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    later_progress = threading.Event()
+    progress = []
+    out_dir = tmp_path / "oracle"
+    views = [_view(LUID_1, WB_1, "Slow first"), _view(LUID_2, WB_2, "Fast later")]
+    real_progress = oracle.log_progress
+
+    def capture(_session, view, *_args, **_kwargs):
+        if view["id"] == LUID_1:
+            first_started.set()
+            assert release_first.wait(HANG_GUARD_SEC)
+        else:
+            assert first_started.wait(HANG_GUARD_SEC)
+        return _record(view)
+
+    def observe_progress(index, total, record, redactor):
+        real_progress(index, total, record, redactor)
+        progress.append(record["view_luid"])
+        if record["view_luid"] == LUID_2:
+            later_progress.set()
+
+    _configure_main(monkeypatch, session, views, out_dir)
+    monkeypatch.setattr(oracle, "capture_view", capture)
+    monkeypatch.setattr(oracle, "log_progress", observe_progress)
+
+    with caplog.at_level(logging.INFO, logger=oracle.LOG.name), ThreadPoolExecutor(max_workers=1) as harness:
+        run = harness.submit(oracle.main)
+        try:
+            assert later_progress.wait(HANG_GUARD_SEC), "later completed view must log before selected-first finishes"
+            assert progress == [LUID_2]
+            assert any("Fast later" in message and "1/2" in message for message in caplog.messages)
+            assert not (out_dir / "oracle-manifest.json").exists()
+        finally:
+            release_first.set()
+        assert run.result(timeout=HANG_GUARD_SEC) == 0
+    manifest = json.loads((out_dir / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert progress == [LUID_2, LUID_1]
+    assert [view["view_luid"] for view in manifest["views"]] == [LUID_1, LUID_2]
+
+
 @pytest.mark.parametrize("fault_site", ["enrichment", "log_progress"])
 def test_coordinator_interrupt_drains_before_signout(  # pylint: disable=too-many-locals,too-many-statements
     monkeypatch, tmp_path, fault_site
@@ -472,7 +518,7 @@ def test_workers_one_is_serial(monkeypatch, tmp_path):
         records = future.result(timeout=2)
 
     assert second_started.is_set()
-    assert [record["view_luid"] for record in records] == [LUID_1, LUID_2]
+    assert {record["view_luid"] for record in records} == {LUID_1, LUID_2}
 
 
 def test_different_workbooks_overlap_with_two_workers(monkeypatch, tmp_path):
@@ -495,7 +541,7 @@ def test_different_workbooks_overlap_with_two_workers(monkeypatch, tmp_path):
         release.set()
         records = future.result(timeout=2)
 
-    assert [record["view_luid"] for record in records] == [LUID_1, LUID_2]
+    assert {record["view_luid"] for record in records} == {LUID_1, LUID_2}
 
 
 def test_same_workbook_views_overlap_without_affinity(monkeypatch, tmp_path):
@@ -518,7 +564,7 @@ def test_same_workbook_views_overlap_without_affinity(monkeypatch, tmp_path):
         release.set()
         records = future.result(timeout=2)
 
-    assert [record["view_luid"] for record in records] == [LUID_1, LUID_2]
+    assert {record["view_luid"] for record in records} == {LUID_1, LUID_2}
 
 
 def test_partial_pool_startup_cancels_and_drains_submitted_workers(monkeypatch, tmp_path):
@@ -1628,10 +1674,10 @@ def _stable_record_facts(record: dict) -> dict:
     }
 
 
-def test_out_of_order_completion_reduces_to_original_records_progress_and_verdict(  # pylint: disable=too-many-locals
+def test_out_of_order_completion_keeps_manifest_order_but_logs_completion_order(  # pylint: disable=too-many-locals
     monkeypatch, tmp_path
 ):
-    """Completion order cannot change record order, progress order, hashes, statuses or exit code."""
+    """Completion order cannot change record order, hashes, statuses or exit code."""
     views = [_view(LUID_1, WB_1, "First"), _view(LUID_2, WB_2, "Second")]
     workbook_names = {WB_1: "Workbook One", WB_2: "Workbook Two"}
     progress: dict[str, list[str]] = {"serial": [], "parallel": []}
@@ -1675,7 +1721,8 @@ def test_out_of_order_completion_reduces_to_original_records_progress_and_verdic
     expected_order = [LUID_1, LUID_2]
     assert parallel_session.completion_order == [LUID_2, LUID_1]
     assert [record["view_luid"] for record in parallel_records] == expected_order
-    assert progress["serial"] == progress["parallel"] == expected_order
+    assert progress["serial"] == expected_order
+    assert set(progress["parallel"]) == set(expected_order)
     assert [_stable_record_facts(record) for record in parallel_records] == [
         _stable_record_facts(record) for record in serial_records
     ]

@@ -22,8 +22,9 @@ from __future__ import annotations
 import json
 import logging
 import time
+import hashlib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 # The capability ladder, for the SVG floor and the three-state "why was SVG refused" verdict. It
@@ -74,9 +75,150 @@ ABSENT_LEG = "absent"
 # now means one thing only, "not requested".
 NOT_ATTEMPTED = "not_attempted"
 
+# The schema written by group_oracle_by_workbook for per-workbook evidence. Recovery consumes this
+# output, not raw capture batches, so the existing merger remains the only cross-batch winner policy.
+GROUPED_SCHEMA = "tableau-oracle-workbook/1"
+
+# Final leg statuses that represent retryable transport/render failures in a completed grouped
+# manifest. Deliberately excludes source_credential, failed, format_mismatch, unsupported_api_version,
+# not_attempted, absent and ok; retry_reasons are history and are never selection input.
+RECOVERY_ELIGIBLE_STATUSES = frozenset({"transient", "session_lost", "truncated"})
+
 # Tier -> the record key it is written under. `png` is spelled `image` for historical reasons: it was
 # the only render there was, and renaming the key now would orphan every manifest already captured.
 _LEG_KEY = {"png": "image", "svg": "svg", "pdf": "pdf"}
+LEG_TO_KIND = {"data": "data", "image": "png", "svg": "svg", "pdf": "pdf"}
+KIND_TO_LEG = {value: key for key, value in LEG_TO_KIND.items()}
+
+
+class OracleRecoveryRefusal(ValueError):
+    """A completed grouped oracle manifest cannot be used as recovery input."""
+
+
+@dataclass(frozen=True)
+class RecoverySource:
+    """A grouped workbook manifest plus the verified facts recovery may consume."""
+
+    path: Path
+    root: Path
+    manifest: dict[str, Any]
+    digest: str
+
+
+def _json_type(value: Any) -> str:
+    return {dict: "object", list: "array", str: "string", int: "number", float: "number", bool: "boolean"}.get(
+        type(value), type(value).__name__
+    )
+
+
+def _require_str(path: Path, where: str, value: Any, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value.strip()):
+        raise OracleRecoveryRefusal(f"{path}: {where} must be a JSON string, not {_json_type(value)}")
+    return value
+
+
+def _contained_artifact(root: Path, relative: Any) -> Path | None:
+    if not isinstance(relative, str) or not relative.strip():
+        return None
+    windows = PureWindowsPath(relative)
+    candidate = Path(relative)
+    if candidate.is_absolute() or windows.is_absolute() or windows.drive or windows.root or ".." in candidate.parts:
+        return None
+    resolved_root = root.resolve()
+    resolved = (root / candidate).resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError:
+        return None
+    return resolved
+
+
+def _verify_ok_artifact(path: Path, root: Path, view: dict[str, Any], leg: str) -> None:
+    entry = view.get(leg)
+    if not isinstance(entry, dict) or entry.get("status") != "ok":
+        return
+    relative = entry.get("path")
+    source = _contained_artifact(root, relative)
+    if source is None or not source.is_file():
+        raise OracleRecoveryRefusal(
+            f"{path}: view {view.get('view_luid')!r} {leg} is already grouped as ok, but its artifact "
+            f"{relative!r} is missing or outside {root}. Re-run group_oracle_by_workbook before retrying; "
+            "a missing grouped success is a re-merge action, not a metered retry target."
+        )
+    recorded = entry.get("sha256")
+    if not isinstance(recorded, str) or not recorded:
+        raise OracleRecoveryRefusal(
+            f"{path}: view {view.get('view_luid')!r} {leg} is grouped as ok but carries no sha256 digest. "
+            "Recovery cannot prove the artifact is still the success the grouped manifest names; re-merge first."
+        )
+    actual = hashlib.sha256(source.read_bytes()).hexdigest()
+    if actual != recorded:
+        raise OracleRecoveryRefusal(
+            f"{path}: view {view.get('view_luid')!r} {leg} artifact digest changed since grouping. "
+            "Recovery refuses before network work; re-run grouping so the evidence and digest agree."
+        )
+
+
+def read_recovery_sources(paths: list[Path]) -> list[RecoverySource]:
+    """Read completed grouped workbook manifests and verify every grouped ok artifact still matches."""
+    if not paths:
+        raise OracleRecoveryRefusal("--retry-failed-from requires at least one grouped workbook manifest")
+    sources: list[RecoverySource] = []
+    seen_workbooks: set[str] = set()
+    seen_views: set[str] = set()
+    identity: tuple[str, str] | None = None
+    for raw in paths:
+        path = raw if raw.name == "oracle-manifest.json" else raw / "oracle-manifest.json"
+        try:
+            data = path.read_bytes()
+            manifest = json.loads(data.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise OracleRecoveryRefusal(f"{path}: grouped recovery manifest is unreadable ({exc})") from exc
+        if not isinstance(manifest, dict):
+            raise OracleRecoveryRefusal(f"{path}: grouped recovery manifest is a JSON {_json_type(manifest)}, not object")
+        if manifest.get("schema") != GROUPED_SCHEMA:
+            raise OracleRecoveryRefusal(
+                f"{path}: recovery input must be grouped schema {GROUPED_SCHEMA!r}, not {manifest.get('schema')!r}"
+            )
+        server = _require_str(path, "server", manifest.get("server"))
+        site = _require_str(path, "site", manifest.get("site"), allow_empty=True)
+        current_identity = (server.strip().rstrip("/").casefold(), site.strip().casefold())
+        if identity is None:
+            identity = current_identity
+        elif current_identity != identity:
+            raise OracleRecoveryRefusal(f"{path}: recovery inputs describe different Tableau server/site identities")
+        workbook = _require_str(path, "workbook_luid", manifest.get("workbook_luid"))
+        if workbook in seen_workbooks:
+            raise OracleRecoveryRefusal(f"{path}: workbook_luid {workbook!r} was supplied more than once")
+        seen_workbooks.add(workbook)
+        views = manifest.get("views")
+        if not isinstance(views, list):
+            raise OracleRecoveryRefusal(f"{path}: grouped recovery manifest carries no views list")
+        if manifest.get("view_count") != len(views):
+            raise OracleRecoveryRefusal(
+                f"{path}: view_count {manifest.get('view_count')!r} does not match {len(views)} view record(s)"
+            )
+        root = path.parent
+        for index, view in enumerate(views):
+            if not isinstance(view, dict):
+                raise OracleRecoveryRefusal(f"{path}: view {index} is a JSON {_json_type(view)}, not object")
+            luid = _require_str(path, f"view {index} view_luid", view.get("view_luid"))
+            if luid in seen_views:
+                raise OracleRecoveryRefusal(f"{path}: view_luid {luid!r} was supplied more than once")
+            seen_views.add(luid)
+            _require_str(path, f"view {index} workbook_luid", view.get("workbook_luid"))
+            _require_str(path, f"view {index} updated_at", view.get("updated_at"))
+            for leg in LEG_TO_KIND:
+                entry = view.get(leg)
+                if entry is None:
+                    continue
+                if not isinstance(entry, dict):
+                    raise OracleRecoveryRefusal(f"{path}: view {index} {leg} leg is a JSON {_json_type(entry)}, not object")
+                _require_str(path, f"view {index} {leg}.status", entry.get("status"))
+                if entry.get("status") == "ok":
+                    _verify_ok_artifact(path, root, view, leg)
+        sources.append(RecoverySource(path=path, root=root, manifest=manifest, digest=hashlib.sha256(data).hexdigest()))
+    return sources
 
 # A view whose `/data` export SUCCEEDED and carried no data rows (#471). A per-view flag and NOT a
 # status: the HTTP call genuinely succeeded, and `status` drives the exit code plus the
@@ -670,6 +812,7 @@ class CaptureRun:
     requested_renders: frozenset[str] = frozenset()
     reference_required: bool = False
     max_age_minutes: int = DEFAULT_MAX_AGE_MINUTES
+    recovery: dict[str, Any] | None = None
 
 
 # One local over the limit, and it is `gate` -- the three version numbers that decide WHY a refused
@@ -794,6 +937,8 @@ def write_manifest(  # pylint: disable=too-many-locals
         "elapsed_sec": round(time.perf_counter() - run.started, 1),
         "views": records,
     }
+    if run.recovery is not None:
+        manifest["recovery"] = run.recovery
     manifest_path = run.out_dir / "oracle-manifest.json"
     # The manifest's own directory, ensured HERE rather than inherited as a side effect. It used to
     # exist only because `_capture_data` created `<out>/data/` before every export -- including the
