@@ -552,6 +552,9 @@ _MANIFEST_TYPES: tuple[_Typed, ...] = (
     # Normalized (`.strip().casefold()`) for the cross-tenant identity check.
     _Typed("server", str),
     _Typed("site", str),
+    _Typed("max_age_minutes", int),
+    _Typed("rest_api_version", str),
+    _Typed("render_capability", dict),
     # `sorted()` over mixed element types raises, and the union feeds the render-intent report.
     _Typed("requested_renders", list, items=str),
 )
@@ -566,6 +569,7 @@ _VIEW_TYPES: tuple[_Typed, ...] = (
 )
 _LEG_TYPES: tuple[_Typed, ...] = (
     _Typed("status", str),
+    _Typed("rest_api_version", str),
     # Joined onto a Path (`root / relative`) and read for its `.name`. Measured: an object-valued
     # `path` raised `TypeError: unsupported operand type(s) for /` at exit 1.
     _Typed("path", str),
@@ -1021,6 +1025,10 @@ def _merge_one_view(  # pylint: disable=too-many-locals
             continue
         batch, view = winner
         merged[kind] = {**view[kind], "source_batch": batch.label}
+        # Preserve the winner's actual API, including a capability-selected SVG override.
+        # Recovery cannot reconstruct this from the unrelated newest batch's top-level metadata.
+        if merged[kind].get("rest_api_version") is None:
+            merged[kind].update(tableau_oracle_manifest.capture_api_policy(batch.manifest, kind))
     return merged, ties, stale
 
 
@@ -1068,15 +1076,46 @@ def _merge_render_intent(batches: list[_Batch], views: list[dict[str, Any]]) -> 
     }
 
 
+def _merge_render_capability(batches: list[_Batch]) -> dict[str, Any] | None:
+    """Retain an unambiguous prior probe; differing reports never block a per-leg merge."""
+    reports = [
+        (batch, report)
+        for batch in sorted(batches, key=lambda item: (item.captured_at, item.order), reverse=True)
+        if (report := tableau_oracle_manifest.validated_render_capability(batch.manifest.get("render_capability")))
+        is not None
+    ]
+    policies = {
+        (
+            report.get("selected_tier"),
+            tableau_oracle_manifest.capture_api_policy(
+                batch.manifest, {"png_high": "image"}.get(report.get("selected_tier"), report.get("selected_tier"))
+            )["rest_api_version"],
+        )
+        for batch, report in reports
+    }
+    if len(policies) > 1:
+        return None
+    if not reports:
+        return None
+    batch, report = reports[0]
+    retained = {**report, "source_batch": batch.label}
+    if report.get("selected_tier") is not None:
+        leg = {"png_high": "image"}.get(report["selected_tier"], report["selected_tier"])
+        retained["selected_api_version"] = tableau_oracle_manifest.capture_api_policy(batch.manifest, leg)[
+            "rest_api_version"
+        ]
+    return retained
+
+
 def merge_batches(batches: list[_Batch]) -> tuple[dict[str, Any], dict[str, Path], str]:  # pylint: disable=R0914
     """Fold every batch into ONE manifest, newest-successful-wins per view and per leg.
 
     Returns ``(merged manifest, label -> directory, the basis the ordering used)``.
 
-    The newest batch supplies the provenance fields (`server`, `site`, `rest_api_version`, the
-    `#403` capability block), because those describe the run that produced the winning artifacts more
-    often than any older one does. `batches` records every input in newest-first order, so a reader
-    can see what was merged rather than infer it from one `source_batch` at a time.
+    The newest batch supplies the top-level provenance fields. Each leg retains its own API/cache
+    policy; an unambiguous prior capability report survives a later batch that did not probe.
+    Differing report policies omit the aggregate report without discarding any leg evidence.
+    `batches` records every input in newest-first order.
 
     ⚠️ Render INTENT is the exception and is unioned instead -- see :func:`_merge_render_intent`.
 
@@ -1101,6 +1140,7 @@ def merge_batches(batches: list[_Batch]) -> tuple[dict[str, Any], dict[str, Path
     """
     roots = {batch.label: batch.directory for batch in batches}
     _refuse_incompatible_sources(batches)
+    capability_report = _merge_render_capability(batches)
     dated = [batch for batch in batches if all(_stamp(batch, view) for view in batch.manifest.get("views", []) or [{}])]
 
     by_view: dict[str, list[tuple[_Batch, dict[str, Any]]]] = {}
@@ -1131,6 +1171,7 @@ def merge_batches(batches: list[_Batch]) -> tuple[dict[str, Any], dict[str, Path
     merged["merge_order_ties"] = ties
     merged["merge_stale_candidates"] = stale
     merged.update(_merge_render_intent(batches, views))
+    merged["render_capability"] = capability_report
     return merged, roots, basis
 
 
@@ -1264,6 +1305,7 @@ def subset_manifest(manifest: dict[str, Any], workbook: str, views: list[dict[st
         "server": manifest.get("server"),
         "site": manifest.get("site"),
         "rest_api_version": manifest.get("rest_api_version"),
+        "max_age_minutes": manifest.get("max_age_minutes"),
         "workbook_name": workbook,
         "workbook_luid": next((v.get("workbook_luid") for v in views if v.get("workbook_luid")), None),
         "view_count": len(views),
@@ -1841,6 +1883,7 @@ def run(  # pylint: disable=too-many-locals
 
 
 REFUSALS = (
+    tableau_oracle_manifest.OracleRecoveryRefusal,
     FileNotFoundError,
     json.JSONDecodeError,
     DuplicateBatchLabel,
