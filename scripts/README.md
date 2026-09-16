@@ -43,6 +43,7 @@ If recovery is allowed, retry the **exact originating command and arguments**: r
 | `check_blank_placeholders.py` | Correlates deterministic-engine handover fallback entries (`report.json` → `workbooks[].model_translation_handoff`, with `handover/*.json` slices as a fallback for bundles that have no usable `report.json`) with TMDL columns/measures whose body is a bare `BLANK()`, then cross-references shipping PBIR filters and visual field bindings. Exit 0 clean / 1 placeholder only documented and unreferenced / 2 report depends on it / 3 incomplete scope (null or absent handoff, or BLANK() owners outside `workbooks[]`). An input it cannot read is counted (`handover_unreadable`) and reported, never raised. Wired into `run_estate.py` as a blocking gate only for report-referenced placeholders. |
 | `probe_bundle.py` | Rewrites an emitted PBIP bundle into a ONE-ROW probe variant (wraps each M partition's final expression in `Table.FirstN(..., 1)`, flips DirectQuery to import) so a credential can be proven against the SAME M the real model uses. If emitted M contains `Value.NativeQuery`, it still writes the probe artifact but exits `PROBE: OPERATOR_REQUIRED` (4) before any refresh is attempted. `--check-only` runs the M-parameter check alone; `--unwrap` and `--assert-clean` reverse it and prove a shipping bundle is probe-free. |
 | `run_estate.py` | **The tier-2 entry point for a whole folder of workbooks.** Runs the deterministic tier's `migrate_estate.py`, then supplies the three things its output contract does not: (1) a **real exit code** — the engine prints `[FAIL] Definition of done` and returns `0` anyway (`# Soft-but-loud: exit stays 0`), so a consumer gating on the exit code silently accepts a failed migration; (2) an **`--approved-dax` collision check** — that map is estate-GLOBAL and name-keyed, so one approval for a calc called `Calculation2` (Tableau's auto-generated default) lands in *every* model that reuses the name, and a differing formula is a wrong-DAX landing that never errors; (3) **per-workbook handover slices**, measured 83.4 KB → 5.7-24.5 KB, so the raw estate report never enters a subagent's context. Also writes `engine-output-receipt.json` (path/size/hash receipt for native engine artifacts, **plus the resolved engine root, `VERSION` and whether it was the canonical plugin** - so a bundle answers "what built me?" without the machine that built it) and `phase-timings.json`. The engine is not a parameter you normally pass: it resolves to the installed plugin via `engine_source.py`, and a `--engine` pointing anywhere else is refused unless `--allow-noncanonical-engine` acknowledges it. Source provenance runs in one supervised leaf worker under `--provenance-timeout-sec` (default 120, finite and > 0 - `0` is a usage error, not a disable switch); expiry, a worker crash or a failed publication publishes an honest partial/failed `source-provenance.json` and exits 11 without adjudicating. Emits no model content, by test. |
+| `run_status.py` | Read-only, non-certifying inventory for one explicitly supplied absolute **local** run (Refs #469). Invoke with **`python -B`**, including for `--json`, to prevent import-bytecode writes. Preserves engine/working-copy occurrences and unscoped packages, reports integrity codes and safe last-observed fields, and gives one non-destructive next action. Both outputs contain the same normalized records, including multiplicity and action details. Exit 0 means assessable diagnostics, never readiness; malformed/unreadable inputs or rejected boundaries exit nonzero. No allocation, root discovery, process/network operation, repair, promotion or current START_READY/COMPLETE. See [read-only run status](#read-only-run-status). | operator diagnostics after a selected run exists |
 | `derive_connection_templates.py` | Derives committable connection **templates** from REAL Tableau exports (`.tds`/`.tdsx`/`.twb`/`.twbx`), replacing only endpoint VALUES with placeholders so the attribute SHAPE stays verbatim. Shape fidelity is the point: a hand-written connection element encodes what we *think* Tableau writes, and that guess was wrong in a way that mattered - the Databricks HTTP path is spelled `_.fcp.DatabricksCatalog.true...v-http-path`, which two parsers read as `None`. Writes `tests/fixtures/connection-templates/<class>.xml`. |
 | `make_live_source_fixture.py` | Builds a `.twbx` whose single federated datasource spans several LIVE systems (Databricks + Snowflake + Azure SQL), from the templates above plus `PROBE_*` environment variables. The generator carries no hostnames and is committable; the generated workbook does, so `tests/fixtures/live/` is gitignored and `tests/test_live_multisource.py` skips when it is absent. |
 | `make_refresh_fixture.py` | Generates the deterministic, credential-free input for `fixtures/large-refresh`: a tunable local `orders.csv` plus the machine-local `expressions.tmdl` binding that points the model's `SourceFolder` parameter at it. The payload and binding are gitignored; same rows + seed produce byte-identical CSV bytes, so refresh timing changes mean the model changed rather than the data. | Issue #262 refresh-behaviour reproduction |
@@ -538,6 +539,52 @@ authorization remains unvalidated and cannot be inherited by a report. Construct
 `ASSEMBLED`/`NOT_EVALUATED`, reference `READY` and successful binding are not final dispatch.
 The v2 numeric obligation is metadata, not a Phase-2 decision. Full workflow, codes and unchanged
 reference ceilings: [final START_READY](../docs/reference-readiness.md#final-package-start_ready-562-622).
+
+## Read-only run status
+
+```powershell
+python -B scripts\run_status.py --run C:\short\_runs\001-estate
+python -B scripts\run_status.py --run C:\short\_runs\001-estate --json
+```
+
+Select the actual existing local run; there is no latest-run search or allocation. **`-B` is part
+of the read-only entrypoint**, not an optional optimization: without Python's startup flag, imports
+may create `.pyc` files outside the selected run before script-level controls can take effect.
+
+The reader rejects UNC/device/network spellings lexically before filesystem access, checks local
+ancestors and entries without following reparse points (including Windows junctions), and never
+reads below a rejected boundary. It reuses `work_dirs.check_run_location` and
+`package_filesystem.verify_package`; it does not run readiness gates. Both engine-report collections
+(`workbooks` and `datasources`) must exist and be lists. Explicit empty lists mean an empty
+diagnostic inventory, **not** readiness. Unestablished report scope does not discard retained
+working copies or package-only observations.
+
+Package discovery stops at each marker, including malformed markers, and ignores ordinary files in
+grouping directories. It supports flat packages and retained grouping layouts up to three directory
+levels below `packages`. Unmarked directories are not inferred to be completed packages. Handover
+JSON is matched by **unique exact embedded workbook identity**, never by guessing a sanitized
+filename. Duplicate identities are reported; when a producer overwrote a colliding filename, only
+the retained identity is observable and the other unit remains missing.
+
+All statuses are closed projections. Arbitrary manifest prose, commands, exception text and nested
+readiness objects are not echoed. Stored readiness is a list of **last-observed** records with
+validated timestamps; every current certification remains `NOT_CHECKED`. The actual packager's
+`oracle.objects`/`omissions` record presence, missing/omitted evidence or an unassessable shape;
+object counts do not prove coverage or fidelity. A recorded report-free datasource can be reference
+`not_applicable`. Human output uses escaped, record-per-line JSON values under readable headings,
+so it carries exactly the JSON output's observations without control-character line spoofing.
+
+Exit **0** means the consumed diagnostic inputs were assessable, including known pending binding,
+missing references and recorded package edits. Exit **1** means some requested evidence could not
+be assessed; other retained observations are still shown. Exit **2** rejects an unsafe/nonlocal or
+relative input spelling (and is argparse's usage exit). Missing optional evidence is distinguished
+from malformed, unreadable and non-directory evidence.
+
+Limits: this is a read-time diagnostic, not an atomic filesystem snapshot. It inherits the package
+reader's documented `lstat`/read replacement-race limit, does not identify overwritten history,
+inspect unmarked package trees or prove that a local drive/mount is physically local, and makes no
+claim about interpreter activity before `-B` takes effect. It never changes run files, invokes
+processes/network clients, opens Desktop, refreshes, promotes, deploys or cleans up.
 
 ## Phase-2 COMPLETE — one caller-pinned current-snapshot check
 
