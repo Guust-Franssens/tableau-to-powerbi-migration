@@ -159,7 +159,7 @@ Only final leg statuses `transient`, exhausted `session_lost`, and render `trunc
 Successful sibling legs suppress their own re-export even when another leg on the same view failed;
 `retry_reasons` are history, not selection input. Before any network work, recovery verifies every
 grouped `ok` artifact is still contained in the grouped evidence root and still matches its recorded
-SHA-256 digest. Missing, changed or undigestable successes are a **re-merge** action, not a metered
+SHA-256 digest. Missing, changed or undigestible successes are a **re-merge** action, not a metered
 retry target.
 
 Recovery reuses the current trusted Tableau configuration for the server destination. The prior

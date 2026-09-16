@@ -19,10 +19,10 @@ line that quotes a response-derived view name. Its entry points are declared in 
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
@@ -781,11 +781,12 @@ def _partition_recovery(
 ) -> dict[str, list[dict[str, Any]]]:
     """Split recovery records by the statuses of legs this recovery actually attempted."""
 
-    def selected_statuses(record: dict[str, Any]) -> list[str | None]:
+    def statuses_for(record: dict[str, Any]) -> list[str | None]:
         return [
             (record.get(leg) or {}).get("status") for leg in selected.get(str(record.get("view_luid")), frozenset())
         ]
 
+    statuses = {id(record): statuses_for(record) for record in records}
     ok = [r for r in records if (r.get("data") or {}).get("status") == "ok"]
     return {
         "ok": ok,
@@ -794,14 +795,10 @@ def _partition_recovery(
         "complete": [
             r
             for r in records
-            if selected_statuses(r)
-            and all(status == "ok" for status in selected_statuses(r))
-            and not unassessable_reason(r)
+            if statuses[id(r)] and all(status == "ok" for status in statuses[id(r)]) and not unassessable_reason(r)
         ],
-        "blocked": [r for r in records if "source_credential" in selected_statuses(r)],
-        "failed": [
-            r for r in records if any(status not in {"ok", "source_credential"} for status in selected_statuses(r))
-        ],
+        "blocked": [r for r in records if "source_credential" in statuses[id(r)]],
+        "failed": [r for r in records if any(status not in {"ok", "source_credential"} for status in statuses[id(r)])],
     }
 
 

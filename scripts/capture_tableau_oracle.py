@@ -1013,6 +1013,9 @@ def capture_recovery_view(  # pylint: disable=too-many-arguments,too-many-positi
     if render_kinds:
         synthetic_data = "data" not in record
         if synthetic_data:
+            # `_capture_renders` reads the data status only to decide salvage/shared-root-cause policy.
+            # A render-only recovery target has a satisfied prior data leg, so "ok" is the exact
+            # precondition that prevents recapturing data while still using the existing render writer.
             record["data"] = {"status": "ok"}
         _capture_renders(
             session,
@@ -1879,8 +1882,12 @@ def _recovery_targets(sources: list[RecoverySource]) -> tuple[dict[str, frozense
     return by_luid, wants, next(iter(max_ages), DEFAULT_MAX_AGE_MINUTES)
 
 
-def _build_recovery_plan(session: TableauSession, sources: list[RecoverySource]) -> _RecoveryPlan:  # pylint: disable=too-many-locals
-    legs_by_luid, wants, max_age = _recovery_targets(sources)
+def _build_recovery_plan(  # pylint: disable=too-many-locals
+    session: TableauSession,
+    sources: list[RecoverySource],
+    targets: tuple[dict[str, frozenset[str]], set[str], int],
+) -> _RecoveryPlan:
+    legs_by_luid, wants, max_age = targets
     if not legs_by_luid:
         return _RecoveryPlan([], {}, wants, {}, max_age, {"sources": _recovery_source_metadata(sources)})
     views, workbook_names = select_views(session, None, 0)
@@ -1951,6 +1958,8 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
     env = resolve_env(args.env)
     require(env)
     recovery_sources: list[RecoverySource] = []
+    recovery_targets: tuple[dict[str, frozenset[str]], set[str], int] | None = None
+    api_overrides: dict[str, str] = {}
     recovery_mode = bool(args.retry_failed_from)
     if args.run and not recovery_mode:
         raise OracleRecoveryRefusal("--run is only valid with --retry-failed-from recovery")
@@ -1980,7 +1989,8 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
                 "recovery evidence does not match the configured Tableau server/site; refusing before sign-in or "
                 "exports: " + ", ".join(invalid_sources)
             )
-        preliminary_legs, _preliminary_wants, _preliminary_max_age = _recovery_targets(recovery_sources)
+        recovery_targets = _recovery_targets(recovery_sources)
+        preliminary_legs = recovery_targets[0]
         if not preliminary_legs:
             LOG.info(
                 "recovery no-work: 0 retry-eligible leg(s) in %d grouped manifest(s); no sign-in, export "
@@ -2005,7 +2015,9 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
 
         recovery_metadata = None
         if recovery_mode:
-            plan = _build_recovery_plan(session, recovery_sources)
+            if recovery_targets is None:
+                raise RuntimeError("recovery targets were not computed before sign-in")
+            plan = _build_recovery_plan(session, recovery_sources, recovery_targets)
             views = plan.views
             workbook_names = {
                 (view.get("workbook") or {}).get("id"): (view.get("workbook") or {}).get("name")
@@ -2021,7 +2033,6 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
             views, workbook_names = select_views(session, args.workbook, args.limit)
             max_age = validate_max_age(args.max_age)
             wants = {kind for kind, on in (("png", args.images), ("svg", args.svg), ("pdf", args.pdf)) if on}
-            api_overrides: dict[str, str] = {}
             recovery_legs = None
         _ensure_unique_output_identities(views)
         out_dir: Path = args.out

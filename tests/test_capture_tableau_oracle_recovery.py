@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 from pathlib import Path
 
@@ -84,7 +85,7 @@ def _ok_data(luid: str) -> dict:
         "status": "ok",
         "certification": "certified",
         "path": f"data/{luid}.csv",
-        "sha256": __import__("hashlib").sha256(CSV).hexdigest(),
+        "sha256": hashlib.sha256(CSV).hexdigest(),
         "row_count": 1,
     }
 
@@ -94,7 +95,7 @@ def _ok_image(luid: str) -> dict:
         "status": "ok",
         "format": "png",
         "path": f"images/{luid}.png",
-        "sha256": __import__("hashlib").sha256(PNG).hexdigest(),
+        "sha256": hashlib.sha256(PNG).hexdigest(),
     }
 
 
@@ -207,7 +208,7 @@ def test_recovery_exports_only_eligible_failed_legs(monkeypatch, tmp_path):
             "status": "ok",
             "certification": "certified",
             "path": f"data/{stem}.csv",
-            "sha256": __import__("hashlib").sha256(CSV).hexdigest(),
+            "sha256": hashlib.sha256(CSV).hexdigest(),
             "row_count": 1,
             "elapsed_sec": 0.0,
             "max_age_minutes": max_age,
@@ -221,7 +222,7 @@ def test_recovery_exports_only_eligible_failed_legs(monkeypatch, tmp_path):
             "status": "ok",
             "format": kind,
             "path": f"images/{path.name}",
-            "sha256": __import__("hashlib").sha256(PNG).hexdigest(),
+            "sha256": hashlib.sha256(PNG).hexdigest(),
             "elapsed_sec": 0.0,
             "max_age_minutes": options.max_age,
         }
@@ -303,7 +304,7 @@ def test_svg_recovery_uses_recorded_api_override_without_serverinfo_probe(monkey
             "status": "ok",
             "format": kind,
             "path": f"images/{path.name}",
-            "sha256": __import__("hashlib").sha256(b"<svg></svg>").hexdigest(),
+            "sha256": hashlib.sha256(b"<svg></svg>").hexdigest(),
             "elapsed_sec": 0.0,
             "max_age_minutes": options.max_age,
         }
