@@ -144,11 +144,17 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from ipaddress import ip_address
 from pathlib import Path
 from pathlib import PureWindowsPath
 from typing import Any
+from urllib.parse import urlsplit
 
+import package_filesystem as pfs
+import tableau_env
 import tableau_oracle_manifest
+import tableau_view_types
+from host_paths import discloses_host_location
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # The ONE census, shared with the capture rather than re-derived here: the two manifests must agree
@@ -1736,6 +1742,8 @@ _RESPONSE_FIELDS = (
 )
 _MAX_HANDOFF_LABEL = 160
 _HANDOFF_IDENTITY = ("server", "site", "workbook_luid", "view_luid", "updated_at")
+_HANDOFF_FIELDS = frozenset({"rows", "repair_gaps", "status", "requested_at", "delivery_status", "request"})
+_HANDOFF_ROW_FIELDS = frozenset(_HANDOFF_IDENTITY) | {"workbook_name", "view_name", "kind", "render_reasons", "context"}
 _HANDOFF_STATUSES = frozenset({"REQUEST_REQUIRED", "ALREADY_REQUESTED", "NO_VISUAL_GAPS", "REPAIR_REQUIRED"})
 _HANDOFF_REPAIRS = frozenset(OUTCOME_BUCKETS) | {
     "residual_view_record_malformed",
@@ -1749,7 +1757,12 @@ _HANDOFF_REPAIRS = frozenset(OUTCOME_BUCKETS) | {
 
 def _safe_label(value: Any) -> str:
     """A bounded readable label, never an identity or path."""
-    if not isinstance(value, str) or not value.isprintable():
+    if (
+        not isinstance(value, str)
+        or not value.isprintable()
+        or discloses_host_location(value)
+        or tableau_env.contains_credential(value)
+    ):
         return "UNKNOWN"
     clean = " ".join(value.split())
     if not clean or not all(char.isprintable() for char in clean):
@@ -1761,8 +1774,117 @@ def _handoff_key(row: dict[str, Any]) -> tuple[str, ...]:
     return tuple(row.get(field) or "" for field in _HANDOFF_IDENTITY)
 
 
-def _known_handoff_identity(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip()) and value.isprintable()
+def _handoff_luid(value: Any) -> bool:
+    return isinstance(value, str) and value == value.strip().lower() and tableau_view_types.is_luid(value)
+
+
+def _handoff_timestamp(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo == timezone.utc and parsed.isoformat().replace("+00:00", "Z") == value
+
+
+def _handoff_server(value: Any) -> bool:
+    """A canonical HTTP(S) authority, never userinfo, a host path or a URL carrying private context."""
+    if not isinstance(value, str) or len(value) > 512 or "%" in value or tableau_env.contains_credential(value):
+        return False
+    try:
+        parsed = urlsplit(value)
+        host, port = parsed.hostname or "", parsed.port
+    except ValueError:
+        return False
+    try:
+        address = ip_address(host)
+    except ValueError:
+        label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+        if len(host) > 253 or re.fullmatch(rf"{label}(?:\.{label})*", host) is None:
+            return False
+    else:
+        host = f"[{address.compressed}]" if address.version == 6 else str(address)
+    authority = host + (f":{port}" if port is not None else "")
+    return (
+        parsed.scheme in ("http", "https")
+        and (port is None or 0 < port <= 65535)
+        and value == f"{parsed.scheme}://{authority}"
+    )
+
+
+def _handoff_site(value: Any) -> bool:
+    # Empty is Tableau's documented Default site, not missing identity.
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"[A-Za-z0-9_-]{0,100}", value) is not None
+        and not tableau_env.contains_credential(value)
+    )
+
+
+def _handoff_identity_valid(row: dict[str, Any]) -> bool:
+    return (
+        _handoff_server(row.get("server"))
+        and _handoff_site(row.get("site"))
+        and _handoff_luid(row.get("workbook_luid"))
+        and _handoff_luid(row.get("view_luid"))
+        and _handoff_timestamp(row.get("updated_at"))
+    )
+
+
+def _handoff_note(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and len(value) <= 512
+        and value.isprintable()
+        and not discloses_host_location(value)
+        and not tableau_env.contains_credential(value)
+    )
+
+
+def _handoff_paths(value: Any) -> bool:
+    if not isinstance(value, list) or len(value) > 64:
+        return False
+    if not all(
+        isinstance(path, str)
+        and len(path) <= 1024
+        and path.isprintable()
+        and pfs.is_canonical_key(path)
+        and not discloses_host_location(path)
+        and not tableau_env.contains_credential(path)
+        for path in value
+    ):
+        return False
+    return len({pfs.alias_key(path) for path in value}) == len(value)
+
+
+def _handoff_context(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {"filters", "parameters", "period"}:
+        return False
+    return all(
+        isinstance(item, dict)
+        and set(item) == {"status", "value"}
+        and (
+            (item["status"] == "UNKNOWN" and item["value"] is None)
+            or (item["status"] == "SUPPLIED" and _handoff_note(item["value"]))
+        )
+        for item in value.values()
+    )
+
+
+def _validate_handoff_response(row: dict[str, Any]) -> None:
+    validators = {
+        "supplied_context": _handoff_context,
+        "retained_reference_paths": _handoff_paths,
+        "retained_image_paths": _handoff_paths,
+        "source_file_sha256": lambda value: isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None,
+        "manual_origin": _handoff_note,
+        "image_inspection_note": _handoff_note,
+        "response_recorded_at": _handoff_timestamp,
+    }
+    if any(not validators[field](row[field]) for field in _RESPONSE_FIELDS if field in row):
+        raise ManualHandoffConflict("existing manual-reference response is malformed or unsafe")
 
 
 def _manual_request(rows: list[dict[str, Any]]) -> str:
@@ -1781,15 +1903,8 @@ def _manual_request(rows: list[dict[str, Any]]) -> str:
 
 
 def _validate_prior_handoff(handoff: Any) -> None:  # pylint: disable=too-many-branches
-    """Validate the immutable request, not just the container holding its response fields."""
-    if not isinstance(handoff, dict) or not {
-        "rows",
-        "repair_gaps",
-        "status",
-        "requested_at",
-        "delivery_status",
-        "request",
-    }.issubset(handoff):
+    """Validate the exact request/response schema before retaining or printing any caller data."""
+    if not isinstance(handoff, dict) or set(handoff) != _HANDOFF_FIELDS:
         raise ManualHandoffConflict("existing manual-reference handoff is malformed")
     if (
         not isinstance(handoff.get("rows"), list)
@@ -1802,7 +1917,11 @@ def _validate_prior_handoff(handoff: Any) -> None:  # pylint: disable=too-many-b
     rows = handoff["rows"]
     keys = set()
     for row in rows:
-        if not isinstance(row, dict) or not all(_known_handoff_identity(row.get(key)) for key in _HANDOFF_IDENTITY):
+        if (
+            not isinstance(row, dict)
+            or not _HANDOFF_ROW_FIELDS <= set(row) <= _HANDOFF_ROW_FIELDS | set(_RESPONSE_FIELDS)
+            or not _handoff_identity_valid(row)
+        ):
             raise ManualHandoffConflict("existing manual-reference row has missing or unsafe immutable identity")
         key = _handoff_key(row)
         if key in keys:
@@ -1824,9 +1943,10 @@ def _validate_prior_handoff(handoff: Any) -> None:  # pylint: disable=too-many-b
             != {name: {"status": "UNKNOWN", "value": None} for name in ("filters", "parameters", "period")}
         ):
             raise ManualHandoffConflict("existing manual-reference request context is malformed")
+        _validate_handoff_response(row)
     timestamp = handoff.get("requested_at")
     if rows:
-        if not _known_handoff_identity(timestamp) or handoff["status"] not in ("REQUEST_REQUIRED", "ALREADY_REQUESTED"):
+        if not _handoff_timestamp(timestamp) or handoff["status"] not in ("REQUEST_REQUIRED", "ALREADY_REQUESTED"):
             raise ManualHandoffConflict("existing manual-reference request has no valid requested_at or status")
     elif timestamp is not None or handoff["status"] not in ("NO_VISUAL_GAPS", "REPAIR_REQUIRED"):
         raise ManualHandoffConflict("existing empty manual-reference handoff has request state")
@@ -1840,10 +1960,7 @@ def _validate_prior_handoff(handoff: Any) -> None:  # pylint: disable=too-many-b
         if (
             not isinstance(gap["reason"], str)
             or gap["reason"] not in _HANDOFF_REPAIRS
-            or any(
-                gap[field] is not None and not _known_handoff_identity(gap[field])
-                for field in ("workbook_luid", "view_luid")
-            )
+            or any(gap[field] is not None and not _handoff_luid(gap[field]) for field in ("workbook_luid", "view_luid"))
         ):
             raise ManualHandoffConflict("existing manual-reference repair gaps are malformed")
 
@@ -1862,8 +1979,8 @@ def _read_grouping_report(path: Path) -> dict[str, Any] | None:
     if not stat.S_ISREG(info.st_mode):
         raise ManualHandoffConflict(f"{path}: existing grouping report is not a regular file")
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        report = pfs.parse_manifest_text(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, pfs._ManifestError) as error:  # pylint: disable=protected-access
         raise ManualHandoffConflict(f"{path}: existing grouping report is unreadable") from error
     if not isinstance(report, dict):
         raise ManualHandoffConflict("existing grouping report is malformed")
@@ -1931,8 +2048,35 @@ def _prior_handoff(inputs: _RunInputs) -> dict[str, Any] | None:  # pylint: disa
     return merged
 
 
+def _manual_view_intent(batch: _Batch, luid: str) -> tuple[set[str], bool]:
+    """Read a recovery's actual per-view selection, not its capture-wide union of render kinds."""
+    requested = set(batch.manifest.get("requested_renders") or [])
+    if not requested <= set(tableau_oracle_manifest.LEG_TO_KIND.values()) - {"data"}:
+        raise ManualHandoffConflict("manual-reference render intent is malformed")
+    recovery = batch.manifest.get("recovery")
+    if recovery is None:
+        return requested, bool(batch.manifest.get("reference_required"))
+    selected = recovery.get("selected_legs_by_view") if isinstance(recovery, dict) else None
+    if (
+        not isinstance(selected, dict)
+        or set(selected) != {view["view_luid"] for view in batch.manifest["views"]}
+        or any(
+            not isinstance(legs, list)
+            or not legs
+            or any(not isinstance(leg, str) or leg not in tableau_oracle_manifest.LEG_TO_KIND for leg in legs)
+            or len(set(legs)) != len(legs)
+            for legs in selected.values()
+        )
+    ):
+        raise ManualHandoffConflict("manual-reference recovery selection is malformed")
+    kinds = {tableau_oracle_manifest.LEG_TO_KIND[leg] for leg in selected[luid] if leg != "data"}
+    if not kinds <= requested:
+        raise ManualHandoffConflict("manual-reference recovery selection conflicts with render intent")
+    return kinds, False
+
+
 def _manual_residuals(views: list[dict[str, Any]], batches: list[_Batch]) -> list[dict[str, Any]]:
-    """Union intent only from accepted batches containing this view, then reuse the producer census."""
+    """Union per-view intent from accepted batches, then reuse the producer's residual census."""
     missing = []
     for view in views:
         if any((view.get(leg) or {}).get("status") == "ok" for leg in ("image", "svg", "pdf")):
@@ -1942,11 +2086,11 @@ def _manual_residuals(views: list[dict[str, Any]], batches: list[_Batch]) -> lis
             for batch in batches
             if any(record.get("view_luid") == view.get("view_luid") for record in batch.manifest.get("views", []))
         ]
-        intent = _merge_render_intent(covering, [view])
-        requested = frozenset(intent["requested_renders"])
+        intents = [_manual_view_intent(batch, view["view_luid"]) for batch in covering]
+        requested = frozenset(kind for kinds, _required in intents for kind in kinds)
         if requested:
             missing.extend(render_unestablished([view], requested))
-        elif intent["reference_required"]:
+        elif any(required for _kinds, required in intents):
             missing.append(
                 {
                     "view_luid": view.get("view_luid"),
@@ -1961,9 +2105,9 @@ def _manual_residuals(views: list[dict[str, Any]], batches: list[_Batch]) -> lis
 
 
 def _handoff_identity_problem(row: dict[str, Any], batches: list[_Batch]) -> str | None:
-    if not _known_handoff_identity(row["updated_at"]):
+    if not _handoff_timestamp(row["updated_at"]):
         return "screenshot_revision_unestablished"
-    if not all(_known_handoff_identity(row[field]) for field in _HANDOFF_IDENTITY):
+    if not _handoff_identity_valid(row):
         return "screenshot_identity_unestablished"
     for batch in batches:
         for view in batch.manifest.get("views", []):
@@ -1985,16 +2129,18 @@ def _manual_handoff(  # pylint: disable=too-many-locals,too-many-branches
     repair_gaps: list[dict[str, Any]] = []
     for bucket in OUTCOME_BUCKETS:
         for outcome in outcomes[bucket]:
+            if bucket != "grouped":
+                repair_gaps.append({"reason": bucket, "workbook_luid": outcome.get("workbook_luid"), "view_luid": None})
+                continue
             views = outcome.get("_grouped_views")
             if not isinstance(views, list):
-                if bucket != "grouped":
-                    repair_gaps.append(
-                        {
-                            "reason": bucket,
-                            "workbook_luid": outcome.get("workbook_luid"),
-                            "view_luid": None,
-                        }
-                    )
+                repair_gaps.append(
+                    {
+                        "reason": "residual_view_record_malformed",
+                        "workbook_luid": outcome.get("workbook_luid"),
+                        "view_luid": None,
+                    }
+                )
                 continue
             valid_views = [view for view in views if isinstance(view, dict)]
             if len(valid_views) != len(views):
@@ -2048,17 +2194,15 @@ def _manual_handoff(  # pylint: disable=too-many-locals,too-many-branches
                     repair_gaps.append(
                         {
                             "reason": problem,
-                            "workbook_luid": row["workbook_luid"]
-                            if _known_handoff_identity(row["workbook_luid"])
-                            else None,
-                            "view_luid": row["view_luid"] if _known_handoff_identity(row["view_luid"]) else None,
+                            "workbook_luid": row["workbook_luid"] if _handoff_luid(row["workbook_luid"]) else None,
+                            "view_luid": row["view_luid"] if _handoff_luid(row["view_luid"]) else None,
                         }
                     )
                     continue
                 rows.append(row)
     for gap in repair_gaps:
         for field in ("workbook_luid", "view_luid"):
-            if not _known_handoff_identity(gap[field]):
+            if not _handoff_luid(gap[field]):
                 gap[field] = None
     rows.sort(key=_handoff_key)
     if prior is not None:

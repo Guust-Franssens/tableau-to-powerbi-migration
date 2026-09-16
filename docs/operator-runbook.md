@@ -918,9 +918,14 @@ calls. This is snapshot admission, not a concurrent-filesystem-adversary guarant
 
 It copies only the existing manifest and its declared images, and declares `artifacts.reference`
 before the normal package seals. It never restamps hashes, raises grades or forges oracle evidence.
-Malformed/empty manifests and missing/unsafe members refuse construction without changing originals
-or old targets. Unsupported evidence or mismatched source/image identity remains subject to the
-existing role/readiness refusals; successful construction does not establish its admissibility.
+Before copying, the closed capture contract rejects unknown fields, validation-grade capabilities,
+non-null numeric or filter-state assertions, malformed typed metadata and recognized private paths
+or credentials. It requires default/empty state, `numeric_oracle: null` and the provider's existing
+layout/text ceiling; unsupported input is refused, never rewritten or silently stripped. See the
+[manual-reference contract](reference-capture.md#one-manual-request-after-bounded-recovery).
+Malformed/empty manifests and missing/unsafe members also refuse construction without changing
+originals or old targets. Mismatched source/image identity remains subject to the existing
+role/readiness refusals; successful construction does not establish its admissibility.
 
 This admission path is **fresh-target only**. If `packages\<Unit>` already exists — clean, sealed or
 edited — retain the screenshots outside it rather than selecting a replacement directory and losing
@@ -929,6 +934,10 @@ during assembly is not replaced. A cached `capture_tableau_reference.py` no-op d
 dropped files: only members already declared by its preserved manifest can enter the package.
 Construction remains diagnostic; all ordinary binding, role-identity and final package
 `START_READY` obligations still apply.
+
+❌ **Final manual completion remains blocked by #664:** `check_unit` still interprets canonical
+manual names/types differently from the reference/readiness authority. The producer/grouper fix in
+PR #658 does not fix that consumer or make an entry-ready manual package final-complete.
 
 The last two commands use **identical exact lowercase 64-hex H**, without a prefix. Only the
 all-scope checker may return COMPLETE/0; tokenless all-scope and every layer scope are not COMPLETE.

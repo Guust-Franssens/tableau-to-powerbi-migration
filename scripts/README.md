@@ -112,8 +112,11 @@ Do not ask the human to generate the note.
 After bounded automatic visual recovery, add `--manual-reference-handoff` to the existing
 `group_oracle_by_workbook.py` invocation. It records and renders the residual original-Tableau
 image request in `oracle-grouping-report.json`; successful visual siblings and data-only
-failures are not screenshot requests. Matching request/response context is retained by source,
+failures are not screenshot requests. Recovery intent stays per view, and any non-grouped outcome
+is a repair gap, not a request. Matching request/response context is retained by source,
 view and revision, not by caption. Unknown context and uncertain delivery remain explicit.
+The closed row/response contract accepts the empty Default site, canonical UUID/server/timestamp
+identity, relative retained paths and bounded privacy-screened notes; unsafe/unknown fields refuse.
 The caller must actually inspect supplied images and record their manual origin; file presence,
 PNG structure and hashes do not prove visual inspection.
 
@@ -121,6 +124,9 @@ PNG structure and hashes do not prove visual inspection.
 `manifest.json` and only its declared image members for exactly one selected workbook.
 Admission happens in a **fresh target before normal sealing**, declares
 `artifacts.reference = "reference"`, and leaves existing source/grade/readiness checks in charge.
+The manifest must first satisfy the closed capture contract: layout/text provider capabilities,
+default empty state, null numeric oracle, typed known fields and privacy-safe metadata. Overclaims
+and unknown fields are rejected without rewriting; only accepted original bytes can be sealed.
 An existing package, including one appearing during assembly, is not replaced; this option
 cannot be combined with `--discard-package-edits`. No external override, forged REST record,
 source-hash rewrite or edited-package reseal is provided.
@@ -129,6 +135,8 @@ The generated package README reports the actual brief's numeric obligation: expl
 does not make optional numeric comparison a prerequisite to permitted visual work; `required`
 remains owed and unknown stays unknown. Images or missing CSV never imply a waiver.
 See [reference capture](../docs/reference-capture.md) for the complete handoff and admission route.
+**Blocking dependency #664 remains:** the final `check_unit` manual-name/type consumer is a separate
+fix; PR #658 alone does not make final manual-reference completion usable.
 
 ### Package-local review iteration commands
 

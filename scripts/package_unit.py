@@ -217,6 +217,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, NamedTuple
@@ -225,6 +226,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_env  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_view_types  # noqa: E402  # pylint: disable=wrong-import-position
+import reference_evidence  # noqa: E402  # pylint: disable=wrong-import-position
 import package_filesystem as pfs  # noqa: E402  # pylint: disable=wrong-import-position
 import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-import-position
 import credential_gate as data_access  # noqa: E402  # pylint: disable=wrong-import-position
@@ -2172,6 +2176,112 @@ def _reference_image(reference_dir: Path, image: Any) -> Path:
     return origin
 
 
+_REFERENCE_LUID_FIELDS = frozenset({"workbook_luid", "source_workbook_luid"})
+_REFERENCE_KIND_FIELDS = frozenset({"view_type", "object_type"})
+
+
+def _reference_contract_fields(record: dict[str, Any], required: set[str], optional: frozenset[str]) -> None:
+    if not required <= set(record) <= required | optional:
+        raise PackagingError("reference_manifest_contract")
+    for key in _REFERENCE_LUID_FIELDS & record.keys():
+        value = record[key]
+        if value is not None and not (
+            isinstance(value, str) and value == value.strip().lower() and tableau_view_types.is_luid(value)
+        ):
+            raise PackagingError("reference_manifest_contract")
+    for key in _REFERENCE_KIND_FIELDS & record.keys():
+        if record[key] not in (KIND_DASHBOARD, KIND_WORKSHEET):
+            raise PackagingError("reference_manifest_contract")
+
+
+def _reference_strings_safe(value: Any) -> bool:
+    """Use the shipping privacy authorities, rejecting rather than redacting held original bytes."""
+    if isinstance(value, str):
+        return (
+            len(value) <= 1024
+            and value.isprintable()
+            and not discloses_host_location(value)
+            and not tableau_env.contains_credential(value)
+        )
+    if isinstance(value, dict):
+        return all(_reference_strings_safe(key) and _reference_strings_safe(item) for key, item in value.items())
+    if isinstance(value, list):
+        return all(_reference_strings_safe(item) for item in value)
+    return True
+
+
+def _reference_state_contract(state: dict[str, Any]) -> None:
+    _reference_contract_fields(
+        state,
+        {"state_slug", "state", "image", "provider", "capabilities", "dimensions", "sha256", "numeric_oracle"},
+        _REFERENCE_LUID_FIELDS | _REFERENCE_KIND_FIELDS | {"bytes"},
+    )
+    capabilities = state["capabilities"]
+    if (
+        state["state_slug"] != "default"
+        or state["state"] != {}
+        or state["numeric_oracle"] is not None
+        or state["provider"] not in ("manual", "public_playwright", "embedded_thumbnail")
+    ):
+        raise PackagingError("reference_manifest_contract")
+    if (
+        not isinstance(capabilities, list)
+        or not capabilities
+        or any(cap not in (reference_evidence.CAP_LAYOUT, reference_evidence.CAP_TEXT) for cap in capabilities)
+        or len(set(capabilities)) != len(capabilities)
+        or reference_evidence.provider_grade(state["provider"], capabilities).startswith("!")
+    ):
+        raise PackagingError("reference_manifest_contract")
+    if (
+        not isinstance(state["image"], str)
+        or PurePosixPath(state["image"]).suffix.lower() != ".png"
+        or not isinstance(state["sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", state["sha256"]) is None
+    ):
+        raise PackagingError("reference_manifest_contract")
+    dimensions = state["dimensions"]
+    if not isinstance(dimensions, dict) or not {"w", "h"} <= set(dimensions) <= {"w", "h", "dpr"}:
+        raise PackagingError("reference_manifest_contract")
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value <= 0
+        for value in (dimensions["w"], dimensions["h"], *([state["bytes"]] if "bytes" in state else []))
+    ):
+        raise PackagingError("reference_manifest_contract")
+    if "dpr" in dimensions:
+        dpr = dimensions["dpr"]
+        if not isinstance(dpr, (int, float)) or isinstance(dpr, bool) or dpr <= 0:
+            raise PackagingError("reference_manifest_contract")
+
+
+def _validate_reference_contract(payload: dict[str, Any]) -> None:
+    """Closed capture format plus known identity enrichment; no numeric or filter-state authority."""
+    _reference_contract_fields(payload, {"captured_at", "source_workbook_sha256", "dashboards"}, _REFERENCE_LUID_FIELDS)
+    digest = payload["source_workbook_sha256"]
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise PackagingError("reference_manifest_contract")
+    timestamp = payload["captured_at"]
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00")) if isinstance(timestamp, str) else None
+    except ValueError:
+        parsed = None
+    if (
+        parsed is None
+        or parsed.tzinfo != timezone.utc
+        or parsed.isoformat().replace("+00:00", "Z") != timestamp
+        or not _reference_strings_safe(payload)
+    ):
+        raise PackagingError("reference_manifest_contract")
+    for entry in payload["dashboards"]:
+        _reference_contract_fields(entry, {"name", "states"}, _REFERENCE_LUID_FIELDS | _REFERENCE_KIND_FIELDS)
+        if not isinstance(entry["name"], str) or not entry["name"].strip():
+            raise PackagingError("reference_manifest_contract")
+        for state in entry["states"]:
+            _reference_state_contract(state)
+            kinds = {record[key] for record in (entry, state) for key in _REFERENCE_KIND_FIELDS & record.keys()}
+            if len(kinds) > 1:
+                raise PackagingError("reference_manifest_contract")
+
+
 def _read_reference(reference_dir: Path) -> dict[str, bytes]:  # pylint: disable=too-many-locals
     """Admit the manifest before reading it, then all declared regular members before construction."""
     manifest_path = _reference_location(reference_dir / "manifest.json")
@@ -2181,27 +2291,32 @@ def _read_reference(reference_dir: Path) -> dict[str, bytes]:  # pylint: disable
         if not stat.S_ISREG(manifest_path.lstat().st_mode):
             raise PackagingError("reference_path_unsafe")
         raw = manifest_path.read_bytes()
-        payload = json.loads(raw.decode("utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        payload = pfs.parse_manifest_text(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, pfs._ManifestError) as error:  # pylint: disable=protected-access
         raise PackagingError("reference_manifest_unreadable") from error
     if not isinstance(payload, dict) or not isinstance(payload.get("dashboards"), list):
         raise PackagingError("reference_manifest_malformed")
     dashboards = payload["dashboards"]
     if not dashboards:
         raise PackagingError("reference_manifest_empty")
-    members: dict[str, Path] = {}
+    records: list[dict[str, Any]] = []
     for dashboard in dashboards:
         if not isinstance(dashboard, dict) or not isinstance(dashboard.get("states"), list):
             raise PackagingError("reference_manifest_malformed")
         states = dashboard["states"]
         if not states:
             raise PackagingError("reference_manifest_empty")
-        for state in states:
-            image = state.get("image") if isinstance(state, dict) else None
-            origin = _reference_image(reference_dir, image)
-            if any(pfs.alias_key(image) == pfs.alias_key(other) and image != other for other in members):
-                raise PackagingError("reference_image_path_unsafe")
-            members[image] = origin
+        if any(not isinstance(state, dict) for state in states):
+            raise PackagingError("reference_manifest_malformed")
+        records.extend(states)
+    _validate_reference_contract(payload)
+    members: dict[str, Path] = {}
+    for state in records:
+        image = state["image"]
+        origin = _reference_image(reference_dir, image)
+        if any(pfs.alias_key(image) == pfs.alias_key(other) and image != other for other in members):
+            raise PackagingError("reference_image_path_unsafe")
+        members[image] = origin
     try:
         content = {relative: origin.read_bytes() for relative, origin in members.items()}
     except OSError as error:

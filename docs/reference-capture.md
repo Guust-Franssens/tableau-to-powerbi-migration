@@ -187,6 +187,10 @@ request. Ordinary initial grouping still writes only beside the last batch and c
 The request includes only residual original Tableau screenshots: any successful visual sibling
 satisfies it. Intent is unioned only across accepted batches containing that view: a later data-only
 retry cannot retract an earlier visual request, and distinct data-only views do not inherit it.
+Within a recovery batch, `recovery.selected_legs_by_view` supplies that per-view intent; its
+capture-wide render union never makes a data-only leg a screenshot target. Only a **grouped**
+workbook can create screenshot rows. Every other outcome, including `incomplete` and `unreconciled`
+foreign files, is a repair gap first, and successful evidence remains untouched.
 A required reference with no selected render
 tier still needs an original; its request says **tier not selected**, without inventing a tier.
 Missing `updated_at`, unknown/conflicting identity and failed local copies remain named repair gaps,
@@ -210,6 +214,12 @@ merging when no handoff exists. Only reports beside already enumerated batches a
 grouping writes begin; hard-linked or reparse carriers refuse without changing captures or prior
 outputs. Admitted reports are published by replacement, never by truncating an existing file.
 
+Request identity is field-specific: lowercase canonical Tableau UUIDs for workbook/view LUIDs,
+canonical UTC `Z` timestamps, and an HTTP(S) server authority without userinfo, path, query, fragment
+or escapes. The site is a bounded content-URL identifier; **`""` is the valid Default site**.
+Unknown handoff/row fields and malformed or unsafe response values refuse without echoing their
+contents. Retained paths are compared as data, never opened.
+
 ⚠️ Retain the original complete cohort when upgrading an older **last-batch-only** handoff. A report
 outside the enumerated inputs, or one whose copies were deleted, cannot be discovered without an
 additional scan/ledger; neither is provided. A successful local write does not prove human delivery
@@ -222,10 +232,35 @@ original evidence outside an already edited/sealed package; admission is only th
 as described in the operator runbook. PNG/hash tests establish bytes and structure, **not** image
 inspection; an image-capable human/model must perform and record that qualification.
 
+The seven optional response fields are closed: `supplied_context`, `retained_reference_paths`,
+`retained_image_paths`, `source_file_sha256`, `manual_origin`, `image_inspection_note` and
+`response_recorded_at`. Omit an unknown response field rather than supplying a placeholder of the
+wrong type. Path fields are lists of at most 64 distinct canonical relative `/`-separated paths,
+each at most 1,024 characters; absolute, traversal, alias and encoded host paths refuse. The digest
+is exactly 64 lowercase hex characters, and the response timestamp is canonical UTC. Origin and
+inspection notes are printable, nonblank, privacy-screened text of at most 512 characters.
+`supplied_context` has exactly `filters`, `parameters` and `period`; each has exactly `status` and
+`value`, either `UNKNOWN`/`null` or `SUPPLIED`/a bounded privacy-screened text declaration. These
+declarations do not change the immutable request's unknown context or become filter-state proof.
+
 Keep supplied references disjoint from package output, final, staging and retired paths; admit
 only local non-reparse roots and regular members. A fresh `package_unit.py --reference <dir>`
-preserves the original manifest, source/image hashes, kind and grade. Construction is not
-`START_READY`; the normal package checks still decide whether work may proceed.
+first validates the closed existing capture format, then preserves accepted manifest/image bytes
+unchanged. Root fields are `captured_at`, `source_workbook_sha256` and `dashboards`; entries contain
+`name` and `states`. States contain `state_slug: default`, `state: {}`, a PNG `image`, `provider`,
+`capabilities`, `dimensions`, `sha256` and `numeric_oracle: null`. Known optional identity enrichment
+is limited to workbook LUID claims at all three scopes, object-kind claims on entries/states, and
+positive `bytes` on states. Dimensions contain positive integer `w`/`h` and optional positive `dpr`.
+Supported providers are `manual`, `public_playwright` and `embedded_thumbnail`, capped by the existing
+provider authority and by **layout/text only**. Validation-grade, numeric/filter-state assertions,
+unknown fields, non-finite/duplicate-key JSON and unsafe metadata refuse; nothing is stripped or
+restamped to make it acceptable. Existing source/image identity, seal and readiness authorities
+still apply. Privacy screening reuses the host-location and credential detectors; it does not prove
+arbitrary prose or pixels secret-free. Construction is not `START_READY`.
+
+❌ **Blocking dependency: #664.** The final `check_unit` consumer does not yet share the canonical
+manual-reference name/type interpretation. Entry readiness does not establish usable final manual
+completion; PR #658's producer/grouper corrections do not close that separate consumer issue.
 
 ✅ API/cache policy belongs to the **selected failed leg**, not the newest batch's top-level
 metadata. Grouping preserves the winning leg's `rest_api_version`, deriving it from that capture's

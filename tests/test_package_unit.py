@@ -677,6 +677,102 @@ def _refuse_reference(entrypoint: str, bundle: Path, out: Path, reference: Path,
 
 
 @pytest.mark.parametrize("entrypoint", ["constructor", "cli"])
+@pytest.mark.parametrize(
+    ("scope", "field", "value"),
+    [
+        ("state", "capabilities", ["layout_grade", "text_readable", "validation_grade"]),
+        ("state", "capabilities", ["layout_grade", "state_reproducible"]),
+        ("state", "capabilities", ["layout_grade", "revision_bound"]),
+        ("state", "capabilities", ["layout_grade", True]),
+        ("state", "numeric_oracle", "tableau-Sales.png"),
+        ("state", "state", {"filters": {"Region": "West"}}),
+        ("state", "filter_state", {"verified": True}),
+        ("manifest", "private_path", r"Q:\private\SYNTHETIC.png"),
+        ("entry", "secret", "SYNTHETIC_SECRET"),
+        ("state", "note", {"secret": "SYNTHETIC_SECRET"}),
+        ("dimensions", "private_path", r"Q:\private\SYNTHETIC.png"),
+        ("state", "provider", "unknown-provider"),
+        ("state", "sha256", True),
+        ("dimensions", "w", True),
+        ("dimensions", "dpr", {"secret": "SYNTHETIC_SECRET"}),
+        ("manifest", "source_workbook_sha256", "not-a-digest"),
+        ("entry", "name", r"tableau-Q:\private\SYNTHETIC.png"),
+        ("state", "state_slug", "token=SYNTHETIC_SECRET"),
+    ],
+)
+def test_reference_closed_manual_contract_refuses_without_rewriting_or_shipping(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    entrypoint: str,
+    scope: str,
+    field: str,
+    value: object,
+) -> None:
+    bundle, _oracle = _bundle(tmp_path, worksheets=("Sales",))
+    reference, _raw = _manual_reference(bundle)
+    manifest_path = reference / "manifest.json"
+    payload = json.loads(manifest_path.read_bytes())
+    entry = payload["dashboards"][0]
+    state = entry["states"][0]
+    target = {"manifest": payload, "entry": entry, "state": state, "dimensions": state["dimensions"]}[scope]
+    target[field] = value
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    before = _reference_hashes(reference)
+    out = _out(tmp_path)
+
+    _refuse_reference(entrypoint, bundle, out, reference, "reference_manifest_contract")
+
+    assert not (out / UNIT).exists()
+    assert _reference_hashes(reference) == before
+    assert "SYNTHETIC" not in caplog.text
+
+
+@pytest.mark.parametrize("provider", ["manual", "public_playwright"])
+def test_reference_closed_layout_text_provider_preserves_bytes(tmp_path: Path, provider: str) -> None:
+    bundle, oracle = _bundle(tmp_path, worksheets=("Sales",))
+    reference, _raw = _manual_reference(bundle)
+    path = reference / "manifest.json"
+    payload = json.loads(path.read_bytes())
+    payload["dashboards"][0]["states"][0]["provider"] = provider
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    before = _reference_hashes(reference)
+
+    pkg.package_unit(
+        bundle, UNIT, _out(tmp_path), oracle_dir=oracle, assets_dir=bundle.parent / "assets", reference_dir=reference
+    )
+
+    packaged = _out(tmp_path) / UNIT / "reference"
+    assert (packaged / "manifest.json").read_bytes() == path.read_bytes()
+    assert _reference_hashes(reference) == before
+    assert _reference_hashes(packaged) == {
+        name: digest for name, digest in before.items() if name != "not-declared.txt"
+    }
+    accepted, rejected = rev.reference_evidence([packaged])
+    assert not rejected
+    assert accepted and all(record.grade != rev.GRADE_VALIDATION for record in accepted)
+
+
+@pytest.mark.parametrize("malformation", ["duplicate-claim", "nonfinite", "overflow"])
+def test_reference_strict_json_refuses_hidden_or_nonfinite_claims_without_rewrite(
+    tmp_path: Path, malformation: str
+) -> None:
+    bundle, _oracle = _bundle(tmp_path, worksheets=("Sales",))
+    reference, raw = _manual_reference(bundle)
+    if malformation == "duplicate-claim":
+        raw = raw.replace(b'"numeric_oracle": null', b'"numeric_oracle": "tableau-Sales.png", "numeric_oracle": null')
+    else:
+        raw = raw.replace(b'"w": 320', b'"w": ' + (b"NaN" if malformation == "nonfinite" else b"1e999"))
+    path = reference / "manifest.json"
+    path.write_bytes(raw)
+    before = _reference_hashes(reference)
+
+    _refuse_reference("constructor", bundle, _out(tmp_path), reference, "reference_manifest_unreadable")
+
+    assert _reference_hashes(reference) == before
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
+@pytest.mark.parametrize("entrypoint", ["constructor", "cli"])
 @pytest.mark.parametrize("overlap", ["out", "final", "staging", "retired", "staging-child", "out-ancestor"])
 def test_reference_source_overlap_preserves_every_source_and_old_target_byte(
     tmp_path: Path, entrypoint: str, overlap: str
