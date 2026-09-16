@@ -18,6 +18,8 @@ import shutil
 import struct
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from types import SimpleNamespace
 from ctypes import wintypes
 from dataclasses import FrozenInstanceError
@@ -278,6 +280,86 @@ def test_visual_child_bad_arguments_cannot_echo_private_data_or_create_a_file(tm
     assert not list(tmp_path.iterdir())
 
 
+_NODE_IMAGE_READER = (
+    "const fs=require('fs'), crypto=require('crypto'); "
+    "fs.writeSync(1,'READY\\n'); "
+    "const path=JSON.parse(fs.readFileSync(0,'utf8')); "
+    "const b=fs.readFileSync(path); "
+    "console.log(JSON.stringify({bytes:b.length,sha256:crypto.createHash('sha256').update(b).digest('hex')}))"
+)
+
+
+@contextmanager
+def _ready_native_process(argv: list[str], process_role: str) -> Iterator[subprocess.Popen]:
+    """Bound setup separately from file access; always reap the exact child, including failed setup."""
+    with subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as child:
+        # Keep the existing 10s setup watchdog, but never let it kill a successfully prepared lease.
+        deadline = threading.Timer(10, child.kill)
+        try:
+            deadline.start()
+            try:
+                ready = child.stdout.readline().strip()
+            finally:
+                deadline.cancel()
+                deadline.join()
+            assert ready == b"READY", (
+                f"{process_role} startup failed before READY; sharing was not tested "
+                f"(pid={child.pid}, exit={child.poll()}, output={ready!r})"
+            )
+            yield child
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=3)
+
+
+def _read_native_image(reader: subprocess.Popen, path: Path) -> dict:
+    """The unchanged 5s bound now measures a prepared external reader, not Node bootstrap."""
+    try:
+        output, _ = reader.communicate(json.dumps(str(path)).encode("utf-8"), timeout=5)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"reader read/hash timed out after READY (pid={reader.pid})")
+    assert reader.returncode == 0, (
+        f"reader read/hash failed after READY (pid={reader.pid}, exit={reader.returncode}, output={output!r})"
+    )
+    return json.loads(output)
+
+
+def test_visual_reader_failed_startup_is_not_a_sharing_failure() -> None:
+    """An exited reader cannot be mistaken for a sharing-contract failure."""
+    with pytest.raises(AssertionError, match="reader startup failed before READY; sharing was not tested"):
+        with _ready_native_process([sys.executable, "-c", "raise SystemExit(19)"], "reader"):
+            pytest.fail("a reader that never became READY must not reach the sharing assertion")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native sharing violation control is Windows-only")
+def test_visual_reader_sharing_failure_is_distinct_from_failed_startup(tmp_path) -> None:
+    """A running Node reader must report EBUSY, not a startup failure, for an exclusive native handle."""
+    path = tmp_path / "_ui-image-exclusive.png"
+    path.write_bytes(b"reader control")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [wintypes.HANDLE], wintypes.BOOL
+    handle = kernel.CreateFileW(str(path), 0x80000000, 0, None, 3, 0, None)  # GENERIC_READ, no sharing
+    assert handle != ctypes.c_void_p(-1).value, "exclusive control handle setup failed"
+    try:
+        with _ready_native_process(["node", "-e", _NODE_IMAGE_READER], "reader") as reader:
+            with pytest.raises(AssertionError, match="reader read/hash failed after READY.*EBUSY"):
+                _read_native_image(reader, path)
+    finally:
+        assert kernel.CloseHandle(handle)
+        path.unlink(missing_ok=True)
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="kernel delete-on-close handles are Windows-only")
 def test_visual_native_lease_allows_shared_reader_and_dies_with_its_process(tmp_path) -> None:
     """A real OS process kill, not Python finally/atexit, must remove its leased image."""
@@ -290,42 +372,21 @@ def test_visual_native_lease_allows_shared_reader_and_dies_with_its_process(tmp_
         "lease.write(m._image_png(2,2,b'\\0\\0\\0'*2+b'\\xff\\xff\\xff'*2)); lease.flush(); "
         "print('READY',flush=True); time.sleep(60)"
     )
-    child = subprocess.Popen(  # pylint: disable=consider-using-with
-        [sys.executable, "-c", script, str(path)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-    )
-    deadline = threading.Timer(10, child.kill)
-    deadline.start()
     try:
-        assert child.stdout.readline().strip() == b"READY", "native lease setup failed"
-        read = subprocess.run(
-            [
-                "node",
-                "-e",
-                "const b=require('fs').readFileSync(process.argv[1]); "
-                "console.log(JSON.stringify({bytes:b.length,sha256:require('crypto').createHash('sha256').update(b).digest('hex')}))",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        assert read.returncode == 0, "the real Node shared-delete reader must be able to inspect the image"
-        observed = json.loads(read.stdout)
-        expected = _credential_modal._image_png(2, 2, b"\0\0\0" * 2 + b"\xff\xff\xff" * 2)
-        assert observed == {"bytes": len(expected), "sha256": hashlib.sha256(expected).hexdigest()}
-        child.kill()
-        child.wait(timeout=3)
-        cleanup_deadline = time.monotonic() + 1
-        while path.exists() and time.monotonic() < cleanup_deadline:
-            time.sleep(0.005)  # native control: handle teardown followed process signalling by 5–6 ms
-        assert not path.exists(), "kernel cleanup must remove pixels on forced observer exit"
+        # #650's communicate timeout did not establish that Node ever reached readFileSync.
+        # Preload the SAME reader before creating the lease; send its path only after both are READY.
+        with _ready_native_process(["node", "-e", _NODE_IMAGE_READER], "reader") as reader:
+            with _ready_native_process([sys.executable, "-c", script, str(path)], "lease") as child:
+                observed = _read_native_image(reader, path)
+                expected = _credential_modal._image_png(2, 2, b"\0\0\0" * 2 + b"\xff\xff\xff" * 2)
+                assert observed == {"bytes": len(expected), "sha256": hashlib.sha256(expected).hexdigest()}
+                child.kill()
+                child.wait(timeout=3)
+                cleanup_deadline = time.monotonic() + 1
+                while path.exists() and time.monotonic() < cleanup_deadline:
+                    time.sleep(0.005)  # native control: handle teardown followed process signalling by 5–6 ms
+                assert not path.exists(), "kernel cleanup must remove pixels on forced observer exit"
     finally:
-        deadline.cancel()
-        if child.poll() is None:
-            child.kill()
-            child.wait(timeout=3)
-        child.stdout.close()
         path.unlink(missing_ok=True)
 
 
