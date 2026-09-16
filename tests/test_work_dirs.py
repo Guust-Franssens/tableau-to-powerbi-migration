@@ -4,14 +4,21 @@
 Every test uses `tmp_path` as `repo_root` so this suite never touches the real repo's `_runs/`.
 """
 
+# Keep the allocator and navigation regressions in this one scoped test module.
+# pylint: disable=too-many-lines
+
 import ast
+import errno
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
+from typing import IO
 
 import pytest
 
@@ -36,10 +43,17 @@ from work_dirs import (
     RUN_LOCATION_MOVED,
     RUN_LOCATION_UNVERIFIABLE,
     RUN_PATH_KEY,
+    _NAVIGATION_MARKER,
+    _admit_selected_run,
+    _display_path,
     _is_location_independent,  # the one private helper a test reaches for - see its test below
+    _load_selected_run,
+    _select_run_for_navigation,
+    _write_navigation_note,
     allocate_run,
     check_run_location,
     list_runs,
+    main,
     runs_root,
     sanitize_unit_key,
     verify_exit_code,
@@ -70,10 +84,12 @@ from work_dirs import (
     ],
 )
 def test_sanitize_unit_key_handles_awkward_characters(raw: str, expected: str) -> None:
+    """Names keep the established safe, bounded slug spelling."""
     assert sanitize_unit_key(raw) == expected
 
 
 def test_sanitize_unit_key_never_returns_empty_or_bare_punctuation() -> None:
+    """Even empty or control-only names retain a usable slug."""
     for raw in ("", "   ", "---", "\u00a0\u2028", "!!!"):
         got = sanitize_unit_key(raw)
         assert got, f"sanitize_unit_key({raw!r}) returned an empty slug"
@@ -81,6 +97,7 @@ def test_sanitize_unit_key_never_returns_empty_or_bare_punctuation() -> None:
 
 
 def test_sanitize_unit_key_caps_length() -> None:
+    """Decorative slugs cannot consume the downstream path budget."""
     got = sanitize_unit_key("x" * 500)
     # New slugs are decorative; the run number remains the permanent identity.
     assert len(got) <= 15
@@ -99,6 +116,7 @@ def test_sanitize_unit_key_is_never_load_bearing_for_identity() -> None:
 
 
 def test_allocate_run_starts_at_one_and_creates_canonical_subdirs(tmp_path: Path) -> None:
+    """The first allocation exposes every canonical accessor."""
     run = allocate_run("Enterprise Dashboards", repo_root=tmp_path)
 
     assert run.run_number == 1
@@ -203,6 +221,7 @@ def test_allocate_run_numbering_is_global_across_units_not_per_unit(tmp_path: Pa
 
 
 def test_allocate_run_never_renumbers_or_reuses_a_number(tmp_path: Path) -> None:
+    """Repeated allocation preserves the first run's identity."""
     run_a = allocate_run("acme", repo_root=tmp_path)
     run_b = allocate_run("acme", repo_root=tmp_path)
     assert run_a.run_number != run_b.run_number
@@ -210,6 +229,7 @@ def test_allocate_run_never_renumbers_or_reuses_a_number(tmp_path: Path) -> None
 
 
 def test_allocate_run_does_not_reuse_a_deleted_run_number(tmp_path: Path) -> None:
+    """Reservations survive deletion of their corresponding run."""
     first = allocate_run("acme", repo_root=tmp_path)
     shutil.rmtree(first.root)
 
@@ -242,9 +262,7 @@ def test_allocate_run_retries_on_a_true_concurrent_mkdir_race(tmp_path: Path, mo
     silently NOT raise on the second call and the mutation would go uncaught - which is exactly what
     happened during mutation testing until this test was rewritten to stop injecting the exception
     directly."""
-    import pathlib
-
-    original_mkdir = pathlib.Path.mkdir
+    original_mkdir = Path.mkdir
     triggered = {"n": 0}
 
     def racy_mkdir(self: Path, *args: object, **kwargs: object) -> None:
@@ -253,7 +271,7 @@ def test_allocate_run_retries_on_a_true_concurrent_mkdir_race(tmp_path: Path, mo
             original_mkdir(self, parents=True, exist_ok=True)  # another process "wins" the race
         original_mkdir(self, *args, **kwargs)  # real semantics decide whether THIS call raises
 
-    monkeypatch.setattr(pathlib.Path, "mkdir", racy_mkdir)
+    monkeypatch.setattr(Path, "mkdir", racy_mkdir)
 
     run = allocate_run("acme", repo_root=tmp_path)
 
@@ -274,7 +292,7 @@ def test_allocate_run_reserves_numbers_atomically_across_distinct_slugs(tmp_path
         try:
             barrier.wait()
             runs.append(allocate_run(name, repo_root=tmp_path))
-        except BaseException as exc:  # pragma: no cover - propagated below with the original exception
+        except BaseException as exc:  # pylint: disable=broad-exception-caught
             failures.append(exc)
 
     threads = [threading.Thread(target=allocate, args=(name,)) for name in names]
@@ -290,6 +308,7 @@ def test_allocate_run_reserves_numbers_atomically_across_distinct_slugs(tmp_path
 
 
 def test_allocate_run_writes_a_readable_manifest(tmp_path: Path) -> None:
+    """Allocation records identity and retains caller-owned metadata."""
     run = allocate_run("acme", repo_root=tmp_path, extra_manifest={"scope": {"kind": "workbook"}})
 
     assert run.manifest_path.is_file()
@@ -311,6 +330,7 @@ def test_allocate_run_reserved_keys_win_over_a_colliding_extra_manifest(tmp_path
 
 
 def test_subdir_rejects_a_noncanonical_name(tmp_path: Path) -> None:
+    """Unknown subdirectories cannot silently become a second convention."""
     run = allocate_run("acme", repo_root=tmp_path)
     with pytest.raises(ValueError):
         run.subdir("not-a-real-subdir")
@@ -343,6 +363,7 @@ def test_packages_dir_is_usable_directly_as_flat_package_root(tmp_path: Path) ->
 
 
 def test_list_runs_returns_manifests_sorted_by_run_number(tmp_path: Path) -> None:
+    """Inspection is ordered by permanent identity, not the decorative slug."""
     allocate_run("zzz-last-alphabetically", repo_root=tmp_path)
     allocate_run("aaa-first-alphabetically", repo_root=tmp_path)
 
@@ -353,6 +374,7 @@ def test_list_runs_returns_manifests_sorted_by_run_number(tmp_path: Path) -> Non
 
 
 def test_list_runs_on_empty_or_missing_runs_root_is_empty_not_an_error(tmp_path: Path) -> None:
+    """An unallocated root has no runs to inspect."""
     assert not list_runs(tmp_path)  # `_runs/` was never created under this tmp_path
 
     root = runs_root(tmp_path)
@@ -361,6 +383,7 @@ def test_list_runs_on_empty_or_missing_runs_root_is_empty_not_an_error(tmp_path:
 
 
 def test_list_runs_skips_a_run_directory_with_no_manifest(tmp_path: Path) -> None:
+    """Inspection may omit unreadable entries, unlike verification."""
     root = runs_root(tmp_path)
     root.mkdir(parents=True)
     (root / "001-half-written").mkdir()  # no run.json inside
@@ -857,6 +880,7 @@ def test_verify_runs_counts_each_state_separately(tmp_path: Path) -> None:
 
 
 def test_verify_runs_reports_duplicate_run_numbers_as_non_clean(tmp_path: Path) -> None:
+    """Both duplicate identities are counted and the CLI refuses the tree."""
     first = allocate_run("acme", repo_root=tmp_path)
     duplicate = runs_root(tmp_path) / "001-beta"
     shutil.copytree(first.root, duplicate)
@@ -1012,18 +1036,650 @@ def test_verify_cli_needs_no_unit_argument_but_allocation_still_does(tmp_path: P
 # --------------------------------------------------------------------------------------
 
 
-def _run_allocate_cli(unit: str, *root_args: str, json_out: bool = True) -> subprocess.CompletedProcess:
-    args = [sys.executable, str(REPO_ROOT / "scripts" / "work_dirs.py"), unit, *root_args]
+def _synthetic_cli_toolkit(root: Path) -> Path:
+    """Copy the agent-callable CLI into an isolated ignored checkout."""
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    for name in ("work_dirs.py", "bundle_corpus.py"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    (root / ".gitignore").write_text("/_*\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+    return root
+
+
+def _run_allocate_cli(
+    toolkit: Path,
+    unit: str,
+    *root_args: str,
+    json_out: bool = True,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess:
+    args = [sys.executable, str(toolkit / "scripts" / "work_dirs.py"), unit, *root_args]
     if json_out:
         args.append("--json")
-    return subprocess.run(args, capture_output=True, text=True, check=False)
+    return subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        cwd=cwd,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+
+
+def _run_select_cli(toolkit: Path, run: str, *extra: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(toolkit / "scripts" / "work_dirs.py"), "--select-run", run, *extra],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+def test_default_cli_allocation_automatically_writes_checkout_navigation_from_another_cwd(tmp_path: Path) -> None:
+    """Normal setup writes only the toolkit note, without materializing lazy destinations."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    result = _run_allocate_cli(toolkit, "acme", cwd=elsewhere)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    note = (toolkit / "_MIGRATION.md").read_text(encoding="utf-8")
+    assert note.startswith(_NAVIGATION_MARKER)
+    assert str(toolkit) in note
+    assert payload["root"] in note
+    assert payload["bundle"] in note and payload["oracle"] in note and payload["packages"] in note
+    assert "Expected destinations" in note
+    assert "does not mean artifacts were generated" in note
+    assert "`<package>\\fabric` (not an observed per-unit path)" in note
+    assert not Path(payload["deliverables"]).exists()
+    assert not (Path(payload["packages"]) / "fabric").exists()
+
+
+def test_select_run_a_then_b_replaces_only_the_marked_note(tmp_path: Path) -> None:
+    """Explicit selection, never prior note content, chooses the context."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    external = tmp_path / "external"
+    run_a = allocate_run("alpha", repo_root=external)
+    run_b = allocate_run("beta", repo_root=external)
+    package_readme = run_a.packages / "Alpha" / "README.md"
+    package_readme.parent.mkdir()
+    package_readme.write_text("portable package bytes\n", encoding="utf-8")
+    before = _tree_bytes(external)
+
+    first = _run_select_cli(toolkit, str(run_a.root))
+    assert first.returncode == 0, first.stdout + first.stderr
+    note_path = toolkit / "_MIGRATION.md"
+    first_note = note_path.read_text(encoding="utf-8")
+    first_generated = next(line for line in first_note.splitlines() if line.startswith("- Generated (UTC):"))
+    note_path.write_text(
+        first_note.replace(str(run_a.root), str(tmp_path / "poisoned-previous-context")),
+        encoding="utf-8",
+    )
+
+    second = _run_select_cli(toolkit, str(run_b.root))
+
+    assert second.returncode == 0, second.stdout + second.stderr
+    second_note = note_path.read_text(encoding="utf-8")
+    second_generated = next(line for line in second_note.splitlines() if line.startswith("- Generated (UTC):"))
+    assert str(run_b.root) in second_note
+    assert "poisoned-previous-context" not in second_note
+    assert second_generated != first_generated
+    assert "outside toolkit" in second_note
+    assert _tree_bytes(external) == before
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("ordinary space \u00e9 `ticks`", "ordinary space \u00e9 `ticks`"),
+        ("\u202e\u2028\u2029\u2066\u2069\x85", r"\u202e\u2028\u2029\u2066\u2069\x85"),
+        ("prefix\n```\n# forged\r\t\x1b[2J", r"prefix\n```\n# forged\r\t\x1b[2J"),
+    ],
+)
+def test_path_display_escapes_controls_not_ordinary_spelling(value: str, expected: str) -> None:
+    """Display-only seam also covers POSIX newlines and terminal escape sequences."""
+    assert _display_path(value) == expected
+    assert _display_path(value).splitlines() == [expected]
+
+
+@pytest.mark.parametrize(
+    ("component", "visible"),
+    [
+        ("ordinary space \u00e9 `ticks`", "ordinary space \u00e9 `ticks`"),
+        ("left\u202e\u2028```spoof\u2029# forged", r"left\u202e\u2028```spoof\u2029# forged"),
+    ],
+)
+def test_native_path_display_keeps_markdown_and_terminal_boundaries(
+    tmp_path: Path, component: str, visible: str
+) -> None:
+    """Real native names must stay on one code/output line; JSON keeps the actual identity."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / (component + "-toolkit"))
+    external = tmp_path / (component + "-runs")
+    created = _run_allocate_cli(toolkit, "acme", "--runs-parent", str(external))
+    assert created.returncode == 0 and not created.stderr, created.stdout + created.stderr
+    payload = json.loads(created.stdout)
+    root = external / "_runs" / "001-acme"
+    assert root.is_dir() and payload["root"] == str(root)
+    assert json.loads((root / "run.json").read_text(encoding="utf-8"))[RUN_PATH_KEY] == str(root)
+    paths = [toolkit, root, root / "bundle", root / "oracle", root / "packages"]
+    expected = [str(path).replace(component, visible) for path in paths]
+    for name in ("bundle", "oracle", "packages"):
+        assert payload[name] == str(root / name)
+    before = _tree_bytes(external)
+    for encoding in ("utf-8", "cp1252"):
+        selected = subprocess.run(
+            [sys.executable, str(toolkit / "scripts" / "work_dirs.py"), "--select-run", str(root)],
+            capture_output=True,
+            text=True,
+            encoding=encoding,
+            check=False,
+            env={**os.environ, "PYTHONIOENCODING": encoding},
+        )
+        assert selected.returncode == 0 and not selected.stderr, selected.stdout + selected.stderr
+        assert selected.stdout.splitlines() == [
+            f"updated {expected[0]}{os.sep}_MIGRATION.md for selected run {expected[1]}"
+        ]
+        note = (toolkit / "_MIGRATION.md").read_text(encoding="utf-8")
+        assert [line[4:] for line in note.splitlines() if line.startswith("    ")] == expected
+        assert "`<package>\\fabric` (not an observed per-unit path)" in note
+    assert _tree_bytes(external) == before
+
+
+@pytest.mark.parametrize(
+    "action", ["allocation", "verify", "selection-refusal", "note-refusal", "allocation-warning", "allocation-error"]
+)
+def test_native_control_paths_in_all_cli_text_sinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], action: str
+) -> None:
+    """Real NTFS-compatible controls cannot inject lines through paths or diagnostic details."""
+    component = "native\u202e\u2028# spoof"
+    toolkit = _synthetic_cli_toolkit(tmp_path / (component + "-toolkit"))
+    external = tmp_path / (component + "-runs")
+    note = toolkit / "_MIGRATION.md"
+    old_bytes = (_NAVIGATION_MARKER + "\nprevious note\n").encode()
+    if action in ("note-refusal", "allocation-warning"):
+        old_bytes = b"human-owned\n"
+    note.write_bytes(old_bytes)
+    args = ["work_dirs.py", "acme", "--runs-parent", str(external)]
+    if action in ("verify", "note-refusal"):
+        run = allocate_run("acme", repo_root=external)
+        args = (
+            ["work_dirs.py", "--verify", "--runs-parent", str(external)]
+            if action == "verify"
+            else ["work_dirs.py", "--select-run", str(run.root)]
+        )
+    elif action == "selection-refusal":
+        args = ["work_dirs.py", "--select-run", str(external)]
+    elif action == "allocation-error":
+        external.write_bytes(b"not a directory")
+    monkeypatch.setattr("work_dirs.REPO_ROOT", toolkit)
+    monkeypatch.setattr(sys, "argv", args)
+    assert main() == (1 if action in ("selection-refusal", "note-refusal", "allocation-error") else 0)
+    captured = capsys.readouterr()
+    assert "\u202e" not in captured.out + captured.err and "\u2028" not in captured.out + captured.err
+    assert r"native\u202e\u2028# spoof" in captured.out + captured.err
+    if captured.err:
+        assert len(captured.err.splitlines()) == 1
+    if action not in ("allocation",):
+        assert note.read_bytes() == old_bytes
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "relative/_runs/001-acme",
+        r"\runs\001-acme",
+        r"\Device\HarddiskVolume1\_runs\001-acme",
+        r"\\server\share\_runs\001-acme",
+        r"\\?\C:\_runs\001-acme",
+        "//server/share/_runs/001-acme",
+        "//?/C:/_runs/001-acme",
+    ],
+)
+def test_selected_nonlocal_or_relative_spelling_does_no_filesystem_io(
+    spelling: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lexical refusals cannot reach even a no-follow filesystem probe."""
+
+    def unexpected_lstat(_path: Path) -> os.stat_result:
+        raise AssertionError("selection touched the filesystem before lexical admission")
+
+    monkeypatch.setattr(os, "lstat", unexpected_lstat)
+    assert _admit_selected_run(Path(spelling)) is not None
+
+
+def test_selected_native_directory_link_stops_before_descendant_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Native directory junction on Windows, directory symlink on POSIX; never a file-symlink claim."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    monkeypatch.setattr("work_dirs.REPO_ROOT", toolkit)
+    real_parent = tmp_path / "real"
+    run = allocate_run("acme", repo_root=real_parent)
+    assert _select_run_for_navigation(run.root) == (True, "")
+    old_note = (toolkit / "_MIGRATION.md").read_bytes()
+    alias = tmp_path / "alias"
+    if sys.platform == "win32":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(alias), str(real_parent)], capture_output=True, check=False
+        )
+        assert result.returncode == 0, result.stderr.decode(errors="replace")
+        assert os.lstat(alias).st_file_attributes & 0x400
+    else:
+        alias.symlink_to(real_parent, target_is_directory=True)
+        assert stat.S_ISLNK(os.lstat(alias).st_mode)
+    real_lstat = os.lstat
+    inspected = []
+
+    def no_descendants(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+        assert alias not in Path(path).parents, "lstat crossed the rejected native directory link"
+        inspected.append(Path(path))
+        return real_lstat(path, *args, **kwargs)
+
+    def unexpected_read(_run_dir: Path) -> tuple[dict | None, str, str]:
+        raise AssertionError("manifest reader was reached through a native directory link")
+
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(os, "lstat", no_descendants)
+            context.setattr("work_dirs._read_run_manifest", unexpected_read)
+            updated, problem = _select_run_for_navigation(alias / "_runs" / run.root.name)
+        assert not updated and "symlink, junction or reparse" in problem
+        assert inspected[-1] == alias
+        assert (toolkit / "_MIGRATION.md").read_bytes() == old_note
+    finally:
+        if sys.platform == "win32":
+            alias.rmdir()
+        else:
+            alias.unlink()
+
+
+def _native_file_symlink(link: Path, target: Path) -> None:
+    """Attempt a genuine file symlink; only unsupported/permission failures earn the existing skip."""
+    try:
+        link.symlink_to(target)
+    except NotImplementedError:
+        pytest.skip("this platform/account cannot create symlinks without elevation")
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != 1314 and exc.errno not in (
+            errno.EPERM,
+            errno.EACCES,
+            errno.ENOSYS,
+            errno.ENOTSUP,
+        ):
+            raise
+        pytest.skip("this platform/account cannot create symlinks without elevation")
+
+
+def test_selected_native_file_symlink_manifest_is_never_opened(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Genuine file-symlink integration, separately from the always-executable attribute seam."""
+    run = allocate_run("acme", repo_root=tmp_path)
+    real_manifest = run.root / "real-run.json"
+    run.manifest_path.rename(real_manifest)
+    _native_file_symlink(run.manifest_path, real_manifest)
+    assert stat.S_ISLNK(os.lstat(run.manifest_path).st_mode)
+
+    def unexpected_read(_run_dir: Path) -> tuple[dict | None, str, str]:
+        raise AssertionError("manifest reader opened a reparse manifest")
+
+    monkeypatch.setattr("work_dirs._read_run_manifest", unexpected_read)
+    selected, problem = _load_selected_run(run.root)
+    assert selected is None
+    assert "regular non-reparse" in str(problem)
+
+
+@pytest.mark.parametrize("boundary", ["manifest", "note"])
+@pytest.mark.parametrize(
+    "info",
+    [
+        SimpleNamespace(st_mode=stat.S_IFLNK, st_file_attributes=0),
+        SimpleNamespace(st_mode=stat.S_IFREG, st_file_attributes=0x400),
+    ],
+    ids=["symlink-mode", "windows-file-reparse-attribute"],
+)
+def test_file_reparse_lstat_seam_stops_before_reader_or_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str, info: SimpleNamespace
+) -> None:
+    """No-follow seam, not native file-symlink coverage: a following-visible regular file must refuse."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    monkeypatch.setattr("work_dirs.REPO_ROOT", toolkit)
+    run = allocate_run("acme", repo_root=tmp_path / "external")
+    assert _select_run_for_navigation(run.root) == (True, "")
+    entry = run.manifest_path if boundary == "manifest" else toolkit / "_MIGRATION.md"
+    assert stat.S_ISREG(os.lstat(entry).st_mode)
+    before = {path: path.read_bytes() for path in (run.manifest_path, toolkit / "_MIGRATION.md")}
+    original = (os.lstat, Path.open)
+    inspected = []
+
+    def nofollow_file(path: Path, *args: object, **kwargs: object) -> os.stat_result | SimpleNamespace:
+        if Path(path) == entry:
+            inspected.append(entry)
+            return info
+        return original[0](path, *args, **kwargs)
+
+    def forbid_entry_open(path: Path, *args: object, **kwargs: object) -> IO[str] | IO[bytes]:
+        assert path != entry, f"{boundary} reader/writer reached a rejected file-reparse entry"
+        return original[1](path, *args, **kwargs)
+
+    def forbid_manifest_reader(_run_dir: Path) -> tuple[dict | None, str, str]:
+        raise AssertionError("manifest reader reached a rejected file-reparse entry")
+
+    with monkeypatch.context() as context:
+        context.setattr(os, "lstat", nofollow_file)
+        context.setattr(Path, "open", forbid_entry_open)
+        if boundary == "manifest":
+            context.setattr("work_dirs._read_run_manifest", forbid_manifest_reader)
+        result = _select_run_for_navigation(run.root)
+    assert inspected == [entry]
+    assert not result[0] and "regular non-reparse" in result[1]
+    assert {path: path.read_bytes() for path in before} == before
+
+
+@pytest.mark.parametrize("boundary", ["ancestor", "manifest"])
+@pytest.mark.parametrize("failure", ["missing", "unreadable", "wrong-type"])
+def test_selection_admission_failure_stops_before_descendants_or_manifest_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, boundary: str, failure: str
+) -> None:
+    """Other pre-read lstat refusals preserve the previous note; ordinary admission is the control."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    monkeypatch.setattr("work_dirs.REPO_ROOT", toolkit)
+    run = allocate_run("acme", repo_root=tmp_path / "external")
+    assert _select_run_for_navigation(run.root) == (True, "")
+    old_note = (toolkit / "_MIGRATION.md").read_bytes()
+    entry = run.root.parent if boundary == "ancestor" else run.manifest_path
+    original = os.lstat
+    inspected = []
+
+    def refuse_entry(path: Path, *args: object, **kwargs: object) -> os.stat_result | SimpleNamespace:
+        assert entry not in Path(path).parents, "lstat crossed the refused local component"
+        inspected.append(Path(path))
+        if Path(path) == entry:
+            if failure == "missing":
+                raise FileNotFoundError("synthetic missing component")
+            if failure == "unreadable":
+                raise PermissionError("synthetic unreadable component")
+            return SimpleNamespace(
+                st_mode=stat.S_IFREG if boundary == "ancestor" else stat.S_IFDIR, st_file_attributes=0
+            )
+        return original(path, *args, **kwargs)
+
+    def forbid_reader(_run_dir: Path) -> tuple[dict | None, str, str]:
+        raise AssertionError("manifest reader reached a refused local component")
+
+    with monkeypatch.context() as context:
+        context.setattr(os, "lstat", refuse_entry)
+        context.setattr("work_dirs._read_run_manifest", forbid_reader)
+        result = _select_run_for_navigation(run.root)
+    assert not result[0] and "selected run was refused" in result[1]
+    assert inspected[-1] == entry
+    assert (toolkit / "_MIGRATION.md").read_bytes() == old_note
+
+
+def test_invalid_moved_selection_preserves_the_previous_note(tmp_path: Path) -> None:
+    """Location validation refuses before changing a previous valid selection."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    external = tmp_path / "external"
+    valid = allocate_run("valid", repo_root=external)
+    moved = allocate_run("moved", repo_root=external)
+    selected = _run_select_cli(toolkit, str(valid.root))
+    assert selected.returncode == 0, selected.stdout + selected.stderr
+    note_path = toolkit / "_MIGRATION.md"
+    old_bytes = note_path.read_bytes()
+    moved_root = _rename_run_dir(moved.root, "042-moved")
+
+    result = _run_select_cli(toolkit, str(moved_root))
+
+    assert result.returncode == 1
+    assert "navigation note not updated" in result.stderr
+    assert note_path.read_bytes() == old_bytes
+
+
+@pytest.mark.parametrize("sentinel", [b"human-owned sentinel\n", b"", _NAVIGATION_MARKER[:30].encode()])
+def test_unmarked_navigation_collision_is_preserved(tmp_path: Path, sentinel: bytes) -> None:
+    """Lost/partial markers need explicit recovery, not an automatic overwrite on the next setup."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    run = allocate_run("acme", repo_root=tmp_path / "external")
+    note = toolkit / "_MIGRATION.md"
+    assert _run_select_cli(toolkit, str(run.root)).returncode == 0
+    before = _tree_bytes(run.root)
+    note.write_bytes(sentinel)
+
+    result = _run_select_cli(toolkit, str(run.root))
+
+    assert result.returncode == 1
+    assert "not marked as generator-owned" in result.stderr
+    assert note.read_bytes() == sentinel
+    note.unlink()  # Explicit recovery of this synthetic collision, never the writer's job.
+    assert _run_select_cli(toolkit, str(run.root)).returncode == 0
+    assert _tree_bytes(run.root) == before
+
+
+@pytest.mark.parametrize("sentinel", [b"human-owned sentinel\n", b"", _NAVIGATION_MARKER[:30].encode()])
+def test_allocation_succeeds_when_unmarked_navigation_collision_is_preserved(tmp_path: Path, sentinel: bytes) -> None:
+    """A navigation warning does not undo allocation, even after a crash loses the marker."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    note = toolkit / "_MIGRATION.md"
+    note.write_bytes(sentinel)
+
+    result = _run_allocate_cli(toolkit, "acme")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert Path(json.loads(result.stdout)["root"]).is_dir()
+    assert "run allocation succeeded, but navigation note was not updated" in result.stderr
+    assert note.read_bytes() == sentinel
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_allocation_survives_note_io_failure_without_losing_its_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], existing: bool
+) -> None:
+    """Both exclusive-create and update failures warn; retry selects the allocated run, not a new one."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    monkeypatch.setattr("work_dirs.REPO_ROOT", toolkit)
+    note = toolkit / "_MIGRATION.md"
+    old_bytes = (_NAVIGATION_MARKER + "\nold note\n").encode()
+    if existing:
+        note.write_bytes(old_bytes)
+    real_open = Path.open
+    attempts = []
+
+    def fail_note_write(path: Path, mode: str, *args: object, **kwargs: object) -> IO[str] | IO[bytes]:
+        if path == note and mode in ("x", "w"):
+            attempts.append(mode)
+            raise PermissionError("synthetic note write failure")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(sys, "argv", ["work_dirs.py", "acme", "--json"])
+    with monkeypatch.context() as context:
+        context.setattr(Path, "open", fail_note_write)
+        assert main() == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    root = Path(payload["root"])
+    assert root.is_dir() and payload["run_number"] == 1
+    assert json.loads((root / "run.json").read_text(encoding="utf-8"))[RUN_PATH_KEY] == str(root)
+    assert attempts == (["w"] if existing else ["x"])
+    assert "run allocation succeeded, but navigation note was not updated" in captured.err
+    assert note.read_bytes() == old_bytes if existing else not note.exists()
+    before = _tree_bytes(root.parent)
+    assert _select_run_for_navigation(root) == (True, "")
+    assert _tree_bytes(root.parent) == before
+
+
+def test_native_file_symlink_navigation_collision_is_preserved(tmp_path: Path) -> None:
+    """Genuine file-symlink integration; a marked referent must never become the writer's target."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    run = allocate_run("acme", repo_root=tmp_path / "external")
+    note = toolkit / "_MIGRATION.md"
+    sentinel = tmp_path / "human-owned.md"
+    old_bytes = (_NAVIGATION_MARKER + "\nreferent sentinel\n").encode()
+    sentinel.write_bytes(old_bytes)
+    _native_file_symlink(note, sentinel)
+    assert stat.S_ISLNK(os.lstat(note).st_mode)
+
+    result = _run_select_cli(toolkit, str(run.root))
+
+    assert result.returncode == 1
+    assert "not a regular non-reparse file" in result.stderr
+    assert sentinel.read_bytes() == old_bytes
+
+
+def test_unreadable_navigation_collision_is_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unreadable marked file cannot be treated as safe to replace."""
+    import work_dirs as work_dirs_module  # pylint: disable=import-outside-toplevel
+
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    run = allocate_run("acme", repo_root=tmp_path / "external")
+    note = toolkit / "_MIGRATION.md"
+    old_bytes = (_NAVIGATION_MARKER + "\nold generated bytes\n").encode()
+    note.write_bytes(old_bytes)
+    original_read_text = Path.read_text
+
+    def deny_note_read(path: Path, *args: object, **kwargs: object) -> str:
+        if path == note:
+            raise PermissionError("synthetic unreadable note")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(work_dirs_module, "REPO_ROOT", toolkit)
+    monkeypatch.setattr(Path, "read_text", deny_note_read)
+    updated, detail = _write_navigation_note(run)
+
+    assert not updated
+    assert "could not read existing" in detail
+    assert note.read_bytes() == old_bytes
+
+
+@pytest.mark.parametrize(
+    ("privacy_case", "name"),
+    [
+        ("tracked", "_MIGRATION.md"),
+        ("tracked", "_migration.md"),
+        ("tracked", "_MiGrAtIoN.Md"),
+        ("nonignored", "_MIGRATION.md"),
+    ],
+)
+@pytest.mark.parametrize("marked", [False, True])
+@pytest.mark.parametrize("ignore_case", ["false", "true"])
+def test_navigation_privacy_refusal_preserves_tracked_variants(
+    tmp_path: Path, privacy_case: str, name: str, marked: bool, ignore_case: str
+) -> None:
+    """Real Git aliases are refused regardless of core.ignorecase or the file's generator marker."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    run = allocate_run("acme", repo_root=tmp_path / "external")
+    note = toolkit / name
+    old_bytes = ((_NAVIGATION_MARKER + "\n") if marked else "").encode() + b"synthetic tracked sentinel\n"
+    note.write_bytes(old_bytes)
+    target = toolkit / "_MIGRATION.md"
+    target_existed = target.exists()
+    if sys.platform == "win32":
+        assert target.samefile(note), "this control must exercise a real Windows case alias"
+    subprocess.run(["git", "-C", str(toolkit), "config", "core.ignorecase", ignore_case], check=True)
+    if privacy_case == "tracked":
+        subprocess.run(["git", "-C", str(toolkit), "add", "-f", "--", name], check=True)
+    else:
+        (toolkit / ".gitignore").write_text("", encoding="utf-8")
+    index_before = subprocess.run(
+        ["git", "-C", str(toolkit), "ls-files", "--stage", "-z"], capture_output=True, check=True
+    ).stdout
+    ignore_before = (toolkit / ".gitignore").read_bytes()
+
+    result = _run_select_cli(toolkit, str(run.root))
+
+    assert result.returncode == 1
+    assert "navigation note not updated" in result.stderr
+    assert "tracked" in result.stderr or "not ignored" in result.stderr
+    assert note.read_bytes() == old_bytes
+    assert target.exists() == target_existed
+    assert (toolkit / ".gitignore").read_bytes() == ignore_before
+    assert (
+        subprocess.run(["git", "-C", str(toolkit), "ls-files", "--stage", "-z"], capture_output=True, check=True).stdout
+        == index_before
+    )
+    subprocess.run(["git", "-C", str(toolkit), "diff", "--exit-code", "--", name], capture_output=True, check=True)
+
+
+def test_nonregular_navigation_collision_is_preserved(tmp_path: Path) -> None:
+    """A directory collision is not a replaceable generated file."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    run = allocate_run("acme", repo_root=tmp_path / "external")
+    note = toolkit / "_MIGRATION.md"
+    note.mkdir()
+
+    result = _run_select_cli(toolkit, str(run.root))
+
+    assert result.returncode == 1
+    assert "not a regular non-reparse file" in result.stderr
+    assert note.is_dir()
+
+
+def test_select_run_is_mutually_exclusive_with_allocation_and_verification_options(tmp_path: Path) -> None:
+    """Selecting existing context cannot accidentally allocate or verify another root."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    run = allocate_run("acme", repo_root=tmp_path / "external")
+
+    with_unit = _run_select_cli(toolkit, str(run.root), "another-unit")
+    with_verify = _run_select_cli(toolkit, str(run.root), "--verify")
+    with_root = _run_select_cli(toolkit, str(run.root), "--repo-root", str(tmp_path))
+
+    assert with_unit.returncode == 2
+    assert with_verify.returncode == 2
+    assert with_root.returncode == 2
+    assert not (toolkit / "_MIGRATION.md").exists()
+
+
+def test_library_allocation_listing_and_verify_do_not_write_navigation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Library callers remain non-selecting even inside an eligible toolkit checkout."""
+    import work_dirs as work_dirs_module  # pylint: disable=import-outside-toplevel
+
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    monkeypatch.setattr(work_dirs_module, "REPO_ROOT", toolkit)
+    run = work_dirs_module.allocate_run("acme")
+    work_dirs_module.list_runs()
+    work_dirs_module.verify_runs()
+
+    assert run.root.is_dir()
+    assert not (toolkit / "_MIGRATION.md").exists()
+
+
+def test_verify_cli_does_not_update_navigation(tmp_path: Path) -> None:
+    """The CLI verification gate remains a read-only observer of navigation."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    allocated = _run_allocate_cli(toolkit, "acme")
+    assert allocated.returncode == 0, allocated.stdout + allocated.stderr
+    note = toolkit / "_MIGRATION.md"
+    old_bytes = note.read_bytes()
+
+    verified = subprocess.run(
+        [sys.executable, str(toolkit / "scripts" / "work_dirs.py"), "--verify"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert verified.returncode == 0, verified.stdout + verified.stderr
+    assert note.read_bytes() == old_bytes
 
 
 def test_runs_parent_allocates_the_identical_canonical_tree_as_repo_root(tmp_path: Path) -> None:
     """`--runs-parent` is plumbing-identical to `--repo-root`: same subdirs, same manifest shape."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
     external = tmp_path / "short"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
 
-    result = _run_allocate_cli("acme", "--runs-parent", str(external))
+    result = _run_allocate_cli(toolkit, "acme", "--runs-parent", str(external), cwd=elsewhere)
 
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads(result.stdout)
@@ -1035,11 +1691,15 @@ def test_runs_parent_allocates_the_identical_canonical_tree_as_repo_root(tmp_pat
     manifest = json.loads((external / "_runs" / "001-acme" / "run.json").read_text(encoding="utf-8"))
     assert manifest["run"] == 1
     assert manifest[RUN_LOCATION_KEY] == "001-acme"
+    note = (toolkit / "_MIGRATION.md").read_text(encoding="utf-8")
+    assert str(external / "_runs" / "001-acme") in note
+    assert not (external / "_MIGRATION.md").exists()
 
 
 def test_runs_parent_and_repo_root_are_mutually_exclusive(tmp_path: Path) -> None:
     """Supplying both must fail before any allocation happens, not silently pick one."""
-    result = _run_allocate_cli("acme", "--repo-root", str(tmp_path), "--runs-parent", str(tmp_path))
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
+    result = _run_allocate_cli(toolkit, "acme", "--repo-root", str(tmp_path), "--runs-parent", str(tmp_path))
 
     assert result.returncode == 2, result.stdout + result.stderr
     assert not runs_root(tmp_path).exists()
@@ -1065,10 +1725,11 @@ def test_runs_parent_verify_inspects_the_named_external_root_only(tmp_path: Path
 
 def test_runs_parent_need_not_be_a_git_checkout(tmp_path: Path) -> None:
     """The override's parent is just a directory - it need not contain a `.git` at all."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
     external = tmp_path / "not-a-repo"
     external.mkdir()
 
-    result = _run_allocate_cli("acme", "--runs-parent", str(external))
+    result = _run_allocate_cli(toolkit, "acme", "--runs-parent", str(external))
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert not (external / ".git").exists()
@@ -1079,6 +1740,7 @@ def test_runs_parent_racing_allocators_still_get_unique_numbers_through_the_cli(
     collide on a run number - the same invariant `allocate_run` already guarantees for a repo-local
     root, but proven here via `subprocess.run(work_dirs.py ... --runs-parent ...)`, not the library
     function directly."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
     external = tmp_path / "short"
     barrier = threading.Barrier(2)
     results: list[dict] = []
@@ -1086,7 +1748,7 @@ def test_runs_parent_racing_allocators_still_get_unique_numbers_through_the_cli(
 
     def worker(name: str) -> None:
         barrier.wait()
-        payload = _run_allocate_cli(name, "--runs-parent", str(external))
+        payload = _run_allocate_cli(toolkit, name, "--runs-parent", str(external))
         assert payload.returncode == 0, payload.stdout + payload.stderr
         with lock:
             results.append(json.loads(payload.stdout))
@@ -1103,10 +1765,11 @@ def test_runs_parent_racing_allocators_still_get_unique_numbers_through_the_cli(
 def test_runs_parent_invalid_target_fails_before_partial_allocation(tmp_path: Path) -> None:
     """An unsafe/invalid parent (a plain FILE, not a directory) must fail cleanly and leave no
     half-allocated run, and no reservation, behind."""
+    toolkit = _synthetic_cli_toolkit(tmp_path / "toolkit")
     blocked = tmp_path / "blocked"
     blocked.write_text("not a directory", encoding="utf-8")
 
-    result = _run_allocate_cli("acme", "--runs-parent", str(blocked))
+    result = _run_allocate_cli(toolkit, "acme", "--runs-parent", str(blocked))
 
     assert result.returncode != 0, result.stdout + result.stderr
     assert not (blocked / "_runs").exists(), "no run tree may be left behind by a failed allocation"
@@ -1578,6 +2241,7 @@ def test_intact_is_constructed_at_exactly_one_place_in_work_dirs() -> None:
 
     assert _constant_load_scopes("RUN_LOCATION_INTACT") == [
         "<module>",
+        "_load_selected_run",
         "check_run_location",
         "is_intact",
         "verify_runs",
