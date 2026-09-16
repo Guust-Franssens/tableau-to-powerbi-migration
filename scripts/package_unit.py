@@ -746,6 +746,7 @@ class _ConstructionAttempt:  # pylint: disable=too-many-instance-attributes
     candidate: _NativeDirectory | None = None
     manifest_sha256: str | None = None
     result: dict[str, Any] | None = None
+    fresh_target_only: bool = False
     findings: list[str] = field(default_factory=list)
 
 
@@ -2079,7 +2080,8 @@ expected set is every dashboard PLUS every worksheet not placed on one.
 | `migration-brief.md` | **what this migration is FOR**, copied from the dispatcher: scope, fidelity bar, autonomy, refresh strategy, and what was pre-authorized if we hit a wall. A copy, so it travels with the package; the dispatcher's own file stays authoritative and its path is deliberately not recorded here. Absent only when the packager was given none - `package-manifest.json`'s notes then say so. |
 | `data-access.json` | The strict nine-field authority projection, declared as `artifacts.data_access` and hashed in `contents.files`. Blocked/cannot-establish never mean ready; authorized model-only remains **UNVALIDATED**, with a structural-only ceiling. |
 | `migration-spec.schema.json` | the CONTRACT `validate_spec.py` enforces. Read it before appending a `limitations_encountered` entry: exactly `item`/`issue`/`severity`/`stage`, `additionalProperties: false`, so one invented field rejects every entry. |
-| `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). **`oracle/*/data/*.csv` is the NUMERIC oracle** - exact labels and figures, no OCR and no judgement. Read it first. |
+| `reference/` | explicitly supplied original Tableau screenshots plus their existing `manifest.json`; only manifest-declared image bytes are copied. The manifest's source/image hashes, provider, kind and capability ceiling are preserved rather than restamped. |
+| `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). `oracle/*/data/*.csv` is the NUMERIC oracle - exact labels and figures, no OCR and no judgement. |
 | `report.json` | **gate input, and readable.** The engine's classification of THIS unit - workbook vs datasource - which is what earns a datasource-only unit `NOT_APPLICABLE` instead of a finding. Scoped to this unit. |
 | `source-provenance.json` | **gate input.** The only trusted route from this package's asset to a Tableau workbook LUID, keyed by the asset's sha256; `origin.match` decides whether a render can be trusted - see UNFIXABLE below. An entry ships only when attribution was NOT refused (`scope.suppressed_reason`). |
 | `engine-output-receipt.json` | **read `engine.version` when a result looks wrong** - it establishes which engine built this, so version drift stays checkable months later. Install paths are not shipped. |
@@ -2091,6 +2093,8 @@ of byte-faithfulness - see `ORACLE_ATTRIBUTION ... match=` in `handover.md`, and
 `limitations_encountered`. The `.png` is the only leg you can LOOK at; the `.svg` carries labels and
 values as greppable `<text>` elements, except where labels render as paths - zero text is not zero
 content.
+
+{numeric_guidance}
 
 ## UNFIXABLE FROM THIS PACKAGE
 
@@ -2106,6 +2110,40 @@ can NEVER exit 0 from this package alone. Log it; this does not waive the data-a
 # --------------------------------------------------------------------------------------------
 # packaging one unit
 # --------------------------------------------------------------------------------------------
+
+
+def _stage_reference(reference_dir: Path, dest: Path) -> dict[str, Any]:  # pylint: disable=too-many-locals
+    """Copy one explicit current-format reference manifest and only the image members it declares."""
+    manifest_path = reference_dir / "manifest.json"
+    try:
+        raw = manifest_path.read_bytes()
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PackagingError("reference_manifest_unreadable") from error
+    dashboards = payload.get("dashboards") if isinstance(payload, dict) else None
+    if not isinstance(dashboards, list) or not dashboards:
+        raise PackagingError("reference_manifest_empty")
+    members: dict[str, Path] = {}
+    for dashboard in dashboards:
+        states = dashboard.get("states") if isinstance(dashboard, dict) else None
+        if not isinstance(states, list) or not states:
+            raise PackagingError("reference_manifest_empty")
+        for state in states:
+            image = state.get("image") if isinstance(state, dict) else None
+            if not isinstance(image, str) or not pfs.is_canonical_key(image) or image == "manifest.json":
+                raise PackagingError("reference_image_path_unsafe")
+            origin, refusal = _resolve_capture_file(reference_dir, image)
+            if origin is None:
+                raise PackagingError("reference_image_missing_or_unsafe") from ValueError(refusal)
+            members[image] = origin
+    target = dest / "reference"
+    for relative, origin in members.items():
+        landing = target / PurePosixPath(relative)
+        landing.parent.mkdir(parents=True, exist_ok=True)
+        landing.write_bytes(origin.read_bytes())
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "manifest.json").write_bytes(raw)
+    return payload
 
 
 def _copy_fabric(bundle: Path, unit: str, dest: Path) -> tuple[str | None, str | None]:
@@ -3984,6 +4022,7 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
     brief: Path | None = None,
     gate_root: Path | None = None,
     provider_packages: Sequence[Path] = (),
+    reference_dir: Path | None = None,
     discard_edits: bool = False,
     limits: Limits | None = None,
     completion: _ConstructionSlot | None = None,
@@ -4042,6 +4081,15 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
             limits = platform_limits() if limits is None else limits
             final = assert_package_destination(out_root, unit)
             attempt.final = final
+            workbooks, _datasources = engine_unit_names(read_json(bundle / "report.json"))
+            if reference_dir is not None:
+                attempt.fresh_target_only = True
+                if discard_edits:
+                    raise PackagingError("reference_conflicts_with_discard_package_edits")
+                if unit not in workbooks:
+                    raise PackagingError("reference_requires_one_workbook_unit")
+                if os.path.lexists(final):
+                    raise PackagingError("reference_requires_fresh_target")
             prepared_brief = _prepare_brief(bundle, unit, assets_dir, brief)
             budget = path_budget(bundle, unit, out_root, limits=limits, assets_dir=assets_dir)
             if budget.refused:
@@ -4066,6 +4114,7 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
                 final=final,
                 oracle_dir=oracle_dir,
                 assets_dir=assets_dir,
+                reference_dir=reference_dir,
                 brief=prepared_brief,
                 gate_root=gate_root,
                 provider_packages=_external_providers(provider_packages, out_root, [unit]),
@@ -4113,6 +4162,8 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
 
 
 def _verify_construction_destination(attempt: _ConstructionAttempt) -> None:
+    if attempt.fresh_target_only and attempt.final is not None and os.path.lexists(attempt.final):
+        raise PackagingError("reference_requires_fresh_target")
     current = _claim_construction_directory(attempt, attempt.final, attempt.prior)
     if attempt.prior is None and current is not None:
         raise PackagingError("construction_destination_changed")
@@ -5175,6 +5226,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     final: Path,
     oracle_dir: Path | None,
     assets_dir: Path | None,
+    reference_dir: Path | None = None,
     brief: bytes | None = None,
     gate_root: Path | None = None,
     provider_packages: Sequence[Path] = (),
@@ -5245,6 +5297,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
         write_json(dest / "engine-output-receipt.json", receipt)
 
     oracle = _attach_oracle(oracle_dir, oracle_identity, dest, unit)
+    reference = _stage_reference(reference_dir, dest) if reference_dir is not None else None
     spec, spec_note = _write_spec(asset, dest)
     if spec_note:
         notes.append(spec_note)
@@ -5288,6 +5341,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
             "report": f"fabric/{report_name}" if report_name else None,
             "model": f"fabric/{model_name}" if model_name else None,
             "handover": f"handover/{unit}.json" if isinstance(handover, dict) else None,
+            "reference": "reference" if reference is not None else None,
         },
         "model_binding": binding,
         "workbook_identity": identity,
@@ -5309,6 +5363,22 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     result["notes"].extend([notice, *data_notes, DATA_ACCESS_PENDING])
     report_dir = dest / "fabric" / report_name if report_name else None
     workbook = _handover_workbook(handover, unit, dest)
+    policy = inputs.roles[-1].brief_policy if inputs.roles else None
+    obligation = policy.numeric_obligation if policy is not None else None
+    numeric_guidance = {
+        "none": (
+            "Numeric obligation: **none** in the explicit commissioned brief. Numeric comparison is optional "
+            "and does not block otherwise permitted layout/text work; this does not waive any other gate."
+        ),
+        "required": (
+            "Numeric obligation: **required** in the explicit commissioned brief. Compare the applicable "
+            "numeric oracle before claiming completion; missing CSV evidence does not waive this obligation."
+        ),
+    }.get(
+        obligation,
+        "Numeric obligation: **unknown**. Do not infer `none` from missing CSV or screenshots; "
+        "the numeric gate remains unresolved.",
+    )
     generated = {
         DATA_ACCESS_NAME: assessment.dumps().encode("utf-8"),
         "handover.md": render_handover(result, workbook, visual_pages(report_dir)).encode("utf-8"),
@@ -5319,6 +5389,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
             unavailable=UNAVAILABLE_TOKEN,
             data_access=notice,
             data_access_pending=DATA_ACCESS_PENDING,
+            numeric_guidance=numeric_guidance,
         ).encode("utf-8"),
     }
     _write_data_access_final(dest, result, snapshot, generated)
@@ -6419,6 +6490,7 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
     out_root: Path,
     oracle_dir: Path | None,
     assets_dir: Path | None,
+    reference_dir: Path | None,
     discard_edits: bool,
     brief: Path | None = None,
     gate_root: Path | None = None,
@@ -6448,6 +6520,7 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
                     out_root,
                     oracle_dir=oracle_dir,
                     assets_dir=assets_dir,
+                    reference_dir=reference_dir,
                     brief=brief,
                     gate_root=gate_root,
                     provider_packages=tuple(providers),
@@ -6600,6 +6673,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, required=True, help="directory to write <Unit>/ packages into")
     parser.add_argument("--unit", action="append", default=[], help="package only this unit (repeatable)")
     parser.add_argument("--oracle", type=Path, help="oracle capture holding oracle-manifest.json")
+    parser.add_argument(
+        "--reference",
+        type=Path,
+        help="existing reference directory holding the current manifest.json and its declared original images",
+    )
     parser.add_argument("--assets", type=Path, help="directory holding the harvested .twb/.twbx/.tds assets")
     parser.add_argument(
         "--brief",
@@ -6781,6 +6859,11 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     unknown = [unit for unit in units if unit not in available]
     if unknown:
         parser.error(f"the bundle's report.json and pbip/ know nothing of: {', '.join(sorted(unknown))}")
+    if args.reference is not None:
+        if args.discard_package_edits:
+            parser.error("--reference cannot be combined with --discard-package-edits")
+        if len(units) != 1 or units[0] not in workbooks:
+            parser.error("--reference requires exactly one selected workbook unit")
 
     if args.json is not None:
         try:
@@ -6817,6 +6900,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
                 out_root,
                 oracle_dir,
                 assets_dir,
+                args.reference,
                 args.discard_package_edits,
                 brief=args.brief,
                 gate_root=args.gate_root,

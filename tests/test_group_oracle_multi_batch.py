@@ -805,6 +805,130 @@ def test_a_workbook_whose_renders_all_landed_reports_zero_unestablished(tmp_path
     assert grouped["render_unestablished_views"] == []
 
 
+def test_public_manual_handoff_requests_only_residual_visuals_once_and_preserves_response(
+    tmp_path, monkeypatch, caplog
+):
+    """Two missing originals produce one request; reorder preserves human response instead of asking again."""
+    root = tmp_path / "_oracle"
+    first = _batch(
+        root,
+        "first",
+        [
+            _view(LUID, "Missing One", data="ok", image="transient", captured_at="2026-08-18T14:00:00Z"),
+            _view(OTHER, "Successful", data="ok", image="ok", captured_at="2026-08-18T14:00:00Z"),
+            _view(
+                "0979a4f9-9999-2222-3333-444444444444",
+                "Data Failure Only",
+                data="transient",
+                image="ok",
+                captured_at="2026-08-18T14:00:00Z",
+            ),
+        ],
+        captured_at="2026-08-18T14:00:00Z",
+    )
+    second_luid = "0979a4f9-aaaa-2222-3333-444444444444"
+    second = _batch(
+        root,
+        "second",
+        [_view(second_luid, "Missing Two", data="ok", image="transient", captured_at=STAMP)],
+        captured_at=STAMP,
+    )
+    migrations = _migrations(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "group",
+            "--oracle",
+            str(first),
+            "--oracle",
+            str(second),
+            "--migrations",
+            str(migrations),
+            "--manual-reference-handoff",
+        ],
+    )
+    assert grp.main() == 0
+    report_path = second / grp.UNMATCHED_REPORT
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    handoff = report["manual_reference_handoff"]
+    assert handoff["status"] == "REQUEST_REQUIRED"
+    assert handoff["delivery_status"] == "UNKNOWN"
+    assert [row["view_luid"] for row in handoff["rows"]] == [LUID, second_luid]
+    assert all(
+        value == {"status": "UNKNOWN", "value": None} for row in handoff["rows"] for value in row["context"].values()
+    )
+    assert handoff["request"].count("\n- ") == 2
+
+    handoff["rows"][0].update(
+        {
+            "retained_reference_paths": ["reference"],
+            "retained_image_paths": ["reference/tableau-Missing One.png"],
+            "source_file_sha256": "a" * 64,
+            "manual_origin": "user-supplied original Tableau screenshot",
+            "image_inspection_note": "inspected actual pixels in an image-capable session",
+        }
+    )
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    caplog.clear()
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "group",
+            "--oracle",
+            str(second),
+            "--oracle",
+            str(first),
+            "--migrations",
+            str(migrations),
+            "--manual-reference-handoff",
+        ],
+    )
+    assert grp.main() == 0
+    repeated = json.loads((first / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))["manual_reference_handoff"]
+    assert repeated["status"] == "ALREADY_REQUESTED"
+    assert repeated["requested_at"] == handoff["requested_at"]
+    assert repeated["rows"][0]["source_file_sha256"] == "a" * 64
+    assert "Please supply" not in caplog.text
+    assert "was not repeated" in caplog.text
+    assert grp.run([first, second], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    third = json.loads((second / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))["manual_reference_handoff"]
+    assert third["status"] == "ALREADY_REQUESTED"
+    assert third["requested_at"] == handoff["requested_at"]
+    assert third["rows"][0]["source_file_sha256"] == "a" * 64
+
+
+def test_manual_handoff_refuses_malformed_prior_state_instead_of_resetting_it(tmp_path):
+    batch = _batch(
+        tmp_path / "_oracle",
+        "only",
+        [_view(LUID, "Missing", data="ok", image="transient", captured_at=STAMP)],
+    )
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 0
+    report_path = batch / grp.UNMATCHED_REPORT
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["manual_reference_handoff"]["rows"] = "lost"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    with pytest.raises(grp.ManualHandoffConflict):
+        grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True)
+
+
+def test_not_copied_render_is_a_repair_gap_not_a_screenshot_target(tmp_path):
+    batch = _batch(
+        tmp_path / "_oracle",
+        "only",
+        [_view(LUID, "Locally Missing", data="ok", image="ok", captured_at=STAMP)],
+    )
+    (batch / "images" / f"{LUID}.png").unlink()
+    migrations = _migrations(tmp_path)
+    assert grp.run([batch], migrations, dry_run=False, manual_reference_handoff=True) == 1
+    handoff = json.loads((batch / grp.UNMATCHED_REPORT).read_text(encoding="utf-8"))["manual_reference_handoff"]
+    assert handoff["rows"] == []
+    assert handoff["repair_gaps"] == [{"reason": "render_not_copied", "workbook_luid": "wb-1", "view_luid": LUID}]
+
+
 # ------------------------------------------------------------- batch identity must be unambiguous
 
 
@@ -2117,6 +2241,10 @@ UNTYPED_ON_PURPOSE = {
     "requested_renders_by_batch": "written by _merge_render_intent",
     "source_batch": "stamped by _merge_one_view onto every surviving leg before anything reads it",
     "refusal": "an outcome record built by this script",
+    "_grouped_views": "an internal outcome field built by this script and removed before report publication",
+    "manual_reference_handoff": "read only from this script's existing grouping report",
+    "rows": "validated as a list while reading this script's existing grouping report",
+    "requested_at": "validated explicitly as a non-empty string in this script's grouping report",
     # Read, but no JSON type it could carry changes the answer.
     "reference_required": "read for truthiness only -- every JSON type is meaningfully truthy or not",
     "selected_tier": "typed and closed by tableau_oracle_manifest.validated_render_capability before policy merging",

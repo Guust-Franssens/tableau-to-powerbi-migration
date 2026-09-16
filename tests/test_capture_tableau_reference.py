@@ -185,6 +185,22 @@ def test_a_small_but_valid_screenshot_is_adopted_and_never_silently_dropped(tmp_
     assert state["image"] == "tableau-Detail.png"
 
 
+def test_existing_manifest_noop_does_not_admit_a_new_manual_image(tmp_path: Path) -> None:
+    """Exit 0 from the cache guard preserves prior evidence; it is not proof a new attachment was adopted."""
+    slug_dir = tmp_path / "workbook"
+    _spec(slug_dir, dashboards=("Detail", "New"))
+    _png(slug_dir / "reference" / "tableau-Detail.png")
+    assert capture.main([str(slug_dir)]) == 0
+    manifest_path = slug_dir / "reference" / "manifest.json"
+    prior = manifest_path.read_bytes()
+    _png(slug_dir / "reference" / "tableau-New.png")
+
+    assert capture.main([str(slug_dir)]) == 0
+    assert manifest_path.read_bytes() == prior
+    recorded = json.loads(prior)
+    assert [row["name"] for row in recorded["dashboards"]] == ["tableau-Detail"]
+
+
 def test_every_rejected_candidate_is_named_with_a_reason(tmp_path: Path) -> None:
     """Adopted or reported - there is no third outcome for a file a human put in `reference/`."""
     reference = tmp_path / "reference"

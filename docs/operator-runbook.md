@@ -882,6 +882,7 @@ dispatch requires the current package-only `START_READY` result.
 
 ```powershell
 python scripts\package_unit.py --bundle _bundle --unit <Unit> --brief <unit-specific-v2-brief> `
+    --reference migrations\workbooks\<slug>\reference `
     --out _runs\<NNN>-<slug>\packages `
     --json _runs\<NNN>-<slug>\packages\packaging.json
 # After construction and original data proof, bind separately when applicable:
@@ -894,6 +895,20 @@ python scripts\check_unit.py _runs\<NNN>-<slug>\packages\<Unit>
 python scripts\check_unit.py <package> --scope all --receipt-sha256 <caller-held-final-sha256>
 python scripts\promote_unit.py --package <package> --slug <slug> --receipt-sha256 <caller-held-final-sha256>
 ```
+
+`--reference` is optional and accepts one existing manual-capture `reference\` directory for exactly
+one selected workbook unit. It reads the existing `manifest.json`, copies its original bytes and only
+the image members declared there, and declares `artifacts.reference` before the normal package seals.
+It never restamps hashes, raises grades or forges oracle evidence. Malformed/empty manifests and
+missing, unsafe, unsupported or identity-mismatched members refuse explicitly.
+
+This admission path is **fresh-target only**. If `packages\<Unit>` already exists — clean, sealed or
+edited — retain the screenshots outside it rather than selecting a replacement directory and losing
+prior work. `--discard-package-edits` cannot be combined with `--reference`, and a target that appears
+during assembly is not replaced. A cached `capture_tableau_reference.py` no-op does not admit newly
+dropped files: only members already declared by its preserved manifest can enter the package.
+Construction remains diagnostic; all ordinary binding, role-identity and final package
+`START_READY` obligations still apply.
 
 The last two commands use **identical exact lowercase 64-hex H**, without a prefix. Only the
 all-scope checker may return COMPLETE/0; tokenless all-scope and every layer scope are not COMPLETE.
@@ -980,6 +995,12 @@ What to check in the output:
     `rest_api_version_source: legacy_producer_default` names an inference, not historical proof.
     Missing or incompatible selected API/cache evidence refuses before sign-in; do not fill it from
     an unrelated batch. A selected data leg's API must also match trusted configuration.
+  - Once bounded recovery is exhausted, run the same grouper with
+    `--manual-reference-handoff`. Present the exact consolidated request in
+    `oracle-grouping-report.json`, not a separately assembled list. Record supplied context, retained
+    paths, source SHA-256, manual origin and the actual image-inspection note back into those rows.
+    Repeat/reordered grouping preserves matching request/response context and refuses conflicts; it
+    does not claim that printing proved delivery.
   - Reused capability reports say `probe_performed: false` and retain `reused_from_grouped` provenance.
     Their probe counts are historical, not fresh probes. Different tier/API reports do not block
     ordinary per-leg grouping: ambiguous aggregate reports become null, without losing leg evidence.

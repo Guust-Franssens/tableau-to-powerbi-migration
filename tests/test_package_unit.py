@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import check_path_ceiling as cpc  # noqa: E402  # pylint: disable=wrong-import-position
 import check_migration_progress as cmp  # noqa: E402  # pylint: disable=wrong-import-position
+import capture_tableau_reference as capture  # noqa: E402  # pylint: disable=wrong-import-position
 import host_paths as hp  # noqa: E402  # pylint: disable=wrong-import-position
 import manifest_scope as ms  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
@@ -162,6 +163,44 @@ def _package(tmp_path: Path, bundle: Path, oracle: Path, unit: str = UNIT) -> di
     return pkg.package_unit(bundle, unit, _out(tmp_path), oracle_dir=oracle, assets_dir=bundle.parent / "assets")
 
 
+def _manual_reference(bundle: Path) -> tuple[Path, bytes]:
+    """A current-format reference with independently known source and PNG bytes."""
+    source = next((bundle.parent / "assets").glob("*.twb"))
+    reference = bundle.parent / "manual-reference"
+    image = write_png(reference / "tableau-Sales.png")
+    raw = (
+        json.dumps(
+            {
+                "captured_at": "2026-09-16T00:00:00Z",
+                "source_workbook_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "dashboards": [
+                    {
+                        "name": "tableau-Sales",
+                        "states": [
+                            {
+                                "state_slug": "default",
+                                "state": {},
+                                "image": image.name,
+                                "provider": "manual",
+                                "capabilities": ["layout_grade", "text_readable"],
+                                "view_type": "worksheet",
+                                "dimensions": {"w": 320, "h": 240},
+                                "sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
+                                "numeric_oracle": None,
+                            }
+                        ],
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n"
+    ).encode()
+    (reference / "manifest.json").write_bytes(raw)
+    (reference / "not-declared.txt").write_text("must stay outside", encoding="utf-8")
+    return reference, raw
+
+
 def _lines(tmp_path: Path, unit: str = UNIT) -> list[str]:
     return (_out(tmp_path) / unit / "handover.md").read_text(encoding="utf-8").splitlines()
 
@@ -183,6 +222,190 @@ def test_only_this_workbooks_views_are_copied_in(tmp_path: Path) -> None:
     assert result["oracle"]["route"] == "workbook_luid"
     assert sorted(obj["name"] for obj in result["oracle"]["objects"]) == ["Landing", "Sales"]
     assert not any("Foreign" in path for path in _images(tmp_path))
+
+
+def test_public_fresh_package_admits_only_declared_reference_bytes_before_sealing(tmp_path: Path) -> None:
+    import check_reference_readiness as crr  # pylint: disable=import-outside-toplevel
+
+    bundle, _oracle = _bundle(tmp_path, worksheets=("Sales",))
+    shutil.rmtree(_oracle)
+    model = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
+    model.mkdir(parents=True)
+    (model / "model.tmdl").write_text("model Model\n", encoding="utf-8")
+    _bind_report_to(bundle, f"../{UNIT}.SemanticModel")
+    (bundle / "pbip" / UNIT / f"{UNIT}.pbip").write_text("{}\n", encoding="utf-8")
+    (bundle / "engine-output-receipt.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "engine": {"version": "2.339.0"},
+                "artifacts": [
+                    {"path": f"pbip/{UNIT}/{UNIT}.Report/definition.pbir"},
+                    {"path": f"pbip/{UNIT}/{UNIT}.SemanticModel/definition/model.tmdl"},
+                    {"path": f"pbip/{UNIT}/{UNIT}.pbip"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    source = next((bundle.parent / "assets").glob("*.twb"))
+    source_dir = bundle / "source"
+    source_dir.mkdir()
+    shutil.copy2(source, source_dir / source.name)
+    (bundle / "migration-spec.json").write_text(
+        json.dumps({"dashboards": [], "worksheets": [{"name": "Sales"}]}), encoding="utf-8"
+    )
+    reference = bundle / "reference"
+    source_image_path = write_png(reference / "tableau-Sales.png")
+    assert capture.main([str(bundle)]) == 0
+    manifest_raw = (reference / "manifest.json").read_bytes()
+    assert crr.scan(bundle)["status"] == crr.STATUS_READY
+    brief = tmp_path / "brief.md"
+    brief.write_text(
+        '+++\nschema = "phase1-start-ready/v2"\nunit = "Book"\nscope = "model_and_report"\n'
+        'fallback_authorization = "stop"\nnumeric_obligation = "required"\n+++\n',
+        encoding="utf-8",
+    )
+    source_image = source_image_path.read_bytes()
+    code = pkg.main(
+        [
+            "--bundle",
+            str(bundle),
+            "--out",
+            str(_out(tmp_path)),
+            "--unit",
+            UNIT,
+            "--assets",
+            str(bundle.parent / "assets"),
+            "--reference",
+            str(reference),
+            "--brief",
+            str(brief),
+            "--quiet",
+        ]
+    )
+    assert code == 0
+    root = _out(tmp_path) / UNIT
+    package_manifest = json.loads((root / pkg.MANIFEST_NAME).read_bytes())
+    assert package_manifest["artifacts"]["reference"] == "reference"
+    assert (root / "reference" / "manifest.json").read_bytes() == manifest_raw
+    assert (root / "reference" / "tableau-Sales.png").read_bytes() == source_image
+    assert not (root / "reference" / "not-declared.txt").exists()
+    assert "reference/manifest.json" in package_manifest["contents"]["files"]
+    role = next(
+        row
+        for row in pkg.pri.verify_phase1_role_identity((root,))[0].roles
+        if row.role == pkg.pri.ROLE_TABLEAU_REFERENCE
+    )
+    assert role.state == "resolved"
+    readiness = crr.scan(root)
+    assert readiness["status"] == crr.STATUS_START_READY, json.dumps(readiness, indent=2)
+
+
+@pytest.mark.parametrize("edited", [False, True])
+def test_reference_never_replaces_an_existing_package(tmp_path: Path, edited: bool) -> None:
+    bundle, oracle = _bundle(tmp_path, worksheets=("Sales",))
+    _package(tmp_path, bundle, oracle)
+    root = _out(tmp_path) / UNIT
+    if edited:
+        (root / "operator-edit.txt").write_text("retain me", encoding="utf-8")
+    before = {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    reference, _raw = _manual_reference(bundle)
+    with pytest.raises(pkg.PackagingError, match="reference_requires_fresh_target"):
+        pkg.package_unit(
+            bundle,
+            UNIT,
+            _out(tmp_path),
+            oracle_dir=oracle,
+            assets_dir=bundle.parent / "assets",
+            reference_dir=reference,
+        )
+    assert {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()} == before
+
+
+def test_reference_refuses_discard_override_and_unsafe_or_missing_members(tmp_path: Path) -> None:
+    bundle, oracle = _bundle(tmp_path, worksheets=("Sales",))
+    reference, _raw = _manual_reference(bundle)
+    with pytest.raises(pkg.PackagingError, match="reference_conflicts_with_discard"):
+        pkg.package_unit(
+            bundle,
+            UNIT,
+            _out(tmp_path),
+            oracle_dir=oracle,
+            assets_dir=bundle.parent / "assets",
+            reference_dir=reference,
+            discard_edits=True,
+        )
+    payload = json.loads((reference / "manifest.json").read_bytes())
+    payload["dashboards"][0]["states"][0]["image"] = "../outside.png"
+    (reference / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(pkg.PackagingError, match="reference_image_path_unsafe"):
+        pkg.package_unit(
+            bundle,
+            UNIT,
+            _out(tmp_path),
+            oracle_dir=oracle,
+            assets_dir=bundle.parent / "assets",
+            reference_dir=reference,
+        )
+    assert not (_out(tmp_path) / UNIT).exists()
+
+
+def test_reference_target_appearing_before_publication_is_not_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, oracle = _bundle(tmp_path, worksheets=("Sales",))
+    reference, _raw = _manual_reference(bundle)
+    original = pkg.replace_dir
+    sentinel = b"arrived while assembly was running"
+
+    def race(staged: Path, final: Path, *args, **kwargs):
+        final.mkdir(parents=True)
+        (final / "owner.txt").write_bytes(sentinel)
+        return original(staged, final, *args, **kwargs)
+
+    monkeypatch.setattr(pkg, "replace_dir", race)
+    with pytest.raises(pkg.PackagingError, match="reference_requires_fresh_target"):
+        pkg.package_unit(
+            bundle,
+            UNIT,
+            _out(tmp_path),
+            oracle_dir=oracle,
+            assets_dir=bundle.parent / "assets",
+            reference_dir=reference,
+        )
+    assert (_out(tmp_path) / UNIT / "owner.txt").read_bytes() == sentinel
+
+
+@pytest.mark.parametrize("fault", ["source-sha", "luid", "name", "kind", "unreadable"])
+def test_reference_identity_and_content_faults_remain_non_admitting(tmp_path: Path, fault: str) -> None:
+    import check_reference_readiness as crr  # pylint: disable=import-outside-toplevel
+
+    bundle, oracle = _bundle(tmp_path, worksheets=("Sales",))
+    reference, _raw = _manual_reference(bundle)
+    payload = json.loads((reference / "manifest.json").read_bytes())
+    state = payload["dashboards"][0]["states"][0]
+    if fault == "source-sha":
+        payload["source_workbook_sha256"] = "0" * 64
+    elif fault == "luid":
+        state["source_workbook_luid"] = OTHER_LUID
+    elif fault == "name":
+        payload["dashboards"][0]["name"] = "Different"
+    elif fault == "kind":
+        state["view_type"] = "dashboard"
+    else:
+        (reference / state["image"]).write_bytes(b"not an image")
+        state["sha256"] = hashlib.sha256(b"not an image").hexdigest()
+    (reference / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    pkg.package_unit(
+        bundle,
+        UNIT,
+        _out(tmp_path),
+        oracle_dir=oracle,
+        assets_dir=bundle.parent / "assets",
+        reference_dir=reference,
+    )
+    assert crr.scan(_out(tmp_path) / UNIT)["status"] != crr.STATUS_START_READY
 
 
 def test_a_render_with_no_attributable_workbook_is_omitted_with_a_reason(tmp_path: Path) -> None:
@@ -910,22 +1133,46 @@ def test_the_module_layout_comment_names_the_oracle_kinds_the_code_emits() -> No
         assert f"{kind}/{{images,data}}" in doc, f"the layout comment does not name {kind}/"
 
 
-def test_the_readme_leads_with_the_csv_numeric_oracle_before_any_image(tmp_path: Path) -> None:
-    """The CSVs are the numeric oracle, and the README used to bury them in a table cell.
-
-    Measured on the 2026-09-03 cold run, by the agent that worked from the package: two of its three
-    targets would have been near-useless as SVG data oracles (`Cities` carries 9 `<text>` elements,
-    `States` 24), while `oracle/worksheet/data/States.csv` handed over `New York 6,270 /
-    Michigan 976` plus the `Rank Top 2` boolean with no OCR and no judgement. So the ORDER is the
-    finding: whichever evidence the README names first is the one an agent reaches for.
-    """
-    readme = (_package_with_receipt(tmp_path) / "README.md").read_text(encoding="utf-8")
-    csv_at = readme.find("`oracle/*/data/*.csv`")
-    assert csv_at != -1, "the README does not name the CSV oracle by its glob"
-    assert "NUMERIC oracle" in readme[csv_at : csv_at + 120]
-    first_image = min(readme.find("`.png`"), readme.find("`.svg`"))
-    assert first_image != -1
-    assert csv_at < first_image, "the README still introduces the image legs before the numeric oracle"
+@pytest.mark.parametrize(
+    ("obligation", "expected"),
+    [
+        ("none", "Numeric obligation: **none**"),
+        ("required", "Numeric obligation: **required**"),
+        (None, "Numeric obligation: **unknown**"),
+    ],
+)
+def test_emitted_readme_reports_the_actual_brief_numeric_policy(
+    tmp_path: Path, obligation: str | None, expected: str
+) -> None:
+    """Visual work is optional only for explicit none; required and absent policy stay owed/unknown."""
+    bundle, oracle = _bundle(tmp_path)
+    brief = None
+    if obligation is not None:
+        brief = tmp_path / "brief.md"
+        brief.write_text(
+            '+++\nschema = "phase1-start-ready/v2"\nunit = "Book"\nscope = "model_and_report"\n'
+            f'fallback_authorization = "stop"\nnumeric_obligation = "{obligation}"\n+++\n',
+            encoding="utf-8",
+        )
+    pkg.package_unit(
+        bundle,
+        UNIT,
+        _out(tmp_path),
+        oracle_dir=oracle,
+        assets_dir=bundle.parent / "assets",
+        brief=brief,
+    )
+    root = _out(tmp_path) / UNIT
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert expected in readme
+    if obligation == "none":
+        assert "does not block otherwise permitted layout/text work" in readme
+    elif obligation == "required":
+        assert "missing CSV evidence does not waive this obligation" in readme
+    else:
+        assert "Do not infer `none` from missing CSV or screenshots" in readme
+    role = pkg.pri.verify_phase1_role_identity((root,))[0]
+    assert (role.brief_policy.numeric_obligation if role.brief_policy else None) == obligation
 
 
 def test_the_readme_keeps_the_png_and_svg_legs_distinct_with_the_zero_text_caveat(tmp_path: Path) -> None:

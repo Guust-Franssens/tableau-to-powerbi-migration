@@ -157,7 +157,12 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
    such row would silently re-scope six other table calcs. Give it the handover slice, the active
    contract and the reference bundle (path/tool/grade from the brief; default
    `migrations/workbooks/<name>/reference/`). **Name the mode** — triage / spot-check / sign-off are
-   different jobs.
+   different jobs. After bounded recovery, present a `REQUEST_REQUIRED` from
+   `oracle-grouping-report.json.manual_reference_handoff` exactly once, never a second list; printing
+   does not prove delivery. There record supplied/unknown context, retained paths, source SHA,
+   manual origin and image inspection. Keep pending evidence outside existing packages; only
+   fresh `package_unit.py --reference <dir>` admits its unchanged manifest/hashes/kind/grade.
+   Construction is not `START_READY`.
 8. **Delegate to `pbi-semantic-builder`** with: the handover slice (its `requests[]` is the work
    queue), the emitted model path, the active contract (parser specs carry table-calc addressing in
    `worksheets[].encodings`) and the validator's model-side findings. Its job: prove the model loads,

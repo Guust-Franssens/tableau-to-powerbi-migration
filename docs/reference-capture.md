@@ -170,6 +170,37 @@ grouped `ok` artifact is still contained in the grouped evidence root and still 
 SHA-256 digest. Missing, changed or undigestible successes are a **re-merge** action, not a metered
 retry target.
 
+### One manual request after bounded recovery
+
+After the bounded automatic recovery above is exhausted, project the remaining visual gaps from the
+same completed batches:
+
+```
+python scripts/group_oracle_by_workbook.py --oracle-root /absolute/path/to/_runs/123-unit \
+    --manual-reference-handoff
+```
+
+This opt-in writes `manual_reference_handoff` into the existing
+`oracle-grouping-report.json` beside the last enumerated batch and prints its single consolidated
+request. It asks only for residual original Tableau screenshots: successful visual legs and
+data-only failures do not enlarge the list. Unknown identity and failed local copies remain named
+repair gaps instead of guessed screenshot targets. Filter, parameter and period context is explicitly
+`DECLARED` when supplied by the caller or `UNKNOWN`; an empty manual-capture `state` is not proof of
+filter state.
+
+Present that exact request once. `requested_at` records creation, while `delivery_status: UNKNOWN`
+correctly avoids claiming that console output reached a person. On later invocations, reports beside
+only the enumerated batches preserve matching request and response context by server, site, workbook
+LUID, view LUID and revision; captions are never identity. Changed, malformed or conflicting state
+refuses instead of silently resetting or repeating the request.
+
+When screenshots arrive, the caller records `supplied_context`, retained reference/image paths,
+source-file SHA-256, `manual_origin`, the actual image-inspection note and `response_recorded_at` in
+those same handoff rows. These are navigation and human assertions, not gate authority. Keep the
+original evidence outside an already edited/sealed package; admission is only through a fresh package
+as described in the operator runbook. PNG/hash tests establish bytes and structure, **not** image
+inspection; an image-capable human/model must perform and record that qualification.
+
 ✅ API/cache policy belongs to the **selected failed leg**, not the newest batch's top-level
 metadata. Grouping preserves the winning leg's `rest_api_version`, deriving it from that capture's
 configuration and selected-tier override when the leg predates the field. New ordinary captures

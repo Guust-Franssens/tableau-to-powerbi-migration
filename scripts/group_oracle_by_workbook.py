@@ -134,6 +134,7 @@ from __future__ import annotations
 # pylint: disable=too-many-lines
 
 import argparse
+import copy
 import json
 import logging
 import re
@@ -298,6 +299,10 @@ class UnidentifiedCaptureView(ValueError):
 
     :func:`_is_view_identity` types it instead: a non-empty string, and nothing else.
     """
+
+
+class ManualHandoffConflict(ValueError):
+    """An existing request-once record is malformed or disagrees with the current residual identity."""
 
 
 def _capture_schema(directory: Path) -> str | None:
@@ -564,6 +569,8 @@ _VIEW_TYPES: tuple[_Typed, ...] = (
     _Typed("workbook_luid", str),
     # A bucket key too (`workbook_names`), and `normalize()` does string work on it.
     _Typed("workbook_name", str),
+    _Typed("view_name", str),
+    _Typed("view_type", str),
     _Typed("captured_at", str),
     _Typed("updated_at", str),
 )
@@ -1402,6 +1409,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="root holding the per-workbook <slug>/ folders (default: migrations/workbooks)",
     )
     parser.add_argument("--dry-run", action="store_true", help="report what would be copied, write nothing")
+    parser.add_argument(
+        "--manual-reference-handoff",
+        action="store_true",
+        help=(
+            "after bounded recovery is exhausted, record and print one consolidated request for only "
+            "the remaining original Tableau screenshots; repeat runs preserve the existing request/response"
+        ),
+    )
     return parser
 
 
@@ -1549,6 +1564,7 @@ def _group_one(
         "not_copied": subset["not_copied"],
         "removed": removed,
         "unattributed": unattributed,
+        "_grouped_views": grouped_views,
     }
     if removed:
         LOG.info(
@@ -1689,7 +1705,7 @@ def _group_all(buckets: dict[str, list[dict[str, Any]]], ctx: _Context) -> dict[
 
 
 @dataclass(frozen=True)
-class _RunInputs:
+class _RunInputs:  # pylint: disable=too-many-instance-attributes
     """How this run was ASKED for, as opposed to what it found. Written into the grouping report.
 
     Kept together because the three provenance answers -- discovered under a root or listed, which
@@ -1703,6 +1719,193 @@ class _RunInputs:
     dry_run: bool
     excluded: frozenset[Path] = frozenset()
     oracle_root: Path | None = None
+    manifest: dict[str, Any] | None = None
+    manual_reference_handoff: bool = False
+
+
+_RESPONSE_FIELDS = (
+    "supplied_context",
+    "retained_reference_paths",
+    "retained_image_paths",
+    "source_file_sha256",
+    "manual_origin",
+    "image_inspection_note",
+    "response_recorded_at",
+)
+
+
+def _safe_label(value: Any) -> str:
+    """A bounded readable label, never an identity or path."""
+    if not isinstance(value, str):
+        return "UNKNOWN"
+    clean = " ".join(value.split())
+    return clean[:160] if clean and all(char.isprintable() for char in clean) else "UNKNOWN"
+
+
+def _handoff_key(row: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(str(row.get(field) or "") for field in ("server", "site", "workbook_luid", "view_luid", "updated_at"))
+
+
+def _prior_handoff(inputs: _RunInputs) -> dict[str, Any] | None:  # pylint: disable=too-many-locals,too-many-branches
+    """Read request context only beside already enumerated input batches."""
+    found: list[dict[str, Any]] = []
+    for batch in inputs.batches:
+        path = batch.directory / UNMATCHED_REPORT
+        if not path.is_file():
+            continue
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ManualHandoffConflict(f"{path}: existing grouping report is unreadable") from error
+        handoff = report.get("manual_reference_handoff") if isinstance(report, dict) else None
+        if handoff is None:
+            continue
+        if not isinstance(handoff, dict) or not isinstance(handoff.get("rows"), list):
+            raise ManualHandoffConflict(f"{path}: existing manual_reference_handoff is malformed")
+        found.append(handoff)
+    if not found:
+        return None
+    merged = copy.deepcopy(found[0])
+    merged.pop("status", None)
+    for candidate in found[1:]:
+        current = copy.deepcopy(candidate)
+        current.pop("status", None)
+        merged_rows = merged.get("rows")
+        current_rows = current.get("rows")
+        if not isinstance(merged_rows, list) or not isinstance(current_rows, list):
+            raise ManualHandoffConflict("enumerated grouping reports contain malformed manual-reference rows")
+        merged_by_key = {_handoff_key(row): row for row in merged_rows if isinstance(row, dict)}
+        current_by_key = {_handoff_key(row): row for row in current_rows if isinstance(row, dict)}
+        if len(merged_by_key) != len(merged_rows) or len(current_by_key) != len(current_rows):
+            raise ManualHandoffConflict("enumerated grouping reports contain malformed or duplicate handoff rows")
+        if set(merged_by_key) != set(current_by_key):
+            raise ManualHandoffConflict("enumerated grouping reports contain conflicting manual-reference handoffs")
+        for key, current_row in current_by_key.items():
+            merged_row = merged_by_key[key]
+            merged_identity = {name: value for name, value in merged_row.items() if name not in _RESPONSE_FIELDS}
+            current_identity = {name: value for name, value in current_row.items() if name not in _RESPONSE_FIELDS}
+            if merged_identity != current_identity:
+                raise ManualHandoffConflict("enumerated grouping reports contain conflicting manual-reference rows")
+            for field in _RESPONSE_FIELDS:
+                if field not in current_row:
+                    continue
+                if field in merged_row and merged_row[field] != current_row[field]:
+                    raise ManualHandoffConflict(
+                        "enumerated grouping reports contain conflicting manual-reference responses"
+                    )
+                merged_row[field] = current_row[field]
+        merged_without_rows = {name: value for name, value in merged.items() if name != "rows"}
+        current_without_rows = {name: value for name, value in current.items() if name != "rows"}
+        if merged_without_rows != current_without_rows:
+            raise ManualHandoffConflict("enumerated grouping reports contain conflicting manual-reference handoffs")
+    return merged
+
+
+def _manual_handoff(  # pylint: disable=too-many-locals,too-many-branches
+    inputs: _RunInputs, outcomes: dict[str, list[dict[str, Any]]]
+) -> dict[str, Any]:
+    """Project actual post-copy visual residuals into the existing grouping report."""
+    manifest = inputs.manifest or {}
+    requested = frozenset(manifest.get("requested_renders") or [])
+    rows: list[dict[str, Any]] = []
+    repair_gaps: list[dict[str, Any]] = []
+    for bucket in OUTCOME_BUCKETS:
+        for outcome in outcomes[bucket]:
+            views = outcome.get("_grouped_views")
+            if not isinstance(views, list):
+                if bucket != "grouped":
+                    repair_gaps.append(
+                        {
+                            "reason": outcome.get("refusal") or bucket,
+                            "workbook_luid": outcome.get("workbook_luid"),
+                        }
+                    )
+                continue
+            by_luid = {view.get("view_luid"): view for view in views}
+            for residual in render_unestablished(views, requested):
+                view = by_luid.get(residual.get("view_luid"))
+                if not isinstance(view, dict):
+                    repair_gaps.append({"reason": "residual_view_identity_ambiguous"})
+                    continue
+                if any(status == NOT_COPIED_STATUS for status in residual["renders"].values()):
+                    repair_gaps.append(
+                        {
+                            "reason": "render_not_copied",
+                            "workbook_luid": outcome.get("workbook_luid"),
+                            "view_luid": view.get("view_luid"),
+                        }
+                    )
+                    continue
+                row = {
+                    "server": manifest.get("server"),
+                    "site": manifest.get("site"),
+                    "workbook_luid": outcome.get("workbook_luid"),
+                    "view_luid": view.get("view_luid"),
+                    "updated_at": view.get("updated_at"),
+                    "workbook_name": _safe_label(view.get("workbook_name")),
+                    "view_name": _safe_label(view.get("view_name")),
+                    "kind": _safe_label(view.get("view_type")),
+                    "render_reasons": residual["renders"],
+                    "context": {
+                        name: {"status": "UNKNOWN", "value": None} for name in ("filters", "parameters", "period")
+                    },
+                }
+                if not all(row.get(field) for field in ("server", "site", "workbook_luid", "view_luid")):
+                    repair_gaps.append(
+                        {
+                            "reason": "screenshot_identity_unestablished",
+                            "workbook_luid": row.get("workbook_luid"),
+                            "view_luid": row.get("view_luid"),
+                        }
+                    )
+                    continue
+                rows.append(row)
+    rows.sort(key=_handoff_key)
+    prior = _prior_handoff(inputs)
+    if prior is not None:
+        prior_rows = prior["rows"]
+        if not all(isinstance(row, dict) for row in prior_rows):
+            raise ManualHandoffConflict("existing manual-reference rows are malformed")
+        if [_handoff_key(row) for row in prior_rows] != [_handoff_key(row) for row in rows]:
+            raise ManualHandoffConflict(
+                "current residual identities differ from the already-recorded request; delivery is uncertain, "
+                "so the request was not reset or repeated"
+            )
+        prior_by_key = {_handoff_key(row): row for row in prior_rows}
+        for row in rows:
+            old = prior_by_key[_handoff_key(row)]
+            for field in _RESPONSE_FIELDS:
+                if field in old:
+                    row[field] = old[field]
+        requested_at = prior.get("requested_at")
+        if not isinstance(requested_at, str) or not requested_at:
+            raise ManualHandoffConflict("existing manual-reference request has no requested_at")
+        status = "ALREADY_REQUESTED"
+    else:
+        requested_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z") if rows else None
+        status = "REQUEST_REQUIRED" if rows else "NO_VISUAL_GAPS"
+    request = "\n".join(
+        [
+            "Please supply the missing ORIGINAL Tableau screenshots for these views:",
+            *[
+                (
+                    f"- {row['workbook_name']} / {row['view_name']} ({row['kind']}), "
+                    f"view LUID {row['view_luid']}, revision {row['updated_at'] or 'UNKNOWN'}; "
+                    "filters=UNKNOWN, parameters=UNKNOWN, period=UNKNOWN; "
+                    + ", ".join(f"{kind}={reason or 'UNKNOWN'}" for kind, reason in row["render_reasons"].items())
+                )
+                for row in rows
+            ],
+        ]
+    )
+    return {
+        "status": status,
+        "requested_at": requested_at,
+        "delivery_status": "UNKNOWN",
+        "request": request,
+        "rows": rows,
+        "repair_gaps": repair_gaps,
+    }
 
 
 def _write_grouping_report(inputs: _RunInputs, outcomes: dict[str, list[dict[str, Any]]]) -> Path:
@@ -1713,6 +1916,10 @@ def _write_grouping_report(inputs: _RunInputs, outcomes: dict[str, list[dict[str
     reader of a merged reference folder actually has. ``oracle_dir`` is kept for callers that read it.
     """
     report_dir = inputs.batches[-1].directory
+    public_outcomes = {
+        bucket: [{key: value for key, value in row.items() if not key.startswith("_")} for row in outcomes[bucket]]
+        for bucket in OUTCOME_BUCKETS
+    }
     report = {
         "schema": "tableau-oracle-grouping/1",
         "oracle_dir": str(report_dir),
@@ -1723,8 +1930,10 @@ def _write_grouping_report(inputs: _RunInputs, outcomes: dict[str, list[dict[str
         "migrations_root": str(inputs.migrations_root),
         "dry_run": inputs.dry_run,
         **{f"workbooks_{bucket}": len(outcomes[bucket]) for bucket in OUTCOME_BUCKETS},
-        **outcomes,
+        **public_outcomes,
     }
+    if inputs.manual_reference_handoff:
+        report["manual_reference_handoff"] = _manual_handoff(inputs, outcomes)
     if not inputs.dry_run:
         (report_dir / UNMATCHED_REPORT).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     return report_dir
@@ -1748,13 +1957,14 @@ def _incomplete(outcomes: dict[str, list[dict[str, Any]]], manifest: dict[str, A
     )
 
 
-def run(  # pylint: disable=too-many-locals
+def run(  # pylint: disable=too-many-locals,too-many-arguments
     oracle: Path | list[Path] | None,
     migrations_root: Path,
     *,
     dry_run: bool,
     oracle_root: Path | None = None,
     exclude: list[Path] | tuple[Path, ...] = (),
+    manual_reference_handoff: bool = False,
 ) -> int:
     """Group every capture on disk. Returns 0 when every workbook landed, 1 when some could not.
 
@@ -1774,6 +1984,10 @@ def run(  # pylint: disable=too-many-locals
     is the reading of #423's criterion 3 that finds a batch nobody typed; with ``oracle`` a capture
     batch sitting unlisted beside a given one is refused rather than silently omitted.
     """
+    if manual_reference_handoff and dry_run:
+        raise ManualHandoffConflict(
+            "--manual-reference-handoff records request state and cannot be used with --dry-run"
+        )
     batch_dirs, excluded = resolve_batch_dirs(oracle, oracle_root, exclude)
     batches = load_batches(batch_dirs)
     manifest, roots, basis = merge_batches(batches)
@@ -1842,8 +2056,28 @@ def run(  # pylint: disable=too-many-locals
     ctx = _Context(manifest=manifest, destinations=destinations, roots=roots, dry_run=dry_run)
     outcomes = _group_all(buckets, ctx)
     report_dir = _write_grouping_report(
-        _RunInputs(batches, migrations_root, basis, dry_run, excluded, oracle_root), outcomes
+        _RunInputs(
+            batches,
+            migrations_root,
+            basis,
+            dry_run,
+            excluded,
+            oracle_root,
+            manifest,
+            manual_reference_handoff,
+        ),
+        outcomes,
     )
+    if manual_reference_handoff:
+        handoff = json.loads((report_dir / UNMATCHED_REPORT).read_text(encoding="utf-8"))["manual_reference_handoff"]
+        if handoff["status"] == "REQUEST_REQUIRED":
+            LOG.warning("%s", handoff["request"])
+        elif handoff["status"] == "ALREADY_REQUESTED":
+            LOG.warning(
+                "Manual screenshot request already recorded at %s; delivery remains %s, so it was not repeated.",
+                handoff["requested_at"],
+                handoff["delivery_status"],
+            )
 
     LOG.info(
         "\n%s%s",
@@ -1893,6 +2127,7 @@ REFUSALS = (
     UnclassifiedCaptureDirectory,
     MalformedCaptureManifest,
     UnidentifiedCaptureView,
+    ManualHandoffConflict,
 )
 
 
@@ -1907,6 +2142,7 @@ def main() -> int:
             dry_run=args.dry_run,
             oracle_root=args.oracle_root,
             exclude=args.exclude,
+            manual_reference_handoff=args.manual_reference_handoff,
         )
     except REFUSALS as exc:
         LOG.error("%s", exc)
