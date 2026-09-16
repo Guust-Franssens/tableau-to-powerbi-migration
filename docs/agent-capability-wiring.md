@@ -119,6 +119,7 @@ must appear below unless the script docstring marks it `internal: true` with an 
 | `scripts/resolve_datasource_target.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/run_engine_survey.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/run_estate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
+| `scripts/run_status.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/set_ai_instructions.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/set_data_folder.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/skill_plugin_source.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
