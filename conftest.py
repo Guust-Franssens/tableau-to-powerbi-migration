@@ -77,6 +77,7 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         "probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter",
         "real Win32 EnumWindows callback is Windows-only",
         "native protected file DACL is Windows-only",
+        "native sharing violation control is Windows-only",
         "kernel delete-on-close handles are Windows-only",
         "shared-delete handle behavior is Windows-only",
         "native PrintWindow control is Windows-only",
