@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import stat
 import sys
@@ -24,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from bundle_corpus import classify_target
-from package_filesystem import _ManifestError, parse_manifest_text, verify_package
+from package_filesystem import verify_package
 from package_unit import unit_name_problem
 from work_dirs import CANONICAL_SUBDIRS, RUN_LOCATION_INTACT, check_run_location
 
@@ -155,7 +156,15 @@ def _strict_json_file(path: Path) -> tuple[Any | None, str | None]:
     except OSError:
         return None, "unreadable"
     try:
-        return json.loads(text, object_pairs_hook=_no_duplicate_keys, parse_constant=_no_constants), None
+        return (
+            json.loads(
+                text,
+                object_pairs_hook=_no_duplicate_keys,
+                parse_constant=_no_constants,
+                parse_float=_finite_float,
+            ),
+            None,
+        )
     except (ValueError, RecursionError):
         return None, "invalid_json"
 
@@ -171,6 +180,13 @@ def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _no_constants(value: str) -> None:
     raise ValueError(value)
+
+
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(value)
+    return parsed
 
 
 def _rel(path: Path, run: Path) -> str:
@@ -327,22 +343,12 @@ def _discover_package_dirs(run: Path, states: dict[str, str], findings: list[Fin
 
 
 def _package_manifest(path: Path) -> tuple[dict[str, object] | None, str | None]:
-    try:
-        info = os.lstat(path / PACKAGE_MANIFEST)
-    except FileNotFoundError:
-        return None, "missing"
-    except (OSError, ValueError):
-        return None, "unreadable"
-    if stat.S_ISLNK(info.st_mode):
-        return None, "unsafe_link"
-    if not stat.S_ISREG(info.st_mode):
-        return None, "not_regular"
-    try:
-        return parse_manifest_text((path / PACKAGE_MANIFEST).read_text(encoding="utf-8")), None
-    except UnicodeDecodeError:
-        return None, "not_utf8"
-    except _ManifestError:
+    manifest, reason = _strict_json_file(path / PACKAGE_MANIFEST)
+    if reason is not None:
+        return None, reason
+    if not isinstance(manifest, dict):
         return None, "invalid_manifest"
+    return manifest, None
 
 
 def _binding_state(manifest: dict[str, object]) -> str | None:
@@ -469,9 +475,9 @@ def _assemble_units(
             package.scope = "UNSCOPED_PACKAGE"
             continue
         key = (package.kind, package.unit)
-        candidates = units.get(key)
-        if candidates is not None and key not in ambiguous_keys:
-            if candidates.package is not None:
+        matched_unit = units.get(key)
+        if matched_unit is not None and key not in ambiguous_keys:
+            if matched_unit.package is not None:
                 package.scope = "UNSCOPED_PACKAGE"
                 findings.append(
                     Finding(
@@ -483,12 +489,14 @@ def _assemble_units(
                 )
                 continue
             package.scope = "associated"
-            candidates.package = package
+            matched_unit.package = package
         else:
             package.scope = "UNSCOPED_PACKAGE"
             code = (
                 "PACKAGE_ONLY_WORK"
-                if report_scope == "established" and not candidates
+                if report_scope == "established" and not matched_unit
+                else "PACKAGE_UNSCOPED_IN_UNESTABLISHED_INVENTORY"
+                if report_scope != "established" and not matched_unit
                 else "AMBIGUOUS_PACKAGE_IDENTITY"
             )
             findings.append(

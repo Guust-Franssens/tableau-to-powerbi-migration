@@ -155,6 +155,7 @@ def test_missing_or_malformed_report_unestablishes_inventory_but_preserves_packa
     assert payload["units"] == []
     assert payload["unscoped_packages"][0]["relative_path"] == "packages/Recovered"
     assert any(finding["code"] == "ENGINE_REPORT_UNESTABLISHED" for finding in payload["findings"])
+    assert any(finding["code"] == "PACKAGE_UNSCOPED_IN_UNESTABLISHED_INVENTORY" for finding in payload["findings"])
 
 
 def test_duplicate_and_kind_mismatch_do_not_safely_associate_a_package(tmp_path: Path) -> None:
