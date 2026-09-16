@@ -967,7 +967,7 @@ def test_remote_source_is_lexically_refused_before_any_filesystem_call(monkeypat
     assert session.signins == 0
 
 
-@pytest.mark.skipif(os.name != "nt", reason="real local Windows junction boundary")
+@pytest.mark.skipif(os.name != "nt", reason="NTFS junction regression")
 @pytest.mark.parametrize("boundary", ["run", "run-ancestor", "source", "artifact", "output", "output-ancestor"])
 def test_recovery_refuses_real_junction_before_following_it(monkeypatch, tmp_path, boundary):
     """Matching run.json and artifact bytes do not authorize following a Windows junction."""
