@@ -82,10 +82,14 @@ def _package(root: Path, unit: str = "Book", kind: str = "workbook", **updates: 
     return manifest
 
 
-def _invoke(run: Path | str, *extra: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _invoke(
+    run: Path | str, *extra: str, env: dict[str, str] | None = None, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    """The documented command. With `cwd`, the documented absolute `<toolkit>\\scripts` spelling."""
+    script = str(SCRIPT) if cwd is not None else str(Path("scripts") / "run_status.py")
     return subprocess.run(
-        [sys.executable, "-B", str(Path("scripts") / "run_status.py"), "--run", str(run), *extra],
-        cwd=REPO_ROOT,
+        [sys.executable, "-B", script, "--run", str(run), *extra],
+        cwd=cwd or REPO_ROOT,
         text=True,
         capture_output=True,
         check=False,
@@ -102,13 +106,21 @@ def _human_payload(text: str) -> dict:
     counts: dict[str, int] = {}
     key = ""
     for line in lines:
+        if line.startswith("    path: "):
+            shown = line.removeprefix("    path: ")
+            record = payload["locations"][-1]
+            assert "path" not in record, "each displayed location carries exactly one native path line"
+            record["path"] = None if shown == rs.PATH_WITHHELD else shown
+            continue
         if line.startswith("  "):
             payload[key].append(json.loads(line))
             continue
         key, value = line.split(": ", 1)
         key = "next_action" if key == "NEXT ACTION" else key
+        key = "locations" if key == "LOCATIONS" else key
+        assert payload or key == "locations", "the Locations block is displayed first"
         parsed = json.loads(value)
-        if key in {"units", "unscoped_packages", "recorded_phases", "recorded_failures", "findings"}:
+        if key in {"locations", "units", "unscoped_packages", "recorded_phases", "recorded_failures", "findings"}:
             counts[key] = parsed
             payload[key] = []
         else:
@@ -897,3 +909,128 @@ def test_source_does_not_invoke_network_processes_or_writers() -> None:
     forbidden = ["subprocess", "socket", "requests", "urllib", ".write_text(", ".write_bytes(", "open("]
     assert all(token not in source for token in forbidden)
     assert "allocate_run" not in source
+
+
+def _locations(payload: dict) -> dict[tuple[str, str | None], dict]:
+    rows = {(row["name"], row["relative_path"]): row for row in payload["locations"]}
+    assert len(rows) == len(payload["locations"]), "each displayed location is addressed exactly once"
+    return rows
+
+
+@pytest.mark.parametrize("from_toolkit", [True, False])
+def test_locations_follow_the_selected_run_and_stay_outside_the_toolkit(tmp_path: Path, from_toolkit: bool) -> None:
+    # A lookalike parent carrying the toolkit's own directory name is still outside the toolkit.
+    run = _run(tmp_path / REPO_ROOT.name / "external")
+    other = _run(tmp_path / "other")
+    _report(run)
+    _report(other, ("Foreign",))
+    (run / "oracle").rmdir()
+    _package(run / "packages" / "Book")
+    before = _hash_tree(run)
+
+    machine = _invoke(run, "--json", cwd=None if from_toolkit else tmp_path)
+    human = _invoke(run, cwd=None if from_toolkit else tmp_path)
+    assert machine.returncode == 0 and human.returncode == 0, machine.stderr + human.stderr
+    payload = json.loads(machine.stdout)
+    assert _human_payload(human.stdout) == payload, "the human Locations block carries the same observations"
+
+    rows = _locations(payload)
+    assert rows[("toolkit", None)] == {
+        "name": "toolkit",
+        "path": str(REPO_ROOT),
+        "expected": "standard",
+        "observed": "present",
+        "relationship": "is_toolkit",
+        "relative_path": None,
+    }
+    assert {name: (row["path"], row["observed"], row["relationship"]) for (name, _rel), row in rows.items()} == {
+        "toolkit": (str(REPO_ROOT), "present", "is_toolkit"),
+        "selected_run": (str(run), "present", "outside_toolkit"),
+        "bundle": (str(run / "bundle"), "present", "outside_toolkit"),
+        "oracle": (str(run / "oracle"), "missing", "outside_toolkit"),
+        "packages": (str(run / "packages"), "present", "outside_toolkit"),
+        "package": (str(run / "packages" / "Book"), "present", "outside_toolkit"),
+        "package_working_copy": (str(run / "packages" / "Book" / "fabric"), "missing", "outside_toolkit"),
+    }
+    assert rows[("package", "packages/Book")]["expected"] == "discovered"
+    assert rows[("package_working_copy", "packages/Book")]["expected"] == "standard"
+    assert not (run / "oracle").exists() and not (run / "packages" / "Book" / "fabric").exists()
+    assert before == _hash_tree(run)
+    assert str(other) not in machine.stdout and str(other) not in human.stdout
+
+
+def test_containment_is_component_aware_not_a_string_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    toolkit = tmp_path / "toolkit"
+    inside = _run(toolkit)
+    lookalike = _run(tmp_path / "toolkit-lookalike")
+    for run in (inside, lookalike):
+        _report(run, ())
+    with monkeypatch.context() as context:
+        context.setattr(rs, "TOOLKIT_ROOT", toolkit)
+        observed = {run: _locations(rs.build_status(run)[0]) for run in (inside, lookalike)}
+    assert observed[inside][("selected_run", None)]["relationship"] == "inside_toolkit"
+    assert observed[inside][("bundle", None)]["relationship"] == "inside_toolkit"
+    assert observed[inside][("toolkit", None)] == {
+        "name": "toolkit",
+        "path": str(toolkit),
+        "expected": "standard",
+        "observed": "present",
+        "relationship": "is_toolkit",
+        "relative_path": None,
+    }
+    assert str(lookalike).startswith(str(toolkit)), "the fixture is a genuine string prefix"
+    assert observed[lookalike][("selected_run", None)]["relationship"] == "outside_toolkit"
+    assert observed[lookalike][("packages", None)]["relationship"] == "outside_toolkit"
+
+
+@pytest.mark.parametrize("condition", ["moved", "malformed", "unsafe_spelling"])
+def test_unestablished_identity_offers_no_run_derived_location(tmp_path: Path, condition: str) -> None:
+    run = _run(tmp_path)
+    _report(run, ("ShouldNotBeRead",))
+    if condition == "moved":
+        selected: Path | str = run.rename(run.parent / "001-moved")
+    elif condition == "malformed":
+        (run / "run.json").write_text("{", encoding="utf-8")
+        selected = run
+    else:
+        selected = str(run / "..") + "\\001-estate"
+
+    payload = _both(selected, 2 if condition == "unsafe_spelling" else 1)
+
+    rows = _locations(payload)
+    assert set(rows) == {("toolkit", None), ("selected_run", None)}
+    assert rows[("toolkit", None)]["path"] == str(REPO_ROOT)
+    assert rows[("selected_run", None)] == {
+        "name": "selected_run",
+        "path": None,
+        "expected": "standard",
+        "observed": "cannot_establish",
+        "relationship": "cannot_establish",
+        "relative_path": None,
+    }
+    assert "bundle" not in {name for name, _relative in rows}
+    assert "ShouldNotBeRead" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize("text", ["run\x1b[31m", "run\nNEXT ACTION: DELETE EVERYTHING", "run\u202eFORGED"])
+def test_unprintable_location_paths_are_withheld_from_the_copyable_line(tmp_path: Path, text: str) -> None:
+    assert rs._printable(tmp_path / "plain-run") == str(tmp_path / "plain-run")
+    assert rs._printable(tmp_path / text) is None
+    status = {
+        "locations": [
+            {
+                "name": "package",
+                "path": rs._printable(tmp_path / text),
+                "expected": "discovered",
+                "observed": "present",
+                "relationship": "outside_toolkit",
+                "relative_path": f"packages/{text}",
+            }
+        ],
+        "current_certification": "NOT_CHECKED",
+    }
+    human = rs.render_human(status)
+    assert f"    path: {rs.PATH_WITHHELD}" in human
+    assert "\x1b" not in human and "\u202e" not in human
+    assert sum(line.startswith("NEXT ACTION") for line in human.splitlines()) == 0
+    assert _human_payload(human) == status

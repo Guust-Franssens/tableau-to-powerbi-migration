@@ -53,6 +53,47 @@ allocate, repair, write a cache/status file, launch Power BI, invoke network cli
 promote, delete, or certify readiness. It rejects UNC/device spellings before filesystem access and
 does not follow symlinks/junctions or read below a rejected boundary.
 
+### Where the toolkit and the selected run actually are
+
+The first block of both outputs is `LOCATIONS`. It shows absolute, copyable native paths for the
+toolkit checkout, the explicitly selected run, its standard `bundle/`, `oracle/` and `packages/`
+roots, and each already-discovered package plus that package's fixed `fabric/` working copy:
+
+```
+LOCATIONS: 7
+  {"expected": "standard", "name": "toolkit", "observed": "present", "relationship": "is_toolkit", "relative_path": null}
+    path: C:\src\tableau-to-powerbi-migration
+  {"expected": "standard", "name": "selected_run", "observed": "present", "relationship": "outside_toolkit", "relative_path": null}
+    path: C:\short\_runs\001-estate
+  {"expected": "standard", "name": "oracle", "observed": "missing", "relationship": "outside_toolkit", "relative_path": null}
+    path: C:\short\_runs\001-estate\oracle
+```
+
+- **`expected`** says only that the path is the standard documented location for that role
+  (`discovered` marks a package directory the bounded package search already found). **`observed`**
+  is the only existence claim: `present`, `missing`, `unassessable:<why>`, or `cannot_establish`.
+  A displayed path is never proof that the directory exists, and the command never creates it.
+- **`relationship`** (`is_toolkit` / `inside_toolkit` / `outside_toolkit` / `cannot_establish`) is
+  computed from the toolkit checkout this script was run from — not the caller's working directory
+  and not anything recorded inside the run. It compares whole path components, so a sibling
+  directory whose name merely starts with the toolkit's name stays `outside_toolkit`. The label is
+  explanatory: it describes spelling only, never identity, ownership, safety or readiness.
+- A short-root run (see below) keeps its `bundle/`, `oracle/` and `packages/` with **that** run;
+  nothing moves back into the repository, and another run with the same number is never consulted.
+- When a run's identity is unestablished (moved, malformed, unsafe or nonlocal spelling), only the
+  toolkit location is offered; the selected run is reported `cannot_establish` with no path, and no
+  bundle/oracle/package location is derived. A path that could carry control characters is withheld
+  as `(not shown: unprintable path)` rather than printed into the copyable line.
+- Package location and package seal integrity are separate: a package with retained edits or a
+  digest mismatch still has a safely observed location, and a safely located package is not thereby
+  clean or ready.
+
+To see the active run beside `Toolkit` in one editor window, use VS Code's
+[**File > Add Folder to Workspace…**](https://code.visualstudio.com/docs/editing/workspaces/multi-root-workspaces)
+with the displayed `selected_run` path. That is a human, optional UI action: it does not move,
+register or relocate anything, and `run_status.py` never launches an editor or writes a workspace
+file.
+
 Only known statuses and validated timestamps appear as `last_observed`; arbitrary stored objects
 and prose are not echoed, and current certification is always `NOT_CHECKED`. Human and JSON output
 contain the same normalized records, occurrence multiplicity, integrity codes and next-action
@@ -77,7 +118,7 @@ and the exact projection limits are documented in
 
 ## Retention and privacy
 
-Everything under `_runs/` is gitignored by `.gitignore` (`/_*`), protecting customer workbooks, credentials, manifests, and reference captures from accidental commits.
+Everything under this checkout's `_runs/` is gitignored by `.gitignore` (`/_*`), protecting customer workbooks, credentials, manifests, and reference captures from accidental commits. A run allocated under an external short root (below) lives outside this checkout, so it does **not** inherit these ignore rules; nothing in this repository can commit it, but whichever directory holds it governs its own retention. Confirm a repo-local path with `git check-ignore -v -- <path>` (no trailing slash).
 
 ## Short-root escape (issue #479)
 

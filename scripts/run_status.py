@@ -27,10 +27,16 @@ from typing import Any
 import package_filesystem as pfs
 import stamp_tableau_provenance as prov
 from bundle_corpus import PACKAGE_MARKER, classify_target, is_reparse_entry
-from work_dirs import CANONICAL_SUBDIRS, RUN_LOCATION_INTACT, check_run_location
+from work_dirs import CANONICAL_SUBDIRS, REPO_ROOT, RUN_LOCATION_INTACT, check_run_location
 
 PACKAGE_SEARCH_DEPTH = 3  # Flat packages and the retained batch layouts; never an estate crawler.
 CERTIFICATION_NOT_CHECKED = "NOT_CHECKED"
+# The toolkit checkout comes from this file's own location, never the caller's CWD and never a
+# path recorded inside the selected run's metadata.
+TOOLKIT_ROOT = REPO_ROOT
+LOCATION_UNOBSERVED = "cannot_establish"
+PATH_WITHHELD = "(not shown: unprintable path)"
+PACKAGE_EDIT_SUBDIR = "fabric"  # The one fixed working-copy directory package_unit writes.
 KNOWN_KINDS = {"workbook", "datasource"}
 # Recorded vocabularies only, from package_unit and run_estate/stamp_tableau_provenance.
 READINESS_STATUSES = {
@@ -127,6 +133,24 @@ class Occurrence:
 
 
 @dataclass
+class Location:
+    """Where a role's directory WOULD be, plus what was actually observed there.
+
+    `expected` says the path is the standard documented location for that role (or a package
+    directory the existing bounded discovery already found); it never asserts that the directory
+    exists. `observed` is the only existence claim, and `relationship` is explanatory only - it
+    describes spelling, not identity, ownership or safety.
+    """
+
+    name: str
+    path: str | None
+    expected: str
+    observed: str
+    relationship: str
+    relative_path: str | None = None
+
+
+@dataclass
 class PackageObservation:
     relative_path: str
     unit: str | None = None
@@ -194,6 +218,74 @@ def _dir_state(path: Path) -> str:
     if state in {"regular", "special"}:
         state = "not_directory"
     return "missing" if state == "missing" else f"unassessable:{state}"
+
+
+def _printable(path: Path) -> str | None:
+    """A copyable native spelling, withheld when printing it could spoof or reorder output."""
+    text = str(path)
+    if any(unicodedata.category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for char in text):
+        return None
+    return text
+
+
+def _relationship(path: Path | None) -> str:
+    """Component-aware containment against the toolkit checkout; a lookalike sibling is outside.
+
+    This compares path SPELLING only. It deliberately does not resolve aliases, so it is an
+    explanatory label, never an identity, ownership or safety authority.
+    """
+    if path is None:
+        return LOCATION_UNOBSERVED
+    toolkit = [os.path.normcase(part) for part in TOOLKIT_ROOT.parts]
+    candidate = [os.path.normcase(part) for part in path.parts]
+    if candidate == toolkit:
+        return "is_toolkit"
+    return "inside_toolkit" if candidate[: len(toolkit)] == toolkit else "outside_toolkit"
+
+
+def _location(name: str, path: Path | None, expected: str, observed: str, relative_path: str | None = None) -> Location:
+    return Location(
+        name=name,
+        path=None if path is None else _printable(path),
+        expected=expected,
+        observed=observed,
+        relationship=_relationship(path),
+        relative_path=relative_path,
+    )
+
+
+def _toolkit_location() -> Location:
+    """Observed 'present' from this module's own import location, never from a filesystem probe:
+    `work_dirs` was loaded out of `<toolkit>/scripts`, so the checkout root existed at import. This
+    keeps a rejected selection from triggering any syscall at all.
+    """
+    return _location("toolkit", TOOLKIT_ROOT, "standard", "present")
+
+
+def _unestablished_locations() -> list[Location]:
+    """Identity was not accepted, so no run-derived location is offered - not even its spelling."""
+    return [_toolkit_location(), _location("selected_run", None, "standard", LOCATION_UNOBSERVED)]
+
+
+def _locations(run: Path, states: dict[str, str], packages: list[tuple[Path, PackageObservation]]) -> list[Location]:
+    """Standard roots of the ACCEPTED selected run, plus already-discovered package directories."""
+    rows = [
+        _toolkit_location(),
+        _location("selected_run", run, "standard", "present"),
+        *(_location(name, run / name, "standard", states[name]) for name in ("bundle", "oracle", "packages")),
+    ]
+    for path, observation in packages:
+        rows.append(_location("package", path, "discovered", _dir_state(path), observation.relative_path))
+        rows.append(
+            _location(
+                "package_working_copy",
+                path / PACKAGE_EDIT_SUBDIR,
+                "standard",
+                _dir_state(path / PACKAGE_EDIT_SUBDIR),
+                observation.relative_path,
+            )
+        )
+    return rows
 
 
 def _strict_json_file(path: Path) -> tuple[dict[str, Any] | None, str | None]:
@@ -495,11 +587,13 @@ def _stored_readiness(manifest: dict[str, Any], observation: PackageObservation,
         )
 
 
-def _package_observations(run: Path, findings: list[Finding]) -> list[PackageObservation]:
-    observations: list[PackageObservation] = []
+def _package_observations(run: Path, findings: list[Finding]) -> list[tuple[Path, PackageObservation]]:
+    """Each already-discovered package directory with its observation; the path is never rebuilt
+    later from a raw recorded name."""
+    observations: list[tuple[Path, PackageObservation]] = []
     for path in _discover_package_dirs(run, findings):
         observation = PackageObservation(_rel(path, run))
-        observations.append(observation)
+        observations.append((path, observation))
         classification = classify_target(path)
         if not classification.declares_self_contained:
             observation.integrity_codes = [classification.code]
@@ -767,6 +861,7 @@ def build_status(run: Path | str) -> tuple[dict[str, Any], int]:
                 break
     if reason is not None:
         _problem(findings, "selected_run", reason)
+        status["locations"] = [asdict(row) for row in _unestablished_locations()]
         status["findings"] = [asdict(finding) for finding in findings]
         status["next_action"] = _next_action(False, "unestablished", [], [], [], findings=findings)
         return status, 2 if reason in {
@@ -788,6 +883,7 @@ def build_status(run: Path | str) -> tuple[dict[str, Any], int]:
         if location.state != RUN_LOCATION_INTACT:
             _problem(findings, "run.json", "run_location_unestablished")
     if findings:
+        status["locations"] = [asdict(row) for row in _unestablished_locations()]
         status["findings"] = [asdict(finding) for finding in findings]
         status["next_action"] = _next_action(False, "unestablished", [], [], [], findings=findings)
         return status, 1
@@ -807,7 +903,8 @@ def build_status(run: Path | str) -> tuple[dict[str, Any], int]:
         phase_evidence, records = _recorded_phases(path, findings)
     else:
         _problem(findings, "bundle/report.json", "parent_boundary_not_established")
-    packages = _package_observations(path, findings) if states["packages"] == "present" else []
+    discovered = _package_observations(path, findings) if states["packages"] == "present" else []
+    packages = [observation for _path, observation in discovered]
     units, unscoped = _assemble_units(
         [*reported, *working],
         packages,
@@ -819,6 +916,7 @@ def build_status(run: Path | str) -> tuple[dict[str, Any], int]:
     failures = [record for record in records if record["failed"]]
     status.update(
         {
+            "locations": [asdict(row) for row in _locations(path, states, discovered)],
             "canonical_subdirs": states,
             "inventory_scope": report_scope,
             "child_evidence": {"bundle/pbip": pbip_state, "bundle/handover": handover_state, **phase_evidence},
@@ -836,7 +934,17 @@ def build_status(run: Path | str) -> tuple[dict[str, Any], int]:
 def render_human(status: dict[str, Any]) -> str:
     """One rendering of the SAME normalized records, including duplicates and action details."""
     lines = ["RUN STATUS: DIAGNOSTIC ONLY (NOT readiness)"]
+    locations = status.get("locations", [])
+    lines.append(f"LOCATIONS: {len(locations)}")
+    for row in locations:
+        # The record keeps its escaped rendering; the copyable native spelling gets its own
+        # indented line, and is withheld outright when it could carry control characters.
+        record = {key: value for key, value in row.items() if key != "path"}
+        lines.append(f"  {json.dumps(record, sort_keys=True, ensure_ascii=True)}")
+        lines.append(f"    path: {PATH_WITHHELD if row['path'] is None else row['path']}")
     for key, value in status.items():
+        if key == "locations":
+            continue
         label = "NEXT ACTION" if key == "next_action" else key
         if isinstance(value, list):
             lines.append(f"{label}: {len(value)}")
