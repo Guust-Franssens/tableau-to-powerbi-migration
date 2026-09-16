@@ -25,6 +25,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import package_filesystem as pfs
+import stamp_tableau_provenance as prov
 from bundle_corpus import PACKAGE_MARKER, classify_target, is_reparse_entry
 from work_dirs import CANONICAL_SUBDIRS, RUN_LOCATION_INTACT, check_run_location
 
@@ -66,35 +67,40 @@ PHASE_NAMES = {
     "slice_handovers",
     "slice_only_baseline_backfill",
 }
-OPERATIONS = {
-    "collect-inputs",
-    "fingerprint",
-    "sign-in",
-    "inventory",
-    "content",
-    "scrub",
-    "sign-out",
+OPERATIONS = set(prov.WORKER_OPERATIONS) | {
+    "lookup-origin",
+    "download-workbook",
+    "build",
     "phase",
     "publish",
-    "validate-result",
+    prov.CONSISTENCY_OPERATION,
     "scrub-local-fields",
 }
-PHASE_CODES = {
+PHASE_CODES = set(prov.INVENTORY_ERROR_CODES) | {
     "collect-inputs-failed",
     "local-fingerprint-failed",
     "live-lookup-refused",
-    "inventory-failed",
-    "inventory-truncated",
-    "inventory-cannot-establish",
+    "live-lookup-failed",
+    prov.MSG_INVENTORY_FAILED,
+    "content-unavailable",
     "scrub-failed",
     "sign-out-failed",
+    "build-failed",
     "empty-input",
-    "deadline-expired",
-    "cancelled",
+    prov.DEADLINE_CODE,
+    prov.CANCELLED_CODE,
     "worker-crashed",
     "worker-protocol-invalid",
     "worker-reap-failed",
     "worker-start-failed",
+    # stamp_tableau_provenance.consistency_faults emits these via normalize_result.
+    "result-not-a-mapping",
+    "inputs-not-a-list",
+    "input-count-not-an-integer",
+    "input-count-negative",
+    "input-count-mismatch",
+    "phase-status-unassessable",
+    "success-without-inputs",
 }
 KNOWN_INTEGRITY_DAMAGE = {
     pfs.CODE_DIGEST_MISMATCH,
@@ -247,11 +253,16 @@ def _local_path_problem(raw: str) -> str | None:
     return None
 
 
-def _known(value: Any, allowed: set[str], findings: list[Finding], source: str, unit: str | None = None) -> str:
+def _known(value: Any, allowed: set[str], findings: list[Finding], source: str, unit: str | None = None) -> str | None:
     if isinstance(value, str) and value in allowed:
         return value
     _problem(findings, source, "unknown_recorded_value", unit)
-    return "unknown"
+    return None
+
+
+def _display_known(value: Any, allowed: set[str], findings: list[Finding], source: str, unit: str | None = None) -> str:
+    """The display fallback is an observation state, never an accepted identity."""
+    return _known(value, allowed, findings, source, unit) or "unknown"
 
 
 def _flag(value: Any, findings: list[Finding], source: str, unit: str | None) -> bool | None:
@@ -378,7 +389,7 @@ def _bindings(manifest: dict[str, Any], observation: PackageObservation, finding
                 ("state", {"bound", "unbound"}),
             ):
                 if key in model:
-                    observation.model_binding[key] = _known(model[key], allowed, findings, source, unit)
+                    observation.model_binding[key] = _display_known(model[key], allowed, findings, source, unit)
             if "resolves_in_package" in model:
                 observation.model_binding["resolves_in_package"] = _flag(
                     model["resolves_in_package"], findings, source, unit
@@ -392,7 +403,7 @@ def _bindings(manifest: dict[str, Any], observation: PackageObservation, finding
         elif data["binding"] is None:
             observation.binding_state = "not_required"
         elif isinstance(data["binding"], dict):
-            observation.binding_state = _known(
+            observation.binding_state = _display_known(
                 data["binding"].get("state"), {"bound", "unbound"}, findings, source, unit
             )
         else:
@@ -466,9 +477,11 @@ def _stored_readiness(manifest: dict[str, Any], observation: PackageObservation,
         raw = manifest[key]
         source, unit = observation.relative_path, observation.unit
         value = raw if isinstance(raw, dict) else {"status": raw}
-        last = {"status": _known(value.get("status"), READINESS_STATUSES, findings, source, unit)}
+        last = {"status": _display_known(value.get("status"), READINESS_STATUSES, findings, source, unit)}
         if "availability" in value:
-            last["availability"] = _known(value["availability"], {"UNAVAILABLE", "AVAILABLE"}, findings, source, unit)
+            last["availability"] = _display_known(
+                value["availability"], {"UNAVAILABLE", "AVAILABLE"}, findings, source, unit
+            )
         for time_key in ("recorded_at", "checked_at"):
             if time_key in value:
                 last[time_key] = _timestamp(value[time_key], findings, source, unit)
@@ -519,7 +532,7 @@ def _package_observations(run: Path, findings: list[Finding]) -> list[PackageObs
                 )
             )
         if "construction_status" in manifest:
-            observation.construction_status = _known(
+            observation.construction_status = _display_known(
                 manifest["construction_status"],
                 {"ASSEMBLED", "BLOCKED"},
                 findings,
@@ -591,7 +604,7 @@ def _assemble_units(  # pylint: disable=too-many-arguments
         package_counts[key] = package_counts.get(key, 0) + 1
     for package in packages:
         key = package.kind, package.unit
-        if key in units and package.unit not in ambiguous and package_counts[key] == 1:
+        if package.kind in KNOWN_KINDS and key in units and package.unit not in ambiguous and package_counts[key] == 1:
             units[key].package = package
             package.scope = "associated"
         else:
@@ -609,7 +622,7 @@ def _phase_record(row: Any, source: str, findings: list[Finding]) -> dict[str, A
         return {"source": source, "last_observed": {"status": "unknown"}, "failed": False}
     last: dict[str, Any] = {}
     if "status" in row:
-        last["status"] = _known(row["status"], PHASE_STATUSES, findings, source)
+        last["status"] = _display_known(row["status"], PHASE_STATUSES, findings, source)
     failed = last.get("status") in FAILED_PHASE_STATUSES
     if "exit_code" in row:
         code = row["exit_code"]
@@ -632,7 +645,7 @@ def _phase_record(row: Any, source: str, findings: list[Finding]) -> dict[str, A
                 _problem(findings, source, "invalid_phase_time")
         else:
             last[key] = value
-    phase = _known(row.get("phase"), PHASE_NAMES, findings, source)
+    phase = _display_known(row.get("phase"), PHASE_NAMES, findings, source)
     return {"source": source, "phase": phase, "last_observed": last, "failed": failed}
 
 
@@ -670,8 +683,8 @@ def _recorded_phases(run: Path, findings: list[Finding]) -> tuple[dict[str, str]
                 continue
             errors.append(
                 {
-                    "code": _known(error.get("code"), PHASE_CODES, findings, error_source),
-                    "operation": _known(error.get("operation"), OPERATIONS, findings, error_source),
+                    "code": _display_known(error.get("code"), PHASE_CODES, findings, error_source),
+                    "operation": _display_known(error.get("operation"), OPERATIONS, findings, error_source),
                 }
             )
         record["last_observed"]["errors"] = errors
@@ -780,7 +793,7 @@ def build_status(run: Path | str) -> tuple[dict[str, Any], int]:
         return status, 1
 
     status["run_recorded_status"] = (
-        _known(manifest["status"], {"active"}, findings, "run.json") if "status" in manifest else "not_recorded"
+        _display_known(manifest["status"], {"active"}, findings, "run.json") if "status" in manifest else "not_recorded"
     )
     status["run_recorded_status_semantics"] = "allocation metadata only; not proof of process liveness"
     states = {name: _directory(path / name, path, findings) for name in CANONICAL_SUBDIRS}

@@ -19,6 +19,7 @@ SCRIPT = REPO_ROOT / "scripts" / "run_status.py"
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import run_status as rs  # noqa: E402  # pylint: disable=wrong-import-position
+import stamp_tableau_provenance as prov  # noqa: E402  # pylint: disable=wrong-import-position
 from bundle_corpus import is_reparse_entry  # noqa: E402  # pylint: disable=wrong-import-position
 
 
@@ -215,6 +216,63 @@ def test_partial_report_retains_readable_occurrences(tmp_path: Path) -> None:
     assert payload["units"][0]["occurrences"] == [
         {"source": "engine_report", "unit": "Book", "kind": "workbook", "status": "observed"},
     ]
+
+
+@pytest.mark.parametrize("kind", ["PRIVATE_INVALID_KIND", "unknown", None, ["workbook"]])
+def test_invalid_package_kind_cannot_associate_with_a_working_copy_only_unit(tmp_path: Path, kind: Any) -> None:
+    run = _run(tmp_path)
+    _report(run, ())
+    (run / "bundle" / "pbip" / "Recovered").mkdir(parents=True)
+    _package(run / "packages" / "Recovered", "Recovered", kind)
+
+    payload = _both(run, 1)
+
+    unit = payload["units"][0]
+    assert unit["kind"] == "unknown" and unit["scope"] == "working_copy_only"
+    assert unit["package"] is None, "an unestablished package kind must never establish an association"
+    package = payload["unscoped_packages"][0]
+    assert package["kind"] is None, "the display sentinel is not a package identity"
+    assert package["unit"] == "Recovered" and package["scope"] == "UNSCOPED_PACKAGE"
+    assert any(
+        finding["code"] == "UNSCOPED_PACKAGE" and finding["reason"] == "preserve_and_inspect_association"
+        for finding in payload["findings"]
+    )
+    assert "preserve retained work" in payload["next_action"]["headline"]
+    assert "PRIVATE_INVALID_KIND" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize("kind", ["workbook", "datasource"])
+def test_valid_package_kinds_remain_associated_or_retained_package_only(tmp_path: Path, kind: str) -> None:
+    run = _run(tmp_path)
+    _report(run, ("Book",) if kind == "workbook" else (), ("Book",) if kind == "datasource" else ())
+    _package(run / "packages" / "Book", "Book", kind)
+    _package(run / "packages" / "Recovered", "Recovered", kind)
+
+    payload = _both(run, 0)
+
+    assert payload["units"][0]["package"]["kind"] == kind
+    assert payload["units"][0]["package"]["scope"] == "associated"
+    package = payload["unscoped_packages"][0]
+    assert (package["unit"], package["kind"], package["scope"]) == ("Recovered", kind, "UNSCOPED_PACKAGE")
+    assert payload["next_action"]["headline"].startswith("Preserve package-only or ambiguous package work")
+
+
+def test_package_join_requires_an_accepted_kind_not_a_display_sentinel() -> None:
+    package = rs.PackageObservation("packages/Recovered", "Recovered", "unknown")
+    findings: list[rs.Finding] = []
+
+    units, unscoped = rs._assemble_units(
+        [rs.Occurrence("working_copy", "Recovered", "unknown", "present")],
+        [package],
+        findings,
+        pbip_state="present",
+        handover_state="missing",
+        handovers={},
+    )
+
+    assert units[0].package is None, "the package join must require a KNOWN_KINDS member"
+    assert unscoped == [package] and package.scope == "UNSCOPED_PACKAGE"
+    assert findings[0].code == "UNSCOPED_PACKAGE"
 
 
 @pytest.mark.parametrize("cross_kind", [False, True])
@@ -450,6 +508,81 @@ def test_valid_success_and_known_failed_phase_records_are_observations(tmp_path:
     assert len(payload["recorded_phases"]) == 3
     assert len(payload["recorded_failures"]) == 1
     assert payload["recorded_phases"][1]["last_observed"]["started_at"] == "1970-01-01T00:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    "code,operation",
+    [
+        ("build-failed", "build"),
+        ("live-lookup-failed", "lookup-origin"),
+        ("content-unavailable", "download-workbook"),
+    ],
+)
+def test_producer_failure_codes_preserve_the_recorded_failed_phase_action(
+    tmp_path: Path, code: str, operation: str
+) -> None:
+    run = _run(tmp_path)
+    _report(run, ())
+    produced = prov.failure_result(code, operation, RuntimeError("PRIVATE_EXCEPTION_SENTINEL"))
+    _write_json(run / "bundle" / "source-provenance.json", produced)
+
+    payload = _both(run, 0)
+
+    assert payload["recorded_failures"] == payload["recorded_phases"]
+    assert payload["recorded_failures"][0]["last_observed"] == {
+        "status": "failed",
+        "errors": [{"code": code, "operation": operation}],
+    }
+    assert payload["next_action"]["headline"].startswith("Inspect the recorded failed phase")
+    assert payload["findings"] == []
+    assert "PRIVATE_EXCEPTION_SENTINEL" not in json.dumps(payload)
+
+
+@pytest.mark.parametrize(
+    "overrides,expected_code",
+    [
+        (None, "result-not-a-mapping"),
+        ({"inputs": None}, "inputs-not-a-list"),
+        ({"input_count": None}, "input-count-not-an-integer"),
+        ({"input_count": -1}, "input-count-negative"),
+        ({"input_count": 1}, "input-count-mismatch"),
+        ({"phase": None}, "phase-status-unassessable"),
+        ({"phase": {"status": "success", "errors": []}}, "success-without-inputs"),
+    ],
+)
+def test_producer_normalization_failures_remain_assessable_diagnostics(
+    tmp_path: Path, overrides: dict | None, expected_code: str
+) -> None:
+    run = _run(tmp_path)
+    _report(run, ())
+    raw = None if overrides is None else {**prov.phase_result([], "failed"), **overrides}
+    produced = prov.normalize_result(raw)
+    assert [error["code"] for error in produced["phase"]["errors"]] == [expected_code]
+    _write_json(run / "bundle" / "source-provenance.json", produced)
+
+    payload = _both(run, 0)
+
+    assert payload["recorded_failures"][0]["last_observed"] == {
+        "status": "failed",
+        "errors": [{"code": expected_code, "operation": "validate-result"}],
+    }
+    assert payload["next_action"]["headline"].startswith("Inspect the recorded failed phase")
+    assert payload["findings"] == []
+
+
+@pytest.mark.parametrize("field", ["code", "operation"])
+def test_unknown_code_like_producer_error_values_are_withheld(tmp_path: Path, field: str) -> None:
+    run = _run(tmp_path)
+    _report(run, ())
+    error = prov.phase_error("build-failed", "build")
+    error[field] = "private-unknown-sentinel"
+    _write_json(run / "bundle" / "source-provenance.json", prov.phase_result([], "failed", [error]))
+
+    payload = _both(run, 1)
+
+    assert payload["recorded_failures"][0]["last_observed"]["errors"] == [{**error, field: "unknown"}]
+    assert payload["next_action"]["headline"].startswith("Inspect unassessable evidence")
+    assert "private-unknown-sentinel" not in json.dumps(payload)
 
 
 @pytest.mark.parametrize(
