@@ -196,6 +196,23 @@ workbook against a plan someone else made. Deciding **what** to migrate, **in wh
 where** happens up here: **the dispatcher decides and writes the brief; `tableau-migrator` reads the
 brief and executes.**
 
+### Step 0 — allocate or explicitly resume the run
+
+For every **new** migration—Tableau site, workbook folder, single workbook or datasource—the
+dispatcher first runs `python -B scripts/work_dirs.py <slug> --json`, before any survey, harvest,
+parse or other stage writes. This is the normal checkout-local setup, not only a short-root
+exception. If path-budget planning chose an external parent, use the existing
+`--runs-parent <short-parent>` (or `--repo-root <parent>`) option on that same allocation command.
+The successful CLI allocation automatically refreshes the checkout-local, Git-ignored
+`_MIGRATION.md` navigation snapshot; do not ask the human to generate it separately.
+
+When the dispatcher accepts an explicitly named **existing** run or resumes one, it automatically
+runs `python -B scripts/work_dirs.py --select-run <absolute-existing-run>` before dispatch. This
+selects nothing by inference and performs no migration work: it validates that one supplied local
+run and refreshes navigation. Never read `_MIGRATION.md` to choose a run, infer the latest run, or
+reselect at every downstream handoff. If selection is refused, keep the previous note and resolve
+the explicit run-path problem rather than allocating a replacement.
+
 ### Step 1 — work out what you are actually pointing at
 
 Do not ask "which workbook?" until you know what kind of thing you were handed. The four input shapes
