@@ -349,6 +349,21 @@ def test_reference_refuses_discard_override_and_unsafe_or_missing_members(tmp_pa
             reference_dir=reference,
         )
     assert not (_out(tmp_path) / UNIT).exists()
+    payload["dashboards"][0]["states"][0]["image"] = "missing.png"
+    (reference / "manifest.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(
+        pkg.PackagingError,
+        match=r"reference_image_missing_or_unsafe: missing\.png: capture path does not resolve to a file",
+    ):
+        pkg.package_unit(
+            bundle,
+            UNIT,
+            _out(tmp_path),
+            oracle_dir=oracle,
+            assets_dir=bundle.parent / "assets",
+            reference_dir=reference,
+        )
+    assert not (_out(tmp_path) / UNIT).exists()
 
 
 def test_reference_target_appearing_before_publication_is_not_replaced(

@@ -184,9 +184,9 @@ This opt-in writes `manual_reference_handoff` into the existing
 `oracle-grouping-report.json` beside the last enumerated batch and prints its single consolidated
 request. It asks only for residual original Tableau screenshots: successful visual legs and
 data-only failures do not enlarge the list. Unknown identity and failed local copies remain named
-repair gaps instead of guessed screenshot targets. Filter, parameter and period context is explicitly
-`DECLARED` when supplied by the caller or `UNKNOWN`; an empty manual-capture `state` is not proof of
-filter state.
+repair gaps instead of guessed screenshot targets. The request initially records filter, parameter
+and period context as `UNKNOWN`; supplied declarations belong in the caller-recorded response
+context. An empty manual-capture `state` is not proof of filter state.
 
 Present that exact request once. `requested_at` records creation, while `delivery_status: UNKNOWN`
 correctly avoids claiming that console output reached a person. On later invocations, reports beside

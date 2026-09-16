@@ -2134,7 +2134,7 @@ def _stage_reference(reference_dir: Path, dest: Path) -> dict[str, Any]:  # pyli
                 raise PackagingError("reference_image_path_unsafe")
             origin, refusal = _resolve_capture_file(reference_dir, image)
             if origin is None:
-                raise PackagingError("reference_image_missing_or_unsafe") from ValueError(refusal)
+                raise PackagingError(f"reference_image_missing_or_unsafe: {image}: {refusal or 'unknown reason'}")
             members[image] = origin
     target = dest / "reference"
     for relative, origin in members.items():
@@ -4081,8 +4081,8 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
             limits = platform_limits() if limits is None else limits
             final = assert_package_destination(out_root, unit)
             attempt.final = final
-            workbooks, _datasources = engine_unit_names(read_json(bundle / "report.json"))
             if reference_dir is not None:
+                workbooks, _datasources = engine_unit_names(read_json(bundle / "report.json"))
                 attempt.fresh_target_only = True
                 if discard_edits:
                     raise PackagingError("reference_conflicts_with_discard_package_edits")
