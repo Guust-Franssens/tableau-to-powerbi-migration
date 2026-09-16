@@ -2048,14 +2048,14 @@ def _prior_handoff(inputs: _RunInputs) -> dict[str, Any] | None:  # pylint: disa
     return merged
 
 
-def _manual_view_intent(batch: _Batch, luid: str) -> tuple[set[str], bool]:
+def _manual_render_intent(batch: _Batch, view_luid: str) -> tuple[frozenset[str], bool]:
     """Read a recovery's actual per-view selection, not its capture-wide union of render kinds."""
-    requested = set(batch.manifest.get("requested_renders") or [])
+    requested = frozenset(batch.manifest.get("requested_renders") or [])
     if not requested <= set(tableau_oracle_manifest.LEG_TO_KIND.values()) - {"data"}:
-        raise ManualHandoffConflict("manual-reference render intent is malformed")
-    recovery = batch.manifest.get("recovery")
-    if recovery is None:
+        raise MalformedCaptureManifest("manual-reference render intent is malformed")
+    if "recovery" not in batch.manifest:
         return requested, bool(batch.manifest.get("reference_required"))
+    recovery = batch.manifest.get("recovery")
     selected = recovery.get("selected_legs_by_view") if isinstance(recovery, dict) else None
     if (
         not isinstance(selected, dict)
@@ -2068,10 +2068,13 @@ def _manual_view_intent(batch: _Batch, luid: str) -> tuple[set[str], bool]:
             for legs in selected.values()
         )
     ):
-        raise ManualHandoffConflict("manual-reference recovery selection is malformed")
-    kinds = {tableau_oracle_manifest.LEG_TO_KIND[leg] for leg in selected[luid] if leg != "data"}
+        raise MalformedCaptureManifest(
+            "recovery.selected_legs_by_view is unestablished for a view; "
+            "restore its recorded selected legs before requesting screenshots."
+        )
+    kinds = frozenset(tableau_oracle_manifest.LEG_TO_KIND[leg] for leg in selected[view_luid] if leg != "data")
     if not kinds <= requested:
-        raise ManualHandoffConflict("manual-reference recovery selection conflicts with render intent")
+        raise MalformedCaptureManifest("manual-reference recovery selection conflicts with render intent")
     return kinds, False
 
 
@@ -2086,7 +2089,7 @@ def _manual_residuals(views: list[dict[str, Any]], batches: list[_Batch]) -> lis
             for batch in batches
             if any(record.get("view_luid") == view.get("view_luid") for record in batch.manifest.get("views", []))
         ]
-        intents = [_manual_view_intent(batch, view["view_luid"]) for batch in covering]
+        intents = [_manual_render_intent(batch, view["view_luid"]) for batch in covering]
         requested = frozenset(kind for kinds, _required in intents for kind in kinds)
         if requested:
             missing.extend(render_unestablished([view], requested))
