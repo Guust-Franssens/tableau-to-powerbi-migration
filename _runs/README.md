@@ -34,6 +34,30 @@ python scripts\package_unit.py --bundle _runs\<NNN>-<slug>\bundle `
 - **Self-contained isolation:** Completed packages carry `package-manifest.json`. The check gates (`check_reference_readiness.py` and `check_unit.py`) inspect `bundle_corpus.is_self_contained` and stop the ancestor evidence walk when the manifest is present, ensuring the package evaluates only its own scoped evidence and never borrows omitted renders or double-matches against run-root captures at `_runs/<NNN>-<slug>/oracle/`.
 - **Fail closed:** An incomplete or failed package without `package-manifest.json` fails closed when ancestor evidence is present.
 
+
+## Read-only run status
+
+To inspect a known run without changing it, use the explicit absolute run path:
+
+```bash
+python scripts/run_status.py --run /absolute/path/to/_runs/<NNN>-<slug>
+python scripts/run_status.py --run /absolute/path/to/_runs/<NNN>-<slug> --json
+```
+
+`run_status.py` is a diagnostic inventory slice only. It reads `run.json` plus the selected run's
+canonical subdirectories, reports retained `bundle/pbip` working copies, package manifests (including
+package-only or ambiguous packages), recorded phase failures, and one non-destructive next action. It
+does **not** select the latest run, discover sibling roots, allocate, repair, write a cache/status
+file, launch Power BI, call the network, rebuild, promote, delete, or certify readiness. A stored
+package START_READY/COMPLETE-like value is printed only as `last_observed`; current certification is
+always `NOT_CHECKED`.
+
+Exit `0` means the requested diagnostic inventory was assessable, not that the migration is ready.
+Nonzero exits are for input, identity, or readability failures: for example a relative `--run`, an
+unreadable/malformed `run.json`, a moved run, an unsafe canonical subdirectory, or an unestablished
+engine `bundle/report.json`. Pending package binding/reference findings stay visible without turning
+into a readiness verdict.
+
 ## Retention and privacy
 
 Everything under `_runs/` is gitignored by `.gitignore` (`/_*`), protecting customer workbooks, credentials, manifests, and reference captures from accidental commits.
