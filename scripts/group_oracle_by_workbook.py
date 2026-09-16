@@ -1786,14 +1786,14 @@ def _prior_handoff(inputs: _RunInputs) -> dict[str, Any] | None:  # pylint: disa
             current_identity = {name: value for name, value in current_row.items() if name not in _RESPONSE_FIELDS}
             if merged_identity != current_identity:
                 raise ManualHandoffConflict("enumerated grouping reports contain conflicting manual-reference rows")
-            for field in _RESPONSE_FIELDS:
-                if field not in current_row:
+            for response_field in _RESPONSE_FIELDS:
+                if response_field not in current_row:
                     continue
-                if field in merged_row and merged_row[field] != current_row[field]:
+                if response_field in merged_row and merged_row[response_field] != current_row[response_field]:
                     raise ManualHandoffConflict(
                         "enumerated grouping reports contain conflicting manual-reference responses"
                     )
-                merged_row[field] = current_row[field]
+                merged_row[response_field] = current_row[response_field]
         merged_without_rows = {name: value for name, value in merged.items() if name != "rows"}
         current_without_rows = {name: value for name, value in current.items() if name != "rows"}
         if merged_without_rows != current_without_rows:
@@ -1821,8 +1821,17 @@ def _manual_handoff(  # pylint: disable=too-many-locals,too-many-branches
                         }
                     )
                 continue
-            by_luid = {view.get("view_luid"): view for view in views}
-            for residual in render_unestablished(views, requested):
+            valid_views = [view for view in views if isinstance(view, dict)]
+            if len(valid_views) != len(views):
+                repair_gaps.append(
+                    {
+                        "reason": "residual_view_record_malformed",
+                        "workbook_luid": outcome.get("workbook_luid"),
+                        "view_luid": None,
+                    }
+                )
+            by_luid = {view.get("view_luid"): view for view in valid_views}
+            for residual in render_unestablished(valid_views, requested):
                 view = by_luid.get(residual.get("view_luid"))
                 if not isinstance(view, dict):
                     repair_gaps.append(

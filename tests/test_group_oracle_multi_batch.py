@@ -931,6 +931,28 @@ def test_not_copied_render_is_a_repair_gap_not_a_screenshot_target(tmp_path):
     assert handoff["repair_gaps"] == [{"reason": "render_not_copied", "workbook_luid": "wb-1", "view_luid": LUID}]
 
 
+def test_malformed_grouped_view_is_a_repair_gap_not_an_uncaught_error(tmp_path):
+    batch_dir = tmp_path / "_oracle"
+    batch_dir.mkdir()
+    inputs = grp._RunInputs(  # pylint: disable=protected-access
+        [grp._Batch(batch_dir, {}, "only", 0)],  # pylint: disable=protected-access
+        tmp_path / "migrations",
+        "captured_at",
+        False,
+        manifest={"server": "https://tableau.example", "site": "site", "requested_renders": ["png_high"]},
+        manual_reference_handoff=True,
+    )
+    outcomes = {bucket: [] for bucket in grp.OUTCOME_BUCKETS}
+    outcomes["grouped"].append({"workbook_luid": "wb-1", "_grouped_views": [None]})
+
+    handoff = grp._manual_handoff(inputs, outcomes)  # pylint: disable=protected-access
+
+    assert handoff["rows"] == []
+    assert handoff["repair_gaps"] == [
+        {"reason": "residual_view_record_malformed", "workbook_luid": "wb-1", "view_luid": None}
+    ]
+
+
 # ------------------------------------------------------------- batch identity must be unambiguous
 
 
