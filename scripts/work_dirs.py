@@ -1222,7 +1222,7 @@ def _render_navigation_note(run: RunPaths) -> str:
         "# Migration navigation\n\n"
         "Generated navigation for this explicitly selected context.\n\n"
         f"- Generated (UTC): {generated}\n"
-        f"- Selected context: run {run.run_number:03d} ({relation})\n"
+        f"- Selected context: {relation}\n"
         "- Toolkit root:\n\n"
         f"    {toolkit_root}\n\n"
         "- Selected run root:\n\n"
