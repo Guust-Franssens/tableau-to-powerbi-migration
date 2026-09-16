@@ -29,6 +29,9 @@ from package_unit import unit_name_problem
 from work_dirs import CANONICAL_SUBDIRS, RUN_LOCATION_INTACT, check_run_location
 
 PACKAGE_MANIFEST = "package-manifest.json"
+# Flat packages are <run>/packages/<Unit>/package-manifest.json; documented batch packages add one
+# grouping directory. Depth 3 matches check_migration_progress.py's bounded compatibility search
+# without turning this read-only diagnostic into an unbounded package crawler.
 PACKAGE_SEARCH_DEPTH = 3
 KNOWN_KINDS = frozenset({"workbook", "datasource", "unknown"})
 CERTIFICATION_NOT_CHECKED = "NOT_CHECKED"
@@ -351,8 +354,6 @@ def _binding_state(manifest: dict[str, object]) -> str | None:
         binding = data_sources.get("binding")
         if isinstance(binding, dict) and isinstance(binding.get("state"), str):
             return binding["state"]
-        if binding:
-            return "unbound"
     return None
 
 
@@ -550,7 +551,7 @@ def _next_action(
     if failures:
         return {
             "headline": "Inspect the recorded failed phase without rebuilding or deleting retained work.",
-            "affected_units": sorted({unit.unit for unit in units}),
+            "affected_units": [],
             "details": failures,
         }
     if unscoped:
