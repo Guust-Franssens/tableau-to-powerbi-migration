@@ -424,7 +424,6 @@ def test_visual_cleanup_failure_is_loud_preserves_result_and_expiry_retries(
     assert "PRIVATE_OS_DETAIL" not in output.out + output.err
 
 
-@pytest.mark.timing
 @pytest.mark.parametrize("progress", [False, True])
 def test_visual_capture_keeps_unreadable_deadline_and_never_becomes_a_verdict(
     monkeypatch, parked, visual_runtime, progress
@@ -783,7 +782,6 @@ def test_refresh_honors_the_wait_verdict_even_if_the_worker_finishes_during_tear
             refresh(port=1234, tables=["Orders"], progress_enabled=False)
 
 
-@pytest.mark.timing
 @pytest.mark.parametrize("progress", [False, True])
 @pytest.mark.parametrize("finishes", [False, True], ids=["deadline", "healthy-completion"])
 def test_delayed_observer_never_blocks_refresh_wait_or_teardown(monkeypatch, parked, progress, finishes) -> None:
@@ -818,7 +816,6 @@ def test_delayed_observer_never_blocks_refresh_wait_or_teardown(monkeypatch, par
         assert observed.wait(2), "release the background control before undoing its monkeypatches"
 
 
-@pytest.mark.timing
 @pytest.mark.parametrize("phase", ["directory", "lease", "process"])
 def test_delayed_evidence_startup_cannot_hold_the_deadline_or_publish_after_exit(
     monkeypatch, parked, visual_runtime, phase
@@ -864,7 +861,6 @@ def test_delayed_evidence_startup_cannot_hold_the_deadline_or_publish_after_exit
     assert all(record[0]["status"] != "ACQUIRED" for record in visual_runtime.records)
 
 
-@pytest.mark.timing
 def test_process_startup_uses_the_acquisition_budget_without_stopping_refresh(
     monkeypatch, parked, visual_runtime
 ) -> None:

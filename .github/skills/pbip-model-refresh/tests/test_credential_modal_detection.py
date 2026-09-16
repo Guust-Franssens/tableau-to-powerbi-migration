@@ -452,7 +452,6 @@ def test_visual_directory_refuses_renamed_artifacts(tmp_path, marker, checkout) 
 
 
 @pytest.mark.gui
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "win32", reason="native PrintWindow control is Windows-only")
 def test_visual_native_background_capture_reaches_production_without_focus(monkeypatch, tmp_path) -> None:
     """Real child/GDI/ACL/PNG against NOACTIVATE controls; never launch Desktop."""
