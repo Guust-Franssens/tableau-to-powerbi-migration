@@ -60,7 +60,7 @@ toolkit checkout, the explicitly selected run, its standard `bundle/`, `oracle/`
 roots, and each already-discovered package plus that package's fixed `fabric/` working copy:
 
 ```
-LOCATIONS: 7
+LOCATIONS: 7   (abridged below: bundle/, packages/ and the discovered package rows are omitted)
   {"expected": "standard", "name": "toolkit", "observed": "present", "relationship": "is_toolkit", "relative_path": null}
     path: C:\src\tableau-to-powerbi-migration
   {"expected": "standard", "name": "selected_run", "observed": "present", "relationship": "outside_toolkit", "relative_path": null}
