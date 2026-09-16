@@ -230,7 +230,7 @@ def test_recovery_exports_only_eligible_failed_legs(monkeypatch, tmp_path):
     monkeypatch.setattr(oracle, "_capture_data", data)
     monkeypatch.setattr(oracle, "_capture_render", render)
 
-    assert oracle.main() == 3
+    assert oracle.main() == 0
 
     manifest = json.loads((out / "oracle-manifest.json").read_text(encoding="utf-8"))
     assert data_exports == [(LUID_1, 17)]
@@ -241,6 +241,8 @@ def test_recovery_exports_only_eligible_failed_legs(monkeypatch, tmp_path):
     assert "data" not in manifest["views"][1], "successful prior data must not be exported again"
     assert manifest["views"][1]["image"]["status"] == "ok"
     assert manifest["recovery"]["eligible_legs"] == 2
+    assert manifest["captured_complete"] == 2
+    assert manifest["failed"] == 0
     assert session.signins == 1 and session.signouts == 1
 
 
@@ -310,7 +312,7 @@ def test_svg_recovery_uses_recorded_api_override_without_serverinfo_probe(monkey
     monkeypatch.setattr(oracle.capability, "server_info", no_serverinfo)
     monkeypatch.setattr(oracle, "_capture_render", render)
 
-    assert oracle.main() == 3
+    assert oracle.main() == 0
     assert render_calls == [(LUID_1, "svg", "3.29")]
 
 

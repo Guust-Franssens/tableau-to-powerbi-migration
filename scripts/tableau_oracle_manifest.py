@@ -764,6 +764,47 @@ def _partition(
     }
 
 
+def _recovery_selected_legs(run: CaptureRun) -> dict[str, frozenset[str]]:
+    recovery = run.recovery or {}
+    raw = recovery.get("selected_legs_by_view")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(luid): frozenset(leg for leg in legs if leg in LEG_TO_KIND)
+        for luid, legs in raw.items()
+        if isinstance(legs, list)
+    }
+
+
+def _partition_recovery(
+    records: list[dict[str, Any]], selected: dict[str, frozenset[str]]
+) -> dict[str, list[dict[str, Any]]]:
+    """Split recovery records by the statuses of legs this recovery actually attempted."""
+
+    def selected_statuses(record: dict[str, Any]) -> list[str | None]:
+        return [
+            (record.get(leg) or {}).get("status") for leg in selected.get(str(record.get("view_luid")), frozenset())
+        ]
+
+    ok = [r for r in records if (r.get("data") or {}).get("status") == "ok"]
+    return {
+        "ok": ok,
+        "empty": [r for r in ok if empty_classification(r)],
+        "unassessable": [r for r in ok if unassessable_reason(r)],
+        "complete": [
+            r
+            for r in records
+            if selected_statuses(r)
+            and all(status == "ok" for status in selected_statuses(r))
+            and not unassessable_reason(r)
+        ],
+        "blocked": [r for r in records if "source_credential" in selected_statuses(r)],
+        "failed": [
+            r for r in records if any(status not in {"ok", "source_credential"} for status in selected_statuses(r))
+        ],
+    }
+
+
 def render_unestablished(records: list[dict[str, Any]], requested: frozenset[str]) -> list[dict[str, Any]]:
     """Views for which a render WAS requested and not one requested tier came back ``ok``.
 
@@ -788,6 +829,25 @@ def render_unestablished(records: list[dict[str, Any]], requested: frozenset[str
         if any(status == "ok" for status in legs.values()):
             continue
         out.append({"view_luid": record.get("view_luid"), "view_name": record.get("view_name"), "renders": legs})
+    return out
+
+
+def render_unestablished_recovery(
+    records: list[dict[str, Any]], selected: dict[str, frozenset[str]]
+) -> list[dict[str, Any]]:
+    """Recovery render gaps, judged only against render legs selected for this retry batch."""
+    out = []
+    for record in records:
+        selected_renders = {
+            LEG_TO_KIND[leg]: (record.get(leg) or {}).get("status", ABSENT_LEG)
+            for leg in selected.get(str(record.get("view_luid")), frozenset())
+            if leg != "data"
+        }
+        if not selected_renders or any(status == "ok" for status in selected_renders.values()):
+            continue
+        out.append(
+            {"view_luid": record.get("view_luid"), "view_name": record.get("view_name"), "renders": selected_renders}
+        )
     return out
 
 
@@ -871,14 +931,23 @@ def write_manifest(  # pylint: disable=too-many-locals
     # anything other than `_capture_data` must not be able to reach the manifest with uncertified
     # bytes named as evidence.
     records = withhold_uncertified_evidence(records)
-    sets = _partition(records, run.requested_renders)
+    recovery_selected = _recovery_selected_legs(run)
+    sets = (
+        _partition_recovery(records, recovery_selected)
+        if recovery_selected
+        else _partition(records, run.requested_renders)
+    )
     blocked, failed, complete = sets["blocked"], sets["failed"], sets["complete"]
     rendered = sum(1 for r in records if any(r.get(leg, {}).get("status") == "ok" for leg in ("image", "svg", "pdf")))
     # "Nothing rendered, and the credential explains ALL of it" -- the one case where an absent
     # reference is code 2's problem rather than code 5's.
     credential_only = rendered == 0 and bool(blocked) and len(blocked) == len(records)
     reference_missing = run.reference_required and rendered == 0 and not credential_only
-    unestablished = render_unestablished(records, run.requested_renders)
+    unestablished = (
+        render_unestablished_recovery(records, recovery_selected)
+        if recovery_selected
+        else render_unestablished(records, run.requested_renders)
+    )
     empty_views = data_empty_views(records)
     gate = svg_gate(capability_report, server_info, run.env.get("TABLEAU_REST_API_VERSION"))
     _stamp_svg_gate(records, gate, run.session.redact_text)

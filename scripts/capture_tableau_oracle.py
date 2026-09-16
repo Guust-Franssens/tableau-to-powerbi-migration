@@ -1911,6 +1911,7 @@ def _build_recovery_plan(session: TableauSession, sources: list[RecoverySource])
         "sources": _recovery_source_metadata(sources),
         "eligible_views": len(selected),
         "eligible_legs": sum(len(legs_by_luid[view["id"]]) for view in selected),
+        "selected_legs_by_view": {view["id"]: sorted(legs_by_luid[view["id"]]) for view in selected},
         "workbook_names": {
             key: value
             for key, value in workbook_names.items()
