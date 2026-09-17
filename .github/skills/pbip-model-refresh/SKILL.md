@@ -662,12 +662,41 @@ bundle exists to prevent, wearing a green badge. So `refresh_pbip_model.py` now 
 callers keep a probe), it just can no longer certify the whole model. `probe_desktop_query.py` never
 refreshes, so there `--tables`/`--table` remain plain aliases for `--canaries`.
 
-Both print a machine-readable last line: `REFRESH: DATA_OK + PERSISTED` / `TABLES_OK '<a>', '<b>'` /
+Both print one authoritative machine-readable verdict line: `REFRESH: DATA_OK + PERSISTED` / `TABLES_OK '<a>', '<b>'` /
 `TABLE_OK '<table>'` / `NO_DATA` / `NOT_PERSISTED` / `WRONG_MODEL` / `ERROR <msg>`, and
 `PREFLIGHT: DATA_OK` / `TABLE_OK '<table>'` / `NO_DATA` / `ERROR`. Exit 0 is the good outcome — but it
 covers a model verdict (`DATA_OK`), a scoped verdict (`TABLES_OK`) **and** a single-table verdict
 (`TABLE_OK`), so a gate that needs model-level certainty must require the literal `DATA_OK` — which
 means running a **whole-model** refresh with explicit `--canaries`, not merely exit 0.
+
+### Read persistence output as an observation, not a durability guarantee (#641)
+
+✅ **Reporting controls:** `tests/test_desktop_instance_binding.py` exercises the real legacy AMO
+tuple producer, UIA outcomes, and unchanged versus externally advanced cache timestamps. Each
+completed invocation emits exactly one authoritative `REFRESH:` verdict; `save` and `cache` lines
+explain it rather than issuing competing verdicts.
+
+| Condition | Human-readable report | Terminal compatibility behavior |
+|---|---|---|
+| AMO helper returns true | `save   : AMO ImageSave attempt completed; legacy cache-update verification pending` | Final verdict decided later, not by the helper Boolean |
+| UIA helper returns true | Existing `UI Automation save attempted (...; verification pending)` variant | Final verdict decided later |
+| `--verify-only` | `cache  : persistence not requested (--verify-only; no refresh or save was run)` | Existing data/scope token, no persistence suffix |
+| `--no-save` | `cache  : persistence not requested (--no-save; refreshed data remains in memory only)` | Existing data/scope token, no persistence suffix |
+| Requested save; timestamp advanced | `cache  : legacy timestamp check observed a newer cache -> <path> (cold reopen not tested)` | Existing `+ PERSISTED` suffix |
+| Requested save; timestamp unchanged | `cache  : legacy timestamp check did not observe a newer cache (write outcome unconfirmed)` | `REFRESH: NOT_PERSISTED (legacy timestamp check did not observe a newer cache.abf; write outcome unconfirmed)` when the data check passes |
+| Save helper fails | Factual helper failure; no prediction about the next open or old cache | One `REFRESH: NOT_PERSISTED (save helper failed; write outcome unconfirmed)` |
+
+**The legacy `after_stamp > before_stamp` predicate, data/scope tokens, `NO_DATA` precedence and
+exit codes are unchanged.** `+ PERSISTED` is a compatibility label for that timestamp observation,
+not durable-write or cold-reopen proof. Typed image observations still carry
+**`commitment: UNESTABLISHED`**; this display does not upgrade them. Cold-reopen qualification
+remains separate (#149).
+
+**A manual save is not verified by `--verify-only`.** That flag queries in-memory data and runs no
+refresh or save. Inspect Desktop's save state after a UIA failure; a subsequent verify-only data
+verdict says nothing about whether that save landed. With either no-persistence flag, external
+changes to cache bytes or metadata are never attributed to this invocation. If both flags are
+present, `--verify-only` describes the run: no refresh and no save.
 
 ## Order matters, do not refresh before you finish editing
 
@@ -798,8 +827,9 @@ UIA is a **workaround, not a contract**: an accessibility surface is not an auto
 on an element literally named "Save", so it breaks on ribbon changes and non-English installs, cannot
 run headless, and a modal dialog swallows the invoke silently. It is not SendKeys, because
 `SetForegroundWindow` is refused in this context, so a Ctrl+S keystroke lands on whatever window has
-focus while the model stays dirty. Its result is confirmed against the bridge's own
-`hasUnsavedChanges` flag. If a real `save` verb ever ships, delete it.
+focus while the model stays dirty. Its Boolean reports an attempt after observing the bridge's
+`hasUnsavedChanges` flag as false, not persisted success; the later legacy timestamp check controls
+the compatibility verdict described above. If a real `save` verb ever ships, delete it.
 
 ## Bind to the right instance, or you will corrupt a sibling
 
