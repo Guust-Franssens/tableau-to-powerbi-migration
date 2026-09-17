@@ -280,7 +280,8 @@ only in the scrubbed result, never in progress or error diagnostics.
 Scrubbed input names are bounded to 255 characters and validated as basenames for the executing
 platform, using lexical pure paths only: no open, stat, resolve or other filesystem lookup. POSIX
 permits `:` and literal backslash; Windows alone applies its punctuation, device-name and trailing
-space/period restrictions. Both reject paths, NUL, empty names and dot segments. Names remain in the
+space/period restrictions. Both reject paths, C0/DEL/C1 controls, empty names and dot segments. The
+control rejection is a provenance-identity ceiling, not a claim about POSIX filename legality. Names remain in the
 artifact, never in protocol diagnostics or progress.
 
 Spawn/setup is charged to the computation budget; start failures are typed failures. Cooperative
@@ -311,7 +312,189 @@ page-number/page-size fields are considered. Malformed or contradictory facts ne
 The parent retains a typed `inventory-truncated` or `inventory-cannot-establish` finding through later
 cancellation, failure or deadline expiry, even if the worker omits it. These outcomes preserve local
 fingerprints and exit 11 before later phases; offline and proven-complete inventories gain no pagination
-finding. This remains exactly one inventory request, not multi-page fetching.
+finding. This legacy origin observation remains one inventory request, not multi-page fetching.
+Published inputs acquire separate current pages inside their existing content phases, as described
+below; these do not overwrite the initial inventory facts or distinct-workbook progress counters.
+
+**Published dependency association — partial #562 prerequisite P.** The only published authority is
+the optional `origin.published_dependencies` block inside the existing `source-provenance.json`.
+No provider package, spec addition, sidecar or registry participates. Existing legacy artifacts remain
+readable without inventing this block. A newly assessed input may omit it on success **only when the
+held-byte assessment completed with zero published occurrences**.
+
+The block has exactly `schema: "tableau-published-dependencies/v1"`, `source_sha256` (the outer
+`input.sha256`), `workbook_luid` (the outer origin LUID), `source_match`
+(`sha256`, `revision_same`, or `unestablished`), and `rows`. Every published occurrence keeps its
+zero-based ordinal in the parser's datasource sequence, including gaps for embedded sources;
+the parser's `Parameters` pseudo-source is excluded. Repeated published keys are not deduplicated.
+Each row has exactly `source_ordinal`, the parser's exact normalized `published_key`, `state`,
+`candidate_count`, and **only for `resolved`**, `datasource_luid`. Ordinals/counts are bounded,
+non-boolean integers; only `cannot_establish` has a null count.
+
+| Row state | Required evidence |
+|---|---|
+| `resolved` | Confirmed held, initial remote and freshly rechecked remote bytes/revision; unique workbook identity; complete independently visible catalog; exactly one candidate; valid datasource LUID and matching detail. |
+| `missing` | Legacy artifact-reader representation only. The current acquisition has no independently validated absence mode: neither the producer nor the current worker protocol admits this state, even with consistent private/public zero counts. |
+| `ambiguous` | Confirmed source and complete catalog with more than one candidate, including duplicate rows; no chosen LUID. |
+| `cannot_establish` | Source identity/revision, visibility, completeness or detail cannot be established; null count, no LUID. |
+
+The stamper fingerprints and parses **one retained immutable byte buffer**, including archive member
+fingerprints, with the existing parser identity helpers, not a second name normalizer. A `.twbx`
+selects the first `.twb` in archive order, exactly as `parse_tableau.load_twb_root` does; it does not
+sort members or silently drop a multi-member workbook. A completed empty assessment is `[]`; unreadable,
+malformed, unsupported or unparseable content is `null` in the private checkpoint and a typed
+`published-assessment-unavailable` phase error, never clean absence. A physical read failure retains
+the existing typed unavailable-input result. Known occurrences without origin/lookup authority produce
+`published-authority-unavailable`, also non-success, retaining safe local evidence. A missing, empty,
+overlong or control-containing parser key likewise cannot produce a successful standalone capture;
+the producer withholds that block, and supervision refuses any malformed authority that still
+arrives, rather than sanitizing the key into another datasource identity.
+
+REST uses only the **case-preserved, decoded `derived-from` content URL segment**, on the matching
+source site/server. Accepted routes are `<base>/datasources/<content-url>` and
+`<base>/t/<site>/datasources/<content-url>`, with no query or a numeric `rev` query (including dotted
+revisions). The source site and any URL site must match the lookup site; an omitted/empty source site
+is usable only for the configured default site. Scheme, hostname, **effective** port and the full
+case-sensitive configured base-path segments must agree. Default ports may be explicit or implicit.
+Segments are decoded once and must equal the parser's content URL; malformed escapes, encoded
+separators, traversal, double encoding, credentials in URLs, fragments, unrelated routes and unknown
+query forms cannot trigger a catalog lookup. Unsupported shapes remain `cannot_establish`, not a
+provider/display-name fallback. The unqualified `derived-from` form with a separate `site` attribute
+is documented in Tableau/Salesforce
+[Downloading a Published Extract Using Tabcmd](https://help.salesforce.com/s/articleView?id=001458254&language=en_US&type=1).
+The explicit site route and configured-base variants have synthetic production-path controls, not a
+claim of live qualification on every server/proxy topology.
+
+Normalized keys, display names, captions, repository IDs, connection-name fallbacks and provider
+choices never become catalog queries. Each eligible physical input first acquires a **fresh workbook
+inventory**, rechecking matching-candidate and LUID uniqueness against its input-bound workbook identity.
+A new same-named candidate, changed identity, incomplete page or failed read withholds published
+authority; matching content alone cannot override those observations. The run-cached legacy origin
+remains an initial observation, not a substitute for this current page.
+Immediately after catalog/detail acquisition and before the
+evidence envelope or public block, the remote workbook content is fetched again without using or
+overwriting the initial content cache. Its SHA/revision must agree with **both** the held source and
+the initial remote observation; comparable contradictory revisions refuse even if a raw SHA agrees.
+The existing revision-key comparison accepts unchanged repacked archives. The held source path is
+then rehashed, after the last remote request. Changed, unreadable or uncomparable current content
+retains the original occurrences as `unestablished` / `cannot_establish`, with no selected LUID.
+An initially unestablished source does not trigger this extra request. Eligible physical published
+inputs each need one recheck, including repeated inputs of the same LUID; the existing progress
+counter still measures **distinct workbook identities attempted**, not total HTTP downloads.
+
+The existing urllib client uses one non-redirecting opener for every request, including sign-in,
+inventory, content, visibility, catalog and detail. **Every 3xx is refused, including same-origin
+redirects**; neither the PAT body nor `X-Tableau-Auth` is resent to a redirect target. GET requests
+send `Cache-Control: no-cache` and `Pragma: no-cache` to require cache revalidation. Real two-server
+loopback controls cover all 300–399 statuses and both token forwarding and forged catalog/detail
+authority; they do not substitute a second HTTP client.
+
+Datasource pagination is deliberately stricter than the older workbook inventory rule above:
+all first-page facts must be explicit, valid and complete. A short page alone does not suffice.
+Even an explicitly complete **empty filtered** page is `cannot_establish` with a null count, never
+certified `missing`: search-index lag can hide a current matching datasource. There is no existing
+independent authoritative absence lookup in this acquisition path, so it does not invent a detail
+LUID from another hint or add a fallback enumeration.
+Visibility is established separately by querying the signed-in user's matching REST identity and
+requiring a server/site administrator role. Tableau documents that non-administrators see only
+datasources they have permission to connect to: see
+[Query Data Sources](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_data_sources.htm#query_data_sources)
+and [Query User On Site](https://help.tableau.com/current/api/rest_api/en-us/REST/rest_api_ref_users_and_groups.htm#query_user_on_site).
+The selected datasource detail must agree exactly on ID, content URL, name and update timestamp.
+REST search-index freshness is not guaranteed; missing, renamed or stale detail therefore refuses.
+Visibility, filtered catalog and selected detail are reacquired for each distinct association.
+Only duplicate occurrences **within the same physical input block** share that acquisition, including
+its failure; a second input or a different content URL makes fresh requests even for the same
+datasource LUID. There is no run-global published cache or cache-invalidation state machine.
+
+The private fingerprint checkpoint always binds assessment, even when empty or unassessable, alongside
+original ordinals and **digests** of parser keys. A paired `launch_identity` binds digests of the launched
+absolute file identity, basename and any harvested workbook LUID **before live work**. The shipping
+parent requires the explicit `tableau-provenance-worker/2` capability on discovery. It independently
+collects the ordered input paths once, in the existing deadline-bounded transport/validation thread,
+and binds each checkpoint to that **parent-owned** launch set before accepting it. It does not derive
+the launch set from a second worker message. Tests may supply the same fixed tuple directly.
+Swapping checkpoints and all corresponding private payloads therefore cannot move authority between
+two physical inputs, even when their bytes are identical. A public authority also requires the
+scrubbed basename to retain its parent-bound identity.
+
+After inventory selection,
+one private `workbook-identity` event binds the independently observed workbook LUID digest to that
+same launched input, before download and origin construction. The supervisor checks the event's
+ordinal, phase, uniqueness and file digest, then reconciles the final LUID against this observation
+and any confirmed harvested LUID. Altering both final LUID fields does not alter that evidence, even
+when two different workbooks have identical bytes.
+
+Each assessed, valid nonempty association emits one `published-evidence` envelope **before** public
+block construction, inside that input's content phase and after its identity event. It retains the
+held-source SHA, the actual final-path rehash (null when unreadable), `current_remote` (fresh
+`sha256` and nullable `revision_key`, or null when the recheck was unavailable/not applicable),
+`current_workbook` (fresh numeric pagination facts, matching-candidate/LUID counts and selected
+workbook LUID digest, or null on an unavailable/inapplicable read), the initial source-match state,
+and each occurrence's ordered key digest, state, count and selected **LUID digest**.
+Each private row also carries its `acquisition`: the visibility result, numeric catalog pagination
+facts, candidate LUID digest, and independent digests of the candidate/detail ID, content URL, name
+and update timestamp. Unavailable observations remain null; an unattempted association has null
+acquisition. No URL, path,
+catalog row, copied name, credential or response/exception text is included. The parent validates
+the closed shape and input/index/phase binding, independently compares the fresh remote observation
+to the checkpoint's held source and the initial origin, checks current workbook identity/uniqueness,
+and independently requires complete visible catalog facts and agreeing candidate/detail digests for
+each resolved private row. It derives workbook/remote/local downgrades and requires the final public
+outcomes to reconcile exactly. Editing only snapshot/terminal source-match,
+outcome/count or selected LUID cannot supersede the earlier acquisition evidence. This is not a
+second REST client or an atomic server snapshot: a later server change still requires another capture.
+Legacy artifact reading remains separate and unchanged; it does not grant an old `missing` row entry
+to the current framed worker protocol. These changes do not add package or START_READY consumers.
+
+The supervisor reconciles the complete ordered row sequence against the checkpoint and validates
+the nested closed shape, SHA, identity, revision evidence and state/cardinality contract. Presence is
+bidirectional: a block cannot invent rows after empty/unassessable assessment, and a successful result
+cannot lose a known occurrence or an unassessable assessment into legacy absence.
+Missing, surplus, duplicate-ordinal, reordered, malformed or unknown nested rows/fields are protocol
+faults, not cleaned legacy origins. An occurrence with no valid parser key remains in the private
+assessment, with a typed non-success error and no public dependency authority; it is never filled
+from another identity hint. Checkpoint-only fields never enter the published artifact, including
+on interruption. Legacy artifact normalization remains compatible separately. Explicitly injected
+legacy transport stand-ins remain observation-only and cannot issue P authority without parent
+input bindings. They are not a fallback for the current shipping worker: deleting its protocol
+marker or either/both assessment fields is a protocol fault, not a legacy downgrade.
+
+Configured server URLs are validated **before client construction copies a public origin and before
+any live request**. Userinfo, query/fragment delimiters (even empty), malformed origins, unsupported
+schemes and ambiguous base paths produce a typed lookup refusal without copying the URL to output.
+HTTP loopback, Server/Cloud, decoded base paths and explicit/default ports have controls; real urllib
+loopback tests verify both supported calls and zero calls for refused configuration. One C0/DEL/C1
+predicate is shared by decoded URL segments, producer keys and supervisor text/identity validation,
+without banning ordinary Unicode. All authority-bearing REST JSON (sign-in, inventory, user,
+catalog and detail) uses one decoder that rejects duplicate object keys, NaN/Infinity and numeric
+overflow to nonfinite floats before consuming any identity.
+
+Before scrub, the producer retains digests of authority-bearing identities and source fields.
+After scrub it reconciles them before sending a safe snapshot or publishing standalone output.
+Redaction may change display metadata; it may not turn a parser key, workbook/datasource LUID,
+server/site or source identity into a different successful association. Such a collision withholds
+the live origin and records `published-identity-redacted` as non-success; redaction is never weakened
+to keep an identity. The standalone CLI publishes normalized nonempty evidence and returns exit 1
+for a non-success phase, including cleanup failures, rather than returning 0 merely for writing a file.
+
+Catalog permission errors, timeouts and unreadable replies produce `cannot_establish` without
+destroying otherwise valid origin evidence or copying catalog rows/exception text into diagnostics.
+The existing absolute supervisor deadline still covers acquisition; cancellation/expiry retains
+accepted safe provenance (or fingerprints before scrub) as non-success. A successful provenance
+**phase** does not imply that its dependency rows resolved. These are local observation-time
+associations, not an atomic server snapshot or proof against a change after the final recheck.
+Catalog/detail caches remain run-local, not continuously refreshed, and an uncooperative intermediary
+or server that ignores revalidation is outside this observation-time guarantee.
+
+**Claim ceiling:** P does not thin consumer models, rewrite PBIR, choose a provider package, transport
+the association through packaging, make consumers `START_READY`, support `COMPLETE`, or change
+promotion. Consumer binding/transport C remains separate and blocked on P; promotion remains #57.
+Under the B-refined boundary, the temporary **whole-estate exit 11 stays in place** for known
+published occurrences without authority. Narrowing that stop belongs to a separate stacked C/S2
+consumer change, not P. The unchanged offline E2E fixture still expects its former exit-0 behavior;
+that integration control is explicitly red until the separately scoped consumer/harness work lands.
+Passing P's direct suites is not a green whole-repository CI or an integration-readiness claim.
 
 ### Package folder identification (#616)
 
