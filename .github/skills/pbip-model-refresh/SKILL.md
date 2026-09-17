@@ -57,6 +57,110 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B
                                      [--ui-save]
 ```
 
+### Inspect an unreadable in-flight dialog without stealing focus (#146)
+
+**Phase-1 seam: acquisition plus a metadata record, not pixel classification.** An in-flight
+`DIALOG_UNREADABLE` owned finding is offered to a background worker for one bounded exact-HWND
+**`PrintWindow(PW_RENDERFULLCONTENT)`** attempt. PID, visibility, direct owner, owner PID and disabled
+owner are checked before rendering, after rendering and after writing. Failure, blank/unpainted
+pixels, changed identity or incomplete metadata cannot become a semantic verdict. The existing
+unreadable latch, refresh deadline and successful-worker behavior remain unchanged.
+
+**The wait only queues an immutable exact-target snapshot.** Its single pending slot never waits
+for storage validation, Git, file/process creation or acquisition. A busy slot can drop an
+observation; later polls can offer it again. At most one attempt per PID/HWND is started.
+The original monotonic refresh deadline is pinned before evidence-worker construction and checked
+before accepting completion in both wait branches, including after a delayed inspection. A worker
+finishing after that deadline cannot overwrite a timeout or latched dialog result during cleanup.
+Timely success remains success even while optional evidence is delayed.
+
+Queueing, startup and capture share an **8-second** attempt budget, capped by the remaining refresh
+deadline. A late storage check cannot start acquisition. The acquisition watcher starts **before**
+`Popen`; timeout/exit closes the reserved delete-on-close lease, and a process handle returned late
+is killed without publishing an image. Native process creation itself cannot always be interrupted:
+it runs on a daemon observer, never on the refresh wait thread, and teardown does not join that
+observer. This is not a guarantee that a wedged OS call returns; its eventual result is discarded.
+
+**Configure caller-owned private scratch explicitly.** Supply
+`--evidence-dir <existing-local-run-scratch>` or export **`PBIP_EVIDENCE_DIR`** before invoking a
+probe that launches this refresh. The Python API also accepts `refresh(..., evidence_dir=Path(...))`;
+the explicit argument overrides the environment. A suitable location is the allocated run's
+`scratch` directory, never a package, deliverable, model or report directory. When inside a checkout
+the destination must be positively Git-ignored. Remote/reparse locations, actual artifact ancestry
+and artifact/package markers (including `package-manifest.json`) are refused, even at a Git root.
+An ancestor's unrelated `fabric` or `pbip` sibling alone does **not** classify the scratch directory.
+The directory must already exist. **There is no image fallback to the working directory.**
+An unconfigured/unusable directory emits a non-verdict diagnostic and preserves the wait.
+
+Run the refresh **asynchronously, attached to the session**, with its explicit PID and the usual
+`--no-save` for read-only work. Read live stdout early; do not wait for the final exit. The stable
+wire interface is a line beginning **`LOCAL_IMAGE `**, followed by one JSON object:
+
+| Field | v1 meaning |
+|---|---|
+| `schema`, `event` | `pbip.window-image.v1`, `owned_modal_image` |
+| `capture_id`, `status` | Opaque per-attempt ID; one `ACQUIRED` notice per stable HWND, followed by cleanup updates using the same marker/ID |
+| `timestamp_utc`, `captured_at_utc` | UTC notice time; publication time after verified acquisition (`null` when not acquired) |
+| `desktop_pid`, `main_hwnd`, `dialog_hwnd`, `owner_hwnd` | Decimal **strings**. `main_hwnd` is the existing enumerator's root snapshot, or `null` when ambiguous; ownership checks attest the dialog/direct-owner relationship, not an invented main-window identity |
+| `ownership_checks` | `before`, `after_render`, `after_write`: real Booleans or `null` for a check not established |
+| `dimensions`, `capture_success`, `capture_method` | Captured width/height as decimal strings, success Boolean, `PrintWindow_PW_RENDERFULLCONTENT` |
+| `image_basename`, `path`, `sha256` | Same random basename/relative locator, and SHA-256 of the PNG, checked against the observer's pinned file handle; never a host path |
+| `expires_at_utc`, `cleanup_state` | Planned expiry; `not_created`, `pending`, `removed_externally`, `expired`, `removed_on_exit`, `removed`, or `cleanup_failed` |
+| `classification_provenance` | `null`: deterministic acquisition has not reviewed the pixels. A visual reviewer records its own provenance separately |
+
+**Parse JSON before interpreting fields.** Wire strings escape zero as `\u0030`: that preserves the
+decoded PID/HWND/hash/timestamp while preventing numeric substrings such as `10054` or `403` from
+tripping legacy free-text failure classifiers. Numeric values are intentionally strings, not JSON
+numbers. Do not feed re-serialized metadata into an authentication-text scanner.
+
+**Exact local reviewer workflow:**
+
+1. Match `schema`, `capture_id` and the expected Desktop PID. Require `status: ACQUIRED`,
+   `capture_success: true`, all three ownership checks `true`, `cleanup_state: pending` and an
+   unexpired record. Resolve **only the basename against the configured evidence directory**,
+   never against the process working directory. Read only that file and verify its SHA-256 before
+   reviewing pixels. Neither hash nor geometry identifies a prompt.
+2. Use a reader that permits **`FILE_SHARE_DELETE`**. The image is held under a protected owner-only
+   DACL and a kernel **delete-on-close** lease. Node/libuv readers are verified; ordinary Python
+   `open(path)` does not share deletion on Windows. A Python image decoder can use
+   `_open_private_image(path, existing=True)` as a shared-delete stream and decode it in memory.
+   Do not copy pixels to another file to work around an incompatible viewer, and never print
+   bytes/base64 or put images in a log, receipt, Git tree, package or deliverable.
+3. A **positively identified username/password form** may be routed by the visual reviewer to the
+   existing credential stop; a **positively identified native-query approval prompt** to
+   operator-required. Record only category, reviewer/method, review time, `capture_id` and image
+   hash as classification provenance—not field values, source names or dialog text. Do not enter
+   credentials, approve a prompt, forge the refresh's exit code, or clear a gate from metadata alone.
+   Absent positive review, preserve `DIALOG_UNREADABLE` and the existing wait/success semantics.
+4. **Delete the exact file immediately after handling and close the viewer.** For example, remove
+   `Join-Path $env:PBIP_EVIDENCE_DIR $record.image_basename` with `Remove-Item -LiteralPath`.
+   The observer notices external deletion without inferring who deleted it or what was classified.
+   It also deletes at **60 seconds**, normal/error wait exit and process exit. Kernel handle cleanup
+   covers forced termination too; the native control observed a 5–6 ms delay after process signalling.
+   Readers holding their own open handles may delay final deallocation, so close them promptly.
+5. `CLEANED`/`CLEANUP_FAILED` updates retain metadata/hash only. Other statuses are closed,
+   non-semantic diagnostics. A cleanup refusal must not replace the original refresh result;
+   close a holding viewer and remove the same private file locally. Never publish pixels to explain
+   a cleanup failure. Durable logs may retain the safe record and external review provenance only.
+
+**Follow-up seam, deliberately not wired here:** `probe_live_source.py` currently buffers the
+refresh's output. Its Phase-1 consumer must forward/stream `LOCAL_IMAGE` lines, supply the run-owned
+`PBIP_EVIDENCE_DIR`, perform the schema/PID/hash/lifetime checks above, and route a separate positive
+visual review. That orchestration requires a file outside this change's closed surface. The
+standalone PowerShell arbiter, t=0 checks and read-only query probe retain their existing behavior;
+no automatic UIA enrichment, OCR or external-verdict ingestion was added.
+
+✅ **Precedent:** the two independent September 15, 2026 controls on #146 acquired readable
+Snowflake forms with their owners minimized and without foreground/restore. This implementation
+never foregrounds, restores, activates or screen-captures. Foreground is neither the default nor a
+proven universal fallback.
+
+⚠️ **Limits:** identity checks are snapshots; identical PID/HWND/owner destruction/reuse entirely
+between checks cannot be distinguished. Painted/nonuniform pixels do not prove current, complete or
+legible connector content. Native synthetic controls exercise the implementation; real
+Desktop/connector qualification remains separate. The capture child's eight-second budget and the
+image's lifetime never change the refresh's XMLA or wall-clock deadline.
+
 **`--calculate-only` / `--measures-only` is an opt-in DAX-only shortcut, not the default.** It sends
 TMSL refresh type `calculate`, which recalculates formulas, relationships and hierarchies without
 re-reading source rows. Use it only when the caller knows the pending edit was measure/DAX-only; after

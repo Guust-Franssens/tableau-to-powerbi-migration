@@ -90,6 +90,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -159,6 +160,7 @@ from _credential_modal import (
     DesktopUnreadyError,
     DialogFinding,
     DialogFoundError,
+    ModalVisualEvidence,
     describe_dialog_finding,
     describe_modal,
     dialog_guidance,
@@ -401,6 +403,42 @@ def _join_refresh_worker(
     total_timeout: float,
     progress_monitor: RefreshProgressMonitor | None,
     observation_mode: bool = False,
+    evidence_dir: Path | None = None,
+) -> bool:
+    """Attach non-verdict visual evidence to the actual in-flight callback in BOTH wait branches."""
+    deadline = time.monotonic() + total_timeout
+    with ModalVisualEvidence(evidence_dir, deadline=deadline) as evidence:
+
+        def detector(pid: int) -> CredentialDetection:
+            state = _in_flight_credential_state(pid)
+            if worker.is_alive():
+                evidence.enqueue(pid, state)
+            return state
+
+        return _wait_refresh_worker(
+            worker,
+            desktop_pid=desktop_pid,
+            source_hint=source_hint,
+            initial_state=initial_state,
+            total_timeout=total_timeout,
+            progress_monitor=progress_monitor,
+            observation_mode=observation_mode,
+            detector=detector,
+            deadline=deadline,
+        )
+
+
+def _wait_refresh_worker(
+    worker: threading.Thread,
+    *,
+    desktop_pid: int | None,
+    source_hint: str | None,
+    initial_state: CredentialDetection | None,
+    total_timeout: float,
+    progress_monitor: RefreshProgressMonitor | None,
+    observation_mode: bool,
+    detector: Callable[[int], CredentialDetection],
+    deadline: float,
 ) -> bool:
     """Wait for the refresh thread, with credential polling and optional progress liveness.
 
@@ -413,8 +451,8 @@ def _join_refresh_worker(
     """
     if progress_monitor is None and not observation_mode:
         if desktop_pid is None:
-            worker.join(total_timeout)
-            return not worker.is_alive()
+            worker.join(max(0.0, deadline - time.monotonic()))
+            return not worker.is_alive() and time.monotonic() < deadline
         return join_with_credential_poll(
             worker,
             pid=desktop_pid,
@@ -422,11 +460,12 @@ def _join_refresh_worker(
             heartbeat_seconds=REFRESH_HEARTBEAT_SECONDS,
             poll_seconds=REFRESH_CREDENTIAL_POLL_SECONDS,
             source_hint=source_hint,
-            detector=_in_flight_credential_state,
+            detector=detector,
             initial_state=initial_state,
+            deadline=deadline,
         )
 
-    started = time.monotonic()
+    started = deadline - total_timeout
     next_heartbeat = REFRESH_HEARTBEAT_SECONDS
     latched_unknown = initial_state.unknown_reason if initial_state else None
     latched_desktop_unready = initial_state.desktop_unready if initial_state else None
@@ -444,9 +483,9 @@ def _join_refresh_worker(
             REFRESH_CREDENTIAL_POLL_SECONDS,
             max(0.0, next_heartbeat - elapsed),
         )
-        worker.join(max(0.01, wait_for))
+        worker.join(min(absolute_remaining, max(0.01, wait_for)))
         if desktop_pid is not None:
-            state = _in_flight_credential_state(desktop_pid)
+            state = detector(desktop_pid)
             raise_terminal_detection(desktop_pid, state, source_hint)
             if state.dialog is not None and latched_dialog is None:
                 latched_dialog = state.dialog
@@ -463,7 +502,7 @@ def _join_refresh_worker(
             if progress_monitor is not None:
                 progress_monitor.print_evidence_heartbeat(elapsed, total_timeout)
             next_heartbeat += REFRESH_HEARTBEAT_SECONDS
-    if worker.is_alive():
+    if worker.is_alive() or time.monotonic() >= deadline:
         # The latches used to be computed here and DISCARDED, so this branch always degraded to the
         # caller's bare TimeoutError - which the parent classifier blames on a slow source. Raise them
         # exactly as `join_with_credential_poll` does, from the same shared helper.
@@ -494,6 +533,7 @@ def refresh(
     bound: BoundDesktop | None = None,
     observations: list[RefreshObservation] | None = None,
     return_observation: bool = False,
+    evidence_dir: Path | None = None,
 ) -> tuple[bool, str] | RefreshObservation:
     """Send a TMSL refresh over XMLA; return the legacy tuple or one bound observation.
 
@@ -553,6 +593,7 @@ def refresh(
             absolute_timeout_sec=absolute_timeout_sec,
             bound=bound,
             return_observation=return_observation,
+            evidence_dir=evidence_dir,
         )
 
 
@@ -570,6 +611,7 @@ def _refresh(
     absolute_timeout_sec: float,
     bound: BoundDesktop | None,
     return_observation: bool,
+    evidence_dir: Path | None,
 ) -> tuple[bool, str] | RefreshObservation:
     """Run the existing refresh lifecycle with invocation-private results."""
     if refresh_type not in REFRESH_TYPES:
@@ -704,7 +746,7 @@ def _refresh(
         worker.start()
         if progress_monitor is not None:
             progress_monitor.mark_refresh_started()
-        _join_refresh_worker(
+        completed = _join_refresh_worker(
             worker,
             desktop_pid=desktop_pid,
             source_hint=source_hint,
@@ -712,8 +754,9 @@ def _refresh(
             total_timeout=total_timeout,
             progress_monitor=progress_monitor,
             observation_mode=return_observation,
+            evidence_dir=evidence_dir,
         )
-        if worker.is_alive():
+        if not completed or worker.is_alive():
             if desktop_pid is not None:
                 # The FINAL check, and it is in-flight too (#376 review, finding 1): by here the
                 # refresh is ours, so a proven-benign progress dialog is ours and must not decide the
@@ -1904,6 +1947,8 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
             refresh_kwargs["progress_liveness_sec"] = args.progress_liveness_seconds
         if "absolute_timeout_sec" in parameters:
             refresh_kwargs["absolute_timeout_sec"] = args.refresh_absolute_timeout_seconds
+        if "evidence_dir" in parameters:
+            refresh_kwargs["evidence_dir"] = getattr(args, "evidence_dir", None)
         ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS, **refresh_kwargs)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         if isinstance(exc, CredentialMissingError):
@@ -2053,6 +2098,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         help="Power BI Desktop process id - required when several instances are open "
         "(`powerbi-desktop status` maps pid -> open file)",
+    )
+    parser.add_argument(
+        "--evidence-dir",
+        type=Path,
+        help=(
+            "Existing caller-owned private scratch for ephemeral dialog images "
+            "(or PBIP_EVIDENCE_DIR). Must be local, outside package/deliverable/model trees, "
+            "and Git-ignored when inside a checkout. No default image output in the working directory."
+        ),
     )
     parser.add_argument(
         "--port",
