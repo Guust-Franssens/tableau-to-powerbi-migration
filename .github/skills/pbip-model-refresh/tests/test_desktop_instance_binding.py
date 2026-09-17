@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import json
 import inspect
+import os
 import re
 import threading
 import traceback
 from dataclasses import FrozenInstanceError, asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -1787,9 +1789,8 @@ def test_ui_save_fallback_when_cache_does_not_update_reports_not_persisted_witho
     """A UI Automation save that reports success but does not update cache.abf must NOT emit
     a success-shaped saved verdict alongside NOT_PERSISTED (#230, half B).
 
-    Durable file evidence on disk is authoritative. Intermediate output reports that UI save was
-    attempted (pending verification), and the single final persistence verdict is NOT_PERSISTED
-    with exit code 1.
+    The legacy timestamp check controls compatibility output, not durability. Intermediate output
+    reports an attempt pending verification; the single final verdict is NOT_PERSISTED with exit 1.
     """
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
@@ -1817,18 +1818,18 @@ def test_ui_save_fallback_when_cache_does_not_update_reports_not_persisted_witho
     assert exit_code == 1
     assert "UI Automation save attempted" in out
     assert "saved via UI Automation" not in out
-    assert "REFRESH: NOT_PERSISTED (model has data in memory, but cache.abf did not update)" in out
+    assert [line for line in out.splitlines() if line.startswith("REFRESH:")] == [
+        "REFRESH: NOT_PERSISTED (legacy timestamp check did not observe a newer cache.abf; write outcome unconfirmed)"
+    ]
     assert "REFRESH: DATA_OK" not in out
     assert "+ PERSISTED" not in out
-    assert "cache  : not persisted (the write did not land - see 'save' above)" in out
+    assert "cache  : legacy timestamp check did not observe a newer cache (write outcome unconfirmed)" in out
 
 
 def test_ui_save_fallback_when_cache_genuinely_persists_reports_persisted_and_exits_0(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    """When UI Automation save genuinely leads to cache.abf being written to disk,
-    the run succeeds with exit code 0 and emits DATA_OK + PERSISTED.
-    """
+    """A newer cache retains the legacy DATA_OK + PERSISTED display, without cold-reopen proof."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
@@ -1855,8 +1856,8 @@ def test_ui_save_fallback_when_cache_genuinely_persists_reports_persisted_and_ex
 
     assert exit_code == 0
     assert "UI Automation save attempted" in out
-    assert "cache  : PERSISTED ->" in out
-    assert "REFRESH: DATA_OK + PERSISTED" in out
+    assert f"cache  : legacy timestamp check observed a newer cache -> {cache} (cold reopen not tested)" in out
+    assert [line for line in out.splitlines() if line.startswith("REFRESH:")] == ["REFRESH: DATA_OK + PERSISTED"]
     assert "REFRESH: NOT_PERSISTED" not in out
     assert cache.read_bytes() == b"persisted-by-desktop"
 
@@ -1885,7 +1886,7 @@ def test_ui_save_flag_bypasses_imagesave_and_attempts_ui_save(monkeypatch, tmp_p
     assert exit_code == 0
     assert "ImageSave skipped (--ui-save requested); falling back to UI" in out
     assert "UI Automation save attempted" in out
-    assert "REFRESH: DATA_OK + PERSISTED" in out
+    assert [line for line in out.splitlines() if line.startswith("REFRESH:")] == ["REFRESH: DATA_OK + PERSISTED"]
 
 
 def test_save_function_unit_cases(monkeypatch) -> None:
@@ -1919,3 +1920,160 @@ def test_save_function_unit_cases(monkeypatch) -> None:
     ok, msg = refresh_pbip_model.save(111)
     assert ok is False
     assert "still dirty after" in msg
+    assert "--verify-only checks in-memory data only" in msg
+    assert "does not verify persistence or a cold reopen" in msg
+    assert "then re-run with --verify-only" not in msg
+
+
+def _reporting_instance(monkeypatch: pytest.MonkeyPatch, root: Path) -> Path:
+    """Use real identity/reporting logic with a bound model and an independently timed old cache."""
+    cache = _model_folder(root, "MyMigration", ["Orders"])
+    cache.parent.mkdir()
+    cache.write_bytes(b"old-cache")
+    os.utime(cache, (1_700_000_000, 1_700_000_000))
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda pid: cache)
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
+    _stub_live_to_match_disk(monkeypatch, cache)
+    return cache
+
+
+@pytest.mark.parametrize("advanced", [False, True], ids=["unchanged", "newer"])
+def test_amo_legacy_attempt_is_not_the_terminal_persistence_verdict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], advanced: bool
+) -> None:
+    """Exercise the real legacy tuple producer, not a canned success message (#641)."""
+    cache = _reporting_instance(monkeypatch, tmp_path)
+    before_stamp = cache.stat().st_mtime
+    # Independently restate the measured ABF layout: UTF-16LE preamble, pad, one short final block.
+    image = (
+        "This backup was created using XPress9 compression.".encode("utf-16-le")
+        + bytes.fromhex("000000100000080000002ad7864e")
+        + b"data"
+    )
+    attempts = []
+
+    def legacy_image_save(port: int, cache_path: Path, model_dir: Path | None = None) -> tuple[bool, str]:
+        assert port == 52001 and cache_path == cache
+        result = refresh_pbip_model._persist_image(cache_path, model_dir, 1604, lambda stage: stage.write_bytes(image))
+        attempts.append(result)
+        stamp = before_stamp + 60 if advanced else before_stamp
+        os.utime(cache_path, (stamp, stamp))
+        return result
+
+    monkeypatch.setattr(refresh_pbip_model, "image_save", legacy_image_save)
+    ui_save = Mock()
+    monkeypatch.setattr(refresh_pbip_model, "save", ui_save)
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
+
+    exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"])
+    out = capsys.readouterr().out
+    assert len(attempts) == 1 and attempts[0][0] is True
+    ui_save.assert_not_called()
+    assert cache.read_bytes() == image
+    assert (cache.stat().st_mtime > before_stamp) is advanced
+    assert "save   : AMO ImageSave attempt completed; legacy cache-update verification pending" in out
+    assert "persisted via AMO ImageSave" not in out
+    if advanced:
+        expected = "REFRESH: DATA_OK + PERSISTED"
+        assert exit_code == 0
+        assert f"cache  : legacy timestamp check observed a newer cache -> {cache} (cold reopen not tested)" in out
+    else:
+        expected = "REFRESH: NOT_PERSISTED (legacy timestamp check did not observe a newer cache.abf; write outcome unconfirmed)"
+        assert exit_code == 1
+        assert "cache  : legacy timestamp check did not observe a newer cache (write outcome unconfirmed)" in out
+    assert [line for line in out.splitlines() if line.startswith("REFRESH:")] == [expected]
+
+
+@pytest.mark.parametrize("advanced", [False, True], ids=["unchanged", "externally-newer"])
+@pytest.mark.parametrize(
+    "flags,cache_message,refresh_count",
+    [
+        (
+            ["--verify-only"],
+            "cache  : persistence not requested (--verify-only; no refresh or save was run)",
+            0,
+        ),
+        (
+            ["--no-save"],
+            "cache  : persistence not requested (--no-save; refreshed data remains in memory only)",
+            1,
+        ),
+        (
+            ["--verify-only", "--no-save"],
+            "cache  : persistence not requested (--verify-only; no refresh or save was run)",
+            0,
+        ),
+    ],
+    ids=["verify-only", "no-save", "verify-only-and-no-save"],
+)
+def test_unrequested_persistence_never_attributes_external_cache_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    advanced: bool,
+    flags: list[str],
+    cache_message: str,
+    refresh_count: int,
+) -> None:
+    """An external cache update cannot become evidence of an invocation's unrequested save."""
+    cache = _reporting_instance(monkeypatch, tmp_path)
+    before_stamp = cache.stat().st_mtime
+    refresh = Mock(return_value=(True, "refreshed"))
+    image_save = Mock()
+    ui_save = Mock()
+    monkeypatch.setattr(refresh_pbip_model, "refresh", refresh)
+    monkeypatch.setattr(refresh_pbip_model, "image_save", image_save)
+    monkeypatch.setattr(refresh_pbip_model, "save", ui_save)
+
+    def row_counts(port: int, tables: list[str]) -> tuple[list[tuple[str, int]], bool]:
+        assert port == 52001 and tables == ["Orders"]
+        if advanced:
+            cache.write_bytes(b"external-cache")
+            os.utime(cache, (before_stamp + 60, before_stamp + 60))
+        return [("Orders", 42)], False
+
+    monkeypatch.setattr(refresh_pbip_model, "row_counts", row_counts)
+    assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", *flags]) == 0
+    out = capsys.readouterr().out
+    assert refresh.call_count == refresh_count
+    image_save.assert_not_called()
+    ui_save.assert_not_called()
+    assert (cache.stat().st_mtime > before_stamp) is advanced
+    assert cache.read_bytes() == (b"external-cache" if advanced else b"old-cache")
+    assert [line.strip() for line in out.splitlines() if line.strip().startswith("cache  :")] == [cache_message]
+    assert [line for line in out.splitlines() if line.startswith("REFRESH:")] == ["REFRESH: DATA_OK"]
+    assert "PERSISTED" not in out and "byte-identical" not in out
+
+
+@pytest.mark.parametrize("instance", [None, {"hasUnsavedChanges": True}], ids=["no-instance", "still-dirty"])
+def test_failed_save_reports_only_the_observed_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], instance: dict | None
+) -> None:
+    """The real UIA failure helper must not predict the next open or certify a manual save."""
+    cache = _reporting_instance(monkeypatch, tmp_path)
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
+    monkeypatch.setattr(
+        refresh_pbip_model, "image_save", lambda port, cache_path, model_dir: (False, "ImageSave unavailable")
+    )
+    monkeypatch.setattr(refresh_pbip_model, "_instance", lambda pid: instance)
+    monkeypatch.setattr(refresh_pbip_model.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(refresh_pbip_model, "SAVE_TIMEOUT_SECONDS", 0)
+    row_counts = Mock()
+    monkeypatch.setattr(refresh_pbip_model, "row_counts", row_counts)
+
+    assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"]) == 1
+    out = capsys.readouterr().out
+    row_counts.assert_not_called()
+    assert cache.read_bytes() == b"old-cache"
+    assert [line for line in out.splitlines() if line.startswith("REFRESH:")] == [
+        "REFRESH: NOT_PERSISTED (save helper failed; write outcome unconfirmed)"
+    ]
+    assert "next open" not in out and "old cache" not in out
+    assert "then re-run with --verify-only" not in out
+    if instance is None:
+        assert "no Desktop Bridge instance for pid 111" in out
+    else:
+        assert "still dirty after" in out
+        assert "--verify-only checks in-memory data only" in out
+        assert "does not verify persistence or a cold reopen" in out

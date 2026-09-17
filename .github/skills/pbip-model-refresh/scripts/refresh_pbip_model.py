@@ -1623,8 +1623,8 @@ Write-Output 'NO_INVOKABLE_SAVE'; exit 1
         if current is not None and not current.get("hasUnsavedChanges"):
             return True, "UI Automation save attempted (hasUnsavedChanges went false; verification pending)"
     return False, (
-        f"still dirty after {SAVE_TIMEOUT_SECONDS}s - Desktop may be showing a dialog. Ask the user "
-        "to press Ctrl+S in Power BI Desktop, then re-run with --verify-only."
+        f"still dirty after {SAVE_TIMEOUT_SECONDS}s - inspect the save state in Power BI Desktop. "
+        "--verify-only checks in-memory data only; it does not verify persistence or a cold reopen."
     )
 
 
@@ -2023,6 +2023,8 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
         if cache is not None and not args.ui_save:
             try:
                 saved, save_message = image_save(port, cache, model_dir=cache.parent.parent)
+                if saved:
+                    save_message = "AMO ImageSave attempt completed; legacy cache-update verification pending"
             except CompatRollbackError as exc:
                 # FATAL: the cache write failed AND the compatibility alignment could not be rolled back,
                 # so database.tmdl declares a level that was never written to a cache. Driving the UI Save
@@ -2052,7 +2054,7 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
             saved, save_message = save(pid)
         print(f"  save   : {save_message}")
         if not saved:
-            print("REFRESH: NOT_PERSISTED (data is in memory only - the next open will be empty)")
+            print("REFRESH: NOT_PERSISTED (save helper failed; write outcome unconfirmed)")
             return 1
     return None
 
