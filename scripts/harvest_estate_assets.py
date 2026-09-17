@@ -50,6 +50,14 @@ interesting part:
 A workbook one parses and the other refuses is a finding by construction, and which way round it
 fails says which tier owns it (see `docs/migration-programme.md` §0).
 
+Each `parse-sweep.json` row also carries `engine_input` version 1 (issue #679). After the parse
+drain, the canonical engine's offline `LocalFilesSource` selects and reads from the resolved assets
+root. `established` records exactly path, size_bytes and sha256 for a contained, stable regular file;
+`cannot_establish` records only a reason. This is a current file/read observation, not conversion
+success or future immutability. The existing `file` still names the parser/archive landing, which
+can differ from the selected input (a datasource's `.tdsx` versus its extracted `.tds`). Selection
+failures do not change parser results, Markdown, totals or harvest exit codes.
+
 ⚠️ Downloads are the session-fragile part. Tableau Cloud drops a session intermittently and the
 failure is a `401002` mid-loop, so each asset is fetched with its OWN sign-in rather than a shared
 token: measured on this site, a shared token truncated a 58-asset run repeatedly while
@@ -60,18 +68,21 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import logging
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
 import time
 import traceback
 import uuid
-from collections import deque
+import zipfile
+from collections import Counter, deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -1741,6 +1752,207 @@ def existing_asset(assets_dir: Path, kind: str, name: str, luid: str) -> Path | 
     return next((path for path in candidates if path.exists()), None)
 
 
+ENGINE_INPUT_SUFFIXES = {"datasource": (".tds", ".tdsx"), "workbook": (".twb", ".twbx")}
+ENGINE_INPUT_REASONS = frozenset(
+    {"download_failed", "selection_unavailable", "missing", "ambiguous", "outside_assets", "unreadable", "unstable"}
+)
+
+
+class _EngineInputRefusal(Exception):
+    """A closed, path-free reason why this input cannot be established."""
+
+
+def _engine_input_failure(reason: str) -> dict[str, Any]:
+    return {"version": 1, "status": "cannot_establish", "reason": reason}
+
+
+def _engine_input_stat(path: Path, root: Path) -> os.stat_result:
+    if not path.is_absolute() or not path.is_relative_to(root):
+        raise _EngineInputRefusal("outside_assets")
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise _EngineInputRefusal("outside_assets")
+    if path.resolve(strict=True) != path:
+        raise _EngineInputRefusal("outside_assets")
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or not isinstance(info.st_size, int)
+        or isinstance(info.st_size, bool)
+        or info.st_size < 0
+    ):
+        raise _EngineInputRefusal("unreadable")
+    return info
+
+
+def _engine_input_stat_key(info: os.stat_result) -> tuple[int, ...]:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _read_engine_input(path: Path, root: Path, kind: str, reader: Callable[[str], str]) -> dict[str, Any]:
+    """Bracket the engine read AND byte digest with path/handle identity and stability checks."""
+    before = None
+    try:
+        if path.suffix.lower() not in ENGINE_INPUT_SUFFIXES[kind]:
+            raise _EngineInputRefusal("unreadable")
+        before = _engine_input_stat(path, root)
+        with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            # Measured on Python 3.13.2/NTFS: lstat and fstat can expose different ctime clocks.
+            # Keep BOTH clocks stable, but compare ctime only against the same API's baseline.
+            if not os.path.samestat(before, opened) or (
+                before.st_mode,
+                before.st_size,
+                before.st_mtime_ns,
+            ) != (opened.st_mode, opened.st_size, opened.st_mtime_ns):
+                raise _EngineInputRefusal("unstable")
+            # The datasource reader accepts non-ZIP text regardless of its suffix. A leftover
+            # archive must actually be a ZIP, not merely bytes that happened to decode as UTF-8.
+            if path.suffix.lower() in (".tdsx", ".twbx") and not zipfile.is_zipfile(stream):
+                raise _EngineInputRefusal("unreadable")
+            reader(str(path))
+            stream.seek(0)
+            digest = hashlib.sha256()
+            size = 0
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+            after_handle = os.fstat(stream.fileno())
+        try:
+            after_path = _engine_input_stat(path, root)
+        except (OSError, RuntimeError, _EngineInputRefusal):
+            raise _EngineInputRefusal("unstable") from None
+        if (
+            size != before.st_size
+            or _engine_input_stat_key(after_handle) != _engine_input_stat_key(opened)
+            or _engine_input_stat_key(after_path) != _engine_input_stat_key(before)
+        ):
+            raise _EngineInputRefusal("unstable")
+    except _EngineInputRefusal as exc:
+        return _engine_input_failure(str(exc))
+    except FileNotFoundError:
+        return _engine_input_failure("missing" if before is None else "unstable")
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Engine readers can fail with archive/codec errors as well as OS errors; none earns a hash.
+        return _engine_input_failure("unreadable")
+    return {
+        "version": 1,
+        "status": "established",
+        "path": str(path),
+        "size_bytes": size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _selected_engine_inputs(source: Any, root: Path, rows: list[dict]) -> list[dict]:
+    """Join engine-selected IDs to exact (kind, asset_path transfer stem) claims, never names.
+
+    No discovery or twin preference lives here. Duplicate selected candidates (including recursive
+    paths with the same transfer stem), or multiple rows claiming that stem, refuse all claimants.
+    Legacy unprefixed `file` values remain usable by the parsers but cannot prove a LUID association.
+    """
+    selected: dict[str, dict[str, list[Path]] | None] = {}
+    for kind in ENGINE_INPUT_SUFFIXES:
+        try:
+            candidates: dict[str, list[Path]] = {}
+            for asset_id in getattr(source, f"list_{kind}s")():
+                path = Path(asset_id)
+                candidates.setdefault(os.path.normcase(path.stem), []).append(path)
+            selected[kind] = candidates
+        except Exception:  # pylint: disable=broad-exception-caught
+            selected[kind] = None
+    keys = [
+        (row["kind"], os.path.normcase(asset_path(root, row["kind"], row["name"], row["luid"]).stem)) for row in rows
+    ]
+    claims = Counter(keys)
+    evidence = []
+    for row, (kind, stem) in zip(rows, keys, strict=True):
+        candidates = (selected[kind] or {}).get(stem, [])
+        if "download_error" in row or "ours" not in row or "theirs" not in row:
+            entry = _engine_input_failure("download_failed")
+        elif selected[kind] is None:
+            entry = _engine_input_failure("selection_unavailable")
+        elif claims[kind, stem] != 1 or os.path.normcase(Path(row["file"]).stem) != stem or len(candidates) > 1:
+            entry = _engine_input_failure("ambiguous")
+        elif not candidates:
+            entry = _engine_input_failure("missing")
+        else:
+            entry = _read_engine_input(candidates[0], root, kind, getattr(source, f"read_{kind}"))
+        evidence.append(entry)
+    return evidence
+
+
+def _valid_engine_input(entry: object) -> bool:
+    if (
+        not isinstance(entry, dict)
+        or not isinstance(entry.get("version"), int)
+        or isinstance(entry["version"], bool)
+        or entry["version"] != 1
+    ):
+        return False
+    if entry.get("status") == "cannot_establish":
+        return set(entry) == {"version", "status", "reason"} and entry["reason"] in ENGINE_INPUT_REASONS
+    return (
+        entry.get("status") == "established"
+        and set(entry) == {"version", "status", "path", "size_bytes", "sha256"}
+        and isinstance(entry["path"], str)
+        and Path(entry["path"]).is_absolute()
+        and isinstance(entry["size_bytes"], int)
+        and not isinstance(entry["size_bytes"], bool)
+        and entry["size_bytes"] >= 0
+        and isinstance(entry["sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]) is not None
+    )
+
+
+def record_engine_inputs(rows: list[dict], assets_dir: Path, scripts: Path) -> None:
+    """Add v1 observations without changing the harvest's existing parser or failure accounting."""
+    for row in rows:
+        failed = "download_error" in row or "ours" not in row or "theirs" not in row
+        row["engine_input"] = _engine_input_failure("download_failed" if failed else "selection_unavailable")
+    if not any(row["engine_input"]["reason"] == "selection_unavailable" for row in rows):
+        return
+    # Isolate engine imports from our parsers' module cache. Only main()'s existing canonical
+    # resolver supplies scripts; argv carries paths literally, never interpolated Python source.
+    snippet = (
+        "import contextlib,json,sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from harvest_estate_assets import _selected_engine_inputs\n"
+        "sys.path.insert(0, sys.argv[2])\n"
+        "from migrate_estate import LocalFilesSource\n"
+        "root = Path(sys.argv[3])\n"
+        "with contextlib.redirect_stdout(sys.stderr):\n"
+        "    evidence = _selected_engine_inputs(LocalFilesSource(str(root)), root, json.load(sys.stdin))\n"
+        "print(json.dumps(evidence))\n"
+    )
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-c",
+                snippet,
+                str(Path(__file__).resolve().parent),
+                str(scripts),
+                str(assets_dir.resolve(strict=True)),
+            ],
+            input=json.dumps(rows),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=120,
+            check=False,
+        )
+        entries = json.loads(proc.stdout) if proc.returncode == 0 else None
+        if not isinstance(entries, list) or len(entries) != len(rows) or not all(map(_valid_engine_input, entries)):
+            raise ValueError("invalid engine input observations")
+    except (OSError, RuntimeError, ValueError, TypeError, subprocess.SubprocessError):
+        LOG.warning("engine input selection unavailable; parser outcomes and harvest exit accounting are unchanged")
+        return
+    for row, entry in zip(rows, entries, strict=True):
+        row["engine_input"] = entry
+
+
 def progress(finished: int, total: int, started: float) -> str:
     """Elapsed, running average and ETA measured on FINISHED assets only.
 
@@ -2037,6 +2249,7 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
         while pending:
             record_parse(pending.popleft(), results, len(todo), started)
 
+    record_engine_inputs(results, assets_dir, scripts)
     args.out.mkdir(parents=True, exist_ok=True)
     orphans = orphaned_dependents(results, edges)
     text = summarise(results, args.out, orphans)
