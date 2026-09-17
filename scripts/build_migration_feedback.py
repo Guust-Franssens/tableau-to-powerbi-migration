@@ -219,6 +219,10 @@ def _bytes(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=True, indent=2, allow_nan=False) + "\n").encode("utf-8")
 
 
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":")).encode("utf-8")
+
+
 def _sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
@@ -413,20 +417,41 @@ def _windows_permissions(path: Path, *, writable: bool) -> None:
         kernel.LocalFree(descriptor)
 
 
-def _stage_permissions(filesystem: _Filesystem, stage: Path, files: list[Path], *, writable: bool) -> None:
+def _stage_permissions(
+    filesystem: _Filesystem, stage: Path, files: list[Path], *, writable: bool, touched: list[Path] | None = None
+) -> None:
+    """Record attempted seal paths; rollback visits that prefix despite individual failures."""
+    failure = None
     for path in (stage, stage / "repro", *files):
-        directory = path in {stage, stage / "repro"}
-        if directory:
-            descriptor = filesystem.directory(path)
-        else:
-            filesystem.read(path)
-            descriptor = filesystem.files[path].descriptor
-        info = os.fstat(descriptor)
-        _regular(info, directory=directory)
-        if os.name == "nt":
-            _windows_permissions(path, writable=writable)
-        else:
-            os.fchmod(descriptor, (0o700 if writable else 0o500) if directory else (0o600 if writable else 0o400))
+        if writable and touched is not None and path not in touched:
+            continue
+        try:
+            directory = path in {stage, stage / "repro"}
+            if directory:
+                descriptor = filesystem.directory(path)
+            else:
+                filesystem.read(path)
+                descriptor = filesystem.files[path].descriptor
+            _regular(os.fstat(descriptor), directory=directory)
+            if not writable and touched is not None:
+                touched.append(path)
+            try:
+                if os.name == "nt":
+                    _windows_permissions(path, writable=writable)
+                else:
+                    os.fchmod(  # pylint: disable=no-member
+                        descriptor, (0o700 if writable else 0o500) if directory else (0o600 if writable else 0o400)
+                    )
+            finally:
+                if not directory:
+                    # Permission changes also alter POSIX ctime, including a partially failed seal.
+                    filesystem.files[path].state = _file_state(os.fstat(descriptor))
+        except (OSError, FeedbackError) as exc:
+            if not writable:
+                raise
+            failure = failure or exc
+    if failure is not None:
+        raise failure
 
 
 def _posix_publish(parent_fd: int, stage: str, destination: str) -> None:
@@ -713,7 +738,7 @@ def _failed(predicate: dict, output: Evidence) -> bool:
         return not found
     _require(found, "predicate:assertion_not_reached")
     # JSON booleans must not compare equal to numeric 0/1.
-    return json.dumps(value, sort_keys=True) != json.dumps(predicate["expected"], sort_keys=True)
+    return _canonical_json(value) != _canonical_json(predicate["expected"])
 
 
 def _schema(document: dict, version: int, label: str) -> None:
@@ -812,7 +837,10 @@ def _oracle_observation(evidence: dict[str, Evidence], prefix: str, predicate: d
         result["command"] == invocation["command"] and result["cwd"] == invocation["cwd"],
         f"{prefix}:oracle_witness_invocation_mismatch",
     )
-    _require(_bytes(result["expected"]) == _bytes(predicate["expected"]), f"{prefix}:oracle_expectation_mismatch")
+    _require(
+        _canonical_json(result["expected"]) == _canonical_json(predicate["expected"]),
+        f"{prefix}:oracle_expectation_mismatch",
+    )
 
 
 def _witness(evidence: dict[str, Evidence], prefix: str, record: dict) -> None:
@@ -1485,16 +1513,15 @@ def _write_outputs(destination: Path, outputs: dict[str, bytes]) -> None:
         created = {}
         repro_identity = None
         sealed = False
+        touched = []
         try:
             filesystem.directory(stage / "repro", create=True)
             repro_identity = filesystem.directories[stage / "repro"][1]
             for name, raw in outputs.items():
                 filesystem.read(stage / name, create=raw)
             filesystem.verify()
+            _stage_permissions(filesystem, stage, list(filesystem.files), writable=False, touched=touched)
             sealed = True
-            _stage_permissions(filesystem, stage, list(filesystem.files), writable=False)
-            for held in filesystem.files.values():
-                held.state = _file_state(os.fstat(held.descriptor))
             filesystem.verify()
             if os.name != "nt":
                 os.fsync(filesystem.directory(stage / "repro"))
@@ -1513,9 +1540,16 @@ def _write_outputs(destination: Path, outputs: dict[str, bytes]) -> None:
         finally:
             if not published:
                 created.update({path: held.state[:2] for path, held in filesystem.files.items()})
-                if sealed:
-                    _stage_permissions(filesystem, stage, list(created), writable=True)
-                _discard_stage(filesystem, stage, created, repro_identity)
+                try:
+                    if sealed or touched:
+                        _stage_permissions(
+                            filesystem, stage, list(created), writable=True, touched=None if sealed else touched
+                        )
+                finally:
+                    try:
+                        _discard_stage(filesystem, stage, created, repro_identity)
+                    except (OSError, FeedbackError) as exc:
+                        raise FeedbackError(f"output:private_cleanup_failed retained_stage={stage}", 1) from exc
 
 
 def build(input_path: Path, *, run: Path | None = None, out: Path | None = None) -> tuple[Path, Assessment]:

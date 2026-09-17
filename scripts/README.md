@@ -836,7 +836,12 @@ Kinds: `json_equals` fails on unequal values; a missing assertion path is unesta
 `json_missing` with `expected: true` fails on an absent property.
 `text_contains` fails on its exact nonempty `expected` signature, never an evaluated expression.
 Failure classes: `incorrect_output`, `missing_output`, `unexpected_refusal`, `runtime_failure`,
-`external_block`. Booleans do not compare equal to numeric 0/1.
+`external_block`. Predicate and oracle expectations use the same type-sensitive canonical JSON:
+object keys are sorted recursively, list order is preserved, booleans differ from numeric 0/1,
+and integers differ from floats (`1` differs from `1.0`). Equivalent decoded float spellings
+(`1.00`, `1e0`) agree; signed float zero remains distinct. Encoding uses compact separators,
+escaped Unicode and UTF-8, with non-finite values refused. This comparison never canonicalizes
+raw evidence bytes or changes their size/SHA-256 identity.
 
 Every **subject observation record is now version 2**, with exactly:
 `schema_version: 2`, `input_sha256`, `output_sha256`, `owner_sha256`, `oracle_sha256`,
@@ -932,10 +937,15 @@ a new private sibling stage using no-follow handles, re-read against held identi
 and flushed before an atomic **no-replace directory rename**. The existing destination and its
 ancestors cannot redirect a write through a junction. Staged bytes and child directories are
 sealed before handles close: owner-readable protected ACLs on Windows, owner read/search-only
-modes on Linux. This closes the Windows child-handle-close/rename interval. Failed writes remove
-the owned stage, never leave a partial final bundle. An unassessable/swapped namespace is refused,
-not traversed for cleanup. The parent must accommodate a private sibling stage, not merely an
-ignored final leaf. Local Windows and Linux `renameat2` are supported; unsupported atomic
+modes on Linux. This closes the Windows child-handle-close/rename interval. A seal is complete only
+after every permission change succeeds. Failed writes, seals and publication attempt deletion of
+the owned stage even if permission rollback fails; partial seals restore only attempted paths,
+and rollback continues after individual permission errors. No failed transaction publishes a final
+bundle. If safe deletion itself fails, exit 1 reports `output:private_cleanup_failed` and the
+retained private stage path **only to the local operator**, never in the public payload or a success
+summary. An unassessable/swapped namespace is refused, not traversed for cleanup. The parent must
+accommodate a private sibling stage, not merely an ignored final leaf. Local Windows and Linux
+`renameat2` are supported; unsupported atomic
 publication/filesystem capabilities refuse rather than downgrade.
 
 The completed bundle remains read-only. Regenerate it rather than editing behind its hashes;

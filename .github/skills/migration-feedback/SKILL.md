@@ -183,8 +183,10 @@ The helper refuses an existing destination and any output Git would offer to com
 There is no unignored-output override.
 The chosen parent must also allow a private sibling staging directory. Inputs are read through
 no-follow identity-bound handles; all outputs are validated/flushed/sealed in that exclusive
-stage before one no-replace directory rename. A failed payload write leaves no partial final
-bundle. Windows ancestor/stage locks and read-only ACLs prevent ordinary junction/child swaps
+stage before one no-replace directory rename. A failed write, seal or rename leaves no final
+bundle; stage deletion is attempted even when permission rollback fails. If safe deletion is
+impossible, exit 1 names the retained private stage to the local operator only; do not share it.
+Windows ancestor/stage locks and read-only ACLs prevent ordinary junction/child swaps
 through the close-and-rename interval; Linux uses directory descriptors and read-only modes.
 Unsupported atomic/filesystem capabilities refuse. The completed bundle is read-only; regenerate
 instead of editing it, or explicitly change its permissions for disposal. This is not a signature,
@@ -211,6 +213,7 @@ fictitious attachments. `public_filing_ready` is evidence readiness, **not publi
 | 3 / incomplete | Report `CANNOT_ESTABLISH` or retained private attribution with `reproducer_not_established`; collect the named missing evidence only. |
 | `setup_not_ready` | Repair setup outside the feedback builder; rerun controls. A nonzero setup exit proves no product failure. |
 | `changed_bytes` / `reviewed_bytes_mismatch` | Re-read and review the actual bytes; stale hashes cannot authorize their replacements. |
+| `private_cleanup_failed` | No final bundle was published. Keep the reported retained stage private; restore access or resolve the local deletion refusal and dispose of that stage. Never put its path in a public payload. |
 | `remote_revision_unconfirmed` | Withhold remote-state claims. A supported local-artifact claim remains a separate valid scope. |
 
 ## Output

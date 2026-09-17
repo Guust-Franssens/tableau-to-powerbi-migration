@@ -17,6 +17,7 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from types import CodeType, FunctionType
 from typing import Any
 
 import pytest
@@ -910,6 +911,107 @@ def test_duplicate_keys_and_nonfinite_json_are_integrity_refusals() -> None:
         assert refusal.value.exit_code == 1
 
 
+@pytest.mark.parametrize(
+    "expected,raw,equal",
+    [
+        pytest.param({"a": 1, "b": 2}, b'{"b":2,"a":1}', True, id="object-order"),
+        pytest.param({"a": [{"b": 1, "c": None}]}, b'{"a":[{"c":null,"b":1}]}', True, id="nested-order"),
+        pytest.param([1, 2], b"[2,1]", False, id="list-order"),
+        pytest.param([1, 2], b"[1,2]", True, id="list-equal"),
+        pytest.param(False, b"0", False, id="false-integer"),
+        pytest.param({"a": [True]}, b'{"a":[1]}', False, id="nested-boolean-integer"),
+        pytest.param(True, b"true", True, id="boolean-equal"),
+        pytest.param(None, b"null", True, id="null-equal"),
+        pytest.param(None, b"false", False, id="null-boolean"),
+        pytest.param(1, b"1.0", False, id="integer-float"),
+        pytest.param(1.0, b"1e0", True, id="float-exponent"),
+        pytest.param(1.0, b"1.00", True, id="float-precision"),
+        pytest.param(0, b"-0", True, id="integer-zero"),
+        pytest.param(0.0, b"-0.0", False, id="float-signed-zero"),
+        pytest.param(1, b"2", False, id="different-integer"),
+        pytest.param("caf\u00e9", b'"caf\\u00e9"', True, id="unicode-escape"),
+    ],
+)
+def test_json_expectation_comparisons_share_canonical_types(tmp_path, monkeypatch, expected, raw, equal) -> None:
+    output = feedback.Evidence("positive_output", tmp_path / "not-read.json", b'{"value":' + raw + b"}")
+    assert feedback._failed({"kind": "json_equals", "pointer": "/value", "expected": expected}, output) is not equal, (
+        "JSON predicate comparison must preserve ordering and type distinctions"
+    )
+    case = _case(tmp_path, monkeypatch, "local")
+    predicate = _json(case.paths["predicate"])
+    predicate["expected"] = expected
+    case.replace("predicate", predicate)
+    result = _json(case.paths["positive_oracle_result"])
+    result.update(expected=json.loads(raw), predicate_sha256=_hash(case.paths["predicate"]))
+    case.replace("positive_oracle_result", result)
+    record = _json(case.paths["positive_oracle_record"])
+    record.update(
+        predicate_sha256=_hash(case.paths["predicate"]), output_sha256=_hash(case.paths["positive_oracle_result"])
+    )
+    case.replace("positive_oracle_record", record)
+    _repin_record(
+        case,
+        "positive",
+        predicate_sha256=_hash(case.paths["predicate"]),
+        oracle_record_sha256=_hash(case.paths["positive_oracle_record"]),
+    )
+    evidence = {role: feedback.Evidence(role, path, path.read_bytes()) for role, path in case.paths.items()}
+    if equal:
+        feedback._oracle_observation(evidence, "positive", predicate, _json(case.paths["positive_record"]))
+    else:
+        with pytest.raises(feedback.FeedbackError, match="positive:oracle_expectation_mismatch") as refusal:
+            feedback._oracle_observation(evidence, "positive", predicate, _json(case.paths["positive_record"]))
+        assert refusal.value.exit_code == 3
+
+
+@pytest.mark.parametrize(
+    "raw,reason",
+    [
+        (b'{"value":NaN}', "json:nonfinite_number"),
+        (b'{"value":Infinity}', "json:nonfinite_number"),
+        (b'{"value":-Infinity}', "json:nonfinite_number"),
+        (b'{"value":1e999}', "json:nonfinite_number"),
+        (b'{"value":-1e999}', "json:nonfinite_number"),
+        (b'{"value":1,"value":1}', "json:duplicate_key"),
+        (b'{"value":{"a":1,"a":2}}', "json:duplicate_key"),
+        (b'{"value":{"a":2,"\\u0061":1}}', "json:duplicate_key"),
+    ],
+)
+def test_json_comparison_refuses_ambiguous_or_nonfinite_documents(raw, reason) -> None:
+    with pytest.raises(feedback.FeedbackError, match=reason) as refusal:
+        feedback._json(raw)
+    assert refusal.value.exit_code == 1
+    with pytest.raises(feedback.FeedbackError, match=reason):
+        feedback._failed(
+            {"kind": "json_equals", "pointer": "/value", "expected": 1},
+            feedback.Evidence("positive_output", ROOT / "not-read.json", raw),
+        )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_canonical_json_never_serializes_nonfinite_values(value) -> None:
+    with pytest.raises(ValueError, match="Out of range float"):
+        feedback._canonical_json({"nested": [value]})
+
+
+def test_canonical_json_has_one_stable_encoding() -> None:
+    assert feedback._canonical_json({"z": ["caf\u00e9", True, 1, 1.0, None], "a": False}) == (
+        b'{"a":false,"z":["caf\\u00e9",true,1,1.0,null]}'
+    )
+
+
+def test_semantic_equality_never_replaces_evidence_byte_identity(tmp_path, monkeypatch, caplog) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    path = case.paths["positive_oracle_result"]
+    before = path.read_bytes()
+    path.write_text(json.dumps(json.loads(before), sort_keys=True, separators=(",", ":")), encoding="utf-8")
+    assert path.read_bytes() != before and _json(path) == json.loads(before)
+    destination = case.root / "out"
+    assert feedback.main(["--input", str(case.save()), "--out", str(destination)]) == 1
+    assert "positive_oracle_result:changed_bytes" in caplog.text
+    assert not destination.exists() and not list(case.root.glob(".migration-feedback-*.staging"))
+
+
 def test_recorded_relative_cli_paths_resolve_only_against_recorded_cwd(tmp_path, monkeypatch) -> None:
     case = _case(tmp_path, monkeypatch, "local")
     relative_owner = os.path.relpath(case.paths["owner"], case.root)
@@ -1035,6 +1137,40 @@ def test_oracle_result_must_independently_earn_predicate_expectation(tmp_path, m
     _, private, public = _build(case, 3)
     assert private["reasons"] == ["positive:oracle_expectation_mismatch"]
     assert not public["public_filing_ready"]
+
+
+def test_nested_oracle_key_order_preserves_exact_controls(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    expected = {"a": [{"b": 2, "c": None}], "d": False}
+    predicate = _json(case.paths["predicate"])
+    predicate["expected"] = expected
+    case.replace("predicate", predicate)
+    replacements = {
+        "owner": (
+            'request.get("value") is not None or not request.get("strict", False)',
+            f"{expected!r} if request.get('strict', False) else 'incorrect'",
+        ),
+        "oracle": ('json.loads(raw).get("value") is not None', repr({"d": False, "a": [{"c": None, "b": 2}]})),
+    }
+    for role, (before, after) in replacements.items():
+        path = case.paths[role]
+        code = path.read_text(encoding="utf-8")
+        assert code.count(before) == 1
+        path.write_text(code.replace(before, after), encoding="utf-8")
+        case.pin(role, path)
+    for prefix in feedback.PREFIXES:
+        _observe(case, prefix)
+        observation = _json(case.paths[f"{prefix}_oracle_result"])
+        assert list(observation["expected"]) == ["d", "a"], "the independent oracle really uses the other order"
+        assert _json(case.paths[f"{prefix}_output"])["allowed"] == (
+            "incorrect" if prefix in {"positive", "candidate"} else expected
+        )
+    out = case.root / "out"
+    code = feedback.main(["--input", str(case.save()), "--out", str(out)])
+    private = _json(out / "feedback.json")
+    assert code == 0, f"equivalent JSON expectations must route, not {private['reasons']}"
+    assert private["route"] == "AGENTIC_REPOSITORY" and private["reasons"] == []
+    assert _json(out / "issue-payload.json")["public_filing_ready"] is True
 
 
 def test_consumed_bytes_witness_is_not_an_invocation_claim(tmp_path, monkeypatch) -> None:
@@ -1349,6 +1485,206 @@ def test_final_payload_failure_leaves_no_final_or_staging_tree(tmp_path, monkeyp
     assert written[-1] == "issue-payload.json" and "positive.json" in written and "feedback.json" in written
     assert not destination.exists(), "failed transactions must not expose established feedback or candidate bytes"
     assert not list(case.root.glob(".migration-feedback-*.staging")), "failed stage must be cleaned"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native protected file DACL is Windows-only")
+def test_persistent_acl_failure_still_discards_private_stage(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    destination = case.root / "out"
+    attempts = []
+
+    def unavailable(path, *, writable):
+        attempts.append((path, writable))
+        raise OSError("controlled persistent ACL API failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(feedback, "_windows_permissions", unavailable)
+        assert feedback.main(["--input", str(case.save()), "--out", str(destination)]) == 1
+    assert attempts and not attempts[0][1], "the fault must reach the seal, not fixture setup"
+    assert not destination.exists(), "a failed seal must never publish a final success manifest"
+    retained = list(case.root.glob(".migration-feedback-*.staging"))
+    assert not retained, (
+        "persistent ACL failure must not retain a deletable private stage: "
+        f"{[(path.name, sorted(child.name for child in path.rglob('*'))) for path in retained]}"
+    )
+
+
+def _intercept_permissions(monkeypatch: pytest.MonkeyPatch, operation: Any) -> None:
+    if os.name == "nt":
+        native = feedback._windows_permissions
+
+        def intercepted(path, *, writable):
+            operation(path, writable, lambda: native(path, writable=writable))
+
+        monkeypatch.setattr(feedback, "_windows_permissions", intercepted)
+    else:
+        native = os.fchmod  # pylint: disable=no-member
+
+        def intercepted(descriptor, mode):
+            operation(descriptor, bool(mode & 0o200), lambda: native(descriptor, mode))
+
+        monkeypatch.setattr(os, "fchmod", intercepted)
+
+
+def _fail_publication(monkeypatch: pytest.MonkeyPatch) -> None:
+    if os.name == "nt":
+        native = feedback._windows_move
+
+        def failed(descriptor, destination):
+            if destination is not None:
+                raise OSError("controlled publication failure")
+            return native(descriptor, destination)
+
+        monkeypatch.setattr(feedback, "_windows_move", failed)
+    else:
+
+        def failed(*_args):
+            raise OSError("controlled publication failure")
+
+        monkeypatch.setattr(feedback, "_posix_publish", failed)
+
+
+@pytest.mark.parametrize("failure_at", [1, 2, 4, 8])
+@pytest.mark.parametrize("after_change", [False, True])
+def test_partial_seal_rolls_back_only_attempted_paths(tmp_path, monkeypatch, failure_at, after_change) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    destination = case.root / "out"
+    attempted, restored = [], []
+
+    def controlled(target, writable, apply):
+        if writable:
+            restored.append(target)
+        else:
+            attempted.append(target)
+            if len(attempted) == failure_at:
+                if after_change:
+                    apply()
+                raise OSError("controlled partial seal failure")
+        apply()
+
+    with monkeypatch.context() as patch:
+        _intercept_permissions(patch, controlled)
+        assert feedback.main(["--input", str(case.save()), "--out", str(destination)]) == 1
+    assert len(attempted) == failure_at, "the controlled fault must reach the selected native permission call"
+    assert restored == attempted, "an incomplete seal must restore only attempted paths, never claim a full seal"
+    assert not destination.exists(), "partial sealing must not expose a final success manifest"
+    assert not list(case.root.glob(".migration-feedback-*.staging")), "partial sealing must leave no private stage"
+
+
+@pytest.mark.parametrize("rollback_failure", [False, True])
+def test_publication_failure_discards_stage_even_if_rollback_raises(tmp_path, monkeypatch, rollback_failure) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    destination = case.root / "out"
+    sealed, restored = [], []
+
+    def controlled(target, writable, apply):
+        (restored if writable else sealed).append(target)
+        apply()
+        if writable and rollback_failure and len(restored) == 1:
+            raise OSError("controlled rollback failure after changing the parent")
+
+    with monkeypatch.context() as patch:
+        _intercept_permissions(patch, controlled)
+        _fail_publication(patch)
+        assert feedback.main(["--input", str(case.save()), "--out", str(destination)]) == 1
+    assert len(sealed) == len(restored) == 8, "rollback must visit remaining paths after one restoration fails"
+    assert not destination.exists(), "failed publication must not leave a success manifest"
+    assert not list(case.root.glob(".migration-feedback-*.staging")), "deletion must run even when rollback raises"
+
+
+@pytest.mark.parametrize("rollback_failure", [False, True])
+def test_discard_failure_names_private_stage_only_to_operator(tmp_path, monkeypatch, caplog, rollback_failure) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    destination = case.root / "out"
+    attempted = []
+
+    def controlled(_target, writable, apply):
+        apply()
+        if writable and rollback_failure:
+            raise OSError("controlled rollback report failure")
+
+    def denied(path, **_kwargs):
+        attempted.append(path)
+        raise PermissionError("controlled operating-system deletion refusal")
+
+    with monkeypatch.context() as patch:
+        _intercept_permissions(patch, controlled)
+        _fail_publication(patch)
+        patch.setattr(os, "unlink", denied)
+        code = feedback.main(["--input", str(case.save()), "--out", str(destination)])
+    retained = list(case.root.glob(".migration-feedback-*.staging"))
+    try:
+        assert code == 1 and attempted and len(retained) == 1
+        assert not destination.exists(), "cleanup refusal must never leave a final success manifest"
+        assert f"output:private_cleanup_failed retained_stage={retained[0]}" in caplog.text
+        assert "FEEDBACK route=" not in caplog.text, "a retained private stage must not produce success-shaped output"
+        public = (retained[0] / "issue-payload.json").read_text(encoding="utf-8")
+        assert str(retained[0]) not in public and retained[0].name not in public
+        assert "private_cleanup_failed" not in public, "local cleanup diagnostics must never enter the public payload"
+    finally:
+        for stage in retained:
+            shutil.rmtree(stage)
+
+
+@pytest.mark.parametrize(
+    "mutation", ["cleanup-finally", "early-sealed", "canonical-sort", "canonical-type", "oracle-type"]
+)
+def test_r2_mutations_fail_the_intended_assertions(tmp_path, monkeypatch, mutation) -> None:
+    name = (
+        "_write_outputs"
+        if mutation in {"cleanup-finally", "early-sealed"}
+        else "_oracle_observation"
+        if mutation == "oracle-type"
+        else "_canonical_json"
+    )
+    source = SCRIPT.read_text(encoding="utf-8")
+    definition = next(
+        node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == name
+    )
+    source = ast.get_source_segment(source, definition)
+    expected_error = AssertionError
+    if mutation == "cleanup-finally":
+        parent = next(
+            node
+            for node in ast.walk(definition)
+            if isinstance(node, ast.If) and ast.unparse(node.test) == "not published"
+        )
+        cleanup = parent.body[-1]
+        assert isinstance(cleanup, ast.Try) and cleanup.finalbody
+        parent.body[-1:] = cleanup.body + cleanup.finalbody
+        exercise, arguments = test_publication_failure_discards_stage_even_if_rollback_raises, (True,)
+        message = "deletion must run even when rollback raises"
+    elif mutation == "early-sealed":
+        before = (
+            "            _stage_permissions(filesystem, stage, list(filesystem.files), "
+            "writable=False, touched=touched)\n"
+            "            sealed = True"
+        )
+        assert source.count(before) == 1
+        definition = ast.parse(source.replace(before, "\n".join(reversed(before.splitlines())))).body[0]
+        exercise, arguments = test_partial_seal_rolls_back_only_attempted_paths, (1, False)
+        message = "an incomplete seal must restore only attempted paths"
+    elif mutation == "canonical-sort":
+        assert source.count("sort_keys=True") == 1
+        definition = ast.parse(source.replace("sort_keys=True", "sort_keys=False")).body[0]
+        exercise, arguments = test_nested_oracle_key_order_preserves_exact_controls, ()
+        message = "equivalent JSON expectations must route"
+    elif mutation == "canonical-type":
+        definition.body = [ast.Return(value=ast.Name(id="value", ctx=ast.Load()))]
+        exercise, arguments = test_json_expectation_comparisons_share_canonical_types, (False, b"0", False)
+        message = "JSON predicate comparison must preserve ordering and type distinctions"
+    else:
+        before = '_canonical_json(result["expected"]) == _canonical_json(predicate["expected"])'
+        assert source.count(before) == 1
+        definition = ast.parse(source.replace(before, 'result["expected"] == predicate["expected"]')).body[0]
+        exercise, arguments = test_json_expectation_comparisons_share_canonical_types, (False, b"0", False)
+        expected_error = pytest.fail.Exception
+        message = "DID NOT RAISE.*FeedbackError"
+    code = compile(ast.fix_missing_locations(ast.Module(body=[definition], type_ignores=[])), str(SCRIPT), "exec")
+    function = next(value for value in code.co_consts if isinstance(value, CodeType) and value.co_name == name)
+    monkeypatch.setattr(feedback, name, FunctionType(function, vars(feedback)))
+    with pytest.raises(expected_error, match=message):
+        exercise(tmp_path, monkeypatch, *arguments)
 
 
 def test_hardlink_alias_and_changed_inode_cannot_copy_private_bytes(tmp_path, monkeypatch) -> None:
