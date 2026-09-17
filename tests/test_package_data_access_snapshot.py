@@ -17,7 +17,17 @@ import test_data_access_contract as authority
 import test_package_role_identity as s2
 import test_package_unit_reproductions as producer
 from test_data_access_contract import _root_fixture  # noqa: F401  # shared pytest fixture
-from test_package_unit_gates import DS_LUID, UNIT, _binding_cli, _binding_package, _brief, _bundle, pkg, sdf
+from test_package_unit_gates import (
+    DS_LUID,
+    UNIT,
+    _binding_cli,
+    _binding_package,
+    _brief,
+    _bundle,
+    _stamp_resolved_published_pair,
+    pkg,
+    sdf,
+)
 
 
 def _files(root: Path) -> dict[str, bytes]:
@@ -301,6 +311,7 @@ def _binding_consumer(parent: Path, provider: Path) -> Path:
             "codes": ["provider-exact"],
         },
     )
+    _stamp_resolved_published_pair(provider, root)
     return root
 
 

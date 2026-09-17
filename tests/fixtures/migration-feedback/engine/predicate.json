@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "defined_at": "2026-01-01T00:00:00Z",
+  "kind": "json_equals",
+  "pointer": "/count",
+  "expected": 1,
+  "failure_class": "missing_output"
+}

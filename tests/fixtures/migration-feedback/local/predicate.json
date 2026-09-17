@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "defined_at": "2026-01-01T00:00:00Z",
+  "kind": "json_equals",
+  "pointer": "/allowed",
+  "expected": false,
+  "failure_class": "incorrect_output"
+}

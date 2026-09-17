@@ -35,6 +35,7 @@ orchestration-specific.
 | Tableau formula → DAX | `docs/tableau-dax-translation-guide.md` |
 | A visual encoding that renders | `.github/pbi.kb/visual-cookbook.md` + `.github/pbi.kb/visuals/` |
 | Parser/tooling behaviour | the script itself plus a regression test |
+| Explicit migration engineering feedback | `.github/skills/migration-feedback/SKILL.md` — private evidence and public-safe payload, never publication |
 | Upstream engine behaviour | fresh empty-output run first; then upstream issue + credential-free reproducer |
 
 If you edit a skill bundle that is also published, re-run `scripts/build_plugin.py` or preflight flags
@@ -55,6 +56,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Open a focused PR | [`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md) | Behavioral/mechanical paths, plan-review evidence, validation exits and exact blind-reviewed head SHA. |
 | Use VS Code Copilot | [`.github/copilot-instructions.md`](../.github/copilot-instructions.md) | VS Code entry instructions. |
 | Run or choose scripts | [`scripts/README.md`](../scripts/README.md) | Map of scripts; `test_repo_layout.py` owns script-list completeness. |
+| Capture migration feedback | [`.github/skills/migration-feedback/SKILL.md`](../.github/skills/migration-feedback/SKILL.md) | Explicit workbook/datasource or script/feature escalation: private evidence, controlled fictitious reproduction, engine/local/external/cannot-establish route; stops at `issue-payload.json`. |
 | Author PBIR visuals | [`.github/pbi.kb/visual-cookbook.md`](../.github/pbi.kb/visual-cookbook.md) | Map of visual files with confidence tiers and Tableau idioms. |
 | Inspect examples | [`examples/README.md`](../examples/README.md) | Map of example migrations, provenance, screenshots, and evidence files. |
 | Browse showcase | [`docs/showcase/README.md`](../docs/showcase/README.md) | Map of rendered showcase outputs and variants. |
