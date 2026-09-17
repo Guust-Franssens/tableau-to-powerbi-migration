@@ -9,6 +9,50 @@ Please read [`SECURITY.md`](SECURITY.md) first — the single most important rul
 customer data** (source workbooks, extracted data, or reference screenshots are all git-ignored for
 this reason).
 
+## Issue-to-PR lifecycle
+
+1. **File the problem and outcome.** Use the
+   [implementation form](.github/ISSUE_TEMPLATE/implementation.yml) or a blank issue. Only the
+   observed journey, desired outcome/default, and privacy confirmation are required at filing;
+   plan details are optional seeds, not a demand for a worktree or review link.
+2. **Plan, then independently review.** Before behavioral coding, turn those seeds into a bounded
+   issue plan: affected consumers/shared files, controls, non-goals and dependencies. Follow the
+   [canonical review contract](AGENTS.md#the-review-contract--state-this-in-the-brief-before-coding),
+   not a copied essay. An independent simplicity/UX reviewer records a link and verdict:
+   **approve, simplify, split, close/no-change, or blocked**. Only an approved revision proceeds.
+3. **Implement the approved scope.** Once ready, record the approved base SHA in the implementation
+   brief, check open work and upstream/local ownership, and keep one concern per PR. A substantive
+   plan delta goes back to plan review before implementation.
+4. **Open a PR, then review the diff blind.** Use the
+   [PR template](.github/PULL_REQUEST_TEMPLATE.md): `Fixes #N` for a complete fix, `Refs #N` for
+   partial work; link the plan review and record acceptance evidence, validation exits and privacy.
+   A reviewer gets only the issue/requirement and diff, not the author's rationale. Record the
+   verdict and exact reviewed head SHA; **every later commit makes that review stale**. Obtain
+   fresh review before merge. The canonical after-round-2 scope freeze still applies.
+
+### Status labels
+
+Existing issue labels are the state authority; templates prompt, maintainers/reviewers decide.
+
+| Label | Meaning |
+|---|---|
+| `status:needs-decision` | Scope, design, evidence or owner decision needed before implementation. |
+| `status:plan-approved` | Plan passed independent simplicity review; dependencies may remain. |
+| `status:ready-for-implementation` | Plan-approved with no known implementation dependency or evidence blocker. |
+
+Approval removes `status:needs-decision` and adds `status:plan-approved`; readiness adds
+`status:ready-for-implementation` **without removing approval**. A new blocker removes readiness;
+an invalidated plan also loses approval and returns to `status:needs-decision`.
+
+### Narrow mechanical exception
+
+A mechanical change is **byte-local**, with no runtime, policy, authority, safety, privacy, fidelity,
+data-loss or customer-facing consequence (for example, a typo that changes no instruction). A
+one-line behavioral change is not mechanical. Qualifying fixes may skip the issue/plan-review
+gate with a one-sentence justification; N/A fields need a reason. Validation exits, privacy
+confirmation and ordinary blind diff review at an exact head SHA remain required.
+Why these boundaries exist: [review-throughput post-mortem](docs/review-throughput-postmortem.md).
+
 ## Environment setup
 
 The agent/skill/MCP dependencies are described in [`AGENTS.md`](AGENTS.md) and verified by the
@@ -143,8 +187,12 @@ Keep every capability/mapping/number claim backed by evidence (a spec field, a T
 
 ## Before you open a PR
 
-- Run the Python ritual and `pytest -q`; both must be clean.
-- Sanitize machine-specific model paths and confirm the gate passes:
+- For code changes, run the Python ritual on edited Python files and `pytest -q`; both must be
+  clean. Record commands and exit codes.
+- For documentation/template-only changes, run applicable metadata/layout checks,
+  `python scripts/check_navigation_index.py`, `python scripts/sync_agent_conventions.py --check`,
+  and `git diff --check`. A full pytest run is not required.
+- When model artifacts changed, sanitize machine-specific paths and confirm the gate passes:
   ```bash
   python scripts/set_data_folder.py --sanitize
   python scripts/set_data_folder.py --check
