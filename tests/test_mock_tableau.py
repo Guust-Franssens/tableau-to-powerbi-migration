@@ -10,9 +10,15 @@ from __future__ import annotations
 
 import io
 import json
+import runpy
 import sys
+import uuid
 import zipfile
+from dataclasses import replace
 from pathlib import Path
+from urllib.parse import urlencode, urlparse
+from urllib.request import Request, urlopen
+from xml.etree import ElementTree
 
 import pytest
 
@@ -20,9 +26,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
-import assess_estate as ae  # noqa: E402
-import tableau_lineage as tl  # noqa: E402
-from mocks import estate, tableau  # noqa: E402
+import assess_estate as ae  # noqa: E402  # pylint: disable=wrong-import-position
+import harvest_estate_assets as hea  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_lineage as tl  # noqa: E402  # pylint: disable=wrong-import-position
+from mocks import estate, tableau  # noqa: E402  # pylint: disable=wrong-import-position
 
 
 @pytest.fixture(name="site")
@@ -37,6 +44,7 @@ def _served(site):
 
 
 def signed_in(site) -> str:
+    """Authenticate through the router, retaining the actual sign-in identity assertion."""
     status, _headers, payload = site.handle(
         "POST",
         f"http://x/api/{site.rest_version}/auth/signin",
@@ -52,7 +60,21 @@ def signed_in(site) -> str:
         ).encode(),
     )
     assert status == 200
-    return json.loads(payload)["credentials"]["token"]
+    credentials = json.loads(payload)["credentials"]
+    assert credentials["user"] == {"id": site.user_id}
+    assert credentials["site"] == {"id": site.site_id, "contentUrl": site.content_url}
+    return credentials["token"]
+
+
+def rest_get(site: tableau.TableauSite, path: str, token: str = "") -> tuple[int, dict]:
+    """GET through the real router; missing tokens stay missing."""
+    status, _headers, payload = site.handle(
+        "GET",
+        f"http://x/api/{site.rest_version}{path}",
+        {"x-tableau-auth": token} if token else {},
+        b"",
+    )
+    return status, json.loads(payload)
 
 
 # ------------------------------------------------------------------ transport
@@ -78,6 +100,7 @@ def test_sign_in_requires_both_halves_of_the_pat(site):
 
 
 def test_an_unknown_site_content_url_is_a_404(site):
+    """A PAT must not sign into a different site."""
     body = json.dumps(
         {
             "credentials": {
@@ -153,6 +176,7 @@ def test_paging_actually_pages(site):
 
 
 def test_the_real_client_follows_pagination_to_the_end(served):
+    """The assessment client must read every server-capped page."""
     site, base = served
     site.page_size = 1
     client = ae.Site(tableau.env_for(site, base))
@@ -177,7 +201,664 @@ def test_usage_statistics_are_absent_unless_requested(site):
     assert any("usage" in row for row in json.loads(with_usage)["views"]["view"])
 
 
+# -------------------------------------------------------- REST authority subset
+
+
+def test_default_site_identity_is_unchanged(site: tableau.TableauSite) -> None:
+    """UUID authority is opt-in; ordinary mock callers keep their historical identity."""
+    assert (site.site_id, site.user_id, site.content_url) == ("site-0000", "user-1", "mock")
+
+
+def test_configured_uuid_identity_uses_exact_user_detail() -> None:
+    """Sign-in and the exact detail route agree on configurable production-shaped UUIDs."""
+    site = estate.build_site(
+        site_id="11111111-1111-4111-8111-111111111111",
+        user_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        content_url="Finance",
+    )
+    assert str(uuid.UUID(site.site_id)) == site.site_id
+    assert str(uuid.UUID(site.user_id)) == site.user_id
+    token = signed_in(site)
+    route = f"/sites/{site.site_id}/users"
+    status, payload = rest_get(site, f"{route}/{site.user_id}", token)
+    assert status == 200
+    assert payload == {"user": {"id": site.user_id, "siteRole": "SiteAdministratorExplorer"}}
+    for wrong_user in ("user-1", site.user_id.upper(), f"{site.user_id}/extra"):
+        assert rest_get(site, f"{route}/{wrong_user}", token)[0] == 404
+
+
+def test_user_detail_matches_the_signed_in_admin(site: tableau.TableauSite) -> None:
+    """The signed-in identity has the least broad site-admin role admitted by provenance P."""
+    route = "users/user-1"
+    status, payload = rest_get(site, f"/sites/{site.site_id}/{route}", signed_in(site))
+    assert status == 200
+    assert payload == {"user": {"id": "user-1", "siteRole": "SiteAdministratorExplorer"}}
+
+
+@pytest.mark.parametrize("route", ["users/user-1", "datasources/{luid}"])
+@pytest.mark.parametrize(
+    "query",
+    [
+        "filter=contentUrl:eq:SalesMaster",
+        "filter=contentUrl:eq:absent",
+        "unknown=1",
+        "pageSize=1",
+        "pageNumber=1",
+        "filter=",
+        "unknown",
+        "=value",
+    ],
+)
+def test_detail_routes_reject_query_parameters(site: tableau.TableauSite, route: str, query: str) -> None:
+    """ASSUMED strict subset: detail routes support no query parameters, including list filters."""
+    route = route.format(luid=site.datasources[0].luid)
+    status, payload = rest_get(site, f"/sites/{site.site_id}/{route}?{query}", signed_in(site))
+    assert status == 400
+    assert set(payload) == {"error"}
+
+
+@pytest.mark.parametrize("value, count", [("SalesMaster", 1), ("salesmaster", 0), ("SALESMASTER", 0), ("absent", 0)])
+def test_datasource_filter_selects_exact_content_url(site: tableau.TableauSite, value: str, count: int) -> None:
+    """An exact match or a complete zero, never display-name matching or a case-folded match."""
+    shared = site.datasources[0]
+    site.datasource("SalesMaster", site.projects[0], estate.FIXTURES / "standalone_datasource.tds", content_url="Other")
+    query = urlencode({"filter": f"contentUrl:eq:{value}", "pageSize": 1000, "pageNumber": 1})
+    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources?{query}", signed_in(site))
+    assert status == 200
+    assert payload["pagination"] == {"pageNumber": "1", "pageSize": "1000", "totalAvailable": str(count)}
+    rows = payload["datasources"]["datasource"]
+    assert len(rows) == count
+    if count:
+        assert {key: rows[0][key] for key in ("id", "name", "contentUrl", "updatedAt")} == {
+            "id": shared.luid,
+            "name": "Corporate Cities",
+            "contentUrl": "SalesMaster",
+            "updatedAt": "2026-02-03T04:05:06Z",
+        }
+
+
+@pytest.mark.parametrize("single_row", [False, True])
+def test_filtered_datasources_page_the_filtered_set(single_row: bool) -> None:
+    """A unique match AFTER nonmatching rows must survive the server's one-row page cap."""
+    site = tableau.TableauSite(page_size=1, single_row_as_object=single_row)
+    project = site.project("Fixture project")
+    first = site.datasource(
+        "Regional Totals", project, estate.FIXTURES / "standalone_datasource.tds", content_url="OtherFirst"
+    )
+    second = site.datasource(
+        "Inventory Snapshot", project, estate.FIXTURES / "standalone_datasource.tds", content_url="OtherSecond"
+    )
+    matched = site.datasource(
+        "City Reference", project, estate.FIXTURES / "standalone_datasource.tds", content_url="SalesMaster"
+    )
+    token = signed_in(site)
+    path = f"/sites/{site.site_id}/datasources"
+    query = urlencode({"filter": "contentUrl:eq:SalesMaster", "pageSize": 1000, "pageNumber": 1})
+    status, payload = rest_get(site, f"{path}?{query}", token)
+    assert status == 200
+    assert payload["pagination"] == {"pageNumber": "1", "pageSize": "1", "totalAvailable": "1"}
+    rows = payload["datasources"]["datasource"]
+    assert isinstance(rows, dict) == single_row
+    assert ([rows] if isinstance(rows, dict) else rows) == [matched.row()]
+    status, payload = rest_get(site, f"{path}?filter=contentUrl:eq:SalesMaster&pageNumber=2", token)
+    assert status == 400, "the filtered set has only one page, although the full catalog has three"
+    assert set(payload) == {"error"}
+
+    seen = []
+    for number, expected in enumerate((first, second, matched), start=1):
+        status, payload = rest_get(site, f"{path}?pageSize=1000&pageNumber={number}", token)
+        assert status == 200
+        assert payload["pagination"] == {"pageNumber": str(number), "pageSize": "1", "totalAvailable": "3"}
+        rows = payload["datasources"]["datasource"]
+        assert isinstance(rows, dict) == single_row
+        rows = [rows] if isinstance(rows, dict) else rows
+        assert rows == [expected.row()]
+        seen.extend(row["id"] for row in rows)
+    assert seen == [first.luid, second.luid, matched.luid]
+    status, payload = rest_get(site, f"{path}?pageNumber=4", token)
+    assert status == 400
+    assert set(payload) == {"error"}
+
+    site.page_size, site.single_row_as_object = None, False
+    status, payload = rest_get(site, path, token)
+    assert status == 200
+    assert [row["id"] for row in payload["datasources"]["datasource"]] == seen
+    assert payload["pagination"] == {"pageNumber": "1", "pageSize": "100", "totalAvailable": "3"}
+
+
+def test_unfiltered_datasources_keep_omitted_page_defaults(site: tableau.TableauSite) -> None:
+    """Omitted parameters, unlike malformed or blank ones, retain Tableau's documented defaults."""
+    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources", signed_in(site))
+    assert status == 200
+    assert payload["pagination"] == {"pageNumber": "1", "pageSize": "100", "totalAvailable": "1"}
+    assert payload["datasources"]["datasource"][0]["id"] == site.datasources[0].luid
+
+
+def test_additional_datasources_require_explicit_content_urls() -> None:
+    """Omission is refused even when the singleton default would not collide with an existing URL."""
+    site = tableau.TableauSite()
+    project = site.project("Fixture project")
+    site.datasource("First", project, estate.FIXTURES / "standalone_datasource.tds", content_url="Other")
+    before = [row.row() for row in site.datasources]
+    with pytest.raises(ValueError, match="explicit content_url"):
+        site.datasource("Another datasource", project, estate.FIXTURES / "standalone_datasource.tds")
+    assert [row.row() for row in site.datasources] == before
+
+
+@pytest.mark.parametrize("project_index", [0, 1])
+def test_duplicate_datasource_content_urls_are_refused_across_projects(
+    site: tableau.TableauSite, project_index: int
+) -> None:
+    """Tableau contentUrl identifies a datasource within the SITE, not only within a project."""
+    before = [row.row() for row in site.datasources]
+    with pytest.raises(ValueError, match="unique"):
+        site.datasource(
+            "Duplicate",
+            site.projects[project_index],
+            estate.FIXTURES / "standalone_datasource.tds",
+            content_url="SalesMaster",
+        )
+    assert [row.row() for row in site.datasources] == before
+
+    other = site.datasource(
+        "Regional Totals",
+        site.projects[project_index],
+        estate.FIXTURES / "standalone_datasource.tds",
+        content_url="Other",
+    )
+    assert (other.name, other.content_url) == ("Regional Totals", "Other")
+    assert [row.content_url for row in site.datasources] == ["SalesMaster", "Other"]
+
+
+@pytest.mark.parametrize("name", ["Corporate Cities", "CORPORATE CITIES", "corporate cities"])
+@pytest.mark.parametrize("copy_project", [False, True])
+def test_duplicate_datasource_display_names_are_refused_within_project(
+    site: tableau.TableauSite, name: str, copy_project: bool
+) -> None:
+    """Tableau's documented name conflict is case-insensitive and scoped to the project LUID."""
+    project = replace(site.projects[0]) if copy_project else site.projects[0]
+    before = [row.row() for row in site.datasources]
+    with pytest.raises(ValueError, match="display names must be unique within each project"):
+        site.datasource(name, project, estate.FIXTURES / "standalone_datasource.tds", content_url="Other")
+    assert [row.row() for row in site.datasources] == before
+
+
+@pytest.mark.parametrize("name", ["Corporate Cities", "CORPORATE CITIES", "corporate cities"])
+@pytest.mark.parametrize("same_project_name", [False, True])
+def test_datasource_display_names_can_repeat_only_in_distinct_projects(
+    site: tableau.TableauSite, name: str, same_project_name: bool
+) -> None:
+    """Documented cross-project names stay valid; moving into the same project creates a conflict."""
+    shared = site.datasources[0]
+    project = site.project("Finance", parent=site.projects[2]) if same_project_name else site.projects[1]
+    other = site.datasource(name, project, estate.FIXTURES / "standalone_datasource.tds", content_url="Other")
+    assert project.luid != shared.project.luid
+    token = signed_in(site)
+    path = f"/sites/{site.site_id}/datasources"
+    status, listing = rest_get(site, path, token)
+    assert status == 200
+    assert [
+        (row["id"], row["name"], row["contentUrl"], row["project"]["id"])
+        for row in listing["datasources"]["datasource"]
+    ] == [
+        (shared.luid, "Corporate Cities", "SalesMaster", shared.project.luid),
+        (other.luid, name, "Other", project.luid),
+    ]
+    other.project = replace(shared.project)
+    for suffix in ("", "?filter=contentUrl:eq:absent", f"/{shared.luid}", f"/{other.luid}"):
+        status, payload = rest_get(site, path + suffix, token)
+        assert status == 500
+        assert set(payload) == {"error"}
+    other.project = project
+    assert rest_get(site, path, token) == (200, listing)
+
+
+@pytest.mark.parametrize("content_url", ["", " ", None])
+def test_explicit_datasource_content_urls_cannot_be_blank(site: tableau.TableauSite, content_url: str | None) -> None:
+    """Malformed fixture identity must not turn into a default URL or a served authority row."""
+    before = [row.row() for row in site.datasources]
+    with pytest.raises(ValueError, match="nonempty"):
+        site.datasource(
+            "No identity", site.projects[0], estate.FIXTURES / "standalone_datasource.tds", content_url=content_url
+        )
+    assert [row.row() for row in site.datasources] == before
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("content_url", "SalesMaster"),
+        ("content_url", ""),
+        ("luid", "duplicate"),
+        ("name", "Corporate Cities"),
+        ("name", "CORPORATE CITIES"),
+        ("name", "corporate cities"),
+    ],
+)
+@pytest.mark.parametrize(
+    "route",
+    [
+        "datasources",
+        "datasources?filter=contentUrl:eq:absent",
+        "datasources/{luid}",
+        "datasources/{other_luid}",
+    ],
+)
+def test_invalid_mutated_datasource_catalog_never_serves_authority(
+    site: tableau.TableauSite, field: str, value: str, route: str
+) -> None:
+    """Invalid setup is a mock error, not a service state that can earn list/detail authority."""
+    shared = site.datasources[0]
+    other = site.datasource(
+        "Other", site.projects[0], estate.FIXTURES / "standalone_datasource.tds", content_url="Other"
+    )
+    route = route.format(luid=shared.luid, other_luid=other.luid)
+    setattr(other, field, shared.luid if field == "luid" else value)
+    status, payload = rest_get(site, f"/sites/{site.site_id}/{route}", signed_in(site))
+    assert status == 500
+    assert set(payload) == {"error"}
+
+
+@pytest.mark.parametrize("key", ["pageSize", "pageNumber"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="blank"),
+        pytest.param("0", id="zero"),
+        pytest.param("-1", id="negative"),
+        pytest.param("not-an-integer", id="text"),
+        pytest.param("1.5", id="fraction"),
+        pytest.param("1_0", id="underscore"),
+        pytest.param("+1", id="signed"),
+        pytest.param(" 1", id="whitespace"),
+        pytest.param("\u0661", id="non-ascii"),
+        pytest.param("9" * 5000, id="overlong"),
+    ],
+)
+def test_malformed_pagination_is_a_structured_refusal(site: tableau.TableauSite, key: str, value: str) -> None:
+    """Strict decimal paging: no silent coercion, negative slicing, defaults or ValueError escape."""
+    query = urlencode({key: value})
+    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources?{query}", signed_in(site))
+    assert status == 400
+    assert set(payload) == {"error"}
+
+
+@pytest.mark.parametrize("key", ["pageSize", "pageNumber"])
+@pytest.mark.parametrize("values", [("1", "1"), ("1", "2"), ("2", "1"), ("", "1"), ("1", "")])
+def test_duplicate_pagination_parameters_are_refused(
+    site: tableau.TableauSite, key: str, values: tuple[str, str]
+) -> None:
+    """ASSUMED strict subset: repeated paging keys are ambiguous even when values agree."""
+    query = urlencode([(key, value) for value in values])
+    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources?{query}", signed_in(site))
+    assert status == 400
+    assert set(payload) == {"error"}
+
+
+@pytest.mark.parametrize("cap", [None, 1])
+def test_oversized_page_requests_are_refused_before_the_server_cap(site: tableau.TableauSite, cap: int | None) -> None:
+    """Tableau documents 1000 as the maximum request size; a mock cap must not rescue 1001."""
+    site.page_size = cap
+    token = signed_in(site)
+    path = f"/sites/{site.site_id}/datasources"
+    status, payload = rest_get(site, f"{path}?pageSize=1000", token)
+    assert status == 200
+    assert payload["pagination"]["pageSize"] == str(cap or 1000)
+    status, payload = rest_get(site, f"{path}?pageSize=1001", token)
+    assert status == 403
+    assert set(payload) == {"error"}
+
+
+@pytest.mark.parametrize("filter_value, total", [(None, "1"), ("SalesMaster", "1"), ("absent", "0")])
+def test_out_of_range_pages_are_refused_including_empty_filtered_sets(
+    site: tableau.TableauSite, filter_value: str | None, total: str
+) -> None:
+    """The first empty page is a complete zero; a nonexistent later page is not another success."""
+    token = signed_in(site)
+    path = f"/sites/{site.site_id}/datasources"
+    for number, expected in ((1, 200), (2, 400)):
+        query = {"pageNumber": number}
+        if filter_value is not None:
+            query["filter"] = f"contentUrl:eq:{filter_value}"
+        status, payload = rest_get(site, path + "?" + urlencode(query), token)
+        assert status == expected
+        if expected == 200:
+            assert payload["pagination"] == {"pageNumber": "1", "pageSize": "100", "totalAvailable": total}
+            assert len(payload["datasources"]["datasource"]) == int(total)
+        else:
+            assert set(payload) == {"error"}
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "filter",
+        "filter=",
+        "filter=name:eq:SalesMaster",
+        "filter=contenturl:eq:SalesMaster",
+        "filter=contentUrl:in:SalesMaster",
+        "filter=contentUrl:EQ:SalesMaster",
+        "filter=contentUrl:eq",
+        "filter=contentUrl:eq:",
+        "filter=contentUrl:eq:%20",
+        "filter=contentUrl:eq:SalesMaster:extra",
+        "filter=contentUrl:eq:SalesMaster,contentUrl:eq:Other",
+        "filter=contentUrl:eq:SalesMaster%26contentUrl:eq:Other",
+        "filter=contentUrl:eq:SalesMaster&filter=contentUrl:eq:Other",
+        "filter=contentUrl:eq:SalesMaster&filter=",
+        "Filter=contentUrl:eq:SalesMaster",
+    ],
+)
+def test_unsupported_datasource_filters_are_bad_requests(site: tableau.TableauSite, query: str) -> None:
+    """Unsupported syntax cannot silently become an unfiltered, apparently authoritative catalog."""
+    status, payload = rest_get(site, f"/sites/{site.site_id}/datasources?{query}", signed_in(site))
+    assert status == 400
+    assert "error" in payload
+    assert "datasources" not in payload
+
+
+def test_datasource_detail_agrees_with_list_and_tracks_current_row(site: tableau.TableauSite) -> None:
+    """Detail/list agreement includes current identity and timestamp, not a stale copied row."""
+    shared = site.datasources[0]
+    token = signed_in(site)
+    path = f"/sites/{site.site_id}/datasources"
+    for content_url, updated_at in (("SalesMaster", shared.updated_at), ("RenamedMaster", "2026-03-04T05:06:07Z")):
+        shared.content_url, shared.updated_at = content_url, updated_at
+        status, listing = rest_get(site, path + "?" + urlencode({"filter": f"contentUrl:eq:{content_url}"}), token)
+        detail_status, detail = rest_get(site, f"{path}/{shared.luid}", token)
+        assert status == detail_status == 200
+        row = listing["datasources"]["datasource"][0]
+        assert detail == {"datasource": row}
+        assert (row["id"], row["contentUrl"], row["updatedAt"]) == (shared.luid, content_url, updated_at)
+
+
+def test_fixture_content_url_matches_preserved_workbook_authority(site: tableau.TableauSite) -> None:
+    """Independently read vendor XML: the synthetic metadata edges are not byte-level authority."""
+    fixture_names = ("minimal.twb", "federated_multi_connection.twb", "published_datasource.twb")
+    for workbook, fixture_name in zip(site.workbooks, fixture_names, strict=True):
+        with zipfile.ZipFile(io.BytesIO(workbook.content)) as archive:
+            assert archive.read(fixture_name) == (estate.FIXTURES / fixture_name).read_bytes()
+    with zipfile.ZipFile(io.BytesIO(site.workbooks[2].content)) as archive:
+        root = ElementTree.fromstring(archive.read("published_datasource.twb"))
+    location = root.find("./datasources/datasource/repository-location")
+    assert location is not None
+    content_url = urlparse(location.attrib["derived-from"]).path.rsplit("/", 1)[1]
+    assert content_url == "SalesMaster"
+    assert site.datasources[0].row()["contentUrl"] == content_url
+    assert location.attrib["id"] != content_url
+    assert site.datasources[0].name == "Corporate Cities"
+    assert site.datasources[0].downstream == ["Sales Review", "Ops Dashboard"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/sites/wrong/{users}/user-1",
+        "/sites/{site}/{users}/wrong",
+        "/sites/{site}/{users}/USER-1",
+        "/sites/{site}/{users}/user-1/extra",
+        "/sites/{site}/{users}//user-1",
+        "/sites/wrong/datasources",
+        "/sites/wrong/datasources/{luid}",
+        "/sites/{site}/datasources/unknown",
+        "/sites/{site}/datasources/{upper_luid}",
+        "/sites/{site}/datasources/{luid}/extra",
+        "/sites/{site}/datasources/{luid}/content/extra",
+        "/sites/{site}/datasources//{luid}",
+        "/sites/{site}-wrong/datasources/{luid}",
+        "/sites/wrong/api/{version}/sites/{site}/{users}/user-1",
+        "/sites/{site}/groups/{luid}/content",
+    ],
+)
+def test_authority_routes_reject_wrong_identity_or_extra_segments(site: tableau.TableauSite, path: str) -> None:
+    """Exact site, collection, user/LUID and path arity; no suffix or fallback route."""
+    luid = site.datasources[0].luid
+    path = path.format(site=site.site_id, luid=luid, upper_luid=luid.upper(), version=site.rest_version, users="users")
+    status, payload = rest_get(site, path, signed_in(site))
+    assert status == 404
+    assert "error" in payload
+
+
+@pytest.mark.parametrize(
+    "route", ["users/user-1", "datasources?filter=contentUrl:eq:SalesMaster", "datasources/{luid}"]
+)
+@pytest.mark.parametrize("state, expected", [("missing", 401), ("invalid", 401), ("expired", 401), ("forbidden", 403)])
+def test_authority_routes_keep_auth_failures(site: tableau.TableauSite, route: str, state: str, expected: int) -> None:
+    """New authority routes must still enforce the mock's token and permission controls."""
+    path = f"/sites/{site.site_id}/" + route.format(luid=site.datasources[0].luid)
+    token = signed_in(site)
+    if state in {"missing", "invalid"}:
+        token = "" if state == "missing" else "not-a-token"
+    elif state == "expired":
+        site.expire_session()
+    else:
+        site.forbid(path.split("?")[0])
+    status, payload = rest_get(site, path, token)
+    assert status == expected
+    assert "error" in payload
+    if state == "expired":
+        assert payload["error"]["code"] == "401002"
+
+
+@pytest.mark.parametrize("route", ["users/user-1", "datasources", "datasources/{luid}"])
+def test_authority_routes_do_not_accept_other_http_methods(site: tableau.TableauSite, route: str) -> None:
+    """A valid path must not turn an unsupported method into a successful read."""
+    route = route.format(luid=site.datasources[0].luid)
+    status, _headers, _body = site.handle(
+        "POST",
+        f"http://x/api/{site.rest_version}/sites/{site.site_id}/{route}",
+        {"x-tableau-auth": signed_in(site)},
+        b"",
+    )
+    assert status == 405
+
+
+def test_real_client_reaches_user_filtered_list_and_datasource_detail(served) -> None:
+    """Unmodified assess client -> urllib -> loopback HTTP -> the same strict router."""
+    site, base = served
+    shared = site.datasources[0]
+    site.datasource("SalesMaster", site.projects[0], estate.FIXTURES / "standalone_datasource.tds", content_url="Other")
+    client = ae.Site(tableau.env_for(site, base))
+    client.sign_in()
+    prefix = f"/sites/{client.site_id}"
+    user_path = "/".join((prefix, "users", "user-1"))
+    list_path = f"{prefix}/datasources?" + urlencode(
+        {"filter": "contentUrl:eq:SalesMaster", "pageSize": 1000, "pageNumber": 1}
+    )
+    detail_path = f"{prefix}/datasources/{shared.luid}"
+    assert client.get(user_path) == {"user": {"id": "user-1", "siteRole": "SiteAdministratorExplorer"}}
+    listing = client.get(list_path)
+    assert listing["pagination"] == {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "1"}
+    rows = listing["datasources"]["datasource"]
+    assert len(rows) == 1
+    assert (rows[0]["id"], rows[0]["contentUrl"], rows[0]["updatedAt"]) == (
+        shared.luid,
+        "SalesMaster",
+        "2026-02-03T04:05:06Z",
+    )
+    assert client.get(detail_path) == {"datasource": rows[0]}
+    missing = client.get(f"{prefix}/datasources?filter=contentUrl:eq:salesmaster&pageSize=1000&pageNumber=1")
+    assert missing == {
+        "pagination": {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "0"},
+        "datasources": {"datasource": []},
+    }
+    all_rows, error = client.paged(f"{prefix}/datasources", "datasources", "datasource")
+    assert error is None
+    assert len(all_rows) == 2
+    for path in (user_path, list_path, detail_path):
+        assert ("GET", f"/api/{site.rest_version}{path}") in site.requests
+    client.sign_out()
+
+
+def test_real_client_refuses_detail_query_parameters(served) -> None:
+    """Bad detail queries must be HTTP refusals over loopback, not unfiltered successful reads."""
+    site, base = served
+    client = ae.Site(tableau.env_for(site, base))
+    client.sign_in()
+    for route in ("users/user-1", f"datasources/{site.datasources[0].luid}"):
+        path = f"/sites/{client.site_id}/{route}"
+        assert client.get(path) is not None
+        for query in (
+            "filter=contentUrl:eq:SalesMaster",
+            "unknown=1",
+            "pageSize=1",
+            "pageNumber=1",
+            "filter=",
+            "=value",
+        ):
+            payload, error = client.get_checked(f"{path}?{query}")
+            assert payload is None, (route, query)
+            assert error is not None and error["status"] == 400, (route, query, error)
+            assert error["transport"] is False
+    client.sign_out()
+
+
+def test_real_client_receives_structured_pagination_refusals(served) -> None:
+    """Malformed pagination cannot crash the HTTP handler or arrive as a successful empty list."""
+    site, base = served
+    client = ae.Site(tableau.env_for(site, base))
+    client.sign_in()
+    path = f"/sites/{client.site_id}/datasources"
+    assert client.get(f"{path}?pageSize=1000&pageNumber=1") is not None
+    for query, expected in (
+        ("pageSize=0", 400),
+        ("pageNumber=0", 400),
+        ("pageSize=not-an-integer", 400),
+        ("pageNumber=not-an-integer", 400),
+        ("pageSize=", 400),
+        ("pageNumber=", 400),
+        ("pageSize=1&pageSize=1", 400),
+        ("pageNumber=1&pageNumber=1", 400),
+        ("pageNumber=2", 400),
+        ("pageSize=1001", 403),
+    ):
+        payload, error = client.get_checked(f"{path}?{query}")
+        assert payload is None, query
+        assert error is not None and error["status"] == expected, (query, error)
+        assert error["transport"] is False
+    client.sign_out()
+
+
 # ------------------------------------------------------------------- download
+
+
+def test_harvest_composes_production_luid_filenames(site, tmp_path, monkeypatch) -> None:
+    """Use the production helper, with independently expected names and collision-safe LUIDs."""
+    calls = []
+    asset_path = hea.asset_path
+
+    def record_path(assets_dir: Path, kind: str, name: str, luid: str) -> Path:
+        calls.append((assets_dir, kind, name, luid))
+        return asset_path(assets_dir, kind, name, luid)
+
+    monkeypatch.setattr(hea, "asset_path", record_path)
+    site.workbooks[0].name = "Same/Name"
+    site.workbooks[1].name = "Same?Name"
+    site.workbooks[2].name = "A" * 61
+    site.mint_token()
+    paths = estate.harvest(site, tmp_path)
+    expected = [
+        f"{site.workbooks[0].luid}_Same_Name.twbx",
+        f"{site.workbooks[1].luid}_Same_Name.twbx",
+        f"{site.workbooks[2].luid}_{'A' * 60}.twbx",
+        f"{site.datasources[0].luid}_Corporate_Cities.tdsx",
+    ]
+    assert [path.name for path in paths] == expected
+    assert calls == [
+        (tmp_path / "assets", kind, asset.name, asset.luid)
+        for kind, assets in (("workbook", site.workbooks), ("datasource", site.datasources))
+        for asset in assets
+    ]
+    assert [path.read_bytes() for path in paths] == [asset.content for asset in [*site.workbooks, *site.datasources]]
+
+
+@pytest.mark.parametrize(
+    "filename, expected",
+    [
+        ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa_Sales_Review.twbx", "Sales_Review"),
+        ("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA_Sales_Review.twb", "Sales_Review"),
+        ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-Sales_Review.tdsx", "Sales_Review"),
+        ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa Sales_Review.tds", "Sales_Review"),
+        ("Sales_Review.twbx", "Sales_Review"),
+        ("Sales.v1.2.twbx", "Sales.v1.2"),
+        ("aaaaaaaa-aaaa_Sales_Review.twbx", "aaaaaaaa-aaaa_Sales_Review"),
+        ("aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa_Sales.twbx", "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa_Sales"),
+        ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaaSales.twbx", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaaSales"),
+        ("Sales--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.twbx", "Sales--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+    ],
+)
+def test_fake_engine_strips_only_a_canonical_uuid_prefix(tmp_path, filename: str, expected: str) -> None:
+    """Exercise the emitted engine's naming seam, not a second test-side naming implementation."""
+    engine = estate.install_fake_engine(tmp_path / "engine")
+    namespace = runpy.run_path(str(engine / "skills" / "tableau-migration" / "scripts" / "migrate_estate.py"))
+    assert namespace["LocalFilesSource"].asset_name(Path(filename)) == expected
+
+
+@pytest.mark.parametrize("content_url", ["ProjectedSite", ""])
+def test_published_source_projection_uses_active_origin_and_site(content_url: str) -> None:
+    """Only opt-in served bytes move; committed fixtures and unrelated archives stay unchanged."""
+    site = estate.build_site(content_url=content_url)
+    original = [workbook.content for workbook in site.workbooks]
+    fixtures = {
+        name: (estate.FIXTURES / name).read_bytes()
+        for name in ("minimal.twb", "federated_multi_connection.twb", "published_datasource.twb")
+    }
+    site.datasources[0].content_url = "DifferentCatalogEntry"
+    with tableau.serve(site) as base:
+        estate.project_published_sources(site, base)
+        assert [workbook.content for workbook in site.workbooks[:2]] == original[:2]
+        workbook = site.workbooks[2]
+        assert workbook.content != original[2]
+        with zipfile.ZipFile(io.BytesIO(workbook.content)) as archive:
+            assert archive.namelist() == ["published_datasource.twb"]
+            root = ElementTree.fromstring(archive.read("published_datasource.twb"))
+        location = root.find("./datasources/datasource/repository-location")
+        connection = root.find("./datasources/datasource/connection")
+        assert location is not None and connection is not None
+        path = f"/t/{content_url}/datasources" if content_url else "/datasources"
+        assert location.attrib == {
+            "derived-from": f"{base}{path}/SalesMaster?rev=1.0",
+            "id": "SalesMaster_oldname",
+            "path": path,
+            "revision": "1.0",
+            "site": content_url,
+        }
+        assert connection.attrib == {"class": "sqlproxy", "dbname": "SalesMaster", "server": base}
+        client = ae.Site(tableau.env_for(site, base))
+        client.sign_in()
+        request = Request(
+            f"{base}/api/{site.rest_version}/sites/{site.site_id}/workbooks/{workbook.luid}/content",
+            headers={"X-Tableau-Auth": client.token},
+        )
+        with urlopen(request, timeout=5) as response:
+            assert response.status == 200
+            assert response.read() == workbook.content
+        client.sign_out()
+    assert site.datasources[0].downstream == ["Sales Review", "Ops Dashboard"]
+    assert {name: (estate.FIXTURES / name).read_bytes() for name in fixtures} == fixtures
+    default_site = estate.build_site()
+    for workbook, fixture in zip(default_site.workbooks, fixtures, strict=True):
+        with zipfile.ZipFile(io.BytesIO(workbook.content)) as archive:
+            assert archive.read(fixture) == fixtures[fixture]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://tableau.contoso.com",
+        "http://127.0.0.1",
+        "http://127.0.0.1:9/foreign",
+        "http://127.0.0.1:9?foreign=1",
+        "http://127.0.0.1:9#foreign",
+        "http://user@127.0.0.1:9",
+    ],
+)
+def test_published_source_projection_refuses_non_loopback_origins(site, base_url: str) -> None:
+    """Projection cannot turn an accidental real-host/base-path argument into served authority."""
+    original = [workbook.content for workbook in site.workbooks]
+    with pytest.raises(ValueError, match="loopback origin"):
+        estate.project_published_sources(site, base_url)
+    assert [workbook.content for workbook in site.workbooks] == original
 
 
 def test_content_download_returns_a_real_packaged_workbook(site):
@@ -219,7 +900,7 @@ def test_the_download_header_uses_tableaus_non_standard_name_form(site):
 def test_a_downloaded_workbook_parses_with_the_real_parser(site, tmp_path):
     """End of the honesty chain: served bytes -> file -> this repo's own parser."""
     sys.path.insert(0, str(ROOT / "scripts"))
-    from parse_tableau import parse_workbook  # noqa: PLC0415
+    from parse_tableau import parse_workbook  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
     target = tmp_path / "wb.twbx"
     target.write_bytes(site.workbooks[0].content)
@@ -228,6 +909,7 @@ def test_a_downloaded_workbook_parses_with_the_real_parser(site, tmp_path):
 
 
 def test_a_missing_luid_is_a_404_not_an_empty_download(site):
+    """Content downloads must not manufacture bytes for unknown workbook identities."""
     token = signed_in(site)
     status, _headers, _payload = site.handle(
         "GET",
@@ -307,7 +989,7 @@ def test_the_real_assessment_runs_end_to_end_against_the_mock(served, tmp_path):
 
 def test_the_estate_db_carries_the_nested_project_tree(served, tmp_path):
     """The deploy step mirrors folders FROM this table, so the nesting has to survive the write."""
-    import sqlite3  # noqa: PLC0415
+    import sqlite3  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
     site, base = served
     client = ae.Site(tableau.env_for(site, base))
@@ -325,7 +1007,7 @@ def test_the_estate_db_carries_the_nested_project_tree(served, tmp_path):
 # --------------------------------------------------------------- the loud gate
 
 
-def test_running_an_engine_script_without_the_pat_variable_fails_loudly(monkeypatch):
+def test_running_an_engine_script_without_the_pat_variable_fails_loudly():
     """MEASURED, and it cost 13 minutes of a real session.
 
     ``estate_survey.py`` resolves its secret through ``credential_resolver``, whose last layer is a
@@ -356,6 +1038,7 @@ def test_the_mock_never_points_at_a_real_host(site):
 
 
 def test_the_server_really_is_loopback_only(served):
+    """No externally reachable bind address is used by the HTTP fixture."""
     site, base = served
     del site
     assert base.startswith("http://127.0.0.1:")

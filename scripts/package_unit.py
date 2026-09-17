@@ -217,6 +217,7 @@ from collections import Counter
 from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, NamedTuple
@@ -225,6 +226,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import read_handover  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_env  # noqa: E402  # pylint: disable=wrong-import-position
+import tableau_view_types  # noqa: E402  # pylint: disable=wrong-import-position
+import reference_evidence  # noqa: E402  # pylint: disable=wrong-import-position
 import package_filesystem as pfs  # noqa: E402  # pylint: disable=wrong-import-position
 import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-import-position
 import credential_gate as data_access  # noqa: E402  # pylint: disable=wrong-import-position
@@ -746,6 +750,7 @@ class _ConstructionAttempt:  # pylint: disable=too-many-instance-attributes
     candidate: _NativeDirectory | None = None
     manifest_sha256: str | None = None
     result: dict[str, Any] | None = None
+    fresh_target_only: bool = False
     findings: list[str] = field(default_factory=list)
 
 
@@ -2079,7 +2084,8 @@ expected set is every dashboard PLUS every worksheet not placed on one.
 | `migration-brief.md` | **what this migration is FOR**, copied from the dispatcher: scope, fidelity bar, autonomy, refresh strategy, and what was pre-authorized if we hit a wall. A copy, so it travels with the package; the dispatcher's own file stays authoritative and its path is deliberately not recorded here. Absent only when the packager was given none - `package-manifest.json`'s notes then say so. |
 | `data-access.json` | The strict nine-field authority projection, declared as `artifacts.data_access` and hashed in `contents.files`. Blocked/cannot-establish never mean ready; authorized model-only remains **UNVALIDATED**, with a structural-only ceiling. |
 | `migration-spec.schema.json` | the CONTRACT `validate_spec.py` enforces. Read it before appending a `limitations_encountered` entry: exactly `item`/`issue`/`severity`/`stage`, `additionalProperties: false`, so one invented field rejects every entry. |
-| `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). **`oracle/*/data/*.csv` is the NUMERIC oracle** - exact labels and figures, no OCR and no judgement. Read it first. |
+| `reference/` | explicitly supplied original Tableau screenshots plus their existing `manifest.json`; only manifest-declared image bytes are copied. The manifest's source/image hashes, provider, kind and capability ceiling are preserved rather than restamped. |
+| `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). `oracle/*/data/*.csv` is the NUMERIC oracle - exact labels and figures, no OCR and no judgement. |
 | `report.json` | **gate input, and readable.** The engine's classification of THIS unit - workbook vs datasource - which is what earns a datasource-only unit `NOT_APPLICABLE` instead of a finding. Scoped to this unit. |
 | `source-provenance.json` | **gate input.** The only trusted route from this package's asset to a Tableau workbook LUID, keyed by the asset's sha256; `origin.match` decides whether a render can be trusted - see UNFIXABLE below. An entry ships only when attribution was NOT refused (`scope.suppressed_reason`). |
 | `engine-output-receipt.json` | **read `engine.version` when a result looks wrong** - it establishes which engine built this, so version drift stays checkable months later. Install paths are not shipped. |
@@ -2091,6 +2097,8 @@ of byte-faithfulness - see `ORACLE_ATTRIBUTION ... match=` in `handover.md`, and
 `limitations_encountered`. The `.png` is the only leg you can LOOK at; the `.svg` carries labels and
 values as greppable `<text>` elements, except where labels render as paths - zero text is not zero
 content.
+
+{numeric_guidance}
 
 ## UNFIXABLE FROM THIS PACKAGE
 
@@ -2106,6 +2114,226 @@ can NEVER exit 0 from this package alone. Log it; this does not waive the data-a
 # --------------------------------------------------------------------------------------------
 # packaging one unit
 # --------------------------------------------------------------------------------------------
+
+
+def _require_reference_local(path: Path) -> None:
+    try:
+        tableau_oracle_manifest.require_local_recovery_path(path)
+    except tableau_oracle_manifest.OracleRecoveryRefusal as error:
+        raise PackagingError("reference_path_unsafe") from error
+
+
+def _reference_location(path: Path) -> Path:
+    _require_reference_local(path)
+    try:
+        return _report_location(path)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise PackagingError("reference_path_unsafe") from error
+
+
+def _admit_reference_root(reference_dir: Path, out_root: Path, unit: str) -> Path:
+    """Reject links and lexical/native overlap before opening a reference or touching working trees."""
+    reference = _reference_location(reference_dir)
+    locations = tuple(_reference_location(root) for root in (out_root, *package_roots(out_root, unit)))
+    try:
+        if _construction_directory(reference) is None:
+            raise PackagingError("reference_path_unsafe")
+        source_identity = _report_entry_identity(reference)
+        source_ancestors = {_report_entry_identity(parent) for parent in reference.parents}
+        observations = [
+            (
+                location,
+                _report_entry_identity(location),
+                {_report_entry_identity(parent) for parent in location.parents},
+            )
+            for location in locations
+        ]
+    except (OSError, RuntimeError, ValueError) as error:
+        raise PackagingError("reference_path_unsafe") from error
+    for location, identity, ancestors in observations:
+        if (
+            reference.is_relative_to(location)
+            or location.is_relative_to(reference)
+            or (identity is not None and identity in {source_identity, *source_ancestors})
+            or source_identity in ancestors
+        ):
+            raise PackagingError("reference_source_overlap")
+    return reference
+
+
+def _reference_image(reference_dir: Path, image: Any) -> Path:
+    if not isinstance(image, str) or not pfs.is_canonical_key(image) or pfs.alias_key(image) == "manifest.json":
+        raise PackagingError("reference_image_path_unsafe")
+    origin = _reference_location(reference_dir / PurePosixPath(image))
+    if not origin.is_relative_to(reference_dir):
+        raise PackagingError("reference_path_unsafe")
+    try:
+        regular = stat.S_ISREG(origin.lstat().st_mode)
+    except OSError:
+        regular = False
+    if not regular:
+        raise PackagingError(f"reference_image_missing_or_unsafe: {image}: capture path does not resolve to a file")
+    return origin
+
+
+_REFERENCE_LUID_FIELDS = frozenset({"workbook_luid", "source_workbook_luid"})
+_REFERENCE_KIND_FIELDS = frozenset({"view_type", "object_type"})
+
+
+def _reference_contract_fields(record: dict[str, Any], required: set[str], optional: frozenset[str]) -> None:
+    if not required <= set(record) <= required | optional:
+        raise PackagingError("reference_manifest_contract")
+    for key in _REFERENCE_LUID_FIELDS & record.keys():
+        value = record[key]
+        if value is not None and not (
+            isinstance(value, str) and value == value.strip().lower() and tableau_view_types.is_luid(value)
+        ):
+            raise PackagingError("reference_manifest_contract")
+    for key in _REFERENCE_KIND_FIELDS & record.keys():
+        if record[key] not in (KIND_DASHBOARD, KIND_WORKSHEET):
+            raise PackagingError("reference_manifest_contract")
+
+
+def _reference_strings_safe(value: Any) -> bool:
+    """Use the shipping privacy authorities, rejecting rather than redacting held original bytes."""
+    if isinstance(value, str):
+        return (
+            len(value) <= 1024
+            and value.isprintable()
+            and not discloses_host_location(value)
+            and not tableau_env.contains_credential(value)
+        )
+    if isinstance(value, dict):
+        return all(_reference_strings_safe(key) and _reference_strings_safe(item) for key, item in value.items())
+    if isinstance(value, list):
+        return all(_reference_strings_safe(item) for item in value)
+    return True
+
+
+def _reference_state_contract(state: dict[str, Any]) -> None:
+    _reference_contract_fields(
+        state,
+        {"state_slug", "state", "image", "provider", "capabilities", "dimensions", "sha256", "numeric_oracle"},
+        _REFERENCE_LUID_FIELDS | _REFERENCE_KIND_FIELDS | {"bytes"},
+    )
+    capabilities = state["capabilities"]
+    if (
+        state["state_slug"] != "default"
+        or state["state"] != {}
+        or state["numeric_oracle"] is not None
+        or state["provider"] not in ("manual", "public_playwright", "embedded_thumbnail")
+    ):
+        raise PackagingError("reference_manifest_contract")
+    if (
+        not isinstance(capabilities, list)
+        or not capabilities
+        or any(cap not in (reference_evidence.CAP_LAYOUT, reference_evidence.CAP_TEXT) for cap in capabilities)
+        or len(set(capabilities)) != len(capabilities)
+        or reference_evidence.provider_grade(state["provider"], capabilities).startswith("!")
+    ):
+        raise PackagingError("reference_manifest_contract")
+    if (
+        not isinstance(state["image"], str)
+        or PurePosixPath(state["image"]).suffix.lower() != ".png"
+        or not isinstance(state["sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", state["sha256"]) is None
+    ):
+        raise PackagingError("reference_manifest_contract")
+    dimensions = state["dimensions"]
+    if not isinstance(dimensions, dict) or not {"w", "h"} <= set(dimensions) <= {"w", "h", "dpr"}:
+        raise PackagingError("reference_manifest_contract")
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value <= 0
+        for value in (dimensions["w"], dimensions["h"], *([state["bytes"]] if "bytes" in state else []))
+    ):
+        raise PackagingError("reference_manifest_contract")
+    if "dpr" in dimensions:
+        dpr = dimensions["dpr"]
+        if not isinstance(dpr, (int, float)) or isinstance(dpr, bool) or dpr <= 0:
+            raise PackagingError("reference_manifest_contract")
+
+
+def _validate_reference_contract(payload: dict[str, Any]) -> None:
+    """Closed capture format plus known identity enrichment; no numeric or filter-state authority."""
+    _reference_contract_fields(payload, {"captured_at", "source_workbook_sha256", "dashboards"}, _REFERENCE_LUID_FIELDS)
+    digest = payload["source_workbook_sha256"]
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise PackagingError("reference_manifest_contract")
+    timestamp = payload["captured_at"]
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00")) if isinstance(timestamp, str) else None
+    except ValueError:
+        parsed = None
+    if (
+        parsed is None
+        or parsed.tzinfo != timezone.utc
+        or parsed.isoformat().replace("+00:00", "Z") != timestamp
+        or not _reference_strings_safe(payload)
+    ):
+        raise PackagingError("reference_manifest_contract")
+    for entry in payload["dashboards"]:
+        _reference_contract_fields(entry, {"name", "states"}, _REFERENCE_LUID_FIELDS | _REFERENCE_KIND_FIELDS)
+        if not isinstance(entry["name"], str) or not entry["name"].strip():
+            raise PackagingError("reference_manifest_contract")
+        for state in entry["states"]:
+            _reference_state_contract(state)
+            kinds = {record[key] for record in (entry, state) for key in _REFERENCE_KIND_FIELDS & record.keys()}
+            if len(kinds) > 1:
+                raise PackagingError("reference_manifest_contract")
+
+
+def _read_reference(reference_dir: Path) -> dict[str, bytes]:  # pylint: disable=too-many-locals
+    """Admit the manifest before reading it, then all declared regular members before construction."""
+    manifest_path = _reference_location(reference_dir / "manifest.json")
+    if not manifest_path.is_relative_to(reference_dir):
+        raise PackagingError("reference_path_unsafe")
+    try:
+        if not stat.S_ISREG(manifest_path.lstat().st_mode):
+            raise PackagingError("reference_path_unsafe")
+        raw = manifest_path.read_bytes()
+        payload = pfs.parse_manifest_text(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, pfs._ManifestError) as error:  # pylint: disable=protected-access
+        raise PackagingError("reference_manifest_unreadable") from error
+    if not isinstance(payload, dict) or not isinstance(payload.get("dashboards"), list):
+        raise PackagingError("reference_manifest_malformed")
+    dashboards = payload["dashboards"]
+    if not dashboards:
+        raise PackagingError("reference_manifest_empty")
+    records: list[dict[str, Any]] = []
+    for dashboard in dashboards:
+        if not isinstance(dashboard, dict) or not isinstance(dashboard.get("states"), list):
+            raise PackagingError("reference_manifest_malformed")
+        states = dashboard["states"]
+        if not states:
+            raise PackagingError("reference_manifest_empty")
+        if any(not isinstance(state, dict) for state in states):
+            raise PackagingError("reference_manifest_malformed")
+        records.extend(states)
+    _validate_reference_contract(payload)
+    members: dict[str, Path] = {}
+    for state in records:
+        image = state["image"]
+        origin = _reference_image(reference_dir, image)
+        if any(pfs.alias_key(image) == pfs.alias_key(other) and image != other for other in members):
+            raise PackagingError("reference_image_path_unsafe")
+        members[image] = origin
+    try:
+        content = {relative: origin.read_bytes() for relative, origin in members.items()}
+    except OSError as error:
+        raise PackagingError("reference_image_unreadable") from error
+    return {"manifest.json": raw, **content}
+
+
+def _stage_reference(reference: dict[str, bytes] | None, dest: Path) -> None:
+    """Copy only the admitted original bytes, never re-open an input after scratch cleanup."""
+    if reference is None:
+        return
+    target = dest / "reference"
+    target.mkdir(parents=True, exist_ok=True)
+    for relative, content in reference.items():
+        landing = target / PurePosixPath(relative)
+        landing.parent.mkdir(parents=True, exist_ok=True)
+        landing.write_bytes(content)
 
 
 def _copy_fabric(bundle: Path, unit: str, dest: Path) -> tuple[str | None, str | None]:
@@ -3984,6 +4212,7 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
     brief: Path | None = None,
     gate_root: Path | None = None,
     provider_packages: Sequence[Path] = (),
+    reference_dir: Path | None = None,
     discard_edits: bool = False,
     limits: Limits | None = None,
     completion: _ConstructionSlot | None = None,
@@ -4039,9 +4268,31 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
     error: BaseException | None = None
     try:
         try:
+            if reference_dir is not None:
+                _require_reference_local(reference_dir)
             limits = platform_limits() if limits is None else limits
+            reference = None
+            if reference_dir is not None:
+                if discard_edits:
+                    raise PackagingError("reference_conflicts_with_discard_package_edits")
+                reference_dir = _admit_reference_root(reference_dir, out_root, unit)
             final = assert_package_destination(out_root, unit)
             attempt.final = final
+            if reference_dir is not None:
+                attempt.fresh_target_only = True
+                if os.path.lexists(final):
+                    raise PackagingError("reference_requires_fresh_target")
+                engine_report = read_json(bundle / "report.json")
+                if not isinstance(engine_report, dict):
+                    raise PackagingError("reference_report_unreadable")
+                workbooks, datasources = engine_unit_names(engine_report)
+                identity = _ConstructionSlot(unit)
+                _identity_preflight((identity,), workbooks, datasources, out_root)
+                if identity.outcome is not None and identity.outcome.failure is not None:
+                    raise identity.outcome.failure
+                if unit not in workbooks:
+                    raise PackagingError("reference_requires_one_workbook_unit")
+                reference = _read_reference(reference_dir)
             prepared_brief = _prepare_brief(bundle, unit, assets_dir, brief)
             budget = path_budget(bundle, unit, out_root, limits=limits, assets_dir=assets_dir)
             if budget.refused:
@@ -4066,6 +4317,7 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
                 final=final,
                 oracle_dir=oracle_dir,
                 assets_dir=assets_dir,
+                reference=reference,
                 brief=prepared_brief,
                 gate_root=gate_root,
                 provider_packages=_external_providers(provider_packages, out_root, [unit]),
@@ -4113,6 +4365,8 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
 
 
 def _verify_construction_destination(attempt: _ConstructionAttempt) -> None:
+    if attempt.fresh_target_only and attempt.final is not None and os.path.lexists(attempt.final):
+        raise PackagingError("reference_requires_fresh_target")
     current = _claim_construction_directory(attempt, attempt.final, attempt.prior)
     if attempt.prior is None and current is not None:
         raise PackagingError("construction_destination_changed")
@@ -5175,6 +5429,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     final: Path,
     oracle_dir: Path | None,
     assets_dir: Path | None,
+    reference: dict[str, bytes] | None = None,
     brief: bytes | None = None,
     gate_root: Path | None = None,
     provider_packages: Sequence[Path] = (),
@@ -5245,6 +5500,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
         write_json(dest / "engine-output-receipt.json", receipt)
 
     oracle = _attach_oracle(oracle_dir, oracle_identity, dest, unit)
+    _stage_reference(reference, dest)
     spec, spec_note = _write_spec(asset, dest)
     if spec_note:
         notes.append(spec_note)
@@ -5288,6 +5544,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
             "report": f"fabric/{report_name}" if report_name else None,
             "model": f"fabric/{model_name}" if model_name else None,
             "handover": f"handover/{unit}.json" if isinstance(handover, dict) else None,
+            "reference": "reference" if reference is not None else None,
         },
         "model_binding": binding,
         "workbook_identity": identity,
@@ -5309,6 +5566,22 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
     result["notes"].extend([notice, *data_notes, DATA_ACCESS_PENDING])
     report_dir = dest / "fabric" / report_name if report_name else None
     workbook = _handover_workbook(handover, unit, dest)
+    policy = inputs.roles[-1].brief_policy if inputs.roles else None
+    obligation = policy.numeric_obligation if policy is not None else None
+    numeric_guidance = {
+        "none": (
+            "Numeric obligation: **none** in the explicit commissioned brief. Numeric comparison is optional "
+            "and does not block otherwise permitted layout/text work; this does not waive any other gate."
+        ),
+        "required": (
+            "Numeric obligation: **required** in the explicit commissioned brief. Compare the applicable "
+            "numeric oracle before claiming completion; missing CSV evidence does not waive this obligation."
+        ),
+    }.get(
+        obligation,
+        "Numeric obligation: **unknown**. Do not infer `none` from missing CSV or screenshots; "
+        "the numeric gate remains unresolved.",
+    )
     generated = {
         DATA_ACCESS_NAME: assessment.dumps().encode("utf-8"),
         "handover.md": render_handover(result, workbook, visual_pages(report_dir)).encode("utf-8"),
@@ -5319,6 +5592,7 @@ def _assemble_unit(  # pylint: disable=too-many-locals,too-many-arguments,too-ma
             unavailable=UNAVAILABLE_TOKEN,
             data_access=notice,
             data_access_pending=DATA_ACCESS_PENDING,
+            numeric_guidance=numeric_guidance,
         ).encode("utf-8"),
     }
     _write_data_access_final(dest, result, snapshot, generated)
@@ -6419,6 +6693,7 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
     out_root: Path,
     oracle_dir: Path | None,
     assets_dir: Path | None,
+    reference_dir: Path | None,
     discard_edits: bool,
     brief: Path | None = None,
     gate_root: Path | None = None,
@@ -6448,6 +6723,7 @@ def _package_each(  # pylint: disable=too-many-arguments,too-many-positional-arg
                     out_root,
                     oracle_dir=oracle_dir,
                     assets_dir=assets_dir,
+                    reference_dir=reference_dir,
                     brief=brief,
                     gate_root=gate_root,
                     provider_packages=tuple(providers),
@@ -6545,8 +6821,25 @@ def _report_entry_identity(path: Path) -> tuple[int, int] | None:
     return identity
 
 
-def _admit_report_destination(path: Path, out_root: Path, selected: Sequence[str], brief: Path | None) -> Path:
-    """Keep the caller's report outside held brief/package addresses before any mkdir or publication."""
+def _admit_report_reference(report: Path, report_id: tuple[int, int] | None, reference_dir: Path | None) -> None:
+    """Prove report/source disjointness without reading any reference contents."""
+    if reference_dir is None:
+        return
+    reference = _reference_location(reference_dir)
+    if report.is_relative_to(reference):
+        raise ValueError("report_destination_unsafe")
+    if report_id is not None:
+        members, findings, _empty = pfs.walk_package(reference)
+        if findings:
+            raise ValueError("report_destination_unassessable")
+        if any(_report_entry_identity(member) == report_id for member in members.values()):
+            raise ValueError("report_destination_unsafe")
+
+
+def _admit_report_destination(
+    path: Path, out_root: Path, selected: Sequence[str], brief: Path | None, reference_dir: Path | None = None
+) -> Path:
+    """Keep reports outside brief/reference/package addresses before any input read or publication."""
     report = _report_location(path)
     out_root = _report_location(out_root)
     report_id = _report_entry_identity(report)
@@ -6556,6 +6849,7 @@ def _admit_report_destination(path: Path, out_root: Path, selected: Sequence[str
     )
     if reserved or report == out_root or (report_id is not None and not stat.S_ISREG(report.lstat().st_mode)):
         raise ValueError("report_destination_unsafe")
+    _admit_report_reference(report, report_id, reference_dir)
     if brief is not None:
         brief = _report_location(brief)
         if report == brief or (report_id is not None and report_id == _report_entry_identity(brief)):
@@ -6564,8 +6858,7 @@ def _admit_report_destination(path: Path, out_root: Path, selected: Sequence[str
     roots = []
     for unit in selected:
         if unit_name_problem(unit) is None:
-            final = out_root / unit
-            roots.extend(_report_location(root) for root in (final, staging_dir(out_root, unit), retired_dir(final)))
+            roots.extend(_report_location(root) for root in package_roots(out_root, unit))
     if any(report.is_relative_to(root) for root in roots):
         raise ValueError("report_destination_unsafe")
 
@@ -6600,6 +6893,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, required=True, help="directory to write <Unit>/ packages into")
     parser.add_argument("--unit", action="append", default=[], help="package only this unit (repeatable)")
     parser.add_argument("--oracle", type=Path, help="oracle capture holding oracle-manifest.json")
+    parser.add_argument(
+        "--reference",
+        type=Path,
+        help="existing reference directory holding the current manifest.json and its declared original images",
+    )
     parser.add_argument("--assets", type=Path, help="directory holding the harvested .twb/.twbx/.tds assets")
     parser.add_argument(
         "--brief",
@@ -6627,7 +6925,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json",
         type=Path,
         help=(
-            "replace the construction report even on brief refusal; a brief/output/package/transaction collision "
+            "replace the construction report even on brief refusal; a reference/brief/output/package/transaction "
+            "collision "
             "or an unassessable alias is a usage error before writes. Package-marker and reserved scratch segments "
             "beneath --out are forbidden even for unselected units; ordinary reporting directories and "
             "non-aliasing external reports are allowed"
@@ -6768,6 +7067,11 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     parser = _build_parser()
     args = parser.parse_args(argv)
 
+    if args.reference is not None:
+        try:
+            _require_reference_local(args.reference)
+        except PackagingError:
+            parser.error("--reference requires a local ordinary reference directory")
     bundle = args.bundle.resolve()
     if not bundle.is_dir():
         parser.error(f"--bundle {args.bundle} is not a directory")
@@ -6781,10 +7085,15 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     unknown = [unit for unit in units if unit not in available]
     if unknown:
         parser.error(f"the bundle's report.json and pbip/ know nothing of: {', '.join(sorted(unknown))}")
+    if args.reference is not None:
+        if args.discard_package_edits:
+            parser.error("--reference cannot be combined with --discard-package-edits")
+        if len(units) != 1 or units[0] not in workbooks:
+            parser.error("--reference requires exactly one selected workbook unit")
 
     if args.json is not None:
         try:
-            args.json = _admit_report_destination(args.json, args.out, units, args.brief)
+            args.json = _admit_report_destination(args.json, args.out, units, args.brief, args.reference)
         except (OSError, RuntimeError, ValueError, PackagingError):
             parser.error("--json destination is unsafe or unassessable; choose a separate ordinary report file")
 
@@ -6808,7 +7117,10 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
         else:
             # The constructor validates and holds a single brief before its first mkdir. Do not
             # eagerly create --out here, or a refused brief would still leave package output.
-            out_root = args.out.resolve() if args.brief is not None else _prepare_out(args.out)
+            if args.reference is not None:
+                out_root = args.out.absolute()
+            else:
+                out_root = args.out.resolve() if args.brief is not None else _prepare_out(args.out)
             budgets = _measure_unit_budgets(bundle, slots, out_root, assets_dir)
             _warn_shipping(budgets)
             _package_each(
@@ -6817,6 +7129,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
                 out_root,
                 oracle_dir,
                 assets_dir,
+                args.reference,
                 args.discard_package_edits,
                 brief=args.brief,
                 gate_root=args.gate_root,

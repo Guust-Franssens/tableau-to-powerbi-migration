@@ -194,6 +194,17 @@ original dashboards belongs to their respective Tableau Public authors.
 | [`.github/{agents,skills}/`](.github/) | The Copilot agent personas and reusable knowledge bundles. |
 | `_runs/<NNN>-<slug>/` | Per-run working state — the first two phases below. Gitignored by construction (`/_*`), but **not disposable**: only its `scratch/` subdir is, and a whole run becomes safe to delete only after its units are promoted and verified. |
 
+### Where are my migration files?
+
+When the dispatcher creates or explicitly resumes a run, setup automatically attempts to write the
+checkout-root `_MIGRATION.md`: a Git-ignored pointer to that selected run's expected bundle,
+Tableau-reference and package locations. A successful allocation can carry a navigation warning,
+leaving the note stale or absent; do not reallocate for it. It is only a local navigation snapshot,
+not readiness/current-run authority, and empty destinations are not generated artifacts.
+Unmarked collisions, including an empty/partial note whose generator marker was lost, are preserved
+and need explicit recovery: inspect and preserve the file, then deliberately clear the collision
+before setup reselects the existing run.
+
 ## The three-phase pipeline
 
 A migration moves through **three locations, one direction**. Knowing which is which is most of

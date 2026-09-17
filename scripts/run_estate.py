@@ -3,7 +3,7 @@ purpose: run the deterministic tier over an ESTATE and turn its output into some
          agent tier can consume safely - a real exit code, collision-checked approvals, per-workbook
          handover slices, and a phase-timing record.
 usage:   python scripts/run_estate.py --input <folder-of-.twb/.twbx/.tds/.tdsx> --output <bundle-dir>
-                                      [--approved-dax <file.json>] [--dry-run]
+                                      [--approved-dax <file.json>] [--storage-decision <file.json>] [--dry-run]
                                       [--accept-bundle-rewrite] [--accept-engine-version-change]
          python scripts/run_estate.py --slice-only --output <existing-bundle-dir>
 
@@ -582,7 +582,22 @@ def preflight_estate_path_ceiling(input_dir: Path, output_root: Path, engine: Pa
     )
 
 
-def run_engine(engine: Path, src: Path, out: Path, approved_dax: Path | None) -> tuple[int, str]:
+def engine_argv(
+    engine: Path, src: Path, out: Path, approved_dax: Path | None, storage_decision: str | None = None
+) -> list[str]:
+    """Build the deterministic engine argv without rewriting an operator-supplied decision token."""
+    script = engine / "skills" / "tableau-migration" / "scripts" / "migrate_estate.py"
+    cmd = [sys.executable, str(script), "-i", str(src), "-o", str(out)]
+    if approved_dax:
+        cmd += ["--approved-dax", str(approved_dax)]
+    if storage_decision is not None:
+        cmd += ["--storage-decision", storage_decision]
+    return cmd
+
+
+def run_engine(
+    engine: Path, src: Path, out: Path, approved_dax: Path | None, storage_decision: str | None = None
+) -> tuple[int, str]:
     """Invoke the deterministic tier. Returns (exit code, combined output).
 
     No timeout: an estate run is legitimately long and offline, and it needs no credentials, so a
@@ -592,9 +607,7 @@ def run_engine(engine: Path, src: Path, out: Path, approved_dax: Path | None) ->
     if not script.is_file():
         raise FileNotFoundError(f"engine not found: {script}")
 
-    cmd = [sys.executable, str(script), "-i", str(src), "-o", str(out)]
-    if approved_dax:
-        cmd += ["--approved-dax", str(approved_dax)]
+    cmd = engine_argv(engine, src, out, approved_dax, storage_decision)
     log.info("ENGINE: %s", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     return proc.returncode, (proc.stdout + proc.stderr)
@@ -2934,6 +2947,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--approved-dax", type=Path, help="landing re-run: {calc name: DAX} JSON")
     parser.add_argument(
+        "--storage-decision",
+        help="engine-owned datasource storage policy JSON; forwarded unchanged after local availability checks",
+    )
+    parser.add_argument(
         "--accept-bundle-rewrite",
         action="store_true",
         help=(
@@ -2984,6 +3001,25 @@ def valid_provenance_timeout(timeout_sec: object) -> bool:
     )
 
 
+def validate_storage_decision(storage_decision: str | None, slice_only: bool) -> str | None:
+    """Return a usage error for a decision that cannot be forwarded safely, if any."""
+    if storage_decision is None:
+        return None
+    if slice_only:
+        return "--storage-decision cannot be combined with --slice-only"
+    if not storage_decision:
+        return "--storage-decision must not be empty"
+    candidate = Path(storage_decision)
+    try:
+        if not candidate.is_file():
+            return "--storage-decision must name a readable file"
+        with candidate.open("rb") as decision:
+            decision.read(1)
+    except OSError:
+        return "--storage-decision must name a readable file"
+    return None
+
+
 def resolve_run_engine(args: argparse.Namespace) -> tuple[Path | None, int]:
     """Resolve the engine ONCE, up front, and fail loudly. Returns (engine, exit code).
 
@@ -3018,13 +3054,21 @@ def print_dry_run(args: argparse.Namespace, engine: Path | None) -> None:
     print(f"DRY RUN: engine={engine} version={version or '(n/a)'}")
     print(f"         input={args.input}  output={args.output}")
     print(f"         approved-dax={args.approved_dax or '(none)'}")
+    print(f"         storage-decision={args.storage_decision or '(none)'}")
+    if engine:
+        command = engine_argv(engine, args.input, args.output, args.approved_dax, args.storage_decision)
+        print(f"         engine-argv={json.dumps(command, ensure_ascii=False)}")
+    print("         storage decision content/policy is not validated in dry-run; the engine validates it on execution.")
 
 
 def run_engine_phase(args: argparse.Namespace, engine: Path | None, phases: list[dict]) -> int:
     """Run the deterministic engine and record its timing. Returns an exit code; 0 means proceed."""
     started = time.monotonic()
     phases.append({"phase": "engine_run", "started_wall": time.time()})
-    code, output = run_engine(engine, args.input, args.output, args.approved_dax)
+    if args.storage_decision is None:
+        code, output = run_engine(engine, args.input, args.output, args.approved_dax)
+    else:
+        code, output = run_engine(engine, args.input, args.output, args.approved_dax, args.storage_decision)
     elapsed = time.monotonic() - started
     phases[-1].update({"elapsed_sec": round(elapsed, 1), "exit_code": code})
     log.info("ENGINE: exit %d in %.0fs", code, elapsed)
@@ -3175,6 +3219,11 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
 
     if not args.slice_only and not args.input:
         print("ERROR: --input is required unless --slice-only is given", file=sys.stderr)
+        return EXIT_USAGE
+
+    storage_error = validate_storage_decision(args.storage_decision, args.slice_only)
+    if storage_error:
+        print(f"ERROR: {storage_error}", file=sys.stderr)
         return EXIT_USAGE
 
     engine, engine_code = resolve_run_engine(args)

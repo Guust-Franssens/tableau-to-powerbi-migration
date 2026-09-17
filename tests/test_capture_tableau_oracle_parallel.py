@@ -248,6 +248,107 @@ def test_first_view_progress_is_visible_while_later_sibling_is_blocked(  # pylin
     assert session.signouts == 1
 
 
+def _enable_recovery(monkeypatch, tmp_path: Path, views: list[dict]) -> Path:
+    """Select two render-only gaps through the real recovery reader and main() coordinator."""
+    run = tmp_path / "_runs" / "001-parallel"
+    run.mkdir(parents=True)
+    (run / "run.json").write_text(
+        json.dumps({"run": 1, "unit_key": "parallel", "allocated_dir_name": run.name, "allocated_abs_path": str(run)}),
+        encoding="utf-8",
+    )
+    source = tmp_path / "reference"
+    source.mkdir()
+    for view in views:
+        view["workbook"]["id"] = WB_1
+        view["updatedAt"] = "2026-09-01T00:00:00Z"
+    (source / "oracle-manifest.json").write_text(
+        json.dumps(
+            {
+                "schema": "tableau-oracle-workbook/1",
+                "server": _main_env()["TABLEAU_SERVER_URL"],
+                "site": "site",
+                "workbook_luid": WB_1,
+                "view_count": len(views),
+                "requested_renders": ["svg"],
+                "views": [
+                    {
+                        "view_luid": view["id"],
+                        "workbook_luid": WB_1,
+                        "updated_at": view["updatedAt"],
+                        "svg": {"status": "transient", "max_age_minutes": 1, "rest_api_version": "3.29"},
+                    }
+                    for view in views
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_dir = run / "retry"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["capture_tableau_oracle.py", "--out", str(out_dir), "--run", str(run), "--retry-failed-from", str(source)],
+    )
+    return out_dir
+
+
+@pytest.mark.parametrize("recovery", [False, True])
+def test_later_worker_completion_is_visible_before_slow_selected_first_view(  # pylint: disable=too-many-locals
+    monkeypatch, tmp_path, caplog, recovery
+):
+    """Completion progress must not stay hidden behind a slow earlier selected view."""
+    session = _MainSession()
+    first_started = threading.Event()
+    release_first = threading.Event()
+    later_progress = threading.Event()
+    progress = []
+    out_dir = tmp_path / "oracle"
+    views = [_view(LUID_1, WB_1, "Slow first"), _view(LUID_2, WB_2, "Fast later")]
+    real_progress = oracle.log_progress
+
+    def capture(_session, view, *_args, **_kwargs):
+        if view["id"] == LUID_1:
+            first_started.set()
+            assert release_first.wait(HANG_GUARD_SEC)
+        else:
+            assert first_started.wait(HANG_GUARD_SEC)
+        record = _record(view)
+        if recovery:
+            record.pop("data")
+            record["svg"] = {"status": "ok"}
+        return record
+
+    def observe_progress(index, total, record, redactor, **kwargs):
+        real_progress(index, total, record, redactor, **kwargs)
+        progress.append(record["view_luid"])
+        if record["view_luid"] == LUID_2:
+            later_progress.set()
+
+    _configure_main(monkeypatch, session, views, out_dir)
+    if recovery:
+        out_dir = _enable_recovery(monkeypatch, tmp_path, views)
+    monkeypatch.setattr(oracle, "capture_recovery_view" if recovery else "capture_view", capture)
+    monkeypatch.setattr(oracle, "log_progress", observe_progress)
+
+    with caplog.at_level(logging.INFO, logger=oracle.LOG.name), ThreadPoolExecutor(max_workers=1) as harness:
+        run = harness.submit(oracle.main)
+        try:
+            assert later_progress.wait(HANG_GUARD_SEC), "later completed view must log before selected-first finishes"
+            assert progress == [LUID_2]
+            assert any("Fast later" in message and "1/2" in message for message in caplog.messages)
+            assert not (out_dir / "oracle-manifest.json").exists()
+        finally:
+            release_first.set()
+        assert run.result(timeout=HANG_GUARD_SEC) == 0
+    manifest = json.loads((out_dir / "oracle-manifest.json").read_text(encoding="utf-8"))
+    assert progress == [LUID_2, LUID_1]
+    assert [view["view_luid"] for view in manifest["views"]] == [LUID_1, LUID_2]
+    if recovery:
+        assert all("data" not in view for view in manifest["views"])
+        assert any("Fast later" in message and "svg=ok" in message for message in caplog.messages)
+        assert not any("FAILED (None)" in message for message in caplog.messages)
+
+
 @pytest.mark.parametrize("fault_site", ["enrichment", "log_progress"])
 def test_coordinator_interrupt_drains_before_signout(  # pylint: disable=too-many-locals,too-many-statements
     monkeypatch, tmp_path, fault_site
@@ -472,7 +573,7 @@ def test_workers_one_is_serial(monkeypatch, tmp_path):
         records = future.result(timeout=2)
 
     assert second_started.is_set()
-    assert [record["view_luid"] for record in records] == [LUID_1, LUID_2]
+    assert {record["view_luid"] for record in records} == {LUID_1, LUID_2}
 
 
 def test_different_workbooks_overlap_with_two_workers(monkeypatch, tmp_path):
@@ -495,7 +596,7 @@ def test_different_workbooks_overlap_with_two_workers(monkeypatch, tmp_path):
         release.set()
         records = future.result(timeout=2)
 
-    assert [record["view_luid"] for record in records] == [LUID_1, LUID_2]
+    assert {record["view_luid"] for record in records} == {LUID_1, LUID_2}
 
 
 def test_same_workbook_views_overlap_without_affinity(monkeypatch, tmp_path):
@@ -518,7 +619,7 @@ def test_same_workbook_views_overlap_without_affinity(monkeypatch, tmp_path):
         release.set()
         records = future.result(timeout=2)
 
-    assert [record["view_luid"] for record in records] == [LUID_1, LUID_2]
+    assert {record["view_luid"] for record in records} == {LUID_1, LUID_2}
 
 
 def test_partial_pool_startup_cancels_and_drains_submitted_workers(monkeypatch, tmp_path):
@@ -1628,10 +1729,10 @@ def _stable_record_facts(record: dict) -> dict:
     }
 
 
-def test_out_of_order_completion_reduces_to_original_records_progress_and_verdict(  # pylint: disable=too-many-locals
+def test_out_of_order_completion_keeps_manifest_order_but_logs_completion_order(  # pylint: disable=too-many-locals
     monkeypatch, tmp_path
 ):
-    """Completion order cannot change record order, progress order, hashes, statuses or exit code."""
+    """Completion order cannot change record order, hashes, statuses or exit code."""
     views = [_view(LUID_1, WB_1, "First"), _view(LUID_2, WB_2, "Second")]
     workbook_names = {WB_1: "Workbook One", WB_2: "Workbook Two"}
     progress: dict[str, list[str]] = {"serial": [], "parallel": []}
@@ -1675,7 +1776,8 @@ def test_out_of_order_completion_reduces_to_original_records_progress_and_verdic
     expected_order = [LUID_1, LUID_2]
     assert parallel_session.completion_order == [LUID_2, LUID_1]
     assert [record["view_luid"] for record in parallel_records] == expected_order
-    assert progress["serial"] == progress["parallel"] == expected_order
+    assert progress["serial"] == expected_order
+    assert set(progress["parallel"]) == set(expected_order)
     assert [_stable_record_facts(record) for record in parallel_records] == [
         _stable_record_facts(record) for record in serial_records
     ]
