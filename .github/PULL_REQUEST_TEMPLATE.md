@@ -1,6 +1,11 @@
 Keep one path and the shared checks. See the
 [contributor lifecycle](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/blob/master/CONTRIBUTING.md#issue-to-pr-lifecycle).
 
+## Operator/customer impact
+
+- Why it matters: <!-- Concrete failure, confusion, risk, or wasted effort removed. Mechanical exception: repository-maintenance value only. -->
+- Journey change: <!-- Observable before -> after. Mechanical exception: write "No direct operator/customer journey change - byte-local only." -->
+
 ## Behavioral change
 
 - Issue: <!-- Fixes #N for a complete fix; Refs #N for partial work. -->
