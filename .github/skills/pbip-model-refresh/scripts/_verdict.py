@@ -71,21 +71,17 @@ def _emit_data_verdict(
 
     for table, rows in results:
         print(f"  data   : {rows} row(s) in '{table}'")
-    # Say what HAPPENED, not where a file would go. Printing the path alone reads as "written" -
-    # it misled a reader on 2026-08-05 into believing a probe run had persisted a 1-row cache.
-    # For a probe that distinction matters twice over: a persisted 1-row `cache.abf` is a trap, and
-    # a cache whose compatibility level disagrees with the project's makes the PBIP unopenable (see
-    # `--no-save`; `image_save` prevents that by aligning `database.tmdl`).
-    if persisted:
-        print(f"  cache  : PERSISTED -> {cache}")
+    # An external timestamp change is not evidence of an unrequested save by this invocation.
+    if args.verify_only:
+        print("  cache  : persistence not requested (--verify-only; no refresh or save was run)")
+    elif args.no_save:
+        print("  cache  : persistence not requested (--no-save; refreshed data remains in memory only)")
+    elif persisted:
+        print(f"  cache  : legacy timestamp check observed a newer cache -> {cache} (cold reopen not tested)")
     elif cache is None:
         print("  cache  : not persisted (no cache path resolved)")
-    elif args.no_save:
-        print("  cache  : not persisted (--no-save; the project is byte-identical)")
     else:
-        # Persisting was requested (the default) and nothing landed. Naming the wrong reason here
-        # sent me looking in the wrong place for ten minutes; the real one is on the 'save' line.
-        print("  cache  : not persisted (the write did not land - see 'save' above)")
+        print("  cache  : legacy timestamp check did not observe a newer cache (write outcome unconfirmed)")
 
     verdict = derive_data_verdict(results, implicit, narrowed=bool(args.tables and not args.verify_only))
     if verdict.code == "NO_DATA":
@@ -94,7 +90,10 @@ def _emit_data_verdict(
         return 1
     wanted_save = not args.no_save and not args.verify_only
     if wanted_save and not persisted:
-        print("REFRESH: NOT_PERSISTED (model has data in memory, but cache.abf did not update)")
+        print(
+            "REFRESH: NOT_PERSISTED (legacy timestamp check did not observe a newer cache.abf; "
+            "write outcome unconfirmed)"
+        )
         return 1
     suffix = " + PERSISTED" if wanted_save else ""
     if verdict.code == "TABLE_OK":
