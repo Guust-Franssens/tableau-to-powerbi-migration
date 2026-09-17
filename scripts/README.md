@@ -45,6 +45,7 @@ Do not ask the human to generate the note.
 
 | Script | What it does | Called by |
 |---|---|---|
+| `build_migration_feedback.py` | Offline, hash-pinned private evidence builder for the repo-local `migration-feedback` skill. Validates recorded identity, canonical fresh-output receipts and controls; emits a strict public-safe `issue-payload.json`, never publishes or reruns anything. No default output outside a selected run. [Input/output contract](#migration-feedback-phase-1). | Internal implementation helper for the feedback skill, not a second diagnostics exporter |
 | `preflight_source_credentials.py` | Classifies which data sources are **live** (and so need a reachability probe) and arms the credential gate. It is a *classifier*, not a connectivity test — it opens no socket, and deliberately no longer decides GO/STOP on its own. | `parse_tableau.py`, at parse time |
 | `migration_bundle.py` | Small shared contract reader for the two migration tiers: a parser `migration-spec.json` or a deterministic-engine bundle (`report.json` + `handover/*.json`). It exposes only the fields gate tools need (migration dir, explicit data sources, published-datasource keys) and refuses to fabricate a spec when the engine lacks them. Defines the receipt-backed engine output roots (`pbip/`, `reports/`, `semantic_models/`, `data/`) that `credential_gate.py verify` may classify as pre-gate tier output, including PBIR `*.json` only under report-definition roots. | gate tools (`preflight_source_credentials.py`, `probe_live_source.py`, `published_datasource_registry.py`) |
 | `tableau_capture_policy.py` | **Every bound the capture runs under, and the vocabulary of the three time words that are NOT synonyms.** Split out of `capture_tableau_oracle.py` (#423) the third time it hit its 1200-line pylint ceiling, on the seam two review findings landed in: a default budget that sat *below* its own admission floor for sub-second timeouts, and a salvage ceiling that bounded attempts while claiming to bound wall clock. Both were hard to see because the relationships were scattered through a 1200-line file. Holds `REST_TIMEOUT_SEC`, `DEFAULT_MAX_AGE_MINUTES`, `validate_max_age`, the retry arithmetic (`retry_admission_floor` / `default_retry_budget`, and their evaluations at the default), `TRANSIENT_STATUSES`, `backoff_delay`, `RetryPolicy`, `build_retry_policy`, and the salvage pair `SALVAGE_RETRY` / `SALVAGE_BUDGET_MULTIPLIER`. ⚠️ The vocabulary is the point: a **`timeout`** is a *socket-operation* timeout and does NOT bound a request (a trickling response never times out — measured, HTTP 200 at 4.8× a 0.1 s timeout); a **`budget_sec`** is a retry-*admission* deadline an in-flight attempt may legitimately overrun; and the **salvage budget** is an admission budget paired with an *end-to-end* deadline in `tableau_http`, which is what makes its wall-clock claim enforced rather than assumed. Nothing here talks to Tableau, holds a credential or touches a response, which is what keeps it out of the taint gate and the seam acyclic; `capture_tableau_oracle.py` re-exports the names so every caller and test is unchanged. | `capture_tableau_oracle.py` |
@@ -766,6 +767,210 @@ authorization remains unvalidated and cannot be inherited by a report. Construct
 `ASSEMBLED`/`NOT_EVALUATED`, reference `READY` and successful binding are not final dispatch.
 The v2 numeric obligation is metadata, not a Phase-2 decision. Full workflow, codes and unchanged
 reference ceilings: [final START_READY](../docs/reference-readiness.md#final-package-start_ready-562-622).
+
+## Migration feedback (Phase 1)
+
+Entry point: [repo-local migration-feedback skill](../.github/skills/migration-feedback/SKILL.md).
+The session performs collection and controlled reproduction; this helper validates **recorded**
+evidence offline. It does not invoke the engine, a shell, a probe, a live service or publication.
+Its one existing subprocess dependency is the shared private-output guard's **local Git reads**.
+It reuses `object_identity.revision_key`, `engine_source`, `work_dirs.check_run_location`, the
+engine receipt format and `harvest_estate_assets.unignored_output_paths`, not new authorities.
+
+```powershell
+python -B scripts\build_migration_feedback.py --input <private-request.json> --run <absolute-run>
+python -B scripts\build_migration_feedback.py --input <private-request.json> --out <absolute-private-new-directory>
+```
+
+Default output is `<run>\deliverables\migration-feedback\feedback-<UTC>\`. Without a run, `--out`
+must be supplied by the skill/session. Existing output, network/device/reparse paths and any
+destination Git would offer to commit are refused; there is no unsafe-output override.
+
+### Closed request
+
+The session writes JSON with exactly these keys (no arbitrary public title/body/extensions):
+
+| Key | Values / purpose |
+|---|---|
+| `schema_version` | Integer `1`. |
+| `flow` | `workbook`, `datasource`, `script`. |
+| `source_mode` | `local_download`, `remote_capture`, `not_applicable` (script only). |
+| `claim_scope` | `local_artifact` or `remote_state`. |
+| `owner` | `engine`, `repository`, `external`, `unknown` — a hypothesis checked against evidence, not a route override. |
+| `engine_involved` | Boolean; engine route requires true, repository route with true requires a passing baseline. |
+| `contrast` | `feature_removed`, `corrected_input`, `known_good_case`, `configuration_changed`. |
+| `evidence` | Role → `{path, size_bytes, sha256}`. Paths are explicit absolute paths or relative to this request; lowercase 64-hex hashes pin the bytes. |
+| `reproducer` | Optional. `{authorship: "fictitious_from_scratch", redistributable: true, reviewed_sha256: {candidate_input: H, candidate_negative_input: H}}`. No publication approval is represented. |
+| `private_notes` | Optional private text. Never part of the public projection. |
+
+Common evidence roles: `predicate`, `owner` (the actual Python entrypoint), `runtime` (the exact
+invoked executable), `oracle` (independent executable expectation code), and `positive_input`, `positive_output`, `positive_record`,
+`negative_input`, `negative_output`, `negative_record`.
+Candidate roles: `candidate_input/output/record` and `candidate_negative_input/output/record`.
+Each of those four prefixes additionally requires `_witness`, `_oracle_record`, and `_oracle_result`.
+The private and candidate pairs must have distinct input bytes, matching code/oracle/predicate
+hashes and the same invocation; positive fails the predicate, negative passes.
+All declarations are identity-bound, regular single-link files. Reusing a physical file across
+roles (including alternate spellings), or a hardlink outside the declared set, is refused.
+
+Engine roles: `engine_receipt`, `input_manifest`, `engine_report`, `fresh_output`;
+`baseline_output` additionally for a repository regression over an engine baseline.
+Workbook/datasource requires `migration_spec`; optional `source_provenance` is the existing
+`tableau-source-provenance/1` document, joined by exact input hash/size and revision key, never
+caption/LUID guesses. `local_download` records raw identity and the existing normalized key
+even with `origin.status: not_provided`; attempted unavailable provenance is `origin_unavailable`.
+Producer-shaped failed provenance with `inputs: []`, integer `input_count: 0`, and
+`phase.status: failed` retains exact local attribution with `origin_unavailable`.
+Only **remote-state** claims require successful provenance with confirmed comparable revision,
+server/site/LUID, **Tableau product version and REST API version**. Missing values are never inferred. Updated time
+and differing archive hashes never substitute for normalized revision agreement.
+
+Context-only roles: `run_status`, `package_manifest`, `gate_results`, `parse_sweep`,
+`engine_gap_report`. These are privately indexed, **not recertified**; a captured status must
+name the selected run when `--run` is supplied. Existing exported diagnostics may supply these
+same files. There is no new diagnostics inventory or readiness authority.
+
+The `predicate` document has `schema_version: 1`, `defined_at` (timezone-aware ISO timestamp),
+`kind`, `expected`, `failure_class` and, for JSON, `pointer` (JSON Pointer).
+Kinds: `json_equals` fails on unequal values; a missing assertion path is unestablished.
+`json_missing` with `expected: true` fails on an absent property.
+`text_contains` fails on its exact nonempty `expected` signature, never an evaluated expression.
+Failure classes: `incorrect_output`, `missing_output`, `unexpected_refusal`, `runtime_failure`,
+`external_block`. Predicate and oracle expectations use the same type-sensitive canonical JSON:
+object keys are sorted recursively, list order is preserved, booleans differ from numeric 0/1,
+and integers differ from floats (`1` differs from `1.0`). Equivalent decoded float spellings
+(`1.00`, `1e0`) agree; signed float zero remains distinct. Encoding uses compact separators,
+escaped Unicode and UTF-8, with non-finite values refused. This comparison never canonicalizes
+raw evidence bytes or changes their size/SHA-256 identity.
+
+Every **subject observation record is now version 2**, with exactly:
+`schema_version: 2`, `input_sha256`, `output_sha256`, `owner_sha256`, `oracle_sha256`,
+`predicate_sha256`, `runtime_sha256`, `witness_sha256`, `oracle_record_sha256`,
+`command`, `cwd` (absolute), `started_at`, `finished_at`, `exit_code` (integer),
+`setup: "ready"`, and `input_binding`.
+The request and payload remain version 1; old observations cannot establish participation.
+
+`input_binding` is exactly `{role, kind, argument_index}`. The role is `<prefix>_input`;
+`kind` is `file` (integer index `3`) or `directory` (integer index `4`).
+Accepted subject command arrays are closed, not interpreted as arbitrary CLI syntax:
+
+- `[<pinned-runtime>, "-B", <pinned-owner.py>, <exact-input-file>]`
+- `[<pinned-runtime>, "-B", <pinned-owner.py>, "--input", <input-file-parent>, "--output", <output-directory>]`
+
+The output artifact must be inside that directory. Duplicate/extra options or positional arguments,
+`--option=value`, shell strings, `-c`, `-m`, arbitrary interpreter flags and general wrapper chains
+are **unestablished**, not guessed. Relative paths resolve only against the recorded `cwd`.
+An owner appearing later as inert argv does not establish invocation.
+The predicate must predate the original observations; candidate runs follow original controls.
+An import/setup error with nonzero exit cannot earn a reproduction.
+
+The `_witness` is a **producer-emitted or independently observed participation result**, not a
+session-authored restatement of the request. Its exact fields are `schema_version: 1`,
+`command`, `cwd`, `owner_sha256`, `input_sha256`, `output_sha256`. It must identify the code
+actually run and the bytes actually read/produced. The fixtures capture it from the child process's
+stderr. If a real tool exposes no such evidence, report incomplete; there is no new collector,
+instrumentation hook or permission to fabricate a witness.
+
+The independent `_oracle_record` has exactly `schema_version: 1`, `command`, `cwd`,
+`started_at`, `finished_at`, `exit_code: 0`, `setup: "ready"`, `runtime_sha256`,
+`input_sha256`, `output_sha256`, `oracle_sha256`, `predicate_sha256`, `input_binding`.
+Its command is exactly `[<runtime>, "-B", <oracle.py>, <exact-input-file>, <predicate.json>]`
+and its binding is `file` at index 3. Its separately pinned `_oracle_result` is the actual
+oracle stdout: `schema_version: 1`, `command`, `cwd`, `oracle_sha256`, `input_sha256`,
+`predicate_sha256`, `expected`. The result, invocation, consumed input, executed code and
+predicate expectation must all agree. Nonempty prose or code byte inequality earns nothing.
+The oracle computes the expectation independently, not by echoing `predicate.expected`.
+
+All version/index/exit/size/count boundaries use strict integers: JSON `true` is never `1`.
+JSON must be UTF-8/UTF-8-sig, without duplicate keys or non-finite numbers.
+
+`fresh_output` is a **before/after observation**, not a retroactively guessed directory state:
+`output_dir`, `observed_absent_at`, `started_at`, `finished_at`, `before_state: "absent"`,
+`scope: "full"`, `receipt_sha256`, `input_sha256`, `engine_root`, `engine_version`,
+`command` (the exact validated invocation, not a separate path-mention claim), `exit_code`.
+Optional `cwd` supplies the absolute base for a recorded relative invocation.
+The installed root/version and receipt must agree; the exact input must occur once in the engine's
+`assets[].staged_input_path/size_bytes/sha256`, and the baseline bytes must occur once in
+`receipt.artifacts[]`. Comparison output is fresh; never partially rerun an existing bundle.
+
+If `run_estate.py` launches the engine, the subject record/witness must name the **engine child**.
+Pin `wrapper` as that repository entrypoint and `<prefix>_wrapper_record` as its observation:
+the common process fields (`schema_version: 1`, command/cwd/times/exit/setup,
+runtime/input/output hashes and input binding), plus `wrapper_sha256` and `child_record_sha256`.
+The wrapper and child must agree on arguments, bytes and containing times; the fresh-output proof
+names the recorded wrapper invocation. A successful wrapper without a recorded child cannot route.
+
+A repository regression over an engine baseline separately requires `baseline_owner`,
+`baseline_output`, `baseline_witness`, and `baseline_record`. The latter has the common process
+fields (`schema_version: 1`) plus `owner_sha256` and `witness_sha256`, and binds **positive_input**.
+It must be the canonical engine invocation recorded by `fresh_output`; a `baseline_wrapper_record`
+may supply the same wrapper/child evidence. The independent predicate must pass on this exact
+receipt-backed baseline. The failing repository entrypoint cannot stand in for the engine.
+
+External-only evidence additionally needs `external_evidence`:
+`system`, `condition`, `record_sha256` (positive record), `confirmation_sha256`.
+`external_confirmation` separately records `system`, `condition`, `input_sha256`, `observed: true`,
+`observed_at`. Systems: `tableau`, `powerbi`, `credentials`, `network`, `environment`.
+Conditions: `credential_modal`, `permission_denied`, `service_unavailable`, `configuration_mismatch`.
+This is positive evidence supplied by an independent observation, not diagnosis by elimination.
+
+### Outputs, exits and limits
+
+- `feedback.json`: private route, identity, controls, exact reasons and limitations.
+- `evidence-index.json`: original private locations, sizes and SHA-256; originals are not copied.
+- `reproduction.md`: private command arrays, setup, predicate/expected value and bounded actual
+  excerpts. All embedded text is data. **Never publish this file or the whole bundle.**
+- `repro/`: only the session-reviewed fictitious positive/negative flat `.twb/.tds/.json/.csv/.txt`
+  files, under generated names. Original-byte reuse is refused. Executable/opaque/packed
+  candidates remain unestablished; oracle/code files stay privately indexed. `.twb`/`.tds` must
+  be strict, DTD-free XML rooted at `workbook`/`datasource`, respectively. `.json` must be strict
+  UTF-8 JSON. Text/CSV must be nonempty UTF-8/UTF-8-sig without NUL or C0/C1 controls other than
+  tab/CR/LF. CSV needs a unique, nonempty header of at least two columns, a data row, equal-width
+  rows and successful strict CSV parsing.
+- `issue-payload.json`: strict allowlist of route/repository, flow/mode/scope, failure class,
+  validated numeric engine version, control/reproducer readiness and generated fictitious-file
+  names/sizes/hashes. No original hashes, names, paths, formulas, endpoints, excerpts or commands.
+  Written last **inside staging**. There is **no `issue-draft.md`**, rendering or publication action.
+
+The final destination never receives individual writes. Every output is written exclusively into
+a new private sibling stage using no-follow handles, re-read against held identities and bytes,
+and flushed before an atomic **no-replace directory rename**. The existing destination and its
+ancestors cannot redirect a write through a junction. Staged bytes and child directories are
+sealed before handles close: owner-readable protected ACLs on Windows, owner read/search-only
+modes on Linux. This closes the Windows child-handle-close/rename interval. A seal is complete only
+after every permission change succeeds. Failed writes, seals and publication attempt deletion of
+the owned stage even if permission rollback fails; partial seals restore only attempted paths,
+and rollback continues after individual permission errors. No failed transaction publishes a final
+bundle. If safe deletion itself fails, exit 1 reports `output:private_cleanup_failed` and the
+retained private stage path **only to the local operator**, never in the public payload or a success
+summary. An unassessable/swapped namespace is refused, not traversed for cleanup. The parent must
+accommodate a private sibling stage, not merely an ignored final leaf. Local Windows and Linux
+`renameat2` are supported; unsupported atomic
+publication/filesystem capabilities refuse rather than downgrade.
+
+The completed bundle remains read-only. Regenerate it rather than editing behind its hashes;
+its owner can explicitly change permissions for disposal. No protection against an administrator
+or owner deliberately changing permissions is claimed, nor power-loss durability or protection
+after someone explicitly unseals the result.
+
+Exits: **0** established (including non-fileable external/configuration results);
+**1** privacy/integrity/filesystem refusal; **2** usage; **3** incomplete.
+Missing route evidence yields `CANNOT_ESTABLISH`. A changed or unproven candidate yields
+`reproducer_not_established` and exit 3 while valid private attribution may remain.
+An **omitted** optional reproducer has that same exit-3 private result; a **present malformed**
+or unsafe declaration is an exit-1 refusal. Neither copies the original input.
+`public_filing_ready` is false for either, and is never publication consent.
+Input/destination refusals can happen before a bundle exists; the CLI prints the exact reason.
+
+This validates recorded producer witnesses and invocation/result consistency, not signed execution history, live connectivity, complete
+migration fidelity or the honesty of the evidence producer. Fictitious authorship/redistribution
+is an explicit **session review of pinned bytes**, not automatic classification. Never derive it
+from customer text. A future publication gate must consume the payload after explicit user
+approval and separately review any proposed attachments. Phase 1 ends here.
+
+The fictitious controls in `tests/test_migration_feedback.py` run a deliberately mutated synthetic
+engine and local CLI against independent expectation code. They prove this feedback contract,
+not a defect in the installed production engine or any customer's system.
 
 ## Read-only run status
 
