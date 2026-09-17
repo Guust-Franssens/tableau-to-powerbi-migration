@@ -50,6 +50,7 @@ Two mechanisms, deliberately different in kind
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sys
 from pathlib import Path
@@ -160,15 +161,17 @@ def project(payload: Any, spec: Any, *, prefix: str = "") -> tuple[Any, list[str
             projected, lost = project(value, spec[key], prefix=path)
             kept[key] = projected
             dropped.extend(lost)
-        if spec is PUBLISHED_DEPENDENCIES_ALLOW:
-            # A refused instruction-shaped KEY must not re-enter through the diagnostic path.
-            dropped = [prefix or "." if scan_text(path) else path for path in dropped]
         return kept, sorted(set(dropped))
     raise TypeError(f"unusable allowlist spec at {prefix or '.'}: {spec!r}")
 
 
 def _safe_path_segment(key: Any) -> str:
-    """One dropped-path segment, with a host-path-disclosing KEY redacted before it is built into it.
+    """One dropped-path segment, sanitized BEFORE any projection level builds a diagnostic from it.
+
+    Instruction-shaped, nonprinting and path-spoofing keys become raw-key SHA-256 tokens. Distinct
+    keys that normalize to the same instruction remain distinct diagnostics; repeated identical
+    keys across rows still deduplicate. The token namespace is reserved against source-key spoofing.
+    Host-location keys retain the existing profile-redaction/final-containment split below.
 
     ⚠️ **#480 round-7 finding B2.** `project()`'s whole job is to refuse an unenumerated field, and it
     then named the refusal using the field's own key - so an *untrusted* key was re-emitted verbatim
@@ -195,6 +198,13 @@ def _safe_path_segment(key: Any) -> str:
     raw key either way.
     """
     text = str(key)
+    if (
+        scan_text(text)
+        or not text.isprintable()
+        or text.startswith(REDACTED_KEY)
+        or (re.search(r"[.\[\]]", text) and not discloses_host_location(text))
+    ):
+        return f"{REDACTED_KEY}#{hashlib.sha256(text.encode('utf-8', errors='surrogatepass')).hexdigest()}"
     return REDACTED if discloses_host_path(text) else text
 
 
@@ -203,6 +213,7 @@ def _safe_path_segment(key: Any) -> str:
 # --------------------------------------------------------------------------------------------
 
 REDACTED = "<redacted-absolute-path>"
+REDACTED_KEY = "<redacted-key>"
 
 
 def _redacted_key(key: Any, taken: dict[str, Any]) -> tuple[Any, bool]:
