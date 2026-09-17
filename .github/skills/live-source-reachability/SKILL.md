@@ -46,14 +46,16 @@ execution route a migrator should invoke instead of carrying the mechanics inlin
    table/column evidence.
 
    ✅ **Custom SQL is never executed by this default probe (#690).** It reuses only an ordinary
-   table's same-scope Power BI `DATA_OK` from this invocation; otherwise it performs connector
-   navigation in the one-table PBIP. SQL Server uses the normalized server including port/instance
-   and exact database; Databricks uses host, HTTP path and exact catalog/database; Snowflake uses
-   account, warehouse, role and exact database. Scalar navigation metadata is eagerly buffered on
-   the output dependency path; nested object tables are not read and no local success row is made.
-   The conservative reuse key retains **all** declared connection fields, including credential/
-   authentication/session hints. Different scopes cannot borrow proof; shell/ODBC success and
-   prior-run observations never participate.
+   table's same-scope Power BI `DATA_OK` from this invocation; otherwise it returns
+   `OPERATOR_REQUIRED` **without generating custom M/PBIP, checking the network, opening Desktop or
+   refreshing**. There is no connector navigation or native/generated SQL fallback, including for
+   unsupported custom-only connectors.
+
+   The conservative key retains **all** declared connection fields: SQL Server server/port-or-instance/
+   database; Databricks host/HTTP path/catalog; Snowflake account/warehouse/role/database; and every
+   credential/authentication/session hint. Only existing class/URL-host normalization is used.
+   Differences prevent reuse, not trigger another operation. Shell/ODBC success and prior-run
+   observations never participate. Ordinary one-row probing remains unchanged.
 
    The SQL stays untouched in the spec: no normalization, comment stripping, native SQL fallback,
    `SELECT 1`, TOP/LIMIT/WHERE wrapper, or automatic exact execution. #692 owns the separate explicit,
@@ -64,8 +66,8 @@ execution route a migrator should invoke instead of carrying the mechanics inlin
 | Verdict | Meaning | Action |
 |---|---|---|
 | `DATA_OK` | Power BI returned a real row; the probe earns the clear itself. | Continue. |
-| `CONNECTION_OK_QUERY_UNVALIDATED` | Only Power BI connector credential/session scope is evidenced. The custom SQL was **not executed**; no object/query permission, schema, rows, semantics, cost or refreshability claim. | **Exit 1; gate armed.** Keyed `probe-error` audit envelope with detail starting `CONNECTION_OK_QUERY_UNVALIDATED:` (the audit action vocabulary is closed); no `proved_names`, `probe-cleared` or gate lift. Stop unless an already valid brief/audit-backed degradation authorization permits model-only continuation; this probe never grants it. |
-| `OPERATOR_REQUIRED` | The shipped-artifact probe requires a human Desktop action for native-query/cost risk. | Hard stop; do not accept SQL-client proof or silently run custom SQL. |
+| `CONNECTION_OK_QUERY_UNVALIDATED` | Only existing same-invocation, exact-scope ordinary `DATA_OK` is reused. The custom SQL was **not executed**; no custom-query/object permission, schema, rows, semantics, cost or refreshability claim. | **Exit 1; gate armed.** Keyed `probe-error` envelope with detail starting `CONNECTION_OK_QUERY_UNVALIDATED:`; no custom `proved_names`, `probe-cleared` or gate lift. Only an already valid brief/audit-backed degradation authorization may permit model-only continuation; this probe never grants it. |
+| `OPERATOR_REQUIRED` | Custom SQL has no same-invocation, same-scope ordinary proof. No custom connection operation was attempted and no connection claim was earned. `probe_bundle.py` retains its separate operator handoff. | **Exit 1; hard stop; gate armed.** Keyed `probe-operator_required`. No PBIP/Desktop/network/native-query fallback, authorization or model-only permission. Do not accept SQL-client proof. |
 | `NO_CREDENTIAL` | Missing/rejected credential or sign-in evidence; not proof Power BI never authenticated before or that the source is reachable. | Hard stop after one attempt; ask for Desktop sign-in/credential repair or human build-only authorization. |
 | `ACCESS_DENIED` | The classifier matched access-denial-shaped text (`403`/forbidden/permission denied/not authorized) ahead of the credential markers. It does **not** establish that authentication succeeded, that the failure is permission-only, or that a fresh sign-in cannot help — `403 Unauthorized: authentication failed` and `403 Forbidden: access token revoked` both land here. | Hard stop; the gate stays armed. **Unchanged retry is not useful** — read the redacted detail and change what the source named: the credential/token when it speaks of authentication or an expired or revoked token, the permission or object grant when it names a principal or object. Do not route it as a timeout or a transient error. |
 | `UNREACHABLE` | Address/network/spec failure, not a credential wall. | Report the bad address/path; do not send the user to sign in. |
@@ -76,11 +78,12 @@ execution route a migrator should invoke instead of carrying the mechanics inlin
 
 - A credential/sign-in/permission refusal is final after **one** attempt. Retrying does not create a
   credential.
-- On connection-only completion say exactly: **Power BI connected using Desktop credentials. Your custom SQL was not executed and remains unvalidated; the gate is still armed.**
-- ⚠️ Metadata navigation can itself take time or use compute; only customer-SQL execution is
-  excluded. Timeout/no popup is not success. Existing dialog/error routing stays unchanged;
-  #146/#687 own actual-Desktop prompt qualification. Empty navigation and empty ordinary tables
-  remain non-success; zero-row `DATA_EMPTY` behavior is outside this slice.
+- On connection-only completion say exactly: **Power BI reached this same connection scope through an ordinary table in this probe. Your custom SQL was not executed and remains unvalidated; the gate is still armed.**
+- Without same-scope ordinary proof say exactly: **Your custom SQL was not executed. No safe automated connection-only operation is currently available without catalog enumeration or a native-query approval prompt. No connection claim was earned; the gate remains armed.**
+- ⚠️ #694 is a nonblocking enhancement for future connector strategies. Any future generated-query
+  default needs explicit dialect support and #146/#687's qualified native-approval routing. No
+  popup/timeout is success; existing ordinary dialog/error and zero-row behavior stays unchanged.
+  No health-query template, popup watcher, exact-query mode or new model-only authority is added.
 - `probe_bundle.py` checks the artifact you ship; `probe_live_source.py` checks a reconstructed
   one-table probe model. If they disagree, believe the shipped-artifact check.
 - Never clear the gate by hand. `credential_gate.py clear` earns nothing; only a probe-earned
