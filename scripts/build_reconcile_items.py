@@ -33,6 +33,8 @@ Splitting dimensions from measures is done from the Tableau **field role** (``DI
 ``MEASURE``) read from the Metadata API, not from guessing at the data. A header with no matching
 field is recorded as ``unmapped`` rather than assumed -- that is how Tableau's generated fields
 (``Latitude (generated)``) are dropped: they are genuinely absent from the datasource's field list.
+Duplicate header captions refuse the whole view: a caption-keyed role map cannot disambiguate
+positions. Grain text is retained exactly as CSV parses it, including embedded newlines.
 
 ⚠️ **The residual risk this CANNOT solve.** A view-level filter leaves *no trace in the exported
 rows* -- if the view excludes a region, the CSV simply has fewer rows and nothing says why. So a
@@ -70,9 +72,10 @@ for _stream in (sys.stdout, sys.stderr):
 
 LOG = logging.getLogger("reconcile-items")
 
-_PERCENT = re.compile(r"^\s*(-?[\d,]*\.?\d+)\s*%\s*$")
-_CURRENCY = re.compile(r"^\s*(-?)\s*[$£€¥]\s*([\d,]*\.?\d+)\s*$")
-_PLAIN = re.compile(r"^\s*-?[\d,]*\.?\d+\s*$")
+_NUMBER = r"(?:(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?|\.[0-9]+)"
+_PERCENT = re.compile(rf"^\s*(-?{_NUMBER})\s*%\s*$")
+_CURRENCY = re.compile(rf"^\s*(-?)\s*[$£€¥]\s*({_NUMBER})\s*$")
+_PLAIN = re.compile(rf"^\s*-?{_NUMBER}\s*$")
 
 
 def normalise_value(text: str) -> tuple[float | str | None, str]:
@@ -82,6 +85,10 @@ def normalise_value(text: str) -> tuple[float | str | None, str]:
     ``0.195``, ``"$12"`` rather than ``12``. Comparing those as strings against a DAX result would
     fail on formatting alone; coercing them silently would hide a real type mismatch. So the applied
     conversion is returned alongside the value and recorded per item.
+
+    The culture-free grammar accepts ASCII digits, a leading minus, dot decimals (including .5),
+    and comma-separated groups of exactly three digits. Existing currency symbols and a percent
+    suffix wrap that same grammar. Other spellings remain text; no locale is inferred.
     """
     if text is None:
         return None, "none"
@@ -122,7 +129,7 @@ def classify_columns(headers: list[str], roles: dict[str, str]) -> dict[str, lis
 
 
 def items_for_view(rows: list[dict[str, str]], columns: dict[str, list[str]], view: dict[str, Any]) -> list[dict]:
-    """One item per (row, measure column). Non-numeric measure cells are skipped, loudly."""
+    """One item per (row, measure column). Non-numeric measure cells are skipped."""
     items = []
     for index, row in enumerate(rows):
         grain_filters = {col: row.get(col, "") for col in columns["grain"]}
@@ -185,12 +192,22 @@ def build(oracle_dir: Path, roles_by_workbook: dict[str, dict[str, str]]) -> dic
         if not roles:
             skipped.append({"view": view.get("view_name"), "reason": "no field roles for workbook"})
             continue
-        text = (oracle_dir / data["path"]).read_text(encoding="utf-8-sig")
-        rows = list(csv.DictReader(text.splitlines()))
+        with (oracle_dir / data["path"]).open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream)
+            headers = reader.fieldnames or []
+            if len(headers) != len(set(headers)):
+                skipped.append(
+                    {
+                        "view": view.get("view_name"),
+                        "reason": "duplicate CSV headers; caption-keyed field roles are ambiguous",
+                    }
+                )
+                continue
+            rows = list(reader)
         if not rows:
             skipped.append({"view": view.get("view_name"), "reason": "empty csv"})
             continue
-        columns = classify_columns(list(rows[0].keys()), roles)
+        columns = classify_columns(headers, roles)
         if not columns["value"]:
             skipped.append({"view": view.get("view_name"), "reason": "no measure column resolved"})
         for col in columns["unmapped"]:
