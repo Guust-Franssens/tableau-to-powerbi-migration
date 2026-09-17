@@ -149,7 +149,7 @@ the runbook's session-start update command. Do not run policy diagnostics before
 ⚠️ **Credentials come from `.env` or exported environment variables, never CLI arguments, and you
 never print a secret.** Redact when quoting output.
 
-**For site runs, pass the exact stage-2 survey at stage 5** (#469). ✅ The producer reads/hashes it
+**For site runs, pass the exact stage-2 survey at stage 5 (#469).** ✅ The producer reads/hashes it
 and `<run>/parse-sweep.json` once before conversion, retaining every workbook, required datasource
 and unresolved occurrence in the receipt-sealed `input_manifest.scope_bridge`. Report its
 `denominator_status` and per-occurrence `status`, not merely the engine's smaller row count.

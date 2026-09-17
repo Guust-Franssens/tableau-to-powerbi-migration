@@ -86,7 +86,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 05fe13f2d5905006da515cf47b73944b0b9093366cd66c824af9d19075d7a6b4  ~~ **Credentials come from `.env` or exported environment va
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-e18ef4e9e23950ad48d8cae2170f9c3b120dee84ef7fa97a795c40c45c748c12  **For site runs, pass the exact stage-2 survey at stage 5** 
+b78d104ca175ae7ae2b5befb59bfdd33985ed03a67eae78b1264c93d4ef0ac90  **For site runs, pass the exact stage-2 survey at stage 5 (#
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 ea3f150cc48476f9756e7321caec9c910f268459fb5fee455df160c168e21cc1  ## How to read a gate ~ this is the part that is easy to get
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
