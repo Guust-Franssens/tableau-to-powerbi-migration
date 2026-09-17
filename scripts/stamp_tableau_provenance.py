@@ -1004,7 +1004,7 @@ class TableauLookup:  # pylint: disable=too-many-instance-attributes
         """Pagination counts only visible rows; an independently queried admin role is also required."""
         if not all(isinstance(value, str) and LUID_RE.fullmatch(value) for value in (self.site_id, self.user_id)):
             return False
-        document = self._dependency_json(f"/sites/{self.site_id}/users/{self.user_id}")
+        document = self._dependency_json("/".join((f"/sites/{self.site_id}", "users", f"{self.user_id}")))
         user = document.get("user")
         return (
             isinstance(user, dict)

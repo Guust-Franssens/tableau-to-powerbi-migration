@@ -2087,7 +2087,7 @@ class PublishedSite(RecordingSite):
         if "/workbooks/" in path and "/content?" in path:
             self.served.setdefault(P_WORKBOOK, []).append(self.remote_bytes)
             return 200, self.remote_bytes
-        if path == f"/sites/{P_SITE}/users/{P_USER}":
+        if path == "/".join((f"/sites/{P_SITE}", "users", f"{P_USER}")):
             return self.user_status, json.dumps({"user": self.user}).encode()
         if "/datasources?" in path:
             self.before_catalog()
