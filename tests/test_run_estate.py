@@ -851,6 +851,34 @@ def _build_scope_bridge(case: ScopeCase) -> dict:
     return _read_scope_bridge(case)
 
 
+def _scope_unresolved_case(root: Path) -> ScopeCase:
+    case = _scope_case(root)
+    dependencies = [
+        {"status": "not_found", "connection_datasource_id": "opaque-missing-a", "candidates": []},
+        {
+            "status": "ambiguous",
+            "connection_datasource_id": "opaque-ambiguous",
+            "candidates": [{"luid": "ds-0"}, {"luid": "ds-1"}],
+        },
+        {"status": "not_found", "connection_datasource_id": "opaque-missing-b", "candidates": []},
+    ]
+    for dependency in dependencies:
+        dependency.update(datasource_name="Same caption", luid="")
+    case.survey["workbooks"][0]["published_dependencies"].extend(dependencies[:2])
+    case.survey["workbooks"][1]["published_dependencies"].insert(0, dependencies[2])
+    case.survey["unresolved_dependencies"] = [
+        {
+            **dependency,
+            "workbook": "Same caption",
+            "parent_workbook_luid": parent,
+            "dependency_ordinal": ordinal,
+        }
+        for dependency, parent, ordinal in zip(dependencies, ("wb-0", "wb-0", "wb-1"), (1, 2, 0))
+    ]
+    case.survey["summary"]["unresolved_dependencies"] = 3
+    return case
+
+
 def _scope_main(case: ScopeCase, monkeypatch, *extra: str) -> int:
     engine = _versioned_engine(case.source.parent / "engine", "2.368.0")
     monkeypatch.setattr(run_estate, "preflight_estate_path_ceiling", lambda *_: (True, "fixture path budget"))
@@ -1307,29 +1335,204 @@ def test_scope_bridge_duplicate_scope_identity_retains_multiplicity(tmp_path: Pa
         assert len(bridge["fetch_order"]) == 6
 
 
-def test_scope_bridge_unresolved_occurrences_never_join_by_workbook_caption(tmp_path: Path) -> None:
-    case = _scope_case(tmp_path)
-    unresolved = {
-        "workbook": "Same caption",
-        "datasource_name": "Same caption",
-        "status": "not_found",
-        "candidates": [],
-    }
-    case.survey["unresolved_dependencies"] = [dict(unresolved), dict(unresolved)]
-    for workbook in case.survey["workbooks"][:2]:
-        workbook["published_dependencies"].append(
-            {"datasource_name": "Same caption", "status": "not_found", "luid": "", "candidates": []}
-        )
-    case.survey["summary"]["unresolved_dependencies"] = 2
+@pytest.mark.parametrize("empty_engine", [False, True])
+def test_scope_bridge_unresolved_exact_nested_identity_survives_receipt(
+    tmp_path: Path, monkeypatch, empty_engine: bool
+) -> None:
+    from credential_gate import _receipt_matches_bundle  # pylint: disable=import-outside-toplevel
+
+    case = _scope_unresolved_case(tmp_path)
+    case.survey["unresolved_dependencies"].reverse()
+    for dependency in case.survey["unresolved_dependencies"]:
+        dependency.update(workbook="Unrelated caption", datasource_name="Unrelated display")
+    if empty_engine:
+        case.report.update(workbooks=[], datasources=[])
+        case.manifest["assets"] = []
+    _persist_scope_inputs(case)
+    survey_sha256 = hashlib.sha256(case.survey_path.read_bytes()).hexdigest()
+
+    def _engine(*_args) -> tuple[int, str]:
+        _emit_scope_output(case)
+        return 0, ""
+
+    monkeypatch.setattr(run_estate, "run_engine", _engine)
+    code = _scope_main(case, monkeypatch, "--scope-survey", str(case.survey_path))
+    bridge = _read_scope_bridge(case)
+    rows = [row for row in bridge["occurrences"] if row["kind"] == "unresolved_dependency"]
+
+    assert [(row.get("parent_workbook_luid"), row.get("dependency_ordinal")) for row in rows] == [
+        ("wb-0", 1),
+        ("wb-0", 2),
+        ("wb-1", 0),
+    ], "UNRESOLVED_IDENTITY: preserve the exact nested parent LUID and dependency ordinal"
+    assert all(type(row["dependency_ordinal"]) is int for row in rows)
+    assert [row["connection_datasource_id"] for row in rows] == [
+        "opaque-missing-a",
+        "opaque-ambiguous",
+        "opaque-missing-b",
+    ]
+    assert [(row["survey_collection"], row["survey_index"]) for row in rows] == [
+        ("workbooks", 0),
+        ("workbooks", 0),
+        ("workbooks", 1),
+    ]
+    assert all(row["luid"] is None and row["match"] is None for row in rows)
+    assert all(row["issues"] == ["unresolved_dependency_artifact_unavailable"] for row in rows)
+    assert bridge["denominator_status"] == "established" and bridge["status"] == "cannot_establish"
+    assert (bridge["version"], bridge["survey_sha256"]) == (1, survey_sha256)
+    assert len(bridge["occurrences"]) == 8 and bridge["counts"]["unresolved_dependencies"] == 3
+    receipt = json.loads((case.bundle / "engine-output-receipt.json").read_text(encoding="utf-8"))
+    manifest_path = case.bundle / "input_manifest.json"
+    assert receipt["input_manifest_sha256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    assert _receipt_matches_bundle(case.bundle, receipt)
+    assert code == run_estate.EXIT_OK and not (case.bundle / "packages").exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["scope_bridge"]["occurrences"][-1]["dependency_ordinal"] = 99
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert not _receipt_matches_bundle(case.bundle, receipt), "UNRESOLVED_SEAL: the receipt covers occurrence identity"
+
+
+@pytest.mark.parametrize("unique_captions", [False, True])
+def test_scope_bridge_unresolved_caption_only_evidence_cannot_establish_denominator(
+    tmp_path: Path, unique_captions: bool
+) -> None:
+    case = _scope_unresolved_case(tmp_path)
+    for index, row in enumerate(case.survey["unresolved_dependencies"]):
+        parent = case.survey["workbooks"][0 if index < 2 else 1]
+        dependency = parent["published_dependencies"][row["dependency_ordinal"]]
+        if unique_captions:
+            parent["name"] = row["workbook"] = parent["luid"]
+            dependency["datasource_name"] = row["datasource_name"] = f"Unique dependency {index}"
+        for field in ("parent_workbook_luid", "dependency_ordinal", "connection_datasource_id", "luid"):
+            del row[field]
     bridge = _build_scope_bridge(case)
 
-    assert bridge["denominator_status"] == "established"
-    assert len(bridge["occurrences"]) == 7
-    rows = bridge["occurrences"][-2:]
-    assert [row["survey_index"] for row in rows] == [0, 1]
-    assert all(row["kind"] == "unresolved_dependency" for row in rows)
-    assert all(row["luid"] is None and row["match"] is None for row in rows)
-    assert all(row["issues"] == ["unresolved_dependency_identity_unavailable"] for row in rows)
+    assert bridge["denominator_status"] == "cannot_establish", (
+        "UNRESOLVED_NO_NAME_JOIN: even unique matching captions cannot supply missing pointers"
+    )
+    assert "invalid_unresolved_dependency_identity" in bridge["issues"]
+    assert [(row.get("parent_workbook_luid"), row.get("dependency_ordinal")) for row in bridge["occurrences"][-3:]] == [
+        ("wb-0", 1),
+        ("wb-0", 2),
+        ("wb-1", 0),
+    ]
+    assert all(row["match"] is None for row in bridge["occurrences"])
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing-parent",
+        "missing-ordinal",
+        "missing-row",
+        "extra-row",
+        "duplicate-pointer",
+        "swapped-ordinals",
+        "cross-parent-pointers",
+        "nested-reorder",
+        "nested-cross-parent",
+        "moved-parent",
+        "wrong-key",
+        "missing-key",
+        "unknown-dependencies",
+        "missing-workbook-parent",
+        "duplicate-workbook-parent",
+        "malformed-dependency",
+        "contradictory-nested-parent",
+        "contradictory-nested-ordinal",
+    ],
+)
+def test_scope_bridge_unresolved_reconciliation_rejects_same_count_misassignment(tmp_path: Path, defect: str) -> None:
+    case = _scope_unresolved_case(tmp_path)
+    declared = case.survey["unresolved_dependencies"]
+    first, second = [workbook["published_dependencies"] for workbook in case.survey["workbooks"][:2]]
+    if defect == "missing-parent":
+        del declared[0]["parent_workbook_luid"]
+    elif defect == "missing-ordinal":
+        del declared[0]["dependency_ordinal"]
+    elif defect == "missing-row":
+        declared.pop()
+    elif defect == "extra-row":
+        declared.append({**declared[0], "dependency_ordinal": 99})
+    elif defect == "duplicate-pointer":
+        declared[1] = dict(declared[0])
+    elif defect == "swapped-ordinals":
+        declared[0]["dependency_ordinal"], declared[1]["dependency_ordinal"] = 2, 1
+    elif defect == "cross-parent-pointers":
+        for field in ("parent_workbook_luid", "dependency_ordinal"):
+            declared[0][field], declared[2][field] = declared[2][field], declared[0][field]
+    elif defect == "nested-reorder":
+        first[1], first[2] = first[2], first[1]
+    elif defect == "nested-cross-parent":
+        first[1], second[0] = second[0], first[1]
+    elif defect == "moved-parent":
+        second.append(first.pop())
+    elif defect == "wrong-key":
+        declared[0]["connection_datasource_id"] = "other-key"
+    elif defect == "missing-key":
+        del declared[0]["connection_datasource_id"]
+    elif defect == "unknown-dependencies":
+        case.survey["workbooks"][0]["dependencies_unknown"] = True
+    elif defect == "missing-workbook-parent":
+        del case.survey["workbooks"][0]["luid"]
+    elif defect == "duplicate-workbook-parent":
+        case.survey["workbooks"][1]["luid"] = "wb-0"
+    elif defect == "malformed-dependency":
+        first[1] = None
+    elif defect == "contradictory-nested-parent":
+        first[1]["parent_workbook_luid"] = "wb-1"
+        first[1]["dependency_ordinal"] = 1
+    else:
+        first[1]["parent_workbook_luid"] = "wb-0"
+        first[1]["dependency_ordinal"] = 2
+    case.survey["summary"]["unresolved_dependencies"] = len(declared)
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["denominator_status"] == "cannot_establish", (
+        f"UNRESOLVED_RECONCILIATION: {defect} cannot establish the denominator by equal counts"
+    )
+    assert bridge["status"] == "cannot_establish" and bridge["issues"]
+    assert bridge["counts"]["unresolved_dependencies"] == len(declared)
+    assert len(bridge["occurrences"]) == 8, "top-level discrepancies must not erase nested occurrences"
+    assert all(row["match"] is None for row in bridge["occurrences"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("parent_workbook_luid", None),
+        ("parent_workbook_luid", ""),
+        ("parent_workbook_luid", " wb-0"),
+        ("parent_workbook_luid", "wb-0 "),
+        ("parent_workbook_luid", "WB-0"),
+        ("parent_workbook_luid", "wb-2"),
+        ("parent_workbook_luid", "absent-parent"),
+        ("parent_workbook_luid", True),
+        ("parent_workbook_luid", 0),
+        ("parent_workbook_luid", []),
+        ("parent_workbook_luid", {}),
+        ("dependency_ordinal", None),
+        ("dependency_ordinal", "1"),
+        ("dependency_ordinal", True),
+        ("dependency_ordinal", 1.0),
+        ("dependency_ordinal", -1),
+        ("dependency_ordinal", 0),
+        ("dependency_ordinal", 3),
+        ("dependency_ordinal", []),
+        ("dependency_ordinal", {}),
+    ],
+)
+def test_scope_bridge_unresolved_pointer_requires_exact_type_parent_and_range(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    case = _scope_unresolved_case(tmp_path)
+    case.survey["unresolved_dependencies"][0][field] = value
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["denominator_status"] == "cannot_establish", (
+        "UNRESOLVED_POINTER: invalid parent/ordinal cannot establish the denominator"
+    )
+    assert len(bridge["occurrences"]) == 8 and all(row["match"] is None for row in bridge["occurrences"])
 
 
 @pytest.mark.parametrize(
@@ -1340,7 +1543,14 @@ def test_scope_bridge_dependencies_consistency_requires_more_than_equal_counts(t
     case.survey["workbooks"][0]["published_dependencies"].append(
         {"datasource_name": "Display", "status": "not_found", "luid": "", "candidates": []}
     )
-    unresolved = {"workbook": "Same caption", "datasource_name": "Display", "status": "not_found", "candidates": []}
+    unresolved = {
+        "workbook": "Same caption",
+        "datasource_name": "Display",
+        "status": "not_found",
+        "candidates": [],
+        "parent_workbook_luid": "wb-0",
+        "dependency_ordinal": 1,
+    }
     case.survey["unresolved_dependencies"] = [unresolved]
     case.survey["summary"]["unresolved_dependencies"] = 1
     if defect == "resolved-candidate":
@@ -1375,6 +1585,8 @@ def test_scope_bridge_ambiguous_candidates_reconcile_but_never_choose_a_datasour
             "datasource_name": "Other display",
             "status": "ambiguous",
             "candidates": [{"luid": "ds-1"}, {"luid": "ds-0"}],
+            "parent_workbook_luid": "wb-0",
+            "dependency_ordinal": 1,
         }
     ]
     case.survey["summary"]["unresolved_dependencies"] = 1
@@ -1383,7 +1595,8 @@ def test_scope_bridge_ambiguous_candidates_reconcile_but_never_choose_a_datasour
     assert bridge["denominator_status"] == "established"
     row = bridge["occurrences"][-1]
     assert row["dependency_status"] == "ambiguous"
-    assert row["candidate_luids"] == ["ds-1", "ds-0"]
+    assert row["candidate_luids"] == ["ds-0", "ds-1"]
+    assert (row["parent_workbook_luid"], row["dependency_ordinal"]) == ("wb-0", 1)
     assert row["status"] == "cannot_establish" and row["match"] is None
 
 

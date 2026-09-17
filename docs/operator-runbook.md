@@ -745,7 +745,8 @@ the bridge. No separate ledger, outcome file or source-provenance schema is intr
 | `survey_sha256`, `parse_sweep_sha256` | the held pre-engine bytes, not a later reread; unreadable snapshots have no digest |
 | `counts` | observed lengths of **all four** survey arrays: `workbooks`, `required_datasources`, `unresolved_dependencies`, `fetch_order`; a missing/non-array collection is `null`, not zero |
 | `denominator_status` | `established` only for survey schema `1.0` with reconciled scope/fetch identities, dependency lists, summary counts, explicit non-degraded/error-free completeness and selected/site counts |
-| `occurrences` | every workbook, required datasource and unresolved-dependency row, preserving `survey_collection`/`survey_index` and duplicates even when no artifact exists |
+| `occurrences` | every workbook, required datasource and nested unresolved dependency, even when no artifact exists; `survey_collection`/`survey_index` identifies the source row (the parent workbook for a nested dependency) |
+| unresolved `parent_workbook_luid`, `dependency_ordinal` | exact parent LUID and zero-based position in that workbook's ordered `published_dependencies`; status, connection key and candidate LUIDs are corroboration, never occurrence identity |
 | `fetch_order` | every plan occurrence retained separately; it corroborates the denominator, never adds a second copy of a workbook to it |
 | occurrence `status`, `issues`, `match` | `established` requires the complete exact join below; otherwise `cannot_establish`, stable reason codes, and no match |
 | bridge `status` | `established` only when the denominator and every occurrence join are established; otherwise `cannot_establish` |
@@ -759,7 +760,8 @@ Names, projects,
 slugs, directory leaves, sanitized names and case-insensitive captions are **display only**.
 Duplicates, missing links, wrong kinds and same-byte copies at different physical files do not
 fall back to first-match or name selection. No `.tds` sibling inference or archive substitution is
-permitted, even if a plausible file is present. Reordering changes indexes, not identity.
+permitted, even if a plausible file is present. Reordering workbook/fetch observations changes
+indexes, not LUID identity. Dependency order is different: its ordinal is part of occurrence identity.
 
 The v1 reasons `download_failed`, `selection_unavailable`, `missing`, `ambiguous`, `outside_assets`,
 `unreadable` and `unstable` remain explicit `engine_input_<reason>` occurrence issues. Missing or
@@ -768,8 +770,14 @@ occurrence and bridge `cannot_establish`, without dropping the denominator or un
 observations. Legacy sweeps with only `file` are insufficient: refresh evidence through the
 canonical harvest producer; never manufacture `engine_input` from a neighboring filename.
 
-❌ Engine **2.368.0**'s `estate_survey.py` unresolved rows carry workbook captions, not stable parent
-LUIDs. Every such occurrence is retained but remains unjoined; it is never associated by caption.
+❌ Engine **2.368.0**'s top-level `unresolved_dependencies` rows carry workbook captions, not
+parent/ordinal pointers. The bridge retains each nested unresolved occurrence's identity from
+`workbooks[].luid` and its ordered `published_dependencies`, but this top-level evidence cannot
+establish the denominator. Reconciliation requires unique exact parent/ordinal pointers with
+agreeing status, connection key and candidate LUIDs; missing, duplicate, out-of-range or
+contradictory records leave `denominator_status: cannot_establish`, even at equal counts.
+Neither captions nor top-level list order supplies missing pointers. An unresolved occurrence's
+absent downstream artifact is `unresolved_dependency_artifact_unavailable`, not lost identity.
 Older/missing survey completeness, missing parse sweeps and reports without `source_id` also stay
 `cannot_establish`. A complete survey of five workbooks still contributes five workbook occurrences
 when the engine emits only two, or none.

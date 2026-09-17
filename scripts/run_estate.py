@@ -796,7 +796,15 @@ def _scope_count(value: object, expected: int) -> bool:
 
 
 def _scope_dependency_key(row: object) -> tuple[str, tuple[str, ...]] | None:
-    if not isinstance(row, dict) or not isinstance(row.get("candidates"), list):
+    if (
+        not isinstance(row, dict)
+        or not isinstance(row.get("candidates"), list)
+        or (
+            "connection_datasource_id" in row
+            and row["connection_datasource_id"] != ""
+            and not _scope_text(row["connection_datasource_id"])
+        )
+    ):
         return None
     candidates = row["candidates"]
     if any(not isinstance(item, dict) or not _scope_text(item.get("luid")) for item in candidates):
@@ -813,37 +821,91 @@ def _scope_dependency_key(row: object) -> tuple[str, tuple[str, ...]] | None:
     return (status, luids) if valid else None
 
 
-def _scope_dependencies(workbooks: list, required: list, unresolved: list) -> tuple[int, list[str]]:
+def _scope_unresolved_identity(row: object) -> tuple[str, int] | None:
+    if isinstance(row, dict):
+        parent, ordinal = row.get("parent_workbook_luid"), row.get("dependency_ordinal")
+        if _scope_text(parent) and isinstance(ordinal, int) and not isinstance(ordinal, bool) and ordinal >= 0:
+            return parent, ordinal
+    return None
+
+
+def _scope_unresolved_issues(nested: list[dict], declared: list) -> list[str]:
+    """Top-level records must point to exactly one nested occurrence, never a caption or position."""
+    issues, observed, seen = [], {}, set()
+    for row in nested:
+        identity = _scope_unresolved_identity(row)
+        if identity is None:
+            issues.append("invalid_unresolved_dependency_identity")
+        elif identity in observed:
+            issues.append("duplicate_unresolved_dependency_identity")
+        else:
+            observed[identity] = row
+    for row in declared:
+        identity = _scope_unresolved_identity(row)
+        if identity is None:
+            issues.append("invalid_unresolved_dependency_identity")
+            continue
+        if identity in seen:
+            issues.append("duplicate_unresolved_dependency_identity")
+        seen.add(identity)
+        key = _scope_dependency_key(row)
+        if key is None or key[0] == "resolved":
+            issues.append("invalid_unresolved_dependency")
+        target = observed.get(identity)
+        if (
+            target is None
+            or key != _scope_dependency_key(target)
+            or row.get("connection_datasource_id") != target.get("connection_datasource_id")
+        ):
+            issues.append("dependency_collections_disagree")
+    if seen != observed.keys():
+        issues.append("dependency_collections_disagree")
+    return issues
+
+
+def _scope_dependencies(workbooks: list, required: list, unresolved: list) -> tuple[int, list[str], list[dict]]:
     issues = []
     dependent = 0
     resolved = set()
-    unresolved_observed = Counter()
-    for workbook in workbooks:
+    nested = []
+    for workbook_index, workbook in enumerate(workbooks):
         if not isinstance(workbook, dict):
             issues.append("invalid_workbook")
             continue
         deps = workbook.get("published_dependencies")
         if workbook.get("dependencies_unknown") is not False or not isinstance(deps, list):
             issues.append("dependencies_unknown")
+        if not isinstance(deps, list):
             continue
         dependent += bool(deps)
         if workbook.get("complexity_understated") is not bool(deps):
             issues.append("dependency_flags_disagree")
-        for dependency in deps:
+        for ordinal, dependency in enumerate(deps):
             key = _scope_dependency_key(dependency)
             if key is None:
                 issues.append("invalid_dependency")
-            elif key[0] == "resolved":
-                resolved.add(key[1][0])
-            else:
-                unresolved_observed[key] += 1
+            if isinstance(dependency, dict) and dependency.get("status") == "resolved":
+                if key is not None:
+                    resolved.add(key[1][0])
+                continue
+            dependency = dependency if isinstance(dependency, dict) else {}
+            parent = workbook.get("luid") if _scope_text(workbook.get("luid")) else None
+            if any(field in dependency for field in ("parent_workbook_luid", "dependency_ordinal")):
+                if _scope_unresolved_identity(dependency) != (parent, ordinal):
+                    issues.append("invalid_unresolved_dependency_identity")
+            nested.append(
+                {
+                    **dependency,
+                    "survey_workbook_index": workbook_index,
+                    "parent_workbook_luid": parent,
+                    "dependency_ordinal": ordinal,
+                }
+            )
     required_ids = {row["luid"] for row in required if isinstance(row, dict) and _scope_text(row.get("luid"))}
-    unresolved_declared = Counter(_scope_dependency_key(row) for row in unresolved)
-    if resolved != required_ids or unresolved_observed != unresolved_declared:
+    if resolved != required_ids:
         issues.append("dependency_collections_disagree")
-    if any(key is None or key[0] == "resolved" for key in unresolved_declared):
-        issues.append("invalid_unresolved_dependency")
-    return dependent, issues
+    issues.extend(_scope_unresolved_issues(nested, unresolved))
+    return dependent, issues, nested
 
 
 def _scope_selection(scope: object, summary: dict, workbook_count: int) -> list[str]:
@@ -866,11 +928,9 @@ def _scope_selection(scope: object, summary: dict, workbook_count: int) -> list[
     return [] if all(checks) else ["scope_completeness_disagrees"]
 
 
-def _scope_completeness(survey: dict, arrays: dict[str, list]) -> list[str]:
+def _scope_completeness(survey: dict, arrays: dict[str, list], dependent: int) -> list[str]:
     """Reconcile the current survey_site envelope; legacy missing evidence is not completeness."""
-    dependent, issues = _scope_dependencies(
-        arrays["workbooks"], arrays["required_datasources"], arrays["unresolved_dependencies"]
-    )
+    issues = []
     summary = survey.get("summary")
     summary = summary if isinstance(summary, dict) else {}
     expected = {
@@ -892,10 +952,10 @@ def _scope_completeness(survey: dict, arrays: dict[str, list]) -> list[str]:
     return issues
 
 
-def _scope_occurrences(arrays: dict[str, list]) -> list[dict]:
+def _scope_occurrences(arrays: dict[str, list], unresolved: list[dict]) -> list[dict]:
     occurrences = []
     for collection, kind in SCOPE_COLLECTIONS.items():
-        for index, value in enumerate(arrays[collection]):
+        for index, value in enumerate(unresolved if kind == "unresolved_dependency" else arrays[collection]):
             row = value if isinstance(value, dict) else {}
             display = {
                 key: redact_host_paths(row[key])[0]
@@ -915,6 +975,18 @@ def _scope_occurrences(arrays: dict[str, list]) -> list[dict]:
                 }
             )
             if kind == "unresolved_dependency":
+                occurrences[-1].update(
+                    survey_collection="workbooks",
+                    survey_index=row["survey_workbook_index"],
+                    luid=None,
+                    parent_workbook_luid=row["parent_workbook_luid"],
+                    dependency_ordinal=row["dependency_ordinal"],
+                    connection_datasource_id=(
+                        row.get("connection_datasource_id")
+                        if isinstance(row.get("connection_datasource_id"), str)
+                        else None
+                    ),
+                )
                 occurrences[-1]["dependency_status"] = row.get("status") if isinstance(row.get("status"), str) else None
                 candidates = row.get("candidates")
                 occurrences[-1]["candidate_luids"] = (
@@ -938,8 +1010,12 @@ def _scope_inventory(document: ScopeDocument) -> dict:
         arrays[collection] = rows if isinstance(rows, list) else []
         if not isinstance(rows, list):
             issues.append(f"invalid_{collection}_array")
-    issues.extend(_scope_completeness(survey, arrays))
-    occurrences = _scope_occurrences(arrays)
+    dependent, dependency_issues, unresolved = _scope_dependencies(
+        arrays["workbooks"], arrays["required_datasources"], arrays["unresolved_dependencies"]
+    )
+    issues.extend(dependency_issues)
+    issues.extend(_scope_completeness(survey, arrays, dependent))
+    occurrences = _scope_occurrences(arrays, unresolved)
     fetch_order = [
         {
             "survey_index": index,
@@ -990,7 +1066,12 @@ def _scope_observations(manifest: dict, report: dict, root: Path) -> tuple[list,
 
 def _scope_match(row: dict, inputs: ScopeInputs, assets: list, reports: list) -> tuple[dict | None, str | None]:
     if row["kind"] == "unresolved_dependency":
-        return None, "unresolved_dependency_identity_unavailable"
+        issue = (
+            "unresolved_dependency_artifact_unavailable"
+            if _scope_unresolved_identity(row) is not None
+            else "invalid_unresolved_dependency_identity"
+        )
+        return None, issue
     key = _scope_key(row["kind"], row["luid"])
     if key is None:
         return None, "invalid_scope_identity"
