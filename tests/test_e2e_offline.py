@@ -11,6 +11,9 @@ green". The mutations each assertion was proven against are listed in
 to the wrong model, models deployed after reports, a flattened folder tree and a re-run that
 re-creates instead of updating.
 
+On the #649 stack, published-dependency authority is mandatory, not capability-gated. Every test
+must request the shared pipeline, including a standalone selection of the page-less deployment check.
+
 Run just this file::
 
     python -m pytest tests/test_e2e_offline.py -q
@@ -120,10 +123,12 @@ def _pipeline(tmp_path_factory):
 
 
 def _assert_source_provenance(work: Path, site: tableau.TableauSite, base: str) -> None:
-    """Earn authority before checking the coarse coordinator exit, including on the #649 stack."""
+    """Require #649 authority at runtime, before checking the coarse coordinator exit."""
+    assert hasattr(run_estate.prov, "PUBLISHED_DEPENDENCIES_SCHEMA"), (
+        "OFFLINE_PUBLISHED_SCHEMA_REQUIRED: the #649 stack must expose PUBLISHED_DEPENDENCIES_SCHEMA"
+    )
     provenance = json.loads((work / "bundle" / "source-provenance.json").read_text(encoding="utf-8"))
-    if hasattr(run_estate.prov, "PUBLISHED_DEPENDENCIES_SCHEMA"):
-        _assert_published_authority(provenance, site)
+    _assert_published_authority(provenance, site)
 
     records = provenance["inputs"]
     assert provenance["input_count"] == len(records) == len(site.workbooks) == 3
@@ -192,8 +197,14 @@ def _bundle(pipeline, tmp_path):
 # ------------------------------------------------------------------ front half
 
 
-def test_the_front_half_produced_real_artifacts_from_real_bytes(pipeline):
+def test_the_front_half_produced_real_artifacts_from_real_bytes(pipeline, request):
     """Harvest downloaded packaged workbooks and the engine turned them into a PBIP bundle."""
+    unlinked = [
+        item.nodeid
+        for item in request.session.items
+        if item.path == request.node.path and "pipeline" not in item.fixturenames
+    ]
+    assert not unlinked, f"OFFLINE_PIPELINE_FIXTURE_REQUIRED: {unlinked}"
     assert {p.suffix for p in pipeline["harvested"]} == {".twbx", ".tdsx"}
     assert all(p.read_bytes()[:2] == b"PK" for p in pipeline["harvested"])
 
@@ -292,6 +303,7 @@ def test_a_report_is_never_left_bound_by_path(monkeypatch, bundle):
         assert "byPath" not in pbir["datasetReference"]
 
 
+@pytest.mark.usefixtures("pipeline")
 def test_a_page_less_report_is_not_sent_to_fabric(tmp_path):
     """The deployer must refuse the service-invalid report shape before issuing a create call."""
     report = tmp_path / "empty.Report"
