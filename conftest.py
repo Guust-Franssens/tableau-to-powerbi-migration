@@ -200,6 +200,14 @@ EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID: dict[str, str] = {
     "[non_zip_residue]": "deterministic tier not installed",
     "tests/test_harvest_project_scope.py::test_canonical_engine_unreadable_residual_archives_do_not_change_parse_exit"
     "[truncated_zip]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_reader_and_digest_share_bytes_during_restored_mutation"
+    "[datasource-.tds]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_reader_and_digest_share_bytes_during_restored_mutation"
+    "[datasource-.tdsx]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_reader_and_digest_share_bytes_during_restored_mutation"
+    "[workbook-.twb]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_reader_and_digest_share_bytes_during_restored_mutation"
+    "[workbook-.twbx]": "deterministic tier not installed",
     "tests/test_issue_194_long_pbir_path.py::test_the_emitted_long_case_stops_the_coordinator_before_its_first_"
     "consumer": "deterministic tier not installed",
     "tests/test_issue_194_long_pbir_path.py::test_the_emitted_short_control_passes_the_same_coordinator_gate": (

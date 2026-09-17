@@ -37,6 +37,14 @@ ENGINE_TEST_TARGETS = (
     "tests/test_harvest_project_scope.py::test_canonical_engine_inputs_preserve_parser_landings",
     "tests/test_harvest_project_scope.py::test_canonical_engine_fetcher_twins_reach_engine_input_through_main",
     "tests/test_harvest_project_scope.py::test_canonical_engine_unreadable_residual_archives_do_not_change_parse_exit",
+    "tests/test_harvest_project_scope.py::test_canonical_reader_and_digest_share_bytes_during_restored_mutation"
+    "[datasource-.tds]",
+    "tests/test_harvest_project_scope.py::test_canonical_reader_and_digest_share_bytes_during_restored_mutation"
+    "[datasource-.tdsx]",
+    "tests/test_harvest_project_scope.py::test_canonical_reader_and_digest_share_bytes_during_restored_mutation"
+    "[workbook-.twb]",
+    "tests/test_harvest_project_scope.py::test_canonical_reader_and_digest_share_bytes_during_restored_mutation"
+    "[workbook-.twbx]",
 )
 ENGINE_TEST_TARGET_COMMAND = " ".join(ENGINE_TEST_TARGETS)
 
@@ -425,10 +433,10 @@ def test_all_engine_dependent_tests_are_accounted_for() -> None:
 
     The skip-reason classifier also treats the installed-engine-constants watchdog as engine-backed,
     so the engine jobs must run that one too instead of marking it NOT_CHECKED in the main job,
-    taking the denominator to 37. Issue #679 adds eleven harvest engine-input controls: six parser
-    landing cases, two fetcher-twin cases, and three unreadable residual archives. Their three exact
-    function selectors expand to the reviewed leaf nodes, taking the denominator to 48 without
-    including the unrelated project-scope tests.
+    taking the denominator to 37. Issue #679 adds fifteen harvest engine-input controls: six parser
+    landing cases, two fetcher-twin cases, three unreadable residual archives, and four immutable
+    snapshot cases. The three existing exact function selectors plus four exact snapshot node
+    selectors take the denominator to 52 without including the unrelated project-scope tests.
     """
     env = dict(os.environ)
     env[engine_source.SIMULATE_ENGINE_ABSENT_ENV] = "1"
