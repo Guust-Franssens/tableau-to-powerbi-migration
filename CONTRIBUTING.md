@@ -12,7 +12,7 @@ this reason).
 ## Issue-to-PR lifecycle
 
 1. **File the problem and outcome.** Use the
-   [implementation form](.github/ISSUE_TEMPLATE/implementation.yml) or a blank issue. Only the
+   [implementation form](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/new?template=implementation.yml) or a blank issue. Only the
    observed journey, desired outcome/default, and privacy confirmation are required at filing;
    plan details are optional seeds, not a demand for a worktree or review link.
 2. **Plan, then independently review.** Before behavioral coding, turn those seeds into a bounded
