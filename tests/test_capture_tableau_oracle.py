@@ -1466,6 +1466,26 @@ def test_invalid_utf8_is_refused_without_numeric_evidence(tmp_path: Path, body: 
     assert not result["items"]
 
 
+def test_bom_prefixed_single_column_blank_header_is_refused_before_consumption(tmp_path: Path) -> None:
+    """The BOM must not become a one-column header that makes a blank-first export look rectangular."""
+    body = b"\xef\xbb\xbf\nValue\n0\n"
+    manifest = _capture_one(tmp_path, body, {"Content-Type": "text/csv"})
+    data = manifest["views"][0]["data"]
+
+    assert data["certification"] == payload_facts.CSV_RAGGED
+    assert data["status"] == "format_mismatch"
+    assert "row_count" not in data and "columns" not in data
+    assert "format_hints" not in data
+    assert "path" not in data and not list(tmp_path.rglob("*.csv"))
+    assert manifest["data_ok"] == manifest["captured_complete"] == manifest["data_empty"] == 0
+    assert manifest["data_empty_views"] == []
+    assert manifest["failed"] == 1
+    assert not _naive_numeric_consumer(tmp_path)
+    result = build_reconcile_items.build(tmp_path, {"Network Ops": {"Value": "MEASURE"}})
+    assert result["item_count"] == 0
+    assert not result["items"]
+
+
 @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
 @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 @pytest.mark.parametrize(
