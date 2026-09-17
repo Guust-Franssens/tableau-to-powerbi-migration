@@ -500,7 +500,7 @@ convention — see §7 for which ones actually are.
 | 2 | `python scripts/assess_estate.py --out _assessment --survey _assessment/estate_survey.json` | ⚠️ ~34 s | `report.md`, `assessment.json`, `estate.db` |
 | 3 | `python scripts/tableau_lineage.py --plan --survey _assessment/estate_survey.json` | seconds | model-first order — **survey edges override the Metadata API** |
 | 4 | `python scripts/harvest_estate_assets.py --out _sweep` | ✅ **120 s / 55 assets** | `_sweep/assets/*`, `parse-sweep.md` |
-| 5 | `python scripts/run_estate.py --input _sweep/assets --output _bundle [--storage-decision <file.json>]` | ✅ **81.7 s of recorded phases** (engine 41.3 s, provenance 38.7 s) | `_bundle/` |
+| 5 | `python scripts/run_estate.py --input _sweep/assets --output _bundle --scope-survey _assessment/estate_survey.json [--storage-decision <file.json>]` | ✅ **81.7 s of recorded phases** (engine 41.3 s, provenance 38.7 s; predates the scope bridge) | `_bundle/` |
 | 6 | `python scripts/deploy_estate.py --bundle _bundle --workspace <workspace-id> --tenant <tenant-id> --estate-db _assessment/estate.db --journal _bundle/deploy-journal.jsonl` | ⚠️ **~25 s per item** — budget 30 min for 75 items | items in the landing zone |
 
 When an operator supplies `--storage-decision`, keep that JSON file outside the destructive bundle
@@ -710,6 +710,58 @@ Useful flags ✅ verified against `--help`: `--limit N` (quick pass), `--skip-do
 
 **This is the gate.** The engine exits 0 regardless; our wrapper is what turns its report into an
 answer.
+
+#### Site scope snapshot
+
+For a **site run**, pass the exact survey selected in steps 1–2:
+
+```powershell
+python scripts\run_estate.py --input <run>\assets --output <run>\bundle --scope-survey <run>\assessment\estate_survey.json
+```
+
+✅ Producer contract (#469): `run_estate.py:capture_scope_inputs` reads and SHA-256 hashes the
+survey's exact bytes and **only** `<input>/../parse-sweep.json`, once before launching the engine.
+There is no parent-tree search, alternative sweep selection, server discovery or network request
+in this bridge. Paths in harvest `file` and engine `source_id` retain their producer semantics:
+relative paths resolve against the invocation's working directory, never by trying several roots.
+The files must resolve inside the explicit input folder.
+
+After conversion, `write_scope_bridge` upserts **version 1** of `input_manifest.scope_bridge`,
+before generated-artifact hashes, the output-tree baseline and the existing receipt are written.
+`engine-output-receipt.json.input_manifest_sha256` therefore seals the **final** manifest, including
+the bridge. No separate ledger, outcome file or source-provenance schema is introduced.
+
+| bridge field | meaning |
+|---|---|
+| `survey_sha256`, `parse_sweep_sha256` | the held pre-engine bytes, not a later reread; unreadable snapshots have no digest |
+| `counts` | observed lengths of **all four** survey arrays: `workbooks`, `required_datasources`, `unresolved_dependencies`, `fetch_order`; a missing/non-array collection is `null`, not zero |
+| `denominator_status` | `established` only for survey schema `1.0` with reconciled scope/fetch identities, dependency lists, summary counts, explicit non-degraded/error-free completeness and selected/site counts |
+| `occurrences` | every workbook, required datasource and unresolved-dependency row, preserving `survey_collection`/`survey_index` and duplicates even when no artifact exists |
+| `fetch_order` | every plan occurrence retained separately; it corroborates the denominator, never adds a second copy of a workbook to it |
+| occurrence `status`, `issues`, `match` | `established` requires the complete exact join below; otherwise `cannot_establish`, stable reason codes, and no match |
+| bridge `status` | `established` only when the denominator and every occurrence join are established; otherwise `cannot_establish` |
+
+The only identity chain is **survey kind/LUID → unique parse-sweep kind/LUID → the same physical
+input file and SHA-256 → unique engine `source_id` with report collection/index**. The match also
+records fetch/sweep/input indexes and the input SHA. Files are fingerprinted before and after the
+engine; a changed file or disagreeing manifest hash cannot establish the join. Names, projects,
+slugs, directory leaves, sanitized names and case-insensitive captions are **display only**.
+Duplicates, missing links, wrong kinds and same-byte copies at different physical files do not
+fall back to first-match or name selection. Reordering changes indexes, not identity.
+
+❌ Engine **2.368.0**'s `estate_survey.py` unresolved rows carry workbook captions, not stable parent
+LUIDs. Every such occurrence is retained but remains unjoined; it is never associated by caption.
+Older/missing survey completeness, missing parse sweeps and reports without `source_id` also stay
+`cannot_establish`. A complete survey of five workbooks still contributes five workbook occurrences
+when the engine emits only two, or none.
+
+This is **producer evidence, not a new conversion/readiness/completion gate**. Existing exit codes
+remain unchanged; an exit 0 does not establish scope identity. `--dry-run` reads neither snapshot
+and prints only that a survey was supplied. Survey/sweep paths are not stored in the bridge or
+printed by it; the engine's existing `source_id` paths remain local metadata in the ignored bundle.
+Folder and single-file routes **omit** the flag and gain no inferred site denominator.
+`--slice-only` ignores it, preserves any existing bridge (including damaged/future versions), and
+never synthesizes or reseals one. The status/package consumer is a separate follow-up.
 
 `run_estate.py` exit codes ✅ verified — read out of the `EXIT_*` constants and `final_verdict()`,
 and 2/5 reproduced by running the command:

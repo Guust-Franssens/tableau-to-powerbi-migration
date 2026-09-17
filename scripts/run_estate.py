@@ -4,6 +4,7 @@ purpose: run the deterministic tier over an ESTATE and turn its output into some
          handover slices, and a phase-timing record.
 usage:   python scripts/run_estate.py --input <folder-of-.twb/.twbx/.tds/.tdsx> --output <bundle-dir>
                                       [--approved-dax <file.json>] [--storage-decision <file.json>] [--dry-run]
+                                      [--scope-survey <estate_survey.json>]
                                       [--accept-bundle-rewrite] [--accept-engine-version-change]
          python scripts/run_estate.py --slice-only --output <existing-bundle-dir>
 
@@ -144,6 +145,7 @@ from __future__ import annotations
 import argparse
 import copy
 import contextlib
+import hashlib
 import json
 import logging
 import math
@@ -152,13 +154,14 @@ import os
 import queue
 import re
 import socket
+import stat
 import subprocess
 import sys
 import threading
 import time
 import uuid
 import zipfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import NamedTuple
@@ -611,6 +614,414 @@ def run_engine(
     log.info("ENGINE: %s", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     return proc.returncode, (proc.stdout + proc.stderr)
+
+
+SCOPE_COLLECTIONS = {
+    "workbooks": "workbook",
+    "required_datasources": "datasource",
+    "unresolved_dependencies": "unresolved_dependency",
+}
+
+
+class ScopeDocument(NamedTuple):
+    """One pre-engine JSON read; its digest covers the bytes parsed, not a later reread."""
+
+    value: object
+    sha256: str | None
+    issue: str | None
+
+
+class ScopeFile(NamedTuple):
+    """Physical identity and bytes observed within the explicit input folder."""
+
+    identity: tuple[int, int]
+    sha256: str | None
+    size: int
+    kind: str
+
+
+class ScopeInputs(NamedTuple):
+    """Frozen survey/harvest evidence, independent of the engine's emitted subset."""
+
+    survey: ScopeDocument
+    sweep: ScopeDocument
+    root: Path
+    files: list[ScopeFile | None]
+
+
+def _scope_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate-json-key")
+        result[key] = value
+    return result
+
+
+def _scope_constant(_value: str) -> None:
+    raise ValueError("nonfinite-json-number")
+
+
+def _scope_document(path: Path) -> ScopeDocument:
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return ScopeDocument(None, None, "unreadable")
+    digest = hashlib.sha256(raw).hexdigest()
+    try:
+        value = json.loads(raw, object_pairs_hook=_scope_object, parse_constant=_scope_constant)
+    except (ValueError, RecursionError):
+        return ScopeDocument(None, digest, "invalid_json")
+    return ScopeDocument(value, digest, None)
+
+
+def _scope_text(value: object) -> bool:
+    return (
+        isinstance(value, str) and bool(value) and value == value.strip() and not any(ord(char) < 32 for char in value)
+    )
+
+
+def _scope_key(kind: object, luid: object) -> tuple[str, str] | None:
+    if kind in ("workbook", "datasource") and _scope_text(luid):
+        return kind, luid
+    return None
+
+
+def _scope_file(value: object, root: Path, *, hash_bytes: bool = True) -> ScopeFile | None:
+    if not _scope_text(value) or PureWindowsPath(value).drive.startswith("\\"):
+        return None
+    try:
+        path = Path(value).resolve(strict=True)
+        suffix = path.suffix.lower()
+        if not path.is_relative_to(root) or suffix not in _ENGINE_SOURCE_SUFFIXES:
+            return None
+        before = path.stat()
+        if not stat.S_ISREG(before.st_mode) or not before.st_ino:
+            return None
+        digest = sha256_file(path) if hash_bytes else None
+        after = path.stat()
+        fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+        if any(getattr(before, field) != getattr(after, field) for field in fields):
+            return None
+        kind = "workbook" if suffix in (".twb", ".twbx") else "datasource"
+        return ScopeFile((before.st_dev, before.st_ino), digest, before.st_size, kind)
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def capture_scope_inputs(survey_path: Path, input_dir: Path) -> ScopeInputs:
+    """Read only the named survey and <input>/../parse-sweep.json, never discover a site or run."""
+    survey = _scope_document(survey_path)
+    sweep = _scope_document(input_dir.parent / "parse-sweep.json")
+    root = input_dir.resolve()
+    rows = sweep.value if isinstance(sweep.value, list) else []
+    files = [_scope_file(row.get("file"), root) if isinstance(row, dict) else None for row in rows]
+    return ScopeInputs(survey, sweep, root, files)
+
+
+def _scope_count(value: object, expected: int) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value == expected
+
+
+def _scope_dependency_key(row: object) -> tuple[str, tuple[str, ...]] | None:
+    if not isinstance(row, dict) or not isinstance(row.get("candidates"), list):
+        return None
+    candidates = row["candidates"]
+    if any(not isinstance(item, dict) or not _scope_text(item.get("luid")) for item in candidates):
+        return None
+    luids = tuple(sorted(item["luid"] for item in candidates))
+    if len(set(luids)) != len(luids):
+        return None
+    status = row.get("status")
+    if status == "resolved":
+        return (status, luids) if _scope_text(row.get("luid")) and luids == (row["luid"],) else None
+    if row.get("luid") not in (None, ""):
+        return None
+    valid = (status == "ambiguous" and len(luids) > 1) or (status == "not_found" and not luids)
+    return (status, luids) if valid else None
+
+
+def _scope_dependencies(workbooks: list, required: list, unresolved: list) -> tuple[int, list[str]]:
+    issues = []
+    dependent = 0
+    resolved = set()
+    unresolved_observed = Counter()
+    for workbook in workbooks:
+        if not isinstance(workbook, dict):
+            issues.append("invalid_workbook")
+            continue
+        deps = workbook.get("published_dependencies")
+        if workbook.get("dependencies_unknown") is not False or not isinstance(deps, list):
+            issues.append("dependencies_unknown")
+            continue
+        dependent += bool(deps)
+        if workbook.get("complexity_understated") is not bool(deps):
+            issues.append("dependency_flags_disagree")
+        for dependency in deps:
+            key = _scope_dependency_key(dependency)
+            if key is None:
+                issues.append("invalid_dependency")
+            elif key[0] == "resolved":
+                resolved.add(key[1][0])
+            else:
+                unresolved_observed[key] += 1
+    required_ids = {row["luid"] for row in required if isinstance(row, dict) and _scope_text(row.get("luid"))}
+    unresolved_declared = Counter(_scope_dependency_key(row) for row in unresolved)
+    if resolved != required_ids or unresolved_observed != unresolved_declared:
+        issues.append("dependency_collections_disagree")
+    if any(key is None or key[0] == "resolved" for key in unresolved_declared):
+        issues.append("invalid_unresolved_dependency")
+    return dependent, issues
+
+
+def _scope_selection(scope: object, summary: dict, workbook_count: int) -> list[str]:
+    if not isinstance(scope, dict):
+        return ["scope_completeness_unavailable"]
+    scoped = scope.get("scoped")
+    selected = scope.get("workbooks_selected")
+    on_site = scope.get("workbooks_on_site")
+    filters = [scope.get("projects"), scope.get("workbooks")]
+    checks = (
+        isinstance(scoped, bool) and summary.get("scoped") is scoped,
+        all(isinstance(values, list) and all(_scope_text(value) for value in values) for values in filters),
+        scoped is any(filters),
+        _scope_count(selected, workbook_count),
+        isinstance(on_site, int) and not isinstance(on_site, bool) and on_site >= workbook_count,
+        scoped or on_site == selected,
+        scope.get("unmatched") == [],
+        scope.get("datasource_index") == "site-wide",
+    )
+    return [] if all(checks) else ["scope_completeness_disagrees"]
+
+
+def _scope_completeness(survey: dict, arrays: dict[str, list]) -> list[str]:
+    """Reconcile the current survey_site envelope; legacy missing evidence is not completeness."""
+    dependent, issues = _scope_dependencies(
+        arrays["workbooks"], arrays["required_datasources"], arrays["unresolved_dependencies"]
+    )
+    summary = survey.get("summary")
+    summary = summary if isinstance(summary, dict) else {}
+    expected = {
+        "workbooks_total": len(arrays["workbooks"]),
+        "required_datasources": len(arrays["required_datasources"]),
+        "unresolved_dependencies": len(arrays["unresolved_dependencies"]),
+        "workbooks_with_published_dependency": dependent,
+        "dependencies_unknown": 0,
+        "listing_errors": 0,
+        "connection_read_errors": 0,
+    }
+    if any(not _scope_count(summary.get(key), count) for key, count in expected.items()):
+        issues.append("summary_counts_disagree")
+    if survey.get("degraded") is not False or summary.get("degraded") is not False:
+        issues.append("survey_degraded_or_unknown")
+    if any(survey.get(key) != [] for key in ("listing_errors", "connection_read_errors")):
+        issues.append("survey_errors_or_unknown")
+    issues.extend(_scope_selection(survey.get("scope"), summary, len(arrays["workbooks"])))
+    return issues
+
+
+def _scope_occurrences(arrays: dict[str, list]) -> list[dict]:
+    occurrences = []
+    for collection, kind in SCOPE_COLLECTIONS.items():
+        for index, value in enumerate(arrays[collection]):
+            row = value if isinstance(value, dict) else {}
+            display = {
+                key: redact_host_paths(row[key])[0]
+                for key in ("name", "datasource_name", "project", "workbook")
+                if isinstance(row.get(key), str)
+            }
+            occurrences.append(
+                {
+                    "survey_collection": collection,
+                    "survey_index": index,
+                    "kind": kind,
+                    "luid": row.get("luid") if _scope_text(row.get("luid")) else None,
+                    "display": display,
+                    "status": "cannot_establish",
+                    "issues": [],
+                    "match": None,
+                }
+            )
+            if kind == "unresolved_dependency":
+                occurrences[-1]["dependency_status"] = row.get("status") if isinstance(row.get("status"), str) else None
+                candidates = row.get("candidates")
+                occurrences[-1]["candidate_luids"] = (
+                    [item.get("luid") if isinstance(item, dict) else None for item in candidates]
+                    if isinstance(candidates, list)
+                    else None
+                )
+    return occurrences
+
+
+def _scope_inventory(document: ScopeDocument) -> dict:
+    survey = document.value if isinstance(document.value, dict) else {}
+    issues = [f"survey_{document.issue}"] if document.issue else []
+    if survey.get("schema_version") != "1.0":
+        issues.append("unsupported_survey_schema")
+    arrays = {}
+    counts = {}
+    for collection in (*SCOPE_COLLECTIONS, "fetch_order"):
+        rows = survey.get(collection)
+        counts[collection] = len(rows) if isinstance(rows, list) else None
+        arrays[collection] = rows if isinstance(rows, list) else []
+        if not isinstance(rows, list):
+            issues.append(f"invalid_{collection}_array")
+    issues.extend(_scope_completeness(survey, arrays))
+    occurrences = _scope_occurrences(arrays)
+    fetch_order = [
+        {
+            "survey_index": index,
+            "kind": row.get("kind") if isinstance(row, dict) else None,
+            "luid": row.get("luid") if isinstance(row, dict) else None,
+        }
+        for index, row in enumerate(arrays["fetch_order"])
+    ]
+    units = [row for row in occurrences if row["kind"] != "unresolved_dependency"]
+    wanted = Counter(_scope_key(row["kind"], row["luid"]) for row in units)
+    planned = Counter(_scope_key(row["kind"], row["luid"]) for row in fetch_order)
+    if None in wanted or None in planned:
+        issues.append("invalid_scope_identity")
+    if any(count != 1 for count in (*wanted.values(), *planned.values())):
+        issues.append("duplicate_scope_identity")
+    if wanted != planned:
+        issues.append("fetch_order_disagrees")
+    return {
+        "version": 1,
+        "survey_sha256": document.sha256,
+        "denominator_status": "cannot_establish" if issues else "established",
+        "issues": sorted(set(issues)),
+        "counts": counts,
+        "occurrences": occurrences,
+        "fetch_order": fetch_order,
+    }
+
+
+def _scope_observations(manifest: dict, report: dict, root: Path) -> tuple[list, list]:
+    assets = []
+    for index, row in enumerate(manifest.get("assets", [])):
+        if isinstance(row, dict):
+            observed = _scope_file(row.get("staged_input_path"), root)
+            if observed:
+                assets.append((index, row, observed))
+    reports = []
+    for collection in ("workbooks", "datasources"):
+        rows = report.get(collection)
+        if not isinstance(rows, list):
+            continue
+        for index, row in enumerate(rows):
+            if isinstance(row, dict):
+                observed = _scope_file(row.get("source_id"), root, hash_bytes=False)
+                if observed:
+                    reports.append((collection, index, row["source_id"], observed.identity))
+    return assets, reports
+
+
+def _scope_match(row: dict, inputs: ScopeInputs, assets: list, reports: list) -> tuple[dict | None, str | None]:
+    if row["kind"] == "unresolved_dependency":
+        return None, "unresolved_dependency_identity_unavailable"
+    key = _scope_key(row["kind"], row["luid"])
+    if key is None:
+        return None, "invalid_scope_identity"
+    sweep = inputs.sweep.value if isinstance(inputs.sweep.value, list) else []
+    candidates = [
+        index
+        for index, entry in enumerate(sweep)
+        if isinstance(entry, dict) and _scope_key(entry.get("kind"), entry.get("luid")) == key
+    ]
+    if len(candidates) != 1:
+        return None, "parse_sweep_missing_or_duplicate"
+    sweep_index = candidates[0]
+    physical = inputs.files[sweep_index]
+    if physical is None or physical.kind != row["kind"] or "download_error" in sweep[sweep_index]:
+        return None, "parse_sweep_file_unavailable"
+    if sum(item is not None and item.identity == physical.identity for item in inputs.files) != 1:
+        return None, "parse_sweep_file_ambiguous"
+    match, issue = _scope_engine_match(physical, assets, reports)
+    if match:
+        match["parse_sweep_index"] = sweep_index
+    return match, issue
+
+
+def _scope_engine_match(physical: ScopeFile, assets: list, reports: list) -> tuple[dict | None, str | None]:
+    candidates = [item for item in assets if item[2].identity == physical.identity]
+    if len(candidates) != 1:
+        return None, "input_asset_missing_or_duplicate"
+    asset_index, asset, current = candidates[0]
+    if (
+        asset.get("kind") != physical.kind
+        or "error" in asset
+        or current != physical
+        or asset.get("sha256") != physical.sha256
+        or not _scope_count(asset.get("size_bytes"), physical.size)
+    ):
+        return None, "input_asset_disagrees"
+    matches = [item for item in reports if item[3] == physical.identity]
+    if len(matches) != 1:
+        return None, "report_source_missing_or_duplicate"
+    collection, index, source_id, _ = matches[0]
+    if collection != ("workbooks" if physical.kind == "workbook" else "datasources"):
+        return None, "report_source_kind_disagrees"
+    return {
+        "input_asset_index": asset_index,
+        "sha256": physical.sha256,
+        "report_collection": collection,
+        "report_index": index,
+        "source_id": source_id,
+    }, None
+
+
+def write_scope_bridge(bundle: Path, report: dict, inputs: ScopeInputs) -> None:
+    """Upsert producer evidence before the existing manifest writers and final receipt seal it."""
+    path = bundle / "input_manifest.json"
+    manifest_doc = _scope_document(path)
+    if manifest_doc.issue == "invalid_json":
+        raise ValueError("SCOPE BRIDGE: cannot_establish; input_manifest invalid JSON")
+    manifest = manifest_doc.value if isinstance(manifest_doc.value, dict) else {}
+    if manifest_doc.value is not None and not isinstance(manifest_doc.value, dict):
+        manifest["engine_input_manifest"] = manifest_doc.value
+    bridge = _scope_inventory(inputs.survey)
+    bridge["parse_sweep_sha256"] = inputs.sweep.sha256
+    link_issues = []
+    if inputs.sweep.issue or not isinstance(inputs.sweep.value, list):
+        link_issues.append("parse_sweep_unavailable")
+    if (
+        manifest_doc.issue
+        or manifest.get("source_kind") != "LocalFilesSource"
+        or not isinstance(manifest.get("assets"), list)
+    ):
+        link_issues.append("input_manifest_unavailable")
+    if not all(isinstance(report.get(collection), list) for collection in ("workbooks", "datasources")):
+        link_issues.append("report_collections_unavailable")
+    assets, reports = _scope_observations(manifest, report, inputs.root) if not link_issues else ([], [])
+    for row in bridge["occurrences"]:
+        match, issue = _scope_match(row, inputs, assets, reports)
+        row["issues"] = list(link_issues)
+        if bridge["denominator_status"] != "established":
+            row["issues"].append("survey_contract_unestablished")
+        if issue:
+            row["issues"].append(issue)
+        if not row["issues"]:
+            row["status"] = "established"
+            match["fetch_order_index"] = next(
+                entry["survey_index"]
+                for entry in bridge["fetch_order"]
+                if (entry["kind"], entry["luid"]) == (row["kind"], row["luid"])
+            )
+            row["match"] = match
+    bridge["issues"].extend(link_issues)
+    bridge["status"] = (
+        "cannot_establish"
+        if bridge["issues"] or any(row["status"] != "established" for row in bridge["occurrences"])
+        else "established"
+    )
+    manifest["scope_bridge"] = bridge
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    log.info(
+        "SCOPE BRIDGE: %s; denominator=%s; occurrences=%d -> <bundle>/input_manifest.json",
+        bridge["status"],
+        bridge["denominator_status"],
+        len(bridge["occurrences"]),
+    )
 
 
 def _is_scratch_path(relative: Path) -> bool:
@@ -2951,6 +3362,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="engine-owned datasource storage policy JSON; forwarded unchanged after local availability checks",
     )
     parser.add_argument(
+        "--scope-survey",
+        type=Path,
+        help="site runs only: explicit estate_survey.json snapshot for the receipt-sealed input scope bridge; "
+        "reads only this file and <input>/../parse-sweep.json, never discovers a server",
+    )
+    parser.add_argument(
         "--accept-bundle-rewrite",
         action="store_true",
         help=(
@@ -3055,6 +3472,8 @@ def print_dry_run(args: argparse.Namespace, engine: Path | None) -> None:
     print(f"         input={args.input}  output={args.output}")
     print(f"         approved-dax={args.approved_dax or '(none)'}")
     print(f"         storage-decision={args.storage_decision or '(none)'}")
+    if getattr(args, "scope_survey", None) is not None:
+        print("         scope-survey=supplied (not read in dry-run; never forwarded to the engine)")
     if engine:
         command = engine_argv(engine, args.input, args.output, args.approved_dax, args.storage_decision)
         print(f"         engine-argv={json.dumps(command, ensure_ascii=False)}")
@@ -3095,7 +3514,10 @@ def produce_and_gate_output(
 
     Returns ``(report, exit code)``; the report is None only when there was no output to read.
     """
+    scope_inputs = None
     if not args.slice_only:
+        if getattr(args, "scope_survey", None) is not None:
+            scope_inputs = capture_scope_inputs(args.scope_survey, args.input)
         code = run_engine_phase(args, engine, phases)
         if code != EXIT_OK:
             # A failed engine has no output to judge, so nothing is measured and no path report is
@@ -3104,6 +3526,8 @@ def produce_and_gate_output(
 
     report = read_report(args.output)
     if not args.slice_only:
+        if scope_inputs is not None:
+            write_scope_bridge(args.output, report, scope_inputs)
         record_engine_output(args.output, report, phases, engine)
     else:
         backfill_slice_only_baseline(args.output, report, phases)
