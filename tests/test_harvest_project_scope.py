@@ -9,6 +9,8 @@ clock, and an ETA is never checked by anyone against the run it described.
 from __future__ import annotations
 
 import hashlib
+import builtins
+import ctypes
 import io
 import json
 import os
@@ -18,6 +20,7 @@ import stat
 import subprocess
 import sys
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -681,7 +684,7 @@ class SelectedFiles:
     def __init__(self, datasources: list[Path] | None = None, workbooks: list[Path] | None = None) -> None:
         self.datasources = datasources or []
         self.workbooks = workbooks or []
-        self.reads: list[tuple[str, str]] = []
+        self.reads: list[tuple[str, str, bytes]] = []
 
     def list_datasources(self) -> list[Path]:
         return self.datasources
@@ -690,12 +693,24 @@ class SelectedFiles:
         return self.workbooks
 
     def read_datasource(self, asset_id: str) -> str:
-        self.reads.append(("datasource", asset_id))
+        with open(asset_id, "rb") as stream:
+            self.reads.append(("datasource", asset_id, stream.read()))
         return INPUT_XML["datasource"].decode()
 
     def read_workbook(self, asset_id: str) -> str:
-        self.reads.append(("workbook", asset_id))
+        with open(asset_id, "rb") as stream:
+            self.reads.append(("workbook", asset_id, stream.read()))
         return INPUT_XML["workbook"].decode()
+
+
+def assert_snapshot_reads(source: SelectedFiles, originals: list[tuple[str, Path]]) -> None:
+    """Reader IDs are private views; evidence must still name the actual selected input."""
+    assert len(source.reads) == len(originals)
+    for (kind, asset_id, data), (expected_kind, path) in zip(source.reads, originals, strict=True):
+        assert kind == expected_kind and asset_id != str(path)
+        assert Path(asset_id).suffix == path.suffix
+        assert data == path.read_bytes()
+        assert not Path(asset_id).exists()
 
 
 @pytest.fixture(name="canonical_engine_scripts")
@@ -753,6 +768,88 @@ def test_canonical_engine_inputs_preserve_parser_landings(
     assert rows[0]["file"] == str(parser_path)
     assert rows[0]["ours"] == expected_ours and rows[0]["theirs"] == expected_theirs
     assert_established(rows[0]["engine_input"], engine_path)
+
+
+@pytest.mark.engine_dependency(expected_skip_reason=ENGINE_SKIP_REASON)
+@pytest.mark.parametrize(
+    ("kind", "suffix"), [("datasource", ".tds"), ("datasource", ".tdsx"), ("workbook", ".twb"), ("workbook", ".twbx")]
+)
+def test_canonical_reader_and_digest_share_bytes_during_restored_mutation(
+    tmp_path: Path, canonical_engine_scripts: Path, kind: str, suffix: str
+) -> None:
+    """The R1 reproducer: the real reader runs while different, same-length source bytes are live."""
+    row = input_row(tmp_path, kind, suffix=suffix)
+    original = Path(row["file"]).read_bytes()
+    if suffix.endswith("x"):
+        changed = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(original)) as source, zipfile.ZipFile(changed, "w") as target:
+            for member in source.infolist():
+                target.writestr(member, source.read(member).replace(b"18.1", b"18.2"))
+        altered = changed.getvalue()
+    else:
+        altered = original.replace(b"18.1", b"18.2")
+    assert original != altered and len(original) == len(altered)
+    snippet = """
+import json, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import harvest_estate_assets as harvest
+sys.path.insert(0, sys.argv[2])
+from migrate_estate import LocalFilesSource
+request = json.load(sys.stdin)
+row = request["row"]
+selected = Path(row["file"])
+original = selected.read_bytes()
+before = selected.lstat()
+source = LocalFilesSource(str(selected.parent))
+canonical_reader = getattr(source, "read_" + row["kind"])
+seen, ids = [], []
+def transient_read(asset_id):
+    ids.append(asset_id)
+    selected.write_bytes(bytes.fromhex(request["altered"]))
+    try:
+        text = canonical_reader(asset_id)
+        seen.append(text)
+        return text
+    finally:
+        selected.write_bytes(original)
+        os.utime(selected, ns=(before.st_atime_ns, before.st_mtime_ns))
+setattr(source, "read_" + row["kind"], transient_read)
+with selected.open("rb", buffering=0) as observer:
+    before_handle = os.fstat(observer.fileno())
+    entry = harvest._selected_engine_inputs(source, selected.parent, [row])[0]
+    after_handle = os.fstat(observer.fileno())
+after = selected.lstat()
+fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+print(json.dumps({
+    "entry": entry, "engine_xml": seen,
+    "bytes_restored": selected.read_bytes() == original,
+    "path_stat_restored": all(getattr(before, field) == getattr(after, field) for field in fields),
+    "handle_stat_restored": all(getattr(before_handle, field) == getattr(after_handle, field) for field in fields),
+    "private_ids": bool(ids) and all(value != str(selected) for value in ids),
+    "suffixes": [Path(value).suffix for value in ids],
+    "no_snapshot_files": all(not Path(value).exists() for value in ids),
+}))
+"""
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", snippet, str(REPO_ROOT / "scripts"), str(canonical_engine_scripts)],
+        input=json.dumps({"row": row, "altered": altered.hex()}),
+        text=True,
+        encoding="utf-8",
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(proc.stdout)
+    assert result["engine_xml"] == [INPUT_XML[kind].decode()], "canonical reader must validate the digested bytes"
+    assert result["bytes_restored"] and result["private_ids"] and result["no_snapshot_files"]
+    assert result["suffixes"] == [suffix]
+    if result["path_stat_restored"] and result["handle_stat_restored"]:
+        assert_established(result["entry"], Path(row["file"]))
+    else:
+        # POSIX ctime, and Python 3.13's NTFS HANDLE ctime, can expose the otherwise-restored write.
+        assert result["entry"] == refused("unstable")
 
 
 @pytest.mark.engine_dependency(expected_skip_reason=ENGINE_SKIP_REASON)
@@ -825,7 +922,7 @@ def test_engine_selected_id_is_authoritative_even_when_it_is_not_the_usual_twin(
     source = SelectedFiles([package])
     evidence = harvest._selected_engine_inputs(source, tmp_path, [row])
     assert_established(evidence[0], package)
-    assert source.reads == [("datasource", str(package))]
+    assert_snapshot_reads(source, [("datasource", package)])
 
 
 @pytest.mark.parametrize("other_luid", [None, OTHER_GUID])
@@ -863,7 +960,7 @@ def test_duplicate_row_claims_are_all_ambiguous_and_do_not_poison_other_luids(tm
                 assert entry == refused("ambiguous")
             else:
                 assert_established(entry, Path(other["file"]))
-        assert source.reads == [("datasource", other["file"])]
+        assert_snapshot_reads(source, [("datasource", Path(other["file"]))])
 
 
 def test_same_display_name_with_distinct_luids_is_not_a_duplicate(tmp_path: Path) -> None:
@@ -892,7 +989,7 @@ def test_failed_download_wins_over_readable_residue_without_poisoning_workbooks(
     evidence = harvest._selected_engine_inputs(source, tmp_path, [failed, workbook])
     assert evidence[0] == refused("download_failed")
     assert_established(evidence[1], Path(workbook["file"]))
-    assert source.reads == [("workbook", workbook["file"])]
+    assert_snapshot_reads(source, [("workbook", Path(workbook["file"]))])
 
 
 def test_download_or_extraction_failure_gets_evidence_on_the_existing_failed_row(
@@ -930,7 +1027,7 @@ def test_selector_failure_is_kind_scoped_and_discards_partial_selection(
     evidence = harvest._selected_engine_inputs(source, tmp_path, [datasource, workbook])
     assert evidence[0] == refused("selection_unavailable")
     assert_established(evidence[1], Path(workbook["file"]))
-    assert source.reads == [("workbook", workbook["file"])]
+    assert_snapshot_reads(source, [("workbook", Path(workbook["file"]))])
 
 
 @pytest.mark.parametrize("location", ["outside", "parent_traversal", "relative"])
@@ -1029,7 +1126,8 @@ def test_an_engine_read_failure_never_leaves_a_hash(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(source, "read_datasource", unreadable)
     assert harvest._selected_engine_inputs(source, tmp_path, [row]) == [refused("unreadable")]
-    assert calls == [row["file"]]
+    assert len(calls) == 1 and calls[0] != row["file"]
+    assert Path(calls[0]).suffix == ".tds" and not Path(calls[0]).exists()
 
 
 def test_a_digest_open_failure_is_unreadable_before_the_engine_reads(
@@ -1110,7 +1208,218 @@ def test_input_mutation_during_read_or_digest_is_unstable(
     assert mutations == [when], "the mutation must actually execute, not fail at fixture setup"
 
 
-@pytest.mark.parametrize("stage", ["opened", "after_handle", "after_path"])
+@pytest.mark.parametrize("stage", ["copy", "copied", "validation"])
+def test_same_size_source_changes_are_compared_as_bytes_even_when_clocks_are_restored(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stage: str
+) -> None:
+    row = input_row(tmp_path)
+    selected = Path(row["file"])
+    original = selected.read_bytes()
+    altered = original.replace(b"fixture", b"changed")
+    before = selected.stat()
+    original_open, original_lstat, original_fstat = Path.open, Path.lstat, os.fstat
+    handle_clocks = {}
+    mutations = []
+
+    def lstat(path, *args, **kwargs):
+        info = original_lstat(path, *args, **kwargs)
+        if path == selected:
+            return changed_stat(info, st_mtime_ns=before.st_mtime_ns, st_ctime_ns=before.st_ctime_ns)
+        return info
+
+    def fstat(fd):
+        info = original_fstat(fd)
+        clocks = handle_clocks.setdefault(fd, (info.st_mtime_ns, info.st_ctime_ns))
+        return changed_stat(info, st_mtime_ns=clocks[0], st_ctime_ns=clocks[1])
+
+    def write(data: bytes) -> None:
+        selected.write_bytes(data)
+        os.utime(selected, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    @contextmanager
+    def instrumented_read(*args, **kwargs):
+        with original_open(selected, *args, **kwargs) as stream:
+
+            def read(size=-1):
+                if size == -1 and stage == "copy":
+                    write(altered)
+                    data = stream.read(size)
+                    write(original)
+                    mutations.append(stage)
+                    return data
+                data = stream.read(size)
+                if size == -1 and stage == "copied":
+                    write(altered)
+                    mutations.append(stage)
+                return data
+
+            yield SimpleNamespace(read=read, seek=stream.seek, fileno=stream.fileno)
+
+    def open_file(path, *args, **kwargs):
+        if path == selected and args == ("rb",):
+            return instrumented_read(*args, **kwargs)
+        return original_open(path, *args, **kwargs)
+
+    source = SelectedFiles([selected])
+    reader = source.read_datasource
+
+    def change_during_validation(asset_id):
+        result = reader(asset_id)
+        write(altered)
+        mutations.append(stage)
+        return result
+
+    # NTFS restored-clock behavior also exercises byte comparison on POSIX, where ctime can change.
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(os, "fstat", fstat)
+    monkeypatch.setattr(Path, "open", open_file)
+    if stage == "validation":
+        monkeypatch.setattr(source, "read_datasource", change_during_validation)
+    assert harvest._selected_engine_inputs(source, tmp_path, [row]) == [refused("unstable")]
+    assert mutations == [stage]
+    assert len(source.reads) == int(stage == "validation")
+
+
+def shared_delete_reader(path: Path) -> io.FileIO:
+    """Let the replacement control ACTUALLY replace an open input on Windows, not fail in setup."""
+    if os.name != "nt":
+        return io.FileIO(path, "rb")
+    import msvcrt  # pylint: disable=import-outside-toplevel
+    from ctypes import wintypes  # pylint: disable=import-outside-toplevel
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateFileW(str(path), 0x80000000, 0x7, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel.CloseHandle(handle)
+        raise
+    return io.FileIO(fd, "rb")
+
+
+@pytest.mark.parametrize("stage", ["copy", "validation"])
+def test_same_bytes_replacement_is_unstable_even_when_the_old_handle_still_reads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stage: str
+) -> None:
+    row = input_row(tmp_path)
+    selected = Path(row["file"])
+    before = selected.stat()
+    replacement = tmp_path / "replacement.tds"
+    replacement.write_bytes(selected.read_bytes())
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    original_open = Path.open
+    replacements = []
+
+    def replace() -> None:
+        if os.name == "nt":
+            # NTFS allows this shared-delete rename, but denies overwrite of the open target.
+            selected.rename(tmp_path / "old-handle.tds")
+        replacement.replace(selected)
+        replacements.append(selected.stat().st_ino)
+
+    @contextmanager
+    def instrumented_read():
+        with shared_delete_reader(selected) as stream:
+
+            def read(size=-1):
+                data = stream.read(size)
+                if size == -1 and stage == "copy":
+                    replace()
+                return data
+
+            yield SimpleNamespace(read=read, seek=stream.seek, fileno=stream.fileno)
+
+    def open_file(path, *args, **kwargs):
+        if path == selected and args == ("rb",):
+            return instrumented_read()
+        return original_open(path, *args, **kwargs)
+
+    source = SelectedFiles([selected])
+    reader = source.read_datasource
+
+    def replace_during_validation(asset_id):
+        result = reader(asset_id)
+        replace()
+        return result
+
+    monkeypatch.setattr(Path, "open", open_file)
+    if stage == "validation":
+        monkeypatch.setattr(source, "read_datasource", replace_during_validation)
+    assert harvest._selected_engine_inputs(source, tmp_path, [row]) == [refused("unstable")]
+    assert replacements == [selected.stat().st_ino] and replacements[0] != before.st_ino
+    assert len(source.reads) == int(stage == "validation")
+
+
+@pytest.mark.parametrize("exit_case", ["ok", "engine_error", "interrupt", "unopened", "native_open", "write_open"])
+def test_private_snapshots_are_read_only_closed_and_never_exposed_on_any_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, exit_case: str
+) -> None:
+    row = input_row(tmp_path)
+    selected = Path(row["file"])
+    original_open, original_io_open = builtins.open, io.open
+    files_before = sorted(tmp_path.rglob("*"))
+    ids, streams = [], []
+
+    def reader(asset_id):
+        ids.append(asset_id)
+        if exit_case == "unopened":
+            return "<datasource/>"
+        if exit_case == "native_open":
+            with io.FileIO(asset_id, "rb") as stream:
+                return stream.read().decode()
+        if exit_case == "write_open":
+            with open(asset_id, "wb"):
+                pytest.fail("a private snapshot must not be writable")
+        for opener in (builtins.open, io.open):
+            stream = opener(asset_id, "rb")
+            streams.append(stream)
+            assert stream.read() == INPUT_XML["datasource"]
+            assert not stream.writable() and not stream.raw.writable()
+            for target in (stream, stream.raw):
+                with pytest.raises(io.UnsupportedOperation):
+                    target.write(b"changed")
+                with pytest.raises(io.UnsupportedOperation):
+                    target.truncate(0)
+        if exit_case == "engine_error":
+            raise UnicodeError(f"private failure at {asset_id}")
+        if exit_case == "interrupt":
+            raise KeyboardInterrupt()
+        return INPUT_XML["datasource"].decode()
+
+    source = SelectedFiles([selected])
+    monkeypatch.setattr(source, "read_datasource", reader)
+    if exit_case == "interrupt":
+        with pytest.raises(KeyboardInterrupt):
+            harvest._selected_engine_inputs(source, tmp_path, [row])
+    else:
+        evidence = harvest._selected_engine_inputs(source, tmp_path, [row])
+        if exit_case == "ok":
+            assert_established(evidence[0], selected)
+        else:
+            assert evidence == [refused("unreadable" if exit_case == "engine_error" else "unstable")]
+        assert all(value not in json.dumps(evidence) for value in ids)
+    assert ids and all(Path(value).suffix == selected.suffix for value in ids)
+    assert all(stream.closed and stream.raw.closed for stream in streams)
+    assert builtins.open is original_open and io.open is original_io_open
+    assert sorted(tmp_path.rglob("*")) == files_before
+    assert all(value not in caplog.text and not Path(value).exists() for value in ids)
+
+
+@pytest.mark.parametrize("stage", ["opened", "copied_handle", "copied_path", "validated_handle", "validated_path"])
 @pytest.mark.parametrize("field", ["st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"])
 def test_path_and_handle_snapshots_include_device_identity_and_nanosecond_stability(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stage: str, field: str
@@ -1125,16 +1434,14 @@ def test_path_and_handle_snapshots_include_device_identity_and_nanosecond_stabil
         info = original_lstat(path, *args, **kwargs)
         if path == selected:
             calls.append("path")
-            if stage == "after_path" and calls.count("path") == 2:
+            if calls.count("path") == {"copied_path": 2, "validated_path": 3}.get(stage):
                 return changed_stat(info, **{field: getattr(info, field) + 1})
         return info
 
     def fstat(fd):
         info = original_fstat(fd)
         calls.append("handle")
-        if (stage == "opened" and calls.count("handle") == 1) or (
-            stage == "after_handle" and calls.count("handle") == 2
-        ):
+        if calls.count("handle") == {"opened": 1, "copied_handle": 2, "validated_handle": 3}.get(stage):
             return changed_stat(info, **{field: getattr(info, field) + 1})
         return info
 
@@ -1143,8 +1450,9 @@ def test_path_and_handle_snapshots_include_device_identity_and_nanosecond_stabil
     source = SelectedFiles([selected])
     assert harvest._selected_engine_inputs(source, tmp_path, [row]) == [refused("unstable")]
     early_refusal = stage == "opened" and field != "st_ctime_ns"
-    assert calls.count("handle") == (1 if early_refusal else 2)
-    assert len(source.reads) == (0 if early_refusal else 1)
+    expected_handles = 3 if stage.startswith("validated") else (1 if early_refusal else 2)
+    assert calls.count("handle") == expected_handles
+    assert len(source.reads) == int(stage.startswith("validated"))
 
 
 def test_stable_path_and_handle_ctime_clocks_need_not_equal_each_other(
@@ -1163,7 +1471,7 @@ def test_stable_path_and_handle_ctime_clocks_need_not_equal_each_other(
     source = SelectedFiles([selected])
     evidence = harvest._selected_engine_inputs(source, tmp_path, [row])
     assert_established(evidence[0], selected)
-    assert source.reads == [("datasource", str(selected))]
+    assert_snapshot_reads(source, [("datasource", selected)])
 
 
 @pytest.mark.parametrize("failure", ["timeout", "launch", "nonzero", "json"])
