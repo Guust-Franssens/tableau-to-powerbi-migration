@@ -212,7 +212,7 @@ copies then drift.
 
 | You were given | First move | Because |
 |---|---|---|
-| **A Tableau Server/Cloud site** (URL + PAT) | **`python scripts/run_engine_survey.py --server <host> --site <slug> --pat-name <name> --env-file .env --json _assessment/estate_survey.json`** → `python scripts/assess_estate.py --out _assessment --survey _assessment/estate_survey.json` → `python scripts/tableau_lineage.py --plan` → **`python scripts/harvest_estate_assets.py --out <dir>`** → `python scripts/run_estate.py --input <dir>/assets --output <bundle> --scope-survey _assessment/estate_survey.json` | Assess emits *a decision, not an inventory* — but without `--survey` it reports migration **order as unknown**, and a workbook whose published datasource has not landed first rebuilds to an **empty report**. Harvest is the seam: it downloads every workbook and published datasource to `<out>/assets/` as `.twbx`/`.tdsx`, exactly what `run_estate.py --input` consumes. The two-step shape is deliberate — the engine's `LiveTableauSource` is an explicit stub, so there is no one-button live-site→PBIP path. Command-by-command: [`docs/operator-runbook.md`](docs/operator-runbook.md) |
+| **A Tableau Server/Cloud site** (URL + PAT) | **`python scripts/run_engine_survey.py --server <host> --site <slug> --pat-name <name> --env-file .env --json _assessment/estate_survey.json`** → `python scripts/assess_estate.py --out _assessment --survey _assessment/estate_survey.json` → `python scripts/tableau_lineage.py --plan` → **`python scripts/harvest_estate_assets.py --out <dir>`** → `python scripts/run_estate.py --input <dir>/assets --output <bundle> --scope-survey _assessment/estate_survey.json` | Land datasources before dependent workbooks to avoid empty reports; harvest supplies the engine's local inputs. |
 | **A folder of `.twb`/`.twbx`** | `python scripts/run_estate.py --input <folder> --output <bundle>` | Sweeps the whole folder through the deterministic tier and emits per-workbook handover slices. No server, so ordering comes from the parsed specs rather than Tableau's metadata API. |
 | **One `.twb`/`.twbx`** | `python scripts/parse_tableau.py <file> -o <spec>` → dispatch `@tableau-migrator`. First-timer route, verified end to end with no server: [`docs/start-with-one-workbook.md`](docs/start-with-one-workbook.md) | The simple path. Still write a brief. |
 | **A `.tds`/`.tdsx`** (data source, no workbook) | `parse_tableau.py` accepts it directly | **Phase 1** of a model-first estate: a semantic model with **no report**. Also the fix for a `sqlproxy` published source, whose calcs live on the server and are therefore *under-reported* by any workbook that merely points at it. |
@@ -230,21 +230,8 @@ conversion) over every asset and writes `<out>/parse-sweep.md` / `parse-sweep.js
 failure distribution, and exactly the evidence an upstream feature request needs instead of an
 anecdote.
 
-**Site runs retain the selected survey, not just the converted subset** (#469).
-Pass that exact snapshot with `--scope-survey`; the producer reads/hashes it and the single
-`<input>/../parse-sweep.json` before launching the engine. Its versioned
-`input_manifest.scope_bridge` retains workbook, required-datasource and unresolved occurrences;
-the existing receipt seals it. ✅ `run_estate.py` requires reconciled `workbooks`,
-`required_datasources`, `fetch_order`, `unresolved_dependencies` and completeness evidence.
-Only exact kind/LUID → parse-sweep **`engine_input` version 1** → physical input identity/SHA →
-engine `source_id`/collection/index joins earn `established`. The `engine_input` must be established,
-with its exact absolute contained path, size and SHA still matching; an explicit failure reason,
-missing/malformed record or changed file stays `cannot_establish`. Legacy `file` is the parser/archive
-landing, **not** this authority: a `.tdsx` download can be consumed as an inner `.tds` (#679).
-Never infer a sibling, stem/name/folder match, same-byte copy or first match. Refresh missing/stale
-evidence through the canonical harvest producer, not by manually repairing the bridge.
-Neither state certifies readiness. Folder/single-file routes omit the flag; `--slice-only` preserves
-an existing bridge without synthesizing or resealing one. [Contract](docs/operator-runbook.md#site-scope-snapshot).
+The [site-scope / `engine_input` contract](docs/operator-runbook.md#site-scope-snapshot)
+defines the sealed bridge, exact joins, unavailable evidence and non-certifying limits (#469).
 
 **Capture the Tableau reference imagery in the SAME trip — the dispatcher's job, not a subagent's.**
 A fidelity review later needs a picture of the *source*, and nothing downstream produces it: the
