@@ -52,11 +52,14 @@ fails says which tier owns it (see `docs/migration-programme.md` §0).
 
 Each `parse-sweep.json` row also carries `engine_input` version 1 (issue #679). After the parse
 drain, the canonical engine's offline `LocalFilesSource` selects and reads from the resolved assets
-root. `established` records exactly path, size_bytes and sha256 for a contained, stable regular file;
-`cannot_establish` records only a reason. This is a current file/read observation, not conversion
-success or future immutability. The existing `file` still names the parser/archive landing, which
-can differ from the selected input (a datasource's `.tdsx` versus its extracted `.tds`). Selection
-failures do not change parser results, Markdown, totals or harvest exit codes.
+root. The canonical reader and digest use one immutable byte snapshot; the original file's bytes
+and path/handle identity are checked before and after validation. Snapshot opens are adapted only
+inside the isolated selection process, with no on-disk copy. `established` records exactly the
+ORIGINAL path, size_bytes and sha256; `cannot_establish` records only a reason. This is a current
+file/read observation, not conversion success or future immutability. The existing `file` still
+names the parser/archive landing, which can differ from the selected input (a datasource's `.tdsx`
+versus its extracted `.tds`). Selection failures do not change parser results, Markdown, totals or
+harvest exit codes.
 
 ⚠️ Downloads are the session-fragile part. Tableau Cloud drops a session intermittently and the
 failure is a `401002` mid-loop, so each asset is fetched with its OWN sign-in rather than a shared
@@ -67,8 +70,10 @@ fresh-per-asset completed 8/8. Slower, and the only thing that finishes.
 from __future__ import annotations
 
 import argparse
+import builtins
 import ctypes
 import hashlib
+import io
 import json
 import logging
 import os
@@ -86,6 +91,7 @@ from collections import Counter, deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import SplitResult, unquote, urlsplit
@@ -1788,14 +1794,111 @@ def _engine_input_stat_key(info: os.stat_result) -> tuple[int, ...]:
     return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+class _EngineInputSnapshot(io.RawIOBase):
+    """Seekable read-only views over the SAME immutable bytes, including repeated ZIP opens."""
+
+    def __init__(self, data: bytes) -> None:
+        super().__init__()
+        self._data = data
+        self._offset = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._offset
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        origins = {os.SEEK_SET: 0, os.SEEK_CUR: self._offset, os.SEEK_END: len(self._data)}
+        if whence not in origins or origins[whence] + offset < 0:
+            raise ValueError("invalid snapshot seek")
+        self._offset = origins[whence] + offset
+        return self._offset
+
+    def readinto(self, buffer: bytearray) -> int:
+        # IOBase.closed is a runtime descriptor, not astroid's inferred constant False.
+        # pylint: disable-next=using-constant-test
+        if self.closed:
+            raise ValueError("snapshot is closed")
+        chunk = self._data[self._offset : self._offset + len(buffer)]
+        buffer[: len(chunk)] = chunk
+        self._offset += len(chunk)
+        return len(chunk)
+
+    def write(self, buffer: bytes) -> int:
+        raise io.UnsupportedOperation("snapshot is read-only")
+
+    def close(self) -> None:
+        self._data = b""
+        super().close()
+
+
+def _validate_engine_snapshot(path: Path, data: bytes, reader: Callable[[str], str]) -> None:
+    """Adapt file I/O, never engine parsing/selection, in the already-isolated selection child.
+
+    A file cannot contain a child path: this private, suffix-preserving ID has no disk backing.
+    Every supported open gets a fresh read-only cursor over `data`; an unadapted native open fails
+    rather than reopening the live input. Neither permissions nor restored stat fields can change
+    the bytes the reader sees. Always restore both openers and close even reader-leaked streams.
+    """
+    snapshot_id = str(path / f".snapshot-{uuid.uuid4().hex}{path.suffix}")
+    streams: list[io.BufferedReader] = []
+    original_open, original_io_open = builtins.open, io.open
+
+    def open_snapshot(fallback: Callable, file: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(file, (str, bytes, os.PathLike)) and os.fsdecode(file) == snapshot_id:
+            if args != ("rb",) or kwargs:
+                raise _EngineInputRefusal("unstable")
+            stream = io.BufferedReader(_EngineInputSnapshot(data))
+            streams.append(stream)
+            return stream
+        return fallback(file, *args, **kwargs)
+
+    try:
+        builtins.open = partial(open_snapshot, original_open)
+        io.open = partial(open_snapshot, original_io_open)
+        reader(snapshot_id)
+        if not streams:
+            raise _EngineInputRefusal("unstable")
+    except OSError:
+        # A snapshot has no OS dependency. An unsupported reader I/O route earns no observation.
+        raise _EngineInputRefusal("unstable") from None
+    finally:
+        builtins.open, io.open = original_open, original_io_open
+        for stream in streams:
+            stream.close()
+
+
+def _verify_engine_input(
+    path: Path, root: Path, stream: io.FileIO, baseline: tuple[os.stat_result, os.stat_result], data: bytes
+) -> None:
+    """Re-read unbuffered original bytes as well as BOTH identity clocks; stat alone is insufficient."""
+    try:
+        stream.seek(0)
+        for offset in range(0, len(data), 1024 * 1024):
+            if stream.read(1024 * 1024) != data[offset : offset + 1024 * 1024]:
+                raise _EngineInputRefusal("unstable")
+        if (
+            stream.read(1)
+            or _engine_input_stat_key(os.fstat(stream.fileno())) != _engine_input_stat_key(baseline[1])
+            or _engine_input_stat_key(_engine_input_stat(path, root)) != _engine_input_stat_key(baseline[0])
+        ):
+            raise _EngineInputRefusal("unstable")
+    except (OSError, RuntimeError, _EngineInputRefusal):
+        raise _EngineInputRefusal("unstable") from None
+
+
 def _read_engine_input(path: Path, root: Path, kind: str, reader: Callable[[str], str]) -> dict[str, Any]:
-    """Bracket the engine read AND byte digest with path/handle identity and stability checks."""
+    """Couple canonical readability and SHA to one snapshot, retaining only the original path."""
     before = None
     try:
         if path.suffix.lower() not in ENGINE_INPUT_SUFFIXES[kind]:
             raise _EngineInputRefusal("unreadable")
         before = _engine_input_stat(path, root)
-        with path.open("rb") as stream:
+        with path.open("rb", buffering=0) as stream:
             opened = os.fstat(stream.fileno())
             # Measured on Python 3.13.2/NTFS: lstat and fstat can expose different ctime clocks.
             # Keep BOTH clocks stable, but compare ctime only against the same API's baseline.
@@ -1805,28 +1908,21 @@ def _read_engine_input(path: Path, root: Path, kind: str, reader: Callable[[str]
                 before.st_mtime_ns,
             ) != (opened.st_mode, opened.st_size, opened.st_mtime_ns):
                 raise _EngineInputRefusal("unstable")
+            data = stream.read()
+            size = len(data)
+            if size != before.st_size:
+                raise _EngineInputRefusal("unstable")
+            digest = hashlib.sha256()
+            digest.update(data)
+            _verify_engine_input(path, root, stream, (before, opened), data)
             # The datasource reader accepts non-ZIP text regardless of its suffix. A leftover
             # archive must actually be a ZIP, not merely bytes that happened to decode as UTF-8.
-            if path.suffix.lower() in (".tdsx", ".twbx") and not zipfile.is_zipfile(stream):
+            if path.suffix.lower() in (".tdsx", ".twbx") and not zipfile.is_zipfile(io.BytesIO(data)):
                 raise _EngineInputRefusal("unreadable")
-            reader(str(path))
-            stream.seek(0)
-            digest = hashlib.sha256()
-            size = 0
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-                size += len(chunk)
-            after_handle = os.fstat(stream.fileno())
-        try:
-            after_path = _engine_input_stat(path, root)
-        except (OSError, RuntimeError, _EngineInputRefusal):
-            raise _EngineInputRefusal("unstable") from None
-        if (
-            size != before.st_size
-            or _engine_input_stat_key(after_handle) != _engine_input_stat_key(opened)
-            or _engine_input_stat_key(after_path) != _engine_input_stat_key(before)
-        ):
-            raise _EngineInputRefusal("unstable")
+            try:
+                _validate_engine_snapshot(path, data, reader)
+            finally:
+                _verify_engine_input(path, root, stream, (before, opened), data)
     except _EngineInputRefusal as exc:
         return _engine_input_failure(str(exc))
     except FileNotFoundError:
