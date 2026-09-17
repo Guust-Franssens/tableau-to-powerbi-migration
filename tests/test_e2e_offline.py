@@ -170,7 +170,11 @@ def _assert_published_authority(provenance: dict, site: tableau.TableauSite) -> 
     }, "OFFLINE_PUBLISHED_IDENTITY: held source, workbook and expected datasource LUID must agree"
     prefix = f"/api/{site.rest_version}/sites/{site.site_id}"
     query = urlencode({"filter": "contentUrl:eq:SalesMaster", "pageSize": 1000, "pageNumber": 1})
-    routes = (f"{prefix}/users/{site.user_id}", f"{prefix}/datasources?{query}", f"{prefix}/datasources/{shared.luid}")
+    routes = (
+        "/".join((prefix, "users", site.user_id)),
+        f"{prefix}/datasources?{query}",
+        f"{prefix}/datasources/{shared.luid}",
+    )
     for route in routes:
         assert site.requests.count(("GET", route)) == 1, f"OFFLINE_AUTHORITY_REQUEST: {route}"
 
