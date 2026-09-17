@@ -409,23 +409,8 @@ class Evidence:  # pylint: disable=too-many-instance-attributes
         )
 
     def candidate(self) -> Candidate:
-        """This record as an external-producer CANDIDATE - never as an identity.
-
-        A capture manifest names a file; it does not establish what the file depicts. So the kind
-        here is whatever the producer DECLARED, and `KIND_UNKNOWN` otherwise, which can never resolve
-        against a real page (`object_identity.IdentityIndex.resolve`).
-
-        A `manual` record is named from its file stem, and `collect_manual`
-        (`capture_tableau_reference.py:105`) only globs `tableau-*.png`, so the prefix is imposed by
-        the glob rather than chosen by the operator - stripping it recovers the name they typed.
-        Both spellings are offered as candidate names, and the index refuses if they turn out to
-        match more than one object: round-3 finding 1 measured one image making two distinct
-        worksheets ready because the alias had no uniqueness check.
-        """
-        names = [self.name]
-        if self.provider == "manual" and self.name.casefold().startswith(MANUAL_NAME_PREFIX):
-            names.append(self.name[len(MANUAL_NAME_PREFIX) :])
-        return Candidate(names=tuple(names), kind=self.kind)
+        """This record as an external-producer candidate, using the shared declaration rules."""
+        return reference_candidate({"name": self.name, "view_type": self.kind}, {"provider": self.provider})
 
     def workbook(self) -> WorkbookIdentity:
         """The workbook this render declares it came from, on whichever axes its producer wrote."""
@@ -652,6 +637,22 @@ def _entry_scope(entry: dict[str, Any], provider: str | None) -> str:
     if isinstance(declared, str) and declared.strip().casefold() in (KIND_DASHBOARD, KIND_WORKSHEET):
         return declared.strip().casefold()
     return PROVIDER_SCOPE.get(str(provider or ""), KIND_UNKNOWN)
+
+
+def reference_candidate(entry: dict[str, Any], state: dict[str, Any]) -> Candidate:
+    """Pure name/type projection of a reference state, not evidence validation or attribution.
+
+    Kind follows the existing entry/state declaration and provider scope. A manual file stem has
+    the capture-imposed ``tableau-`` prefix, so both the original and stripped spelling are offered.
+    Consumers must resolve these through CandidateIndex and refuse a record selected by more than
+    one expected object; an alias is a candidate name, never an additional identity.
+    """
+    name = str(entry.get("name") or "")
+    provider = state.get("provider")
+    names = [name]
+    if provider == "manual" and name.casefold().startswith(MANUAL_NAME_PREFIX):
+        names.append(name[len(MANUAL_NAME_PREFIX) :])
+    return Candidate(names=tuple(names), kind=_entry_scope({**entry, **state}, provider))
 
 
 def provider_grade(provider: str, capabilities: Any) -> str:

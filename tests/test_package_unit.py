@@ -34,6 +34,7 @@ import types as reference_types
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from xml.etree import ElementTree
 
 import pytest
 
@@ -42,6 +43,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import check_path_ceiling as cpc  # noqa: E402  # pylint: disable=wrong-import-position
 import check_migration_progress as cmp  # noqa: E402  # pylint: disable=wrong-import-position
 import capture_tableau_reference as capture  # noqa: E402  # pylint: disable=wrong-import-position
+import check_reference_readiness as crr  # noqa: E402  # pylint: disable=wrong-import-position
+import check_unit as cu  # noqa: E402  # pylint: disable=wrong-import-position
 import host_paths as hp  # noqa: E402  # pylint: disable=wrong-import-position
 import manifest_scope as ms  # noqa: E402  # pylint: disable=wrong-import-position
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
@@ -92,13 +95,14 @@ def _bundle(  # pylint: disable=too-many-arguments
     provenance_match: str = "sha256",
     asset_prefix: str | None = WB_LUID,
     datasources: tuple[str, ...] = (),
+    dashboards: dict[str, list[str]] | None = None,
 ) -> tuple[Path, Path]:
     """`(bundle, oracle)` shaped exactly as a real estate run, with one workbook unit."""
     bundle = tmp_path / "bundle"
     assets = tmp_path / "assets"
     assets.mkdir(parents=True, exist_ok=True)
     name = f"{asset_prefix}_{UNIT}.twb" if asset_prefix else f"{UNIT}.twb"
-    source = write_workbook(assets / name, worksheets=list(worksheets))
+    source = write_workbook(assets / name, worksheets=list(worksheets), dashboards=dashboards)
     write_engine_report(bundle, workbooks=[UNIT], datasources=list(datasources))
     write_handover(bundle, UNIT, source_id=str(Path("_runs") / "999-x" / "assets" / name))
     write_report(bundle, UNIT, _page_ids(source))
@@ -226,12 +230,19 @@ def test_only_this_workbooks_views_are_copied_in(tmp_path: Path) -> None:
     assert not any("Foreign" in path for path in _images(tmp_path))
 
 
-def test_public_fresh_package_admits_only_declared_reference_bytes_before_sealing(tmp_path: Path) -> None:
-    """Real manual capture reaches final package readiness without modifying source or image bytes."""
-    import check_reference_readiness as crr  # pylint: disable=import-outside-toplevel
-
-    bundle, _oracle = _bundle(tmp_path, worksheets=("Sales",))
-    shutil.rmtree(_oracle)
+def _fresh_reference_package(  # pylint: disable=too-many-arguments,too-many-locals
+    tmp_path: Path,
+    *,
+    worksheets: tuple[str, ...] = ("Sales",),
+    dashboards: dict[str, list[str]] | None = None,
+    images: tuple[str, ...] = ("Sales",),
+    edit_reference: Callable[[dict], None] | None = None,
+    oracle_views: list[dict] | None = None,
+) -> Path:
+    """Capture, enrich before sealing, then construct through the real public --reference route."""
+    bundle, oracle = _bundle(tmp_path, worksheets=worksheets, dashboards=dashboards, views=oracle_views)
+    if oracle_views is None:
+        shutil.rmtree(oracle)
     model = bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel" / "definition"
     model.mkdir(parents=True)
     (model / "model.tmdl").write_text("model Model\n", encoding="utf-8")
@@ -252,26 +263,48 @@ def test_public_fresh_package_admits_only_declared_reference_bytes_before_sealin
         encoding="utf-8",
     )
     source = next((bundle.parent / "assets").glob("*.twb"))
+    tree = ElementTree.parse(source)
+    for worksheet in tree.findall("worksheets/worksheet"):
+        ElementTree.SubElement(ElementTree.SubElement(worksheet, "table"), "view")
+        title = ElementTree.SubElement(ElementTree.SubElement(worksheet, "layout-options"), "title")
+        ElementTree.SubElement(ElementTree.SubElement(title, "formatted-text"), "run").text = "Reference fixture"
+    tree.write(source, encoding="utf-8", xml_declaration=True)
+    provenance_path = bundle / "source-provenance.json"
+    provenance = json.loads(provenance_path.read_bytes())
+    provenance["inputs"][0]["input"]["sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    provenance_path.write_text(json.dumps(provenance), encoding="utf-8")
     source_dir = bundle / "source"
     source_dir.mkdir()
     shutil.copy2(source, source_dir / source.name)
     (bundle / "migration-spec.json").write_text(
-        json.dumps({"dashboards": [], "worksheets": [{"name": "Sales"}]}), encoding="utf-8"
+        json.dumps(
+            {
+                "source": {"file_name": source.name},
+                "dashboards": [{"name": name, "worksheets": placed} for name, placed in (dashboards or {}).items()],
+                "worksheets": [{"name": name} for name in worksheets],
+            }
+        ),
+        encoding="utf-8",
     )
     reference = bundle / "reference"
-    source_image_path = write_png(reference / "tableau-Sales.png")
+    source_images = {
+        f"tableau-{name}.png": write_png(reference / f"tableau-{name}.png").read_bytes() for name in images
+    }
     (reference / "not-declared.txt").write_bytes(b"retain outside the package")
     assert capture.main([str(bundle)]) == 0
-    manifest_raw = (reference / "manifest.json").read_bytes()
+    manifest_path = reference / "manifest.json"
+    if edit_reference is not None:
+        manifest = json.loads(manifest_path.read_bytes())
+        edit_reference(manifest)
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    manifest_raw = manifest_path.read_bytes()
     original_reference = _reference_hashes(reference)
-    assert crr.scan(bundle)["status"] == crr.STATUS_READY
     brief = tmp_path / "brief.md"
     brief.write_text(
         '+++\nschema = "phase1-start-ready/v2"\nunit = "Book"\nscope = "model_and_report"\n'
         'fallback_authorization = "stop"\nnumeric_obligation = "required"\n+++\n',
         encoding="utf-8",
     )
-    source_image = source_image_path.read_bytes()
     code = pkg.main(
         [
             "--bundle",
@@ -287,6 +320,7 @@ def test_public_fresh_package_admits_only_declared_reference_bytes_before_sealin
             "--brief",
             str(brief),
             "--quiet",
+            *(["--oracle", str(oracle)] if oracle_views is not None else []),
         ]
     )
     assert code == 0
@@ -294,19 +328,257 @@ def test_public_fresh_package_admits_only_declared_reference_bytes_before_sealin
     package_manifest = json.loads((root / pkg.MANIFEST_NAME).read_bytes())
     assert package_manifest["artifacts"]["reference"] == "reference"
     assert (root / "reference" / "manifest.json").read_bytes() == manifest_raw
-    assert (root / "reference" / "tableau-Sales.png").read_bytes() == source_image
+    for name, image in source_images.items():
+        assert (root / "reference" / name).read_bytes() == image
     assert not (root / "reference" / "not-declared.txt").exists()
     assert _reference_hashes(reference) == original_reference
-    assert set(_reference_hashes(root / "reference")) == {"manifest.json", "tableau-Sales.png"}
+    assert set(_reference_hashes(root / "reference")) == {"manifest.json", *source_images}
     assert "reference/manifest.json" in package_manifest["contents"]["files"]
+    return root
+
+
+def _manual_consumers(root: Path) -> tuple[dict, dict]:
+    """Both consumers read the same sealed reference bytes, without changing them."""
+    before = _reference_hashes(root)
+    readiness = crr.scan(root)
+    coverage = cu.check_oracle_coverage(root, None, None)
+    assert _reference_hashes(root) == before
+    assert coverage["numeric_present"] == 0
+    assert coverage["status"] == cu.STATUS_NOT_CHECKED
+    return readiness, coverage
+
+
+@pytest.mark.parametrize("kind", ["dashboard", "worksheet"])
+@pytest.mark.parametrize(
+    ("scope", "field"),
+    [("entry", "view_type"), ("entry", "object_type"), ("state", "view_type"), ("state", "object_type")],
+)
+def test_public_fresh_package_admits_only_declared_reference_bytes_before_sealing(
+    tmp_path: Path, kind: str, scope: str, field: str
+) -> None:
+    """A canonical manual capture is visible to both consumers, without promoting its authority."""
+
+    def declare(manifest: dict) -> None:
+        entry = manifest["dashboards"][0]
+        state = entry["states"][0]
+        state.pop("view_type", None)
+        (entry if scope == "entry" else state)[field] = kind
+
+    root = _fresh_reference_package(
+        tmp_path,
+        worksheets=("Sales",) if kind == "worksheet" else (),
+        dashboards={"Sales": []} if kind == "dashboard" else None,
+        edit_reference=declare,
+    )
+    assert crr.scan(tmp_path / "bundle")["status"] == crr.STATUS_READY
     role = next(
         row
         for row in pkg.pri.verify_phase1_role_identity((root,))[0].roles
         if row.role == pkg.pri.ROLE_TABLEAU_REFERENCE
     )
     assert role.state == "resolved"
-    readiness = crr.scan(root)
+    readiness, coverage = _manual_consumers(root)
     assert readiness["status"] == crr.STATUS_START_READY, json.dumps(readiness, indent=2)
+    assert coverage["visual_present"] == 1, coverage
+    assert coverage["rows"][0]["page"]["kind"] == kind
+    assert coverage["grade"] == "layout_grade/text_readable"
+    assert coverage["admitted_evidence"] == 1
+    assert coverage["kindless_evidence"] == 0
+    assert crr.scan(root, require_validation_grade=True)["status"] != crr.STATUS_START_READY
+    state = json.loads((root / "reference" / "manifest.json").read_bytes())["dashboards"][0]["states"][0]
+    assert state["state"] == {}
+    assert state["numeric_oracle"] is None
+    assert set(state["capabilities"]) == {"layout_grade", "text_readable"}
+
+
+@pytest.mark.parametrize("kind", ["dashboard", "worksheet"])
+def test_manual_reference_consumer_isolates_same_named_kinds(tmp_path: Path, kind: str) -> None:
+    def declare(manifest: dict) -> None:
+        manifest["dashboards"][0]["states"][0]["view_type"] = kind
+
+    root = _fresh_reference_package(
+        tmp_path, worksheets=("Ops",), dashboards={"Ops": []}, images=("Ops",), edit_reference=declare
+    )
+    readiness, coverage = _manual_consumers(root)
+    assert readiness["status"] != crr.STATUS_START_READY
+    assert [row["source_type"] for row in readiness["units"][0]["pages"] if row["readiness"] == "ready"] == [kind]
+    assert [(row["page"]["kind"], row["page"]["name"]) for row in coverage["rows"] if row["visual"]] == [(kind, "Ops")]
+
+
+def test_manual_reference_consumer_accepts_distinct_records_for_same_named_kinds(tmp_path: Path) -> None:
+    def declare(manifest: dict) -> None:
+        for entry, kind in zip(manifest["dashboards"], ("dashboard", "worksheet"), strict=True):
+            entry["name"] = "tableau-Ops"
+            entry["states"][0]["view_type"] = kind
+
+    root = _fresh_reference_package(
+        tmp_path, worksheets=("Ops",), dashboards={"Ops": []}, images=("dashboard", "worksheet"), edit_reference=declare
+    )
+    readiness, coverage = _manual_consumers(root)
+    assert readiness["status"] == crr.STATUS_START_READY
+    assert coverage["visual_present"] == 2
+    assert coverage["admitted_evidence"] == 2
+    assert coverage["refused_evidence"] == []
+
+
+@pytest.mark.parametrize("worksheets", [("Ops", "tableau-Ops"), ("Ops", "ops"), ("Ops Summary", "Ops  Summary")])
+def test_manual_reference_consumer_refuses_one_record_for_multiple_pages(
+    tmp_path: Path, worksheets: tuple[str, ...]
+) -> None:
+    def declare(manifest: dict) -> None:
+        manifest["dashboards"][0]["states"][0]["view_type"] = "worksheet"
+
+    root = _fresh_reference_package(tmp_path, worksheets=worksheets, images=(worksheets[0],), edit_reference=declare)
+    readiness, coverage = _manual_consumers(root)
+    assert all(row["readiness"] != "ready" for row in readiness["units"][0]["pages"])
+    assert coverage["pages"] == 2
+    assert coverage["visual_present"] == 0
+    assert coverage["admitted_evidence"] == 1
+    assert coverage["refused_evidence"] == ["one manual producer record is selected by 2 expected pages"] * 2
+
+
+@pytest.mark.parametrize(
+    ("record_name", "present"),
+    [("TABLEAU-Ops", 1), ("tableau-ops", 1), ("invalid-Ops", 0), ("before-tableau-Ops", 0), ("tableau-tableau-Ops", 0)],
+)
+def test_manual_reference_consumer_uses_only_the_shared_prefix_rule(
+    tmp_path: Path, record_name: str, present: int
+) -> None:
+    def rename(manifest: dict) -> None:
+        manifest["dashboards"][0]["name"] = record_name
+
+    root = _fresh_reference_package(tmp_path, worksheets=("Ops",), images=("Ops",), edit_reference=rename)
+    readiness, coverage = _manual_consumers(root)
+    assert sum(row["readiness"] == "ready" for row in readiness["units"][0]["pages"]) == present
+    assert coverage["visual_present"] == present
+
+
+@pytest.mark.parametrize(
+    ("names", "present"),
+    [(("tableau-Ops", "tableau-Ops"), 0), (("tableau-Ops", "tableau-ops"), 1), (("tableau-ops", "tableau-OPS"), 0)],
+)
+def test_manual_reference_consumer_preserves_multiplicity_and_exact_first(
+    tmp_path: Path, names: tuple[str, str], present: int
+) -> None:
+    def rename(manifest: dict) -> None:
+        for entry, name in zip(manifest["dashboards"], names, strict=True):
+            entry["name"] = name
+            entry["states"][0]["view_type"] = "worksheet"
+
+    root = _fresh_reference_package(tmp_path, worksheets=("Ops",), images=("first", "second"), edit_reference=rename)
+    readiness, coverage = _manual_consumers(root)
+    assert sum(row["readiness"] == "ready" for row in readiness["units"][0]["pages"]) == present
+    assert coverage["visual_present"] == present
+    assert coverage["admitted_evidence"] == 2
+    assert bool(coverage["refused_evidence"]) == (not present)
+
+
+@pytest.mark.parametrize("kinds", [(), ("dashboard", "worksheet"), ("worksheet", "dashboard")])
+def test_manual_reference_consumer_refuses_absent_and_conflicting_state_kinds(
+    tmp_path: Path, kinds: tuple[str, ...]
+) -> None:
+    def declare(manifest: dict) -> None:
+        entry = manifest["dashboards"][0]
+        state = entry["states"][0]
+        state.pop("view_type", None)
+        if kinds:
+            entry["states"] = [{**state, "view_type": kind} for kind in kinds]
+
+    root = _fresh_reference_package(
+        tmp_path, worksheets=("Ops",), dashboards={"Ops": []}, images=("Ops",), edit_reference=declare
+    )
+    readiness, coverage = _manual_consumers(root)
+    assert all(row["readiness"] != "ready" for row in readiness["units"][0]["pages"])
+    assert coverage["visual_present"] == 0
+    assert coverage["kindless_evidence"] == 1
+    assert coverage["admitted_evidence"] == 0
+
+
+@pytest.mark.parametrize("foreign", [False, True])
+@pytest.mark.parametrize("scope", ["manifest", "entry", "state"])
+@pytest.mark.parametrize("field", ["workbook_luid", "source_workbook_luid"])
+def test_manual_reference_consumer_preserves_workbook_claims(
+    tmp_path: Path, foreign: bool, scope: str, field: str
+) -> None:
+    def declare(manifest: dict) -> None:
+        entry = manifest["dashboards"][0]
+        {"manifest": manifest, "entry": entry, "state": entry["states"][0]}[scope][field] = (
+            OTHER_LUID if foreign else WB_LUID
+        )
+
+    root = _fresh_reference_package(tmp_path, edit_reference=declare)
+    readiness, coverage = _manual_consumers(root)
+    assert sum(row["readiness"] == "ready" for row in readiness["units"][0]["pages"]) == int(not foreign)
+    assert coverage["visual_present"] == int(not foreign)
+    assert bool(coverage["foreign_workbook_evidence"]) == foreign
+    assert coverage["admitted_evidence"] == int(not foreign)
+
+
+@pytest.mark.parametrize("fault", ["unknown-kind", "missing-image"])
+def test_manual_reference_consumer_withholds_unsealable_inputs(tmp_path: Path, fault: str) -> None:
+    """The producer refuses these bytes; both bundle consumers still withhold them, without repair."""
+    root = _fresh_reference_package(tmp_path)
+    assert _manual_consumers(root)[1]["visual_present"] == 1
+    bundle = tmp_path / "bundle"
+    reference = bundle / "reference"
+    manifest_path = reference / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    state = manifest["dashboards"][0]["states"][0]
+    state["view_type" if fault == "unknown-kind" else "image"] = "unknown" if fault == "unknown-kind" else "missing.png"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    before = _reference_hashes(reference)
+    reason = "reference_manifest_contract" if fault == "unknown-kind" else "construction_failed"
+    _refuse_reference("cli", bundle, tmp_path / "refused", reference, reason)
+    readiness = crr.scan(bundle)
+    coverage = cu.check_oracle_coverage(bundle, reference, None)
+    assert _reference_hashes(reference) == before
+    assert all(row["readiness"] != "ready" for row in readiness["units"][0]["pages"])
+    assert coverage["pages"] == 1
+    assert coverage["visual_present"] == coverage["numeric_present"] == 0
+    assert coverage["status"] == cu.STATUS_NOT_CHECKED
+    assert coverage["kindless_evidence"] == int(fault == "unknown-kind")
+
+
+def test_manual_reference_consumer_aggregates_states_without_creating_extra_records(tmp_path: Path) -> None:
+    def split(manifest: dict) -> None:
+        entry = manifest["dashboards"][0]
+        entry["states"] = [{**entry["states"][0], "capabilities": [cap]} for cap in ("layout_grade", "text_readable")]
+
+    root = _fresh_reference_package(tmp_path, edit_reference=split)
+    readiness, coverage = _manual_consumers(root)
+    assert readiness["status"] != crr.STATUS_START_READY
+    assert coverage["visual_present"] == 1
+    assert coverage["admitted_evidence"] == 1
+    assert coverage["kindless_evidence"] == 0
+    assert coverage["grade"] == "layout_grade, text_readable"
+
+
+@pytest.mark.parametrize("view_name", ["Ops", "ops", "tableau-Ops"])
+def test_manual_reference_consumer_keeps_ordinary_oracle_names_exact(tmp_path: Path, view_name: str) -> None:
+    def rename(manifest: dict) -> None:
+        manifest["dashboards"][0]["name"] = "Unrelated"
+
+    root = _fresh_reference_package(
+        tmp_path,
+        worksheets=("Ops",),
+        images=("Ops",),
+        edit_reference=rename,
+        oracle_views=[
+            _view(
+                view_name,
+                "aaaaaaaa-0000-0000-0000-000000000001",
+                workbook_luid=WB_LUID,
+                workbook_name=UNIT,
+                view_type="worksheet",
+            )
+        ],
+    )
+    readiness, coverage = _manual_consumers(root)
+    assert coverage["visual_present"] == int(view_name == "Ops")
+    assert rev.GRADE_ORACLE in coverage["grade"]
+    assert rev.GRADE_VALIDATION not in coverage["grade"]
+    if view_name == "Ops":
+        assert readiness["status"] == crr.STATUS_START_READY
 
 
 @pytest.mark.parametrize("edited", [False, True])
