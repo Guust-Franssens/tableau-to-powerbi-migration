@@ -1,6 +1,6 @@
 """
-purpose: prove a live data source is actually reachable FROM POWER BI, by building a one-table
-         probe model, refreshing it, and requiring a real row back.
+purpose: probe live sources FROM POWER BI: real rows for ordinary tables, connector navigation
+         only for custom SQL (which stays unvalidated and cannot clear the gate).
 usage:   python scripts/probe_live_source.py --spec <migration-spec.json> [--source-index 0]
          python scripts/probe_live_source.py --bundle <engine-output-dir> [--source-index 0]
                                              [--refresh-timeout-sec 390] [--keep]
@@ -31,25 +31,27 @@ Power BI's `SELECT 1` - it just has to be spelled as a partition instead of a sh
 The first physical column is discovered with `Table.ColumnNames` and renamed to `ProbeOK`:
 Tableau's `internal_name` is not a remote column name. No columns means no probe rows.
 
-Custom SQL is judged by its own query
--------------------------------------
-A Tableau relation of `type='text'` is already a hand-written query. The probe runs it through
-`Value.NativeQuery` and adds a constant probe column, so it does not need Tableau's optional column
-enumeration. This still runs the full custom query (folding is off), but it proves reachability using
-the same Power BI credential path as the eventual model. A query that cannot be run remains a
-non-zero source verdict; missing schema metadata is never treated as a successful probe.
+Custom SQL is NEVER executed by this probe
+------------------------------------------
+A small result does not bound a non-folding query's execution cost. For a custom-SQL relation,
+reuse ordinary-table DATA_OK connection evidence from this invocation's exact connection scope,
+or enumerate connector navigation through the one-table PBIP. No native statement is generated.
+The original SQL remains untouched in the spec for separately authorized exact validation (#692).
+Navigation success is CONNECTION_OK_QUERY_UNVALIDATED, exit 1: no query/object permission, schema,
+row, semantics, cost or refreshability claim, no gate lift, and no model-only authorization.
 
 The ordinary-table probe mirrors the builder on purpose: `pbi-semantic-builder` is instructed to emit
 `Databricks.Catalogs(host, httpPath, ...)` / `Sql.Database(server, db)`, and `build_m_query` below
 uses exactly those. A pass therefore predicts the real model rather than merely resembling it. If the
 builder's connector shape changes, change this with it - the alignment is the point, not a detail.
 
-Outcomes (last line, machine-readable; exit 0 only on DATA_OK)
+Outcomes (machine-readable; exit 0 only on DATA_OK or SKIPPED)
 -------------------------------------------------------------
     PROBE: DATA_OK <n> row(s) from <table>     the source is genuinely reachable, build for real
+    PROBE: CONNECTION_OK_QUERY_UNVALIDATED     connector scope reached; query unvalidated, gate armed
     PROBE: SKIPPED <reason>                    not a live source - nothing to prove
     PROBE: NO_CREDENTIAL <detail>              a human must sign in; no retry can fix this
-    PROBE: ACCESS_DENIED <detail>              permissions must change; signing in again is not enough
+    PROBE: ACCESS_DENIED <detail>              denial-shaped text; inspect credential/token or grants
     PROBE: UNREACHABLE <detail>                refresh failed for a non-credential reason
     PROBE: ERROR <detail>                      the probe itself could not run
 
@@ -140,6 +142,8 @@ PROBE_KILL_MARGIN_SECONDS = 60
 # construction" is false - the old 180s default sat only 13s (7.8%) above that cold success and would
 # report a healthy-but-cold source as a failure. 390s is comfortably clear of it.
 PROBE_TIMEOUT_SECONDS = REFRESH_TIMEOUT_SECONDS + REFRESH_WALL_CLOCK_GRACE_SECONDS + PROBE_KILL_MARGIN_SECONDS
+CONNECTION_ONLY = "CONNECTION_OK_QUERY_UNVALIDATED"
+CONNECTION_PROBE_TABLE = "ConnectionProbe"
 
 # A credential block does not surface as a clean "auth failed". Measured: the mashup engine raises
 # the credential exception and then crashes posting it back over the named pipe, so the client sees
@@ -212,44 +216,67 @@ def normalize_host(server: str) -> str:
     return host.rstrip(".").strip()
 
 
-def _m_sql_literal(sql: str) -> str:
-    """Escape custom SQL as a single-line M string literal body.
+def _m_connection_text(value: str) -> str:
+    """Escape connector identifiers, never SQL, without changing their M string value."""
+    return (
+        value.replace("#(", "#(#)(")
+        .replace('"', '""')
+        .replace("\r", "#(cr)")
+        .replace("\n", "#(lf)")
+        .replace("\t", "#(tab)")
+    )
 
-    Two transforms, both load-bearing. `"` is doubled (M's own escape). Then the text is collapsed
-    onto ONE line, because `_pbip_files` indents every line of the query with tabs to sit under
-    `source =` in TMDL - which would otherwise push tabs INSIDE the string literal. SQL is
-    whitespace-insensitive so collapsing is safe, with one exception: `--` comments run to
-    end-of-line, so a collapse would comment out everything after them. Strip those first.
+
+def _sql_server(conn: dict) -> str:
+    """Keep the named instance or port in the Sql.Database endpoint, not its DNS hostname."""
+    server = normalize_host(conn.get("server") or "")
+    port = str(conn.get("port") or "").strip()
+    if not port:
+        return server
+    embedded = re.search(r"[,:]([0-9]+)$", server)
+    if embedded:
+        if embedded.group(1).lstrip("0") != port.lstrip("0"):
+            raise ValueError("SQL Server embedded port conflicts with the declared port")
+        server = server[: embedded.start()]
+    return f"{server},{port}"
+
+
+def _validate_sql_port(conn: dict) -> None:
+    """Reject invalid explicit ports at execution admission, leaving M generation a pure projection."""
+    if (conn.get("class") or "").lower() not in {"sqlserver", "azure_sqldb", "azure_sql_dw", "azuresqldw"}:
+        return
+    port = str(conn.get("port") or "").strip()
+    if port and (not port.isascii() or not port.isdigit() or not 1 <= int(port) <= 65535):
+        raise ValueError("SQL Server port must be an integer from 1 to 65535")
+
+
+def _connection_scope(conn: dict) -> str:
+    """An invocation-local, conservative snapshot; never an audit key or persisted credential.
+
+    Retain ALL declared fields, including unknown credential/session hints, so a new hint cannot
+    silently borrow another identity's evidence. Only class and URL-host spelling are normalized;
+    extra metadata differences may cause an additional navigation, never an over-broad reuse.
     """
-    without_comments = []
-    index = 0
-    while index < len(sql):
-        if sql[index] == "'":
-            quote_start = index
-            index += 1
-            while index < len(sql):
-                if sql[index] != "'":
-                    index += 1
-                    continue
-                if index + 1 < len(sql) and sql[index + 1] == "'":
-                    index += 2
-                    continue
-                index += 1
-                break
-            without_comments.append(sql[quote_start:index])
-            continue
-        if sql.startswith("--", index):
-            newline = sql.find("\n", index)
-            index = len(sql) if newline < 0 else newline
-            continue
-        if sql.startswith("/*", index):
-            end = sql.find("*/", index + 2)
-            without_comments.append(" ")
-            index = len(sql) if end < 0 else end + 2
-            continue
-        without_comments.append(sql[index])
-        index += 1
-    return " ".join("".join(without_comments).split()).replace('"', '""')
+    scope = dict(conn)
+    scope["class"] = (conn.get("class") or "").lower()
+    scope["server"] = normalize_host(conn.get("server") or "")
+    return json.dumps(scope, sort_keys=True, separators=(",", ":"))
+
+
+def _navigation_m(head: str, navigation: str, name_column: str) -> tuple[str, str]:
+    """Consume navigation metadata, not nested [Data] tables or an artificial success row.
+
+    Eager buffering forces scalar navigation enumeration before FirstN; selecting the name column
+    excludes nested tables/functions. Empty navigation stays empty (non-success).
+    """
+    return (
+        head
+        + f'    navigation = Table.Buffer(Table.SelectColumns({navigation}, {{"{name_column}"}}),\n'
+        + "        [BufferMode=BufferMode.Eager]),\n"
+        + f'    probe = Table.RenameColumns(Table.FirstN(navigation, 1), {{{{"{name_column}", "ProbeOK"}}}})\n'
+        + "in\n    probe",
+        "Power BI connector navigation only; custom SQL was not executed",
+    )
 
 
 _ORDINARY_PROJECTION = (
@@ -264,24 +291,23 @@ _ORDINARY_PROJECTION = (
 
 
 def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = None) -> tuple[str, str]:
-    """Return (m_query, note) for a one-row read of `table`.
+    """Return ordinary-table row M, or connector-navigation M when custom_sql is not None.
 
     Names no secret: every connector below defers to Power BI's own credential store, which is the
     entire point - the probe must exercise the SAME credential path the real model will use, or it
     proves nothing about the real model.
 
     Ordinary tables select their first physical column at runtime and rename it to `ProbeOK`.
-    `column` is retained for caller compatibility, not used as a remote identifier. Custom SQL
-    keeps its constant `ProbeOK` projection after executing the customer's query.
+    `column` and `custom_sql` are retained for caller compatibility. Only the latter's presence
+    selects connection mode; its content is NEVER read, transformed, emitted or executed.
     """
     del column
     klass = (conn.get("class") or "").lower()
-    server = normalize_host(conn.get("server") or "")
-    database = conn.get("database") or ""
-    schema = conn.get("schema") or "default"
-    native = _m_sql_literal(custom_sql) if custom_sql else None
-    if custom_sql is not None and not native:
-        raise ValueError("custom SQL is empty after removing comments; reachability cannot be assessed")
+    server = _m_connection_text(normalize_host(conn.get("server") or ""))
+    database = _m_connection_text(conn.get("database") or "")
+    schema = _m_connection_text(conn.get("schema") or "default")
+    if custom_sql is not None and (not server or not database):
+        raise ValueError("connection navigation requires the exact server and database/catalog in the spec")
 
     if klass == "databricks":
         http_path = conn.get("http_path")
@@ -290,20 +316,14 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
                 "Databricks source has no 'http_path' in the spec (the SQL warehouse path). "
                 "Re-parse the workbook with the current parse_tableau.py, which captures it."
             )
+        http_path = _m_connection_text(http_path)
         head = (
             "let\n"
             f'    Source = Databricks.Catalogs("{server}", "{http_path}", null),\n'
             f'    db = Source{{[Name="{database}",Kind="Database"]}}[Data],\n'
         )
-        if native:
-            m = (
-                head
-                + f'    one = Table.FirstN(Value.NativeQuery(db, "{native}"), 1),\n'
-                + '    without_probe = Table.RemoveColumns(one, {"ProbeOK"}, MissingField.Ignore),\n'
-                + '    probe = Table.SelectColumns(Table.AddColumn(without_probe, "ProbeOK", each 1), {"ProbeOK"})\n'
-                + "in\n    probe"
-            )
-            return m, f"Databricks {server}{http_path} :: {database} :: custom SQL '{table}'"
+        if custom_sql is not None:
+            return _navigation_m(head, "db", "Name")
         m = (
             head + f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
             f'    tbl = sch{{[Name="{table}",Kind="Table"]}}[Data],\n' + _ORDINARY_PROJECTION
@@ -311,17 +331,9 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
         return m, f"Databricks {server}{http_path} :: {database}.{schema}.{table}"
 
     if klass in {"sqlserver", "azure_sqldb", "azure_sql_dw", "azuresqldw"}:
-        if native:
-            m = (
-                "let\n"
-                f'    Source = Sql.Database("{server}", "{database}", [Query="{native}"]),\n'
-                "    one = Table.FirstN(Source, 1),\n"
-                '    without_probe = Table.RemoveColumns(one, {"ProbeOK"}, MissingField.Ignore),\n'
-                '    probe = Table.SelectColumns(Table.AddColumn(without_probe, "ProbeOK", each 1), {"ProbeOK"})\n'
-                "in\n"
-                "    probe"
-            )
-            return m, f"SQL Server {server} :: {database} :: custom SQL '{table}'"
+        server = _m_connection_text(_sql_server(conn))
+        if custom_sql is not None:
+            return _navigation_m("let\n" + f'    Source = Sql.Database("{server}", "{database}"),\n', "Source", "Item")
         m = (
             "let\n"
             f'    Source = Sql.Database("{server}", "{database}"),\n'
@@ -330,7 +342,7 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
         return m, f"SQL Server {server} :: {database}.{schema}.{table}"
 
     if klass == "snowflake":
-        warehouse = (conn.get("warehouse") or "").strip()
+        warehouse = _m_connection_text((conn.get("warehouse") or "").strip())
         if not warehouse:
             raise ValueError(
                 "Snowflake source has no 'warehouse' in the spec. Snowflake cannot execute a query "
@@ -338,22 +350,15 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
                 "reachability. Re-parse the workbook with the current parse_tableau.py, which "
                 "captures it, or add `warehouse` to the source's connection block."
             )
-        role = (conn.get("role") or "").strip()
+        role = _m_connection_text((conn.get("role") or "").strip())
         options = f'[Role="{role}"]' if role else "null"
         head = (
             "let\n"
             f'    Source = Snowflake.Databases("{server}", "{warehouse}", {options}),\n'
             f'    db = Source{{[Name="{database}",Kind="Database"]}}[Data],\n'
         )
-        if native:
-            m = (
-                head
-                + f'    one = Table.FirstN(Value.NativeQuery(db, "{native}"), 1),\n'
-                + '    without_probe = Table.RemoveColumns(one, {"ProbeOK"}, MissingField.Ignore),\n'
-                + '    probe = Table.SelectColumns(Table.AddColumn(without_probe, "ProbeOK", each 1), {"ProbeOK"})\n'
-                + "in\n    probe"
-            )
-            return m, f"Snowflake {server} ({warehouse}) :: {database} :: custom SQL '{table}'"
+        if custom_sql is not None:
+            return _navigation_m(head, "db", "Name")
         m = (
             head + f'    sch = db{{[Name="{schema}",Kind="Schema"]}}[Data],\n'
             f'    tbl = sch{{[Name="{table}",Kind="Table"]}}[Data],\n' + _ORDINARY_PROJECTION
@@ -541,13 +546,6 @@ def _is_custom_sql(table: dict) -> bool:
     return table.get("source_relation") == "custom-sql"
 
 
-def _probe_custom_sql(table: dict) -> str | None:
-    """Return custom SQL for probing, preserving an empty payload as an assessability failure."""
-    if not _is_custom_sql(table):
-        return None
-    return table.get("custom_sql") or ""
-
-
 def _resolve_probe_targets(
     sources: list[dict], source_index: int, migration: Path | None = None
 ) -> list[tuple[str, dict, list[dict], str]]:
@@ -557,12 +555,9 @@ def _resolve_probe_targets(
     usually names several, so the probe can move on to the next rather than declaring the whole
     source unreachable over one bad name.
 
-    Real tables are ordered FIRST and custom-SQL relations last. Both are probeable (see
-    `build_m_query`), but a real table costs the source a catalog lookup and a one-row read, whereas
-    a custom-SQL relation runs the workbook's own hand-written SELECT - which can be arbitrarily
-    expensive and can trigger Desktop's native-query approval modal. Prefer the cheap proof for
-    credentials, but still probe any later custom-SQL relation rather than letting the cheap table
-    stand in for it.
+    Real tables are ordered FIRST. Their DATA_OK may supply connection evidence for a later
+    custom-SQL relation on that exact scope, but never proof of the custom query. Without such
+    evidence, custom relations use connector navigation only.
     """
     if source_index >= len(sources):
         log.error("PROBE: ERROR source index %d out of range (%d sources)", source_index, len(sources))
@@ -748,7 +743,9 @@ def _classify_catalog_timeout(conn: dict) -> str:
     return "ERROR"
 
 
-def _refresh_and_classify(pid: int, table: str, timeout_sec: int, network_fault_observed: bool) -> tuple[int, str]:
+def _refresh_and_classify(
+    pid: int, table: str, timeout_sec: int, network_fault_observed: bool, *, connection_only: bool = False
+) -> tuple[int, str]:
     """Refresh the probe table and turn the result into a verdict. Returns (exit code, verdict).
 
     Deliberately does NOT lift the gate - the caller does that, and only once EVERY live source has
@@ -823,6 +820,9 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int, network_fault_
     # rule - and the list of what counts as authoritative - lives in `_verdict_lines._is_earned_success`
     # so a new verdict family joins the gate by being added to one list (issues #152, #158, #376).
     if _is_earned_success(text, table, returncode=refresh.returncode):
+        if connection_only:
+            log.info("PROBE: %s Power BI connector navigation returned metadata; gate still armed", CONNECTION_ONLY)
+            return 1, CONNECTION_ONLY
         log.info("PROBE: DATA_OK 1 row(s) from %s - the source is genuinely reachable", table)
         return 0, "DATA_OK"
     verdict, detail = _classify_failure(text, network_fault_observed=network_fault_observed)
@@ -863,7 +863,12 @@ def _record_attempt(migration: Path, verdict: str, what: str, sources: list[str]
     sys.path.insert(0, str(Path(__file__).parent))
     from credential_gate import _audit  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
-    _audit(migration, f"probe-{verdict.lower()}", what, sources=list(sources))
+    # The gate reader has a closed action vocabulary. Preserve its non-success envelope rather
+    # than poisoning an otherwise valid audit with an unknown action (#690's gate file is unchanged).
+    action = "probe-error" if verdict == CONNECTION_ONLY else f"probe-{verdict.lower()}"
+    if verdict == CONNECTION_ONLY:
+        what = f"{CONNECTION_ONLY}: {what}"
+    _audit(migration, action, what, sources=list(sources))
 
 
 @contextmanager
@@ -935,6 +940,9 @@ def _default_port(conn: dict) -> int:
         return int(explicit)
     klass = (conn.get("class") or "").lower()
     if klass in {"sqlserver", "azure_sqldb", "azure_sql_dw", "azuresqldw"}:
+        embedded = re.search(r"[,:]([0-9]+)$", normalize_host(conn.get("server") or ""))
+        if embedded:
+            return int(embedded.group(1))
         return 1433
     return 443
 
@@ -948,13 +956,25 @@ def _tcp_connects(server: str, port: int, timeout_sec: float = 3.0) -> bool:
         return False
 
 
+def _network_server(conn: dict) -> str:
+    """DNS takes a hostname, whereas Sql.Database also takes a protocol, instance and port."""
+    server = normalize_host(conn.get("server") or "")
+    if (conn.get("class") or "").lower() in {"sqlserver", "azure_sqldb", "azure_sql_dw", "azuresqldw"}:
+        server = re.sub(r"^tcp:", "", server, flags=re.IGNORECASE)
+        server = re.sub(r"[,:][0-9]+$", "", server).split("\\", 1)[0].strip("[]")
+    return server
+
+
 def _network_fault_observed(conn: dict) -> bool:
     """Return True only when DNS or TCP actually showed a network fault."""
-    server = normalize_host(conn.get("server") or "")
+    server = _network_server(conn)
     if not server:
         return False
     if not _host_resolves(server):
         return True
+    if "\\" in str(conn.get("server") or "") and not conn.get("port"):
+        # A named instance may use a dynamic port; a failed guess at 1433 would prove nothing.
+        return False
     return not _tcp_connects(server, _default_port(conn))
 
 
@@ -986,8 +1006,13 @@ def run_probe(bundle_path: Path, source_index: int | None, timeout_sec: int, kee
 
     log.info("probing %d live source(s): %s", len(live), live)
     proved_names: list[str] = []
+    known_connections: set[str] = set()
+    connection_only = False
     for idx in live:
-        rc, verdict = _probe_one(bundle.migration_dir, sources, idx, timeout_sec, keep)
+        rc, verdict = _probe_one(bundle.migration_dir, sources, idx, timeout_sec, keep, known_connections)
+        if verdict == CONNECTION_ONLY:
+            connection_only = True
+            continue
         if rc != 0:
             log.error("PROBE: source index %d failed - not lifting the gate", idx)
             _print_verdict_directive(verdict)
@@ -995,11 +1020,14 @@ def run_probe(bundle_path: Path, source_index: int | None, timeout_sec: int, kee
         # SKIPPED means `_resolve_probe_target` found nothing to reach, so no endpoint was contacted
         # and this source proves nothing. Counting it would re-open #353 for exactly the shape that
         # exposed it: a `federated` outer connection carrying no server at all.
-        if verdict != "SKIPPED":
+        if verdict == "DATA_OK":
             proved_names.extend(
                 name for name, _leg, _tables, _column in _resolve_probe_targets(sources, idx, bundle.migration_dir)
             )
 
+    if connection_only:
+        _print_verdict_directive(CONNECTION_ONLY)
+        return 1
     if not _lift_gate(bundle.migration_dir, f"{len(proved_names)} live source leg(s)", proved_names):
         log.warning(
             "PROBE: %d source(s) reachable, but the gate is STILL ARMED and nothing was earned. "
@@ -1025,6 +1053,15 @@ def _print_verdict_directive(verdict: str) -> None:
     UNREACHABLE needs a spec edit and no sign-in at all. Sending a user to authenticate against a
     hostname that does not exist is its own kind of wrong answer.
     """
+    if verdict == CONNECTION_ONLY:
+        log.warning(
+            "Power BI connected using Desktop credentials. Your custom SQL was not executed and remains "
+            "unvalidated; the gate is still armed.\n"
+            "STOP unless an already valid brief/audit-backed degradation authorization permits model-only "
+            "continuation. This observation grants no authorization. Exact-query validation is a separate, "
+            "explicitly authorized action (#692), not a mode of this probe."
+        )
+        return
     if verdict == "ERROR":
         log.error(
             "\n"
@@ -1049,9 +1086,10 @@ def _print_verdict_directive(verdict: str) -> None:
         log.error(
             "\n"
             "################################################################\n"
-            "#  STOP - NO POWER BI CREDENTIAL. A HUMAN MUST ACT.\n"
+            "#  STOP - POWER BI CREDENTIAL EVIDENCE NEEDS A HUMAN.\n"
             "################################################################\n"
-            "  The source is REACHABLE but Power BI has never authenticated to it.\n"
+            "  Power BI reported missing/rejected credential or sign-in evidence. This does not\n"
+            "  establish that it never authenticated before, or independently prove reachability.\n"
             "\n"
             "  DIRECTIVE - NOT ADVISORY, NOT A WARNING:\n"
             "    1. You may NOT build the semantic model or the report. The gate stays armed.\n"
@@ -1078,15 +1116,16 @@ def _print_verdict_directive(verdict: str) -> None:
         log.error(
             "\n"
             "################################################################\n"
-            "#  STOP - ACCESS DENIED. A PERMISSION OWNER MUST ACT.\n"
+            "#  STOP - ACCESS-DENIAL EVIDENCE. A HUMAN MUST ACT.\n"
             "################################################################\n"
-            "  Power BI reached the source, but the authenticated identity is not allowed to\n"
-            "  read the requested object. This is final until permissions change.\n"
+            "  The error contains access-denial-shaped text. That alone does not establish that\n"
+            "  authentication succeeded or that permissions are the only possible cause.\n"
             "\n"
             "    1. You may NOT build the semantic model or the report. The gate stays armed.\n"
             "    2. Do NOT retry unchanged, and do NOT send the user to fix a hostname.\n"
-            "    3. Ask the source owner to grant the Power BI identity access to the server,\n"
-            "       database/schema, warehouse, or table named in the probe output.\n"
+            "    3. Read the detail: fix credentials/tokens when it names authentication or a\n"
+            "       revoked/expired token; ask the source owner about grants when it names an\n"
+            "       object or principal. A fresh sign-in may help; do not assume either cause.\n"
             "################################################################"
         )
         return
@@ -1107,8 +1146,13 @@ def _print_verdict_directive(verdict: str) -> None:
     )
 
 
-def _probe_one(
-    migration: Path, sources: list[dict], source_index: int, timeout_sec: int, keep: bool
+def _probe_one(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    migration: Path,
+    sources: list[dict],
+    source_index: int,
+    timeout_sec: int,
+    keep: bool,
+    known_connections: set[str] | None = None,
 ) -> tuple[int, str]:
     """Probe a single data source, trying its tables in order until one answers.
 
@@ -1123,24 +1167,53 @@ def _probe_one(
     targets = _resolve_probe_targets(sources, source_index, migration)
     if not targets:
         return 0, "SKIPPED"
+    if known_connections is None:
+        known_connections = set()
+    connection_only = False
     for leg_name, conn, tables, column in targets:
-        rc, verdict = _probe_leg(migration, leg_name, conn, (tables, column), (timeout_sec, keep))
+        scope = _connection_scope(conn)
+        if any(_is_custom_sql(table) for table in tables):
+            rc, verdict = _probe_leg(
+                migration, leg_name, conn, (tables, column), (timeout_sec, keep), known_connections=known_connections
+            )
+        else:
+            rc, verdict = _probe_leg(migration, leg_name, conn, (tables, column), (timeout_sec, keep))
+        if verdict == CONNECTION_ONLY:
+            connection_only = True
+            continue
         if rc != 0:
             return rc, verdict
+        if verdict == "DATA_OK":
+            known_connections.add(scope)
+    if connection_only:
+        return 1, CONNECTION_ONLY
     return 0, "DATA_OK"
 
 
-def _probe_leg(
+def _reuse_connection(migration: Path, leg_name: str) -> tuple[int, str]:
+    """Record connection-only reuse, never a clear or a success for the custom query."""
+    log.info("PROBE: %s reused same-scope ordinary-table Desktop evidence; query not executed", CONNECTION_ONLY)
+    _record_attempt(migration, CONNECTION_ONLY, "ordinary-table connection reused; custom SQL unvalidated", [leg_name])
+    return 1, CONNECTION_ONLY
+
+
+def _probe_leg(  # pylint: disable=too-many-arguments
     migration: Path,
     leg_name: str,
     conn: dict,
     target: tuple[list[dict], str],
     opts: tuple[int, bool],
+    *,
+    known_connections: set[str] | None = None,
 ) -> tuple[int, str]:
     """Probe one resolved connection leg."""
     with _recorded_attempt(migration, [leg_name]) as finish:
         tables, column = target
-        server = normalize_host(conn.get("server") or "")
+        custom = any(_is_custom_sql(table) for table in tables)
+        scope = _connection_scope(conn)
+        if custom and known_connections is not None and scope in known_connections:
+            return _reuse_connection(migration, leg_name)
+        server = _network_server(conn)
         if server and not _host_resolves(server):
             log.error(
                 "PROBE: UNREACHABLE '%s' does not resolve in DNS. This is a spec/config problem, not a "
@@ -1153,15 +1226,16 @@ def _probe_leg(
             return finish(1, "BAD_TABLE")
 
     log.info("probing leg: %s", leg_name)
-    for i, table in enumerate(tables):
+    for table in tables:
         rc, verdict = _probe_one_table(migration, leg_name, conn, (table, column), opts)
-        if rc == 0:
-            if any(_is_custom_sql(candidate) for candidate in tables[i + 1 :]):
-                continue
-            return 0, "DATA_OK"
-        if verdict != "BAD_TABLE" or i == len(tables) - 1:
+        if rc == 0 and verdict == "DATA_OK":
+            if custom and known_connections is not None:
+                known_connections.add(scope)
+            return _reuse_connection(migration, leg_name) if custom else (0, "DATA_OK")
+        if _is_custom_sql(table) or verdict != "BAD_TABLE":
             return rc, verdict
-        log.warning("table '%s' not found at the source - trying the next one in the spec", table.get("name"))
+        if table is not tables[-1]:
+            log.warning("table '%s' not found at the source - trying the next one in the spec", table.get("name"))
     return 1, "BAD_TABLE"
 
 
@@ -1173,10 +1247,12 @@ def _probe_one_table(
     desktop_event = None
     try:
         with _recorded_attempt(migration, [leg_name]) as finish:
-            table_spec, column = target
-            table = table_spec.get("name", "")
+            table_spec = target[0]
+            custom = _is_custom_sql(table_spec)
+            table = CONNECTION_PROBE_TABLE if custom else table_spec.get("name", "")
             try:
-                m_query, note = build_m_query(conn, table, column, custom_sql=_probe_custom_sql(table_spec))
+                _validate_sql_port(conn)
+                m_query, note = build_m_query(conn, table, target[1], custom_sql="" if custom else None)
             except ValueError as exc:
                 log.error("PROBE: ERROR %s", exc)
                 return finish(1, "ERROR")
@@ -1189,6 +1265,10 @@ def _probe_one_table(
             if not _wait_for_catalog(pid):
                 return finish(1, _classify_catalog_timeout(conn))
             log.info("model loaded - refreshing")
+            if custom:
+                return finish(
+                    *_refresh_and_classify(pid, table, opts[0], _network_fault_observed(conn), connection_only=True)
+                )
             return finish(*_refresh_and_classify(pid, table, opts[0], _network_fault_observed(conn)))
     finally:
         if pid and desktop_event and opts[1]:
