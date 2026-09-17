@@ -1001,7 +1001,8 @@ def test_published_provider_applicability_uses_final_cohort_topology(
         assert results[1].topology == "published_consumer" and results[1].dependencies[0].provider_ordinal == 0
 
 
-@pytest.mark.parametrize("publication_metadata,selected", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("publication_metadata", [False, True])
+@pytest.mark.parametrize("selected", [False, True])
 def test_mixed_case_sqlproxy_retains_canonical_direct_applicability(
     tmp_path: Path, publication_metadata: bool, selected: bool
 ) -> None:
@@ -1025,14 +1026,20 @@ def test_mixed_case_sqlproxy_retains_canonical_direct_applicability(
             )
         )
     results = pri.verify_phase1_role_identity(roots)
-    assert all(result.is_start_ready for result in results)
-    assert results[0].topology == ("published_provider" if selected else "standalone_datasource")
+    eligible = selected and publication_metadata
+    assert results[0].is_start_ready
+    assert results[0].topology == ("published_provider" if eligible else "standalone_datasource")
     facts = require_handoff(results[0].data_access_handoff(provider)).facts
     assert tuple(facts) == ((), False, True, False, None)
     assert facts.all_flat
     if selected:
-        assert results[1].topology == "published_consumer" and results[1].dependencies[0].provider_ordinal == 0
-        assert require_handoff(results[1].data_access_handoff(roots[1])).facts.published_only
+        assert results[1].topology == "published_consumer"
+        if eligible:
+            assert results[1].is_start_ready and results[1].dependencies[0].provider_ordinal == 0
+            assert require_handoff(results[1].data_access_handoff(roots[1])).facts.published_only
+        else:
+            assert not results[1].is_start_ready
+            assert results[1].dependencies[0].code == "provider_key_contradiction"
 
 
 @pytest.mark.parametrize(

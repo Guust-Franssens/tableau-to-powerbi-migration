@@ -1112,6 +1112,10 @@ def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
         spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
         spec["data_sources"] *= 2
         s2._write(consumer / "migration-spec.json", spec)
+        provenance = json.loads((consumer / "source-provenance.json").read_bytes())
+        rows = provenance["inputs"][0]["origin"]["published_dependencies"]["rows"]
+        rows.append({**rows[0], "source_ordinal": 1})
+        s2._write(consumer / "source-provenance.json", provenance)
         _reseal(consumer)
     providers = (other, selected) if reverse else (selected, other)
     s2_results = pkg.pri.verify_phase1_role_identity([*providers, consumer])
@@ -1135,7 +1139,13 @@ def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
         assert projection.source_keys == handoff.facts.live_source_keys == (key,), (
             "direct-provider source-key authority must derive the literal key from held connection metadata"
         )
-        assert json.loads(handoff.migration_spec.content)["data_sources"] == [{"id": "ds-1", "connection": connection}]
+        assert json.loads(handoff.migration_spec.content)["data_sources"] == [
+            {
+                "id": "ds-1",
+                "connection": connection,
+                "published_datasource": {"id": "Shared", "site": "sales-site", "key": s2.PUBLISHED_KEY},
+            }
+        ]
         assert handoff.facts.direct_applicable and not handoff.facts.published_only
         assert not handoff.facts.has_review and handoff.facts.refusal_code is None
         pkg._binding_access(pkg._binding_hold(provider), role, provider)

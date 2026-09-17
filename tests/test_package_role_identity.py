@@ -349,6 +349,8 @@ def test_a_shared_provider_and_its_consumer_resolve_as_one_cohort(
     )
     provenance = json.loads((consumer / "source-provenance.json").read_bytes())
     provenance["inputs"][0]["origin"]["published_dependencies"]["source_match"] = source_match
+    if source_match == "revision_same":
+        provenance["inputs"][0]["origin"]["match"] = "name_only"
     _write(consumer / "source-provenance.json", provenance)
     seal(consumer, **json.loads((consumer / "package-manifest.json").read_bytes()))
     assert (
@@ -369,6 +371,8 @@ def test_a_shared_provider_and_its_consumer_resolve_as_one_cohort(
     assert consumer_result.dependencies[0].datasource_luid == DS_LUID
     assert consumer_result.dependencies[0].provider_ordinal == roots.index(provider)
     assert "provider_ordinal" not in consumer_result.as_dict()["dependencies"][0]
+    if source_match == "revision_same":
+        assert consumer_result.source_identity.revision == pri.REVISION_UNCONFIRMED
 
 
 def test_a_local_source_with_no_server_luid_resolves_by_sha_and_earns_luid_not_applicable(tmp_path: Path) -> None:
@@ -733,7 +737,7 @@ def test_a_provider_answering_the_key_with_a_different_luid_is_a_contradiction(t
     consumer = workbook_package(
         tmp_path / "Revenue",
         published={"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY, "luid": DS_LUID},
-        binding=f"../{DS_UNIT}.SemanticModel",
+        binding=f"../../../{DS_UNIT}/fabric/{DS_UNIT}.SemanticModel",
     )
 
     results = pri.verify_phase1_role_identity([provider, consumer])
