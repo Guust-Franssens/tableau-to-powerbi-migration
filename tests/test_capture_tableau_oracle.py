@@ -21,6 +21,7 @@ import ast
 import csv
 import gzip
 import inspect
+import io
 import json
 import logging
 import sys
@@ -955,11 +956,15 @@ def test_the_run_end_block_is_silent_when_nothing_is_empty(tmp_path, caplog):
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
+        ("\n", "empty_cannot_classify"),
+        ("\n\n", "empty_cannot_classify"),
         ("\r\n", "empty_cannot_classify"),
         ("\r\n\r\n", "empty_cannot_classify"),
+        ("\ufeff\r\n\r\n", "empty_cannot_classify"),
         ("Region,Sales\r\n", "empty_query_no_rows"),
         ("Region,Sales\n\n", "empty_query_no_rows"),
         ("Region,Sales\r\n\r\n\r\n", "empty_query_no_rows"),
+        ("\ufeffRegion,Sales\r\n\r\n", "empty_query_no_rows"),
     ],
 )
 def test_a_REAL_empty_export_travels_the_whole_path_from_capture_to_manifest(tmp_path, payload, expected):
@@ -988,6 +993,9 @@ def test_a_REAL_empty_export_travels_the_whole_path_from_capture_to_manifest(tmp
     assert manifest["data_empty_views"][0]["view_name"] == "Real Time Availability"
     assert manifest["data_empty_views"][0]["classification"] == expected
     assert manifest["views"][0]["flags"] == ["data_empty", expected]
+    result = build_reconcile_items.build(tmp_path, {"Network Ops": {"Region": "DIMENSION", "Sales": "MEASURE"}})
+    assert result["item_count"] == 0
+    assert not result["items"]
 
 
 # --- #480 finding 2: an HTTP 200 body is not evidence until it is certified as CSV ------------
@@ -1007,6 +1015,9 @@ def test_a_REAL_empty_export_travels_the_whole_path_from_capture_to_manifest(tmp
 _UNCERTIFIABLE = [
     ("text/html", "<html>\n<body>Error</body>\n</html>\n", "content_type_not_csv"),
     ("text/csv", 'Region,Sales\r\nWest,"unterminated', "payload_malformed_csv"),
+    ("text/csv", 'Region,Sales\r\n\r\n\r\nWest,"unterminated', "payload_malformed_csv"),
+    ("text/csv", "Region,Sales\n\n\nWest,0,EXTRA\n\n", "payload_ragged_rows"),
+    ("text/csv", "Region,Sales\r\n\r\n\r\nWest\r\n\r\n", "payload_ragged_rows"),
     ("application/octet-stream", "not CSV at all", "content_type_not_csv"),
 ]
 
@@ -1456,9 +1467,48 @@ def test_invalid_utf8_is_refused_without_numeric_evidence(tmp_path: Path, body: 
 
 
 @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
-def test_certified_utf8_exports_are_consumable_and_preserve_zero(tmp_path: Path, encoding: str) -> None:
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize(
+    "records",
+    ["Region,Sales\nWest,0\n", "Region,Sales\n", ",\n"],
+    ids=["header-and-data", "header-only", "empty-fields"],
+)
+def test_leading_blank_csv_header_is_refused_before_consumption(
+    tmp_path: Path, encoding: str, newline: str, records: str
+) -> None:
+    """A physical first blank is the header, not a record that certification may discard."""
+    body = ("\n" + records).replace("\n", newline).encode(encoding)
+    reader = csv.DictReader(io.StringIO(body.decode("utf-8-sig")))
+    assert reader.fieldnames == []
+    rows = list(reader)
+    assert rows and all(None in row for row in rows), "DictReader exposes the original empty header"
+    assert payload_facts.summarise_csv(body) == {"row_count": len(rows), "columns": [], "format_hints": {}}
+    assert payload_facts.certify_csv(body, "text/csv") == payload_facts.CSV_RAGGED
+
+    manifest = _capture_one(tmp_path, body, {"Content-Type": "text/csv"})
+    data = manifest["views"][0]["data"]
+    assert data["certification"] == payload_facts.CSV_RAGGED
+    assert data["status"] == "format_mismatch"
+    assert "row_count" not in data and "columns" not in data
+    assert "path" not in data and not list(tmp_path.rglob("*.csv"))
+    assert manifest["data_ok"] == manifest["captured_complete"] == manifest["data_empty"] == 0
+    assert manifest["data_empty_views"] == []
+    assert manifest["failed"] == 1
+    assert not _naive_numeric_consumer(tmp_path)
+    result = build_reconcile_items.build(tmp_path, {"Network Ops": {"Region": "DIMENSION", "Sales": "MEASURE"}})
+    assert result["item_count"] == 0
+    assert not result["items"]
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("blank_lines", [0, 2], ids=["no-blanks", "multiple-body-blanks"])
+def test_certified_utf8_exports_are_consumable_and_preserve_zero(
+    tmp_path: Path, encoding: str, newline: str, blank_lines: int
+) -> None:
     """Both encodings keep their bytes, non-ASCII text and real numeric zero through consumption."""
-    body = "Region,Sales\nMontréal,0\n".encode(encoding)
+    separator = newline * (blank_lines + 1)
+    body = f"Region,Sales{separator}Montréal,0{separator}".encode(encoding)
     manifest = _capture_one(tmp_path, body, {"Content-Type": "text/csv; charset=utf-8"})
     data = manifest["views"][0]["data"]
     assert data["status"] == "ok"
@@ -1479,32 +1529,47 @@ def test_certified_utf8_exports_are_consumable_and_preserve_zero(tmp_path: Path,
 
 
 @pytest.mark.parametrize(
-    ("body", "expected"),
+    ("body", "expected", "expected_values"),
     [
-        (b"Region,Sales\n,\n", [{"Region": "", "Sales": ""}]),
-        (b"Region,Sales\n\n,\n\n", [{"Region": "", "Sales": ""}]),
+        (b"Region,Sales\n,\n", [{"Region": "", "Sales": ""}], []),
+        (b"Region,Sales\n\n,\n\n", [{"Region": "", "Sales": ""}], []),
         (
-            b"Region,Sales\nWest,0\n\nEast,10\n\n",
-            [{"Region": "West", "Sales": "0"}, {"Region": "East", "Sales": "10"}],
+            b"Region,Sales\n\n\n,\n\n\n,\n\n",
+            [{"Region": "", "Sales": ""}, {"Region": "", "Sales": ""}],
+            [],
         ),
-        (b'Value\n""\n', [{"Value": ""}]),
-        (b"Value\n \n", [{"Value": " "}]),
+        (
+            b"Region,Sales\nWest,0\n\n\nEast,10\n\n\n",
+            [{"Region": "West", "Sales": "0"}, {"Region": "East", "Sales": "10"}],
+            [0.0, 10.0],
+        ),
+        (b'Value\n""\n', [{"Value": ""}], []),
+        (b"Value\n \n", [{"Value": " "}], []),
     ],
 )
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"], ids=["lf", "crlf"])
 def test_csv_summary_counts_records_not_blank_lines(
-    tmp_path: Path, body: bytes, expected: list[dict[str, str]]
+    tmp_path: Path, body: bytes, expected: list[dict[str, str]], expected_values: list[float], newline: bytes
 ) -> None:
     """DictReader is the independent count oracle: empty fields are records, empty lines are not."""
+    body = body.replace(b"\n", newline)
     manifest = _capture_one(tmp_path, body, {"Content-Type": "text/csv"})
     data = manifest["views"][0]["data"]
     assert data["status"] == "ok"
     assert data["certification"] == payload_facts.CSV_CERTIFIED
     with (tmp_path / data["path"]).open(encoding="utf-8-sig", newline="") as source:
-        rows = list(csv.DictReader(source))
+        reader = csv.DictReader(source)
+        rows = list(reader)
     assert rows == expected
+    assert data["columns"] == reader.fieldnames
+    assert all(None not in row for row in rows)
     assert data["row_count"] == len(rows)
     assert manifest["data_empty"] == 0
     assert manifest["data_empty_views"] == []
+    result = build_reconcile_items.build(
+        tmp_path, {"Network Ops": {"Region": "DIMENSION", "Sales": "MEASURE", "Value": "MEASURE"}}
+    )
+    assert [item["tableau_value"] for item in result["items"]] == expected_values
 
 
 @pytest.mark.parametrize(

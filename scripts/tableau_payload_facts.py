@@ -230,6 +230,8 @@ def certify_csv(payload: bytes, content_type: str | None) -> str:
 
     Certification decodes strictly as UTF-8-sig, matching the supported numeric consumer. Replacing
     invalid bytes would certify a different interpretation from the bytes that consumer reads.
+    Like ``summarise_csv`` and ``DictReader``, keep the first CSV record as the header even when it
+    is blank. Ignore physical blank records only in the body, not structurally present empty fields.
 
     The order is deliberate. The DECLARATION is decisive first, unlike
     :func:`tableau_render_capability.format_matches` where the payload is: a PNG or a PDF carries a
@@ -264,12 +266,12 @@ def certify_csv(payload: bytes, content_type: str | None) -> str:
     # field, which is how `Region,Sales\r\nWest,"unterminated` was recorded as one complete row. CSV
     # escapes a literal quote by doubling it, so a well-formed export always carries an even count.
     try:
-        rows = [row for row in csv.reader(io.StringIO(text), strict=True) if row]
+        rows = list(csv.reader(io.StringIO(text), strict=True))
     except csv.Error:
         rows = None
     if rows is None or text.count('"') % 2:
         return CSV_MALFORMED
-    if rows and any(len(row) != len(rows[0]) for row in rows[1:]):
+    if rows and any(len(row) != len(rows[0]) for row in rows[1:] if row):
         return CSV_RAGGED
     certification = CSV_CONTENT_TYPE_UNSPECIFIC if declared else CSV_CONTENT_TYPE_ABSENT
     if declared in CSV_MIME_TYPES:
