@@ -1,0 +1,39 @@
+name: Implementation request
+description: Propose a fix or improvement; a short problem and outcome are enough.
+labels: ["status:needs-decision"]
+body:
+  - type: textarea
+    id: observed-problem
+    attributes:
+      label: Observed problem / current journey
+      description: What were you trying to do, and what happened? Include a small, sanitized reproduction if known.
+    validations:
+      required: true
+  - type: textarea
+    id: desired-outcome
+    attributes:
+      label: Desired outcome / default
+      description: What should happen instead, including the default behavior?
+    validations:
+      required: true
+  - type: textarea
+    id: plan-seeds
+    attributes:
+      label: Plan seeds (optional)
+      description: Fill only what you know; no worktree or review link is needed to file.
+      placeholder: |
+        Value / why now:
+        Possible invariant / failure direction:
+        Known consumers / surface / shared files:
+        Positive / negative controls:
+        Non-goals / residuals:
+        Dependencies / open work / upstream or local routing:
+    validations:
+      required: false
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I confirm this issue and its attachments contain no secrets, customer data, identifying screenshots, or personal machine paths.
+          required: true
