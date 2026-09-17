@@ -313,7 +313,7 @@ def _windows_api() -> Any:
 
 def _windows_open(path: Path, *, directory: bool, create: bool, movable: bool) -> int:
     import ctypes  # pylint: disable=import-outside-toplevel
-    import msvcrt  # pylint: disable=import-outside-toplevel
+    import msvcrt  # pylint: disable=import-outside-toplevel,import-error
     from ctypes import wintypes  # pylint: disable=import-outside-toplevel
 
     kernel = _windows_api()
@@ -323,7 +323,10 @@ def _windows_open(path: Path, *, directory: bool, create: bool, movable: bool) -
     if handle == wintypes.HANDLE(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        return msvcrt.open_osfhandle(handle, (os.O_RDWR if create else os.O_RDONLY) | os.O_BINARY)
+        return msvcrt.open_osfhandle(
+            handle,
+            (os.O_RDWR if create else os.O_RDONLY) | os.O_BINARY,  # pylint: disable=no-member
+        )
     except OSError:
         kernel.CloseHandle(handle)
         raise
@@ -331,7 +334,7 @@ def _windows_open(path: Path, *, directory: bool, create: bool, movable: bool) -
 
 def _windows_move(descriptor: int, destination: Path | None) -> None:
     import ctypes  # pylint: disable=import-outside-toplevel
-    import msvcrt  # pylint: disable=import-outside-toplevel
+    import msvcrt  # pylint: disable=import-outside-toplevel,import-error
     from ctypes import wintypes  # pylint: disable=import-outside-toplevel
 
     if destination is None:
