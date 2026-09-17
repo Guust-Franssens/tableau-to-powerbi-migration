@@ -1133,7 +1133,9 @@ def _reuse_connection(migration: Path, leg_name: str) -> tuple[int, str]:
 def _custom_sql_stop(migration: Path, leg_name: str) -> tuple[int, str]:
     """Stop without a connection claim, scaffold, network check, or Desktop operation."""
     log.info("PROBE: OPERATOR_REQUIRED no same-scope ordinary DATA_OK; no automatic custom-SQL operation")
-    _record_attempt(migration, "OPERATOR_REQUIRED", "custom SQL not executed; no connection claim earned", [leg_name])
+    _record_attempt(
+        migration, "ERROR", "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned", [leg_name]
+    )
     return 1, "OPERATOR_REQUIRED"
 
 

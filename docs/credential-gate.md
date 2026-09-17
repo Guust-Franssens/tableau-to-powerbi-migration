@@ -77,9 +77,10 @@ Without it, say:
 
 > Your custom SQL was not executed. No safe automated connection-only operation is currently available without catalog enumeration or a native-query approval prompt. No connection claim was earned; the gate remains armed.
 
-The gate's audit vocabulary is closed. Reuse keeps the existing keyed `probe-error` envelope
-with detail beginning **`CONNECTION_OK_QUERY_UNVALIDATED:`**; the public verdict is connection-only,
-not `ERROR`. No-operation refusal uses keyed `probe-operator_required`. Ordinary row attempts may
+The gate's audit vocabulary is closed. **Both custom outcomes use the existing keyed `probe-error`
+envelope**, with distinct detail prefixes **`CONNECTION_OK_QUERY_UNVALIDATED:`** and
+**`OPERATOR_REQUIRED:`**. Their public verdicts remain distinct, not `ERROR`. This mapping is confined
+to the custom no-operation/reuse paths; other existing `OPERATOR_REQUIRED` producers are unchanged. Ordinary row attempts may
 retain their own `probe-data_ok` observation, but neither custom outcome earns `probe-cleared`,
 custom proof names, a gate lift, authorization or model-only permission.
 Connection evidence does **not** validate custom-query/object permissions, schema, rows, semantics,

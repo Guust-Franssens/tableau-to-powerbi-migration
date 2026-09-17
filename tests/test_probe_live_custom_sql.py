@@ -136,11 +136,9 @@ def _assert_terminal(root: Path, code: int, token: str, effects: list[tuple[str,
         "custom SQL must not earn clearance or authorization"
     )
     assert not any("proved_names" in entry for entry in entries)
-    expected = "probe-error" if token == TOKEN else "probe-operator_required"
-    assert entries[-1]["action"] == expected
+    assert entries[-1]["action"] == "probe-error", "custom outcomes must use the keyed probe-error envelope"
     assert entries[-1]["sources"] and all(key.startswith("source-key:") for key in entries[-1]["sources"])
-    if token == TOKEN:
-        assert entries[-1]["detail"].startswith(TOKEN + ":")
+    assert entries[-1]["detail"].startswith(token + ":"), "custom outcome detail must preserve its verdict"
     assert gate._read_audit_trail(root)[1] is None
 
 
@@ -267,7 +265,7 @@ def test_scope_mismatch_does_not_borrow_an_ordinary_success(
     custom = _custom(conn)
     custom["connection"][field] = value
     code = probe_live_source.main(["--spec", str(_spec(tmp_path, [ordinary, custom]))])
-    assert _audit(tmp_path)[-1]["action"] == "probe-operator_required", "cross-scope proof must not be reused"
+    assert _audit(tmp_path)[-1]["detail"].startswith("OPERATOR_REQUIRED:"), "cross-scope proof must not be reused"
     _assert_terminal(tmp_path, code, "OPERATOR_REQUIRED", effects)
     assert sum(kind == "refresh" for kind, _value in effects) == 1
 
@@ -406,6 +404,10 @@ def test_both_custom_outcomes_keep_the_real_audit_and_gate_armed(
     assert (tmp_path / gate.MARKER).read_bytes() == marker
     assert gate.status(tmp_path) == 1 and gate.verify(tmp_path) == 1
     assert not (tmp_path / gate.OVERRIDE).exists()
+    probe_live_source._record_attempt(
+        tmp_path, "OPERATOR_REQUIRED", "other existing producer", [probe_live_source._leg_key({}, 0, SQLSERVER)]
+    )
+    assert _audit(tmp_path)[-1]["action"] == "probe-operator_required", "other operator producers must remain unchanged"
 
 
 @pytest.mark.parametrize(
@@ -554,8 +556,14 @@ def test_real_tables_are_ordered_before_custom_sql_without_reading_the_query() -
             '_audit(migration, "probe-cleared", what, sources=list(sources))',
             "custom SQL must not earn clearance or authorization",
         ),
+        (
+            "_custom_sql_stop",
+            '"ERROR",',
+            '"OPERATOR_REQUIRED",',
+            "custom outcomes must use the keyed probe-error envelope",
+        ),
     ],
-    ids=["operator-exit-zero", "reuse-exit-zero", "probe-cleared"],
+    ids=["operator-exit-zero", "reuse-exit-zero", "probe-cleared", "retained-operator-audit"],
 )
 def test_verdict_mutations_fail_the_intended_assertion(
     tmp_path: Path,
