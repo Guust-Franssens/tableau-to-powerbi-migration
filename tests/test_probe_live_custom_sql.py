@@ -8,6 +8,7 @@ custom-only sources stop without M generation, sockets, a PBIP, Desktop, or a re
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import subprocess
@@ -64,7 +65,7 @@ def _source(tables: list[dict], fields: list[dict] | None = None) -> dict:
     }
 
 
-def _custom(conn: dict, sql: str | None = EXPENSIVE_SQL) -> dict:
+def _custom(conn: dict, sql: object = EXPENSIVE_SQL) -> dict:
     return {
         "connection": dict(conn),
         "tables": [{"name": "Q", "source_relation": "custom-sql", "custom_sql": sql}],
@@ -182,6 +183,140 @@ class SqlReadTrap(dict):
             raise AssertionError("the default path read the custom SQL payload")
         return super().get(key, default)
 
+    def __getitem__(self, key: str) -> object:
+        if key == "custom_sql":
+            raise AssertionError("the default path read the custom SQL payload")
+        return super().__getitem__(key)
+
+    def items(self) -> object:
+        raise AssertionError("the default path traversed or serialized the custom SQL payload")
+
+    def values(self) -> object:
+        raise AssertionError("the default path traversed the custom SQL payload")
+
+    def copy(self) -> object:
+        raise AssertionError("the default path copied the custom SQL payload")
+
+
+def _protect_loaded_sql(monkeypatch: pytest.MonkeyPatch, *, memory_error: bool = False) -> list[dict]:
+    """Instrument the JSON-read boundary, not a replacement bundle loader or probe result."""
+    original_load, original_dumps, original_hash = json.load, json.dumps, hashlib.sha256
+    loaded_sources: list[dict] = []
+    protected: list[object] = []
+
+    def load(handle: object, **kwargs: object) -> dict:
+        document = original_load(handle, **kwargs)
+        nested = document.get("nested", {})
+        sources = document.get("data_sources", nested if isinstance(nested, list) else nested.get("data_sources", []))
+        loaded_sources.extend(sources)
+        for source in sources:
+            for index, table in enumerate(source.get("tables", [])):
+                if table.get("source_relation") == "custom-sql":
+                    source["tables"][index] = SqlReadTrap(table)
+                    protected.extend((document, sources, source, source["tables"]))
+        return document
+
+    def dumps(value: object, *args: object, **kwargs: object) -> str:
+        if any(value is source for source in protected):
+            if memory_error:
+                raise MemoryError("custom SQL serialization exhausted memory before its verdict")
+            raise AssertionError("the default loader serialized a custom SQL source")
+        return original_dumps(value, *args, **kwargs)
+
+    def sha256(value: bytes = b"", **kwargs: object) -> object:
+        assert SENTINEL.encode() not in value, "the default path hashed custom SQL"
+        return original_hash(value, **kwargs)
+
+    monkeypatch.setattr(json, "load", load)
+    monkeypatch.setattr(json, "dumps", dumps)
+    monkeypatch.setattr(hashlib, "sha256", sha256)
+    return loaded_sources
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (shape, composition, payload)
+        for shape in ("spec", "engine", "engine-direct")
+        for composition in ("custom-only", "mixed-leg", "earlier-source")
+        for payload in ("object", "list", "string", "huge")
+    ],
+    ids="-".join,
+)
+def test_cli_loader_leaves_payload_opaque(
+    tmp_path: Path,
+    effects: list[tuple[str, object]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    case: tuple[str, str, str],
+) -> None:
+    """Nested/non-string/large SQL cannot abort CLI loading before a keyed terminal observation."""
+    shape, composition, payload = case
+    custom = _custom(
+        SQLSERVER,
+        {
+            "object": {"data_sources": [_custom(UNSUPPORTED)], "binding_signal": {"published_ds_name": SENTINEL}},
+            "list": [{"nested": [SIDE_EFFECT_SQL, {"custom_sql": EXPENSIVE_SQL}]}],
+            "string": SIDE_EFFECT_SQL,
+            "huge": SENTINEL + ("x" * 2_000_000),
+        }[payload],
+    )
+    sources = [custom]
+    if composition == "mixed-leg":
+        custom["tables"].insert(0, {"name": "REAL_TABLE"})
+    elif composition == "earlier-source":
+        sources.insert(0, {"connection": dict(SQLSERVER), "tables": [{"name": "REAL_TABLE"}]})
+    if shape == "spec":
+        path = _spec(tmp_path, sources)
+        args = ["--spec", str(path)]
+    else:
+        path = tmp_path / "report.json"
+        path.write_text(
+            json.dumps({"nested": sources if shape == "engine-direct" else {"data_sources": sources}}),
+            encoding="utf-8",
+        )
+        args = ["--bundle", str(tmp_path)]
+    original_bytes = path.read_bytes()
+    _protect_loaded_sql(monkeypatch, memory_error=payload == "huge")
+    caplog.set_level("INFO", logger="probe_live_source")
+    try:
+        code = probe_live_source.main(args)
+    except MemoryError:
+        pytest.fail("custom payload processing prevented a keyed verdict/audit")
+    token = "OPERATOR_REQUIRED" if composition == "custom-only" else TOKEN
+    _assert_terminal(tmp_path, code, token, effects)
+    assert _audit(tmp_path)[-1]["sources"] == [probe_live_source._leg_key({}, 0, SQLSERVER)]
+    assert [value for kind, value in effects if kind == "m"] == ([] if composition == "custom-only" else ["REAL_TABLE"])
+    if composition == "custom-only":
+        assert effects == [], "custom SQL must not perform automatic operations"
+        assert not (tmp_path / "_probe").exists()
+    assert path.read_bytes() == original_bytes
+    assert SENTINEL not in caplog.text + (tmp_path / gate.AUDIT).read_text(encoding="utf-8") + repr(effects)
+
+
+@pytest.mark.parametrize("shape", ["spec", "engine"])
+def test_loader_preserves_occurrences_metadata_and_ordinary_dedupe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    """Opaque custom occurrences must not collapse after erasing SQL from a dedupe key."""
+    ordinary = {"name": "ordinary", "connection": dict(SQLSERVER), "tables": [{"name": "REAL_TABLE"}]}
+    custom = _custom({**SQLSERVER, "instance": "REPORTING", "session": {"principal": "fixture"}})
+    custom["occurrence"] = {"workbook": "fixture", "source_id": "source-42", "lineage": [3, 7]}
+    sources = [ordinary, custom, _custom(custom["connection"], SIDE_EFFECT_SQL), ordinary, custom]
+    if shape == "spec":
+        path = _spec(tmp_path, sources)
+    else:
+        path = tmp_path
+        (path / "report.json").write_text(json.dumps({"nested": {"data_sources": sources}}), encoding="utf-8")
+    loaded = _protect_loaded_sql(monkeypatch)
+    bundle = probe_live_source.load_bundle(path)
+    expected = [loaded[index] for index in (0, 1, 2, 4)]
+    assert len(bundle.data_sources) == 4, "only ordinary duplicates may be coalesced"
+    assert all(actual is source for actual, source in zip(bundle.data_sources, expected, strict=True))
+    assert bundle.migration_dir == tmp_path
+    assert bundle.data_sources[1]["occurrence"] == custom["occurrence"]
+    assert bundle.data_sources[1]["connection"] == custom["connection"]
+
 
 def test_custom_payload_is_not_read_and_direct_table_entry_is_also_closed(
     tmp_path: Path, effects: list[tuple[str, object]]
@@ -287,6 +422,63 @@ def test_scope_snapshot_is_immutable_and_reuse_does_not_survive_an_invocation(
     _assert_terminal(tmp_path, code, "OPERATOR_REQUIRED", effects)
 
 
+@pytest.mark.parametrize("same_source", [True, False], ids=["same-leg", "earlier-source"])
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        {"port": "1544"},
+        {"port": 1544},
+        {"instance": "REPORTING"},
+        {"port": "1544", "instance": "REPORTING"},
+        {"port": ""},
+        {"port": None},
+        {"port": "not-a-port"},
+        {"port": -1},
+        {"port": 70000},
+        {"port": False},
+        {"port": [1544]},
+        {"instance": ""},
+        {"instance": None},
+        {"instance": 42},
+        {"instance": r"OTHER\REPORTING"},
+        {"instance": {"name": "REPORTING"}},
+    ],
+)
+def test_unexercised_endpoint_cannot_supply_reuse(
+    tmp_path: Path, effects: list[tuple[str, object]], same_source: bool, endpoint: dict
+) -> None:
+    """Pin the actual ordinary M endpoint, then refuse to reuse its incomplete endpoint proof."""
+    conn = {**SQLSERVER, **endpoint}
+    ordinary = {"connection": conn, "tables": [{"name": "REAL_TABLE"}]}
+    custom = _custom(conn)
+    sources = [ordinary, custom]
+    if same_source:
+        ordinary["tables"].extend(custom["tables"])
+        sources = [ordinary]
+    code = probe_live_source.main(["--spec", str(_spec(tmp_path, sources))])
+    query = next(value for kind, value in effects if kind == "pbip")
+    assert query.splitlines()[1] == '    Source = Sql.Database("sql.example.com", "DB"),'
+    assert query == probe_live_source.build_m_query(SQLSERVER, "REAL_TABLE", "ProbeOK")[0]
+    assert _audit(tmp_path)[-1]["detail"].startswith("OPERATOR_REQUIRED:"), (
+        "unexercised endpoint proof must not be reused"
+    )
+    _assert_terminal(tmp_path, code, "OPERATOR_REQUIRED", effects)
+    assert sum(kind == "refresh" for kind, _value in effects) == 1
+
+
+@pytest.mark.parametrize("server", ["sql.example.com", r"sql.example.com\REPORTING", "sql.example.com,1544"])
+def test_server_endpoint_is_exercised_before_reuse(
+    tmp_path: Path, effects: list[tuple[str, object]], server: str
+) -> None:
+    """Existing server-string connector semantics remain unchanged; no endpoint syntax is invented."""
+    conn = {**SQLSERVER, "server": server}
+    ordinary = {"connection": conn, "tables": [{"name": "REAL_TABLE"}]}
+    code = probe_live_source.main(["--spec", str(_spec(tmp_path, [ordinary, _custom(conn)]))])
+    query = next(value for kind, value in effects if kind == "pbip")
+    assert query.splitlines()[1] == f'    Source = Sql.Database("{server}", "DB"),'
+    _assert_terminal(tmp_path, code, TOKEN, effects)
+
+
 def test_shell_success_and_no_popup_do_not_supply_connection_evidence(
     tmp_path: Path, effects: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -336,23 +528,26 @@ def test_no_exact_mode_is_implemented(tmp_path: Path, effects: list[tuple[str, o
     assert raised.value.code == 2 and effects == []
 
 
-def test_operator_required_is_a_real_nonzero_process_exit(tmp_path: Path) -> None:
+@pytest.mark.parametrize("payload", ["object", "huge"])
+def test_operator_required_is_a_real_nonzero_process_exit(tmp_path: Path, payload: str) -> None:
     """Run the real CLI main in a child with external-effect spies, never a live Desktop."""
-    spec = _spec(tmp_path, [_custom(SQLSERVER)])
+    sql = {"nested": [SIDE_EFFECT_SQL, {"query": EXPENSIVE_SQL}]} if payload == "object" else SENTINEL * 100_000
+    spec = _spec(tmp_path, [_custom(SQLSERVER, sql)])
     script = (
         "import sys\n"
         "from pathlib import Path\n"
         "sys.path.insert(0, str(Path(sys.argv[1]) / 'tests'))\n"
         "import pytest\n"
-        "from test_probe_live_custom_sql import effects_fixture, probe_live_source\n"
+        "from test_probe_live_custom_sql import effects_fixture, probe_live_source, _protect_loaded_sql\n"
         "with pytest.MonkeyPatch.context() as patch:\n"
         "    events = effects_fixture.__wrapped__(patch)\n"
+        "    _protect_loaded_sql(patch, memory_error=sys.argv[3] == 'huge')\n"
         "    code = probe_live_source.main(['--spec', sys.argv[2]])\n"
         "    assert not events, 'custom SQL must not perform automatic operations'\n"
         "sys.exit(code)\n"
     )
     child = subprocess.run(
-        [sys.executable, "-c", script, str(REPO), str(spec)],
+        [sys.executable, "-c", script, str(REPO), str(spec), payload],
         capture_output=True,
         text=True,
         check=False,
@@ -362,23 +557,107 @@ def test_operator_required_is_a_real_nonzero_process_exit(tmp_path: Path) -> Non
     assert "PROBE: OPERATOR_REQUIRED" in child.stderr
     assert "No connection claim was earned; the gate remains armed." in child.stderr
     assert "Traceback" not in child.stderr and SENTINEL not in child.stderr + child.stdout
+    _assert_terminal(tmp_path, child.returncode, "OPERATOR_REQUIRED", [])
 
 
 def test_customer_messages_match_the_two_evidence_states(caplog: pytest.LogCaptureFixture) -> None:
     """No connection assertion is permitted on the unprobed path."""
     probe_live_source._print_verdict_directive(TOKEN)
-    assert (
+    assert [record.getMessage() for record in caplog.records] == [
         "Power BI reached this same connection scope through an ordinary table in this probe. "
         "Your custom SQL was not executed and remains unvalidated; the gate is still armed."
-    ) in caplog.text
+    ], "connection-only customer LogRecord must equal the approved message"
     caplog.clear()
     probe_live_source._print_verdict_directive("OPERATOR_REQUIRED")
-    assert (
+    assert [record.getMessage() for record in caplog.records] == [
         "Your custom SQL was not executed. No safe automated connection-only operation is currently "
         "available without catalog enumeration or a native-query approval prompt. "
         "No connection claim was earned; the gate remains armed."
-    ) in caplog.text
+    ], "operator-required customer LogRecord must equal the approved message"
     assert "Power BI reached" not in caplog.text and "SOURCE UNREACHABLE" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("verdict", "expected"),
+    [
+        (
+            "NO_CREDENTIAL",
+            "\n"
+            "################################################################\n"
+            "#  STOP - NO POWER BI CREDENTIAL. A HUMAN MUST ACT.\n"
+            "################################################################\n"
+            "  The source is REACHABLE but Power BI has never authenticated to it.\n"
+            "\n"
+            "  DIRECTIVE - NOT ADVISORY, NOT A WARNING:\n"
+            "    1. You may NOT build the semantic model or the report. The gate stays armed.\n"
+            "    2. You CANNOT fix this yourself. There is no flag, retry, tool or workaround.\n"
+            "       The credential lives behind a modal sign-in dialog that only a HUMAN sitting\n"
+            "       at this machine can fill in. Retrying cannot conjure one.\n"
+            "    3. Report it and TERMINATE THE RUN NOW - if your runtime has a 'blocked' or\n"
+            "       task-complete exit, use it. Do NOT merely pause: measured 2026-08-01, three\n"
+            "       runs announced this stop correctly and then talked themselves past it a few\n"
+            "       turns later ('applying the non-interactive fallback'). A stop that does not\n"
+            "       terminate gets re-prompted until it erodes. Stopping IS your completed task\n"
+            "       here; report it as such, not as an unfinished one.\n"
+            "\n"
+            "  A non-interactive / autopilot / unattended session is NOT authorization. Having\n"
+            "  nobody to answer is not permission to proceed - end the run with the question\n"
+            "  unanswered. That is the correct, successful outcome here.\n"
+            "\n"
+            "  Tell the user to sign in interactively in Power BI Desktop (or supply a PAT/key),\n"
+            "  then re-run. Name the server and warehouse in your message.\n"
+            "################################################################",
+        ),
+        (
+            "ACCESS_DENIED",
+            "\n"
+            "################################################################\n"
+            "#  STOP - ACCESS DENIED. A PERMISSION OWNER MUST ACT.\n"
+            "################################################################\n"
+            "  Power BI reached the source, but the authenticated identity is not allowed to\n"
+            "  read the requested object. This is final until permissions change.\n"
+            "\n"
+            "    1. You may NOT build the semantic model or the report. The gate stays armed.\n"
+            "    2. Do NOT retry unchanged, and do NOT send the user to fix a hostname.\n"
+            "    3. Ask the source owner to grant the Power BI identity access to the server,\n"
+            "       database/schema, warehouse, or table named in the probe output.\n"
+            "################################################################",
+        ),
+    ],
+    ids=["no-credential", "access-denied"],
+)
+def test_ordinary_directives_remain_base_exact(caplog: pytest.LogCaptureFixture, verdict: str, expected: str) -> None:
+    """#690 cannot silently change ordinary credential/permission guidance."""
+    probe_live_source._print_verdict_directive(verdict)
+    assert [record.getMessage() for record in caplog.records] == [expected], (
+        "ordinary customer directive must remain base-identical"
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative", "expected"),
+    [
+        (
+            Path("docs") / "credential-gate.md",
+            "| `NO_CREDENTIAL` | Positive authentication evidence: Power BI has no credential, "
+            "or the one it has was rejected. | STOP; ask a human to sign in. No retry conjures a credential. |",
+        ),
+        (
+            Path(".github") / "skills" / "live-source-reachability" / "SKILL.md",
+            "| `NO_CREDENTIAL` | Power BI lacks or rejects a credential. | Hard stop after one attempt; "
+            "ask for Desktop sign-in or human build-only authorization. |",
+        ),
+    ],
+    ids=["docs", "skill"],
+)
+def test_ordinary_credential_docs_remain_base_exact(relative: Path, expected: str) -> None:
+    """Ordinary wording revisions need their own issue rather than this custom-SQL safety slice."""
+    rows = [
+        line
+        for line in (REPO / relative).read_text(encoding="utf-8").splitlines()
+        if line.startswith("| `NO_CREDENTIAL`")
+    ]
+    assert rows == [expected], "ordinary credential documentation must remain base-identical"
 
 
 @pytest.mark.parametrize("reuse", [False, True], ids=["operator-required", "connection-only"])

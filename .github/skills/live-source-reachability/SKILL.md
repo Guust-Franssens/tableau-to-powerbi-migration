@@ -51,11 +51,19 @@ execution route a migrator should invoke instead of carrying the mechanics inlin
    refreshing**. There is no connector navigation or native/generated SQL fallback, including for
    unsupported custom-only connectors.
 
+   The probe-specific loader keeps each custom-source occurrence by reference after JSON parsing.
+   It never reads, copies, serializes or hashes the payload, skips `custom_sql` during engine source
+   discovery, and does not traverse published-binding signals. Only ordinary sources use the existing
+   deduplication rule; mixed ordinary/custom sources are not fingerprinted either.
+
    The conservative key retains **all** declared connection fields: SQL Server server/port-or-instance/
    database; Databricks host/HTTP path/catalog; Snowflake account/warehouse/role/database; and every
    credential/authentication/session hint. Only existing class/URL-host normalization is used.
    Differences prevent reuse, not trigger another operation. Shell/ODBC success and prior-run
-   observations never participate. Ordinary one-row probing remains unchanged.
+   observations never participate. A separate `port` or `instance` declaration is **ineligible for
+   reuse** because ordinary M does not exercise those fields; empty, malformed or conflicting values
+   also refuse reuse, including after a same-leg ordinary `DATA_OK`. Existing server-string M and
+   ordinary one-row probing remain unchanged; no endpoint syntax is added.
 
    The SQL stays untouched in the spec: no normalization, comment stripping, native SQL fallback,
    `SELECT 1`, TOP/LIMIT/WHERE wrapper, or automatic exact execution. #692 owns the separate explicit,
@@ -68,7 +76,7 @@ execution route a migrator should invoke instead of carrying the mechanics inlin
 | `DATA_OK` | Power BI returned a real row; the probe earns the clear itself. | Continue. |
 | `CONNECTION_OK_QUERY_UNVALIDATED` | Only existing same-invocation, exact-scope ordinary `DATA_OK` is reused. The custom SQL was **not executed**; no custom-query/object permission, schema, rows, semantics, cost or refreshability claim. | **Exit 1; gate armed.** Keyed `probe-error` envelope with detail starting `CONNECTION_OK_QUERY_UNVALIDATED:`; no custom `proved_names`, `probe-cleared` or gate lift. Only an already valid brief/audit-backed degradation authorization may permit model-only continuation; this probe never grants it. |
 | `OPERATOR_REQUIRED` | Custom SQL has no same-invocation, same-scope ordinary proof. No custom connection operation was attempted and no connection claim was earned. `probe_bundle.py` retains its separate operator handoff. | **Exit 1; hard stop; gate armed.** This custom no-operation path uses keyed `probe-error` with detail starting `OPERATOR_REQUIRED:`; other operator producers are unchanged. No PBIP/Desktop/network/native-query fallback, authorization or model-only permission. Do not accept SQL-client proof. |
-| `NO_CREDENTIAL` | Missing/rejected credential or sign-in evidence; not proof Power BI never authenticated before or that the source is reachable. | Hard stop after one attempt; ask for Desktop sign-in/credential repair or human build-only authorization. |
+| `NO_CREDENTIAL` | Power BI lacks or rejects a credential. | Hard stop after one attempt; ask for Desktop sign-in or human build-only authorization. |
 | `ACCESS_DENIED` | The classifier matched access-denial-shaped text (`403`/forbidden/permission denied/not authorized) ahead of the credential markers. It does **not** establish that authentication succeeded, that the failure is permission-only, or that a fresh sign-in cannot help — `403 Unauthorized: authentication failed` and `403 Forbidden: access token revoked` both land here. | Hard stop; the gate stays armed. **Unchanged retry is not useful** — read the redacted detail and change what the source named: the credential/token when it speaks of authentication or an expired or revoked token, the permission or object grant when it names a principal or object. Do not route it as a timeout or a transient error. |
 | `UNREACHABLE` | Address/network/spec failure, not a credential wall. | Report the bad address/path; do not send the user to sign in. |
 | `ERROR` | Local tooling/artifact evidence failure. | Stop; fix/reroute the artifact evidence before retrying. |
@@ -80,6 +88,7 @@ execution route a migrator should invoke instead of carrying the mechanics inlin
   credential.
 - On connection-only completion say exactly: **Power BI reached this same connection scope through an ordinary table in this probe. Your custom SQL was not executed and remains unvalidated; the gate is still armed.**
 - Without same-scope ordinary proof say exactly: **Your custom SQL was not executed. No safe automated connection-only operation is currently available without catalog enumeration or a native-query approval prompt. No connection claim was earned; the gate remains armed.**
+- Each approved message is one exact customer-facing log record, with no appended paragraphs.
 - ⚠️ #694 is a nonblocking enhancement for future connector strategies. Any future generated-query
   default needs explicit dialect support and #146/#687's qualified native-approval routing. No
   popup/timeout is success; existing ordinary dialog/error and zero-row behavior stays unchanged.

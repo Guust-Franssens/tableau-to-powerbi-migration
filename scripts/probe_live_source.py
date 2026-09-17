@@ -53,7 +53,7 @@ Outcomes (machine-readable; exit 0 only on DATA_OK or SKIPPED)
     PROBE: OPERATOR_REQUIRED                  no same-scope proof; no custom connection operation
     PROBE: SKIPPED <reason>                    not a live source - nothing to prove
     PROBE: NO_CREDENTIAL <detail>              a human must sign in; no retry can fix this
-    PROBE: ACCESS_DENIED <detail>              denial-shaped text; inspect credential/token or grants
+    PROBE: ACCESS_DENIED <detail>              permissions must change; signing in again is not enough
     PROBE: UNREACHABLE <detail>                refresh failed for a non-credential reason
     PROBE: ERROR <detail>                      the probe itself could not run
 
@@ -106,7 +106,7 @@ from _verdict_lines import (  # noqa: F401  # pylint: disable=unused-import
 )
 from check_desktop_orphans import record_desktop_event
 from connection_target import LIVE_SOURCE, powerbi_target
-from migration_bundle import load_bundle
+from migration_bundle import MigrationBundle, _engine_embedded_source, _looks_like_data_source
 from preflight_source_credentials import _leg_key
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -217,13 +217,84 @@ def normalize_host(server: str) -> str:
     return host.rstrip(".").strip()
 
 
-def _connection_scope(conn: dict) -> str:
+def _find_probe_sources(value: object) -> Iterator[dict]:
+    """Discover the existing engine source shapes without descending into SQL payloads."""
+    if isinstance(value, list):
+        for item in value:
+            yield from _find_probe_sources(item)
+    elif isinstance(value, dict):
+        for key in value:
+            if key == "custom_sql":
+                continue
+            item = value[key]
+            if key in {"data_sources", "datasources"} and isinstance(item, list):
+                yield from (source for source in item if _looks_like_data_source(source))
+            elif key == "embedded_datasources" and isinstance(item, list):
+                yield from (_engine_embedded_source(source) for source in item if isinstance(source, dict))
+            else:
+                yield from _find_probe_sources(item)
+        if _looks_like_data_source(value):
+            yield value
+
+
+def load_bundle(path: Path) -> MigrationBundle:
+    """Load probe inputs without serializing, copying or comparing custom-SQL sources.
+
+    The shared loader fingerprints whole sources and traverses published-binding signals; neither
+    is safe or needed for a custom no-operation verdict. Preserve each custom occurrence by
+    reference, including its complete connection metadata. Ordinary deduplication is unchanged.
+    """
+    resolved = path.resolve()
+    if not resolved.is_file() and not resolved.is_dir():
+        raise FileNotFoundError(f"no migration spec or bundle at {path}")
+    spec = resolved if resolved.is_file() else resolved / "migration-spec.json"
+    if spec.is_file():
+        kind, migration, paths = "migration-spec", spec.parent, [spec]
+    else:
+        report = resolved / "report.json"
+        if not report.is_file():
+            raise FileNotFoundError(
+                f"{resolved} is not a migration-spec directory and has no report.json engine bundle marker"
+            )
+        kind, migration, paths = "engine-bundle", resolved, [report, *sorted((resolved / "handover").glob("*.json"))]
+    sources: list[dict] = []
+    seen: set[str] = set()
+    for document_path in paths:
+        with document_path.open(encoding="utf-8") as handle:
+            document = json.load(handle)
+        candidates = (
+            (source for source in document.get("data_sources", []) if isinstance(source, dict))
+            if kind == "migration-spec"
+            else _find_probe_sources(document)
+        )
+        for source in candidates:
+            if not any(_is_custom_sql(table) for table in source.get("tables") or []):
+                marker = json.dumps(source, sort_keys=True, default=str)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+            sources.append(source)
+    return MigrationBundle(
+        path=spec if kind == "migration-spec" else resolved,
+        migration_dir=migration,
+        kind=kind,
+        data_sources=sources,
+        published_datasource_keys=[],
+        unknown_published_datasources=[],
+    )
+
+
+def _connection_scope(conn: dict) -> str | None:
     """An invocation-local, conservative snapshot; never an audit key or persisted credential.
 
     Retain ALL declared fields, including unknown credential/session hints, so a new hint cannot
     silently borrow another identity's evidence. Only class and URL-host spelling are normalized;
     extra metadata differences prevent reuse, never trigger a guessed connection operation.
+    Separate port/instance fields are not used by the ordinary M builders: their presence, including
+    empty, malformed or conflicting values, makes the observation ineligible for reuse.
     """
+    if "port" in conn or "instance" in conn:
+        return None
     scope = dict(conn)
     scope["class"] = (conn.get("class") or "").lower()
     scope["server"] = normalize_host(conn.get("server") or "")
@@ -979,20 +1050,14 @@ def _print_verdict_directive(verdict: str) -> None:
     if verdict == CONNECTION_ONLY:
         log.warning(
             "Power BI reached this same connection scope through an ordinary table in this probe. "
-            "Your custom SQL was not executed and remains unvalidated; the gate is still armed.\n"
-            "STOP unless an already valid brief/audit-backed degradation authorization permits model-only "
-            "continuation. This observation grants no authorization. Exact-query validation is a separate, "
-            "explicitly authorized action (#692), not a mode of this probe."
+            "Your custom SQL was not executed and remains unvalidated; the gate is still armed."
         )
         return
     if verdict == "OPERATOR_REQUIRED":
         log.warning(
             "Your custom SQL was not executed. No safe automated connection-only operation is currently "
             "available without catalog enumeration or a native-query approval prompt. "
-            "No connection claim was earned; the gate remains armed.\n"
-            "No automatic custom-SQL connection operation was attempted. Operator validation or an "
-            "already valid brief/audit-backed degradation authorization is required; this probe "
-            "grants neither query validation nor model-only permission."
+            "No connection claim was earned; the gate remains armed."
         )
         return
     if verdict == "ERROR":
@@ -1019,10 +1084,9 @@ def _print_verdict_directive(verdict: str) -> None:
         log.error(
             "\n"
             "################################################################\n"
-            "#  STOP - POWER BI CREDENTIAL EVIDENCE NEEDS A HUMAN.\n"
+            "#  STOP - NO POWER BI CREDENTIAL. A HUMAN MUST ACT.\n"
             "################################################################\n"
-            "  Power BI reported missing/rejected credential or sign-in evidence. This does not\n"
-            "  establish that it never authenticated before, or independently prove reachability.\n"
+            "  The source is REACHABLE but Power BI has never authenticated to it.\n"
             "\n"
             "  DIRECTIVE - NOT ADVISORY, NOT A WARNING:\n"
             "    1. You may NOT build the semantic model or the report. The gate stays armed.\n"
@@ -1049,16 +1113,15 @@ def _print_verdict_directive(verdict: str) -> None:
         log.error(
             "\n"
             "################################################################\n"
-            "#  STOP - ACCESS-DENIAL EVIDENCE. A HUMAN MUST ACT.\n"
+            "#  STOP - ACCESS DENIED. A PERMISSION OWNER MUST ACT.\n"
             "################################################################\n"
-            "  The error contains access-denial-shaped text. That alone does not establish that\n"
-            "  authentication succeeded or that permissions are the only possible cause.\n"
+            "  Power BI reached the source, but the authenticated identity is not allowed to\n"
+            "  read the requested object. This is final until permissions change.\n"
             "\n"
             "    1. You may NOT build the semantic model or the report. The gate stays armed.\n"
             "    2. Do NOT retry unchanged, and do NOT send the user to fix a hostname.\n"
-            "    3. Read the detail: fix credentials/tokens when it names authentication or a\n"
-            "       revoked/expired token; ask the source owner about grants when it names an\n"
-            "       object or principal. A fresh sign-in may help; do not assume either cause.\n"
+            "    3. Ask the source owner to grant the Power BI identity access to the server,\n"
+            "       database/schema, warehouse, or table named in the probe output.\n"
             "################################################################"
         )
         return
@@ -1116,7 +1179,7 @@ def _probe_one(  # pylint: disable=too-many-arguments,too-many-positional-argume
             continue
         if rc != 0:
             return rc, verdict
-        if verdict == "DATA_OK":
+        if verdict == "DATA_OK" and scope is not None:
             known_connections.add(scope)
     if connection_only:
         return 1, CONNECTION_ONLY
@@ -1150,15 +1213,12 @@ def _probe_leg(  # pylint: disable=too-many-arguments
 ) -> tuple[int, str]:
     """Probe one resolved connection leg."""
     with _recorded_attempt(migration, [leg_name]) as finish:
-        tables, column = target
+        tables = target[0]
         custom = any(_is_custom_sql(table) for table in tables)
         scope = _connection_scope(conn)
-        if custom and (scope in (known_connections or ()) or all(_is_custom_sql(table) for table in tables)):
-            return (
-                _reuse_connection(migration, leg_name)
-                if scope in (known_connections or ())
-                else _custom_sql_stop(migration, leg_name)
-            )
+        reuse = scope is not None and scope in (known_connections or ())
+        if custom and (reuse or all(_is_custom_sql(table) for table in tables)):
+            return _reuse_connection(migration, leg_name) if reuse else _custom_sql_stop(migration, leg_name)
         server = normalize_host(conn.get("server") or "")
         if server and not _host_resolves(server):
             log.error(
@@ -1176,11 +1236,17 @@ def _probe_leg(  # pylint: disable=too-many-arguments
         if _is_custom_sql(table):
             rc, verdict = _custom_sql_stop(migration, leg_name)
         else:
-            rc, verdict = _probe_one_table(migration, leg_name, conn, (table, column), opts)
+            rc, verdict = _probe_one_table(migration, leg_name, conn, (table, target[1]), opts)
         if rc == 0 and verdict == "DATA_OK":
-            if custom and known_connections is not None:
-                known_connections.add(scope)
-            return _reuse_connection(migration, leg_name) if custom else (0, "DATA_OK")
+            if custom:
+                if scope is not None and known_connections is not None:
+                    known_connections.add(scope)
+                rc, verdict = (
+                    _reuse_connection(migration, leg_name)
+                    if scope is not None
+                    else _custom_sql_stop(migration, leg_name)
+                )
+            return rc, verdict
         if verdict != "BAD_TABLE":
             return rc, verdict
         if table is not tables[-1]:
