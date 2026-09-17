@@ -26,9 +26,12 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TARGET = REPO_ROOT / "scripts" / "check_unit.py"
-# Both suites are collected and ``-k`` picks the anchor out of them: the _slug census gate lives in
-# its own file but is a test OF this production file, so its mutations belong in this campaign.
-SUITES = (REPO_ROOT / "tests" / "test_check_unit.py", REPO_ROOT / "tests" / "test_slug_call_site_census.py")
+# ``-k`` selects each anchor across the gate, census and packaged manual-reference consumer tests.
+SUITES = (
+    REPO_ROOT / "tests" / "test_check_unit.py",
+    REPO_ROOT / "tests" / "test_slug_call_site_census.py",
+    REPO_ROOT / "tests" / "test_package_unit.py",
+)
 
 NEGATIVE_CONTROL = "NEGATIVE CONTROL"
 
@@ -532,15 +535,37 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
     ),
     (
         "ORACLE KIND: the page lookup ignores the record's kind",
-        '        exact = self.by_exact.get((str(page.get("kind")), page["name"]), [])',
+        "        exact = self.by_exact.get(key, [])",
         '        exact = next((v for k, v in self.by_exact.items() if k[1] == page["name"]), [])',
-        ["test_a_worksheet_typed_record_cannot_certify_a_same_named_dashboard"],
+        [
+            "test_a_worksheet_typed_record_cannot_certify_a_same_named_dashboard",
+            "test_manual_reference_consumer_isolates_same_named_kinds",
+        ],
     ),
     (
-        "ORACLE KIND: a reference entry stops being a dashboard by construction",
-        '                    kind="dashboard",',
-        "                    kind=None,",
-        ["test_reference_manifest_entries_are_dashboards_by_construction"],
+        "ORACLE KIND: a manual reference ignores its declared kind",
+        '        if state.get("provider") == "manual":\n            candidate = state_candidate',
+        '        if state.get("provider") == "manual":\n'
+        "            candidate = oid.Candidate(names=state_candidate.names, kind=oid.KIND_DASHBOARD)",
+        ["test_manual_reference_consumer_isolates_same_named_kinds"],
+    ),
+    (
+        "MANUAL ALIAS: shared candidate aliases are discarded before lookup",
+        "            manual.add(record.candidate, record)",
+        "            manual.add(oid.Candidate(names=(record.name,), kind=record.candidate.kind), record)",
+        ["test_manual_reference_consumer_uses_only_the_shared_prefix_rule"],
+    ),
+    (
+        "MANUAL KIND: conflicting state kinds are not downgraded to unknown",
+        "    if candidate is not None and len(kinds) != 1:",
+        "    if False:",
+        ["test_manual_reference_consumer_refuses_absent_and_conflicting_state_kinds"],
+    ),
+    (
+        "MANUAL EXCLUSIVITY: one producer record certifies multiple expected pages",
+        "        if len(keys) > 1:",
+        "        if False:",
+        ["test_manual_reference_consumer_refuses_one_record_for_multiple_pages"],
     ),
     (
         "ORACLE IDENTITY: producer records are collapsed to one per key again",
@@ -690,6 +715,7 @@ MUTATIONS: list[tuple[str, str, str, list[str]]] = [
         [
             "test_engine_evidence_explains_an_omission_but_does_not_accept_it",
             "test_a_worksheet_row_can_never_explain_a_same_named_dashboard",
+            "test_manual_reference_consumer_isolates_same_named_kinds",
         ],
     ),
 ]
