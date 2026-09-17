@@ -99,6 +99,7 @@ CSV_CONTENT_TYPE_ABSENT = "content_type_absent"
 #: uncertified: nothing establishes those bytes as data.
 CSV_CONTENT_TYPE_UNSPECIFIC = "content_type_unspecific"
 CSV_CONTENT_TYPE_NOT_CSV = "content_type_not_csv"
+CSV_INVALID_UTF8 = "payload_invalid_utf8"
 CSV_NOT_TABULAR = "payload_not_tabular"
 CSV_MALFORMED = "payload_malformed_csv"
 CSV_RAGGED = "payload_ragged_rows"
@@ -110,7 +111,7 @@ CSV_TRANSPORT_UNSUPPORTED_CONTENT_ENCODING = "transport_unsupported_content_enco
 
 #: A verdict that REFUSES the payload outright: these bytes were never established to be a CSV, so
 #: nothing may be derived from them -- not a row count, not a header, and above all not a diagnosis.
-CSV_REFUSALS = frozenset({CSV_CONTENT_TYPE_NOT_CSV, CSV_NOT_TABULAR, CSV_MALFORMED, CSV_RAGGED})
+CSV_REFUSALS = frozenset({CSV_CONTENT_TYPE_NOT_CSV, CSV_INVALID_UTF8, CSV_NOT_TABULAR, CSV_MALFORMED, CSV_RAGGED})
 #: A verdict that RETAINS the bytes and certifies NOTHING about them. The transport succeeded and the
 #: body may well be a perfect export -- nothing here establishes that it is, so no row count, no
 #: header and no diagnosis may be taken from it, and (see
@@ -140,6 +141,10 @@ CSV_REFUSAL_DETAIL = {
         "the export returned HTTP 200 but declared a Content-Type that is not CSV, so the body is "
         "not data. Nothing was recorded from it: a row count read off a non-CSV payload is fiction "
         "with a number attached, and a classification read off its first line is confidently wrong."
+    ),
+    CSV_INVALID_UTF8: (
+        "the export returned HTTP 200 whose body cannot be decoded as UTF-8-sig, which the numeric "
+        "oracle consumer requires. No row count, header or numeric evidence path was recorded."
     ),
     CSV_NOT_TABULAR: (
         "the export returned HTTP 200 whose body opens a tag or a JSON object rather than a table -- "
@@ -215,13 +220,16 @@ def certify_csv(payload: bytes, content_type: str | None) -> str:
 
     ⚠️ **This is the only function here that CERTIFIES a `/data` payload, and it exists because
     describing one is not the same as establishing it.** ``summarise_csv`` decodes with ``replace``
-    and reads a non-strict ``csv.reader``, so *any* first line becomes a "header" and *any* further
-    line becomes a "row". Measured on this branch before the check existed: an HTTP 200 ``text/html``
+    and reads a non-strict ``csv.reader``, so *any* first record becomes a "header" and *any* further
+    nonblank record becomes a "row". Measured before the check existed: an HTTP 200 ``text/html``
     error page (``<html>/<body>Error</body>/</html>``) was recorded ``status: ok`` with
     ``columns: ["<html>"]`` and **``row_count: 2``**; and a 200 ``application/octet-stream`` body
     reading ``not CSV at all`` was recorded ``row_count: 0`` and then classified
     ``empty_query_no_rows`` -- a *specific diagnosis* ("the query ran and returned nothing") about a
     payload never shown to be CSV at all. Confidently wrong is worse than unknown.
+
+    Certification decodes strictly as UTF-8-sig, matching the supported numeric consumer. Replacing
+    invalid bytes would certify a different interpretation from the bytes that consumer reads.
 
     The order is deliberate. The DECLARATION is decisive first, unlike
     :func:`tableau_render_capability.format_matches` where the payload is: a PNG or a PDF carries a
@@ -244,7 +252,10 @@ def certify_csv(payload: bytes, content_type: str | None) -> str:
     declared = (content_type or "").split(";")[0].strip().lower()
     if declared and declared not in CSV_READABLE_MIME_TYPES:
         return CSV_CONTENT_TYPE_NOT_CSV
-    text = payload.decode("utf-8-sig", "replace")
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return CSV_INVALID_UTF8
     if text.lstrip()[:1] in _NOT_TABULAR_OPENERS:
         return CSV_NOT_TABULAR
     # Two ways the same MALFORMED verdict is reached, merged into one exit. An odd number of quotes
@@ -260,9 +271,10 @@ def certify_csv(payload: bytes, content_type: str | None) -> str:
         return CSV_MALFORMED
     if rows and any(len(row) != len(rows[0]) for row in rows[1:]):
         return CSV_RAGGED
+    certification = CSV_CONTENT_TYPE_UNSPECIFIC if declared else CSV_CONTENT_TYPE_ABSENT
     if declared in CSV_MIME_TYPES:
-        return CSV_CERTIFIED
-    return CSV_CONTENT_TYPE_UNSPECIFIC if declared else CSV_CONTENT_TYPE_ABSENT
+        certification = CSV_CERTIFIED
+    return certification
 
 
 def summarise_csv(payload: bytes) -> dict[str, Any]:
@@ -271,12 +283,14 @@ def summarise_csv(payload: bytes) -> dict[str, Any]:
     ⚠️ **Describes; does not certify.** Call :func:`certify_csv` first and do not call this at all on
     a payload it refused -- every field below is derived from whatever bytes arrived, and on a
     non-CSV body they are fiction with a number attached.
+
+    Like ``DictReader``, ignore physical blank records after the header, not rows of empty fields.
     """
     text = payload.decode("utf-8-sig", "replace")
     rows = list(csv.reader(io.StringIO(text)))
     if not rows:
         return {"row_count": 0, "columns": [], "format_hints": {}}
-    header, body = rows[0], rows[1:]
+    header, body = rows[0], [row for row in rows[1:] if row]
     hints = {}
     for idx, name in enumerate(header):
         fmt = detect_format([r[idx] for r in body if idx < len(r)])
