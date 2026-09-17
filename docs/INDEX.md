@@ -51,7 +51,8 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 |---|---|---|
 | Start or route session | [`AGENTS.md`](../AGENTS.md) | Canonical workflow plus repo agent/skill map. |
 | Understand toolkit | [`README.md`](../README.md) | Project purpose and quick start. |
-| Contribute safely | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Validation and PR expectations. |
+| Contribute safely | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Issue-to-plan-review-to-PR lifecycle, status labels, mechanical exception and validation expectations. |
+| Open a focused PR | [`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md) | Behavioral/mechanical paths, plan-review evidence, validation exits and exact blind-reviewed head SHA. |
 | Use VS Code Copilot | [`.github/copilot-instructions.md`](../.github/copilot-instructions.md) | VS Code entry instructions. |
 | Run or choose scripts | [`scripts/README.md`](../scripts/README.md) | Map of scripts; `test_repo_layout.py` owns script-list completeness. |
 | Author PBIR visuals | [`.github/pbi.kb/visual-cookbook.md`](../.github/pbi.kb/visual-cookbook.md) | Map of visual files with confidence tiers and Tableau idioms. |
