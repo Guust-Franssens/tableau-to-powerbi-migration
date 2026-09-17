@@ -24,11 +24,15 @@ Two pieces, both of which exist so an end-to-end rehearsal does real work on rea
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import textwrap
+import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit, urlunsplit
+from xml.etree import ElementTree
 
 from .tableau import TableauSite
 
@@ -85,6 +89,60 @@ def _group(name: str, domain: str, members: list[str]):
     return Group(luid=f"group-{name.lower().replace(' ', '-')}", name=name, domain=domain, members=members)
 
 
+def project_published_sources(site: TableauSite, base_url: str) -> None:
+    """Opt in to served, in-memory source URLs for this loopback site BEFORE harvesting.
+
+    Keep the fixture's content-URL segment, revision and stale repository id; only its origin/site
+    location changes. Metadata-only dependencies remain metadata-only. No fixture file is written.
+    """
+    origin = urlsplit(base_url)
+    if any(
+        (
+            origin.scheme != "http",
+            origin.hostname != "127.0.0.1",
+            not origin.port,
+            origin.username is not None,
+            origin.path not in ("", "/"),
+            origin.query,
+            origin.fragment,
+        )
+    ):
+        raise ValueError("published source projection requires a served loopback origin")
+    base_url = base_url.rstrip("/")
+    source_path = (f"/t/{quote(site.content_url, safe='')}" if site.content_url else "") + "/datasources"
+    for workbook in site.workbooks:
+        output = io.BytesIO()
+        changed = False
+        with zipfile.ZipFile(io.BytesIO(workbook.content)) as archive, zipfile.ZipFile(output, "w") as projected:
+            projected.comment = archive.comment
+            for member in archive.infolist():
+                payload = archive.read(member)
+                if member.filename.endswith(".twb"):
+                    root = ElementTree.fromstring(payload)
+                    updated = False
+                    for source in root.findall("./datasources/datasource"):
+                        location = source.find("./repository-location")
+                        connection = source.find("./connection[@class='sqlproxy']")
+                        if location is None or connection is None:
+                            continue
+                        derived = urlsplit(location.attrib["derived-from"])
+                        path = f"{source_path}/{derived.path.rsplit('/', 1)[-1]}"
+                        location.set(
+                            "derived-from",
+                            urlunsplit((origin.scheme, origin.netloc, path, derived.query, derived.fragment)),
+                        )
+                        location.set("path", source_path)
+                        location.set("site", site.content_url)
+                        connection.set("server", base_url)
+                        updated = True
+                    if updated:
+                        payload = ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
+                        changed = True
+                projected.writestr(member, payload)
+        if changed:
+            workbook.content = output.getvalue()
+
+
 # --------------------------------------------------------------------------- the engine stand-in
 
 _FAKE_ENGINE = '''\
@@ -93,6 +151,7 @@ _FAKE_ENGINE = '''\
 
 import argparse
 import json
+import re
 import sys
 import uuid
 import zipfile
@@ -122,7 +181,11 @@ class LocalFilesSource:
 
     @staticmethod
     def asset_name(asset_id):
-        return Path(asset_id).stem
+        return re.sub(
+            r"^[0-9a-fA-F]{{8}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{12}}[-_ ]",
+            "",
+            Path(asset_id).stem,
+        )
 
 
 def _safe_folder(name, used):
@@ -364,14 +427,16 @@ def harvest(site: TableauSite, out: Path, *, base_url: str = "", token: str = ""
     """
     import urllib.request  # noqa: PLC0415
 
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from harvest_estate_assets import asset_path  # noqa: PLC0415
+
     assets = out / "assets"
     assets.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     jobs = [("workbooks", w.luid, w.name, w.extension) for w in site.workbooks]
     jobs += [("datasources", d.luid, d.name, ".tdsx") for d in site.datasources]
     for collection, luid, name, extension in jobs:
-        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)[:60]
-        target = assets / f"{safe}{extension}"
+        target = asset_path(assets, collection.removesuffix("s"), name, luid).with_suffix(extension)
         if base_url:
             url = f"{base_url}/api/{site.rest_version}/sites/{site.site_id}/{collection}/{luid}/content"
             request = urllib.request.Request(url, method="GET")
