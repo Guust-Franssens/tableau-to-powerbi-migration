@@ -319,9 +319,10 @@ below; these do not overwrite the initial inventory facts or distinct-workbook p
 
 **Published dependency association — partial #562 prerequisite P.** The only published authority is
 the optional `origin.published_dependencies` block inside the existing `source-provenance.json`.
-No provider package, spec addition, sidecar or registry participates. Existing legacy artifacts remain
-readable without inventing this block. A newly assessed input may omit it on success **only when the
-held-byte assessment completed with zero published occurrences**.
+Acquisition never uses a selected provider package, spec addition, sidecar or registry to establish
+the datasource LUID. Existing legacy artifacts remain readable, **not START_READY**, without
+inventing this block. A newly assessed input may omit it on success **only when the held-byte
+assessment completed with zero published occurrences**.
 
 The block has exactly `schema: "tableau-published-dependencies/v1"`, `source_sha256` (the outer
 `input.sha256`), `workbook_luid` (the outer origin LUID), `source_match`
@@ -631,9 +632,33 @@ not reused for brief refusal.
 dispatch authorization and does not call or reimplement `check_reference_readiness.py`.
 
 `package_role_identity.py` re-runs no-follow S1 at the S2 entry seam rather than trusting an earlier
-clearance. It strictly reads identity JSON, preserves every dependency row, requires S2-clean
-providers and checks actual PBIR bindings to complete declared model roles. Evidence consumers receive
-only exact walked paths under the evidence role. Datasource N/A roles require verified absence.
+clearance. It reads **package-local P through `VerifiedPackage.read_verified_member`**, using the
+single provenance row matched to the held source filename/SHA. P's source SHA, workbook-origin LUID,
+exact schema, source-match state, row cardinalities and increasing ordinals must agree. The held spec
+owns topology and every physical published occurrence: P joins it one-to-one by ordinal and exact key,
+with equal counts. Optional spec LUIDs corroborate P; they never select a provider or rescue absent P.
+
+Only supplied datasource packages whose own source identity equals P's acquired datasource LUID
+are candidates. Canonical UUID hex is case-insensitive; published keys are exact. Zero candidates
+gives `provider_missing` (or `provider_luid_contradiction` for an exact-key foreign LUID), duplicates
+give `provider_ambiguous`, and a sole provider with a missing/different key gives
+`provider_key_contradiction`. There is **no key-only, display-name, package-name or folder fallback**.
+S2-clean provider roles, exactly one resolved model and the actual complete PBIR/model binding
+remain required. The selected input ordinal alone flows to data-access inheritance and binding;
+caller order and repeated occurrences never pick/deduplicate by name.
+
+Missing P on a published consumer is `CANNOT_ESTABLISH / 3` at `role_identity`
+(`published_dependency_authority_missing`); valid cannot-establish rows or unestablished source
+matching use `published_dependency_authority_unestablished`. Ambiguity, invalid authority,
+contradictions or any established S2 defect are `FINDINGS / 1`, even alongside cannot-establish.
+Neither reaches source, data, reference or binding helpers; model-only authorization cannot bypass P.
+**Reacquire current authority and repackage legacy published consumers** rather than guessing or
+stamping a LUID. No-P owned workbooks/standalone datasources remain supported. P carriage and internal
+S2 readiness alone are not final START_READY and do not upgrade reference grades, BOUND/UNVALIDATED
+ceilings, or report-only use of a model-only provider.
+
+Evidence consumers receive only exact walked paths under the evidence role. Datasource N/A roles
+require verified absence.
 The complete role contract and controls are in [reference readiness](../docs/reference-readiness.md).
 
 The #562 prerequisite handoff is **not the final START_READY consumer**. S1 retains an immutable,

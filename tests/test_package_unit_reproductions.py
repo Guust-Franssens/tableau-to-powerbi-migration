@@ -1016,7 +1016,7 @@ def _direct_provider(
     parent: Path, *, luid: str = DS_LUID, key: str = authority.KEY, connection: dict[str, Any] | None = None
 ) -> Path:
     """Supply direct connection metadata independently of the projection's claimed key."""
-    package = s2.datasource_package(parent, unit="Shared", luid=luid)
+    package = s2.datasource_package(parent, unit="Shared", luid=luid, published_key=s2.PUBLISHED_KEY)
     spec_path = package / "migration-spec.json"
     spec = json.loads(spec_path.read_bytes())
     spec["data_sources"][0]["connection"] = dict(authority.LIVE if connection is None else connection)
@@ -1036,7 +1036,7 @@ def _direct_provider(
 def _provider_consumer(parent: Path, provider: Path) -> Path:
     package = parent / "Consumer"
     binding = os.path.relpath(provider / "fabric" / "Shared.SemanticModel", package / "fabric" / "Revenue.Report")
-    return s2.workbook_package(package, published={"luid": DS_LUID}, binding=binding.replace("\\", "/"))
+    return s2.workbook_package(package, published={"key": s2.PUBLISHED_KEY}, binding=binding.replace("\\", "/"))
 
 
 @pytest.mark.parametrize("change", ["projection-key", "connection-identity", "missing-connection"])
@@ -1307,9 +1307,16 @@ def test_contradictory_luid_and_second_dependency_cannot_be_collapsed_by_name(tm
     consumer = _provider_consumer(tmp_path, selected)
     spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
     spec["data_sources"].append(
-        {"connection": {"class": "sqlproxy", "mode": "live"}, "published_datasource": {"luid": s2.WB_LUID}}
+        {
+            "connection": {"class": "sqlproxy", "mode": "live"},
+            "published_datasource": {"luid": s2.WB_LUID, "key": s2.PUBLISHED_KEY},
+        }
     )
     s2._write(consumer / "migration-spec.json", spec)
+    provenance = json.loads((consumer / "source-provenance.json").read_bytes())
+    rows = provenance["inputs"][0]["origin"]["published_dependencies"]["rows"]
+    rows.append({**rows[0], "source_ordinal": 1, "datasource_luid": s2.WB_LUID})
+    s2._write(consumer / "source-provenance.json", provenance)
     _reseal(consumer)
     verdict = pkg.pri.verify_phase1_role_identity([selected, other, consumer])[-1]
     assert [dep.state for dep in verdict.dependencies] == ["resolved", "mismatch"]
@@ -1324,8 +1331,7 @@ def _shared_bundle(parent: Path) -> tuple[Path, Path]:
     assets = bundle.parent / "assets"
     consumer = next(assets.glob(f"*_{UNIT}.twb"))
     shutil.copyfile(Path(__file__).parent / "fixtures" / "published_datasource.twb", consumer)
-    (assets / f"{DS_LUID}_{DS_UNIT}.tds").unlink()
-    provider = assets / f"{DS_UNIT}.tds"
+    provider = assets / f"{DS_LUID}_{DS_UNIT}.tds"
     provider.write_text(
         "<datasource name='Shared'>"
         "<repository-location id='SalesMaster' site='Finance'/>"
@@ -1335,7 +1341,18 @@ def _shared_bundle(parent: Path) -> tuple[Path, Path]:
     )
     _write_input_manifest(bundle, [consumer, provider])
     provenance = json.loads((bundle / "source-provenance.json").read_text(encoding="utf-8"))
-    provenance["inputs"][0]["input"]["sha256"] = hashlib.sha256(consumer.read_bytes()).hexdigest()
+    source = provenance["inputs"][0]
+    source["input"]["sha256"] = hashlib.sha256(consumer.read_bytes()).hexdigest()
+    source["origin"]["published_dependencies"] = s2.published_authority(
+        source["input"]["sha256"], source["origin"]["workbook_luid"]
+    )
+    source["origin"]["published_dependencies"]["rows"][0]["published_key"] = "finance/salesmaster"
+    provenance["inputs"].append(
+        {
+            "input": {"file": provider.name, "sha256": hashlib.sha256(provider.read_bytes()).hexdigest()},
+            "origin": {"datasource_luid": DS_LUID, "match": "sha256"},
+        }
+    )
     s2._write(bundle / "source-provenance.json", provenance)
     shutil.rmtree(bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel")
     s2._write(
@@ -1393,7 +1410,6 @@ def test_canonical_datasource_model_only_package_publishes_from_staged_input(
 ) -> None:
     bundle, oracle = _shared_bundle(tmp_path)
     asset = bundle.parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
-    (asset.parent / f"{DS_UNIT}.tds").rename(asset)
     row = {"name": DS_UNIT, "staged_input_path": str(asset), "sha256": hashlib.sha256(asset.read_bytes()).hexdigest()}
     rows = [row]
     if fault == "wrong-basename":
@@ -1440,7 +1456,7 @@ def test_canonical_shared_packages_resolve_raw_sources_and_ship_redacted_handove
     bundle, oracle = _shared_bundle(tmp_path)
     assets = bundle.parent / "assets"
     consumer = next(assets.glob(f"*_{UNIT}.twb"))
-    provider = assets / f"{DS_UNIT}.tds"
+    provider = assets / f"{DS_LUID}_{DS_UNIT}.tds"
     write_rows(
         bundle,
         [

@@ -96,7 +96,7 @@ def numeric_package(root: Path, numeric_obligation: str = "none", shape: str = "
         package = datasource_package(root)
         unit, scope = DS_UNIT, "model_only"
     else:
-        package = workbook_package(root, published={"luid": DS_LUID} if shape == "consumer" else None)
+        package = workbook_package(root, published={"key": PUBLISHED_KEY} if shape == "consumer" else None)
         unit, scope = WB_UNIT, "report_only_shared_model" if shape == "consumer" else "model_and_report"
     (package / "migration-brief.md").write_bytes(numeric_brief_text(unit, scope, numeric_obligation).encode("utf-8"))
     return seal(package, **json.loads((package / "package-manifest.json").read_bytes()))
@@ -118,6 +118,25 @@ def fabric_tree(
     _write(package / "fabric" / f"{unit}.pbip", {"version": "1.0"})
     outputs.append(f"fabric/{unit}.pbip")
     return outputs
+
+
+def published_authority(source_sha256: str, workbook_luid: str = WB_LUID) -> dict[str, Any]:
+    """Literal acquired authority, deliberately independent of the consumer spec's optional LUID."""
+    return {
+        "schema": "tableau-published-dependencies/v1",
+        "source_sha256": source_sha256,
+        "workbook_luid": workbook_luid,
+        "source_match": "sha256",
+        "rows": [
+            {
+                "source_ordinal": 0,
+                "published_key": PUBLISHED_KEY,
+                "state": "resolved",
+                "candidate_count": 1,
+                "datasource_luid": DS_LUID,
+            }
+        ],
+    }
 
 
 def workbook_package(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
@@ -153,6 +172,8 @@ def workbook_package(  # pylint: disable=too-many-arguments,too-many-positional-
     origin: dict[str, Any] = {"match": "sha256"}
     if luid:
         origin["workbook_luid"] = luid
+        if published is not None:
+            origin["published_dependencies"] = published_authority(digest, luid)
     _write(
         package / "source-provenance.json",
         {"inputs": [{"input": {"file": name, "sha256": digest}, "origin": origin}], "scope": {"unit": unit}},
@@ -314,16 +335,30 @@ def test_a_complete_standalone_datasource_resolves_and_earns_its_not_applicables
     ]
 
 
-def test_a_shared_provider_and_its_consumer_resolve_as_one_cohort(tmp_path: Path) -> None:
+@pytest.mark.parametrize("reverse", [False, True], ids=["provider-first", "consumer-first"])
+@pytest.mark.parametrize("source_match", ["sha256", "revision_same"])
+def test_a_shared_provider_and_its_consumer_resolve_as_one_cohort(
+    tmp_path: Path, reverse: bool, source_match: str
+) -> None:
     """The whole reason the verifier takes a SEQUENCE: the provider edge is a cohort property."""
     provider = datasource_package(tmp_path / "Shared_Sales", published_key=PUBLISHED_KEY)
     consumer = workbook_package(
         tmp_path / "Revenue",
-        published={"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY, "luid": DS_LUID},
+        published={"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY},
         binding=f"../../../{DS_UNIT}/fabric/{DS_UNIT}.SemanticModel",
     )
+    provenance = json.loads((consumer / "source-provenance.json").read_bytes())
+    provenance["inputs"][0]["origin"]["published_dependencies"]["source_match"] = source_match
+    _write(consumer / "source-provenance.json", provenance)
+    seal(consumer, **json.loads((consumer / "package-manifest.json").read_bytes()))
+    assert (
+        "luid"
+        not in json.loads((consumer / "migration-spec.json").read_bytes())["data_sources"][0]["published_datasource"]
+    )
 
-    provider_result, consumer_result = pri.verify_phase1_role_identity([provider, consumer])
+    roots = [consumer, provider] if reverse else [provider, consumer]
+    results = pri.verify_phase1_role_identity(roots)
+    provider_result, consumer_result = results[roots.index(provider)], results[roots.index(consumer)]
 
     assert (provider_result.verdict, consumer_result.verdict) == (pri.VERDICT_START_READY, pri.VERDICT_START_READY)
     assert provider_result.topology == pri.TOPOLOGY_PUBLISHED_PROVIDER
@@ -331,6 +366,9 @@ def test_a_shared_provider_and_its_consumer_resolve_as_one_cohort(tmp_path: Path
     assert role(consumer_result, pri.ROLE_FABRIC_MODEL).state == pri.STATE_NOT_APPLICABLE
     assert consumer_result.dependencies[0].provider_unit == DS_UNIT
     assert consumer_result.dependencies[0].model_role == f"fabric/{DS_UNIT}.SemanticModel"
+    assert consumer_result.dependencies[0].datasource_luid == DS_LUID
+    assert consumer_result.dependencies[0].provider_ordinal == roots.index(provider)
+    assert "provider_ordinal" not in consumer_result.as_dict()["dependencies"][0]
 
 
 def test_a_local_source_with_no_server_luid_resolves_by_sha_and_earns_luid_not_applicable(tmp_path: Path) -> None:
@@ -719,8 +757,8 @@ def test_a_consumer_bound_to_its_own_model_instead_of_the_provider_blocks(tmp_pa
     assert results[1].dependencies[0].code == pri.CODE_PROVIDER_BINDING
 
 
-def test_a_provider_is_matched_by_the_exact_published_key_when_no_luid_is_available(tmp_path: Path) -> None:
-    """The second axis, used only when the first is genuinely unavailable on both sides."""
+def test_a_provider_with_no_luid_cannot_be_selected_by_the_exact_key(tmp_path: Path) -> None:
+    """Even a unique exact key and correct binding cannot replace acquired datasource identity."""
     provider = datasource_package(tmp_path / "Shared_Sales", luid=None, published_key=PUBLISHED_KEY)
     consumer = workbook_package(
         tmp_path / "Revenue",
@@ -730,9 +768,10 @@ def test_a_provider_is_matched_by_the_exact_published_key_when_no_luid_is_availa
 
     results = pri.verify_phase1_role_identity([provider, consumer])
 
-    assert [row.verdict for row in results] == [pri.VERDICT_START_READY, pri.VERDICT_START_READY], results[1].blockers
+    assert [row.verdict for row in results] == ["START_READY", "BLOCKED"]
     assert results[1].dependencies[0].published_key == PUBLISHED_KEY
-    assert results[1].dependencies[0].datasource_luid is None
+    assert results[1].dependencies[0].datasource_luid == DS_LUID
+    assert results[1].dependencies[0].code == "provider_missing"
 
 
 def test_a_provider_named_only_by_a_DISPLAY_name_never_resolves(tmp_path: Path) -> None:
@@ -743,7 +782,6 @@ def test_a_provider_named_only_by_a_DISPLAY_name_never_resolves(tmp_path: Path) 
         published={"id": DS_UNIT, "site": "sales-site", "key": None, "luid": None},
         binding=f"../{DS_UNIT}.SemanticModel",
     )
-
     results = pri.verify_phase1_role_identity([provider, consumer])
 
     assert results[1].topology == pri.TOPOLOGY_PUBLISHED_CONSUMER
@@ -767,6 +805,10 @@ def test_a_provider_whose_only_agreement_is_its_NAME_is_still_missing(tmp_path: 
         published={"id": DS_UNIT, "site": "other-site", "key": "other-site/shared_sales", "luid": None},
         binding=f"../{DS_UNIT}.SemanticModel",
     )
+    provenance = json.loads((consumer / "source-provenance.json").read_bytes())
+    provenance["inputs"][0]["origin"]["published_dependencies"]["rows"][0]["published_key"] = "other-site/shared_sales"
+    _write(consumer / "source-provenance.json", provenance)
+    seal(consumer, **json.loads((consumer / "package-manifest.json").read_bytes()))
 
     results = pri.verify_phase1_role_identity([provider, consumer])
 
@@ -1291,11 +1333,11 @@ def test_current_brief_refuses_links_before_opening_any_bytes(
 
 @pytest.mark.parametrize("reverse", [False, True])
 def test_selected_provider_ordinal_survives_duplicate_units_and_filtered_roots(tmp_path: Path, reverse: bool) -> None:
-    first = datasource_package(tmp_path / "first", unit="Shared", luid=DS_LUID)
+    first = datasource_package(tmp_path / "first", unit="Shared", luid=DS_LUID, published_key=PUBLISHED_KEY)
     second = datasource_package(tmp_path / "second", unit="Shared", luid=WB_LUID)
     consumer = workbook_package(
         tmp_path / "Consumer",
-        published={"luid": DS_LUID},
+        published={"key": PUBLISHED_KEY},
         binding="../../../first/fabric/Shared.SemanticModel",
     )
     roots = [second, first] if reverse else [first, second]
