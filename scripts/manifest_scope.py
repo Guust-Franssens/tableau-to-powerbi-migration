@@ -28,7 +28,8 @@ actually read was measured, not argued:
   `check_reference_readiness._engine_report` :461, `._unit_names` :478-483;
   `check_unit._is_engine_report` :379 |
 | `source-provenance.json` | `inputs[].input.sha256`, `inputs[].origin.match`,
-  `inputs[].origin.workbook_luid` | `check_reference_readiness._provenance_luid` |
+  `inputs[].origin.workbook_luid`; acquired `origin.published_dependencies` for the #562 S2 consumer |
+  `check_reference_readiness._provenance_luid`; `stamp_tableau_provenance._attach_published_dependencies` |
 | `engine-output-receipt.json` | `engine.version` | `check_engine_receipts` :33-35 |
 
 Everything else was engine metadata no gate consumes, so it is no longer shipped. That deletes every
@@ -49,6 +50,7 @@ Two mechanisms, deliberately different in kind
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -56,6 +58,12 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from host_paths import discloses_host_location, discloses_host_path  # noqa: E402  # pylint: disable=wrong-import-position
+from prompt_injection import scan_text  # noqa: E402  # pylint: disable=wrong-import-position
+from stamp_tableau_provenance import (  # noqa: E402  # pylint: disable=wrong-import-position
+    LUID_RE,
+    PUBLISHED_DEPENDENCIES_SCHEMA,
+    valid_published_key,
+)
 
 
 class UnscopedStructure(TypeError):
@@ -106,6 +114,8 @@ def project(payload: Any, spec: Any, *, prefix: str = "") -> tuple[Any, list[str
     spec meeting a dict means the manifest is not the shape we enumerated, and carrying it anyway is
     how the estate got out the first time.
     """
+    if spec is PUBLISHED_DEPENDENCIES_ALLOW and not _valid_published_dependencies(payload):
+        return {}, [prefix or "."]
     if spec is KEEP:
         if not isinstance(payload, _SCALARS):
             raise UnscopedStructure(
@@ -150,6 +160,9 @@ def project(payload: Any, spec: Any, *, prefix: str = "") -> tuple[Any, list[str
             projected, lost = project(value, spec[key], prefix=path)
             kept[key] = projected
             dropped.extend(lost)
+        if spec is PUBLISHED_DEPENDENCIES_ALLOW:
+            # A refused instruction-shaped KEY must not re-enter through the diagnostic path.
+            dropped = [prefix or "." if scan_text(path) else path for path in dropped]
         return kept, sorted(set(dropped))
     raise TypeError(f"unusable allowlist spec at {prefix or '.'}: {spec!r}")
 
@@ -336,8 +349,83 @@ RECEIPT_ALLOW: dict[str, Any] = {
 #: `estate` is estate-wide by content and read by nobody, so it is not shipped.
 HANDOVER_CONSUMED_KEYS = ("workbook", "workbooks")
 
-#: `source-provenance.json`. Exactly the fields `check_reference_readiness._provenance_luid` reads,
-#: plus the datasource half of the same identity - and nothing else. Not `workbook_name`, not
+#: The public shape produced by `stamp_tableau_provenance._attach_published_dependencies` (#649).
+#: Acquisition/checkpoint, catalog, transport and free-text fields are NOT part of this surface.
+PUBLISHED_DEPENDENCY_ROW_ALLOW = _fields(
+    "source_ordinal", "published_key", "state", "candidate_count", "datasource_luid"
+)
+PUBLISHED_DEPENDENCIES_ALLOW = {
+    **_fields("schema", "source_sha256", "workbook_luid", "source_match"),
+    "rows": Rows(PUBLISHED_DEPENDENCY_ROW_ALLOW),
+}
+
+
+def _valid_published_dependencies(payload: Any) -> bool:
+    """Withhold malformed authority whole; dropping individual rows could manufacture a valid subset.
+
+    This checks the producer's public shape, not its acquisition or a provider selection. Honest
+    ambiguous/cannot-establish outcomes survive unchanged. Reconciliation with held source bytes,
+    migration-spec occurrences and provider identities belongs to S2, not carriage.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if not all(
+        (
+            payload.get("schema") == PUBLISHED_DEPENDENCIES_SCHEMA,
+            isinstance(payload.get("source_sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", payload["source_sha256"]) is not None,
+            isinstance(payload.get("workbook_luid"), str) and LUID_RE.fullmatch(payload["workbook_luid"]) is not None,
+            payload.get("source_match") in ("sha256", "revision_same", "unestablished"),
+            isinstance(payload.get("rows"), list) and bool(payload["rows"]),
+        )
+    ):
+        return False
+    previous = -1
+    for row in payload["rows"]:
+        if not isinstance(row, dict) or not PUBLISHED_DEPENDENCY_ROW_ALLOW.keys() - {"datasource_luid"} <= row.keys():
+            return False
+        ordinal, count, key, state = (
+            row[name] for name in ("source_ordinal", "candidate_count", "published_key", "state")
+        )
+        valid_ordinal = isinstance(ordinal, int) and not isinstance(ordinal, bool) and previous < ordinal < (1 << 63)
+        safe_key = (
+            valid_published_key(key)
+            and key not in (REDACTED, "<refused-by-packager>")
+            and not discloses_host_location(key)
+            and not scan_text(key)
+        )
+        if not (
+            valid_ordinal
+            and safe_key
+            and state in ("resolved", "ambiguous", "cannot_establish")
+            and (payload["source_match"] != "unestablished" or state == "cannot_establish")
+        ):
+            return False
+        previous = ordinal
+        if state == "resolved":
+            valid = (
+                isinstance(count, int)
+                and not isinstance(count, bool)
+                and count == 1
+                and isinstance(row.get("datasource_luid"), str)
+                and LUID_RE.fullmatch(row["datasource_luid"]) is not None
+            )
+        elif state == "ambiguous":
+            valid = (
+                isinstance(count, int)
+                and not isinstance(count, bool)
+                and 1 < count < (1 << 63)
+                and "datasource_luid" not in row
+            )
+        else:
+            valid = count is None and "datasource_luid" not in row
+        if not valid:
+            return False
+    return True
+
+
+#: `source-provenance.json`. The fields `check_reference_readiness._provenance_luid` reads,
+#: plus datasource identity and the acquired published-dependency block for #562 S2. Not `workbook_name`, not
 #: `project`, both of which are foreign-identity channels when an entry belongs to another workbook.
 #:
 #: ⚠️ **`origin.datasource_luid` is a second NAMESPACE, not a second spelling** (#562 S2). A
@@ -350,7 +438,10 @@ PROVENANCE_ALLOW: dict[str, Any] = {
     "inputs": Rows(
         {
             "input": _fields("file", "sha256"),
-            "origin": _fields("workbook_luid", "datasource_luid", "match"),
+            "origin": {
+                **_fields("workbook_luid", "datasource_luid", "match"),
+                "published_dependencies": PUBLISHED_DEPENDENCIES_ALLOW,
+            },
         }
     )
 }
