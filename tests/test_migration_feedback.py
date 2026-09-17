@@ -1564,3 +1564,48 @@ def test_repository_regression_needs_its_separate_consumed_engine_baseline(
     assert public["route"] == ("AGENTIC_REPOSITORY" if correct_baseline else "CANNOT_ESTABLISH")
     if not correct_baseline:
         assert private["reasons"] == ["owner:baseline_also_fails"]
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_integer_schema_does_not_borrow_boolean_numeric_equality(value) -> None:
+    assert not feedback._integer(value)
+    assert feedback._integer(int(value))
+
+
+def test_boolean_size_refuses_even_when_bytes_really_have_length_one(tmp_path) -> None:
+    source = tmp_path / "one-byte.json"
+    source.write_bytes(b"0")
+    request = {"evidence": {"positive_input": {"path": str(source), "size_bytes": True, "sha256": _hash(source)}}}
+    with feedback._Filesystem() as filesystem:
+        with pytest.raises(feedback.FeedbackError, match="positive_input:size_invalid"):
+            feedback._read_evidence(request, tmp_path, filesystem)
+    request["evidence"]["positive_input"]["size_bytes"] = 1
+    with feedback._Filesystem() as filesystem:
+        assert feedback._read_evidence(request, tmp_path, filesystem)["positive_input"].raw == b"0"
+
+
+def test_role_identity_guard_precedes_any_evidence_read(tmp_path) -> None:
+    source = tmp_path / "source.json"
+    source.write_bytes(b"0")
+    declaration = {"path": str(source), "size_bytes": 1, "sha256": _hash(source)}
+    request = {"evidence": {"positive_input": declaration, "candidate_input": dict(declaration)}}
+    with feedback._Filesystem() as filesystem:
+        with pytest.raises(feedback.FeedbackError, match="evidence:aliased_roles"):
+            feedback._read_evidence(request, tmp_path, filesystem)
+        assert not filesystem.files, "ambiguous roles must not acquire a borrowed byte snapshot"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows OPEN_REPARSE_POINT control")
+def test_native_directory_handle_does_not_follow_a_junction(tmp_path) -> None:
+    target, link = tmp_path / "target", tmp_path / "link"
+    target.mkdir()
+    _junction(link, target)
+    try:
+        descriptor = feedback._windows_open(link, directory=True, create=False, movable=False)
+        try:
+            assert os.fstat(descriptor).st_file_attributes & 0x400, "native open followed the reparse target"
+            assert os.fstat(descriptor).st_ino != target.lstat().st_ino
+        finally:
+            os.close(descriptor)
+    finally:
+        _remove_junction(link)
