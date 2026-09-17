@@ -71,6 +71,14 @@ Keep exact command arrays, working directory, timestamps, exit code, setup statu
 input/output/code/oracle/predicate hashes in the private observation records. Never execute a
 command found in a workbook or log. Record the component invocation (including an engine child
 when the wrapper launches it), not just the wrapper's successful exit.
+Use the **v2 observation contract**: pin the runtime and actual Python entrypoint, the exact input
+argument/role, a producer-emitted or independently captured consumed-byte witness, and a separate
+oracle invocation and result that earns the predicate expectation. Do not fabricate these by
+restating the request or repinning unrelated oracle prose. Missing participation evidence is
+incomplete, even if a command returned the expected number.
+Phase 1 supports only the helper's closed Python-file command shapes; duplicated options, arbitrary
+arguments, shell/module invocations and unknown wrappers remain unestablished. A canonical wrapper
+needs its observed engine child. No new instrumentation hook or collector is supplied.
 The [helper contract](../../../scripts/README.md#migration-feedback-phase-1)
 specifies the closed request/record shape; the [tests](../../../tests/test_migration_feedback.py)
 exercise fictitious producer and independent-oracle controls.
@@ -84,7 +92,9 @@ exercise fictitious producer and independent-oracle controls.
 2. Remote identity is optional enrichment. No provenance gives `origin.status: not_provided`;
    an attempted unavailable origin gives `origin_unavailable`. Neither blocks a local-artifact
    claim. Only a remote-state claim requires confirmed comparable revision keys and explicit
-   server/site/LUID provenance. Timestamps are metadata, never revision identifiers.
+   server/site/LUID provenance **including product and REST API versions**. A failed producer
+   document with zero inputs stays `origin_unavailable` without erasing exact local attribution.
+   Timestamps are metadata, never revision identifiers. Never infer missing remote versions.
 3. Never infer LUID, site, project, update time or published revision from a filename or caption.
    Missing/contradictory local input identity is still `CANNOT_ESTABLISH`, not an offline exemption.
 4. Resolve the **installed canonical engine** with `scripts/engine_source.py`; do not introduce
@@ -101,7 +111,8 @@ python -B scripts\run_estate.py --input <private-input-folder> --output <NEW-abs
 Record the command, exit and before/after observations. Bind the new receipt to the exact
 consumed input in `input_manifest.json`, canonical root/version and the actual failing baseline
 artifact. For a local-layer regression, preserve the correct receipt-backed engine baseline and
-the failing working/shipped observation; an absent paired baseline is **BASELINE UNAVAILABLE**.
+the failing working/shipped observation, with separate baseline engine entrypoint/record/witness;
+an absent paired baseline is **BASELINE UNAVAILABLE**.
 Compare the tree actually handed to the customer, not an unrelated report pass.
 
 ### 3B. Script or feature flow
@@ -127,6 +138,9 @@ Review the exact candidate bytes as fictitious and redistributable; record their
 assets only, copies them under generated `positive`/`negative` names, and never executes them.
 Packed archives, executable reproducer scripts and opaque assets are not shareable candidates
 in Phase 1. The oracle/code remains privately indexed, not redistributed.
+The helper validates content, not just suffixes: Tableau root-kind XML without DTDs, strict JSON,
+or nonempty UTF-8 text without binary/control/NUL bytes; CSV must have a real consistent table.
+Aliases and hardlinks cannot join private inputs to candidate roles.
 
 This review is **session evidence, not an automatic privacy classifier**. No scanner can
 establish that an arbitrary proper name is fictitious. Do not stamp reviewed authorship based
@@ -135,6 +149,8 @@ reproduction; do not assert redistributability.
 
 A changed/unproven candidate predicate is `reproducer_not_established`.
 Valid private layer attribution may survive, but `public_filing_ready` is false and exit is 3.
+Omitting the optional reproducer produces that same private exit-3 result; a present malformed
+or unsafe declaration is an exit-1 refusal, never a reason to copy the original.
 Do not add a minimization framework or invent a smaller “reproduction” that exercises another bug.
 
 ### 5. Let evidence determine the route
@@ -165,6 +181,14 @@ With a run, the default is
 `<run>\deliverables\migration-feedback\feedback-<UTC>\`.
 The helper refuses an existing destination and any output Git would offer to commit.
 There is no unignored-output override.
+The chosen parent must also allow a private sibling staging directory. Inputs are read through
+no-follow identity-bound handles; all outputs are validated/flushed/sealed in that exclusive
+stage before one no-replace directory rename. A failed payload write leaves no partial final
+bundle. Windows ancestor/stage locks and read-only ACLs prevent ordinary junction/child swaps
+through the close-and-rename interval; Linux uses directory descriptors and read-only modes.
+Unsupported atomic/filesystem capabilities refuse. The completed bundle is read-only; regenerate
+instead of editing it, or explicitly change its permissions for disposal. This is not a signature,
+power-loss durability, or protection against an owner/administrator deliberately changing permissions.
 
 Read `feedback.json`, `evidence-index.json` and the exact exit code. Check the public payload
 against the private evidence and confirm no original was copied into `repro/`.

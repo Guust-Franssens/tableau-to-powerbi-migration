@@ -76,39 +76,79 @@ class Case:
         return _write(self.request_path, self.request)
 
 
-def _observe(case: Case, prefix: str) -> None:
+def _observe(case: Case, prefix: str, *, relative: bool = False, output_label: str | None = None) -> None:
     source = case.paths[f"{prefix}_input"]
     owner = case.paths["owner"]
-    output_dir = case.run / "scratch" / f"emitted-{prefix}"
+    runtime = str(case.paths["runtime"])
+    output_dir = case.run / "scratch" / (output_label or f"emitted-{prefix}")
     if case.kind == "engine":
         assert not output_dir.exists(), "the positive engine control really starts with no output"
-        command = [sys.executable, "-B", str(owner), "--input", str(source.parent), "--output", str(output_dir)]
+        command = [runtime, "-B", str(owner), "--input", str(source.parent), "--output", str(output_dir)]
         artifact = output_dir / "reports" / "Fixture.Report" / "definition" / "report.json"
     else:
-        command = [sys.executable, "-B", str(owner), str(source)]
+        command = [runtime, "-B", str(owner), str(source)]
         artifact = case.root / f"{prefix}-output.json"
+    if relative:
+        for index in (2, 4, 6) if case.kind == "engine" else (2, 3):
+            command[index] = os.path.relpath(command[index], case.root)
     start = _now()
-    execution = subprocess.run(command, capture_output=True, text=True, check=False, cwd=case.root, timeout=15)
+    launched = [runtime, "-B", str(case.paths["wrapper"]), *command[3:]] if "wrapper" in case.paths else command
+    execution = subprocess.run(launched, capture_output=True, check=False, cwd=case.root, timeout=15)
     end = _now()
     assert execution.returncode == 0, execution.stderr
     # Independent code, not the classifier or the intentionally mutated producer, earns the expectation.
+    oracle_command = [runtime, "-B", str(case.paths["oracle"]), str(source), str(case.paths["predicate"])]
+    oracle_start = _now()
     oracle = subprocess.run(
-        [sys.executable, "-B", str(case.paths["oracle"]), str(source)],
+        oracle_command,
         capture_output=True,
-        text=True,
         check=False,
+        cwd=case.root,
         timeout=15,
     )
+    oracle_end = _now()
     assert oracle.returncode == 0, oracle.stderr
     expected = _json(case.paths["predicate"])["expected"]
-    assert json.loads(oracle.stdout) == expected
+    assert json.loads(oracle.stdout)["expected"] == expected
     if case.kind != "engine":
-        artifact.write_text(execution.stdout, encoding="utf-8")
+        artifact.write_bytes(execution.stdout)
     else:
         assert _json(artifact) == json.loads(execution.stdout)
     case.pin(f"{prefix}_output", artifact)
+    witness = case.root / f"{prefix}-witness.json"
+    witness.write_bytes(execution.stderr)
+    case.pin(f"{prefix}_witness", witness)
+    oracle_result = case.root / f"{prefix}-oracle-result.json"
+    oracle_result.write_bytes(oracle.stdout)
+    case.pin(f"{prefix}_oracle_result", oracle_result)
+    binding = {
+        "role": f"{prefix}_input",
+        "kind": "directory" if case.kind == "engine" else "file",
+        "argument_index": 4 if case.kind == "engine" else 3,
+    }
+    case.pin(
+        f"{prefix}_oracle_record",
+        _write(
+            case.root / f"{prefix}-oracle-record.json",
+            {
+                "schema_version": 1,
+                "input_sha256": _hash(source),
+                "output_sha256": _hash(oracle_result),
+                "oracle_sha256": _hash(case.paths["oracle"]),
+                "predicate_sha256": _hash(case.paths["predicate"]),
+                "runtime_sha256": _hash(case.paths["runtime"]),
+                "command": oracle_command,
+                "cwd": str(case.root),
+                "started_at": oracle_start,
+                "finished_at": oracle_end,
+                "exit_code": oracle.returncode,
+                "setup": "ready",
+                "input_binding": {"role": f"{prefix}_input", "kind": "file", "argument_index": 3},
+            },
+        ),
+    )
     record = {
-        "schema_version": 1,
+        "schema_version": 2,
         "input_sha256": _hash(source),
         "output_sha256": _hash(artifact),
         "owner_sha256": _hash(owner),
@@ -120,8 +160,21 @@ def _observe(case: Case, prefix: str) -> None:
         "finished_at": end,
         "exit_code": execution.returncode,
         "setup": "ready",
+        "runtime_sha256": _hash(case.paths["runtime"]),
+        "input_binding": binding,
+        "witness_sha256": _hash(witness),
+        "oracle_record_sha256": _hash(case.paths[f"{prefix}_oracle_record"]),
     }
     case.pin(f"{prefix}_record", _write(case.root / f"{prefix}-record.json", record))
+    if "wrapper" in case.paths:
+        parent = {key: record[key] for key in feedback.PROCESS_FIELDS}
+        parent.update(
+            schema_version=1,
+            command=launched,
+            wrapper_sha256=_hash(case.paths["wrapper"]),
+            child_record_sha256=_hash(case.paths[f"{prefix}_record"]),
+        )
+        case.pin(f"{prefix}_wrapper_record", _write(case.root / f"{prefix}-wrapper-record.json", parent))
 
 
 def _engine_evidence(case: Case) -> None:
@@ -146,7 +199,7 @@ def _engine_evidence(case: Case) -> None:
     case.pin("engine_report", _write(output_dir / "report.json", {"workbooks": [{"name": "Sample"}]}))
     # Use the existing receipt producer, independent of the feedback code under test.
     case.pin("engine_receipt", write_engine_receipt(output_dir))
-    record = _json(case.paths["positive_record"])
+    record = _json(case.paths.get("positive_wrapper_record", case.paths["positive_record"]))
     case.pin(
         "fresh_output",
         _write(
@@ -187,6 +240,7 @@ def _code(case: Case, monkeypatch: pytest.MonkeyPatch) -> None:
     owner.parent.mkdir(parents=True)
     shutil.copyfile(source_owner, owner)
     case.pin("owner", owner)
+    case.pin("runtime", Path(sys.executable).resolve())
     for role in ("oracle", "predicate"):
         path = case.root / (f"{role}.py" if role == "oracle" else f"{role}.json")
         shutil.copyfile(fixture / path.name, path)
@@ -237,6 +291,7 @@ def _case(
     *,
     privacy: bool = False,
     shape: str = ".twb",
+    wrapper: bool = False,
 ) -> Case:
     root = tmp_path / "case"
     run = root / "_runs" / "001-fixture"
@@ -262,6 +317,18 @@ def _case(
     }
     case = Case(root, run, kind, request)
     _code(case, monkeypatch)
+    if wrapper:
+        path = feedback.REPO_ROOT / "scripts" / "run_estate.py"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "import subprocess, sys\n"
+            f"child = [sys.executable, '-B', {str(case.paths['owner'])!r}, *sys.argv[1:]]\n"
+            "result = subprocess.run(child, capture_output=True, check=False)\n"
+            "sys.stdout.buffer.write(result.stdout)\nsys.stderr.buffer.write(result.stderr)\n"
+            "raise SystemExit(result.returncode)\n",
+            encoding="utf-8",
+        )
+        case.pin("wrapper", path)
     _inputs(case, privacy=privacy, packed=shape.endswith("x"), datasource=shape.startswith(".tds"))
     if kind == "engine":
         case.pin(
@@ -549,6 +616,7 @@ def test_minimization_that_removes_failure_is_rejected(tmp_path, monkeypatch) ->
     case = _case(tmp_path, monkeypatch)
     case.replace("candidate_output", {"count": 1})
     _repin_record(case, "candidate", output_sha256=_hash(case.paths["candidate_output"]))
+    _repin_witness(case, "candidate", output_sha256=_hash(case.paths["candidate_output"]))
     _, private, _ = _build(case, 3)
     assert private["reasons"] == ["candidate:predicate_not_reproduced"]
 
@@ -557,6 +625,7 @@ def test_meaningful_negative_must_pass_the_identical_predicate(tmp_path, monkeyp
     case = _case(tmp_path, monkeypatch)
     case.replace("negative_output", {"count": 0})
     _repin_record(case, "negative", output_sha256=_hash(case.paths["negative_output"]))
+    _repin_witness(case, "negative", output_sha256=_hash(case.paths["negative_output"]))
     _, private, _ = _build(case, 3)
     assert private["route"] == "CANNOT_ESTABLISH"
     assert private["reasons"] == ["negative:negative_control_failed"]
@@ -582,8 +651,9 @@ def test_private_paths_sizes_hashes_and_excerpts_never_leak_into_payload(tmp_pat
             f"; write PRIVATE_SENTINEL_684 to {marker}",
         ],
     )
-    out, private, public = _build(case)
-    assert private["route"] == "ENGINE_UPSTREAM"
+    out, private, public = _build(case, 3)
+    assert private["route"] == "CANNOT_ESTABLISH"
+    assert private["reasons"] == ["positive:directory_invocation_unsupported"]
     raw = (out / "issue-payload.json").read_text(encoding="utf-8")
     for forbidden in _json(FIXTURES / "privacy" / "sentinels.json")["forbidden"]:
         assert forbidden not in raw
@@ -747,7 +817,6 @@ def test_script_and_skill_have_no_publication_or_network_action_surface() -> Non
         "socket",
         "aiohttp",
         "webbrowser",
-        "os",
         "importlib",
         "runpy",
         "multiprocessing",
@@ -760,6 +829,26 @@ def test_script_and_skill_have_no_publication_or_network_action_surface() -> Non
             imports.add((node.module or "").split(".")[0])
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             assert node.func.id not in {"eval", "exec", "compile", "__import__"}
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+        ):
+            if node.func.value.id == "os":
+                assert node.func.attr in {
+                    "fstat",
+                    "open",
+                    "close",
+                    "mkdir",
+                    "fdopen",
+                    "dup",
+                    "fsync",
+                    "lseek",
+                    "fsencode",
+                    "unlink",
+                    "rmdir",
+                    "fchmod",
+                }
     assert not imports & forbidden_imports
     text = SCRIPT.read_text(encoding="utf-8") + SKILL.read_text(encoding="utf-8")
     for action in ("gh issue create", "gh issue comment", "gh pr create", "gh api", "curl -X", "Invoke-RestMethod"):
@@ -837,18 +926,641 @@ def test_recorded_relative_cli_paths_resolve_only_against_recorded_cwd(tmp_path,
         )
         assert replay.returncode == 0
         assert json.loads(replay.stdout) == _json(case.paths[f"{prefix}_output"])
+        case.replace(f"{prefix}_witness", json.loads(replay.stderr))
+        record["witness_sha256"] = _hash(case.paths[f"{prefix}_witness"])
         case.replace(f"{prefix}_record", record)
     _, _, public = _build(case)
     assert public["route"] == "AGENTIC_REPOSITORY"
-    assert not feedback._mentions_path(["python", relative_owner], case.paths["owner"], case.root / "other")
 
 
 def test_fresh_proof_can_record_the_actual_relative_invocation(tmp_path, monkeypatch) -> None:
     case = _case(tmp_path, monkeypatch)
-    proof = _json(case.paths["fresh_output"])
-    proof["cwd"] = str(case.root)
-    for index in (2, 4, 6):
-        proof["command"][index] = os.path.relpath(proof["command"][index], case.root)
-    case.replace("fresh_output", proof)
+    for prefix in feedback.PREFIXES:
+        shutil.rmtree(case.run / "scratch" / f"emitted-{prefix}")
+        _observe(case, prefix, relative=True)
+    _engine_evidence(case)
     _, _, public = _build(case)
     assert public["route"] == "ENGINE_UPSTREAM"
+
+
+def _repin_witness(case: Case, prefix: str, **changes: Any) -> None:
+    witness = _json(case.paths[f"{prefix}_witness"])
+    witness.update(changes)
+    case.replace(f"{prefix}_witness", witness)
+    _repin_record(case, prefix, witness_sha256=_hash(case.paths[f"{prefix}_witness"]))
+
+
+def test_positive_command_consumes_negative_not_declared_positive(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    record = _json(case.paths["positive_record"])
+    record["command"][-1] = str(case.paths["negative_input"])
+    actual = subprocess.run(record["command"], cwd=case.root, capture_output=True, check=False, timeout=15)
+    assert actual.returncode == 0
+    assert json.loads(actual.stdout) == _json(case.paths["negative_output"])
+    case.replace("positive_record", record)
+    _, private, public = _build(case, 3)
+    assert private["reasons"] == ["positive:input_not_in_invocation"]
+    assert public["route"] == "CANNOT_ESTABLISH" and not public["public_filing_ready"]
+
+
+def test_all_commands_execute_oracle_with_owner_inert(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    for prefix in feedback.PREFIXES:
+        command = [
+            str(case.paths["runtime"]),
+            "-B",
+            str(case.paths["oracle"]),
+            str(case.paths[f"{prefix}_input"]),
+            str(case.paths["predicate"]),
+            str(case.paths["owner"]),
+        ]
+        actual = subprocess.run(command, cwd=case.root, capture_output=True, check=False, timeout=15)
+        assert actual.returncode == 0
+        assert json.loads(actual.stdout)["oracle_sha256"] == _hash(case.paths["oracle"])
+        _repin_record(case, prefix, command=command)
+    _, private, public = _build(case, 3)
+    assert private["reasons"] == ["positive:entrypoint_not_invoked"]
+    assert not public["public_filing_ready"]
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        ["--input", "other"],
+        ["--input=other"],
+        ["--output", "other"],
+        ["--output=other"],
+        ["--force"],
+        ["--", "other"],
+    ],
+)
+def test_duplicate_or_ambiguous_option_semantics_are_not_guessed(tmp_path, monkeypatch, tail) -> None:
+    case = _case(tmp_path, monkeypatch)
+    record = _json(case.paths["positive_record"])
+    _repin_record(case, "positive", command=[*record["command"], *tail])
+    _, private, public = _build(case, 3)
+    assert private["reasons"] == ["positive:directory_invocation_unsupported"]
+    assert not public["public_filing_ready"]
+
+
+def test_unrelated_oracle_prose_repinned_cannot_borrow_an_observation(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    # Even valid Python prose is not the code whose invocation produced the separately pinned result.
+    case.paths["oracle"].write_text('"Unrelated oracle prose, not an executed expectation."\n', encoding="utf-8")
+    case.pin("oracle", case.paths["oracle"])
+    for prefix in feedback.PREFIXES:
+        oracle_record = _json(case.paths[f"{prefix}_oracle_record"])
+        oracle_record["oracle_sha256"] = _hash(case.paths["oracle"])
+        case.replace(f"{prefix}_oracle_record", oracle_record)
+        _repin_record(
+            case,
+            prefix,
+            oracle_sha256=_hash(case.paths["oracle"]),
+            oracle_record_sha256=_hash(case.paths[f"{prefix}_oracle_record"]),
+        )
+    _, private, public = _build(case, 3)
+    assert private["reasons"] == ["positive:oracle_oracle_sha256_mismatch"]
+    assert not public["public_filing_ready"]
+
+
+def test_oracle_result_must_independently_earn_predicate_expectation(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    result = _json(case.paths["positive_oracle_result"])
+    result["expected"] = True
+    case.replace("positive_oracle_result", result)
+    record = _json(case.paths["positive_oracle_record"])
+    record["output_sha256"] = _hash(case.paths["positive_oracle_result"])
+    case.replace("positive_oracle_record", record)
+    _repin_record(case, "positive", oracle_record_sha256=_hash(case.paths["positive_oracle_record"]))
+    _, private, public = _build(case, 3)
+    assert private["reasons"] == ["positive:oracle_expectation_mismatch"]
+    assert not public["public_filing_ready"]
+
+
+def test_consumed_bytes_witness_is_not_an_invocation_claim(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    _repin_witness(case, "positive", input_sha256=_hash(case.paths["negative_input"]))
+    _, private, public = _build(case, 3)
+    assert private["reasons"] == ["positive:witness_input_sha256_mismatch"]
+    assert not public["public_filing_ready"]
+
+
+@pytest.mark.parametrize("role", ["positive_witness", "positive_oracle_record", "positive_oracle_result", "runtime"])
+def test_missing_participation_evidence_cannot_route(tmp_path, monkeypatch, role) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    del case.request["evidence"][role]
+    _, private, public = _build(case, 3)
+    assert private["reasons"] == [f"missing_evidence:{role}"]
+    assert public["route"] == "CANNOT_ESTABLISH"
+
+
+@pytest.mark.parametrize("declaration", [None, [], {}, {"authorship": "fictitious_from_scratch"}])
+def test_present_malformed_reproducer_refuses(tmp_path, monkeypatch, declaration) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    case.request["reproducer"] = declaration
+    destination = case.root / "out"
+    assert feedback.main(["--input", str(case.save()), "--out", str(destination)]) == 1
+    assert not destination.exists()
+
+
+def test_omitted_reproducer_retains_private_attribution(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    del case.request["reproducer"]
+    out, private, public = _build(case, 3)
+    assert private["route"] == "AGENTIC_REPOSITORY"
+    assert private["reasons"] == ["reproducer:not_provided"]
+    assert public["reproducer_status"] == "reproducer_not_established"
+    assert not public["public_filing_ready"]
+    assert not list((out / "repro").iterdir())
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_failed_empty_provenance_does_not_erase_local_identity(tmp_path, monkeypatch, remote) -> None:
+    case = _case(tmp_path, monkeypatch)
+    case.pin(
+        "source_provenance",
+        _write(
+            case.root / "provenance.json",
+            {
+                "schema": "tableau-source-provenance/1",
+                "inputs": [],
+                "input_count": 0,
+                "phase": {"status": "failed", "errors": ["origin unavailable"]},
+            },
+        ),
+    )
+    case.request["claim_scope"] = "remote_state" if remote else "local_artifact"
+    _, private, public = _build(case, 3 if remote else 0)
+    assert private["source"]["engine_input"]["sha256"] == _hash(case.paths["positive_input"])
+    assert private["source"]["origin"] == {"status": "origin_unavailable"}
+    assert public["route"] == ("CANNOT_ESTABLISH" if remote else "ENGINE_UPSTREAM")
+    assert public["public_filing_ready"] is not remote
+
+
+@pytest.mark.parametrize("missing", ["tableau_product_version", "rest_api_version"])
+def test_remote_versions_are_required_never_inferred(tmp_path, monkeypatch, missing) -> None:
+    case = _case(tmp_path, monkeypatch)
+    origin = {
+        "server": "https://tableau.example.invalid",
+        "site": "fixture",
+        "workbook_luid": "00000000-0000-0000-0000-000000000001",
+        "tableau_product_version": "2026.1",
+        "rest_api_version": "3.28",
+        "remote_revision_key": revision_key(case.paths["positive_input"].read_bytes()).as_json(),
+        "revision_match": "same",
+    }
+    del origin[missing]
+    _provenance(case, origin)
+    case.request["claim_scope"] = "remote_state"
+    _, private, public = _build(case, 3)
+    assert private["reasons"] == ["source:remote_revision_unconfirmed"]
+    assert not public["public_filing_ready"]
+
+
+@pytest.mark.parametrize(
+    "suffix,raw",
+    [
+        (".twb", b"MZ\x00opaque"),
+        (".tds", b"MZ\x00opaque"),
+        (".twb", b"opaque"),
+        (".twb", b"<datasource/>"),
+        (".tds", b"<workbook/>"),
+        (".twb", b'<!DOCTYPE workbook [<!ENTITY x "opaque">]><workbook>&x;</workbook>'),
+        (".json", b"{broken"),
+        (".json", b'{"a":1,"a":2}'),
+        (".json", b'{"a":1e999}'),
+        (".txt", b"\x00binary"),
+        (".txt", b"\xff\xfeopaque"),
+        (".txt", b"bad\x1bcontrol"),
+        (".csv", b"a,b\nx,\x00"),
+        (".csv", b"a,b\nx"),
+        (".csv", b'a,b\n"broken,x'),
+    ],
+)
+def test_reproducer_content_not_suffix_is_allowlisted(tmp_path, monkeypatch, suffix, raw) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    candidate = case.paths["candidate_input"].with_suffix(suffix)
+    candidate.write_bytes(raw)
+    case.pin("candidate_input", candidate)
+    case.request["reproducer"]["reviewed_sha256"]["candidate_input"] = _hash(candidate)
+    out, private, public = _build(case, 3)
+    assert private["route"] == "AGENTIC_REPOSITORY"
+    assert private["reasons"] == ["reproducer:format_not_established"]
+    assert not public["public_filing_ready"] and not list((out / "repro").iterdir())
+
+
+@pytest.mark.parametrize(
+    "suffix,raw",
+    [
+        (".twb", b"<workbook/>"),
+        (".tds", b"<datasource/>"),
+        (".json", b'{"a":1}'),
+        (".txt", "fictitious caf\u00e9\n".encode("utf-8")),
+        (".txt", b"\xef\xbb\xbffictitious\n"),
+        (".csv", b'a,b\n"fictitious, cell",1\n'),
+    ],
+)
+def test_supported_content_formats_have_positive_controls(suffix, raw) -> None:
+    feedback._reproducer_format(feedback.Evidence("candidate_input", ROOT / f"not-read{suffix}", raw))
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "request",
+        "predicate",
+        "record",
+        "oracle_record",
+        "witness",
+        "oracle_result",
+        "receipt",
+        "evidence_size",
+        "manifest_size",
+        "artifact_size",
+        "provenance_size",
+        "provenance_count",
+        "input_index",
+        "run_number",
+    ],
+)
+def test_boolean_integer_boundaries_refuse(tmp_path, monkeypatch, boundary) -> None:
+    case = _case(tmp_path, monkeypatch)
+    if boundary == "request":
+        case.request["schema_version"] = True
+    elif boundary == "evidence_size":
+        case.request["evidence"]["positive_input"]["size_bytes"] = True
+    elif boundary == "run_number":
+        run = _json(case.run / "run.json")
+        run["run"] = True
+        _write(case.run / "run.json", run)
+    elif boundary.startswith("provenance"):
+        _provenance(case)
+        provenance = _json(case.paths["source_provenance"])
+        if boundary == "provenance_count":
+            provenance["input_count"] = True
+        else:
+            provenance["inputs"][0]["input"]["size_bytes"] = True
+        case.replace("source_provenance", provenance)
+    elif boundary in {"receipt", "manifest_size", "artifact_size"}:
+        receipt = _json(case.paths["engine_receipt"])
+        if boundary == "receipt":
+            receipt["version"] = True
+        elif boundary == "artifact_size":
+            receipt["artifacts"][0]["size"] = True
+        else:
+            manifest = _json(case.paths["input_manifest"])
+            manifest["assets"][0]["size_bytes"] = True
+            case.replace("input_manifest", manifest)
+            receipt["input_manifest_sha256"] = _hash(case.paths["input_manifest"])
+        case.replace("engine_receipt", receipt)
+        proof = _json(case.paths["fresh_output"])
+        proof["receipt_sha256"] = _hash(case.paths["engine_receipt"])
+        case.replace("fresh_output", proof)
+    else:
+        role = {
+            "predicate": "predicate",
+            "record": "positive_record",
+            "oracle_record": "positive_oracle_record",
+            "witness": "positive_witness",
+            "oracle_result": "positive_oracle_result",
+            "input_index": "positive_record",
+        }[boundary]
+        document = _json(case.paths[role])
+        if boundary == "input_index":
+            document["input_binding"]["argument_index"] = True
+        else:
+            document["schema_version"] = True
+        case.replace(role, document)
+        if boundary in {"witness", "oracle_record"}:
+            _repin_record(case, "positive", **{f"{boundary}_sha256": _hash(case.paths[role])})
+        elif boundary == "oracle_result":
+            oracle_record = _json(case.paths["positive_oracle_record"])
+            oracle_record["output_sha256"] = _hash(case.paths[role])
+            case.replace("positive_oracle_record", oracle_record)
+            _repin_record(case, "positive", oracle_record_sha256=_hash(case.paths["positive_oracle_record"]))
+    out = case.root / "refused"
+    assert feedback.main(["--input", str(case.save()), "--run", str(case.run), "--out", str(out)]) == 1
+    assert not out.exists(), "a Boolean must not satisfy any integer boundary"
+
+
+def _junction(link: Path, target: Path) -> None:
+    if os.name == "nt":
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                f"New-Item -ItemType Junction -Path '{link}' -Target '{target}' | Out-Null",
+            ],
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        assert result.returncode == 0, result.stderr
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
+def _remove_junction(link: Path) -> None:
+    if os.name == "nt":
+        os.rmdir(link)
+    else:
+        link.unlink()
+
+
+def test_destination_junction_before_first_write_never_receives_bytes(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    destination, escaped = case.root / "out", case.root / "escaped"
+    escaped.mkdir()
+    original = feedback._Filesystem.read
+    attempts = []
+
+    def swapped(store, path, *, create=None):
+        if create is not None and not attempts:
+            assert not destination.exists(), "no success-shaped final directory may precede staging"
+            _junction(destination, escaped)
+            attempts.append(True)
+        return original(store, path, create=create)
+
+    monkeypatch.setattr(feedback._Filesystem, "read", swapped)
+    try:
+        assert feedback.main(["--input", str(case.save()), "--out", str(destination)]) == 1
+        assert attempts == [True]
+        assert not list(escaped.iterdir()), "a destination swap must not redirect even the first private write"
+        assert not list(case.root.glob(".migration-feedback-*.staging"))
+    finally:
+        _remove_junction(destination)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize("target_kind", ["parent", "stage", "repro"])
+def test_parent_and_staging_reparse_swaps_cannot_redirect_writes(tmp_path, monkeypatch, target_kind) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    destination = case.root / "out"
+    escaped = case.root.parent / "escaped"
+    escaped.mkdir()
+    original = feedback._Filesystem.read
+    attempts = []
+    renamed = []
+
+    def swapped(store, path, *, create=None):
+        if create is not None and not attempts:
+            stage = path.parent
+            target = case.root if target_kind == "parent" else stage / "repro" if target_kind == "repro" else stage
+            moved = target.with_name(target.name + "-moved")
+            try:
+                target.rename(moved)
+            except PermissionError:
+                attempts.append("denied")
+            else:
+                _junction(target, escaped)
+                renamed.append((target, moved))
+                attempts.append("swapped")
+        return original(store, path, create=create)
+
+    monkeypatch.setattr(feedback._Filesystem, "read", swapped)
+    code = feedback.main(["--input", str(case.save()), "--out", str(destination)])
+    assert attempts in (["denied"], ["swapped"])
+    assert code == (0 if attempts == ["denied"] else 1)
+    assert not list(escaped.iterdir()), "held ancestors, not lexical names, must own every staged write"
+    for target, moved in reversed(renamed):
+        _remove_junction(target)
+        moved.rename(target)
+    if code == 1:
+        assert not destination.exists()
+
+
+def test_final_payload_failure_leaves_no_final_or_staging_tree(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    destination = case.root / "out"
+    original = feedback._Filesystem.read
+    written = []
+
+    def failed(store, path, *, create=None):
+        if create is not None:
+            assert not destination.exists(), "final directory became visible before the complete transaction"
+            written.append(path.name)
+            if path.name == "issue-payload.json":
+                raise OSError("controlled final payload write failure")
+        return original(store, path, create=create)
+
+    monkeypatch.setattr(feedback._Filesystem, "read", failed)
+    assert feedback.main(["--input", str(case.save()), "--out", str(destination)]) == 1
+    assert written[-1] == "issue-payload.json" and "positive.json" in written and "feedback.json" in written
+    assert not destination.exists(), "failed transactions must not expose established feedback or candidate bytes"
+    assert not list(case.root.glob(".migration-feedback-*.staging")), "failed stage must be cleaned"
+
+
+def test_hardlink_alias_and_changed_inode_cannot_copy_private_bytes(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    source, candidate = case.paths["positive_input"], case.paths["candidate_input"]
+    candidate.unlink()
+    os.link(source, candidate)
+    sentinel = b'{"value":null,"private":"PRIVATE_SENTINEL_684"}'
+    digest = hashlib.sha256(sentinel).hexdigest()
+    case.request["evidence"]["candidate_input"].update(size_bytes=len(sentinel), sha256=digest)
+    case.request["reproducer"]["reviewed_sha256"]["candidate_input"] = digest
+    original = feedback._Filesystem.read
+    attempted = []
+
+    def swapped(store, path, *, create=None):
+        if path == candidate:
+            attempted.append(True)
+            source.unlink()
+            source.write_bytes(b'{"replacement":true}')
+            candidate.write_bytes(sentinel)
+        return original(store, path, create=create)
+
+    monkeypatch.setattr(feedback._Filesystem, "read", swapped)
+    out = case.root / "refused"
+    assert feedback.main(["--input", str(case.save()), "--out", str(out)]) == 1
+    assert not attempted, "aliased roles must be refused before either read can borrow an old snapshot"
+    assert not out.exists()
+
+
+def test_undeclared_hardlink_is_also_an_unsafe_source_alias(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    os.link(case.paths["candidate_input"], case.root / "private-alias.json")
+    out = case.root / "refused"
+    assert feedback.main(["--input", str(case.save()), "--out", str(out)]) == 1
+    assert not out.exists(), "a candidate alias outside the declared role set is still unsafe"
+
+
+def test_same_path_private_candidate_roles_are_refused_before_reads(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    case.pin("candidate_input", case.paths["positive_input"])
+    out = case.root / "refused"
+    assert feedback.main(["--input", str(case.save()), "--out", str(out)]) == 1
+    assert not out.exists()
+
+
+def test_read_binds_preopen_identity_not_only_equal_bytes(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"fictitious identity control")
+    before = source.lstat()
+    if os.name == "nt":
+        real_open = feedback._windows_open
+
+        def changed(path, **kwargs):
+            if path == source:
+                replacement = tmp_path / "replacement.txt"
+                replacement.write_bytes(source.read_bytes())
+                os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+                os.replace(replacement, source)
+            return real_open(path, **kwargs)
+
+        monkeypatch.setattr(feedback, "_windows_open", changed)
+    else:
+        real_open = os.open
+
+        def changed(path, flags, *args, **kwargs):
+            if path == source.name:
+                replacement = tmp_path / "replacement.txt"
+                replacement.write_bytes(source.read_bytes())
+                os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+                os.replace(replacement, source)
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", changed)
+    with feedback._Filesystem() as store:
+        with pytest.raises(feedback.FeedbackError, match="filesystem:file_changed"):
+            store.read(source)
+    assert source.lstat().st_ino != before.st_ino
+
+
+def test_retained_snapshot_bytes_are_rechecked_through_held_handle(tmp_path) -> None:
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"fictitious")
+    with feedback._Filesystem() as store:
+        store.read(source)
+        store.files[source].raw = b"PRIVATE_SENTINEL_684"
+        with pytest.raises(feedback.FeedbackError, match="filesystem:bytes_changed"):
+            store.verify()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows sharing modes are a native Windows boundary")
+def test_windows_held_input_denies_write_and_inode_replacement(tmp_path) -> None:
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"fictitious")
+    with feedback._Filesystem() as store:
+        store.read(source)
+        with pytest.raises(PermissionError):
+            source.write_bytes(b"PRIVATE_SENTINEL_684")
+        with pytest.raises(PermissionError):
+            source.rename(tmp_path / "renamed.txt")
+        store.verify()
+
+
+@pytest.mark.parametrize(
+    "suffix,raw",
+    [(".twb", b"MZ\x00"), (".tds", b"opaque"), (".json", b"{bad"), (".txt", b"text\x00"), (".csv", b"a,b\nc")],
+)
+def test_format_guard_has_a_direct_negative_control(suffix, raw) -> None:
+    with pytest.raises(feedback.FeedbackError, match="reproducer:format_not_established"):
+        feedback._reproducer_format(feedback.Evidence("candidate_input", ROOT / f"not-read{suffix}", raw))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows close/rename sharing window requires its native ACL control")
+def test_sealed_stage_blocks_repro_swap_and_byte_change_after_handles_close(tmp_path, monkeypatch) -> None:
+    case = _case(tmp_path, monkeypatch, "local")
+    real_move = feedback._windows_move
+    observed = []
+
+    def attempt(descriptor, destination):
+        if destination is not None:
+            stage = next(destination.parent.glob(".migration-feedback-*.staging"))
+            try:
+                (stage / "repro").rename(stage / "changed-repro")
+            except PermissionError:
+                blocked = True
+            else:
+                (stage / "changed-repro").rename(stage / "repro")
+                blocked = False
+            assert blocked, "stage seal must deny a child-directory replacement at commit"
+            before = (stage / "feedback.json").read_bytes()
+            try:
+                (stage / "feedback.json").write_bytes(b"PRIVATE_SENTINEL_684")
+            except PermissionError:
+                blocked = True
+            else:
+                (stage / "feedback.json").write_bytes(before)
+                blocked = False
+            assert blocked, "stage seal must deny changing verified bytes at commit"
+            observed.append(True)
+        real_move(descriptor, destination)
+
+    monkeypatch.setattr(feedback, "_windows_move", attempt)
+    _, _, public = _build(case)
+    assert observed == [True] and public["public_filing_ready"]
+
+
+@pytest.fixture(autouse=True)
+def restore_private_bundle_access(tmp_path):
+    """Only dispose of this test's sealed outputs; the production artifact stays read-only."""
+    yield
+    for marker in tmp_path.rglob("feedback.json"):
+        root = marker.parent
+        if (root / "repro").is_dir():
+            files = [path for path in root.rglob("*") if path.is_file()]
+            with feedback._Filesystem() as filesystem:
+                filesystem.directory(root)
+                feedback._stage_permissions(filesystem, root, files, writable=True)
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_real_wrapper_records_the_engine_child_not_just_its_own_success(tmp_path, monkeypatch, missing) -> None:
+    case = _case(tmp_path, monkeypatch, wrapper=True)
+    child = _json(case.paths["positive_record"])
+    wrapper = _json(case.paths["positive_wrapper_record"])
+    assert wrapper["command"][2] != child["command"][2]
+    assert _json(case.paths["positive_witness"])["command"] == child["command"]
+    if missing:
+        del case.request["evidence"]["positive_wrapper_record"]
+    _, private, public = _build(case, 3 if missing else 0)
+    assert public["route"] == ("CANNOT_ESTABLISH" if missing else "ENGINE_UPSTREAM")
+    if missing:
+        assert private["reasons"] == ["engine:fresh_invocation_mismatch"]
+
+
+@pytest.mark.parametrize("correct_baseline", [False, True])
+def test_repository_regression_needs_its_separate_consumed_engine_baseline(
+    tmp_path, monkeypatch, correct_baseline
+) -> None:
+    case = _case(tmp_path, monkeypatch)
+    engine_owner = case.paths["owner"]
+    shutil.rmtree(case.run / "scratch")
+    if correct_baseline:
+        for prefix in feedback.PREFIXES:
+            source = case.paths[f"{prefix}_input"]
+            raw = source.read_bytes()
+            raw = raw.replace(b"enabled", b"SWAP").replace(b"disabled", b"enabled").replace(b"SWAP", b"disabled")
+            source.write_bytes(raw)
+            case.pin(f"{prefix}_input", source)
+    _observe(case, "positive")
+    _engine_evidence(case)
+    case.pin("baseline_owner", engine_owner)
+    case.pin("baseline_output", case.paths["positive_output"])
+    baseline = _json(case.paths["positive_record"])
+    baseline = {key: baseline[key] for key in feedback.PROCESS_FIELDS | {"owner_sha256", "witness_sha256"}}
+    baseline["schema_version"] = 1
+    witness = case.root / "baseline-witness.json"
+    witness.write_bytes(case.paths["positive_witness"].read_bytes())
+    case.pin("baseline_witness", witness)
+    case.pin("baseline_record", _write(case.root / "baseline-record.json", baseline))
+    owner = feedback.REPO_ROOT / "scripts" / "local_step.py"
+    owner.parent.mkdir(parents=True, exist_ok=True)
+    code = engine_owner.read_text(encoding="utf-8")
+    if correct_baseline:
+        code = code.replace('== "enabled"', '== "disabled"')
+    owner.write_text(code, encoding="utf-8")
+    case.pin("owner", owner)
+    case.request["owner"] = "repository"
+    for prefix in feedback.PREFIXES:
+        _observe(case, prefix, output_label=f"local-{prefix}")
+    case.request["reproducer"]["reviewed_sha256"] = {
+        role: _hash(case.paths[role]) for role in ("candidate_input", "candidate_negative_input")
+    }
+    _, private, public = _build(case, 0 if correct_baseline else 3)
+    assert public["route"] == ("AGENTIC_REPOSITORY" if correct_baseline else "CANNOT_ESTABLISH")
+    if not correct_baseline:
+        assert private["reasons"] == ["owner:baseline_also_fails"]

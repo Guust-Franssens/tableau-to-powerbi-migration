@@ -803,12 +803,15 @@ The session writes JSON with exactly these keys (no arbitrary public title/body/
 | `reproducer` | Optional. `{authorship: "fictitious_from_scratch", redistributable: true, reviewed_sha256: {candidate_input: H, candidate_negative_input: H}}`. No publication approval is represented. |
 | `private_notes` | Optional private text. Never part of the public projection. |
 
-Common evidence roles: `predicate`, `owner` (invoked code/feature file), `oracle` (independent
-expected contract/test), and `positive_input`, `positive_output`, `positive_record`,
+Common evidence roles: `predicate`, `owner` (the actual Python entrypoint), `runtime` (the exact
+invoked executable), `oracle` (independent executable expectation code), and `positive_input`, `positive_output`, `positive_record`,
 `negative_input`, `negative_output`, `negative_record`.
 Candidate roles: `candidate_input/output/record` and `candidate_negative_input/output/record`.
+Each of those four prefixes additionally requires `_witness`, `_oracle_record`, and `_oracle_result`.
 The private and candidate pairs must have distinct input bytes, matching code/oracle/predicate
 hashes and the same invocation; positive fails the predicate, negative passes.
+All declarations are identity-bound, regular single-link files. Reusing a physical file across
+roles (including alternate spellings), or a hardlink outside the declared set, is refused.
 
 Engine roles: `engine_receipt`, `input_manifest`, `engine_report`, `fresh_output`;
 `baseline_output` additionally for a repository regression over an engine baseline.
@@ -816,7 +819,10 @@ Workbook/datasource requires `migration_spec`; optional `source_provenance` is t
 `tableau-source-provenance/1` document, joined by exact input hash/size and revision key, never
 caption/LUID guesses. `local_download` records raw identity and the existing normalized key
 even with `origin.status: not_provided`; attempted unavailable provenance is `origin_unavailable`.
-Only **remote-state** claims require confirmed remote revision/server/site/LUID. Updated time
+Producer-shaped failed provenance with `inputs: []`, integer `input_count: 0`, and
+`phase.status: failed` retains exact local attribution with `origin_unavailable`.
+Only **remote-state** claims require successful provenance with confirmed comparable revision,
+server/site/LUID, **Tableau product version and REST API version**. Missing values are never inferred. Updated time
 and differing archive hashes never substitute for normalized revision agreement.
 
 Context-only roles: `run_status`, `package_manifest`, `gate_results`, `parse_sweep`,
@@ -832,22 +838,69 @@ Kinds: `json_equals` fails on unequal values; a missing assertion path is unesta
 Failure classes: `incorrect_output`, `missing_output`, `unexpected_refusal`, `runtime_failure`,
 `external_block`. Booleans do not compare equal to numeric 0/1.
 
-Every observation record has exactly:
-`schema_version: 1`, `input_sha256`, `output_sha256`, `owner_sha256`, `oracle_sha256`,
-`predicate_sha256`, `command` (nonempty string array including the owner path), `cwd` (absolute),
-`started_at`, `finished_at`, `exit_code` (integer), `setup: "ready"`.
-Relative owner arguments resolve only against the recorded `cwd`, never the builder's directory.
+Every **subject observation record is now version 2**, with exactly:
+`schema_version: 2`, `input_sha256`, `output_sha256`, `owner_sha256`, `oracle_sha256`,
+`predicate_sha256`, `runtime_sha256`, `witness_sha256`, `oracle_record_sha256`,
+`command`, `cwd` (absolute), `started_at`, `finished_at`, `exit_code` (integer),
+`setup: "ready"`, and `input_binding`.
+The request and payload remain version 1; old observations cannot establish participation.
+
+`input_binding` is exactly `{role, kind, argument_index}`. The role is `<prefix>_input`;
+`kind` is `file` (integer index `3`) or `directory` (integer index `4`).
+Accepted subject command arrays are closed, not interpreted as arbitrary CLI syntax:
+
+- `[<pinned-runtime>, "-B", <pinned-owner.py>, <exact-input-file>]`
+- `[<pinned-runtime>, "-B", <pinned-owner.py>, "--input", <input-file-parent>, "--output", <output-directory>]`
+
+The output artifact must be inside that directory. Duplicate/extra options or positional arguments,
+`--option=value`, shell strings, `-c`, `-m`, arbitrary interpreter flags and general wrapper chains
+are **unestablished**, not guessed. Relative paths resolve only against the recorded `cwd`.
+An owner appearing later as inert argv does not establish invocation.
 The predicate must predate the original observations; candidate runs follow original controls.
 An import/setup error with nonzero exit cannot earn a reproduction.
+
+The `_witness` is a **producer-emitted or independently observed participation result**, not a
+session-authored restatement of the request. Its exact fields are `schema_version: 1`,
+`command`, `cwd`, `owner_sha256`, `input_sha256`, `output_sha256`. It must identify the code
+actually run and the bytes actually read/produced. The fixtures capture it from the child process's
+stderr. If a real tool exposes no such evidence, report incomplete; there is no new collector,
+instrumentation hook or permission to fabricate a witness.
+
+The independent `_oracle_record` has exactly `schema_version: 1`, `command`, `cwd`,
+`started_at`, `finished_at`, `exit_code: 0`, `setup: "ready"`, `runtime_sha256`,
+`input_sha256`, `output_sha256`, `oracle_sha256`, `predicate_sha256`, `input_binding`.
+Its command is exactly `[<runtime>, "-B", <oracle.py>, <exact-input-file>, <predicate.json>]`
+and its binding is `file` at index 3. Its separately pinned `_oracle_result` is the actual
+oracle stdout: `schema_version: 1`, `command`, `cwd`, `oracle_sha256`, `input_sha256`,
+`predicate_sha256`, `expected`. The result, invocation, consumed input, executed code and
+predicate expectation must all agree. Nonempty prose or code byte inequality earns nothing.
+The oracle computes the expectation independently, not by echoing `predicate.expected`.
+
+All version/index/exit/size/count boundaries use strict integers: JSON `true` is never `1`.
+JSON must be UTF-8/UTF-8-sig, without duplicate keys or non-finite numbers.
 
 `fresh_output` is a **before/after observation**, not a retroactively guessed directory state:
 `output_dir`, `observed_absent_at`, `started_at`, `finished_at`, `before_state: "absent"`,
 `scope: "full"`, `receipt_sha256`, `input_sha256`, `engine_root`, `engine_version`,
-`command` (canonical entry point, exact `--input` and `--output`), `exit_code`.
+`command` (the exact validated invocation, not a separate path-mention claim), `exit_code`.
 Optional `cwd` supplies the absolute base for a recorded relative invocation.
 The installed root/version and receipt must agree; the exact input must occur once in the engine's
 `assets[].staged_input_path/size_bytes/sha256`, and the baseline bytes must occur once in
 `receipt.artifacts[]`. Comparison output is fresh; never partially rerun an existing bundle.
+
+If `run_estate.py` launches the engine, the subject record/witness must name the **engine child**.
+Pin `wrapper` as that repository entrypoint and `<prefix>_wrapper_record` as its observation:
+the common process fields (`schema_version: 1`, command/cwd/times/exit/setup,
+runtime/input/output hashes and input binding), plus `wrapper_sha256` and `child_record_sha256`.
+The wrapper and child must agree on arguments, bytes and containing times; the fresh-output proof
+names the recorded wrapper invocation. A successful wrapper without a recorded child cannot route.
+
+A repository regression over an engine baseline separately requires `baseline_owner`,
+`baseline_output`, `baseline_witness`, and `baseline_record`. The latter has the common process
+fields (`schema_version: 1`) plus `owner_sha256` and `witness_sha256`, and binds **positive_input**.
+It must be the canonical engine invocation recorded by `fresh_output`; a `baseline_wrapper_record`
+may supply the same wrapper/child evidence. The independent predicate must pass on this exact
+receipt-backed baseline. The failing repository entrypoint cannot stand in for the engine.
 
 External-only evidence additionally needs `external_evidence`:
 `system`, `condition`, `record_sha256` (positive record), `confirmation_sha256`.
@@ -864,20 +917,42 @@ This is positive evidence supplied by an independent observation, not diagnosis 
   excerpts. All embedded text is data. **Never publish this file or the whole bundle.**
 - `repro/`: only the session-reviewed fictitious positive/negative flat `.twb/.tds/.json/.csv/.txt`
   files, under generated names. Original-byte reuse is refused. Executable/opaque/packed
-  candidates remain unestablished; oracle/code files stay privately indexed.
+  candidates remain unestablished; oracle/code files stay privately indexed. `.twb`/`.tds` must
+  be strict, DTD-free XML rooted at `workbook`/`datasource`, respectively. `.json` must be strict
+  UTF-8 JSON. Text/CSV must be nonempty UTF-8/UTF-8-sig without NUL or C0/C1 controls other than
+  tab/CR/LF. CSV needs a unique, nonempty header of at least two columns, a data row, equal-width
+  rows and successful strict CSV parsing.
 - `issue-payload.json`: strict allowlist of route/repository, flow/mode/scope, failure class,
   validated numeric engine version, control/reproducer readiness and generated fictitious-file
   names/sizes/hashes. No original hashes, names, paths, formulas, endpoints, excerpts or commands.
-  Written last. There is **no `issue-draft.md`**, rendering or publication action.
+  Written last **inside staging**. There is **no `issue-draft.md`**, rendering or publication action.
+
+The final destination never receives individual writes. Every output is written exclusively into
+a new private sibling stage using no-follow handles, re-read against held identities and bytes,
+and flushed before an atomic **no-replace directory rename**. The existing destination and its
+ancestors cannot redirect a write through a junction. Staged bytes and child directories are
+sealed before handles close: owner-readable protected ACLs on Windows, owner read/search-only
+modes on Linux. This closes the Windows child-handle-close/rename interval. Failed writes remove
+the owned stage, never leave a partial final bundle. An unassessable/swapped namespace is refused,
+not traversed for cleanup. The parent must accommodate a private sibling stage, not merely an
+ignored final leaf. Local Windows and Linux `renameat2` are supported; unsupported atomic
+publication/filesystem capabilities refuse rather than downgrade.
+
+The completed bundle remains read-only. Regenerate it rather than editing behind its hashes;
+its owner can explicitly change permissions for disposal. No protection against an administrator
+or owner deliberately changing permissions is claimed, nor power-loss durability or protection
+after someone explicitly unseals the result.
 
 Exits: **0** established (including non-fileable external/configuration results);
 **1** privacy/integrity/filesystem refusal; **2** usage; **3** incomplete.
 Missing route evidence yields `CANNOT_ESTABLISH`. A changed or unproven candidate yields
 `reproducer_not_established` and exit 3 while valid private attribution may remain.
+An **omitted** optional reproducer has that same exit-3 private result; a **present malformed**
+or unsafe declaration is an exit-1 refusal. Neither copies the original input.
 `public_filing_ready` is false for either, and is never publication consent.
 Input/destination refusals can happen before a bundle exists; the CLI prints the exact reason.
 
-This validates recorded consistency, not signed execution history, live connectivity, complete
+This validates recorded producer witnesses and invocation/result consistency, not signed execution history, live connectivity, complete
 migration fidelity or the honesty of the evidence producer. Fictitious authorship/redistribution
 is an explicit **session review of pinned bytes**, not automatic classification. Never derive it
 from customer text. A future publication gate must consume the payload after explicit user
