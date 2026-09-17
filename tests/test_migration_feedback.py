@@ -1438,7 +1438,7 @@ def test_retained_snapshot_bytes_are_rechecked_through_held_handle(tmp_path) -> 
             store.verify()
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows sharing modes are a native Windows boundary")
+@pytest.mark.skipif(os.name != "nt", reason="native sharing violation control is Windows-only")
 def test_windows_held_input_denies_write_and_inode_replacement(tmp_path) -> None:
     source = tmp_path / "source.txt"
     source.write_bytes(b"fictitious")
@@ -1460,7 +1460,7 @@ def test_format_guard_has_a_direct_negative_control(suffix, raw) -> None:
         feedback._reproducer_format(feedback.Evidence("candidate_input", ROOT / f"not-read{suffix}", raw))
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows close/rename sharing window requires its native ACL control")
+@pytest.mark.skipif(os.name != "nt", reason="native protected file DACL is Windows-only")
 def test_sealed_stage_blocks_repro_swap_and_byte_change_after_handles_close(tmp_path, monkeypatch) -> None:
     case = _case(tmp_path, monkeypatch, "local")
     real_move = feedback._windows_move
@@ -1595,7 +1595,7 @@ def test_role_identity_guard_precedes_any_evidence_read(tmp_path) -> None:
         assert not filesystem.files, "ambiguous roles must not acquire a borrowed byte snapshot"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Native Windows OPEN_REPARSE_POINT control")
+@pytest.mark.skipif(os.name != "nt", reason="NTFS junction regression")
 def test_native_directory_handle_does_not_follow_a_junction(tmp_path) -> None:
     target, link = tmp_path / "target", tmp_path / "link"
     target.mkdir()
@@ -1611,7 +1611,7 @@ def test_native_directory_handle_does_not_follow_a_junction(tmp_path) -> None:
         _remove_junction(link)
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Native Windows ACL inheritance cleanup control")
+@pytest.mark.skipif(os.name != "nt", reason="native protected file DACL is Windows-only")
 def test_restoring_stage_permissions_preserves_unsealed_child_read_access(tmp_path) -> None:
     stage = tmp_path / "stage"
     (stage / "repro").mkdir(parents=True)
