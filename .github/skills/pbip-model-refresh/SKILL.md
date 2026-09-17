@@ -66,6 +66,29 @@ owner are checked before rendering, after rendering and after writing. Failure, 
 pixels, changed identity or incomplete metadata cannot become a semantic verdict. The existing
 unreadable latch, refresh deadline and successful-worker behavior remain unchanged.
 
+✅ **DPI-cropped evidence is not acquired (#686).** Measured September 17, 2026 on actual
+Desktop **2.158.758.0 at 125% scaling**: the old child reported `ACQUIRED` for a **502×264**
+top-left crop of a **627×330** physical popup, omitting lower/right Close controls. Valid PNG,
+matching digest and nonblank pixels all passed; none established completeness.
+
+The killable capture child now sets its thread to **per-monitor DPI aware** before reading bounds
+or rendering, and restores its previous context afterwards. Before and after rendering, its full
+window rectangle must contain the independently physical **DWM extended-frame bounds**. The full
+rectangle retains invisible resize borders; allocating only the smaller visible-frame dimensions
+would introduce another crop. Unavailable DPI support returns `UNSUPPORTED`; failed setup or
+unestablished physical bounds returns `BLANK_OR_INCOMPLETE`, never a virtualized fallback.
+The v1 thread context requires Windows 10 1607 or later; v2 is not required. See Microsoft's
+[DPI context API](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setthreaddpiawarenesscontext)
+and [physical versus virtualized bounds](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getwindowrect).
+
+**Invariant:** `ACQUIRED` requires the complete physical frame of the pinned PID/HWND/owner.
+Independent physical bounds and bottom/right content markers gate the synthetic controls; merely
+matching the child's own dimensions or the old top-left pixels does not. This closes the measured
+geometric crop, not renderer staleness, text legibility or semantic classification.
+⚠️ **Post-fix actual-Desktop requalification is still required after #687 releases Desktop.**
+The retained actual-Desktop evidence above proves the old defect, not qualification of this fix.
+Observer eligibility remains `DIALOG_UNREADABLE` only; no OCR or new prompt classification is added.
+
 **The wait only queues an immutable exact-target snapshot.** Its single pending slot never waits
 for storage validation, Git, file/process creation or acquisition. A busy slot can drop an
 observation; later polls can offer it again. At most one attempt per PID/HWND is started.
