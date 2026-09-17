@@ -96,35 +96,40 @@ refreshed files, while a running session keeps its old in-memory copy.
 
 ## Delegating and monitoring work (orchestrator discipline, not persona content)
 
-Deliberately **outside** the synced block: this is what *whoever delegates* — the top-level session,
-or `tableau-migrator` orchestrating the builders — owes the work once it hands out a task. Incident
-evidence behind every rule below: [`docs/agent-operations.md`](docs/agent-operations.md).
+Dispatchers, including `tableau-migrator`, owe these checks.
+Incident evidence behind every rule below: [`docs/agent-operations.md`](docs/agent-operations.md).
 
-- **A subagent's own summary is a claim, not evidence — verify before repeating it.** Run an
-  authoritative, non-narrative check: an audit log's `action` field (`probe-cleared` vs
-  `manual-clear`), `credential_gate.py verify`'s exit code, an artifact count, a checksum. Measured
-  2026-08-02: a summary declared "Sign-off ready: YES" while the gate's log showed it had cleared its
-  credential gate unearned.
-- **An anomaly in elapsed time or tool-call count is a signal, not noise.** Ground truth is readable
-  *mid-run*; reading it early caught that bypass, a misclassified `UNREACHABLE` and a real Desktop
-  crash — none of which appeared in the eventual "done" message.
-- **When a summary and the ground truth disagree, ground truth wins, unconditionally.** Restate the
-  verdict from the evidence; do not soften it to be polite about the subagent's framing.
-- **A green CI is the start of review, not the end.** Measured 2026-08-09: five agents fixed eleven
-  issues, all five PRs went green, and a blind review — given only the diff and the issue, never the
-  author's rationale — requested changes on all five, because each fix had *moved* its failure
-  boundary rather than removing it.
-- **Review the diff without the author's explanation**; say plainly that a clean bill of health is a
-  legitimate outcome (or reviewers invent findings); tell authors to push back with evidence; send a
-  re-review to the reviewer who found the defect; and require **`Fixes #N`** in the commit message,
-  not merely "reference the issue" — four issues stayed open after being fixed and merged because
-  the commits said `(#46)`.
-- **After a host crash, in-flight subagent work is UNKNOWN — never assume lost, never assume
-  complete.** Do file-level forensics BEFORE re-dispatching: `git status` / `git diff --stat` in the
-  target worktree, plus file mtimes against the crash time. Measured 2026-08-19: three agents with
-  identical "in progress" status had finished, half-finished and done nothing; blind re-dispatch
-  would have overwritten verified-good work. **Prefer briefs that land work incrementally** (commit
-  and `git push` as you go): a crash then truncates the work instead of taking all of it.
+- **Verify claims before repeating them.** Use authoritative logs, gate exits, counts or checksums.
+  A summary is not evidence; contradictory ground truth wins, unconditionally.
+- **Inspect anomalous elapsed time/tool-call counts mid-run** against ground truth, not the
+  eventual summary.
+- **Green CI starts review.** Give reviewers only the issue/requirement and diff, never the
+  author's rationale.
+- **Allow a clean verdict and evidence-backed pushback.** Return fixes to the same reviewer.
+  Full-fix commits require `Fixes #N`; partial work uses `Refs #N`, not merely `(#N)`.
+- **After a crash, in-flight work is UNKNOWN.** Before re-dispatch, inspect target-worktree
+  `git status`, `git diff --stat` and file mtimes against crash time; neither assume lost nor done.
+  Brief agents to commit and push incrementally, not just commit.
+
+### Repository changes — root dispatcher
+
+Follow the [contributor lifecycle](CONTRIBUTING.md#issue-to-pr-lifecycle) and the contract below.
+
+1. **Issue → independent plan review → implementation → blind diff review.** Filing needs only
+   problem, outcome/default and privacy; blank issues remain. Develop a bounded plan; check open
+   work, dependencies, shared-file owners and upstream/local routing. Record independent
+   simplicity/UX review link/verdict; only an approved revision advances to behavioral coding.
+2. **Labels are the state authority.** Approval replaces `status:needs-decision` with
+   `status:plan-approved`; add `status:ready-for-implementation` only when no dependency/evidence
+   blocker remains, retaining approval. New blockers remove readiness; invalidated plans also lose
+   approval and regain `status:needs-decision`. Templates prompt; they do not grant approval.
+3. **Brief the approved base SHA and file owners.** Re-review substantive plan deltas before coding.
+   The PR records issue/plan links, acceptance results, validation commands/exits and privacy.
+   Record the blind-review verdict and exact head SHA; **every later commit makes review stale**.
+   Re-review before merge; keep one concern per PR and the after-round-2 scope freeze.
+
+The [mechanical exception](CONTRIBUTING.md#narrow-mechanical-exception) alone may skip issue/plan
+review: one-sentence byte-local reason; validation, privacy and exact-head blind review still apply.
 
 ### The review contract — state this in the brief BEFORE coding
 
