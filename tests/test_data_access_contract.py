@@ -580,40 +580,61 @@ def test_spec_fact_shapes_precede_classifier_fallback(root: Path, path: tuple, v
 
 @pytest.mark.usefixtures("desktop")
 @pytest.mark.parametrize("sql", ["", "-- comment only", "/* comment only */", None])
-def test_custom_sql_preprocessing_failure_invalidates_earned_key(root: Path, sql: str | None) -> None:
-    """Comment-only SQL cannot leave the same key's earlier earned state green."""
+def test_custom_sql_operator_required_invalidates_earned_key(root: Path, sql: str | None) -> None:
+    """Opaque custom payloads invalidate prior proof without earning connection evidence."""
     _earn(root)
+    before = _rows(root)
     table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": sql}
-    assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (1, "ERROR")
-    last = _rows(root)[-1]
-    assert (last["action"], last["sources"]) == ("probe-error", [KEY])
+    assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (1, "OPERATOR_REQUIRED")
+    rows = _rows(root)
+    last = rows[-1]
+    assert (last["action"], last.get("sources"), last["detail"]) == (
+        "probe-error",
+        [KEY],
+        "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned",
+    )
+    assert rows[:-1] == before, "custom SQL must append only its refusal, never earned proof or a clear"
     assert _assess(root).state == "blocked"
     assert _assess(root).codes == ("probe-error",)
 
 
 @pytest.mark.usefixtures("desktop")
-def test_malformed_custom_sql_type_also_records_its_terminal_error(root: Path) -> None:
-    """A preprocessing exception, rather than a handled ValueError, must still invalidate proof."""
+def test_nonstring_custom_sql_is_opaque_and_invalidates_earned_key(root: Path) -> None:
+    """A non-string payload requires a keyed refusal, not type inspection or an exception."""
     _earn(root)
+    before = _rows(root)
     table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": True}
-    with pytest.raises(TypeError):
-        _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False))
-    assert (_rows(root)[-1]["action"], _rows(root)[-1]["sources"]) == ("probe-error", [KEY])
+    assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (1, "OPERATOR_REQUIRED")
+    rows = _rows(root)
+    last = rows[-1]
+    assert (last["action"], last.get("sources"), last["detail"]) == (
+        "probe-error",
+        [KEY],
+        "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned",
+    )
+    assert rows[:-1] == before, "custom SQL must append only its refusal, never earned proof or a clear"
+    assert _assess(root).state == "blocked"
     assert _assess(root).codes == ("probe-error",)
 
 
 @pytest.mark.usefixtures("desktop")
-def test_custom_sql_success_is_keyed_and_earns_only_after_clear(root: Path) -> None:
-    """Real custom-query scaffolding reaches the same keyed attempt/clear boundary."""
+def test_custom_sql_without_ordinary_evidence_never_earns_proof(root: Path) -> None:
+    """Even valid SQL receives only a keyed refusal; no DATA_OK or clear is earned."""
     assert gate.apply_block(root, [KEY]) == 0
+    before = _rows(root)
     table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": "SELECT 'private-query-value'"}
-    assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (0, "DATA_OK")
-    last = _rows(root)[-1]
-    assert (last["action"], last["sources"]) == ("probe-data_ok", [KEY])
+    assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (1, "OPERATOR_REQUIRED")
+    rows = _rows(root)
+    last = rows[-1]
+    assert (last["action"], last.get("sources"), last["detail"]) == (
+        "probe-error",
+        [KEY],
+        "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned",
+    )
+    assert rows[:-1] == before, "custom SQL must append only its refusal, never earned proof or a clear"
     assert "private-query-value" not in json.dumps(last)
     assert _assess(root).state == "blocked"
-    assert gate.clear_block(root, "custom query returned a row", earned=True, sources=[KEY]) == 0
-    assert _assess(root).state == "live_data_ok"
+    assert _assess(root).codes == ("probe-error",)
 
 
 @pytest.mark.usefixtures("desktop")
