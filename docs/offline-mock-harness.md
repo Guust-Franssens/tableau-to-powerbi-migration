@@ -47,10 +47,15 @@ confidence. So:
   the engine's injected-caller seam.
 * `test_the_mock_never_points_at_a_real_host` asserts the generated environment contains a loopback
   URL and no `online.tableau.com`.
-* `run_estate.py`'s provenance stamping is the one step that *could* contact a real site. It is safe
-  here for two reasons that are both worth knowing: `resolve_env` gives the **process environment
-  precedence over `.env`**, and the whole call is best-effort inside a broad `except`. In the E2E it
-  reports `0 confirmed against the site` and carries on.
+* `run_estate.py`'s provenance worker uses its real HTTP client. The E2E keeps `tableau.serve(site)`
+  **open through `run_estate.main`**, and a scoped `tableau.env_for(site, base)` process-environment
+  overlay is present when the worker is spawned. `resolve_env` gives those loopback values
+  **precedence over `.env`**; the overlay is restored when the context exits. A client-local env
+  dictionary alone does not reach a spawned worker.
+* ✅ The E2E requires **three of three byte-confirmed live origins**, including exact workbook
+  LUIDs and held/downloaded SHA-256 agreement. Provenance is supervised, not a broad best-effort
+  exception. On the separate strict #649 stack, a known published occurrence without authority
+  correctly stops the coordinator with **exit 11**; this harness does not bypass that refusal.
 
 ---
 
@@ -106,7 +111,8 @@ under test, a parser bug would be invisible because both sides would move togeth
 
 ✅ Direct router controls and the unmodified `assess_estate.Site` client over loopback cover:
 
-* `GET /api/<ver>/sites/<site-id>/users/<user-id>`: the signed-in `user-1` identity, with
+* `GET /api/<ver>/sites/<site-id>/users/<user-id>`: the configurable signed-in identity (`user-1`
+  remains the ordinary default), with
   `SiteAdministratorExplorer` (the least broad site-admin role admitted by provenance P).
 * `GET /api/<ver>/sites/<site-id>/datasources?filter=contentUrl:eq:<value>&pageSize=1000&pageNumber=1`:
   exact, **case-sensitive** URL equality, before paging. String-valued pagination describes the
@@ -170,12 +176,56 @@ checks unfiltered paging; it never relies on two LUIDs sharing a content URL.
 Dashboard** to that shared datasource; it does not rewrite their fixture bytes or turn those
 metadata edges into source-bound provenance.
 
-❌ This proves **route fidelity only**, not successful production provenance, catalog completeness on
-a real site, or source identity across hosts. In particular, the unchanged E2E closes its mock before
-`run_estate` starts, its synthetic site/user ids are not UUIDs, and the published fixture's
-`https://tableau.contoso.com/t/Finance/…` origin is not the loopback site's origin. These are separate
-prerequisites for an authenticated, source-bound provenance positive control; adding REST routes
-does not waive them.
+### Live mock lifecycle and harvested identity (separate #562 prerequisite)
+
+The route tests alone establish route fidelity, not resolved provenance. The joined E2E additionally
+provides the production prerequisites, without changing provenance, package construction or S2:
+
+1. **Identity:** deterministic UUID site/user ids and site content URL `Finance`. Both sign-in and
+   exact user detail use the configured user id. `TableauSite()` still defaults to
+   `site-0000` / `user-1` / `mock`.
+2. **Source bytes:** inside the active `tableau.serve` context, opt in with
+   `estate.project_published_sources(site, base)` **before harvest**. Only the in-memory published
+   workbook's repository origin/site/path and SQL-proxy server are projected to that loopback
+   origin/site. The fixture's `SalesMaster` content-URL segment, `?rev=1.0`, stale repository id and
+   all committed fixture bytes remain unchanged. A catalog display name or metadata-only edge
+   never supplies the source identity. Default sites remain unprojected.
+3. **Production filenames:** `estate.harvest` composes
+   `harvest_estate_assets.asset_path`, producing **`<luid>_<sanitized-name>.twbx/.tdsx`**. The prefix
+   is not decoration: a bare `Attic_Copy` cannot recover the remote display name `Attic Copy`.
+   The engine stand-in strips only a leading canonical UUID plus its separator when naming PBIP
+   units, so model/report names and deployment expectations do not change.
+4. **Lifetime and environment:** keep the loopback server and scoped environment overlay alive
+   through coordinator execution and worker spawn, not just assessment/harvest.
+
+✅ `_assert_source_provenance` compares persisted fingerprints/origins with independently served and
+harvested bytes. When the production module supports #649's published-dependency schema,
+`_assert_published_authority` also requires **exactly one resolved row** for **Attic Copy**,
+the normalized key `finance/salesmaster`, source ordinal **0**, the expected datasource LUID, held
+source SHA and workbook LUID. It checks
+the **exact user, filtered catalog and datasource-detail requests**, once each. This condition is
+on the production capability, **not on whether the output happened to include the block**; deleting
+the block cannot skip the assertions. Sales Review/Ops Dashboard's metadata-only edges remain
+excluded. All existing three-model/two-report, folder, binding, ordering and deployment checks stay.
+
+The authority assertions precede the coarse coordinator exit assertion deliberately. Separate
+one-arm negative controls must fail `OFFLINE_RESOLVED_AUTHORITY_COUNT` or
+`OFFLINE_RESOLVED_AUTHORITY_ROW`: close the server early; remove the spawned worker's env overlay;
+remove the harvested LUID prefix; use a non-UUID site or user; retain a foreign source origin or site;
+refuse user detail, the exact filtered catalog, or datasource detail. A nonzero process exit, import
+error or generic coordinator refusal alone is **not** a killed control. These are direct mutations,
+not additions to a mutation runner.
+
+✅ Verified on the isolated #562 prerequisite stacked with #649 head
+`cb8d22f419a7cdba4f73e5670529f7e3ec8c9c7e`: all ten separate one-arm invocations exited 1 at those
+authority assertions (three missing-block counts; seven `cannot_establish`-versus-`resolved` rows).
+The unmutated resolved-authority control passed. The mock/E2E suites passed **211 tests**, and the
+two unchanged #649 provenance suites passed **1,224 tests**. These numbers describe this synthetic
+estate, not a customer estate.
+
+❌ This does not establish a real site's catalog completeness, live deployment, engine conversion
+fidelity, package/S2 or consumer START_READY. PR #649 remains a separate production change; this
+prerequisite changes only the two mocks, their direct/E2E tests and this document.
 
 ---
 

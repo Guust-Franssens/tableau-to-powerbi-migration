@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import sqlite3
 import sys
 from pathlib import Path
+from urllib.parse import urlencode
 
 import pytest
 
@@ -72,9 +74,16 @@ def _pipeline(tmp_path_factory):
     feedback. Each deploy test still gets its own workspace and its own copy of the bundle path.
     """
     work = tmp_path_factory.mktemp("estate")
-    site = estate.build_site()
+    site = estate.build_site(
+        site_id="11111111-1111-4111-8111-111111111111",
+        user_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        content_url="Finance",
+    )
 
-    with tableau.serve(site) as base:
+    with tableau.serve(site) as base, pytest.MonkeyPatch.context() as environment:
+        for key, value in tableau.env_for(site, base).items():
+            environment.setenv(key, value)
+        estate.project_published_sources(site, base)
         client = ae.Site(tableau.env_for(site, base))
         client.sign_in()
         raw = ae.collect(client, None)
@@ -85,18 +94,19 @@ def _pipeline(tmp_path_factory):
         harvested = estate.harvest(site, work, base_url=base, token=client.token)
         client.sign_out()
 
-    engine = estate.install_fake_engine(work / "engine")
-    code = run_estate.main(
-        [
-            "--input",
-            str(work / "assets"),
-            "--output",
-            str(work / "bundle"),
-            "--engine",
-            str(engine),
-            "--allow-noncanonical-engine",
-        ]
-    )
+        engine = estate.install_fake_engine(work / "engine")
+        code = run_estate.main(
+            [
+                "--input",
+                str(work / "assets"),
+                "--output",
+                str(work / "bundle"),
+                "--engine",
+                str(engine),
+                "--allow-noncanonical-engine",
+            ]
+        )
+    _assert_source_provenance(work, site, base)
     assert code == 0, "the coordinator must accept the bundle before anything is deployed"
 
     return {
@@ -107,6 +117,62 @@ def _pipeline(tmp_path_factory):
         "harvested": harvested,
         "assembled": assembled,
     }
+
+
+def _assert_source_provenance(work: Path, site: tableau.TableauSite, base: str) -> None:
+    """Earn authority before checking the coarse coordinator exit, including on the #649 stack."""
+    provenance = json.loads((work / "bundle" / "source-provenance.json").read_text(encoding="utf-8"))
+    if hasattr(run_estate.prov, "PUBLISHED_DEPENDENCIES_SCHEMA"):
+        _assert_published_authority(provenance, site)
+
+    records = provenance["inputs"]
+    assert provenance["input_count"] == len(records) == len(site.workbooks) == 3
+    origins = [record.get("origin") for record in records]
+    assert all(origins), "OFFLINE_BYTE_CONFIRMED_ORIGINS: all three harvested workbooks require live origins"
+    assert {origin["workbook_luid"] for origin in origins} == {workbook.luid for workbook in site.workbooks}
+    for record, origin in zip(records, origins, strict=True):
+        workbook = next(workbook for workbook in site.workbooks if workbook.luid == origin["workbook_luid"])
+        raw = (work / "assets" / record["input"]["file"]).read_bytes()
+        assert raw == workbook.content
+        assert record["input"]["file"].startswith(f"{workbook.luid}_")
+        assert record["input"]["sha256"] == origin["remote_sha256"] == hashlib.sha256(raw).hexdigest()
+        assert (origin["match"], origin["matched_by"], origin["revision_match"]) == ("sha256", "luid", "same")
+        assert (origin["server"], origin["site"]) == (base, site.content_url)
+    assert provenance["phase"] == {"status": "success", "errors": []}
+
+
+def _assert_published_authority(provenance: dict, site: tableau.TableauSite) -> None:
+    """The source fixture, not the two metadata-only edges, determines the one resolved row."""
+    blocks = [
+        record["origin"]["published_dependencies"]
+        for record in provenance["inputs"]
+        if "published_dependencies" in (record.get("origin") or {})
+    ]
+    assert len(blocks) == 1, "OFFLINE_RESOLVED_AUTHORITY_COUNT: exactly one source-bound published dependency"
+    rows = blocks[0]["rows"]
+    assert len(rows) == 1 and rows[0]["state"] == "resolved", "OFFLINE_RESOLVED_AUTHORITY_ROW: resolution is required"
+    workbook = next(workbook for workbook in site.workbooks if workbook.name == "Attic Copy")
+    shared = site.datasources[0]
+    assert blocks[0] == {
+        "schema": "tableau-published-dependencies/v1",
+        "source_sha256": hashlib.sha256(workbook.content).hexdigest(),
+        "workbook_luid": workbook.luid,
+        "source_match": "sha256",
+        "rows": [
+            {
+                "source_ordinal": 0,
+                "published_key": "finance/salesmaster",
+                "state": "resolved",
+                "candidate_count": 1,
+                "datasource_luid": shared.luid,
+            }
+        ],
+    }, "OFFLINE_PUBLISHED_IDENTITY: held source, workbook and expected datasource LUID must agree"
+    prefix = f"/api/{site.rest_version}/sites/{site.site_id}"
+    query = urlencode({"filter": "contentUrl:eq:SalesMaster", "pageSize": 1000, "pageNumber": 1})
+    routes = (f"{prefix}/users/{site.user_id}", f"{prefix}/datasources?{query}", f"{prefix}/datasources/{shared.luid}")
+    for route in routes:
+        assert site.requests.count(("GET", route)) == 1, f"OFFLINE_AUTHORITY_REQUEST: {route}"
 
 
 @pytest.fixture(name="bundle")
