@@ -348,6 +348,63 @@ def _manual_consumers(root: Path) -> tuple[dict, dict]:
     return readiness, coverage
 
 
+@pytest.mark.parametrize("kind", [rev.KIND_UNKNOWN, rev.KIND_DASHBOARD, rev.KIND_WORKSHEET])
+@pytest.mark.parametrize(
+    ("provider", "name", "names"),
+    [
+        ("embedded_thumbnail", "tableau-Ops", ("tableau-Ops",)),
+        ("public_playwright", "tableau-Ops", ("tableau-Ops",)),
+        ("server_rest", "tableau-Ops", ("tableau-Ops",)),
+        ("oracle_capture", "tableau-Ops", ("tableau-Ops",)),
+        ("unrecognized", "tableau-Ops", ("tableau-Ops",)),
+        ("manual", "Ops", ("Ops",)),
+        ("manual", "tableau-Ops", ("tableau-Ops", "Ops")),
+        ("manual", "TABLEAU-Ops", ("TABLEAU-Ops", "Ops")),
+        ("manual", "before-tableau-Ops", ("before-tableau-Ops",)),
+        ("manual", "tableau-tableau-Ops", ("tableau-tableau-Ops", "tableau-Ops")),
+    ],
+)
+def test_evidence_candidate_preserves_established_kind_and_names(
+    kind: str, provider: str, name: str, names: tuple[str, ...]
+) -> None:
+    """Candidate projection preserves established evidence, not raw provider-default scope."""
+    evidence = rev.Evidence(
+        name=name,
+        kind=kind,
+        grade=rev.GRADE_UNKNOWN,
+        origin="reference",
+        provider=provider,
+        path="unused.png",
+        width=320,
+        height=240,
+        workbook_sha="a" * 64,
+        workbook_luid=None,
+        workbook_name=None,
+        render_digest="b" * 64,
+    )
+    candidate = evidence.candidate()
+    assert candidate.kind == kind, "candidate projection must preserve the already-established evidence kind"
+    assert candidate.names == names
+
+
+@pytest.mark.parametrize(
+    ("provider", "kind"),
+    [
+        ("embedded_thumbnail", rev.KIND_WORKSHEET),
+        ("public_playwright", rev.KIND_DASHBOARD),
+        ("server_rest", rev.KIND_DASHBOARD),
+        ("manual", rev.KIND_UNKNOWN),
+        ("oracle_capture", rev.KIND_UNKNOWN),
+        ("unrecognized", rev.KIND_UNKNOWN),
+    ],
+)
+def test_raw_reference_candidate_retains_provider_scope(provider: str, kind: str) -> None:
+    """Raw entry/state consumers still establish scope before constructing evidence."""
+    candidate = rev.reference_candidate({"name": "tableau-Ops"}, {"provider": provider})
+    assert candidate.kind == kind
+    assert candidate.names == (("tableau-Ops", "Ops") if provider == "manual" else ("tableau-Ops",))
+
+
 @pytest.mark.parametrize("kind", ["dashboard", "worksheet"])
 @pytest.mark.parametrize(
     ("scope", "field"),

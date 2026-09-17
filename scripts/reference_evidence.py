@@ -409,8 +409,8 @@ class Evidence:  # pylint: disable=too-many-instance-attributes
         )
 
     def candidate(self) -> Candidate:
-        """This record as an external-producer candidate, using the shared declaration rules."""
-        return reference_candidate({"name": self.name, "view_type": self.kind}, {"provider": self.provider})
+        """Project shared name spellings without reinterpreting the already-established kind."""
+        return Candidate(names=_reference_names(self.name, self.provider), kind=self.kind)
 
     def workbook(self) -> WorkbookIdentity:
         """The workbook this render declares it came from, on whichever axes its producer wrote."""
@@ -639,6 +639,14 @@ def _entry_scope(entry: dict[str, Any], provider: str | None) -> str:
     return PROVIDER_SCOPE.get(str(provider or ""), KIND_UNKNOWN)
 
 
+def _reference_names(name: str, provider: str | None) -> tuple[str, ...]:
+    """The producer spelling and, for manual captures, its single capture-imposed prefix alias."""
+    names = [name]
+    if provider == "manual" and name.casefold().startswith(MANUAL_NAME_PREFIX):
+        names.append(name[len(MANUAL_NAME_PREFIX) :])
+    return tuple(names)
+
+
 def reference_candidate(entry: dict[str, Any], state: dict[str, Any]) -> Candidate:
     """Pure name/type projection of a reference state, not evidence validation or attribution.
 
@@ -649,10 +657,7 @@ def reference_candidate(entry: dict[str, Any], state: dict[str, Any]) -> Candida
     """
     name = str(entry.get("name") or "")
     provider = state.get("provider")
-    names = [name]
-    if provider == "manual" and name.casefold().startswith(MANUAL_NAME_PREFIX):
-        names.append(name[len(MANUAL_NAME_PREFIX) :])
-    return Candidate(names=tuple(names), kind=_entry_scope({**entry, **state}, provider))
+    return Candidate(names=_reference_names(name, provider), kind=_entry_scope({**entry, **state}, provider))
 
 
 def provider_grade(provider: str, capabilities: Any) -> str:
