@@ -66,11 +66,30 @@ def test_unique_headers_keep_each_value_and_caption_identity(tmp_path: Path) -> 
         b"Region,Amount,Amount,Other\nWest,999,1,7\n",
         b"Region,Region,Amount\nWest,East,1\n",
         b"Region,Unknown,Unknown,Amount\nWest,1,999,7\n",
+        b"Region,Amount, Amount,Other\nWest,1,999,7\n",
+        b"Region,Amount,Amount ,Other\nWest,1,999,7\n",
+        b"Region,Amount,\tAmount\t,Other\nWest,1,999,7\n",
+        b"Region, Amount ,Amount,Other\nWest,999,1,7\n",
+        b"Region, Amount ,\tAmount\t,Other\nWest,1,999,7\n",
+        b"Region,\tRegion ,Amount,Other\nWest,East,1,7\n",
+        b"Region,Unknown,\tUnknown ,Amount\nWest,1,999,7\n",
     ],
-    ids=["measure-first-order", "measure-reversed", "dimension", "unmapped"],
+    ids=[
+        "measure-first-order",
+        "measure-reversed",
+        "dimension",
+        "unmapped",
+        "leading-space-alias",
+        "trailing-space-alias",
+        "tab-alias",
+        "reversed-alias",
+        "two-aliases",
+        "dimension-alias",
+        "unmapped-alias",
+    ],
 )
 def test_duplicate_headers_refuse_the_entire_view(tmp_path: Path, payload: bytes) -> None:
-    """Even a unique measure beside duplicate captions must not become numeric evidence."""
+    """Raw duplicates and aliases of one role key refuse even neighboring unique measures."""
     _write_oracle(tmp_path, payload)
 
     result = builder.build(tmp_path, ROLES)
@@ -83,20 +102,96 @@ def test_duplicate_headers_refuse_the_entire_view(tmp_path: Path, payload: bytes
     ]
 
 
-def test_a_duplicate_view_does_not_discard_a_separate_unique_view(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"Region,Amount,Amount\nWest,1,999\n",
+        b"Region,Amount, Amount \nWest,1,999\n",
+        b"Region,Amount,\tAmount\t\nWest,1,999\n",
+        b"Region, Amount ,\tAmount\t\nWest,1,999\n",
+    ],
+    ids=["raw-duplicate", "space-alias", "tab-alias", "two-aliases"],
+)
+def test_a_duplicate_view_does_not_discard_neighboring_unique_views(tmp_path: Path, payload: bytes) -> None:
     """Refusal is view-scoped, not a silent partial mapping or an estate-wide stop."""
     _write_oracle(
         tmp_path,
-        b"Region,Amount,Amount\nWest,1,999\n",
-        b"Region,Amount,Other\nEast,1,999\n",
+        b"Region,Amount,Other\nWest,1,999\n",
+        payload,
+        b"Region,Amount,Other\nEast,2,998\n",
     )
 
     result = builder.build(tmp_path, ROLES)
 
+    assert result["item_count"] == 4
+    assert [
+        (item["source"]["view_name"], item["grain_filters"], item["name"], item["tableau_value"])
+        for item in result["items"]
+    ] == [
+        ("View 0", {"Region": "West"}, "Amount", 1.0),
+        ("View 0", {"Region": "West"}, "Other", 999.0),
+        ("View 2", {"Region": "East"}, "Amount", 2.0),
+        ("View 2", {"Region": "East"}, "Other", 998.0),
+    ]
+    assert result["skipped_views"] == [
+        {"view": "View 1", "reason": "duplicate CSV headers; caption-keyed field roles are ambiguous"}
+    ]
+    assert result["unmapped_columns"] == []
+
+
+@pytest.mark.parametrize("caption", [b" Amount ", b"\tAmount\t", b"amount"])
+@pytest.mark.parametrize("role", ["MEASURE", "DIMENSION"])
+def test_distinct_exact_caption_keys_keep_their_roles(tmp_path: Path, caption: bytes, role: str) -> None:
+    """Exact role keys take precedence; whitespace and case are not blanket-normalized."""
+    _write_oracle(tmp_path, b"Region,Amount," + caption + b",Other\nWest,1,999,7\n")
+    name = caption.decode("utf-8")
+    roles = {"Workbook": {**ROLES["Workbook"], name: role}}
+
+    result = builder.build(tmp_path, roles)
+
+    expected_items = [("Amount", 1.0), ("Other", 7.0)]
+    expected_grain = {"Region": "West"}
+    if role == "MEASURE":
+        expected_items.insert(1, (name, 999.0))
+    else:
+        expected_grain[name] = "999"
+    assert [(item["name"], item["tableau_value"]) for item in result["items"]] == expected_items
+    assert result["item_count"] == len(expected_items)
+    assert all(item["grain_filters"] == expected_grain for item in result["items"])
+    assert result["skipped_views"] == []
+    assert result["unmapped_columns"] == []
+
+
+def test_empty_exact_role_still_uses_the_stripped_caption_key(tmp_path: Path) -> None:
+    """A present but empty role retains classification's existing stripped-key fallback."""
+    _write_oracle(tmp_path, b"Region,Amount, Amount ,Other\nWest,1,999,7\n")
+    roles = {"Workbook": {**ROLES["Workbook"], " Amount ": ""}}
+
+    result = builder.build(tmp_path, roles)
+
+    assert result["items"] == []
+    assert result["item_count"] == 0
+    assert result["unmapped_columns"] == []
+    assert result["skipped_views"] == [
+        {"view": "View 0", "reason": "duplicate CSV headers; caption-keyed field roles are ambiguous"}
+    ]
+
+
+@pytest.mark.parametrize("caption", [b" Amount ", b"\tAmount\t"])
+def test_unique_stripped_caption_still_resolves_without_renaming(tmp_path: Path, caption: bytes) -> None:
+    """A whitespace alias is not ambiguous unless another header resolves to the same key."""
+    _write_oracle(tmp_path, b"Region," + caption + b",Other\nWest,1,999\n")
+
+    result = builder.build(tmp_path, ROLES)
+
     assert result["item_count"] == 2
-    assert [(item["name"], item["tableau_value"]) for item in result["items"]] == [("Amount", 1.0), ("Other", 999.0)]
-    assert all(item["source"]["view_name"] == "View 1" for item in result["items"])
-    assert [entry["view"] for entry in result["skipped_views"]] == ["View 0"]
+    assert [(item["name"], item["tableau_value"]) for item in result["items"]] == [
+        (caption.decode("utf-8"), 1.0),
+        ("Other", 999.0),
+    ]
+    assert all(item["grain_filters"] == {"Region": "West"} for item in result["items"])
+    assert result["skipped_views"] == []
+    assert result["unmapped_columns"] == []
 
 
 @pytest.mark.parametrize(
@@ -128,15 +223,20 @@ def test_grain_text_survives_csv_parsing_exactly(tmp_path: Path, payload: bytes,
     [
         (b"1.23", 1.23, "number"),
         (b"0", 0.0, "number"),
+        (b"0.123", 0.123, "number"),
         (b"-.5", -0.5, "number"),
         (b"1234.56", 1234.56, "number"),
         (b"1,234", 1234.0, "number"),
+        (b"123,456.78", 123456.78, "number"),
         (b"-12,345,678.90", -12345678.9, "number"),
+        (b"0%", 0.0, "percent"),
         (b"19.5%", 0.195, "percent"),
         (b"-1,234.5 %", -12.345, "percent"),
+        (b"$0", 0.0, "currency"),
         (b"$1,234.56", 1234.56, "currency"),
         (b" - $ 12.50 ", -12.5, "currency"),
         (b"\xc2\xa312.50", 12.5, "currency"),
+        (b"\xe2\x82\xac0.123", 0.123, "currency"),
         (b"\xe2\x82\xac1,234.56", 1234.56, "currency"),
         (b"\xc2\xa512", 12.0, "currency"),
     ],
@@ -170,6 +270,9 @@ def test_supported_numbers_still_emit_items(tmp_path: Path, cell: bytes, expecte
         b"NaN",
         b"Infinity",
         b"\xd9\xa1.\xd9\xa2\xd9\xa3",
+        b"-0,123",
+        b"-0,123%",
+        b"-$0,123",
     ],
 )
 def test_unsupported_numbers_stay_text_and_emit_no_item(tmp_path: Path, cell: bytes) -> None:
@@ -186,13 +289,48 @@ def test_unsupported_numbers_stay_text_and_emit_no_item(tmp_path: Path, cell: by
 
 
 @pytest.mark.parametrize(
+    "number",
+    [b"0,123", b"0,000", b"00,123", b"000,001", b"01,234", b"012,345", b"000,001,234.56"],
+)
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [(b"", b""), (b"", b"%"), (b"\xe2\x82\xac", b"")],
+    ids=["plain", "percent", "currency"],
+)
+def test_zero_prefixed_grouped_numbers_stay_text(tmp_path: Path, number: bytes, prefix: bytes, suffix: bytes) -> None:
+    """Every format arm refuses a leading zero before comma grouping, including zero itself."""
+    cell = prefix + number + suffix
+    raw = cell.decode("utf-8")
+    assert builder.normalise_value(raw) == (raw, "text")
+    _write_oracle(tmp_path, b'Region,Amount\nWest,"' + cell + b'"\n')
+
+    result = builder.build(tmp_path, ROLES)
+
+    assert result["items"] == []
+    assert result["item_count"] == 0
+    assert result["skipped_views"] == []
+
+
+@pytest.mark.parametrize(
     ("payload", "expected_exit", "expected_count"),
     [
         (b"Region,Amount,Other\nWest,1,999\n", 0, 2),
         (b"Region,Amount,Amount\nWest,1,999\n", 1, 0),
+        (b"Region,Amount,\tAmount \nWest,1,999\n", 1, 0),
         (b'Region,Amount\nWest,"1,23"\n', 1, 0),
+        (b'Region,Amount\nWest,"0,123"\n', 1, 0),
+        (b'Region,Amount\nWest,"0,123%"\n', 1, 0),
+        (b'Region,Amount\nWest,"\xe2\x82\xac0,123"\n', 1, 0),
     ],
-    ids=["unique", "duplicate", "unsupported"],
+    ids=[
+        "unique",
+        "duplicate",
+        "alias",
+        "unsupported",
+        "zero-prefix-plain",
+        "zero-prefix-percent",
+        "zero-prefix-currency",
+    ],
 )
 def test_cli_reports_whether_any_numeric_item_was_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: bytes, expected_exit: int, expected_count: int

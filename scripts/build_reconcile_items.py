@@ -33,8 +33,9 @@ Splitting dimensions from measures is done from the Tableau **field role** (``DI
 ``MEASURE``) read from the Metadata API, not from guessing at the data. A header with no matching
 field is recorded as ``unmapped`` rather than assumed -- that is how Tableau's generated fields
 (``Latitude (generated)``) are dropped: they are genuinely absent from the datasource's field list.
-Duplicate header captions refuse the whole view: a caption-keyed role map cannot disambiguate
-positions. Grain text is retained exactly as CSV parses it, including embedded newlines.
+Duplicate resolved captions refuse the whole view, including whitespace aliases of the same role
+key: a caption-keyed role map cannot disambiguate positions. Grain text is retained exactly as CSV
+parses it, including embedded newlines.
 
 ⚠️ **The residual risk this CANNOT solve.** A view-level filter leaves *no trace in the exported
 rows* -- if the view excludes a region, the CSV simply has fewer rows and nothing says why. So a
@@ -72,7 +73,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 LOG = logging.getLogger("reconcile-items")
 
-_NUMBER = r"(?:(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?|\.[0-9]+)"
+_NUMBER = r"(?:(?:[0-9]+|[1-9][0-9]{0,2}(?:,[0-9]{3})+)(?:\.[0-9]+)?|\.[0-9]+)"
 _PERCENT = re.compile(rf"^\s*(-?{_NUMBER})\s*%\s*$")
 _CURRENCY = re.compile(rf"^\s*(-?)\s*[$£€¥]\s*({_NUMBER})\s*$")
 _PLAIN = re.compile(rf"^\s*-?{_NUMBER}\s*$")
@@ -87,8 +88,9 @@ def normalise_value(text: str) -> tuple[float | str | None, str]:
     conversion is returned alongside the value and recorded per item.
 
     The culture-free grammar accepts ASCII digits, a leading minus, dot decimals (including .5),
-    and comma-separated groups of exactly three digits. Existing currency symbols and a percent
-    suffix wrap that same grammar. Other spellings remain text; no locale is inferred.
+    and comma-separated groups of exactly three digits with a leading digit from 1 to 9. Ungrouped
+    zero remains supported. Existing currency symbols and a percent suffix wrap that same grammar.
+    Other spellings remain text; no locale is inferred.
     """
     if text is None:
         return None, "none"
@@ -107,18 +109,23 @@ def normalise_value(text: str) -> tuple[float | str | None, str]:
     return raw, "text"
 
 
+def _resolved_caption_key(header: str, roles: dict[str, str]) -> str:
+    return header if roles.get(header) else header.strip()
+
+
 def classify_columns(headers: list[str], roles: dict[str, str]) -> dict[str, list[str]]:
     """Split headers into grain / value / unmapped using Tableau's own field roles.
 
     Never infers a role from the data. A header absent from ``roles`` is ``unmapped``, which is both
     how generated fields are excluded and how an aliased column header announces itself instead of
-    being silently mis-bound.
+    being silently mis-bound. Exact role keys precede stripped-key fallback; duplicate detection
+    uses that same resolved key.
     """
     grain: list[str] = []
     value: list[str] = []
     unmapped: list[str] = []
     for header in headers:
-        role = roles.get(header) or roles.get(header.strip())
+        role = roles.get(_resolved_caption_key(header, roles))
         if role == "DIMENSION":
             grain.append(header)
         elif role == "MEASURE":
@@ -195,7 +202,7 @@ def build(oracle_dir: Path, roles_by_workbook: dict[str, dict[str, str]]) -> dic
         with (oracle_dir / data["path"]).open(encoding="utf-8-sig", newline="") as stream:
             reader = csv.DictReader(stream)
             headers = reader.fieldnames or []
-            if len(headers) != len(set(headers)):
+            if len(headers) != len({_resolved_caption_key(header, roles) for header in headers}):
                 skipped.append(
                     {
                         "view": view.get("view_name"),
