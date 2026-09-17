@@ -722,9 +722,18 @@ python scripts\run_estate.py --input <run>\assets --output <run>\bundle --scope-
 ✅ Producer contract (#469): `run_estate.py:capture_scope_inputs` reads and SHA-256 hashes the
 survey's exact bytes and **only** `<input>/../parse-sweep.json`, once before launching the engine.
 There is no parent-tree search, alternative sweep selection, server discovery or network request
-in this bridge. Paths in harvest `file` and engine `source_id` retain their producer semantics:
-relative paths resolve against the invocation's working directory, never by trying several roots.
-The files must resolve inside the explicit input folder.
+in this bridge. Each harvest row's **`engine_input` version 1** is the only consumed-file authority
+(#679). An established record has exactly `version`, `status`, `path`, `size_bytes`, `sha256`:
+an absolute canonical path inside the input assets, a nonnegative integer size and lowercase
+64-hex SHA-256. A cannot-establish record has exactly `version`, `status`, `reason`.
+Only report `source_id` may retain a producer-relative path, resolved against the invocation's
+working directory, never by trying several roots.
+
+Legacy `file` remains the parser/archive landing and does **not** select scope identity. In the
+canonical packaged-datasource flow, the fetcher lands both `.tdsx` and `.tds`, while engine 2.368
+consumes the inner `.tds`. ✅ The original bridge reproduced `input_asset_missing_or_duplicate`
+despite an established `.tds` engine-input record and matching report source. The bridge now follows
+that record, not the archive. Changing/removing legacy `file` cannot change an otherwise valid join.
 
 After conversion, `write_scope_bridge` upserts **version 1** of `input_manifest.scope_bridge`,
 before generated-artifact hashes, the output-tree baseline and the existing receipt are written.
@@ -741,13 +750,23 @@ the bridge. No separate ledger, outcome file or source-provenance schema is intr
 | occurrence `status`, `issues`, `match` | `established` requires the complete exact join below; otherwise `cannot_establish`, stable reason codes, and no match |
 | bridge `status` | `established` only when the denominator and every occurrence join are established; otherwise `cannot_establish` |
 
-The only identity chain is **survey kind/LUID → unique parse-sweep kind/LUID → the same physical
-input file and SHA-256 → unique engine `source_id` with report collection/index**. The match also
-records fetch/sweep/input indexes and the input SHA. Files are fingerprinted before and after the
-engine; a changed file or disagreeing manifest hash cannot establish the join. Names, projects,
+The only identity chain is **survey kind/LUID → unique parse-sweep kind/LUID → established v1
+`engine_input` physical file, size and SHA-256 → unique engine `source_id` with report
+collection/index**. The match also records fetch/sweep/input indexes and the input SHA. The
+selected file is checked against its recorded size/SHA before the engine, then against the
+input-manifest asset after the engine; a changed file or disagreeing hash cannot establish the join.
+Names, projects,
 slugs, directory leaves, sanitized names and case-insensitive captions are **display only**.
 Duplicates, missing links, wrong kinds and same-byte copies at different physical files do not
-fall back to first-match or name selection. Reordering changes indexes, not identity.
+fall back to first-match or name selection. No `.tds` sibling inference or archive substitution is
+permitted, even if a plausible file is present. Reordering changes indexes, not identity.
+
+The v1 reasons `download_failed`, `selection_unavailable`, `missing`, `ambiguous`, `outside_assets`,
+`unreadable` and `unstable` remain explicit `engine_input_<reason>` occurrence issues. Missing or
+malformed records, inaccessible/redirected/outside paths and size/SHA disagreement also leave the
+occurrence and bridge `cannot_establish`, without dropping the denominator or unmatched engine
+observations. Legacy sweeps with only `file` are insufficient: refresh evidence through the
+canonical harvest producer; never manufacture `engine_input` from a neighboring filename.
 
 ❌ Engine **2.368.0**'s `estate_survey.py` unresolved rows carry workbook captions, not stable parent
 LUIDs. Every such occurrence is retained but remains unjoined; it is never associated by caption.

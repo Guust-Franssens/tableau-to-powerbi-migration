@@ -236,8 +236,13 @@ Pass that exact snapshot with `--scope-survey`; the producer reads/hashes it and
 `input_manifest.scope_bridge` retains workbook, required-datasource and unresolved occurrences;
 the existing receipt seals it. ✅ `run_estate.py` requires reconciled `workbooks`,
 `required_datasources`, `fetch_order`, `unresolved_dependencies` and completeness evidence.
-Only exact kind/LUID → harvest file identity/SHA → engine `source_id`/collection/index joins earn
-`established`; missing or ambiguous evidence stays `cannot_establish`, never a caption match.
+Only exact kind/LUID → parse-sweep **`engine_input` version 1** → physical input identity/SHA →
+engine `source_id`/collection/index joins earn `established`. The `engine_input` must be established,
+with its exact absolute contained path, size and SHA still matching; an explicit failure reason,
+missing/malformed record or changed file stays `cannot_establish`. Legacy `file` is the parser/archive
+landing, **not** this authority: a `.tdsx` download can be consumed as an inner `.tds` (#679).
+Never infer a sibling, stem/name/folder match, same-byte copy or first match. Refresh missing/stale
+evidence through the canonical harvest producer, not by manually repairing the bridge.
 Neither state certifies readiness. Folder/single-file routes omit the flag; `--slice-only` preserves
 an existing bridge without synthesizing or resealing one. [Contract](docs/operator-runbook.md#site-scope-snapshot).
 

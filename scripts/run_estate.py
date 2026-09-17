@@ -621,6 +621,9 @@ SCOPE_COLLECTIONS = {
     "required_datasources": "datasource",
     "unresolved_dependencies": "unresolved_dependency",
 }
+SCOPE_ENGINE_INPUT_REASONS = frozenset(
+    {"download_failed", "selection_unavailable", "missing", "ambiguous", "outside_assets", "unreadable", "unstable"}
+)
 
 
 class ScopeDocument(NamedTuple):
@@ -640,13 +643,20 @@ class ScopeFile(NamedTuple):
     kind: str
 
 
+class ScopeEngineInput(NamedTuple):
+    """One v1 engine-consumed input observation, or an explicit path-free refusal."""
+
+    file: ScopeFile | None
+    issue: str | None
+
+
 class ScopeInputs(NamedTuple):
     """Frozen survey/harvest evidence, independent of the engine's emitted subset."""
 
     survey: ScopeDocument
     sweep: ScopeDocument
     root: Path
-    files: list[ScopeFile | None]
+    engine_inputs: list[ScopeEngineInput]
 
 
 def _scope_object(pairs: list[tuple[str, object]]) -> dict:
@@ -709,14 +719,76 @@ def _scope_file(value: object, root: Path, *, hash_bytes: bool = True) -> ScopeF
         return None
 
 
+def _scope_engine_input_issue(entry: object) -> str | None:
+    """Strict receiver for #679's v1 record; importing the harvester CLI would mutate streams."""
+    malformed = "engine_input_malformed"
+    if not isinstance(entry, dict):
+        return malformed
+    version = entry.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version != 1:
+        return malformed
+    if entry.get("status") == "cannot_establish":
+        reason = entry.get("reason")
+        valid = (
+            set(entry) == {"version", "status", "reason"}
+            and isinstance(reason, str)
+            and reason in SCOPE_ENGINE_INPUT_REASONS
+        )
+        return f"engine_input_{reason}" if valid else malformed
+    path, size, digest = entry.get("path"), entry.get("size_bytes"), entry.get("sha256")
+    checks = (
+        entry.get("status") == "established",
+        set(entry) == {"version", "status", "path", "size_bytes", "sha256"},
+        _scope_text(path) and Path(path).is_absolute(),
+        isinstance(size, int) and not isinstance(size, bool) and size >= 0,
+        isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) is not None,
+    )
+    return None if all(checks) else malformed
+
+
+def _scope_engine_input_path_issue(path: Path, root: Path) -> str | None:
+    if PureWindowsPath(str(path)).drive.startswith("\\") or not path.is_relative_to(root):
+        return "engine_input_outside_assets"
+    try:
+        info = path.lstat()
+        redirected = stat.S_ISLNK(info.st_mode) or (
+            getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        )
+        if redirected or path.resolve(strict=True) != path:
+            return "engine_input_outside_assets"
+    except FileNotFoundError:
+        return "engine_input_missing"
+    except (OSError, ValueError, RuntimeError):
+        return "engine_input_unreadable"
+    return None
+
+
+def _scope_engine_input(row: object, root: Path) -> ScopeEngineInput:
+    if not isinstance(row, dict) or "engine_input" not in row:
+        return ScopeEngineInput(None, "engine_input_missing")
+    entry = row["engine_input"]
+    issue = _scope_engine_input_issue(entry)
+    if issue:
+        return ScopeEngineInput(None, issue)
+    issue = _scope_engine_input_path_issue(Path(entry["path"]), root)
+    if issue:
+        return ScopeEngineInput(None, issue)
+    physical = _scope_file(entry["path"], root)
+    if physical is None:
+        return ScopeEngineInput(None, "engine_input_file_unavailable")
+    if physical.size != entry["size_bytes"] or physical.sha256 != entry["sha256"]:
+        return ScopeEngineInput(None, "engine_input_disagrees")
+    return ScopeEngineInput(physical, None)
+
+
 def capture_scope_inputs(survey_path: Path, input_dir: Path) -> ScopeInputs:
     """Read only the named survey and <input>/../parse-sweep.json, never discover a site or run."""
     survey = _scope_document(survey_path)
     sweep = _scope_document(input_dir.parent / "parse-sweep.json")
     root = input_dir.resolve()
     rows = sweep.value if isinstance(sweep.value, list) else []
-    files = [_scope_file(row.get("file"), root) if isinstance(row, dict) else None for row in rows]
-    return ScopeInputs(survey, sweep, root, files)
+    engine_inputs = [_scope_engine_input(row, root) for row in rows]
+    return ScopeInputs(survey, sweep, root, engine_inputs)
 
 
 def _scope_count(value: object, expected: int) -> bool:
@@ -931,11 +1003,15 @@ def _scope_match(row: dict, inputs: ScopeInputs, assets: list, reports: list) ->
     if len(candidates) != 1:
         return None, "parse_sweep_missing_or_duplicate"
     sweep_index = candidates[0]
-    physical = inputs.files[sweep_index]
-    if physical is None or physical.kind != row["kind"] or "download_error" in sweep[sweep_index]:
-        return None, "parse_sweep_file_unavailable"
-    if sum(item is not None and item.identity == physical.identity for item in inputs.files) != 1:
-        return None, "parse_sweep_file_ambiguous"
+    observed = inputs.engine_inputs[sweep_index]
+    if observed.issue or observed.file is None:
+        return None, observed.issue or "engine_input_file_unavailable"
+    physical = observed.file
+    issue = "engine_input_kind_disagrees" if physical.kind != row["kind"] else None
+    if sum(item.file is not None and item.file.identity == physical.identity for item in inputs.engine_inputs) != 1:
+        issue = issue or "engine_input_ambiguous"
+    if issue:
+        return None, issue
     match, issue = _scope_engine_match(physical, assets, reports)
     if match:
         match["parse_sweep_index"] = sweep_index
