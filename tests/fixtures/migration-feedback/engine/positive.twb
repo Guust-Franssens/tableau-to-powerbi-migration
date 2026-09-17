@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<workbook version="18.1" feature="enabled">
+  <!-- Fictitious original; the independent contract requires one worksheet in both cases. -->
+  <worksheets><worksheet name="Sample"/></worksheets>
+</workbook>
