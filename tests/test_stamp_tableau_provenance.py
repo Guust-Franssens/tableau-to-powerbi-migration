@@ -12,13 +12,22 @@ The rule these tests exist to enforce: **a same-named workbook is not the same w
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import html
+import io
 import json
 import multiprocessing
 import sys
+import threading
 import urllib.error
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 
@@ -288,10 +297,10 @@ def test_one_failed_local_fingerprint_keeps_the_completed_sibling(tmp_path, monk
     _twbx(tmp_path, "Healthy")
     real_fingerprint = prov.fingerprint
 
-    def fingerprint(path):
+    def fingerprint(path, raw=None):
         if path.stem == "Broken":
             raise OSError(5, str(path))
-        return real_fingerprint(path)
+        return real_fingerprint(path, raw)
 
     monkeypatch.setattr(prov, "fingerprint", fingerprint)
     result = prov.build(tmp_path, {})
@@ -786,7 +795,7 @@ def test_the_cli_still_writes_the_artifact_when_signout_fails(tmp_path, monkeypa
     monkeypatch.setattr(prov, "resolve_env", lambda _path: dict(LIVE_ENV))
     monkeypatch.setattr(sys, "argv", ["stamp_tableau_provenance.py", "--input", str(tmp_path), "--out", str(out)])
 
-    assert prov.main() == 0
+    assert prov.main() == 1
     assert json.loads(out.read_text(encoding="utf-8"))["input_count"] == 3
 
 
@@ -1143,7 +1152,7 @@ class RecordingReporter(prov.NullReporter):
         self.cancelled = False
 
     def inputs_discovered(self, total):
-        self.messages.append({"kind": prov.MSG_INPUTS_DISCOVERED, "total": total})
+        self.messages.append({"kind": prov.MSG_INPUTS_DISCOVERED, "total": total, "protocol": prov.WORKER_PROTOCOL})
 
     def operation(self, operation, completed, total=None):
         self.messages.append(
@@ -1152,8 +1161,22 @@ class RecordingReporter(prov.NullReporter):
         if self._cancel_after == operation and self._cancel_completed == completed:
             self.cancelled = True
 
-    def checkpoint(self, index, record):
-        self.messages.append({"kind": prov.MSG_CHECKPOINT, "index": index, "record": prov.checkpoint_record(record)})
+    def checkpoint(self, index, record, source=None):
+        self.messages.append(
+            {"kind": prov.MSG_CHECKPOINT, "index": index, "record": prov.checkpoint_record(record, source)}
+        )
+
+    def workbook_identity(self, index, source, luid):
+        self.messages.append(
+            {
+                "kind": prov.MSG_WORKBOOK_IDENTITY,
+                "index": index,
+                "identity": prov.workbook_identity_checkpoint(source.path, luid),
+            }
+        )
+
+    def published_evidence(self, index, evidence):
+        self.messages.append({"kind": prov.MSG_PUBLISHED_EVIDENCE, "index": index, "evidence": copy.deepcopy(evidence)})
 
     def lookup_intent(self, requested):
         self.messages.append({"kind": prov.MSG_LOOKUP_INTENT, "requested": requested})
@@ -1204,7 +1227,9 @@ def test_a_many_input_run_reports_one_inventory_and_finishes_at_the_full_input_c
     result = prov.build(tmp_path, LIVE_ENV, reporter)
 
     assert (site.count("inventory"), site.count("content")) == (1, 66)
-    assert reporter.of_kind(prov.MSG_INPUTS_DISCOVERED) == [{"kind": prov.MSG_INPUTS_DISCOVERED, "total": 66}]
+    assert reporter.of_kind(prov.MSG_INPUTS_DISCOVERED) == [
+        {"kind": prov.MSG_INPUTS_DISCOVERED, "total": 66, "protocol": prov.WORKER_PROTOCOL}
+    ]
     assert len(reporter.operations("inventory")) == 2, "one inventory operation, started and finished"
     assert reporter.operations("fingerprint")[-1]["completed"] == 66
     assert reporter.operations("fingerprint")[-1]["total"] == 66
@@ -1438,9 +1463,9 @@ def test_cancellation_is_checked_at_every_expensive_boundary(
     fingerprint_calls, scrub_calls, discovery_calls = [], [], []
     fingerprint, scrub, discover = prov.fingerprint, prov.scrub_tree, prov.collect_inputs
 
-    def counted_fingerprint(path):
+    def counted_fingerprint(path, raw=None):
         fingerprint_calls.append(True)
-        return fingerprint(path)
+        return fingerprint(path, raw)
 
     def counted_scrub(*args):
         scrub_calls.append(True)
@@ -1753,6 +1778,11 @@ def test_full_inventory_without_total_remains_unestablished(tmp_path: Path, monk
 def test_malformed_pagination_counts_never_prove_completeness(row_count: int, key: str, bad: object) -> None:
     metadata = {"pageNumber": "1", "pageSize": "1000", "totalAvailable": str(row_count), key: bad}
     site = RecordingSite(LIVE_ENV, inventory_document=_inventory_page(row_count, metadata))
+    if isinstance(bad, float) and str(bad) in ("nan", "inf", "-inf"):
+        with pytest.raises(ValueError, match="nonfinite REST response number"):
+            site.workbooks()
+        assert site.inventory_completeness is None
+        return
     assert len(site.workbooks()) == row_count
     assert site.inventory_completeness.status == "cannot_establish", "MALFORMED_METADATA_NOT_COMPLETE"
     error = site.inventory_completeness.error()
@@ -1764,6 +1794,11 @@ def test_malformed_pagination_counts_never_prove_completeness(row_count: int, ke
 @pytest.mark.parametrize("metadata", [None, True, -1, float("nan"), "private-response", [], [{}]])
 def test_malformed_pagination_container_is_not_missing_metadata(metadata: object) -> None:
     site = RecordingSite(LIVE_ENV, inventory_document=_inventory_page(1, metadata))
+    if isinstance(metadata, float):
+        with pytest.raises(ValueError, match="nonfinite REST response number"):
+            site.workbooks()
+        assert site.inventory_completeness is None
+        return
     site.workbooks()
     assert site.inventory_completeness.status == "cannot_establish", "MALFORMED_CONTAINER_NOT_COMPLETE"
 
@@ -1995,3 +2030,1820 @@ def test_pagination_diagnostics_and_progress_never_copy_response_text(tmp_path: 
     }
     rendered = json.dumps({"result": result, "messages": reporter.messages, "progress": emitted}, allow_nan=False)
     assert all(secret not in rendered for secret in secrets), "PAGINATION_DIAGNOSTIC_PRIVACY"
+
+
+# #562 prerequisite P. These synthetic REST fixtures record transport, not resolver method calls.
+P_WORKBOOK = _fixture_luid(710)
+P_DATASOURCE = _fixture_luid(711)
+P_SITE = _fixture_luid(712)
+P_USER = _fixture_luid(713)
+
+
+def _published_xml(*segments: str, site: str = "site", server: str = "https://x.online.tableau.com") -> bytes:
+    rows = [
+        '<datasource name="Parameters"/>',
+        '<datasource name="embedded"><connection class="textscan"/></datasource>',
+    ]
+    for index, segment in enumerate(segments or ("SalesFeed",)):
+        rows.append(
+            f'<datasource name="published-{index}" caption="DisplayOnly">'
+            f'<repository-location site="{site}" id="stale-repository-id" '
+            f'derived-from="{server}/datasources/{segment}?rev=4"/>'
+            '<connection class="sqlproxy" dbname="WrongDatabaseName"/></datasource>'
+        )
+    return f"<workbook><datasources>{''.join(rows)}</datasources></workbook>".encode()
+
+
+class PublishedSite(RecordingSite):
+    """A complete independent catalog, user detail, and datasource detail behind real client code."""
+
+    def __init__(self, payload: bytes, env: dict | None = None) -> None:
+        super().__init__(LIVE_ENV if env is None else env, workbooks=[{"id": P_WORKBOOK, "name": "Consumer"}])
+        self.remote_bytes = payload
+        self.user = {"id": P_USER, "siteRole": "SiteAdministratorCreator"}
+        candidate = {
+            "id": P_DATASOURCE,
+            "contentUrl": "SalesFeed",
+            "name": "CatalogDisplayName",
+            "updatedAt": "2026-09-01T00:00:00Z",
+        }
+        self.catalog = {
+            "pagination": {"pageNumber": "1", "pageSize": "1000", "totalAvailable": "1"},
+            "datasources": {"datasource": [candidate]},
+        }
+        self.detail = {"datasource": dict(candidate)}
+        self.catalog_status = self.detail_status = self.user_status = 200
+        self.catalog_error = None
+        self.before_catalog = self.before_detail = lambda: None
+
+    def _call(self, method, path, body=None, accept=None):
+        if path == "/auth/signout" or "/workbooks?" in path:
+            return super()._call(method, path, body, accept)
+        self.calls.append((method, path))
+        if path == "/auth/signin":
+            return 200, json.dumps(
+                {"credentials": {"token": "session-token", "site": {"id": P_SITE}, "user": {"id": P_USER}}}
+            ).encode()
+        if "/workbooks/" in path and "/content?" in path:
+            self.served.setdefault(P_WORKBOOK, []).append(self.remote_bytes)
+            return 200, self.remote_bytes
+        if path == "/".join((f"/sites/{P_SITE}", "users", f"{P_USER}")):
+            return self.user_status, json.dumps({"user": self.user}).encode()
+        if "/datasources?" in path:
+            self.before_catalog()
+            if self.catalog_error is not None:
+                raise self.catalog_error
+            return self.catalog_status, json.dumps(self.catalog).encode()
+        if "/datasources/" in path:
+            self.before_detail()
+            return self.detail_status, json.dumps(self.detail).encode()
+        raise AssertionError("fixture received an unexpected REST route")
+
+    def queries(self) -> list[dict]:
+        return [parse_qs(urlsplit(path).query) for _method, path in self.calls if "/datasources?" in path]
+
+    def detail_count(self) -> int:
+        return sum("/datasources/" in path for _method, path in self.calls)
+
+
+def _published_setup(
+    tmp_path: Path, monkeypatch, payload: bytes | None = None, env: dict | None = None
+) -> tuple[Path, PublishedSite]:
+    path = tmp_path / f"{P_WORKBOOK}_Consumer.twb"
+    path.write_bytes(payload if payload is not None else _published_xml())
+    return path, _install(monkeypatch, PublishedSite(path.read_bytes(), env))
+
+
+def _association(result: dict) -> dict:
+    return result["inputs"][0]["origin"]["published_dependencies"]
+
+
+def test_published_dependency_resolves_only_current_case_preserved_source_and_confirmed_catalog(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    result = prov.build(path, LIVE_ENV)
+    assert _association(result) == {
+        "schema": "tableau-published-dependencies/v1",
+        "source_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "workbook_luid": P_WORKBOOK,
+        "source_match": "sha256",
+        "rows": [
+            {
+                "source_ordinal": 1,
+                "published_key": "site/salesfeed",
+                "state": "resolved",
+                "candidate_count": 1,
+                "datasource_luid": P_DATASOURCE,
+            }
+        ],
+    }, "P_SOURCE_BOUND_UNIQUE_RESOLUTION"
+    assert site.queries() == [{"filter": ["contentUrl:eq:SalesFeed"], "pageSize": ["1000"], "pageNumber": ["1"]}], (
+        "P_CASE_PRESERVED_LOOKUP"
+    )
+    assert site.detail_count() == 1 and len(site.served[P_WORKBOOK]) == 2
+    assert prov.is_success(result)
+
+
+def test_published_escaped_source_segment_uses_parser_identity_without_a_second_normalizer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch, _published_xml("Sales%20Feed"))
+    site.catalog["datasources"]["datasource"][0]["contentUrl"] = "Sales Feed"
+    site.detail["datasource"]["contentUrl"] = "Sales Feed"
+    result = prov.build(path, LIVE_ENV)
+    assert _association(result)["rows"][0]["published_key"] == "site/sales feed"
+    assert _association(result)["rows"][0]["state"] == "resolved"
+    assert site.queries()[0]["filter"] == ["contentUrl:eq:Sales Feed"], "P_CASE_PRESERVED_LOOKUP"
+
+
+@pytest.mark.parametrize(
+    "kind", ["dbname", "repository-id", "display-name", "foreign-site", "foreign-host", "filter-syntax"]
+)
+def test_published_non_authoritative_lookup_hints_never_select_a_datasource(
+    tmp_path: Path, monkeypatch, kind: str
+) -> None:
+    payload = _published_xml()
+    if kind in {"dbname", "repository-id", "display-name"}:
+        payload = payload.replace(b' derived-from="https://x.online.tableau.com/datasources/SalesFeed?rev=4"', b"")
+        if kind != "dbname":
+            payload = payload.replace(b'class="sqlproxy"', b'class="textscan"')
+        if kind == "display-name":
+            payload = payload.replace(b'id="stale-repository-id"', b'id="other-id"')
+    elif kind == "foreign-site":
+        payload = _published_xml(site="other-site")
+    elif kind == "foreign-host":
+        payload = _published_xml(server="https://other.invalid")
+    else:
+        payload = _published_xml("SalesFeed%2Cname%3Aeq%3ASalesFeed")
+    path, site = _published_setup(tmp_path, monkeypatch, payload)
+    rows = _association(prov.build(path, LIVE_ENV))["rows"]
+    assert rows[0]["state"] == "cannot_establish" and rows[0]["candidate_count"] is None
+    assert "datasource_luid" not in rows[0] and site.queries() == []
+
+
+@pytest.mark.parametrize("complete", [True, False], ids=["complete-filtered", "incomplete-filtered"])
+def test_published_zero_candidates_never_certify_absence_from_filtered_catalog(
+    tmp_path: Path, monkeypatch, complete: bool
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    site.catalog["datasources"]["datasource"] = []
+    site.catalog["pagination"] = {"pageNumber": 1, "pageSize": 1000, "totalAvailable": 0} if complete else {}
+    status, payload = site._call("GET", f"/sites/{P_SITE}/datasources/{P_DATASOURCE}")
+    assert status == 200 and json.loads(payload)["datasource"]["contentUrl"] == "SalesFeed"
+    details_before = site.detail_count()
+    row = _association(prov.build(path, LIVE_ENV))["rows"][0]
+    assert row["state"] == "cannot_establish", "P_FILTERED_ZERO_IS_NOT_ABSENCE"
+    assert row["candidate_count"] is None, "P_FILTERED_ZERO_IS_NOT_ABSENCE"
+    assert "datasource_luid" not in row and site.detail_count() == details_before, "P_NO_INVENTED_DETAIL_IDENTITY"
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        {"id": P_USER, "siteRole": "Creator"},
+        {"id": _fixture_luid(999), "siteRole": "SiteAdministratorCreator"},
+        {"id": P_USER},
+        {"id": P_USER, "siteRole": ["SiteAdministratorCreator"]},
+    ],
+)
+@pytest.mark.parametrize("candidate_count", [0, 1])
+def test_published_visible_page_never_proves_unfiltered_catalog_permissions(
+    tmp_path: Path, monkeypatch, user: dict, candidate_count: int
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    site.user = user
+    if candidate_count == 0:
+        site.catalog["datasources"]["datasource"] = []
+        site.catalog["pagination"]["totalAvailable"] = 0
+    row = _association(prov.build(path, LIVE_ENV))["rows"][0]
+    assert row["state"] == "cannot_establish" and row["candidate_count"] is None, "P_CATALOG_VISIBILITY"
+    assert site.queries() == [] and site.detail_count() == 0
+
+
+@pytest.mark.parametrize("duplicate", [False, True], ids=["different-ids", "duplicate-id"])
+def test_published_two_candidates_are_ambiguous_even_when_the_rows_duplicate(
+    tmp_path: Path, monkeypatch, duplicate: bool
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    second = dict(site.catalog["datasources"]["datasource"][0])
+    if not duplicate:
+        second["id"] = _fixture_luid(799)
+    site.catalog["datasources"]["datasource"].append(second)
+    site.catalog["pagination"]["totalAvailable"] = "2"
+    row = _association(prov.build(path, LIVE_ENV))["rows"][0]
+    assert row["state"] == "ambiguous" and row["candidate_count"] == 2, "P_CANDIDATE_CARDINALITY"
+    assert "datasource_luid" not in row and site.detail_count() == 0
+
+
+@pytest.mark.parametrize("defect", ["404", "403", "id", "contentUrl", "name", "updatedAt", "missing", "non-object"])
+def test_published_detail_must_confirm_the_exact_current_candidate(tmp_path: Path, monkeypatch, defect: str) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if defect in {"404", "403"}:
+        site.detail_status = int(defect)
+    elif defect == "missing":
+        site.detail = {}
+    elif defect == "non-object":
+        site.detail = {"datasource": []}
+    else:
+        site.detail["datasource"][defect] = _fixture_luid(798) if defect == "id" else "renamed-or-new-revision"
+    result = prov.build(path, LIVE_ENV)
+    row = _association(result)["rows"][0]
+    assert row["state"] == "cannot_establish" and row["candidate_count"] is None, "P_DETAIL_CONFIRMATION"
+    assert "datasource_luid" not in row and site.detail_count() == 1
+    assert result["inputs"][0]["origin"]["match"] == "sha256" and prov.is_success(result)
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "403",
+        "timeout",
+        "non-object-row",
+        "bad-id",
+        "wrong-content-url",
+        "bad-page",
+        "bool-total",
+        "truncated",
+        "no-total",
+    ],
+)
+def test_published_catalog_failures_preserve_otherwise_valid_provenance(
+    tmp_path: Path, monkeypatch, defect: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if defect == "403":
+        site.catalog_status = 403
+    elif defect == "timeout":
+        site.catalog_error = TimeoutError("private-catalog-row reflected-session-token")
+    elif defect == "non-object-row":
+        site.catalog["datasources"]["datasource"] = ["private-catalog-row"]
+    elif defect == "bad-id":
+        site.catalog["datasources"]["datasource"][0]["id"] = "not-a-luid"
+    elif defect == "wrong-content-url":
+        site.catalog["datasources"]["datasource"][0]["contentUrl"] = "salesfeed"
+    elif defect == "bad-page":
+        site.catalog["pagination"]["pageNumber"] = 2
+    elif defect == "bool-total":
+        site.catalog["pagination"]["totalAvailable"] = True
+    elif defect == "truncated":
+        site.catalog["pagination"]["totalAvailable"] = 2
+    else:
+        del site.catalog["pagination"]["totalAvailable"]
+    result = prov.build(path, LIVE_ENV)
+    assert _association(result)["rows"][0]["state"] == "cannot_establish", "P_CATALOG_COMPLETENESS"
+    assert _association(result)["rows"][0]["candidate_count"] is None
+    assert result["inputs"][0]["origin"]["match"] == "sha256" and prov.is_success(result)
+
+
+@pytest.mark.parametrize("when", ["after-fingerprint", "during-catalog"])
+def test_published_source_is_rehashed_before_association_use(tmp_path: Path, monkeypatch, when: str) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    original_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    class ChangedSourceReporter(RecordingReporter):
+        def checkpoint(self, index, record, dependencies=None):
+            super().checkpoint(index, record, dependencies)
+            if when == "after-fingerprint":
+                path.write_bytes(_published_xml("ChangedSource"))
+
+    if when == "during-catalog":
+        site.before_catalog = lambda: path.write_bytes(_published_xml("ChangedSource"))
+    result = prov.build(path, LIVE_ENV, ChangedSourceReporter())
+    block = _association(result)
+    assert block["source_sha256"] == original_sha
+    assert block["source_match"] == "unestablished", "P_SOURCE_REHASH"
+    assert block["rows"][0]["state"] == "cannot_establish" and block["rows"][0]["candidate_count"] is None
+    assert "datasource_luid" not in block["rows"][0]
+
+
+@pytest.mark.parametrize("boundary", ["catalog", "detail"])
+def test_published_remote_content_change_during_lookup_refuses_authority(
+    tmp_path: Path, monkeypatch, boundary: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    held = path.read_bytes()
+    changed = _published_xml("ChangedRemoteSource")
+    setattr(site, f"before_{boundary}", lambda: setattr(site, "remote_bytes", changed))
+    result, messages = _published_capture(path, LIVE_ENV)
+    block = _association(result)
+    assert block["source_match"] == "unestablished", "P_REMOTE_CURRENT_MATCH"
+    assert block["rows"][0] == {
+        "source_ordinal": 1,
+        "published_key": "site/salesfeed",
+        "state": "cannot_establish",
+        "candidate_count": None,
+    }, "P_REMOTE_CURRENT_OUTCOME"
+    assert path.read_bytes() == held and site.served[P_WORKBOOK] == [held, changed]
+    assert result["inputs"][0]["origin"]["remote_sha256"] == hashlib.sha256(held).hexdigest()
+    evidence = next(message["evidence"] for message in messages if message["kind"] == prov.MSG_PUBLISHED_EVIDENCE)
+    assert evidence["current_remote"]["sha256"] == hashlib.sha256(changed).hexdigest()
+    assert evidence["rows"][0]["state"] == "resolved", "the catalog/detail lookup succeeded before the recheck"
+    assert site.calls[-2][1] == f"/sites/{P_SITE}/workbooks/{P_WORKBOOK}/content?includeExtract=True"
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "P_REMOTE_CURRENT_WIRE"
+
+
+def test_published_repeated_input_rechecks_remote_content_after_each_lookup(tmp_path: Path, monkeypatch) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    held = path.read_bytes()
+    (tmp_path / f"{P_WORKBOOK}_Later.twb").write_bytes(held)
+    changed = _published_xml("ChangedRemoteSource")
+    call = site._call
+
+    def advance_remote(method, route, body=None, accept=None):
+        answer = call(method, route, body, accept)
+        if "/content?" in route and len(site.served[P_WORKBOOK]) == 2:
+            site.remote_bytes = changed
+        return answer
+
+    monkeypatch.setattr(site, "_call", advance_remote)
+    result, messages = _published_capture(tmp_path, LIVE_ENV)
+    blocks = [record["origin"]["published_dependencies"] for record in result["inputs"]]
+    assert blocks[0]["rows"][0]["state"] == "resolved", "P_REMOTE_REPEATED_POSITIVE"
+    assert blocks[1]["source_match"] == "unestablished", "P_REMOTE_REPEATED_RECHECK"
+    assert blocks[1]["rows"][0]["state"] == "cannot_establish" and "datasource_luid" not in blocks[1]["rows"][0]
+    assert site.served[P_WORKBOOK] == [held, held, changed], "P_REMOTE_DISTINCT_INITIAL_PLUS_TWO_RECHECKS"
+    assert len(site.queries()) == site.detail_count() == 2
+    assert _published_replay(messages)[0] is None
+
+
+@pytest.mark.parametrize("failure", [403, 404, 304, "timeout", "uncomparable"])
+def test_published_unavailable_remote_recheck_cannot_reuse_initial_content(
+    tmp_path: Path, monkeypatch, failure: int | str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    call = site._call
+    attempts = []
+
+    def unavailable(method, route, body=None, accept=None):
+        if "/content?" in route:
+            attempts.append(route)
+            if len(attempts) == 2:
+                if failure == "timeout":
+                    raise TimeoutError("private-current-remote-response")
+                if failure == "uncomparable":
+                    return 200, b"PK\x03\x04broken-archive"
+                return failure, b"private-current-remote-response"
+        return call(method, route, body, accept)
+
+    monkeypatch.setattr(site, "_call", unavailable)
+    result, messages = _published_capture(path, LIVE_ENV)
+    block = _association(result)
+    assert block["source_match"] == "unestablished", "P_REMOTE_RECHECK_REQUIRED"
+    assert block["rows"][0]["state"] == "cannot_establish" and "datasource_luid" not in block["rows"][0]
+    assert len(attempts) == 2 and site.detail_count() == 1
+    assert "private-current-remote-response" not in json.dumps(messages)
+    assert _published_replay(messages)[0] is None
+
+
+def test_published_fresh_remote_repacking_preserves_revision_authority(tmp_path: Path, monkeypatch) -> None:
+    path = _twbx(tmp_path, f"{P_WORKBOOK}_Consumer", _published_xml())
+    held = path.read_bytes()
+    repacked = _repack(path)
+    assert repacked != held and oid.revision_key(held).agrees_with(oid.revision_key(repacked))
+    site = _install(monkeypatch, PublishedSite(held))
+    site.before_detail = lambda: setattr(site, "remote_bytes", repacked)
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert _association(result)["rows"][0]["datasource_luid"] == P_DATASOURCE, "P_REMOTE_REPACK_POSITIVE"
+    assert site.served[P_WORKBOOK] == [held, repacked], "P_REMOTE_REPACK_FETCHED"
+    evidence = next(message["evidence"] for message in messages if message["kind"] == prov.MSG_PUBLISHED_EVIDENCE)
+    assert evidence["current_remote"]["sha256"] == hashlib.sha256(repacked).hexdigest()
+    assert evidence["current_remote"]["revision_key"] == result["inputs"][0]["input"]["revision_key"]
+    assert _published_replay(messages)[0] is None
+
+
+@pytest.mark.parametrize("observation", ["held", "initial"])
+@pytest.mark.parametrize("defect", ["different", "contradiction", "missing-key", "incomparable-key"])
+def test_published_current_remote_requires_agreement_with_each_prior_observation(observation: str, defect: str) -> None:
+    current = {"sha256": "a" * 64, "revision_key": {"algo": "tableau-xml-v1", "value": "b" * 64}}
+    local = copy.deepcopy(current)
+    origin = {"remote_sha256": current["sha256"], "remote_revision_key": copy.deepcopy(current["revision_key"])}
+    assert prov.published_remote_agrees(current, local, origin), "P_REMOTE_THREE_WAY_POSITIVE"
+    changed = copy.deepcopy(current)
+    if defect != "contradiction":
+        changed["sha256"] = "c" * 64
+    if defect in ("different", "contradiction"):
+        changed["revision_key"]["value"] = "d" * 64
+    elif defect == "missing-key":
+        changed["revision_key"] = None
+    else:
+        changed["revision_key"]["algo"] = "raw-sha256-v1"
+    if observation == "held":
+        local = changed
+    else:
+        origin = {"remote_sha256": changed["sha256"], "remote_revision_key": changed["revision_key"]}
+    assert not prov.published_remote_agrees(current, local, origin), f"P_REMOTE_AGREEMENT_{observation}"
+
+
+@pytest.mark.parametrize("kind", ["stale", "incomparable"])
+def test_published_source_revision_must_be_confirmed(tmp_path: Path, monkeypatch, kind: str) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    site.remote_bytes = _published_xml("AnotherRevision")
+    if kind == "incomparable":
+        monkeypatch.setattr(site, "content_revision_key", lambda _luid: oid.RevisionKey("raw-sha256-v1", "f" * 64))
+    block = _association(prov.build(path, LIVE_ENV))
+    assert block["source_match"] == "unestablished" and block["rows"][0]["state"] == "cannot_establish"
+    assert site.queries() == []
+
+
+def test_published_repacked_equal_revision_is_independently_confirmed(tmp_path: Path, monkeypatch) -> None:
+    path = _twbx(tmp_path, f"{P_WORKBOOK}_Consumer", _published_xml())
+    remote = io.BytesIO()
+    with zipfile.ZipFile(path) as source, zipfile.ZipFile(remote, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for member in source.namelist():
+            archive.writestr(member, source.read(member))
+    site = _install(monkeypatch, PublishedSite(remote.getvalue()))
+    result = prov.build(path, LIVE_ENV)
+    assert result["inputs"][0]["origin"]["match"] == "name_only"
+    assert _association(result)["source_match"] == "revision_same"
+    assert _association(result)["rows"][0]["datasource_luid"] == P_DATASOURCE and site.detail_count() == 1
+
+
+@pytest.mark.parametrize("kind", ["duplicate-luid", "ambiguous-name", "stale-harvest-luid", "incomplete-workbooks"])
+def test_published_association_requires_a_uniquely_established_workbook(tmp_path: Path, monkeypatch, kind: str) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if kind == "duplicate-luid":
+        site._site_workbooks.append(dict(site._site_workbooks[0]))
+    elif kind == "ambiguous-name":
+        path = path.rename(tmp_path / "Consumer.twb")
+        site._site_workbooks.append({"id": _fixture_luid(799), "name": "Consumer"})
+    elif kind == "stale-harvest-luid":
+        path = path.rename(tmp_path / f"{_fixture_luid(798)}_Consumer.twb")
+    else:
+        site._inventory_document = {
+            "workbooks": {"workbook": site._site_workbooks},
+            "pagination": {"pageNumber": 1, "pageSize": 1000, "totalAvailable": 2},
+        }
+    block = _association(prov.build(path, LIVE_ENV))
+    assert block["source_match"] == "unestablished" and block["rows"][0]["candidate_count"] is None
+    assert site.queries() == []
+
+
+@pytest.mark.parametrize("detail_status", [200, 404])
+def test_published_occurrences_are_not_deduplicated_but_catalog_and_detail_are_cached_per_run(
+    tmp_path: Path, monkeypatch, detail_status: int
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch, _published_xml("SalesFeed", "SalesFeed"))
+    site.detail_status = detail_status
+    result = prov.build(path, LIVE_ENV)
+    rows = _association(result)["rows"]
+    assert [row["source_ordinal"] for row in rows] == [1, 2]
+    assert [row["published_key"] for row in rows] == ["site/salesfeed", "site/salesfeed"]
+    assert all(row["state"] == ("resolved" if detail_status == 200 else "cannot_establish") for row in rows)
+    assert len(site.queries()) == site.detail_count() == 1 and len(site.served[P_WORKBOOK]) == 2
+    fresh = _install(monkeypatch, PublishedSite(path.read_bytes()))
+    prov.build(path, LIVE_ENV)
+    assert len(fresh.queries()) == fresh.detail_count() == 1
+
+
+def test_published_catalog_private_rows_and_reflected_credentials_never_enter_diagnostics(
+    tmp_path: Path, monkeypatch, caplog, capsys
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    private = ["private-account-name", "private-catalog-description", LIVE_ENV["TABLEAU_PAT_SECRET"], "session-token"]
+    site.catalog["datasources"]["datasource"][0].update(name=private[0], description=" ".join(private))
+    site.detail["datasource"].update(name=private[0], description=" ".join(private))
+    reporter = RecordingReporter()
+    result = prov.build(path, LIVE_ENV, reporter)
+    assert _association(result)["rows"][0]["state"] == "resolved"
+    output = json.dumps({"result": result, "wire": reporter.messages}) + caplog.text + str(capsys.readouterr())
+    assert all(secret not in output for secret in private), "P_CATALOG_DIAGNOSTIC_PRIVACY"
+    early = json.dumps(reporter.of_kind(prov.MSG_CHECKPOINT))
+    assert "site/salesfeed" not in early and "SalesFeed" not in early and P_DATASOURCE not in early
+
+
+@pytest.mark.parametrize("boundary", ["catalog", "detail"])
+def test_published_cancellation_retains_only_safe_partial_provenance(
+    tmp_path: Path, monkeypatch, boundary: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    reporter = RecordingReporter()
+    setattr(site, f"before_{boundary}", lambda: setattr(reporter, "cancelled", True))
+    result = prov.build(path, LIVE_ENV, reporter)
+    assert result["phase"]["status"] == "partial" and result["phase"]["errors"][-1]["code"] == "cancelled"
+    assert result["inputs"][0]["input"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert "origin" not in result["inputs"][0] and "published_occurrences" not in result["inputs"][0]
+
+
+def test_published_missing_parser_key_is_retained_not_filled_from_a_provider(tmp_path: Path, monkeypatch) -> None:
+    payload = b'<workbook><datasources><datasource name="sql"><connection class="sqlproxy"/></datasource></datasources></workbook>'
+    path, site = _published_setup(tmp_path, monkeypatch, payload)
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert "published_dependencies" not in result["inputs"][0]["origin"]
+    checkpoint = next(message["record"] for message in messages if message["kind"] == "checkpoint")
+    assert checkpoint["published_occurrences"] == [
+        {"source_ordinal": 0, "published_key_sha256": hashlib.sha256(b"null").hexdigest()}
+    ]
+    assert site.queries() == []
+    assert not prov.is_success(result), "P_INVALID_PARSER_KEY_STATUS"
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result and not prov.is_success(result), "P_INVALID_PARSER_KEY_WIRE"
+
+
+@pytest.mark.parametrize("case", ["resolved", "empty-filtered", "ambiguous", "cannot_establish"])
+def test_published_real_producer_messages_reconcile_with_supervisor(tmp_path: Path, monkeypatch, case: str) -> None:
+    import run_estate as estate  # pylint: disable=import-outside-toplevel
+
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if case == "empty-filtered":
+        site.catalog["datasources"]["datasource"] = []
+        site.catalog["pagination"]["totalAvailable"] = 0
+    elif case == "ambiguous":
+        site.catalog["datasources"]["datasource"] *= 2
+        site.catalog["pagination"]["totalAvailable"] = 2
+    elif case == "cannot_establish":
+        site.catalog_error = TimeoutError("private catalog exception")
+    reporter = RecordingReporter()
+    result = prov.build(path, LIVE_ENV, reporter)
+    reporter.terminal(result)
+    supervisor = estate._ProvenanceState(emit=lambda *_args: None, launch_inputs=(path,))
+    for message in reporter.messages:
+        supervisor.accept(message)
+    expected = "cannot_establish" if case == "empty-filtered" else case
+    assert supervisor.terminal == result and _association(result)["rows"][0]["state"] == expected
+    assert supervisor.checkpoints[0]["published_occurrences"] == [
+        {"source_ordinal": 1, "published_key_sha256": hashlib.sha256(b'"site/salesfeed"').hexdigest()}
+    ]
+    assert "published_occurrences" not in json.dumps(result)
+
+
+class PublishedMessages(list[dict]):
+    """Parent-known launch inputs are held outside the worker's framed messages."""
+
+    def __init__(self, inputs: tuple[Path, ...]) -> None:
+        super().__init__()
+        self.launch_inputs = inputs
+
+
+def _published_capture(path: Path, env: dict) -> tuple[dict, PublishedMessages]:
+    """Capture the production reporter, preserving the same copy boundary as a real JSON channel."""
+    messages = PublishedMessages(tuple(prov.collect_inputs(path)))
+    reporter = prov.WorkerReporter(SimpleNamespace(send=lambda message: messages.append(copy.deepcopy(message))))
+    result = prov.build(path, env, reporter)
+    reporter.terminal(result)
+    return result, messages
+
+
+def _published_replay(messages: PublishedMessages):
+    from test_provenance_supervisor import _receive, _wire  # pylint: disable=import-outside-toplevel
+
+    return _receive(b"".join(_wire(message) for message in messages), launch_inputs=messages.launch_inputs)
+
+
+@pytest.mark.parametrize("harvested", [True, False], ids=["harvest-luid", "plain-name"])
+def test_published_identical_bytes_do_not_allow_swapping_both_final_workbook_identities(
+    tmp_path: Path, monkeypatch, harvested: bool
+) -> None:
+    other_luid = "33333333-3333-4333-8333-333333333333"
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if not harvested:
+        path = path.rename(tmp_path / "Consumer.twb")
+    other = tmp_path / (f"{other_luid}_Other.twb" if harvested else "Other.twb")
+    other.write_bytes(path.read_bytes())
+    site._site_workbooks.append({"id": other_luid, "name": "Other"})  # pylint: disable=protected-access
+    result, messages = _published_capture(tmp_path, LIVE_ENV)
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result and prov.is_success(result), "P_IDENTITY_POSITIVE"
+    assert len({record["input"]["sha256"] for record in result["inputs"]}) == 1
+    identities = [record["origin"]["workbook_luid"] for record in result["inputs"]]
+    assert len(set(identities)) == 2
+    checkpoints = [message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT]
+    assert len({record["launch_identity"]["file_sha256"] for record in checkpoints}) == 2, "P_LAUNCHED_FILE"
+    for message in messages:
+        if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            for record, other_identity in zip(message["result"]["inputs"], reversed(identities)):
+                record["origin"]["workbook_luid"] = other_identity
+                record["origin"]["published_dependencies"]["workbook_luid"] = other_identity
+    code, rejected = _published_replay(messages)
+    assert code == "worker-protocol-invalid" and rejected.terminal is None, "P_RESOLVED_WORKBOOK_BINDING"
+    document = rejected.document(code)
+    assert not prov.is_success(document) and len(document["inputs"]) == 2
+    assert all(record["input"]["sha256"] == result["inputs"][0]["input"]["sha256"] for record in document["inputs"])
+    assert all(
+        key not in json.dumps(document) for key in ("launch_identity", "resolved_identity", "published_occurrences")
+    )
+
+
+def test_published_authority_cannot_disappear_from_successful_producer_wire(tmp_path: Path, monkeypatch) -> None:
+    path, _site = _published_setup(tmp_path, monkeypatch)
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert _published_replay(messages)[0] is None and prov.is_success(result), "P_AUTHORITY_POSITIVE"
+    for message in messages:
+        if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            del message["result"]["inputs"][0]["origin"]["published_dependencies"]
+    code, state = _published_replay(messages)
+    assert code == "worker-protocol-invalid" and state.terminal is None, "P_AUTHORITY_PRESENCE"
+    assert state.document(code)["inputs"][0]["input"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_published_identity_observations_cannot_move_between_equal_byte_input_phases(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    other_luid = "33333333-3333-4333-8333-333333333333"
+    (tmp_path / f"{other_luid}_Other.twb").write_bytes(path.read_bytes())
+    site._site_workbooks.append({"id": other_luid, "name": "Other"})  # pylint: disable=protected-access
+    result, messages = _published_capture(tmp_path, LIVE_ENV)
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "P_IDENTITY_PHASE_POSITIVE"
+    first, second = [index for index, message in enumerate(messages) if message["kind"] == prov.MSG_WORKBOOK_IDENTITY]
+    messages[first], messages[second] = messages[second], messages[first]
+    code, state = _published_replay(messages)
+    assert code == "worker-protocol-invalid" and state.terminal is None, "P_IDENTITY_INPUT_PHASE"
+    assert not prov.is_success(state.document(code))
+
+
+@pytest.mark.parametrize("live", [False, True], ids=["offline", "live"])
+def test_published_complete_empty_assessment_allows_legacy_absence(tmp_path: Path, monkeypatch, live: bool) -> None:
+    path, _site = _published_setup(tmp_path, monkeypatch, b"<workbook/>")
+    result, messages = _published_capture(path, LIVE_ENV if live else {})
+    checkpoint = next(message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT)
+    assert checkpoint["published_occurrences"] == [], "P_EMPTY_ASSESSMENT_BOUND"
+    assert "published_dependencies" not in (result["inputs"][0].get("origin") or {})
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result and prov.is_success(result), "P_COMPLETE_EMPTY_SUCCESS"
+
+
+@pytest.mark.parametrize("reason", ["offline", "no-origin", "invalid-origin"])
+def test_published_occurrences_without_origin_authority_are_explicit_non_success(
+    tmp_path: Path, monkeypatch, reason: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if reason == "no-origin":
+        site._site_workbooks = []  # pylint: disable=protected-access
+    elif reason == "invalid-origin":
+        site._site_workbooks[0]["id"] = "not-a-luid"  # pylint: disable=protected-access
+    result, messages = _published_capture(path, {} if reason == "offline" else LIVE_ENV)
+    checkpoint = next(message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT)
+    assert len(checkpoint["published_occurrences"]) == 1
+    assert not prov.is_success(result), "P_UNAVAILABLE_AUTHORITY_STATUS"
+    assert {"code": "published-authority-unavailable", "operation": "lookup-origin"} in result["phase"]["errors"]
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result
+    assert result["inputs"][0]["input"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "defect",
+    ["truncated-xml", "bad-zip", "no-workbook-member", "wrong-root", "doctype", "parser-failure", "read-failure"],
+)
+@pytest.mark.parametrize("live", [False, True], ids=["offline", "live"])
+def test_published_unassessable_input_preserves_fingerprint_without_claiming_empty(
+    tmp_path: Path, monkeypatch, defect: str, live: bool
+) -> None:
+    payload = _published_xml()
+    if defect == "truncated-xml":
+        payload = payload[:-12]
+    elif defect == "wrong-root":
+        payload = b"<datasource/>"
+    elif defect == "doctype":
+        payload = b'<!DOCTYPE workbook [<!ENTITY source "untrusted">]><workbook/>'
+    elif defect == "bad-zip":
+        payload = b"PK incomplete archive"
+    elif defect == "no-workbook-member":
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("not-a-workbook.txt", b"unassessable")
+        payload = buffer.getvalue()
+    path, _site = _published_setup(tmp_path, monkeypatch, payload)
+    if defect in ("bad-zip", "no-workbook-member"):
+        path = path.rename(path.with_suffix(".twbx"))
+    if defect == "parser-failure":
+
+        def fail_parser(*_args):
+            raise ValueError("private-parser-diagnostic")
+
+        monkeypatch.setattr(prov.parse_tableau, "_parse_published_datasource", fail_parser)
+    elif defect == "read-failure":
+        original = Path.read_bytes
+
+        def fail_read(current):
+            if current == path:
+                raise PermissionError("private-read-diagnostic")
+            return original(current)
+
+        monkeypatch.setattr(Path, "read_bytes", fail_read)
+    result, messages = _published_capture(path, LIVE_ENV if live else {})
+    checkpoint = next(message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT)
+    assert "published_occurrences" in checkpoint and checkpoint["published_occurrences"] is None, "P_ASSESSMENT_UNKNOWN"
+    assert not prov.is_success(result), "P_UNASSESSABLE_STATUS"
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result
+    if defect == "read-failure":
+        assert result["inputs"][0]["input"] == {"status": "unavailable"}
+    else:
+        assert result["inputs"][0]["input"]["sha256"] == hashlib.sha256(payload).hexdigest()
+        assert {"code": "published-assessment-unavailable", "operation": "fingerprint"} in result["phase"]["errors"]
+    assert "private-parser-diagnostic" not in json.dumps(messages) and "private-read-diagnostic" not in json.dumps(
+        messages
+    )
+
+
+@pytest.mark.parametrize("assessment", ["published", "unassessable"])
+def test_published_incomplete_assessment_cannot_be_relabelled_local_success(
+    tmp_path: Path, monkeypatch, assessment: str
+) -> None:
+    payload = _published_xml() if assessment == "published" else _published_xml()[:-12]
+    path, _site = _published_setup(tmp_path, monkeypatch, payload)
+    result, messages = _published_capture(path, {})
+    assert not prov.is_success(result) and _published_replay(messages)[0] is None
+    messages[-1]["result"]["phase"] = {"status": "local_only", "errors": []}
+    code, _state = _published_replay(messages)
+    assert code == "worker-protocol-invalid", "P_ASSESSMENT_SUCCESS_BINDING"
+
+
+@pytest.mark.parametrize("archive", [False, True], ids=["twb", "twbx"])
+def test_published_fingerprint_and_parse_share_one_retained_buffer(tmp_path: Path, monkeypatch, archive: bool) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if archive:
+        path.unlink()
+        path = _twbx(tmp_path, f"{P_WORKBOOK}_Consumer", _published_xml())
+        site.remote_bytes = path.read_bytes()
+    original = Path.read_bytes
+    raw = original(path)
+    phases = []
+    live = False
+    real_sign_in = site.sign_in
+
+    def sign_in():
+        nonlocal live
+        live = True
+        return real_sign_in()
+
+    def second_read_only(current):
+        if current == path:
+            phases.append("live" if live else "local")
+            if len(phases) == 2:
+                return b"<workbook/>"
+        return original(current)
+
+    monkeypatch.setattr(site, "sign_in", sign_in)
+    monkeypatch.setattr(Path, "read_bytes", second_read_only)
+    result, messages = _published_capture(path, LIVE_ENV)
+    checkpoint = next(message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT)
+    assert checkpoint["published_occurrences"] == [
+        {"source_ordinal": 1, "published_key_sha256": hashlib.sha256(b'"site/salesfeed"').hexdigest()}
+    ], "P_RETAINED_BYTES"
+    assert phases == ["local", "live"], "P_ONE_LOCAL_READ"
+    block = _association(result)
+    assert block["source_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert block["source_match"] == "unestablished" and block["rows"][0]["state"] == "cannot_establish", (
+        "P_FINAL_REHASH"
+    )
+    assert _published_replay(messages)[0] is None
+
+
+def test_published_archive_member_fingerprint_uses_the_supplied_buffer(tmp_path: Path) -> None:
+    path = _twbx(tmp_path, payload=_published_xml())
+    raw = path.read_bytes()
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        expected = [
+            {"name": info.filename, "size_bytes": info.file_size, "crc32": f"{info.CRC:08x}"}
+            for info in sorted(archive.infolist(), key=lambda member: member.filename)
+        ]
+    path.write_bytes(b"not the fingerprinted archive")
+    actual = prov.fingerprint(path, raw)
+    assert actual["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert actual["members"] == expected, "P_ARCHIVE_BUFFER"
+
+
+def test_published_archive_path_replacement_cannot_rewrite_held_member_evidence(tmp_path: Path, monkeypatch) -> None:
+    path = _twbx(tmp_path, f"{P_WORKBOOK}_Consumer", _published_xml())
+    raw = path.read_bytes()
+    _install(monkeypatch, PublishedSite(raw))
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        expected = [
+            {"name": info.filename, "size_bytes": info.file_size, "crc32": f"{info.CRC:08x}"}
+            for info in sorted(archive.infolist(), key=lambda member: member.filename)
+        ]
+    fingerprint = prov.fingerprint
+
+    def replaced_path(source, held=None):
+        with zipfile.ZipFile(source, "w") as archive:
+            archive.writestr("replacement.twb", b"<workbook/>")
+        return fingerprint(source, held)
+
+    monkeypatch.setattr(prov, "fingerprint", replaced_path)
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert result["inputs"][0]["input"]["members"] == expected, "P_ARCHIVE_HELD_MEMBER_EVIDENCE"
+    block = _association(result)
+    assert block["source_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert block["source_match"] == "unestablished" and len(block["rows"]) == 1, "P_ARCHIVE_PATH_REHASH"
+    assert _published_replay(messages)[0] is None
+
+
+@pytest.mark.parametrize("published_first", [True, False])
+def test_published_multi_member_archive_uses_actual_parser_first_member_rule(
+    tmp_path: Path, monkeypatch, published_first: bool
+) -> None:
+    path = tmp_path / f"{P_WORKBOOK}_Consumer.twbx"
+    first, second = (_published_xml(), b"<workbook/>") if published_first else (b"<workbook/>", _published_xml())
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("z-first.TWB", first)
+        archive.writestr("a-second.twb", second)
+    root, _files = prov.parse_tableau.load_twb_root(path)
+    assert (root.find("datasources/datasource/repository-location") is not None) == published_first
+    _install(monkeypatch, PublishedSite(path.read_bytes()))
+    result, messages = _published_capture(path, LIVE_ENV)
+    checkpoint = next(message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT)
+    assert len(checkpoint["published_occurrences"]) == int(published_first), "P_ARCHIVE_SELECTION_PARITY"
+    assert ("published_dependencies" in result["inputs"][0]["origin"]) == published_first
+    assert _published_replay(messages)[0] is None and prov.is_success(result)
+
+
+def test_published_malformed_first_archive_member_is_unknown_not_an_empty_or_later_workbook(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / f"{P_WORKBOOK}_Consumer.twbx"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("z-first.twb", _published_xml()[:-12])
+        archive.writestr("a-second.twb", b"<workbook/>")
+    with pytest.raises(prov.parse_tableau.etree.XMLSyntaxError):
+        prov.parse_tableau.load_twb_root(path)
+    _install(monkeypatch, PublishedSite(path.read_bytes()))
+    result, messages = _published_capture(path, LIVE_ENV)
+    checkpoint = next(message["record"] for message in messages if message["kind"] == prov.MSG_CHECKPOINT)
+    assert checkpoint["published_occurrences"] is None, "P_ARCHIVE_UNASSESSABLE"
+    assert not prov.is_success(result) and _published_replay(messages)[0] is None
+    assert {"code": "published-assessment-unavailable", "operation": "fingerprint"} in result["phase"]["errors"]
+
+
+@pytest.mark.parametrize(
+    "base,address,source_site,lookup_site,content_url,accepted",
+    [
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed?rev=4",
+            "site",
+            "site",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/t/site/datasources/SalesFeed?rev=1.0",
+            "site",
+            "site",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com:443/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "https://x.online.tableau.com:443",
+            "https://x.online.tableau.com/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "http://tableau.example:80",
+            "http://tableau.example/datasources/SalesFeed?rev=1.0",
+            "",
+            "",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "https://tableau.example:8443/tableau",
+            "https://tableau.example:8443/tableau/t/site/datasources/Sales%20Feed?rev=2.1",
+            "site",
+            "site",
+            "Sales Feed",
+            True,
+        ),
+        (
+            "https://tableau.example/tableau/",
+            "https://tableau.example/tableau/datasources/SalesFeed/",
+            "site",
+            "site",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/t/si%74e/datasources/Sales%C3%A9Feed",
+            "site",
+            "site",
+            "SaleséFeed",
+            True,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "http://x.online.tableau.com/datasources/SalesFeed?rev=4",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com:80/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/not-datasources/SalesFeed?rev=4",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://tableau.example/tableau",
+            "https://tableau.example/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://tableau.example/tableau",
+            "https://tableau.example/tableau2/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://tableau.example/tableau",
+            "https://tableau.example/elsewhere/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://tableau.example/tableau",
+            "https://tableau.example/Tableau/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/t/other/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/t/site/datasources/SalesFeed",
+            "other",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/t/site/datasources/SalesFeed",
+            "site",
+            "other",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://user:secret@x.online.tableau.com/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://user:secret@x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed?other=1",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed?rev=1&rev=2",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed?rev=1#other",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com?other=1",
+            "https://x.online.tableau.com/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com#other",
+            "https://x.online.tableau.com/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://other.online.tableau.com/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://tableau.example",
+            "https://tableau.example/datasources/SalesFeed",
+            None,
+            "",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed",
+            None,
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com/datasources/SalesFeed",
+            "",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com:0",
+            "https://x.online.tableau.com:0/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://x.online.tableau.com",
+            "https://x.online.tableau.com:65536/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+        (
+            "https://tableau.example/proxy/%74ableau",
+            "https://tableau.example/proxy/tableau/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            True,
+        ),
+        (
+            "ftp://tableau.example",
+            "ftp://tableau.example/datasources/SalesFeed",
+            "site",
+            "site",
+            "SalesFeed",
+            False,
+        ),
+    ],
+    ids=[
+        "cloud-unqualified",
+        "cloud-site-route",
+        "explicit-default-port",
+        "configured-default-port",
+        "server-default-site",
+        "server-base-and-port",
+        "server-base-trailing-slash",
+        "decoded-unicode-and-site",
+        "wrong-scheme",
+        "wrong-effective-port",
+        "unrelated-route",
+        "missing-base",
+        "base-prefix-collision",
+        "cross-base",
+        "base-case",
+        "url-site-mismatch",
+        "source-site-mismatch",
+        "lookup-site-mismatch",
+        "source-url-credentials",
+        "configured-url-credentials",
+        "unsupported-query",
+        "duplicate-revision-query",
+        "fragment",
+        "configured-query",
+        "configured-fragment",
+        "foreign-host",
+        "omitted-default-site",
+        "omitted-nondefault-site",
+        "empty-nondefault-site",
+        "zero-port",
+        "invalid-port",
+        "decoded-multisegment-base",
+        "unsupported-scheme",
+    ],
+)
+def test_published_url_origin_route_and_site_are_independently_required(
+    tmp_path: Path,
+    monkeypatch,
+    base: str,
+    address: str,
+    source_site: str | None,
+    lookup_site: str,
+    content_url: str,
+    accepted: bool,
+) -> None:
+    env = {**LIVE_ENV, "TABLEAU_SERVER_URL": base, "TABLEAU_SITE": lookup_site}
+    payload = _published_xml(site=source_site or "").replace(
+        b"https://x.online.tableau.com/datasources/SalesFeed?rev=4", html.escape(address, quote=True).encode()
+    )
+    if source_site is None:
+        payload = payload.replace(b' site=""', b"")
+    path = tmp_path / f"{P_WORKBOOK}_Consumer.twb"
+    path.write_bytes(payload)
+    try:
+        site = PublishedSite(payload, env)
+    except ValueError:
+        assert not accepted
+        monkeypatch.setattr(prov.TableauLookup, "_call", lambda *_args, **_kwargs: pytest.fail("P_URL_PRE_LOOKUP"))
+        result, messages = _published_capture(path, env)
+        assert not prov.is_success(result) and result["inputs"][0].get("origin") is None
+        assert result["phase"]["errors"][0]["code"] == "live-lookup-refused"
+        assert _published_replay(messages)[0] is None
+        return
+    _install(monkeypatch, site)
+    site.catalog["datasources"]["datasource"][0]["contentUrl"] = content_url
+    site.detail["datasource"]["contentUrl"] = content_url
+    result, messages = _published_capture(path, env)
+    row = _association(result)["rows"][0]
+    assert row["state"] == ("resolved" if accepted else "cannot_establish"), "P_URL_AUTHORITY"
+    assert len(site.queries()) == int(accepted) and site.detail_count() == int(accepted), "P_URL_PRE_LOOKUP"
+    if accepted:
+        assert site.queries()[0]["filter"] == [f"contentUrl:eq:{content_url}"]
+    else:
+        assert row["candidate_count"] is None and "datasource_luid" not in row
+    assert _published_replay(messages)[0] is None
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "datasources/Sales%2FFeed",
+        "datasources/Sales%5CFeed",
+        "datasources/Sales%252FFeed",
+        "datasources/Sales%23Feed",
+        "datasources/Sales%3FFeed",
+        "datasources/Sales%7FFeed",
+        "datasources/Sales%0AFeed",
+        "datasources/Sales%ZZFeed",
+        "datasources/Sales%FFFeed",
+        "datasources/%2e%2e",
+        "datasources/SalesFeed/extra",
+        "datasources//SalesFeed",
+        "other/../datasources/SalesFeed",
+        "datasources/SalesFeed;extra",
+        "Datasources/SalesFeed",
+    ],
+)
+def test_published_malformed_or_ambiguous_url_segments_cannot_select_even_a_matching_catalog_row(
+    tmp_path: Path, monkeypatch, suffix: str
+) -> None:
+    address = f"https://x.online.tableau.com/{suffix}"
+    payload = _published_xml().replace(
+        b"https://x.online.tableau.com/datasources/SalesFeed?rev=4", html.escape(address, quote=True).encode()
+    )
+    path, site = _published_setup(tmp_path, monkeypatch, payload)
+    source = prov._published_source(path, payload)  # pylint: disable=protected-access
+    parsed_url = source.dependencies[0]["content_url"]
+    site.catalog["datasources"]["datasource"][0]["contentUrl"] = parsed_url
+    site.detail["datasource"]["contentUrl"] = parsed_url
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert site.queries() == [] and site.detail_count() == 0
+    code, state = _published_replay(messages)
+    if suffix in ("datasources/Sales%0AFeed", "datasources/Sales%7FFeed"):
+        assert "published_dependencies" not in result["inputs"][0]["origin"], "P_URL_SEGMENT"
+        assert not prov.is_success(result), "P_INVALID_PARSER_KEY_STATUS"
+        assert code is None and state.terminal == result, "P_INVALID_PARSER_KEY_WIRE"
+        assert result["inputs"][0]["input"]["sha256"] == hashlib.sha256(payload).hexdigest()
+    else:
+        assert _association(result)["rows"][0]["state"] == "cannot_establish", "P_URL_SEGMENT"
+        assert code is None
+
+
+def test_published_url_segment_must_equal_the_decoded_parser_content_url(tmp_path: Path, monkeypatch) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    parse = prov.parse_tableau._parse_published_datasource  # pylint: disable=protected-access
+
+    def inconsistent_parser(*args):
+        parsed = parse(*args)
+        return {**parsed, "id": "UnrelatedFeed"} if parsed is not None else None
+
+    monkeypatch.setattr(prov.parse_tableau, "_parse_published_datasource", inconsistent_parser)
+    site.catalog["datasources"]["datasource"][0]["contentUrl"] = "UnrelatedFeed"
+    site.detail["datasource"]["contentUrl"] = "UnrelatedFeed"
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert _association(result)["rows"][0]["state"] == "cannot_establish", "P_URL_PARSER_AGREEMENT"
+    assert site.queries() == [] and _published_replay(messages)[0] is None
+
+
+def test_published_overlong_parser_key_is_explicit_non_success_and_preserves_local_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch, _published_xml("S" * 1025))
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert not prov.is_success(result), "P_INVALID_PARSER_KEY_STATUS"
+    assert {"code": "published-authority-unavailable", "operation": "lookup-origin"} in result["phase"]["errors"]
+    assert site.queries() == [] and "published_dependencies" not in result["inputs"][0]["origin"]
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "P_INVALID_PARSER_KEY_WIRE"
+    assert result["inputs"][0]["input"]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("defect", ["changed-source", "luid-only", "outcome-only"])
+def test_r2_published_final_fields_cannot_replace_acquisition_evidence(
+    tmp_path: Path, monkeypatch, defect: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    held_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    if defect == "changed-source":
+        site.before_catalog = lambda: path.write_bytes(_published_xml("ChangedSource"))
+    elif defect == "outcome-only":
+        site.catalog["datasources"]["datasource"] = []
+        site.catalog["pagination"]["totalAvailable"] = 0
+    result, messages = _published_capture(path, LIVE_ENV)
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result and prov.is_success(result), "R2_ACQUISITION_POSITIVE"
+    evidence = next(message["evidence"] for message in messages if message["kind"] == prov.MSG_PUBLISHED_EVIDENCE)
+    assert evidence["source_sha256"] == held_sha
+    assert evidence["current_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert evidence["rows"][0]["candidate_count"] == (None if defect == "outcome-only" else 1)
+    if defect == "changed-source":
+        assert _association(result)["source_match"] == "unestablished"
+        assert _association(result)["rows"][0]["state"] == "cannot_establish"
+        assert evidence["current_sha256"] != held_sha and site.detail_count() == 1
+    original_evidence = copy.deepcopy(evidence)
+    for message in messages:
+        if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            block = _association(message["result"])
+            if defect == "luid-only":
+                block["rows"][0]["datasource_luid"] = "33333333-3333-4333-8333-333333333333"
+            else:
+                block["source_match"] = "sha256"
+                block["rows"][0].update(state="resolved", candidate_count=1, datasource_luid=P_DATASOURCE)
+    assert evidence == original_evidence, "the negative control changed only the final public claims"
+    code, rejected = _published_replay(messages)
+    assert code == "worker-protocol-invalid" and rejected.terminal is None, f"R2_FINAL_EVIDENCE_{defect}"
+    assert rejected.document(code)["inputs"][0]["input"]["sha256"] == held_sha
+
+
+@pytest.mark.parametrize("harvested", [True, False], ids=["harvest-luid", "plain-name"])
+@pytest.mark.parametrize("payload_swap", ["whole-payload", "keep-public-basename"])
+def test_r2_published_worker_payloads_cannot_transplant_parent_known_inputs(
+    tmp_path: Path, monkeypatch, harvested: bool, payload_swap: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch)
+    if not harvested:
+        path = path.rename(tmp_path / "Consumer.twb")
+    other_luid = "33333333-3333-4333-8333-333333333333"
+    other = tmp_path / (f"{other_luid}_Other.twb" if harvested else "Other.twb")
+    other.write_bytes(path.read_bytes())
+    site._site_workbooks.append({"id": other_luid, "name": "Other"})
+    ordered = tuple(sorted((path, other)))
+    result, messages = _published_capture(tmp_path, LIVE_ENV)
+    assert messages.launch_inputs == ordered
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "R2_PARENT_BINDING_POSITIVE"
+    assert len({record["input"]["sha256"] for record in result["inputs"]}) == 1
+    luids = [record["origin"]["workbook_luid"] for record in result["inputs"]]
+    assert len(set(luids)) == 2
+    for kind, field in (
+        (prov.MSG_CHECKPOINT, "record"),
+        (prov.MSG_WORKBOOK_IDENTITY, "identity"),
+        (prov.MSG_PUBLISHED_EVIDENCE, "evidence"),
+    ):
+        first, second = [message for message in messages if message["kind"] == kind]
+        identity_key = "launch_identity" if kind == prov.MSG_CHECKPOINT else "identity"
+        first_identity = first[field] if field == "identity" else first[field][identity_key]
+        second_identity = second[field] if field == "identity" else second[field][identity_key]
+        names = first_identity["basename_sha256"], second_identity["basename_sha256"]
+        first[field], second[field] = second[field], first[field]
+        if payload_swap == "keep-public-basename":
+            for message, name in zip((first, second), names):
+                identity = message[field] if field == "identity" else message[field][identity_key]
+                identity["basename_sha256"] = name
+        assert (first["index"], second["index"]) == (0, 1)
+    for message in messages:
+        if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            for record, luid in zip(message["result"]["inputs"], reversed(luids)):
+                record["origin"]["workbook_luid"] = record["origin"]["published_dependencies"]["workbook_luid"] = luid
+            assert [record["input"]["file"] for record in message["result"]["inputs"]] == [
+                path.name for path in ordered
+            ]
+    assert messages.launch_inputs == ordered, "the parent seed must remain outside swapped worker payloads"
+    code, state = _published_replay(messages)
+    assert code == "worker-protocol-invalid" and state.terminal is None, "R2_PARENT_ORDINAL_BINDING"
+    assert not prov.is_success(state.document(code))
+
+
+def test_r2_published_public_filename_is_also_bound_to_the_parent_launch(tmp_path: Path, monkeypatch) -> None:
+    path, _site = _published_setup(tmp_path, monkeypatch)
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert _published_replay(messages)[0] is None and prov.is_success(result)
+    for message in messages:
+        if message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+            message["result"]["inputs"][0]["input"]["file"] = "Other.twb"
+    code, state = _published_replay(messages)
+    assert code == "worker-protocol-invalid" and state.terminal is None, "R2_PUBLIC_FILENAME_BINDING"
+
+
+@pytest.mark.parametrize(
+    "defect", ["marker", "version", "whole-envelope", "assessment-envelope", "duplicate-discovery", "early-discovery"]
+)
+def test_r2_published_current_worker_cannot_downgrade_to_legacy(tmp_path: Path, monkeypatch, defect: str) -> None:
+    path, _site = _published_setup(tmp_path, monkeypatch)
+    result, messages = _published_capture(path, LIVE_ENV)
+    assert _published_replay(messages)[0] is None and prov.is_success(result), "R2_CURRENT_PROTOCOL_POSITIVE"
+    discovery = next(message for message in messages if message["kind"] == prov.MSG_INPUTS_DISCOVERED)
+    if defect in ("marker", "whole-envelope"):
+        del discovery["protocol"]
+    elif defect == "version":
+        discovery["protocol"] = "tableau-provenance-worker/1"
+    elif defect == "duplicate-discovery":
+        messages.insert(messages.index(discovery) + 1, copy.deepcopy(discovery))
+    elif defect == "early-discovery":
+        messages.insert(0, messages.pop(messages.index(discovery)))
+    if defect in ("whole-envelope", "assessment-envelope"):
+        messages[:] = [
+            message
+            for message in messages
+            if message["kind"] not in (prov.MSG_WORKBOOK_IDENTITY, prov.MSG_PUBLISHED_EVIDENCE)
+        ]
+        for message in messages:
+            if message["kind"] == prov.MSG_CHECKPOINT:
+                del message["record"]["launch_identity"]
+                del message["record"]["published_occurrences"]
+            elif message["kind"] in (prov.MSG_SAFE_SNAPSHOT, prov.MSG_TERMINAL):
+                del message["result"]["inputs"][0]["origin"]["published_dependencies"]
+    code, state = _published_replay(messages)
+    assert code == "worker-protocol-invalid" and state.terminal is None, f"R2_CURRENT_PROTOCOL_{defect}"
+    legacy = copy.deepcopy(result)
+    del legacy["inputs"][0]["origin"]["published_dependencies"]
+    assert prov.is_success(prov.normalize_result(legacy)), "R2_LEGACY_ARTIFACT_READER"
+
+
+@contextmanager
+def _published_http_server() -> Iterator[dict]:
+    """Real urllib transport to a recording loopback responder, including the old query-URL escape."""
+    served = {"fixture": None, "requests": 0, "observed": [], "redirect": lambda _route: None}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            self.respond()
+
+        def do_POST(self):
+            self.respond()
+
+        def respond(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            served["requests"] += 1
+            route = self.path.split("/api/3.21", 1)[1]
+            served["observed"].append(
+                {
+                    "route": route,
+                    "auth": self.headers.get("X-Tableau-Auth"),
+                    "cache_control": self.headers.get("Cache-Control"),
+                    "pragma": self.headers.get("Pragma"),
+                }
+            )
+            redirect = served["redirect"](route)
+            status, body = (redirect[0], b"") if redirect else served["fixture"]._call(self.command, route)
+            self.send_response(status)
+            if redirect:
+                self.send_header("Location", redirect[1] + self.path)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
+    thread.start()
+    served["base"] = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        yield served
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(1)
+        assert not thread.is_alive()
+
+
+@pytest.fixture
+def published_http_site() -> Iterator[dict]:
+    with _published_http_server() as served:
+        yield served
+
+
+@pytest.mark.parametrize("status", range(300, 400))
+@pytest.mark.parametrize("same_origin", [False, True], ids=["foreign-origin", "same-origin"])
+def test_published_every_redirect_status_is_refused_without_resending_auth(
+    published_http_site, status: int, same_origin: bool
+) -> None:
+    with _published_http_server() as foreign:
+        foreign["fixture"] = PublishedSite(_published_xml())
+        destination = published_http_site["base"] if same_origin else foreign["base"]
+        published_http_site["redirect"] = lambda _route: (status, destination)
+        lookup = prov.TableauLookup(dict(LIVE_ENV, TABLEAU_SERVER_URL=published_http_site["base"]))
+        lookup.token = "synthetic-redirect-session"
+        observed_status, _body = lookup._call("GET", f"/sites/{P_SITE}/datasources/{P_DATASOURCE}")
+        assert foreign["observed"] == [], "P_REDIRECT_NO_CREDENTIAL_RESEND"
+        assert published_http_site["requests"] == 1, "P_REDIRECT_NO_REPEAT"
+        assert observed_status == status, "P_REDIRECT_STATUS_REFUSED"
+        assert published_http_site["observed"][0]["auth"] == "synthetic-redirect-session"
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["signin", "inventory", "initial-content", "user", "catalog", "detail", "catalog-and-detail", "current-content"],
+)
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_published_authority_redirect_never_resolves_foreign_evidence(
+    tmp_path: Path, published_http_site, endpoint: str, status: int
+) -> None:
+    base = published_http_site["base"]
+    raw = _published_xml(server=base)
+    path = tmp_path / f"{P_WORKBOOK}_Consumer.twb"
+    path.write_bytes(raw)
+    site = published_http_site["fixture"] = PublishedSite(raw)
+    with _published_http_server() as foreign:
+        foreign_site = foreign["fixture"] = PublishedSite(raw)
+        forged_luid = "99999999-9999-4999-8999-999999999999"
+        foreign_site.catalog["datasources"]["datasource"][0]["id"] = forged_luid
+        foreign_site.detail["datasource"]["id"] = forged_luid
+
+        def redirect(route: str) -> tuple[int, str] | None:
+            matches = {
+                "signin": route == "/auth/signin",
+                "inventory": "/workbooks?" in route,
+                "initial-content": "/content?" in route and not site.served.get(P_WORKBOOK),
+                "current-content": "/content?" in route and bool(site.served.get(P_WORKBOOK)),
+                "user": "/users/" in route,
+                "catalog": "/datasources?" in route,
+                "detail": "/datasources/" in route,
+                "catalog-and-detail": "/datasources" in route,
+            }
+            return (status, foreign["base"]) if matches[endpoint] else None
+
+        published_http_site["redirect"] = redirect
+        result, messages = _published_capture(path, dict(LIVE_ENV, TABLEAU_SERVER_URL=base))
+        origin = result["inputs"][0].get("origin") or {}
+        block = origin.get("published_dependencies")
+        if endpoint != "catalog-and-detail":
+            assert foreign["observed"] == [], "P_AUTHORITY_REDIRECT_NO_FOREIGN_REQUEST"
+        assert block is None or all(row["state"] == "cannot_establish" for row in block["rows"]), (
+            "P_AUTHORITY_REDIRECT_NO_RESOLUTION"
+        )
+        assert foreign["observed"] == [], "P_AUTHORITY_REDIRECT_NO_FOREIGN_REQUEST"
+        assert forged_luid not in json.dumps(result)
+        assert _published_replay(messages)[0] is None
+
+
+@pytest.mark.parametrize("base_path", ["", "/gateway", "/gateway/front", "/gate%77ay/front/"])
+def test_r2_published_valid_configured_base_uses_real_urllib(
+    tmp_path: Path, published_http_site, base_path: str
+) -> None:
+    base = published_http_site["base"] + base_path
+    payload = _published_xml(server=base.rstrip("/"))
+    path = tmp_path / f"{P_WORKBOOK}_Consumer.twb"
+    path.write_bytes(payload)
+    published_http_site["fixture"] = PublishedSite(payload)
+    result, messages = _published_capture(path, dict(LIVE_ENV, TABLEAU_SERVER_URL=base))
+    assert _association(result)["rows"][0]["datasource_luid"] == P_DATASOURCE, "R2_URL_POSITIVE"
+    assert published_http_site["requests"] == 9
+    assert sum("/workbooks?" in row["route"] for row in published_http_site["observed"]) == 2
+    downloads = [row for row in published_http_site["observed"] if "/content?" in row["route"]]
+    assert len(downloads) == 2 and all(row["cache_control"] == row["pragma"] == "no-cache" for row in downloads)
+    assert _published_replay(messages)[0] is None and prov.is_success(result)
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "query",
+        "empty-query",
+        "userinfo",
+        "password",
+        "fragment",
+        "empty-fragment",
+        "zero-port",
+        "bad-port",
+        "missing-host",
+        "scheme",
+        "control",
+        "c1",
+        "encoded-control",
+        "escape",
+        "backslash",
+        "bad-host",
+    ],
+)
+def test_r2_published_configured_url_is_refused_before_io_or_public_copy(
+    tmp_path: Path, published_http_site, caplog, capsys, defect: str
+) -> None:
+    marker = "R2_ONLY_URL_SYNTHETIC_SECRET"
+    base = published_http_site["base"] + "/gateway"
+    variants = {
+        "query": base + "?token=" + marker,
+        "empty-query": base + "?",
+        "userinfo": base.replace("://", "://" + marker + "@"),
+        "password": base.replace("://", "://user:" + marker + "@"),
+        "fragment": base + "#" + marker,
+        "empty-fragment": base + "#",
+        "zero-port": "http://127.0.0.1:0/gateway",
+        "bad-port": "http://127.0.0.1:bad/gateway",
+        "missing-host": "http:///gateway",
+        "scheme": base.replace("http:", "ftp:"),
+        "control": base + "\x01" + marker,
+        "c1": base + "\x85" + marker,
+        "encoded-control": base + "/part%C2%85" + marker,
+        "escape": base + "/%invalid",
+        "backslash": base + "\\" + marker,
+        "bad-host": "http://[not-an-ip]/gateway",
+    }
+    payload = _published_xml(server=base)
+    path = tmp_path / f"{P_WORKBOOK}_Consumer.twb"
+    path.write_bytes(payload)
+    published_http_site["fixture"] = PublishedSite(payload)
+    result, messages = _published_capture(path, dict(LIVE_ENV, TABLEAU_SERVER_URL=variants[defect]))
+    assert published_http_site["requests"] == 0, "R2_CONFIG_URL_BEFORE_IO"
+    assert not prov.is_success(result) and result["inputs"][0].get("origin") is None, "R2_CONFIG_URL_NO_AUTHORITY"
+    assert result["phase"]["errors"][0]["code"] == "live-lookup-refused"
+    assert _published_replay(messages)[0] is None
+    assert marker not in json.dumps(messages) + caplog.text + str(capsys.readouterr()), "R2_CONFIG_URL_PRIVACY"
+
+
+@pytest.mark.parametrize(
+    "credential", ["pat-name", "pat-secret", "session", "workbook-luid", "datasource-luid", "server"]
+)
+def test_r2_published_post_scrub_identity_is_non_success_before_snapshot_and_standalone_publication(
+    tmp_path: Path, monkeypatch, credential: str
+) -> None:
+    secret = {
+        "workbook-luid": P_WORKBOOK,
+        "datasource-luid": P_DATASOURCE,
+        "server": LIVE_ENV["TABLEAU_SERVER_URL"],
+    }.get(credential, "salesfeed")
+    env = dict(LIVE_ENV)
+    if credential != "session":
+        env["TABLEAU_PAT_NAME" if credential == "pat-name" else "TABLEAU_PAT_SECRET"] = secret
+    path, site = _published_setup(tmp_path, monkeypatch, env=env)
+    if credential == "session":
+        call = site._call
+
+        def session_collision(method, route, body=None, accept=None):
+            status, payload = call(method, route, body, accept)
+            return status, payload.replace(b"session-token", secret.encode()) if route == "/auth/signin" else payload
+
+        monkeypatch.setattr(site, "_call", session_collision)
+    result, messages = _published_capture(path, env)
+    assert not prov.is_success(result), "R2_POST_SCRUB_STATUS"
+    assert result["inputs"][0]["origin"] is None, "R2_POST_SCRUB_WITHHOLD"
+    assert {"code": "published-identity-redacted", "operation": "scrub"} in result["phase"]["errors"]
+    snapshot = next(message["result"] for message in messages if message["kind"] == prov.MSG_SAFE_SNAPSHOT)
+    assert not prov.is_success(snapshot) and snapshot["inputs"][0]["origin"] is None, "R2_POST_SCRUB_SNAPSHOT"
+    assert secret not in json.dumps(messages), "R2_POST_SCRUB_PRIVACY"
+    assert _published_replay(messages)[0] is None
+    out = tmp_path / "source-provenance.json"
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: env)
+    monkeypatch.setattr(sys, "argv", ["stamp_tableau_provenance.py", "--input", str(path), "--out", str(out)])
+    assert prov.main() == 1, "R2_POST_SCRUB_CLI_EXIT"
+    published = json.loads(out.read_text(encoding="utf-8"))
+    assert not prov.is_success(published) and published["inputs"][0]["origin"] is None, "R2_POST_SCRUB_PUBLICATION"
+    assert secret not in out.read_text(encoding="utf-8")
+
+
+def test_r2_published_standalone_main_never_publishes_a_redacted_key_as_success(tmp_path: Path, monkeypatch) -> None:
+    env = dict(LIVE_ENV, TABLEAU_PAT_NAME="salesfeed")
+    path, _site = _published_setup(tmp_path, monkeypatch, env=env)
+    out = tmp_path / "source-provenance.json"
+    monkeypatch.setattr(prov, "resolve_env", lambda _path: env)
+    monkeypatch.setattr(sys, "argv", ["stamp_tableau_provenance.py", "--input", str(path), "--out", str(out)])
+    code = prov.main()
+    assert out.is_file(), "the main-path control must reach actual publication"
+    assert code == 1, "R2_POST_SCRUB_CLI_EXIT"
+    result = json.loads(out.read_text(encoding="utf-8"))
+    assert not prov.is_success(result) and result["inputs"][0]["origin"] is None, "R2_POST_SCRUB_PUBLICATION"
+    assert "salesfeed" not in out.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("char", ["\x00", "\x01", "\x09", "\x1f", "\x7f", "\x80", "\x85", "\x9f", "é", "漢"])
+def test_r2_published_one_control_predicate_preserves_legitimate_unicode(
+    tmp_path: Path, monkeypatch, char: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch, _published_xml("Sales" + quote(char, safe="") + "Feed"))
+    segment = "Sales" + char + "Feed"
+    site.catalog["datasources"]["datasource"][0]["contentUrl"] = segment
+    site.detail["datasource"]["contentUrl"] = segment
+    result, messages = _published_capture(path, LIVE_ENV)
+    if char in ("é", "漢"):
+        assert _association(result)["rows"][0]["state"] == "resolved", "R2_UNICODE_POSITIVE"
+        assert site.queries()[0]["filter"] == [f"contentUrl:eq:{segment}"]
+    else:
+        assert site.queries() == [] and site.detail_count() == 0, "R2_CONTROL_BEFORE_REQUEST"
+        assert not prov.is_success(result), "R2_IDENTITY_CONTROL"
+        assert "published_dependencies" not in result["inputs"][0]["origin"], "R2_CONTROL_PUBLIC_IDENTITY"
+    assert _published_replay(messages)[0] is None
+
+
+@pytest.mark.parametrize("endpoint", ["signin", "user", "catalog", "detail"])
+@pytest.mark.parametrize("defect", ["duplicate", "NaN", "Infinity", "-Infinity", "1e999"])
+def test_r2_published_every_authority_response_uses_strict_json(
+    tmp_path: Path, monkeypatch, endpoint: str, defect: str
+) -> None:
+    path, _site = _published_setup(tmp_path, monkeypatch)
+    positive, messages = _published_capture(path, LIVE_ENV)
+    assert _association(positive)["rows"][0]["state"] == "resolved" and _published_replay(messages)[0] is None, (
+        "R2_JSON_POSITIVE"
+    )
+    site = _install(monkeypatch, PublishedSite(path.read_bytes()))
+    call = site._call
+
+    def contaminated(method, route, body=None, accept=None):
+        status, payload = call(method, route, body, accept)
+        matches = {
+            "signin": route == "/auth/signin",
+            "user": "/users/" in route,
+            "catalog": "/datasources?" in route,
+            "detail": "/datasources/" in route,
+        }
+        if matches[endpoint]:
+            if defect == "duplicate" and endpoint == "signin":
+                payload = payload.replace(
+                    f'"id": "{P_USER}"'.encode(),
+                    f'"id":"99999999-9999-4999-8999-999999999999","id":"{P_USER}"'.encode(),
+                )
+            elif defect == "duplicate":
+                payload = payload[:-1] + b',"response-private":0,"response-private":1}'
+            else:
+                payload = payload[:-1] + b',"response-private":' + defect.encode() + b"}"
+        return status, payload
+
+    monkeypatch.setattr(site, "_call", contaminated)
+    result, messages = _published_capture(path, LIVE_ENV)
+    if endpoint == "signin":
+        assert not prov.is_success(result) and result["inputs"][0].get("origin") is None, "R2_REST_STRICT"
+        assert result["phase"]["errors"][0]["code"] == "live-lookup-refused"
+    else:
+        row = _association(result)["rows"][0]
+        assert row["state"] == "cannot_establish" and row["candidate_count"] is None, "R2_REST_STRICT"
+        assert "datasource_luid" not in row
+    assert _published_replay(messages)[0] is None
+    assert "response-private" not in json.dumps(messages)
+
+
+def _published_between_inputs(tmp_path: Path, monkeypatch, change: str) -> tuple:
+    """Change the REST authority only after the first physical input's acquisition completes."""
+    path, site = _published_setup(tmp_path, monkeypatch, _published_xml("SalesFeed", "SalesFeed"))
+    (tmp_path / "Consumer.twb").write_bytes(path.read_bytes())
+    messages = PublishedMessages(tuple(prov.collect_inputs(tmp_path)))
+    boundary = []
+
+    def send(message: dict) -> None:
+        messages.append(copy.deepcopy(message))
+        if message["kind"] != prov.MSG_PUBLISHED_EVIDENCE or message["index"] != 0:
+            return
+        boundary.append(len(site.calls))
+        if change == "catalog-empty":
+            site.catalog["datasources"]["datasource"] = []
+            site.catalog["pagination"]["totalAvailable"] = 0
+        elif change == "catalog-ambiguous":
+            site.catalog["datasources"]["datasource"] *= 2
+            site.catalog["pagination"]["totalAvailable"] = 2
+        elif change == "detail-404":
+            site.detail_status = 404
+        elif change == "detail-changed":
+            site.detail["datasource"]["updatedAt"] = "2026-09-16T20:00:00Z"
+        elif change == "visibility":
+            site.user["siteRole"] = "Creator"
+        elif change == "workbook-ambiguous":
+            site._site_workbooks.append({"id": _fixture_luid(799), "name": "Consumer"})
+        elif change == "workbook-identity":
+            site._site_workbooks[0]["id"] = _fixture_luid(799)
+        elif change == "workbook-failed":
+            site._inventory_status = 404
+        elif change == "workbook-truncated":
+            site._inventory_document = {
+                "workbooks": {"workbook": site._site_workbooks},
+                "pagination": {"pageNumber": 1, "pageSize": 1000, "totalAvailable": 2},
+            }
+
+    reporter = prov.WorkerReporter(SimpleNamespace(send=send))
+    result = prov.build(tmp_path, LIVE_ENV, reporter)
+    reporter.terminal(result)
+    assert len(boundary) == 1, "P_CURRENT_INPUT_BOUNDARY_REACHED"
+    return result, messages, site, site.calls[boundary[0] :]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "unchanged",
+        "catalog-empty",
+        "catalog-ambiguous",
+        "detail-404",
+        "detail-changed",
+        "visibility",
+        "workbook-ambiguous",
+        "workbook-identity",
+        "workbook-failed",
+        "workbook-truncated",
+    ],
+)
+def test_published_authority_is_reacquired_for_each_physical_input(tmp_path: Path, monkeypatch, change: str) -> None:
+    result, messages, site, later_calls = _published_between_inputs(tmp_path, monkeypatch, change)
+    first, second = [record["origin"]["published_dependencies"] for record in result["inputs"]]
+    assert all(row["state"] == "resolved" for row in first["rows"]), "P_CURRENT_INPUT_POSITIVE"
+    expected = {"unchanged": "resolved", "catalog-ambiguous": "ambiguous"}.get(change, "cannot_establish")
+    assert [row["state"] for row in second["rows"]] == [expected, expected], f"P_CURRENT_INPUT_AUTHORITY_{change}"
+    assert second["source_match"] == ("unestablished" if change.startswith("workbook-") else "sha256")
+    assert all(("datasource_luid" in row) == (expected == "resolved") for row in second["rows"])
+    assert site.count("inventory") == 3, "P_CURRENT_INPUT_INVENTORY_REQUESTS"
+    assert sum("/workbooks?" in route for _, route in later_calls) == 1
+    visible = not change.startswith("workbook-")
+    catalog = visible and change != "visibility"
+    detail = catalog and change not in ("catalog-empty", "catalog-ambiguous")
+    assert sum("/users/" in route for _, route in later_calls) == int(visible), "P_CURRENT_INPUT_VISIBILITY_REQUESTS"
+    assert len(site.queries()) == 1 + int(catalog), "P_CURRENT_INPUT_CATALOG_REQUESTS"
+    assert site.detail_count() == 1 + int(detail), "P_CURRENT_INPUT_DETAIL_REQUESTS"
+    code, state = _published_replay(messages)
+    assert code is None and state.terminal == result, "P_CURRENT_INPUT_OBSERVATIONS_RECONCILE"
+    assert all(
+        field not in json.dumps(result)
+        for field in ("current_workbook", "acquisition", "candidate_sha256", "detail_sha256")
+    ), "P_CURRENT_INPUT_PRIVATE_OBSERVATIONS"
+
+
+@pytest.mark.parametrize("change", ["unchanged", "detail-404", "visibility"])
+def test_published_distinct_associations_reacquire_visibility_and_detail_within_one_input(
+    tmp_path: Path, monkeypatch, change: str
+) -> None:
+    path, site = _published_setup(tmp_path, monkeypatch, _published_xml("SalesFeed", "OtherFeed", "OtherFeed"))
+    call = site._call
+
+    def change_association(
+        method: str, route: str, body: dict | None = None, accept: str | None = None
+    ) -> tuple[int, bytes]:
+        if "/datasources?" in route and "OtherFeed" in parse_qs(urlsplit(route).query).get("filter", [""])[0]:
+            site.catalog["datasources"]["datasource"][0]["contentUrl"] = "OtherFeed"
+            site.detail["datasource"]["contentUrl"] = "OtherFeed"
+        answer = call(method, route, body, accept)
+        if "/datasources/" in route and site.detail_count() == 1:
+            if change == "detail-404":
+                site.detail_status = 404
+            elif change == "visibility":
+                site.user["siteRole"] = "Creator"
+        return answer
+
+    monkeypatch.setattr(site, "_call", change_association)
+    result, messages = _published_capture(path, LIVE_ENV)
+    rows = _association(result)["rows"]
+    assert rows[0]["state"] == "resolved", "P_CURRENT_ASSOCIATION_POSITIVE"
+    expected = "resolved" if change == "unchanged" else "cannot_establish"
+    assert [row["state"] for row in rows[1:]] == [expected, expected], "P_CURRENT_ASSOCIATION_AUTHORITY"
+    assert site.detail_count() == len(site.queries()) == (1 if change == "visibility" else 2), (
+        "P_CURRENT_ASSOCIATION_REQUESTS"
+    )
+    assert sum("/users/" in route for _, route in site.calls) == 2, "P_CURRENT_ASSOCIATION_VISIBILITY"
+    assert _published_replay(messages)[0] is None
