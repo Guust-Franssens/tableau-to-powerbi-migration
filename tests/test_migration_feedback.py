@@ -1609,3 +1609,15 @@ def test_native_directory_handle_does_not_follow_a_junction(tmp_path) -> None:
             os.close(descriptor)
     finally:
         _remove_junction(link)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows ACL inheritance cleanup control")
+def test_restoring_stage_permissions_preserves_unsealed_child_read_access(tmp_path) -> None:
+    stage = tmp_path / "stage"
+    (stage / "repro").mkdir(parents=True)
+    child = stage / "repro" / "one.txt"
+    child.write_bytes(b"fictitious")
+    with feedback._Filesystem() as filesystem:
+        filesystem.directory(stage)
+        feedback._stage_permissions(filesystem, stage, [child], writable=True)
+    assert child.read_bytes() == b"fictitious"

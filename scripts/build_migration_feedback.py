@@ -395,7 +395,7 @@ def _windows_permissions(path: Path, *, writable: bool) -> None:
     # The owner can explicitly change the ACL for disposal; ordinary writes/renames are sealed.
     rights = "FA" if writable else "FRFXWD"
     if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
-        f"D:P(A;;{rights};;;OW)", 1, ctypes.byref(descriptor), None
+        f"D:P(A;OICI;{rights};;;OW)", 1, ctypes.byref(descriptor), None
     ):
         raise ctypes.WinError(ctypes.get_last_error())
     try:
