@@ -52,6 +52,7 @@ from bundle_corpus import (
     shipping_reports,
 )
 from check_field_bindings import model_for_report
+from reference_evidence import reference_candidate
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -2055,6 +2056,7 @@ class OracleRecord:
     workbook: oid.WorkbookIdentity
     visual: bool
     numeric: bool
+    candidate: oid.Candidate | None = None
 
 
 def _declared_kind(record: Any) -> str | None:
@@ -2072,11 +2074,10 @@ def _declared_kind(record: Any) -> str | None:
 
 
 def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[OracleRecord], set[str]]:
-    """Reference-capture records, one per dashboard entry, multiplicity preserved.
+    """Reference-capture records, one per entry, multiplicity preserved.
 
-    Every entry is a DASHBOARD by construction: ``capture_tableau_reference.py`` builds this array
-    from the migration spec's ``dashboards`` (``_dashboard_names``), so the kind is structurally known
-    here and does not depend on #402 landing.
+    Manual entries use the shared candidate and declared kind; the container named ``dashboards``
+    also holds worksheet captures. Other reference providers retain their existing exact-name path.
 
     A `reference/manifest.json` declares no producing workbook NAME - it records
     ``source_workbook_sha256`` (`capture_tableau_reference.py:234`), which is a machine identity and
@@ -2096,24 +2097,34 @@ def _reference_oracles(target: Path, reference_dir: Path | None) -> tuple[list[O
         for dashboard in payload.get("dashboards", []) if isinstance(payload, dict) else []:
             if not isinstance(dashboard, dict):
                 continue
-            visual, numeric, caps, state_luids = _reference_states(directory, dashboard)
+            visual, numeric, caps, state_luids, candidate = _reference_states(directory, dashboard)
             grades |= caps
+            kind = "dashboard" if candidate is None else candidate.kind
+            if candidate is not None:
+                state_luids.extend(
+                    scope.get("source_workbook_luid")
+                    for scope in (dashboard, payload, *dashboard.get("states", []))
+                    if isinstance(scope, dict)
+                )
             records.append(
                 OracleRecord(
                     name=str(dashboard.get("name") or ""),
-                    kind="dashboard",
+                    kind=kind if kind != oid.KIND_UNKNOWN else None,
                     workbook=_declared_workbook(
                         dashboard, payload, sha256=payload.get("source_workbook_sha256"), extra_luids=state_luids
                     ),
                     visual=visual,
                     numeric=numeric,
+                    candidate=candidate,
                 )
             )
     return records, grades
 
 
-def _reference_states(directory: Path, dashboard: dict[str, Any]) -> tuple[bool, bool, set[str], list[Any]]:
-    """``(visual, numeric, grades, per-state LUID claims)`` across one dashboard entry's states.
+def _reference_states(
+    directory: Path, dashboard: dict[str, Any]
+) -> tuple[bool, bool, set[str], list[Any], oid.Candidate | None]:
+    """Visual/numeric/grade/LUID aggregates and the manual candidate across one entry's states.
 
     The LUID claims are returned rather than resolved here because this gate collapses every state
     of an entry into ONE record, so they are claims about that record and must agree with the entry's
@@ -2121,13 +2132,22 @@ def _reference_states(directory: Path, dashboard: dict[str, Any]) -> tuple[bool,
     (`reference_evidence._reference_workbook_luid`); a scope one gate reads and the other ignores is
     a hole by construction - measured on this branch, a state declaring another workbook's LUID
     reached ``PASS route=sha256 admitted=1`` here.
+
+    A manual record's states must also agree on kind. An unknown or conflicting kind is never
+    promoted by the image, capabilities, or another state's successful capture.
     """
     visual = numeric = False
     grades: set[str] = set()
     luids: list[Any] = []
+    candidate = None
+    kinds: set[str] = set()
     for state in dashboard.get("states", []):
         if not isinstance(state, dict):
             continue
+        state_candidate = reference_candidate(dashboard, state)
+        kinds.add(state_candidate.kind)
+        if state.get("provider") == "manual":
+            candidate = state_candidate
         caps = {str(cap) for cap in state.get("capabilities", []) if isinstance(cap, str)}
         if caps:
             grades.add("validation-grade" if "validation_grade" in caps else "/".join(sorted(caps)))
@@ -2135,7 +2155,9 @@ def _reference_states(directory: Path, dashboard: dict[str, Any]) -> tuple[bool,
         oracle = state.get("numeric_oracle")
         numeric = numeric or (isinstance(oracle, str) and _existing_relative(directory, oracle))
         luids.append(state.get("workbook_luid"))
-    return visual, numeric, grades, luids
+    if candidate is not None and len(kinds) != 1:
+        candidate = oid.Candidate(names=candidate.names)
+    return visual, numeric, grades, luids, candidate
 
 
 def _is_within(directory: Path, base: Path) -> bool:
@@ -2241,12 +2263,14 @@ class OracleEvidence:
       see :func:`_admissible_oracle_records`, where issue #450 lived.
     * **Kind.** A record may only satisfy a page of the SAME kind, and a record whose kind cannot be
       established satisfies nothing. See :class:`OracleRecord`.
-    * **Exact spelling.** A view name and a page name are BOTH source-owned - they come from the same
+    * **Exact spelling.** An oracle view name and a page name are BOTH source-owned - they come from the same
       Tableau workbook with no filesystem in between - so nothing legitimately re-spells one into the
       other and there is no lossy fallback on names at all. (Round 6 permitted a uniqueness-guarded
       one; round 7 removed it, because a guard on a fallback that has no mechanism behind it only
-      narrows an unjustified match.)
-    * **Multiplicity.** Two records answering to one page name settle nothing, and say so.
+      narrows an unjustified match.) Manual reference spellings instead follow the shared provider
+      candidate rules and CandidateIndex's exact-first resolution.
+    * **Multiplicity.** Two records answering to one page, or one manual record selected by several
+      expected pages, settle nothing and say so.
 
     ⚠️ **The KIND half of issue #438 is CLOSED here**, so the runtime caveat that disclosed it while
     it was open is gone with it - a disclosure that outlives its gap manufactures doubt exactly as
@@ -2269,10 +2293,14 @@ class OracleEvidence:
     #: Records refused because a display NAME was their only identity (round-3 review, B-B).
     name_only: list[str]
     foreign: tuple[str, ...]
+    refused: dict[tuple[str, str], str]
 
     def evidence_for(self, page: dict[str, Any]) -> tuple[OracleRecord | None, str | None]:
         """``(record, refusal)`` for one expected page. At most one of the two is ever set."""
-        exact = self.by_exact.get((str(page.get("kind")), page["name"]), [])
+        key = (str(page.get("kind")), page["name"])
+        if key in self.refused:
+            return None, self.refused[key]
+        exact = self.by_exact.get(key, [])
         if len(exact) == 1:
             return exact[0], None
         if exact:
@@ -2414,15 +2442,37 @@ def _admissible_oracle_records(
     return admissible, foreign, unattributed, kindless, name_only
 
 
-def _resolve_oracle_evidence(
+def _resolve_oracle_evidence(  # pylint: disable=too-many-locals
     records: list[OracleRecord], candidates: list[dict[str, Any]], unit_ids: list[oid.WorkbookIdentity]
 ) -> OracleEvidence:
     """Index producer records against the expected pages without losing a collision."""
-    _ = candidates
     admissible, foreign, unattributed, kindless, named = _admissible_oracle_records(records, unit_ids)
     by_exact: dict[tuple[str, str], list[OracleRecord]] = {}
+    manual: oid.CandidateIndex[OracleRecord] = oid.CandidateIndex()
     for record in admissible:
-        by_exact.setdefault((str(record.kind), record.name), []).append(record)
+        if record.candidate is None:
+            by_exact.setdefault((str(record.kind), record.name), []).append(record)
+        else:
+            manual.add(record.candidate, record)
+    refused: dict[tuple[str, str], str] = {}
+    selected: dict[int, list[tuple[str, str]]] = {}
+    for identity in dict.fromkeys(_candidate_identity(page) for page in candidates):
+        if identity is None:
+            continue
+        key = (identity.kind, identity.name)
+        resolution = manual.resolve(identity)
+        if resolution.outcome == oid.AMBIGUOUS:
+            count = resolution.count + len(by_exact.get(key, []))
+            refused[key] = f"{count} producer records are named {identity.name!r}"
+        elif resolution.outcome == oid.UNIQUE:
+            record = resolution.value()
+            by_exact.setdefault(key, []).append(record)
+            if len(by_exact[key]) == 1:
+                selected.setdefault(id(record), []).append(key)
+    for keys in selected.values():
+        if len(keys) > 1:
+            for key in keys:
+                refused[key] = f"one manual producer record is selected by {len(keys)} expected pages"
     return OracleEvidence(
         by_exact=by_exact,
         unattributed=unattributed,
@@ -2430,6 +2480,7 @@ def _resolve_oracle_evidence(
         admitted=len(admissible),
         name_only=named,
         foreign=tuple(sorted(set(foreign))),
+        refused=refused,
     )
 
 
@@ -2452,9 +2503,9 @@ def check_oracle_coverage(  # pylint: disable=too-many-locals
     denominator too meant a unit missing a page reported validation-grade coverage of everything it
     still had. A signed page-parity exemption is the only thing that takes a page out.
 
-    An oracle entry names an object without saying what KIND it is, so it may only satisfy a page
-    whose name exactly ONE expected page claims. Measured before this: with a dashboard ``Sales`` and
-    a worksheet ``Sales`` both expected, one reference row was counted as 2-of-2 coverage.
+    A record must uniquely resolve to a page of its declared KIND. Manual aliases must be exclusive
+    across the expected pages; ordinary oracle records remain exact-name. A dashboard and worksheet
+    named ``Sales`` must never share one reference row as 2-of-2 coverage.
 
     ⚠️ Classifies its own argument FIRST and INDEPENDENTLY (issue #562), before reference/oracle
     discovery, the manifest read and the ancestor walk. A refused boundary is the existing blocking

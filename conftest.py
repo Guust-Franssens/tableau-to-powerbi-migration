@@ -178,6 +178,36 @@ EXPECTED_ENGINE_SKIP_REASONS_BY_NODEID: dict[str, str] = {
     "tests/test_harvest_download_watchdog.py::test_the_ceiling_constants_match_the_INSTALLED_engine": (
         "canonical engine not installed, so its constants cannot be read"
     ),
+    "tests/test_harvest_project_scope.py::test_canonical_engine_fetcher_twins_reach_engine_input_through_main"
+    "[datasource]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_engine_fetcher_twins_reach_engine_input_through_main"
+    "[workbook]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_engine_inputs_preserve_parser_landings"
+    "[datasource-suffixes0-.tds-.tds]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_engine_inputs_preserve_parser_landings"
+    "[datasource-suffixes1-.tdsx-.tdsx]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_engine_inputs_preserve_parser_landings"
+    "[datasource-suffixes2-.tdsx-.tds]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_engine_inputs_preserve_parser_landings"
+    "[workbook-suffixes3-.twb-.twb]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_engine_inputs_preserve_parser_landings"
+    "[workbook-suffixes4-.twbx-.twbx]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_engine_inputs_preserve_parser_landings"
+    "[workbook-suffixes5-.twbx-.twbx]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_engine_unreadable_residual_archives_do_not_change_parse_exit"
+    "[missing_inner_document]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_engine_unreadable_residual_archives_do_not_change_parse_exit"
+    "[non_zip_residue]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_engine_unreadable_residual_archives_do_not_change_parse_exit"
+    "[truncated_zip]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_reader_and_digest_share_bytes_during_restored_mutation"
+    "[datasource-.tds]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_reader_and_digest_share_bytes_during_restored_mutation"
+    "[datasource-.tdsx]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_reader_and_digest_share_bytes_during_restored_mutation"
+    "[workbook-.twb]": "deterministic tier not installed",
+    "tests/test_harvest_project_scope.py::test_canonical_reader_and_digest_share_bytes_during_restored_mutation"
+    "[workbook-.twbx]": "deterministic tier not installed",
     "tests/test_issue_194_long_pbir_path.py::test_the_emitted_long_case_stops_the_coordinator_before_its_first_"
     "consumer": "deterministic tier not installed",
     "tests/test_issue_194_long_pbir_path.py::test_the_emitted_short_control_passes_the_same_coordinator_gate": (
