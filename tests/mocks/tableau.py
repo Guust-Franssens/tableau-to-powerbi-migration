@@ -18,7 +18,7 @@ What it serves
 ``POST /api/<ver>/auth/signin`` and ``/auth/signout``; the paged site collections
 (``workbooks``, ``views``, ``datasources``, ``projects``, ``groups``, ``flows``, ``subscriptions``,
 ``dataAlerts``, ``customviews``), ``groups/<id>/users``, ``<object>/<id>/permissions``,
-``users/user-1``, exact ``datasources?filter=contentUrl:eq:<value>`` and datasource detail,
+``users/<signed-in-user-id>``, exact ``datasources?filter=contentUrl:eq:<value>`` and datasource detail,
 ``workbooks/<luid>/connections``, ``workbooks|datasources/<luid>/content`` (real ``.twbx``/``.tdsx``
 bytes), and ``POST /api/metadata/graphql``.
 
@@ -212,16 +212,18 @@ class Grant:
 class TableauSite:  # pylint: disable=too-many-instance-attributes
     """The estate this fake serves, plus the switches a test needs to make it misbehave."""
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments
         self,
         *,
         site_id: str = "site-0000",
+        user_id: str = "user-1",
         content_url: str = "mock",
         rest_version: str = DEFAULT_REST_VERSION,
         page_size: int | None = None,
         single_row_as_object: bool = False,
     ) -> None:
         self.site_id = site_id
+        self.user_id = user_id
         self.content_url = content_url
         self.rest_version = rest_version
         # A page size the SERVER enforces, independent of the client's `pageSize=` request. Tableau
@@ -415,7 +417,7 @@ class TableauSite:  # pylint: disable=too-many-instance-attributes
                 "credentials": {
                     "token": token,
                     "site": {"id": self.site_id, "contentUrl": self.content_url},
-                    "user": {"id": "user-1"},
+                    "user": {"id": self.user_id},
                 }
             },
         )
@@ -490,8 +492,8 @@ class TableauSite:  # pylint: disable=too-many-instance-attributes
         return self._fail(404, "404000", f"no route for {path}")
 
     def _detail(self, collection: str, luid: str) -> tuple[int, dict, bytes]:
-        if collection == "users" and luid == "user-1":
-            return self._json(200, {"user": {"id": "user-1", "siteRole": "SiteAdministratorExplorer"}})
+        if collection == "users" and luid == self.user_id:
+            return self._json(200, {"user": {"id": self.user_id, "siteRole": "SiteAdministratorExplorer"}})
         if collection == "datasources":
             found = next((d for d in self.datasources if d.luid == luid), None)
             if found is not None:

@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import io
 import json
+import runpy
 import sys
+import uuid
 import zipfile
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
+from urllib.request import Request, urlopen
 from xml.etree import ElementTree
 
 import pytest
@@ -24,6 +27,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import assess_estate as ae  # noqa: E402  # pylint: disable=wrong-import-position
+import harvest_estate_assets as hea  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_lineage as tl  # noqa: E402  # pylint: disable=wrong-import-position
 from mocks import estate, tableau  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -57,7 +61,8 @@ def signed_in(site) -> str:
     )
     assert status == 200
     credentials = json.loads(payload)["credentials"]
-    assert credentials["user"] == {"id": "user-1"}
+    assert credentials["user"] == {"id": site.user_id}
+    assert credentials["site"] == {"id": site.site_id, "contentUrl": site.content_url}
     return credentials["token"]
 
 
@@ -197,6 +202,29 @@ def test_usage_statistics_are_absent_unless_requested(site):
 
 
 # -------------------------------------------------------- REST authority subset
+
+
+def test_default_site_identity_is_unchanged(site: tableau.TableauSite) -> None:
+    """UUID authority is opt-in; ordinary mock callers keep their historical identity."""
+    assert (site.site_id, site.user_id, site.content_url) == ("site-0000", "user-1", "mock")
+
+
+def test_configured_uuid_identity_uses_exact_user_detail() -> None:
+    """Sign-in and the exact detail route agree on configurable production-shaped UUIDs."""
+    site = estate.build_site(
+        site_id="11111111-1111-4111-8111-111111111111",
+        user_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        content_url="Finance",
+    )
+    assert str(uuid.UUID(site.site_id)) == site.site_id
+    assert str(uuid.UUID(site.user_id)) == site.user_id
+    token = signed_in(site)
+    route = f"/sites/{site.site_id}/users"
+    status, payload = rest_get(site, f"{route}/{site.user_id}", token)
+    assert status == 200
+    assert payload == {"user": {"id": site.user_id, "siteRole": "SiteAdministratorExplorer"}}
+    for wrong_user in ("user-1", site.user_id.upper(), f"{site.user_id}/extra"):
+        assert rest_get(site, f"{route}/{wrong_user}", token)[0] == 404
 
 
 def test_user_detail_matches_the_signed_in_admin(site: tableau.TableauSite) -> None:
@@ -712,6 +740,125 @@ def test_real_client_receives_structured_pagination_refusals(served) -> None:
 
 
 # ------------------------------------------------------------------- download
+
+
+def test_harvest_composes_production_luid_filenames(site, tmp_path, monkeypatch) -> None:
+    """Use the production helper, with independently expected names and collision-safe LUIDs."""
+    calls = []
+    asset_path = hea.asset_path
+
+    def record_path(assets_dir: Path, kind: str, name: str, luid: str) -> Path:
+        calls.append((assets_dir, kind, name, luid))
+        return asset_path(assets_dir, kind, name, luid)
+
+    monkeypatch.setattr(hea, "asset_path", record_path)
+    site.workbooks[0].name = "Same/Name"
+    site.workbooks[1].name = "Same?Name"
+    site.workbooks[2].name = "A" * 61
+    site.mint_token()
+    paths = estate.harvest(site, tmp_path)
+    expected = [
+        f"{site.workbooks[0].luid}_Same_Name.twbx",
+        f"{site.workbooks[1].luid}_Same_Name.twbx",
+        f"{site.workbooks[2].luid}_{'A' * 60}.twbx",
+        f"{site.datasources[0].luid}_Corporate_Cities.tdsx",
+    ]
+    assert [path.name for path in paths] == expected
+    assert calls == [
+        (tmp_path / "assets", kind, asset.name, asset.luid)
+        for kind, assets in (("workbook", site.workbooks), ("datasource", site.datasources))
+        for asset in assets
+    ]
+    assert [path.read_bytes() for path in paths] == [asset.content for asset in [*site.workbooks, *site.datasources]]
+
+
+@pytest.mark.parametrize(
+    "filename, expected",
+    [
+        ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa_Sales_Review.twbx", "Sales_Review"),
+        ("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA_Sales_Review.twb", "Sales_Review"),
+        ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa-Sales_Review.tdsx", "Sales_Review"),
+        ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa Sales_Review.tds", "Sales_Review"),
+        ("Sales_Review.twbx", "Sales_Review"),
+        ("Sales.v1.2.twbx", "Sales.v1.2"),
+        ("aaaaaaaa-aaaa_Sales_Review.twbx", "aaaaaaaa-aaaa_Sales_Review"),
+        ("aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa_Sales.twbx", "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa_Sales"),
+        ("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaaSales.twbx", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaaSales"),
+        ("Sales--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.twbx", "Sales--aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+    ],
+)
+def test_fake_engine_strips_only_a_canonical_uuid_prefix(tmp_path, filename: str, expected: str) -> None:
+    """Exercise the emitted engine's naming seam, not a second test-side naming implementation."""
+    engine = estate.install_fake_engine(tmp_path / "engine")
+    namespace = runpy.run_path(str(engine / "skills" / "tableau-migration" / "scripts" / "migrate_estate.py"))
+    assert namespace["LocalFilesSource"].asset_name(Path(filename)) == expected
+
+
+@pytest.mark.parametrize("content_url", ["ProjectedSite", ""])
+def test_published_source_projection_uses_active_origin_and_site(content_url: str) -> None:
+    """Only opt-in served bytes move; committed fixtures and unrelated archives stay unchanged."""
+    site = estate.build_site(content_url=content_url)
+    original = [workbook.content for workbook in site.workbooks]
+    fixtures = {
+        name: (estate.FIXTURES / name).read_bytes()
+        for name in ("minimal.twb", "federated_multi_connection.twb", "published_datasource.twb")
+    }
+    site.datasources[0].content_url = "DifferentCatalogEntry"
+    with tableau.serve(site) as base:
+        estate.project_published_sources(site, base)
+        assert [workbook.content for workbook in site.workbooks[:2]] == original[:2]
+        workbook = site.workbooks[2]
+        assert workbook.content != original[2]
+        with zipfile.ZipFile(io.BytesIO(workbook.content)) as archive:
+            assert archive.namelist() == ["published_datasource.twb"]
+            root = ElementTree.fromstring(archive.read("published_datasource.twb"))
+        location = root.find("./datasources/datasource/repository-location")
+        connection = root.find("./datasources/datasource/connection")
+        assert location is not None and connection is not None
+        path = f"/t/{content_url}/datasources" if content_url else "/datasources"
+        assert location.attrib == {
+            "derived-from": f"{base}{path}/SalesMaster?rev=1.0",
+            "id": "SalesMaster_oldname",
+            "path": path,
+            "revision": "1.0",
+            "site": content_url,
+        }
+        assert connection.attrib == {"class": "sqlproxy", "dbname": "SalesMaster", "server": base}
+        client = ae.Site(tableau.env_for(site, base))
+        client.sign_in()
+        request = Request(
+            f"{base}/api/{site.rest_version}/sites/{site.site_id}/workbooks/{workbook.luid}/content",
+            headers={"X-Tableau-Auth": client.token},
+        )
+        with urlopen(request, timeout=5) as response:
+            assert response.status == 200
+            assert response.read() == workbook.content
+        client.sign_out()
+    assert site.datasources[0].downstream == ["Sales Review", "Ops Dashboard"]
+    assert {name: (estate.FIXTURES / name).read_bytes() for name in fixtures} == fixtures
+    default_site = estate.build_site()
+    for workbook, fixture in zip(default_site.workbooks, fixtures, strict=True):
+        with zipfile.ZipFile(io.BytesIO(workbook.content)) as archive:
+            assert archive.read(fixture) == fixtures[fixture]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://tableau.contoso.com",
+        "http://127.0.0.1",
+        "http://127.0.0.1:9/foreign",
+        "http://127.0.0.1:9?foreign=1",
+        "http://127.0.0.1:9#foreign",
+        "http://user@127.0.0.1:9",
+    ],
+)
+def test_published_source_projection_refuses_non_loopback_origins(site, base_url: str) -> None:
+    """Projection cannot turn an accidental real-host/base-path argument into served authority."""
+    original = [workbook.content for workbook in site.workbooks]
+    with pytest.raises(ValueError, match="loopback origin"):
+        estate.project_published_sources(site, base_url)
+    assert [workbook.content for workbook in site.workbooks] == original
 
 
 def test_content_download_returns_a_real_packaged_workbook(site):

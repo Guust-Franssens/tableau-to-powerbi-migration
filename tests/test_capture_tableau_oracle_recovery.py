@@ -596,6 +596,7 @@ def test_legacy_null_or_missing_api_is_derived_from_its_own_capture(monkeypatch,
     if capability_config is not None:
         outcomes[LUID_1, "svg"] = "transient"
         args.append("--reference-best")
+        monkeypatch.setattr(oracle.capability, "server_info", lambda *_args, **_kwargs: {})
         monkeypatch.setattr(
             oracle.capability,
             "probe_render_capability",
