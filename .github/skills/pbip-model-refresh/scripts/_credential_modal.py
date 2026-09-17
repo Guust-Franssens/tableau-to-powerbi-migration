@@ -1296,10 +1296,40 @@ def _image_user32() -> ctypes.CDLL:
     return user32
 
 
+def _set_image_dpi_awareness(user32: ctypes.CDLL) -> int:
+    """Use physical coordinates on the capture thread, not the observer or Desktop's threads."""
+    try:
+        setter = user32.SetThreadDpiAwarenessContext
+    except AttributeError:
+        raise _ImageUnavailable("UNSUPPORTED") from None
+    setter.argtypes, setter.restype = [ctypes.c_void_p], ctypes.c_void_p
+    # PER_MONITOR_AWARE v1 works from Windows 10 1607; v2 is not needed for a memory-DC capture.
+    previous = setter(-3)
+    if not previous:
+        raise _ImageUnavailable("BLANK_OR_INCOMPLETE")
+    return previous
+
+
 def _image_extent(user32: ctypes.CDLL, hwnd: int) -> tuple[int, int]:
     rect = wintypes.RECT()
     if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
         raise _ImageUnavailable("TARGET_CHANGED")
+    frame = wintypes.RECT()
+    try:
+        dwm = ctypes.WinDLL("dwmapi", use_last_error=True)
+        dwm.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+        dwm.DwmGetWindowAttribute.restype = ctypes.c_long
+        result = dwm.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(frame), ctypes.sizeof(frame))
+    except (AttributeError, OSError):
+        raise _ImageUnavailable("BLANK_OR_INCOMPLETE") from None
+    # DWM extended-frame bounds are physical, unlike a virtualized GetWindowRect (#686).
+    # Keep the full window rectangle: PrintWindow includes invisible resize borders too.
+    if (
+        result != 0
+        or not rect.left <= frame.left < frame.right <= rect.right
+        or not rect.top <= frame.top < frame.bottom <= rect.bottom
+    ):
+        raise _ImageUnavailable("BLANK_OR_INCOMPLETE")
     width, height = rect.right - rect.left, rect.bottom - rect.top
     # Allocation bounds only. Neither size nor successful rasterisation establishes a prompt.
     if width <= 0 or height <= 0 or width * height > 4_000_000:
@@ -1468,7 +1498,9 @@ def _capture_exact_image(pid: int, window: DesktopWindow, path: Path, *, existin
         raise _ImageUnavailable("UNSUPPORTED")
     user32 = _image_user32()
     checks = dict.fromkeys(_IMAGE_CHECKS)
+    previous_dpi = None
     try:
+        previous_dpi = _set_image_dpi_awareness(user32)
         checks["before"] = _same_image_target(user32, pid, window)
         if not checks["before"]:
             raise _ImageUnavailable("TARGET_CHANGED")
@@ -1487,6 +1519,9 @@ def _capture_exact_image(pid: int, window: DesktopWindow, path: Path, *, existin
     except _ImageUnavailable as exc:
         exc.checks = checks
         raise
+    finally:
+        if previous_dpi and not user32.SetThreadDpiAwarenessContext(previous_dpi):
+            raise _ImageUnavailable("CAPTURE_FAILED")
     return {
         "status": "ACQUIRED",
         "ownership_checks": checks,

@@ -68,10 +68,20 @@ class _ImageWin32:
         self.owner_enabled = False
         self.thread = 7
         self.extent = (2, 2)
+        self.virtual_extent = None
+        self.origin = (0, 0)
+        self.physical_bounds = (0, 0, 2, 2)
+        self.dwm_result = 0
+        self.dpi_context = -1
+        self.dpi_calls = []
+        self.SetThreadDpiAwarenessContext = _NativeCall(self.set_dpi_context)
+        self.dwm = SimpleNamespace(DwmGetWindowAttribute=_NativeCall(self.get_physical_bounds))
+        self.frame = (2, 2, b"\x00\x00\x00\x00" * 2 + b"\xff\xff\xff\x00" * 2)
         self.render_mode = "paint"
         self.after_render = lambda: None
         self.after_write = lambda: None
         self.buffer = None
+        self.dib_size = None
         self.captures = []
         self.writes = []
         self.cleanup_ok = True
@@ -101,16 +111,29 @@ class _ImageWin32:
     def IsWindowEnabled(self, _hwnd):
         return self.owner_enabled
 
+    def set_dpi_context(self, context):
+        self.dpi_calls.append(context)
+        previous, self.dpi_context = self.dpi_context, context
+        return previous
+
+    def get_physical_bounds(self, _hwnd, attribute, pointer, size):
+        assert attribute == 9 and size == ctypes.sizeof(wintypes.RECT)
+        rect = pointer._obj
+        rect.left, rect.top, rect.right, rect.bottom = self.physical_bounds
+        return self.dwm_result
+
     def GetWindowRect(self, _hwnd, pointer):
         rect = pointer._obj
-        rect.left = rect.top = 0
-        rect.right, rect.bottom = self.extent
+        width, height = self.virtual_extent if self.virtual_extent and self.dpi_context != -3 else self.extent
+        rect.left, rect.top = self.origin
+        rect.right, rect.bottom = rect.left + width, rect.top + height
         return True
 
     def create_dib(self, _dc, header, _colors, pointer, _section, _offset):
         _size, width, height = struct.unpack_from("<Iii", header.raw)
-        assert (width, height) == (2, -2), "production must request a top-down, full-sized DIB"
-        self.buffer = ctypes.create_string_buffer(16)
+        assert width > 0 and height < 0, "production must request a top-down DIB"
+        self.dib_size = (width, -height)
+        self.buffer = ctypes.create_string_buffer(width * -height * 4)
         pointer._obj.value = ctypes.addressof(self.buffer)
         return 32
 
@@ -119,9 +142,15 @@ class _ImageWin32:
         if self.render_mode == "false":
             return False
         if self.render_mode == "paint":
-            self.buffer.raw = b"\x00\x00\x00\x00" * 2 + b"\xff\xff\xff\x00" * 2
+            # The fixture frame is independent of the requested DIB; a small DIB really crops it.
+            width, height = self.dib_size
+            frame_width, frame_height, pixels = self.frame
+            count = min(width, frame_width) * 4
+            for row in range(min(height, frame_height)):
+                start = row * frame_width * 4
+                ctypes.memmove(ctypes.addressof(self.buffer) + row * width * 4, pixels[start : start + count], count)
         elif self.render_mode == "blank":
-            self.buffer.raw = b"\xff\xff\xff\x00" * 4
+            self.buffer.raw = b"\xff\xff\xff\x00" * (self.dib_size[0] * self.dib_size[1])
         elif self.render_mode == "partial":
             ctypes.memmove(self.buffer, b"\xff\xff\xff\x00", 4)
         self.after_render()
@@ -146,7 +175,12 @@ def visual_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(_credential_modal, "_evidence_directory", lambda directory, _name: directory)
     monkeypatch.setattr(_credential_modal.sys, "platform", "win32")
     monkeypatch.setattr(_credential_modal, "_image_user32", lambda: api)
-    monkeypatch.setattr(_credential_modal.ctypes, "WinDLL", lambda *_a, **_k: api.gdi, raising=False)
+    monkeypatch.setattr(
+        _credential_modal.ctypes,
+        "WinDLL",
+        lambda name, **_k: {"gdi32": api.gdi, "dwmapi": api.dwm}[name],
+        raising=False,
+    )
     monkeypatch.setattr(_credential_modal, "_write_private_image", api.write)
     monkeypatch.setattr(_credential_modal.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
     real_print = print
@@ -226,6 +260,128 @@ def visual_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(_credential_modal.subprocess, "Popen", ImageChild)
     return SimpleNamespace(
         api=api, noticed=noticed, records=records, wires=wire_records, children=children, root=tmp_path
+    )
+
+
+@pytest.fixture(name="dpi_runtime")
+def dpi_runtime(visual_runtime):
+    """A 125% physical-frame oracle; both the old crop and the full image are nonblank."""
+    api = visual_runtime.api
+    api.extent = (627, 330)
+    api.virtual_extent = (502, 264)
+    api.physical_bounds = (0, 0, 627, 330)
+    pixels = bytearray(b"\xff\xff\xff\x00" * (627 * 330))
+    for x_start, y_start, x_end, y_end, color in (
+        (5, 5, 25, 25, b"\x00\x00\x00\x00"),
+        (607, 310, 627, 330, b"\x00\x00\xff\x00"),
+    ):
+        for row in range(y_start, y_end):
+            pixels[(row * 627 + x_start) * 4 : (row * 627 + x_end) * 4] = color * (x_end - x_start)
+    api.frame = (627, 330, bytes(pixels))
+    return visual_runtime
+
+
+def _visual_child_result(runtime, capsys):
+    basename = "_ui-image-" + "a" * 32 + ".png"
+    result = _credential_modal._image_child(["111", str(DIALOG_HWND), str(MAIN_HWND), basename])
+    return result, json.loads(capsys.readouterr().out), runtime.root / basename
+
+
+@pytest.mark.parametrize("initial_context", [-1, -2, -3])
+def test_visual_dpi_capture_includes_independent_bottom_right_marker(dpi_runtime, capsys, initial_context) -> None:
+    image_decoder = pytest.importorskip("PIL.Image", reason="independent PNG decoder is a repo dev extra")
+    dpi_runtime.api.dpi_context = initial_context
+    result, payload, path = _visual_child_result(dpi_runtime, capsys)
+    assert result == 0 and payload["status"] == "ACQUIRED", "complete physical-frame acquisition was not established"
+    with image_decoder.open(path) as image:
+        # A crop outside the image is padded, not an IndexError; the intended assertion must fail.
+        assert image.crop((607, 310, 627, 330)).getcolors() == [(400, (255, 0, 0))], (
+            "ACQUIRED must include the independent bottom/right marker, not just the nonblank top-left crop"
+        )
+        assert image.size == (627, 330), "DWM's physical frame, not child-reported dimensions, is the oracle"
+        assert image.getpixel((10, 10)) == (0, 0, 0) and image.getpixel((0, 0)) == (255, 255, 255)
+    assert dpi_runtime.api.dpi_calls == [-3, initial_context]
+    assert dpi_runtime.api.dpi_context == initial_context, "capture must restore the caller's DPI context"
+
+
+def test_visual_dpi_virtualized_nonblank_crop_is_refused(monkeypatch, dpi_runtime, capsys) -> None:
+    # Even a setter claiming success cannot substitute for the independently physical extent.
+    dpi_runtime.api.SetThreadDpiAwarenessContext = _NativeCall(lambda _context: -1)
+    result, payload, path = _visual_child_result(dpi_runtime, capsys)
+    assert result == 4 and payload["status"] == "BLANK_OR_INCOMPLETE", (
+        "the 502x264 virtualized crop cannot earn ACQUIRED against the independent 627x330 physical frame"
+    )
+    assert dpi_runtime.api.captures == [] and not path.exists()
+
+
+@pytest.mark.parametrize("failure", ["missing", "refused"])
+def test_visual_dpi_setup_failure_cannot_fall_back_to_virtualized_bounds(
+    monkeypatch, dpi_runtime, capsys, failure
+) -> None:
+    if failure == "missing":
+        monkeypatch.delattr(dpi_runtime.api, "SetThreadDpiAwarenessContext")
+    else:
+        dpi_runtime.api.SetThreadDpiAwarenessContext = _NativeCall(lambda _context: None)
+    result, payload, path = _visual_child_result(dpi_runtime, capsys)
+    assert result == 4 and payload["status"] == ("UNSUPPORTED" if failure == "missing" else "BLANK_OR_INCOMPLETE")
+    assert dpi_runtime.api.captures == [] and not path.exists()
+    assert dpi_runtime.api.dpi_context == -1
+
+
+@pytest.mark.parametrize("failure", ["missing", "hresult", "empty", "right", "bottom", "left", "top"])
+def test_visual_dpi_physical_extent_must_be_established(monkeypatch, dpi_runtime, capsys, failure) -> None:
+    api = dpi_runtime.api
+    if failure == "missing":
+        monkeypatch.delattr(api.dwm, "DwmGetWindowAttribute")
+    elif failure == "hresult":
+        api.dwm_result = -1
+    else:
+        api.physical_bounds = {
+            "empty": (0, 0, 0, 0),
+            "right": (1, 0, 628, 330),
+            "bottom": (0, 1, 627, 331),
+            "left": (-1, 0, 626, 330),
+            "top": (0, -1, 627, 329),
+        }[failure]
+    result, payload, path = _visual_child_result(dpi_runtime, capsys)
+    assert result == 4 and payload["status"] == "BLANK_OR_INCOMPLETE"
+    assert api.captures == [] and not path.exists()
+    assert api.dpi_context == -1
+
+
+def test_visual_dpi_physical_extent_is_rechecked_after_render(dpi_runtime, capsys) -> None:
+    api = dpi_runtime.api
+    api.after_render = lambda: setattr(api, "physical_bounds", (0, 0, 628, 330))
+    result, payload, path = _visual_child_result(dpi_runtime, capsys)
+    assert result == 4 and payload["status"] == "BLANK_OR_INCOMPLETE"
+    assert len(api.captures) == 1 and api.writes == [] and not path.exists()
+    assert api.dpi_context == -1
+
+
+def test_visual_dpi_nonblank_render_missing_bottom_right_pixels_is_refused(dpi_runtime, capsys) -> None:
+    api = dpi_runtime.api
+    frame_width, _height, pixels = api.frame
+    api.frame = (
+        502,
+        264,
+        b"".join(pixels[row * frame_width * 4 : (row * frame_width + 502) * 4] for row in range(264)),
+    )
+    result, payload, path = _visual_child_result(dpi_runtime, capsys)
+    assert result == 4 and payload["status"] == "BLANK_OR_INCOMPLETE", (
+        "a nonblank top-left render missing the bottom/right marker cannot earn ACQUIRED"
+    )
+    assert api.writes == [] and not path.exists()
+
+
+@pytest.mark.parametrize("origin", [(0, 0), (-700, -400)])
+def test_visual_dpi_physical_extent_allows_invisible_borders(dpi_runtime, origin) -> None:
+    api = dpi_runtime.api
+    api.dpi_context = -3
+    api.origin = origin
+    api.extent = (643, 346)
+    api.physical_bounds = (origin[0] + 8, origin[1] + 8, origin[0] + 635, origin[1] + 338)
+    assert _credential_modal._image_extent(api, DIALOG_HWND) == (643, 346), (
+        "PrintWindow needs the whole physical window, not a visible-frame-sized crop that drops resize borders"
     )
 
 
@@ -515,7 +671,7 @@ def test_visual_directory_refuses_renamed_artifacts(tmp_path, marker, checkout) 
 @pytest.mark.gui
 @pytest.mark.skipif(sys.platform != "win32", reason="native PrintWindow control is Windows-only")
 def test_visual_native_background_capture_reaches_production_without_focus(monkeypatch, tmp_path) -> None:
-    """Real child/GDI/ACL/PNG against NOACTIVATE controls; never launch Desktop."""
+    """Real child/GDI/ACL/PNG against a physical-frame oracle; NOACTIVATE, never Desktop."""
     image_decoder = pytest.importorskip("PIL.Image", reason="independent PNG decoder is a repo dev extra")
     native = _NativeWindowProbe("ImageOnly")
     ui = native.user32
@@ -546,6 +702,13 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
         [wintypes.HDC, ctypes.POINTER(wintypes.RECT), wintypes.HBRUSH],
         ctypes.c_int,
     )
+    ui.SetThreadDpiAwarenessContext.argtypes, ui.SetThreadDpiAwarenessContext.restype = (
+        [ctypes.c_void_p],
+        ctypes.c_void_p,
+    )
+    dwm = ctypes.WinDLL("dwmapi", use_last_error=True)
+    dwm.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    dwm.DwmGetWindowAttribute.restype = ctypes.c_long
     gdi = ctypes.WinDLL("gdi32", use_last_error=True)
     gdi.GetStockObject.argtypes, gdi.GetStockObject.restype = [ctypes.c_int], wintypes.HANDLE
     original_proc = [None]
@@ -553,10 +716,12 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
     @native.wndproc_type
     def paint(window, message, dc, parameter):
         if message in (0x0317, 0x0318):  # WM_PRINT / WM_PRINTCLIENT: independent, deterministic fixture pixels
-            whole = wintypes.RECT(0, 0, 80, 60)
+            whole = wintypes.RECT(0, 0, 627, 330)
             square = wintypes.RECT(5, 5, 25, 25)
+            marker = wintypes.RECT(607, 310, 627, 330)
             ui.FillRect(dc, ctypes.byref(whole), gdi.GetStockObject(0))
             ui.FillRect(dc, ctypes.byref(square), gdi.GetStockObject(4))
+            ui.FillRect(dc, ctypes.byref(marker), gdi.GetStockObject(4))
             return 0
         return ui.CallWindowProcW(original_proc[0], window, message, dc, parameter)
 
@@ -565,6 +730,7 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
     notices = []
     outcome = {}
     thread = None
+    previous_dpi = None
     real_print = print
 
     def record(message, **kwargs):
@@ -579,22 +745,32 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
             ui.DispatchMessageW(ctypes.byref(message))
 
     try:
-        # STATIC's built-in paint handler supplies a complete white surface plus a black child.
-        # WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW: acquisition never touches foreground.
-        owner = ui.CreateWindowExW(0x08000080, "STATIC", "", 0x90000006, 0, 0, 100, 80, None, None, None, None)
+        # Only this fixture thread becomes aware here; the production child is a fresh process.
+        previous_dpi = ui.SetThreadDpiAwarenessContext(-3)
+        assert previous_dpi, "could not establish the native fixture's physical coordinates"
+        # WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW: neither setup nor acquisition touches foreground.
+        owner = ui.CreateWindowExW(0x08000080, "STATIC", "", 0x90000006, 0, 0, 700, 400, None, None, None, None)
         assert owner
         native.created.append(owner)
-        hwnd = ui.CreateWindowExW(0x08000080, "STATIC", "", 0x90000006, 0, 0, 80, 60, owner, None, None, None)
+        hwnd = ui.CreateWindowExW(0x08000080, "STATIC", "", 0x90000006, 0, 0, 627, 330, owner, None, None, None)
         assert hwnd
         native.created.append(hwnd)
         original_proc[0] = ui.SetWindowLongPtrW(hwnd, -4, ctypes.cast(paint, ctypes.c_void_p))
         assert original_proc[0]
         rectangle = ui.CreateWindowExW(0, "STATIC", "", 0x50000004, 5, 5, 20, 20, hwnd, None, None, None)
         assert rectangle
+        # PW_RENDERFULLCONTENT can use the compositor instead of WM_PRINT. Both paths need markers.
+        edge_marker = ui.CreateWindowExW(0, "STATIC", "", 0x50000004, 607, 310, 20, 20, hwnd, None, None, None)
+        assert edge_marker
         ui.EnableWindow(owner, False)
         pump()
         ui.UpdateWindow(hwnd)
         ui.UpdateWindow(rectangle)
+        ui.UpdateWindow(edge_marker)
+        physical = wintypes.RECT()
+        assert dwm.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(physical), ctypes.sizeof(physical)) == 0
+        physical_size = (physical.right - physical.left, physical.bottom - physical.top)
+        assert physical_size == (627, 330), "the independent DWM oracle must describe the complete fixture"
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv(_credential_modal.IMAGE_DIRECTORY_ENV, str(tmp_path))
         monkeypatch.setattr(_credential_modal, "print", record, raising=False)
@@ -629,13 +805,19 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
             _credential_modal._open_private_image(tmp_path / notices[0]["path"], existing=True) as stream,
             image_decoder.open(stream) as image,
         ):
-            assert image.size == (80, 60)
-            # The fixture's WM_PRINT handler supplies this exact rectangle independently of the encoder.
             outside, inside = image.getpixel((0, 0)), image.getpixel((10, 10))
             assert inside != outside, "the modal has a child rectangle; its owner is uniformly filled"
-            for y in range(60):
-                for x in range(80):
-                    expected = inside if 5 <= x < 25 and 5 <= y < 25 else outside
+            assert (
+                image.width >= physical_size[0]
+                and image.height >= physical_size[1]
+                and image.crop((607, 310, 627, 330)).getcolors() == [(400, inside)]
+            ), "ACQUIRED must retain the physical bottom/right marker, even when the top-left crop is nonblank"
+            assert image.size == physical_size, "DWM bounds must agree independently of the image child's metadata"
+            # Both markers are supplied independently of the production extent, GDI and PNG code.
+            for y in range(physical_size[1]):
+                for x in range(physical_size[0]):
+                    marked = (5 <= x < 25 and 5 <= y < 25) or (607 <= x and 310 <= y)
+                    expected = inside if marked else outside
                     assert image.getpixel((x, y)) == expected
     finally:
         released.set()
@@ -646,6 +828,8 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
                 pump()
                 thread.join(0.005)
         native.close()
+        if previous_dpi:
+            assert ui.SetThreadDpiAwarenessContext(previous_dpi), "fixture DPI restoration failed"
     assert outcome.get("result", (False,))[0] is True, outcome
     assert not list(tmp_path.glob("_ui-image-*.png"))
 
