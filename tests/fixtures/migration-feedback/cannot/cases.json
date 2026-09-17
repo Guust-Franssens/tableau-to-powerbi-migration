@@ -1,0 +1,5 @@
+{
+  "remove": ["positive_input", "engine_receipt", "negative_record", "fresh_output", "oracle"],
+  "expected_exit": 3,
+  "expected_route": "CANNOT_ESTABLISH"
+}
