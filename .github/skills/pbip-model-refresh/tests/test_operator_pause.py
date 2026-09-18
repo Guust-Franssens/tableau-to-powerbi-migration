@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import copy
 import ctypes
 import hashlib
@@ -82,6 +83,32 @@ def publish(context: pause.OperatorPauseContext) -> pause.PausePublication:
         return stage
     finally:
         stage.lease.close()
+
+
+@pytest.mark.parametrize("flag", ["O_BINARY", "O_NOINHERIT"])
+def test_private_file_flags_must_exist_before_native_io(monkeypatch, tmp_path, flag) -> None:
+    monkeypatch.delattr(pause.os, flag, raising=False)
+    monkeypatch.setattr(
+        pause.ctypes, "WinDLL", lambda *_a, **_k: pytest.fail("unsupported flags reached native I/O"), raising=False
+    )
+    with pytest.raises(pause.OperatorPauseUnavailable):
+        pause._open_file(tmp_path / "prompt.png", create=True)
+    assert not (tmp_path / "prompt.png").exists()
+
+
+def test_missing_msvcrt_is_a_closed_native_refusal(monkeypatch, tmp_path) -> None:
+    original = builtins.__import__
+
+    def unavailable(name, *args, **kwargs):
+        if name == "msvcrt":
+            raise ImportError("synthetic unavailable platform")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", unavailable)
+    with pytest.raises(pause.OperatorPauseUnavailable):
+        pause._open_file(tmp_path / "prompt.png", create=True)
+    with pytest.raises(pause.OperatorPauseUnavailable):
+        pause._disposition(None, 1)
 
 
 def sample_record() -> dict:

@@ -300,7 +300,12 @@ def _open_file(
 ) -> BinaryIO:
     """CreateNew with protected ACL, or pin an ordinary existing file; never truncate or replace."""
     # pylint: disable=import-outside-toplevel,too-many-arguments
-    import msvcrt
+    try:
+        import msvcrt
+
+        descriptor_flags = (os.O_RDWR if create else os.O_RDONLY) | getattr(os, "O_BINARY") | getattr(os, "O_NOINHERIT")
+    except (ImportError, AttributeError):
+        raise OperatorPauseUnavailable() from None
 
     with _private_attributes() as attributes:
         kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -329,9 +334,7 @@ def _open_file(
         if handle == ctypes.c_void_p(-1).value:
             raise OSError("private file unavailable")
         try:
-            descriptor = msvcrt.open_osfhandle(
-                handle, (os.O_RDWR if create else os.O_RDONLY) | os.O_BINARY | os.O_NOINHERIT
-            )
+            descriptor = msvcrt.open_osfhandle(handle, descriptor_flags)
         except BaseException:
             kernel.CloseHandle(handle)
             raise
@@ -348,7 +351,10 @@ def _open_file(
 
 def _disposition(stream: BinaryIO, flags: int, *, extended: bool = False) -> None:
     # pylint: disable=import-outside-toplevel
-    import msvcrt
+    try:
+        import msvcrt
+    except ImportError:
+        raise OperatorPauseUnavailable() from None
 
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
