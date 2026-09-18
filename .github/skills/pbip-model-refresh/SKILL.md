@@ -119,6 +119,12 @@ late results cannot publish a positive category. Native process creation itself 
 it runs on a daemon observer, never on the refresh wait thread, and teardown does not join that
 observer. This is not a guarantee that a wedged OS call returns; its eventual result is discarded.
 
+**The OCR watchdog is independent of pipe I/O.** On Windows, `communicate(timeout=...)` writes stdin
+before its timed stdout wait: a child that never reads can block that write. A separate deadline
+watchdog kills only the owned OCR child even then. The native negative control sends a PNG larger
+than the pipe buffer to a non-reading process and requires its termination while refresh stays alive.
+Neither startup, input backpressure nor a late OCR result can allocate another attempt budget.
+
 **Configure caller-owned private scratch explicitly.** Supply
 `--evidence-dir <existing-local-run-scratch>` or export **`PBIP_EVIDENCE_DIR`** before invoking a
 probe that launches this refresh. The Python API also accepts `refresh(..., evidence_dir=Path(...))`;

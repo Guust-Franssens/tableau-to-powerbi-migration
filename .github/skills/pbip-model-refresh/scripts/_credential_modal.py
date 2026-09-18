@@ -2044,9 +2044,13 @@ class ModalVisualEvidence:  # pylint: disable=too-many-instance-attributes
             self._stop(request)
 
     def _classify_image(self, request: _ImageRequest, image: bytes, acquired: dict, deadline: float) -> None:
+        # On Windows communicate(timeout=...) can block writing stdin BEFORE its timed wait.
+        watchdog = threading.Timer(max(0.0, deadline - time.monotonic()), self._stop, args=(request,))
+        watchdog.daemon = True
         try:
             request.child = None
             request.ready.clear()
+            watchdog.start()
             threading.Thread(target=self._launch_ocr, args=(request, deadline), name="window-ocr", daemon=True).start()
             if not request.ready.wait(max(0.0, deadline - time.monotonic())):
                 raise subprocess.TimeoutExpired("window-ocr", IMAGE_CAPTURE_SECONDS)
@@ -2068,6 +2072,8 @@ class ModalVisualEvidence:  # pylint: disable=too-many-instance-attributes
             # No child bytes or exception detail may cross the closed metadata seam.
             self._stop(request)
             provenance = _ocr_error("ocr_unparseable")
+        finally:
+            watchdog.cancel()
         with self._lock:
             if (
                 self._closed

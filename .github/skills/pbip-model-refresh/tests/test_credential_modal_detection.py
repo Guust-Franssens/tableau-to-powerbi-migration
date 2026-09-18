@@ -168,6 +168,7 @@ class _ImageWin32:
 def visual_runtime(monkeypatch, tmp_path):
     """Exercise the production child body without a real window; record flushed in-flight notices."""
     api = _ImageWin32()
+    real_popen = subprocess.Popen
     noticed = threading.Event()
     classified = threading.Event()
     records = []
@@ -309,6 +310,7 @@ def visual_runtime(monkeypatch, tmp_path):
         wires=wire_records,
         children=children,
         leases=leases,
+        real_popen=real_popen,
         ocr=ocr,
         root=tmp_path,
     )

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -360,6 +362,53 @@ def test_ocr_late_positive_is_discarded_while_refresh_is_still_alive(
         assert thread.is_alive(), "evidence expiry must be independent of the refresh deadline"
         assert not visual_runtime.classified.wait(0.05), "an expired positive must be discarded"
     finally:
+        released.set()
+        thread.join(3)
+    assert outcome.get("result", (False,))[0] is True
+
+
+@pytest.mark.timing
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows stdin backpressure deadline control")
+def test_ocr_nonreading_native_child_is_killed_at_the_attempt_deadline(monkeypatch, parked, visual_runtime) -> None:
+    """Windows communicate writes stdin synchronously before joining its timed stdout reader."""
+    started = threading.Event()
+    children = []
+    captured_popen = _credential_modal.subprocess.Popen
+    monkeypatch.setattr(_credential_modal, "IMAGE_CAPTURE_SECONDS", 1.0)
+    api = visual_runtime.api
+    api.extent = (800, 800)
+    api.physical_bounds = (0, 0, 800, 800)
+    colors = (b"\0\0\0\0", b"\xff\xff\xff\0", b"\0\0\xff\0")
+    api.frame = (800, 800, b"".join(colors[value % 3] for value in os.urandom(800 * 800)))
+
+    def nonreading_child(argv, **kwargs):
+        if "-OcrImage" not in argv:
+            return captured_popen(argv, **kwargs)
+        child = visual_runtime.real_popen([sys.executable, "-c", "import time; time.sleep(60)"], **kwargs)
+        children.append(child)
+        started.set()
+        return child
+
+    monkeypatch.setattr(_credential_modal.subprocess, "Popen", nonreading_child)
+    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, timeout=5)
+    try:
+        assert started.wait(3), "the control must reach the real non-reading process"
+        acquired = visual_runtime.records[0][0]
+        assert (visual_runtime.root / acquired["path"]).stat().st_size > 65536, "the PNG must exceed the pipe buffer"
+        deadline = time.monotonic() + 2
+        while children[0].poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert children[0].poll() is not None, "blocked stdin must not outlive the original evidence attempt"
+        assert thread.is_alive(), "the independent OCR deadline must not wait for or abort refresh"
+        assert not any(
+            record["classification_provenance"] and record["classification_provenance"]["status"] == "positive"
+            for record, _kwargs in visual_runtime.records
+        )
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=2)
         released.set()
         thread.join(3)
     assert outcome.get("result", (False,))[0] is True
