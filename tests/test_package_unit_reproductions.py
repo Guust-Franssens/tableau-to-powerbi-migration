@@ -20,8 +20,10 @@ import pytest
 
 import test_data_access_contract as authority
 import test_package_role_identity as s2
-from test_data_access_contract import _desktop_fixture, _root_fixture  # noqa: F401  # existing pytest fixtures
+from test_data_access_contract import _desktop_fixture, _root_fixture, _rows  # noqa: F401  # existing pytest fixtures
 from test_package_unit_gates import DS_LUID, DS_UNIT, UNIT, _brief, _bundle, _write_input_manifest, _write_receipt, pkg
+from credential_gate import _clear_was_earned
+from probe_live_source import _probe_leg
 
 
 def selected_input(root: Path) -> tuple[Path, Path, dict[str, Any]]:
@@ -833,7 +835,12 @@ def test_real_localized_bytes_and_exact_in_memory_facts_drive_projection(
 def test_producer_uses_current_keyed_authority_without_writes(
     tmp_path: Path, root: Path, fault: str, state: str, codes: tuple[str, ...]
 ) -> None:
-    authority._earn(root)
+    if fault in {"manual", "rearm"}:
+        assert authority.gate.apply_block(root, [authority.KEY]) == 0
+        assert (root / authority.gate.MARKER).is_file()
+        assert json.loads((root / authority.gate.MARKER).read_text(encoding="utf-8"))["sources"] == [authority.KEY]
+    else:
+        authority._earn(root)
     rows = authority._rows(root)
     if fault == "missing":
         (root / authority.gate.AUDIT).unlink()
@@ -843,10 +850,10 @@ def test_producer_uses_current_keyed_authority_without_writes(
                 row.pop("sources", None)
         authority._write_rows(root, rows)
     elif fault == "manual":
-        authority._write_rows(root, [row for row in rows if not row["action"].startswith("probe-")])
-        authority.gate._audit(root, "manual-clear", "fixture-only")
-    elif fault == "rearm":
-        authority.gate._audit(root, "block-marker-only", "sources_json=" + json.dumps([authority.KEY]), [authority.KEY])
+        assert authority.gate.clear_block(root, "manual diagnostic", earned=False) == 0
+        assert not (root / authority.gate.MARKER).exists()
+        assert _clear_was_earned(root, [authority.KEY]) is None
+        assert [row["action"] for row in _rows(root)] == ["block-marker-only", "manual-clear"]
     candidate = _assessment_candidate(tmp_path, authority._spec(authority.LIVE))
     before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
     actual = _assess_candidate(candidate, root)
@@ -867,11 +874,30 @@ def test_mixed_direct_sources_need_every_key_and_all_local_bytes(
         keys.reverse()
         connections.reverse()
     assert authority.gate.apply_block(root, keys) == 0
+    connections_by_key = {authority.KEY: authority.LIVE, authority.OTHER_KEY: authority.OTHER}
     for key in keys:
         if fault == "unearned-key" and key == authority.OTHER_KEY:
             continue
-        authority.gate._audit(root, "probe-data_ok", "fixture row returned", [key])
+        assert _probe_leg(root, key, connections_by_key[key], ([{"name": "Orders"}], "ID"), (1, False)) == (
+            0,
+            "DATA_OK",
+        )
         assert authority.gate.clear_block(root, "fixture-earned", earned=True, sources=[key]) == 0
+    if fault == "unearned-key":
+        assert json.loads((root / authority.gate.MARKER).read_text(encoding="utf-8"))["sources"] == [
+            authority.OTHER_KEY
+        ]
+    else:
+        assert not (root / authority.gate.MARKER).exists()
+    assert [(row["action"], row["sources"]) for row in _rows(root)] == [
+        ("block-marker-only", keys),
+        *[
+            (action, [key])
+            for key in keys
+            if not (fault == "unearned-key" and key == authority.OTHER_KEY)
+            for action in ("probe-data_ok", "probe-cleared")
+        ],
+    ]
     candidate = _assessment_candidate(tmp_path, authority._spec(*connections))
     local = copy.deepcopy(authority.LOCAL)
     if fault == "incomplete-flat":
