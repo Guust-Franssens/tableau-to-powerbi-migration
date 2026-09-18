@@ -268,7 +268,11 @@ def visual_runtime(monkeypatch, tmp_path):
             children.append(self)
 
         def communicate(self, timeout, input=None):
-            assert 0 < timeout <= _credential_modal.IMAGE_CAPTURE_SECONDS
+            # Subtracting monotonic readings can round a few ULPs above the nominal cap.
+            assert timeout > 0
+            assert timeout <= _credential_modal.IMAGE_CAPTURE_SECONDS or timeout == pytest.approx(
+                _credential_modal.IMAGE_CAPTURE_SECONDS, rel=0, abs=1e-9
+            )
             if "-OcrImage" in self.argv:
                 ocr.inputs.append(input)
                 if ocr.communicate is not None:
