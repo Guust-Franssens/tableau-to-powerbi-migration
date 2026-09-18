@@ -83,6 +83,14 @@ from typing import BinaryIO
 # its bias errs toward "alive" on any ambiguity, so an uncertain Desktop routes to UNKNOWN-latched and
 # never to a false crash - and it is already load-bearing and tested for stale-lock reclaim.
 from _lock import _process_alive
+from _operator_pause import (
+    OperatorPauseContext,
+    OperatorPauseUnavailable,
+    PausePublication,
+    cleanup_operator_pause,
+    process_start_identity,
+    reserve_operator_pause,
+)
 
 SIGNATURE_PATH = Path(__file__).resolve().with_name("credential_modal_signature.regex")
 BENIGN_SIGNATURE_PATH = Path(__file__).resolve().with_name("benign_dialog_signature.regex")
@@ -1492,20 +1500,31 @@ def _write_private_image(path: Path, data: bytes, *, existing: bool = False) -> 
         image.truncate()
 
 
-def _capture_exact_image(pid: int, window: DesktopWindow, path: Path, *, existing: bool = False) -> dict:
+def _capture_exact_image(
+    pid: int, window: DesktopWindow, path: Path, *, existing: bool = False, process_start: str | None = None
+) -> dict:
     """Acquisition only. Checks bracket PrintWindow AND the write, without reading any UI text."""
     if sys.platform != "win32":
         raise _ImageUnavailable("UNSUPPORTED")
     user32 = _image_user32()
     checks = dict.fromkeys(_IMAGE_CHECKS)
     previous_dpi = None
+
+    def same_target() -> bool:
+        try:
+            return _same_image_target(user32, pid, window) and (
+                process_start is None or process_start_identity(pid) == process_start
+            )
+        except (OSError, OperatorPauseUnavailable):
+            return False
+
     try:
         previous_dpi = _set_image_dpi_awareness(user32)
-        checks["before"] = _same_image_target(user32, pid, window)
+        checks["before"] = same_target()
         if not checks["before"]:
             raise _ImageUnavailable("TARGET_CHANGED")
         width, height, rgb = _render_exact_window(user32, window.hwnd)
-        checks["after_render"] = _same_image_target(user32, pid, window)
+        checks["after_render"] = same_target()
         if not checks["after_render"]:
             raise _ImageUnavailable("TARGET_CHANGED")
         png = _image_png(width, height, rgb)
@@ -1513,7 +1532,7 @@ def _capture_exact_image(pid: int, window: DesktopWindow, path: Path, *, existin
             _write_private_image(path, png, existing=existing)
         except OSError:
             raise _ImageUnavailable("WRITE_FAILED") from None
-        checks["after_write"] = _same_image_target(user32, pid, window)
+        checks["after_write"] = same_target()
         if not checks["after_write"]:
             raise _ImageUnavailable("TARGET_CHANGED")
     except _ImageUnavailable as exc:
@@ -1535,10 +1554,16 @@ def _image_child(arguments: list[str]) -> int:
     payload = {}
     try:
         pid, hwnd, owner = (int(value) for value in arguments[:3])
-        if len(arguments) != 4 or min(pid, hwnd, owner) <= 0 or not _IMAGE_NAME.fullmatch(arguments[3]):
+        retained = (
+            len(arguments) == 5 and arguments[3] == "prompt.png" and re.fullmatch(r"[1-9][0-9]{0,19}", arguments[4])
+        )
+        if min(pid, hwnd, owner) <= 0 or not (
+            retained or (len(arguments) == 4 and _IMAGE_NAME.fullmatch(arguments[3]))
+        ):
             raise _ImageUnavailable("CAPTURE_FAILED")
         window = DesktopWindow("", "", 0, 0, hwnd=hwnd, owner_hwnd=owner, owner_enabled=False)
-        payload = _capture_exact_image(pid, window, Path(arguments[3]), existing=True)
+        options = {"process_start": arguments[4]} if retained else {}
+        payload = _capture_exact_image(pid, window, Path(arguments[3]), existing=True, **options)
     except _ImageUnavailable as exc:
         code = str(exc) if str(exc) in _IMAGE_RESULTS else "CAPTURE_FAILED"
         payload["ownership_checks"] = exc.checks
@@ -1635,7 +1660,7 @@ def _image_notice(record: dict, status: str) -> None:
 
 
 @dataclass
-class _ImageRequest:
+class _ImageRequest:  # pylint: disable=too-many-instance-attributes
     """One bounded launch/capture and its lease, registered BEFORE process creation."""
 
     path: Path
@@ -1645,17 +1670,33 @@ class _ImageRequest:
     ready: threading.Event = field(default_factory=threading.Event)
     cancelled: bool = False
     expiry: threading.Timer | None = None
+    pause: PausePublication | None = None
 
 
-class ModalVisualEvidence:
+class ModalVisualEvidence:  # pylint: disable=too-many-instance-attributes
     """Invocation-private, one-shot asynchronous evidence. Never mutates a detection or its deadline."""
 
-    def __init__(self, directory: Path | None = None, *, deadline: float = float("inf")) -> None:
+    def __init__(
+        self,
+        directory: Path | None = None,
+        *,
+        deadline: float = float("inf"),
+        operator_pause: OperatorPauseContext | None = None,
+    ) -> None:
+        if operator_pause is not None and (
+            type(operator_pause) is not OperatorPauseContext  # pylint: disable=unidiomatic-typecheck
+            or directory is not None
+            or IMAGE_DIRECTORY_ENV in os.environ
+        ):
+            raise OperatorPauseUnavailable()
         self._attempted: set[tuple[int, int]] = set()
         self._requests: list[_ImageRequest] = []
         self._lock = threading.Lock()
         self._closed = False
         self._deadline = deadline
+        self._operator_pause = operator_pause
+        self._finished = threading.Event()
+        self._successful = False
         self._pending: queue.Queue[tuple[int, CredentialDetection, float] | None] = queue.Queue(maxsize=1)
         configured = directory if directory is not None else os.environ.get(IMAGE_DIRECTORY_ENV)
         self._directory = Path(configured) if configured else None
@@ -1677,6 +1718,8 @@ class ModalVisualEvidence:
     def _remove(request: _ImageRequest, reason: str) -> bool:
         try:
             request.lease.close()
+            if request.pause is not None:
+                return True  # unready private remnants are not accepted pauses; never delete retained pixels here
             if request.path.exists():
                 request.path.unlink(missing_ok=True)
             if request.path.exists():
@@ -1691,6 +1734,8 @@ class ModalVisualEvidence:
     def enqueue(self, pid: int, state: CredentialDetection) -> None:
         """Nonblocking handoff of an immutable detection; no filesystem, subprocess or thread startup."""
         if state.modal is not None or state.dialog is None or state.dialog.verdict != VERDICT_DIALOG_UNREADABLE:
+            return
+        if self._operator_pause is not None and pid != self._operator_pause.desktop_pid:
             return
         window = state.dialog.window
         if self._closed or not window.hwnd or not window.owner_hwnd or window.owner_enabled is not False:
@@ -1735,7 +1780,7 @@ class ModalVisualEvidence:
         if sys.platform != "win32":
             self._notice(record, "UNSUPPORTED")
             return
-        if self._directory is None:
+        if self._directory is None and self._operator_pause is None:
             self._notice(record, "EVIDENCE_DIR_REQUIRED")
             return
         request = self._prepare_image(record, deadline)
@@ -1751,6 +1796,7 @@ class ModalVisualEvidence:
                         str(window.hwnd),
                         str(window.owner_hwnd),
                         request.path.name,
+                        *([self._operator_pause.process_start] if self._operator_pause is not None else []),
                     ],
                     cwd=request.path.parent,
                     stdout=subprocess.PIPE,
@@ -1768,14 +1814,22 @@ class ModalVisualEvidence:
     def _prepare_image(self, record: dict, deadline: float) -> _ImageRequest | None:
         request = None
         try:
-            basename = f"_ui-image-{record['capture_id']}.png"
-            path = _evidence_directory(self._directory, basename) / basename
+            pause = None
+            if self._operator_pause is not None:
+                pause = reserve_operator_pause(self._operator_pause, deadline, lambda: self._closed)
+                path = pause.image_path
+            else:
+                basename = f"_ui-image-{record['capture_id']}.png"
+                path = _evidence_directory(self._directory, basename) / basename
             if self._closed or time.monotonic() >= deadline:
+                if pause is not None:
+                    pause.lease.close()
                 self._notice(record, "CAPTURE_TIMEOUT")
                 return None
-            lease = _open_private_image(path, delete_on_close=True)
-            record.update(image_basename=path.name, path=path.name, cleanup_state="pending")
-            request = _ImageRequest(path, lease, record)
+            lease = pause.lease if pause is not None else _open_private_image(path, delete_on_close=True)
+            if pause is None:
+                record.update(image_basename=path.name, path=path.name, cleanup_state="pending")
+            request = _ImageRequest(path, lease, record, pause=pause)
             with self._lock:
                 if not self._closed:
                     self._requests.append(request)
@@ -1787,7 +1841,7 @@ class ModalVisualEvidence:
             # only open this reserved name, which timeout/close has already removed.
             threading.Thread(target=self._watch, args=(request, deadline), name="window-image", daemon=True).start()
             return request
-        except (OSError, subprocess.TimeoutExpired, _ImageUnavailable, RuntimeError):
+        except (OSError, subprocess.TimeoutExpired, _ImageUnavailable, OperatorPauseUnavailable, RuntimeError):
             if request is not None:
                 self._stop(request)
                 self._remove(request, "removed")
@@ -1827,6 +1881,9 @@ class ModalVisualEvidence:
         return code
 
     def _watch(self, request: _ImageRequest, deadline: float) -> None:
+        if request.pause is not None:
+            self._watch_pause(request, deadline)
+            return
         try:
             code = self._capture_result(request, deadline)
             if code is None:
@@ -1859,6 +1916,59 @@ class ModalVisualEvidence:
             if self._remove(request, "removed") and request.expiry is not None:
                 request.expiry.cancel()
             _image_notice(request.record, code if code != "ACQUIRED" else "WRITE_FAILED")
+
+    def _watch_pause(self, request: _ImageRequest, deadline: float) -> None:
+        try:
+            code = self._capture_result(request, deadline)
+            if code != "ACQUIRED":
+                self._notice(request.record, code or "CAPTURE_FAILED")
+                return
+            request.record["captured_at_utc"] = _utc_stamp()
+            record = request.pause.publish(request.record, deadline, lambda: self._closed or request.cancelled)
+            request.record["cleanup_state"] = "retained"
+            print("OPERATOR_PAUSE " + json.dumps(record, separators=(",", ":")), flush=True)
+            print(
+                "OPERATOR REQUIRED — DEVELOPMENT PAUSED\n"
+                f"Captured image: {request.pause.image_path}\nPause ID: {request.pause.pause_id}",
+                flush=True,
+            )
+            # Only this background observer waits. Refresh completion never waits for storage.
+            self._finished.wait()
+            if self._successful:
+                result = cleanup_operator_pause(
+                    request.pause.context.run_scratch, request.pause.pause_id, record["image"]["sha256"]
+                )
+                request.record["cleanup_state"] = result
+                self._pause_cleanup_notice(request, result)
+        except Exception:  # pylint: disable=broad-exception-caught
+            # Optional evidence cannot leak native exception details or change the refresh outcome.
+            if request.pause.record is not None:
+                request.record["cleanup_state"] = "cleanup_failed"
+                self._pause_cleanup_notice(request, "cleanup_failed")
+            else:
+                self._notice(request.record, "CAPTURE_FAILED")
+        finally:
+            self._stop(request)
+            request.lease.close()
+
+    @staticmethod
+    def _pause_cleanup_notice(request: _ImageRequest, status: str) -> None:
+        print(
+            "OPERATOR_PAUSE_CLEANUP "
+            + json.dumps(
+                {
+                    "pause_id": request.pause.pause_id,
+                    "sha256": request.pause.record["image"]["sha256"],
+                    "status": status,
+                },
+                separators=(",", ":"),
+            ),
+            flush=True,
+        )
+
+    def succeeded(self) -> None:
+        """A timely successful XMLA worker, not merely a finished/failed thread, permits cleanup."""
+        self._successful = True
 
     @staticmethod
     def _accept_image(request: _ImageRequest, payload: dict) -> bool:
@@ -1905,8 +2015,22 @@ class ModalVisualEvidence:
     def close(self) -> None:
         """Cancel without joining the observer or waiting for its filesystem/process startup."""
         with self._lock:
+            repeated = self._closed
             self._closed = True
             requests = tuple(self._requests)
+        if self._operator_pause is not None:
+            self._finished.set()
+            for request in requests:
+                request.cancelled = True
+                request.ready.set()
+                if repeated and self._successful and request.record["cleanup_state"] == "retained":
+                    # At process exit an unfinished cleanup is loud, never a rewritten refresh result.
+                    self._pause_cleanup_notice(request, "cleanup_failed")
+            try:
+                self._pending.put_nowait(None)
+            except queue.Full:
+                pass
+            return
         try:
             self._pending.put_nowait(None)
         except queue.Full:

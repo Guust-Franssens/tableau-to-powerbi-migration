@@ -160,6 +160,7 @@ from _credential_modal import (
     DesktopUnreadyError,
     DialogFinding,
     DialogFoundError,
+    IMAGE_DIRECTORY_ENV,
     ModalVisualEvidence,
     describe_dialog_finding,
     describe_modal,
@@ -173,6 +174,12 @@ from _credential_modal import (
     raise_latched_verdict,
     raise_terminal_detection,
     source_hint_from_model,
+)
+from _operator_pause import (
+    OperatorPauseContext,
+    OperatorPauseUnavailable,
+    prepare_operator_pause,
+    recheck_operator_pause,
 )
 
 SAVE_SETTLE_SECONDS = 3
@@ -404,10 +411,13 @@ def _join_refresh_worker(
     progress_monitor: RefreshProgressMonitor | None,
     observation_mode: bool = False,
     evidence_dir: Path | None = None,
+    operator_pause: OperatorPauseContext | None = None,
+    worker_succeeded: Callable[[], bool] | None = None,
 ) -> bool:
     """Attach non-verdict visual evidence to the actual in-flight callback in BOTH wait branches."""
     deadline = time.monotonic() + total_timeout
-    with ModalVisualEvidence(evidence_dir, deadline=deadline) as evidence:
+    retained = {"operator_pause": operator_pause} if operator_pause is not None else {}
+    with ModalVisualEvidence(evidence_dir, deadline=deadline, **retained) as evidence:
 
         def detector(pid: int) -> CredentialDetection:
             state = _in_flight_credential_state(pid)
@@ -415,7 +425,7 @@ def _join_refresh_worker(
                 evidence.enqueue(pid, state)
             return state
 
-        return _wait_refresh_worker(
+        completed = _wait_refresh_worker(
             worker,
             desktop_pid=desktop_pid,
             source_hint=source_hint,
@@ -426,6 +436,9 @@ def _join_refresh_worker(
             detector=detector,
             deadline=deadline,
         )
+        if completed and worker_succeeded is not None and worker_succeeded():
+            evidence.succeeded()
+        return completed
 
 
 def _wait_refresh_worker(
@@ -534,6 +547,7 @@ def refresh(
     observations: list[RefreshObservation] | None = None,
     return_observation: bool = False,
     evidence_dir: Path | None = None,
+    operator_pause: OperatorPauseContext | None = None,
 ) -> tuple[bool, str] | RefreshObservation:
     """Send a TMSL refresh over XMLA; return the legacy tuple or one bound observation.
 
@@ -579,6 +593,15 @@ def refresh(
     as STALE.
     """
     _validate_observation_request(return_observation, observations)
+    if operator_pause is not None:
+        if (
+            type(operator_pause) is not OperatorPauseContext  # pylint: disable=unidiomatic-typecheck
+            or evidence_dir is not None
+            or IMAGE_DIRECTORY_ENV in os.environ
+            or operator_pause.desktop_pid != desktop_pid
+        ):
+            raise OperatorPauseUnavailable()
+        recheck_operator_pause(operator_pause)
     with _observation_errors(return_observation, preserve=(CompatRollbackError, ModelLockTimeout)):
         return _refresh(
             port,
@@ -594,6 +617,7 @@ def refresh(
             bound=bound,
             return_observation=return_observation,
             evidence_dir=evidence_dir,
+            operator_pause=operator_pause,
         )
 
 
@@ -612,6 +636,7 @@ def _refresh(
     bound: BoundDesktop | None,
     return_observation: bool,
     evidence_dir: Path | None,
+    operator_pause: OperatorPauseContext | None,
 ) -> tuple[bool, str] | RefreshObservation:
     """Run the existing refresh lifecycle with invocation-private results."""
     if refresh_type not in REFRESH_TYPES:
@@ -755,6 +780,8 @@ def _refresh(
             progress_monitor=progress_monitor,
             observation_mode=return_observation,
             evidence_dir=evidence_dir,
+            operator_pause=operator_pause,
+            worker_succeeded=lambda: isinstance(result.get("ok"), tuple) and result["ok"][0] is True,
         )
         if not completed or worker.is_alive():
             if desktop_pid is not None:
@@ -1949,6 +1976,8 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
             refresh_kwargs["absolute_timeout_sec"] = args.refresh_absolute_timeout_seconds
         if "evidence_dir" in parameters:
             refresh_kwargs["evidence_dir"] = getattr(args, "evidence_dir", None)
+        if "operator_pause" in parameters and getattr(args, "operator_pause_context", None) is not None:
+            refresh_kwargs["operator_pause"] = args.operator_pause_context
         ok, message = refresh(port, args.tables, REFRESH_TIMEOUT_SECONDS, **refresh_kwargs)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         if isinstance(exc, CredentialMissingError):
@@ -2101,13 +2130,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Power BI Desktop process id - required when several instances are open "
         "(`powerbi-desktop status` maps pid -> open file)",
     )
-    parser.add_argument(
+    evidence = parser.add_mutually_exclusive_group()
+    evidence.add_argument(
         "--evidence-dir",
         type=Path,
         help=(
             "Existing caller-owned private scratch for ephemeral dialog images "
             "(or PBIP_EVIDENCE_DIR). Must be local, outside package/deliverable/model trees, "
             "and Git-ignored when inside a checkout. No default image output in the working directory."
+        ),
+    )
+    evidence.add_argument(
+        "--operator-pause-scratch",
+        type=Path,
+        help=(
+            "Opt in to retained unreadable in-flight popup evidence in an absolute existing canonical "
+            "run scratch directory. Conflicts with --evidence-dir and ambient PBIP_EVIDENCE_DIR. "
+            "No automatic selection, prompt classification, or continuation."
         ),
     )
     parser.add_argument(
@@ -2192,6 +2231,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-return-statements,too-many-statements
     """CLI entry point: refresh, save, and prove data is really there."""
     args = _build_arg_parser().parse_args(argv)
+    if args.operator_pause_scratch is not None and (IMAGE_DIRECTORY_ENV in os.environ or args.verify_only):
+        print("REFRESH: ERROR OPERATOR_PAUSE_CONFIGURATION_CONFLICT")
+        return 2
 
     pid = _resolve_pid(args.pid)
     if pid is None:
@@ -2216,6 +2258,14 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
         return 2
     if credential_state.unknown_reason:
         print(f"  credential-check: UNKNOWN ({credential_state.unknown_reason})")
+    if args.operator_pause_scratch is not None:
+        try:
+            if cache is None:
+                raise OperatorPauseUnavailable()
+            args.operator_pause_context = prepare_operator_pause(args.operator_pause_scratch, cache.parent.parent, pid)
+        except OperatorPauseUnavailable:
+            print("REFRESH: ERROR OPERATOR_PAUSE_CANNOT_ESTABLISH")
+            return 2
 
     # The port is DERIVED from the pid. A stray --port must never bypass that on this mutating path:
     # the destination cache is resolved from the pid, so a --port pointing at another instance would

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import subprocess
 import threading
 import time
@@ -24,6 +25,9 @@ from types import SimpleNamespace
 import pytest
 import _credential_modal
 import refresh_pbip_model
+import _operator_pause
+from test_operator_pause import NATIVE, NATIVE_DLL, make_run, publish
+from test_operator_pause import run_paths as _pause_run_paths_fixture  # noqa: F401
 from test_credential_modal_detection import (
     DIALOG_HWND,
     MAIN_HWND,
@@ -179,10 +183,13 @@ def _visual_refresh(
     timeout: float = 3.0,
     pid: int = 111,
     evidence_dir: Path | None = None,
+    operator_pause: _operator_pause.OperatorPauseContext | None = None,
+    cli_scratch: Path | None = None,
+    initial_window=None,
 ):
     """Run the real refresh -> both wait branches -> detector -> acquisition callback chain."""
     _conn, released = parked
-    window = {"value": owned_dialog()}
+    window = {"value": initial_window or owned_dialog()}
     outcome = {}
 
     def state(pid, *, in_flight=False):
@@ -196,9 +203,30 @@ def _visual_refresh(
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.005)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_WALL_CLOCK_GRACE_SECONDS", 0)
     monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_a, **_k: _FakeProgressMonitor())
+    if cli_scratch is not None:
+        monkeypatch.setattr(refresh_pbip_model, "_resolve_pid", lambda _pid: pid)
+        monkeypatch.setattr(
+            refresh_pbip_model, "cache_file", lambda _pid: operator_pause.model_dir / ".pbi" / "cache.abf"
+        )
+        monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda _pid: 1234)
+        monkeypatch.setattr(refresh_pbip_model, "_identity_gate", lambda *_args: True)
+        monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda *_args: ([("control", 1)], True))
+        monkeypatch.setattr(refresh_pbip_model, "REFRESH_TIMEOUT_SECONDS", timeout)
 
     def run():
         try:
+            if cli_scratch is not None:
+                outcome["result"] = refresh_pbip_model.main(
+                    [
+                        "--pid",
+                        str(pid),
+                        "--operator-pause-scratch",
+                        str(cli_scratch),
+                        "--no-save",
+                        "--no-progress",
+                    ]
+                )
+                return
             outcome["result"] = refresh(
                 port=1234,
                 tables=["Orders"],
@@ -207,6 +235,7 @@ def _visual_refresh(
                 timeout_sec=timeout,
                 absolute_timeout_sec=timeout,
                 evidence_dir=evidence_dir,
+                operator_pause=operator_pause,
             )
         except BaseException as exc:  # the assertion, not an unhandled thread warning, judges the result
             outcome["error"] = exc
@@ -214,6 +243,358 @@ def _visual_refresh(
     thread = threading.Thread(target=run, name="test-image-refresh", daemon=True)
     thread.start()
     return thread, released, outcome, window
+
+
+@pytest.fixture
+def retained_runtime(visual_runtime, monkeypatch):
+    """Real retained filesystem lifecycle, existing synthetic GDI and acquisition-child boundary."""
+    runtime = visual_runtime
+    monkeypatch.delenv(_credential_modal.IMAGE_DIRECTORY_ENV)
+    monkeypatch.setattr(
+        _credential_modal.ctypes,
+        "WinDLL",
+        lambda name, **kwargs: (
+            {"gdi32": runtime.api.gdi, "dwmapi": runtime.api.dwm}.get(name) or NATIVE_DLL(name, **kwargs)
+        ),
+    )
+    # The separate canonical-run controls exercise Git; the acquisition Popen double owns subprocess here.
+    monkeypatch.setattr(_operator_pause, "_ignored", lambda _path: None)
+    context = _operator_pause.prepare_operator_pause(*make_run(runtime.root), os.getpid())
+    runtime.api.pid = runtime.api.owner_pid = os.getpid()
+    notices, cleanup = [], []
+    acquired, cleaned = threading.Event(), threading.Event()
+    original_print = _credential_modal.print
+
+    def notice(message, **kwargs):
+        original_print(message, **kwargs)
+        if message.startswith("OPERATOR_PAUSE "):
+            notices.append(json.loads(message.removeprefix("OPERATOR_PAUSE ")))
+            acquired.set()
+        if message.startswith("OPERATOR_PAUSE_CLEANUP "):
+            cleanup.append(json.loads(message.removeprefix("OPERATOR_PAUSE_CLEANUP ")))
+            cleaned.set()
+
+    monkeypatch.setattr(_credential_modal, "print", notice)
+    return SimpleNamespace(
+        context=context,
+        notices=notices,
+        acquired=acquired,
+        cleanup=cleanup,
+        cleaned=cleaned,
+        visual=runtime,
+    )
+
+
+def _run_retained(monkeypatch, parked, runtime, **kwargs):
+    return _visual_refresh(
+        monkeypatch,
+        parked,
+        pid=runtime.context.desktop_pid,
+        operator_pause=runtime.context,
+        **kwargs,
+    )
+
+
+@NATIVE
+@pytest.mark.parametrize("progress", [False, True])
+def test_retained_in_flight_success_cleans_only_this_invocations_pause(monkeypatch, parked, retained_runtime, progress):
+    runtime = retained_runtime
+    unrelated = publish(runtime.context)
+    timers = []
+
+    def unexpected_timer(*args, **_kwargs):
+        timers.append(args)
+        raise RuntimeError("retained expiry is not supported")
+
+    monkeypatch.setattr(_credential_modal.threading, "Timer", unexpected_timer)
+    thread, released, outcome, _window = _run_retained(monkeypatch, parked, runtime, progress=progress)
+    try:
+        assert runtime.acquired.wait(3), "retained in-flight acquisition never published"
+        record = runtime.notices[0]
+        assert (
+            _operator_pause.load_operator_pause(
+                runtime.context.run_scratch, record["pause_id"], record["image"]["sha256"]
+            )
+            == record
+        )
+        assert record["desktop"]["process_start"] == runtime.context.process_start
+        assert not any(str(runtime.context.run_scratch) in json.dumps(value) for value in record.values())
+        assert thread.is_alive(), "publication cannot end or classify the in-flight refresh"
+        assert len(runtime.visual.children) == 1
+        assert runtime.visual.children[0].argv[-2:] == ["prompt.png", runtime.context.process_start]
+    finally:
+        released.set()
+        thread.join(3)
+    assert outcome.get("result", (False,))[0] is True
+    assert not timers, "retained evidence must have no expiry timer"
+    assert runtime.cleaned.wait(3)
+    assert runtime.cleanup == [
+        {"pause_id": record["pause_id"], "sha256": record["image"]["sha256"], "status": "removed"}
+    ]
+    assert unrelated.image_path.is_file(), "successful refresh may not clean another pause or select newest"
+    assert (
+        _operator_pause.cleanup_operator_pause(
+            runtime.context.run_scratch, unrelated.pause_id, unrelated.record["image"]["sha256"]
+        )
+        == "removed"
+    )
+
+
+@NATIVE
+def test_retained_cli_reaches_actual_refresh_and_exact_model_binding(monkeypatch, parked, retained_runtime):
+    runtime = retained_runtime
+    thread, released, outcome, _window = _run_retained(
+        monkeypatch,
+        parked,
+        runtime,
+        cli_scratch=runtime.context.run_scratch,
+    )
+    try:
+        assert runtime.acquired.wait(3), "the CLI did not reach the actual acquisition-backed refresh"
+        record = runtime.notices[0]
+        assert (
+            record["model_path"] == runtime.context.model_dir.relative_to(runtime.context.run_scratch.parent).as_posix()
+        )
+        assert record["desktop"]["pid"] == str(runtime.context.desktop_pid)
+    finally:
+        released.set()
+        thread.join(3)
+    assert outcome.get("result") == 0, outcome
+    assert runtime.cleaned.wait(3) and runtime.cleanup[-1]["status"] == "removed"
+
+
+@NATIVE
+@pytest.mark.parametrize("progress", [False, True])
+def test_retained_unreadable_timeout_keeps_ready_pause_and_original_latch(
+    monkeypatch, parked, retained_runtime, progress
+):
+    runtime = retained_runtime
+    started = time.monotonic()
+    thread, released, outcome, _window = _run_retained(monkeypatch, parked, runtime, progress=progress, timeout=0.75)
+    try:
+        assert runtime.acquired.wait(3), "positive retained publication was not exercised"
+        thread.join(2)
+        assert not thread.is_alive() and time.monotonic() - started >= 0.75
+        assert isinstance(outcome.get("error"), _credential_modal.DialogFoundError)
+        assert outcome["error"].finding.verdict == "DIALOG_UNREADABLE"
+        record = runtime.notices[0]
+        assert (
+            _operator_pause.load_operator_pause(
+                runtime.context.run_scratch, record["pause_id"], record["image"]["sha256"]
+            )
+            == record
+        )
+        assert runtime.cleanup == []
+    finally:
+        released.set()
+        thread.join(3)
+
+
+@NATIVE
+def test_retained_worker_error_is_not_misread_as_success_cleanup(monkeypatch, parked, retained_runtime):
+    runtime = retained_runtime
+    _conn, released = parked
+
+    def fail(_command):
+        released.wait(5)
+        raise RuntimeError("synthetic refresh failure")
+
+    monkeypatch.setattr(_ParkedCommand, "ExecuteNonQuery", fail)
+    thread, released, outcome, _window = _run_retained(monkeypatch, parked, runtime)
+    try:
+        assert runtime.acquired.wait(3)
+    finally:
+        released.set()
+        thread.join(3)
+    assert isinstance(outcome.get("error"), RuntimeError), outcome
+    record = runtime.notices[0]
+    assert (
+        _operator_pause.load_operator_pause(runtime.context.run_scratch, record["pause_id"], record["image"]["sha256"])
+        == record
+    )
+    assert runtime.cleanup == []
+
+
+@NATIVE
+@pytest.mark.timing
+@pytest.mark.parametrize("progress", [False, True])
+@pytest.mark.parametrize("outcome_kind", ["success", "timeout"])
+@pytest.mark.parametrize("boundary", ["reserve", "metadata", "rename", "READY"])
+def test_retained_slow_storage_cannot_hold_refresh_or_publish_after_close(
+    monkeypatch,
+    parked,
+    retained_runtime,
+    progress,
+    outcome_kind,
+    boundary,
+):
+    runtime = retained_runtime
+    entered, finish = threading.Event(), threading.Event()
+    original_reserve = _credential_modal.reserve_operator_pause
+    original_open, original_rename = _operator_pause._open_file, _operator_pause._rename
+
+    def stall():
+        entered.set()
+        assert finish.wait(5)
+
+    def reserve(*args, **kwargs):
+        if boundary == "reserve":
+            stall()
+        return original_reserve(*args, **kwargs)
+
+    def open_file(path, **kwargs):
+        stream = original_open(path, **kwargs)
+        if kwargs.get("create") and path.name == {"metadata": "pause.json", "READY": "READY"}.get(boundary):
+            stall()
+        return stream
+
+    def rename(source, target):
+        original_rename(source, target)
+        if boundary == "rename":
+            stall()
+
+    monkeypatch.setattr(_credential_modal, "reserve_operator_pause", reserve)
+    monkeypatch.setattr(_operator_pause, "_open_file", open_file)
+    monkeypatch.setattr(_operator_pause, "_rename", rename)
+    thread, released, outcome, _window = _run_retained(
+        monkeypatch,
+        parked,
+        runtime,
+        progress=progress,
+        timeout=0.45,
+    )
+    try:
+        assert entered.wait(2), f"storage boundary {boundary} was never exercised"
+        started = time.monotonic()
+        if outcome_kind == "success":
+            released.set()
+        thread.join(1)
+        assert not thread.is_alive() and time.monotonic() - started < 0.8, "optional storage held the refresh wait"
+        if outcome_kind == "success":
+            assert outcome.get("result", (False,))[0] is True, outcome
+        else:
+            assert isinstance(outcome.get("error"), _credential_modal.DialogFoundError), outcome
+        assert not runtime.notices
+    finally:
+        finish.set()
+        released.set()
+        thread.join(3)
+    until = time.monotonic() + 2
+    while any(t.name == "window-image" and t.is_alive() for t in threading.enumerate()) and time.monotonic() < until:
+        time.sleep(0.01)
+    assert not runtime.notices, "late READY may not publish after the original deadline or close"
+    assert not list(runtime.context.run_scratch.rglob("READY"))
+
+
+@NATIVE
+@pytest.mark.timing
+def test_retained_cleanup_failure_is_loud_keeps_pause_and_never_changes_success(monkeypatch, parked, retained_runtime):
+    runtime = retained_runtime
+    entered, finish = threading.Event(), threading.Event()
+
+    def delayed_cleanup(*_args):
+        entered.set()
+        assert finish.wait(5)
+        return "cleanup_failed"
+
+    monkeypatch.setattr(_credential_modal, "cleanup_operator_pause", delayed_cleanup)
+    thread, released, outcome, _window = _run_retained(monkeypatch, parked, runtime)
+    try:
+        assert runtime.acquired.wait(3)
+        started = time.monotonic()
+        released.set()
+        assert entered.wait(1)
+        thread.join(0.5)
+        assert not thread.is_alive() and time.monotonic() - started < 0.8, "cleanup is not a new refresh wait"
+        assert outcome.get("result", (False,))[0] is True
+        record = runtime.notices[0]
+        assert (
+            _operator_pause.load_operator_pause(
+                runtime.context.run_scratch, record["pause_id"], record["image"]["sha256"]
+            )
+            == record
+        )
+    finally:
+        finish.set()
+        released.set()
+        thread.join(3)
+    assert runtime.cleaned.wait(2)
+    assert runtime.cleanup[-1]["status"] == "cleanup_failed"
+    assert outcome.get("result", (False,))[0] is True
+
+
+@NATIVE
+@pytest.mark.parametrize(
+    "text",
+    [
+        ("Evaluating...",),
+        ("Save changes?",),
+        ("Please specify how to connect",),
+        ("Permission is required to run this native database query",),
+    ],
+)
+def test_retained_does_not_widen_eligibility_to_other_prompt_kinds(monkeypatch, parked, retained_runtime, text):
+    runtime = retained_runtime
+    thread, released, outcome, _window = _run_retained(
+        monkeypatch,
+        parked,
+        runtime,
+        initial_window=owned_dialog(text),
+    )
+    try:
+        time.sleep(0.06)
+    finally:
+        released.set()
+        thread.join(3)
+    assert not runtime.visual.children and not runtime.notices
+    assert not (runtime.context.run_scratch / "operator-pauses").exists()
+
+
+@NATIVE
+def test_retained_t0_is_unchanged_and_never_acquires(monkeypatch, parked, retained_runtime):
+    runtime = retained_runtime
+    state = _credential_modal.inspect_credential_modal(
+        runtime.context.desktop_pid,
+        lambda _pid: [owned_dialog(), main_window()],
+    )
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda *_a, **_k: state)
+    with pytest.raises(_credential_modal.DialogFoundError) as caught:
+        refresh(1234, None, desktop_pid=runtime.context.desktop_pid, operator_pause=runtime.context)
+    assert caught.value.finding.verdict == "DIALOG_UNREADABLE"
+    assert runtime.visual.children == [] and runtime.notices == []
+    assert not (runtime.context.run_scratch / "operator-pauses").exists()
+
+
+@NATIVE
+@pytest.mark.parametrize("configuration", ["explicit", "ambient", "empty-ambient"])
+def test_retained_rejects_ephemeral_conflicts_before_operation(monkeypatch, run_paths, configuration):
+    context = _operator_pause.prepare_operator_pause(*run_paths, os.getpid())
+    directory = None
+    if configuration == "explicit":
+        directory = run_paths[0]
+    else:
+        monkeypatch.setenv(
+            _credential_modal.IMAGE_DIRECTORY_ENV, "" if configuration == "empty-ambient" else str(run_paths[0])
+        )
+    with pytest.raises(_operator_pause.OperatorPauseUnavailable):
+        refresh(1234, None, desktop_pid=os.getpid(), evidence_dir=directory, operator_pause=context)
+    with pytest.raises(_operator_pause.OperatorPauseUnavailable):
+        _credential_modal.ModalVisualEvidence(directory, operator_pause=context)
+    assert not (run_paths[0] / "operator-pauses").exists()
+    if configuration == "explicit":
+        with pytest.raises(SystemExit) as caught:
+            refresh_pbip_model._build_arg_parser().parse_args(
+                [
+                    "--evidence-dir",
+                    str(directory),
+                    "--operator-pause-scratch",
+                    str(run_paths[0]),
+                ]
+            )
+        assert caught.value.code == 2
+    else:
+        monkeypatch.setattr(refresh_pbip_model, "_resolve_pid", lambda _pid: pytest.fail("conflict reached Desktop"))
+        assert refresh_pbip_model.main(["--operator-pause-scratch", str(run_paths[0])]) == 2
 
 
 @pytest.mark.parametrize("progress", [False, True])
