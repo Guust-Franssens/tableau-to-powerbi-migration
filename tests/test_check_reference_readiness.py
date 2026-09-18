@@ -2781,7 +2781,7 @@ def _shared_source_pair(tmp_path: Path) -> tuple[Path, Path]:
     provider = datasource_package(tmp_path / DS_UNIT, published_key=PUBLISHED_KEY)
     consumer = workbook_package(
         tmp_path / WB_UNIT,
-        published={"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY, "luid": DS_LUID},
+        published={"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY},
         binding=f"../../../{DS_UNIT}/fabric/{DS_UNIT}.SemanticModel",
         body="<workbook><worksheets><worksheet name='Overview'/></worksheets></workbook>",
     )
@@ -2790,6 +2790,213 @@ def _shared_source_pair(tmp_path: Path) -> tuple[Path, Path]:
     write_oracle(consumer, [{"view_name": "Overview", "view_type": "worksheet", "workbook_luid": WB_LUID}])
     seal(consumer, **json.loads((consumer / bundle_corpus.PACKAGE_MARKER).read_text(encoding="utf-8")))
     return provider, consumer
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_current_acquired_authority_drives_real_packaging_inheritance_binding_and_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    reverse: bool,
+) -> None:
+    from test_package_unit_gates import _shared_ready_cohort
+
+    provider, consumer = _shared_ready_cohort(tmp_path)
+    spec = json.loads((consumer / "migration-spec.json").read_bytes())
+    assert spec["data_sources"][0]["published_datasource"]["key"] == "finance/salesmaster"
+    assert "luid" not in spec["data_sources"][0]["published_datasource"]
+    provenance = json.loads((consumer / "source-provenance.json").read_bytes())
+    authority = provenance["inputs"][0]["origin"]["published_dependencies"]
+    assert authority["rows"] == [
+        {
+            "source_ordinal": 0,
+            "published_key": "finance/salesmaster",
+            "state": "resolved",
+            "candidate_count": 1,
+            "datasource_luid": DS_LUID,
+        }
+    ]
+    roots = [consumer, provider] if reverse else [provider, consumer]
+    roles = package_role_identity.verify_phase1_role_identity(roots)
+    selected = roles[roots.index(consumer)].dependencies
+    assert len(selected) == 1 and selected[0].provider_ordinal == roots.index(provider)
+    assert roots[selected[0].provider_ordinal] == provider
+    inspect, inspected = crr.binding.bind_package, []
+
+    def tracked(root, **kwargs):
+        assert kwargs["inspect"] is True and kwargs["sanitize"] is False
+        inspected.append((root, kwargs["provider_packages"]))
+        return inspect(root, **kwargs)
+
+    monkeypatch.setattr(crr.binding, "bind_package", tracked)
+    capsys.readouterr()
+    assert crr.main([*map(str, roots), "--json", "-", "--quiet"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "START_READY" and report["packages_start_ready"] == 2
+    data = {roots[row["ordinal"]]: row["assessment"] for row in report["package_data_access"]}
+    assert data[consumer]["state"] == "provider_inherited"
+    assert data[consumer]["provider_state"] == data[provider]["state"] == "local_import_ready"
+    assert (str(consumer), (str(provider),)) in inspected
+    assert (str(provider), ()) in inspected
+    assert len(inspected) == 2, "the final inspector must receive only the selected provider and own target"
+    for root in roots:
+        manifest = json.loads((root / "package-manifest.json").read_bytes())
+        assert manifest["dispatch_readiness"]["status"] == "NOT_EVALUATED"
+
+
+@pytest.mark.parametrize(
+    "fault,exit_code,status,code",
+    [
+        ("missing", 3, "CANNOT_ESTABLISH", "published_dependency_authority_missing"),
+        ("row-cannot", 3, "CANNOT_ESTABLISH", "published_dependency_authority_unestablished"),
+        ("source-unestablished", 3, "CANNOT_ESTABLISH", "published_dependency_authority_unestablished"),
+        ("ambiguous", 1, "FINDINGS", "published_dependency_authority_ambiguous"),
+        ("null-block", 1, "FINDINGS", "published_dependency_authority_invalid"),
+        ("sha", 1, "FINDINGS", "published_dependency_authority_contradiction"),
+        ("workbook", 1, "FINDINGS", "published_dependency_authority_contradiction"),
+        ("ordinal", 1, "FINDINGS", "published_dependency_authority_contradiction"),
+        ("key", 1, "FINDINGS", "published_dependency_authority_contradiction"),
+        ("count", 1, "FINDINGS", "published_dependency_authority_contradiction"),
+        ("spec-luid", 1, "FINDINGS", "published_dependency_authority_contradiction"),
+        ("state-cardinality", 1, "FINDINGS", "published_dependency_authority_invalid"),
+    ],
+)
+@pytest.mark.parametrize("fallback", ["stop", "model_only_unvalidated"])
+def test_published_authority_refuses_publicly_before_all_downstream_helpers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fault: str,
+    exit_code: int,
+    status: str,
+    code: str,
+    fallback: str,
+) -> None:
+    _provider, consumer = _shared_source_pair(tmp_path / "packages")
+    path = consumer / "source-provenance.json"
+    provenance = json.loads(path.read_bytes())
+    origin = provenance["inputs"][0]["origin"]
+    authority = origin["published_dependencies"]
+    spec = json.loads((consumer / "migration-spec.json").read_bytes())
+    spec["data_sources"][0]["published_datasource"]["luid"] = DS_LUID
+    if fault == "missing":
+        del origin["published_dependencies"]
+    elif fault in ("row-cannot", "source-unestablished", "ambiguous"):
+        authority["rows"][0].pop("datasource_luid")
+        authority["rows"][0].update(
+            state="ambiguous" if fault == "ambiguous" else "cannot_establish",
+            candidate_count=2 if fault == "ambiguous" else None,
+        )
+        if fault == "source-unestablished":
+            authority["source_match"] = "unestablished"
+    elif fault == "null-block":
+        origin["published_dependencies"] = None
+    elif fault == "sha":
+        authority["source_sha256"] = "0" * 64
+    elif fault == "workbook":
+        authority["workbook_luid"] = DS_LUID
+    elif fault == "ordinal":
+        authority["rows"][0]["source_ordinal"] = 1
+    elif fault == "key":
+        authority["rows"][0]["published_key"] = PUBLISHED_KEY.upper()
+    elif fault == "count":
+        authority["rows"].append({**authority["rows"][0], "source_ordinal": 1})
+    elif fault == "spec-luid":
+        spec["data_sources"][0]["published_datasource"]["luid"] = WB_LUID
+    else:
+        authority["rows"][0]["candidate_count"] = True
+    path.write_text(json.dumps(provenance), encoding="utf-8")
+    (consumer / "migration-spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    brief = consumer / "migration-brief.md"
+    brief.write_text(brief.read_text(encoding="utf-8").replace('"stop"', f'"{fallback}"'), encoding="utf-8")
+    _reseal_start_fixture(consumer)
+    _forbid_after(
+        monkeypatch,
+        "resolve_verified_package_source",
+        "source_objects",
+        "_data_for_cohort",
+        "_read_package_data",
+        "_collect_package_evidence",
+        "_scan_safe_target",
+        "_inspect_package",
+    )
+    capsys.readouterr()
+    assert crr.main([str(consumer), "--json", "-", "--quiet"]) == exit_code
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == status and report["packages_start_ready"] == 0
+    assert report["package_readiness"][0]["failed_stage"] == "role_identity"
+    assert report["role_identity"][0]["blockers"] == [code]
+    assert report["package_source"] == report["package_data_access"] == report["package_binding"] == []
+    dependency = report["role_identity"][0]["dependencies"][0]
+    assert dependency["code"] == code
+    if exit_code == 3:
+        assert dependency["state"] == "cannot_establish"
+        assert not any(row["state"] == "cannot_establish" for row in report["role_identity"][0]["roles"])
+
+
+@pytest.mark.parametrize("defect", ["ambiguous", "provider-missing", "brief"])
+def test_established_s2_defect_outranks_a_coexisting_authority_cannot_establish(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    defect: str,
+) -> None:
+    _provider, consumer = _shared_source_pair(tmp_path)
+    path = consumer / "source-provenance.json"
+    provenance = json.loads(path.read_bytes())
+    authority = provenance["inputs"][0]["origin"]["published_dependencies"]
+    resolved = authority["rows"][0].copy()
+    authority["rows"][0] = {
+        "source_ordinal": 0,
+        "published_key": PUBLISHED_KEY,
+        "state": "cannot_establish",
+        "candidate_count": None,
+    }
+    if defect == "brief":
+        brief = consumer / "migration-brief.md"
+        brief.write_text(brief.read_text(encoding="utf-8").replace(WB_UNIT, "Wrong"), encoding="utf-8")
+        expected = "brief_unit_mismatch"
+    else:
+        spec_path = consumer / "migration-spec.json"
+        spec = json.loads(spec_path.read_bytes())
+        spec["data_sources"].append(spec["data_sources"][0].copy())
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+        second = {**resolved, "source_ordinal": 1}
+        if defect == "ambiguous":
+            second.pop("datasource_luid")
+            second.update(state="ambiguous", candidate_count=2)
+        authority["rows"].append(second)
+        expected = "published_dependency_authority_ambiguous" if defect == "ambiguous" else "provider_missing"
+    path.write_text(json.dumps(provenance), encoding="utf-8")
+    _reseal_start_fixture(consumer)
+    _forbid_after(
+        monkeypatch, "resolve_verified_package_source", "_data_for_cohort", "_scan_safe_target", "_inspect_package"
+    )
+    capsys.readouterr()
+    assert crr.main([str(consumer), "--json", "-", "--quiet"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "FINDINGS"
+    assert report["package_readiness"][0]["failed_stage"] == "role_identity"
+    assert expected in report["role_identity"][0]["blockers"]
+    assert "published_dependency_authority_unestablished" in report["role_identity"][0]["blockers"]
+
+
+def test_provenance_changed_after_seal_stops_at_integrity_before_s2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _provider, consumer = _shared_source_pair(tmp_path)
+    path = consumer / "source-provenance.json"
+    path.write_bytes(path.read_bytes() + b"\n")
+    _forbid_after(monkeypatch, "verify_phase1_role_identity", "resolve_verified_package_source", "_inspect_package")
+    capsys.readouterr()
+    assert crr.main([str(consumer), "--json", "-", "--quiet"]) == 3
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "CANNOT_ESTABLISH"
+    assert report["package_readiness"][0]["failed_stage"] == "integrity"
+    assert report["package_readiness"][0]["codes"] == ["package_file_digest_mismatch"]
+    assert report["role_identity"] == report["package_source"] == []
 
 
 @pytest.mark.parametrize("provider_first", [True, False], ids=["provider-consumer", "consumer-provider"])
