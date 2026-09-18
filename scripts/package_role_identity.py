@@ -2,20 +2,11 @@
 purpose: prove required package roles and cross-artifact identity over an exact-root cohort.
 usage:   import package_role_identity as pri; pri.verify_phase1_role_identity([Path("packages/Unit")])
 
-S2 (#562) re-runs no-follow S1 even when earlier observations are supplied. Both sets must biject
-with the original lexical roots. Roles are declarations, never discovery; only walked paths open.
-Provider closure uses datasource LUID, then exact published key only when BOTH sides lack a LUID.
-Display names and paths never supply identity; a consumer alone blocks.
-source_handoff() retains the bound root and RAW asset role for #558's pure projector. Brief policy
-and the selected provider's input ordinal travel only in memory. No source Path, search, credentials,
-evidence grade, final START_READY fold or package writes here.
-read_current_brief_policy() independently rechecks the current brief role/digest without requiring
-the working model/report to retain their packaging-time bytes. It grants no completion verdict.
-read_current_source_data_handoff() binds current immutable roles to a caller-pinned working revision,
-not to original commissioning. Coherent current declarations/roles with a newly accepted revision
-are a new reviewed snapshot. No token authentication, latest-ever history, full working integrity,
-S1/S2 renewal, data-success judgment or COMPLETE authority is provided by that read.
-Full contract and limitations: docs/reference-readiness.md, S2.
+S2 rechecks no-follow S1 against exact lexical roots. Held acquired authority selects providers;
+the spec owns topology, occurrences and exact keys, never LUID/key fallback. Source roles and
+provider ordinals travel in memory only. Current-working readers bind caller-pinned revisions,
+not original commissioning or latest-ever history. No package writes, source discovery, credentials,
+evidence grade, data-success judgment or COMPLETE authority. Contract: docs/reference-readiness.md.
 """
 
 from __future__ import annotations
@@ -62,26 +53,28 @@ from reference_evidence import (  # noqa: E402  # pylint: disable=wrong-import-p
     REVISION_UNCONFIRMED,
     revision_status,
 )
+from stamp_tableau_provenance import (  # noqa: E402  # pylint: disable=wrong-import-position
+    LUID_RE,
+    PUBLISHED_DEPENDENCIES_SCHEMA,
+    valid_published_key,
+)
 
 _ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 
 # pylint: disable=unidiomatic-typecheck  # The handoff must reject subclass coercion.
 
 RoleState = Literal["resolved", "not_applicable", "missing", "ambiguous", "mismatch"]
+DependencyState = RoleState | Literal["cannot_establish"]
 Topology = Literal["owned_model", "standalone_datasource", "published_provider", "published_consumer"]
 
-#: One admissible role, all applicable identity claims agreeing. The only passing state.
 STATE_RESOLVED = "resolved"
-#: EARNED from kind/topology - never inferred from absence.
+# Not-applicable is earned from topology; cannot-establish is dependency-only.
 STATE_NOT_APPLICABLE = "not_applicable"
-#: Zero admissible candidates for a required role.
 STATE_MISSING = "missing"
-#: More than one admissible candidate, provider or identity remains.
 STATE_AMBIGUOUS = "ambiguous"
-#: The artifacts are present and their stable claims disagree.
 STATE_MISMATCH = "mismatch"
+STATE_CANNOT_ESTABLISH = "cannot_establish"
 
-#: Every role state that blocks. ``not_applicable`` has to be earned, which is why it is not here.
 BLOCKING_STATES = frozenset({STATE_MISSING, STATE_AMBIGUOUS, STATE_MISMATCH})
 
 KIND_WORKBOOK = "workbook"
@@ -113,20 +106,18 @@ ROLE_TABLEAU_ORACLE = "tableau_oracle"
 ROLE_VISUAL_EVIDENCE = "visual_evidence"
 ROLE_PUBLISHED_DEPENDENCY = "published_dependency"
 
-#: The source-role extensions each kind may carry. A `.tds` in a workbook package is not a source
-#: role that happens to be unusual - it is the wrong artifact, and the unit is not what it says.
+# Kind constrains the source role; a datasource is never a workbook's source.
 SOURCE_EXTENSIONS: dict[str, tuple[str, ...]] = {
     KIND_WORKBOOK: (".twb", ".twbx"),
     KIND_DATASOURCE: (".tds", ".tdsx"),
 }
 
-#: The one package-relative name a packaged brief may have. Named rather than discovered so that
-#: "the brief is present" cannot be satisfied by any other Markdown file a package happens to carry.
+# Exact role names, never discovery.
 BRIEF_NAME = "migration-brief.md"
 SPEC_NAME = "migration-spec.json"
+PROVENANCE_NAME = "source-provenance.json"
 DATA_ACCESS_NAME = "data-access.json"
 
-#: The brief's explicit scope must agree with topology; it is never inferred as authorization.
 TOPOLOGY_SCOPE = {
     TOPOLOGY_OWNED_MODEL: "model_and_report",
     TOPOLOGY_STANDALONE_DATASOURCE: "model_only",
@@ -134,15 +125,12 @@ TOPOLOGY_SCOPE = {
     TOPOLOGY_PUBLISHED_CONSUMER: "report_only_shared_model",
 }
 
-#: Recorded when a source is genuinely local: no Tableau Server LUID exists to agree with, and the
-#: SHA/filename/spec axes all do. It does NOT convert a role state - it says why one is N/A.
+# Limitations explain earned N/A; they never convert a blocking state.
 LIMITATION_LOCAL_SOURCE = "local_source_no_server_luid"
 #: Plain/legacy/missing briefs establish no typed policy. Markdown never authorizes a fallback.
 LIMITATION_BRIEF_POLICY_UNPARSED = "brief_policy_not_parsed"
 
-# Stable diagnostic codes. ⚠️ These are printed into shared verdicts: no host path, no customer
-# text, no exception message. A package-RELATIVE path may travel in `RoleResult.paths`, because the
-# package already publishes those in its own manifest.
+# Public codes contain no customer/host/exception text. Role paths are package-relative.
 CODE_NOT_A_PACKAGE = "package_boundary_not_declared"
 CODE_UNSAFE_TARGET = "package_boundary_unsafe"
 CODE_INTEGRITY_NOT_CLEAN = "package_integrity_not_clean"
@@ -152,12 +140,7 @@ CODE_IDENTITY_JSON = "identity_json_invalid"
 CODE_IDENTITY_TYPE = "identity_type_invalid"
 CODE_UNIT_MISSING = "package_unit_missing"
 CODE_KIND_UNCLASSIFIED = "package_kind_unclassified"
-# ⚠️ There is deliberately NO "duplicate unit in the cohort" code. `unit` is a package-LOCAL scope
-# key derived from a Tableau display name, and two genuinely distinct workbooks may share one - the
-# case `_runs/<NNN>-<slug>` numbering exists for elsewhere in this repo. Refusing a cohort on that
-# basis would be a name join wearing a collision check, and it would refuse exactly the shape the
-# "duplicate display names, distinct LUID/SHA" control requires to resolve. Real collisions are
-# caught where identities actually collide: two providers answering one LUID or key.
+# Unit names are package-local scope, not cohort identity; duplicate names are legitimate.
 CODE_ROLE_MISSING = "role_missing"
 CODE_ROLE_AMBIGUOUS = "role_ambiguous"
 CODE_ROLE_UNDECLARED = "role_declaration_absent"
@@ -189,6 +172,11 @@ CODE_BRIEF_POLICY = "brief_policy_invalid"
 CODE_BRIEF_NUMERIC_UNKNOWN = "brief_numeric_obligation_unknown"
 CODE_DEPENDENCY_IDENTITY = "published_dependency_identity_missing"
 CODE_DEPENDENCY_INVALID = "published_dependency_invalid"
+CODE_AUTHORITY_MISSING = "published_dependency_authority_missing"
+CODE_AUTHORITY_UNESTABLISHED = "published_dependency_authority_unestablished"
+CODE_AUTHORITY_AMBIGUOUS = "published_dependency_authority_ambiguous"
+CODE_AUTHORITY_INVALID = "published_dependency_authority_invalid"
+CODE_AUTHORITY_CONTRADICTION = "published_dependency_authority_contradiction"
 CODE_PROVIDER_MISSING = "provider_missing"
 CODE_PROVIDER_AMBIGUOUS = "provider_ambiguous"
 CODE_PROVIDER_LUID_CONTRADICTION = "provider_luid_contradiction"
@@ -261,7 +249,7 @@ class SourceIdentity:
 class DependencyResult:
     """One published-datasource edge, resolved inside the cohort or refused with a reason."""
 
-    state: RoleState
+    state: DependencyState
     datasource_luid: str | None = None
     published_key: str | None = None
     provider_unit: str | None = None
@@ -288,6 +276,7 @@ class DeclaredDependency:
     luid: str | None = None
     key: str | None = None
     code: str | None = None
+    source_ordinal: int = 0
 
 
 @dataclass(frozen=True)
@@ -430,13 +419,7 @@ class Phase1RoleIdentityResult:  # pylint: disable=too-many-instance-attributes
     def data_access_handoff(  # pylint: disable=too-many-return-statements
         self, root: Path
     ) -> PackageDataAccessHandoff | pfs.PackageFilesystemResult:
-        """Obtain the exact declared projection, with the spec bytes/facts already used by S2.
-
-        The caller cannot substitute a root or obtain an undeclared file by its familiar name.
-        S1 rechecks only the two small roles and manifest, not unrelated asset content. The held
-        spec is not reparsed/reclassified. Copies cannot borrow the original role result's authority.
-        Renewal requires fresh S1 and S2, not a fresh S1 grafted into the issued S2 result.
-        """
+        """Recheck issued S2 spec/projection without substitution; renewal needs fresh S1 AND S2."""
         verified = self.verified
         if type(verified) is not VerifiedPackage or not verified.is_bound_to(str(root)):
             return pfs.member_refusal(pfs.CODE_ROOT_BINDING)
@@ -619,11 +602,13 @@ class _Facts(_RoleContext):  # pylint: disable=too-many-instance-attributes,attr
     spec_facts: PackageSpecFacts | None = None
 
     def json(self, key: str | None) -> Any:
-        """A declared key's JSON payload, read from the path the WALK produced, or ``None``."""
+        """Use held spec/provenance bytes; other roles retain their walk-produced read path."""
         if key is None or key not in self.walked:
             return None
         if key == SPEC_NAME:
             return self.spec_document
+        if key == PROVENANCE_NAME:
+            return self.documents.get(key)
         try:
             return pfs.parse_manifest_text(self.walked[key].read_text(encoding="utf-8"))
         except (OSError, ValueError, pfs._ManifestError):  # pylint: disable=protected-access
@@ -736,6 +721,21 @@ def _facts(  # pylint: disable=too-many-return-statements
     )
 
 
+def _hold_document(facts: _Facts, key: str) -> pfs.HeldVerifiedMember | None:
+    if key not in facts.digests:
+        return None
+    held = facts.verified.read_verified_member(facts.root, key)
+    if isinstance(held, pfs.PackageFilesystemResult):
+        facts.blockers.extend(held.codes())
+        return None
+    try:
+        facts.documents[key] = pfs.parse_manifest_text(held.content.decode("utf-8"))
+    except (ValueError, pfs._ManifestError):  # pylint: disable=protected-access
+        facts.blockers.append(CODE_IDENTITY_JSON)
+        return None
+    return held
+
+
 def _facts_with_source(facts: _Facts) -> _Facts:
     """Fill in the source-role key, its verified digest, and the spec's published dependencies."""
     declared_asset = _declared_string(facts.artifacts, "asset")
@@ -743,18 +743,12 @@ def _facts_with_source(facts: _Facts) -> _Facts:
         facts.source_key = declared_asset
         facts.source_sha = facts.digests[declared_asset]
     spec_key = _declared_string(facts.artifacts, "migration_spec")
-    if spec_key == SPEC_NAME and spec_key in facts.digests:
-        held = facts.verified.read_verified_member(facts.root, spec_key)
-        if isinstance(held, pfs.PackageFilesystemResult):
-            facts.blockers.extend(held.codes())
-        else:
-            try:
-                facts.spec_document = pfs.parse_manifest_text(held.content.decode("utf-8"))
-            except (ValueError, pfs._ManifestError):  # pylint: disable=protected-access
-                facts.blockers.append(CODE_IDENTITY_JSON)
-            else:
-                facts.spec_member = held
-                facts.spec_facts = package_spec_facts(facts.spec_document)
+    if spec_key == SPEC_NAME:
+        facts.spec_member = _hold_document(facts, SPEC_NAME)
+        facts.spec_document = facts.documents.get(SPEC_NAME)
+        if facts.spec_member is not None:
+            facts.spec_facts = package_spec_facts(facts.spec_document)
+    _hold_document(facts, PROVENANCE_NAME)
     spec = facts.json(spec_key)
     facts.declared_dependencies = _spec_dependencies(spec)
     if facts.kind == KIND_DATASOURCE:
@@ -775,9 +769,9 @@ def _spec_dependencies(spec: Any) -> tuple[DeclaredDependency, ...]:
     if not isinstance(rows, list):
         return (DeclaredDependency(code=CODE_DEPENDENCY_INVALID),)
     found: list[DeclaredDependency] = []
-    for row in rows:
+    for ordinal, row in enumerate(rows):
         if not isinstance(row, dict):
-            found.append(DeclaredDependency(code=CODE_DEPENDENCY_INVALID))
+            found.append(DeclaredDependency(code=CODE_DEPENDENCY_INVALID, source_ordinal=ordinal))
             continue
         if "published_datasource" not in row:
             continue
@@ -786,15 +780,12 @@ def _spec_dependencies(spec: Any) -> tuple[DeclaredDependency, ...]:
             luid = _luid(published, "luid")
             key = _declared_string(published, "key")
         except _IdentityError:
-            found.append(DeclaredDependency(code=CODE_DEPENDENCY_INVALID))
+            found.append(DeclaredDependency(code=CODE_DEPENDENCY_INVALID, source_ordinal=ordinal))
             continue
-        found.append(DeclaredDependency(luid, key, CODE_DEPENDENCY_IDENTITY if luid is None and key is None else None))
+        found.append(
+            DeclaredDependency(luid, key, CODE_DEPENDENCY_IDENTITY if luid is None and key is None else None, ordinal)
+        )
     return tuple(found)
-
-
-# ---------------------------------------------------------------------------------------------
-# role helpers
-# ---------------------------------------------------------------------------------------------
 
 
 def _role(role: str, state: str, cardinality: str, paths: Iterable[str] = (), code: str | None = None) -> RoleResult:
@@ -808,20 +799,7 @@ def _declared_role(  # pylint: disable=too-many-return-statements
     candidates: Sequence[str],
     verified: Iterable[str],
 ) -> RoleResult:
-    """Adjudicate one DECLARED role against the verified candidates that could have filled it.
-
-    The order is the invariant, and it is what makes rediscovery impossible:
-
-    1. no declaration is ``missing`` **even when a candidate file is sitting right there** - the
-       producer never said which file plays the role, and picking the only one present is exactly
-       the fail-open that let a package with ``artifacts.asset`` deleted read as READY;
-    2. a declaration naming something the walk did not verify is ``mismatch``;
-    3. more than one admissible candidate is ``ambiguous`` - two source assets mean the package
-       cannot say which bytes it is about;
-    4. a declaration that is not among the admissible candidates (wrong extension, wrong directory)
-       is ``mismatch``;
-    5. only then ``resolved``.
-    """
+    """Require declaration, verified membership, unique candidate and admissibility, in that order."""
     if declared is None:
         return _role(role, STATE_MISSING, cardinality, candidates, CODE_ROLE_UNDECLARED)
     if declared not in set(verified):
@@ -852,11 +830,6 @@ def _scope_unit(payload: Any) -> str | None:
     """A packaged artifact's own ``scope.unit`` stamp, or ``None`` when it does not carry one."""
     scope = payload.get("scope") if isinstance(payload, dict) else None
     return _declared_string(scope, "unit")
-
-
-# ---------------------------------------------------------------------------------------------
-# the individual role checks
-# ---------------------------------------------------------------------------------------------
 
 
 def _package_scope_role(facts: _RoleContext) -> RoleResult:
@@ -891,8 +864,7 @@ def _source_asset_role(facts: _RoleContext) -> RoleResult:
     result = _declared_role(ROLE_SOURCE_ASSET, "1 file", declared, candidates, facts.digests)
     if result.blocks:
         return result
-    # An `assets/` directory holding a second, non-source file is not ambiguity about WHICH source
-    # this is, but the container rule still applies: unrelated bytes belong in a declared data role.
+    # Non-source bytes need a declared data role, not a second asset.
     if len(facts.under("assets")) != 1:
         return _role(ROLE_SOURCE_ASSET, STATE_AMBIGUOUS, "1 file", facts.under("assets"), CODE_ROLE_AMBIGUOUS)
     return result
@@ -955,9 +927,7 @@ def _source_identity_role(facts: _RoleContext, row: dict[str, Any] | None) -> Ro
     return _role(ROLE_SOURCE_IDENTITY, STATE_RESOLVED, "1 sha256", [facts.source_key])
 
 
-#: The two LUID namespaces, keyed by the kind that owns each. ⚠️ They are NEVER interchangeable: a
-#: datasource LUID in a workbook's provenance is a category error, not a spelling difference, and
-#: reading one as the other is how a name-free comparison silently compares nothing.
+# Workbook and datasource LUID namespaces are never interchangeable.
 LUID_FIELD = {KIND_WORKBOOK: "workbook_luid", KIND_DATASOURCE: "datasource_luid"}
 
 
@@ -989,11 +959,7 @@ def _server_identity_role(  # pylint: disable=too-many-return-statements
 
 
 def _filename_luid(name: str) -> str | None:
-    """The canonical-UUID prefix `harvest_estate_assets.py` writes, or ``None``.
-
-    Deliberately a pure shape test on the packaged basename: it is a CROSS-CHECK against a recorded
-    LUID, never an identity on its own, and it is compared only within the package's own namespace.
-    """
+    """A harvested canonical-UUID prefix: corroboration within its kind, never selection authority."""
     head = name.split("_", 1)[0]
     parts = head.split("-")
     if len(parts) != 5 or [len(part) for part in parts] != [8, 4, 4, 4, 12]:
@@ -1002,13 +968,7 @@ def _filename_luid(name: str) -> str | None:
 
 
 def _receipt_role(facts: _Facts, required: Mapping[str, str]) -> RoleResult:  # pylint: disable=too-many-return-statements
-    """The engine receipt must scope to this unit and ACCOUNT for every required fabric role.
-
-    ``required`` maps role name to the package-relative path that role resolved to. Each one must be
-    covered by at least one receipt output row, and every row must itself be a verified file in this
-    package - a row naming another unit's output is what "this package was composed from two builds"
-    looks like from the inside.
-    """
+    """Require a scoped receipt covering every resolved fabric role with verified package outputs."""
     payload = facts.json("engine-output-receipt.json")
     if not isinstance(payload, dict):
         return _role(ROLE_ENGINE_RECEIPT, STATE_MISSING, "1 file", [], CODE_ROLE_MISSING)
@@ -1038,12 +998,7 @@ def _receipt_role(facts: _Facts, required: Mapping[str, str]) -> RoleResult:  # 
 
 
 def _handover_role(facts: _Facts) -> RoleResult:
-    """A workbook's handover slice, scoped to this unit by the package's OWN stamp.
-
-    ⚠️ ``workbook.source_id`` is deliberately not read. It is the diagnostic the packager resolves an
-    asset by, and using it here would make a package whose asset role was deleted resolvable again
-    from a second channel - the precise rediscovery this slice refuses.
-    """
+    """Require the package's own scope stamp; source_id diagnostics cannot rediscover an asset."""
     declared = _declared_string(facts.artifacts, "handover")
     candidates = facts.under("handover")
     result = _declared_role(ROLE_HANDOVER, "1 file", declared, candidates, facts.digests)
@@ -1057,11 +1012,8 @@ def _handover_role(facts: _Facts) -> RoleResult:
 def parse_brief_policy(  # pylint: disable=too-many-return-statements
     text: str, unit: str, scope: str
 ) -> tuple[str | None, BriefPolicy | None]:
-    """One TOML parser for preparation and S2: strict policy, or truthful legacy non-policy.
-
-    A header without fallback authorization may carry only the legacy identity keys. An explicit
-    v1 policy requires four string fields, v2 all five including explicit numeric obligation.
-    v1 keeps its Phase-1 policy but has no numeric authority. Invalid policy never becomes prose.
+    """Strict TOML: v1's four policy fields, v2's five, or truthful legacy identity-only non-policy.
+    Invalid policy never becomes prose; v1 has no numeric authority.
     """
     env = tableau_env.resolve_env(_ENV_PATH)
     scrub = tableau_env.env_redactor(env, *(env.get(key, "") for key in sorted(tableau_env.DATASOURCE_CREDENTIAL_KEYS)))
@@ -1144,12 +1096,8 @@ def _current_brief_context(manifest: dict[str, Any], walked: Mapping[str, Path])
 def read_current_brief_policy(  # pylint: disable=too-many-return-statements
     root: Path,
 ) -> tuple[str | None, BriefPolicy | None]:
-    """Read explicit numeric scope from the current package, or return a fixed refusal and no policy.
-
-    Only the immutable brief is compared with its existing contents.files digest. Current spec
-    bytes supply topology through the same S2 rule; unrelated working bytes need not match S1's
-    baseline. A consumer must separately bind this read to its checked current package snapshot.
-    This is not START_READY, a receipt/token check, or authentication of the customer's agreement.
+    """Recheck immutable brief digest and current spec topology, not unrelated working bytes.
+    The caller must bind its snapshot; this is not START_READY or authentication of agreement.
     """
     try:
         walked, _ = revision.tree_files(root)
@@ -1206,13 +1154,7 @@ def _brief_role(facts: _Facts, topology: str) -> tuple[RoleResult, list[str]]:
 def _evidence_role(  # pylint: disable=too-many-return-statements
     facts: _Facts, role: str, directory: str, manifest_name: str
 ) -> RoleResult:
-    """A 0..1 evidence directory: one manifest, every file accounted for, owned by THIS source.
-
-    Ownership is by the only stable axis each provider has - the reference manifest carries the
-    workbook's source SHA, and every oracle view carries the workbook LUID. A file inside the
-    directory that no record names is refused rather than ignored: unattributed bytes beside real
-    evidence is how a foreign render gets read as this unit's.
-    """
+    """Require one manifest accounting for every file, owned by reference SHA or oracle workbook LUID."""
     keys = facts.under(directory)
     declared = _declared_string(facts.artifacts, "reference" if role == ROLE_TABLEAU_REFERENCE else "oracle")
     if declared is not None and (declared != directory or not keys):
@@ -1358,42 +1300,118 @@ def _oracle_records(
     return records, named, claims
 
 
-# ---------------------------------------------------------------------------------------------
-# topology and the cohort edge
-# ---------------------------------------------------------------------------------------------
-
-
 def _topology(kind: str, dependencies: Sequence[DeclaredDependency]) -> str:
-    """What SHAPE this package is - decided from the engine's kind plus the spec's own dependencies.
-
-    A datasource package that also emits a self-service report is still a datasource: kind comes from
-    the engine's classification, never from the filesystem, so an auxiliary `.Report` cannot promote
-    it into a workbook.
-    """
+    """Topology comes from engine kind and spec occurrences; auxiliary reports never change kind."""
     if kind == KIND_WORKBOOK:
         return TOPOLOGY_PUBLISHED_CONSUMER if dependencies else TOPOLOGY_OWNED_MODEL
     return TOPOLOGY_STANDALONE_DATASOURCE
 
 
-def _provider_matches(dependency: DeclaredDependency, providers: Sequence[_Facts]) -> tuple[list[_Facts], list[_Facts]]:
-    """`(matched by datasource LUID, matched by exact published key)` across the cohort.
+def _authority_rows(facts: _Facts, origin: dict[str, Any]) -> list[dict[str, Any]]:
+    """Validate the exact public P envelope before using any row as selection authority."""
+    block = origin["published_dependencies"]
+    if not (
+        isinstance(block, dict)
+        and block.keys() == {"schema", "source_sha256", "workbook_luid", "source_match", "rows"}
+        and block["schema"] == PUBLISHED_DEPENDENCIES_SCHEMA
+        and isinstance(block["source_sha256"], str)
+        and re.fullmatch(r"[0-9a-f]{64}", block["source_sha256"])
+        and isinstance(block["workbook_luid"], str)
+        and LUID_RE.fullmatch(block["workbook_luid"])
+        and block["source_match"] in ("sha256", "revision_same", "unestablished")
+        and isinstance(block["rows"], list)
+        and 0 < len(block["rows"]) <= 4096
+    ):
+        raise _IdentityError(CODE_AUTHORITY_INVALID)
+    if block["source_sha256"] != facts.source_sha or block["workbook_luid"] != origin.get("workbook_luid"):
+        raise _IdentityError(CODE_AUTHORITY_CONTRADICTION)
+    previous = -1
+    for row in block["rows"]:
+        required = {"source_ordinal", "published_key", "state", "candidate_count"}
+        if not isinstance(row, dict) or not required <= row.keys() <= required | {"datasource_luid"}:
+            raise _IdentityError(CODE_AUTHORITY_INVALID)
+        ordinal, count, state = row["source_ordinal"], row["candidate_count"], row["state"]
+        if not (
+            type(ordinal) is int
+            and previous < ordinal < (1 << 63)
+            and valid_published_key(row["published_key"])
+            and state in (STATE_RESOLVED, STATE_AMBIGUOUS, STATE_CANNOT_ESTABLISH)
+            and (count is None or type(count) is int and 0 <= count < (1 << 63))
+            and (block["source_match"] != "unestablished" or state == STATE_CANNOT_ESTABLISH)
+        ):
+            raise _IdentityError(CODE_AUTHORITY_INVALID)
+        if state == STATE_RESOLVED:
+            valid = (
+                count == 1 and isinstance(row.get("datasource_luid"), str) and LUID_RE.fullmatch(row["datasource_luid"])
+            )
+        else:
+            valid = "datasource_luid" not in row and (
+                count is None if state == STATE_CANNOT_ESTABLISH else count is not None and count > 1
+            )
+        if not valid:
+            raise _IdentityError(CODE_AUTHORITY_INVALID)
+        previous = ordinal
+    if len(block["rows"]) != len(facts.declared_dependencies):
+        raise _IdentityError(CODE_AUTHORITY_CONTRADICTION)
+    return block["rows"]
 
-    Both axes are computed even though only one may be USED, because the disagreement between them
-    is itself a finding: a package that answers the exact `<site>/<name>` key while carrying a
-    different datasource LUID is not a near-miss provider, it is a contradiction.
-    """
-    luid, key = dependency.luid, dependency.key
-    by_luid = [p for p in providers if luid and p.source_luid and p.source_luid.casefold() == luid.casefold()]
-    by_key = [p for p in providers if key is not None and p.published_key == key]
+
+def _published_dependencies(facts: _Facts, row: dict[str, Any] | None) -> list[DependencyResult]:
+    """Reconcile the held source/spec occurrence denominator; neither document can rescue the other."""
+    origin = row.get("origin", {}) if row is not None else {}
+    present = "published_dependencies" in origin
+    if facts.kind != KIND_WORKBOOK:
+        if present:
+            facts.blockers.append(CODE_AUTHORITY_CONTRADICTION)
+        return []
+    code, rows = CODE_AUTHORITY_MISSING, None
+    if present:
+        try:
+            rows = _authority_rows(facts, origin)
+        except _IdentityError as exc:
+            code = str(exc)
+            facts.blockers.append(code)
+    results = []
+    for index, declared in enumerate(facts.declared_dependencies):
+        invalid = declared.code or (CODE_DEPENDENCY_IDENTITY if declared.key is None else None)
+        if invalid or rows is None:
+            results.append(
+                DependencyResult(
+                    STATE_MISMATCH if invalid or present else STATE_CANNOT_ESTABLISH,
+                    published_key=declared.key,
+                    code=invalid or code,
+                )
+            )
+            continue
+        authority = rows[index]
+        luid = _luid(authority, "datasource_luid")
+        if (
+            authority["source_ordinal"] != declared.source_ordinal
+            or authority["published_key"] != declared.key
+            or luid is not None
+            and declared.luid is not None
+            and declared.luid != luid
+        ):
+            results.append(DependencyResult(STATE_MISMATCH, luid, declared.key, code=CODE_AUTHORITY_CONTRADICTION))
+            continue
+        state = authority["state"]
+        code = {STATE_AMBIGUOUS: CODE_AUTHORITY_AMBIGUOUS, STATE_CANNOT_ESTABLISH: CODE_AUTHORITY_UNESTABLISHED}.get(
+            state
+        )
+        results.append(DependencyResult(state, luid, declared.key, code=code))
+    return results
+
+
+def _provider_matches(dependency: DependencyResult, providers: Sequence[_Facts]) -> tuple[list[_Facts], list[_Facts]]:
+    """Only acquired LUID matches can select; an exact-key foreign LUID diagnoses contradiction."""
+    luid, key = dependency.datasource_luid, dependency.published_key
+    by_luid = [p for p in providers if luid is not None and p.source_luid == luid]
+    by_key = [p for p in providers if p.published_key == key and p.source_luid not in (None, luid)]
     return by_luid, by_key
 
 
 def _binding_matches(facts: _Facts, provider: _Facts) -> bool:
-    """Compare the strict walked PBIR and summary with the provider's complete resolved model path.
-
-    Normalisation is lexical: it compares addresses without opening or following the binding target.
-    Only the provider's already-resolved declared model may satisfy the comparison.
-    """
+    """Compare strict PBIR/summary with the resolved model's lexical address, without following it."""
     report_role = next((row for row in facts.roles if row.role == ROLE_FABRIC_REPORT), None)
     if report_role is None or report_role.state != STATE_RESOLVED or provider.model_role is None:
         return False
@@ -1427,25 +1445,22 @@ def _binding_matches(facts: _Facts, provider: _Facts) -> bool:
 
 
 def _dependency(  # pylint: disable=too-many-return-statements
-    facts: _Facts, dependency: DeclaredDependency, providers: Sequence[_Facts]
+    facts: _Facts, dependency: DependencyResult, providers: Sequence[_Facts]
 ) -> DependencyResult:
     """Resolve one published edge to exactly one provider package, and check the report binds to it."""
-    luid, key = dependency.luid, dependency.key
-    if dependency.code is not None:
-        return DependencyResult(STATE_MISMATCH, luid, key, code=dependency.code)
-    by_luid, by_key = _provider_matches(dependency, providers)
-    if luid is not None and not by_luid and by_key:
+    luid, key = dependency.datasource_luid, dependency.published_key
+    if dependency.state != STATE_RESOLVED:
+        return dependency
+    matches, by_key = _provider_matches(dependency, providers)
+    if not matches and by_key:
         named = by_key[0].unit if len(by_key) == 1 else None
         return DependencyResult(STATE_MISMATCH, luid, key, named, code=CODE_PROVIDER_LUID_CONTRADICTION)
-    matches = by_luid if luid is not None else [provider for provider in by_key if provider.source_luid is None]
-    if luid is None and not matches and by_key:
-        return DependencyResult(STATE_MISMATCH, luid, key, code=CODE_PROVIDER_LUID_CONTRADICTION)
     if not matches:
         return DependencyResult(STATE_MISSING, luid, key, code=CODE_PROVIDER_MISSING)
     if len(matches) > 1:
         return DependencyResult(STATE_AMBIGUOUS, luid, key, code=CODE_PROVIDER_AMBIGUOUS)
     provider = matches[0]
-    if key is not None and provider.published_key is not None and provider.published_key != key:
+    if provider.published_key != key:
         return DependencyResult(STATE_MISMATCH, luid, key, provider.unit, code=CODE_PROVIDER_KEY_CONTRADICTION)
     provider.topology = TOPOLOGY_PUBLISHED_PROVIDER
     if provider.model_role is None:
@@ -1459,19 +1474,10 @@ def _dependency(  # pylint: disable=too-many-return-statements
     )
 
 
-# ---------------------------------------------------------------------------------------------
-# entry point
-# ---------------------------------------------------------------------------------------------
-
-
 def verify_phase1_role_identity(
     package_roots: Sequence[Path], *, verified: Sequence[VerifiedPackage] | None = None
 ) -> tuple[Phase1RoleIdentityResult, ...]:
-    """One typed verdict per root, with exact binding before any cohort role read.
-
-    Earlier ``verified`` observations must biject, but never replace fresh no-follow S1.
-    Bad packages return BLOCKED, not tracebacks carrying host paths or artifact-controlled text.
-    """
+    """One bound verdict per root. Earlier observations must biject, never replace fresh S1."""
     identities = tuple(str(root) for root in package_roots)
     if not unique_root_identities(identities) or (
         verified is not None and bind_root_results(identities, verified, verified_root_binding) is None
@@ -1517,26 +1523,26 @@ def _resolve_cohort(facts: Sequence[_Facts]) -> None:
             entry.blockers.append(str(exc))
         entry.provider_ready = not entry.blockers and not any(role.blocks for role in entry.roles)
     for consumer in consumers:
-        for dependency in consumer.declared_dependencies:
+        for index, dependency in enumerate(consumer.dependencies):
             try:
                 row = _dependency(consumer, dependency, providers)
             except _IdentityError as exc:
-                row = DependencyResult(STATE_MISMATCH, dependency.luid, dependency.key, code=str(exc))
-            consumer.dependencies.append(row)
+                row = DependencyResult(
+                    STATE_MISMATCH, dependency.datasource_luid, dependency.published_key, code=str(exc)
+                )
+            consumer.dependencies[index] = row
 
 
 def _identify(facts: _Facts) -> None:
-    """Establish the source SHA/LUID/published key BEFORE any cohort edge is resolved.
-
-    Order matters: a provider's LUID is what a consumer's dependency matches on, so it has to exist
-    before matching, and it may only exist if this package's own provenance/asset/filename agree.
-    """
+    """Establish source identity and held P before any cohort edge can select a provider."""
     _role_result, row = _provenance_role(facts)
     if row is not None:
         facts.source_revision = revision_status(row.get("origin", {}), [row])
     facts.roles.append(_role_result)
-    facts.roles.append(_source_identity_role(facts, row))
+    identity = _source_identity_role(facts, row)
+    facts.roles.append(identity)
     facts.roles.append(_server_identity_role(facts, row))
+    facts.dependencies = _published_dependencies(facts, row if identity.state == STATE_RESOLVED else None)
 
 
 def _required_fabric(facts: _RoleContext, topology: str) -> tuple[list[RoleResult], dict[str, str]]:
@@ -1559,9 +1565,7 @@ def _required_fabric(facts: _RoleContext, topology: str) -> tuple[list[RoleResul
         if report_role.state == STATE_RESOLVED and declared_report:
             required[ROLE_FABRIC_REPORT] = declared_report
     if consumer:
-        # A consumer REUSES the provider's model. A second copy is a mismatch, not a convenience:
-        # two models for one report is exactly the drift that migrating a shared datasource once
-        # exists to prevent, and nothing downstream can then say which one the numbers came from.
+        # A consumer reuses the provider; a second model is a contradiction.
         owned = bool(models) or declared_model is not None
         roles.append(
             _role(ROLE_FABRIC_MODEL, STATE_MISMATCH, "0 dir", models, CODE_ROLE_WRONG_CANDIDATE)
@@ -1638,6 +1642,8 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
     topology = facts.topology or _topology(facts.kind, facts.declared_dependencies)
     roles = list(facts.roles)
     for row in facts.dependencies:
+        if row.state == STATE_CANNOT_ESTABLISH:
+            continue
         roles.append(
             _role(
                 ROLE_PUBLISHED_DEPENDENCY,
@@ -1649,7 +1655,11 @@ def _verdict(facts: _Facts) -> Phase1RoleIdentityResult:
         )
     if topology == TOPOLOGY_PUBLISHED_CONSUMER and not facts.dependencies:
         roles.append(_role(ROLE_PUBLISHED_DEPENDENCY, STATE_MISSING, "1 provider", [], CODE_PROVIDER_MISSING))
-    blockers = [*facts.blockers, *(role.code or role.state for role in roles if role.blocks)]
+    blockers = [
+        *facts.blockers,
+        *(role.code or role.state for role in roles if role.blocks),
+        *(row.code or row.state for row in facts.dependencies if row.state == STATE_CANNOT_ESTABLISH),
+    ]
     spec_facts = facts.spec_facts
     if spec_facts is not None:
         sources = facts.spec_document.get("data_sources") if isinstance(facts.spec_document, Mapping) else None
