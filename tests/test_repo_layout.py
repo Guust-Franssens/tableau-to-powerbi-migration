@@ -10,10 +10,12 @@ Every test here exists because the 16 committed examples all live in the ONE-lev
 that only affects the two-level user trees is invisible to every other test in the suite.
 """
 
+import ast
 import json
 import re
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -512,3 +514,222 @@ def test_newly_exposed_build_audit_files_are_absolute_path_clean() -> None:
             leaks.append(f"{path.relative_to(REPO_ROOT).as_posix()}: {hit.group(0)!r}")
 
     assert not leaks, "newly exposed _build audit file(s) leak absolute user path(s):\n  " + "\n  ".join(leaks)
+
+
+PREPARATION_ROUTES = (
+    "AGENTS.md",
+    ".github/agents/tableau-migrator.agent.md",
+    ".github/agents/dry-run-operator.agent.md",
+)
+PREPARATION_DOCS = (
+    "docs/start-with-one-workbook.md",
+    "docs/operator-runbook.md",
+    "scripts/README.md",
+)
+MANUAL_CONSUMER_DOCS = ("docs/reference-capture.md", "docs/operator-runbook.md", "scripts/README.md")
+PREPARATION_BEGIN = "<!-- BEGIN:strict-preparation -->"
+PREPARATION_END = "<!-- END:strict-preparation -->"
+
+
+def _preparation_block(text: str) -> str:
+    assert text.count(PREPARATION_BEGIN) == text.count(PREPARATION_END) == 1
+    return text.split(PREPARATION_BEGIN, 1)[1].split(PREPARATION_END, 1)[0]
+
+
+def preparation_guard(text: str | None = None) -> str:
+    """Execute the persona's actual guard in journey controls, not a test-owned readiness classifier."""
+    if text is None:
+        text = (REPO_ROOT / PREPARATION_ROUTES[1]).read_text(encoding="utf-8")
+    blocks = re.findall(r"```python\n(.*?)\n\s*```", _preparation_block(text), re.DOTALL)
+    assert len(blocks) == 1, "expected one executable dispatch guard"
+    return textwrap.dedent(blocks[0])
+
+
+def _assert_preparation_route(text: str) -> None:
+    route = " ".join(_preparation_block(text).replace("**", "").split())
+    ordered = (
+        "Construct",
+        "package_unit.py",
+        "Bind",
+        "set_data_folder.py",
+        "Check",
+        "check_reference_readiness.py",
+        "Dispatch",
+    )
+    cursor = 0
+    for item in ordered:
+        found = route.find(item, cursor)
+        assert found >= cursor, f"preparation sequence missing/out of order: {item}"
+        if item == "Dispatch":
+            assert route.index(item) == found, "validator/builder dispatch precedes the barrier"
+        cursor = found + len(item)
+    for requirement in (
+        "explicit selected run",
+        "exact unit",
+        "never choose the latest run",
+        "provider first",
+        "--provider-package",
+        "no name/spec fallback",
+        "package-only",
+        "--json - --quiet",
+        'process exit == 0 AND status == "START_READY"',
+        "Missing/malformed/multiple JSON",
+        "process/JSON disagreement",
+        "ASSEMBLED",
+        "BOUND",
+        "ordinary READY",
+        "NOT_APPLICABLE",
+        "stored status",
+        "todo completion",
+        "Only explicit Export diagnostics",
+        "--assemble-only",
+        "never fall back",
+        "orchestrator always prints a terminal outcome, even with quiet helpers",
+        "discovered inputs",
+        "completed stages",
+        "blocking stage",
+        "authoritative verdict",
+        "one executable next action",
+        "no agent was dispatched",
+    ):
+        assert requirement in route, f"preparation contract missing: {requirement}"
+
+
+@pytest.mark.parametrize("path", PREPARATION_ROUTES)
+def test_supported_routes_own_complete_preparation_before_dispatch(path: str) -> None:
+    _assert_preparation_route((REPO_ROOT / path).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("path", PREPARATION_ROUTES)
+@pytest.mark.parametrize(
+    ("old", "new", "failure"),
+    [
+        ("set_data_folder.py", "skip-binding", "sequence"),
+        ("provider first", "consumer first", "provider first"),
+        ("no name/spec fallback", "select provider by name", "no name/spec fallback"),
+        ("<provider-package> <consumer-package>", "<consumer-package>", "--json"),
+        ('status == "START_READY"', 'status == "READY"', "START_READY"),
+        ("never fall back", "fall back silently", "never fall back"),
+        ("even with quiet helpers", "unless quiet", "terminal outcome"),
+    ],
+)
+def test_preparation_instruction_mutations_fail_the_intended_contract(
+    path: str, old: str, new: str, failure: str
+) -> None:
+    text = (REPO_ROOT / path).read_text(encoding="utf-8")
+    block = _preparation_block(text)
+    changed_block, count = re.subn(r"\s+".join(re.escape(word) for word in old.split()), new, block)
+    assert count, "the intended instruction mutation did not reach its target"
+    changed = text.replace(block, changed_block)
+    if old == "<provider-package> <consumer-package>":
+        assert old not in _preparation_block(changed), "full cohort mutation was not applied"
+        with pytest.raises(AssertionError, match="complete provider/consumer"):
+            _assert_complete_cohort(changed)
+    else:
+        with pytest.raises(AssertionError, match=failure):
+            _assert_preparation_route(changed)
+
+
+def _assert_complete_cohort(text: str) -> None:
+    assert "<provider-package> <consumer-package> --json - --quiet" in " ".join(_preparation_block(text).split()), (
+        "final check must receive the complete provider/consumer package cohort"
+    )
+
+
+@pytest.mark.parametrize("path", PREPARATION_ROUTES)
+def test_final_check_has_the_full_cohort_and_no_early_dispatch(path: str) -> None:
+    text = (REPO_ROOT / path).read_text(encoding="utf-8")
+    _assert_complete_cohort(text)
+    changed = text.replace("**Construct**", "**Dispatch** validator now. **Construct**", 1)
+    assert changed != text
+    with pytest.raises(AssertionError, match="dispatch precedes"):
+        _assert_preparation_route(changed)
+
+
+@pytest.mark.parametrize("path", PREPARATION_DOCS)
+def test_operator_docs_keep_the_same_dispatch_and_quiet_contract(path: str) -> None:
+    text = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").replace("**", "").split())
+    for required in (
+        "--json - --quiet",
+        'process exit == 0 AND status == "START_READY"',
+        "never fall back",
+        "one executable next action",
+        "terminal outcome, even with quiet helpers",
+        "NOT_EVALUATED",
+    ):
+        assert required in text, f"{path}: missing {required}"
+    assert "pending-consumer" not in text
+
+
+def _assert_manual_consumer_current(text: str) -> None:
+    assert "#664 is resolved by #672" in text, "stale #664 consumer dependency"
+    assert "START_READY is not Phase-2 COMPLETE" in text, "manual admission became a completion claim"
+    assert not re.search(r"(?:Blocking dependency|remains blocked).*#664", text, re.IGNORECASE)
+
+
+@pytest.mark.parametrize("path", MANUAL_CONSUMER_DOCS)
+def test_manual_consumer_docs_and_stale_dependency_mutation(path: str) -> None:
+    text = (REPO_ROOT / path).read_text(encoding="utf-8").replace("**", "")
+    _assert_manual_consumer_current(text)
+    changed = text.replace("#664 is resolved by #672", "Blocking dependency: #664")
+    with pytest.raises(AssertionError, match="stale #664"):
+        _assert_manual_consumer_current(changed)
+
+
+def _snapshot_assertion(source: str) -> ast.Assert:
+    function = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_real_parsed_shared_provider_reaches_producer_handoff_and_binder"
+    )
+    assertions = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Assert)
+        and isinstance(node.test, ast.Compare)
+        and ast.unparse(node.test.left) == "manifest['dispatch_readiness']"
+    ]
+    assert len(assertions) == 1, "snapshot atomic projection assertion missing"
+    values = ast.literal_eval(assertions[0].test.comparators[0])
+    assert set(values) == {"availability", "status", "message"}, "snapshot added a projection field"
+    assert (values["availability"], values["status"]) == ("AVAILABLE", "NOT_EVALUATED")
+    assert "no agent was dispatched" in values["message"]
+    assert "complete current provider/consumer package cohort" in values["message"]
+    assert "only START_READY with process exit 0" in values["message"]
+    return assertions[0]
+
+
+def test_shared_snapshot_assertion_cannot_disappear() -> None:
+    path = REPO_ROOT / "tests" / "test_package_data_access_snapshot.py"
+    source = path.read_text(encoding="utf-8")
+    assertion = _snapshot_assertion(source)
+    lines = source.splitlines(keepends=True)
+    changed = "".join(lines[: assertion.lineno - 1] + lines[assertion.end_lineno :])
+    with pytest.raises(AssertionError, match="snapshot atomic projection assertion missing"):
+        _snapshot_assertion(changed)
+
+
+@pytest.mark.parametrize(
+    "persona", ["tableau-migrator.agent.md", "dry-run-operator.agent.md", "pbi-report-builder.agent.md"]
+)
+def test_preparation_and_unrelated_persona_blocks_are_still_pinned(persona: str) -> None:
+    import test_openability_claim_citations as pins  # pylint: disable=import-outside-toplevel
+
+    text = pins.read_source(REPO_ROOT / ".github" / "agents" / persona)
+    blocks = pins.segment(text, collapse_generated=True)
+    assert not pins.findings(persona, blocks), "committed persona pin is stale"
+    lines = text.splitlines(keepends=True)
+    if PREPARATION_BEGIN in text:
+        start = next(index for index, line in enumerate(lines, 1) if PREPARATION_BEGIN in line)
+        end = next(index for index, line in enumerate(lines, 1) if PREPARATION_END in line)
+        selected = [block for block in blocks if start < block.line < end and block.text.strip()]
+    else:
+        selected = [block for block in blocks if "## Workflow" in block.text]
+    assert selected, "no instruction block was selected for the pin control"
+    for block in selected:
+        changed = "".join(lines[: block.line - 1]) + "Dispatch without the preparation barrier.\n"
+        changed += "".join(lines[block.line - 1 :])
+        assert pins.findings(persona, pins.segment(changed, collapse_generated=True)), (
+            f"pin missed instruction block {block.line}"
+        )

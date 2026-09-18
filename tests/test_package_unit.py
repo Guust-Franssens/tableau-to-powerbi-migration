@@ -28,6 +28,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import types as reference_types
@@ -53,6 +54,9 @@ import reference_evidence as rev  # noqa: E402  # pylint: disable=wrong-import-p
 import set_data_folder as sdf  # noqa: E402  # pylint: disable=wrong-import-position
 import test_package_filesystem as reference_filesystem  # noqa: E402  # pylint: disable=wrong-import-position
 import test_stamp_tableau_provenance as published_fixture  # noqa: E402  # pylint: disable=wrong-import-position
+import test_repo_layout as layout  # noqa: E402  # pylint: disable=wrong-import-position
+import test_package_unit_gates as journeys  # noqa: E402  # pylint: disable=wrong-import-position
+import test_check_reference_readiness as readiness_fixtures  # noqa: E402  # pylint: disable=wrong-import-position
 from test_package_unit_gates import _binding_cli, _binding_package  # noqa: E402  # pylint: disable=wrong-import-position
 from manifest_scope import KEEP, REPORT_ALLOW, Rows, project  # noqa: E402  # pylint: disable=wrong-import-position
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
@@ -68,9 +72,14 @@ UNIT = "Book"
 WB_LUID = "11111111-2222-3333-4444-555555555555"
 OTHER_LUID = "99999999-8888-7777-6666-555555555555"
 EXPECTED_DISPATCH_READINESS = {
-    "availability": "UNAVAILABLE",
-    "status": pkg.DISPATCH_READINESS_NOT_EVALUATED,
-    "message": pkg.NOT_START_READY_NOTICE,
+    "availability": "AVAILABLE",
+    "status": "NOT_EVALUATED",
+    "message": (
+        "NOT START_READY: the final package checker is AVAILABLE but NOT_EVALUATED by this constructor. "
+        "ASSEMBLED is diagnostic construction only; no agent was dispatched. "
+        "Run check_reference_readiness.py on the complete current provider/consumer package cohort; "
+        "only START_READY with process exit 0 authorizes dispatch."
+    ),
 }
 
 
@@ -5901,6 +5910,20 @@ def test_packaging_every_emitted_unit_exits_zero(tmp_path: Path) -> None:
     assert (package / "oracle" / "oracle-manifest.json").is_file()
 
 
+def _nonvolatile_construction_bytes(root: Path) -> dict[str, bytes]:
+    """Exclude only the parser's wall-clock value and its derived seal, preserving all other bytes."""
+    files = {path.relative_to(root).as_posix(): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    raw = files["migration-spec.json"]
+    stamp = json.dumps(json.loads(raw)["source"]["parsed_at"]).encode()
+    assert raw.count(stamp) == 1, "parse-time normalization must target exactly one value"
+    files["migration-spec.json"] = raw.replace(stamp, b'"<PARSED_AT>"')
+    old_hash = hashlib.sha256(raw).hexdigest().encode()
+    new_hash = hashlib.sha256(files["migration-spec.json"]).hexdigest().encode()
+    assert files[pkg.MANIFEST_NAME].count(old_hash) == 1, "normalization must replace only the matching spec seal"
+    files[pkg.MANIFEST_NAME] = files[pkg.MANIFEST_NAME].replace(old_hash, new_hash)
+    return files
+
+
 def test_assemble_only_is_an_explicit_alias_for_the_existing_construction_behavior(  # pylint: disable=too-many-locals
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -5921,6 +5944,7 @@ def test_assemble_only_is_an_explicit_alias_for_the_existing_construction_behavi
     common = ["--bundle", str(bundle), "--oracle", str(oracle), "--assets", str(bundle.parent / "assets"), "--quiet"]
 
     assert pkg.main([*common, "--out", str(default_out), "--json", str(default_json)]) == pkg.EXIT_OK
+    assert capsys.readouterr().out == "", "default low-level quiet must stay silent"
     assert (
         pkg.main(
             [
@@ -5933,10 +5957,10 @@ def test_assemble_only_is_an_explicit_alias_for_the_existing_construction_behavi
             ]
         )
         == pkg.EXIT_OK
-    )
+    ), "explicit construction exit changed"
 
     output = capsys.readouterr().out
-    assert output.strip() == pkg.NOT_START_READY_NOTICE
+    assert output.strip() == EXPECTED_DISPATCH_READINESS["message"], "explicit quiet diagnostic notice changed"
     default_report = json.loads(default_json.read_text(encoding="utf-8"))
     explicit_report = json.loads(explicit_json.read_text(encoding="utf-8"))
     assert default_report["mode"]["name"] == pkg.ASSEMBLY_MODE
@@ -5946,7 +5970,7 @@ def test_assemble_only_is_an_explicit_alias_for_the_existing_construction_behavi
     assert explicit_report["mode"]["explicit"] is True
     assert default_report["dispatch_readiness"] == EXPECTED_DISPATCH_READINESS
     assert explicit_report["dispatch_readiness"] == EXPECTED_DISPATCH_READINESS
-    assert default_report["totals"] == explicit_report["totals"]
+    assert default_report["totals"] == explicit_report["totals"], "construction totals diverged"
     assert default_report["totals"] == {
         "requested": 1,
         "units": 1,
@@ -5957,6 +5981,7 @@ def test_assemble_only_is_an_explicit_alias_for_the_existing_construction_behavi
         "blocked": 0,
     }
     assert default_report["construction"]["totals"] == {"requested": 1, "assembled": 1, "blocked": 0}
+    assert default_report["construction"] == explicit_report["construction"], "construction projection diverged"
     assert default_report["legacy_bucket_semantics"] == "construction_only; never dispatch readiness"
     for report_path in (default_json, explicit_json):
         assert '"status": "packaged"' not in report_path.read_text(encoding="utf-8").casefold()
@@ -5967,12 +5992,326 @@ def test_assemble_only_is_an_explicit_alias_for_the_existing_construction_behavi
         path.relative_to(explicit_package) for path in explicit_package.rglob("*") if path.is_file()
     }
     assert (default_package / "data-access.json").read_bytes() == (explicit_package / "data-access.json").read_bytes()
+    default_bytes = _nonvolatile_construction_bytes(default_package)
+    explicit_bytes = _nonvolatile_construction_bytes(explicit_package)
+    assert default_bytes == explicit_bytes, "nonvolatile package bytes diverged"
+    for report, files in ((default_report, default_bytes), (explicit_report, explicit_bytes)):
+        report["units"][0]["contents"]["files"]["migration-spec.json"] = hashlib.sha256(
+            files["migration-spec.json"]
+        ).hexdigest()
+    default_report["mode"]["explicit"] = True
+    assert default_report == explicit_report, "reports differ beyond mode.explicit"
     assert not [
         path
         for path in explicit_package.rglob("*")
         if path.name.casefold() in {"start-ready.json", "dispatch-authorization.json"}
     ]
     assert all("check_reference_readiness.py" not in " ".join(command) for command in commands)
+
+
+def _exercise_dispatch_guard(
+    roots: tuple[Path, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    events: list[str],
+    *,
+    response: tuple[str, int] | None = None,
+    guard: str | None = None,
+) -> tuple[int, subprocess.CompletedProcess[str]]:
+    """Rehearse the shipped persona guard; a recording sink replaces the actual agent launch."""
+    run = subprocess.run
+    calls = []
+
+    def observed(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert command[1:] == [
+            str(Path("scripts") / "check_reference_readiness.py"),
+            *map(str, roots),
+            "--json",
+            "-",
+            "--quiet",
+        ], "checker must receive exactly the current full package cohort"
+        events.append("checker")
+        completed = (
+            run(command, cwd=layout.REPO_ROOT, **kwargs)
+            if response is None
+            else subprocess.CompletedProcess(command, response[1], response[0], "")
+        )
+        calls.append(completed)
+        events.append(f"checked:{completed.returncode}")
+        return completed
+
+    namespace = {
+        "run_root": roots[-1].parent.parent,
+        "unit": roots[-1].name,
+        "package_roots": roots,
+        "verdict": {"status": "START_READY"},  # A stored claim must be replaced, never trusted.
+    }
+    exit_code = 0
+    with monkeypatch.context() as local:
+        local.setattr(subprocess, "run", observed)
+        try:
+            exec(compile(guard or layout.preparation_guard(), "<migrator-preparation-guard>", "exec"), namespace)
+        except SystemExit as stop:
+            assert isinstance(stop.code, int), "guard must stop with a nonzero process exit"
+            exit_code = stop.code
+        else:
+            events.append("dispatch")
+    assert len(calls) == 1, "fresh checker was not called exactly once"
+    return exit_code, calls[0]
+
+
+@pytest.mark.parametrize("route", ["local-import", "manual-reference", "report-free"])
+def test_preparation_journey_checks_current_packages_before_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], route: str
+) -> None:
+    root = (
+        _fresh_reference_package(tmp_path, worksheets=("Sales",))
+        if route == "manual-reference"
+        else _binding_package(tmp_path, datasource=route == "report-free")
+    )
+    events = ["package"]
+    assert json.loads((root / pkg.MANIFEST_NAME).read_bytes())["dispatch_readiness"] == EXPECTED_DISPATCH_READINESS
+    assert _binding_cli(root)["exit_code"] == 0
+    events.append("binding")
+    capsys.readouterr()
+    code, completed = _exercise_dispatch_guard((root,), monkeypatch, events)
+    assert (code, completed.returncode, json.loads(completed.stdout)["status"]) == (0, 0, "START_READY")
+    assert events == ["package", "binding", "checker", "checked:0", "dispatch"]
+    terminal = capsys.readouterr().out
+    assert str(root.parent.parent) in terminal and root.name in terminal
+    assert "START_READY/0" in terminal, "quiet helpers must not silence the orchestrator terminal outcome"
+    if route == "report-free":
+        assert json.loads(completed.stdout)["units"][0]["status"] == "NOT_APPLICABLE"
+
+
+def test_preparation_journey_provider_first_and_consumer_alone_refuses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    events = []
+    assemble = pkg.package_unit
+    bind = journeys._binding_cli
+
+    def observed_assembly(bundle, unit, out, **kwargs):
+        result = assemble(bundle, unit, out, **kwargs)
+        events.append(f"package:{unit}")
+        return result
+
+    def observed_binding(root, *flags):
+        result = bind(root, *flags)
+        events.append(f"binding:{root.name}")
+        return result
+
+    with monkeypatch.context() as local:
+        local.setattr(pkg, "package_unit", observed_assembly)
+        local.setattr(journeys, "_binding_cli", observed_binding)
+        provider, consumer = journeys._shared_ready_cohort(tmp_path)
+    assert events == [
+        f"package:{provider.name}",
+        f"package:{consumer.name}",
+        f"binding:{provider.name}",
+        f"binding:{consumer.name}",
+    ]
+    code, checked = _exercise_dispatch_guard((provider, consumer), monkeypatch, events)
+    assert (code, checked.returncode, json.loads(checked.stdout)["status"]) == (0, 0, "START_READY")
+    assert events[-3:] == ["checker", "checked:0", "dispatch"]
+    capsys.readouterr()
+    blocked = []
+    code, checked = _exercise_dispatch_guard((consumer,), monkeypatch, blocked)
+    row = json.loads(checked.stdout)["package_readiness"][0]
+    assert code != 0 and "dispatch" not in blocked
+    assert row["failed_stage"] == "role_identity" and "provider_missing" in row["codes"]
+    assert "no agent was dispatched" in capsys.readouterr().out
+
+
+def test_preexisting_assembled_and_stored_ready_cannot_skip_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _binding_package(tmp_path)
+    (tmp_path / "historical-readiness.json").write_text('{"status":"START_READY"}', encoding="utf-8")
+    assert json.loads((root / pkg.MANIFEST_NAME).read_bytes())["construction_status"] == "ASSEMBLED"
+    capsys.readouterr()
+    events = []
+    code, checked = _exercise_dispatch_guard((root,), monkeypatch, events)
+    assert (code, checked.returncode) == (1, 1)
+    assert json.loads(checked.stdout)["package_readiness"][0]["failed_stage"] == "binding"
+    assert events == ["checker", "checked:1"]
+    assert "no agent was dispatched" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("missing", "stage", "expected_exit"),
+    [
+        ("reference", "reference", 1),
+        ("source", "role_identity", 1),
+        ("brief", "role_identity", 1),
+        ("credential-authority", "data_access", 3),
+    ],
+)
+def test_preparation_missing_prerequisites_block_at_the_authoritative_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    missing: str,
+    stage: str,
+    expected_exit: int,
+) -> None:
+    """Controlled sealed faults reuse the checker fixtures; this is not an orchestration reseal path."""
+    root = readiness_fixtures._packaged_unit(tmp_path)
+    manifest = json.loads((root / pkg.MANIFEST_NAME).read_bytes())
+    if missing == "reference":
+        readiness_fixtures._blind_reference_fixture(root)
+    elif missing in ("source", "brief"):
+        relative = manifest["artifacts"]["asset"] if missing == "source" else "migration-brief.md"
+        (root / relative).unlink()
+        readiness_fixtures._reseal_start_fixture(root)
+    else:
+        path = root / "data-access.json"
+        assessment = json.loads(path.read_bytes())
+        assessment.update(
+            state="cannot_establish",
+            codes=["audit-missing"],
+            validation="not_established",
+            effective_scope=None,
+            max_phase2_claim="none",
+        )
+        path.write_text(json.dumps(assessment), encoding="utf-8")
+        readiness_fixtures._reseal_start_fixture(root)
+    capsys.readouterr()
+    events = []
+    code, checked = _exercise_dispatch_guard((root,), monkeypatch, events)
+    report = json.loads(checked.stdout)
+    assert (code, checked.returncode) == (expected_exit, expected_exit), report
+    row = report["package_readiness"][0]
+    assert row["failed_stage"] == stage, row
+    assert row["codes"], "the real prerequisite must be diagnosed, not merely exit nonzero"
+    if missing == "credential-authority":
+        assert row["codes"] == ["audit-missing"]
+    assert "dispatch" not in events
+    terminal = capsys.readouterr().out
+    assert root.name in terminal and "no agent was dispatched" in terminal
+    assert stage in terminal, "terminal output must expose the real blocking stage"
+
+
+@pytest.mark.parametrize(
+    ("raw", "exit_code"),
+    [
+        *[
+            (json.dumps({"status": status}), 0)
+            for status in (
+                "ASSEMBLED",
+                "BOUND",
+                "READY",
+                "NOT_APPLICABLE",
+                "FINDINGS",
+                "CANNOT_ESTABLISH",
+                "NOT_EVALUATED",
+            )
+        ],
+        ('{"status":"START_READY"}', 1),
+        ('{"status":"START_READY"}', 3),
+        ("", 0),
+        ("{", 0),
+        ("{}", 0),
+        ("null", 0),
+        ("[]", 0),
+        ('{"status":"START_READY"}\n{"status":"START_READY"}', 0),
+        ('{"status":"FINDINGS","status":"START_READY"}', 0),
+        ('{"status":"START_READY","extra":NaN}', 0),
+        ('{"status":"START_READY","extra":1e999}', 0),
+    ],
+)
+def test_dispatch_guard_rejects_every_non_current_start_ready_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    raw: str,
+    exit_code: int,
+) -> None:
+    events = []
+    code, _checked = _exercise_dispatch_guard((tmp_path / "ExactUnit",), monkeypatch, events, response=(raw, exit_code))
+    assert code != 0, "barrier authorized a non-START_READY/0 response"
+    assert "dispatch" not in events, "barrier dispatched from a stored or non-authorizing status"
+    terminal = capsys.readouterr().out
+    assert "ExactUnit" in terminal and "no agent was dispatched" in terminal
+
+
+@pytest.mark.parametrize("mutation", ["exit-only", "ordinary-ready", "stored-verdict", "quiet-terminal"])
+def test_dispatch_guard_mutations_fail_the_intended_assertion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mutation: str
+) -> None:
+    guard = layout.preparation_guard()
+    failure = "barrier authorized"
+    if mutation == "exit-only":
+        guard = guard.replace(' or verdict.get("status") != "START_READY"', "")
+    elif mutation == "ordinary-ready":
+        guard = guard.replace(
+            'verdict.get("status") != "START_READY"', 'verdict.get("status") not in ("START_READY", "READY")'
+        )
+    elif mutation == "stored-verdict":
+        start, end = guard.index("checked = subprocess.run("), guard.index("\ntry:")
+        guard = (
+            guard[:start] + 'checked = subprocess.CompletedProcess([], 0, \'{"status":"START_READY"}\')\n' + guard[end:]
+        )
+        failure = "fresh checker"
+    else:
+        guard = "\n".join(line for line in guard.splitlines() if not line.lstrip().startswith("print("))
+        failure = "quiet terminal"
+    assert guard != layout.preparation_guard(), "mutation did not reach the intended guard"
+    capsys.readouterr()
+    with pytest.raises(AssertionError, match=failure):
+        code, _ = _exercise_dispatch_guard(
+            (tmp_path / "ExactUnit",), monkeypatch, [], response=('{"status":"READY"}', 0), guard=guard
+        )
+        assert code != 0, "barrier authorized an ordinary READY response"
+        assert "no agent was dispatched" in capsys.readouterr().out, "quiet terminal outcome was suppressed"
+
+
+@pytest.mark.parametrize("field,value", [("availability", "UNAVAILABLE"), ("status", "START_READY"), ("message", "")])
+def test_constructor_projection_mutations_fail_the_atomic_assertion(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: str
+) -> None:
+    assert pkg._dispatch_readiness() == EXPECTED_DISPATCH_READINESS  # pylint: disable=protected-access
+    changed = {**pkg._dispatch_readiness(), field: value}  # pylint: disable=protected-access
+    monkeypatch.setattr(pkg, "_dispatch_readiness", lambda: changed)
+    with pytest.raises(AssertionError, match="atomic constructor projection"):
+        assert pkg._dispatch_readiness() == EXPECTED_DISPATCH_READINESS, "atomic constructor projection changed"  # pylint: disable=protected-access
+
+
+@pytest.mark.parametrize(
+    ("mutation", "failure"),
+    [
+        ("exit", "explicit construction exit changed"),
+        ("totals", "construction totals diverged"),
+        ("construction", "construction projection diverged"),
+        ("bytes", "nonvolatile package bytes diverged"),
+    ],
+)
+def test_diagnostic_equivalence_mutations_fail_the_intended_assertion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mutation: str, failure: str
+) -> None:
+    run = pkg.main
+
+    def changed(argv: list[str]) -> int:
+        code = run(argv)
+        if "--assemble-only" not in argv:
+            return code
+        if mutation == "exit":
+            return 1
+        if mutation == "bytes":
+            path = Path(argv[argv.index("--out") + 1]) / UNIT / "README.md"
+            path.write_bytes(path.read_bytes() + b"\nMutation of nonvolatile bytes.\n")
+        else:
+            path = Path(argv[argv.index("--json") + 1])
+            report = json.loads(path.read_bytes())
+            if mutation == "totals":
+                report["totals"]["assembled"] += 1
+            else:
+                report["construction"]["totals"]["assembled"] += 1
+            path.write_text(json.dumps(report), encoding="utf-8")
+        return code
+
+    monkeypatch.setattr(pkg, "main", changed)
+    with pytest.raises(AssertionError, match=failure):
+        test_assemble_only_is_an_explicit_alias_for_the_existing_construction_behavior(tmp_path, monkeypatch, capsys)
 
 
 def test_an_unknown_unit_is_a_usage_error_not_an_empty_package(tmp_path: Path) -> None:
@@ -7450,7 +7789,7 @@ def test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_block
         edited: "package_edits_refused",
     }
     assert payload["unaccounted"] == []
-    assert payload["dispatch_readiness"]["availability"] == "UNAVAILABLE"
+    assert payload["dispatch_readiness"]["availability"] == "AVAILABLE"
     assert payload["dispatch_readiness"]["status"] == pkg.DISPATCH_READINESS_NOT_EVALUATED
     assert all((out / unit / pkg.MANIFEST_NAME).is_file() for unit in assembled_names)
     assert not (out / crashed).exists() and not (out / unreadable).exists()

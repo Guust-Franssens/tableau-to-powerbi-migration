@@ -136,8 +136,10 @@ The generated package README reports the actual brief's numeric obligation: expl
 does not make optional numeric comparison a prerequisite to permitted visual work; `required`
 remains owed and unknown stays unknown. Images or missing CSV never imply a waiver.
 See [reference capture](../docs/reference-capture.md) for the complete handoff and admission route.
-**Blocking dependency #664 remains:** the final `check_unit` manual-name/type consumer is a separate
-fix; PR #658 alone does not make final manual-reference completion usable.
+**#664 is resolved by #672:** `check_unit` shares canonical manual-reference name/type interpretation
+with reference readiness. Accepted layout/text evidence can serve both consumers without an upgrade
+of its ceiling. **START_READY is not Phase-2 COMPLETE**; caller-pinned final evidence and all remaining
+data, numeric, visual and history obligations still apply.
 
 ### Package-local review iteration commands
 
@@ -545,6 +547,17 @@ assembly remains **ASSEMBLED**, and applicable binding inspections remain **UNVA
 
 ### S2 package preparation
 
+The supported dispatcher/`tableau-migrator` Migrate/Continue route owns construction, applicable
+binding and the final current package-only check. Keep the explicit selected run and exact unit;
+never choose the latest run. Derive paths from that run, not from a stored readiness result.
+Construct provider first with each unit's own brief, bind using the same exact provider roots, then
+run `check_reference_readiness.py <provider-package> <consumer-package> --json - --quiet` on the
+complete current cohort (one package for an owned model). The retained #562 authority and S2 select
+providers, with no name/spec fallback. The executable guard is in `tableau-migrator` step 7.
+No validator/builder dispatch unless **process exit == 0 AND status == "START_READY"** in exactly one
+fresh JSON object. Malformed/multiple/missing JSON, disagreement, ASSEMBLED, BOUND, ordinary READY,
+NOT_APPLICABLE, stored status and completed todos block. Preserve edit refusal on Continue.
+
 `package_unit.py --brief` requires **one selected unit**; use a separate invocation and brief per
 unit, not one brief broadcast over an estate. The typed unit/scope and whole-message host-location
 and credential containment checks run before assembly. Unsafe text is refused without copying,
@@ -554,6 +567,20 @@ the legacy fallback only when that path is absent). The raw handover's portable 
 agree before the separate shipped handover is redacted. The selecting row stays attached to the
 walked path through digest validation; wrong/foreign paths, unresolved declared assets and ambiguous
 rows or candidates refuse.
+
+A current per-unit brief starts with this v2 metadata, followed by the chosen fidelity/autonomy/
+refresh instructions. Replace the unit and scope with the commissioned values. `required` is an
+example, not permission to guess the numeric obligation; only an explicit user decision earns `none`.
+
+```toml
++++
+schema = "phase1-start-ready/v2"
+unit = "<exact-unit>"
+scope = "model_and_report"
+fallback_authorization = "stop"
+numeric_obligation = "required"
++++
+```
 
 ### Construction status (#614)
 
@@ -627,9 +654,20 @@ Syntax errors, missing mandatory switches, an invalid bundle and unknown units r
 usage exit 2, outside occurrence reporting; they do not replace a prior report. Exits 1 and 4 are
 not reused for brief refusal.
 
-**ASSEMBLED is never START_READY.** Output records dispatch readiness as unavailable and
-`NOT_EVALUATED`; #622 and the final #562 consumer own that later decision. The command creates no
-dispatch authorization and does not call or reimplement `check_reference_readiness.py`.
+**ASSEMBLED is never START_READY.** The existing `dispatch_readiness` object records
+`availability: AVAILABLE` (the final package checker exists) and `status: NOT_EVALUATED` (this
+constructor did not run it). Its message says diagnostic construction dispatched no agent and the
+complete current cohort still needs START_READY with process exit 0. No dispatch boolean, schema
+or aggregate state is added; construction neither calls nor reimplements the final checker.
+
+Only explicit **Export diagnostics** selects `--assemble-only` in the orchestrated route; ordinary
+Migrate/Continue failure must **never fall back** to it. Default and explicit low-level construction
+retain the same totals, exits, file sets and nonvolatile bytes, apart from `mode.explicit`.
+Default low-level `--quiet` remains silent; explicit quiet diagnostics retain the terminal notice.
+The **orchestrator always prints a terminal outcome, even with quiet helpers**: exact run/unit,
+discovered inputs, completed stages, blocking stage, authoritative verdict/exit and **one executable
+next action** addressing that stage. Source/reference/brief/provider/data authority precedes binding;
+an existing manifest or package is not a stored permission to dispatch.
 
 `package_role_identity.py` re-runs no-follow S1 at the S2 entry seam rather than trusting an earlier
 clearance. It reads **package-local P through `VerifiedPackage.read_verified_member`**, using the
