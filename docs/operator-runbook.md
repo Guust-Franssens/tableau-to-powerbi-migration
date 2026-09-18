@@ -500,7 +500,7 @@ convention — see §7 for which ones actually are.
 | 2 | `python scripts/assess_estate.py --out _assessment --survey _assessment/estate_survey.json` | ⚠️ ~34 s | `report.md`, `assessment.json`, `estate.db` |
 | 3 | `python scripts/tableau_lineage.py --plan --survey _assessment/estate_survey.json` | seconds | model-first order — **survey edges override the Metadata API** |
 | 4 | `python scripts/harvest_estate_assets.py --out _sweep` | ✅ **120 s / 55 assets** | `_sweep/assets/*`, `parse-sweep.md` |
-| 5 | `python scripts/run_estate.py --input _sweep/assets --output _bundle [--storage-decision <file.json>]` | ✅ **81.7 s of recorded phases** (engine 41.3 s, provenance 38.7 s) | `_bundle/` |
+| 5 | `python scripts/run_estate.py --input _sweep/assets --output _bundle --scope-survey _assessment/estate_survey.json [--storage-decision <file.json>]` | ✅ **81.7 s of recorded phases** (engine 41.3 s, provenance 38.7 s; predates the scope bridge) | `_bundle/` |
 | 6 | `python scripts/deploy_estate.py --bundle _bundle --workspace <workspace-id> --tenant <tenant-id> --estate-db _assessment/estate.db --journal _bundle/deploy-journal.jsonl` | ⚠️ **~25 s per item** — budget 30 min for 75 items | items in the landing zone |
 
 When an operator supplies `--storage-decision`, keep that JSON file outside the destructive bundle
@@ -710,6 +710,85 @@ Useful flags ✅ verified against `--help`: `--limit N` (quick pass), `--skip-do
 
 **This is the gate.** The engine exits 0 regardless; our wrapper is what turns its report into an
 answer.
+
+#### Site scope snapshot
+
+For a **site run**, pass the exact survey selected in steps 1–2:
+
+```powershell
+python scripts\run_estate.py --input <run>\assets --output <run>\bundle --scope-survey <run>\assessment\estate_survey.json
+```
+
+✅ Producer contract (#469): `run_estate.py:capture_scope_inputs` reads and SHA-256 hashes the
+survey's exact bytes and **only** `<input>/../parse-sweep.json`, once before launching the engine.
+There is no parent-tree search, alternative sweep selection, server discovery or network request
+in this bridge. Each harvest row's **`engine_input` version 1** is the only consumed-file authority
+(#679). An established record has exactly `version`, `status`, `path`, `size_bytes`, `sha256`:
+an absolute canonical path inside the input assets, a nonnegative integer size and lowercase
+64-hex SHA-256. A cannot-establish record has exactly `version`, `status`, `reason`.
+Only report `source_id` may retain a producer-relative path, resolved against the invocation's
+working directory, never by trying several roots.
+
+Legacy `file` remains the parser/archive landing and does **not** select scope identity. In the
+canonical packaged-datasource flow, the fetcher lands both `.tdsx` and `.tds`, while engine 2.368
+consumes the inner `.tds`. ✅ The original bridge reproduced `input_asset_missing_or_duplicate`
+despite an established `.tds` engine-input record and matching report source. The bridge now follows
+that record, not the archive. Changing/removing legacy `file` cannot change an otherwise valid join.
+
+After conversion, `write_scope_bridge` upserts **version 1** of `input_manifest.scope_bridge`,
+before generated-artifact hashes, the output-tree baseline and the existing receipt are written.
+`engine-output-receipt.json.input_manifest_sha256` therefore seals the **final** manifest, including
+the bridge. No separate ledger, outcome file or source-provenance schema is introduced.
+
+| bridge field | meaning |
+|---|---|
+| `survey_sha256`, `parse_sweep_sha256` | the held pre-engine bytes, not a later reread; unreadable snapshots have no digest |
+| `counts` | observed lengths of **all four** survey arrays: `workbooks`, `required_datasources`, `unresolved_dependencies`, `fetch_order`; a missing/non-array collection is `null`, not zero |
+| `denominator_status` | `established` only for survey schema `1.0` with reconciled scope/fetch identities, dependency lists, summary counts, explicit non-degraded/error-free completeness and selected/site counts |
+| `occurrences` | every workbook, required datasource and nested unresolved dependency, even when no artifact exists; `survey_collection`/`survey_index` identifies the source row (the parent workbook for a nested dependency) |
+| unresolved `parent_workbook_luid`, `dependency_ordinal` | exact parent LUID and zero-based position in that workbook's ordered `published_dependencies`; status, connection key and candidate LUIDs are corroboration, never occurrence identity |
+| `fetch_order` | every plan occurrence retained separately; it corroborates the denominator, never adds a second copy of a workbook to it |
+| occurrence `status`, `issues`, `match` | `established` requires the complete exact join below; otherwise `cannot_establish`, stable reason codes, and no match |
+| bridge `status` | `established` only when the denominator and every occurrence join are established; otherwise `cannot_establish` |
+
+The only identity chain is **survey kind/LUID → unique parse-sweep kind/LUID → established v1
+`engine_input` physical file, size and SHA-256 → unique engine `source_id` with report
+collection/index**. The match also records fetch/sweep/input indexes and the input SHA. The
+selected file is checked against its recorded size/SHA before the engine, then against the
+input-manifest asset after the engine; a changed file or disagreeing hash cannot establish the join.
+Names, projects,
+slugs, directory leaves, sanitized names and case-insensitive captions are **display only**.
+Duplicates, missing links, wrong kinds and same-byte copies at different physical files do not
+fall back to first-match or name selection. No `.tds` sibling inference or archive substitution is
+permitted, even if a plausible file is present. Reordering workbook/fetch observations changes
+indexes, not LUID identity. Dependency order is different: its ordinal is part of occurrence identity.
+
+The v1 reasons `download_failed`, `selection_unavailable`, `missing`, `ambiguous`, `outside_assets`,
+`unreadable` and `unstable` remain explicit `engine_input_<reason>` occurrence issues. Missing or
+malformed records, inaccessible/redirected/outside paths and size/SHA disagreement also leave the
+occurrence and bridge `cannot_establish`, without dropping the denominator or unmatched engine
+observations. Legacy sweeps with only `file` are insufficient: refresh evidence through the
+canonical harvest producer; never manufacture `engine_input` from a neighboring filename.
+
+❌ Engine **2.368.0**'s top-level `unresolved_dependencies` rows carry workbook captions, not
+parent/ordinal pointers. The bridge retains each nested unresolved occurrence's identity from
+`workbooks[].luid` and its ordered `published_dependencies`, but this top-level evidence cannot
+establish the denominator. Reconciliation requires unique exact parent/ordinal pointers with
+agreeing status, connection key and candidate LUIDs; missing, duplicate, out-of-range or
+contradictory records leave `denominator_status: cannot_establish`, even at equal counts.
+Neither captions nor top-level list order supplies missing pointers. An unresolved occurrence's
+absent downstream artifact is `unresolved_dependency_artifact_unavailable`, not lost identity.
+Older/missing survey completeness, missing parse sweeps and reports without `source_id` also stay
+`cannot_establish`. A complete survey of five workbooks still contributes five workbook occurrences
+when the engine emits only two, or none.
+
+This is **producer evidence, not a new conversion/readiness/completion gate**. Existing exit codes
+remain unchanged; an exit 0 does not establish scope identity. `--dry-run` reads neither snapshot
+and prints only that a survey was supplied. Survey/sweep paths are not stored in the bridge or
+printed by it; the engine's existing `source_id` paths remain local metadata in the ignored bundle.
+Folder and single-file routes **omit** the flag and gain no inferred site denominator.
+`--slice-only` ignores it, preserves any existing bridge (including damaged/future versions), and
+never synthesizes or reseals one. The status/package consumer is a separate follow-up.
 
 `run_estate.py` exit codes ✅ verified — read out of the `EXIT_*` constants and `final_verdict()`,
 and 2/5 reproduced by running the command:
