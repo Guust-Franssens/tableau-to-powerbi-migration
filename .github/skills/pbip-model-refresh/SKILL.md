@@ -189,6 +189,18 @@ image's lifetime never change the refresh's XMLA or wall-clock deadline.
 
 ### Retain unreadable popup evidence for an explicit human handoff (#704)
 
+⛔ **Blocked prototype — not qualified for use.** September 18, 2026 blind review and independent
+native reproduction found two accepted-evidence defects: READY becomes loadable after a delayed
+exclusive-handle release crosses the original deadline/close, and a model-directory replacement
+during READY creation is accepted against an earlier immutable context. The bundled
+`test_ready_visibility_itself_must_not_start_after_the_original_window` and
+`test_final_ready_cannot_accept_a_replaced_immutable_model_context` are failing acceptance controls,
+not skips. A native consumer also accepted the late marker **before** a candidate post-close
+deadline check could roll it back; adding that local guard would move, not close, the boundary.
+The contract below remains the requirement, **not a verified capability claim**. Default ephemeral
+behavior is unchanged. Do not merge or use retained mode until a revised publication design proves
+both controls without broadening the approved schema or authority.
+
 **Opt in; the ephemeral default above is unchanged.** The bundled refresh CLI accepts
 `--operator-pause-scratch <absolute-existing-canonical-run\scratch>`. This conflicts with
 `--evidence-dir`, **any set `PBIP_EVIDENCE_DIR`** (including an empty value), and `--verify-only`.
@@ -234,11 +246,12 @@ lease.** There is no sudden-power-loss durability claim.
     READY
 ```
 
-✅ **Synthetic Windows controls** in the bundled tests check ordinary Python/PIL and Node reads,
+✅ **Earlier positive synthetic Windows controls** in the bundled tests check ordinary Python/PIL and Node reads,
 protected owner-only file/directory DACLs, unchanged image identity/hash across rename, exact cleanup
 with a held viewer, process death at stage/image/metadata/rename/READY, physical bottom/right markers,
 and both real refresh wait branches. Only the fully READY case is loadable after producer exit.
-These are not customer-image, connector or real-source qualification.
+These are not customer-image, connector or real-source qualification, and do not override the
+failing acceptance-boundary controls above.
 
 Only after READY does stdout emit `OPERATOR_PAUSE ` followed by the strict metadata JSON, plus a
 separate local human notice:

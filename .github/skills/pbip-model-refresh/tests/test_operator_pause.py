@@ -21,7 +21,7 @@ from PIL import Image
 import _credential_modal as modal
 import _operator_pause as pause
 
-NATIVE = pytest.mark.skipif(sys.platform != "win32", reason="Windows native private-file publication control")
+NATIVE = pytest.mark.skipif(sys.platform != "win32", reason="native protected file DACL is Windows-only")
 NATIVE_DLL = getattr(ctypes, "WinDLL", None)
 PIXELS = b"\0\0\0" * 2 + b"\xff\xff\xff" * 2
 PNG = modal._image_png(2, 2, PIXELS)
@@ -579,3 +579,88 @@ def test_original_deadline_or_closed_state_cannot_publish_a_late_ready(context, 
     assert not (stage.directory / "READY").exists(), "late publication must leave no accepted READY marker"
     with pytest.raises(pause.OperatorPauseUnavailable):
         pause.load_operator_pause(context.run_scratch, stage.pause_id, HASH)
+
+
+@NATIVE
+@pytest.mark.parametrize("limit", ["deadline", "closed"])
+def test_ready_visibility_itself_must_not_start_after_the_original_window(context, monkeypatch, limit) -> None:
+    """A post-close rollback alone cannot rescue a pause already accepted by another local reader."""
+    clock = {"now": 100.0, "closed": False}
+    monkeypatch.setattr(pause, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+    stage = pause.reserve_operator_pause(context, 108.0, lambda: clock["closed"])
+    modal._write_private_image(stage.image_path, PNG, existing=True)
+    original_open = pause._open_file
+    observed = []
+
+    def accepted():
+        try:
+            return pause.load_operator_pause(context.run_scratch, stage.pause_id, HASH)["pause_id"] == stage.pause_id
+        except pause.OperatorPauseUnavailable:
+            return False
+
+    class DelayedRelease:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            before = accepted()
+            clock.update(now=109.0 if limit == "deadline" else 100.0, closed=limit == "closed")
+            self.stream.__exit__(*args)
+            observed.append((before, accepted()))
+
+    def open_file(path, **kwargs):
+        stream = original_open(path, **kwargs)
+        return DelayedRelease(stream) if path.name == "READY" and kwargs.get("create") else stream
+
+    monkeypatch.setattr(pause, "_open_file", open_file)
+    try:
+        try:
+            stage.publish(acquisition(), 108.0, lambda: clock["closed"])
+        except pause.OperatorPauseUnavailable:
+            pass
+    finally:
+        stage.lease.close()
+    assert observed, "the native marker-release boundary must actually be exercised"
+    assert not any(not before and after for before, after in observed), "LATE_READY_ACCEPTED_AFTER_ORIGINAL_WINDOW"
+
+
+@NATIVE
+def test_final_ready_cannot_accept_a_replaced_immutable_model_context(context, monkeypatch) -> None:
+    stage = pause.reserve_operator_pause(context, time.monotonic() + 8, lambda: False)
+    modal._write_private_image(stage.image_path, PNG, existing=True)
+    original_open = pause._open_file
+    attempted, prevented = [], []
+
+    def open_file(path, **kwargs):
+        stream = original_open(path, **kwargs)
+        if path.name == "READY" and kwargs.get("create"):
+            attempted.append(True)
+            try:
+                context.model_dir.rename(context.model_dir.with_name("original.SemanticModel"))
+                context.model_dir.mkdir()
+            except PermissionError:
+                prevented.append(True)  # a future native identity pin may correctly prevent the replacement
+        return stream
+
+    monkeypatch.setattr(pause, "_open_file", open_file)
+    try:
+        try:
+            stage.publish(acquisition(), time.monotonic() + 8, lambda: False)
+        except pause.OperatorPauseUnavailable:
+            pass
+    finally:
+        stage.lease.close()
+    assert attempted, "the replacement boundary must actually be exercised"
+    if prevented:
+        pause.recheck_operator_pause(context)
+    else:
+        with pytest.raises(pause.OperatorPauseUnavailable):
+            pause.recheck_operator_pause(context)
+        with pytest.raises(pause.OperatorPauseUnavailable, match="OPERATOR_PAUSE_CANNOT_ESTABLISH"):
+            pause.load_operator_pause(context.run_scratch, stage.pause_id, HASH)
