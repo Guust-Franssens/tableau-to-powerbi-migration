@@ -109,9 +109,36 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
    **below the correctness floor**: stop; surface preflight's hints and request session-start repair.
 1. **Read the brief, then confirm inputs.** `migrations/workbooks/<name>/migration-brief.md` carries
    scope, **autonomy** (`guided`/`standard`/`autopilot`), **fidelity bar** (faithful vs modernise) and
-   the **wall policy** (stop, or degrade under `credential_gate.py authorize`). Obey it and pass the
-   fidelity bar and autonomy down in **every** delegation — subagents are stateless. **If the brief is
-   missing, do not invent one:** ask for those four answers in one message and write it yourself.
+   the **wall policy** (stop, or degrade under `credential_gate.py authorize`), **refresh strategy**
+   (`scripted`/`operator`/`xmla`) and **numeric comparison scope**. Obey it and pass the fidelity bar
+   and autonomy down in **every** delegation — subagents are stateless. **If the brief is missing
+   or incomplete, do not invent answers:** ask the six intake choices together in one message and
+   write it yourself. Reuse recorded answers; ask only missing choices, not a second intake.
+   **Numeric comparison scope (`numeric_obligation`)** — `none` (explicit commission without
+   numeric comparison) or `required` (numeric comparison is owed)? This is commissioned scope,
+   not a numeric result or a completion verdict. **Numeric scope has no default:** without the
+   human's `none` or `required`, **stop before packaging**; never infer it from available evidence.
+
+   Before `package_unit.py`, write complete `phase1-start-ready/v2` frontmatter at the top of the
+   brief, with **exactly five string keys**; replace every placeholder with the established identity
+   or agreed choice, never a guessed/default numeric value:
+
+   ```toml
+   +++
+   schema = "phase1-start-ready/v2"
+   unit = "<exact-unit>"
+   scope = "<topology-scope>"
+   fallback_authorization = "<agreed-fallback>"
+   numeric_obligation = "<agreed-numeric-obligation>"
+   +++
+   ```
+
+   Match `unit` exactly and `scope` to S2 topology: `model_only` for a datasource,
+   `model_and_report` for an owned workbook, `report_only_shared_model` for a consumer.
+   `fallback_authorization` is the agreed `stop` or `model_only_unvalidated`; `numeric_obligation`
+   is the human's `none` or `required`. Keep autonomy, fidelity, refresh and other narrative outside
+   the frontmatter; [the existing parser contract](../../scripts/README.md#current-packaged-numeric-scope-authority-363)
+   permits no extra keys.
    Autonomy governs choices, never physics — no level clears step 6. Inputs: a
    `.twb`/`.twbx` under `migrations/workbooks/<name>/source/`; the spec lands beside it as
    `migration-spec.json`. **If this workbook is one of several from an estate, model-first ordering is

@@ -459,7 +459,13 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 4cb0883da72ab2344d1a30ea472a1722da7347db99db2a1be99391c9881ea35a  0. **Preflight every invocation, first** ~ **plain**, **neve
 a5415270216716edb9afac3881a5e7970e1f9a2adcede2d299f2f6b25b02a697  ``` powershell -ExecutionPolicy Bypass -File scripts/preflig
 8db99ded121e393f37502220f5ea3a7515a3db1cab85c7538ee30e219c489a20  **Only after an actual unsigned/ExecutionPolicy startup refu
-187acc29692c89cd15e512985265a1f822077baecac261d4415e514ab2ac93d1  1. **Read the brief, then confirm inputs.** `migrations/work
+1f5243561ce78d952609a209e8ad87bba9e2a05980cdf8e548936c9d3045e427  1. **Read the brief, then confirm inputs.** `migrations/work
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+9a59d98260320aa926054043158918c8e88dffc1d3ccb80431e2bd737575c94f  Before `package_unit.py`, write complete `phase1-start-ready
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+d5b587fc782f46ece364c1f6481d5013b863c3ab71f19e362430d0ebafdf1904  ```toml +++ schema = "phase1-start-ready/v2" unit = "<exact-
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+289901a2dd94466ad83572e37e1f9309dd1df9d511c08787225155ead93ee3c2  Match `unit` exactly and `scope` to S2 topology: `model_only
 d4c8d021b6e27e59433c5c23b5680b4dd0ee077ca799c1eeab2e065e33d00c6a  2. **Run the deterministic tier ~ it builds, you consume.** 
 272158cc1a2edb7e189325c99d69def28de430900304fdea05fbca16345868ca  3. **Pick the canonical contract; never invent a parallel sp
 288dd88f593b88c8189d493f920fa8b52c18b86dfa5a0f8e1be087062a6adf6e  4. **Triage before building.** From the spec or handover sli

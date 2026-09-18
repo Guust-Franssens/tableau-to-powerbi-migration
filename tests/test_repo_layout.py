@@ -25,6 +25,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 # ruff: noqa: E402  (the sys.path insert above must precede these imports)
 # pylint: disable=wrong-import-position
+from package_role_identity import BriefPolicy, parse_brief_policy
 from published_datasource_registry import _by_path_from_report, _near_misses, _normalize_key
 from set_data_folder import ABSOLUTE_USER_PATH_RE, _tree_and_slug_for
 from tableau_lineage import dedup_key
@@ -531,6 +532,131 @@ PREPARATION_BEGIN = "<!-- BEGIN:strict-preparation -->"
 PREPARATION_END = "<!-- END:strict-preparation -->"
 
 
+def _intake_block(text: str, path: str) -> str:
+    if path == "AGENTS.md":
+        return text.split("### Step 2 —", 1)[1].split("### Step 3 —", 1)[0]
+    return text.split("1. **Read the brief,", 1)[1].split("2. **Run the deterministic tier", 1)[0]
+
+
+def _assert_numeric_intake(text: str) -> None:
+    intake = " ".join(text.replace("**", "").split())
+    question = re.search(r"Numeric comparison scope \(`numeric_obligation`\).*?\?", intake)
+    assert question, "intake must ask the human for numeric_obligation"
+    assert re.findall(r"`([^`]+)`", question.group()) == ["numeric_obligation", "none", "required"], (
+        "numeric intake vocabulary must be exactly none or required"
+    )
+    for required in (
+        "`none` (explicit commission without numeric comparison)",
+        "`required` (numeric comparison is owed)",
+        "not a numeric result or a completion verdict",
+        "one message",
+        "ask only missing choices",
+        "Numeric scope has no default",
+        "stop before packaging",
+    ):
+        assert required in intake, f"numeric intake contract missing: {required}"
+
+
+@pytest.mark.parametrize("path", PREPARATION_ROUTES[:2])
+def test_intake_requires_human_numeric_scope_in_the_same_message(path: str) -> None:
+    """Both intake owners must collect the schema's required human choice without another round."""
+    text = (REPO_ROOT / path).read_text(encoding="utf-8")
+    intake = _intake_block(text, path)
+    _assert_numeric_intake(intake)
+    if path == "AGENTS.md":
+        assert "six questions, asked ONCE, in one message" in intake
+        assert re.findall(r"^\| ([1-6]) \|", intake, re.MULTILINE) == list("123456")
+        assert "numeric_obligation" in next(line for line in intake.splitlines() if line.startswith("| 6 |"))
+
+
+@pytest.mark.parametrize("path", PREPARATION_ROUTES[:2])
+@pytest.mark.parametrize(
+    ("old", "new", "failure"),
+    [
+        ("numeric_obligation", "omitted_numeric_choice", "ask the human for numeric_obligation"),
+        ("`required` (numeric comparison is owed)", "`optional` (numeric comparison is owed)", "vocabulary"),
+        ("Numeric scope has no default", "Numeric scope defaults to none", "no default"),
+        ("stop before packaging", "continue packaging", "stop before packaging"),
+    ],
+)
+def test_numeric_intake_mutations_fail_the_intended_assertion(path: str, old: str, new: str, failure: str) -> None:
+    """Missing, invalid or defaulted numeric intent must fail its own instruction assertion."""
+    text = (REPO_ROOT / path).read_text(encoding="utf-8")
+    changed = text.replace(old, new)
+    assert changed != text, "numeric intake mutation did not reach its target"
+    with pytest.raises(AssertionError, match=failure):
+        _assert_numeric_intake(_intake_block(changed, path))
+
+
+def _assert_migrator_v2_brief(text: str, scope: str, fallback: str, numeric: str) -> None:
+    intake = _intake_block(text, PREPARATION_ROUTES[1])
+    blocks = re.findall(r"```toml\n(.*?)\n\s*```", intake, re.DOTALL)
+    assert len(blocks) == 1, "migrator must write one complete v2 frontmatter before packaging"
+    template = textwrap.dedent(blocks[0])
+    assert 'schema = "phase1-start-ready/v2"' in template, "migrator must write exact v2"
+    rendered = (
+        template.replace("<exact-unit>", "Exact_Unit")
+        .replace("<topology-scope>", scope)
+        .replace("<agreed-fallback>", fallback)
+        .replace("<agreed-numeric-obligation>", numeric)
+    )
+    code, policy = parse_brief_policy(rendered, "Exact_Unit", scope)
+    assert code is None, f"documented v2 brief rejected: {code}"
+    assert policy == BriefPolicy(scope, fallback, numeric), "documented v2 brief changed human intent"
+    assert 'numeric_obligation = "<agreed-numeric-obligation>"' in template, "numeric choice must not default"
+    assert "Before `package_unit.py`, write complete `phase1-start-ready/v2` frontmatter" in intake
+
+
+@pytest.mark.parametrize("scope", ["model_only", "model_and_report", "report_only_shared_model"])
+@pytest.mark.parametrize("fallback", ["stop", "model_only_unvalidated"])
+@pytest.mark.parametrize("numeric", ["none", "required"])
+def test_migrator_writes_exact_v2_frontmatter_from_human_choices(scope: str, fallback: str, numeric: str) -> None:
+    """The documented template must parse for every existing topology and human policy choice."""
+    _assert_migrator_v2_brief((REPO_ROOT / PREPARATION_ROUTES[1]).read_text(encoding="utf-8"), scope, fallback, numeric)
+
+
+@pytest.mark.parametrize("replacement", ["", 'numeric_obligation = "optional"'])
+def test_migrator_v2_frontmatter_mutations_fail_the_parser_and_persona_pin(replacement: str) -> None:
+    """The real parser and existing persona pin independently reject incomplete or invalid v2."""
+    import test_openability_claim_citations as pins  # pylint: disable=import-outside-toplevel
+
+    persona = "tableau-migrator.agent.md"
+    text = pins.read_source(REPO_ROOT / PREPARATION_ROUTES[1])
+    assert not pins.findings(persona, pins.segment(text, collapse_generated=True)), "committed persona pin is stale"
+    changed = text.replace('numeric_obligation = "<agreed-numeric-obligation>"', replacement)
+    assert changed != text, "frontmatter mutation did not reach its target"
+    with pytest.raises(AssertionError, match="documented v2 brief rejected: brief_policy_invalid"):
+        _assert_migrator_v2_brief(changed, "model_and_report", "stop", "required")
+    assert pins.findings(persona, pins.segment(changed, collapse_generated=True)), "pin missed numeric frontmatter"
+
+
+def _assert_provider_selection_wording(text: str) -> None:
+    row = next(line for line in text.splitlines() if line.startswith("| `package_role_identity.py` |"))
+    for required in (
+        "acquired published-datasource LUID is the provider selection authority",
+        "exact `<site>/<name>` key only corroborates the selected candidate",
+        "Key-only selection is never allowed",
+        "Missing acquired LUID remains cannot-establish",
+        "provider without the required LUID is `provider_missing`",
+    ):
+        assert required in row, f"provider selection contract missing: {required}"
+    assert "key only when a LUID is genuinely unavailable" not in row, "forbidden key-only provider fallback"
+
+
+def test_provider_docs_refuse_key_only_selection_and_the_old_fallback() -> None:
+    """Even appended fallback advice must fail while all correct wording remains present."""
+    text = (REPO_ROOT / "scripts" / "README.md").read_text(encoding="utf-8")
+    _assert_provider_selection_wording(text)
+    old_fallback = (
+        "Provider matching is datasource LUID first, then the exact `<site>/<name>` published "
+        "key only when a LUID is genuinely unavailable on both sides; "
+    )
+    changed = text.replace("| `package_role_identity.py` |", f"| `package_role_identity.py` | {old_fallback}")
+    assert changed != text, "provider wording mutation did not reach its target"
+    with pytest.raises(AssertionError, match="forbidden key-only provider fallback"):
+        _assert_provider_selection_wording(changed)
+
+
 def _preparation_block(text: str) -> str:
     assert text.count(PREPARATION_BEGIN) == text.count(PREPARATION_END) == 1
     return text.split(PREPARATION_BEGIN, 1)[1].split(PREPARATION_END, 1)[0]
@@ -597,6 +723,7 @@ def _assert_preparation_route(text: str) -> None:
 
 @pytest.mark.parametrize("path", PREPARATION_ROUTES)
 def test_supported_routes_own_complete_preparation_before_dispatch(path: str) -> None:
+    """Each supported route must retain the complete preparation and dispatch contract."""
     _assert_preparation_route((REPO_ROOT / path).read_text(encoding="utf-8"))
 
 
@@ -616,6 +743,7 @@ def test_supported_routes_own_complete_preparation_before_dispatch(path: str) ->
 def test_preparation_instruction_mutations_fail_the_intended_contract(
     path: str, old: str, new: str, failure: str
 ) -> None:
+    """Break each preparation instruction and require the corresponding contract failure."""
     text = (REPO_ROOT / path).read_text(encoding="utf-8")
     block = _preparation_block(text)
     changed_block, count = re.subn(r"\s+".join(re.escape(word) for word in old.split()), new, block)
@@ -638,6 +766,7 @@ def _assert_complete_cohort(text: str) -> None:
 
 @pytest.mark.parametrize("path", PREPARATION_ROUTES)
 def test_final_check_has_the_full_cohort_and_no_early_dispatch(path: str) -> None:
+    """Provider omission and premature dispatch cannot bypass the final preparation check."""
     text = (REPO_ROOT / path).read_text(encoding="utf-8")
     _assert_complete_cohort(text)
     changed = text.replace("**Construct**", "**Dispatch** validator now. **Construct**", 1)
@@ -648,6 +777,7 @@ def test_final_check_has_the_full_cohort_and_no_early_dispatch(path: str) -> Non
 
 @pytest.mark.parametrize("path", PREPARATION_DOCS)
 def test_operator_docs_keep_the_same_dispatch_and_quiet_contract(path: str) -> None:
+    """Operator documentation must not weaken the persona's dispatch or terminal-output rules."""
     text = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").replace("**", "").split())
     for required in (
         "--json - --quiet",
@@ -669,6 +799,7 @@ def _assert_manual_consumer_current(text: str) -> None:
 
 @pytest.mark.parametrize("path", MANUAL_CONSUMER_DOCS)
 def test_manual_consumer_docs_and_stale_dependency_mutation(path: str) -> None:
+    """Current manual admission must stay distinct from completion and stale dependency claims."""
     text = (REPO_ROOT / path).read_text(encoding="utf-8").replace("**", "")
     _assert_manual_consumer_current(text)
     changed = text.replace("#664 is resolved by #672", "Blocking dependency: #664")
@@ -701,6 +832,7 @@ def _snapshot_assertion(source: str) -> ast.Assert:
 
 
 def test_shared_snapshot_assertion_cannot_disappear() -> None:
+    """The real shared snapshot must assert the full atomic construction projection."""
     path = REPO_ROOT / "tests" / "test_package_data_access_snapshot.py"
     source = path.read_text(encoding="utf-8")
     assertion = _snapshot_assertion(source)
@@ -714,6 +846,7 @@ def test_shared_snapshot_assertion_cannot_disappear() -> None:
     "persona", ["tableau-migrator.agent.md", "dry-run-operator.agent.md", "pbi-report-builder.agent.md"]
 )
 def test_preparation_and_unrelated_persona_blocks_are_still_pinned(persona: str) -> None:
+    """The existing pin must cover preparation instructions without weakening unrelated personas."""
     import test_openability_claim_citations as pins  # pylint: disable=import-outside-toplevel
 
     text = pins.read_source(REPO_ROOT / ".github" / "agents" / persona)

@@ -328,7 +328,7 @@ promotion out of the landing zone remain human decisions (#57). So the question 
 Fabric?" but *"name the destination workspace in the brief, and say whether this run stops at the
 bundle or goes on to deploy."*
 
-### Step 2 — five questions, asked ONCE, in one message
+### Step 2 — six questions, asked ONCE, in one message
 
 **The problem was never that we ask too little; it is that every question arrived too late.** All
 four ask-moments used to be mid-flight (published datasource, credential stop, re-parse
@@ -345,6 +345,11 @@ Step 1 answers *scope* by investigation, so only these are genuinely questions:
 | 3 | **Fidelity bar** — faithful re-creation, or modernise where Power BI is better? | It decides real translations (a Tableau dual-axis trick → a native combo chart; a `MAKELINE` route map → endpoint bubbles). Both builders need it. |
 | 4 | **If we hit a wall — stop, or degrade?** | Pre-authorising the fallback is what lets an unattended run *survive* one instead of dying at 3 am. |
 | 5 | **Who drives the data refreshes?** — see below. Default `scripted`. | Only you know how large the source is and whether you will be at the keyboard. |
+| 6 | **Numeric comparison scope (`numeric_obligation`)** — `none` (explicit commission without numeric comparison) or `required` (numeric comparison is owed)? | This is commissioned scope, not a numeric result or a completion verdict. |
+
+Reuse answers already recorded in the current brief; ask only missing choices in that same message.
+**Numeric scope has no default:** without the human's `none` or `required`, **stop before packaging**;
+never infer it from available data, reference images or a successful gate.
 
 **Autonomy levels, defined by behaviour at a decision point — not by vibe:**
 
@@ -388,8 +393,11 @@ Write the answers to `migrations/workbooks/<name>/migration-brief.md`. **The fil
 two reasons no persona can solve alone: it survives a **dropped session** (a closed terminal takes
 this session's entire working memory with it — measured 2026-08-08), and it is what a **stateless**
 subagent receives instead of re-deriving intent nobody wrote down. Its current
-[`phase1-start-ready/v2` frontmatter](scripts/README.md#s2-package-preparation) must name the exact
-unit, scope, fallback authorization and numeric obligation; never infer numeric `none`.
+[`phase1-start-ready/v2` frontmatter](scripts/README.md#s2-package-preparation) must be complete
+**before `package_unit.py`**: exactly five string keys, `schema`, `unit`, `scope`,
+`fallback_authorization` and `numeric_obligation`. Match unit and topology scope exactly and record
+the agreed fallback and human numeric choice; never infer numeric `none`. Keep the other answers
+in the brief's narrative, not as extra frontmatter keys.
 Invoke `@tableau-migrator` as the preparation owner, with the **explicit selected run and exact unit**,
 the current brief and discovered inputs. Never choose the latest run. Invoking this orchestrator is
 not permission to dispatch a validator or builder.
