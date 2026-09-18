@@ -10,17 +10,21 @@ from pathlib import Path
 
 import pytest
 
+from test_credential_gate import KEY_A, KEY_B, LIVE_A, LIVE_B, REARM_BLOCKERS, _da_spec, cg, load_hook_module
+from test_credential_gate import gate_acl as gate_acl
+
 REPO = Path(__file__).resolve().parents[1]
 GATE = REPO / "scripts" / "credential_gate.py"
 HOOK = REPO / "scripts" / "hooks" / "credential_gate.py"
 MARKER = ".credential-gate-BLOCKED.json"
 OVERRIDE = ".credential-gate-AUTHORIZED"
 AUDIT = ".credential-gate-audit.log"
+pytestmark = pytest.mark.usefixtures("gate_acl")
 
 
 def run_gate(*args: str) -> subprocess.CompletedProcess:
-    """Run the gate CLI in a subprocess."""
-    return subprocess.run([sys.executable, str(GATE), *args], capture_output=True, text=True, check=False)
+    """Run the real CLI parser with the fixture's fully stubbed Windows ACL operations."""
+    return subprocess.CompletedProcess([str(GATE), *args], cg.main(list(args)), "", "")
 
 
 def run_hook(payload: dict) -> dict:
@@ -35,11 +39,12 @@ def run_hook(payload: dict) -> dict:
     return json.loads(proc.stdout or "{}")
 
 
-def migration_fixture(root: Path) -> Path:
-    """Create a minimal migration-shaped directory."""
+def migration_fixture(root: Path, *, both: bool = False) -> Path:
+    """Create an exact current source scope, not a display-name-only proof fixture."""
     migration = root / "mig"
     (migration / "fabric").mkdir(parents=True)
-    (migration / "migration-spec.json").write_text("{}", encoding="utf-8")
+    spec = _da_spec(LIVE_A, LIVE_B) if both else _da_spec(LIVE_A)
+    (migration / "migration-spec.json").write_text(json.dumps(spec), encoding="utf-8")
     return migration
 
 
@@ -48,14 +53,17 @@ def write_marker(path: Path, sources: list[str]) -> None:
     path.write_text(json.dumps({"writes_blocked": True, "sources": sources}), encoding="utf-8")
 
 
-def append_audit(migration: Path, action: str, detail: str) -> None:
+def append_audit(migration: Path, action: str, detail: str, sources: list[str] | None = None) -> None:
     """Append one audit entry for states that are awkward to create through the CLI."""
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "action": action,
         "detail": detail,
         "user": "test",
+        "scope": str(migration.resolve()),
     }
+    if sources is not None:
+        entry["sources"] = sources
     with (migration / AUDIT).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry) + "\n")
 
@@ -66,11 +74,18 @@ def hook_for_model_write(root: Path, migration: Path) -> dict:
     return run_hook({"toolName": "create", "toolArgs": json.dumps({"path": str(target)}), "cwd": str(root)})
 
 
+def earn(migration: Path) -> None:
+    """The shield requires a keyed measurement followed by a clear in the same arm epoch."""
+    assert run_gate("block", str(migration), "--sources", KEY_A).returncode == 0
+    append_audit(migration, "probe-data_ok", "fixture measured a row", [KEY_A])
+    assert run_gate("clear", str(migration), "--reason", "DATA_OK", "--earned", "--sources", KEY_A).returncode == 0
+    assert cg._clear_was_earned(migration, [KEY_A]) == "probe-cleared"
+
+
 def test_probe_cleared_directory_shields_against_later_ancestor_marker(tmp_path: Path) -> None:
     migration = migration_fixture(tmp_path)
-    assert run_gate("block", str(migration), "--sources", "warehouse").returncode == 0
-    assert run_gate("clear", str(migration), "--reason", "DATA_OK", "--earned").returncode == 0
-    write_marker(tmp_path / MARKER, ["warehouse"])
+    earn(migration)
+    write_marker(tmp_path / MARKER, [KEY_A])
 
     out = hook_for_model_write(tmp_path, migration)
 
@@ -80,7 +95,7 @@ def test_probe_cleared_directory_shields_against_later_ancestor_marker(tmp_path:
 def test_forged_bare_override_does_not_shield_from_an_ancestor_marker(tmp_path: Path) -> None:
     migration = migration_fixture(tmp_path)
     (migration / OVERRIDE).write_text("forged by agent", encoding="utf-8")
-    write_marker(tmp_path / MARKER, ["warehouse"])
+    write_marker(tmp_path / MARKER, [KEY_A])
 
     out = hook_for_model_write(tmp_path, migration)
 
@@ -89,9 +104,9 @@ def test_forged_bare_override_does_not_shield_from_an_ancestor_marker(tmp_path: 
 
 def test_manual_clear_does_not_shield_from_an_ancestor_marker(tmp_path: Path) -> None:
     migration = migration_fixture(tmp_path)
-    assert run_gate("block", str(migration), "--sources", "warehouse").returncode == 0
+    assert run_gate("block", str(migration), "--sources", KEY_A).returncode == 0
     assert run_gate("clear", str(migration), "--reason", "manual teardown").returncode == 0
-    write_marker(tmp_path / MARKER, ["warehouse"])
+    write_marker(tmp_path / MARKER, [KEY_A])
 
     out = hook_for_model_write(tmp_path, migration)
 
@@ -99,17 +114,12 @@ def test_manual_clear_does_not_shield_from_an_ancestor_marker(tmp_path: Path) ->
 
 
 def test_authorize_audit_entry_without_override_does_not_shield_from_ancestor_marker(tmp_path: Path) -> None:
-    """Pin the stricter shield: only a probe-cleared source, not build-only authorization, counts.
-
-    The normal `authorize` command creates the override file, which `_blocking_marker` handles before
-    the audit-shield path. Removing the local marker and writing the audit entry directly isolates
-    the reachable state where `_redundant_rearm` would return `authorize`.
-    """
+    """An authorize action without its file is neither permission nor probe proof."""
     migration = migration_fixture(tmp_path)
-    assert run_gate("block", str(migration), "--sources", "warehouse").returncode == 0
+    assert run_gate("block", str(migration), "--sources", KEY_A).returncode == 0
     (migration / MARKER).unlink()
-    append_audit(migration, "authorize", "by=test; chain=[]")
-    write_marker(tmp_path / MARKER, ["warehouse"])
+    append_audit(migration, "authorize", "by=test; chain=['python.exe', 'pwsh.exe']")
+    write_marker(tmp_path / MARKER, [KEY_A])
 
     out = hook_for_model_write(tmp_path, migration)
 
@@ -118,9 +128,8 @@ def test_authorize_audit_entry_without_override_does_not_shield_from_ancestor_ma
 
 def test_probe_clear_for_one_source_does_not_cover_a_later_two_source_block(tmp_path: Path) -> None:
     migration = migration_fixture(tmp_path)
-    assert run_gate("block", str(migration), "--sources", "warehouse_a").returncode == 0
-    assert run_gate("clear", str(migration), "--reason", "DATA_OK", "--earned").returncode == 0
-    write_marker(tmp_path / MARKER, ["warehouse_a", "warehouse_b"])
+    earn(migration)
+    write_marker(tmp_path / MARKER, [KEY_A, KEY_B])
 
     out = hook_for_model_write(tmp_path, migration)
 
@@ -128,12 +137,11 @@ def test_probe_clear_for_one_source_does_not_cover_a_later_two_source_block(tmp_
 
 
 def test_probe_clear_before_later_rearm_does_not_count_as_current_shield(tmp_path: Path) -> None:
-    migration = migration_fixture(tmp_path)
-    assert run_gate("block", str(migration), "--sources", "warehouse_a").returncode == 0
-    assert run_gate("clear", str(migration), "--reason", "DATA_OK", "--earned").returncode == 0
-    assert run_gate("block", str(migration), "--sources", "warehouse_a", "warehouse_b").returncode == 0
+    migration = migration_fixture(tmp_path, both=True)
+    earn(migration)
+    assert run_gate("block", str(migration), "--sources", KEY_A, KEY_B).returncode == 0
     assert run_gate("clear", str(migration), "--reason", "teardown after rearm").returncode == 0
-    write_marker(tmp_path / MARKER, ["warehouse_a", "warehouse_b"])
+    write_marker(tmp_path / MARKER, [KEY_A, KEY_B])
 
     out = hook_for_model_write(tmp_path, migration)
 
@@ -157,3 +165,29 @@ def test_marker_without_parseable_sources_fails_closed_even_after_empty_source_c
     out = hook_for_model_write(tmp_path, migration)
 
     assert out.get("permissionDecision") == "deny", "unparseable marker sources must fail closed"
+
+
+@pytest.mark.parametrize("action", (*REARM_BLOCKERS, "probe-data_ok"))
+def test_newer_attempt_revokes_the_exact_local_ancestor_shield(tmp_path: Path, action: str) -> None:
+    migration = migration_fixture(tmp_path)
+    earn(migration)
+    append_audit(migration, action, "fixture newer attempt", [KEY_A])
+    write_marker(tmp_path / MARKER, [KEY_A])
+    assert hook_for_model_write(tmp_path, migration).get("permissionDecision") == "deny"
+
+
+def test_foreign_key_failure_does_not_revoke_the_exact_local_shield(tmp_path: Path) -> None:
+    migration = migration_fixture(tmp_path, both=True)
+    earn(migration)
+    append_audit(migration, "probe-error", "fixture unrelated endpoint", [KEY_B])
+    write_marker(tmp_path / MARKER, [KEY_A])
+    assert hook_for_model_write(tmp_path, migration).get("permissionDecision") != "deny"
+
+
+def test_authentic_model_only_permission_is_not_a_probe_earned_shield(tmp_path: Path) -> None:
+    migration = migration_fixture(tmp_path)
+    assert run_gate("block", str(migration), "--sources", KEY_A).returncode == 0
+    assert cg.authorize(migration, "Fixture Human") == 0
+    assert cg._override_is_authentic(migration)
+    write_marker(tmp_path / MARKER, [KEY_A])
+    assert not load_hook_module()._earned_clear_shields(migration, tmp_path / MARKER)

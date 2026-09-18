@@ -21,6 +21,7 @@ Two properties are pinned here, and the second matters more than the first:
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -33,6 +34,21 @@ import credential_gate as cg  # noqa: E402
 import preflight_source_credentials as pf  # noqa: E402
 import probe_live_source as pls  # noqa: E402
 from parse_tableau import parse_workbook  # noqa: E402
+from test_credential_gate import KEY_A, KEY_B, LIVE_A, LIVE_B, _da_root, _earn_rearm_fixture, _trail  # noqa: E402
+from test_credential_gate import gate_acl as gate_acl  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _stub_gate_processes(monkeypatch, gate_acl) -> None:
+    """Exercise the real gate CLI while forbidding real ACL or Desktop subprocesses in this module."""
+    _ = gate_acl
+
+    def run(args, **_kwargs):
+        assert Path(args[1]).resolve() == REPO / "scripts" / "credential_gate.py", "unexpected external operation"
+        return subprocess.CompletedProcess(args, cg.main(args[2:]), b"", b"")
+
+    monkeypatch.setattr(subprocess, "run", run)
+
 
 FEDERATED_FIXTURE = REPO / "tests" / "fixtures" / "federated_multi_connection.twb"
 SOURCE_NAMES = ["A", "B"]
@@ -95,6 +111,54 @@ def test_proving_only_a_subset_partially_clears_the_gate(tmp_path: Path) -> None
     assert marker["sources"] == NAMED
     assert cg.status(d) == 1
     assert "probe-cleared" not in _audit_actions(d), "partial proof must not record earned evidence"
+
+
+@pytest.mark.parametrize("system", ["Windows", "Linux"], ids=["block", "block-marker-only"])
+@pytest.mark.parametrize("supplied_index", [0, 1])
+@pytest.mark.parametrize("rearm_subset", [False, True], ids=["partial-lift-control", "scope-reducing-rearm"])
+def test_rearm_subset_cannot_release_an_independently_pending_sibling(
+    tmp_path: Path,
+    gate_acl: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    system: str,
+    supplied_index: int,
+    rearm_subset: bool,
+) -> None:
+    """R1 F1: keeping the deny during re-arm is not enough if the next lift can erase it."""
+    monkeypatch.setattr(cg.platform, "system", lambda: system)
+    root = _da_root(tmp_path, "pending-siblings", LIVE_A, LIVE_B)
+    keys = [KEY_A, KEY_B]
+    supplied, omitted = keys[supplied_index], keys[1 - supplied_index]
+    _earn_rearm_fixture(root, keys)
+    _trail(root, ("probe-error", keys))
+    assert cg.apply_block(root, keys) == 0
+    marker_before = (root / cg.MARKER).read_bytes()
+    audit_before = (root / cg.AUDIT).read_bytes()
+    denied_before = set(gate_acl["denied"])
+    gate_acl["calls"].clear()
+
+    rearm_exit = cg.apply_block(root, [supplied]) if rearm_subset else None
+    marker_after = (root / cg.MARKER).read_bytes()
+    audit_after = (root / cg.AUDIT).read_bytes()
+    rearm_calls = list(gate_acl["calls"])
+    _trail(root, ("probe-data_ok", [supplied]))
+    lifted = pls._lift_gate(root, "one fixture source reached again", [supplied])
+
+    assert not lifted, "clearing the re-armed subset must not release the independently pending sibling"
+    assert (root / cg.MARKER).read_bytes() == marker_before
+    assert (root / "fabric" in gate_acl["denied"]) is (system == "Windows")
+    assert gate_acl["denied"] == denied_before and cg.status(root) == 1
+    assert cg._earned_sources(root)[0][omitted] is None
+    assert _audit_actions(root)[-1] == "probe-data_ok", "a refused partial lift must not record a clear"
+    if rearm_subset:
+        assert rearm_exit == 2, "refuse the contraction; never fill the caller's scope with its sibling"
+        assert marker_after == marker_before and audit_after == audit_before
+        assert not rearm_calls, "scope refusal must precede any ACL operation"
+
+    _trail(root, ("probe-data_ok", keys))
+    assert pls._lift_gate(root, "both fixture sources reached again", keys), "a complete re-probe must still clear"
+    assert not (root / cg.MARKER).exists() and not gate_acl["denied"]
+    assert cg.status(root) == 0
 
 
 def test_run_probe_passes_marker_names_not_indices_or_counts(tmp_path: Path, monkeypatch) -> None:
@@ -186,7 +250,7 @@ def test_source_index_never_clears_unmatched_marker_names(tmp_path: Path, monkey
     """A probe may only clear marker names it actually matches."""
     d = tmp_path / "unmatched"
     (d / "fabric").mkdir(parents=True)
-    cg.apply_block(d, ["source-key:not-in-probe"], force_scope=True)
+    cg.apply_block(d, ["source-key:0000000000000000"], force_scope=True)
     sources = [
         {
             "name": "not-in-marker",
@@ -260,17 +324,18 @@ def test_duplicate_display_names_do_not_clear_an_uncontacted_sibling(tmp_path: P
     assert contacted == [keys[0]]
 
 
-def test_semicolon_in_source_key_does_not_forget_real_clear(tmp_path: Path) -> None:
-    """HIGH 1: structured audit sources survive semicolons in source identities."""
+def test_semicolon_in_legacy_label_stays_readable_but_does_not_earn_proof(tmp_path: Path) -> None:
+    """Structured labels retain punctuation, but only canonical keyed pairs earn clearance."""
     d = tmp_path / "semicolon"
     (d / "fabric").mkdir(parents=True)
     key = "source[0];west"
     cg.apply_block(d, [key], force_scope=True)
 
     assert cg.clear_block(d, "probe", earned=True, sources=[key]) == 0
-    assert cg._clear_was_earned(d) == "probe-cleared"  # pylint: disable=protected-access
+    assert cg._clear_was_earned(d) is None  # pylint: disable=protected-access
+    assert key in (d / cg.AUDIT).read_text(encoding="utf-8")
     (d / "fabric" / "Model.tmdl").write_text("table x", encoding="utf-8")
-    assert cg.verify(d) == 0
+    assert cg.verify(d) != 0
 
 
 def test_refusing_to_clear_does_not_report_success(tmp_path: Path, monkeypatch) -> None:
@@ -667,7 +732,7 @@ def test_marker_with_more_leg_keys_than_probe_refuses(tmp_path: Path, monkeypatc
     names = [key for key, _display, _verdict, _reason in pf._classify_legs(src, 0)]
     d = tmp_path / "marker-has-extra-leg"
     (d / "fabric").mkdir(parents=True)
-    cg.apply_block(d, [*names, "source-key:extra"], force_scope=True)
+    cg.apply_block(d, [*names, "source-key:0000000000000000"], force_scope=True)
     contacted: list[str] = []
 
     def _probe_leg(_migration, leg_name, _conn, _target, _opts):
@@ -954,3 +1019,26 @@ def test_a_real_keyed_probe_run_is_what_the_pure_assessor_can_earn_from(tmp_path
     assert (regressed.state, regressed.codes) == ("blocked", ("stale-clear",)), (
         "an unkeyed success must not be earnable - if this still passes, the key is decorative"
     )
+
+
+@pytest.mark.parametrize("verdict", ["ERROR", "NO_CREDENTIAL", "ACCESS_DENIED", "UNREACHABLE", "BAD_TABLE"])
+def test_real_probe_failure_rearms_until_a_new_probe_pair(tmp_path: Path, monkeypatch, gate_acl, verdict: str) -> None:
+    """The unchanged probe writer and lift caller must share the physical authority's epochs."""
+    root = _keyed_root(tmp_path, "probe-rearm")
+    assert cg.apply_block(root, [PROBE_KEY]) == 0
+    _stub_desktop(monkeypatch)
+    assert pls.run_probe(root, None, 60, False) == 0
+    assert _assess(root).state == "live_data_ok" and not gate_acl["denied"]
+
+    _stub_desktop(monkeypatch, verdict=verdict, rc=1)
+    assert pls.run_probe(root, None, 60, False) == 1
+    assert _assess(root).state == "blocked"
+    assert cg.apply_block(root, [PROBE_KEY]) == 0
+    assert (root / cg.MARKER).is_file(), "the authority must re-arm after a real keyed blocking attempt"
+    assert root / "fabric" in gate_acl["denied"]
+
+    _stub_desktop(monkeypatch)
+    assert pls.run_probe(root, None, 60, False) == 0
+    assert cg.apply_block(root, [PROBE_KEY]) == 0
+    assert not (root / cg.MARKER).exists() and not gate_acl["denied"]
+    assert _assess(root).state == "live_data_ok"

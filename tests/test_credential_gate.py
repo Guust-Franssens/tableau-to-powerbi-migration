@@ -30,6 +30,671 @@ import credential_gate as cg  # noqa: E402  # pylint: disable=wrong-import-posit
 import preflight_source_credentials as pf  # noqa: E402  # pylint: disable=wrong-import-position
 
 
+@pytest.fixture
+def gate_acl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Observe Windows enforcement calls without changing any real ACL, even on failure."""
+    state = {"denied": set(), "calls": []}
+
+    def icacls(args: list[str]) -> tuple[int, str]:
+        target = Path(args[0])
+        assert target.is_relative_to(tmp_path), "ACL controls must stay inside this test's root"
+        state["calls"].append(args)
+        if "/deny" in args:
+            state["denied"].add(target)
+        elif "/remove:d" in args:
+            state["denied"].discard(target)
+        return 0, "fixture:(DENY)(WD,AD,WA)" if target in state["denied"] else "fixture:(F)"
+
+    monkeypatch.setattr(cg.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(cg, "_icacls", icacls)
+    monkeypatch.setattr(cg, "_ancestry", lambda: ["python.exe", "pwsh.exe", "WindowsTerminal.exe"])
+    return state
+
+
+def _earn_rearm_fixture(root: Path, keys: list[str]) -> None:
+    """Arm and clear through production writers; supply independent, keyed measurement rows."""
+    assert cg.apply_block(root, keys) == 0
+    _trail(root, ("probe-data_ok", keys))
+    assert cg.clear_block(root, "fixture measured rows", earned=True, sources=keys) == 0
+    assert not (root / cg.MARKER).exists()
+
+
+def _assert_rearmed(root: Path, pending: list[str], acl: dict) -> None:
+    assert (root / cg.MARKER).is_file(), "pending source must re-arm the physical marker"
+    assert json.loads((root / cg.MARKER).read_text(encoding="utf-8"))["sources"] == pending
+    assert root / "fabric" in acl["denied"], "pending source must re-apply the deny ACL"
+    assert any("/deny" in call for call in acl["calls"]), "re-arm must actually invoke ACL enforcement"
+    last_action = json.loads((root / cg.AUDIT).read_text(encoding="utf-8").splitlines()[-1])["action"]
+    assert last_action == "block", "successful arm must follow complete enforcement"
+    assert cg.status(root) == 1
+
+
+REARM_BLOCKERS = (
+    "probe-operator_required",
+    "probe-no_credential",
+    "probe-access_denied",
+    "probe-unreachable",
+    "probe-error",
+    "probe-bad_table",
+    "probe-skipped",
+    "probe-credential_present",
+)
+
+
+@pytest.mark.parametrize("action", (*REARM_BLOCKERS, "probe-data_ok"))
+def test_rearm_after_each_newer_attempt_blocks_physically(tmp_path: Path, gate_acl: dict, action: str) -> None:
+    root = _da_root(tmp_path, "rearm", LIVE_A)
+    _earn_rearm_fixture(root, [KEY_A])
+    assert root / "fabric" not in gate_acl["denied"], "positive control: fixture really was cleared"
+    _trail(root, (action, [KEY_A]))
+    assert _assess(root, _da_spec(LIVE_A)).state == "blocked"
+    gate_acl["calls"].clear()
+
+    assert cg.apply_block(root, [KEY_A]) == 0
+
+    _assert_rearmed(root, [KEY_A], gate_acl)
+
+
+@pytest.mark.parametrize("action", REARM_BLOCKERS)
+def test_rearm_restored_pair_and_foreign_failure_preserve_skip(tmp_path: Path, gate_acl: dict, action: str) -> None:
+    root = _da_root(tmp_path, "restored", LIVE_A)
+    _earn_rearm_fixture(root, [KEY_A])
+    _trail(root, (action, [KEY_A]))
+    assert cg.apply_block(root, [KEY_A]) == 0
+    _assert_rearmed(root, [KEY_A], gate_acl)
+    _trail(root, ("probe-data_ok", [KEY_A]))
+    assert cg.clear_block(root, "new measurement", earned=True, sources=[KEY_A]) == 0
+    _trail(root, (action, [KEY_B]))
+    gate_acl["calls"].clear()
+
+    assert cg.apply_block(root, [KEY_A]) == 0
+    assert not (root / cg.MARKER).exists(), "a restored current pair must be reusable"
+    assert not gate_acl["denied"] and not gate_acl["calls"], "foreign-key failure must not re-arm this root"
+    assert _audit_actions(root)[-1] == "block-skipped"
+    assert cg._clear_was_earned(root) == "probe-cleared"
+
+
+@pytest.mark.parametrize("action", REARM_BLOCKERS)
+@pytest.mark.parametrize("unkeyed", [None, [], ["legacy display"]])
+def test_rearm_unkeyed_failure_invalidates_every_current_key(
+    tmp_path: Path, gate_acl: dict, action: str, unkeyed: list[str] | None
+) -> None:
+    root = _da_root(tmp_path, "unkeyed-failure", LIVE_A, LIVE_B)
+    _earn_rearm_fixture(root, [KEY_A, KEY_B])
+    _trail(root, (action, unkeyed))
+    gate_acl["calls"].clear()
+
+    assert cg.apply_block(root, [KEY_A, KEY_B]) == 0
+    _assert_rearmed(root, [KEY_A, KEY_B], gate_acl)
+
+
+@pytest.mark.parametrize("blocked_index", [0, 1])
+@pytest.mark.parametrize("reverse_clear", [False, True])
+@pytest.mark.parametrize("reverse_call", [False, True])
+def test_rearm_one_of_two_keys_keeps_earned_sibling(
+    tmp_path: Path, gate_acl: dict, blocked_index: int, reverse_clear: bool, reverse_call: bool
+) -> None:
+    root = _da_root(tmp_path, "two-keys", LIVE_A, LIVE_B)
+    keys = [KEY_A, KEY_B]
+    assert cg.apply_block(root, keys) == 0
+    for key in reversed(keys) if reverse_clear else keys:
+        _trail(root, ("probe-data_ok", [key]))
+        assert cg.clear_block(root, "measured one key", earned=True, sources=[key]) == 0
+    assert not gate_acl["denied"], "both keys must begin physically cleared"
+    _trail(root, ("probe-error", [keys[blocked_index]]))
+    gate_acl["calls"].clear()
+
+    assert cg.apply_block(root, list(reversed(keys)) if reverse_call else keys) == 0
+    _assert_rearmed(root, [keys[blocked_index]], gate_acl)
+    earned, _authorized = cg._earned_sources(root)
+    assert earned[keys[1 - blocked_index]] == "probe-cleared", "re-arm must preserve the earned sibling"
+    assert earned[keys[blocked_index]] is None
+
+    # A full re-probe measures the already-earned sibling again. Its unmatched new measurement
+    # must pair with this clear even though the reduced marker only names the previously failed key.
+    _trail(root, ("probe-data_ok", keys))
+    assert cg.clear_block(root, "all sources re-probed", earned=True, sources=keys) == 0
+    assert cg.apply_block(root, keys) == 0
+    assert not (root / cg.MARKER).exists() and not gate_acl["denied"]
+
+
+@pytest.mark.parametrize("blocked_index", [0, 1])
+def test_rearm_omitted_pending_key_on_clear_root_is_refused(tmp_path: Path, gate_acl: dict, blocked_index: int) -> None:
+    root = _da_root(tmp_path, "complete-root", LIVE_A, LIVE_B)
+    keys = [KEY_A, KEY_B]
+    _earn_rearm_fixture(root, keys)
+    _trail(root, ("probe-error", [keys[blocked_index]]))
+    supplied = [keys[1 - blocked_index]]
+    before = (root / cg.AUDIT).read_bytes()
+    gate_acl["calls"].clear()
+
+    assert cg.apply_block(root, supplied) == 2, "an uncovered omitted key must refuse, not synthesize a scope"
+    assert not (root / cg.MARKER).exists() and not gate_acl["denied"]
+    assert not any("/deny" in call for call in gate_acl["calls"])
+    assert (root / cg.AUDIT).read_bytes() == before, "refusal must not change any key's audit epoch"
+    assert cg._clear_was_earned(root, supplied) == "probe-cleared"
+    assert cg._clear_was_earned(root) is None
+    assert cg.apply_block(root, keys) == 0, "the caller's explicit complete-scope retry must work"
+    _assert_rearmed(root, [keys[blocked_index]], gate_acl)
+
+
+@pytest.mark.parametrize("supplied_index", [0, 1])
+@pytest.mark.parametrize("omitted_was_armed", [False, True])
+def test_rearm_pending_subset_on_clear_root_requires_complete_retry(
+    tmp_path: Path, gate_acl: dict, supplied_index: int, omitted_was_armed: bool
+) -> None:
+    """An omitted failure is pending even without an earlier keyed arm; it is not an untouched key."""
+    root = _da_root(tmp_path, "pending-without-marker", LIVE_A, LIVE_B)
+    keys = [KEY_A, KEY_B]
+    _earn_rearm_fixture(root, keys if omitted_was_armed else [keys[supplied_index]])
+    _trail(root, ("probe-error", keys))
+    before = (root / cg.AUDIT).read_bytes()
+    gate_acl["calls"].clear()
+
+    assert cg.apply_block(root, [keys[supplied_index]]) == 2, "pending supplied keys do not waive omitted pending keys"
+    assert not (root / cg.MARKER).exists() and not gate_acl["denied"] and not gate_acl["calls"]
+    assert (root / cg.AUDIT).read_bytes() == before
+    assert cg.apply_block(root, list(reversed(keys))) == 0
+    _assert_rearmed(root, list(reversed(keys)), gate_acl)
+
+
+@pytest.mark.parametrize(
+    "route",
+    ["trusted", "force", "missing-audit", "malformed-audit", "unreadable-root", "removed-key", "legacy", "empty"],
+)
+def test_rearm_replacement_preserves_existing_marker_coverage(tmp_path: Path, gate_acl: dict, route: str) -> None:
+    """Every arming path must preserve existing obligations, even when keyed skip is unavailable."""
+    root = _da_root(tmp_path, "replacement-coverage", LIVE_A, LIVE_B)
+    _earn_rearm_fixture(root, [KEY_A, KEY_B])
+    _trail(root, ("probe-error", [KEY_A, KEY_B]))
+    assert cg.apply_block(root, [KEY_A, KEY_B]) == 0
+    if route == "missing-audit":
+        (root / cg.AUDIT).unlink()
+    elif route == "malformed-audit":
+        with (root / cg.AUDIT).open("a", encoding="utf-8") as stream:
+            stream.write("{broken\n")
+    elif route == "unreadable-root":
+        (root / cg.MIGRATION_SPEC).write_text("{broken", encoding="utf-8")
+    elif route == "removed-key":
+        (root / cg.MIGRATION_SPEC).write_text(json.dumps(_da_spec(LIVE_A)), encoding="utf-8")
+    supplied = ["legacy display"] if route == "legacy" else ([] if route == "empty" else [KEY_A])
+    before = _tree_snapshot(root)
+    denied_before = set(gate_acl["denied"])
+    gate_acl["calls"].clear()
+
+    assert cg.apply_block(root, supplied, force_scope=route == "force") == 2, (
+        "a new marker must not drop an existing omitted source, including on fallback arm paths"
+    )
+    assert _tree_snapshot(root) == before, "refusal must preserve marker, audit, and unrelated epochs"
+    assert gate_acl["denied"] == denied_before and not gate_acl["calls"]
+
+
+@pytest.mark.parametrize("blocked_index", [0, 1])
+def test_rearm_omitted_pending_key_already_barriered_preserves_exact_scope(
+    tmp_path: Path, gate_acl: dict, blocked_index: int
+) -> None:
+    root = _da_root(tmp_path, "covered-omission", LIVE_A, LIVE_B)
+    keys = [KEY_A, KEY_B]
+    _earn_rearm_fixture(root, keys)
+    blocked, earned = keys[blocked_index], keys[1 - blocked_index]
+    _trail(root, ("probe-error", [blocked]))
+    assert cg.apply_block(root, [blocked]) == 0
+    marker = (root / cg.MARKER).read_bytes()
+    arms = [row for row in _read_rows(root) if row["action"] == "block"]
+    gate_acl["calls"].clear()
+
+    assert cg.apply_block(root, [earned]) == 0
+    assert (root / cg.MARKER).read_bytes() == marker, "a covered omission must not rewrite the marker"
+    assert _audit_actions(root)[-1] == "block-skipped"
+    assert [row for row in _read_rows(root) if row["action"] == "block"] == arms
+    assert not any("/deny" in call for call in gate_acl["calls"])
+    assert cg._clear_was_earned(root, [earned]) == "probe-cleared"
+    assert root / "fabric" in gate_acl["denied"]
+
+
+@pytest.mark.parametrize(
+    "fault", ["marker-only", "acl-only", "wrong-key", "malformed", "duplicate", "query-failure", "query-exception"]
+)
+def test_rearm_omitted_coverage_requires_matching_marker_and_active_acl(
+    tmp_path: Path, gate_acl: dict, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    root = _da_root(tmp_path, "bad-coverage", LIVE_A, LIVE_B)
+    _earn_rearm_fixture(root, [KEY_A, KEY_B])
+    _trail(root, ("probe-error", [KEY_B]))
+    assert cg.apply_block(root, [KEY_B]) == 0
+    marker = root / cg.MARKER
+    if fault == "marker-only":
+        gate_acl["denied"].clear()
+    elif fault == "acl-only":
+        marker.unlink()
+    elif fault == "malformed":
+        marker.write_text("{broken", encoding="utf-8")
+    elif fault == "duplicate":
+        raw = marker.read_text(encoding="utf-8")
+        marker.write_text(raw[:-1] + ',"sources":' + json.dumps([KEY_B]) + "}", encoding="utf-8")
+    elif fault == "wrong-key":
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+        payload["sources"] = [KEY_A]
+        marker.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+
+        def query_failure(_args):
+            if fault == "query-exception":
+                raise OSError("fixture query failure")
+            return 5, "fixture:(DENY)(WD,AD,WA)"
+
+        monkeypatch.setattr(cg, "_icacls", query_failure)
+    before = (root / cg.AUDIT).read_bytes()
+    assert cg.apply_block(root, [KEY_A]) == 2, "unestablished physical coverage must never permit a skip"
+    assert (root / cg.AUDIT).read_bytes() == before
+
+
+@pytest.mark.parametrize("sources", [[], ["display"], ["2 live source(s)"], ["Source B", "Source A"]])
+def test_rearm_legacy_scope_is_never_rewritten_or_earned(tmp_path: Path, gate_acl: dict, sources: list[str]) -> None:
+    root = _da_root(tmp_path, "legacy", LIVE_A)
+    _earn_rearm_fixture(root, [KEY_A])
+    for _ in range(2):
+        gate_acl["calls"].clear()
+        assert cg.apply_block(root, sources) == 0
+        _assert_rearmed(root, sources, gate_acl)
+        assert _read_rows(root)[-1]["sources"] == sources, "legacy scope must remain byte-for-byte diagnostic"
+        assert cg.clear_block(root, "fixture legacy clear", earned=True, sources=sources) == 0
+        assert cg._clear_was_earned(root, sources) is None
+    assert "block-skipped" not in _audit_actions(root)
+
+
+@pytest.mark.parametrize("same_count", [False, True])
+def test_rearm_foreign_key_and_same_count_substitution_refuse_before_effects(
+    tmp_path: Path, gate_acl: dict, same_count: bool
+) -> None:
+    root = _da_root(tmp_path, "foreign", LIVE_A, LIVE_B)
+    _earn_rearm_fixture(root, [KEY_A, KEY_B])
+    sources = [KEY_A, "source-key:0000000000000000"] if same_count else ["source-key:0000000000000000"]
+    before = (root / cg.AUDIT).read_bytes()
+    gate_acl["calls"].clear()
+    assert cg.apply_block(root, sources) == 2, "canonical foreign identities must be refused, not replaced"
+    assert not (root / cg.MARKER).exists() and not gate_acl["calls"]
+    assert (root / cg.AUDIT).read_bytes() == before
+
+
+def test_rearm_partial_arm_does_not_invent_an_epoch_for_omitted_keys(tmp_path: Path, gate_acl: dict) -> None:
+    root = _da_root(tmp_path, "partial-arm", LIVE_A, LIVE_B)
+    assert cg.apply_block(root, [KEY_B]) == 0
+    _assert_rearmed(root, [KEY_B], gate_acl)
+    assert _read_rows(root)[-1]["sources"] == [KEY_B]
+    assert _assess(root, _da_spec(LIVE_A)).codes == ("source-key-set-changed",)
+
+
+def _read_rows(root: Path) -> list[dict]:
+    return [json.loads(line) for line in (root / cg.AUDIT).read_text(encoding="utf-8").splitlines()]
+
+
+@pytest.mark.parametrize("action", ["block", "block-marker-only"])
+@pytest.mark.parametrize("sources", [None, [], ["legacy display"]])
+def test_rearm_unattributable_arm_starts_a_new_epoch(
+    tmp_path: Path, gate_acl: dict, action: str, sources: list[str] | None
+) -> None:
+    root = _da_root(tmp_path, "arm-epoch", LIVE_A, LIVE_B)
+    _earn_rearm_fixture(root, [KEY_A, KEY_B])
+    # Empty/legacy arms are canonical but unattributable. An absent list is malformed instead.
+    _trail(root, (action, sources))
+    gate_acl["calls"].clear()
+    assert cg.apply_block(root, [KEY_A, KEY_B]) == 0
+    _assert_rearmed(root, [KEY_A, KEY_B], gate_acl)
+
+
+def test_rearm_is_idempotent_while_already_blocked(tmp_path: Path, gate_acl: dict) -> None:
+    root = _da_root(tmp_path, "already-blocked", LIVE_A)
+    for _ in range(2):
+        assert cg.apply_block(root, [KEY_A]) == 0
+        _assert_rearmed(root, [KEY_A], gate_acl)
+    assert _audit_actions(root) == ["block", "block"]
+
+
+@pytest.mark.parametrize("poison", ["malformed", "duplicate", "foreign", "unreadable", "forced"])
+def test_rearm_bad_audit_never_reuses_old_proof(
+    tmp_path: Path, gate_acl: dict, monkeypatch: pytest.MonkeyPatch, poison: str
+) -> None:
+    root = _da_root(tmp_path, "poison", LIVE_A)
+    _earn_rearm_fixture(root, [KEY_A])
+    audit = root / cg.AUDIT
+    raw = audit.read_text(encoding="utf-8")
+    if poison == "malformed":
+        audit.write_text(raw + "{broken\n", encoding="utf-8")
+    elif poison == "duplicate":
+        last = raw.splitlines()[-1]
+        audit.write_text(raw + last[:-1] + ',"action":"probe-cleared"}\n', encoding="utf-8")
+    elif poison == "foreign":
+        row = json.loads(raw.splitlines()[-1])
+        row["scope"] = str(tmp_path / "other")
+        audit.write_text(raw + json.dumps(row) + "\n", encoding="utf-8")
+    elif poison == "forced":
+        _trail(root, ("block-forced-scope", None))
+    read_text = Path.read_text
+    with monkeypatch.context() as patch:
+        if poison == "unreadable":
+
+            def fail_read(path, *args, **kwargs):
+                if path == audit:
+                    raise PermissionError("fixture unreadable audit")
+                return read_text(path, *args, **kwargs)
+
+            patch.setattr(Path, "read_text", fail_read)
+        gate_acl["calls"].clear()
+        assert cg.apply_block(root, [KEY_A]) == 0
+    _assert_rearmed(root, [KEY_A], gate_acl)
+
+
+@pytest.mark.parametrize("shape", ["malformed", "duplicate-keys", "identity-incomplete", "empty"])
+def test_rearm_unknown_current_root_keys_never_skip(tmp_path: Path, gate_acl: dict, shape: str) -> None:
+    root = _da_root(tmp_path, "unreadable-root", LIVE_A)
+    _earn_rearm_fixture(root, [KEY_A])
+    contents = {
+        "malformed": "{broken",
+        "duplicate-keys": json.dumps(_da_spec(LIVE_A, LIVE_A)),
+        "identity-incomplete": json.dumps(_da_spec({"class": "sqlserver"})),
+        "empty": "{}",
+    }[shape]
+    (root / cg.MIGRATION_SPEC).write_text(contents, encoding="utf-8")
+    gate_acl["calls"].clear()
+    assert cg.apply_block(root, [KEY_A]) == (2 if shape == "empty" else 0)
+    if shape == "empty":
+        assert not (root / cg.MARKER).exists() and not gate_acl["calls"], "known empty R cannot adopt a foreign key"
+    else:
+        _assert_rearmed(root, [KEY_A], gate_acl)
+
+
+def test_rearm_authentic_permission_survives_later_probe_error(tmp_path: Path, gate_acl: dict) -> None:
+    root = _da_root(tmp_path, "authorized-rearm", LIVE_A)
+    assert cg.apply_block(root, [KEY_A]) == 0
+    assert cg.authorize(root, "Fixture Human") == 0
+    _trail(root, ("probe-error", [KEY_A]))
+    gate_acl["calls"].clear()
+
+    assert cg.apply_block(root, [KEY_A]) == 0
+    assert not (root / cg.MARKER).exists() and not gate_acl["denied"] and not gate_acl["calls"]
+    assert "human model-only" in json.loads((root / cg.AUDIT).read_text().splitlines()[-1])["detail"]
+    assert cg._clear_was_earned(root) is None, "permission must never masquerade as probe-earned proof"
+    assert _assess(root, _da_spec(LIVE_A), scope="model_only", policy="model_only_unvalidated").state == (
+        "authorized_model_only"
+    )
+    assert _assess(root, _da_spec(LIVE_A)).state == "blocked"
+    (root / "fabric" / "Model.tmdl").write_text("table Fixture\n", encoding="utf-8")
+    assert cg.verify(root) == 0, "valid human permission must not be revoked by the probe-only check"
+
+
+@pytest.mark.parametrize("authorized_index", [0, 1])
+@pytest.mark.parametrize("change", ["unchanged", "broadened", "replaced"])
+def test_rearm_verify_authorization_cannot_widen_to_built_root(
+    tmp_path: Path, gate_acl: dict, caplog: pytest.LogCaptureFixture, authorized_index: int, change: str
+) -> None:
+    """R1 F2: authentic permission for A is not whole-root authority for a newly declared B."""
+    connections, keys = [LIVE_A, LIVE_B], [KEY_A, KEY_B]
+    original, added = connections[authorized_index], connections[1 - authorized_index]
+    supplied, other = keys[authorized_index], keys[1 - authorized_index]
+    root = _da_root(tmp_path, "authorization-scope", original)
+    assert cg.apply_block(root, [supplied]) == 0
+    assert cg.authorize(root, "Fixture Human") == 0
+    current = [original] if change == "unchanged" else ([original, added] if change == "broadened" else [added])
+    (root / cg.MIGRATION_SPEC).write_text(json.dumps(_da_spec(*current)), encoding="utf-8")
+    _trail(root, ("probe-error", [supplied if change == "unchanged" else other]))
+    gate_acl["calls"].clear()
+    assert cg.apply_block(root, [supplied]) == (0 if change == "unchanged" else 2)
+    assert cg._override_is_authentic(root), "the original exact-scope human permission remains genuine"
+    assert not (root / cg.MARKER).exists() and not gate_acl["denied"]
+    assert all(len(call) == 1 for call in gate_acl["calls"]), "coverage queries must not mutate ACLs"
+    if change != "replaced":
+        exact = _assess(root, _da_spec(original), scope="model_only", policy="model_only_unvalidated")
+        assert (exact.state, exact.validation, exact.max_phase2_claim) == (
+            "authorized_model_only",
+            "unvalidated",
+            "structural_only",
+        ), "exact-scope package permission must not be revoked or relabeled as data proof"
+    if change != "unchanged":
+        assessment = _assess(root, _da_spec(*current), scope="model_only", policy="model_only_unvalidated")
+        assert (assessment.state, assessment.codes) == ("cannot_establish", ("source-key-set-changed",))
+    (root / "fabric" / "Model.tmdl").write_text("table Fixture\n", encoding="utf-8")
+    before = _tree_snapshot(root)
+    caplog.clear()
+
+    assert cg.verify(root) == (0 if change == "unchanged" else 3), (
+        "whole-root verify cannot reuse A-only permission for a newly declared B"
+    )
+    assert _tree_snapshot(root) == before, "insufficient scope must not forge an audit violation or revoke permission"
+    assert cg._override_is_authentic(root) and cg._clear_was_earned(root) is None
+    assert "FORGED OVERRIDE" not in caplog.text
+    if change != "unchanged":
+        assert "CANNOT ASSESS" in caplog.text and "authorization" in caplog.text
+        assert "GATE VERIFY: OK" not in caplog.text
+
+
+def test_rearm_artifact_free_verify_keeps_exact_package_authorization(tmp_path: Path, gate_acl: dict) -> None:
+    """The unchanged data-access contract permits artifact-free verification of an exact package grant."""
+    root = _da_root(tmp_path, "artifact-free-authorization", LIVE_A, LIVE_B)
+    assert cg.apply_block(root, [KEY_A]) == 0
+    assert cg.authorize(root, "Fixture Human") == 0
+    _trail(root, ("probe-error", [KEY_B]))
+
+    assert cg.verify(root) == 0
+    assert not gate_acl["denied"] and not (root / cg.MARKER).exists()
+    assert _assess(root, _da_spec(LIVE_A), scope="model_only", policy="model_only_unvalidated").state == (
+        "authorized_model_only"
+    )
+    assert _assess(root, _da_spec(LIVE_A, LIVE_B), scope="model_only", policy="model_only_unvalidated").codes == (
+        "source-key-set-changed",
+    )
+
+
+def test_rearm_authorization_never_completes_the_callers_omitted_scope(tmp_path: Path, gate_acl: dict) -> None:
+    root = _da_root(tmp_path, "exact-authorization", LIVE_A, LIVE_B)
+    assert cg.apply_block(root, [KEY_A]) == 0
+    assert _read_rows(root)[-1]["sources"] == [KEY_A]
+    assert cg.authorize(root, "Fixture Human") == 0
+    assert cg._override_is_authentic(root), "the human's exact A authorization is genuine"
+    before = (root / cg.AUDIT).read_bytes()
+    assert cg.apply_block(root, [KEY_A]) == 2, "authorization for A must not waive an uncovered omitted B"
+    assert (root / cg.AUDIT).read_bytes() == before and not (root / cg.MARKER).exists()
+    assert cg.apply_block(root, [KEY_A, KEY_B]) == 0
+    _assert_rearmed(root, [KEY_A, KEY_B], gate_acl)
+    assert not cg._override_is_authentic(root), "the broadened scope needs a new exact keyed authorization"
+
+
+def test_rearm_legacy_authorization_cannot_be_upgraded_into_keyed_permission(tmp_path: Path, gate_acl: dict) -> None:
+    root = _da_root(tmp_path, "legacy-authorization", LIVE_A)
+    assert cg.apply_block(root, ["warehouse"]) == 0
+    assert cg.authorize(root, "Fixture Human") == 0
+    assert not cg._override_is_authentic(root)
+    assert cg.apply_block(root, ["warehouse"]) == 0
+    _assert_rearmed(root, ["warehouse"], gate_acl)
+    assert all(row.get("sources") != [KEY_A] for row in _read_rows(root)), "no writer may invent a keyed arm"
+
+
+@pytest.mark.parametrize("shape", ["file-only", "audit-only", "later-arm", "new-source", "poison"])
+def test_rearm_incomplete_or_stale_authorization_never_skips(tmp_path: Path, gate_acl: dict, shape: str) -> None:
+    root = _da_root(tmp_path, "bad-authorization", LIVE_A)
+    assert cg.apply_block(root, [KEY_A]) == 0
+    if shape == "file-only":
+        assert cg.clear_block(root, "fixture unearned teardown") == 0
+        (root / cg.OVERRIDE).write_text("bare file", encoding="utf-8")
+    else:
+        assert cg.authorize(root, "Fixture Human") == 0
+        if shape == "audit-only":
+            (root / cg.OVERRIDE).unlink()
+        elif shape == "later-arm":
+            _trail(root, ("block", [KEY_A]))
+        elif shape == "new-source":
+            (root / cg.MIGRATION_SPEC).write_text(json.dumps(_da_spec(LIVE_A, LIVE_B)), encoding="utf-8")
+        else:
+            with (root / cg.AUDIT).open("a", encoding="utf-8") as stream:
+                stream.write("{broken\n")
+    keys = [KEY_A, KEY_B] if shape == "new-source" else [KEY_A]
+    gate_acl["calls"].clear()
+    assert cg.apply_block(root, keys) == 0
+    _assert_rearmed(root, keys, gate_acl)
+    assert not cg._override_is_authentic(root)
+
+
+@pytest.mark.parametrize("authorized", [False, True])
+def test_rearm_uses_one_strict_audit_snapshot(
+    tmp_path: Path, gate_acl: dict, monkeypatch: pytest.MonkeyPatch, authorized: bool
+) -> None:
+    root = _da_root(tmp_path, "snapshot", LIVE_A)
+    if authorized:
+        assert cg.apply_block(root, [KEY_A]) == 0
+        assert cg.authorize(root, "Fixture Human") == 0
+    else:
+        _earn_rearm_fixture(root, [KEY_A])
+    reader = cg._read_audit_trail
+    reads = []
+
+    def read_once(location: Path):
+        reads.append(location)
+        assert len(reads) == 1, "apply_block must not re-read its mutable audit"
+        return reader(location)
+
+    monkeypatch.setattr(cg, "_read_audit_trail", read_once)
+    gate_acl["calls"].clear()
+    assert cg.apply_block(root, [KEY_A]) == 0
+    assert reads == [root] and not gate_acl["calls"]
+
+
+@pytest.mark.parametrize("where", ["marker", "fabric", "probe"])
+def test_rearm_preparation_failure_has_no_acl_or_success_action(
+    tmp_path: Path, gate_acl: dict, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    root = _da_root(tmp_path, "preparation", LIVE_A)
+    if where == "marker":
+        original = Path.write_text
+
+        def fail_marker(path, *args, **kwargs):
+            if path == root / cg.MARKER:
+                raise PermissionError("fixture marker failure")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", fail_marker)
+    else:
+
+        def fail_directory(*_args, **_kwargs):
+            raise PermissionError("fixture directory failure")
+
+        monkeypatch.setattr(cg, "denied_dirs" if where == "fabric" else "probe_dir", fail_directory)
+    assert cg.apply_block(root, [KEY_A]) == 1, "marker/directory failure must return the integer failure code"
+    assert not gate_acl["calls"] and not gate_acl["denied"], "a failed marker may not mutate ACLs"
+    assert not (root / cg.MARKER).exists()
+    assert not (root / cg.AUDIT).exists(), "preparation failure must not claim a successful arm"
+
+
+@pytest.mark.parametrize("failure_index", [None, 0, 1, 2])
+@pytest.mark.parametrize("raises", [False, True])
+def test_rearm_all_denies_precede_success_and_failures_keep_restrictive_state(
+    tmp_path: Path, gate_acl: dict, monkeypatch: pytest.MonkeyPatch, failure_index: int | None, raises: bool
+) -> None:
+    root = _da_root(tmp_path, "acl-order", LIVE_A)
+    directories = [root / "fabric", root / "second", root / "third"]
+    for directory in directories:
+        directory.mkdir(exist_ok=True)
+    monkeypatch.setattr(cg, "denied_dirs", lambda *_args, **_kwargs: directories)
+    stub = cg._icacls
+    calls = []
+    before = []
+
+    def enforce(args):
+        assert (root / cg.MARKER).is_file(), "marker must precede the first deny"
+        actions = _audit_actions(root) if (root / cg.AUDIT).exists() else []
+        assert actions == before, "successful arm must not be audited before every deny"
+        calls.append(Path(args[0]))
+        if failure_index is not None and args[0] == str(directories[failure_index]):
+            if raises:
+                raise OSError("fixture ACL process failure")
+            return 5, "fixture access denied"
+        return stub(args)
+
+    monkeypatch.setattr(cg, "_icacls", enforce)
+    expected = 0 if failure_index is None else 1
+    assert cg.apply_block(root, [KEY_A]) == expected
+    assert calls == directories, "every deny must be attempted, including after a sibling failure"
+    denied = set(directories) - ({directories[failure_index]} if failure_index is not None else set())
+    assert gate_acl["denied"] == denied, "successful restrictions must not be rolled back"
+    assert (root / cg.MARKER).is_file()
+    actions = _audit_actions(root)
+    assert actions == (["block"] if failure_index is None else ["violation"])
+
+
+@pytest.mark.parametrize("system", ["Windows", "Linux"])
+def test_rearm_audit_append_failure_returns_failure_and_retains_restrictions(
+    tmp_path: Path, gate_acl: dict, monkeypatch: pytest.MonkeyPatch, system: str
+) -> None:
+    root = _da_root(tmp_path, "audit-append-failure", LIVE_A)
+    monkeypatch.setattr(cg.platform, "system", lambda: system)
+    original = Path.open
+
+    def fail_append(path, mode="r", *args, **kwargs):
+        if path == root / cg.AUDIT and mode == "a":
+            raise PermissionError("fixture audit append failure")
+        return original(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_append)
+    assert cg.apply_block(root, [KEY_A]) == 1, "a physically blocked but unaudited arm is not success"
+    assert (root / cg.MARKER).is_file()
+    assert (root / "fabric" in gate_acl["denied"]) is (system == "Windows")
+    assert not (root / cg.AUDIT).exists()
+
+
+@pytest.mark.parametrize("sources", [["duplicate", "duplicate"], ["source-key:bad"], [None], "count"])
+def test_rearm_invalid_identities_return_two_before_effects(tmp_path: Path, gate_acl: dict, sources) -> None:
+    root = _da_root(tmp_path, "invalid-input", LIVE_A)
+    assert cg.apply_block(root, sources) == 2
+    assert not (root / cg.MARKER).exists() and not gate_acl["calls"]
+    assert not cg._gate_was_ever_applied(root)
+
+
+def test_rearm_invalid_target_returns_two_before_effects(tmp_path: Path, gate_acl: dict) -> None:
+    missing = tmp_path / "absent"
+    assert cg.apply_block(missing, [KEY_A], force_scope=True) == 2
+    missing.write_text("file, not a directory", encoding="utf-8")
+    assert cg.apply_block(missing, [KEY_A], force_scope=True) == 2
+    assert not gate_acl["calls"]
+
+
+@pytest.mark.parametrize("authority_code", [0, 1, 2])
+def test_preflight_checks_authority_exit_before_claiming_enforcement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog, authority_code: int
+) -> None:
+    root = _da_root(tmp_path, "preflight-return", LIVE_A)
+    # Both files already exist: neither one proves that this invocation established enforcement.
+    (root / pf.GATE_OVERRIDE).write_text("bare file", encoding="utf-8")
+    (root / pf.GATE_MARKER).write_text("{}", encoding="utf-8")
+    calls = []
+
+    def authority(args, **_kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, authority_code)
+
+    monkeypatch.setattr(pf.subprocess, "run", authority)
+    assert pf.cmd_classify(root / cg.MIGRATION_SPEC) == (1 if authority_code == 0 else 2)
+    assert len(calls) == 1 and calls[0][2:4] == ["block", str(root)], "a bare file must not bypass authority"
+    assert ("GATE ARMED:" in caplog.text) is (authority_code == 0)
+    assert "by creating" not in caplog.text
+    if authority_code == 0:
+        assert 'authorize <dir> --who "<name>"' in caplog.text
+
+
+def test_preflight_accepts_authority_skip_without_claiming_a_physical_block(
+    tmp_path: Path, gate_acl: dict, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    root = _da_root(tmp_path, "preflight-skip", LIVE_A)
+    _earn_rearm_fixture(root, [KEY_A])
+    gate_acl["calls"].clear()
+
+    def authority(args, **_kwargs):
+        return subprocess.CompletedProcess(args, cg.main(args[2:]))
+
+    monkeypatch.setattr(pf.subprocess, "run", authority)
+    assert pf.cmd_classify(root / cg.MIGRATION_SPEC) == 1, "classification still reports a live source"
+    assert "GATE ARMED:" not in caplog.text
+    assert not (root / cg.MARKER).exists() and not gate_acl["calls"]
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -275,7 +940,7 @@ def migration(tmp_path: Path) -> Path:
     # A real migration dir always carries its spec, and `apply_block` now REQUIRES a scope marker
     # before it will arm (a marker governs its whole subtree; one written too high blocked ~13
     # unrelated agents in a real incident). Writing it here makes the fixture match reality.
-    (tmp_path / "migration-spec.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "migration-spec.json").write_text(json.dumps(_da_spec(LIVE_A)), encoding="utf-8")
     yield tmp_path
     run_gate("clear", str(tmp_path), "--reason", "test-teardown")
 
@@ -310,7 +975,7 @@ def test_authorize_is_audit_backed_and_lifts_the_gate(migration: Path, monkeypat
     sys.path.insert(0, str(REPO / "scripts"))
     import credential_gate as gate  # noqa: PLC0415
 
-    run_gate("block", str(migration), "--sources", "x")
+    run_gate("block", str(migration), "--sources", KEY_A)
     monkeypatch.setattr(gate, "_ancestry", lambda: ["python.exe", "pwsh.exe"])
     assert gate.authorize(migration, "tester") == 0
     assert gate.verify(migration) == 0
@@ -692,7 +1357,8 @@ def test_an_earned_clear_passes_verify(migration: Path) -> None:
     Without it, `verify` could satisfy that test by always returning 1, and both would look green
     while the gate was useless. Every "must be caught" needs a "must NOT be caught" beside it.
     """
-    run_gate("block", str(migration), "--sources", "x")
+    run_gate("block", str(migration), "--sources", KEY_A)
+    _trail(migration, ("probe-data_ok", [KEY_A]))
     run_gate("clear", str(migration), "--reason", "probe-cleared: DATA_OK from t", "--earned")
     (migration / "fabric" / "M.tmdl").write_text("table x", encoding="utf-8")
     assert run_gate("verify", str(migration)).returncode == 0
@@ -1562,13 +2228,10 @@ def test_rearming_an_already_probe_cleared_gate_is_a_no_op(tmp_path: Path) -> No
     earlier, it bypassed rather than re-probed (`cd variant-m5c; clear .`). Re-arming a gate that a
     probe has already satisfied does not add safety - it manufactures the dead end.
     """
-    mig = tmp_path / "mig"
-    (mig / "fabric").mkdir(parents=True)
-    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "shipment")
-    run_gate("clear", str(mig), "--reason", "probe ok", "--earned")
+    mig = _da_root(tmp_path, "mig", LIVE_A)
+    _earn_rearm_fixture(mig, [KEY_A])
 
-    run_gate("block", str(mig), "--sources", "shipment")
+    run_gate("block", str(mig), "--sources", KEY_A)
 
     assert not (mig / ".credential-gate-BLOCKED.json").exists(), "gate must NOT re-arm for already-proven sources"
     assert _audit_actions(mig)[-1] == "block-skipped"
@@ -1615,15 +2278,10 @@ def test_source_specific_clear_keeps_gate_for_still_pending_sources(tmp_path: Pa
 
 def test_a_sibling_block_does_not_discard_another_source_clearance(tmp_path: Path) -> None:
     """A bundle shared by sibling agents must remember each source's earned clearance independently."""
-    mig = tmp_path / "mig"
-    (mig / "fabric").mkdir(parents=True)
-    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "orders")
-    run_gate("clear", str(mig), "--reason", "probe ok", "--earned", "--sources", "orders")
-
-    run_gate("block", str(mig), "--sources", "customers")
-    run_gate("clear", str(mig), "--reason", "probe ok", "--earned", "--sources", "customers")
-    run_gate("block", str(mig), "--sources", "orders")
+    mig = _da_root(tmp_path, "mig", LIVE_A, LIVE_B)
+    _earn_rearm_fixture(mig, [KEY_A])
+    _earn_rearm_fixture(mig, [KEY_B])
+    run_gate("block", str(mig), "--sources", KEY_A)
 
     assert not (mig / ".credential-gate-BLOCKED.json").exists(), "orders clearance must survive a sibling block"
     assert _audit_actions(mig)[-1] == "block-skipped"
@@ -1670,13 +2328,10 @@ def test_rearming_with_a_NEW_source_still_arms(tmp_path: Path) -> None:
 
 def test_the_rearm_skip_is_order_insensitive_on_sources(tmp_path: Path) -> None:
     """Source ORDER is a classifier implementation detail, not a change in what was proven."""
-    mig = tmp_path / "mig"
-    (mig / "fabric").mkdir(parents=True)
-    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "shipment", "orders")
-    run_gate("clear", str(mig), "--reason", "probe ok", "--earned")
+    mig = _da_root(tmp_path, "mig", LIVE_A, LIVE_B)
+    _earn_rearm_fixture(mig, [KEY_A, KEY_B])
 
-    run_gate("block", str(mig), "--sources", "orders", "shipment")
+    run_gate("block", str(mig), "--sources", KEY_B, KEY_A)
 
     assert not (mig / ".credential-gate-BLOCKED.json").exists(), "reordered but identical sources must not re-arm"
     assert _audit_actions(mig)[-1] == "block-skipped"
@@ -1737,11 +2392,8 @@ def test_an_earned_clear_still_verifies_clean_for_a_live_source(tmp_path: Path) 
     Asserts the reason as well as the exit code: this must pass because the probe EARNED the lift,
     not because it fell through the `_gate_was_ever_applied` escape hatch.
     """
-    mig = tmp_path / "mig"
-    (mig / "fabric").mkdir(parents=True)
-    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "shipment")
-    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    mig = _da_root(tmp_path, "mig", LIVE_A)
+    _earn_rearm_fixture(mig, [KEY_A])
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
     proc = run_gate("verify", str(mig))
@@ -2110,11 +2762,8 @@ def test_a_foreign_audit_log_copied_in_from_another_scope_CANNOT_be_verified_ok(
 
 def test_negative_control_verifying_at_the_original_scope_still_passes(tmp_path: Path) -> None:
     """Negative control: the log's OWN scope must still verify clean, unaffected."""
-    scope_a = tmp_path / "scope-a"
-    (scope_a / "fabric").mkdir(parents=True)
-    (scope_a / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(scope_a), "--sources", "shipment")
-    run_gate("clear", str(scope_a), "--reason", "probe returned a row", "--earned")
+    scope_a = _da_root(tmp_path, "scope-a", LIVE_A)
+    _earn_rearm_fixture(scope_a, [KEY_A])
     (scope_a / "fabric" / "model.tmdl").write_text("table Shipment")
 
     proc = run_gate("verify", str(scope_a))
@@ -2146,6 +2795,7 @@ def test_a_swapped_live_source_key_makes_a_stale_clearance_unable_to_certify_it(
 
     key_e1 = pf._leg_key({}, 0, {"class": "sqlserver", "server": "e1.example", "database": "db"})
     run_gate("block", str(mig), "--sources", key_e1)
+    _trail(mig, ("probe-data_ok", [key_e1]))
     run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
@@ -2175,6 +2825,7 @@ def test_negative_control_an_unswapped_source_still_verifies_clean(tmp_path: Pat
 
     key_e1 = pf._leg_key({}, 0, {"class": "sqlserver", "server": "e1.example", "database": "db"})
     run_gate("block", str(mig), "--sources", key_e1)
+    _trail(mig, ("probe-data_ok", [key_e1]))
     run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
@@ -2268,6 +2919,7 @@ def test_negative_control_a_fully_scoped_mixed_action_trail_still_verifies_ok(tm
 
     key = pf._leg_key({}, 0, {"class": "sqlserver", "server": "host1", "database": "db"})
     run_gate("block", str(mig), "--sources", key)
+    _trail(mig, ("probe-data_ok", [key]))
     run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
@@ -2314,10 +2966,12 @@ def test_two_independently_earned_sources_both_verify_clean_together(tmp_path: P
     key_e2 = pf._leg_key({}, 1, {"class": "sqlserver", "server": "e2.example", "database": "db"})
 
     run_gate("block", str(mig), "--sources", key_e1)
+    _trail(mig, ("probe-data_ok", [key_e1]))
     run_gate("clear", str(mig), "--reason", "E1 probe returned a row", "--earned")
     # E2 is blocked and earned INDEPENDENTLY, later, and its own `block` names only E2 - so a
     # "most recent block" comparison would see only E2 here, not E1+E2.
     run_gate("block", str(mig), "--sources", key_e2)
+    _trail(mig, ("probe-data_ok", [key_e2]))
     run_gate("clear", str(mig), "--reason", "E2 probe returned a row", "--earned")
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
@@ -2351,8 +3005,10 @@ def test_swapping_either_of_two_earned_sources_for_an_unearned_one_fails(tmp_pat
     key_e2 = pf._leg_key({}, 1, {"class": "sqlserver", "server": "e2.example", "database": "db"})
 
     run_gate("block", str(mig), "--sources", key_e1)
+    _trail(mig, ("probe-data_ok", [key_e1]))
     run_gate("clear", str(mig), "--reason", "E1 probe returned a row", "--earned")
     run_gate("block", str(mig), "--sources", key_e2)
+    _trail(mig, ("probe-data_ok", [key_e2]))
     run_gate("clear", str(mig), "--reason", "E2 probe returned a row", "--earned")
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
@@ -2378,12 +3034,15 @@ def _unit(root: Path, name: str, *, marker: bool = False, override: bool = False
     """Build one unit on disk in a given gate state. Artifacts only -- never prose."""
     d = root / name
     d.mkdir(parents=True)
+    (d / cg.MIGRATION_SPEC).write_text(json.dumps(_da_spec(LIVE_A)), encoding="utf-8")
     if marker:
         (d / ".credential-gate-BLOCKED.json").write_text("{}", encoding="utf-8")
     if override:
         (d / ".credential-gate-AUTHORIZED").write_text("x", encoding="utf-8")
     for action in audit:
-        _trail(d, (action, [] if action in cg.BLOCK_ACTIONS else None))
+        if action == "probe-cleared":
+            _trail(d, ("probe-data_ok", [KEY_A]))
+        _trail(d, (action, [KEY_A] if action in cg.BLOCK_ACTIONS or action == "probe-cleared" else None))
     return d
 
 

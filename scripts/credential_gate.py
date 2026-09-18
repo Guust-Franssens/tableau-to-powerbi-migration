@@ -136,10 +136,12 @@ def _sources_detail(sources: list[str]) -> str:
 
 def _block_refusal(migration: Path, sources: list[str], force_scope: bool) -> int | None:
     """Return a refusal code for invalid block inputs, or None when arming may proceed."""
+    if not migration.is_dir() or not _valid_audit_sources(sources, diagnostic=True):
+        log.error("REFUSING to arm the gate: target must be a directory and sources must be valid identities.")
+        return 2
     duplicates = _duplicate_sources(sources)
     if duplicates:
         log.error("REFUSING to arm the gate: duplicate source key(s) are not unique identities: %s", duplicates)
-        _audit(migration, "violation", f"duplicate source keys at block: {duplicates}", sources=sources)
         return 2
 
     refusal = _scope_refusal(migration)
@@ -157,11 +159,10 @@ def _block_refusal(migration: Path, sources: list[str], force_scope: bool) -> in
         )
         return 2
     log.warning("--force-scope: arming the gate on a target that failed the scope check (%s).", refusal)
-    _audit(migration, "block-forced-scope", refusal)
     return None
 
 
-def _audit(migration: Path, action: str, detail: str, sources: list[str] | None = None) -> None:
+def _audit(migration: Path, action: str, detail: str, sources: list[str] | None = None) -> bool:
     """Append a tamper-evident-ish record of every gate transition.
 
     Issue #354 (B3): every entry names the SCOPE it was written for so `_audit_entries`, the sole
@@ -180,8 +181,10 @@ def _audit(migration: Path, action: str, detail: str, sources: list[str] | None 
     try:
         with (migration / AUDIT).open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
-    except OSError:
-        pass
+    except OSError as exc:
+        log.error("Could not append credential-gate audit action %s: %s", action, exc)
+        return False
+    return True
 
 
 def _valid_audit_sources(value: object, *, diagnostic: bool = False) -> bool:
@@ -273,9 +276,9 @@ def _valid_scoped_audit_entry(line: str, scope: str) -> dict | None:
 def _read_audit_trail(migration: Path) -> tuple[list[dict] | None, str | None]:
     """Return one complete trusted snapshot or a closed audit-* refusal; an empty log is malformed."""
     path = migration / AUDIT
-    if not path.is_file():
-        return None, AUDIT_MISSING
     try:
+        if not path.is_file():
+            return None, AUDIT_MISSING
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return None, AUDIT_MALFORMED
@@ -333,60 +336,29 @@ def _entry_sources(entry: dict) -> list[str] | None:
     return _parse_sources_detail(str(entry.get("detail") or ""))
 
 
-def _parse_legacy_probe_source(detail: str) -> list[str] | None:
-    """Source name from pre-source-aware ``probe-cleared: DATA_OK from ...`` audit details."""
-    marker = "probe-cleared: DATA_OK from "
-    return [detail[len(marker) :]] if detail.startswith(marker) and detail[len(marker) :] else None
-
-
 def _earned_sources(migration: Path) -> tuple[dict[str, str | None], bool]:
-    """Source-level gate evidence from the append-only audit log.
-
-    A later block invalidates only the sources it names. This is the concurrency fix for sibling
-    agents sharing one bundle: source Y being re-armed must not erase source X's previously earned
-    proof, because those are independent reachability facts.
-    """
+    """Compatibility view of the sole ordered ledger, including historical keys for mismatch checks."""
     entries = _audit_entries(migration)
-    if entries is None:
+    if entries is None or any(entry["action"] == "block-forced-scope" for entry in entries):
         return {}, False
-    states: dict[str, tuple[str | None, str]] = {}
-    authorized = False
-    last_block_sources: list[str] = []
-    for entry in entries:
-        action = entry.get("action")
-        ts = str(entry.get("ts") or "")
-        detail = str(entry.get("detail") or "")
-        if action in BLOCK_ACTIONS:
-            sources = _entry_sources(entry)
-            last_block_sources = sources or []
-            for source in last_block_sources:
-                states[source] = (None, ts)
-        elif action == "authorize":
-            authorized = True
-        elif action == "probe-cleared":
-            sources = _entry_sources(entry) or _parse_legacy_probe_source(detail) or last_block_sources
-            for source in sources:
-                _earned, blocked_at = states.get(source, (None, ""))
-                if ts >= blocked_at:
-                    states[source] = ("probe-cleared", blocked_at)
-    return {source: earned for source, (earned, _blocked_at) in states.items()}, authorized
+    keys = {source for entry in entries for source in _entry_sources(entry) or [] if SOURCE_KEY_RE.fullmatch(source)}
+    codes, _authorized = _data_access_ledger(entries, tuple(sorted(keys)))
+    return (
+        {key: PROBE_CLEARED if code is None else None for key, code in codes.items()},
+        _override_is_authentic(migration, entries=entries),
+    )
 
 
 def _clear_was_earned(migration: Path, sources: list[str] | None = None) -> str | None:
-    """Return probe-cleared/authorize only for an audit-backed lift; a bare clear earns nothing.
-
-    Source ordering preserves sibling clearances but invalidates each re-armed source's proof.
-    Same-user forgery remains possible: this text audit is accountability, not non-repudiation.
-    A genuine probe also leaves an independent one-row query in the source system's query history.
-    """
-    states, authorized = _earned_sources(migration)
-    if authorized:
-        return "authorize"
-    if sources is not None:
-        return "probe-cleared" if sources and all(states.get(source) for source in sources) else None
-    if not states:
+    """Probe-only proof for exact supplied keys; the no-argument verifier requires the whole root."""
+    current, refusal = _gate_root_live_keys(migration)
+    if refusal or not current:
         return None
-    return "probe-cleared" if all(states.values()) else None
+    requested = list(current) if sources is None else sources
+    if not _valid_audit_sources(requested) or not requested or not set(requested) <= current:
+        return None
+    states, _authorized = _earned_sources(migration)
+    return PROBE_CLEARED if all(states.get(key) for key in requested) else None
 
 
 def _icacls(args: list[str]) -> tuple[int, str]:
@@ -675,61 +647,52 @@ def _last_block_sources(migration: Path) -> list[str] | None:
 
 
 def _redundant_rearm(migration: Path, sources: list[str]) -> str | None:
-    """Skip only an earned lift covering EVERY incoming source, never a bare manual clear.
-
-    Unconditional re-arming invited a measured bypass on an already-proven source (2026-08-03).
-    Conversely, a new/unproven source must re-arm; sibling proof cannot cover it.
-    """
+    """Hook shield: every exact supplied key must still have its own earned probe pair."""
     return _clear_was_earned(migration, sources)
 
 
-def apply_block(migration: Path, sources: list[str], force_scope: bool = False) -> int:
-    """Write the marker and deny write access to the output folder.
+def _omitted_keys_are_blocked(migration: Path, omitted: set[str]) -> bool:
+    """Omission cannot borrow a stale/malformed marker or a failed ACL query as coverage."""
+    return (
+        inspect_physical_barrier(migration) == ("blocked", "physical_marker_blocked")
+        and omitted <= set(_marker_sources(migration))
+        and _has_deny_ace(migration)
+    )
 
-    ⚠️ The marker states a STATE, never a VERDICT, and the distinction is load-bearing. This runs at
-    PARSE time, from a static classifier that opens no socket - it knows only that a live source
-    EXISTS. It cannot know whether a credential is present, whether the host resolves, or whether a
-    single row could be read.
 
-    It used to claim `"reason": "live data source(s) have no Power BI credential"`. Measured
-    2026-08-03: `claude-opus-4.6` read that, reasonably treated it as an established fact, reported
-    "no credential" to the user, and never ran the probe. It behaved correctly on false input. The
-    same conflation was fixed in the classifier's console output first; the file kept the old claim,
-    so the two disagreed and the file won.
-    """
-    refusal_code = _block_refusal(migration, sources, force_scope)
-    if refusal_code is not None:
-        return refusal_code
+def _rearm_decision(
+    migration: Path, sources: list[str], entries: list[dict] | None, force_scope: bool
+) -> tuple[list[str], str | None]:
+    """Never synthesize identities from the root; it only bounds membership and safe omissions."""
+    root_keys, refusal = _gate_root_live_keys(migration)
+    if refusal is None and any(SOURCE_KEY_RE.fullmatch(key) and key not in root_keys for key in sources):
+        raise ValueError("supplied source key is not a member of the current root")
+    if refusal or not sources or not all(SOURCE_KEY_RE.fullmatch(key) for key in sources):
+        return sources, None
+    if force_scope or entries is None or any(entry["action"] == "block-forced-scope" for entry in entries):
+        return sources, None
+    codes, _authorized = _data_access_ledger(entries, tuple(root_keys))
+    authentic = _override_is_authentic(migration, entries=entries)
+    authorized = authentic and _data_access_ledger(entries, tuple(sources))[1]
+    pending = [key for key in sources if codes[key] is not None]
+    omitted = {
+        key
+        for key in root_keys - set(sources)
+        if codes[key] is not None and not (authentic and _data_access_ledger(entries, (key,))[1])
+    }
+    if pending and not authorized:
+        tracked, _authorized = _source_ledger(entries, tuple(omitted))
+        # An exact-key arm may start without inventing epochs for untouched root siblings.
+        omitted = {key for key in omitted if tracked[key] != _new_key_state()}
+    if omitted and ((pending and not authorized) or not _omitted_keys_are_blocked(migration, omitted)):
+        raise ValueError("omitted pending root keys are not physically covered; retry with the complete root scope")
+    if pending and not authorized:
+        return pending, None
+    return [], "authentic human model-only authorization" if authorized else "current keyed probe proof"
 
-    if (migration / OVERRIDE).exists():
-        if _override_is_authentic(migration):
-            log.warning("Override present and audit-backed: gate NOT applied - human authorized a build-only run.")
-            _audit(migration, "block-skipped", "authentic override")
-            return 0
-        log.error(
-            "IGNORING FORGED OVERRIDE: %s exists with no 'authorize' audit entry - applying the gate anyway.", OVERRIDE
-        )
-        _audit(migration, "violation", "forged override ignored at block time")
 
-    already = _redundant_rearm(migration, sources)
-    if already:
-        log.warning(
-            "Gate NOT re-applied: these sources were already proven by '%s'. Re-arming a gate "
-            "that a probe has satisfied is what invited a real bypass (see _redundant_rearm). "
-            "Re-probe explicitly if you need to re-verify reachability.",
-            already,
-        )
-        _audit(migration, "block-skipped", f"already earned by {already}; sources={sources}")
-        return 0
-
-    pending_sources = sources
-    if sources:
-        states, authorized = _earned_sources(migration)
-        pending_sources = [] if authorized else [source for source in sources if not states.get(source)]
-    if sources and not pending_sources:
-        _audit(migration, "block-skipped", f"already earned by source state; sources={sources}")
-        return 0
-
+def _write_block_marker(migration: Path, sources: list[str]) -> None:
+    """State, not a credential verdict: static classification has opened no connection."""
     (migration / MARKER).write_text(
         json.dumps(
             {
@@ -749,7 +712,7 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
                     "UNREACHABLE) decide. Only the probe can tell a missing credential (a human must "
                     "act) from a wrong hostname (nobody needs to sign in)."
                 ),
-                "sources": pending_sources,
+                "sources": sources,
                 "applied": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             },
             indent=2,
@@ -757,48 +720,93 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
         encoding="utf-8",
     )
 
-    # The sandbox is a SIBLING of fabric/, so it needs no grant and no particular ordering - see
-    # probe_dir(). Created before the platform branch: the probe needs somewhere to build on every
-    # platform, and only the ENFORCEMENT is Windows-specific, not the workflow.
-    probe = probe_dir(migration)
+
+def apply_block(migration: Path, sources: list[str], force_scope: bool = False) -> int:
+    """Resolve exact proof/permission or establish the barrier: 0 completed, 1 failed, 2 invalid.
+
+    No successful arm is audited before the marker and every platform deny have succeeded.
+    Failures keep restrictive state, including an audit append failure after enforcement.
+    """
+    pending_sources, skip = sources, None
+    try:
+        refusal_code = _block_refusal(migration, sources, force_scope)
+        if refusal_code is None:
+            entries, _refusal = _read_audit_trail(migration)
+            pending_sources, skip = _rearm_decision(migration, sources, entries, force_scope)
+            if skip is None and set(_marker_sources(migration)) - set(sources):
+                raise ValueError("re-arm would drop existing marker sources; retry with their complete scope")
+    except (OSError, ValueError) as exc:
+        log.error("Could not validate credential-gate target/scope: %s", exc)
+        refusal_code = 2
+    if refusal_code is not None:
+        return refusal_code
+    if skip:
+        log.warning("Gate NOT re-applied: %s.", skip)
+        return 0 if _audit(migration, "block-skipped", skip) else 1
+    try:
+        directories = denied_dirs(migration)
+        probe = probe_dir(migration)
+        _write_block_marker(migration, pending_sources)
+    except OSError as exc:
+        log.error("Could not prepare the credential-gate directories/marker: %s", exc)
+        return 1
 
     if platform.system() != "Windows":
         log.warning("Non-Windows: marker written, but ACL enforcement is Windows-only here.")
-        log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
-        # Same `sources=` detail as the enforced path. Without it `_last_block_sources` cannot read
-        # this entry, so the redundant-re-arm check fails closed forever on non-Windows.
-        _audit(migration, "block-marker-only", _sources_detail(pending_sources), sources=pending_sources)
-        return 0
+        action = "block-marker-only"
+    else:
+        if not _apply_denies(directories):
+            _audit(migration, "violation", "credential-gate deny application failed; restrictive state retained")
+            return 1
+        action = "block"
 
-    failed = 0
-    for d in denied_dirs(migration):
-        code, out = _icacls([str(d), "/deny", f"{_user()}:{DENY_RIGHTS}"])
+    log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
+    if force_scope and not _audit(migration, "block-forced-scope", "explicit force-scope arm"):
+        return 1
+    return 0 if _audit(migration, action, _sources_detail(pending_sources), sources=pending_sources) else 1
+
+
+def _apply_denies(directories: list[Path]) -> bool:
+    """Attempt every existing deny operation; retain every successful restriction on failure."""
+    failed = False
+    for d in directories:
+        try:
+            code, out = _icacls([str(d), "/deny", f"{_user()}:{DENY_RIGHTS}"])
+        except (OSError, subprocess.SubprocessError) as exc:
+            code, out = 1, str(exc)
         if code != 0:
             log.error("Could not deny write on %s: %s", d, out)
-            failed += 1
+            failed = True
         else:
             log.info("ENFORCED: write denied on %s", d)
 
-    log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
-    _audit(migration, "block", _sources_detail(pending_sources), sources=pending_sources)
-    return 1 if failed else 0
+    return not failed
 
 
 def _marker_sources(migration: Path) -> list[str]:
     """Source list currently named by the blocking marker, or an empty list when unreadable."""
     try:
-        payload = json.loads((migration / MARKER).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        payload = json.loads(
+            (migration / MARKER).read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite,
+        )
+    except (OSError, ValueError, _DuplicateJsonKey, _NonFiniteJsonConstant):
         return []
     marker_sources = payload.get("sources") if isinstance(payload, dict) else None
-    return [str(source) for source in marker_sources] if isinstance(marker_sources, list) else []
+    return marker_sources if _valid_audit_sources(marker_sources) else []
 
 
 def _unmatched_earned_sources(migration: Path, marker_sources: list[str], earned_sources: list[str]) -> list[str]:
-    """Earned sources that neither remain in the marker nor have prior source-level evidence."""
-    states, _authorized = _earned_sources(migration)
+    """A re-probed sibling can pair its new measurement even when only another key remains marked."""
+    entries = _audit_entries(migration)
+    tracked, _authorized = _source_ledger(entries or [], tuple(earned_sources))
     marker_set = set(marker_sources)
-    return [source for source in earned_sources if source not in marker_set and not states.get(source)]
+    return [
+        source
+        for source, state in tracked.items()
+        if source not in marker_set and not (state["earned"] or state["data_ok"] is not None)
+    ]
 
 
 def clear_block(migration: Path, reason: str, earned: bool = False, sources: list[str] | None = None) -> int:
@@ -851,8 +859,10 @@ def clear_block(migration: Path, reason: str, earned: bool = False, sources: lis
     return 0
 
 
-def _override_is_authentic(migration: Path, *, entries: list[dict] | None = None) -> bool:
-    """Require the override FILE and a canonical authorization; either alone earns nothing.
+def _override_is_authentic(
+    migration: Path, *, entries: list[dict] | None = None, live_keys: tuple[str, ...] | None = None
+) -> bool:
+    """Authenticate exact keyed arm epochs, not an expanded current-root scope.
 
     The assessor supplies its already-validated same-root snapshot, avoiding a second mutable read
     between its epoch fold and authorization decision. authorize() owns the process-lineage guard.
@@ -861,9 +871,19 @@ def _override_is_authentic(migration: Path, *, entries: list[dict] | None = None
         return False
     if entries is None:
         entries = _audit_entries(migration)
-    if entries is None:
+    if entries is None or any(entry["action"] == "block-forced-scope" for entry in entries):
         return False
-    return any(entry.get("action") == "authorize" for entry in entries)
+    if live_keys is None:
+        live_keys = tuple(
+            {
+                key
+                for entry in entries
+                if entry["action"] in BLOCK_ACTIONS
+                for key in _entry_sources(entry) or []
+                if SOURCE_KEY_RE.fullmatch(key)
+            }
+        )
+    return bool(live_keys) and _data_access_ledger(entries, live_keys)[1]
 
 
 def _ancestry() -> list[str]:
@@ -942,7 +962,7 @@ def status(migration: Path) -> int:
             _, out = _icacls([str(d)])
             denied = "(DENY)" in out.upper() or ":(DENY)" in out.upper() or "(N)" in out.upper()
             log.info("acl on %s: %s", d.name, "deny-write present" if denied else "no deny ACE")
-    return 1 if blocked and not override else 0
+    return 1 if blocked and not _override_is_authentic(migration) else 0
 
 
 def _unit_state(unit: Path) -> str:
@@ -1042,13 +1062,18 @@ def _has_deny_ace(migration: Path) -> bool:
     """
     if platform.system() != "Windows":
         return (migration / MARKER).exists()
-    for d in denied_dirs(migration, create=False):
-        if not d.exists():
-            continue
-        _, out = _icacls([str(d)])
-        if "(DENY)" in out.upper():
-            return True
-    return False
+    directories = denied_dirs(migration, create=False)
+    try:
+        for d in directories:
+            if not d.is_dir():
+                return False
+            code, out = _icacls([str(d)])
+            if code != 0 or "(DENY)" not in out.upper():
+                return False
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.error("Could not establish active credential-gate enforcement: %s", exc)
+        return False
+    return bool(directories)
 
 
 def _gate_was_ever_applied(migration: Path) -> bool:
@@ -1065,8 +1090,8 @@ def _gate_was_ever_applied(migration: Path) -> bool:
     it fires for every extract-only migration -- i.e. exactly the shape most likely to be run
     offline, where a spurious "do not ship" is most likely to be believed.
 
-    The signal is the audit log: `apply_block` writes a BLOCK_ACTIONS entry before it does anything
-    else, so a gate that was ever applied always left one. Same trust model as `_clear_was_earned`
+    The signal is the audit log: `apply_block` reports success only after a BLOCK_ACTIONS entry
+    follows complete physical enforcement. Same trust model as `_clear_was_earned`
     (an accountability trail, not proof) -- and no weaker, because anyone who could delete the log to
     fake "never gated" could equally append a fake `probe-cleared` to fake "earned".
     """
@@ -1257,6 +1282,11 @@ def _verify_one(migration: Path) -> int:
     marker = (migration / MARKER).exists()
     override_file = (migration / OVERRIDE).exists()
     authentic = _override_is_authentic(migration)
+    if artifacts and authentic:
+        root_keys, root_refusal = _gate_root_live_keys(migration)
+        if root_refusal or not _override_is_authentic(migration, live_keys=tuple(root_keys)):
+            _log_source_mismatch("authentic human model-only authorization does not cover the current root scope")
+            return 3
     deny = _has_deny_ace(migration)
     violations = 0
 
@@ -1275,7 +1305,13 @@ def _verify_one(migration: Path) -> int:
     # no probe ever run. Enforcement cannot prevent that (clear has to exist for teardown), but it
     # must never pass silently, or the guarantee is gone via the front door.
     pre_gate_engine_artifacts, gate_artifacts = _split_pre_gate_engine_artifacts(migration, artifacts)
-    if artifacts and not deny and not _clear_was_earned(migration) and _gate_was_ever_applied(migration):
+    if (
+        artifacts
+        and not deny
+        and not authentic
+        and not _clear_was_earned(migration)
+        and _gate_was_ever_applied(migration)
+    ):
         log.error("GATE VERIFY: UNEARNED CLEAR - artifacts exist, but no successful probe and no")
         log.error("  human authorization is recorded in the audit log. The gate was lifted without")
         log.error("  proving the source is reachable, so this model is UNVALIDATED. Do not ship it.")
@@ -1783,6 +1819,12 @@ def _key_block_code(state: dict) -> str | None:
 
 
 def _data_access_ledger(entries: list[dict], live_keys: tuple[str, ...]) -> tuple[dict[str, str | None], bool]:
+    """Assessment view of the same state fold used by gate clears and physical re-arm."""
+    tracked, authorized = _source_ledger(entries, live_keys)
+    return {key: _key_block_code(state) for key, state in tracked.items()}, authorized
+
+
+def _source_ledger(entries: list[dict], live_keys: tuple[str, ...]) -> tuple[dict[str, dict], bool]:
     """Fold one trusted snapshot by file order, retaining each key's arm/measurement timestamps."""
     tracked = {key: _new_key_state() for key in live_keys}
     authorized = False
@@ -1807,7 +1849,7 @@ def _data_access_ledger(entries: list[dict], live_keys: tuple[str, ...]) -> tupl
             _apply_clear(tracked, sources, timestamp)
         elif action.startswith("probe-"):
             _apply_probe_attempt(tracked, action, sources, timestamp)
-    return {key: _key_block_code(state) for key, state in tracked.items()}, authorized
+    return tracked, authorized
 
 
 def _authorization_state(

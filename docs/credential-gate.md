@@ -363,12 +363,88 @@ reachable minutes earlier, it did not re-probe — it ran `cd <variant>; clear .
 outright. **An unconditional re-arm adds no safety; it manufactures the dead end that makes bypassing
 look reasonable.**
 
-The skip is deliberately narrow, and fails closed on anything it cannot parse:
+The skip is deliberately narrow. Assessment, re-arm and hook proof share **one ordered per-key
+ledger**, not independent interpretations of a historical `probe-cleared` line (#698):
 
-- the gate must be currently **earned** (`probe-cleared` / audit-backed `authorize`) — a bare
-  `manual-clear` still re-arms, so it cannot launder itself into permanent immunity;
-- the source list must be **identical** (order-insensitive) — a newly added live source has no
-  reachability evidence at all, so it still arms the gate.
+- Only stable `source-key:<16 lowercase hex>` identities earn proof. Each key needs an attributable
+  `block`/`block-marker-only` epoch, then keyed `probe-data_ok`, then keyed `probe-cleared`.
+  A newer unmatched `probe-data_ok` invalidates the old clearance until its own clear arrives.
+- Every later non-success attempt invalidates its named key immediately: `probe-operator_required`,
+  `probe-no_credential`, `probe-access_denied`, `probe-unreachable`, `probe-error`, `probe-bad_table`,
+  `probe-skipped`, and `probe-credential_present`. An unkeyed failure invalidates all tracked keys;
+  a different valid key does not invalidate an unrelated sibling.
+- Named arms start new epochs only for their keys. An unattributable arm invalidates all tracked
+  keys. `manual-clear`, `block-skipped`, violations and engine receipts create no proof.
+- Malformed, duplicate, unreadable, foreign-scope or forced-scope audit evidence cannot justify a
+  skip. The authority reads one strict audit snapshot, never drops a bad row to rescue old proof.
+
+**Caller scope is not root discovery.** For `apply_block(root, sources=S)`, the supplied identities
+stay exactly S, in their original order. Root keys R validate membership and reveal unsafe omissions;
+they never fill S, replace its labels, or establish a missing key's epoch. Duplicate/malformed S and
+canonical foreign keys refuse with exit 2. Opaque legacy labels and empty scopes remain physically
+armable exactly as supplied for compatibility, but cannot earn keyed skips or authorization.
+
+Only pending supplied keys enter a new marker; earned siblings keep their evidence. The deny ACL
+is still root-wide. A subset whose supplied keys are all earned may skip only if every omitted
+pending root key is already named by a valid active marker **and** covered by platform enforcement.
+That coverage permits a **skip, not a replacement marker**: when supplied keys also need re-arming,
+omitted pending keys refuse with exit 2, even if the old marker already covers them. On a clear root,
+the same omission refuses with exit 2. The **caller must retry with complete R**; the authority does
+not silently rewrite S or unrelated keys' audit epochs. Every marker-writing path, including legacy,
+forced and untrusted-audit arms, also refuses to drop an existing marker source omitted from S.
+Refusal leaves the existing marker, ACL and audit untouched.
+An exact-key arm may still start an epoch while an omitted root key has no ledger activity at all;
+it creates no epoch or proof for that untouched key. An omitted recorded failure is not untouched,
+even if that key has never had its own arm. Neither untouched nor failed keys permit a keyed skip.
+
+✅ **R1 reproduction (#698):** earn A+B, record newer errors for both, re-arm A+B, then request an
+A-only re-arm and lift after `DATA_OK(A)`. Merely retaining the root-wide deny during that re-arm was
+insufficient: replacing `[A,B]` with `[A]` let the unchanged lift consumer subsequently remove the
+entire barrier while B remained unproved. `test_rearm_subset_cannot_release_an_independently_pending_sibling`
+in `tests/test_probe_earned_clear.py` retains both source permutations, both arm variants and the
+paired no-contraction control. The refused contraction now preserves `[A,B]`; a complete re-probe
+still clears it.
+
+Human model-only authorization is separate from measured proof. It needs the regular authorization
+file and canonical same-root audit covering the exact keyed arm epoch; neither file-only nor
+audit-only permission counts. Later probe errors change data certification but do not revoke valid
+human permission. A later arm or a broadened/new source scope needs current authorization of its own.
+Package acceptance still requires the existing explicit `model_only_unvalidated` policy and
+`model_only` scope; authorization never certifies live data.
+
+**Whole-root artifact verification is stricter than exact-package permission.** When audited
+artifacts exist, `verify(root)` may use the human exemption only if it covers every current live
+root key. Authentic A-only permission after R changes to A+B (or B) is insufficient: verification
+returns **3 / CANNOT ASSESS**, without labeling the permission forged, writing a violation, or
+revoking its original scope. Unchanged A permission still verifies with exit 0 after a newer A
+probe error. Exact-A model-only package assessment remains `unvalidated/structural_only` when A is
+still in R. Artifact-free verification retains its existing exit-0 permission check; that is not
+full-root data certification. These paired controls live in
+`test_rearm_verify_authorization_cannot_widen_to_built_root` and
+`test_rearm_artifact_free_verify_keeps_exact_package_authorization` in `tests/test_credential_gate.py`.
+
+### Re-arm return codes and failure order
+
+| `apply_block` exit | Meaning |
+|---|---|
+| `0` | Authority completed: safe probe-earned or authentic human-authorized `block-skipped`, or a completely applied and audited barrier. It does **not** necessarily mean a physical block was applied. |
+| `1` | Directory, marker, ACL or audit-append failure. Do not build or claim enforcement completed. |
+| `2` | Invalid target/scope/identity, foreign keyed input, unsafe omitted pending keys, or replacement that would drop existing marker coverage. |
+
+Validation and the audit decision precede directory preparation. The marker is written before any
+deny ACL; every deny must succeed before `block` is appended (`block-marker-only` off Windows).
+A marker failure mutates no ACL and records no successful arm. ACL failure retains the marker and
+every successful deny, may append `violation`, never appends a successful arm, and returns 1.
+An audit append failure after physical enforcement also returns 1 while retaining restrictive state:
+an applied but unaudited barrier is not a completed authority operation. No rollback opens writes.
+
+`preflight_source_credentials.py` always calls this authority, even when an authorization filename
+already exists, and checks its exit before claiming enforcement. Its own exit 1 still means live
+sources were classified; authority failure is exit 2. Only the human-only
+`credential_gate.py authorize <dir> --who "<name>"` command from a plain terminal outside Copilot
+authorizes an unvalidated model-only run; creating a file does not.
+**Residual:** `parse_tableau.py` still suppresses the credential-preflight subprocess result.
+Its parser exit is not evidence of an established barrier; that caller change is outside #698.
 
 ### Cleared migrations also shield themselves from unrelated ancestor markers
 
@@ -376,7 +452,9 @@ The hook walks upward from a write target, so a marker placed too high can other
 migration beneath it. A migration that already earned a `probe-cleared` for the **same source list**
 is treated as its own boundary: the hook reads the nearest audit log below an ancestor marker and
 reuses the same transition/source comparison as re-arming. A bare file is never a shield, and neither
-is `manual-clear`; only an audit-backed `probe-cleared` after the latest block counts.
+is `manual-clear`; only the exact supplied keys' current measurement-and-clear pairs count.
+Later blocking attempts revoke that shield. Human build-only permission is never returned as
+probe-earned proof by this shield; the hook's existing authenticated-override path remains separate.
 
 This deliberately stays audit-backed rather than adding a new "cleared" file. A file-only token would
 repeat the override failure mode: agents already forged control files, including via string fragments
