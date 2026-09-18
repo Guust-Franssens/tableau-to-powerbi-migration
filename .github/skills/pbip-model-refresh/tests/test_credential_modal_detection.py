@@ -235,7 +235,10 @@ def visual_runtime(monkeypatch, tmp_path):
             pid, hwnd, owner = map(int, self.argv[2:5])
             window = DesktopWindow("", "", 0, 0, hwnd=hwnd, owner_hwnd=owner, owner_enabled=False)
             try:
-                payload = _credential_modal._capture_exact_image(pid, window, self.cwd / self.argv[5], existing=True)
+                retained = {"process_start": self.argv[6]} if len(self.argv) == 7 else {}
+                payload = _credential_modal._capture_exact_image(
+                    pid, window, self.cwd / self.argv[5], existing=True, **retained
+                )
             except _credential_modal._ImageUnavailable as exc:
                 code = str(exc)
                 payload = {"status": code, "ownership_checks": exc.checks}
@@ -573,6 +576,42 @@ def test_visual_private_stream_requires_real_windows_support(monkeypatch, tmp_pa
     assert not list(tmp_path.iterdir())
 
 
+@pytest.mark.parametrize("phase", ["before", "after_render", "after_write"])
+def test_retained_capture_checks_process_creation_around_the_exact_capture(visual_runtime, monkeypatch, phase) -> None:
+    identity = {"start": "123456"}
+    monkeypatch.setattr(_credential_modal, "process_start_identity", lambda _pid: identity["start"])
+
+    def change():
+        identity["start"] = "123457"  # same PID/HWND/owner, different process incarnation
+
+    if phase == "before":
+        change()
+    else:
+        setattr(visual_runtime.api, phase, change)
+    with pytest.raises(_credential_modal._ImageUnavailable, match="TARGET_CHANGED"):
+        _credential_modal._capture_exact_image(
+            111, owned_dialog(), visual_runtime.root / "prompt.png", process_start="123456"
+        )
+    assert len(visual_runtime.api.captures) == (0 if phase == "before" else 1)
+    assert len(visual_runtime.api.writes) == (1 if phase == "after_write" else 0)
+
+
+def test_retained_child_requires_exact_prompt_name_and_process_creation(monkeypatch, capsys) -> None:
+    seen = []
+
+    def acquire(pid, window, path, **kwargs):
+        seen.append((pid, window.hwnd, window.owner_hwnd, path, kwargs))
+        return {"status": "ACQUIRED"}
+
+    monkeypatch.setattr(_credential_modal, "_capture_exact_image", acquire)
+    for name, start in [("../prompt.png", "123"), ("other.png", "123"), ("prompt.png", "0"), ("prompt.png", "text")]:
+        assert _credential_modal._image_child(["1", "2", "3", name, start]) == 4
+        assert json.loads(capsys.readouterr().out)["status"] == "CAPTURE_FAILED"
+    assert seen == []
+    assert _credential_modal._image_child(["1", "2", "3", "prompt.png", "123"]) == 0
+    assert seen == [(1, 2, 3, Path("prompt.png"), {"existing": True, "process_start": "123"})]
+
+
 def test_visual_enqueue_is_bounded_immutable_and_has_no_acquisition_side_effects(monkeypatch, tmp_path) -> None:
     # Freeze the consumer at its startup boundary so the queue, not a scheduler race, is the oracle.
     monkeypatch.setattr(_credential_modal.threading.Thread, "start", lambda _self: None)
@@ -670,7 +709,8 @@ def test_visual_directory_refuses_renamed_artifacts(tmp_path, marker, checkout) 
 
 @pytest.mark.gui
 @pytest.mark.skipif(sys.platform != "win32", reason="native PrintWindow control is Windows-only")
-def test_visual_native_background_capture_reaches_production_without_focus(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("retained", [False, True], ids=["ephemeral", "retained"])
+def test_visual_native_background_capture_reaches_production_without_focus(monkeypatch, tmp_path, retained) -> None:
     """Real child/GDI/ACL/PNG against a physical-frame oracle; NOACTIVATE, never Desktop."""
     image_decoder = pytest.importorskip("PIL.Image", reason="independent PNG decoder is a repo dev extra")
     native = _NativeWindowProbe("ImageOnly")
@@ -731,12 +771,16 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
     outcome = {}
     thread = None
     previous_dpi = None
+    pause_context = None
+    retained_path = None
     real_print = print
 
     def record(message, **kwargs):
         real_print(message, **kwargs)
         if message.startswith("LOCAL_IMAGE "):
             notices.append(json.loads(message.removeprefix("LOCAL_IMAGE ")))
+        if message.startswith("OPERATOR_PAUSE "):
+            notices.append(json.loads(message.removeprefix("OPERATOR_PAUSE ")))
 
     def pump():
         message = wintypes.MSG()
@@ -773,6 +817,12 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
         assert physical_size == (627, 330), "the independent DWM oracle must describe the complete fixture"
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv(_credential_modal.IMAGE_DIRECTORY_ENV, str(tmp_path))
+        if retained:
+            from _operator_pause import prepare_operator_pause
+            from test_operator_pause import make_run
+
+            monkeypatch.delenv(_credential_modal.IMAGE_DIRECTORY_ENV)
+            pause_context = prepare_operator_pause(*make_run(tmp_path), os.getpid())
         monkeypatch.setattr(_credential_modal, "print", record, raising=False)
         monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: ParkedConnection(released))
         monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-native")
@@ -786,7 +836,12 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
         def run():
             try:
                 outcome["result"] = refresh(
-                    port=1234, tables=None, desktop_pid=os.getpid(), progress_enabled=False, timeout_sec=20
+                    port=1234,
+                    tables=None,
+                    desktop_pid=os.getpid(),
+                    progress_enabled=False,
+                    timeout_sec=20,
+                    operator_pause=pause_context,
                 )
             except BaseException as exc:
                 outcome["error"] = type(exc).__name__
@@ -797,12 +852,20 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
         while not notices and time.monotonic() < deadline:
             pump()
             time.sleep(0.005)
-        assert notices and notices[0]["dialog_hwnd"] == str(hwnd), "the fixture must exercise its intended dialog"
-        assert notices and notices[0]["status"] == "ACQUIRED", "native acquisition never produced usable evidence"
+        assert notices, "native acquisition never produced usable evidence"
+        if retained:
+            assert notices[0]["schema"] == "pbip.operator-pause.v1"
+            assert notices[0]["desktop"]["dialog_hwnd"] == str(hwnd)
+            retained_path = pause_context.run_scratch / "operator-pauses" / notices[0]["pause_id"] / "prompt.png"
+            stream = retained_path.open("rb")  # ordinary viewer, while the producer is still alive
+        else:
+            assert notices[0]["dialog_hwnd"] == str(hwnd), "the fixture must exercise its intended dialog"
+            assert notices[0]["status"] == "ACQUIRED", "native acquisition never produced usable evidence"
+            stream = _credential_modal._open_private_image(tmp_path / notices[0]["path"], existing=True)
         assert thread.is_alive()
         assert ui.GetForegroundWindow() == before, "capture must not alter foreground"
         with (
-            _credential_modal._open_private_image(tmp_path / notices[0]["path"], existing=True) as stream,
+            stream,
             image_decoder.open(stream) as image,
         ):
             outside, inside = image.getpixel((0, 0)), image.getpixel((10, 10))
@@ -832,6 +895,11 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
             assert ui.SetThreadDpiAwarenessContext(previous_dpi), "fixture DPI restoration failed"
     assert outcome.get("result", (False,))[0] is True, outcome
     assert not list(tmp_path.glob("_ui-image-*.png"))
+    if retained_path is not None:
+        until = time.monotonic() + 3
+        while retained_path.exists() and time.monotonic() < until:
+            time.sleep(0.01)
+        assert not retained_path.exists(), "normal successful refresh must clean its exact retained pause"
 
 
 class ParkedConnection:
