@@ -258,9 +258,11 @@ restamped to make it acceptable. Existing source/image identity, seal and readin
 still apply. Privacy screening reuses the host-location and credential detectors; it does not prove
 arbitrary prose or pixels secret-free. Construction is not `START_READY`.
 
-❌ **Blocking dependency: #664.** The final `check_unit` consumer does not yet share the canonical
-manual-reference name/type interpretation. Entry readiness does not establish usable final manual
-completion; PR #658's producer/grouper corrections do not close that separate consumer issue.
+✅ **#664 is resolved by #672:** `check_unit` shares canonical manual-reference name/type
+interpretation with reference readiness. Accepted manual evidence can serve both consumers at its
+existing layout/text ceiling. **START_READY is not Phase-2 COMPLETE**: caller-pinned final evidence
+and every remaining data, numeric, visual and history obligation still apply. Capture/adoption or
+an existing manifest alone authorizes neither dispatch nor completion.
 
 ✅ API/cache policy belongs to the **selected failed leg**, not the newest batch's top-level
 metadata. Grouping preserves the winning leg's `rest_api_version`, deriving it from that capture's

@@ -473,14 +473,26 @@ error, not bad luck. Note your PID when you open one, and close only what you op
 ### 1.5 Write the brief
 
 Per `AGENTS.md`, the brief is a **file**, not a conversation: a closed terminal takes the session's
-entire working memory with it. Put it at `migrations/workbooks/<slug>/migration-brief.md` and record
-the four answers that cannot be inferred:
+entire working memory with it. Put it at `migrations/workbooks/<slug>/migration-brief.md`.
+Ask the **six intake choices together in one message**; reuse recorded answers and **ask only missing choices**:
 
 1. the plan from §2 — this ordering, these workbooks, this destination workspace;
 2. **autonomy** — `guided` / `standard` (default) / `autopilot`;
 3. **fidelity bar** — faithful re-creation, or modernise where Power BI is better;
 4. **if we hit a wall — stop, or degrade?** (pre-authorising the fallback is what lets an unattended
-   run survive one).
+   run survive one);
+5. **refresh strategy** — `scripted` (default) / `operator` / `xmla`;
+6. **Numeric comparison scope (`numeric_obligation`)** — `none` (explicit commission without
+   numeric comparison) or `required` (numeric comparison is owed)? This is commissioned scope,
+   not a numeric result or a completion verdict.
+
+**Numeric scope has no default:** without the human's `none` or `required`, **stop before packaging**;
+never infer or guess it.
+
+Before `package_unit.py`, write complete exact `phase1-start-ready/v2` frontmatter with exactly five
+string keys: `schema`, `unit`, `scope`, `fallback_authorization` and `numeric_obligation`. Match the
+selected unit and topology scope and record the human choices; keep other answers in the narrative,
+not extra policy keys. Use the [existing v2 contract](../scripts/README.md#current-packaged-numeric-scope-authority-363).
 
 No autonomy level clears a credential wall — that is a modal sign-in dialog no automation can fill.
 
@@ -960,26 +972,47 @@ unit path**, and getting one wrong is silent: `check_reference_readiness.py` ret
 `CANNOT_ESTABLISH` (exit 3), which reads as *"this unit is broken"* rather than *"you did not tell
 me where the workbook is"* (issue #446).
 
-This handoff is **after deterministic emission**; conversion output is not agentic dispatch
-readiness. Apply the authoritative [conversion, dispatch, and fidelity boundaries](reference-readiness.md#conversion-dispatch-and-fidelity-boundaries),
-before handing off the constructed package. Construction is only `ASSEMBLED`; final Phase-1
-dispatch requires the current package-only `START_READY` result.
+This handoff is **after deterministic emission**. In the supported Migrate/Continue route the
+dispatcher and `tableau-migrator` own complete preparation, not just construction. The customer selects
+the exact run/unit and supplies real intent/evidence; the orchestrator derives the ordinary paths
+from that selected run, never the latest run. The following commands are technical details of that
+route, not a second front door. Apply the authoritative
+[conversion, dispatch, and fidelity boundaries](reference-readiness.md#conversion-dispatch-and-fidelity-boundaries).
+Construction is only `ASSEMBLED`; binding is not dispatch permission.
 
 ```powershell
-python scripts\package_unit.py --bundle _bundle --unit <Unit> --brief <unit-specific-v2-brief> `
+python scripts\package_unit.py --bundle <selected-run>\bundle --unit <exact-unit> --brief <unit-specific-v2-brief> `
+    --assets <selected-run>\assets --gate-root <selected-run>\bundle `
     --reference migrations\workbooks\<slug>\reference `
-    --out _runs\<NNN>-<slug>\packages `
-    --json _runs\<NNN>-<slug>\packages\packaging.json
-# After construction and original data proof, bind separately when applicable:
+    --out <selected-run>\packages
+# After source/reference/brief/provider/data authority and construction, bind when applicable:
 python scripts\set_data_folder.py --package <absolute-package>
 # Final Phase-1 readiness (stdout-only JSON; never a file-valued --json):
-python scripts\check_reference_readiness.py _runs\<NNN>-<slug>\packages\<Unit> --json -
+python scripts\check_reference_readiness.py <absolute-package> --json - --quiet
 # Diagnostic work, not COMPLETE:
 python scripts\check_unit.py _runs\<NNN>-<slug>\packages\<Unit>
 # After final-v3 evidence: H is supplied by the caller, never discovered on disk.
 python scripts\check_unit.py <package> --scope all --receipt-sha256 <caller-held-final-sha256>
 python scripts\promote_unit.py --package <package> --slug <slug> --receipt-sha256 <caller-held-final-sha256>
 ```
+
+**Dispatch barrier:** follow the executable guard in `tableau-migrator` step 7. Parse exactly one
+fresh stdout JSON object from the complete **package-only** cohort; require **process exit == 0
+AND status == "START_READY"** before any validator or builder. Missing/malformed/multiple JSON,
+process/JSON disagreement or any other status blocks. ASSEMBLED, BOUND, ordinary READY,
+NOT_APPLICABLE, stored status, todo completion and package exit 0 are not substitutes.
+On Continue, inspect/recheck the selected packages, including pre-existing ASSEMBLED output;
+never substitute historical success or automatically discard, overwrite or reseal edited work.
+
+Only explicit **Export diagnostics** selects `package_unit.py --assemble-only`. That output is
+diagnostic-only ASSEMBLED / NOT_EVALUATED, and no agent was dispatched. Default Migrate/Continue
+must **never fall back** to it. The final checker is AVAILABLE; the constructor did not evaluate it.
+Default low-level `--quiet` stays silent; explicit `--assemble-only --quiet` retains its notice.
+The **orchestrator always prints a terminal outcome, even with quiet helpers**: exact run/unit,
+discovered inputs (including absences), completed stages, blocking stage, authoritative verdict/exit,
+and **one executable next action**. Resolve the actual prerequisite first: missing references need
+the selected source's exact capture/adoption command, not binding. Use the existing authority's
+finding; do not infer credential permission or numeric `none`.
 
 `--reference` is optional and accepts one existing manual-capture `reference\` directory for exactly
 one unambiguous workbook occurrence in the engine report, with no workbook/datasource kind collision.
@@ -1014,9 +1047,10 @@ dropped files: only members already declared by its preserved manifest can enter
 Construction remains diagnostic; all ordinary binding, role-identity and final package
 `START_READY` obligations still apply.
 
-❌ **Final manual completion remains blocked by #664:** `check_unit` still interprets canonical
-manual names/types differently from the reference/readiness authority. The producer/grouper fix in
-PR #658 does not fix that consumer or make an entry-ready manual package final-complete.
+✅ **#664 is resolved by #672:** `check_unit` now shares canonical manual-reference name/type
+interpretation with reference readiness. Accepted manual evidence can serve both consumers at its
+existing layout/text ceiling. **START_READY is not Phase-2 COMPLETE**: caller-pinned final evidence
+and every remaining data, numeric, visual and history obligation still apply.
 
 The last two commands use **identical exact lowercase 64-hex H**, without a prefix. Only the
 all-scope checker may return COMPLETE/0; tokenless all-scope and every layer scope are not COMPLETE.
@@ -1029,13 +1063,14 @@ latest-ever snapshot, durable persistence or receiving-machine proof. Full
 `--force` conflicts with H before effects; force never overrides shipment guards and records exactly:
 **PROMOTED unchecked; Phase-2 COMPLETE was not established.**
 
-For a shared datasource, construct **each unit separately with its own current v2 brief**. The
-consumer construction command also receives `--provider-package <absolute-provider>`. Then:
+For a shared datasource, construct **provider first**, then each consumer separately with its own
+current v2 brief and `--provider-package <absolute-provider>`. The retained #562 dependency authority
+and S2 determine the full cohort, with **no name/spec fallback**. Then:
 
 ```powershell
 python scripts\set_data_folder.py --package <absolute-provider>
 python scripts\set_data_folder.py --package <absolute-consumer> --provider-package <absolute-provider>
-python scripts\check_reference_readiness.py <provider-package> <consumer-package>
+python scripts\check_reference_readiness.py <provider-package> <consumer-package> --json - --quiet
 ```
 
 The final command emits one privacy-safe JSON result and never performs those mutations for you.

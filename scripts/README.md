@@ -136,8 +136,10 @@ The generated package README reports the actual brief's numeric obligation: expl
 does not make optional numeric comparison a prerequisite to permitted visual work; `required`
 remains owed and unknown stays unknown. Images or missing CSV never imply a waiver.
 See [reference capture](../docs/reference-capture.md) for the complete handoff and admission route.
-**Blocking dependency #664 remains:** the final `check_unit` manual-name/type consumer is a separate
-fix; PR #658 alone does not make final manual-reference completion usable.
+**#664 is resolved by #672:** `check_unit` shares canonical manual-reference name/type interpretation
+with reference readiness. Accepted layout/text evidence can serve both consumers without an upgrade
+of its ceiling. **START_READY is not Phase-2 COMPLETE**; caller-pinned final evidence and all remaining
+data, numeric, visual and history obligations still apply.
 
 ### Package-local review iteration commands
 
@@ -545,6 +547,17 @@ assembly remains **ASSEMBLED**, and applicable binding inspections remain **UNVA
 
 ### S2 package preparation
 
+The supported dispatcher/`tableau-migrator` Migrate/Continue route owns construction, applicable
+binding and the final current package-only check. Keep the explicit selected run and exact unit;
+never choose the latest run. Derive paths from that run, not from a stored readiness result.
+Construct provider first with each unit's own brief, bind using the same exact provider roots, then
+run `check_reference_readiness.py <provider-package> <consumer-package> --json - --quiet` on the
+complete current cohort (one package for an owned model). The retained #562 authority and S2 select
+providers, with no name/spec fallback. The executable guard is in `tableau-migrator` step 7.
+No validator/builder dispatch unless **process exit == 0 AND status == "START_READY"** in exactly one
+fresh JSON object. Malformed/multiple/missing JSON, disagreement, ASSEMBLED, BOUND, ordinary READY,
+NOT_APPLICABLE, stored status and completed todos block. Preserve edit refusal on Continue.
+
 `package_unit.py --brief` requires **one selected unit**; use a separate invocation and brief per
 unit, not one brief broadcast over an estate. The typed unit/scope and whole-message host-location
 and credential containment checks run before assembly. Unsafe text is refused without copying,
@@ -554,6 +567,20 @@ the legacy fallback only when that path is absent). The raw handover's portable 
 agree before the separate shipped handover is redacted. The selecting row stays attached to the
 walked path through digest validation; wrong/foreign paths, unresolved declared assets and ambiguous
 rows or candidates refuse.
+
+A current per-unit brief starts with this v2 metadata, followed by the chosen fidelity/autonomy/
+refresh instructions. Replace the unit and scope with the commissioned values. `required` is an
+example, not permission to guess the numeric obligation; only an explicit user decision earns `none`.
+
+```toml
++++
+schema = "phase1-start-ready/v2"
+unit = "<exact-unit>"
+scope = "model_and_report"
+fallback_authorization = "stop"
+numeric_obligation = "required"
++++
+```
 
 ### Construction status (#614)
 
@@ -627,9 +654,20 @@ Syntax errors, missing mandatory switches, an invalid bundle and unknown units r
 usage exit 2, outside occurrence reporting; they do not replace a prior report. Exits 1 and 4 are
 not reused for brief refusal.
 
-**ASSEMBLED is never START_READY.** Output records dispatch readiness as unavailable and
-`NOT_EVALUATED`; #622 and the final #562 consumer own that later decision. The command creates no
-dispatch authorization and does not call or reimplement `check_reference_readiness.py`.
+**ASSEMBLED is never START_READY.** The existing `dispatch_readiness` object records
+`availability: AVAILABLE` (the final package checker exists) and `status: NOT_EVALUATED` (this
+constructor did not run it). Its message says diagnostic construction dispatched no agent and the
+complete current cohort still needs START_READY with process exit 0. No dispatch boolean, schema
+or aggregate state is added; construction neither calls nor reimplements the final checker.
+
+Only explicit **Export diagnostics** selects `--assemble-only` in the orchestrated route; ordinary
+Migrate/Continue failure must **never fall back** to it. Default and explicit low-level construction
+retain the same totals, exits, file sets and nonvolatile bytes, apart from `mode.explicit`.
+Default low-level `--quiet` remains silent; explicit quiet diagnostics retain the terminal notice.
+The **orchestrator always prints a terminal outcome, even with quiet helpers**: exact run/unit,
+discovered inputs, completed stages, blocking stage, authoritative verdict/exit and **one executable
+next action** addressing that stage. Source/reference/brief/provider/data authority precedes binding;
+an existing manifest or package is not a stored permission to dispatch.
 
 `package_role_identity.py` re-runs no-follow S1 at the S2 entry seam rather than trusting an earlier
 clearance. It reads **package-local P through `VerifiedPackage.read_verified_member`**, using the
@@ -1199,7 +1237,7 @@ dialog and can make a healthy bridge look broken.
 | `bundle_corpus.py` | Shared helper for locating shipping `.Report` and `.SemanticModel` folders. Keeps the `pbip/`-first bundle rule in one place so artifact gates and `check_unit.py` do not grow copy-pasted `find_reports()` / `find_models()` variants. Also holds `classify_target()`, the no-follow **package-boundary classifier** every gate consults before it resolves or discovers anything. |
 | `package_source.py` | Internal pure projection (#558), consumed only by `check_reference_readiness.py`: S2's root-bound handoff returns the exact declared Tableau asset role, kind and SHA, or preserves a prerequisite refusal. No discovery, file reads, hashing or ancestor lookup. Workbook consumers keep their own workbook source even when their model belongs to a datasource provider. Public source paths are package-relative; package `--source` is a fixed usage refusal before any following check. |
 | `package_filesystem.py` | Library only, imported by `check_reference_readiness.py`. Proves a self-contained package's root `package-manifest.json` is strict readable JSON whose `contents.files` describes **exactly** the regular files under it, and that each still hashes to the recorded SHA-256. Strict parse (duplicate keys refused at any depth, `NaN`/`Infinity` refused), canonical package-relative POSIX keys (backslash, absolute, UNC, drive-qualified, `..`, control characters, trailing dot/space, reserved devices incl. `COM¹`, case/trailing aliases, and every character no Windows filename may hold — `< > : " \| ? *` — all refused, by **ordinal** so an unsafe spelling is never echoed), then one top-down `os.scandir`/`lstat` walk where a reparse point is a finding **and** a dead end. It never calls `resolve`/`rglob`/`is_file`/`is_dir`/`exists` and never opens a path built from a manifest key, so bytes outside the package are never read. Unassessable is a state of its own, never clean. ⚠️ The manifest is unsigned and excludes itself, so this detects accidental damage and confused composition, **not** an adversary who rewrites a file and its manifest entry together. |
-| `package_role_identity.py` | Library only, imported by `check_reference_readiness.py`. The **role and identity** half of the entry gate (#562 S2): it runs after the boundary classifier and after `package_filesystem.py`, and answers whether a package carries exactly the roles its kind and topology require and whether every stable identity claim those roles make agrees. It verifies a **cohort**, because a workbook that points at a Tableau PUBLISHED datasource has no model of its own and cannot prove its provider from one package - `check_reference_readiness.py <provider-package> <consumer-package>` is one operator command that gives the verifier the set it needs. Role states are `resolved` / `not_applicable` / `missing` / `ambiguous` / `mismatch`, and only `resolved` or an **earned** `not_applicable` passes. ⚠️ **A role is a DECLARATION the bytes confirm, never a discovery**: deleting `artifacts.asset` while the file remains is `missing`, and the file is not rediscovered by scanning `assets/`, by reading the handover slice's `source_id` or by matching a display name - that rediscovery is the fail-open this slice closes (measured on master: the entry gate returned `READY 4/4`, exit 0). ⚠️ **The two Tableau LUID namespaces are typed and never interchangeable** - a workbook LUID in a datasource's provenance (or the reverse) is a category error, not a spelling difference. Provider matching is datasource LUID first, then the exact `<site>/<name>` published key only when a LUID is genuinely unavailable on both sides; `bound_datasource`, `published_ds_name`, folder stems and captions are diagnostics and admit nothing. It **returns no source `Path` and performs no source search** - that is #558 - writes nothing into a package, and refuses rather than raises, so no host path escapes in a traceback. It re-runs the no-follow walk and opens only paths that walk produced, so a manifest key is never joined onto the root. | consumed by the entry gate; called directly only by its own tests |
+| `package_role_identity.py` | Library only, imported by `check_reference_readiness.py`. The **role and identity** half of the entry gate (#562 S2): it runs after the boundary classifier and after `package_filesystem.py`, and answers whether a package carries exactly the roles its kind and topology require and whether every stable identity claim those roles make agrees. It verifies a **cohort**, because a workbook that points at a Tableau PUBLISHED datasource has no model of its own and cannot prove its provider from one package - `check_reference_readiness.py <provider-package> <consumer-package>` is one operator command that gives the verifier the set it needs. Role states are `resolved` / `not_applicable` / `missing` / `ambiguous` / `mismatch`, and only `resolved` or an **earned** `not_applicable` passes. ⚠️ **A role is a DECLARATION the bytes confirm, never a discovery**: deleting `artifacts.asset` while the file remains is `missing`, and the file is not rediscovered by scanning `assets/`, by reading the handover slice's `source_id` or by matching a display name - that rediscovery is the fail-open this slice closes (measured on master: the entry gate returned `READY 4/4`, exit 0). ⚠️ **The two Tableau LUID namespaces are typed and never interchangeable** - a workbook LUID in a datasource's provenance (or the reverse) is a category error, not a spelling difference. The acquired published-datasource LUID is the provider selection authority; the exact `<site>/<name>` key only corroborates the selected candidate. **Key-only selection is never allowed.** Missing acquired LUID remains cannot-establish; a provider without the required LUID is `provider_missing`, never rescued by its key. `bound_datasource`, `published_ds_name`, folder stems and captions are diagnostics and admit nothing. It **returns no source `Path` and performs no source search** - that is #558 - writes nothing into a package, and refuses rather than raises, so no host path escapes in a traceback. It re-runs the no-follow walk and opens only paths that walk produced, so a manifest key is never joined onto the root. | consumed by the entry gate; called directly only by its own tests |
 | `path_flavour.py` | **Answers a path question in the flavour of the LITERAL, not of the host** — imported by `package_unit.py` and `set_data_folder.py`, library only. Containment, separator choice, composition and leaf extraction all change answer with flavour, so a packager that reads a customer's `.tmdl` on one platform and ships it to another must not let the machine decide. Three measured defects share that shape (blind review of #463 round 2): `_inside()` used `PureWindowsPath` unconditionally, whose comparison is **case-insensitive**, so on Linux a source at `/data/Extract.csv` was judged inside a package at `/DATA` and was skipped by localization *and* by the post-rewrite scan — silence on a data-loss-shaped question; `_classify_source()` used the host `Path`, and on Windows `Path("/Users/<name>/README.md").is_file()` resolves against the **current drive**, so a foreign macOS literal matched local bytes that were then packaged as the customer's source; and `set_data_folder.py` composed with a literal backslash, writing `/tmp/package\data\...` on POSIX as one segment, reporting the folder missing and exiting 1 *after* the file was already rewritten. ⚠️ **Nothing here touches the filesystem** — probing a UNC literal blocks on SMB name resolution for minutes (#462 measured one test module going 30 s → 52 min), and `Path.resolve()` on a foreign literal is the reinterpretation above. Callers that must probe ask `is_host_native()` first. |
 | `engine_source.py` | **The one place the deterministic conversion engine is resolved** (issue #107). Returns the installed `tableau-fabric-skills@tableau-collection` plugin — the single canonical source — and **raises** rather than falling back to a second copy, because a silent fallback is what let 2.113.0 and 2.126.0 build one pipeline between them (deprecated Bing `shapeMap` and a dropped density-map worksheet on one side, `azureMap` + heat layer on the other, with nothing in the output saying which ran). Also names every non-canonical tree it can see, which is how `preflight.ps1` blocks on a second install, and supplies the provenance block (`root`/`version`/`canonical`) that `run_estate.py` stamps into every bundle's `engine-output-receipt.json`. `--json` is preflight's input. |
 | `check_engine_receipts.py` | Walks bundle receipts and WARNs when their recorded `engine.version` differs from the installed canonical engine. `preflight.ps1` surfaces this advisory check, so operators can re-run stale bundles between migrations without blocking work already in flight. |
