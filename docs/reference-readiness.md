@@ -462,11 +462,16 @@ verified by `scripts/package_role_identity.py`.
 It asks one question: does this package carry exactly the roles its **kind** and **topology** require,
 and do the identity claims those roles make agree? Each role is `resolved`, an **earned**
 `not_applicable`, or one of `missing` / `ambiguous` / `mismatch`. Only the first two pass.
+Published dependencies additionally admit `cannot_establish`, which never passes and is **not**
+a general role state.
 
 **An earlier S1 observation is not a reusable clearance.** S2 re-runs the existing no-follow S1
 verifier at its entry seam, even when the caller supplies `VerifiedPackage`. A changed, missing or
 reparse-replaced package is a typed block, not a traceback. This is a fresh entry check, not a
 transactional filesystem snapshot or a second revision/digest registry.
+Both the declared spec and package-local `source-provenance.json` are read through the existing
+`VerifiedPackage.read_verified_member` capability. S2 parses those held bytes, never reopens the
+walked provenance path to select a provider, and cannot mix a replacement with an earlier seal.
 
 **Identity JSON is strict at every read.** Duplicate keys, non-finite/overflowing numbers and
 incorrect container/scalar types block. Invalid collection rows are not filtered away: every declared
@@ -496,21 +501,40 @@ reading the handover slice's `source_id`, or by matching a display name. That re
 fail-open this slice closes: measured on the audited master, exactly that package returned `READY
 4/4`, exit 0.
 
-⚠️ **Identity is hierarchical, and a weaker axis never replaces an available stronger one.** The
+⚠️ **Identity is typed; diagnostic names never become provider authority.** The
 source SHA-256 (S1-verified) joins asset → provenance row → spec filename. The Tableau LUID, when one
 exists, must agree across provenance, the harvester's `<luid>_<name>` filename prefix and every
 oracle view. The two LUID namespaces are **typed**: a datasource LUID in a workbook's provenance is a
-category error, not a spelling difference. A published consumer resolves to its provider by
-datasource LUID first and by the exact `<site>/<name>` published key only when a LUID is genuinely
-unavailable on both sides; `bound_datasource`, `published_ds_name`, folder stems and captions are
-diagnostics and admit nothing. A matching LUID does not erase a conflicting published key. An exact
-key cannot admit a LUID-bearing provider when the consumer has no LUID.
+category error, not a spelling difference.
+
+**Current acquired P, not a spec LUID, selects a published provider.** P is the exact optional
+`origin.published_dependencies` block (`tableau-published-dependencies/v1`) on the single provenance
+row matched to the held workbook filename and SHA. Its source SHA and enclosing workbook-origin
+LUID must agree; `source_match` is exactly `sha256`, `revision_same` or `unestablished`. Rows are
+nonempty and strictly increasing by physical `source_ordinal`. `resolved` carries count 1 and one
+canonical datasource LUID; `ambiguous` carries count >1 and no LUID; `cannot_establish` carries a
+null count and no LUID. An unestablished source permits only cannot-establish rows. Unknown fields,
+malformed types/cardinalities and contradictory source/workbook claims block.
+
+The held migration spec still owns **topology, the occurrence denominator and exact published key**.
+Every P row joins one spec occurrence by `source_ordinal` **and exact `published_key`**, with equal
+counts. A spec LUID is optional corroboration only: if present on a resolved occurrence it must
+equal the acquired datasource LUID. Missing/unestablished P cannot be rescued by spec LUIDs or keys;
+P cannot invent a dependency absent from the spec. Repeated physical occurrences remain separate
+results and may share one selected provider ordinal.
+
+Only supplied **datasource** packages with that acquired LUID are candidates (canonical UUID hex
+is case-insensitive). Zero candidates is `provider_missing`, or `provider_luid_contradiction` when
+an exact-key provider carries a different LUID. Multiple LUID candidates are `provider_ambiguous`;
+caller order never selects the first. The sole candidate must also carry the **exact** published
+key: missing/different keys are `provider_key_contradiction`. `bound_datasource`, display names,
+package names, folder stems, captions and key-only matches admit nothing.
 
 ⚠️ **A cohort, because a consumer cannot prove its provider alone.** The verifier takes the whole
 invocation, so `check_reference_readiness.py <provider-package> <consumer-package>` — still one
 operator command — is what closes a shared-datasource pair. A consumer supplied on its own is
-BLOCKED, because "I cannot see a provider" and "there is no provider" are the same answer from one
-package.
+BLOCKED: resolved P without a supplied provider is `provider_missing`; missing P is instead an
+authority cannot-establish, not a reason to search siblings or ancestors.
 
 Every provider must first pass its **own S2 roles**. A consumer then reads its walked
 `definition.pbir` strictly, cross-checks `model_binding`, and compares the complete normalized
@@ -621,9 +645,26 @@ Results stay in input order, including blocked roots; bind them with the supplie
 not `unit`. Two distinct providers can legitimately have the same unit name. The opaque
 `provider_reference(unit)` in the data projection is a privacy token, **not** a unique root identifier.
 
-**Failing S2 is `FINDINGS`, exit 1 — not `CANNOT_ESTABLISH`.** S1 refuses because the package cannot
-be described at all; here it describes itself perfectly well and what it describes is wrong, which is
-a defect an operator fixes. Either way no evidence is collected and it is not a pass.
+The public gate stops at **`role_identity` before source, data-access, reference or binding helpers**:
+
+| S2 condition | Public verdict / exit | Stable reason |
+|---|---|---|
+| Spec-declared consumer with no P | `CANNOT_ESTABLISH / 3` | `published_dependency_authority_missing` |
+| Valid P cannot-establish row or unestablished source | `CANNOT_ESTABLISH / 3` | `published_dependency_authority_unestablished` |
+| Ambiguous P | `FINDINGS / 1` | `published_dependency_authority_ambiguous` |
+| Malformed P or disagreement with source/workbook/spec | `FINDINGS / 1` | `published_dependency_authority_invalid` / `published_dependency_authority_contradiction` |
+| Missing, ambiguous, foreign, blocked, model-less or misbound provider | `FINDINGS / 1` | Existing named provider finding |
+
+**Any established S2 defect outranks a coexisting cannot-establish.** Neither verdict permits
+dispatch. Model-only fallback cannot authorize missing/unestablished P, and an authorized model-only
+provider still cannot serve a report-only consumer.
+
+**Legacy published consumers must be reacquired/repackaged with current authority.** Reading a
+legacy file does not grant readiness. Do not stamp a guessed LUID or rename a provider to repair it.
+Owned workbooks and standalone datasources with no published consumer occurrences do not need P.
+Carriage alone, successful construction and internal S2 readiness are not final START_READY: the
+brief, source, canonical data access, reference and fresh binding conjunction above still applies.
+`revision_same` establishes the association only; it upgrades no reference grade or data validation.
 
 The JSON verdict carries `role_identity`: the same list-of-blocks shape as `package_integrity`, one
 per assessed package, each with the target `ordinal`, the safe `unit` label, the per-role states, the
@@ -678,8 +719,8 @@ JSON/provenance/handover parsing, filename matching, hashing, existence checks, 
 
 `check_reference_readiness.py` is the sole production consumer. It projects the source **before**
 source parsing, report discovery or reference/oracle grading. Earlier refusals prevent those helpers
-from running: S1 retains `CANNOT_ESTABLISH` and its stable codes; S2 retains `FINDINGS` and its
-role/provider blockers. A missing or internally inconsistent ready handoff is
+from running: S1 retains `CANNOT_ESTABLISH` and its stable codes; S2 returns the authority
+cannot-establish or established role/provider finding described above. A missing or internally inconsistent ready handoff is
 `source_handoff_invalid`, never a reason to search for another file.
 
 Root binding uses the **case-sensitive lexical identity of the original classified target** through

@@ -483,14 +483,18 @@ def test_post_s2_changes_refuse_instead_of_mixing_snapshots(tmp_path: Path, name
 @pytest.mark.parametrize("reverse", [False, True])
 def test_provider_ordinals_and_owned_roles_keep_exact_snapshot_roots(tmp_path: Path, reverse: bool) -> None:
     first = with_data_access(
-        datasource_package(tmp_path / "first", unit="Shared", luid=DS_LUID), source_rows(LIVE), LIVE_PROJECTION
+        datasource_package(tmp_path / "first", unit="Shared", luid=DS_LUID),
+        [{**source_rows(LIVE)[0], "published_datasource": {"key": PUBLISHED_KEY}}],
+        LIVE_PROJECTION,
     )
     second = with_data_access(datasource_package(tmp_path / "second", unit="Shared", luid=WB_LUID), source_rows(FLAT))
     consumer = with_data_access(
         workbook_package(
-            tmp_path / "Consumer", published={"luid": DS_LUID}, binding="../../../first/fabric/Shared.SemanticModel"
+            tmp_path / "Consumer",
+            published={"key": PUBLISHED_KEY},
+            binding="../../../first/fabric/Shared.SemanticModel",
         ),
-        [{**PUBLISHED, "published_datasource": {"luid": DS_LUID}}],
+        [PUBLISHED],
     )
     owned = with_data_access(workbook_package(tmp_path / "Owned", unit="Owned"), source_rows(FLAT))
     roots = [first, second, consumer, owned]
@@ -747,7 +751,8 @@ def test_r1_blocked_s2_cannot_be_reconstructed_as_ready(tmp_path: Path) -> None:
 @pytest.mark.parametrize("target", ["live_source", "unknown"])
 def test_published_row_with_direct_or_review_connection_retains_its_leg(tmp_path: Path, target: str) -> None:
     provider = with_data_access(
-        datasource_package(tmp_path / "Provider", unit="Shared", luid=DS_LUID), source_rows(FLAT)
+        datasource_package(tmp_path / "Provider", unit="Shared", luid=DS_LUID),
+        [{**source_rows(FLAT)[0], "published_datasource": {"key": PUBLISHED_KEY}}],
     )
     connection = {
         "class": "sqlserver",
@@ -759,10 +764,10 @@ def test_published_row_with_direct_or_review_connection_retains_its_leg(tmp_path
     consumer = with_data_access(
         workbook_package(
             tmp_path / "Consumer",
-            published={"luid": DS_LUID},
+            published={"key": PUBLISHED_KEY},
             binding="../../../Provider/fabric/Shared.SemanticModel",
         ),
-        [{"connection": connection, "published_datasource": {"luid": DS_LUID}}],
+        [{"connection": connection, "published_datasource": {"key": PUBLISHED_KEY}}],
     )
     results = pri.verify_phase1_role_identity([provider, consumer])
     assert all(result.is_start_ready for result in results)
@@ -1021,14 +1026,20 @@ def test_mixed_case_sqlproxy_retains_canonical_direct_applicability(
             )
         )
     results = pri.verify_phase1_role_identity(roots)
-    assert all(result.is_start_ready for result in results)
-    assert results[0].topology == ("published_provider" if selected else "standalone_datasource")
+    eligible = selected and publication_metadata
+    assert results[0].is_start_ready
+    assert results[0].topology == ("published_provider" if eligible else "standalone_datasource")
     facts = require_handoff(results[0].data_access_handoff(provider)).facts
     assert tuple(facts) == ((), False, True, False, None)
     assert facts.all_flat
     if selected:
-        assert results[1].topology == "published_consumer" and results[1].dependencies[0].provider_ordinal == 0
-        assert require_handoff(results[1].data_access_handoff(roots[1])).facts.published_only
+        assert results[1].topology == "published_consumer"
+        if eligible:
+            assert results[1].is_start_ready and results[1].dependencies[0].provider_ordinal == 0
+            assert require_handoff(results[1].data_access_handoff(roots[1])).facts.published_only
+        else:
+            assert not results[1].is_start_ready
+            assert results[1].dependencies[0].code == "provider_key_contradiction"
 
 
 @pytest.mark.parametrize(
@@ -1038,7 +1049,10 @@ def test_mixed_case_sqlproxy_retains_canonical_direct_applicability(
 def test_consumer_applicability_preserves_strict_proxy_and_mixed_canonical_facts(
     tmp_path: Path, additional: dict | None, keys: tuple[str, ...], review: bool
 ) -> None:
-    provider = with_data_access(datasource_package(tmp_path / "Provider", unit="Shared"), source_rows(FLAT))
+    provider = with_data_access(
+        datasource_package(tmp_path / "Provider", unit="Shared"),
+        [{**source_rows(FLAT)[0], "published_datasource": {"key": PUBLISHED_KEY}}],
+    )
     rows = [PUBLISHED, *(source_rows(additional) if additional is not None else [])]
     consumer = with_data_access(
         workbook_package(

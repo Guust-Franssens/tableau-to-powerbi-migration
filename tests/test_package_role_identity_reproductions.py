@@ -63,7 +63,7 @@ def cohort(root: Path, *, provider_luid: str | None = DS_LUID) -> tuple[Path, Pa
     provider = datasource_package(root / DS_UNIT, luid=provider_luid, published_key=PUBLISHED_KEY)
     consumer = workbook_package(
         root / WB_UNIT,
-        published={"luid": provider_luid, "key": PUBLISHED_KEY},
+        published={"key": PUBLISHED_KEY},
         binding=f"../../../{DS_UNIT}/fabric/{DS_UNIT}.SemanticModel",
     )
     return provider, consumer
@@ -220,7 +220,7 @@ def test_invalid_published_rows_remain_counted_and_block(tmp_path: Path, publish
     result = pri.verify_phase1_role_identity([provider, consumer])[1]
 
     assert len(result.dependencies) == 2, "a declared row disappeared from the dependency denominator"
-    assert result.dependencies[0].state == "resolved"
+    assert result.dependencies[0].code == "published_dependency_authority_contradiction"
     expected = (
         "published_dependency_identity_missing"
         if published in ({}, {"id": DS_UNIT})
@@ -320,15 +320,19 @@ def test_valid_non_published_source_collections_keep_owned_model_topology(tmp_pa
     assert role(result, "fabric_model").state == "resolved"
 
 
-@pytest.mark.parametrize("provider_luid", [DS_LUID, None], ids=["luid", "published-key"])
-def test_non_published_rows_do_not_hide_a_valid_published_dependency(tmp_path: Path, provider_luid: str | None) -> None:
+def test_non_published_rows_do_not_hide_a_valid_published_dependency(tmp_path: Path) -> None:
     """A legitimate non-published row adds no edge; the valid published row still resolves."""
-    provider, consumer = cohort(tmp_path, provider_luid=provider_luid)
+    provider, consumer = cohort(tmp_path)
     spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
     local = {"id": "local", "connection": {"class": "textscan", "mode": "live"}, "fields": []}
     spec["data_sources"] = [local, *spec["data_sources"], local]
     _write(consumer / "migration-spec.json", spec)
-    reseal(consumer)
+    replace_field(
+        consumer,
+        "source-provenance.json",
+        ("inputs", 0, "origin", "published_dependencies", "rows", 0, "source_ordinal"),
+        1,
+    )
 
     results = pri.verify_phase1_role_identity([provider, consumer])
 
@@ -338,7 +342,7 @@ def test_non_published_rows_do_not_hide_a_valid_published_dependency(tmp_path: P
     assert result.topology == "published_consumer"
     assert len(result.dependencies) == 1
     assert result.dependencies[0].state == "resolved"
-    assert result.dependencies[0].datasource_luid == provider_luid
+    assert result.dependencies[0].datasource_luid == DS_LUID
     assert result.dependencies[0].published_key == PUBLISHED_KEY
 
 
@@ -347,12 +351,17 @@ def test_duplicate_published_rows_do_not_disappear(tmp_path: Path) -> None:
     spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
     spec["data_sources"] *= 2
     _write(consumer / "migration-spec.json", spec)
+    provenance = json.loads((consumer / "source-provenance.json").read_bytes())
+    rows = provenance["inputs"][0]["origin"]["published_dependencies"]["rows"]
+    rows.append({**rows[0], "source_ordinal": 1})
+    _write(consumer / "source-provenance.json", provenance)
     reseal(consumer)
 
     result = pri.verify_phase1_role_identity([provider, consumer])[1]
 
     assert result.verdict == "START_READY", result.blockers
     assert len(result.dependencies) == 2, "every declared row must have a result, even identical rows"
+    assert [row.provider_ordinal for row in result.dependencies] == [0, 0]
 
 
 def test_matching_luid_cannot_override_a_conflicting_published_key(tmp_path: Path) -> None:
@@ -363,18 +372,290 @@ def test_matching_luid_cannot_override_a_conflicting_published_key(tmp_path: Pat
 
     result = pri.verify_phase1_role_identity([provider, consumer])[1]
 
-    assert result.dependencies[0].code == "provider_key_contradiction"
+    assert result.dependencies[0].code == "published_dependency_authority_contradiction"
     assert result.verdict == "BLOCKED"
 
 
-def test_key_fallback_cannot_use_a_provider_with_an_established_luid(tmp_path: Path) -> None:
+def test_spec_luid_cannot_override_acquired_authority(tmp_path: Path) -> None:
     provider, consumer = cohort(tmp_path)
-    replace_field(consumer, "migration-spec.json", ("data_sources", 0, "published_datasource", "luid"), None)
+    replace_field(
+        consumer,
+        "migration-spec.json",
+        ("data_sources", 0, "published_datasource", "luid"),
+        "99999999-9999-9999-9999-999999999999",
+    )
 
     result = pri.verify_phase1_role_identity([provider, consumer])[1]
 
-    assert result.dependencies[0].code == "provider_luid_contradiction"
+    assert result.dependencies[0].code == "published_dependency_authority_contradiction"
     assert result.verdict == "BLOCKED"
+
+
+@pytest.mark.parametrize("spec_luid", [None, DS_LUID])
+def test_missing_authority_cannot_be_rescued_by_spec_identity(tmp_path: Path, spec_luid: str | None) -> None:
+    provider, consumer = cohort(tmp_path)
+    if spec_luid is not None:
+        replace_field(consumer, "migration-spec.json", ("data_sources", 0, "published_datasource", "luid"), spec_luid)
+    provenance = json.loads((consumer / "source-provenance.json").read_bytes())
+    del provenance["inputs"][0]["origin"]["published_dependencies"]
+    _write(consumer / "source-provenance.json", provenance)
+    reseal(consumer)
+
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+
+    assert result.verdict == "BLOCKED"
+    assert result.topology == "published_consumer"
+    assert len(result.dependencies) == 1
+    assert (result.dependencies[0].state, result.dependencies[0].code) == (
+        "cannot_establish",
+        "published_dependency_authority_missing",
+    )
+    assert result.dependencies[0].datasource_luid is result.dependencies[0].provider_ordinal is None
+    assert result.evidence == ()
+    assert not any(row.blocks for row in result.roles), "cannot-establish is a dependency-only state"
+
+
+@pytest.mark.parametrize(
+    "source_match,state,count,expected_state,code",
+    [
+        ("sha256", "cannot_establish", None, "cannot_establish", "published_dependency_authority_unestablished"),
+        ("unestablished", "cannot_establish", None, "cannot_establish", "published_dependency_authority_unestablished"),
+        ("revision_same", "ambiguous", 2, "ambiguous", "published_dependency_authority_ambiguous"),
+    ],
+)
+def test_acquired_non_success_is_not_a_provider_selection_request(
+    tmp_path: Path,
+    source_match: str,
+    state: str,
+    count: int | None,
+    expected_state: str,
+    code: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, consumer = cohort(tmp_path)
+    provenance = json.loads((consumer / "source-provenance.json").read_bytes())
+    authority = provenance["inputs"][0]["origin"]["published_dependencies"]
+    authority["source_match"] = source_match
+    authority["rows"][0] = {
+        "source_ordinal": 0,
+        "published_key": PUBLISHED_KEY,
+        "state": state,
+        "candidate_count": count,
+    }
+    _write(consumer / "source-provenance.json", provenance)
+    reseal(consumer)
+
+    def forbidden(*_args: object) -> None:
+        pytest.fail("non-success acquired authority reached provider selection")
+
+    monkeypatch.setattr(pri, "_provider_matches", forbidden)
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+    assert result.verdict == "BLOCKED"
+    assert (result.dependencies[0].state, result.dependencies[0].code) == (expected_state, code)
+    assert result.dependencies[0].provider_ordinal is None
+    assert result.codes() == (code,)
+
+
+@pytest.mark.parametrize(
+    "keys,value,code",
+    [
+        (("schema",), "unknown/v1", "published_dependency_authority_invalid"),
+        (("source_sha256",), "0" * 64, "published_dependency_authority_contradiction"),
+        (("source_sha256",), True, "published_dependency_authority_invalid"),
+        (("source_sha256",), "A" * 64, "published_dependency_authority_invalid"),
+        (("workbook_luid",), DS_LUID, "published_dependency_authority_contradiction"),
+        (("workbook_luid",), "not-a-uuid", "published_dependency_authority_invalid"),
+        (("source_match",), "name_only", "published_dependency_authority_invalid"),
+        (("source_match",), "unestablished", "published_dependency_authority_invalid"),
+        (("private",), {}, "published_dependency_authority_invalid"),
+        (("rows",), [], "published_dependency_authority_invalid"),
+        (("rows",), {}, "published_dependency_authority_invalid"),
+        (("rows", 0, "source_ordinal"), 1, "published_dependency_authority_contradiction"),
+        (("rows", 0, "source_ordinal"), True, "published_dependency_authority_invalid"),
+        (("rows", 0, "source_ordinal"), -1, "published_dependency_authority_invalid"),
+        (("rows", 0, "source_ordinal"), 1 << 63, "published_dependency_authority_invalid"),
+        (("rows", 0, "published_key"), PUBLISHED_KEY.upper(), "published_dependency_authority_contradiction"),
+        (("rows", 0, "published_key"), None, "published_dependency_authority_invalid"),
+        (("rows", 0, "published_key"), "key\ncontrol", "published_dependency_authority_invalid"),
+        (("rows", 0, "published_key"), "x" * 1025, "published_dependency_authority_invalid"),
+        (("rows", 0, "state"), "missing", "published_dependency_authority_invalid"),
+        (("rows", 0, "state"), "cannot_establish", "published_dependency_authority_invalid"),
+        (("rows", 0, "state"), "ambiguous", "published_dependency_authority_invalid"),
+        (("rows", 0, "candidate_count"), None, "published_dependency_authority_invalid"),
+        (("rows", 0, "candidate_count"), 0, "published_dependency_authority_invalid"),
+        (("rows", 0, "candidate_count"), 2, "published_dependency_authority_invalid"),
+        (("rows", 0, "candidate_count"), 1.0, "published_dependency_authority_invalid"),
+        (("rows", 0, "candidate_count"), True, "published_dependency_authority_invalid"),
+        (("rows", 0, "candidate_count"), 1 << 63, "published_dependency_authority_invalid"),
+        (("rows", 0, "datasource_luid"), None, "published_dependency_authority_invalid"),
+        (("rows", 0, "datasource_luid"), "name", "published_dependency_authority_invalid"),
+        (("rows", 0, "acquisition"), {}, "published_dependency_authority_invalid"),
+    ],
+)
+def test_invalid_or_contradictory_authority_never_selects_a_provider(
+    tmp_path: Path,
+    keys: tuple[str | int, ...],
+    value: Any,
+    code: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider, consumer = cohort(tmp_path)
+    assert all(row.is_start_ready for row in pri.verify_phase1_role_identity([provider, consumer]))
+    replace_field(consumer, "source-provenance.json", ("inputs", 0, "origin", "published_dependencies", *keys), value)
+    assert pri.verify_s1(consumer).integrity.is_clean
+
+    def forbidden(*_args: object) -> None:
+        pytest.fail("invalid or contradictory acquired authority reached provider selection")
+
+    monkeypatch.setattr(pri, "_provider_matches", forbidden)
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+    assert (result.dependencies[0].state, result.dependencies[0].code) == ("mismatch", code)
+    assert result.verdict == "BLOCKED" and result.evidence == ()
+
+
+@pytest.mark.parametrize(
+    "fault", ["extra-row", "reordered", "duplicate-ordinal", "invented-dependency", "datasource-kind"]
+)
+def test_authority_cannot_invent_drop_or_reorder_occurrences(tmp_path: Path, fault: str) -> None:
+    provider, consumer = cohort(tmp_path)
+    path = provider if fault == "datasource-kind" else consumer
+    provenance = json.loads((path / "source-provenance.json").read_bytes())
+    if fault == "datasource-kind":
+        source = json.loads((consumer / "source-provenance.json").read_bytes())
+        provenance["inputs"][0]["origin"]["published_dependencies"] = source["inputs"][0]["origin"][
+            "published_dependencies"
+        ]
+    else:
+        authority = provenance["inputs"][0]["origin"]["published_dependencies"]
+        spec = json.loads((consumer / "migration-spec.json").read_bytes())
+        if fault == "invented-dependency":
+            spec["data_sources"] = []
+        else:
+            authority["rows"].append({**authority["rows"][0], "source_ordinal": 1})
+            if fault != "extra-row":
+                spec["data_sources"] *= 2
+            if fault == "reordered":
+                authority["rows"].reverse()
+            elif fault == "duplicate-ordinal":
+                authority["rows"][1]["source_ordinal"] = 0
+        _write(consumer / "migration-spec.json", spec)
+    _write(path / "source-provenance.json", provenance)
+    reseal(path)
+    results = pri.verify_phase1_role_identity([provider, consumer])
+    result = results[0 if path == provider else 1]
+    code = "published_dependency_authority_" + (
+        "invalid" if fault in ("reordered", "duplicate-ordinal") else "contradiction"
+    )
+    assert code in result.codes()
+    assert result.verdict == "BLOCKED"
+    assert len(result.dependencies) == (
+        0 if fault in ("invented-dependency", "datasource-kind") else 2 if fault != "extra-row" else 1
+    )
+
+
+@pytest.mark.parametrize("published_key", [None, PUBLISHED_KEY.upper(), "other/key"])
+def test_sole_acquired_luid_provider_requires_the_exact_key(tmp_path: Path, published_key: str | None) -> None:
+    provider, consumer = cohort(tmp_path)
+    spec = json.loads((provider / "migration-spec.json").read_bytes())
+    if published_key is None:
+        del spec["data_sources"][0]["published_datasource"]
+    else:
+        spec["data_sources"][0]["published_datasource"]["key"] = published_key
+    _write(provider / "migration-spec.json", spec)
+    reseal(provider)
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+    assert result.dependencies[0].code == "provider_key_contradiction"
+    assert result.dependencies[0].provider_ordinal is None
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_duplicate_acquired_luid_providers_never_choose_input_order(tmp_path: Path, reverse: bool) -> None:
+    provider, consumer = cohort(tmp_path)
+    duplicate = datasource_package(tmp_path / "duplicate", published_key=PUBLISHED_KEY)
+    roots = [provider, duplicate, consumer]
+    if reverse:
+        roots.reverse()
+    result = pri.verify_phase1_role_identity(roots)[roots.index(consumer)]
+    assert result.dependencies[0].state == "ambiguous"
+    assert result.dependencies[0].code == "provider_ambiguous"
+    assert result.dependencies[0].provider_ordinal is None
+
+
+def test_datasource_luid_uses_uuid_case_only_and_never_the_workbook_namespace(tmp_path: Path) -> None:
+    provider, consumer = cohort(tmp_path)
+    acquired = "abcdefab-cdef-abcd-efab-cdefabcdefab"
+    replace_field(provider, "source-provenance.json", ("inputs", 0, "origin", "datasource_luid"), acquired.upper())
+    old = next((provider / "assets").iterdir())
+    new = old.with_name(f"{acquired}_{DS_UNIT}.tdsx")
+    old.rename(new)
+    replace_field(provider, "source-provenance.json", ("inputs", 0, "input", "file"), new.name)
+    replace_field(provider, "migration-spec.json", ("source", "file_name"), new.name)
+    replace_field(provider, "package-manifest.json", ("artifacts", "asset"), f"assets/{new.name}")
+    replace_field(
+        consumer,
+        "source-provenance.json",
+        ("inputs", 0, "origin", "published_dependencies", "rows", 0, "datasource_luid"),
+        acquired.lower(),
+    )
+    collision = workbook_package(tmp_path / "collision", unit="Collision", luid=acquired)
+    results = pri.verify_phase1_role_identity([collision, consumer, provider])
+    assert all(row.is_start_ready for row in results)
+    assert results[1].dependencies[0].provider_ordinal == 2
+    assert results[1].dependencies[0].datasource_luid == acquired
+    without_datasource = pri.verify_phase1_role_identity([collision, consumer])[1]
+    assert without_datasource.dependencies[0].code == "provider_missing"
+
+
+def test_provenance_is_parsed_only_from_the_s1_held_member(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, consumer = cohort(tmp_path)
+    read, observed = pri.VerifiedPackage.read_verified_member, []
+    original = Path.read_text
+
+    def held(self, root, name):
+        member = read(self, root, name)
+        if name == "source-provenance.json":
+            assert isinstance(member, pri.pfs.HeldVerifiedMember)
+            observed.append((root, member.sha256))
+        return member
+
+    def no_reopen(path, *args, **kwargs):
+        assert path.name != "source-provenance.json", "S2 reopened walked provenance instead of parsing held bytes"
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(pri.VerifiedPackage, "read_verified_member", held)
+    monkeypatch.setattr(Path, "read_text", no_reopen)
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+    assert result.is_start_ready, result.codes()
+    assert [root for root, _digest in observed] == [provider, consumer]
+
+
+@pytest.mark.parametrize("resealed", [False, True])
+def test_provenance_change_between_s1_and_held_read_cannot_mix_snapshots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resealed: bool,
+) -> None:
+    provider, consumer = cohort(tmp_path)
+    original = pri.VerifiedPackage.read_verified_member
+    changed = []
+
+    def replaced(self, root, name):
+        if root == consumer and name == "source-provenance.json" and not changed:
+            path = consumer / name
+            payload = json.loads(path.read_bytes())
+            payload["inputs"][0]["origin"]["published_dependencies"]["rows"][0]["datasource_luid"] = pri.KIND_WORKBOOK
+            _write(path, payload)
+            if resealed:
+                reseal(consumer)
+            changed.append(True)
+        return original(self, root, name)
+
+    monkeypatch.setattr(pri.VerifiedPackage, "read_verified_member", replaced)
+    result = pri.verify_phase1_role_identity([provider, consumer])[1]
+    assert changed == [True]
+    assert "package_file_digest_mismatch" in result.codes()
+    assert result.verdict == "BLOCKED"
+    assert all(row.provider_ordinal is None for row in result.dependencies)
 
 
 @pytest.mark.parametrize("blocked_first", [False, True])
