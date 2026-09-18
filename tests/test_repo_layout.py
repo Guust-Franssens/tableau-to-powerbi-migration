@@ -522,6 +522,7 @@ PREPARATION_ROUTES = (
     ".github/agents/tableau-migrator.agent.md",
     ".github/agents/dry-run-operator.agent.md",
 )
+INTAKE_ROUTES = (*PREPARATION_ROUTES[:2], "docs/operator-runbook.md")
 PREPARATION_DOCS = (
     "docs/start-with-one-workbook.md",
     "docs/operator-runbook.md",
@@ -535,10 +536,12 @@ PREPARATION_END = "<!-- END:strict-preparation -->"
 def _intake_block(text: str, path: str) -> str:
     if path == "AGENTS.md":
         return text.split("### Step 2 —", 1)[1].split("### Step 3 —", 1)[0]
+    if path == "docs/operator-runbook.md":
+        return text.split("### 1.5 Write the brief\n", 1)[1].split("\n---\n", 1)[0]
     return text.split("1. **Read the brief,", 1)[1].split("2. **Run the deterministic tier", 1)[0]
 
 
-def _assert_numeric_intake(text: str) -> None:
+def _assert_numeric_intake(text: str, path: str) -> None:
     intake = " ".join(text.replace("**", "").split())
     question = re.search(r"Numeric comparison scope \(`numeric_obligation`\).*?\?", intake)
     assert question, "intake must ask the human for numeric_obligation"
@@ -555,28 +558,49 @@ def _assert_numeric_intake(text: str) -> None:
         "stop before packaging",
     ):
         assert required in intake, f"numeric intake contract missing: {required}"
+    if path == "docs/operator-runbook.md":
+        assert "never infer or guess it" in intake, "runbook numeric intent must not be guessed"
+        assert "Before `package_unit.py`, write complete exact `phase1-start-ready/v2` frontmatter" in intake, (
+            "runbook intake requires complete pre-package v2 frontmatter"
+        )
 
 
-@pytest.mark.parametrize("path", PREPARATION_ROUTES[:2])
+@pytest.mark.parametrize("path", INTAKE_ROUTES)
 def test_intake_requires_human_numeric_scope_in_the_same_message(path: str) -> None:
-    """Both intake owners must collect the schema's required human choice without another round."""
+    """Every intake route must collect the schema's required human choice without another round."""
     text = (REPO_ROOT / path).read_text(encoding="utf-8")
     intake = _intake_block(text, path)
-    _assert_numeric_intake(intake)
+    _assert_numeric_intake(intake, path)
     if path == "AGENTS.md":
         assert "six questions, asked ONCE, in one message" in intake
         assert re.findall(r"^\| ([1-6]) \|", intake, re.MULTILINE) == list("123456")
         assert "numeric_obligation" in next(line for line in intake.splitlines() if line.startswith("| 6 |"))
+    elif path == "docs/operator-runbook.md":
+        assert "six intake choices together in one message" in intake
+        assert re.findall(r"^([1-6])\. ", intake, re.MULTILINE) == list("123456")
+        assert "**refresh strategy**" in next(line for line in intake.splitlines() if line.startswith("5. "))
+        assert "numeric_obligation" in next(line for line in intake.splitlines() if line.startswith("6. "))
 
 
-@pytest.mark.parametrize("path", PREPARATION_ROUTES[:2])
 @pytest.mark.parametrize(
-    ("old", "new", "failure"),
+    ("path", "old", "new", "failure"),
     [
-        ("numeric_obligation", "omitted_numeric_choice", "ask the human for numeric_obligation"),
-        ("`required` (numeric comparison is owed)", "`optional` (numeric comparison is owed)", "vocabulary"),
-        ("Numeric scope has no default", "Numeric scope defaults to none", "no default"),
-        ("stop before packaging", "continue packaging", "stop before packaging"),
+        (path, old, new, failure)
+        for path in INTAKE_ROUTES
+        for old, new, failure in (
+            ("numeric_obligation", "omitted_numeric_choice", "ask the human for numeric_obligation"),
+            ("`required` (numeric comparison is owed)", "`optional` (numeric comparison is owed)", "vocabulary"),
+            ("Numeric scope has no default", "Numeric scope defaults to none", "no default"),
+            ("stop before packaging", "continue packaging", "stop before packaging"),
+        )
+    ]
+    + [
+        (
+            "docs/operator-runbook.md",
+            "Before `package_unit.py`, write complete exact `phase1-start-ready/v2` frontmatter",
+            "",
+            "pre-package v2 frontmatter",
+        ),
     ],
 )
 def test_numeric_intake_mutations_fail_the_intended_assertion(path: str, old: str, new: str, failure: str) -> None:
@@ -585,7 +609,7 @@ def test_numeric_intake_mutations_fail_the_intended_assertion(path: str, old: st
     changed = text.replace(old, new)
     assert changed != text, "numeric intake mutation did not reach its target"
     with pytest.raises(AssertionError, match=failure):
-        _assert_numeric_intake(_intake_block(changed, path))
+        _assert_numeric_intake(_intake_block(changed, path), path)
 
 
 def _assert_migrator_v2_brief(text: str, scope: str, fallback: str, numeric: str) -> None:

@@ -473,14 +473,26 @@ error, not bad luck. Note your PID when you open one, and close only what you op
 ### 1.5 Write the brief
 
 Per `AGENTS.md`, the brief is a **file**, not a conversation: a closed terminal takes the session's
-entire working memory with it. Put it at `migrations/workbooks/<slug>/migration-brief.md` and record
-the four answers that cannot be inferred:
+entire working memory with it. Put it at `migrations/workbooks/<slug>/migration-brief.md`.
+Ask the **six intake choices together in one message**; reuse recorded answers and **ask only missing choices**:
 
 1. the plan from §2 — this ordering, these workbooks, this destination workspace;
 2. **autonomy** — `guided` / `standard` (default) / `autopilot`;
 3. **fidelity bar** — faithful re-creation, or modernise where Power BI is better;
 4. **if we hit a wall — stop, or degrade?** (pre-authorising the fallback is what lets an unattended
-   run survive one).
+   run survive one);
+5. **refresh strategy** — `scripted` (default) / `operator` / `xmla`;
+6. **Numeric comparison scope (`numeric_obligation`)** — `none` (explicit commission without
+   numeric comparison) or `required` (numeric comparison is owed)? This is commissioned scope,
+   not a numeric result or a completion verdict.
+
+**Numeric scope has no default:** without the human's `none` or `required`, **stop before packaging**;
+never infer or guess it.
+
+Before `package_unit.py`, write complete exact `phase1-start-ready/v2` frontmatter with exactly five
+string keys: `schema`, `unit`, `scope`, `fallback_authorization` and `numeric_obligation`. Match the
+selected unit and topology scope and record the human choices; keep other answers in the narrative,
+not extra policy keys. Use the [existing v2 contract](../scripts/README.md#current-packaged-numeric-scope-authority-363).
 
 No autonomy level clears a credential wall — that is a modal sign-in dialog no automation can fill.
 
