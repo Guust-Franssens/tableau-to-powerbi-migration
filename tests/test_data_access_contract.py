@@ -10,7 +10,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import ntpath
 import re
+import subprocess
 import traceback
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -87,6 +89,209 @@ def _root_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     unit.mkdir()
     (unit / gate.MIGRATION_SPEC).write_text(json.dumps(_spec(LIVE, OTHER)), encoding="utf-8")
     return unit
+
+
+class _StatefulIcacls:
+    """Model only registered paths and exact commands; return raw ACE rows, never a verdict."""
+
+    PRINCIPAL = "fixture-user"
+    DOMAIN = "FIXTURE"
+    RIGHTS = "(OI)(CI)(WD,AD,WA)"
+
+    def __init__(self, *paths: Path) -> None:
+        self.states = {self.key(path): "clear" for path in paths}
+        self.events: list[tuple[str, str]] = []
+        self.faults: dict[tuple[str, str], str] = {}
+
+    @staticmethod
+    def key(path: Path | str) -> str:
+        """Use Windows path identity even when the platform-parameter tests run on POSIX."""
+        return ntpath.normcase(ntpath.normpath(str(path)))
+
+    def inject(self, operation: str, path: Path, outcome: str) -> None:
+        """Keep faults persistent and scoped to one registered operation/target pair."""
+        assert operation in {"query", "apply", "remove"}, "unexpected icacls operation"
+        assert self.key(path) in self.states, "unexpected icacls target"
+        outcomes = {"nonzero", "timeout"} | (
+            {"empty", "restricted", "clear", "partial", "unparseable"}
+            if operation == "query"
+            else {"no-change", "partial"}
+        )
+        assert outcome in outcomes, "unexpected icacls fault"
+        self.faults[operation, self.key(path)] = outcome
+
+    def _listing(self, target: str, state: str) -> str:
+        identity = f"{self.DOMAIN}\\{self.PRINCIPAL}"
+        rows = [f"{identity}:(I)(OI)(CI)(F)", r"NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F)"]
+        if state == "restricted":
+            rows.insert(0, f"{identity}:(OI)(CI)(DENY)(WD,AD,WA)")
+        elif state == "partial":
+            rows.insert(0, f"{identity}:(OI)(DENY)(WD)")
+        return (
+            target
+            + " "
+            + ("\n" + " " * (len(target) + 1)).join(rows)
+            + ("\n\nSuccessfully processed 1 files; Failed processing 0 files")
+        )
+
+    def __call__(self, args: list[str]) -> tuple[int, str]:
+        assert isinstance(args, list) and args and all(isinstance(arg, str) for arg in args), (
+            "unexpected icacls command"
+        )
+        target = self.key(args[0])
+        assert target in self.states, "unexpected icacls target"
+        if args == [args[0]]:
+            operation = "query"
+        elif args == [args[0], "/deny", f"{self.PRINCIPAL}:{self.RIGHTS}"]:
+            operation = "apply"
+        elif args == [args[0], "/remove:d", self.PRINCIPAL]:
+            operation = "remove"
+        else:
+            raise AssertionError("unexpected icacls command")
+        self.events.append((operation, target))
+        fault = self.faults.get((operation, target))
+        if fault == "nonzero":
+            return 5, "Access is denied."
+        if fault == "timeout":
+            raise subprocess.TimeoutExpired(["icacls", *args], 30)
+        if operation == "query":
+            if fault == "empty":
+                return 0, ""
+            if fault == "unparseable":
+                return 0, "1 bestand verwerkt; 0 bestanden mislukt."
+            return 0, self._listing(args[0], fault or self.states[target])
+        if fault != "no-change":
+            self.states[target] = (
+                "partial" if fault == "partial" else ("restricted" if operation == "apply" else "clear")
+            )
+        return 0, f"processed file: {args[0]}\nSuccessfully processed 1 files; Failed processing 0 files"
+
+
+@pytest.fixture(name="stateful_icacls")
+def _stateful_icacls_fixture(root: Path, monkeypatch: pytest.MonkeyPatch) -> _StatefulIcacls:
+    """Keep principal resolution synthetic too; only the two platform-writer tests opt in."""
+    permissions = _StatefulIcacls(root / "fabric")
+    monkeypatch.setenv("USERNAME", permissions.PRINCIPAL)
+    monkeypatch.setenv("USER", permissions.PRINCIPAL)
+    monkeypatch.setenv("USERDOMAIN", permissions.DOMAIN)
+    monkeypatch.setattr(gate, "_user", lambda: permissions.PRINCIPAL)
+    monkeypatch.setattr(gate, "_icacls", permissions)
+    return permissions
+
+
+def test_stateful_icacls_keeps_independent_normalized_paths_and_raw_rows(tmp_path: Path) -> None:
+    """Neither a sibling's removal nor a differently cased query changes the target's state."""
+    target, sibling = tmp_path / "output folder", tmp_path / "sibling"
+    permissions = _StatefulIcacls(target, sibling)
+    assert permissions([str(target), "/deny", "fixture-user:(OI)(CI)(WD,AD,WA)"])[0] == 0
+    query = str(target).upper()
+    code, rows = permissions([query])
+    assert code == 0
+    assert rows.startswith(f"{query} FIXTURE\\fixture-user:(OI)(CI)(DENY)(WD,AD,WA)\n")
+    assert r"FIXTURE\fixture-user:(I)(OI)(CI)(F)" in rows
+    assert r"NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F)" in rows
+    assert permissions([str(sibling), "/remove:d", "fixture-user"])[0] == 0
+    assert permissions.states == {permissions.key(target): "restricted", permissions.key(sibling): "clear"}
+    assert permissions([str(target), "/remove:d", "fixture-user"])[0] == 0
+    code, rows = permissions([str(target)])
+    assert code == 0 and rows.startswith(f"{target} FIXTURE\\fixture-user:(I)(OI)(CI)(F)\n")
+    assert "(DENY)" not in rows
+    assert permissions.states == {permissions.key(target): "clear", permissions.key(sibling): "clear"}
+    assert permissions.events == [
+        ("apply", permissions.key(target)),
+        ("query", permissions.key(target)),
+        ("remove", permissions.key(sibling)),
+        ("remove", permissions.key(target)),
+        ("query", permissions.key(target)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["{target}", "/q"],
+        ["{target}", "/DENY", "fixture-user:(OI)(CI)(WD,AD,WA)"],
+        ["{target}", "/deny", "other-user:(OI)(CI)(WD,AD,WA)"],
+        ["{target}", "/deny", "fixture-user:(OI)(CI)(WD)"],
+        ["{target}", "fixture-user:(OI)(CI)(WD,AD,WA)", "/deny"],
+        ["{target}", "/remove", "fixture-user"],
+        ["{target}", "/remove:d", "other-user"],
+        ["{target}", "/remove:d", "fixture-user", "/t"],
+        ["{other}"],
+        ["{other}", "/deny", "fixture-user:(OI)(CI)(WD,AD,WA)"],
+        ["{other}", "/remove:d", "fixture-user"],
+    ],
+)
+def test_stateful_icacls_rejects_unexpected_commands_without_effects(tmp_path: Path, args: list[str]) -> None:
+    """Option spelling/order, rights, principal and target are part of the seam's exact contract."""
+    target = tmp_path / "fabric"
+    permissions = _StatefulIcacls(target)
+    command = [arg.replace("{target}", str(target)).replace("{other}", str(tmp_path / "other")) for arg in args]
+    with pytest.raises(AssertionError, match="unexpected icacls (command|target)"):
+        permissions(command)
+    assert not permissions.events
+    assert permissions.states == {permissions.key(target): "clear"}
+
+
+@pytest.mark.parametrize("operation", ["query", "apply", "remove"])
+@pytest.mark.parametrize("fault", ["nonzero", "timeout", "no-change", "partial"])
+def test_stateful_icacls_faults_are_operation_and_path_local(tmp_path: Path, operation: str, fault: str) -> None:
+    """A failed command cannot invent a transition or leak its fault into a sibling."""
+    target, sibling = tmp_path / "fabric", tmp_path / "sibling"
+    permissions = _StatefulIcacls(target, sibling)
+    commands = {
+        "query": [],
+        "apply": ["/deny", "fixture-user:(OI)(CI)(WD,AD,WA)"],
+        "remove": ["/remove:d", "fixture-user"],
+    }
+    if operation == "remove":
+        permissions([str(target), *commands["apply"]])
+    before = dict(permissions.states)
+    if operation == "query" and fault == "no-change":
+        with pytest.raises(AssertionError, match="unexpected icacls fault"):
+            permissions.inject(operation, target, fault)
+        return
+    permissions.inject(operation, target, fault)
+    if fault == "timeout":
+        with pytest.raises(subprocess.TimeoutExpired) as raised:
+            permissions([str(target), *commands[operation]])
+        assert raised.value.cmd == ["icacls", str(target), *commands[operation]]
+    else:
+        code, _output = permissions([str(target), *commands[operation]])
+        assert code == (5 if fault == "nonzero" else 0)
+    expected = {**before, permissions.key(target): "partial"} if fault == "partial" and operation != "query" else before
+    assert permissions.states == expected
+    assert permissions.events[-1] == (operation, permissions.key(target))
+    assert permissions([str(sibling), *commands[operation]])[0] == 0
+    assert permissions.states[permissions.key(sibling)] == ("restricted" if operation == "apply" else "clear")
+    assert permissions.states[permissions.key(target)] == expected[permissions.key(target)]
+    with pytest.raises(AssertionError, match="unexpected icacls target"):
+        permissions.inject(operation, tmp_path / "unregistered", fault)
+
+
+@pytest.mark.parametrize("override", ["empty", "restricted", "clear", "partial", "unparseable"])
+def test_stateful_icacls_query_overrides_do_not_change_physical_state(tmp_path: Path, override: str) -> None:
+    """Contradictory query evidence stays separate from the independent final-state oracle."""
+    target = tmp_path / "fabric"
+    permissions = _StatefulIcacls(target)
+    permissions([str(target), "/deny", "fixture-user:(OI)(CI)(WD,AD,WA)"])
+    permissions.inject("query", target, override)
+    code, rows = permissions([str(target)])
+    assert code == 0
+    if override == "empty":
+        assert rows == ""
+    elif override == "unparseable":
+        assert rows == "1 bestand verwerkt; 0 bestanden mislukt."
+    else:
+        rights = {
+            "clear": "(I)(OI)(CI)(F)",
+            "restricted": "(OI)(CI)(DENY)(WD,AD,WA)",
+            "partial": "(OI)(DENY)(WD)",
+        }
+        assert rows.startswith(f"{target} FIXTURE\\fixture-user:{rights[override]}\n")
+    assert permissions.states == {permissions.key(target): "restricted"}
+    assert permissions.events == [("apply", permissions.key(target)), ("query", permissions.key(target))]
 
 
 @pytest.fixture(name="desktop")
@@ -314,12 +519,11 @@ def test_forged_authorization_never_qualifies(root: Path, shape: str) -> None:
     [("Linux", []), ("Darwin", []), ("Windows", ["python.exe", "pwsh.exe", "WindowsTerminal.exe"])],
 )
 def test_authentic_authorization_written_on_each_platform(
-    root: Path, monkeypatch: pytest.MonkeyPatch, system: str, chain: list[str]
+    root: Path, monkeypatch: pytest.MonkeyPatch, stateful_icacls: _StatefulIcacls, system: str, chain: list[str]
 ) -> None:
     """Both current platform writers must produce readable, structural-only authorization."""
     monkeypatch.setattr(gate.platform, "system", lambda: system)
     monkeypatch.setattr(gate, "_ancestry", lambda: chain)
-    monkeypatch.setattr(gate, "_icacls", lambda _args: (0, ""))
     _authorize(root)
     result = _assess(root, authorized=True)
     assert (result.state, result.validation, result.max_phase2_claim) == (
@@ -330,6 +534,15 @@ def test_authentic_authorization_written_on_each_platform(
     assert gate.parse_data_access(result.dumps()) == result
     assert _audit_entries(root) == _rows(root)
     assert gate.verify(root) == 0
+    target = stateful_icacls.key(root / "fabric")
+    if system == "Windows":
+        assert [event for event in stateful_icacls.events if event[0] != "query"] == [
+            ("apply", target),
+            ("remove", target),
+        ]
+    else:
+        assert not stateful_icacls.events
+    assert stateful_icacls.states == {target: "clear"}, "accepted authorization must leave every path clear"
 
 
 @pytest.mark.parametrize(
@@ -346,13 +559,17 @@ def test_authentic_authorization_written_on_each_platform(
         pytest.param("Darwin", [], 0, id="darwin-empty"),
     ],
 )
-def test_authorization_writer_reader_platform_parity(
-    root: Path, monkeypatch: pytest.MonkeyPatch, system: str, chain: list[str], writer_exit: int
+def test_authorization_writer_reader_platform_parity(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stateful_icacls: _StatefulIcacls,
+    system: str,
+    chain: list[str],
+    writer_exit: int,
 ) -> None:
     """A real writer refusal is the independent oracle for a forged row's lack of authority."""
     monkeypatch.setattr(gate.platform, "system", lambda: system)
     monkeypatch.setattr(gate, "_ancestry", lambda: chain)
-    monkeypatch.setattr(gate, "_icacls", lambda _args: (0, ""))
     assert gate.apply_block(root, [KEY]) == 0
     assert gate.authorize(root, "Fixture Human") == writer_exit
     detail = f"by=Fixture Human; chain={chain}"
@@ -381,6 +598,15 @@ def test_authorization_writer_reader_platform_parity(
         assert _override_is_authentic(root)
         assert _audit_entries(root) == before
     assert _rows(root) == before, "the reader must not rerun authorization or write evidence"
+    target = stateful_icacls.key(root / "fabric")
+    if system == "Windows":
+        expected_events = [("apply", target)] + ([] if writer_exit else [("remove", target)])
+        assert [event for event in stateful_icacls.events if event[0] != "query"] == expected_events
+    else:
+        assert not stateful_icacls.events
+    assert stateful_icacls.states == {target: "restricted" if writer_exit else "clear"}, (
+        "refusal must retain the restriction; accepted authorization must leave every path clear"
+    )
 
 
 @pytest.mark.parametrize("inherited", [False, True], ids=["direct", "inherited"])
