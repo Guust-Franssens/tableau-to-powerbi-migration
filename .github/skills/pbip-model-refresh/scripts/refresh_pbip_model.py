@@ -161,6 +161,7 @@ from _credential_modal import (
     DialogFinding,
     DialogFoundError,
     ModalVisualEvidence,
+    IMAGE_CAPTURE_SECONDS,
     describe_dialog_finding,
     describe_modal,
     dialog_guidance,
@@ -272,6 +273,15 @@ def _in_flight_credential_state(pid: int) -> CredentialDetection:
     and the tests exercise one function rather than two.
     """
     return _credential_state(pid, in_flight=True)
+
+
+def _initial_image_evidence(pid: int, state: CredentialDetection, directory: Path | None, timeout: float) -> None:
+    """Publish optional closed OCR evidence before the unchanged t=0 unreadable-dialog stop."""
+    if state.modal is not None or state.dialog is None or state.dialog.verdict != "DIALOG_UNREADABLE":
+        return
+    deadline = time.monotonic() + min(IMAGE_CAPTURE_SECONDS, timeout)
+    with ModalVisualEvidence(directory, deadline=deadline) as evidence:
+        evidence.inspect_initial(pid, state)
 
 
 def _raise_if_blocked(pid: int, state: CredentialDetection, source_hint: str | None = None) -> None:
@@ -629,6 +639,12 @@ def _refresh(
     untraced_absolute_backstop = False
     if desktop_pid is not None:
         state = initial_state or _credential_state(desktop_pid)
+        _initial_image_evidence(
+            desktop_pid,
+            state,
+            evidence_dir,
+            absolute_timeout_sec if progress_enabled and refresh_type == REFRESH_TYPE_FULL else total_timeout,
+        )
         _raise_if_blocked(desktop_pid, state, source_hint)
         initial_state = state
     if progress_enabled and refresh_type == REFRESH_TYPE_FULL:
@@ -2206,6 +2222,14 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
         _emit_credential_missing(pid, credential_state.modal, source_hint)
         return 1
     if credential_state.dialog is not None:
+        _initial_image_evidence(
+            pid,
+            credential_state,
+            args.evidence_dir,
+            args.refresh_absolute_timeout_seconds
+            if not args.no_progress and args.refresh_type == REFRESH_TYPE_FULL
+            else REFRESH_TIMEOUT_SECONDS + REFRESH_WALL_CLOCK_GRACE_SECONDS,
+        )
         _emit_dialog_finding(pid, credential_state.dialog)
         return 3
     if credential_state.process_gone is not None:

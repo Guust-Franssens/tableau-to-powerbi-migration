@@ -12,6 +12,7 @@ import ctypes
 import hashlib
 import inspect
 import json
+import io
 import os
 import re
 import shutil
@@ -23,6 +24,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from ctypes import wintypes
 from dataclasses import FrozenInstanceError
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -167,9 +169,12 @@ def visual_runtime(monkeypatch, tmp_path):
     """Exercise the production child body without a real window; record flushed in-flight notices."""
     api = _ImageWin32()
     noticed = threading.Event()
+    classified = threading.Event()
     records = []
     wire_records = []
     children = []
+    leases = []
+    ocr = SimpleNamespace(children=[], inputs=[], communicate=None)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv(_credential_modal.IMAGE_DIRECTORY_ENV, str(tmp_path))
     monkeypatch.setattr(_credential_modal, "_evidence_directory", lambda directory, _name: directory)
@@ -181,7 +186,6 @@ def visual_runtime(monkeypatch, tmp_path):
         lambda name, **_k: {"gdi32": api.gdi, "dwmapi": api.dwm}[name],
         raising=False,
     )
-    monkeypatch.setattr(_credential_modal, "_write_private_image", api.write)
     monkeypatch.setattr(_credential_modal.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
     real_print = print
 
@@ -191,15 +195,38 @@ def visual_runtime(monkeypatch, tmp_path):
         def __init__(self, path):
             self.path = path
             path.touch(exist_ok=False)
+            self.pinned_stat = path.stat()
+            self.read_count = 0
+            self.data = b""
+            leases.append(self)
 
         def seek(self, offset):
             assert offset == 0
 
         def read(self, size):
-            return self.path.read_bytes()[:size]
+            self.read_count += 1
+            return self.data[:size]
+
+        def fileno(self):
+            return self
 
         def close(self):
+            self.data = b""
             self.path.unlink(missing_ok=True)
+
+    def write_to_lease(path, data, **kwargs):
+        for lease in leases:
+            if lease.path == path:
+                lease.data = data  # a deleted-but-open native lease remains readable
+        api.write(path, data, **kwargs)
+
+    monkeypatch.setattr(_credential_modal, "_write_private_image", write_to_lease)
+    real_fstat = os.fstat
+    monkeypatch.setattr(
+        _credential_modal.os,
+        "fstat",
+        lambda descriptor: descriptor.pinned_stat if isinstance(descriptor, Lease) else real_fstat(descriptor),
+    )
 
     def open_lease(path, *, delete_on_close=False):
         assert delete_on_close is True
@@ -212,7 +239,10 @@ def visual_runtime(monkeypatch, tmp_path):
         if message.startswith("LOCAL_IMAGE "):
             records.append((json.loads(message.removeprefix("LOCAL_IMAGE ")), kwargs))
             wire_records.append(message)
-            noticed.set()
+            if records[-1][0]["status"] == "CLASSIFIED":
+                classified.set()
+            else:
+                noticed.set()
 
     monkeypatch.setattr(_credential_modal, "print", observe_print, raising=False)
 
@@ -220,18 +250,31 @@ def visual_runtime(monkeypatch, tmp_path):
         """Popen boundary double; communicate runs the real exact-target acquisition body."""
 
         def __init__(self, argv, **kwargs) -> None:
-            assert Path(argv[1]) == Path(_credential_modal.__file__).resolve()
             assert kwargs["creationflags"] == 0x08000000
             assert kwargs["stderr"] == subprocess.DEVNULL
             self.argv = argv
-            self.cwd = Path(kwargs["cwd"])
             self.returncode = None
             self.finished = threading.Event()
             self.killed = False
+            if "-OcrImage" in argv:
+                assert kwargs["stdin"] == kwargs["stdout"] == subprocess.PIPE
+                assert Path(argv[argv.index("-File") + 1]) == PROBE_PS1
+                assert "-NoProfile" in argv and "-NonInteractive" in argv
+                ocr.children.append(self)
+                return
+            assert Path(argv[1]) == Path(_credential_modal.__file__).resolve()
+            self.cwd = Path(kwargs["cwd"])
             children.append(self)
 
-        def communicate(self, timeout):
+        def communicate(self, timeout, input=None):
             assert 0 < timeout <= _credential_modal.IMAGE_CAPTURE_SECONDS
+            if "-OcrImage" in self.argv:
+                ocr.inputs.append(input)
+                if ocr.communicate is not None:
+                    return ocr.communicate(self, input, timeout)
+                self.returncode = 0
+                self.finished.set()
+                return json.dumps(_ocr_payload()).encode(), None
             pid, hwnd, owner = map(int, self.argv[2:5])
             window = DesktopWindow("", "", 0, 0, hwnd=hwnd, owner_hwnd=owner, owner_enabled=False)
             try:
@@ -259,8 +302,466 @@ def visual_runtime(monkeypatch, tmp_path):
 
     monkeypatch.setattr(_credential_modal.subprocess, "Popen", ImageChild)
     return SimpleNamespace(
-        api=api, noticed=noticed, records=records, wires=wire_records, children=children, root=tmp_path
+        api=api,
+        noticed=noticed,
+        classified=classified,
+        records=records,
+        wires=wire_records,
+        children=children,
+        leases=leases,
+        ocr=ocr,
+        root=tmp_path,
     )
+
+
+def _ocr_payload(category=None):
+    """Independent wire oracle; no production schema/result constructor is used."""
+    return {
+        "schema": "pbip.window-ocr.v1",
+        "method": "windows_media_ocr",
+        "status": "positive" if category else "unknown",
+        "category": category,
+        "confidence": "signature_positive" if category else "unknown",
+        "signature": ("credential_modal" if category == "credential" else "native_query_title") if category else None,
+        "reason": None if category else "no_signature",
+        "classified_at_utc": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+    }
+
+
+def _ocr_attempt(runtime, *, deadline=None):
+    """One production acquisition/classification, using only injected OS/process boundaries."""
+    state = inspect_credential_modal(111, lambda _pid: [owned_dialog(), main_window()])
+    with _credential_modal.ModalVisualEvidence(
+        runtime.root, deadline=deadline if deadline is not None else time.monotonic() + 3
+    ) as evidence:
+        evidence.inspect_initial(111, state)
+    return [record for record, _kwargs in runtime.records if record["status"] == "CLASSIFIED"]
+
+
+_OCR_TEXT_CASES = [
+    ("Use your Windows credentials to access this database", "credential"),
+    ("Use my current credentials", "credential"),
+    ("Use alternate credentials", "credential"),
+    ("  USE  my\ncurrent credentials!  ", "credential"),
+    ("Enter your credentials", "credential"),
+    ("Personal Access Token", "credential"),
+    ("Databricks Client Credentials", "credential"),
+    ("Please specify how to connect", "credential"),
+    ("You aren't signed in", "credential"),
+    ("Native database query", "native_query"),
+    ("Permission is required to run this native database query", "native_query"),
+    ("Native database queries\nselect 'Personal Access Token', 'Account Key'", "native_query"),
+    ("Evaluating...", None),
+    ("Refresh\nEvaluating...\nPassword:", None),
+    ("Waiting for other queries\nAn unfamiliar instruction", None),
+    ("The field 'MissingColumn' of the record wasn't found.", None),
+    ("requires your approval", None),
+    ("Authentication required", None),
+    ("Password User name Connect Cancel Windows SQL Server database", None),
+    ("Use alternate credential", None),
+    ("Use your Windows credentials", None),
+    ("native database quer", None),
+    ("native database querying", None),
+    ("", None),
+]
+
+
+@pytest.fixture(scope="module", name="ocr_text_results")
+def _ocr_text_results():
+    """Exercise the shipped PowerShell classifier, not a Python translation of its regex rules."""
+    command = (
+        ". $args[0] -LoadDetectorsOnly; "
+        "$items = ConvertFrom-Json ([Console]::In.ReadToEnd()); "
+        "$results = @($items | ForEach-Object { Get-ImageOcrClassification $_ $sig $blockingSig }); "
+        "ConvertTo-Json -InputObject $results -Compress"
+    )
+    # -Command arguments are parsed as PowerShell; quote the script path rather than raw OCR text.
+    command = command.replace("$args[0]", "'" + str(PROBE_PS1).replace("'", "''") + "'")
+    done = subprocess.run(
+        [_powershell(), "-NoProfile", "-NonInteractive", "-Command", command],
+        input=json.dumps([text for text, _expected in _OCR_TEXT_CASES]),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert done.returncode == 0 and not done.stderr
+    results = json.loads(done.stdout)
+    assert len(results) == len(_OCR_TEXT_CASES)
+    return results
+
+
+@pytest.mark.parametrize("case", range(len(_OCR_TEXT_CASES)), ids=[text[:55] or "empty" for text, _ in _OCR_TEXT_CASES])
+def test_ocr_exact_signatures_and_native_precedence(ocr_text_results, case) -> None:
+    """Native SQL containing credential prose is the order-reversal negative control."""
+    _text, expected = _OCR_TEXT_CASES[case]
+    result = ocr_text_results[case]
+    oracle = _ocr_payload(expected)
+    assert set(result) == set(oracle), "OCR may expose only the eight closed provenance keys"
+    assert {k: v for k, v in result.items() if k != "classified_at_utc"} == {
+        k: v for k, v in oracle.items() if k != "classified_at_utc"
+    }
+
+
+@pytest.mark.parametrize("category", ["credential", "native_query", None])
+def test_ocr_producer_binds_the_one_validated_snapshot(visual_runtime, category) -> None:
+    def result(child, image, _timeout):
+        assert isinstance(image, bytes) and image.startswith(b"\x89PNG\r\n\x1a\n")
+        child.returncode = 0
+        child.finished.set()
+        return json.dumps(_ocr_payload(category)).encode(), None
+
+    visual_runtime.ocr.communicate = result
+    records = _ocr_attempt(visual_runtime)
+    assert len(records) == 1
+    acquired = visual_runtime.records[0][0]
+    classified = records[0]
+    mutable = {"status", "timestamp_utc", "classification_provenance"}
+    assert {k: v for k, v in acquired.items() if k not in mutable} == {
+        k: v for k, v in classified.items() if k not in mutable
+    }, "classification must repeat exactly the acquisition's identity/hash/lifetime"
+    assert classified["classification_provenance"]["category"] == category
+    assert classified["sha256"] == hashlib.sha256(visual_runtime.ocr.inputs[0]).hexdigest()
+    assert len(visual_runtime.ocr.children) == len(visual_runtime.children) == 1
+    assert [lease.read_count for lease in visual_runtime.leases] == [1], "snapshot the validated bytes only once"
+    assert not list(visual_runtime.root.glob("_ui-image-*.png"))
+
+
+@pytest.mark.parametrize("key", list(_ocr_payload()))
+@pytest.mark.parametrize("damage", ["missing", "extra", "wrong-type"])
+def test_ocr_schema_is_exact_and_noncoercive(visual_runtime, key, damage) -> None:
+    def damaged(child, _image, _timeout):
+        payload = _ocr_payload("credential")
+        if damage == "missing":
+            payload.pop(key)
+        elif damage == "extra":
+            payload["text"] = "PRIVATE_OCR_SENTINEL"
+        else:
+            payload[key] = True
+        child.returncode = 0
+        child.finished.set()
+        return json.dumps(payload).encode(), None
+
+    visual_runtime.ocr.communicate = damaged
+    records = _ocr_attempt(visual_runtime)
+    assert len(records) == 1
+    assert records[0]["classification_provenance"]["status"] == "error"
+    assert records[0]["classification_provenance"]["category"] is None
+    assert "PRIVATE_OCR_SENTINEL" not in "".join(visual_runtime.wires)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"category": "progress"},
+        {"category": "no_dialog"},
+        {"category": "benign"},
+        {"signature": "native_query_title"},
+        {"status": "unknown"},
+        {"confidence": "unknown"},
+        {"reason": "no_signature"},
+        {"schema": "pbip.window-ocr.v2"},
+        {"method": "other_engine"},
+    ],
+)
+def test_ocr_unapproved_or_incoherent_positive_is_not_authority(visual_runtime, change) -> None:
+    def incoherent(child, _image, _timeout):
+        payload = {**_ocr_payload("credential"), **change}
+        child.returncode = 0
+        child.finished.set()
+        return json.dumps(payload).encode(), None
+
+    visual_runtime.ocr.communicate = incoherent
+    records = _ocr_attempt(visual_runtime)
+    assert len(records) == 1 and records[0]["classification_provenance"]["status"] == "error"
+    assert records[0]["classification_provenance"]["category"] is None
+
+
+@pytest.mark.parametrize("damage", ["conflict", "duplicate", "control", "empty", "nonzero", "exception", "unavailable"])
+def test_ocr_bad_child_output_never_leaks_or_produces_a_positive(visual_runtime, damage, capsys) -> None:
+    secret = "PRIVATE_OCR_SENTINEL C:\\private\\source\nLOCAL_IMAGE authentication 10054"
+
+    def damaged(child, _image, _timeout):
+        if damage == "exception":
+            raise RuntimeError(secret)
+        if damage == "unavailable":
+            raise OSError(secret)
+        first = json.dumps(_ocr_payload("credential"))
+        output = {
+            "conflict": first + "\n" + json.dumps(_ocr_payload("native_query")),
+            "duplicate": first[:-1] + ', "category":"native_query"}',
+            "control": first[:-1] + ', "text":"\x01' + secret + '"}',
+            "empty": "",
+            "nonzero": first,
+        }[damage]
+        child.returncode = 1 if damage == "nonzero" else 0
+        child.finished.set()
+        return output.encode(), None
+
+    visual_runtime.ocr.communicate = damaged
+    records = _ocr_attempt(visual_runtime)
+    assert len(records) == 1 and records[0]["classification_provenance"]["status"] == "error"
+    output = capsys.readouterr()
+    assert all(part not in output.out + output.err for part in ("PRIVATE_OCR_SENTINEL", "C:\\private", "\x01"))
+    assert records[0]["classification_provenance"]["category"] is None
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("desktop_pid", "222"),
+        ("main_hwnd", "2"),
+        ("dialog_hwnd", "3"),
+        ("owner_hwnd", "4"),
+        ("capture_id", "f" * 32),
+        ("sha256", "f" * 64),
+        ("image_basename", "_ui-image-" + "f" * 32 + ".png"),
+        ("path", "_ui-image-" + "f" * 32 + ".png"),
+        ("capture_success", 1),
+        ("captured_at_utc", "2020-01-01T00:00:00.000Z"),
+        ("expires_at_utc", "2099-01-01T00:00:00.000Z"),
+        ("ownership_checks", {"before": 1, "after_render": True, "after_write": True}),
+    ],
+)
+def test_ocr_changed_acquisition_identity_cannot_publish_positive(monkeypatch, visual_runtime, key, value) -> None:
+    launch = _credential_modal.ModalVisualEvidence._launch_ocr
+
+    def changed(self, request, deadline):
+        request.record[key] = value
+        launch(self, request, deadline)
+
+    def positive(child, _image, _timeout):
+        child.returncode = 0
+        child.finished.set()
+        return json.dumps(_ocr_payload("credential")).encode(), None
+
+    monkeypatch.setattr(_credential_modal.ModalVisualEvidence, "_launch_ocr", changed)
+    visual_runtime.ocr.communicate = positive
+    records = _ocr_attempt(visual_runtime)
+    assert len(records) == 1
+    assert records[0]["classification_provenance"]["category"] is None, "changed identity must not earn a positive"
+    assert records[0]["classification_provenance"]["reason"] == "image_unavailable"
+
+
+@pytest.mark.parametrize("when", ["before", "during", "after"])
+def test_ocr_deletion_is_decided_at_the_pinned_snapshot(monkeypatch, visual_runtime, when) -> None:
+    accept = _credential_modal.ModalVisualEvidence._accept_image
+
+    def delete_at_snapshot(request, payload):
+        if when == "before":
+            request.path.unlink()
+        if when == "during":
+            read = request.lease.read
+
+            def delete_before_read(size):
+                request.path.unlink()
+                return read(size)
+
+            request.lease.read = delete_before_read
+        image = accept(request, payload)
+        if when == "after":
+            request.path.unlink()
+        return image
+
+    monkeypatch.setattr(_credential_modal.ModalVisualEvidence, "_accept_image", staticmethod(delete_at_snapshot))
+
+    def positive(child, _image, _timeout):
+        child.returncode = 0
+        child.finished.set()
+        return json.dumps(_ocr_payload("credential")).encode(), None
+
+    visual_runtime.ocr.communicate = positive
+    records = _ocr_attempt(visual_runtime)
+    assert bool(records) is (when == "after"), "only deletion AFTER the validated snapshot is harmless"
+    assert len(visual_runtime.ocr.inputs) == (1 if when == "after" else 0)
+    if when == "after":
+        assert records[0]["classification_provenance"]["category"] == "credential"
+        assert records[0]["sha256"] == hashlib.sha256(visual_runtime.ocr.inputs[0]).hexdigest()
+    assert not list(visual_runtime.root.glob("_ui-image-*.png"))
+
+
+@pytest.mark.parametrize("stamp", ["2020-01-01T00:00:00.000Z", "2099-01-01T00:00:00.000Z", None])
+def test_ocr_stale_future_or_absent_classification_time_is_not_positive(visual_runtime, stamp) -> None:
+    def dated(child, _image, _timeout):
+        payload = _ocr_payload("credential")
+        payload["classified_at_utc"] = stamp
+        child.returncode = 0
+        child.finished.set()
+        return json.dumps(payload).encode(), None
+
+    visual_runtime.ocr.communicate = dated
+    records = _ocr_attempt(visual_runtime)
+    assert len(records) == 1 and records[0]["classification_provenance"]["status"] == "error"
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_ocr_expiry_rejects_an_otherwise_current_positive(expired) -> None:
+    now = datetime.now(timezone.utc)
+    acquired = {
+        "captured_at_utc": (now - timedelta(seconds=5)).isoformat(),
+        "expires_at_utc": (now + timedelta(seconds=-1 if expired else 5)).isoformat(),
+    }
+    output = json.dumps(_ocr_payload("credential")).encode()
+    if expired:
+        with pytest.raises(ValueError):
+            _credential_modal._ocr_provenance(output, acquired)
+    else:
+        assert _credential_modal._ocr_provenance(output, acquired)["category"] == "credential"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows delete-pending lease control")
+@pytest.mark.parametrize("delete_before", [False, True])
+def test_ocr_native_deleted_file_is_decided_before_the_lease_snapshot(tmp_path, delete_before) -> None:
+    """A removed file really remains readable through its lease; path existence is load-bearing."""
+    capture_id = "a" * 32
+    path = tmp_path / f"_ui-image-{capture_id}.png"
+    state = inspect_credential_modal(111, lambda _pid: [owned_dialog(), main_window()])
+    record = _credential_modal._image_record(111, state, state.dialog.window, capture_id)
+    record.update(
+        image_basename=path.name,
+        path=path.name,
+        ownership_checks=dict.fromkeys(("before", "after_render", "after_write"), True),
+    )
+    image = _credential_modal._image_png(2, 2, b"\0" * 6 + b"\xff" * 6)
+    payload = {"dimensions": {"width": 2, "height": 2}, "sha256": hashlib.sha256(image).hexdigest()}
+    with _credential_modal._open_private_image(path, delete_on_close=True) as lease:
+        lease.write(image)
+        lease.flush()
+        request = _credential_modal._ImageRequest(path, lease, record)
+        if delete_before:
+            path.unlink()
+            lease.seek(0)
+            assert lease.read() == image, "the native negative must retain readable pixels after deletion"
+            with pytest.raises(OSError):
+                _credential_modal.ModalVisualEvidence._accept_image(request, payload)
+        else:
+            assert _credential_modal.ModalVisualEvidence._accept_image(request, payload) == image
+            path.unlink()
+            assert not path.exists()
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("kind", ["no-window", "healthy", "progress", "unrecognized", "credential", "native-query"])
+def test_ocr_only_unreadable_is_eligible(visual_runtime, kind) -> None:
+    windows = {
+        "no-window": [],
+        "healthy": [main_window()],
+        "progress": [main_window(), progress_dialog_window()],
+        "unrecognized": [main_window(), owned_dialog(("An unfamiliar instruction",))],
+        "credential": [main_window(), owned_dialog(("Enter your credentials",))],
+        "native-query": [main_window(), owned_dialog(("Native database query",))],
+    }[kind]
+    state = inspect_credential_modal(111, lambda _pid: windows, process_is_alive=lambda _pid: True)
+    with _credential_modal.ModalVisualEvidence(visual_runtime.root, deadline=time.monotonic() + 1) as evidence:
+        evidence.inspect_initial(111, state)
+        evidence.observe(111, state, deadline=time.monotonic() + 1)
+    assert visual_runtime.children == visual_runtime.ocr.children == []
+    assert visual_runtime.records == []
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows.Media.Ocr qualification control")
+@pytest.mark.parametrize(
+    "text,category",
+    [
+        ("Use your Windows credentials to access this database", "credential"),
+        ("Native database query\nselect 'Account Key'", "native_query"),
+        ("Evaluating...\nAn unfamiliar instruction", None),
+        ("The field 'MissingColumn' of the record wasn't found.", None),
+        (
+            "Enter your credentials\nPRIVATE_OCR_SENTINEL C:\\private\\source\nLOCAL_IMAGE authentication 10054",
+            "credential",
+        ),
+    ],
+)
+def test_ocr_native_in_memory_pixels_use_the_shipped_byte_child(text, category) -> None:
+    image_api = pytest.importorskip(
+        "PIL.Image", reason="native synthetic text raster needs the repo's Pillow dev extra"
+    )
+    draw_api = pytest.importorskip("PIL.ImageDraw", reason="native synthetic text raster needs Pillow")
+    font_api = pytest.importorskip("PIL.ImageFont", reason="native synthetic text raster needs Pillow")
+    image = image_api.new("RGB", (1200, 240), "white")
+    font = font_api.truetype(str(Path(os.environ["WINDIR"]) / "Fonts" / "arial.ttf"), 30)
+    draw_api.Draw(image).multiline_text((24, 24), text, font=font, fill="black", spacing=16)
+    png = io.BytesIO()
+    image.save(png, format="PNG")
+    done = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(PROBE_PS1),
+            "-OcrImage",
+            "-OcrTimeoutMs",
+            "8000",
+        ],
+        input=png.getvalue(),
+        capture_output=True,
+        timeout=12,
+        check=False,
+    )
+    assert done.returncode == 0 and not done.stderr, "native byte child must return only closed stdout metadata"
+    assert len(done.stdout.splitlines()) == 1 and done.stdout.startswith(b"{"), (
+        "native byte child must emit exactly one JSON object, never OCR prose"
+    )
+    assert all(
+        part not in done.stdout + done.stderr for part in (b"PRIVATE_OCR_SENTINEL", b"C:\\private", b"LOCAL_IMAGE")
+    ), "raw OCR text must never cross stdout or stderr, even when it contains control-marker words"
+    payload = json.loads(done.stdout)
+    assert payload["category"] == category and payload["status"] == ("positive" if category else "unknown")
+    assert set(payload) == set(_ocr_payload())
+    assert text.encode() not in done.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows.Media.Ocr failure controls")
+@pytest.mark.parametrize("failure", ["invalid-png", "missing-runtime", "unapproved-language", "timeout"])
+def test_ocr_native_failures_return_closed_errors(tmp_path, failure) -> None:
+    script = PROBE_PS1
+    if failure not in ("invalid-png", "timeout"):
+        script = tmp_path / "probe.ps1"
+        content = PROBE_PS1.read_text(encoding="utf-8")
+        if failure == "missing-runtime":
+            content = content.replace(
+                "Add-Type -AssemblyName System.Runtime.WindowsRuntime",
+                "throw 'PRIVATE_OCR_SENTINEL C:\\private\\source'",
+                1,
+            )
+        else:
+            content = content.replace("::new('en-US')", "::new('fr-FR')", 1)
+        script.write_text(content, encoding="utf-8")
+    done = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            "-OcrImage",
+            "-OcrTimeoutMs",
+            "1" if failure == "timeout" else "8000",
+        ],
+        input=b"not PNG \x01 PRIVATE_OCR_SENTINEL",
+        capture_output=True,
+        timeout=12,
+        check=False,
+    )
+    assert done.returncode == 0 and not done.stderr
+    payload = json.loads(done.stdout)
+    assert payload["status"] == "error" and payload["category"] is None
+    assert (
+        payload["reason"]
+        == {
+            "invalid-png": "ocr_unparseable",
+            "missing-runtime": "ocr_unavailable",
+            "unapproved-language": "ocr_unavailable",
+            "timeout": "ocr_timeout",
+        }[failure]
+    )
+    assert b"PRIVATE_OCR_SENTINEL" not in done.stdout
 
 
 @pytest.fixture(name="dpi_runtime")
@@ -1718,7 +2219,8 @@ def test_refresh_main_reports_a_t0_dialog_at_exit_3_before_any_mutation(monkeypa
     out = capsys.readouterr().out
 
     assert exit_code == 3
-    assert out.startswith("REFRESH: DIALOG_UNREADABLE")
+    verdicts = [line for line in out.splitlines() if line.startswith("REFRESH:")]
+    assert len(verdicts) == 1 and verdicts[0].startswith("REFRESH: DIALOG_UNREADABLE")
 
 
 def test_refresh_and_save_wires_desktop_gone_to_exit_2(monkeypatch, capsys) -> None:
@@ -3817,6 +4319,9 @@ CREDENTIAL_ALTERNATIVES = [
     "Account Key",
     "Enter your credentials",
     "Please specify how to connect",
+    "Use your Windows credentials to access this database",
+    "Use my current credentials",
+    "Use alternate credentials",
 ]
 
 _FAKE_DESKTOP_APP = r"""

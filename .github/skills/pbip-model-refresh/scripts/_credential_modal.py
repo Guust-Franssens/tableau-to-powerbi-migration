@@ -1260,6 +1260,71 @@ _IMAGE_RESULTS = {
     "UNSUPPORTED",
     "CAPTURE_CLEANUP_FAILED",
 }
+_IMAGE_IDENTITY = (
+    "schema",
+    "event",
+    "capture_id",
+    "desktop_pid",
+    "main_hwnd",
+    "dialog_hwnd",
+    "owner_hwnd",
+    "image_basename",
+    "path",
+)
+_OCR_KEYS = {"schema", "method", "status", "category", "confidence", "signature", "reason", "classified_at_utc"}
+
+
+def _ocr_error(reason: str) -> dict:
+    return {
+        "schema": "pbip.window-ocr.v1",
+        "method": "windows_media_ocr",
+        "status": "error",
+        "category": None,
+        "confidence": "unknown",
+        "signature": None,
+        "reason": reason,
+        "classified_at_utc": _utc_stamp(),
+    }
+
+
+def _ocr_fields(pairs: list[tuple]) -> dict:
+    # Reject duplicate keys as well as extra keys; last-key-wins could hide conflicting positives.
+    if len(pairs) != len(_OCR_KEYS) or {key for key, _value in pairs} != _OCR_KEYS:
+        raise ValueError
+    return dict(pairs)
+
+
+def _ocr_provenance(output: bytes, acquired: dict) -> dict:
+    """Validate only the closed child contract, never interpret or forward OCR text."""
+    if len(output) > 2048:
+        raise ValueError
+    payload = json.loads(output, object_pairs_hook=_ocr_fields)
+    if not isinstance(payload, dict) or payload["schema"] != "pbip.window-ocr.v1":
+        raise ValueError
+    if payload["method"] != "windows_media_ocr":
+        raise ValueError
+    outcome = tuple(payload[key] for key in ("status", "category", "confidence", "signature", "reason"))
+    allowed = {
+        ("positive", "credential", "signature_positive", "credential_modal", None),
+        ("positive", "native_query", "signature_positive", "native_query_title", None),
+        ("unknown", None, "unknown", None, "no_signature"),
+        *(
+            ("error", None, "unknown", None, reason)
+            for reason in ("ocr_unavailable", "ocr_timeout", "ocr_unparseable", "image_unavailable")
+        ),
+    }
+    if outcome not in allowed:
+        raise ValueError
+    stamp = payload["classified_at_utc"]
+    if not isinstance(stamp, str) or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", stamp):
+        raise ValueError
+    classified = datetime.fromisoformat(stamp)
+    if not (
+        datetime.fromisoformat(acquired["captured_at_utc"]) <= classified <= datetime.now(timezone.utc)
+        and classified < datetime.fromisoformat(acquired["expires_at_utc"])
+    ):
+        raise ValueError
+    return payload
 
 
 class _ImageUnavailable(RuntimeError):
@@ -1624,18 +1689,20 @@ def _image_record(pid: int, state: CredentialDetection, window: DesktopWindow, c
 
 
 def _image_notice(record: dict, status: str) -> None:
-    """One versioned marker family, with no numeric auth-marker collisions in its wire spelling.
+    """One marker family, JSON-escaped so metadata cannot activate legacy free-text scanners.
 
     Identifiers/dimensions/timestamps are strings. Escaping zero preserves their decoded value while
     ensuring a PID/hash containing 10054 or 403 cannot trip the parent's unanchored text classifier.
-    This is not a semantic verdict or an arbitrary-text redactor: the record has closed safe fields.
+    The closed category/signature's credential lexeme needs the same protection until #146 consumes
+    structured records. This is not an arbitrary-text redactor: the record has closed safe fields.
     """
     record.update(status=status, timestamp_utc=_utc_stamp())
-    print("LOCAL_IMAGE " + json.dumps(record, separators=(",", ":")).replace("0", r"\u0030"), flush=True)
+    wire = json.dumps(record, separators=(",", ":")).replace("0", r"\u0030").replace("credential", r"\u0063redential")
+    print("LOCAL_IMAGE " + wire, flush=True)
 
 
 @dataclass
-class _ImageRequest:
+class _ImageRequest:  # pylint: disable=too-many-instance-attributes
     """One bounded launch/capture and its lease, registered BEFORE process creation."""
 
     path: Path
@@ -1645,9 +1712,14 @@ class _ImageRequest:
     ready: threading.Event = field(default_factory=threading.Event)
     cancelled: bool = False
     expiry: threading.Timer | None = None
+    completed: threading.Event = field(default_factory=threading.Event)
+    identity: tuple = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.identity = tuple(self.record[key] for key in _IMAGE_IDENTITY)
 
 
-class ModalVisualEvidence:
+class ModalVisualEvidence:  # pylint: disable=too-many-instance-attributes
     """Invocation-private, one-shot asynchronous evidence. Never mutates a detection or its deadline."""
 
     def __init__(self, directory: Path | None = None, *, deadline: float = float("inf")) -> None:
@@ -1656,6 +1728,7 @@ class ModalVisualEvidence:
         self._lock = threading.Lock()
         self._closed = False
         self._deadline = deadline
+        self._settled = threading.Event()
         self._pending: queue.Queue[tuple[int, CredentialDetection, float] | None] = queue.Queue(maxsize=1)
         configured = directory if directory is not None else os.environ.get(IMAGE_DIRECTORY_ENV)
         self._directory = Path(configured) if configured else None
@@ -1688,19 +1761,33 @@ class ModalVisualEvidence:
         request.record["cleanup_state"] = reason
         return True
 
-    def enqueue(self, pid: int, state: CredentialDetection) -> None:
+    def enqueue(self, pid: int, state: CredentialDetection) -> bool:
         """Nonblocking handoff of an immutable detection; no filesystem, subprocess or thread startup."""
-        if state.modal is not None or state.dialog is None or state.dialog.verdict != VERDICT_DIALOG_UNREADABLE:
-            return
-        window = state.dialog.window
-        if self._closed or not window.hwnd or not window.owner_hwnd or window.owner_enabled is not False:
-            return
+        if self._closed or not self._eligible(state):
+            return False
         deadline = min(self._deadline, time.monotonic() + IMAGE_CAPTURE_SECONDS)
         try:
             self._pending.put_nowait((pid, state, deadline))
+            return True
         except queue.Full:
             # One pending exact snapshot is enough; later detector polls can offer a newer HWND.
-            pass
+            return False
+
+    @staticmethod
+    def _eligible(state: CredentialDetection) -> bool:
+        return bool(
+            state.modal is None
+            and state.dialog is not None
+            and state.dialog.verdict == VERDICT_DIALOG_UNREADABLE
+            and state.dialog.window.hwnd
+            and state.dialog.window.owner_hwnd
+            and state.dialog.window.owner_enabled is False
+        )
+
+    def inspect_initial(self, pid: int, state: CredentialDetection) -> None:
+        """One t=0 attempt; even wedged storage/process startup cannot delay the existing stop."""
+        if self.enqueue(pid, state):
+            self._settled.wait(max(0.0, self._deadline - time.monotonic()))
 
     def _consume(self) -> None:
         while not self._closed:
@@ -1718,6 +1805,8 @@ class ModalVisualEvidence:
 
     def observe(self, pid: int, state: CredentialDetection, *, deadline: float) -> None:
         """Background-only acquisition. Startup and capture share the queued attempt's deadline."""
+        if not self._eligible(state):
+            return
         window = state.dialog.window
         with self._lock:
             key = (pid, window.hwnd)
@@ -1725,7 +1814,11 @@ class ModalVisualEvidence:
             previous_requests = tuple(self._requests)
             self._attempted.add(key)
         for previous in previous_requests:
-            if previous.record["cleanup_state"] == "pending" and not previous.path.exists():
+            if (
+                previous.completed.is_set()
+                and previous.record["cleanup_state"] == "pending"
+                and not previous.path.exists()
+            ):
                 if self._remove(previous, "removed_externally"):
                     self._notice(previous.record, "CLEANED")
         if self._closed or repeated:
@@ -1798,14 +1891,15 @@ class ModalVisualEvidence:
         with self._lock:
             if not self._closed:
                 _image_notice(record, status)
+        self._settled.set()
 
-    def _capture_result(self, request: _ImageRequest, deadline: float) -> str | None:
+    def _capture_result(self, request: _ImageRequest, deadline: float) -> tuple[str | None, bytes | None]:
         # Exact bools are intentional: integer 1 must not certify an ownership check.
         # pylint: disable=unidiomatic-typecheck
         if not request.ready.wait(max(0.0, deadline - time.monotonic())):
             raise subprocess.TimeoutExpired("window-image", IMAGE_CAPTURE_SECONDS)
         if self._closed or request.cancelled:
-            return None
+            return None, None
         if request.child is None:
             raise OSError
         output, _ = request.child.communicate(timeout=max(0.0, deadline - time.monotonic()))
@@ -1820,15 +1914,24 @@ class ModalVisualEvidence:
             and all(value is None or type(value) is bool for value in checks.values())
         ):
             request.record["ownership_checks"] = checks
-        if code == "ACQUIRED" and not self._accept_image(request, payload):
+        image = self._accept_image(request, payload) if code == "ACQUIRED" else None
+        if code == "ACQUIRED" and image is None:
             code = "CAPTURE_FAILED"
         if time.monotonic() >= deadline:
             raise subprocess.TimeoutExpired("window-image", IMAGE_CAPTURE_SECONDS)
-        return code
+        return code, image
 
     def _watch(self, request: _ImageRequest, deadline: float) -> None:
         try:
-            code = self._capture_result(request, deadline)
+            self._acquire_and_classify(request, deadline)
+        finally:
+            request.completed.set()
+            self._settled.set()
+
+    def _acquire_and_classify(self, request: _ImageRequest, deadline: float) -> None:
+        image = None
+        try:
+            code, image = self._capture_result(request, deadline)
             if code is None:
                 return
         except subprocess.TimeoutExpired:
@@ -1837,6 +1940,7 @@ class ModalVisualEvidence:
         except (OSError, UnicodeError, ValueError, TypeError, AttributeError):
             code = "CAPTURE_FAILED"
             self._stop(request)
+        acquired_record = None
         with self._lock:
             if self._closed:
                 return
@@ -1845,24 +1949,32 @@ class ModalVisualEvidence:
                 request.expiry = threading.Timer(IMAGE_LIFETIME_SECONDS, self._expire, args=(request,))
                 request.expiry.daemon = True
                 request.expiry.start()
-                if code == "ACQUIRED" and request.path.is_file():
+                if code == "ACQUIRED":
                     acquired = datetime.now(timezone.utc)
                     request.record.update(
                         captured_at_utc=_utc_stamp(acquired),
                         expires_at_utc=_utc_stamp(acquired + timedelta(seconds=IMAGE_LIFETIME_SECONDS)),
                         capture_success=True,
                     )
+                    acquired_record = {
+                        **request.record,
+                        "dimensions": dict(request.record["dimensions"]),
+                        "ownership_checks": dict(request.record["ownership_checks"]),
+                    }
                     _image_notice(request.record, code)
-                    return
+                    acquired_record.update(status=code, timestamp_utc=request.record["timestamp_utc"])
             except (OSError, RuntimeError):
                 code = "CAPTURE_FAILED"
-            if self._remove(request, "removed") and request.expiry is not None:
-                request.expiry.cancel()
-            _image_notice(request.record, code if code != "ACQUIRED" else "WRITE_FAILED")
+            if acquired_record is None:
+                if self._remove(request, "removed") and request.expiry is not None:
+                    request.expiry.cancel()
+                _image_notice(request.record, code if code != "ACQUIRED" else "WRITE_FAILED")
+        if acquired_record is not None:
+            self._classify_image(request, image, acquired_record, deadline)
 
     @staticmethod
-    def _accept_image(request: _ImageRequest, payload: dict) -> bool:
-        """Validate the child metadata against the observer's pinned, shared-delete file handle."""
+    def _accept_image(request: _ImageRequest, payload: dict) -> bytes | None:
+        """Snapshot ONCE through the pinned lease. The same validated bytes go to OCR, never a path."""
         # bool is an int subclass, but is not a pixel dimension.
         # pylint: disable=unidiomatic-typecheck
         dimensions = payload.get("dimensions")
@@ -1871,20 +1983,107 @@ class ModalVisualEvidence:
             or set(dimensions) != {"width", "height"}
             or not all(type(value) is int and value > 0 for value in dimensions.values())
         ):
-            return False
-        if not all(request.record["ownership_checks"].get(stage) is True for stage in _IMAGE_CHECKS):
-            return False
+            return None
+        if (
+            not all(request.record["ownership_checks"].get(stage) is True for stage in _IMAGE_CHECKS)
+            or tuple(request.record[key] for key in _IMAGE_IDENTITY) != request.identity
+            or request.path.name != request.record["image_basename"]
+            or request.path.name != request.record["path"]
+            or request.path.name != f"_ui-image-{request.record['capture_id']}.png"
+        ):
+            return None
+        # A delete-pending lease is still readable. It is not a current image if removed BEFORE this
+        # snapshot; replacing its pathname must not make the old lease current again.
+        pinned = os.fstat(request.lease.fileno())
+        visible = request.path.stat()
+        if (pinned.st_dev, pinned.st_ino) != (visible.st_dev, visible.st_ino):
+            return None
         request.lease.seek(0)
         image = request.lease.read(_MAX_IMAGE_BYTES + 1)
-        if not 33 <= len(image) <= _MAX_IMAGE_BYTES or image[:8] != b"\x89PNG\r\n\x1a\n":
-            return False
-        if struct.unpack(">II", image[16:24]) != (dimensions["width"], dimensions["height"]):
-            return False
+        if (
+            not 33 <= len(image) <= _MAX_IMAGE_BYTES
+            or image[:8] != b"\x89PNG\r\n\x1a\n"
+            or struct.unpack(">II", image[16:24]) != (dimensions["width"], dimensions["height"])
+        ):
+            return None
         digest = hashlib.sha256(image).hexdigest()
-        if payload.get("sha256") != digest:
-            return False
+        visible = request.path.stat()
+        if payload.get("sha256") != digest or (pinned.st_dev, pinned.st_ino) != (visible.st_dev, visible.st_ino):
+            return None
         request.record.update(dimensions={key: str(value) for key, value in dimensions.items()}, sha256=digest)
-        return True
+        return image
+
+    def _launch_ocr(self, request: _ImageRequest, deadline: float) -> None:
+        """Process creation can wedge; its eventual handle is reclaimed, not joined by the wait."""
+        try:
+            if not self._closed and not request.cancelled and time.monotonic() < deadline:
+                request.child = subprocess.Popen(  # pylint: disable=consider-using-with
+                    [
+                        "powershell.exe",
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(Path(__file__).with_name("probe_desktop_credential.ps1")),
+                        "-OcrImage",
+                        "-OcrTimeoutMs",
+                        str(max(1, min(8000, int((deadline - time.monotonic()) * 1000)))),
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+        except OSError:
+            pass
+        finally:
+            request.ready.set()
+        if self._closed or request.cancelled or time.monotonic() >= deadline:
+            self._stop(request)
+
+    def _classify_image(self, request: _ImageRequest, image: bytes, acquired: dict, deadline: float) -> None:
+        try:
+            request.child = None
+            request.ready.clear()
+            threading.Thread(target=self._launch_ocr, args=(request, deadline), name="window-ocr", daemon=True).start()
+            if not request.ready.wait(max(0.0, deadline - time.monotonic())):
+                raise subprocess.TimeoutExpired("window-ocr", IMAGE_CAPTURE_SECONDS)
+            if self._closed or request.cancelled:
+                return
+            if request.child is None:
+                raise OSError
+            output, _ = request.child.communicate(input=image, timeout=max(0.0, deadline - time.monotonic()))
+            if request.child.returncode != 0:
+                raise ValueError
+            provenance = _ocr_provenance(output, acquired)
+        except subprocess.TimeoutExpired:
+            self._stop(request)
+            provenance = _ocr_error("ocr_timeout")
+        except OSError:
+            self._stop(request)
+            provenance = _ocr_error("ocr_unavailable")
+        except Exception:  # pylint: disable=broad-exception-caught
+            # No child bytes or exception detail may cross the closed metadata seam.
+            self._stop(request)
+            provenance = _ocr_error("ocr_unparseable")
+        with self._lock:
+            if (
+                self._closed
+                or time.monotonic() >= min(deadline, self._deadline)
+                or datetime.now(timezone.utc) >= datetime.fromisoformat(acquired["expires_at_utc"])
+            ):
+                return  # discard late completion, including after a timely refresh has already exited
+            if (
+                request.record != acquired
+                or tuple(request.record.get(key) for key in _IMAGE_IDENTITY) != request.identity
+                or request.record.get("capture_success") is not True
+                or not all(request.record.get("ownership_checks", {}).get(stage) is True for stage in _IMAGE_CHECKS)
+            ):
+                provenance = _ocr_error("image_unavailable")
+            request.record = {**acquired, "classification_provenance": provenance}
+            _image_notice(request.record, "CLASSIFIED")
 
     def _expire(self, request: _ImageRequest) -> None:
         with self._lock:

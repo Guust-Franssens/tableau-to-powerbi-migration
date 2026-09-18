@@ -28,6 +28,7 @@ from test_credential_modal_detection import (
     DIALOG_HWND,
     MAIN_HWND,
     _FakeProgressMonitor,
+    _ocr_payload,
     main_window,
     owned_dialog,
     visual_runtime as _visual_runtime_fixture,  # noqa: F401  (shared pytest fixture)
@@ -216,6 +217,190 @@ def _visual_refresh(
     return thread, released, outcome, window
 
 
+@pytest.mark.parametrize("category", ["credential", "native_query", None])
+@pytest.mark.parametrize("api", [False, True], ids=["cli", "api"])
+def test_ocr_t0_publishes_before_the_unchanged_unreadable_stop(
+    monkeypatch, visual_runtime, capsys, category, api
+) -> None:
+    state = _credential_modal.inspect_credential_modal(111, lambda _pid: [owned_dialog(), main_window()])
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid, **_kwargs: state)
+    monkeypatch.setattr(refresh_pbip_model, "_resolve_pid", lambda _pid: 111)
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda _pid: None)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("t=0 must not start XMLA, discover a port, query rows or save")
+
+    for name in ("_load_adomd", "discover_port", "row_counts", "image_save", "save"):
+        monkeypatch.setattr(refresh_pbip_model, name, forbidden)
+
+    def result(child, _image, _timeout):
+        child.returncode = 0
+        child.finished.set()
+        return json.dumps(_ocr_payload(category)).encode(), None
+
+    visual_runtime.ocr.communicate = result
+    if api:
+        with pytest.raises(_credential_modal.DialogFoundError) as error:
+            refresh(port=1234, tables=["Orders"], desktop_pid=111, evidence_dir=visual_runtime.root)
+        assert error.value.finding.verdict == "DIALOG_UNREADABLE"
+    else:
+        assert refresh_pbip_model.main(["--pid", "111", "--evidence-dir", str(visual_runtime.root)]) == 3
+        stdout = capsys.readouterr().out
+        assert stdout.index('"status":"CLASSIFIED"') < stdout.index("REFRESH: DIALOG_UNREADABLE")
+    records = [record for record, _ in visual_runtime.records if record["status"] == "CLASSIFIED"]
+    assert len(records) == 1 and records[0]["classification_provenance"]["category"] == category
+    assert len(visual_runtime.ocr.children) == 1
+    assert not list(visual_runtime.root.glob("_ui-image-*.png"))
+
+
+@pytest.mark.parametrize("progress", [False, True])
+@pytest.mark.parametrize("category", ["credential", "native_query", None])
+def test_ocr_inflight_publishes_while_alive_but_cannot_replace_worker_success(
+    monkeypatch, parked, visual_runtime, progress, category
+) -> None:
+    def result(child, _image, _timeout):
+        child.returncode = 0
+        child.finished.set()
+        return json.dumps(_ocr_payload(category)).encode(), None
+
+    visual_runtime.ocr.communicate = result
+    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, progress=progress)
+    try:
+        assert visual_runtime.classified.wait(2), "classification must be published before the worker returns"
+        assert thread.is_alive(), "OCR cannot stop the refresh: #146 owns positive-category consumption"
+        records = [record for record, _ in visual_runtime.records if record["status"] == "CLASSIFIED"]
+        assert len(records) == 1 and records[0]["classification_provenance"]["category"] == category
+    finally:
+        released.set()
+        thread.join(3)
+    assert outcome.get("result", (False,))[0] is True
+
+
+@pytest.mark.parametrize("progress", [False, True])
+@pytest.mark.parametrize("boundary", ["startup", "recognition"])
+@pytest.mark.parametrize("finishes", [False, True])
+def test_ocr_delayed_child_cannot_extend_wait_or_publish_after_exit(
+    monkeypatch, parked, visual_runtime, progress, boundary, finishes
+) -> None:
+    entered, resume, returned = threading.Event(), threading.Event(), threading.Event()
+    popen = _credential_modal.subprocess.Popen
+
+    def delayed_startup(argv, **kwargs):
+        if "-OcrImage" in argv:
+            entered.set()
+            resume.wait(5)
+        child = popen(argv, **kwargs)
+        if "-OcrImage" in argv:
+            returned.set()
+        return child
+
+    def delayed_result(child, _image, _timeout):
+        entered.set()
+        resume.wait(5)
+        child.returncode = 0
+        child.finished.set()
+        returned.set()
+        return json.dumps(_ocr_payload("credential")).encode(), None
+
+    if boundary == "startup":
+        monkeypatch.setattr(_credential_modal.subprocess, "Popen", delayed_startup)
+    else:
+        visual_runtime.ocr.communicate = delayed_result
+    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, progress=progress, timeout=0.3)
+    try:
+        assert entered.wait(2), "the test must reach the selected OCR boundary"
+        if finishes:
+            released.set()
+        thread.join(2)
+        assert not thread.is_alive(), "OCR must not hold the existing refresh deadline or teardown"
+        assert not returned.is_set(), "the control must still be stalled when refresh ends"
+        if finishes:
+            assert outcome.get("result", (False,))[0] is True
+        else:
+            assert isinstance(outcome.get("error"), _credential_modal.DialogFoundError)
+        classifications = [record for record, _ in visual_runtime.records if record["status"] == "CLASSIFIED"]
+        assert all(record["classification_provenance"]["status"] != "positive" for record in classifications)
+        assert not list(visual_runtime.root.glob("_ui-image-*.png"))
+    finally:
+        released.set()
+        resume.set()
+        thread.join(3)
+        assert returned.wait(2)
+        deadline = time.monotonic() + 2
+        while any(not child.finished.is_set() for child in visual_runtime.ocr.children) and time.monotonic() < deadline:
+            time.sleep(0.01)
+    assert all(child.finished.is_set() for child in visual_runtime.ocr.children)
+    assert len([record for record, _ in visual_runtime.records if record["status"] == "CLASSIFIED"]) == len(
+        classifications
+    ), "a late result cannot be published after cleanup"
+
+
+@pytest.mark.timing
+@pytest.mark.parametrize("limit", ["attempt", "expiry"])
+def test_ocr_late_positive_is_discarded_while_refresh_is_still_alive(
+    monkeypatch, parked, visual_runtime, limit
+) -> None:
+    if limit == "attempt":
+        monkeypatch.setattr(_credential_modal, "IMAGE_CAPTURE_SECONDS", 0.08)
+    else:
+        monkeypatch.setattr(_credential_modal, "IMAGE_LIFETIME_SECONDS", 0.08)
+    finished = threading.Event()
+
+    def delayed_result(child, _image, _timeout):
+        time.sleep(0.15)
+        child.returncode = 0
+        child.finished.set()
+        finished.set()
+        return json.dumps(_ocr_payload("credential")).encode(), None
+
+    visual_runtime.ocr.communicate = delayed_result
+    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
+    try:
+        assert finished.wait(2)
+        assert thread.is_alive(), "evidence expiry must be independent of the refresh deadline"
+        assert not visual_runtime.classified.wait(0.05), "an expired positive must be discarded"
+    finally:
+        released.set()
+        thread.join(3)
+    assert outcome.get("result", (False,))[0] is True
+
+
+@pytest.mark.timing
+def test_ocr_t0_uses_original_budget_even_if_startup_is_stalled(monkeypatch, visual_runtime) -> None:
+    entered, resume, returned = threading.Event(), threading.Event(), threading.Event()
+    state = _credential_modal.inspect_credential_modal(111, lambda _pid: [owned_dialog(), main_window()])
+    popen = _credential_modal.subprocess.Popen
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid, **_kwargs: state)
+
+    def delayed_startup(argv, **kwargs):
+        if "-OcrImage" in argv:
+            entered.set()
+            resume.wait(3)
+        child = popen(argv, **kwargs)
+        if "-OcrImage" in argv:
+            returned.set()
+        return child
+
+    monkeypatch.setattr(_credential_modal.subprocess, "Popen", delayed_startup)
+    started = time.monotonic()
+    try:
+        with pytest.raises(_credential_modal.DialogFoundError):
+            refresh(
+                port=1234,
+                tables=["Orders"],
+                desktop_pid=111,
+                evidence_dir=visual_runtime.root,
+                absolute_timeout_sec=0.15,
+            )
+        assert entered.is_set()
+        assert time.monotonic() - started < 0.75, "t=0 classification must not allocate a fresh eight seconds"
+        classifications = [record for record, _ in visual_runtime.records if record["status"] == "CLASSIFIED"]
+        assert all(record["classification_provenance"]["status"] == "error" for record in classifications)
+    finally:
+        resume.set()
+        assert returned.wait(2)
+
+
 @pytest.mark.parametrize("progress", [False, True])
 def test_visual_notice_is_once_flushed_readable_in_flight_and_deleted_on_success(
     monkeypatch, parked, visual_runtime, progress
@@ -252,7 +437,8 @@ def test_visual_notice_is_once_flushed_readable_in_flight_and_deleted_on_success
         time.sleep(0.04)  # several production polls must see the SAME HWND without recapturing it
         assert len(visual_runtime.children) == 1, "repeated polls must not launch repeated acquisition"
         assert visual_runtime.api.captures == [(DIALOG_HWND, 31, 2)], "capture only the detected HWND"
-        assert len(visual_runtime.records) == 1, "exactly one flushed acquisition notice per HWND"
+        assert sum(record[0]["status"] == "ACQUIRED" for record in visual_runtime.records) == 1
+        assert visual_runtime.classified.wait(2), "one closed classification must follow acquisition"
     finally:
         released.set()
         thread.join(3)
@@ -389,7 +575,7 @@ def test_visual_inspector_can_delete_early(monkeypatch, parked, visual_runtime) 
         released.set()
         thread.join(3)
     assert outcome.get("result", (False,))[0] is True
-    assert [record[0]["status"] for record in visual_runtime.records] == ["ACQUIRED", "CLEANED"]
+    assert [record[0]["status"] for record in visual_runtime.records] == ["ACQUIRED", "CLASSIFIED", "CLEANED"]
     assert visual_runtime.records[-1][0]["cleanup_state"] == "removed_externally"
 
 
@@ -477,8 +663,9 @@ def test_visual_does_not_mask_later_positive_semantic_text(monkeypatch, parked, 
         thread.join(3)
 
 
+@pytest.mark.parametrize("category", ["credential", "native_query", None])
 def test_visual_notice_and_path_cannot_trip_the_real_parent_text_classifier(
-    monkeypatch, parked, visual_runtime
+    monkeypatch, parked, visual_runtime, category
 ) -> None:
     source = Path(__file__).resolve()
     repo_scripts = next(
@@ -499,9 +686,17 @@ def test_visual_notice_and_path_cannot_trip_the_real_parent_text_classifier(
     monkeypatch.chdir(private_cwd)
     monkeypatch.setattr(_credential_modal.uuid, "uuid4", lambda: SimpleNamespace(hex="1005403abcdef" + "0" * 20))
     visual_runtime.api.pid = visual_runtime.api.owner_pid = 10054
+
+    def result(child, _image, _timeout):
+        child.returncode = 0
+        child.finished.set()
+        return json.dumps(_ocr_payload(category)).encode(), None
+
+    visual_runtime.ocr.communicate = result
     thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, pid=10054)
     try:
         assert visual_runtime.noticed.wait(2)
+        assert visual_runtime.classified.wait(2)
         payload = visual_runtime.records[0][0]
         assert payload["status"] == "ACQUIRED"
         assert payload["desktop_pid"] == "10054", "escaping must preserve the decoded identifier"
@@ -511,6 +706,13 @@ def test_visual_notice_and_path_cannot_trip_the_real_parent_text_classifier(
         assert "authentication-10054-oauth" not in line
         assert str(private_cwd) not in line
         assert "/" not in payload["path"] and "\\" not in payload["path"]
+        classified = [record for record, _ in visual_runtime.records if record["status"] == "CLASSIFIED"]
+        assert classified[0]["classification_provenance"]["category"] == category
+        for wire in visual_runtime.wires:
+            assert not any(marker in wire.lower() for marker in probe_live_source.CREDENTIAL_MARKERS), (
+                "closed metadata must not trigger the unwired legacy credential scanner"
+            )
+            assert probe_live_source._classify_failure(wire, False)[0] == "ERROR"
     finally:
         released.set()
         thread.join(3)
@@ -604,7 +806,7 @@ def test_visual_parent_classifier_is_optional_in_a_shallow_copy(monkeypatch, par
     shallow = Path(Path.cwd().anchor) / "portable" / "tests" / "test_refresh_wall_clock.py"
     monkeypatch.setitem(test.__globals__, "__file__", str(shallow))
     with pytest.raises(pytest.skip.Exception, match="parent transcript classifier is host-repo-only"):
-        test(monkeypatch, parked, visual_runtime)
+        test(monkeypatch, parked, visual_runtime, None)
     assert visual_runtime.children == []
 
 

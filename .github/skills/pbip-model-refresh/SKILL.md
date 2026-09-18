@@ -57,14 +57,26 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B
                                      [--ui-save]
 ```
 
-### Inspect an unreadable in-flight dialog without stealing focus (#146)
+### Classify an unreadable dialog without stealing focus (#697; consumer #146)
 
-**Phase-1 seam: acquisition plus a metadata record, not pixel classification.** An in-flight
-`DIALOG_UNREADABLE` owned finding is offered to a background worker for one bounded exact-HWND
+**Portable producer, not a reachability verdict.** A `DIALOG_UNREADABLE` owned finding is offered
+to a background worker for one bounded exact-HWND
 **`PrintWindow(PW_RENDERFULLCONTENT)`** attempt. PID, visibility, direct owner, owner PID and disabled
 owner are checked before rendering, after rendering and after writing. Failure, blank/unpainted
-pixels, changed identity or incomplete metadata cannot become a semantic verdict. The existing
-unreadable latch, refresh deadline and successful-worker behavior remain unchanged.
+pixels, changed identity or incomplete metadata cannot become a positive classification. The producer
+then sends the **exact validated in-memory PNG bytes**, not a pathname, to one killable internal mode
+of the bundled PowerShell arbiter. Windows-provided
+[`Windows.Media.Ocr`](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr.ocrengine.recognizeasync)
+reads them with `en-US`.
+No package or language pack is installed; an unavailable recognizer returns a closed error.
+
+**Readable evidence remains first.** Only the existing `DIALOG_UNREADABLE` route is eligible,
+never `DIALOG_UNRECOGNIZED`, progress, a readable credential/native prompt, or no dialog.
+At **t=0**, refresh CLI and API make one bounded attempt before the unchanged unreadable stop
+(exit 3 / `DialogFoundError`); they do not start another refresh. **In flight**, acquisition and
+OCR remain asynchronous: a closed classification can be published while XMLA is still running.
+Unknown/error never aborts a worker that may still return data. Even a positive category is metadata
+here, not a replacement refresh verdict; **#146 remains the downstream consumer**.
 
 ✅ **DPI-cropped evidence is not acquired (#686).** Measured September 17, 2026 on actual
 Desktop **2.158.758.0 at 125% scaling**: the old child reported `ACQUIRED` for a **502×264**
@@ -84,10 +96,10 @@ and [physical versus virtualized bounds](https://learn.microsoft.com/en-us/windo
 **Invariant:** `ACQUIRED` requires the complete physical frame of the pinned PID/HWND/owner.
 Independent physical bounds and bottom/right content markers gate the synthetic controls; merely
 matching the child's own dimensions or the old top-left pixels does not. This closes the measured
-geometric crop, not renderer staleness, text legibility or semantic classification.
-⚠️ **Post-fix actual-Desktop requalification is still required after #687 releases Desktop.**
-The retained actual-Desktop evidence above proves the old defect, not qualification of this fix.
-Observer eligibility remains `DIALOG_UNREADABLE` only; no OCR or new prompt classification is added.
+geometric crop, not renderer staleness, text legibility or OCR completeness.
+The prior acquisition qualification is recorded in #689; it is not qualification of this new producer.
+⚠️ **Final actual-Desktop credential/native/progress/unknown/no-dialog qualification remains required
+after #146 integrates the consumer**, through the production probe path on its exact final SHA.
 
 **The wait only queues an immutable exact-target snapshot.** Its single pending slot never waits
 for storage validation, Git, file/process creation or acquisition. A busy slot can drop an
@@ -97,10 +109,13 @@ before accepting completion in both wait branches, including after a delayed ins
 finishing after that deadline cannot overwrite a timeout or latched dialog result during cleanup.
 Timely success remains success even while optional evidence is delayed.
 
-Queueing, startup and capture share an **8-second** attempt budget, capped by the remaining refresh
-deadline. A late storage check cannot start acquisition. The acquisition watcher starts **before**
+Queueing, startup, capture and OCR/classification share **one 8-second attempt budget**, capped by
+the original refresh deadline (also by the configured refresh budget at t=0). OCR gets only the
+remaining time, not a second budget. A late storage check cannot start acquisition.
+The acquisition watcher starts **before**
 `Popen`; timeout/exit closes the reserved delete-on-close lease, and a process handle returned late
-is killed without publishing an image. Native process creation itself cannot always be interrupted:
+is killed without publishing an image. OCR process startup likewise runs on a bounded daemon handoff;
+late results cannot publish a positive category. Native process creation itself cannot always be interrupted:
 it runs on a daemon observer, never on the refresh wait thread, and teardown does not join that
 observer. This is not a guarantee that a wedged OS call returns; its eventual result is discarded.
 
@@ -122,21 +137,63 @@ wire interface is a line beginning **`LOCAL_IMAGE `**, followed by one JSON obje
 | Field | v1 meaning |
 |---|---|
 | `schema`, `event` | `pbip.window-image.v1`, `owned_modal_image` |
-| `capture_id`, `status` | Opaque per-attempt ID; one `ACQUIRED` notice per stable HWND, followed by cleanup updates using the same marker/ID |
+| `capture_id`, `status` | Opaque per-attempt ID; one `ACQUIRED`, at most one `CLASSIFIED`, then cleanup updates using the same marker/ID |
 | `timestamp_utc`, `captured_at_utc` | UTC notice time; publication time after verified acquisition (`null` when not acquired) |
 | `desktop_pid`, `main_hwnd`, `dialog_hwnd`, `owner_hwnd` | Decimal **strings**. `main_hwnd` is the existing enumerator's root snapshot, or `null` when ambiguous; ownership checks attest the dialog/direct-owner relationship, not an invented main-window identity |
 | `ownership_checks` | `before`, `after_render`, `after_write`: real Booleans or `null` for a check not established |
 | `dimensions`, `capture_success`, `capture_method` | Captured width/height as decimal strings, success Boolean, `PrintWindow_PW_RENDERFULLCONTENT` |
 | `image_basename`, `path`, `sha256` | Same random basename/relative locator, and SHA-256 of the PNG, checked against the observer's pinned file handle; never a host path |
 | `expires_at_utc`, `cleanup_state` | Planned expiry; `not_created`, `pending`, `removed_externally`, `expired`, `removed_on_exit`, `removed`, or `cleanup_failed` |
-| `classification_provenance` | `null`: deterministic acquisition has not reviewed the pixels. A visual reviewer records its own provenance separately |
+| `classification_provenance` | `null` at acquisition; the exact-key closed object below on `CLASSIFIED` and subsequent cleanup notices |
+
+**Closed classification contract.** `CLASSIFIED` repeats the acquisition identity, hash, dimensions,
+capture time, expiry and real Boolean ownership checks exactly. Only notice time, status and
+classification provenance change. Extra or duplicate child keys, multiple/conflicting results,
+wrong types, stale/future timestamps or nonzero child exits cannot produce a positive category.
+
+| Exact provenance key | Allowed value |
+|---|---|
+| `schema` | `pbip.window-ocr.v1` |
+| `method` | `windows_media_ocr` |
+| `status` | `positive`, `unknown`, `error` |
+| `category` | `credential`, `native_query`, or `null` |
+| `confidence` | `signature_positive` for a positive; otherwise `unknown` |
+| `signature` | `credential_modal`, `native_query_title`, or `null` |
+| `reason` | Positive: `null`; unknown: `no_signature`; error: `ocr_unavailable`, `ocr_timeout`, `ocr_unparseable`, `image_unavailable` |
+| `classified_at_utc` | UTC milliseconds, no earlier than acquisition or later than the current time; before image expiry |
+
+**Only a coherent positive tuple is actionable.** Native database query/queries is checked
+**first**, so a native approval displaying SQL containing `Account Key` or `Personal Access Token`
+stays `native_query`. The narrow shared credential signature is second. The only additions are the
+observed phrases `Use your Windows credentials to access this database`, `Use my current credentials`,
+and `Use alternate credentials`. Generic `requires your approval`, unknown errors, partial phrases,
+progress and broad labels such as Password/User name/Connect/Cancel return unknown.
+There is **no progress category**, numeric confidence threshold, popup suppression, approval,
+credential entry, reachability conclusion or gate change.
+
+The producer checks the original monotonic deadline and image expiry before publishing. A completion
+after either is discarded; a missing `CLASSIFIED` is not a negative result or a clean state.
+Raw OCR text stays inside the child: stdout is closed JSON only, stderr is discarded, and neither
+native exceptions nor malformed child output are echoed. No OCR transcript or second image is saved.
 
 **Parse JSON before interpreting fields.** Wire strings escape zero as `\u0030`: that preserves the
 decoded PID/HWND/hash/timestamp while preventing numeric substrings such as `10054` or `403` from
-tripping legacy free-text failure classifiers. Numeric values are intentionally strings, not JSON
-numbers. Do not feed re-serialized metadata into an authentication-text scanner.
+tripping legacy free-text failure classifiers. The closed `credential` category/signature lexeme
+likewise spells its first character as `\u0063`. ✅ The current parent's bare substring scanner
+otherwise relabels a metadata-only line `NO_CREDENTIAL`; the compatibility control requires `ERROR`
+while preserving the exact decoded category. Numeric values are intentionally strings, not JSON
+numbers. Do not feed re-serialized metadata into an authentication-text scanner; #146 must remove
+control records before that scan.
 
-**Exact local reviewer workflow:**
+**Byte lifetime and optional local inspection:**
+
+The producer snapshots the PNG **once through its pinned shared-delete lease**, verifying the
+pathname's file identity on both sides of that read, dimensions and SHA-256. OCR consumes exactly
+those bytes. Deletion before or during that validated snapshot cannot classify. Deletion afterwards
+does not invalidate the digest-bound classification: the consumer needs no file. External-cleanup notices follow
+classification completion so they do not race a valid byte snapshot.
+
+Manual inspection is optional, not part of the automatic consumer protocol:
 
 1. Match `schema`, `capture_id` and the expected Desktop PID. Require `status: ACQUIRED`,
    `capture_success: true`, all three ownership checks `true`, `cleanup_state: pending` and an
@@ -149,12 +206,10 @@ numbers. Do not feed re-serialized metadata into an authentication-text scanner.
    `_open_private_image(path, existing=True)` as a shared-delete stream and decode it in memory.
    Do not copy pixels to another file to work around an incompatible viewer, and never print
    bytes/base64 or put images in a log, receipt, Git tree, package or deliverable.
-3. A **positively identified username/password form** may be routed by the visual reviewer to the
-   existing credential stop; a **positively identified native-query approval prompt** to
-   operator-required. Record only category, reviewer/method, review time, `capture_id` and image
-   hash as classification provenance—not field values, source names or dialog text. Do not enter
-   credentials, approve a prompt, forge the refresh's exit code, or clear a gate from metadata alone.
-   Absent positive review, preserve `DIALOG_UNREADABLE` and the existing wait/success semantics.
+3. Keep any manual review separate from `classification_provenance`, whose method is specifically
+   Windows OCR. Do not forge a producer classification or exit code, enter credentials, approve
+   native SQL, or clear a gate from an image or its metadata. Preserve the existing
+   `DIALOG_UNREADABLE` and wait/success behavior unless the downstream consumer accepts a positive.
 4. **Delete the exact file immediately after handling and close the viewer.** For example, remove
    `Join-Path $env:PBIP_EVIDENCE_DIR $record.image_basename` with `Remove-Item -LiteralPath`.
    The observer notices external deletion without inferring who deleted it or what was classified.
@@ -166,12 +221,14 @@ numbers. Do not feed re-serialized metadata into an authentication-text scanner.
    close a holding viewer and remove the same private file locally. Never publish pixels to explain
    a cleanup failure. Durable logs may retain the safe record and external review provenance only.
 
-**Follow-up seam, deliberately not wired here:** `probe_live_source.py` currently buffers the
-refresh's output. Its Phase-1 consumer must forward/stream `LOCAL_IMAGE` lines, supply the run-owned
-`PBIP_EVIDENCE_DIR`, perform the schema/PID/hash/lifetime checks above, and route a separate positive
-visual review. That orchestration requires a file outside this change's closed surface. The
-standalone PowerShell arbiter, t=0 checks and read-only query probe retain their existing behavior;
-no automatic UIA enrichment, OCR or external-verdict ingestion was added.
+**Follow-up seam, deliberately not wired here:** #146 changes `probe_live_source.py`, which currently
+buffers refresh output. Its consumer must stream and remove `LOCAL_IMAGE` control lines before
+free-text scanning, supply run-owned `PBIP_EVIDENCE_DIR`, and accept only coherent `CLASSIFIED`
+metadata following the matching current-invocation `ACQUIRED`. It must check expected PID,
+HWND/direct owner, capture ID, hash and lifetime; it must **never open pixels or rerun OCR**.
+Only the existing exact row verdict and successful child exit can establish data success.
+The standalone PowerShell arbiter and read-only query probe retain their existing behavior:
+no automatic OCR was added to either entry point.
 
 ✅ **Precedent:** the two independent September 15, 2026 controls on #146 acquired readable
 Snowflake forms with their owners minimized and without foreground/restore. This implementation
@@ -181,8 +238,10 @@ proven universal fallback.
 ⚠️ **Limits:** identity checks are snapshots; identical PID/HWND/owner destruction/reuse entirely
 between checks cannot be distinguished. Painted/nonuniform pixels do not prove current, complete or
 legible connector content. Native synthetic controls exercise the implementation; real
-Desktop/connector qualification remains separate. The capture child's eight-second budget and the
-image's lifetime never change the refresh's XMLA or wall-clock deadline.
+Desktop/connector qualification remains separate. Arbitrary-language/connector coverage and OCR
+completeness are not claimed. A same-HWND unknown-to-positive change is not automatically recaptured;
+unknown is never cached as clean. Capture and classification never extend the original attempt,
+the 60-second maximum image lifetime, or the refresh's XMLA/wall-clock deadline.
 
 **`--calculate-only` / `--measures-only` is an opt-in DAX-only shortcut, not the default.** It sends
 TMSL refresh type `calculate`, which recalculates formulas, relationships and hierarchies without

@@ -59,6 +59,11 @@
   within a bounded time (measured in review 2026-08-29: a blocked provider held a `-TimeoutSec 1` run
   for 15.1s and produced NO verdict at all).
 
+.PARAMETER OcrImage
+  Internal byte-in/closed-category-out child for the Python image producer. Reads one PNG from
+  stdin, uses Windows.Media.Ocr with English only, and emits no OCR text. Does not inspect or drive
+  Desktop, and never changes the standalone arbiter's verdicts.
+
 .OUTPUTS
   A single final `VERDICT:` line, and an exit code in three bands:
 
@@ -143,8 +148,133 @@ param(
   [Parameter(ParameterSetName = 'Probe')]
   [Parameter(ParameterSetName = 'Harvest')][int]$HarvestMaxElements = 2000,
   [Parameter(Mandatory = $true, ParameterSetName = 'Detectors')][switch]$LoadDetectorsOnly,
-  [Parameter(Mandatory = $true, ParameterSetName = 'Harvest')][long]$HarvestHwnd
+  [Parameter(Mandatory = $true, ParameterSetName = 'Harvest')][long]$HarvestHwnd,
+  [Parameter(Mandatory = $true, ParameterSetName = 'Ocr')][switch]$OcrImage,
+  [Parameter(ParameterSetName = 'Ocr')][ValidateRange(1, 8000)][int]$OcrTimeoutMs = 8000
 )
+
+function New-ImageOcrResult {
+  param(
+    [ValidateSet('positive', 'unknown', 'error')][string]$Status,
+    [AllowNull()][string]$Category,
+    [AllowNull()][string]$Signature,
+    [AllowNull()][string]$Reason
+  )
+  return [ordered]@{
+    schema = 'pbip.window-ocr.v1'
+    method = 'windows_media_ocr'
+    status = $Status
+    category = $(if ($Category) { $Category } else { $null })
+    confidence = $(if ($Status -eq 'positive') { 'signature_positive' } else { 'unknown' })
+    signature = $(if ($Signature) { $Signature } else { $null })
+    reason = $(if ($Reason) { $Reason } else { $null })
+    classified_at_utc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fff'Z'", [Globalization.CultureInfo]::InvariantCulture)
+  }
+}
+
+function Get-ImageOcrClassification {
+  <# Native first: the displayed SQL may itself contain a credential-signature phrase. #>
+  param([AllowNull()][object]$Text, [string]$CredentialSignature, [string]$BlockingSignature)
+  if ($Text -isnot [string]) {
+    return (New-ImageOcrResult -Status error -Reason ocr_unparseable)
+  }
+  $normalized = ($Text -replace '\s+', ' ').Trim()
+  $options = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+  foreach ($match in [regex]::Matches($normalized, "\b(?:$BlockingSignature)\b", $options)) {
+    if ($match.Value -match '^native database quer(?:y|ies)$') {
+      return (New-ImageOcrResult -Status positive -Category native_query -Signature native_query_title)
+    }
+  }
+  if ([regex]::IsMatch($normalized, "\b(?:$CredentialSignature)\b", $options)) {
+    return (New-ImageOcrResult -Status positive -Category credential -Signature credential_modal)
+  }
+  return (New-ImageOcrResult -Status unknown -Reason no_signature)
+}
+
+function Wait-ImageOcrOperation {
+  param($Operation, [type]$ResultType, [Diagnostics.Stopwatch]$Clock, [int]$BudgetMs)
+  $remaining = $BudgetMs - $Clock.ElapsedMilliseconds
+  if ($remaining -le 0) { throw [TimeoutException]::new() }
+  $asTask = [System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+    $_.Name -eq 'AsTask' -and $_.IsGenericMethod -and $_.GetGenericArguments().Count -eq 1 -and
+    $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+  } | Select-Object -First 1
+  $task = $asTask.MakeGenericMethod($ResultType).Invoke($null, @($Operation))
+  if (-not $task.Wait([int]$remaining)) { throw [TimeoutException]::new() }
+  return $task.Result
+}
+
+function Invoke-ImageOcr {
+  param([int]$BudgetMs)
+  $clock = [Diagnostics.Stopwatch]::StartNew()
+  $memory = $random = $writer = $bitmap = $null
+  $reason = 'ocr_unavailable'
+  try {
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    $null = [Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]
+    $null = [Windows.Globalization.Language,Windows.Globalization,ContentType=WindowsRuntime]
+    $null = [Windows.Storage.Streams.InMemoryRandomAccessStream,Windows.Storage.Streams,ContentType=WindowsRuntime]
+    $null = [Windows.Storage.Streams.DataWriter,Windows.Storage.Streams,ContentType=WindowsRuntime]
+    $null = [Windows.Graphics.Imaging.BitmapDecoder,Windows.Graphics.Imaging,ContentType=WindowsRuntime]
+    $null = [Windows.Graphics.Imaging.SoftwareBitmap,Windows.Graphics.Imaging,ContentType=WindowsRuntime]
+    $null = [Windows.Media.Ocr.OcrResult,Windows.Foundation,ContentType=WindowsRuntime]
+    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new('en-US'))
+    if ($null -eq $engine -or $engine.RecognizerLanguage.LanguageTag -cne 'en-US') {
+      return (New-ImageOcrResult -Status error -Reason ocr_unavailable)
+    }
+    $credential = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'credential_modal_signature.regex') -Raw).Trim()
+    $blocking = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'blocking_prompt_signature.regex') -Raw).Trim()
+    if (-not $credential -or -not $blocking) { throw [InvalidOperationException]::new() }
+    $reason = 'ocr_unparseable'
+    $memory = [IO.MemoryStream]::new()
+    $inputStream = [Console]::OpenStandardInput()
+    $buffer = [byte[]]::new(81920)
+    while (($count = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+      if ($memory.Length + $count -gt 20000000) { throw [FormatException]::new() }
+      $memory.Write($buffer, 0, $count)
+      if ($clock.ElapsedMilliseconds -ge $BudgetMs) { throw [TimeoutException]::new() }
+    }
+    $bytes = $memory.ToArray()
+    if ($bytes.Length -lt 33 -or [BitConverter]::ToString($bytes, 0, 8) -cne '89-50-4E-47-0D-0A-1A-0A') {
+      throw [FormatException]::new()
+    }
+    $random = [Windows.Storage.Streams.InMemoryRandomAccessStream]::new()
+    $writer = [Windows.Storage.Streams.DataWriter]::new($random.GetOutputStreamAt(0))
+    $writer.WriteBytes($bytes)
+    $null = Wait-ImageOcrOperation $writer.StoreAsync() ([uint32]) $clock $BudgetMs
+    $decoder = Wait-ImageOcrOperation ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($random)) `
+      ([Windows.Graphics.Imaging.BitmapDecoder]) $clock $BudgetMs
+    if ($decoder.PixelWidth -gt [Windows.Media.Ocr.OcrEngine]::MaxImageDimension -or
+        $decoder.PixelHeight -gt [Windows.Media.Ocr.OcrEngine]::MaxImageDimension) {
+      throw [FormatException]::new()
+    }
+    $bitmap = Wait-ImageOcrOperation ($decoder.GetSoftwareBitmapAsync(
+      [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8, [Windows.Graphics.Imaging.BitmapAlphaMode]::Ignore
+    )) ([Windows.Graphics.Imaging.SoftwareBitmap]) $clock $BudgetMs
+    $result = Wait-ImageOcrOperation ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult]) $clock $BudgetMs
+    if ($clock.ElapsedMilliseconds -ge $BudgetMs) { throw [TimeoutException]::new() }
+    return (Get-ImageOcrClassification $result.Text $credential $blocking)
+  } catch [TimeoutException] {
+    return (New-ImageOcrResult -Status error -Reason ocr_timeout)
+  } catch {
+    return (New-ImageOcrResult -Status error -Reason $reason)
+  } finally {
+    foreach ($resource in @($bitmap, $writer, $random, $memory)) {
+      if ($null -ne $resource) { try { $resource.Dispose() } catch {} }
+    }
+  }
+}
+
+if ($OcrImage) {
+  # This branch precedes every standalone read/harvest. Never serialize an exception or OCR prose.
+  $ErrorActionPreference = 'Stop'
+  $ProgressPreference = $WarningPreference = $VerbosePreference = $DebugPreference = 'SilentlyContinue'
+  [Console]::SetError([IO.TextWriter]::Null)
+  try { $classification = Invoke-ImageOcr -BudgetMs $OcrTimeoutMs }
+  catch { $classification = New-ImageOcrResult -Status error -Reason ocr_unparseable }
+  [Console]::Out.WriteLine((ConvertTo-Json -InputObject $classification -Compress))
+  exit 0
+}
 
 # --------------------------------------------------------------------------------------------------
 # Pure detectors. No Win32, no UI Automation, no process access - they take window objects and return
