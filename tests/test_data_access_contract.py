@@ -20,7 +20,15 @@ import pytest
 
 from test_probe_earned_clear import cg as gate, pls as probe
 from test_package_role_identity import DS_LUID, PUBLISHED_KEY, datasource_package, workbook_package
-from credential_gate import _audit, _audit_entries, _DuplicateJsonKey, _override_is_authentic, _reject_duplicate_keys
+from credential_gate import (
+    _audit,
+    _audit_entries,
+    _clear_was_earned,
+    _DuplicateJsonKey,
+    _override_is_authentic,
+    _reject_duplicate_keys,
+    _valid_authorization_detail,
+)
 from package_filesystem import is_canonical_key
 from package_role_identity import verify_phase1_role_identity
 from preflight_source_credentials import _leg_key
@@ -99,6 +107,55 @@ def _rows(root: Path) -> list[dict]:
 
 def _write_rows(root: Path, rows: list[dict]) -> None:
     (root / gate.AUDIT).write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _append_fixture_audit(root: Path, action: str, detail: str) -> None:
+    """Append only deliberate malformed/legacy reader fixtures, never a supported writer's output."""
+    legacy_rows = {
+        ("probe-error", "legacy unkeyed attempt"),
+        ("probe-data_ok", "Orders -> DATA_OK"),
+        ("block-marker-only", "sources=['legacy source']"),
+        ("block-marker-only", 'sources_json=["legacy source"]'),
+    }
+    forged_authorization = (
+        action == "authorize"
+        and detail.startswith("by=Fixture Human; chain=")
+        and not _valid_authorization_detail(detail)
+    )
+    assert (action, detail) in legacy_rows or forged_authorization, "only malformed/legacy reader fixtures"
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "action": action,
+        "detail": detail,
+        "user": "fixture-history",
+        "scope": str(root.resolve()),
+    }
+    with (root / gate.AUDIT).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+@pytest.mark.parametrize(
+    "action,detail",
+    [
+        ("engine-receipt", "sha256=" + "a" * 64),
+        ("violation", "duplicate source keys at block"),
+        ("authorize", "by=Fixture Human; chain=[]"),
+        ("block", "sources_json=" + json.dumps([KEY])),
+        ("block-marker-only", "sources_json=" + json.dumps([KEY])),
+        ("block-skipped", "authentic override"),
+        ("probe-error", "source probe -> ERROR"),
+        ("probe-data_ok", "source probe -> DATA_OK"),
+        ("probe-cleared", "sources_json=" + json.dumps([KEY]) + "; reason=earned"),
+        ("manual-clear", "manual diagnostic"),
+        ("unknown-action", "not a historical fixture"),
+    ],
+)
+def test_fixture_audit_helper_refuses_current_writer_shapes(root: Path, action: str, detail: str) -> None:
+    """The historical escape hatch cannot replace supported writers or append on refusal."""
+    assert not (root / gate.AUDIT).exists()
+    with pytest.raises(AssertionError, match="only malformed/legacy reader fixtures"):
+        _append_fixture_audit(root, action, detail)
+    assert not (root / gate.AUDIT).exists()
 
 
 def _earn(root: Path) -> None:
@@ -302,10 +359,13 @@ def test_authorization_writer_reader_platform_parity(
     if writer_exit:
         assert not (root / gate.OVERRIDE).exists()
         assert all(row["action"] != "authorize" for row in _rows(root))
-        _audit(root, "authorize", detail)
+        assert (root / gate.MARKER).is_file(), "a refused authorization must retain the physical marker"
+        _append_fixture_audit(root, "authorize", detail)
         (root / gate.OVERRIDE).write_text("TEST-ONLY forged override\n", encoding="utf-8")
     else:
         assert next(row["detail"] for row in _rows(root) if row["action"] == "authorize") == detail
+        assert not (root / gate.MARKER).exists()
+        assert (root / gate.OVERRIDE).is_file()
     before = _rows(root)
     result = _assess(root, authorized=True)
     if writer_exit:
@@ -467,40 +527,68 @@ def test_native_engine_root_keeps_the_canonical_adapter(root: Path, authorized: 
 
 
 @pytest.mark.usefixtures("desktop")
-def test_all_current_audit_writers_remain_readable(root: Path) -> None:
-    """Diagnostics may lack sources, and duplicate-source refusal rows must not poison history."""
+def test_all_current_audit_writers_remain_readable(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Current keyed writers and explicit legacy input retain their exact sequence and scope."""
     _audit(root, "engine-receipt", "sha256=" + "a" * 64)
-    _audit(root, "probe-error", "legacy unkeyed attempt")
+    _append_fixture_audit(root, "probe-error", "legacy unkeyed attempt")
     assert gate.apply_block(root, [KEY, OTHER_KEY]) == 0
+    assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [KEY, OTHER_KEY]
+    with monkeypatch.context() as failed_refresh:
+        failed_refresh.setattr(probe, "_refresh_and_classify", lambda *_args: (1, "ERROR"))
+        assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders"}], "ID"), (1, False)) == (1, "ERROR")
     assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders"}], "ID"), (1, False)) == (0, "DATA_OK")
     assert gate.clear_block(root, "first leg", earned=True, sources=[KEY]) == 0
     assert gate.apply_block(root, [KEY]) == 0
     assert gate.apply_block(root, [KEY, KEY]) == 2
     assert gate.clear_block(root, "duplicate refusal", earned=True, sources=[KEY, KEY]) == 1
     assert _assess(root).state == "live_data_ok"
-    assert gate.clear_block(root, "manual diagnostic") == 0
+    assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [OTHER_KEY]
+    assert gate.clear_block(root, "manual diagnostic", earned=False) == 0
+    assert not (root / gate.MARKER).exists()
+    assert _clear_was_earned(root, [OTHER_KEY]) is None, "administrative clear must not earn the other key"
+    assert gate.apply_block(root, [OTHER_KEY]) == 0
+    assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [OTHER_KEY]
+    assert _probe_leg(root, OTHER_KEY, OTHER, ([{"name": "Orders"}], "ID"), (1, False)) == (0, "DATA_OK")
+    assert gate.clear_block(root, "second leg", earned=True, sources=[OTHER_KEY]) == 0
+    assert _assess(root, spec=_spec(LIVE, OTHER)).state == "live_data_ok"
+    assert not (root / gate.MARKER).exists()
+    assert not (root / gate.OVERRIDE).exists()
     assert gate.authorize(root, "Fixture Human") == 0
     assert gate.apply_block(root, [KEY]) == 0
     rows = _rows(root)
     assert _audit_entries(root) == rows, "each real writer's schema must survive the strict reader"
-    assert {row["action"] for row in rows} == {
-        "engine-receipt",
-        "probe-error",
-        "block-marker-only",
-        "probe-data_ok",
-        "probe-cleared",
-        "block-skipped",
-        "violation",
-        "manual-clear",
-        "authorize",
-    }
+    expected = [
+        ("engine-receipt", None),
+        ("probe-error", None),
+        ("block-marker-only", [KEY, OTHER_KEY]),
+        ("probe-error", [KEY]),
+        ("probe-data_ok", [KEY]),
+        ("probe-cleared", [KEY]),
+        ("block-skipped", None),
+        ("violation", [KEY, KEY]),
+        ("violation", [KEY, KEY]),
+        ("manual-clear", None),
+        ("block-marker-only", [OTHER_KEY]),
+        ("probe-data_ok", [OTHER_KEY]),
+        ("probe-cleared", [OTHER_KEY]),
+        ("authorize", None),
+        ("probe-cleared", [OTHER_KEY]),
+        ("block-skipped", None),
+    ]
+    assert [row["action"] for row in rows] == [action for action, _sources in expected], "exact writer action sequence"
+    assert {index: row["sources"] for index, row in enumerate(rows) if "sources" in row} == {
+        index: sources for index, (_action, sources) in enumerate(expected) if sources is not None
+    }, "exact keyed versus unkeyed writer sources"
+    assert not (root / gate.MARKER).exists()
+    assert (root / gate.OVERRIDE).is_file()
+    assert _override_is_authentic(root)
 
 
 @pytest.mark.usefixtures("desktop")
 def test_legacy_unkeyed_success_is_readable_but_not_earned(root: Path) -> None:
     """The pre-key probe writer remains readable, without becoming evidence for any key."""
     assert gate.apply_block(root, [KEY]) == 0
-    _audit(root, "probe-data_ok", "Orders -> DATA_OK")
+    _append_fixture_audit(root, "probe-data_ok", "Orders -> DATA_OK")
     assert gate.clear_block(root, "legacy success", earned=True, sources=[KEY]) == 0
     assert _audit_entries(root) == _rows(root)
     result = _assess(root)
@@ -512,7 +600,7 @@ def test_legacy_unkeyed_success_is_readable_but_not_earned(root: Path) -> None:
 @pytest.mark.parametrize("detail", ["sources=['legacy source']", 'sources_json=["legacy source"]'])
 def test_legacy_arm_names_stay_readable_without_becoming_current_coverage(root: Path, detail: str) -> None:
     """Pre-structured-source arms remain diagnostic history, never current keyed authority."""
-    _audit(root, "block-marker-only", detail)
+    _append_fixture_audit(root, "block-marker-only", detail)
     assert _audit_entries(root) == _rows(root)
     assert _assess(root).codes == ("source-key-set-changed",)
     _earn(root)
