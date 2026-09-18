@@ -387,8 +387,23 @@ armable exactly as supplied for compatibility, but cannot earn keyed skips or au
 Only pending supplied keys enter a new marker; earned siblings keep their evidence. The deny ACL
 is still root-wide. A subset whose supplied keys are all earned may skip only if every omitted
 pending root key is already named by a valid active marker **and** covered by platform enforcement.
-On a clear root, such omission refuses with exit 2: the **caller must retry with complete R**.
-The authority does not silently rewrite the caller's request or unrelated keys' audit epochs.
+That coverage permits a **skip, not a replacement marker**: when supplied keys also need re-arming,
+omitted pending keys refuse with exit 2, even if the old marker already covers them. On a clear root,
+the same omission refuses with exit 2. The **caller must retry with complete R**; the authority does
+not silently rewrite S or unrelated keys' audit epochs. Every marker-writing path, including legacy,
+forced and untrusted-audit arms, also refuses to drop an existing marker source omitted from S.
+Refusal leaves the existing marker, ACL and audit untouched.
+An exact-key arm may still start an epoch while an omitted root key has no ledger activity at all;
+it creates no epoch or proof for that untouched key. An omitted recorded failure is not untouched,
+even if that key has never had its own arm. Neither untouched nor failed keys permit a keyed skip.
+
+✅ **R1 reproduction (#698):** earn A+B, record newer errors for both, re-arm A+B, then request an
+A-only re-arm and lift after `DATA_OK(A)`. Merely retaining the root-wide deny during that re-arm was
+insufficient: replacing `[A,B]` with `[A]` let the unchanged lift consumer subsequently remove the
+entire barrier while B remained unproved. `test_rearm_subset_cannot_release_an_independently_pending_sibling`
+in `tests/test_probe_earned_clear.py` retains both source permutations, both arm variants and the
+paired no-contraction control. The refused contraction now preserves `[A,B]`; a complete re-probe
+still clears it.
 
 Human model-only authorization is separate from measured proof. It needs the regular authorization
 file and canonical same-root audit covering the exact keyed arm epoch; neither file-only nor
@@ -397,13 +412,24 @@ human permission. A later arm or a broadened/new source scope needs current auth
 Package acceptance still requires the existing explicit `model_only_unvalidated` policy and
 `model_only` scope; authorization never certifies live data.
 
+**Whole-root artifact verification is stricter than exact-package permission.** When audited
+artifacts exist, `verify(root)` may use the human exemption only if it covers every current live
+root key. Authentic A-only permission after R changes to A+B (or B) is insufficient: verification
+returns **3 / CANNOT ASSESS**, without labeling the permission forged, writing a violation, or
+revoking its original scope. Unchanged A permission still verifies with exit 0 after a newer A
+probe error. Exact-A model-only package assessment remains `unvalidated/structural_only` when A is
+still in R. Artifact-free verification retains its existing exit-0 permission check; that is not
+full-root data certification. These paired controls live in
+`test_rearm_verify_authorization_cannot_widen_to_built_root` and
+`test_rearm_artifact_free_verify_keeps_exact_package_authorization` in `tests/test_credential_gate.py`.
+
 ### Re-arm return codes and failure order
 
 | `apply_block` exit | Meaning |
 |---|---|
 | `0` | Authority completed: safe probe-earned or authentic human-authorized `block-skipped`, or a completely applied and audited barrier. It does **not** necessarily mean a physical block was applied. |
 | `1` | Directory, marker, ACL or audit-append failure. Do not build or claim enforcement completed. |
-| `2` | Invalid target/scope/identity, foreign keyed input, or an uncovered omitted pending key on a would-be skip. |
+| `2` | Invalid target/scope/identity, foreign keyed input, unsafe omitted pending keys, or replacement that would drop existing marker coverage. |
 
 Validation and the audit decision precede directory preparation. The marker is written before any
 deny ACL; every deny must succeed before `block` is appended (`block-marker-only` off Windows).

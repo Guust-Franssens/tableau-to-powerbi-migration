@@ -178,6 +178,57 @@ def test_rearm_omitted_pending_key_on_clear_root_is_refused(tmp_path: Path, gate
     _assert_rearmed(root, [keys[blocked_index]], gate_acl)
 
 
+@pytest.mark.parametrize("supplied_index", [0, 1])
+@pytest.mark.parametrize("omitted_was_armed", [False, True])
+def test_rearm_pending_subset_on_clear_root_requires_complete_retry(
+    tmp_path: Path, gate_acl: dict, supplied_index: int, omitted_was_armed: bool
+) -> None:
+    """An omitted failure is pending even without an earlier keyed arm; it is not an untouched key."""
+    root = _da_root(tmp_path, "pending-without-marker", LIVE_A, LIVE_B)
+    keys = [KEY_A, KEY_B]
+    _earn_rearm_fixture(root, keys if omitted_was_armed else [keys[supplied_index]])
+    _trail(root, ("probe-error", keys))
+    before = (root / cg.AUDIT).read_bytes()
+    gate_acl["calls"].clear()
+
+    assert cg.apply_block(root, [keys[supplied_index]]) == 2, "pending supplied keys do not waive omitted pending keys"
+    assert not (root / cg.MARKER).exists() and not gate_acl["denied"] and not gate_acl["calls"]
+    assert (root / cg.AUDIT).read_bytes() == before
+    assert cg.apply_block(root, list(reversed(keys))) == 0
+    _assert_rearmed(root, list(reversed(keys)), gate_acl)
+
+
+@pytest.mark.parametrize(
+    "route",
+    ["trusted", "force", "missing-audit", "malformed-audit", "unreadable-root", "removed-key", "legacy", "empty"],
+)
+def test_rearm_replacement_preserves_existing_marker_coverage(tmp_path: Path, gate_acl: dict, route: str) -> None:
+    """Every arming path must preserve existing obligations, even when keyed skip is unavailable."""
+    root = _da_root(tmp_path, "replacement-coverage", LIVE_A, LIVE_B)
+    _earn_rearm_fixture(root, [KEY_A, KEY_B])
+    _trail(root, ("probe-error", [KEY_A, KEY_B]))
+    assert cg.apply_block(root, [KEY_A, KEY_B]) == 0
+    if route == "missing-audit":
+        (root / cg.AUDIT).unlink()
+    elif route == "malformed-audit":
+        with (root / cg.AUDIT).open("a", encoding="utf-8") as stream:
+            stream.write("{broken\n")
+    elif route == "unreadable-root":
+        (root / cg.MIGRATION_SPEC).write_text("{broken", encoding="utf-8")
+    elif route == "removed-key":
+        (root / cg.MIGRATION_SPEC).write_text(json.dumps(_da_spec(LIVE_A)), encoding="utf-8")
+    supplied = ["legacy display"] if route == "legacy" else ([] if route == "empty" else [KEY_A])
+    before = _tree_snapshot(root)
+    denied_before = set(gate_acl["denied"])
+    gate_acl["calls"].clear()
+
+    assert cg.apply_block(root, supplied, force_scope=route == "force") == 2, (
+        "a new marker must not drop an existing omitted source, including on fallback arm paths"
+    )
+    assert _tree_snapshot(root) == before, "refusal must preserve marker, audit, and unrelated epochs"
+    assert gate_acl["denied"] == denied_before and not gate_acl["calls"]
+
+
 @pytest.mark.parametrize("blocked_index", [0, 1])
 def test_rearm_omitted_pending_key_already_barriered_preserves_exact_scope(
     tmp_path: Path, gate_acl: dict, blocked_index: int
@@ -370,6 +421,68 @@ def test_rearm_authentic_permission_survives_later_probe_error(tmp_path: Path, g
     assert _assess(root, _da_spec(LIVE_A)).state == "blocked"
     (root / "fabric" / "Model.tmdl").write_text("table Fixture\n", encoding="utf-8")
     assert cg.verify(root) == 0, "valid human permission must not be revoked by the probe-only check"
+
+
+@pytest.mark.parametrize("authorized_index", [0, 1])
+@pytest.mark.parametrize("change", ["unchanged", "broadened", "replaced"])
+def test_rearm_verify_authorization_cannot_widen_to_built_root(
+    tmp_path: Path, gate_acl: dict, caplog: pytest.LogCaptureFixture, authorized_index: int, change: str
+) -> None:
+    """R1 F2: authentic permission for A is not whole-root authority for a newly declared B."""
+    connections, keys = [LIVE_A, LIVE_B], [KEY_A, KEY_B]
+    original, added = connections[authorized_index], connections[1 - authorized_index]
+    supplied, other = keys[authorized_index], keys[1 - authorized_index]
+    root = _da_root(tmp_path, "authorization-scope", original)
+    assert cg.apply_block(root, [supplied]) == 0
+    assert cg.authorize(root, "Fixture Human") == 0
+    current = [original] if change == "unchanged" else ([original, added] if change == "broadened" else [added])
+    (root / cg.MIGRATION_SPEC).write_text(json.dumps(_da_spec(*current)), encoding="utf-8")
+    _trail(root, ("probe-error", [supplied if change == "unchanged" else other]))
+    gate_acl["calls"].clear()
+    assert cg.apply_block(root, [supplied]) == (0 if change == "unchanged" else 2)
+    assert cg._override_is_authentic(root), "the original exact-scope human permission remains genuine"
+    assert not (root / cg.MARKER).exists() and not gate_acl["denied"]
+    assert all(len(call) == 1 for call in gate_acl["calls"]), "coverage queries must not mutate ACLs"
+    if change != "replaced":
+        exact = _assess(root, _da_spec(original), scope="model_only", policy="model_only_unvalidated")
+        assert (exact.state, exact.validation, exact.max_phase2_claim) == (
+            "authorized_model_only",
+            "unvalidated",
+            "structural_only",
+        ), "exact-scope package permission must not be revoked or relabeled as data proof"
+    if change != "unchanged":
+        assessment = _assess(root, _da_spec(*current), scope="model_only", policy="model_only_unvalidated")
+        assert (assessment.state, assessment.codes) == ("cannot_establish", ("source-key-set-changed",))
+    (root / "fabric" / "Model.tmdl").write_text("table Fixture\n", encoding="utf-8")
+    before = _tree_snapshot(root)
+    caplog.clear()
+
+    assert cg.verify(root) == (0 if change == "unchanged" else 3), (
+        "whole-root verify cannot reuse A-only permission for a newly declared B"
+    )
+    assert _tree_snapshot(root) == before, "insufficient scope must not forge an audit violation or revoke permission"
+    assert cg._override_is_authentic(root) and cg._clear_was_earned(root) is None
+    assert "FORGED OVERRIDE" not in caplog.text
+    if change != "unchanged":
+        assert "CANNOT ASSESS" in caplog.text and "authorization" in caplog.text
+        assert "GATE VERIFY: OK" not in caplog.text
+
+
+def test_rearm_artifact_free_verify_keeps_exact_package_authorization(tmp_path: Path, gate_acl: dict) -> None:
+    """The unchanged data-access contract permits artifact-free verification of an exact package grant."""
+    root = _da_root(tmp_path, "artifact-free-authorization", LIVE_A, LIVE_B)
+    assert cg.apply_block(root, [KEY_A]) == 0
+    assert cg.authorize(root, "Fixture Human") == 0
+    _trail(root, ("probe-error", [KEY_B]))
+
+    assert cg.verify(root) == 0
+    assert not gate_acl["denied"] and not (root / cg.MARKER).exists()
+    assert _assess(root, _da_spec(LIVE_A), scope="model_only", policy="model_only_unvalidated").state == (
+        "authorized_model_only"
+    )
+    assert _assess(root, _da_spec(LIVE_A, LIVE_B), scope="model_only", policy="model_only_unvalidated").codes == (
+        "source-key-set-changed",
+    )
 
 
 def test_rearm_authorization_never_completes_the_callers_omitted_scope(tmp_path: Path, gate_acl: dict) -> None:

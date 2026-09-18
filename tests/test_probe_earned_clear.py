@@ -34,6 +34,7 @@ import credential_gate as cg  # noqa: E402
 import preflight_source_credentials as pf  # noqa: E402
 import probe_live_source as pls  # noqa: E402
 from parse_tableau import parse_workbook  # noqa: E402
+from test_credential_gate import KEY_A, KEY_B, LIVE_A, LIVE_B, _da_root, _earn_rearm_fixture, _trail  # noqa: E402
 from test_credential_gate import gate_acl as gate_acl  # noqa: E402
 
 
@@ -110,6 +111,54 @@ def test_proving_only_a_subset_partially_clears_the_gate(tmp_path: Path) -> None
     assert marker["sources"] == NAMED
     assert cg.status(d) == 1
     assert "probe-cleared" not in _audit_actions(d), "partial proof must not record earned evidence"
+
+
+@pytest.mark.parametrize("system", ["Windows", "Linux"], ids=["block", "block-marker-only"])
+@pytest.mark.parametrize("supplied_index", [0, 1])
+@pytest.mark.parametrize("rearm_subset", [False, True], ids=["partial-lift-control", "scope-reducing-rearm"])
+def test_rearm_subset_cannot_release_an_independently_pending_sibling(
+    tmp_path: Path,
+    gate_acl: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    system: str,
+    supplied_index: int,
+    rearm_subset: bool,
+) -> None:
+    """R1 F1: keeping the deny during re-arm is not enough if the next lift can erase it."""
+    monkeypatch.setattr(cg.platform, "system", lambda: system)
+    root = _da_root(tmp_path, "pending-siblings", LIVE_A, LIVE_B)
+    keys = [KEY_A, KEY_B]
+    supplied, omitted = keys[supplied_index], keys[1 - supplied_index]
+    _earn_rearm_fixture(root, keys)
+    _trail(root, ("probe-error", keys))
+    assert cg.apply_block(root, keys) == 0
+    marker_before = (root / cg.MARKER).read_bytes()
+    audit_before = (root / cg.AUDIT).read_bytes()
+    denied_before = set(gate_acl["denied"])
+    gate_acl["calls"].clear()
+
+    rearm_exit = cg.apply_block(root, [supplied]) if rearm_subset else None
+    marker_after = (root / cg.MARKER).read_bytes()
+    audit_after = (root / cg.AUDIT).read_bytes()
+    rearm_calls = list(gate_acl["calls"])
+    _trail(root, ("probe-data_ok", [supplied]))
+    lifted = pls._lift_gate(root, "one fixture source reached again", [supplied])
+
+    assert not lifted, "clearing the re-armed subset must not release the independently pending sibling"
+    assert (root / cg.MARKER).read_bytes() == marker_before
+    assert (root / "fabric" in gate_acl["denied"]) is (system == "Windows")
+    assert gate_acl["denied"] == denied_before and cg.status(root) == 1
+    assert cg._earned_sources(root)[0][omitted] is None
+    assert _audit_actions(root)[-1] == "probe-data_ok", "a refused partial lift must not record a clear"
+    if rearm_subset:
+        assert rearm_exit == 2, "refuse the contraction; never fill the caller's scope with its sibling"
+        assert marker_after == marker_before and audit_after == audit_before
+        assert not rearm_calls, "scope refusal must precede any ACL operation"
+
+    _trail(root, ("probe-data_ok", keys))
+    assert pls._lift_gate(root, "both fixture sources reached again", keys), "a complete re-probe must still clear"
+    assert not (root / cg.MARKER).exists() and not gate_acl["denied"]
+    assert cg.status(root) == 0
 
 
 def test_run_probe_passes_marker_names_not_indices_or_counts(tmp_path: Path, monkeypatch) -> None:

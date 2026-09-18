@@ -675,15 +675,19 @@ def _rearm_decision(
     authentic = _override_is_authentic(migration, entries=entries)
     authorized = authentic and _data_access_ledger(entries, tuple(sources))[1]
     pending = [key for key in sources if codes[key] is not None]
-    if pending and not authorized:
-        return pending, None
     omitted = {
         key
         for key in root_keys - set(sources)
         if codes[key] is not None and not (authentic and _data_access_ledger(entries, (key,))[1])
     }
-    if omitted and not _omitted_keys_are_blocked(migration, omitted):
+    if pending and not authorized:
+        tracked, _authorized = _source_ledger(entries, tuple(omitted))
+        # An exact-key arm may start without inventing epochs for untouched root siblings.
+        omitted = {key for key in omitted if tracked[key] != _new_key_state()}
+    if omitted and ((pending and not authorized) or not _omitted_keys_are_blocked(migration, omitted)):
         raise ValueError("omitted pending root keys are not physically covered; retry with the complete root scope")
+    if pending and not authorized:
+        return pending, None
     return [], "authentic human model-only authorization" if authorized else "current keyed probe proof"
 
 
@@ -729,6 +733,8 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
         if refusal_code is None:
             entries, _refusal = _read_audit_trail(migration)
             pending_sources, skip = _rearm_decision(migration, sources, entries, force_scope)
+            if skip is None and set(_marker_sources(migration)) - set(sources):
+                raise ValueError("re-arm would drop existing marker sources; retry with their complete scope")
     except (OSError, ValueError) as exc:
         log.error("Could not validate credential-gate target/scope: %s", exc)
         refusal_code = 2
@@ -1276,6 +1282,11 @@ def _verify_one(migration: Path) -> int:
     marker = (migration / MARKER).exists()
     override_file = (migration / OVERRIDE).exists()
     authentic = _override_is_authentic(migration)
+    if artifacts and authentic:
+        root_keys, root_refusal = _gate_root_live_keys(migration)
+        if root_refusal or not _override_is_authentic(migration, live_keys=tuple(root_keys)):
+            _log_source_mismatch("authentic human model-only authorization does not cover the current root scope")
+            return 3
     deny = _has_deny_ace(migration)
     violations = 0
 
