@@ -3793,8 +3793,7 @@ def _finish_completion(target: Path, snapshot: _PinnedSnapshot | None, checks: l
                     continue
                 if (
                     check["status"] == STATUS_NOT_CHECKED
-                    and pages > 0
-                    and visual_present == pages
+                    and 0 < pages == visual_present
                     and all(
                         check.get(field) == [] for field in ("visual_missing", "contested_names", "refused_evidence")
                     )
