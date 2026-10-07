@@ -25,19 +25,18 @@ parse_tableau.py  ──►  GATE ARMED           writes are denied on <migratio
                        (reachability: UNPROVEN — nothing has been contacted yet)
                               │
                               ▼
-                  probe_live_source.py      builds a 1-table PBIP in the <migration>/_probe/
-                       THE MEASUREMENT      sandbox, opens Power BI Desktop, refreshes, and
-                              │             requires a real row back
+                  probe_live_source.py      ordinary tables: 1-table PBIP, Desktop refresh, real row
+                       THE MEASUREMENT      custom SQL: reuse prior same-scope ordinary DATA_OK,
+                              │             otherwise stop with no connection operation
                               ▼
-        ┌─────────────┬────────────────┬──────────────┬─────────────┬─────────┬───────┐
-        ▼             ▼                ▼              ▼             ▼         ▼       ▼
-     DATA_OK  OPERATOR_REQUIRED  NO_CREDENTIAL  ACCESS_DENIED  UNREACHABLE  ERROR  SKIPPED
+        DATA_OK / CONNECTION_OK_QUERY_UNVALIDATED / OPERATOR_REQUIRED / failure / SKIPPED
 ```
 
 | Verdict | What it means | What happens next |
 |---|---|---|
 | `DATA_OK` | Power BI returned a real row. | The gate lifts (`probe-cleared`); build for real. |
-| `OPERATOR_REQUIRED` | Custom SQL / cost / modal risk needs a human Desktop refresh. | STOP; run the PBIP in Desktop manually. |
+| `CONNECTION_OK_QUERY_UNVALIDATED` | An ordinary table already returned `DATA_OK` in this invocation on the exact same connection scope. Only that connection evidence is reused; the custom SQL was **not executed**. | **Exit 1; the gate stays armed.** Keyed observation only, no custom `proved_names`, `probe-cleared`, gate lift or new authorization. Stop unless an already valid brief/audit-backed degradation authorization permits model-only work. |
+| `OPERATOR_REQUIRED` | No same-invocation, same-scope ordinary `DATA_OK` exists for custom SQL. **No automatic custom connection operation or connection claim.** Unsupported custom-only connectors follow this path too. `probe_bundle.py` retains its separate operator handoff. | **Exit 1; STOP before custom M/PBIP generation, network checks or Desktop.** The gate remains armed. Do not substitute shell proof or silently execute SQL, navigation or a generated constant. |
 | `NO_CREDENTIAL` | Positive authentication evidence: Power BI has no credential, or the one it has was rejected. | STOP; ask a human to sign in. No retry conjures a credential. |
 | `ACCESS_DENIED` | The classifier matched **access-denial-shaped** text (`403` / forbidden / access denied / permission denied / insufficient privilege / not authorized) in the refresh error, ahead of any credential marker. It does **not** establish that authentication succeeded, that the failure is permission-only, or that signing in again cannot help: the markers are bare, so `403 Unauthorized: authentication failed` and `403 Forbidden: access token revoked` both land here. | STOP; the gate stays armed. **Unchanged retry is not useful** — read the redacted detail and change what the source actually named: the credential or token when it speaks of authentication or an expired/revoked token, the permission or object grant when it names a principal, a grant or an object. Do not relabel it a timeout or a transient error. |
 | `UNREACHABLE` | Address/network/spec fault. | STOP; report the address/path. Nobody needs to sign in. |
@@ -47,6 +46,68 @@ parse_tableau.py  ──►  GATE ARMED           writes are denied on <migratio
 **The probe must go *through* Power BI.** A shell query (`sqlcmd`, a Python driver) authenticates as
 the *agent*, while Power BI uses Desktop's per-user credential store — so a shell probe can pass
 against a source Power BI cannot open. Only a Desktop refresh answers the question that matters.
+
+### Default custom SQL: reuse or no operation (#690)
+
+✅ **The default never sends customer SQL to Power BI.** A custom relation is selected by
+`source_relation: "custom-sql"`. After unavoidable JSON parsing, the probe-specific loader preserves
+each custom-source occurrence by reference: no payload access, full-source serialization, hashing,
+copying or published-signal traversal. It skips `custom_sql` during engine source discovery and
+deduplicates only ordinary sources, using their existing rule. Mixed ordinary/custom sources are
+also retained without fingerprinting; their occurrence and connection metadata is unchanged.
+Empty, nested/non-string, large, comment-only and side-effect-shaped payloads stay opaque.
+There is **no custom-only probe PBIP**, connector navigation, eager metadata buffering, native SQL
+or generated constant. A custom-only source stops before DNS, Desktop open or refresh. The
+ordinary-table one-row path and its existing connector/network behavior are unchanged.
+
+✅ **Reuse is invocation-local and conservative.** Only an ordinary table's actual Power BI
+`DATA_OK` in this invocation supplies evidence. Ordinary candidates in a mixed leg are tried
+first; a successful row leaves the custom query unvalidated. Existing ordinary-table failures
+remain failures; a missing-table fallback may reach the no-operation custom stop.
+
+The key snapshots the **entire declared connection mapping**, not merely `_leg_key`. It preserves
+SQL Server's server/port-or-instance/database, Databricks host/HTTP path/catalog, Snowflake
+account/warehouse/role/database, and every declared credential/authentication/session field.
+Only connector class and existing URL-host spelling normalization are applied. A mismatch,
+including additional metadata or a changed session hint, prevents reuse and never starts a
+replacement connection operation. **Separate `port` or `instance` fields make an observation
+ineligible for reuse**, including empty, malformed or conflicting declarations: ordinary M does
+not exercise those fields. Even a mixed leg's ordinary `DATA_OK` therefore ends at
+`OPERATOR_REQUIRED` for its custom relation. No new endpoint normalization or connector behavior is
+introduced; an endpoint already carried in `server` is still passed through by the existing M.
+No audit history, shell/ODBC success, connection-only result or earlier invocation seeds the cache.
+
+With same-scope ordinary proof, say:
+
+> Power BI reached this same connection scope through an ordinary table in this probe. Your custom SQL was not executed and remains unvalidated; the gate is still armed.
+
+Without it, say:
+
+> Your custom SQL was not executed. No safe automated connection-only operation is currently available without catalog enumeration or a native-query approval prompt. No connection claim was earned; the gate remains armed.
+
+Each approved message is one exact customer-facing log record, with no appended paragraphs.
+
+The gate's audit vocabulary is closed. **Both custom outcomes use the existing keyed `probe-error`
+envelope**, with distinct detail prefixes **`CONNECTION_OK_QUERY_UNVALIDATED:`** and
+**`OPERATOR_REQUIRED:`**. Their public verdicts remain distinct, not `ERROR`. This mapping is confined
+to the custom no-operation/reuse paths; other existing `OPERATOR_REQUIRED` producers are unchanged. Ordinary row attempts may
+retain their own `probe-data_ok` observation, but neither custom outcome earns `probe-cleared`,
+custom proof names, a gate lift, authorization or model-only permission.
+Connection evidence does **not** validate custom-query/object permissions, schema, rows, semantics,
+cost or refreshability. An already valid brief/audit-backed degradation authorization is handled
+**outside** this probe. It cannot be inferred from either verdict or from unattended execution.
+
+⚠️ #694 is a nonblocking enhancement for future connector strategies, not a prerequisite for this
+no-operation default. Generated health SQL would need connector/dialect-specific qualification and
+#146/#687's positively qualified native-approval handling; neither is implemented here. Exact
+customer-query execution remains the separate, explicit and cost-disclosed #692 scope.
+No `--custom-sql-mode exact` flag, SQL normalization, TOP/LIMIT/WHERE wrapper, zero-row `DATA_EMPTY`
+expansion, popup change or shipped-artifact `probe_bundle.py` change is included.
+
+Check the same audit root with `credential_gate.py status` and `verify`. A connection-only result
+leaves `status` blocked; `verify` still rejects unvalidated artifacts behind that gate. With no
+artifacts, the existing verifier may exit 0 for a correctly applied barrier—**that is not a clear
+or permission to build**. Do not interpret that compliance check as connection/query validation.
 
 ### The marker states a state, not a verdict
 
