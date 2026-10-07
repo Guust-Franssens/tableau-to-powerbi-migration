@@ -99,14 +99,10 @@ def _write_gate_marker(migration: Path, sources: list[str]) -> Path | None:
     by writing through `python -c` with the extension split into `'R3' + '.' + 'tmdl'`, so no
     literal ever appeared to match. A kernel-enforced ACL does not care how the write is attempted.
 
-    Skipped when the user has explicitly authorized a build-only run: that is a legitimate choice
-    once a human has seen the gate, and removing it would make the toolkit unusable for a customer
-    who genuinely wants a structural-only pass.
+    The authority alone decides whether current probe proof or authentic human model-only permission
+    permits a skip. A filename is not permission. Nonzero means enforcement was NOT established.
     """
-    if (migration / GATE_OVERRIDE).exists():
-        log.warning("Gate OVERRIDDEN by %s - build-only run authorized by the user.", GATE_OVERRIDE)
-        return None
-    subprocess.run(
+    proc = subprocess.run(
         [
             sys.executable,
             str(Path(__file__).parent / "credential_gate.py"),
@@ -117,6 +113,8 @@ def _write_gate_marker(migration: Path, sources: list[str]) -> Path | None:
         ],
         check=False,
     )
+    if proc.returncode != 0:
+        raise RuntimeError(f"credential-gate authority failed (exit {proc.returncode}); do not build")
     marker = migration / GATE_MARKER
     return marker if marker.exists() else None
 
@@ -264,19 +262,21 @@ def cmd_classify(bundle_path: Path) -> int:
         # invites exactly that reading ("the human fixes it later, I continue now"). Persona prose
         # already said "Unconditional" and lost, so the imperative lives here, in tool output, which
         # agents follow far more literally than their own instructions.
-        written = _write_gate_marker(bundle.migration_dir, blocked_names)
+        try:
+            written = _write_gate_marker(bundle.migration_dir, blocked_names)
+        except (OSError, RuntimeError) as exc:
+            log.error("CREDENTIAL GATE NOT ESTABLISHED: %s", exc)
+            return 2
         _print_stop_directive(needs)
         _print_remediation()
         if written:
             log.warning(
-                "\nENFORCED AT THE FILESYSTEM: %s exists and the migration's output folder is now\n"
-                "  DENIED write access at the OS level. This is not advice you can reason around and\n"
-                "  not a pattern you can route around - the kernel refuses the write however it is\n"
-                "  attempted (verified against python ctypes and split-string paths).\n"
-                "  Clear it with a successful probe:  python scripts/credential_gate.py clear <dir>\n"
-                "  Or the USER may authorize an unvalidated build by creating %s.",
+                "\nGATE ARMED: %s exists; the authority completed platform enforcement\n"
+                "  (Windows write-deny ACL, marker-only on other platforms).\n"
+                "  Only a successful probe earns clearance: python scripts/probe_live_source.py --spec <spec>\n"
+                "  Or the USER, in a plain terminal outside Copilot, may authorize an unvalidated model-only run:\n"
+                '    python scripts/credential_gate.py authorize <dir> --who "<name>"',
                 written,
-                GATE_OVERRIDE,
             )
     else:
         _clear_gate_marker(bundle.migration_dir)
