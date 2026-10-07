@@ -168,7 +168,7 @@ def test_ordinary_probe_requires_child_row_evidence(
     # pylint: disable=protected-access
     child, verdict_module, _ = _import_skill_modules()
     observed: list[str] = []
-    source = {"connection": conn, "tables": [{"name": "Orders"}]}
+    source = {"connection": conn, "tables": [{"name": "Orders", "table": f"[{conn['schema']}].[Orders]"}]}
 
     def _open(pbip: Path) -> int:
         tmdl = next(pbip.parent.glob("*.SemanticModel/definition/tables/*.tmdl")).read_text(encoding="utf-8")
@@ -206,3 +206,59 @@ def test_ordinary_probe_requires_child_row_evidence(
         assert code == 1 and verdict != "DATA_OK"
     else:
         assert (code, verdict) == (0, "DATA_OK")
+
+
+@pytest.mark.parametrize("schema", [None, "", " ", 7, False, " bad", "bad ", 'a"b', "a#(b)", "a\nb"])
+def test_717_direct_builder_refuses_missing_or_unsafe_schema(schema):
+    with pytest.raises(ValueError):
+        probe_live_source.build_m_query({**DATABRICKS, "schema": schema}, "trips", "ProbeOK")
+
+
+@pytest.mark.parametrize("table", [None, "", " ", 7, False, " bad", "bad ", 'a"b', "a#(b)", "a\nb"])
+def test_717_direct_builder_refuses_missing_or_unsafe_physical_table(table):
+    with pytest.raises(ValueError):
+        probe_live_source.build_m_query(DATABRICKS, table, "ProbeOK")
+
+
+def test_717_direct_builder_accepts_recorded_default():
+    query, _ = probe_live_source.build_m_query(DATABRICKS, "trips", "ProbeOK")
+    assert 'sch = db{[Name="default",Kind="Schema"]}[Data]' in query
+    assert 'tbl = sch{[Name="trips",Kind="Table"]}[Data]' in query
+
+
+@pytest.mark.parametrize("source_index", [None, 0])
+@pytest.mark.parametrize("identifier", ["trips", "[samples].[trips]", "[other].[nyctaxi].[trips]", "a.b.c.d", None])
+def test_717_cli_metadata_refusal_is_error_before_any_effect(tmp_path, monkeypatch, caplog, source_index, identifier):
+    import credential_gate as cg  # noqa: PLC0415
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    source = {
+        "connection": {**DATABRICKS, "database": "samples", "schema": None},
+        "tables": [{"name": "Alias", "table": identifier}],
+    }
+    spec_path = tmp_path / "migration-spec.json"
+    spec_path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    key = pf._leg_key(source, 0, source["connection"])
+    monkeypatch.setattr(cg, "_icacls", lambda _args: (0, ""))
+    cg.apply_block(tmp_path, [key], force_scope=True)
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append(True)
+        pytest.fail("metadata refusal reached an external effect or M builder")
+
+    for name in ("build_m_query", "_host_resolves", "_write_probe_model", "_open_desktop"):
+        monkeypatch.setattr(probe_live_source, name, forbidden)
+    try:
+        code = probe_live_source.run_probe(tmp_path, source_index, 1, False)
+    except SystemExit as refused:
+        code = refused.code
+    assert calls == []
+    assert "PROBE: ERROR" in caplog.text
+    assert "PROBE: SKIPPED" not in caplog.text
+    assert code != 0
+    entries = [json.loads(line) for line in (tmp_path / cg.AUDIT).read_text().splitlines()]
+    assert entries[-1]["action"] == "probe-error"
+    assert entries[-1]["sources"] == [key]
+    assert not any(entry["action"] in {"probe-cleared", "probe-data_ok"} for entry in entries)
+    assert (tmp_path / cg.MARKER).exists()

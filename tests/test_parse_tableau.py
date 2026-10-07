@@ -7,6 +7,8 @@ usage:   pytest -q
 
 import sys
 import sqlite3
+import copy
+import json
 from pathlib import Path
 
 import pytest
@@ -31,6 +33,49 @@ CAPTIONLESS_TDS_FIXTURES = {
     "Meridian_Custom_SQL_Databricks.tds": "ds.meridiantripslivedatabricks",
     "Meridian_Custom_SQL_Snowflake.tds": "ds.meridiancalcgauntletlivesnowflake",
 }
+
+
+def test_717_parser_retains_physical_identifiers_and_exact_leg_references(tmp_path):
+    twb = tmp_path / "identity.twb"
+    twb.write_text(
+        '<workbook version="2024.1"><datasources><datasource name="ds">'
+        '<connection class="federated"><named-connections>'
+        '<named-connection name="dbx"><connection class="databricks" server="adb.example" '
+        'dbname="samples" schema="default" /></named-connection>'
+        '<named-connection name="sql"><connection class="sqlserver" server="sql.example" '
+        'dbname="DB" /></named-connection></named-connections>'
+        '<relation type="collection">'
+        '<relation type="table" name="Display Trips" table="[nyctaxi].[trips]" connection="dbx" />'
+        '<relation type="table" name="Display Trips" table="[dbo].[trips]" connection="sql" />'
+        '<relation type="text" name="Query" connection="dbx">SELECT 1</relation>'
+        "</relation></connection></datasource></datasources></workbook>",
+        encoding="utf-8",
+    )
+    spec = parse_workbook(twb)
+    source = spec["data_sources"][0]
+    legs = source["connection"]["connections"]
+    assert [leg["name"] for leg in legs] == ["dbx", "sql"]
+    assert legs[0]["schema"] == "default", "the parser must not backfill the relation's schema"
+    assert not legs[1].get("schema")
+    assert [(table["name"], table.get("table"), table["connection"]) for table in source["tables"]] == [
+        ("Display Trips", "[nyctaxi].[trips]", "dbx"),
+        ("Display Trips", "[dbo].[trips]", "sql"),
+        ("Query", None, "dbx"),
+    ]
+    assert source["tables"][2]["custom_sql"] == "SELECT 1"
+    assert all("schema" not in table for table in source["tables"])
+
+    import jsonschema  # noqa: PLC0415
+
+    schema = json.loads((Path(__file__).resolve().parents[1] / "docs/migration-spec.schema.json").read_text())
+    jsonschema.validate(spec, schema)
+    legacy = copy.deepcopy(spec)
+    for leg in legacy["data_sources"][0]["connection"]["connections"]:
+        leg.pop("name")
+    for table in legacy["data_sources"][0]["tables"]:
+        table.pop("table", None)
+        table.pop("connection", None)
+    jsonschema.validate(legacy, schema)
 
 
 def test_parses_top_level_shape():
