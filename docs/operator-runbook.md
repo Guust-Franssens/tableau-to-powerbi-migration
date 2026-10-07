@@ -162,6 +162,22 @@ how to set it, including why the hint preflight prints does not fix your current
 the world moved"* rather than *"is what I have good enough"* — every other check compares against a
 hard-coded number.
 
+`scripts/preflight.ps1` is the environment contract: required tools, plugins, MCP servers, Python
+dependencies, Desktop assumptions and version floors, with a repair hint beside each miss. If setup
+guidance is thin, improve its hint through approved contributor work rather than adding a second recipe.
+`-Update` is a **floor check, not blind `@latest`**; at or above the floor it does nothing.
+`powerbi-report-author` **>= 0.1.4** is a correctness floor: older versions green-lit reports missing
+`reportVersionAtImport`, which is required inside each `themeCollection` entry and forbidden at
+the top level. The `powerbi-report-gotchas` skill holds the mutation evidence and valid shape.
+`-CheckUpstream` compares installed npm bridges and the engine's `VERSION` with upstream; it neither
+upgrades nor fails the run.
+
+An installed skill plugin can shadow correct repo-local skills. Preflight blocks on `STALE in plugin`.
+`copilot plugin update` file-locks while a session is running; the lock blocks renaming, not content
+writes. Use `python scripts/sync_installed_skills.py` for content drift. Newly started sessions and
+subagents see the refreshed files; a running session keeps its old in-memory copy.
+Before removing a second engine copy, confirm it has no uncommitted or unpushed work.
+
 #### Preflight cannot start
 
 **Reactive, manual recovery only — not a pre-check.** First try the exact command in the document
@@ -342,6 +358,29 @@ built it — do not guess, and do not file a defect against a version you inferr
 > is what to do in each case."* The `.engine` check above is written that way on purpose: absent key
 > → old bundle, present key → read it. Neither answer needs this paragraph to be up to date.
 
+Resolve every engine step through `scripts/engine_source.py`, which raises rather than falling back.
+The installed plugin remains read-only. Update it between sessions with
+`copilot plugin update tableau-fabric-skills@tableau-collection`; a running session locks renames.
+Mid-session content refresh uses `python scripts/sync_engine_plugin.py --source <checkout>` and
+refuses a downgrade. Do not swap tools underneath previously validated work.
+
+Version safety depends on downstream investment, not the calendar:
+
+| operation | boundary |
+|---|---|
+| Compare versions | `--allow-noncanonical-engine` into a **fresh** output directory; leave the installed engine and old bundle untouched. This is not an upgrade. |
+| Re-run with little hand-authoring | Fresh output only, after **both** report and model baseline diffs are nearly empty. |
+| Re-run with substantial hand-authoring | Finish or checkpoint first if **either** diff is large. Missing baseline is **BASELINE UNAVAILABLE**, not no changes. |
+| Partial re-run into an existing bundle | **Never**: one `engine.version` receipt would misrepresent mixed builds. |
+
+The [model-baseline procedure](#engine-model-baseline-availability) owns diff commands and caveats.
+`_build/generated-edit-declarations.json` is better evidence of hand edits than report-only diffs.
+Engine defects route upstream to `Yarbrdab000/tableau-fabric-skills`; our tier's mitigation is a
+separate cross-linked local issue. Use qualified issue links, not ambiguous bare numbers;
+see [upstream routing](upstream-issue-gate.md). Customer migrations stop and ask before toolkit
+patching; approval waives no credential gate, plugin read-only rule or validator/dry-run role.
+Artifact repairs and replay stay within each builder's existing layer.
+
 ### 1.3 Credentials — test them the day before
 
 Two independent credentials, and both have a failure mode that looks like a hang.
@@ -472,20 +511,115 @@ error, not bad luck. Note your PID when you open one, and close only what you op
 
 ### 1.5 Write the brief
 
-Per `AGENTS.md`, the brief is a **file**, not a conversation: a closed terminal takes the session's
-entire working memory with it. Put it at `migrations/workbooks/<slug>/migration-brief.md` and record
-the four answers that cannot be inferred:
+The normal front door is `python scripts\start_migration.py` for the named scope; it allocates once
+and prints absolute run/bundle/handover/reference paths. Repo-local `_runs` is the default;
+`--runs-parent` is opt-in. Do not pre-allocate a second run or silently widen scope. Local folders,
+`.twb/.twbx` and `.tds/.tdsx` use the expert/manual routes in §2 or the
+[one-workbook guide](start-with-one-workbook.md). Published `sqlproxy` source calcs live on the server;
+migrate the `.tds/.tdsx` first rather than infer a complete model from a dependent workbook.
+
+The brief is a **file**, not a conversation: it survives a dropped session and gives stateless agents
+the same intent. **Issue each unit's current v2 brief before packaging** at the final private path
+`<absolute-run>\assessment\briefs\<exact-unit>\migration-brief.md`, using the front door's printed
+bundle/handover/reference paths. The front door creates no brief draft or `dispatch.md`.
+Use the [current v2 schema](../scripts/README.md#current-packaged-numeric-scope-authority-363).
+Ask **once**, in one message, reusing known answers:
 
 1. the plan from §2 — this ordering, these workbooks, this destination workspace;
 2. **autonomy** — `guided` / `standard` (default) / `autopilot`;
-3. **fidelity bar** — faithful re-creation, or modernise where Power BI is better;
+3. **fidelity bar** — faithful re-creation, or modernise where Power BI is better; include explicit
+   numeric comparison `none|required` (**no default**);
 4. **if we hit a wall — stop, or degrade?** (pre-authorising the fallback is what lets an unattended
-   run survive one).
+   run survive one);
+5. **who drives refreshes?** — `scripted` (default), `operator` or manual `xmla`.
 
-No autonomy level clears a credential wall — that is a modal sign-in dialog no automation can fill.
+Record exact source/working paths, dependencies, limitations and reference provider/capabilities/
+grade/ceiling. Pass the brief in every delegation, providers first; never fabricate a spec.
+Dispatch `@tableau-migrator` via the task/subagent tool, passing the existing bundle and exact run/unit.
+Unavailable dispatch blocks work; it is not permission for inline substitution.
+The migrator prepares; builders/validator wait for the complete current package-cohort
+**START_READY + process exit 0** under the [entry authority](reference-readiness.md#final-package-start_ready-562-622).
+
+Autonomy describes behaviour at a decision point:
+
+| level | reversible choice | costly or irreversible | credential wall |
+|---|---|---|---|
+| `guided` | ask | ask | ask |
+| **`standard`** (default) | decide, log it | **ask** | ask |
+| `autopilot` | decide, log it | decide, flag in the summary | **ask — always** |
+
+No level clears the credential stop — a modal sign-in dialog needs a human. Wall policy may
+pre-authorize the fallback (model-only under `credential_gate.py authorize`, artifacts unvalidated),
+never pretend a source was reachable or infer authorization.
 
 > ⚠️ **Check the brief is actually ignored before you write anything into it:**
-> `git check-ignore -v migrations/workbooks/<slug>/migration-brief.md`. See §7.
+> `git check-ignore -v -- <actual-private-brief-path>` (without a trailing slash). Repo-local runs
+> are covered by `/_*`; a short-root run outside the checkout cannot be committed by it, but is still
+> private. Neither case licenses deletion; keep the run as evidence. See §7.
+
+#### Refresh strategy and evidence
+
+The verified contract comes from `refresh_pbip_model.py`'s constants and branches; re-read them
+before quoting a timeout. This runbook, not stale skill prose, owns the strategy explanation.
+
+| strategy/path | who drives it / ceiling | evidence |
+|---|---|---|
+| **`scripted`** default full refresh | `refresh_pbip_model.py`; **3600 s** absolute backstop, configurable with `--refresh-absolute-timeout-seconds` | Rows only when `ProgressReportCurrent` emits counts; otherwise elapsed heartbeat. Traced silence warning defaults to **120 s** (`--progress-liveness-seconds`) and is **non-fatal**. |
+| Trace setup unavailable | Same absolute backstop, not a return to 300 s | Loses trace row counts/liveness. AMO/TOM availability changes observability and the `ImageSave` persist path, not the timeout. |
+| `--no-progress`, `--calculate-only` / `--measures-only` | Legacy XMLA **300 s** plus **30 s** outer grace | Calculate-only does not reread source rows. |
+| `operator` | Agent prepares, stops and asks the operator to hit Refresh in Desktop; no script-imposed ceiling | UI per-table row counts. |
+| `xmla` | Manual XMLA/TOM; no script-imposed ceiling | Partial evidence; **whole-database** refresh when calculated objects depend on refreshed tables. |
+
+Small tables can emit only Begin/End events, so trace setup does not guarantee row-count evidence.
+Read a self-timed tool's announced deadline; do not kill it at the generic external-system cap.
+A **detected** credential modal aborts with a specific error; an unclassifiable timeout is unknown,
+not proof of a credential failure. The absolute backstop is fatal; a liveness warning is not.
+
+#### Run identity and cost attribution
+
+A run is **one invocation over a named scope** (site, project or workbook), not one per migration unit.
+Keep the allocated absolute root and `run.json`; never rename, move or reuse its numbered identity.
+**Multi-unit runs report one combined cost, not per-unit estimates.**
+`migration_cost_report.py` produces one report per `run.json`; the by-kind summary is not a per-unit
+allocation.
+
+Record the real dedicated session's `session_id` in `run.json` at dispatch/allocation, **before spend**,
+not at completion. A crash before attribution makes spend permanently unattributable. Unrelated work
+or a shared session pollutes the run: flag it and exclude it from customer budget estimates rather
+than silently averaging it. An optional dispatched root `agent_id` in `attribution.roots[]` captures
+only that agent's own calls, never descendants; the session is the bucket containing all children.
+Missing attribution stays **unknown**, not zero; retroactive attribution is impossible. Sessions
+with no `run.json` are development work and excluded. Report **both model-call time and elapsed time**:
+tool execution is outside model calls.
+
+### 1.6 Capture the Tableau reference while authenticated
+
+Capture in the **same trip**, the dispatcher's job: Desktop Bridge `screenshot`/`screenshot-all`
+capture Power BI output, not Tableau. Imagery is not a conversion prerequisite; agentic work requires
+reference readiness under the [conversion, dispatch and fidelity boundaries](reference-readiness.md#conversion-dispatch-and-fidelity-boundaries).
+
+| source | manual capture command | limits |
+|---|---|---|
+| Tableau Public URL or local `.twb/.twbx` | `python scripts/capture_tableau_reference.py migrations/workbooks/<slug> [--public-url <url> --view <view>]` | Per-record provenance/capabilities in `reference/manifest.json`; adopts manual `tableau-*.png`. An existing manifest short-circuits to exit 0: use `--force`, then recheck readiness. |
+| Tableau Server/Cloud | `python scripts/capture_tableau_oracle.py --out <absolute-run>/oracle --images --reference-best [--workbook "<published name>"]` | Live REST image export; default-state imagery is layout/text only, not numeric fidelity proof. |
+
+**Exit 4 is "no views selected"**, a wrong/over-narrow target, **not** "capture is impossible";
+**exit 3** is a total non-credential failure. `--out` is required (omitting it is argparse exit 2).
+`--workbook` is an exact case-insensitive published-workbook-name filter, repeatable; a migration slug
+can silently select zero views. Read `oracle-manifest.json`'s `view_count` and per-render statuses:
+`0` all captured / `1` partial non-credential failure / `2` human re-authorization in Tableau /
+`3` total non-credential failure / `4` no views selected / `5` required `--reference-best` render absent.
+Image stems are validated bare view LUIDs, never response names.
+Credentials come from ignored `.env` or exported environment (the latter wins), never CLI secrets.
+
+For dashboards, include `--reference-best`: it probes `svg` → `pdf` → `png_high`, recording the
+best answered rung, per-rung verdicts and versions in `render_capability`. Never infer this from a
+version string or Cloud behaviour. Report each reference's provider/capabilities/grade/ceiling in
+the brief and `limitations_encountered`; oracle default-state images remain layout/text grade even
+when copied into `reference/`. The ladder raises the ceiling within text grade, never the grade.
+See [reference capture](reference-capture.md). Independent validation compares the shipped tree to
+Tableau with data, including labels/layout/interactions and commissioned values; structural checks
+and conversion/capture success alone never establish a match or COMPLETE.
 
 ---
 
@@ -493,6 +627,15 @@ No autonomy level clears a credential wall — that is a modal sign-in dialog no
 
 Run every step from the repo root with the venv active. Output directories are git-ignored by
 convention — see §7 for which ones actually are.
+
+These are **expert/manual routes**, not a second normal front door:
+
+| input | first move |
+|---|---|
+| Server/Cloud site | Survey → assess → lineage → harvest → convert below; providers before consumers. |
+| Folder of `.twb/.twbx` | `python scripts/run_estate.py --input <folder> --output <absolute-run>/bundle`; parsed specs determine local ordering. |
+| One `.twb/.twbx` | `python scripts/parse_tableau.py <file> -o <spec>`, then task-tool dispatch of `@tableau-migrator` with the brief; see the [one-workbook guide](start-with-one-workbook.md). |
+| `.tds/.tdsx` | `parse_tableau.py` accepts it directly; model-first phase, no report. |
 
 | # | command | ~time (38 wb / 55 assets) | produces |
 |---|---|---|---|
@@ -1221,10 +1364,18 @@ hand-roll it ✅ verified from the module docstring:
 
 ## 3. Decision points — stop and ask
 
-`AGENTS.md` calls this **Gate B**. Present these as **one block**, not four serial stops: serial
+**Gate B — after parse + probe, before building.** Present these as **ONE block, not four serial stops**: serial
 stops are the same questions with strictly more waiting, and each is another chance to catch the
 customer out of the room. Where the brief (§1.5) already answered one, **apply it and say so** — do
 not re-ask.
+
+1. Published datasources → fetch the `.tds` and migrate it first, or proceed knowingly incomplete.
+2. Live sources that failed the probe → credential, or the authorized build-only path.
+3. Extract-only sources → materialize real rows, or model-only.
+4. The high-severity `limitations_encountered` digest → proceed, or narrow scope.
+
+Each question is answered once per migration, not once per session. A fallback clears neither
+credentials nor validation; reuse actual choices, never infer authorization from autonomy.
 
 ### 3.1 After assess/lineage — published datasources
 
@@ -1717,7 +1868,8 @@ Remove one-off probe scripts, `%TEMP%` harnesses, and `.pbip` cache/backups. Kee
 deliverables and the re-runnable `_build/` scripts. Confirm nothing scratch leaked into git before
 reporting done.
 
-**Canonical pre-bundle layout (issue #291/#234):** new work allocates a numbered, per-run home under
+**Canonical pre-bundle layout (issue #291/#234):** the normal front door allocates a numbered run.
+Expert/manual operation uses the same home under
 `_runs/<NNN>-<slug>/{assessment,assets,bundle,oracle,packages,deliverables,scratch}/` via
 `python scripts/work_dirs.py <unit-name> --json`, rather than inventing another `_*` root. The number
 is the identity — **never renamed, never renumbered, never reused**, because generated bundle output

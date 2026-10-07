@@ -21,7 +21,7 @@ import test_openability_claim_citations as persona_pins
 
 ROOT = Path(__file__).resolve().parents[1]
 ORIGINS = {
-    "AGENTS.md": (("-Update", "-CheckUpstream"), ()),
+    "AGENTS.md": (("-Update", "-CheckUpstream"),),
     ".github/copilot-instructions.md": (("-Update", "-CheckUpstream"),),
     "README.md": ((), ()),
     "docs/operator-runbook.md": (("-Update", "-CheckUpstream"),),
@@ -85,12 +85,6 @@ def _assert_entry_route(text: str, arguments: tuple[tuple[str, ...], ...]) -> li
         end = entries[index + 1].start() if index + 1 < len(entries) else len(text)
         following = text[entry.end() : end]
         routes = list(ROUTE.finditer(following))
-        if not routes and index > 0 and not flags:
-            # AGENTS.md's plain setup call explicitly reuses its already-validated session-start fallback.
-            assert re.match(r"\s*```\s+That fallback keeps this call \*\*plain\*\*, without updates\.", following), (
-                "direct invocation is missing its recovery route"
-            )
-            continue
         assert len(routes) == 1, "fallback must follow the direct invocation"
         route = routes[0]
         assert REFUSAL in _normalized(following[: route.start()]).lower(), (
