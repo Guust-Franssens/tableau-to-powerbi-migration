@@ -38,15 +38,15 @@ import json
 import os
 from pathlib import Path
 
+from copilot_home import copilot_home
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Test simulation hook: when set, engine resolution acts as if the plugin is not installed.
 SIMULATE_ENGINE_ABSENT_ENV = "T2P_SIMULATE_ENGINE_ABSENT_FOR_TESTS"
 
 # The one canonical location: the installed Copilot plugin `tableau-fabric-skills@tableau-collection`.
-DEFAULT_PLUGIN_ENGINE_ROOT = (
-    Path.home() / ".copilot" / "installed-plugins" / "tableau-collection" / "tableau-fabric-skills"
-)
+DEFAULT_PLUGIN_ENGINE_ROOT = copilot_home() / "installed-plugins" / "tableau-collection" / "tableau-fabric-skills"
 PLUGIN_ENGINE_ROOT = DEFAULT_PLUGIN_ENGINE_ROOT
 
 # Where the engine lives inside a `tableau-fabric-skills` tree, plugin or clone alike.

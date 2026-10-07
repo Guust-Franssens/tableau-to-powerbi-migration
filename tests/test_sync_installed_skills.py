@@ -71,6 +71,53 @@ def _build_installed_from(repo: Path, destination: Path) -> Path:
     return plugin_root
 
 
+@pytest.mark.parametrize("configured", [None, "", "relocated", "missing"])
+def test_sync_target_follows_copilot_home(tmp_path, monkeypatch, capsys, configured):
+    repo = _fixture_repo(tmp_path, monkeypatch)
+    baseline = _build_installed_from(repo, tmp_path)
+    user = tmp_path / "user"
+    suffix = Path("installed-plugins/collection/plugin")
+    default = user / ".copilot" / suffix
+    relocated = tmp_path / "relocated"
+    shutil.copytree(baseline, default)
+    shutil.copytree(baseline, relocated / suffix)
+    monkeypatch.setattr(Path, "home", lambda: user)
+    monkeypatch.delenv(sync.PLUGIN_ROOT_ENV, raising=False)
+    if configured is None:
+        monkeypatch.delenv("COPILOT_HOME", raising=False)
+    else:
+        monkeypatch.setenv("COPILOT_HOME", str(tmp_path / configured) if configured else "")
+    result = sync.discover_skill_plugin(build_plugin.SHIPPED_SKILLS)
+    if configured == "missing":
+        assert result.status == "missing"
+        assert result.plugin_root is None
+        assert sync.main(["--check"]) == 2
+        assert str(tmp_path / "missing" / "installed-plugins") in capsys.readouterr().out
+    else:
+        expected = relocated / suffix if configured else default
+        assert result.plugin_root == expected
+        assert sync.main(["--check"]) == 0
+        assert str(expected / "skills") in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("override", ["environment", "explicit"])
+def test_sync_overrides_win_without_resolving_home(tmp_path, monkeypatch, capsys, override):
+    repo = _fixture_repo(tmp_path, monkeypatch)
+    plugin = _build_installed_from(repo, tmp_path)
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "missing"))
+
+    def forbidden_home():
+        pytest.fail("Copilot home must not be derived when a sync override wins")
+
+    monkeypatch.setattr(sync, "copilot_home", forbidden_home)
+    monkeypatch.setenv(sync.PLUGIN_ROOT_ENV, str(plugin) if override == "environment" else str(tmp_path / "wrong"))
+    args = ["--check"]
+    if override == "explicit":
+        args.extend(["--plugin-root", str(plugin)])
+    assert sync.main(args) == 0
+    assert str(plugin / "skills") in capsys.readouterr().out
+
+
 def test_default_check_uses_origin_master_not_dirty_feature_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

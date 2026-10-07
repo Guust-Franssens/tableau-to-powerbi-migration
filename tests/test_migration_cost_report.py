@@ -18,6 +18,38 @@ import migration_cost_report as report  # noqa: E402  # pylint: disable=wrong-im
 SCRATCH = REPO_ROOT / ".test-scratch" / "migration_cost_report"
 
 
+@pytest.mark.parametrize("configured", [None, "", "relocated", "missing"])
+def test_store_default_follows_copilot_home(tmp_path, monkeypatch, capsys, configured):
+    user = tmp_path / "user"
+    default = user / ".copilot" / "session-store.db"
+    default.parent.mkdir(parents=True)
+    default.touch()
+    relocated = tmp_path / "relocated"
+    relocated.mkdir()
+    (relocated / "session-store.db").touch()
+    monkeypatch.setattr(Path, "home", lambda: user)
+    if configured is None:
+        monkeypatch.delenv("COPILOT_HOME", raising=False)
+    else:
+        monkeypatch.setenv("COPILOT_HOME", str(tmp_path / configured) if configured else "")
+    expected = (tmp_path / configured / "session-store.db") if configured else default
+    assert report.parse_args([]).store == expected
+    if configured == "missing":
+        assert report.main(["--runs-root", str(tmp_path)]) == 2
+        assert f"Copilot session store does not exist: {expected}" in capsys.readouterr().err
+
+
+def test_store_override_wins_without_resolving_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "missing"))
+
+    def forbidden_home():
+        pytest.fail("Copilot home must not be derived when --store wins")
+
+    monkeypatch.setattr(report, "copilot_home", forbidden_home)
+    explicit = tmp_path / "explicit.db"
+    assert report.parse_args(["--store", str(explicit)]).store == explicit
+
+
 @pytest.fixture(name="case_dir")
 def fixture_case_dir() -> Path:
     """Create a repo-local scratch directory; do not rely on system temp paths."""
