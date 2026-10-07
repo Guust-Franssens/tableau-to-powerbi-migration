@@ -1,9 +1,10 @@
 # The live-source credential gate
 
 **What it does:** when a workbook has a **live** data source (Databricks, Snowflake, SQL Server…),
-this makes it **physically impossible** to write a semantic model or report for that source until a
-real measurement has proven the source can actually be read — rather than merely asking an agent not
-to.
+the Windows gate denies ordinary writes to the working model/report directories until a real
+measurement proves the source can be read (or a human authorizes an unvalidated build). Enforcement
+must first be established on every target; an unsupported ACL is a nonzero refusal, not a claim that
+writes are physically blocked.
 
 **Why it exists:** a semantic model built against a warehouse that was never contacted is
 **byte-identical** to one that refreshes perfectly. Nothing on disk tells you which you have. The
@@ -21,7 +22,7 @@ it is unproven.
 ## The lifecycle
 
 ```
-parse_tableau.py  ──►  GATE ARMED           writes are denied on <migration>/fabric/
+parse_tableau.py  ──►  GATE ARMED           writes denied on the layout's working artifact anchors
                        (reachability: UNPROVEN — nothing has been contacted yet)
                               │
                               ▼
@@ -65,10 +66,67 @@ problem before the probe has returned one.
 | | |
 |---|---|
 | **Armed** | automatically, by `parse_tableau.py`, the moment a spec with a live source is written |
-| **Enforced by** | a Windows ACL that denies write on `<migration>/fabric/` |
+| **Enforced by** | Windows ACLs on the [working artifact anchors](#physical-targets-and-nested-gates), independent of whether a tool hook loads |
 | **Explained by** | a `preToolUse` / `permissionRequest` hook that turns the raw `PermissionError` into a reason, and ends the run |
 | **Lifted by** | a successful one-row probe (`probe-cleared`), or an audit-backed human `authorize` |
 | **Audited by** | `credential_gate.py verify` — the authoritative pre-ship check |
+
+### Physical targets and nested gates
+
+One resolver in `scripts/credential_gate.py` feeds arm/re-arm, clear, status and physical inspection:
+
+| Gate root | Explicit recursive write-deny anchor(s) |
+|---|---|
+| Native unit with immediate `*.SemanticModel` / `*.Report` directories | Each of those directories, including model-only/report-only units and unequal artifact names |
+| Parser migration or package | `<root>\fabric` |
+| Engine bundle | `<bundle>\pbip` |
+| Promoted migration or explicitly force-scoped legacy layout | `<root>\fabric` |
+
+Native artifacts take precedence, allowing an **empty** former `fabric`. Parser/package identity
+(`migration-spec.json` / `package-manifest.json`) then outranks a bundle-style `report.json`: a
+package containing all three still uses `fabric`, not a newly invented `pbip`.
+Otherwise existing `pbip`, `report.json`, `engine-output-receipt.json` or `input_manifest.json`
+identify the bundle target. In particular, a receipt-only bundle creates `pbip`, and a parser root
+creates `fabric` if needed. The existing scope guard still refuses bare unforced directories;
+`--force-scope` permits the legacy `fabric` fallback, not ambiguous populated layouts.
+Reparse/unsafe targets and conflicting populated layouts refuse rather than picking one tree.
+Bundles and native units never acquire a dummy `fabric`.
+
+✅ The focused real-Windows controls in `tests/test_credential_gate_acl_layouts.py` check existing
+file writes, new descendants, reads, the writable probe and post-clear writes. `(OI)(CI)` propagates
+the deny to ordinary inheriting existing and future children. Protected DACLs and non-gate
+explicit permissions are checked **before mutation**: the gate refuses with
+`CANNOT ESTABLISH`, a nonzero result and no `ENFORCED` claim. It does not repair permissions or
+promise to restore grants an ACL operation would remove. Exact, audit-attributable gate denies are
+the nesting/re-arm exception. Explicit group grants can also override an inherited deny on a child:
+the supported ACL shape is deliberately limited to inherited permissions plus attributable gate
+denies, without attempting group-membership analysis. A partial apply retains the stop and completed
+denies, but marks
+`writes_blocked: false`; retry the same gate after resolving the refusal. Non-Windows retains only
+its marker and warning, never kernel enforcement.
+
+**Outer gate first.** A bundle owns `pbip`; its nested unit owns the model/report directories,
+so the two gates never remove each other's explicit ACEs. While the bundle is blocked, build the
+probe in **`<bundle>\_probe`**. Earn the outer clear before using `<unit>\_probe` or writing the
+unit's gate metadata. Clearing the outer gate preserves the inner explicit denies; clearing the
+inner first preserves the outer inherited deny and cannot announce physical clearance. Both
+physical removals are necessary. The child-first order proves only ACE preservation: the enclosing
+deny can prevent the inner audit append, and `_audit` durability remains separate #702 work.
+Only the outer-first route is the supported earned-clear workflow.
+
+Arm and marker-present verification require **all** expected anchors to be denied, with supported
+inheritance. Markerless/post-clear inspection treats **any** residual expected/legacy deny as
+blocked; a failed query is cannot-establish, never clear. Clear and all read paths use `create=False`
+and never create a directory. A legitimate clear may also remove a former same-root `fabric` deny,
+but only when that directory is empty, its deny exactly matches the current principal/gate mask and
+same-root gate history attributes it. Unattributable, conflicting or populated residue refuses.
+Legacy cleanup neither creates nor deletes the directory. A failed removal/readback does not print
+`CLEARED`.
+
+Working-model `.pbi` caches are **not** exemptions: probe outside the working tree, earn the clear,
+then refresh/persist the working model. Loose `.pbip` launchers, atomic-replace/delete-child policy,
+same-user ACL tampering and same-root concurrency/durability are outside this change's guarantee.
+Pristine engine baselines remain read-only by migration convention, not additional gate anchors.
 
 ### Package data-access projection
 
@@ -139,9 +197,10 @@ decision and the unchanged reference evidence ceilings.
 ### Engine-produced bundles: detection, not prevention
 
 The deterministic engine runs before the agent tier and can emit `pbip/`, `reports/`,
-`semantic_models/`, and `data/` before this gate is armed. On that path the gate cannot honestly promise "no model exists";
-it promises that no **agent-tier** artifact is added while the source is unproven, and that pre-gate
-engine output is labelled as unvalidated until a probe clears the gate.
+`semantic_models/`, and `data/` before this gate is armed. On that path the gate cannot honestly
+promise "no model exists". It now denies subsequent ordinary agent-tier writes beneath `pbip`,
+while the wider audit still labels pre-gate engine output as unvalidated until a probe clears the
+gate. Detection of pre-gate output and prevention of working-tree edits are different controls.
 
 `verify` therefore classifies provenance-backed engine artifacts separately when all of these are true:
 
@@ -460,8 +519,9 @@ The probe has to *write* a throwaway model in order to measure anything — but 
 is armed. A v1 that put the sandbox inside `fabric/` deadlocked instantly: the measurement that lifts
 the gate was itself blocked by the gate.
 
-The sandbox is therefore `<migration>/_probe/`, a **sibling** of `fabric/`, never in `output_dirs()`.
-It needs no grant and no special ordering.
+The sandbox is therefore `<migration>/_probe/`, beside this gate's denied anchors, never inside
+one. It needs no grant exception. For nested gates, use the outer root's sandbox and clear the
+outer gate first, as described under [physical targets](#physical-targets-and-nested-gates).
 
 ---
 
