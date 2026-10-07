@@ -1662,26 +1662,10 @@ def scoped_todo(
     OUT of the project is what stops a report rebuilding against a model nobody migrated. Selecting
     the datasources that simply LIVE in the project is what makes the model-first phase-1 workflow
     work at all: the issue's own example, `--project "00 - Certified Sources"`, is 3 datasources and
-    0 workbooks, so an edges-only scope selects nothing and exits 1 on `0 asset(s) to sweep`.
+    0 workbooks, so an edges-only scope selects nothing and exits 1 on     `0 asset(s) to sweep`.
     """
     if workbook_ids:
-        if project_names or project_ids:
-            raise ValueError("--workbook-id cannot be combined with project selectors")
-        requested = list(dict.fromkeys(workbook_ids))
-        placeholders = ",".join("?" for _ in requested)
-        selected_workbooks = list(
-            con.execute(
-                f"SELECT luid, name FROM workbook WHERE luid IN ({placeholders}) ORDER BY name, luid", requested
-            )
-        )
-        found = {luid for luid, _ in selected_workbooks}
-        missing = [luid for luid in requested if luid not in found]
-        if missing:
-            raise ValueError(f"no workbooks matched --workbook-id: {', '.join(missing)}")
-        pulled_in = [] if workbooks_only else dependency_datasources(con, [luid for luid, _ in selected_workbooks])
-        todo = [("datasource", luid, name) for luid, name in pulled_in]
-        todo.extend(("workbook", luid, name) for luid, name in selected_workbooks)
-        return todo, [], len(selected_workbooks), 0, len(pulled_in)
+        return _workbook_scoped_todo(con, project_names, project_ids, workbook_ids, workbooks_only)
 
     if not project_names and not project_ids:
         todo = []
@@ -1726,6 +1710,31 @@ def scoped_todo(
     todo = [("datasource", luid, name) for luid, name in datasources]
     todo.extend(("workbook", luid, name) for luid, name in workbooks)
     return todo, selected, len(workbooks), len(in_project), len(pulled_in)
+
+
+def _workbook_scoped_todo(
+    con: sqlite3.Connection,
+    project_names: list[str],
+    project_ids: list[str],
+    workbook_ids: list[str],
+    workbooks_only: bool,
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]], int, int, int]:
+    """Select exact workbooks and only the published datasources their dependency edges require."""
+    if project_names or project_ids:
+        raise ValueError("--workbook-id cannot be combined with project selectors")
+    requested = list(dict.fromkeys(workbook_ids))
+    placeholders = ",".join("?" for _ in requested)
+    selected_workbooks = list(
+        con.execute(f"SELECT luid, name FROM workbook WHERE luid IN ({placeholders}) ORDER BY name, luid", requested)
+    )
+    found = {luid for luid, _ in selected_workbooks}
+    missing = [luid for luid in requested if luid not in found]
+    if missing:
+        raise ValueError(f"no workbooks matched --workbook-id: {', '.join(missing)}")
+    pulled_in = [] if workbooks_only else dependency_datasources(con, [luid for luid, _ in selected_workbooks])
+    todo = [("datasource", luid, name) for luid, name in pulled_in]
+    todo.extend(("workbook", luid, name) for luid, name in selected_workbooks)
+    return todo, [], len(selected_workbooks), 0, len(pulled_in)
 
 
 def parse_asset(path: Path, scripts: Path) -> tuple[dict[str, Any], dict[str, Any]]:

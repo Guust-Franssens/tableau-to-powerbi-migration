@@ -46,7 +46,7 @@ def _survey(*, project: bool = False, workbook: bool = False, unmatched=None, em
     }
 
 
-def _write_assessment(out: Path) -> None:
+def _write_assessment(out: Path, *, duplicate_project: bool = False) -> None:
     out.mkdir(parents=True, exist_ok=True)
     (out / "assessment.json").write_text(json.dumps({"workbooks": [{"luid": WORKBOOK}]}), encoding="utf-8")
     connection = sqlite3.connect(out / "estate.db")
@@ -62,6 +62,8 @@ def _write_assessment(out: Path) -> None:
         INSERT INTO dependency VALUES ('{WORKBOOK}', '{DATASOURCE}', 'Ledger');
         """
     )
+    if duplicate_project:
+        connection.execute("INSERT INTO project VALUES ('dddddddd-4444-4444-8444-dddddddddddd', 'Finance')")
     connection.commit()
     connection.close()
 
@@ -112,9 +114,7 @@ def _write_bundle(out: Path, *, bridge="established") -> None:
     out.mkdir(parents=True, exist_ok=True)
     (out / "report.json").write_text(json.dumps({"workbooks": [{}], "datasources": [{}]}), encoding="utf-8")
     if bridge is not None:
-        (out / "input_manifest.json").write_text(
-            json.dumps({"scope_bridge": {"status": bridge}}), encoding="utf-8"
-        )
+        (out / "input_manifest.json").write_text(json.dumps({"scope_bridge": {"status": bridge}}), encoding="utf-8")
 
 
 class _Pipeline:
@@ -129,6 +129,9 @@ class _Pipeline:
         bridge: str | None = "established",
         engine_started: bool = False,
         interrupt: bool = False,
+        malformed_survey: bool = False,
+        missing_oracle: bool = False,
+        duplicate_project: bool = False,
     ) -> None:
         self.root = tmp_path / "toolkit"
         self.root.mkdir()
@@ -146,6 +149,9 @@ class _Pipeline:
         self.bridge = bridge
         self.engine_started = engine_started
         self.interrupt = interrupt
+        self.malformed_survey = malformed_survey
+        self.missing_oracle = missing_oracle
+        self.duplicate_project = duplicate_project
         self.commands: list[list[str]] = []
         self.options: list[dict] = []
         self.before_exit = []
@@ -169,7 +175,14 @@ class _Pipeline:
                 pipeline.options.append(kwargs)
                 print(f"producer-stdout:{Path(command[3]).name}")
                 print(f"producer-stderr:{Path(command[3]).name}", file=sys.stderr)
+                print("OK")
                 pipeline._emit_artifacts(self.command)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _kind, _value, _traceback):
+                return False
 
             @property
             def pid(self):
@@ -224,13 +237,14 @@ class _Pipeline:
             survey = self.survey or _survey(project="--project" in command, workbook="--workbook" in command)
             target = arg("--json")
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(json.dumps(survey), encoding="utf-8")
+            target.write_text("not-json" if self.malformed_survey else json.dumps(survey), encoding="utf-8")
         elif name == "assess_estate.py":
-            _write_assessment(arg("--out"))
+            _write_assessment(arg("--out"), duplicate_project=self.duplicate_project)
         elif name == "harvest_estate_assets.py":
             _write_harvest(arg("--out"))
         elif name == "capture_tableau_oracle.py":
-            _write_oracle(arg("--out"))
+            if not self.missing_oracle:
+                _write_oracle(arg("--out"))
         elif name == "run_estate.py":
             if self.engine_started:
                 arg("--output").mkdir(parents=True, exist_ok=True)
@@ -248,6 +262,9 @@ def _captured(capsys, pipeline: _Pipeline) -> tuple[str, str]:
 
 def test_site_run_streams_children_allocates_under_toolkit_and_has_honest_handoff(monkeypatch, tmp_path, capsys):
     monkeypatch.delenv("COPILOT_AGENT_SESSION_ID", raising=False)
+    unrelated_cwd = tmp_path / "caller-cwd"
+    unrelated_cwd.mkdir()
+    monkeypatch.chdir(unrelated_cwd)
     pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
 
     code = frontdoor.main([])
@@ -289,9 +306,7 @@ def test_site_run_streams_children_allocates_under_toolkit_and_has_honest_handof
     assert "fidelity NOT VERIFIED" in out
 
 
-def test_intersection_scope_uses_resolved_workbook_id_and_session_precedence(
-    monkeypatch, tmp_path, capsys
-):
+def test_intersection_scope_uses_resolved_workbook_id_and_session_precedence(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("COPILOT_AGENT_SESSION_ID", SESSION)
     pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
 
@@ -311,6 +326,32 @@ def test_intersection_scope_uses_resolved_workbook_id_and_session_precedence(
     assert manifest["scope"]["selection"] == {"project": "Finance", "workbook": WORKBOOK}
     assert manifest["attribution"] == {"driver": "copilot", "session_id": SESSION}
     assert "NEXT STEPS" in out
+
+
+def test_project_only_scope_keeps_standalone_project_datasource_selection(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+
+    code = frontdoor.main(["--project", PROJECT])
+
+    _out, _err = _captured(capsys, pipeline)
+    harvest_command = next(cmd for cmd in pipeline.commands if Path(cmd[3]).name == "harvest_estate_assets.py")
+    assert code == 0
+    assert harvest_command[harvest_command.index("--project-id") + 1] == PROJECT
+    assert "--workbook-id" not in harvest_command
+
+
+def test_explicit_short_runs_parent_is_used_as_allocator_repo_root(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+    parent = tmp_path / "short"
+
+    code = frontdoor.main(["--runs-parent", str(parent)])
+
+    out, _err = _captured(capsys, pipeline)
+    run = work_dirs.runs_root(parent) / "001-site"
+    assert code == 0
+    assert out.splitlines()[0] == str(run)
+    assert (run / "run.json").is_file()
+    assert not work_dirs.runs_root(pipeline.root).exists()
 
 
 def test_output_guard_runs_before_allocation_and_names_runs_parent(monkeypatch, tmp_path, capsys):
@@ -357,6 +398,109 @@ def test_zero_exit_invalid_survey_scope_refuses_assessment(monkeypatch, tmp_path
     assert [Path(command[3]).name for command in pipeline.commands] == ["run_engine_survey.py"]
 
 
+def test_empty_project_scope_explains_datasource_only_ambiguity(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, survey=_survey(project=True, empty=True))
+
+    code = frontdoor.main(["--project", "Datasources"])
+
+    out, _err = _captured(capsys, pipeline)
+    assert code == 3
+    assert "cannot distinguish a missing project from a datasource-only project" in out
+    assert len(pipeline.commands) == 1
+
+
+def test_ambiguous_project_name_refuses_before_harvest(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, duplicate_project=True)
+
+    code = frontdoor.main(["--project", "Finance"])
+
+    out, _err = _captured(capsys, pipeline)
+    assert code == 3
+    assert "project name is ambiguous; use its LUID" in out
+    assert [Path(command[3]).name for command in pipeline.commands] == [
+        "run_engine_survey.py",
+        "assess_estate.py",
+    ]
+
+
+def test_changed_workbook_selection_refuses_instead_of_falling_back_to_site(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+
+    code = frontdoor.main(["--workbook", "Missing workbook"])
+
+    out, _err = _captured(capsys, pipeline)
+    assert code == 3
+    assert "requested workbook did not match" in out
+    assert [Path(command[3]).name for command in pipeline.commands] == [
+        "run_engine_survey.py",
+        "assess_estate.py",
+    ]
+
+
+def test_zero_exit_malformed_survey_is_unknown_and_blocks_dependents(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, malformed_survey=True)
+
+    code = frontdoor.main([])
+
+    out, _err = _captured(capsys, pipeline)
+    assert code == 3
+    assert "survey is missing or unreadable" in out
+    assert len(pipeline.commands) == 1
+
+
+def test_preflight_failure_stops_before_any_producer(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+    monkeypatch.setattr(frontdoor, "_preflight", lambda _env: 7)
+
+    code = frontdoor.main([])
+
+    out, _err = _captured(capsys, pipeline)
+    assert code == 1
+    assert pipeline.commands == []
+    assert "Migration preflight FAILED exit=7" in out
+
+
+def test_failed_harvest_does_not_launch_reference_or_bundle(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, exit_codes={"harvest_estate_assets.py": 3})
+
+    code = frontdoor.main([])
+
+    out, _err = _captured(capsys, pipeline)
+    assert code == 1
+    assert [Path(command[3]).name for command in pipeline.commands] == [
+        "run_engine_survey.py",
+        "assess_estate.py",
+        "harvest_estate_assets.py",
+    ]
+    assert "harvest - FAILED exit=3" in out
+
+
+def test_zero_exit_reference_with_missing_manifest_still_attempts_bundle_but_cannot_pass(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, missing_oracle=True)
+
+    code = frontdoor.main([])
+
+    out, _err = _captured(capsys, pipeline)
+    assert code == 3
+    assert [Path(command[3]).name for command in pipeline.commands][-2:] == [
+        "capture_tableau_oracle.py",
+        "run_estate.py",
+    ]
+    assert "oracle manifest is missing or unreadable" in out
+
+
+def test_native_child_failure_wins_over_console_ok_text(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, exit_codes={"run_engine_survey.py": 7})
+
+    code = frontdoor.main([])
+
+    out, _err = _captured(capsys, pipeline)
+    assert code == 1
+    assert "OK" in out
+    assert "survey - FAILED exit=7" in out
+    assert len(pipeline.commands) == 1
+
+
 @pytest.mark.parametrize("oracle_code", [1, 2, 3, 4, 5])
 def test_reference_failure_is_reported_but_bundle_still_runs(monkeypatch, tmp_path, capsys, oracle_code):
     pipeline = _Pipeline(monkeypatch, tmp_path, capsys, exit_codes={"capture_tableau_oracle.py": oracle_code})
@@ -371,9 +515,7 @@ def test_reference_failure_is_reported_but_bundle_still_runs(monkeypatch, tmp_pa
 
 
 @pytest.mark.parametrize("bridge", [None, "unestablished"])
-def test_zero_exit_bundle_without_established_scope_bridge_is_not_success(
-    monkeypatch, tmp_path, capsys, bridge
-):
+def test_zero_exit_bundle_without_established_scope_bridge_is_not_success(monkeypatch, tmp_path, capsys, bridge):
     pipeline = _Pipeline(monkeypatch, tmp_path, capsys, bridge=bridge)
 
     code = frontdoor.main([])
@@ -431,6 +573,18 @@ def test_invalid_session_id_is_usage_error_before_output_guard(monkeypatch, tmp_
 
     with pytest.raises(SystemExit) as excinfo:
         frontdoor.main(["--session-id", "not-a-uuid"])
+
+    assert excinfo.value.code == 2
+    assert pipeline.guard_calls == []
+    assert pipeline.preflight == [] and pipeline.commands == []
+
+
+def test_empty_explicit_session_id_does_not_fall_back_to_environment(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("COPILOT_AGENT_SESSION_ID", SESSION)
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+
+    with pytest.raises(SystemExit) as excinfo:
+        frontdoor.main(["--session-id", ""])
 
     assert excinfo.value.code == 2
     assert pipeline.guard_calls == []

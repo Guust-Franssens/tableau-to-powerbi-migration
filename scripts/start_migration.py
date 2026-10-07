@@ -51,10 +51,7 @@ FRONT_DOOR_ARTIFACTS = (
     "bundle/input_manifest.json",
     "bundle/pbip/reference.json",
 )
-FRONT_DOOR_HINT = (
-    "Fix: rerun this command with `--runs-parent <short path>` (for example `C:\\t2p`); "
-    "do not bypass the output guard."
-)
+FRONT_DOOR_HINT = "Fix: use `--runs-parent <short path>` for a new run; never bypass the output guard."
 
 
 class EvidenceError(ValueError):
@@ -63,6 +60,8 @@ class EvidenceError(ValueError):
 
 @dataclass(frozen=True)
 class StageResult:
+    """Native child outcome and the artifact path the stage was expected to produce."""
+
     name: str
     code: int | None
     output: Path
@@ -91,6 +90,8 @@ def _count(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+# The shape checks intentionally mirror the survey's machine-readable completeness contract.
+# pylint: disable=too-many-branches
 def _survey_workbooks(path: Path, args: argparse.Namespace) -> tuple[dict, list[dict], list[str]]:
     survey = _read_json(path, "survey")
     if not isinstance(survey, dict):
@@ -101,21 +102,24 @@ def _survey_workbooks(path: Path, args: argparse.Namespace) -> tuple[dict, list[
     if not isinstance(rows, list) or not isinstance(scope, dict) or not isinstance(summary, dict):
         raise EvidenceError("survey workbooks, scope and summary must be present")
     if scope.get("unmatched") != []:
-        raise EvidenceError("survey scope is unmatched or its unmatched evidence is unavailable")
+        detail = (
+            "; a workbook-centric survey cannot distinguish a missing project from a datasource-only project"
+            if args.project
+            else ""
+        )
+        raise EvidenceError(f"survey scope is unmatched or its unmatched evidence is unavailable{detail}")
     selected = scope.get("workbooks_selected")
     total = summary.get("workbooks_total")
     scoped = scope.get("scoped")
-    if (
-        not _count(selected)
-        or selected != len(rows)
-        or not _count(total)
-        or total != len(rows)
-        or not isinstance(scoped, bool)
-        or summary.get("scoped") is not scoped
-        or not isinstance(scope.get("projects"), list)
-        or not isinstance(scope.get("workbooks"), list)
+    if not _count(selected) or selected != len(rows) or not _count(total) or total != len(rows):
+        raise EvidenceError("survey scope counts do not reconcile")
+    if not isinstance(scoped, bool) or summary.get("scoped") is not scoped:
+        raise EvidenceError("survey scoped flag is missing or inconsistent")
+    if any(
+        not isinstance(values, list) or any(not isinstance(value, str) or not value for value in values)
+        for values in (scope.get("projects"), scope.get("workbooks"))
     ):
-        raise EvidenceError("survey scope counts or selector evidence do not reconcile")
+        raise EvidenceError("survey selector evidence is unavailable")
     if not rows:
         detail = (
             "; a workbook-centric survey cannot distinguish a missing project from a datasource-only project"
@@ -137,7 +141,9 @@ def _survey_workbooks(path: Path, args: argparse.Namespace) -> tuple[dict, list[
     if len(set(ids)) != len(ids):
         raise EvidenceError("survey contains duplicate workbook LUIDs")
     sources = survey.get("required_datasources")
-    if not isinstance(sources, list) or any(not isinstance(row, dict) or not row.get("luid") for row in sources):
+    if not isinstance(sources, list) or any(
+        not isinstance(row, dict) or not isinstance(row.get("luid"), str) or not row["luid"] for row in sources
+    ):
         raise EvidenceError("survey required_datasources evidence is unavailable")
     return survey, rows, ids
 
@@ -157,9 +163,7 @@ def _catalog(database: Path) -> tuple[list[tuple[str, str]], list[tuple[str, str
     return projects, workbooks
 
 
-def _resolve_named(
-    token: str, rows: list[tuple[str, ...]], label: str, *, name_index: int
-) -> tuple[str, ...]:
+def _resolve_named(token: str, rows: list[tuple[str, ...]], label: str, *, name_index: int) -> tuple[str, ...]:
     luid_matches = [row for row in rows if row[0] == token]
     matches = luid_matches or [row for row in rows if row[name_index].casefold() == token.casefold()]
     if not matches:
@@ -242,8 +246,10 @@ def _verify_harvest(path: Path, totals_path: Path, expected: set[tuple[str, str]
     if len(set(identities)) != len(identities) or set(identities) != expected:
         raise EvidenceError("harvest asset identities do not equal the requested scope")
     keys = ("both_ok", "ours_only", "theirs_only", "both_fail", "invalid", "never_downloaded")
-    if not _count(totals.get("total")) or totals["total"] != len(rows) or any(
-        not _count(totals.get(key)) for key in keys
+    if (
+        not _count(totals.get("total"))
+        or totals["total"] != len(rows)
+        or any(not _count(totals.get(key)) for key in keys)
     ):
         raise EvidenceError("harvest totals are incomplete or inconsistent")
     if sum(totals[key] for key in keys) != totals["total"]:
@@ -292,7 +298,7 @@ def _stop_process(process: subprocess.Popen) -> None:
     """Stop only this invocation's child process group and reap its direct child."""
     try:
         if os.name == "nt":
-            process.send_signal(signal.CTRL_BREAK_EVENT)
+            process.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
         else:
             os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=2)
@@ -313,24 +319,25 @@ def _run_child(name: str, index: int, command: list[str], env: dict[str, str], o
     else:
         options["start_new_session"] = True
     try:
-        process = subprocess.Popen(command, **options)
+        process_context = subprocess.Popen(command, **options)
     except OSError as exc:
         print(f"[{index}/5] {name} - FAILED exit=launch-failed out={output}", flush=True)
         print(f"Could not start {name}: {type(exc).__name__}", file=sys.stderr, flush=True)
         return StageResult(name, None, output)
-    started = time.monotonic()
-    heartbeat = started + HEARTBEAT_SECONDS
-    try:
-        while process.poll() is None:
-            now = time.monotonic()
-            if now >= heartbeat:
-                print(f"[{index}/5] {name} - running elapsed={int(now - started)}s", flush=True)
-                heartbeat = now + HEARTBEAT_SECONDS
-            time.sleep(min(0.2, max(0.01, heartbeat - now)))
-        return StageResult(name, process.wait(), output)
-    except KeyboardInterrupt:
-        _stop_process(process)
-        raise
+    with process_context as process:
+        started = time.monotonic()
+        heartbeat = started + HEARTBEAT_SECONDS
+        try:
+            while process.poll() is None:
+                now = time.monotonic()
+                if now >= heartbeat:
+                    print(f"[{index}/5] {name} - running elapsed={int(now - started)}s", flush=True)
+                    heartbeat = now + HEARTBEAT_SECONDS
+                time.sleep(min(0.2, max(0.01, heartbeat - now)))
+            return StageResult(name, process.wait(), output)
+        except KeyboardInterrupt:
+            _stop_process(process)
+            raise
 
 
 def _finish_stage(result: StageResult, index: int, status: str, detail: str = "") -> None:
@@ -366,8 +373,8 @@ def _scope_label(args: argparse.Namespace, env: dict[str, str]) -> tuple[str, st
 
 
 def _attribution(args: argparse.Namespace, environ: dict[str, str]) -> dict[str, str]:
-    supplied = args.session_id or environ.get("COPILOT_AGENT_SESSION_ID")
-    if not supplied:
+    supplied = args.session_id if args.session_id is not None else environ.get("COPILOT_AGENT_SESSION_ID")
+    if supplied is None:
         return {"driver": "operator"}
     try:
         session_id = str(uuid.UUID(supplied))
@@ -410,7 +417,10 @@ def _summary(run: Path, bundle: Path, oracle: Path, overall: int, *, fidelity: s
     if overall == 0:
         print("1. Compare the working/shipping report with Tableau before calling the migration done.", flush=True)
     else:
-        print("1. Remedy the reported blocking input or reference-capture issue, then inspect retained artifacts.", flush=True)
+        print(
+            "1. Remedy the reported blocking input or reference-capture issue, then inspect retained artifacts.",
+            flush=True,
+        )
     handover = bundle / "handover"
     for label, path in (
         ("BUNDLE", bundle),
@@ -433,10 +443,16 @@ def _summary(run: Path, bundle: Path, oracle: Path, overall: int, *, fidelity: s
     print(f"RUN {run}", flush=True)
 
 
+# This entry point is intentionally the five-stage composition; stage contracts stay adjacent here.
+# pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
 def main(argv: list[str] | None = None) -> int:
     """Run survey, assessment, harvest, reference capture and deterministic conversion."""
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.project is not None and not args.project:
+        parser.error("--project must not be empty")
+    if args.workbook is not None and not args.workbook:
+        parser.error("--workbook must not be empty")
     try:
         attribution = _attribution(args, os.environ)
     except ValueError as exc:
@@ -552,9 +568,11 @@ def main(argv: list[str] | None = None) -> int:
             selected_workbooks, project_luid, workbook_luid = _resolve_selection(
                 assessment / "estate.db", survey_ids, args
             )
-            db_counts = f"workbooks={len(assessment_doc['workbooks'])}" if isinstance(
-                assessment_doc.get("workbooks"), list
-            ) else "workbooks=unavailable"
+            db_counts = (
+                f"workbooks={len(assessment_doc['workbooks'])}"
+                if isinstance(assessment_doc.get("workbooks"), list)
+                else "workbooks=unavailable"
+            )
         except (EvidenceError, KeyError) as exc:
             _finish_stage(result, 2, "CANNOT_ESTABLISH", str(exc))
             invalid = True
@@ -582,9 +600,7 @@ def main(argv: list[str] | None = None) -> int:
             return _finalize(root, bundle, oracle_root, failed, invalid, fidelity)
         try:
             expected = _expected_harvest(assessment / "estate.db", project_luid, workbook_luid)
-            totals = _verify_harvest(
-                asset_root / "parse-sweep.json", asset_root / "parse-sweep-totals.json", expected
-            )
+            totals = _verify_harvest(asset_root / "parse-sweep.json", asset_root / "parse-sweep-totals.json", expected)
         except EvidenceError as exc:
             _finish_stage(result, 3, "CANNOT_ESTABLISH", str(exc))
             invalid = True
@@ -604,12 +620,10 @@ def main(argv: list[str] | None = None) -> int:
         for luid in selected_workbooks:
             oracle_command.extend(["--workbook-id", luid])
         result = _run_child("reference", 4, oracle_command, child_env, oracle_root / "oracle-manifest.json")
-        oracle_valid = False
         if result.code == 0:
             try:
                 manifest = _verify_oracle(oracle_root / "oracle-manifest.json", selected_workbooks)
                 _finish_stage(result, 4, "OK", f"views={manifest['view_count']}")
-                oracle_valid = True
             except EvidenceError as exc:
                 _finish_stage(result, 4, "CANNOT_ESTABLISH", str(exc))
                 invalid = True
@@ -633,16 +647,19 @@ def main(argv: list[str] | None = None) -> int:
         if result.code == 10:
             engine_state = _engine_started(bundle)
             if engine_state is False:
-                print("PATH CEILING: stopped before conversion; allocated run and harvested inputs retained.", flush=True)
+                print(
+                    "PATH CEILING: stopped before conversion; allocated run and harvested inputs retained.", flush=True
+                )
             elif engine_state is True:
                 print("PATH CEILING: bundle was built and retained.", flush=True)
             else:
-                print("PATH CEILING: engine phase cannot be established; retained output is not classified.", flush=True)
+                print(
+                    "PATH CEILING: engine phase cannot be established; retained output is not classified.", flush=True
+                )
                 invalid = True
             short_root = Path("C:/t2p")
             print(
-                "Rerun in a new run (old run retained): "
-                + _front_door_command(args, env_path, short_root),
+                "Rerun in a new run (old run retained): " + _front_door_command(args, env_path, short_root),
                 flush=True,
             )
             _finish_stage(result, 5, "FAILED")
@@ -665,11 +682,11 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("Migration interrupted; invocation-owned child work was cancelled and reaped.", flush=True)
         return _finalize(root, bundle, oracle_root, True, False, fidelity, code=130)
-    if result.name == "bundle" and result.code == 0 and oracle_valid and not invalid and not failed:
-        return _finalize(root, bundle, oracle_root, failed, invalid, fidelity)
     return _finalize(root, bundle, oracle_root, failed, invalid, fidelity)
 
 
+# The separate flags encode wrapper precedence without conflating invalid evidence and failed stages.
+# pylint: disable=too-many-arguments,too-many-positional-arguments
 def _finalize(
     run: Path,
     bundle: Path,
