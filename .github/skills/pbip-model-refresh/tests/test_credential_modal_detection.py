@@ -105,7 +105,11 @@ def test_diagnostic_recognizes_only_complete_same_window_templates(monkeypatch, 
     assert argv[-4:] == ["-HarvestHwnd", "222", "-DiagnosticPid", "111"]
     assert "-DesktopPid" not in argv, "diagnostic mode must not enter the Refresh probe"
     assert Path(argv[argv.index("-File") + 1]) == PROBE_PS1
-    assert kwargs["capture_output"] is True and kwargs["timeout"] == 8.0
+    assert kwargs.get("capture_output") is True, "harvest output must stay inside private pipes"
+    assert kwargs.get("timeout") == 8.0, "diagnostic child wait must remain bounded"
+    assert kwargs.get("creationflags") == getattr(subprocess, "CREATE_NO_WINDOW", 0), (
+        "diagnostic harvest must not create a foreground console"
+    )
     assert not calls
 
 
@@ -237,8 +241,10 @@ def test_cli_diagnostic_preserves_detector_token_and_exit(monkeypatch, capsys, m
     assert "PRIVATE_TEST_VALUE" not in out and "DATA_OK" not in out
 
 
-def test_query_poll_diagnostic_is_terminal_and_once(monkeypatch, capsys) -> None:  # pylint: disable=no-member
+def test_query_poll_diagnostic_is_terminal_and_once(monkeypatch, capsys) -> None:
     """A late query refusal is enriched only when the polling loop chooses to return."""
+    # The canonical bundled module is selected at runtime, not the root CLI shim.
+    # pylint: disable=no-member
     states = iter([CredentialDetection(), dialog_state()])
     monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda *_a, **_kw: next(states))
     monkeypatch.setattr(

@@ -1026,6 +1026,7 @@ def diagnose_dialog(pid: int, window: DesktopWindow, *, timeout_seconds: float =
             text=True,
             encoding="utf-8",
             timeout=timeout_seconds,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             check=False,
         )
         payload = _diagnostic_payload(child.stdout, pid, window.hwnd) if child.returncode == 0 else None

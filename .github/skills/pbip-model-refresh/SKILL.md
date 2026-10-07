@@ -197,8 +197,9 @@ numbers. Do not feed re-serialized metadata into an authentication-text scanner.
 refresh's output. Its Phase-1 consumer must forward/stream `LOCAL_IMAGE` lines, supply the run-owned
 `PBIP_EVIDENCE_DIR`, perform the schema/PID/hash/lifetime checks above, and route a separate positive
 visual review. That orchestration requires a file outside this change's closed surface. The
-standalone PowerShell arbiter, t=0 checks and read-only query probe retain their existing behavior;
-no automatic UIA enrichment, OCR or external-verdict ingestion was added.
+image seam itself adds no UIA enrichment, OCR or external-verdict ingestion. The separate #498
+exact-HWND text diagnostic above runs only at terminal reporting; detector verdicts and active-wait
+behavior remain unchanged.
 
 ✅ **Precedent:** the two independent September 15, 2026 controls on #146 acquired readable
 Snowflake forms with their owners minimized and without foreground/restore. This implementation
