@@ -33,7 +33,6 @@ from credential_gate import (
 )
 from package_filesystem import is_canonical_key
 from package_role_identity import verify_phase1_role_identity
-from preflight_source_credentials import _leg_key
 from probe_live_source import _probe_leg, _probe_one_table
 
 LIVE = {
@@ -41,13 +40,31 @@ LIVE = {
     "server": "source.example",
     "database": "db",
     "schema": "dbo",
+    "name": "orders-leg",
     "powerbi_target": "live_source",
 }
 OTHER = {**LIVE, "server": "other.example"}
 FLAT = {"class": "excel-direct", "powerbi_target": "flat_file"}
 REVIEW = {"class": "unknown", "server": "review.example", "powerbi_target": "unknown"}
-KEY = _leg_key({"connection": LIVE, "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}]}, 0, LIVE)
-OTHER_KEY = _leg_key({"connection": OTHER, "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}]}, 0, OTHER)
+
+
+def _ordinary_key(server: str, ordinary_tables: tuple[str, ...] | None = ("Orders",)) -> str:
+    """Independent SHA-256 oracle for the documented dbo.Orders identity."""
+    identity = {
+        "class": "sqlserver",
+        "server": server,
+        "database": "db",
+        "schema": "dbo",
+        "ordinary_tables": list(ordinary_tables) if ordinary_tables is not None else None,
+    }
+    return (
+        "source-key:"
+        + hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+    )
+
+
+KEY = _ordinary_key("source.example")
+OTHER_KEY = _ordinary_key("other.example")
 LOCAL = {
     "self_contained": True,
     "omissions": [],
@@ -66,7 +83,9 @@ def _spec(*connections: dict) -> dict:
             {
                 "name": f"source{index}",
                 "connection": dict(connection),
-                "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
+                "tables": [
+                    {"name": "Orders", "table": "[dbo].[Orders]", "connection": connection.get("name", "orders-leg")}
+                ],
                 "fields": [{"kind": "column", "internal_name": "[ID]"}],
             }
             for index, connection in enumerate(connections)
@@ -988,7 +1007,7 @@ def test_production_resolution_error_cannot_reuse_old_clearance(root: Path, sour
     _earn(root)
     spec = _spec(LIVE)
     spec["data_sources"][0]["tables"] = []
-    current_key = _leg_key(spec["data_sources"][0], 0, LIVE)
+    current_key = _ordinary_key("source.example", None)
     assert current_key != KEY, "unresolved identity must not inherit valid Orders proof"
     (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
     with pytest.raises(SystemExit) as error:

@@ -121,6 +121,9 @@ far more reliable than asking an LLM to re-derive this structure from raw XML on
   These optional raw fields do not change JSON-schema validity: previously schema-valid specs
   remain schema-valid. Legacy alias-only or implicit-schema ordinary specs may nevertheless
   refuse runtime probing; reparse or correct their physical metadata rather than guessing.
+  **Legacy upgrade:** specs and bundles parsed before this change lack raw identifiers, so their
+  ordinary live sources fail closed (`cannot_establish` / `NOT_CHECKED`). Re-parse with the current
+  parser, re-probe, and regenerate packages. Never hand-edit credential-gate keys.
   The two committed live connection-fidelity fixtures lack these raw fields and therefore refuse
   runtime probing; they need no regeneration for their connection-fidelity purpose.
 - **`dashboards[].zones.type == "layout-floating"`.** Tableau dashboards built entirely from

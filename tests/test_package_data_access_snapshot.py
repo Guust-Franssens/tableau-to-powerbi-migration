@@ -963,7 +963,8 @@ def test_provider_projection_and_root_stay_bound_to_the_pre_s2_snapshot(
 ) -> None:
     provider = producer._direct_provider(tmp_path / "provider")
     consumer = producer._provider_consumer(tmp_path, provider)
-    assert producer._assess_candidate(consumer, root, providers=(provider,)).state == "provider_inherited"
+    baseline = producer._assess_candidate(consumer, root, providers=(provider,))
+    assert (baseline.state, baseline.source_keys) == ("provider_inherited", (producer.DIRECT_KEY,))
     verify = pkg.pri.verify_phase1_role_identity
     hit = []
 
@@ -979,7 +980,7 @@ def test_provider_projection_and_root_stay_bound_to_the_pre_s2_snapshot(
         elif change.startswith("projection"):
             path = provider / "data-access.json"
             payload = json.loads(path.read_bytes())
-            payload["source_keys"] = [authority.OTHER_KEY]
+            payload["source_keys"] = [producer.OTHER_DIRECT_KEY]
             path.write_text(json.dumps(payload), encoding="utf-8")
             if change.endswith("reseal"):
                 producer._reseal(provider)
@@ -1035,7 +1036,7 @@ def test_provider_remains_pinned_after_final_s2(tmp_path: Path, monkeypatch: pyt
         result = verify(roots)
         path = provider / "data-access.json"
         payload = json.loads(path.read_bytes())
-        payload["source_keys"] = [authority.OTHER_KEY]
+        payload["source_keys"] = [producer.OTHER_DIRECT_KEY]
         path.write_text(json.dumps(payload), encoding="utf-8")
         producer._reseal(provider)
         return result
@@ -1075,7 +1076,7 @@ def test_only_the_once_parsed_provider_assessment_crosses_s2_selection(
     monkeypatch.setattr(pkg.pri, "verify_phase1_role_identity", after_capture)
     monkeypatch.setattr(pkg.data_access, "assess_data_access", exact_assessment)
     result = producer._assess_candidate(consumer, root, providers=(provider,))
-    assert result.state == "provider_inherited"
+    assert (result.state, result.source_keys) == ("provider_inherited", (producer.DIRECT_KEY,))
     assert selected == [True] and len(held) == 1
 
 
@@ -1118,7 +1119,8 @@ def test_published_only_rows_are_complete_before_any_inheritance(
 ) -> None:
     provider = producer._direct_provider(tmp_path / "provider")
     consumer = producer._provider_consumer(tmp_path, provider)
-    assert producer._assess_candidate(consumer, root, providers=(provider,)).state == "provider_inherited"
+    baseline = producer._assess_candidate(consumer, root, providers=(provider,))
+    assert (baseline.state, baseline.source_keys) == ("provider_inherited", (producer.DIRECT_KEY,))
     spec = json.loads((consumer / "migration-spec.json").read_bytes())
     row = spec["data_sources"][0]
     if fault == "missing":
@@ -1376,16 +1378,16 @@ def test_selected_provider_cannot_borrow_a_projection_key_from_another_root(
 ) -> None:
     selected = producer._direct_provider(tmp_path / "selected")
     other = producer._direct_provider(
-        tmp_path / "other", luid=s2.WB_LUID, key=authority.OTHER_KEY, connection=authority.OTHER
+        tmp_path / "other", luid=s2.WB_LUID, key=producer.OTHER_DIRECT_KEY, connection=authority.OTHER
     )
     consumer = producer._provider_consumer(tmp_path, selected)
     providers = (other, selected) if reverse else (selected, other)
     baseline = producer._assess_candidate(consumer, root, providers=providers)
-    assert baseline.state == "provider_inherited" and baseline.source_keys == ("source-key:ab1baa4b3f77bb70",)
+    assert baseline.state == "provider_inherited" and baseline.source_keys == (producer.DIRECT_KEY,)
     if change == "projection-key":
         path = selected / "data-access.json"
         payload = json.loads(path.read_bytes())
-        payload["source_keys"] = ["source-key:e625ce798a6d19bb"]
+        payload["source_keys"] = [producer.OTHER_DIRECT_KEY]
     else:
         path = selected / "migration-spec.json"
         payload = json.loads(path.read_bytes())

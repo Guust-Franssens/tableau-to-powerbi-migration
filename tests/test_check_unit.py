@@ -4905,9 +4905,11 @@ def _r2_package(root: Path, *, numeric: str = "none") -> Path:
                         "class": "sqlserver",
                         "server": "source.example",
                         "database": "db",
+                        "schema": "dbo",
+                        "name": "sales-leg",
                         "powerbi_target": "live_source",
                     },
-                    "tables": [{"name": "Sales"}],
+                    "tables": [{"name": "Sales", "table": "[dbo].[Sales]", "connection": "sales-leg"}],
                     "fields": [],
                 }
             ],
@@ -4923,7 +4925,22 @@ def _r2_package(root: Path, *, numeric: str = "none") -> Path:
         {
             "schema": "phase1-data-access/v1",
             "state": "live_data_ok",
-            "source_keys": ["source-key:ab1baa4b3f77bb70"],
+            "source_keys": [
+                "source-key:"
+                + hashlib.sha256(
+                    json.dumps(
+                        {
+                            "class": "sqlserver",
+                            "server": "source.example",
+                            "database": "db",
+                            "schema": "dbo",
+                            "ordinary_tables": ["Sales"],
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()[:16]
+            ],
             "provider_unit": None,
             "provider_state": None,
             "validation": "validated",

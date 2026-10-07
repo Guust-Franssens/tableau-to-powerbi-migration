@@ -1378,10 +1378,29 @@ _W_LIVE_CONNECTION = {
     "class": "sqlserver",
     "server": "source.example",
     "database": "db",
+    "schema": "dbo",
+    "name": "orders-leg",
     "powerbi_target": "live_source",
 }
-_W_LIVE_KEY = "source-key:ab1baa4b3f77bb70"  # Literal independent endpoint-JSON digest.
-_W_OTHER_KEY = "source-key:e625ce798a6d19bb"
+
+
+def _w_ordinary_key(server: str) -> str:
+    """Independent SHA-256 oracle for the documented dbo.Orders identity."""
+    identity = {
+        "class": "sqlserver",
+        "server": server,
+        "database": "db",
+        "schema": "dbo",
+        "ordinary_tables": ["Orders"],
+    }
+    return (
+        "source-key:"
+        + hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+    )
+
+
+_W_LIVE_KEY = _w_ordinary_key("source.example")
+_W_OTHER_KEY = _w_ordinary_key("other.example")
 _W_IMMUTABLE = (
     _W_ASSET,
     "migration-spec.json",
@@ -1422,7 +1441,9 @@ def _w_package(root: Path, *, live: bool = False, projection: dict | None = None
                 "data_sources": [
                     {
                         "id": "orders",
-                        "tables": [],
+                        "tables": [{"name": "Orders", "table": "[dbo].[Orders]", "connection": "orders-leg"}]
+                        if live
+                        else [],
                         "fields": [],
                         "connection": _W_LIVE_CONNECTION
                         if live
@@ -1691,6 +1712,7 @@ def test_current_working_coherent_role_rewrite_is_a_new_snapshot_not_original_co
     source = b"<workbook name='Revenue' revised='yes'/>\n"
     spec = json.loads(raw["migration-spec.json"])
     spec["data_sources"][0]["connection"] = _W_LIVE_CONNECTION
+    spec["data_sources"][0]["tables"] = [{"name": "Orders", "table": "[dbo].[Orders]", "connection": "orders-leg"}]
     provenance = json.loads(raw["source-provenance.json"])
     provenance["inputs"][0]["input"]["sha256"] = hashlib.sha256(source).hexdigest()
     projection = {
