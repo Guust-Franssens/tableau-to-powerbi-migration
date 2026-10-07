@@ -145,10 +145,10 @@ def make_oracle(execute: Callable[[str], list[dict]]) -> Callable[[str], dict]:
     return oracle
 
 
-def adomd_executor(port: int) -> Callable[[str], list[dict]]:
+def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[dict]]:
     """A real `execute(dax) -> rows` bound to one Power BI Desktop instance's local AS engine.
 
-    The connection is opened ONCE and held: opening a PBIP and refreshing it costs minutes, which is
+    The connection is opened lazily ONCE and held: opening a PBIP and refreshing it costs minutes, which is
     exactly why his contract offers `persistent_oracle`. Reuses `probe_desktop_query.discover_port`'s
     pid-scoped lookup rather than re-deriving it - that function refuses to widen to "any msmdsrv on
     the machine", which in a parallel batch is the difference between querying your model and
@@ -160,13 +160,44 @@ def adomd_executor(port: int) -> Callable[[str], list[dict]]:
     # pylint: disable-next=import-outside-toplevel
     import probe_desktop_query as pdq  # noqa: PLC0415
 
-    # pylint: disable-next=protected-access,no-member  # the skill's ADOMD loader; resolved at runtime
-    connection = pdq._load_adomd()(f"Data Source=localhost:{port}")  # noqa: SLF001
-    connection.Open()
+    # pylint: disable-next=import-outside-toplevel
+    from _credential_modal import print_dialog_diagnostic
+
+    connection = None
+
+    def refuse_nonclean_desktop() -> None:
+        if pid is None:
+            return
+        state = pdq._credential_state(pid)  # pylint: disable=protected-access,no-member
+        token, window = None, None
+        if state.modal is not None:
+            token, window = "CREDENTIAL_MISSING", state.modal.window
+        elif state.dialog is not None:
+            token, window = state.dialog.verdict, state.dialog.window
+        elif state.process_gone or state.desktop_unready or state.unknown_reason:
+            token = (
+                "DESKTOP_GONE" if state.process_gone else ("DESKTOP_UNREADY" if state.desktop_unready else "UNKNOWN")
+            )
+        if token is not None:
+            if window is not None:
+                print_dialog_diagnostic(pid, window, stream=sys.stderr)
+            raise RuntimeError(f"Desktop query refused ({token}); inspect this Desktop locally")
 
     def execute(dax: str) -> list[dict]:
+        nonlocal connection
+        if connection is None:
+            refuse_nonclean_desktop()
+            # pylint: disable-next=protected-access,no-member
+            candidate = pdq._load_adomd()(f"Data Source=localhost:{port}")
+            try:
+                candidate.Open()
+            except Exception:  # pylint: disable=broad-exception-caught
+                candidate.Close()
+                raise
+            connection = candidate
         command = connection.CreateCommand()
         command.CommandText = dax
+        refuse_nonclean_desktop()
         reader = command.ExecuteReader()
         try:
             columns = [reader.GetName(i) for i in range(reader.FieldCount)]
@@ -177,7 +208,11 @@ def adomd_executor(port: int) -> Callable[[str], list[dict]]:
         finally:
             reader.Close()
 
-    execute.close = connection.Close  # type: ignore[attr-defined]
+    def close() -> None:
+        if connection is not None:
+            connection.Close()
+
+    execute.close = close  # type: ignore[attr-defined]
     return execute
 
 
@@ -288,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
 
     port = args.port or pdq.discover_port(args.pid)  # pylint: disable=no-member  # resolved at runtime
     log.info("bound to Power BI Desktop local AS on port %s", port)
-    execute = adomd_executor(port)
+    execute = adomd_executor(port, args.pid)
     oracle = make_oracle(execute)
     try:
         if args.certify:
@@ -300,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
         return serve(oracle)
     finally:
         close = getattr(execute, "close", None)
-        if close:
+        if close is not None:
             close()
 
 

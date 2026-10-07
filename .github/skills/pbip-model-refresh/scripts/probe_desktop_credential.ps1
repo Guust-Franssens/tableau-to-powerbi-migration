@@ -579,7 +579,8 @@ function Get-AutomationHarvest {
     if ($ExpectedPid) {
       if ($element.Current.ProcessId -ne $ExpectedPid -or
           $element.Current.NativeWindowHandle -ne $Hwnd -or
-          $element.Current.ControlType.ProgrammaticName -ne 'ControlType.Window') { return $null }
+          $element.Current.ControlType.ProgrammaticName -ne 'ControlType.Window' -or
+          $element.Current.IsPassword) { return $null }
       $title = [string]$element.Current.Name
       if ($title.Length -gt 8000) { return $null }
     }
@@ -599,14 +600,10 @@ function Get-AutomationHarvest {
         $role = [string]$d.Current.ControlType.ProgrammaticName
         if ($d.Current.IsPassword -or $role -in @('ControlType.Edit', 'ControlType.ComboBox')) {
           $incomplete = $true
-          continue
-        }
-        $name = [string]$d.Current.Name
-        if ($name.Length -gt 8000) { $truncated = $true; break }
-        if ($name) {
-          $items += [pscustomobject]@{ Text = $name; Role = $role; Source = 'Name' }
+          break
         }
         # Buttons are identified only by Button.Name. Never read ValuePattern in diagnostic mode.
+        $document = ''
         if ($role -ne 'ControlType.Button') {
           $textPattern = $null
           if ($d.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$textPattern)) {
@@ -614,14 +611,19 @@ function Get-AutomationHarvest {
               [System.Windows.Automation.TextPattern]::IsReadOnlyAttribute)
             if (($readOnly -isnot [bool]) -or -not $readOnly) {
               $incomplete = $true
-              continue
+              break
             }
             $document = $textPattern.DocumentRange.GetText(8001)
             if ($document.Length -gt 8000) { $truncated = $true; break }
-            if ($document) {
-              $items += [pscustomobject]@{ Text = [string]$document; Role = $role; Source = 'TextPattern' }
-            }
           }
+        }
+        $name = [string]$d.Current.Name
+        if ($name.Length -gt 8000) { $truncated = $true; break }
+        if ($name) {
+          $items += [pscustomobject]@{ Text = $name; Role = $role; Source = 'Name' }
+        }
+        if ($document) {
+          $items += [pscustomobject]@{ Text = [string]$document; Role = $role; Source = 'TextPattern' }
         }
       } catch { $incomplete = $true }
       continue

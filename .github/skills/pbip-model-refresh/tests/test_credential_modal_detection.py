@@ -207,6 +207,57 @@ def test_diagnostic_without_an_exact_target_does_not_start_a_child(monkeypatch, 
     assert not calls
 
 
+@pytest.mark.parametrize("module", [refresh_pbip_model, probe_desktop_query])
+@pytest.mark.parametrize("status", ["OBSERVED", "WITHHELD", "CANNOT_READ"])
+@pytest.mark.parametrize(
+    "token", ["DIALOG_UNREADABLE", "DIALOG_UNRECOGNIZED", "DIALOG_NEEDS_HUMAN", "REFRESH_IN_PROGRESS"]
+)
+def test_cli_diagnostic_preserves_detector_token_and_exit(monkeypatch, capsys, module, status: str, token: str) -> None:
+    """No diagnostic result may reclassify, suppress or clear the pre-read refusal."""
+    window = DesktopWindow("PRIVATE_TEST_VALUE", "", 100, 100, hwnd=222)
+    kind = next(key for key, value in _credential_modal.DIALOG_KIND_VERDICTS.items() if value == token)
+    finding = DialogFinding(kind, token, window, "PRIVATE_TEST_VALUE")
+    calls = []
+
+    def diagnose(pid: int, target):
+        calls.append((pid, target))
+        return status, "privacy_warning" if status == "OBSERVED" else None, "template_match"
+
+    monkeypatch.setattr(_credential_modal, "diagnose_dialog", diagnose)
+    monkeypatch.setattr(module, "_credential_state", lambda *_a, **_kw: CredentialDetection(dialog=finding))
+    monkeypatch.setattr(module, "discover_port", lambda *_a: pytest.fail("refused dialog reached port discovery"))
+    if module is refresh_pbip_model:
+        monkeypatch.setattr(module, "cache_file", lambda *_a: None)
+    code = module.main(["--pid", "111"])
+    out = capsys.readouterr().out
+    prefix = "REFRESH" if module is refresh_pbip_model else "PREFLIGHT"
+    assert code == 3, "diagnostic enrichment must preserve the existing refusal exit"
+    assert out.splitlines()[0].startswith(f"{prefix}: {token} "), "diagnostic changed the detector token"
+    assert calls == [(111, window)] and out.count("DIALOG_DIAGNOSTIC ") == 1
+    assert "PRIVATE_TEST_VALUE" not in out and "DATA_OK" not in out
+
+
+def test_query_poll_diagnostic_is_terminal_and_once(monkeypatch, capsys) -> None:  # pylint: disable=no-member
+    """A late query refusal is enriched only when the polling loop chooses to return."""
+    states = iter([CredentialDetection(), dialog_state()])
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda *_a, **_kw: next(states))
+    monkeypatch.setattr(
+        probe_desktop_query.threading,
+        "Thread",
+        lambda **_kw: SimpleNamespace(start=lambda: None, is_alive=lambda: True, join=lambda _seconds: None),
+    )
+    calls = []
+
+    def diagnose(pid: int, window):
+        calls.append((pid, window))
+        return "WITHHELD", None, "unknown_template"
+
+    monkeypatch.setattr(_credential_modal, "diagnose_dialog", diagnose)
+    assert probe_desktop_query._probe_with_credential_poll(111, 1234, None) == 3
+    out = capsys.readouterr().out
+    assert "PREFLIGHT: DIALOG_UNREADABLE" in out and len(calls) == 1
+
+
 def test_fixed_diagnostics_and_numeric_metadata_are_marker_free(monkeypatch, capsys) -> None:
     """These are the parent's substring vocabulary, duplicated so the bundle remains portable."""
     markers = (
@@ -366,7 +417,7 @@ def test_diagnostic_harvest_pid_and_completeness_guards(tmp_path: Path, case: st
     else:
         flag = "Truncated" if case == "oversized" else "PatternsIncomplete"
         assert result["Payload"][flag] is True, "an incomplete harvest must not claim completeness"
-        if case in {"child_pid", "password", "editable"}:
+        if case in {"child_pid", "password", "editable", "editable_document"}:
             assert result["Reads"] == 1, "private descendant values must not be read"
 
 

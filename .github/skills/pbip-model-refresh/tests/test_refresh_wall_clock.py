@@ -100,9 +100,8 @@ def test_a_command_that_never_returns_still_yields_a_verdict(parked) -> None:
     elapsed = time.monotonic() - started
 
     assert elapsed < 15, f"refresh took {elapsed:.1f}s - the wall clock did not bound it"
-    # The message must name the diagnosis, not just the number: an agent reading it has to be able to
-    # tell "slow query" (retry smaller) from "parked on a modal" (a human must sign in).
-    assert "modal" in str(excinfo.value).lower()
+    assert "cause unestablished" in str(excinfo.value).lower()
+    assert "sign-in" not in str(excinfo.value).lower(), "elapsed time must not invent a dialog"
 
 
 def test_the_worker_is_a_daemon_so_a_parked_engine_cannot_outlive_the_process(parked) -> None:
@@ -169,6 +168,74 @@ def test_default_refresh_type_is_full() -> None:
     """A DAX-only shortcut must stay opt-in; data-affecting edits need the full default."""
     args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "1"])
     assert args.refresh_type == "full"
+
+
+@pytest.mark.parametrize("progress_enabled", [False, True])
+def test_terminal_diagnostic_runs_once_after_either_refresh_wait_branch(
+    monkeypatch, parked, capsys, progress_enabled: bool
+) -> None:
+    """Only the terminal reporting boundary enriches a latched finding, never an active wait."""
+    # The tests deliberately reach bundled internals; pylint may instead resolve the root CLI shim.
+    # pylint: disable=protected-access,no-member
+    terminal = []
+    calls = []
+    window = owned_dialog(hwnd=DIALOG_HWND)
+    finding = _credential_modal.classify_dialog(window)
+
+    def state(_pid: int, *, in_flight: bool = False):
+        return (
+            _credential_modal.CredentialDetection(dialog=finding)
+            if in_flight
+            else _credential_modal.CredentialDetection()
+        )
+
+    original_join = refresh_pbip_model._join_refresh_worker
+
+    def join(*args, **kwargs):
+        try:
+            return original_join(*args, **kwargs)
+        finally:
+            terminal.append(True)
+
+    def diagnose(pid: int, target):
+        assert terminal, "diagnostic harvesting must not run inside active wait callbacks"
+        calls.append((pid, target.hwnd))
+        return "OBSERVED", "privacy_warning", "template_match"
+
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", state)
+    monkeypatch.setattr(refresh_pbip_model, "_join_refresh_worker", join)
+    monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_a, **_kw: _FakeProgressMonitor())
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_WALL_CLOCK_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.02)
+    monkeypatch.setattr(_credential_modal, "diagnose_dialog", diagnose)
+    argv = ["--pid", "111", "--no-save", "--refresh-absolute-timeout-seconds", "1"]
+    if not progress_enabled:
+        argv.append("--no-progress")
+    args = refresh_pbip_model._build_arg_parser().parse_args(argv)
+    assert refresh_pbip_model._refresh_and_save(111, 1234, None, args) == 3
+    out = capsys.readouterr().out
+    assert "REFRESH: DIALOG_UNREADABLE" in out and out.count("DIALOG_DIAGNOSTIC ") == 1
+    assert calls == [(111, DIALOG_HWND)]
+    assert not parked[0].closed, "the worker should remain parked until fixture cleanup"
+
+
+def test_timeout_diagnostic_does_not_invent_a_dialog_or_source_state(monkeypatch, capsys) -> None:
+    """An unverified timeout has no exact target and no two-cause narrative."""
+    # pylint: disable=protected-access,no-member
+
+    def timeout(*_args, **_kwargs):
+        raise TimeoutError("PRIVATE_TEST_VALUE sign in 403")
+
+    monkeypatch.setattr(refresh_pbip_model, "refresh", timeout)
+    monkeypatch.setattr(
+        _credential_modal, "diagnose_dialog", lambda *_a: pytest.fail("a timeout has no detected HWND to enrich")
+    )
+    args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "111", "--no-save"])
+    assert refresh_pbip_model._refresh_and_save(111, 1234, None, args) == 3
+    out = capsys.readouterr().out
+    assert "REFRESH: TIMEOUT" in out and "cause unestablished" in out
+    assert "PRIVATE_TEST_VALUE" not in out and "sign in" not in out and "two" not in out
 
 
 def _visual_refresh(
