@@ -5,6 +5,7 @@ purpose: download every workbook and published datasource on a Tableau site, the
 usage:   python scripts/harvest_estate_assets.py --out <dir> [--env .env] [--limit N]
                                                  [--skip-download] [--workbooks-only]
                                                  [--project NAME] [--project-id LUID]
+                                                 [--workbook-id LUID]
                                                  [--project-url URL]
                                                  [--allow-unignored-out]
 
@@ -405,7 +406,7 @@ def output_path_forms(out: Path) -> list[Path]:
 
 def refuse_unignored_output(
     out: Path,
-    allow_unignored: bool,
+    allow_unignored: bool | None,
     *,
     artifacts: Sequence[str] = OUTPUT_ARTIFACTS,
     hint: str = DEFAULT_UNIGNORED_HINT,
@@ -419,6 +420,7 @@ def refuse_unignored_output(
     `artifacts` and `hint` exist so a second tool that downloads customer content can reuse this one
     implementation rather than growing a near-copy that drifts. Pass the FILES that tool writes: the
     probe must name a file, never a bare directory (see `unignored_output_paths`).
+    Pass `allow_unignored=None` when the caller offers no bypass; the refusal then advertises none.
     """
     try:
         unignored = list(
@@ -438,7 +440,10 @@ def refuse_unignored_output(
         LOG.warning("--allow-unignored-out: proceeding anyway, but %s", message)
         return False
     LOG.error("REFUSING to write customer content into %s: %s", out, message)
-    LOG.error("Nothing was downloaded. Pass --allow-unignored-out to override this deliberately.")
+    if allow_unignored is None:
+        LOG.error("Nothing was downloaded.")
+    else:
+        LOG.error("Nothing was downloaded. Pass --allow-unignored-out to override this deliberately.")
     return True
 
 
@@ -1647,7 +1652,11 @@ def project_ids_from_urls(urls: Sequence[str], project_ids: Sequence[str]) -> li
 
 
 def scoped_todo(
-    con: sqlite3.Connection, project_names: list[str], project_ids: list[str], workbooks_only: bool
+    con: sqlite3.Connection,
+    project_names: list[str],
+    project_ids: list[str],
+    workbooks_only: bool,
+    workbook_ids: list[str] | None = None,
 ) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]], int, int, int]:
     """Select everything IN the chosen projects, plus the published sources their edges require.
 
@@ -1657,8 +1666,11 @@ def scoped_todo(
     OUT of the project is what stops a report rebuilding against a model nobody migrated. Selecting
     the datasources that simply LIVE in the project is what makes the model-first phase-1 workflow
     work at all: the issue's own example, `--project "00 - Certified Sources"`, is 3 datasources and
-    0 workbooks, so an edges-only scope selects nothing and exits 1 on `0 asset(s) to sweep`.
+    0 workbooks, so an edges-only scope selects nothing and exits 1 on     `0 asset(s) to sweep`.
     """
+    if workbook_ids:
+        return _workbook_scoped_todo(con, project_names, project_ids, workbook_ids, workbooks_only)
+
     if not project_names and not project_ids:
         todo = []
         if not workbooks_only:
@@ -1702,6 +1714,31 @@ def scoped_todo(
     todo = [("datasource", luid, name) for luid, name in datasources]
     todo.extend(("workbook", luid, name) for luid, name in workbooks)
     return todo, selected, len(workbooks), len(in_project), len(pulled_in)
+
+
+def _workbook_scoped_todo(
+    con: sqlite3.Connection,
+    project_names: list[str],
+    project_ids: list[str],
+    workbook_ids: list[str],
+    workbooks_only: bool,
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]], int, int, int]:
+    """Select exact workbooks and only the published datasources their dependency edges require."""
+    if project_names or project_ids:
+        raise ValueError("--workbook-id cannot be combined with project selectors")
+    requested = list(dict.fromkeys(workbook_ids))
+    placeholders = ",".join("?" for _ in requested)
+    selected_workbooks = list(
+        con.execute(f"SELECT luid, name FROM workbook WHERE luid IN ({placeholders}) ORDER BY name, luid", requested)
+    )
+    found = {luid for luid, _ in selected_workbooks}
+    missing = [luid for luid in requested if luid not in found]
+    if missing:
+        raise ValueError(f"no workbooks matched --workbook-id: {', '.join(missing)}")
+    pulled_in = [] if workbooks_only else dependency_datasources(con, [luid for luid, _ in selected_workbooks])
+    todo = [("datasource", luid, name) for luid, name in pulled_in]
+    todo.extend(("workbook", luid, name) for luid, name in selected_workbooks)
+    return todo, [], len(selected_workbooks), 0, len(pulled_in)
 
 
 def parse_asset(path: Path, scripts: Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -2170,6 +2207,13 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
         help="project LUID to harvest (repeatable); same selection as --project, matched exactly",
     )
     ap.add_argument(
+        "--workbook-id",
+        action="append",
+        default=[],
+        help="exact workbook LUID to harvest (repeatable), plus its required published datasources; "
+        "exclusive with project selectors",
+    )
+    ap.add_argument(
         "--project-url",
         action="append",
         default=[],
@@ -2264,7 +2308,7 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-statements,too-ma
     con = sqlite3.connect(db)
     try:
         todo, selected, project_workbooks, project_datasources, pulled_datasources = scoped_todo(
-            con, args.project, args.project_id, args.workbooks_only
+            con, args.project, args.project_id, args.workbooks_only, args.workbook_id
         )
     except (sqlite3.OperationalError, ValueError) as exc:
         con.close()

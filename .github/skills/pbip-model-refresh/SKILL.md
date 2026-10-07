@@ -57,6 +57,33 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B
                                      [--ui-save]
 ```
 
+### Read an already-detected dialog at the failing tool (#498)
+
+✅ Refresh and query CLI refusals now attempt one read-only UIA harvest of the **exact HWND already
+selected by the Win32 detector**, after the refusal or terminal latch is chosen. Standalone capture
+failures and package capture/reload/observation failures inspect only their held PID. The explicit-PID
+DAX oracle checks before opening its connection and before each reader, including persistent requests;
+a refusal returns its existing JSON error, with the diagnostic on stderr and unchanged exit behavior.
+Port-only and offline oracle calls do not infer a PID.
+
+The harvest-only `-DiagnosticPid` option verifies the HWND's process before reading text and again
+afterwards. It omits editable/password values, keeps control roles, and marks oversized or incomplete
+reads non-complete. It exits before the normal PowerShell probe can invoke Refresh. Python bounds the
+child wait at eight seconds and discards child stderr; native startup/teardown latency is additional.
+There are no clicks, focus changes, clipboard reads, approvals, saves or restarts.
+
+Only two complete English title/instruction/**Button.Name** structures produce fixed, value-free
+messages: `privacy_warning` (the operator's file-trust decision) and `package_session` (a Desktop
+session error; check unsaved-state safety before reopening). Everything else is `WITHHELD` or
+`CANNOT_READ`, never arbitrary UI text. `DIALOG_DIAGNOSTIC` is a separate JSON line, not a verdict;
+decode its escaped numeric strings before reading PID/HWND metadata. The detector's token, exit,
+suppression, deadlines, success behavior and gate state are unchanged.
+
+⚠️ This is diagnostic-only, not a second classifier. An incomplete read never establishes clean
+absence. Real-Desktop latency, localization, MSHTML-only dialogs, dialogs absent from existing
+discovery, and modals appearing after a DAX precheck remain unverified/outside this slice. The buffered
+`probe_live_source.py` wrapper and its catalog-readiness behavior are a separate follow-up.
+
 ### Inspect an unreadable in-flight dialog without stealing focus (#146)
 
 **Phase-1 seam: acquisition plus a metadata record, not pixel classification.** An in-flight
@@ -170,8 +197,9 @@ numbers. Do not feed re-serialized metadata into an authentication-text scanner.
 refresh's output. Its Phase-1 consumer must forward/stream `LOCAL_IMAGE` lines, supply the run-owned
 `PBIP_EVIDENCE_DIR`, perform the schema/PID/hash/lifetime checks above, and route a separate positive
 visual review. That orchestration requires a file outside this change's closed surface. The
-standalone PowerShell arbiter, t=0 checks and read-only query probe retain their existing behavior;
-no automatic UIA enrichment, OCR or external-verdict ingestion was added.
+image seam itself adds no UIA enrichment, OCR or external-verdict ingestion. The separate #498
+exact-HWND text diagnostic above runs only at terminal reporting; detector verdicts and active-wait
+behavior remain unchanged.
 
 ✅ **Precedent:** the two independent September 15, 2026 controls on #146 acquired readable
 Snowflake forms with their owners minimized and without foreground/restore. This implementation
@@ -250,12 +278,14 @@ stay byte-identical.
 > names the arbiter (`scripts/probe_desktop_credential.ps1`, which **ships in this bundle** — the
 > script prints its absolute path at runtime so the instruction always points at a file that is here).
 >
-> **The ceiling is 300 s and is deliberately NOT agent-tunable — there is no flag.** A knob here is
-> an attractive nuisance: an agent that hits a timeout reaches for a bigger number, and the one case
-> where waiting longer never helps is the credential wait, which this ceiling cannot interrupt
-> anyway. If a model legitimately needs longer, refresh less with `--tables`. Never emit a
-> "this needs a human" stop from an unverified timeout - that phrasing names the one blocker an
-> agent must not retry, so a false positive turns a slow refresh into a permanent dead end.
+> **Timeouts are mode-specific.** The legacy `--no-progress` and
+> `--calculate-only` / `--measures-only` paths use a **300 s XMLA ceiling plus 30 s wall-clock grace**.
+> Traced full refresh uses a default **3600 s fatal backstop**, retained even if trace setup fails.
+> **120 s without progress is a non-fatal liveness warning**, not a termination or source diagnosis.
+> Traced settings are exposed by `--refresh-absolute-timeout-seconds` and
+> `--progress-liveness-seconds`; the constants and argparse in `scripts/refresh_pbip_model.py` are
+> authoritative. A timeout alone leaves the cause unestablished. Inspect the held Desktop locally
+> before retrying rather than asserting a dialog or warehouse state from elapsed time.
 >
 > ⚠️ **Bridge errors that look technical can be a blocking Desktop dialog.** The pair
 > `powerbi-desktop status` -> **"Host is not ready to accept operations"** and
