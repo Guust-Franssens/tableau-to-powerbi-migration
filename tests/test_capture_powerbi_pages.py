@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 # ruff: noqa: E402  (the sys.path insert above must precede this import)
 import capture_powerbi_pages as capture
+import _credential_modal as modal  # pylint: disable=wrong-import-position
 from probe_desktop_query import DesktopIdentity
 from refresh_pbip_model import ImageObservation
 from test_iteration_receipt import (
@@ -30,6 +32,111 @@ from test_iteration_receipt import (
     build_package,
     receipt,
 )
+
+
+@pytest.fixture(name="dialog_capture")
+def dialog_capture_fixture(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Supply only a synthetic detector result, with the real fixed diagnostic renderer."""
+    calls = []
+    window = modal.DesktopWindow("PRIVATE_TEST_VALUE", "", 400, 300, hwnd=222)
+    finding = modal.DialogFinding("unrecognized", "DIALOG_UNRECOGNIZED", window, "PRIVATE_TEST_VALUE")
+
+    def inspect_pid(pid: int):
+        calls.append(pid)
+        return modal.CredentialDetection(dialog=finding)
+
+    monkeypatch.setattr(capture, "inspect_credential_modal", inspect_pid)
+    monkeypatch.setattr(modal, "diagnose_dialog", lambda *_a: ("OBSERVED", "package_session", "template_match"))
+    return calls
+
+
+def test_capture_dialog_report_is_once_after_standalone_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dialog_capture: list[int], capsys
+) -> None:
+    """Two failed pages share one terminal diagnostic, with the original failure exit."""
+    clock = ManualClock()
+    monkeypatch.setattr(capture, "pages", lambda _report: [("a", "Page A"), ("b", "Page B")])
+    code = capture.capture_report(
+        tmp_path,
+        tmp_path / "out",
+        "111",
+        capture.CaptureOptions(1, 1, 2),
+        capture.CaptureRuntime(lambda *_a: False, clock.sleep, clock),
+    )
+    output = capsys.readouterr()
+    assert code == capture.EXIT_CAPTURE_FAILED
+    assert dialog_capture == [111]
+    assert output.err.count("DIALOG_DIAGNOSTIC ") == 1
+    assert "PackageSession" in output.err and "PRIVATE_TEST_VALUE" not in output.err
+    assert "DIALOG_DIAGNOSTIC " not in output.out
+
+
+@pytest.mark.parametrize("phase", ["reload", "capture", "bind", "observation", "missing-observation"])
+def test_capture_dialog_report_preserves_package_refusals_and_receipts(
+    a1: tuple, monkeypatch: pytest.MonkeyPatch, dialog_capture: list[int], capsys, phase: str
+) -> None:
+    """Failure reporting does not alter receipt fields, retained refusal codes or cleanup."""
+    package, _, _, _ = a1
+    runtime = _runtime(package)
+
+    def refuse(*_args, **_kwargs):
+        if phase != "missing-observation":
+            raise capture.ObservationUnavailable("TOOL_UNAVAILABLE")
+
+    if phase == "reload":
+        runtime = replace(runtime, reload=lambda _pid: False)
+    elif phase == "capture":
+        runtime = replace(runtime, screenshotter=lambda *_a: False)
+    elif phase == "bind":
+        monkeypatch.setattr(capture, "bind_desktop", refuse)
+    else:
+        for operation in ("refresh", "probe_observations", "image_save"):
+            monkeypatch.setattr(capture, operation, refuse)
+    if phase in {"reload", "capture", "bind"}:
+        code = _code(lambda: _prepared_iteration(package, runtime=runtime))
+        assert (
+            code
+            == {"reload": "DESKTOP_UNVERIFIED", "capture": "CAPTURE_FAILED", "bind": "A1_BINDING_UNESTABLISHED"}[phase]
+        )
+        assert not _path(package).exists()
+    else:
+        pending = _prepared_iteration(package, runtime=runtime)
+        expected = "refused" if phase == "observation" else "unestablished"
+        assert all(
+            pending["generated"]["data_evidence"][key]["status"] == expected
+            for key in ("refresh", "canaries", "persistence")
+        )
+        assert "DIALOG_DIAGNOSTIC" not in json.dumps(pending)
+        assert "PackageSession" not in _path(package).read_text(encoding="utf-8")
+    assert dialog_capture == [PID], "one terminal report must not repeat UIA reads for each failed measurement"
+    assert capsys.readouterr().err.count("DIALOG_DIAGNOSTIC ") == 1
+
+
+def test_capture_dialog_diagnostic_never_inspects_success_or_an_unheld_pid(
+    a1: tuple, dialog_capture: list[int]
+) -> None:
+    """Success and pre-binding validation remain free of diagnostic Desktop I/O."""
+    # pylint: disable=protected-access
+    package, _, _, _ = a1
+    _prepared_iteration(package)
+    capture._report_dialog(None)
+    capture._report_dialog("not-a-pid")
+    assert not dialog_capture
+
+
+def test_capture_dialog_diagnostic_failure_cannot_replace_capture_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """No exception/provider prose escapes the best-effort diagnostic boundary."""
+    # pylint: disable=protected-access
+
+    def unavailable(_pid: int):
+        raise RuntimeError("PRIVATE_TEST_VALUE OAuth 403")
+
+    monkeypatch.setattr(capture, "inspect_credential_modal", unavailable)
+    capture._report_dialog(111)
+    output = capsys.readouterr()
+    assert "could not be read safely" in output.err and "PRIVATE_TEST_VALUE" not in output.err
 
 
 class ManualClock:

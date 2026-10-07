@@ -59,6 +59,11 @@
   within a bounded time (measured in review 2026-08-29: a blocked provider held a `-TimeoutSec 1` run
   for 15.1s and produced NO verdict at all).
 
+.PARAMETER DiagnosticPid
+  Internal, harvest-only. Pin the exact HWND to this process before and after a read-only diagnostic
+  harvest. Retain text roles, omit editable/password values, and report truncation. No probe or
+  Refresh is run; the caller owns the child-process timeout.
+
 .OUTPUTS
   A single final `VERDICT:` line, and an exit code in three bands:
 
@@ -143,7 +148,8 @@ param(
   [Parameter(ParameterSetName = 'Probe')]
   [Parameter(ParameterSetName = 'Harvest')][int]$HarvestMaxElements = 2000,
   [Parameter(Mandatory = $true, ParameterSetName = 'Detectors')][switch]$LoadDetectorsOnly,
-  [Parameter(Mandatory = $true, ParameterSetName = 'Harvest')][long]$HarvestHwnd
+  [Parameter(Mandatory = $true, ParameterSetName = 'Harvest')][long]$HarvestHwnd,
+  [Parameter(ParameterSetName = 'Harvest')][ValidateRange(1, 2147483647)][int]$DiagnosticPid
 )
 
 # --------------------------------------------------------------------------------------------------
@@ -518,6 +524,26 @@ if ($LoadDetectorsOnly) { return }
 
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, WindowsBase
 
+if ($DiagnosticPid) {
+  Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class DiagnosticWindowTarget {
+  [DllImport("user32.dll")]
+  public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
+}
+"@
+}
+
+function Test-DiagnosticTarget {
+  param([long]$Hwnd, [int]$ExpectedPid)
+  [uint32]$windowPid = 0
+  return (
+    [DiagnosticWindowTarget]::GetWindowThreadProcessId([IntPtr]$Hwnd, [ref]$windowPid) -ne 0 -and
+    $windowPid -eq $ExpectedPid
+  )
+}
+
 # Control types whose text labels an ACTION rather than forming prose. Excluded from the prose join
 # only - their text is still searched element-by-element and still counts as content.
 $InteractiveControlTypes = @(
@@ -540,14 +566,24 @@ function Get-AutomationHarvest {
   be read from here at all. That gap is survivable ONLY because completeness is never assumed:
   `Truncated`/`PatternsIncomplete` withhold the right to suppress, they do not grant it.
   #>
-  param([long]$Hwnd, [int]$MaxElements = 2000)
+  param([long]$Hwnd, [int]$MaxElements = 2000, [int]$ExpectedPid = 0)
 
   $items = @()
   $truncated = $false
   $incomplete = $false
+  $title = ''
   try {
+    if ($ExpectedPid -and -not (Test-DiagnosticTarget $Hwnd $ExpectedPid)) { return $null }
     $element = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Hwnd)
     if ($null -eq $element) { return $null }
+    if ($ExpectedPid) {
+      if ($element.Current.ProcessId -ne $ExpectedPid -or
+          $element.Current.NativeWindowHandle -ne $Hwnd -or
+          $element.Current.ControlType.ProgrammaticName -ne 'ControlType.Window' -or
+          $element.Current.IsPassword) { return $null }
+      $title = [string]$element.Current.Name
+      if ($title.Length -gt 8000) { return $null }
+    }
     $descendants = $element.FindAll(
       [System.Windows.Automation.TreeScope]::Descendants,
       [System.Windows.Automation.Condition]::TrueCondition)
@@ -558,6 +594,40 @@ function Get-AutomationHarvest {
   foreach ($d in $descendants) {
     if ($seen -ge $MaxElements) { $truncated = $true; break }
     $seen++
+    if ($ExpectedPid) {
+      try {
+        if ($d.Current.ProcessId -ne $ExpectedPid) { $incomplete = $true; break }
+        $role = [string]$d.Current.ControlType.ProgrammaticName
+        if ($d.Current.IsPassword -or $role -in @('ControlType.Edit', 'ControlType.ComboBox')) {
+          $incomplete = $true
+          break
+        }
+        # Buttons are identified only by Button.Name. Never read ValuePattern in diagnostic mode.
+        $document = ''
+        if ($role -ne 'ControlType.Button') {
+          $textPattern = $null
+          if ($d.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$textPattern)) {
+            $readOnly = $textPattern.DocumentRange.GetAttributeValue(
+              [System.Windows.Automation.TextPattern]::IsReadOnlyAttribute)
+            if (($readOnly -isnot [bool]) -or -not $readOnly) {
+              $incomplete = $true
+              break
+            }
+            $document = $textPattern.DocumentRange.GetText(8001)
+            if ($document.Length -gt 8000) { $truncated = $true; break }
+          }
+        }
+        $name = [string]$d.Current.Name
+        if ($name.Length -gt 8000) { $truncated = $true; break }
+        if ($name) {
+          $items += [pscustomobject]@{ Text = $name; Role = $role; Source = 'Name' }
+        }
+        if ($document) {
+          $items += [pscustomobject]@{ Text = [string]$document; Role = $role; Source = 'TextPattern' }
+        }
+      } catch { $incomplete = $true }
+      continue
+    }
     $typeName = ''
     try { $typeName = [string]$d.Current.ControlType.ProgrammaticName } catch { $incomplete = $true }
     $isInteractive = $false
@@ -583,14 +653,22 @@ function Get-AutomationHarvest {
       $items += [pscustomobject]@{ Text = $t; Interactive = $isInteractive }
     }
   }
+  if ($ExpectedPid) {
+    if (-not (Test-DiagnosticTarget $Hwnd $ExpectedPid)) { return $null }
+    return [pscustomobject]@{
+      Title = $title; Items = $items; Truncated = $truncated; PatternsIncomplete = $incomplete
+      TargetPid = $ExpectedPid; TargetHwnd = $Hwnd; TargetBefore = $true; TargetAfter = $true
+    }
+  }
   return [pscustomobject]@{ Items = $items; Truncated = $truncated; PatternsIncomplete = $incomplete }
 }
 
 if ($PSCmdlet.ParameterSetName -eq 'Harvest') {
   # Child-process mode. Kept above the Win32 `Add-Type` so the child compiles nothing it does not need
   # - this runs once per candidate per poll.
-  $harvested = Get-AutomationHarvest -Hwnd $HarvestHwnd -MaxElements $HarvestMaxElements
+  $harvested = Get-AutomationHarvest -Hwnd $HarvestHwnd -MaxElements $HarvestMaxElements -ExpectedPid $DiagnosticPid
   if ($null -eq $harvested) { exit 4 }
+  if ($DiagnosticPid) { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) }
   Write-Output ('HARVEST:' + (ConvertTo-Json $harvested -Compress -Depth 5))
   exit 0
 }

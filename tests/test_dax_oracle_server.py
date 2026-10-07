@@ -20,6 +20,7 @@ import sys
 from decimal import Decimal
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -293,3 +294,136 @@ def test_certify_without_the_engine_refuses_rather_than_passing_vacuously():
         assert module.certify(module.make_oracle(module._stub_executor)) == 2
     finally:
         module.engine_scripts_dir = original
+
+
+@pytest.fixture(name="desktop_executor")
+def desktop_executor_fixture(monkeypatch: pytest.MonkeyPatch) -> tuple:
+    """ADOMD and detector seams with separate open/read observations; no Desktop is contacted."""
+    sys.path.insert(0, str(dos.SKILL_SCRIPTS))
+    import _credential_modal as modal  # pylint: disable=import-outside-toplevel
+    import probe_desktop_query as pdq  # pylint: disable=import-outside-toplevel
+
+    events = []
+    state = SimpleNamespace(current=modal.CredentialDetection())
+    window = modal.DesktopWindow("PRIVATE_TEST_VALUE", "", 400, 300, hwnd=222)
+    finding = modal.DialogFinding("unrecognized", "DIALOG_UNRECOGNIZED", window, "PRIVATE_TEST_VALUE")
+    blocked = modal.CredentialDetection(dialog=finding)
+
+    def inspect_pid(pid: int):
+        assert pid == 111, "the explicit PID must never be widened or inferred"
+        events.append("check")
+        return state.current
+
+    def reader():
+        events.append("read")
+        available = iter([True, False])
+        return SimpleNamespace(
+            FieldCount=1,
+            GetName=lambda _i: "v",
+            GetValue=lambda _i: 7,
+            Read=lambda: next(available),
+            Close=lambda: events.append("reader-close"),
+        )
+
+    def command():
+        events.append("command")
+        return SimpleNamespace(CommandText="", ExecuteReader=reader)
+
+    connection = SimpleNamespace(
+        Open=lambda: events.append("open"), CreateCommand=command, Close=lambda: events.append("close")
+    )
+    monkeypatch.setattr(pdq, "_load_adomd", lambda: lambda _dsn: connection)
+    monkeypatch.setattr(pdq, "_credential_state", inspect_pid)
+    monkeypatch.setattr(modal, "diagnose_dialog", lambda *_a: ("OBSERVED", "package_session", "template_match"))
+    return events, state, blocked, connection, modal
+
+
+def test_desktop_refusal_precedes_open_and_keeps_startup_silent(desktop_executor: tuple, capsys) -> None:
+    """A modal at startup yields exactly one error when requested, never unsolicited NDJSON."""
+    events, state, blocked, _, _ = desktop_executor
+    state.current = blocked
+    execute = dos.adomd_executor(55001, 111)
+    assert not events and capsys.readouterr() == ("", "")
+    result = dos.make_oracle(execute)('EVALUATE ROW("v", 1)')
+    output = capsys.readouterr()
+    assert set(result) == {"error"}, "a detected modal must return an error, never fabricated rows or zero"
+    assert "DIALOG_UNRECOGNIZED" in result["error"]
+    assert events == ["check"], "Open must not run behind a detected modal"
+    assert output.out == "" and "PackageSession" in output.err
+    assert "PRIVATE_TEST_VALUE" not in output.err + json.dumps(result)
+
+
+def test_desktop_refusal_rechecks_after_open_before_execute_reader(desktop_executor: tuple) -> None:
+    """Opening a connection does not license a read if a dialog appeared meanwhile."""
+    events, state, blocked, connection, _ = desktop_executor
+
+    def open_with_dialog() -> None:
+        events.append("open")
+        state.current = blocked
+
+    connection.Open = open_with_dialog
+    result = dos.make_oracle(dos.adomd_executor(55001, 111))('EVALUATE ROW("v", 1)')
+    assert "read" not in events, "ExecuteReader must not run behind a detected modal"
+    assert events == ["check", "open", "command", "check"]
+    assert set(result) == {"error"}
+
+
+def test_desktop_persistent_requests_are_each_checked(desktop_executor: tuple, capsys) -> None:
+    """The held connection is reused, but a former clean request cannot authorize the next one."""
+    events, state, blocked, _, modal = desktop_executor
+    execute = dos.adomd_executor(55001, 111)
+
+    def requests():
+        for current in (modal.CredentialDetection(), blocked, modal.CredentialDetection()):
+            state.current = current
+            yield '{"dax":"EVALUATE ROW(\\"v\\", 1)"}\n'
+
+    output = StringIO()
+    assert dos.serve(dos.make_oracle(execute), requests(), output) == 0
+    replies = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert len(replies) == 3
+    assert replies[0] == replies[2] == {"rows": [{"v": 7}]}
+    assert set(replies[1]) == {"error"}, "each persistent request must refuse a newly detected modal"
+    assert events.count("open") == 1 and events.count("read") == 2
+    assert capsys.readouterr().err.count("DIALOG_DIAGNOSTIC ") == 1
+    execute.close()
+    assert events[-1] == "close"
+
+
+@pytest.mark.parametrize("condition", ["modal", "unknown_reason", "desktop_unready", "process_gone"])
+def test_desktop_nonclean_states_never_reach_open(desktop_executor: tuple, condition: str) -> None:
+    """Diagnostic success is not required to refuse the detector's existing non-clean states."""
+    events, state, blocked, _, modal = desktop_executor
+    value = (
+        modal.CredentialModal("PRIVATE_TEST_VALUE", blocked.dialog.window)
+        if condition == "modal"
+        else "PRIVATE_TEST_VALUE"
+    )
+    state.current = modal.CredentialDetection(**{condition: value})
+    result = dos.make_oracle(dos.adomd_executor(55001, 111))('EVALUATE ROW("v", 1)')
+    assert events == ["check"] and set(result) == {"error"}
+    assert "PRIVATE_TEST_VALUE" not in json.dumps(result)
+
+
+def test_desktop_one_shot_keeps_error_json_and_exit_zero(desktop_executor: tuple, capsys) -> None:
+    """The diagnostic slice must not invent a detector-specific public exit band."""
+    _, state, blocked, _, _ = desktop_executor
+    state.current = blocked
+    code = dos.main(["--pid", "111", "--port", "55001", "--query", 'EVALUATE ROW("v", 1)'])
+    output = capsys.readouterr()
+    assert code == 0, "oracle one-shot errors retain the existing exit-zero JSON contract"
+    assert set(json.loads(output.out)) == {"error"}
+    assert "DIALOG_DIAGNOSTIC " not in output.out and "DIALOG_DIAGNOSTIC " in output.err
+
+
+def test_desktop_port_only_and_offline_never_infer_a_pid(desktop_executor: tuple, monkeypatch, capsys) -> None:
+    """Only explicit-PID live execution acquires diagnostics."""
+    events, state, blocked, _, _ = desktop_executor
+    state.current = blocked
+    result = dos.make_oracle(dos.adomd_executor(55001))('EVALUATE ROW("v", 1)')
+    assert result == {"rows": [{"v": 7}]} and "check" not in events
+    events.clear()
+    monkeypatch.setattr(sys, "stdin", StringIO('{"dax":"EVALUATE ROW(\\"v\\", 1)"}\n'))
+    assert dos.main(["--offline", "--pid", "111"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"rows": [{"[value]": 1}]}
+    assert not events
