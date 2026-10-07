@@ -299,9 +299,15 @@ def test_recovery_refuses_workbook_id_before_sign_in_or_export(monkeypatch, tmp_
     _configure(monkeypatch, tmp_path, session, grouped, out, run)
     sys.argv.extend(["--workbook-id", WB_1])
 
-    with pytest.raises(oracle.OracleRecoveryRefusal, match="--workbook-id"):
+    try:
         oracle.main()
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        refusal = exc
+    else:
+        refusal = None
 
+    assert isinstance(refusal, oracle.OracleRecoveryRefusal)
+    assert "--workbook-id" in str(refusal)
     assert session.signins == 0
     assert not out.exists()
 

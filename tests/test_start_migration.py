@@ -20,6 +20,7 @@ PROJECT = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
 WORKBOOK = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
 DATASOURCE = "cccccccc-3333-4333-8333-cccccccccccc"
 SESSION = "11111111-2222-4333-8444-555555555555"
+ENV_SESSION = "99999999-2222-4333-8444-555555555555"
 ENV = {
     "TABLEAU_SERVER_URL": "https://tableau.example.invalid",
     "TABLEAU_SITE": "site",
@@ -117,6 +118,10 @@ def _write_bundle(out: Path, *, bridge="established") -> None:
         (out / "input_manifest.json").write_text(json.dumps({"scope_bridge": {"status": bridge}}), encoding="utf-8")
 
 
+def _script_name(command: list[str]) -> str:
+    return next(Path(part).name for part in command if part.endswith(".py"))
+
+
 class _Pipeline:
     def __init__(
         self,
@@ -170,11 +175,11 @@ class _Pipeline:
                 self.command = list(command)
                 self.returncode = None
                 self.poll_count = 0
-                self.code = pipeline.exit_codes.get(Path(command[3]).name, 0)
+                self.code = pipeline.exit_codes.get(_script_name(command), 0)
                 pipeline.commands.append(self.command)
                 pipeline.options.append(kwargs)
-                print(f"producer-stdout:{Path(command[3]).name}")
-                print(f"producer-stderr:{Path(command[3]).name}", file=sys.stderr)
+                print(f"producer-stdout:{_script_name(command)}")
+                print(f"producer-stderr:{_script_name(command)}", file=sys.stderr)
                 print("OK")
                 pipeline._emit_artifacts(self.command)
 
@@ -189,7 +194,7 @@ class _Pipeline:
                 return 43210
 
             def poll(self):
-                if pipeline.interrupt and Path(self.command[3]).name == "assess_estate.py":
+                if pipeline.interrupt and _script_name(self.command) == "assess_estate.py":
                     raise KeyboardInterrupt
                 if self.poll_count == 0:
                     self.poll_count += 1
@@ -228,7 +233,7 @@ class _Pipeline:
         monkeypatch.setattr(frontdoor.time, "sleep", lambda _seconds: None)
 
     def _emit_artifacts(self, command: list[str]) -> None:
-        name = Path(command[3]).name
+        name = _script_name(command)
 
         def arg(flag: str) -> Path:
             return Path(command[command.index(flag) + 1])
@@ -307,7 +312,7 @@ def test_site_run_streams_children_allocates_under_toolkit_and_has_honest_handof
 
 
 def test_intersection_scope_uses_resolved_workbook_id_and_session_precedence(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("COPILOT_AGENT_SESSION_ID", SESSION)
+    monkeypatch.setenv("COPILOT_AGENT_SESSION_ID", ENV_SESSION)
     pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
 
     code = frontdoor.main(["--project", "Finance", "--workbook", WORKBOOK, "--session-id", SESSION])
@@ -315,10 +320,11 @@ def test_intersection_scope_uses_resolved_workbook_id_and_session_precedence(mon
     out, _err = _captured(capsys, pipeline)
     run = next(work_dirs.runs_root(pipeline.root).glob("001-*"))
     assert code == 0
-    harvest_command = next(cmd for cmd in pipeline.commands if Path(cmd[3]).name == "harvest_estate_assets.py")
+    harvest_command = next(cmd for cmd in pipeline.commands if _script_name(cmd) == "harvest_estate_assets.py")
+    assert "--workbook-id" in harvest_command
     assert harvest_command[harvest_command.index("--workbook-id") + 1] == WORKBOOK
     assert "--project-id" not in harvest_command
-    oracle_command = next(cmd for cmd in pipeline.commands if Path(cmd[3]).name == "capture_tableau_oracle.py")
+    oracle_command = next(cmd for cmd in pipeline.commands if _script_name(cmd) == "capture_tableau_oracle.py")
     assert oracle_command[oracle_command.index("--workbook-id") + 1] == WORKBOOK
     assert "--server" in pipeline.commands[0] and "--pat-name" in pipeline.commands[0]
     assert ENV["TABLEAU_PAT_SECRET"] not in " ".join(pipeline.commands[0])
@@ -328,13 +334,25 @@ def test_intersection_scope_uses_resolved_workbook_id_and_session_precedence(mon
     assert "NEXT STEPS" in out
 
 
+def test_environment_session_id_is_used_when_no_explicit_id_is_supplied(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("COPILOT_AGENT_SESSION_ID", ENV_SESSION)
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+
+    code = frontdoor.main([])
+
+    run = work_dirs.runs_root(pipeline.root) / "001-site"
+    manifest = json.loads((run / "run.json").read_text(encoding="utf-8"))
+    assert code == 0
+    assert manifest["attribution"] == {"driver": "copilot", "session_id": ENV_SESSION}
+
+
 def test_project_only_scope_keeps_standalone_project_datasource_selection(monkeypatch, tmp_path, capsys):
     pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
 
     code = frontdoor.main(["--project", PROJECT])
 
     _out, _err = _captured(capsys, pipeline)
-    harvest_command = next(cmd for cmd in pipeline.commands if Path(cmd[3]).name == "harvest_estate_assets.py")
+    harvest_command = next(cmd for cmd in pipeline.commands if _script_name(cmd) == "harvest_estate_assets.py")
     assert code == 0
     assert harvest_command[harvest_command.index("--project-id") + 1] == PROJECT
     assert "--workbook-id" not in harvest_command
@@ -395,7 +413,7 @@ def test_zero_exit_invalid_survey_scope_refuses_assessment(monkeypatch, tmp_path
     out, _err = _captured(capsys, pipeline)
     assert code == 3
     assert message in out
-    assert [Path(command[3]).name for command in pipeline.commands] == ["run_engine_survey.py"]
+    assert [_script_name(command) for command in pipeline.commands] == ["run_engine_survey.py"]
 
 
 def test_empty_project_scope_explains_datasource_only_ambiguity(monkeypatch, tmp_path, capsys):
@@ -417,7 +435,7 @@ def test_ambiguous_project_name_refuses_before_harvest(monkeypatch, tmp_path, ca
     out, _err = _captured(capsys, pipeline)
     assert code == 3
     assert "project name is ambiguous; use its LUID" in out
-    assert [Path(command[3]).name for command in pipeline.commands] == [
+    assert [_script_name(command) for command in pipeline.commands] == [
         "run_engine_survey.py",
         "assess_estate.py",
     ]
@@ -431,7 +449,7 @@ def test_changed_workbook_selection_refuses_instead_of_falling_back_to_site(monk
     out, _err = _captured(capsys, pipeline)
     assert code == 3
     assert "requested workbook did not match" in out
-    assert [Path(command[3]).name for command in pipeline.commands] == [
+    assert [_script_name(command) for command in pipeline.commands] == [
         "run_engine_survey.py",
         "assess_estate.py",
     ]
@@ -446,6 +464,19 @@ def test_zero_exit_malformed_survey_is_unknown_and_blocks_dependents(monkeypatch
     assert code == 3
     assert "survey is missing or unreadable" in out
     assert len(pipeline.commands) == 1
+
+
+def test_missing_survey_count_stays_unknown_and_blocks_dependents(monkeypatch, tmp_path, capsys):
+    survey = _survey()
+    del survey["scope"]["workbooks_on_site"]
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, survey=survey)
+
+    code = frontdoor.main([])
+
+    out, _err = _captured(capsys, pipeline)
+    assert code == 3
+    assert "site-wide survey completeness is unavailable" in out
+    assert [_script_name(command) for command in pipeline.commands] == ["run_engine_survey.py"]
 
 
 def test_preflight_failure_stops_before_any_producer(monkeypatch, tmp_path, capsys):
@@ -467,7 +498,7 @@ def test_failed_harvest_does_not_launch_reference_or_bundle(monkeypatch, tmp_pat
 
     out, _err = _captured(capsys, pipeline)
     assert code == 1
-    assert [Path(command[3]).name for command in pipeline.commands] == [
+    assert [_script_name(command) for command in pipeline.commands] == [
         "run_engine_survey.py",
         "assess_estate.py",
         "harvest_estate_assets.py",
@@ -482,7 +513,7 @@ def test_zero_exit_reference_with_missing_manifest_still_attempts_bundle_but_can
 
     out, _err = _captured(capsys, pipeline)
     assert code == 3
-    assert [Path(command[3]).name for command in pipeline.commands][-2:] == [
+    assert [_script_name(command) for command in pipeline.commands][-2:] == [
         "capture_tableau_oracle.py",
         "run_estate.py",
     ]
@@ -508,7 +539,7 @@ def test_reference_failure_is_reported_but_bundle_still_runs(monkeypatch, tmp_pa
     code = frontdoor.main([])
 
     out, _err = _captured(capsys, pipeline)
-    names = [Path(command[3]).name for command in pipeline.commands]
+    names = [_script_name(command) for command in pipeline.commands]
     assert code == 1
     assert names[-2:] == ["capture_tableau_oracle.py", "run_estate.py"]
     assert f"reference - FAILED exit={oracle_code}" in out
@@ -560,7 +591,7 @@ def test_interrupt_cancels_current_child_and_launches_no_later_stage(monkeypatch
     out, _err = _captured(capsys, pipeline)
     assert code == 130
     assert pipeline.cancelled == ["killpg"]
-    assert [Path(command[3]).name for command in pipeline.commands] == [
+    assert [_script_name(command) for command in pipeline.commands] == [
         "run_engine_survey.py",
         "assess_estate.py",
     ]
