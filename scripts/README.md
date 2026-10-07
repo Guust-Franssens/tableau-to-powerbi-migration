@@ -30,10 +30,26 @@ If recovery is allowed, retry the **exact originating command and arguments**: r
 
 ### Run setup
 
-For each new site/folder/workbook/datasource, before stage writes run
+For new local folders, workbooks or datasources, before stage writes run
 `python -B scripts\work_dirs.py <slug> --json`; external roots add
 `--runs-parent <parent>` (`--repo-root` alias). Allocation auto-attempts ignored
 `_MIGRATION.md`; a warning does not undo success.
+
+For a live Tableau Server/Cloud site, the recommended pre-bundle route is
+`python -B scripts\start_migration.py [--project <name-or-LUID>] [--workbook <name-or-LUID>]`.
+Invoke it directly; do not pre-allocate a run for live-site invocations.
+One invocation is one run; use one site/environment per invocation. It allocates under the toolkit's
+repo-local `_runs/` by default; `--runs-parent <short-parent>` is an explicit alternative. It runs
+survey, site-wide assessment, scoped harvest, Tableau reference capture, then the bundle, reading
+their JSON/SQLite artifacts rather than treating console text as proof. Child stdout/stderr remain
+live. Oracle failure is reported but does not suppress the bundle attempt. Exit 0 means only that the
+bundle and references were captured for the supported scope—not fidelity, START_READY, COMPLETE or
+deployability. Compare the shipping report with Tableau, then give the printed handover/reference
+paths to the root dispatcher for an issued brief and `@tableau-migrator` handoff. Datasource-only
+project scopes are not supported by this workbook-centric front door.
+
+The individual producer commands below remain available for expert/recovery use; do not hand-chain
+their legacy default output folders for a normal site migration.
 
 For an accepted existing/resumed run, setup runs
 `python -B scripts\work_dirs.py --select-run <absolute-existing-run>`. It migrates
@@ -45,6 +61,7 @@ Do not ask the human to generate the note.
 
 | Script | What it does | Called by |
 |---|---|---|
+| `start_migration.py` | The recommended live-site pre-bundle front door: one site/project/workbook scope, one allocated `_runs/<NNN>-<slug>/`, five direct-output producer stages, artifact-based scope checks, a retained bundle attempt after reference failure, and an explicit handoff. Exit 0 is capture-only, never fidelity or readiness. Use `--runs-parent` only for a new shorter-root run after a path refusal; existing runs are never relocated. | Operator/root dispatcher, before `@tableau-migrator` |
 | `build_migration_feedback.py` | Offline, hash-pinned private evidence builder for the repo-local `migration-feedback` skill. Validates recorded identity, canonical fresh-output receipts and controls; emits a strict public-safe `issue-payload.json`, never publishes or reruns anything. No default output outside a selected run. [Input/output contract](#migration-feedback-phase-1). | Internal implementation helper for the feedback skill, not a second diagnostics exporter |
 | `preflight_source_credentials.py` | Classifies which data sources are **live** (and so need a reachability probe) and arms the credential gate. It is a *classifier*, not a connectivity test — it opens no socket, and deliberately no longer decides GO/STOP on its own. | `parse_tableau.py`, at parse time |
 | `migration_bundle.py` | Small shared contract reader for the two migration tiers: a parser `migration-spec.json` or a deterministic-engine bundle (`report.json` + `handover/*.json`). It exposes only the fields gate tools need (migration dir, explicit data sources, published-datasource keys) and refuses to fabricate a spec when the engine lacks them. Defines the receipt-backed engine output roots (`pbip/`, `reports/`, `semantic_models/`, `data/`) that `credential_gate.py verify` may classify as pre-gate tier output, including PBIR `*.json` only under report-definition roots. | gate tools (`preflight_source_credentials.py`, `probe_live_source.py`, `published_datasource_registry.py`) |
