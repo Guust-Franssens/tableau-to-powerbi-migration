@@ -32,12 +32,14 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
 import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-import-position
 import build_reconcile_items  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_oracle_manifest as verdict  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_view_types as view_types_mod  # noqa: E402  # pylint: disable=wrong-import-position
 import tableau_payload_facts as payload_facts  # noqa: E402  # pylint: disable=wrong-import-position
+from mocks import estate  # noqa: E402  # pylint: disable=wrong-import-position
 
 FEDERATED_401 = (
     "<?xml version='1.0'?><tsResponse><error code='401002'><summary>Unauthorized Access</summary></error></tsResponse>"
@@ -580,6 +582,83 @@ def test_a_clean_image_capture_exits_zero(tmp_path):
 def test_zero_selected_views_exits_four(tmp_path):
     """Selecting nothing is a failed invocation, not a successful capture of an empty estate."""
     assert _write(tmp_path, []) == 4
+
+
+def test_select_views_filters_by_exact_workbook_luid(monkeypatch):
+    wanted = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+    other = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+    views = [
+        {"id": "view-1", "workbook": {"id": wanted}},
+        {"id": "view-2", "workbook": {"id": other}},
+    ]
+
+    class Session:
+        site_id = "site-id"
+
+        @staticmethod
+        def get_json(_path):
+            return {
+                "workbooks": {
+                    "workbook": [
+                        {"id": wanted, "name": "Duplicate caption"},
+                        {"id": other, "name": "Duplicate caption"},
+                    ]
+                }
+            }
+
+    monkeypatch.setattr(oracle, "list_views", lambda _session: views)
+
+    selected, names = oracle.select_views(Session(), None, 0, [wanted])
+
+    assert [view["id"] for view in selected] == ["view-1"]
+    assert names == {wanted: "Duplicate caption", other: "Duplicate caption"}
+
+
+def test_select_views_refuses_unknown_luid_without_caption_fallback(monkeypatch):
+    class Session:
+        site_id = "site-id"
+
+        @staticmethod
+        def get_json(_path):
+            return {"workbooks": {"workbook": [{"id": "known", "name": "Requested Caption"}]}}
+
+    monkeypatch.setattr(oracle, "list_views", lambda _session: [{"id": "view", "workbook": {"id": "known"}}])
+
+    with pytest.raises(ValueError, match="unknown --workbook-id LUID"):
+        oracle.select_views(Session(), ["Requested Caption"], 0, ["missing"])
+
+
+def test_workbook_luid_selection_matches_the_mock_tableau_request_records():
+    site = estate.build_site()
+    target = site.workbooks[0]
+    same_caption_project = site.project("Duplicate caption control")
+    duplicate = site.workbook(target.name, same_caption_project, estate.FIXTURES / "minimal.twb")
+    token = site.mint_token()
+
+    class Session:
+        site_id = site.site_id
+
+        @staticmethod
+        def get_json(path):
+            status, _headers, body = site.handle(
+                "GET",
+                f"http://mock/api/{site.rest_version}{path}",
+                {"x-tableau-auth": token},
+                b"",
+            )
+            assert status == 200
+            return json.loads(body)
+
+    selected, names = oracle.select_views(Session(), None, 0, [target.luid])
+
+    expected = [view.luid for view in site.views if view.workbook_luid == target.luid]
+    assert [view["id"] for view in selected] == expected
+    assert duplicate.name == names[duplicate.luid] == names[target.luid]
+    assert all(view["workbook"]["id"] == target.luid for view in selected)
+    assert [path.split("?", 1)[0] for method, path in site.requests if method == "GET"] == [
+        f"/api/{site.rest_version}/sites/{site.site_id}/views",
+        f"/api/{site.rest_version}/sites/{site.site_id}/workbooks",
+    ]
 
 
 def test_every_image_failed_exits_three(tmp_path):

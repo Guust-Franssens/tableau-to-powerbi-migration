@@ -61,6 +61,7 @@ from _credential_modal import (
     describe_modal,
     dialog_guidance,
     inspect_credential_modal,
+    print_dialog_diagnostic,
 )
 
 # ADOMD.NET assembly shipped in the nuget cache (netcore build).
@@ -784,6 +785,7 @@ def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
     unrecognized tokens settle nothing in either direction. Both lines are marker-free (issue #153).
     """
     print(f"PREFLIGHT: {finding.verdict} pid={pid}; {describe_dialog_finding(finding)}")
+    print_dialog_diagnostic(pid, finding.window)
     print(f"  {dialog_guidance(finding)}")
 
 

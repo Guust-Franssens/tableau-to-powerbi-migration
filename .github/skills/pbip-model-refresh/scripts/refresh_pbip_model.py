@@ -167,6 +167,7 @@ from _credential_modal import (
     inspect_credential_modal,
     join_with_credential_poll,
     print_dialog_observed_notice,
+    print_dialog_diagnostic,
     print_indeterminate_state_notice,
     print_refresh_banner,
     print_refresh_unknown_banner,
@@ -315,6 +316,7 @@ def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
     the false hard stop this verdict exists to avoid.
     """
     print(f"REFRESH: {finding.verdict} pid={pid}; {describe_dialog_finding(finding)}")
+    print_dialog_diagnostic(pid, finding.window)
     print(f"  {dialog_guidance(finding)}")
 
 
@@ -772,8 +774,7 @@ def _refresh(
                 )
             raise TimeoutError(
                 f"refresh did not return within {total_timeout}s "
-                f"(XMLA CommandTimeout was {command_timeout}s and did not fire, which is the signature of a "
-                f"mashup engine parked on a sign-in modal rather than a slow query)"
+                f"(XMLA CommandTimeout was {command_timeout}s; cause unestablished)"
             )
     finally:
         if progress_monitor is not None:
@@ -1967,35 +1968,14 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
             _emit_desktop_unready(exc.pid, exc.reason)
             return 2
         text = f"{type(exc).__name__}: {exc}"
-        # A timeout has TWO possible causes and this code cannot tell them apart. It used to assert
-        # the credential one ("THIS NEEDS A HUMAN. Do not retry"), which is the single most expensive
-        # thing it could get wrong: that phrasing names the one blocker an agent is forbidden to
-        # retry, so a false positive turns a transient slowdown into a permanent dead end.
-        #
-        # Measured 2026-08-04: it fired on 2 of 5 Desktop instances opened on the SAME bundle, which
-        # refreshed cleanly on the other 3. Real cause: a 246,236-row, 11-table refresh took 38.8s on
-        # a good run and over 87s on a slow one, against a 90s ceiling. It cost that run ~45 minutes
-        # and produced a headline finding that was flatly wrong until it was re-tested.
-        #
-        # So: report the observation, offer both hypotheses, and name the arbiter that settles it.
-        # Never emit a stop-word instruction from an unverified heuristic.
+        # Elapsed time alone establishes neither a Desktop dialog nor any state of the source.
         if "timeout" in text.lower() or "timed out" in text.lower():
-            print(f"REFRESH: TIMEOUT - no result within configured refresh deadline ({text})")
+            print("REFRESH: TIMEOUT - no result within configured refresh deadline")
             print(
-                "  CAUSE UNKNOWN - this script cannot distinguish these two, and they need\n"
-                "  opposite responses:\n"
-                "    (a) SLOW: a very large model. Refresh only what you need with --tables;\n"
-                "        do NOT simply wait longer.\n"
-                "    (b) BLOCKED: Desktop is showing a data-source sign-in modal no automation\n"
-                "        can fill. Retrying cannot dismiss it; a human must sign in once.\n"
-                "  SETTLE IT - run the arbiter that ships beside this script, do not guess:\n"
-                f'    powershell -File "{CREDENTIAL_PROBE}" -DesktopPid {pid}\n'
-                "  A one-row probe bundle narrows this, but does NOT settle it: a probe limited to a\n"
-                "  single row is fast once the source is WARM, yet measured 2026-08-05 a 1-row probe\n"
-                "  against a SUSPENDED Snowflake warehouse took 167 s (vs 21 s against an already\n"
-                "  running Databricks warehouse) - the auto-resume dominates, not the row count. So a\n"
-                "  slow probe is evidence of a cold source at least as often as a blocked one; use the\n"
-                "  arbiter above, and check whether the compute was suspended, before concluding (b)."
+                f"  CAUSE UNKNOWN: cause unestablished. Inspect Desktop PID {pid} locally before retrying. "
+                "A deadline alone does not identify a dialog or establish the state of the data source.\n"
+                "  The existing arbiter is available after local inspection (it may invoke Refresh):\n"
+                f'    powershell -File "{CREDENTIAL_PROBE}" -DesktopPid {pid}'
             )
             return 3
         print(f"REFRESH: ERROR {text}")

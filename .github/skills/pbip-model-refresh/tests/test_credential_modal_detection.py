@@ -47,6 +47,509 @@ from _credential_modal import (
 from refresh_pbip_model import CredentialMissingError, refresh
 
 
+def diagnostic_payload(kind: str = "privacy_warning", *, pid: int = 111, hwnd: int = 222) -> dict:
+    """Observer-specified fixtures, independent of the product's template table."""
+    if kind == "privacy_warning":
+        title = "Potential security risk"
+        instruction = (
+            "This file uses multiple data sources. Information in one data source might be shared with other "
+            "data sources without your knowledge. Only open this file if you trust the sender. "
+            "Do you want to open this file?"
+        )
+        buttons = ["OK", "Cancel"]
+    else:
+        title = "Something went wrong"
+        instruction = "Could not find a PackageSession for the given sessionID."
+        buttons = ["Close", "Copy details to clipboard", "Report this issue", "Cancel"]
+    return {
+        "Title": title,
+        "TargetPid": pid,
+        "TargetHwnd": hwnd,
+        "TargetBefore": True,
+        "TargetAfter": True,
+        "Truncated": False,
+        "PatternsIncomplete": False,
+        "Items": [
+            {"Text": instruction, "Role": "ControlType.Text", "Source": "Name"},
+            *[{"Text": button_text, "Role": "ControlType.Button", "Source": "Name"} for button_text in buttons],
+        ],
+    }
+
+
+def stub_diagnostic_child(monkeypatch, payload: dict, **changes) -> list:
+    """Keep child output in the production private-pipe path without touching a real process."""
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        fields = {"returncode": 0, "stdout": "HARVEST:" + json.dumps(payload), "stderr": "private-stderr"}
+        fields.update(changes)
+        return subprocess.CompletedProcess(argv, **fields)
+
+    monkeypatch.setattr(_credential_modal.subprocess, "run", run)
+    return calls
+
+
+@pytest.mark.parametrize("kind", ["privacy_warning", "package_session"])
+def test_diagnostic_recognizes_only_complete_same_window_templates(monkeypatch, capsys, kind: str) -> None:
+    """Only predefined prose travels out of the exact-HWND private child pipe."""
+    payload = diagnostic_payload(kind)
+    calls = stub_diagnostic_child(monkeypatch, payload)
+    window = DesktopWindow("untrusted detector title", "private-class", 100, 100, hwnd=222)
+    _credential_modal.print_dialog_diagnostic(111, window)
+    out, err = capsys.readouterr()
+    record = json.loads(out.removeprefix("DIALOG_DIAGNOSTIC "))
+    assert (record["status"], record["message_id"]) == ("OBSERVED", kind)
+    assert "private" not in out + err and "untrusted" not in out + err
+    argv, kwargs = calls.pop()
+    assert argv[-4:] == ["-HarvestHwnd", "222", "-DiagnosticPid", "111"]
+    assert "-DesktopPid" not in argv, "diagnostic mode must not enter the Refresh probe"
+    assert Path(argv[argv.index("-File") + 1]) == PROBE_PS1
+    assert kwargs.get("capture_output") is True, "harvest output must stay inside private pipes"
+    assert kwargs.get("timeout") == 8.0, "diagnostic child wait must remain bounded"
+    assert kwargs.get("creationflags") == getattr(subprocess, "CREATE_NO_WINDOW", 0), (
+        "diagnostic harvest must not create a foreground console"
+    )
+    assert not calls
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["title", "instruction", "buttons", "checkbox", "document-buttons", "button-value", "sql", "extra-prose"],
+)
+def test_diagnostic_withholds_unknown_or_imitation_structures(monkeypatch, capsys, fault: str) -> None:
+    """A suggestive fragment or non-button control cannot certify a fixed template."""
+    payload = diagnostic_payload()
+    secret = "PRIVATE_TEST_VALUE OAuth 403\nREFRESH: DATA_OK"
+    if fault == "title":
+        payload["Title"] = secret
+    elif fault in {"instruction", "sql"}:
+        payload["Items"][0]["Text"] = (
+            secret if fault == "instruction" else "SELECT '" + payload["Items"][0]["Text"] + "'"
+        )
+    elif fault == "buttons":
+        payload["Items"].pop()
+    elif fault in {"checkbox", "document-buttons", "button-value"}:
+        item = payload["Items"][-1]
+        if fault == "button-value":
+            item["Source"] = "ValuePattern"
+        else:
+            item["Role"] = "ControlType.CheckBox" if fault == "checkbox" else "ControlType.Document"
+    else:
+        payload["Items"].append({"Text": secret, "Role": "ControlType.Text", "Source": "Name"})
+    stub_diagnostic_child(monkeypatch, payload, stderr=secret)
+    window = DesktopWindow(secret, secret, 100, 100, (secret,), hwnd=222)
+    _credential_modal.print_dialog_diagnostic(111, window)
+    output = capsys.readouterr()
+    record = json.loads(output.out.removeprefix("DIALOG_DIAGNOSTIC "))
+    assert (record["status"], record["message_id"]) == ("WITHHELD", None)
+    assert "PRIVATE_TEST_VALUE" not in output.out + output.err
+    assert "REFRESH:" not in output.out and "OAuth" not in output.out and "403" not in output.out
+    finding = DialogFinding("unrecognized", "DIALOG_UNRECOGNIZED", window, secret)
+    assert "PRIVATE_TEST_VALUE" not in _credential_modal.describe_dialog_finding(finding)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("TargetPid", 112),
+        ("TargetPid", "111"),
+        ("TargetHwnd", 223),
+        ("TargetBefore", False),
+        ("TargetAfter", False),
+        ("TargetAfter", 1),
+        ("Truncated", True),
+        ("Truncated", None),
+        ("PatternsIncomplete", "false"),
+        ("PatternsIncomplete", True),
+        ("Items", {}),
+        ("Items", [{"Text": "secret"}]),
+        ("Title", "x" * 8001),
+    ],
+)
+def test_diagnostic_incomplete_or_wrong_target_is_never_observed(monkeypatch, field: str, value) -> None:
+    """Completeness and identity require literal, correctly typed evidence."""
+    payload = diagnostic_payload()
+    payload[field] = value
+    stub_diagnostic_child(monkeypatch, payload)
+    result = _credential_modal.diagnose_dialog(111, DesktopWindow("", "", 0, 0, hwnd=222))
+    assert result == ("CANNOT_READ", None, "incomplete_read")
+
+
+@pytest.mark.parametrize("fault", ["malformed", "nonzero", "oversized", "timeout", "provider-error"])
+def test_diagnostic_discards_failure_output(monkeypatch, capsys, fault: str) -> None:
+    """Child failures carry no public text, even when a valid template was partly read."""
+    secret = "PRIVATE_TEST_VALUE 403 OAuth\nREFRESH: DATA_OK"
+    if fault in {"timeout", "provider-error"}:
+
+        def fail(*_args, **_kwargs):
+            if fault == "timeout":
+                raise subprocess.TimeoutExpired("private-command", 8, output=secret, stderr=secret)
+            raise OSError(secret)
+
+        monkeypatch.setattr(_credential_modal.subprocess, "run", fail)
+    else:
+        changes = {
+            "malformed": {"stdout": secret},
+            "nonzero": {"returncode": 4, "stderr": secret},
+            "oversized": {"stdout": "HARVEST:" + ("x" * 131073) + secret},
+        }[fault]
+        stub_diagnostic_child(monkeypatch, diagnostic_payload(), **changes)
+    _credential_modal.print_dialog_diagnostic(111, DesktopWindow("", "", 0, 0, hwnd=222))
+    output = capsys.readouterr()
+    record = json.loads(output.out.removeprefix("DIALOG_DIAGNOSTIC "))
+    assert record["status"] == "CANNOT_READ" and record["message_id"] is None
+    assert secret not in output.out + output.err
+
+
+@pytest.mark.parametrize("pid,hwnd", [(0, 222), (111, 0), (True, 222), (111, -1)])
+def test_diagnostic_without_an_exact_target_does_not_start_a_child(monkeypatch, pid, hwnd) -> None:
+    """No target means no read; never rediscover or infer a window for diagnostics."""
+    calls = stub_diagnostic_child(monkeypatch, diagnostic_payload())
+    result = _credential_modal.diagnose_dialog(pid, DesktopWindow("", "", 0, 0, hwnd=hwnd))
+    assert result == ("CANNOT_READ", None, "invalid_target")
+    assert not calls
+
+
+@pytest.mark.parametrize("module", [refresh_pbip_model, probe_desktop_query])
+@pytest.mark.parametrize("status", ["OBSERVED", "WITHHELD", "CANNOT_READ"])
+@pytest.mark.parametrize(
+    "token", ["DIALOG_UNREADABLE", "DIALOG_UNRECOGNIZED", "DIALOG_NEEDS_HUMAN", "REFRESH_IN_PROGRESS"]
+)
+def test_cli_diagnostic_preserves_detector_token_and_exit(monkeypatch, capsys, module, status: str, token: str) -> None:
+    """No diagnostic result may reclassify, suppress or clear the pre-read refusal."""
+    window = DesktopWindow("PRIVATE_TEST_VALUE", "", 100, 100, hwnd=222)
+    kind = next(key for key, value in _credential_modal.DIALOG_KIND_VERDICTS.items() if value == token)
+    finding = DialogFinding(kind, token, window, "PRIVATE_TEST_VALUE")
+    calls = []
+
+    def diagnose(pid: int, target):
+        calls.append((pid, target))
+        return status, "privacy_warning" if status == "OBSERVED" else None, "template_match"
+
+    monkeypatch.setattr(_credential_modal, "diagnose_dialog", diagnose)
+    monkeypatch.setattr(module, "_credential_state", lambda *_a, **_kw: CredentialDetection(dialog=finding))
+    monkeypatch.setattr(module, "discover_port", lambda *_a: pytest.fail("refused dialog reached port discovery"))
+    if module is refresh_pbip_model:
+        monkeypatch.setattr(module, "cache_file", lambda *_a: None)
+    code = module.main(["--pid", "111"])
+    out = capsys.readouterr().out
+    prefix = "REFRESH" if module is refresh_pbip_model else "PREFLIGHT"
+    assert code == 3, "diagnostic enrichment must preserve the existing refusal exit"
+    assert out.splitlines()[0].startswith(f"{prefix}: {token} "), "diagnostic changed the detector token"
+    assert calls == [(111, window)] and out.count("DIALOG_DIAGNOSTIC ") == 1
+    assert "PRIVATE_TEST_VALUE" not in out and "DATA_OK" not in out
+
+
+def test_query_poll_diagnostic_is_terminal_and_once(monkeypatch, capsys) -> None:
+    """A late query refusal is enriched only when the polling loop chooses to return."""
+    # The canonical bundled module is selected at runtime, not the root CLI shim.
+    # pylint: disable=no-member
+    states = iter([CredentialDetection(), dialog_state()])
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda *_a, **_kw: next(states))
+    monkeypatch.setattr(
+        probe_desktop_query.threading,
+        "Thread",
+        lambda **_kw: SimpleNamespace(start=lambda: None, is_alive=lambda: True, join=lambda _seconds: None),
+    )
+    calls = []
+
+    def diagnose(pid: int, window):
+        calls.append((pid, window))
+        return "WITHHELD", None, "unknown_template"
+
+    monkeypatch.setattr(_credential_modal, "diagnose_dialog", diagnose)
+    assert probe_desktop_query._probe_with_credential_poll(111, 1234, None) == 3
+    out = capsys.readouterr().out
+    assert "PREFLIGHT: DIALOG_UNREADABLE" in out and len(calls) == 1
+
+
+def test_fixed_diagnostics_and_numeric_metadata_are_marker_free(monkeypatch, capsys) -> None:
+    """These are the parent's substring vocabulary, duplicated so the bundle remains portable."""
+    markers = (
+        "credential",
+        "sign in",
+        "signed in",
+        "authentication",
+        "unauthorized",
+        "access token",
+        "login",
+        "oauth",
+        "10054",
+        "forcibly closed",
+        "unrecognizable response",
+        "403",
+        "forbidden",
+        "access denied",
+        "permission denied",
+        "insufficient privilege",
+        "does not have permission",
+        "not authorized",
+        "not found",
+        "does not exist",
+        "cannot be found",
+        "invalid object name",
+        "table_or_view_not_found",
+        "unknown table",
+        "no such table",
+        "match any rows",
+        "no catalog",
+        "wrong_model",
+        "identity unverified",
+    )
+    for message in _credential_modal._DIALOG_MESSAGES.values():
+        assert not any(marker in message.lower() for marker in markers), "fixed diagnostic carried a parent marker"
+    stub_diagnostic_child(monkeypatch, diagnostic_payload(pid=403, hwnd=10054))
+    _credential_modal.print_dialog_diagnostic(403, DesktopWindow("", "", 0, 0, hwnd=10054))
+    output = capsys.readouterr().out
+    assert not any(marker in output.lower() for marker in markers), "numeric metadata fabricated a verdict"
+    record = json.loads(output.removeprefix("DIALOG_DIAGNOSTIC "))
+    assert (record["pid"], record["hwnd"]) == ("403", "10054")
+
+
+_DIAGNOSTIC_HARVEST_CONTROL = r"""
+param([string]$Probe, [string]$Case)
+$ErrorActionPreference = 'Stop'
+Add-Type @'
+using System;
+namespace System.Windows.Automation {
+  public enum TreeScope { Descendants }
+  public class Condition { public static Condition TrueCondition = new Condition(); }
+  public class Control { public string ProgrammaticName; }
+  public class Info {
+    public int ProcessId = 111, NativeWindowHandle = 222;
+    public Control ControlType = new Control { ProgrammaticName = "ControlType.Text" };
+    public bool IsPassword;
+    public string Text = "";
+    public string Name { get { AutomationElement.Reads++; return Text; } }
+  }
+  public class Range {
+    public string Text = "";
+    public bool ReadOnly = true;
+    public object GetAttributeValue(object a) { return ReadOnly; }
+    public string GetText(int n) { return Text.Substring(0, Math.Min(n, Text.Length)); }
+  }
+  public class TextPattern {
+    public static object Pattern = new object(), IsReadOnlyAttribute = new object();
+    public Range DocumentRange = new Range();
+  }
+  public class AutomationElement {
+    public static int Reads;
+    public static AutomationElement Root = new AutomationElement();
+    public Info Current = new Info();
+    public AutomationElement[] Children = new AutomationElement[0];
+    public TextPattern Text;
+    public static AutomationElement FromHandle(IntPtr h) { return Root; }
+    public AutomationElement[] FindAll(TreeScope s, Condition c) { return Children; }
+    public bool TryGetCurrentPattern(object p, out object v) { v = Text; return Text != null; }
+  }
+}
+public static class DiagnosticWindowTarget {
+  public static int Calls, MismatchAt;
+  public static uint GetWindowThreadProcessId(IntPtr h, out uint p) {
+    Calls++; p = (uint)(Calls == MismatchAt ? 112 : 111); return 1;
+  }
+}
+'@
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Probe, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'script did not parse' }
+foreach ($name in @('Test-DiagnosticTarget', 'Get-AutomationHarvest')) {
+  $fn = $ast.Find({ param($n)
+    $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name
+  }.GetNewClosure(), $true)
+  Invoke-Expression $fn.Extent.Text
+}
+$root = [System.Windows.Automation.AutomationElement]::Root
+$root.Current.ControlType.ProgrammaticName = 'ControlType.Window'
+$root.Current.Text = 'Synthetic title'
+$child = [System.Windows.Automation.AutomationElement]::new()
+$child.Current.Text = 'PRIVATE_TEST_VALUE'
+$root.Children = @($child)
+switch ($Case) {
+  before { [DiagnosticWindowTarget]::MismatchAt = 1 }
+  after { [DiagnosticWindowTarget]::MismatchAt = 2 }
+  child_pid { $child.Current.ProcessId = 112 }
+  password { $child.Current.IsPassword = $true }
+  editable { $child.Current.ControlType.ProgrammaticName = 'ControlType.Edit' }
+  reused { $root.Current.NativeWindowHandle = 223 }
+  oversized {
+    $child.Text = [System.Windows.Automation.TextPattern]::new()
+    $child.Text.DocumentRange.Text = 'x' * 8001
+  }
+  editable_document {
+    $child.Text = [System.Windows.Automation.TextPattern]::new()
+    $child.Text.DocumentRange.ReadOnly = $false
+  }
+}
+$result = Get-AutomationHarvest -Hwnd 222 -ExpectedPid 111
+@{ Payload = $result; Reads = [System.Windows.Automation.AutomationElement]::Reads
+   Checks = [DiagnosticWindowTarget]::Calls } | ConvertTo-Json -Depth 8 -Compress
+"""
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter"
+)
+@pytest.mark.parametrize(
+    "case",
+    ["complete", "before", "after", "child_pid", "password", "editable", "reused", "oversized", "editable_document"],
+)
+def test_diagnostic_harvest_pid_and_completeness_guards(tmp_path: Path, case: str) -> None:
+    """Execute the real harvest body over controllable providers, without any Desktop/window access."""
+    harness = tmp_path / "diagnostic_control.ps1"
+    harness.write_text(_DIAGNOSTIC_HARVEST_CONTROL, encoding="utf-8")
+    done = subprocess.run(
+        [_powershell(), "-NoProfile", "-File", str(harness), "-Probe", str(PROBE_PS1), "-Case", case],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert done.returncode == 0, f"control did not execute: {done.stderr}"
+    result = json.loads(done.stdout)
+    if case in {"before", "after", "reused"}:
+        assert result["Payload"] is None, "a failed target check must discard the entire read"
+        if case == "before":
+            assert result["Reads"] == 0, "wrong-PID HWND was read before refusal"
+    elif case == "complete":
+        assert result["Checks"] == 2 and result["Reads"] == 2
+        assert result["Payload"]["PatternsIncomplete"] is False
+        assert result["Payload"]["Items"][0] == {
+            "Text": "PRIVATE_TEST_VALUE",
+            "Role": "ControlType.Text",
+            "Source": "Name",
+        }
+    else:
+        flag = "Truncated" if case == "oversized" else "PatternsIncomplete"
+        assert result["Payload"][flag] is True, "an incomplete harvest must not claim completeness"
+        if case in {"child_pid", "password", "editable", "editable_document"}:
+            assert result["Reads"] == 1, "private descendant values must not be read"
+
+
+_DIAGNOSTIC_WINDOW = r"""
+param([string]$Fixture, [string]$ReadyFile)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+$data = Get-Content -LiteralPath $Fixture -Raw | ConvertFrom-Json
+$frame = [System.Windows.Window]::new()
+$frame.Title = 'Test-owned frame'
+$frame.ShowActivated = $false
+$refresh = [System.Windows.Controls.Button]::new()
+$refresh.Content = 'Refresh'
+$refresh.Add_Click({ throw 'diagnostic harvest invoked Refresh' })
+$frame.Content = $refresh
+$frame.Show()
+$modal = [System.Windows.Window]::new()
+$modal.Title = $data.Title
+$modal.Width = 680; $modal.Height = 400
+$modal.WindowStyle = 'None'
+$modal.ShowActivated = $false
+$modal.Owner = $frame
+$panel = [System.Windows.Controls.StackPanel]::new()
+foreach ($item in $data.Items) {
+  if ($item.Role -eq 'ControlType.Button') {
+    $control = [System.Windows.Controls.Button]::new()
+    $control.Content = $item.Text
+    $control.Add_Click({ throw 'diagnostic harvest clicked a button' })
+  } else {
+    $control = [System.Windows.Controls.TextBlock]::new()
+    $control.Text = $item.Text
+    $control.TextWrapping = 'Wrap'
+  }
+  $null = $panel.Children.Add($control)
+}
+$modal.Content = $panel
+$modal.Add_ContentRendered({
+  $handle = [System.Windows.Interop.WindowInteropHelper]::new($modal).Handle.ToInt64()
+  [System.IO.File]::WriteAllText($ReadyFile, [string]$handle)
+  [Console]::WriteLine('READY')
+})
+$null = $modal.ShowDialog()
+"""
+
+
+def _diagnostic_window_command(tmp_path: Path, kind: str) -> list[str]:
+    """Prepare a test-owned window using the independent diagnostic fixtures."""
+    script, fixture = (tmp_path / name for name in ("dialog.ps1", "fixture.json"))
+    script.write_text(_DIAGNOSTIC_WINDOW, encoding="utf-8")
+    fixture.write_text(json.dumps(diagnostic_payload(kind)), encoding="utf-8")
+    return [
+        _powershell(),
+        "-Sta",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-Fixture",
+        str(fixture),
+    ]
+
+
+def _assert_test_owned_diagnostic_window(child: subprocess.Popen, ready: Path, kind: str) -> None:
+    """Bound startup, assert read-only diagnosis, and reap only the exact test-owned child."""
+    deadline = threading.Timer(10, child.kill)
+    try:
+        deadline.start()
+        try:
+            startup = child.stdout.readline().strip()
+        finally:
+            deadline.cancel()
+            deadline.join()
+        assert startup == b"READY", (
+            f"test-owned diagnostic window startup failed before READY "
+            f"(pid={child.pid}, exit={child.poll()}, output={startup!r})"
+        )
+        hwnd = int(ready.read_text(encoding="utf-8"))
+        state = inspect_credential_modal(child.pid)
+        assert state.dialog is not None and state.dialog.window.hwnd == hwnd
+        observed = _credential_modal.diagnose_dialog(child.pid, state.dialog.window)
+        assert observed == ("OBSERVED", kind, "template_match"), observed
+        # A real wrong-PID attempt must never borrow the same window's valid template.
+        assert _credential_modal.diagnose_dialog(child.pid + 1, state.dialog.window)[0] == "CANNOT_READ"
+        assert child.poll() is None, "the read-only child must leave its target window running"
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=3)
+
+
+# Keep one function per GUI case and the real -ReadyFile argument at Popen for the AST marker census.
+@pytest.mark.gui
+@pytest.mark.serial
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter"
+)
+def test_diagnostic_harvest_only_mode_reads_test_owned_privacy_warning(tmp_path: Path) -> None:
+    """Read the full privacy template without finding/clicking the owner's Refresh button."""
+    ready = tmp_path / "hwnd.txt"
+    with subprocess.Popen(
+        [*_diagnostic_window_command(tmp_path, "privacy_warning"), "-ReadyFile", str(ready)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    ) as child:
+        _assert_test_owned_diagnostic_window(child, ready, "privacy_warning")
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter"
+)
+def test_diagnostic_harvest_only_mode_reads_test_owned_package_session(tmp_path: Path) -> None:
+    """Read the full session template without finding/clicking the owner's Refresh button."""
+    ready = tmp_path / "hwnd.txt"
+    with subprocess.Popen(
+        [*_diagnostic_window_command(tmp_path, "package_session"), "-ReadyFile", str(ready)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    ) as child:
+        _assert_test_owned_diagnostic_window(child, ready, "package_session")
+
+
 class _NativeCall:
     """Injectable native function with ctypes' assignable argtypes/restype."""
 

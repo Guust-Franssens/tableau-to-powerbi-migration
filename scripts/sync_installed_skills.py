@@ -44,6 +44,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from copilot_home import copilot_home
+
 REPO = Path(__file__).resolve().parent.parent
 REFERENCE_BUILD = REPO / "_build" / "skill-plugin-reference"
 DEFAULT_SOURCE_REF = "origin/master"
@@ -275,7 +277,7 @@ def discover_skill_plugin(
             detail=f"override: {plugin_root}",
         )
 
-    root = (Path.home() / ".copilot" / "installed-plugins").expanduser().resolve()
+    root = (copilot_home() / "installed-plugins").expanduser().resolve()
     candidates = [
         skills_dir.parent
         for skills_dir in sorted(root.glob("*/*/skills"))

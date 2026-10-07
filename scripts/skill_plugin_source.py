@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from build_plugin import MARKETPLACE_NAME, PLUGIN_NAME, PUBLISH_REPO, SHIPPED_SKILLS
+from copilot_home import copilot_home
 
 PLUGIN_ROOT_ENV = "POWERBI_SKILLS_PLUGIN_ROOT"
 DEFAULT_IDENTITY = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
@@ -119,7 +120,7 @@ def discover_skill_plugin(
             override=True,
         )
 
-    root = installed_plugins_root or (Path.home() / ".copilot" / "installed-plugins")
+    root = installed_plugins_root or (copilot_home() / "installed-plugins")
     root = root.expanduser().resolve()
     candidates: list[Path] = []
     if root.is_dir():
@@ -162,7 +163,11 @@ def discover_skill_plugin(
 def main(argv: list[str] | None = None) -> int:
     """Print the discovered plugin root as JSON or human-readable text."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--installed-plugins-root", type=Path, help="override ~/.copilot/installed-plugins")
+    parser.add_argument(
+        "--installed-plugins-root",
+        type=Path,
+        help="override installed-plugins under the Copilot home (COPILOT_HOME or ~/.copilot)",
+    )
     parser.add_argument("--plugin-root", type=Path, help=f"explicit plugin root; also supported via {PLUGIN_ROOT_ENV}")
     parser.add_argument("--json", action="store_true", help="emit a JSON verdict for scripts/preflight.ps1")
     args = parser.parse_args(argv)
