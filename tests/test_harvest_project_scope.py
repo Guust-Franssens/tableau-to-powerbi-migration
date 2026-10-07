@@ -31,6 +31,19 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import harvest_estate_assets as harvest  # noqa: E402  # pylint: disable=wrong-import-position
 
+
+def test_harvest_cli_output_refusal_keeps_its_override_hint(monkeypatch, tmp_path, caplog):
+    """Standalone harvest still offers its existing explicit override after a refusal."""
+    out = tmp_path / "unignored-output"
+    monkeypatch.setattr(sys, "argv", ["harvest_estate_assets.py", "--out", str(out)])
+    monkeypatch.setattr(harvest, "unignored_output_paths", lambda path, _artifacts: [path / "parse-sweep.json"])
+    monkeypatch.setattr(harvest, "engine_scripts_dir", lambda: pytest.fail("refusal must precede engine or sign-in"))
+
+    assert harvest.main() == harvest.EXIT_REFUSED_UNIGNORED_OUT
+    assert "Nothing was downloaded. Pass --allow-unignored-out to override this deliberately." in caplog.text
+    assert not out.exists()
+
+
 # The engine's own `_TRANSFER_UUID_PREFIX` (`migrate_estate.py`), copied so this suite stays offline.
 # Verified against engine 2.126.0: `strip_transfer_uuid('<uuid>_Meridian_Revenue_by_Region')` ->
 # `'Meridian_Revenue_by_Region'`, while `'Meridian_Revenue_by_Region--<uuid>'` comes back intact.

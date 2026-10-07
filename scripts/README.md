@@ -30,13 +30,14 @@ If recovery is allowed, retry the **exact originating command and arguments**: r
 
 ### Run setup
 
-For each new site/folder/workbook/datasource, before stage writes run
+For new local folders, workbooks or datasources, before stage writes run
 `python -B scripts\work_dirs.py <slug> --json`; external roots add
 `--runs-parent <parent>` (`--repo-root` alias). Allocation auto-attempts ignored
 `_MIGRATION.md`; a warning does not undo success.
 
 For a live Tableau Server/Cloud site, the recommended pre-bundle route is
 `python -B scripts\start_migration.py [--project <name-or-LUID>] [--workbook <name-or-LUID>]`.
+Invoke it directly; do not pre-allocate a run for live-site invocations.
 One invocation is one run; use one site/environment per invocation. It allocates under the toolkit's
 repo-local `_runs/` by default; `--runs-parent <short-parent>` is an explicit alternative. It runs
 survey, site-wide assessment, scoped harvest, Tableau reference capture, then the bundle, reading

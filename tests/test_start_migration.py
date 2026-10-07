@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,8 @@ import work_dirs  # noqa: E402  # pylint: disable=wrong-import-position
 PROJECT = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
 WORKBOOK = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
 DATASOURCE = "cccccccc-3333-4333-8333-cccccccccccc"
+OTHER_PROJECT = "dddddddd-4444-4444-8444-dddddddddddd"
+EXTRA_WORKBOOK = "eeeeeeee-5555-4555-8555-eeeeeeeeeeee"
 SESSION = "11111111-2222-4333-8444-555555555555"
 ENV_SESSION = "99999999-2222-4333-8444-555555555555"
 ENV = {
@@ -47,9 +50,12 @@ def _survey(*, project: bool = False, workbook: bool = False, unmatched=None, em
     }
 
 
-def _write_assessment(out: Path, *, duplicate_project: bool = False) -> None:
+def _write_assessment(out: Path, *, duplicate_project: bool = False, extra_workbook_project: str | None = None) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    (out / "assessment.json").write_text(json.dumps({"workbooks": [{"luid": WORKBOOK}]}), encoding="utf-8")
+    rows = [{"luid": WORKBOOK}]
+    if extra_workbook_project:
+        rows.append({"luid": EXTRA_WORKBOOK})
+    (out / "assessment.json").write_text(json.dumps({"workbooks": rows}), encoding="utf-8")
     connection = sqlite3.connect(out / "estate.db")
     connection.executescript(
         f"""
@@ -65,17 +71,33 @@ def _write_assessment(out: Path, *, duplicate_project: bool = False) -> None:
     )
     if duplicate_project:
         connection.execute("INSERT INTO project VALUES ('dddddddd-4444-4444-8444-dddddddddddd', 'Finance')")
+    if extra_workbook_project:
+        connection.execute("INSERT OR IGNORE INTO project VALUES (?, 'Other')", (OTHER_PROJECT,))
+        connection.execute(
+            "INSERT INTO workbook VALUES (?, 'Extra workbook', ?)", (EXTRA_WORKBOOK, extra_workbook_project)
+        )
     connection.commit()
     connection.close()
 
 
-def _write_harvest(out: Path) -> None:
+def _write_harvest(out: Path, *, outcome: str = "theirs_only") -> None:
     out.mkdir(parents=True, exist_ok=True)
+    row = {"kind": "workbook", "luid": WORKBOOK}
+    if outcome == "never_downloaded":
+        row["download_error"] = "synthetic download failure"
+    else:
+        ours, theirs = {
+            "ours_only": (True, False),
+            "theirs_only": (False, True),
+            "both_fail": (False, False),
+            "invalid": (None, True),
+        }[outcome]
+        row.update(ours={"ok": ours}, theirs={"ok": theirs})
     (out / "parse-sweep.json").write_text(
         json.dumps(
             [
                 {"kind": "datasource", "luid": DATASOURCE, "ours": {"ok": True}, "theirs": {"ok": True}},
-                {"kind": "workbook", "luid": WORKBOOK, "ours": {"ok": False}, "theirs": {"ok": True}},
+                row,
             ]
         ),
         encoding="utf-8",
@@ -85,11 +107,11 @@ def _write_harvest(out: Path) -> None:
             {
                 "total": 2,
                 "both_ok": 1,
-                "ours_only": 0,
-                "theirs_only": 1,
-                "both_fail": 0,
-                "invalid": 0,
-                "never_downloaded": 0,
+                "ours_only": int(outcome == "ours_only"),
+                "theirs_only": int(outcome == "theirs_only"),
+                "both_fail": int(outcome == "both_fail"),
+                "invalid": int(outcome == "invalid"),
+                "never_downloaded": int(outcome == "never_downloaded"),
             }
         ),
         encoding="utf-8",
@@ -137,6 +159,8 @@ class _Pipeline:
         malformed_survey: bool = False,
         missing_oracle: bool = False,
         duplicate_project: bool = False,
+        extra_workbook_project: str | None = None,
+        harvest_outcome: str = "theirs_only",
     ) -> None:
         self.root = tmp_path / "toolkit"
         self.root.mkdir()
@@ -157,10 +181,13 @@ class _Pipeline:
         self.malformed_survey = malformed_survey
         self.missing_oracle = missing_oracle
         self.duplicate_project = duplicate_project
+        self.extra_workbook_project = extra_workbook_project
+        self.harvest_outcome = harvest_outcome
         self.commands: list[list[str]] = []
         self.options: list[dict] = []
         self.before_exit = []
         self.cancelled = []
+        self.waits = []
         self.preflight = []
         monkeypatch.setattr(
             frontdoor.subprocess,
@@ -204,6 +231,7 @@ class _Pipeline:
                 return self.returncode
 
             def wait(self, timeout=None):
+                pipeline.waits.append((_script_name(self.command), timeout))
                 return self.returncode
 
             def send_signal(self, _signal):
@@ -244,9 +272,13 @@ class _Pipeline:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("not-json" if self.malformed_survey else json.dumps(survey), encoding="utf-8")
         elif name == "assess_estate.py":
-            _write_assessment(arg("--out"), duplicate_project=self.duplicate_project)
+            _write_assessment(
+                arg("--out"),
+                duplicate_project=self.duplicate_project,
+                extra_workbook_project=self.extra_workbook_project,
+            )
         elif name == "harvest_estate_assets.py":
-            _write_harvest(arg("--out"))
+            _write_harvest(arg("--out"), outcome=self.harvest_outcome)
         elif name == "capture_tableau_oracle.py":
             if not self.missing_oracle:
                 _write_oracle(arg("--out"))
@@ -263,6 +295,69 @@ def _captured(capsys, pipeline: _Pipeline) -> tuple[str, str]:
     out = "".join(piece.out for piece in pipeline.before_exit) + tail.out
     err = "".join(piece.err for piece in pipeline.before_exit) + tail.err
     return out, err
+
+
+@pytest.fixture(name="guard_repo")
+def guard_repo_fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Use real Git ignore decisions, but stop before any producer or service access."""
+    root = tmp_path / "guard-repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "--quiet"], cwd=root, check=True, capture_output=True)
+    monkeypatch.setattr(frontdoor, "REPO_ROOT", root)
+    monkeypatch.setattr(work_dirs, "REPO_ROOT", root)
+    monkeypatch.setattr(frontdoor, "resolve_env", lambda _path: dict(ENV))
+    monkeypatch.setattr(frontdoor, "_preflight", lambda _env: 7)
+    monkeypatch.setattr(frontdoor, "_run_child", lambda *_args: pytest.fail("no producer may run in guard controls"))
+    return root
+
+
+@pytest.mark.parametrize("ignore_manifest", [False, True])
+def test_output_guard_checks_run_manifest_before_allocation(guard_repo, capsys, ignore_manifest):
+    rules = (
+        "_runs/*/assessment/\n"
+        "_runs/*/assets/\n"
+        "_runs/*/oracle/\n"
+        "_runs/*/bundle/\n"
+        "_runs/*/parse-sweep.json\n"
+        "_runs/*/parse-sweep.md\n"
+        "_runs/*/parse-sweep-totals.json\n"
+    )
+    if ignore_manifest:
+        rules += "_runs/*/run.json\n"
+    (guard_repo / ".gitignore").write_text(rules, encoding="utf-8")
+    probe = subprocess.run(
+        ["git", "check-ignore", "-q", "--", "_runs/001-site/run.json"],
+        cwd=guard_repo,
+        check=False,
+        capture_output=True,
+    )
+    assert probe.returncode == (0 if ignore_manifest else 1)
+
+    code = frontdoor.main([])
+
+    out, err = capsys.readouterr()
+    manifests = list(guard_repo.rglob("run.json"))
+    assert code == 1
+    if ignore_manifest:
+        assert manifests == [guard_repo / "_runs" / "001-site" / "run.json"]
+        assert "Migration preflight FAILED exit=7" in out
+    else:
+        assert manifests == [], "the output guard wrote a commit-visible run.json"
+        assert "Output guard refused before allocation" in err
+        assert "Migration preflight" not in out
+
+
+def test_front_door_guard_refusal_never_offers_harvest_override(guard_repo, capsys, caplog):
+    code = frontdoor.main([])
+
+    out, err = capsys.readouterr()
+    assert code == 1
+    assert not list(guard_repo.rglob("run.json"))
+    assert "Output guard refused before allocation" in err
+    assert "--runs-parent" in err
+    assert "REFUSING to write customer content" in caplog.text
+    assert "Nothing was downloaded." in caplog.text
+    assert "--allow-unignored-out" not in out + err + caplog.text
 
 
 def test_site_run_streams_children_allocates_under_toolkit_and_has_honest_handoff(monkeypatch, tmp_path, capsys):
@@ -308,6 +403,8 @@ def test_site_run_streams_children_allocates_under_toolkit_and_has_honest_handof
     assert manifest["attribution"] == {"driver": "operator"}
     assert "stages" not in manifest and "preparation" not in manifest
     assert "BUNDLE + REFERENCES CAPTURED" in out
+    assert f"BUNDLE {run / 'bundle'} (present)" in out
+    assert f"REFERENCES {run / 'oracle'} (present)" in out
     assert "fidelity NOT VERIFIED" in out
 
 
@@ -358,6 +455,60 @@ def test_project_only_scope_keeps_standalone_project_datasource_selection(monkey
     assert "--workbook-id" not in harvest_command
 
 
+@pytest.mark.parametrize("workbook", ["Finance", WORKBOOK])
+def test_workbook_only_scope_uses_exact_survey_and_catalog_selection(monkeypatch, tmp_path, capsys, workbook):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+
+    code = frontdoor.main(["--workbook", workbook])
+
+    _captured(capsys, pipeline)
+    assert code == 0
+    harvest_command = next(cmd for cmd in pipeline.commands if _script_name(cmd) == "harvest_estate_assets.py")
+    assert harvest_command[harvest_command.index("--workbook-id") + 1] == WORKBOOK
+
+
+@pytest.mark.parametrize(
+    ("selectors", "extra_project"),
+    [
+        (["--project", "Finance"], OTHER_PROJECT),
+        (["--workbook", WORKBOOK], OTHER_PROJECT),
+        (["--workbook", "Finance"], PROJECT),
+        (["--project", PROJECT, "--workbook", WORKBOOK], OTHER_PROJECT),
+        (["--project", "Finance", "--workbook", WORKBOOK], PROJECT),
+    ],
+    ids=[
+        "project",
+        "workbook-other-project",
+        "workbook-same-project",
+        "combined-other-project",
+        "combined-same-project",
+    ],
+)
+def test_extra_survey_workbook_refuses_before_harvest(monkeypatch, tmp_path, capsys, selectors, extra_project):
+    survey = _survey(project="--project" in selectors, workbook="--workbook" in selectors)
+    survey["workbooks"].append(
+        {
+            "luid": EXTRA_WORKBOOK,
+            "name": "Extra workbook",
+            "project": "Finance" if extra_project == PROJECT else "Other",
+        }
+    )
+    survey["scope"]["workbooks_selected"] = 2
+    survey["scope"]["workbooks_on_site"] = 2
+    survey["summary"]["workbooks_total"] = 2
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, survey=survey, extra_workbook_project=extra_project)
+
+    code = frontdoor.main(selectors)
+
+    out, _err = _captured(capsys, pipeline)
+    assert code == 3
+    assert "survey workbook LUIDs do not equal the requested scope" in out
+    assert [_script_name(command) for command in pipeline.commands] == [
+        "run_engine_survey.py",
+        "assess_estate.py",
+    ]
+
+
 def test_explicit_short_runs_parent_is_used_as_allocator_repo_root(monkeypatch, tmp_path, capsys):
     pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
     parent = tmp_path / "short"
@@ -389,7 +540,8 @@ def test_output_guard_runs_before_allocation_and_names_runs_parent(monkeypatch, 
     assert not list(work_dirs.runs_root(pipeline.root).glob("*"))
     assert pipeline.preflight == [] and pipeline.commands == []
     assert len(pipeline.guard_calls) == 1
-    assert pipeline.guard_calls[0][1] is False
+    assert pipeline.guard_calls[0][1] is None
+    assert "run.json" in pipeline.guard_calls[0][2]["artifacts"]
     assert any(path.startswith("assessment/") for path in pipeline.guard_calls[0][2]["artifacts"])
     assert any(path.startswith("assets/") for path in pipeline.guard_calls[0][2]["artifacts"])
     assert any(path.startswith("oracle/") for path in pipeline.guard_calls[0][2]["artifacts"])
@@ -489,6 +641,10 @@ def test_preflight_failure_stops_before_any_producer(monkeypatch, tmp_path, caps
     assert code == 1
     assert pipeline.commands == []
     assert "Migration preflight FAILED exit=7" in out
+    run = work_dirs.runs_root(pipeline.root) / "001-site"
+    assert (run / "bundle").is_dir() and (run / "oracle").is_dir()
+    assert f"BUNDLE {run / 'bundle'} (absent)" in out
+    assert f"REFERENCES {run / 'oracle'} (absent)" in out
 
 
 def test_failed_harvest_does_not_launch_reference_or_bundle(monkeypatch, tmp_path, capsys):
@@ -506,6 +662,38 @@ def test_failed_harvest_does_not_launch_reference_or_bundle(monkeypatch, tmp_pat
     assert "harvest - FAILED exit=3" in out
 
 
+@pytest.mark.parametrize("outcome", ["never_downloaded", "invalid"])
+def test_zero_exit_incomplete_harvest_blocks_both_dependents(monkeypatch, tmp_path, capsys, outcome):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, harvest_outcome=outcome)
+
+    code = frontdoor.main([])
+
+    out, _err = _captured(capsys, pipeline)
+    assert code == 3
+    assert "harvest - CANNOT_ESTABLISH exit=0" in out
+    assert f"{outcome}=1" in out
+    assert [_script_name(command) for command in pipeline.commands] == [
+        "run_engine_survey.py",
+        "assess_estate.py",
+        "harvest_estate_assets.py",
+    ]
+
+
+@pytest.mark.parametrize("outcome", ["ours_only", "theirs_only", "both_fail"])
+def test_assessed_parser_failures_do_not_become_harvest_refusals(monkeypatch, tmp_path, capsys, outcome):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, harvest_outcome=outcome)
+
+    code = frontdoor.main([])
+
+    out, _err = _captured(capsys, pipeline)
+    assert code == 0
+    assert "harvest - OK exit=0" in out
+    assert [_script_name(command) for command in pipeline.commands][-2:] == [
+        "capture_tableau_oracle.py",
+        "run_estate.py",
+    ]
+
+
 def test_zero_exit_reference_with_missing_manifest_still_attempts_bundle_but_cannot_pass(monkeypatch, tmp_path, capsys):
     pipeline = _Pipeline(monkeypatch, tmp_path, capsys, missing_oracle=True)
 
@@ -518,6 +706,9 @@ def test_zero_exit_reference_with_missing_manifest_still_attempts_bundle_but_can
         "run_estate.py",
     ]
     assert "oracle manifest is missing or unreadable" in out
+    run = work_dirs.runs_root(pipeline.root) / "001-site"
+    assert f"BUNDLE {run / 'bundle'} (present)" in out
+    assert f"REFERENCES {run / 'oracle'} (absent)" in out
 
 
 def test_native_child_failure_wins_over_console_ok_text(monkeypatch, tmp_path, capsys):
@@ -582,21 +773,37 @@ def test_path_ceiling_uses_engine_artifacts_and_suggests_a_new_short_root(
     assert "--session-id" in out
 
 
-def test_interrupt_cancels_current_child_and_launches_no_later_stage(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_interrupt_cancels_current_child_and_launches_no_later_stage(monkeypatch, tmp_path, capsys, platform):
     pipeline = _Pipeline(monkeypatch, tmp_path, capsys, interrupt=True)
-    monkeypatch.setattr(frontdoor.os, "killpg", lambda _pid, _signal: pipeline.cancelled.append("killpg"))
+    monkeypatch.setattr(
+        frontdoor, "sys", SimpleNamespace(platform=platform, executable=sys.executable, stderr=sys.stderr)
+    )
+    monkeypatch.setattr(
+        frontdoor.os, "killpg", lambda _pid, _signal: pipeline.cancelled.append("killpg"), raising=False
+    )
 
     code = frontdoor.main([])
 
     out, _err = _captured(capsys, pipeline)
     assert code == 130
-    assert pipeline.cancelled == ["killpg"]
+    assert pipeline.cancelled == (["signal"] if platform == "win32" else ["killpg"])
+    assert pipeline.waits[-1] == ("assess_estate.py", 2)
     assert [_script_name(command) for command in pipeline.commands] == [
         "run_engine_survey.py",
         "assess_estate.py",
     ]
     assert "Migration interrupted" in out
     assert out.splitlines()[-1].startswith("RUN ")
+
+
+def test_readme_routes_live_sites_to_front_door_without_preallocation():
+    setup = (REPO_ROOT / "scripts" / "README.md").read_text(encoding="utf-8").split("### Run setup\n", 1)[1]
+    setup = setup.split("## Migration pipeline", 1)[0]
+    assert "For new local folders, workbooks or datasources" in setup
+    assert "python -B scripts\\start_migration.py" in setup
+    assert "do not pre-allocate a run for live-site invocations" in setup
+    assert "For each new site/folder/workbook/datasource" not in setup
 
 
 def test_invalid_session_id_is_usage_error_before_output_guard(monkeypatch, tmp_path, capsys):

@@ -406,7 +406,7 @@ def output_path_forms(out: Path) -> list[Path]:
 
 def refuse_unignored_output(
     out: Path,
-    allow_unignored: bool,
+    allow_unignored: bool | None,
     *,
     artifacts: Sequence[str] = OUTPUT_ARTIFACTS,
     hint: str = DEFAULT_UNIGNORED_HINT,
@@ -420,6 +420,7 @@ def refuse_unignored_output(
     `artifacts` and `hint` exist so a second tool that downloads customer content can reuse this one
     implementation rather than growing a near-copy that drifts. Pass the FILES that tool writes: the
     probe must name a file, never a bare directory (see `unignored_output_paths`).
+    Pass `allow_unignored=None` when the caller offers no bypass; the refusal then advertises none.
     """
     try:
         unignored = list(
@@ -439,7 +440,10 @@ def refuse_unignored_output(
         LOG.warning("--allow-unignored-out: proceeding anyway, but %s", message)
         return False
     LOG.error("REFUSING to write customer content into %s: %s", out, message)
-    LOG.error("Nothing was downloaded. Pass --allow-unignored-out to override this deliberately.")
+    if allow_unignored is None:
+        LOG.error("Nothing was downloaded.")
+    else:
+        LOG.error("Nothing was downloaded. Pass --allow-unignored-out to override this deliberately.")
     return True
 
 

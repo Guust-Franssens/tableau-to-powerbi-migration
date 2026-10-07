@@ -33,6 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = Path(__file__).resolve()
 HEARTBEAT_SECONDS = 15.0
 FRONT_DOOR_ARTIFACTS = (
+    "run.json",
     "assessment/estate_survey.json",
     "assessment/assessment.json",
     "assessment/estate.db",
@@ -186,16 +187,12 @@ def _resolve_selection(
     requested_workbook = None
     if args.workbook:
         requested_workbook = _resolve_named(args.workbook, workbooks, "workbook", name_index=1)
-        if requested_workbook[0] not in survey_ids:
-            raise EvidenceError("requested workbook is absent from the surveyed scope")
         if project_luid and requested_workbook[2] != project_luid:
             raise EvidenceError("requested workbook is outside the selected project")
     if project_luid and not args.workbook:
         project_workbooks = [row[0] for row in workbooks if row[2] == project_luid]
         if not project_workbooks:
             raise EvidenceError("selected project has no workbooks; datasource-only projects are not supported")
-        if not set(project_workbooks).issubset(survey_ids):
-            raise EvidenceError("survey does not establish every workbook in the selected project")
         selected = project_workbooks
     elif requested_workbook:
         selected = [requested_workbook[0]]
@@ -203,6 +200,8 @@ def _resolve_selection(
         selected = survey_ids
     if not selected:
         raise EvidenceError("requested scope contains no workbooks")
+    if set(selected) != set(survey_ids):
+        raise EvidenceError("survey workbook LUIDs do not equal the requested scope")
     return selected, project_luid, requested_workbook[0] if requested_workbook else None
 
 
@@ -254,6 +253,10 @@ def _verify_harvest(path: Path, totals_path: Path, expected: set[tuple[str, str]
         raise EvidenceError("harvest totals are incomplete or inconsistent")
     if sum(totals[key] for key in keys) != totals["total"]:
         raise EvidenceError("harvest outcome totals do not close")
+    if totals["invalid"] or totals["never_downloaded"]:
+        raise EvidenceError(
+            f"zero-exit harvest contradicts invalid={totals['invalid']} never_downloaded={totals['never_downloaded']}"
+        )
     return totals
 
 
@@ -297,10 +300,10 @@ def _verify_bundle(bundle: Path) -> dict:
 def _stop_process(process: subprocess.Popen) -> None:
     """Stop only this invocation's child process group and reap its direct child."""
     try:
-        if os.name == "nt":
-            process.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
-        else:
+        if sys.platform != "win32":
             os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.send_signal(getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM))
         process.wait(timeout=2)
     except (OSError, subprocess.TimeoutExpired):
         process.terminate()
@@ -422,12 +425,12 @@ def _summary(run: Path, bundle: Path, oracle: Path, overall: int, *, fidelity: s
             flush=True,
         )
     handover = bundle / "handover"
-    for label, path in (
-        ("BUNDLE", bundle),
-        ("HANDOVER", handover),
-        ("REFERENCES", oracle),
+    for label, path, present in (
+        ("BUNDLE", bundle, (bundle / "report.json").is_file()),
+        ("HANDOVER", handover, handover.is_dir()),
+        ("REFERENCES", oracle, (oracle / "oracle-manifest.json").is_file()),
     ):
-        state = "present" if path.exists() else "absent"
+        state = "present" if present else "absent"
         print(f"{label} {path} ({state})", flush=True)
     print(
         "2. Give the exact handover and reference paths to the root dispatcher for an issued brief and "
@@ -462,7 +465,7 @@ def main(argv: list[str] | None = None) -> int:
     candidate = work_dirs.runs_root(parent) / "000-front-door-preflight"
     if harvest.refuse_unignored_output(
         candidate,
-        False,
+        None,
         artifacts=FRONT_DOOR_ARTIFACTS,
         hint=FRONT_DOOR_HINT,
     ):
