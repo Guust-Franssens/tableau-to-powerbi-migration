@@ -70,6 +70,7 @@ c40cbc771eb704f7fef3f3aaa0072cb85779332c7c3b37697ea0fba0836974f5  ``` _runs/<NNN
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 b2cd5d9dceece5981d17f17aa3d56733f943f230bc1c9ad33a2ef53064e3acd6  ~~ **Stage 1 is a short-root allocation on this Windows repo
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+09bdb6b5e8e2012074f5b3a916f6f82eac2d0652f7b3025db2d9b0da76e53162  <!-- BEGIN:strict-preparation -->
 f14c3cd0f5a9dc4e03df442b9361b5ceceea5be9f9092c0f64f25d766cd18edd  | # | stage | command | notes |
 4da1ec6f47782090102dc16bda978efb5655fbf2ddce0f84ecf1faf79a930f2d  |---|---|---|---|
 593e00854990a02a65abfa92b3f1919b847d9bb2f546ea4c687909615a82ddd0  | 0 | preflight | `powershell -ExecutionPolicy Bypass -File 
@@ -79,8 +80,16 @@ f14c3cd0f5a9dc4e03df442b9361b5ceceea5be9f9092c0f64f25d766cd18edd  | # | stage | 
 e888a3b8cf53a482e39f30173778a2e76d789b3d08e0cf1f826b7d537d778bb3  | 4 | harvest | `python scripts/harvest_estate_assets.py --o
 c7177e555bbb09670a6d0053c9e0b6c475ccb2bd21243c36fbe3e95a0b70211e  | 5 | engine | `python scripts/run_estate.py --input <run>/a
 3af170b7f85096d6cc9f0a08c0a482edca2f993b9399793f1e4057df6f05c7f8  | 6 | oracle | `python scripts/capture_tableau_oracle.py --o
-977dfe8972ec0400bcbc3fdca64160fdd9294a649cb38cfc75a8e67339dfe92f  | 7 | **PRE-check** | `python scripts/check_reference_readin
-6f692a8af643b0e9bf4987fc5442f080d298fb20f9814dee8501b646ed9e85fa  | 8 | **POST-check** | `python scripts/check_unit.py <run>/b
+5f458b4e1c4ad2a96908e251062a7995bdb789da69760d60c2192d0e342ce0c2  | 7 | **Construct** | `python scripts/package_unit.py --bund
+5f4e8edc49ab935931bdafca0dc58eb644de6af4be17826f08be297582333703  | 8 | **Bind** | `python scripts/set_data_folder.py --packag
+c7d6d29375fa92fbbc71a48c3a55c5d6bdcda82486f9d22249d9a830e1d819e7  | 9 | **Check** | `python scripts/check_reference_readiness.
+4beaf251dd026529c3379339c55860301cbce3621ef2f3fba48afdd4fd0fd55f  | 10 | **Dispatch** | `tableau-migrator`'s validator/builder
+f42cce382d88381ef0df21064f09a34fae4a9fc1ed08e25998fb636fb44dd8b3  | 11 | **POST-check** | `python scripts/check_unit.py <exact
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+8414544a0040e0945cba322973df8d026dab641e0d58afb795c4f2a58dd39ef1  The explicit selected run and exact unit stay fixed; **never
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+9509949cb0c126a2849762f3ef75a6592ee33feb011c6cf5f96cb817bd5567a0  Preserve package edits and existing refusals; no automatic d
+34a38a3abc68b4436b923256b7db6f645c7ae28f13d54b381ab850456bcfee47  <!-- END:strict-preparation -->
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 859d0070eaac435765a6f45ed27fb1e8e764267b0c512c2b452d86aeec526c6d  **Only after an actual unsigned/ExecutionPolicy startup refu
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -450,16 +459,33 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 4cb0883da72ab2344d1a30ea472a1722da7347db99db2a1be99391c9881ea35a  0. **Preflight every invocation, first** ~ **plain**, **neve
 a5415270216716edb9afac3881a5e7970e1f9a2adcede2d299f2f6b25b02a697  ``` powershell -ExecutionPolicy Bypass -File scripts/preflig
 8db99ded121e393f37502220f5ea3a7515a3db1cab85c7538ee30e219c489a20  **Only after an actual unsigned/ExecutionPolicy startup refu
-187acc29692c89cd15e512985265a1f822077baecac261d4415e514ab2ac93d1  1. **Read the brief, then confirm inputs.** `migrations/work
+1f5243561ce78d952609a209e8ad87bba9e2a05980cdf8e548936c9d3045e427  1. **Read the brief, then confirm inputs.** `migrations/work
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+9a59d98260320aa926054043158918c8e88dffc1d3ccb80431e2bd737575c94f  Before `package_unit.py`, write complete `phase1-start-ready
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+d5b587fc782f46ece364c1f6481d5013b863c3ab71f19e362430d0ebafdf1904  ```toml +++ schema = "phase1-start-ready/v2" unit = "<exact-
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+289901a2dd94466ad83572e37e1f9309dd1df9d511c08787225155ead93ee3c2  Match `unit` exactly and `scope` to S2 topology: `model_only
 d4c8d021b6e27e59433c5c23b5680b4dd0ee077ca799c1eeab2e065e33d00c6a  2. **Run the deterministic tier ~ it builds, you consume.** 
 272158cc1a2edb7e189325c99d69def28de430900304fdea05fbca16345868ca  3. **Pick the canonical contract; never invent a parallel sp
 288dd88f593b88c8189d493f920fa8b52c18b86dfa5a0f8e1be087062a6adf6e  4. **Triage before building.** From the spec or handover sli
-54de5766657768ca90323c5338bca867109220cca2e0b83294aed27eb2ea1060  5. **Published data source ~ resolve or preserve UNKNOWN.** 
+49bbddeb1d4d3ea20fb6f8c66818bb6e8042a246354b84adcb8b3f57468fe47e  5. **Published source ~ resolve or preserve UNKNOWN.** Regis
 c3d2e1b71d53e0600a5a6c4738b1d727762d4648ce20a1c79de743ee7563e20b  6. **Live-source reachability (MANDATORY before building ~ n
-906402c57150652a732b6a4664cc1150a107ca6b97e76e663b6c848babdd7ef8  7. **Delegate to `pbi-migration-validator` FIRST for triage.
-eab88770d84c9792c0c605ea43999de3cd2097c5b8d0236d7c1259f3781f4413  8. **Delegate to `pbi-semantic-builder`** with: the handover
+2fbd8e3cf943624e1854766461d471d2bd2e9456af044918a75dd65e47bb424f  7. **Complete preparation before ANY validator/builder dispa
+4dde328a59df40c478d170c6f9507e7783e7bf1b4d70072e7c1e9fd359bffa6f  <!-- BEGIN:strict-preparation -->
+ee9bc4ee0c8b393a2c6d62f2b6440e30a36b8ae73125713ae9d21f394e00596f  Keep the explicit selected run and exact unit from the brief
+a66224fd4fc432c6b6f5b42fbd88dac1c6ef7723b0b2789bc79c78d8003dd62b  - **Construct** with `package_unit.py`, one exact `--unit` a
+7a3a443f31490acd9499f9e769d4afe9af814e5a975e2b2909ca62cd65b7302e  - **Bind** with `set_data_folder.py --package <absolute-pack
+08196866f59d7ffa2e547a07338562ea7d7818a339670a3bd6b463b59f511675  - **Check** the complete current provider/consumer cohort, *
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+56a886feb5cbb295a3d427bbc4010735d60fa884c18c83f89721326d54e354e7  ```python import json import subprocess import sys from path
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+43608669342448458f69f1e9b31edb2da92ceda0dc5cf1d5088865882cdcb010  - **Dispatch** only when **process exit == 0 AND status == "
+b5295d9f99800d0d2d29407cd44d84c314e78026376bcecc7ecc123ae7a41905  <!-- END:strict-preparation -->
+b52c148a542eabe498f674e2d007281caeb627d9503111227b0c949a0fdd701f  **Now delegate to `pbi-migration-validator` FIRST for triage
+77af0b70a62a6db1e844a266dcb6154ca556641571680c76f5e6807ecf4115de  8. **Delegate to `pbi-semantic-builder`** with: the handover
 0bd8fc440e81c24eb7090fa3abd7aeba3a0590d785b83328afd44f47e2f6c249  - Approvals land through `--approved-dax`, never by hand-edi
-2b5de341fdc8d077c85bf19931a750f7a7f6b58fefb7b5c7a168540a2caa09a5  - **The landing re-run is a BARRIER**: it deletes and recrea
+d135d82edcf321217aa601af90ec32b3cf265e6057b24636185f7a62d6303671  - **The landing re-run is a BARRIER**: it deletes and recrea
 e99599871043a3e3cdece5e4a013fa6d016a6531d26db65af559d95065817bf0  9. **Delegate to `pbi-report-builder`** ~ only AFTER step 8'
 72fe64f785bc5ffbeabbc24ad8f7baeea0db26ab5854bf00d31d30f5c9de2f1c  8. Give it the handover slice, the step-7 classification, th
 75876f8abd203cc651a4bdfd8e9b6dab27e5e4af73dcf5fcd231fbc1c1ee243b  10. **Fresh `pbi-migration-validator`, full sign-off mode.**

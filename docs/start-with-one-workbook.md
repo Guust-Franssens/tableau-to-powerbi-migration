@@ -150,19 +150,47 @@ own exit code, never by printed success text or another operation's result.
 
 ## 5. Prepare the agent handoff
 
-After the requested reference bar and the applicable dispatch prerequisites are met, pick
-**`tableau-migrator`** in Copilot CLI or VS Code, or name it in chat. Substitute the actual allocated
-bundle path and the accepted evidence grade; package dispatch remains subject to the pending-consumer
-boundary linked above.
+Pick **`tableau-migrator`** in Copilot CLI or VS Code as the preparation owner, not as permission to
+start builders yet. Name the explicit selected run and exact unit from its handover; never choose
+the latest run. The dispatcher/migrator owns the remaining path plumbing and complete preparation.
+Substitute the allocated run path, exact unit and accepted evidence grade:
 
 ```
-@tableau-migrator migrate migrations/workbooks/<slug> — bundle is at <allocated bundle path>,
+@tableau-migrator migrate run <allocated run path>, unit <exact-unit> — source is migrations/workbooks/<slug>/source,
 reference screenshots are in migrations/workbooks/<slug>/reference (accepted manifest grade: <grade>).
 ```
 
-Write the four answers it needs into `migrations/workbooks/<slug>/migration-brief.md` first — scope,
-autonomy, fidelity bar (faithful re-creation vs. modernise), and what to do at a wall. It is
-stateless and cannot infer them, and the file survives a closed terminal.
+Write the current per-unit brief first, including the
+[`phase1-start-ready/v2` example](../scripts/README.md#s2-package-preparation): exact unit/scope,
+fallback authorization and numeric obligation, then autonomy, fidelity bar and refresh strategy.
+Do not infer numeric `none`. The brief survives a closed terminal and the stateless orchestrator
+cannot infer the customer's choices.
+
+The order is **package → applicable binding → package-only checker → dispatch**:
+
+1. `package_unit.py` constructs the exact unit with its brief and discovered source/reference inputs.
+   Shared models require **provider first** and explicit `--provider-package` roots selected by the
+   retained #562 authority/S2, with **no name/spec fallback**.
+2. `set_data_folder.py --package <absolute-package>` binds when applicable, providers before consumers
+   with the same provider roots. Resolve missing prerequisites before binding.
+3. `check_reference_readiness.py <provider-package> <consumer-package> --json - --quiet` checks the
+   complete current cohort; an owned model supplies just its package. Follow `tableau-migrator`
+   step 7's executable guard: exactly one fresh JSON object, **process exit == 0 AND status == "START_READY"**.
+4. Only then may validator/builder dispatch begin against the exact checked package `fabric/`.
+
+Missing/malformed/multiple JSON, process/JSON disagreement, ASSEMBLED, BOUND, ordinary READY,
+NOT_APPLICABLE, stored status, completed todos or package exit 0 cannot clear the barrier.
+Continue rechecks current packages, including pre-existing ASSEMBLED output; it never automatically
+discards, overwrites or reseals edited work. Accepted manual evidence is supported by the current
+#664 consumer, but **START_READY is not Phase-2 COMPLETE** or a grade upgrade.
+
+Only explicit **Export diagnostics** selects `--assemble-only`: diagnostic-only
+ASSEMBLED / NOT_EVALUATED, no agent was dispatched. Default Migrate/Continue must **never fall back**
+to diagnostics. The final checker is AVAILABLE but NOT_EVALUATED by construction. Low-level default
+quiet stays silent and explicit quiet diagnostics retain their notice; the **orchestrator always
+prints a terminal outcome, even with quiet helpers**: exact run/unit, discovered inputs, completed
+stages, blocking stage, authoritative verdict/exit and **one executable next action** for that stage.
+If a reference is absent, that action is the selected source's capture/adoption command, not binding.
 
 ---
 

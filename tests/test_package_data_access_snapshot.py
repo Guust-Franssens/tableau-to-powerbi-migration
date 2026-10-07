@@ -1246,8 +1246,16 @@ def test_real_parsed_shared_provider_reaches_producer_handoff_and_binder(
         assert (out / unit / "migration-brief.md").read_bytes() == brief_bytes
         manifest = json.loads((out / unit / "package-manifest.json").read_bytes())
         assert manifest["construction_status"] == "ASSEMBLED"
-        assert manifest["dispatch_readiness"]["status"] == "NOT_EVALUATED"
-        assert manifest["dispatch_readiness"]["availability"] == "UNAVAILABLE"
+        assert manifest["dispatch_readiness"] == {
+            "availability": "AVAILABLE",
+            "status": "NOT_EVALUATED",
+            "message": (
+                "NOT START_READY: the final package checker is AVAILABLE but NOT_EVALUATED by this constructor. "
+                "ASSEMBLED is diagnostic construction only; no agent was dispatched. "
+                "Run check_reference_readiness.py on the complete current provider/consumer package cohort; "
+                "only START_READY with process exit 0 authorizes dispatch."
+            ),
+        }, "shared snapshot lost the atomic constructor-only readiness projection"
         assert pkg.pri.verify_s1(out / unit).integrity.is_clean
     manifest = json.loads((consumer / "package-manifest.json").read_bytes())
     assert (consumer / manifest["artifacts"]["asset"]).read_bytes() == (

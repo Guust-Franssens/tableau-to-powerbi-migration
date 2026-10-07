@@ -129,6 +129,7 @@ same-user `subst` alias may open an already-built over-ceiling tree in Desktop w
 blocked — temporary, machine-local, never the run's recorded path, and it waives no gate
 ([`docs/windows-path-limits.md`](../../docs/windows-path-limits.md) §6).
 
+<!-- BEGIN:strict-preparation -->
 | # | stage | command | notes |
 |---|---|---|---|
 | 0 | preflight | `powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1` | **plain, no `-Update`** — never swap tooling mid-run. Must exit 0 before you continue |
@@ -138,8 +139,31 @@ blocked — temporary, machine-local, never the run's recorded path, and it waiv
 | 4 | harvest | `python scripts/harvest_estate_assets.py --out <run> --env .env --db <run>/assessment/estate.db` | ⚠️ `--out` is the RUN root; the script appends `assets/` itself |
 | 5 | engine | `python scripts/run_estate.py --input <run>/assets --output <run>/bundle --scope-survey <run>/assessment/estate_survey.json` | the canonical engine only — `python scripts/engine_source.py` resolves it |
 | 6 | oracle | `python scripts/capture_tableau_oracle.py --out <run>/oracle --env .env --images --reference-best` | slow (hours at estate scale). Run it **async** and continue |
-| 7 | **PRE-check** | `python scripts/check_reference_readiness.py <run>/bundle --oracle <run>/oracle` | the entry gate |
-| 8 | **POST-check** | `python scripts/check_unit.py <run>/bundle` | the exit gate |
+| 7 | **Construct** | `python scripts/package_unit.py --bundle <run>/bundle --unit <exact-unit> --brief <current-v2-brief> --assets <run>/assets --oracle <run>/oracle --out <run>/packages --gate-root <run>/bundle` | one unit/brief per command; provider first, consumers receive exact `--provider-package` roots; accepted local evidence uses `--reference` instead |
+| 8 | **Bind** | `python scripts/set_data_folder.py --package <absolute-package>` | provider first; consumers receive the same `--provider-package` roots; only after actual prerequisites pass |
+| 9 | **Check** | `python scripts/check_reference_readiness.py <provider-package> <consumer-package> --json - --quiet` | package-only full cohort; one package for an owned model |
+| 10 | **Dispatch** | `tableau-migrator`'s validator/builder handoff | only after current process exit == 0 AND status == "START_READY" |
+| 11 | **POST-check** | `python scripts/check_unit.py <exact-package>` | diagnostic only; Phase-2 COMPLETE retains its separate caller-pinned contract |
+
+The explicit selected run and exact unit stay fixed; **never choose the latest run**.
+The retained #562 published-dependency authority and S2 determine the complete provider/consumer
+cohort: **no name/spec fallback**. Package/bind exits alone grant nothing. Stage 9 uses the executable
+guard in `tableau-migrator` step 7: one current stdout JSON object and BOTH
+**process exit == 0 AND status == "START_READY"**, never a stored result.
+Missing/malformed/multiple JSON, process/JSON disagreement, ASSEMBLED, BOUND, ordinary READY,
+NOT_APPLICABLE, stored status or todo completion block all validator/builder dispatch.
+An in-flight capture or a pre-existing ASSEMBLED package does not clear this barrier.
+
+Preserve package edits and existing refusals; no automatic discard, overwrite or reseal.
+Only explicit **Export diagnostics** selects `--assemble-only`, producing diagnostic-only
+ASSEMBLED / NOT_EVALUATED; no agent was dispatched. Default Migrate/Continue failure must
+**never fall back** to diagnostics. The **orchestrator always prints a terminal outcome, even
+with quiet helpers**: exact run/unit, discovered inputs, completed stages, blocking stage,
+authoritative verdict and exit, and **one executable next action** for that actual blocker.
+Keep low-level default quiet silent and explicit quiet diagnostics' notice intact.
+Missing source/reference/brief/provider/data authority is not a reason to recommend binding.
+Use the existing owner's finding and preserve all unexercised stages as unexercised.
+<!-- END:strict-preparation -->
 
 **Only after an actual unsigned/ExecutionPolicy startup refusal** at stage 0, follow
 [preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start).

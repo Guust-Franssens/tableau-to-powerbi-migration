@@ -328,7 +328,7 @@ promotion out of the landing zone remain human decisions (#57). So the question 
 Fabric?" but *"name the destination workspace in the brief, and say whether this run stops at the
 bundle or goes on to deploy."*
 
-### Step 2 — five questions, asked ONCE, in one message
+### Step 2 — six questions, asked ONCE, in one message
 
 **The problem was never that we ask too little; it is that every question arrived too late.** All
 four ask-moments used to be mid-flight (published datasource, credential stop, re-parse
@@ -345,6 +345,11 @@ Step 1 answers *scope* by investigation, so only these are genuinely questions:
 | 3 | **Fidelity bar** — faithful re-creation, or modernise where Power BI is better? | It decides real translations (a Tableau dual-axis trick → a native combo chart; a `MAKELINE` route map → endpoint bubbles). Both builders need it. |
 | 4 | **If we hit a wall — stop, or degrade?** | Pre-authorising the fallback is what lets an unattended run *survive* one instead of dying at 3 am. |
 | 5 | **Who drives the data refreshes?** — see below. Default `scripted`. | Only you know how large the source is and whether you will be at the keyboard. |
+| 6 | **Numeric comparison scope (`numeric_obligation`)** — `none` (explicit commission without numeric comparison) or `required` (numeric comparison is owed)? | This is commissioned scope, not a numeric result or a completion verdict. |
+
+Reuse answers already recorded in the current brief; ask only missing choices in that same message.
+**Numeric scope has no default:** without the human's `none` or `required`, **stop before packaging**;
+never infer it from available data, reference images or a successful gate.
 
 **Autonomy levels, defined by behaviour at a decision point — not by vibe:**
 
@@ -382,13 +387,65 @@ unclassifiable timeout says so in its own output.
 `Date` table built with `CALENDAR(MINX(...), MAXX(...))` over the fact). Refresh the fact alone and
 the calculated object does not recompute in the same transaction.
 
-### Step 3 — write the brief, then dispatch
+### Step 3 — write the brief, then prepare the exact handoff
 
 Write the answers to `migrations/workbooks/<name>/migration-brief.md`. **The file is the point**, for
 two reasons no persona can solve alone: it survives a **dropped session** (a closed terminal takes
 this session's entire working memory with it — measured 2026-08-08), and it is what a **stateless**
-subagent receives instead of re-deriving intent nobody wrote down. Then invoke `@tableau-migrator`
-per unit of work, handing it the brief.
+subagent receives instead of re-deriving intent nobody wrote down. Its current
+[`phase1-start-ready/v2` frontmatter](scripts/README.md#s2-package-preparation) must be complete
+**before `package_unit.py`**: exactly five string keys, `schema`, `unit`, `scope`,
+`fallback_authorization` and `numeric_obligation`. Match unit and topology scope exactly and record
+the agreed fallback and human numeric choice; never infer numeric `none`. Keep the other answers
+in the brief's narrative, not as extra frontmatter keys.
+Invoke `@tableau-migrator` as the preparation owner, with the **explicit selected run and exact unit**,
+the current brief and discovered inputs. Never choose the latest run. Invoking this orchestrator is
+not permission to dispatch a validator or builder.
+
+### Strict preparation barrier — Migrate and Continue
+
+<!-- BEGIN:strict-preparation -->
+The dispatcher and `tableau-migrator` own this entire sequence, including the ordinary path plumbing;
+do not hand it back to the customer as a list of missing helper flags. Use the selected run's allocated
+bundle/assets/oracle/packages paths and the exact current brief/manual reference and original gate
+root. Report absent or ambiguous inputs; do not invent another locator, classifier or authority.
+Keep the explicit selected run and exact unit; **never choose the latest run**.
+
+1. **Construct** with `package_unit.py`, one exact `--unit` and current `--brief` per invocation.
+   Supply the discovered `--assets`, applicable `--oracle` or accepted `--reference`, `--out` and
+   original `--gate-root`. For a shared model, construct **provider first**, then consumers with
+   `--provider-package <exact-provider-package>` for every required provider. The full cohort and
+   ordering come from the retained #562 published-dependency authority and existing S2 resolution:
+   **no name/spec fallback** and no unrelated provider to make a smaller cohort pass.
+2. **Bind** using `set_data_folder.py --package <absolute-package>` when applicable, providers
+   before consumers; consumers receive the same `--provider-package` roots. Resolve the actual
+   source/reference/brief/provider/data-access refusal first, not a speculative binding problem.
+   Package and binding commands must succeed by their own exits, but neither grants dispatch.
+3. **Check the complete current provider/consumer cohort** with
+   `check_reference_readiness.py <provider-package> <consumer-package> --json - --quiet`
+   (one package for an owned model). Use **package-only** targets, no bundle or external evidence
+   override. Follow the executable guard in `tableau-migrator` step 7: parse exactly one fresh
+   stdout JSON object and require **process exit == 0 AND status == "START_READY"**.
+   Missing/malformed/multiple JSON, process/JSON disagreement or any other status is blocked /
+   cannot-establish. ASSEMBLED, BOUND, ordinary READY, NOT_APPLICABLE, stored status and todo completion
+   are never substitutes. A pre-existing ASSEMBLED package needs this current check too.
+4. **Dispatch** validator triage, then the builders, only after that barrier. Give them the exact
+   checked package `fabric/` tree and accepted reference ceilings, not the engine's baseline.
+   On Continue or changed preparation inputs, re-evaluate current packages; never reuse a historical
+   success. Preserve all edit refusals: no automatic discard, overwrite, reseal or alternate output
+   chosen to evade an existing edited package.
+
+Only explicit **Export diagnostics** may select `--assemble-only`. It yields diagnostic-only
+ASSEMBLED / NOT_EVALUATED, never agentic permission; no agent was dispatched.
+Default Migrate/Continue failure must **never fall back** to Export diagnostics.
+Low-level default `--quiet` remains silent and explicit diagnostics retain their notice.
+The **orchestrator always prints a terminal outcome, even with quiet helpers**: exact run/unit,
+discovered inputs (present versus absent), completed stages, blocking stage, authoritative verdict
+and exit, no-dispatch when blocked, and **one executable next action** addressing that actual stage.
+For example, missing references require the exact capture/adoption command for the selected source,
+not binding; missing authority requires its existing acquisition/credential route, never a waiver.
+This is preparation reporting, not the future five-intent presentation policy.
+<!-- END:strict-preparation -->
 
 **Record the Step-1 capture in the brief — grade included.** Name **where** it landed, **which tool**
 produced it, and each accepted manifest record's **capabilities, grade and provider ceiling**; a
