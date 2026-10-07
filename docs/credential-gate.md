@@ -540,7 +540,7 @@ Finding (1) is also why the idempotency rule above exists.
 
 > **Judge a run by ground truth, not by its own summary.** The haiku run that bypassed the gate
 > reported "Sign-off ready: YES" and never mentioned it. `verify` caught it; the summary did not.
-> See *Monitoring delegated work* in [`AGENTS.md`](../AGENTS.md).
+> See [agent operations §1](agent-operations.md#1-a-subagents-summary-is-a-claim-not-evidence).
 
 ### Both paths, re-verified against the shipped code (2026-08-03)
 

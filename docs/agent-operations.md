@@ -1,9 +1,8 @@
 # Agent operations — monitoring delegated work, host limits, crash forensics
 
-The **rules** these incidents produced live in [`AGENTS.md`](../AGENTS.md) (session start, delegation
-discipline, concurrency budgets) — this file holds the **evidence** behind them, so an auto-loaded
-file can stay short without the measurement being lost. If a rule here and a rule in `AGENTS.md`
-disagree, `AGENTS.md` is the contract and this file is the reason.
+This file owns **delegation discipline, concurrency budgets and crash recovery**, plus the evidence
+behind them. [`AGENTS.md`](../AGENTS.md) owns the customer runtime and links here before parallel work
+or crash recovery. Contributor lifecycle and review rules live in [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
 Related: [`docs/agent-architecture.md`](agent-architecture.md) (what text reaches an agent at all),
 [`docs/review-throughput-postmortem.md`](review-throughput-postmortem.md) (review-round measurements
@@ -12,6 +11,20 @@ behind the review contract).
 ---
 
 ## 1. A subagent's summary is a claim, not evidence
+
+Dispatchers, including `tableau-migrator`, owe these checks:
+
+- **Verify claims before repeating them.** Use authoritative logs, gate exits, counts or checksums.
+  A summary is not evidence; contradictory ground truth wins, unconditionally.
+- **Inspect anomalous elapsed time/tool-call counts mid-run** against ground truth, not the
+  eventual summary.
+- **Green CI starts review.** Give reviewers only the issue/requirement and diff, never the
+  author's rationale.
+- **Allow a clean verdict and evidence-backed pushback.** Return fixes to the same reviewer.
+  Full-fix commits require `Fixes #N`; partial work uses `Refs #N`, not merely `(#N)`.
+- **After a crash, in-flight work is UNKNOWN.** Before re-dispatch, inspect target-worktree
+  `git status`, `git diff --stat` and file mtimes against crash time; neither assume lost nor done.
+  Brief agents to commit and push incrementally, not just commit.
 
 **Measured 2026-08-02.** A subagent's final summary declared **"Sign-off ready: YES"** and never
 mentioned that it had, minutes earlier, re-armed its own credential gate and cleared it unearned.

@@ -160,32 +160,13 @@ not survive the measurements.
 
 ## Replacement brief instruction
 
-Paste this into the implementation brief **before coding**:
+The live six-rule [review contract](../CONTRIBUTING.md#the-review-contract--state-this-in-the-brief-before-coding)
+now lives in `CONTRIBUTING.md`; state it in the implementation brief **before coding**.
+This section records the 2026-09-01/02 evidence, not a second live checklist.
 
-> ### Review contract
-> 1. **Invariant and direction:** State the exact pass/refuse/cannot-establish contract. Name the
->    fail-open consequence, fail-closed consequence, and which one blocks merge.
-> 2. **Closed surface:** Enumerate every current consumer, phase, transformation, identity-loss join,
->    and mutable read that can affect the invariant (`N = ___`). Name residuals explicitly. If review
->    finds a new class or an unlisted surface after round 1, do not add another local guard: simplify,
->    delete, split, or descope the mechanism.
-> 3. **Independent oracle:** For each verdict, name evidence not produced by the code under test and
->    one positive plus one negative control. A proof must fail on its intended assertion; a non-zero
->    process alone is not a kill.
-> 4. **Proof escalation:** Direct tests are the default. A new mutation runner, digest, census,
->    anchor map, or pin requires: an observed/accepted need; named harm if the ordinary test is
->    vacuous; a demonstrated mutation that the ordinary test misses; and why an existing harness or
->    direct positive/negative control cannot close it. Otherwise do not add the mechanism.
-> 5. **Round route:** Round 1 reviews the invariant and enumerated surface. Round 2 checks regressions
->    and whether the class is closed. After round 2, freeze scope: a new defect in the same class may
->    be fixed; a new class or new proof mechanism forces simplify/delete/split/descope. Fail-open,
->    security, and data-loss findings block; fail-closed/diagnostic/proof residuals become issues.
-> 6. **Integration:** Name shared/contended files and the base SHA. Bring the branch current once
->    before final review, then prove the reviewed tree's SHA rather than relying on a three-dot diff.
-
-Traceability: line 2 addresses the 66% cross-PR recurrence; line 3 the 45 Q findings; line 4 the
-64.2% proof footprint; line 5 preserves the useful direction rule without pretending two rounds
-erase 44 late blockers; line 6 addresses the measured contention/currency findings without blaming
+Traceability: rule 2 addresses the 66% cross-PR recurrence; rule 3 the 45 Q findings; rule 4 the
+64.2% proof footprint; rule 5 preserves the useful direction rule without pretending two rounds
+erase 44 late blockers; rule 6 addresses the measured contention/currency findings without blaming
 them for the whole spiral.
 
 ## Follow-up at 2026-09-02 09:57Z: falsifying the proof-ratio hypothesis
