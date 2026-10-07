@@ -48,13 +48,13 @@ FLAT = {"class": "excel-direct", "powerbi_target": "flat_file"}
 REVIEW = {"class": "unknown", "server": "review.example", "powerbi_target": "unknown"}
 
 
-def _ordinary_key(server: str, ordinary_tables: tuple[str, ...] | None = ("Orders",)) -> str:
+def _ordinary_key(server: str, ordinary_tables: tuple[str, ...] | None = ("Orders",), *, schema: str = "dbo") -> str:
     """Independent SHA-256 oracle for the documented dbo.Orders identity."""
     identity = {
         "class": "sqlserver",
         "server": server,
         "database": "db",
-        "schema": "dbo",
+        "schema": schema,
         "ordinary_tables": list(ordinary_tables) if ordinary_tables is not None else None,
     }
     return (
@@ -1007,7 +1007,7 @@ def test_production_resolution_error_cannot_reuse_old_clearance(root: Path, sour
     _earn(root)
     spec = _spec(LIVE)
     spec["data_sources"][0]["tables"] = []
-    current_key = _ordinary_key("source.example", None)
+    current_key = _ordinary_key("source.example", None, schema="")
     assert current_key != KEY, "unresolved identity must not inherit valid Orders proof"
     (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
     with pytest.raises(SystemExit) as error:
