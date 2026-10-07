@@ -40,7 +40,8 @@ import iteration_receipt as receipt
 # Neither import loads CLR or starts native work; there is no alternate implementation.
 SKILL_SCRIPTS = Path(__file__).resolve().parents[1] / ".github" / "skills" / "pbip-model-refresh" / "scripts"
 sys.path.insert(0, str(SKILL_SCRIPTS))
-from _credential_modal import (  # noqa: E402  # pylint: disable=wrong-import-position
+# The root CLI lint pass cannot resolve this runtime-added sibling path; copy/import tests cover it.
+from _credential_modal import (  # noqa: E402  # pylint: disable=wrong-import-position,import-error
     inspect_credential_modal,
     print_dialog_diagnostic,
 )

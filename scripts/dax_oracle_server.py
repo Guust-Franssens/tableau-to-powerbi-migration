@@ -160,7 +160,8 @@ def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[di
     # pylint: disable-next=import-outside-toplevel
     import probe_desktop_query as pdq  # noqa: PLC0415
 
-    # pylint: disable-next=import-outside-toplevel
+    # The root CLI lint pass cannot resolve the runtime-added skill path.
+    # pylint: disable-next=import-outside-toplevel,import-error
     from _credential_modal import print_dialog_diagnostic
 
     connection = None
