@@ -71,7 +71,7 @@ def diagnostic_payload(kind: str = "privacy_warning", *, pid: int = 111, hwnd: i
         "PatternsIncomplete": False,
         "Items": [
             {"Text": instruction, "Role": "ControlType.Text", "Source": "Name"},
-            *[{"Text": label, "Role": "ControlType.Button", "Source": "Name"} for label in buttons],
+            *[{"Text": button_text, "Role": "ControlType.Button", "Source": "Name"} for button_text in buttons],
         ],
     }
 
@@ -469,18 +469,12 @@ $null = $modal.ShowDialog()
 """
 
 
-@pytest.mark.gui
-@pytest.mark.serial
-@pytest.mark.skipif(
-    sys.platform != "win32", reason="probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter"
-)
-@pytest.mark.parametrize("kind", ["privacy_warning", "package_session"])
-def test_diagnostic_harvest_only_mode_reads_test_owned_windows(tmp_path: Path, kind: str) -> None:
-    """The full child branch returns without finding/clicking the owner's Refresh button."""
-    script, fixture, ready = (tmp_path / name for name in ("dialog.ps1", "fixture.json", "hwnd.txt"))
+def _diagnostic_window_command(tmp_path: Path, kind: str) -> list[str]:
+    """Prepare a test-owned window using the independent diagnostic fixtures."""
+    script, fixture = (tmp_path / name for name in ("dialog.ps1", "fixture.json"))
     script.write_text(_DIAGNOSTIC_WINDOW, encoding="utf-8")
     fixture.write_text(json.dumps(diagnostic_payload(kind)), encoding="utf-8")
-    argv = [
+    return [
         _powershell(),
         "-Sta",
         "-NoProfile",
@@ -490,10 +484,23 @@ def test_diagnostic_harvest_only_mode_reads_test_owned_windows(tmp_path: Path, k
         str(script),
         "-Fixture",
         str(fixture),
-        "-ReadyFile",
-        str(ready),
     ]
-    with _ready_native_process(argv, "test-owned diagnostic window") as child:
+
+
+def _assert_test_owned_diagnostic_window(child: subprocess.Popen, ready: Path, kind: str) -> None:
+    """Bound startup, assert read-only diagnosis, and reap only the exact test-owned child."""
+    deadline = threading.Timer(10, child.kill)
+    try:
+        deadline.start()
+        try:
+            startup = child.stdout.readline().strip()
+        finally:
+            deadline.cancel()
+            deadline.join()
+        assert startup == b"READY", (
+            f"test-owned diagnostic window startup failed before READY "
+            f"(pid={child.pid}, exit={child.poll()}, output={startup!r})"
+        )
         hwnd = int(ready.read_text(encoding="utf-8"))
         state = inspect_credential_modal(child.pid)
         assert state.dialog is not None and state.dialog.window.hwnd == hwnd
@@ -502,6 +509,45 @@ def test_diagnostic_harvest_only_mode_reads_test_owned_windows(tmp_path: Path, k
         # A real wrong-PID attempt must never borrow the same window's valid template.
         assert _credential_modal.diagnose_dialog(child.pid + 1, state.dialog.window)[0] == "CANNOT_READ"
         assert child.poll() is None, "the read-only child must leave its target window running"
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=3)
+
+
+# Keep one function per GUI case and the real -ReadyFile argument at Popen for the AST marker census.
+@pytest.mark.gui
+@pytest.mark.serial
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter"
+)
+def test_diagnostic_harvest_only_mode_reads_test_owned_privacy_warning(tmp_path: Path) -> None:
+    """Read the full privacy template without finding/clicking the owner's Refresh button."""
+    ready = tmp_path / "hwnd.txt"
+    with subprocess.Popen(
+        [*_diagnostic_window_command(tmp_path, "privacy_warning"), "-ReadyFile", str(ready)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    ) as child:
+        _assert_test_owned_diagnostic_window(child, ready, "privacy_warning")
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter"
+)
+def test_diagnostic_harvest_only_mode_reads_test_owned_package_session(tmp_path: Path) -> None:
+    """Read the full session template without finding/clicking the owner's Refresh button."""
+    ready = tmp_path / "hwnd.txt"
+    with subprocess.Popen(
+        [*_diagnostic_window_command(tmp_path, "package_session"), "-ReadyFile", str(ready)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    ) as child:
+        _assert_test_owned_diagnostic_window(child, ready, "package_session")
 
 
 class _NativeCall:
