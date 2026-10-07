@@ -390,8 +390,47 @@ def _clear_was_earned(migration: Path, sources: list[str] | None = None) -> str 
 
 
 def _icacls(args: list[str]) -> tuple[int, str]:
-    proc = subprocess.run(["icacls", *args], capture_output=True, text=True, check=False)
-    return proc.returncode, (proc.stdout + proc.stderr).strip()
+    """The Windows ACL boundary, including the protection bit absent from icacls' listing."""
+    try:
+        if len(args) == 1 and _protected_dacl(Path(args[0])):
+            return 1, "physical_acl_protected"
+        proc = subprocess.run(["icacls", *args], capture_output=True, text=True, timeout=30, check=False)
+        return proc.returncode, (proc.stdout + proc.stderr).strip()
+    except (OSError, subprocess.SubprocessError):
+        return 1, "physical_acl_query_failed"
+
+
+def _protected_dacl(path: Path) -> bool:
+    """Read SE_DACL_PROTECTED without following an unchecked path or altering its descriptor."""
+    import ctypes  # pylint: disable=import-outside-toplevel
+    from ctypes import wintypes  # pylint: disable=import-outside-toplevel
+
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    security.GetFileSecurityW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    security.GetFileSecurityW.restype = wintypes.BOOL
+    security.GetSecurityDescriptorControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    security.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    size = wintypes.DWORD()
+    security.GetFileSecurityW(str(path), 4, None, 0, ctypes.byref(size))  # DACL_SECURITY_INFORMATION
+    if not size.value:
+        raise OSError("physical_acl_query_failed")
+    descriptor = ctypes.create_string_buffer(size.value)
+    if not security.GetFileSecurityW(str(path), 4, descriptor, size.value, ctypes.byref(size)):
+        raise OSError("physical_acl_query_failed")
+    control, revision = wintypes.WORD(), wintypes.DWORD()
+    if not security.GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision)):
+        raise OSError("physical_acl_query_failed")
+    return bool(control.value & 0x1000)  # SE_DACL_PROTECTED
 
 
 def _user() -> str:
@@ -402,10 +441,11 @@ PROBE_DIR = "_probe"
 
 
 def probe_dir(migration: Path) -> Path:
-    """Writable one-table probe sandbox, a SIBLING of denied `fabric/`, never a deliverable.
+    """Writable one-table probe sandbox beside this gate's anchors, never a deliverable.
 
     A child inherits the deny and cannot earn the clear it needs to build. Re-granting a child
-    introduces ACL ordering, recreation and temporary-lift hazards; the sibling avoids all three.
+    introduces ACL ordering, recreation and temporary-lift hazards. For nested gates, use the
+    outer root's sandbox and clear the outer gate first.
     """
     d = migration / PROBE_DIR
     d.mkdir(parents=True, exist_ok=True)
@@ -413,15 +453,170 @@ def probe_dir(migration: Path) -> Path:
 
 
 def denied_dirs(migration: Path, create: bool = True) -> list[Path]:
-    """Directories the ACL DENIES writes to while the gate is up. Enforcement surface only.
-
-    Only `fabric/` is denied; the sibling probe stays writable. Read-only callers pass create=False.
-    This is deliberately narrower than `audited_paths`: enforcement and verification are different.
-    """
-    fabric = migration / "fabric"
+    """Resolve non-colliding anchors; clear/read use create=False and never synthesize a folder."""
+    for parent in (migration, *migration.parents):
+        _safe_acl_entry(parent, directory=True)
+    native = sorted(path for path in migration.iterdir() if path.suffix.lower() in {".semanticmodel", ".report"})
+    fabric, pbip = migration / "fabric", migration / "pbip"
+    for directory in (*native, fabric, pbip):
+        _safe_acl_entry(directory, directory=True)
+    identities = (MIGRATION_SPEC, "package-manifest.json", "report.json", ENGINE_RECEIPT, "input_manifest.json")
+    present = {name for name in identities if _safe_acl_entry(migration / name, directory=False)}
+    if native:
+        targets = native
+        alternatives = (fabric, pbip)
+    elif present & {MIGRATION_SPEC, "package-manifest.json"}:
+        targets, alternatives = [fabric], (pbip,)
+    elif pbip.exists() or present & {"report.json", ENGINE_RECEIPT, "input_manifest.json"}:
+        targets, alternatives = [pbip], (fabric,)
+    else:
+        # The caller's existing scope guard permits this only for a promoted/forced legacy root.
+        targets, alternatives = [fabric], ()
+    if any(path.exists() and next(path.iterdir(), None) is not None for path in alternatives):
+        raise ValueError("physical_layout_ambiguous")
     if create:
-        fabric.mkdir(parents=True, exist_ok=True)
-    return [fabric]
+        for directory in targets:
+            directory.mkdir(exist_ok=True)
+    return targets
+
+
+def _safe_acl_entry(path: Path, *, directory: bool) -> bool:
+    """No-follow type check; missing targets are readable state, not permission to create them."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    if is_reparse_entry(info) or not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)):
+        raise ValueError("physical_directory_unsafe")
+    return True
+
+
+def _inspection_dirs(migration: Path) -> list[Path]:
+    """Expected anchors plus the one bounded legacy location; never a recursive removal list."""
+    targets = denied_dirs(migration, create=False)
+    legacy = migration / "fabric"
+    if legacy not in targets and _safe_acl_entry(legacy, directory=True):
+        targets.append(legacy)
+    return targets
+
+
+def _acl_listing(path: Path) -> str:
+    code, output = _icacls([str(path)])
+    if code:
+        raise ValueError("physical_acl_query_failed")
+    return output
+
+
+def _account_aces(path: Path) -> list[tuple[frozenset[str], frozenset[str]]]:
+    """Parse current-principal flags/rights, never a localized success sentence or a substring."""
+    listing = _acl_listing(path)
+    entries = []
+    parsed = False
+    user = _user().casefold()
+    if not user:
+        raise ValueError("physical_acl_principal_unknown")
+    for line in listing.splitlines():
+        line = line.removeprefix(str(path)).strip()
+        principal, separator, permissions = line.partition(":(")
+        if not separator:
+            continue
+        groups = re.findall(r"\(([^)]*)\)", "(" + permissions)
+        if not groups or "".join(f"({group})" for group in groups) != "(" + permissions:
+            raise ValueError("physical_acl_unreadable")
+        parsed = True
+        identity = principal.casefold()
+        if identity != user and ("\\" in user or identity.rsplit("\\", 1)[-1] != user):
+            continue
+        entries.append((frozenset(group.upper() for group in groups[:-1]), frozenset(groups[-1].upper().split(","))))
+    if not parsed:
+        raise ValueError("physical_acl_unreadable")
+    return entries
+
+
+def _gate_ace(flags: frozenset[str], rights: frozenset[str]) -> bool:
+    return flags - {"I"} == {"OI", "CI", "DENY"} and rights == {"WD", "AD", "WA"}
+
+
+def _attributable_anchor(path: Path) -> bool:
+    """Exact gate-shaped explicit denies are the only nesting/re-arm exception."""
+    return _gate_was_ever_applied(path.parent) and path in denied_dirs(path.parent, create=False)
+
+
+def _checked_acl_tree(
+    targets: list[Path], *, for_mutation: bool = True
+) -> dict[Path, list[tuple[frozenset[str], frozenset[str]]]]:
+    """Read existing inheritance/explicit ACLs; never install or repair descendant ACEs."""
+    snapshots = {}
+    pending = [path for path in targets if _safe_acl_entry(path, directory=True)]
+    while pending:
+        path = pending.pop()
+        info = path.lstat()
+        if is_reparse_entry(info) or not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+            raise ValueError("physical_directory_unsafe")
+        entries = _account_aces(path)
+        for flags, rights in entries:
+            if "I" not in flags and not (_gate_ace(flags, rights) and (not for_mutation or _attributable_anchor(path))):
+                raise ValueError("physical_acl_conflict")
+        snapshots[path] = entries
+        if stat.S_ISDIR(info.st_mode):
+            pending.extend(path.iterdir())
+    return snapshots
+
+
+def _all_targets_denied(migration: Path) -> bool:
+    """Enforcement is ALL expected anchors with supported descendants, not any residual deny."""
+    targets = denied_dirs(migration, create=False)
+    snapshots = _checked_acl_tree(targets, for_mutation=False)
+    return bool(targets) and all(any(_gate_ace(*ace) for ace in snapshots.get(path, [])) for path in targets)
+
+
+def _clear_acl_targets(migration: Path) -> None:
+    """Remove only this root's explicit anchors; inherited or nested gates are never removed."""
+    targets = denied_dirs(migration, create=False)
+    candidates = _inspection_dirs(migration)
+    removable = []
+    for path in candidates:
+        if not _safe_acl_entry(path, directory=True):
+            continue
+        entries = _account_aces(path)
+        explicit = [(flags, rights) for flags, rights in entries if "DENY" in flags and "I" not in flags]
+        if not explicit:
+            continue
+        if (
+            not _gate_was_ever_applied(migration)
+            or any(not _gate_ace(*ace) for ace in explicit)
+            or (path not in targets and next(path.iterdir(), None) is not None)
+        ):
+            raise ValueError("physical_acl_conflict")
+        removable.append(path)
+    for path in removable:
+        code, _output = _icacls([str(path), "/remove:d", _user()])
+        if code:
+            raise ValueError("physical_acl_remove_failed")
+    if _has_deny_ace(migration):
+        raise ValueError("physical_acl_still_blocked")
+
+
+def _acl_refusal() -> None:
+    """Path/account-free remedy shared by failed physical operations."""
+    log.error(
+        "CANNOT ESTABLISH credential-gate enforcement/clearance: unsupported layout, ACL, or failed ACL operation. "
+        "Do not build. For nested gates, probe and clear the outer gate first; otherwise have the operator "
+        "resolve protected/conflicting ACLs and retry."
+    )
+
+
+def _mark_unenforced(migration: Path) -> None:
+    """Retain an existing stop without claiming complete physical coverage after a failed arm."""
+    try:
+        marker = migration / MARKER
+        if marker.is_file():
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                payload["writes_blocked"] = False
+                marker.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
 
 
 # The existing authority owns this one additional read-only boundary; no fourth producer module.
@@ -487,7 +682,7 @@ def inspect_physical_barrier(root: Path) -> tuple[str, str]:  # pylint: disable=
             ):
                 return "cannot_establish", "physical_marker_invalid"
             return "blocked", "physical_marker_blocked"
-        for directory in denied_dirs(root, create=False):
+        for directory in _inspection_dirs(root):
             try:
                 info = directory.lstat()
             except FileNotFoundError:
@@ -501,7 +696,7 @@ def inspect_physical_barrier(root: Path) -> tuple[str, str]:  # pylint: disable=
                 if "(DENY)" in output.upper():
                     return "blocked", "physical_acl_blocked"
         return "clear", "physical_clear"
-    except (OSError, ValueError, _DuplicateJsonKey, _NonFiniteJsonConstant):
+    except (OSError, ValueError, subprocess.SubprocessError, _DuplicateJsonKey, _NonFiniteJsonConstant):
         return "cannot_establish", "physical_query_failed"
 
 
@@ -729,40 +924,45 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
     if sources and not pending_sources:
         _audit(migration, "block-skipped", f"already earned by source state; sources={sources}")
         return 0
+    return _apply_pending_block(migration, pending_sources)
 
-    (migration / MARKER).write_text(
-        json.dumps(
-            {
-                "writes_blocked": True,
-                "reachability": "UNPROVEN",
-                "credential_status": "UNKNOWN - nothing has contacted this source yet",
-                "reason": "live data source(s) detected; reachability has NOT been measured",
-                "next_step": (
-                    "python scripts/probe_live_source.py --spec <this-migration>/migration-spec.json "
-                    "OR --bundle <engine-output-dir>"
-                ),
-                "read_this_before_reporting": (
-                    "This file was written at PARSE time by a static check that opens NO connection. "
-                    "It does NOT mean a credential is missing - only that nothing has proven the "
-                    "source is reachable. Do NOT report a credential or connection problem from this "
-                    "file alone: run the probe and let its verdict (DATA_OK / NO_CREDENTIAL / "
-                    "UNREACHABLE) decide. Only the probe can tell a missing credential (a human must "
-                    "act) from a wrong hostname (nobody needs to sign in)."
-                ),
-                "sources": pending_sources,
-                "applied": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
 
-    # The sandbox is a SIBLING of fabric/, so it needs no grant and no particular ordering - see
-    # probe_dir(). Created before the platform branch: the probe needs somewhere to build on every
-    # platform, and only the ENFORCEMENT is Windows-specific, not the workflow.
-    probe = probe_dir(migration)
+def _apply_pending_block(migration: Path, pending_sources: list[str]) -> int:
+    """Precheck every existing descendant before changing ACLs; claim coverage only after readback."""
+    windows = platform.system() == "Windows"
+    try:
+        targets = denied_dirs(migration, create=False)
+        if windows:
+            _checked_acl_tree(targets)
+            targets = denied_dirs(migration)
+        probe = probe_dir(migration)
+        payload = {
+            "writes_blocked": not windows,
+            "reachability": "UNPROVEN",
+            "credential_status": "UNKNOWN - nothing has contacted this source yet",
+            "reason": "live data source(s) detected; reachability has NOT been measured",
+            "next_step": (
+                "python scripts/probe_live_source.py --spec <this-migration>/migration-spec.json "
+                "OR --bundle <engine-output-dir>"
+            ),
+            "read_this_before_reporting": (
+                "This file was written at PARSE time by a static check that opens NO connection. "
+                "It does NOT mean a credential is missing - only that nothing has proven the "
+                "source is reachable. Do NOT report a credential or connection problem from this "
+                "file alone: run the probe and let its verdict (DATA_OK / NO_CREDENTIAL / "
+                "UNREACHABLE) decide. Only the probe can tell a missing credential (a human must "
+                "act) from a wrong hostname (nobody needs to sign in)."
+            ),
+            "sources": pending_sources,
+            "applied": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        (migration / MARKER).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        _mark_unenforced(migration)
+        _acl_refusal()
+        return 1
 
-    if platform.system() != "Windows":
+    if not windows:
         log.warning("Non-Windows: marker written, but ACL enforcement is Windows-only here.")
         log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
         # Same `sources=` detail as the enforced path. Without it `_last_block_sources` cannot read
@@ -770,18 +970,26 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
         _audit(migration, "block-marker-only", _sources_detail(pending_sources), sources=pending_sources)
         return 0
 
-    failed = 0
-    for d in denied_dirs(migration):
-        code, out = _icacls([str(d), "/deny", f"{_user()}:{DENY_RIGHTS}"])
-        if code != 0:
-            log.error("Could not deny write on %s: %s", d, out)
-            failed += 1
-        else:
-            log.info("ENFORCED: write denied on %s", d)
-
-    log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
+    # History also attributes completed anchors after a partial failure; no new target ledger.
     _audit(migration, "block", _sources_detail(pending_sources), sources=pending_sources)
-    return 1 if failed else 0
+    try:
+        for directory in targets:
+            if any("I" not in flags and _gate_ace(flags, rights) for flags, rights in _account_aces(directory)):
+                continue
+            code, _output = _icacls([str(directory), "/deny", f"{_user()}:{DENY_RIGHTS}"])
+            if code:
+                raise ValueError("physical_acl_apply_failed")
+        if not _all_targets_denied(migration):
+            raise ValueError("physical_acl_incomplete")
+        payload["writes_blocked"] = True
+        (migration / MARKER).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        _mark_unenforced(migration)
+        _acl_refusal()
+        return 1
+    log.info("ENFORCED: write denied on every resolved model/report target.")
+    log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
+    return 0
 
 
 def _marker_sources(migration: Path) -> list[str]:
@@ -838,12 +1046,11 @@ def clear_block(migration: Path, reason: str, earned: bool = False, sources: lis
             return 0
 
     if platform.system() == "Windows":
-        for d in denied_dirs(migration):
-            code, out = _icacls([str(d), "/remove:d", _user()])
-            if code != 0:
-                log.error("Could not clear deny ACE on %s: %s", d, out)
-                return 1
-            log.info("cleared write-deny on %s", d)
+        try:
+            _clear_acl_targets(migration)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            _acl_refusal()
+            return 1
     if marker.exists():
         marker.unlink()
     log.info("credential gate CLEARED (%s)", reason)
@@ -931,18 +1138,21 @@ def authorize(migration: Path, who: str) -> int:
 
 
 def status(migration: Path) -> int:
-    """Report the gate state. Exit 1 when blocked."""
+    """Report the marker and physical state. Exit 1 blocked, 3 cannot establish."""
     blocked = (migration / MARKER).exists()
     override = (migration / OVERRIDE).exists()
     log.info("marker=%s override=%s", "BLOCKED" if blocked else "none", "yes" if override else "no")
-    if platform.system() == "Windows":
-        for d in denied_dirs(migration, create=False):
-            if not d.exists():
-                continue
-            _, out = _icacls([str(d)])
-            denied = "(DENY)" in out.upper() or ":(DENY)" in out.upper() or "(N)" in out.upper()
-            log.info("acl on %s: %s", d.name, "deny-write present" if denied else "no deny ACE")
-    return 1 if blocked and not override else 0
+    try:
+        denied = _has_deny_ace(migration)
+        if platform.system() == "Windows":
+            if blocked and not _all_targets_denied(migration):
+                _acl_refusal()
+                return 3
+            log.info("acl=%s", "deny present" if denied else "no deny ACE")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        _acl_refusal()
+        return 3
+    return 1 if denied or (blocked and not override) else 0
 
 
 def _unit_state(unit: Path) -> str:
@@ -1042,11 +1252,10 @@ def _has_deny_ace(migration: Path) -> bool:
     """
     if platform.system() != "Windows":
         return (migration / MARKER).exists()
-    for d in denied_dirs(migration, create=False):
-        if not d.exists():
+    for directory in _inspection_dirs(migration):
+        if not directory.exists():
             continue
-        _, out = _icacls([str(d)])
-        if "(DENY)" in out.upper():
+        if "(DENY)" in _acl_listing(directory).upper():
             return True
     return False
 
@@ -1257,7 +1466,12 @@ def _verify_one(migration: Path) -> int:
     marker = (migration / MARKER).exists()
     override_file = (migration / OVERRIDE).exists()
     authentic = _override_is_authentic(migration)
-    deny = _has_deny_ace(migration)
+    try:
+        deny = _has_deny_ace(migration)
+        covered = _all_targets_denied(migration) if marker and platform.system() == "Windows" else deny
+    except (OSError, ValueError, subprocess.SubprocessError):
+        _acl_refusal()
+        return 3
     violations = 0
 
     if override_file and not authentic:
@@ -1266,8 +1480,8 @@ def _verify_one(migration: Path) -> int:
         _audit(migration, "violation", "forged override")
         violations += 1
 
-    if marker and not deny and not authentic:
-        log.error("GATE VERIFY: ENFORCEMENT REMOVED - marker present but the write-deny ACE is gone.")
+    if marker and not covered and not authentic:
+        log.error("GATE VERIFY: ENFORCEMENT REMOVED - marker present but not every target has its write-deny ACE.")
         violations += 1
 
     # A gate that is down must have been EARNED - by a successful probe or a human authorization.
