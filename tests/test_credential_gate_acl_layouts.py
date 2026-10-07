@@ -4,6 +4,9 @@ Run: pytest -q tests/test_credential_gate_acl_layouts.py --basetemp _credential_
 ACL cleanup is independent of the product, including when a mutation makes a test fail.
 """
 
+# These controls intentionally exercise the gate's existing private readback and syscall seams.
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import csv
@@ -97,8 +100,8 @@ def acl_session_cleanup(tmp_path_factory: pytest.TempPathFactory) -> Iterator[No
         AclLab(tmp_path_factory.getbasetemp()).cleanup()
 
 
-@pytest.fixture
-def acl_lab(tmp_path: Path) -> Iterator[AclLab]:
+@pytest.fixture(name="acl_lab")
+def _acl_lab_fixture(tmp_path: Path) -> Iterator[AclLab]:
     """Even assertion failures and deliberate product mutations must leave no fixture ACEs."""
     if platform.system() != "Windows":
         pytest.skip(WINDOWS_REASON)
@@ -175,6 +178,7 @@ def _probe_write(root: Path) -> None:
 
 
 def test_bundle_denies_existing_and_new_artifacts(acl_lab: AclLab) -> None:
+    """Existing emitted bytes, new descendants and post-clear writes are independent syscall oracles."""
     root, files = _bundle(acl_lab.root / "bundle")
     assert gate.apply_block(root, [SOURCE]) == 0
     _denied(files)
@@ -189,6 +193,7 @@ def test_bundle_denies_existing_and_new_artifacts(acl_lab: AclLab) -> None:
 
 @pytest.mark.parametrize("kinds", [("SemanticModel", "Report"), ("SemanticModel",), ("Report",)])
 def test_native_unit_denies_each_artifact_directory(acl_lab: AclLab, kinds: tuple[str, ...]) -> None:
+    """Unequal names and model/report-only units share the same kernel-write invariant."""
     root, files = _unit(acl_lab.root / "unit", kinds)
     assert gate.apply_block(root, [SOURCE]) == 0
     _denied(files)
@@ -202,6 +207,7 @@ def test_native_unit_denies_each_artifact_directory(acl_lab: AclLab, kinds: tupl
 
 @pytest.mark.parametrize("layout", ["parser", "package", "mixed-package", "promoted"])
 def test_fabric_layouts_remain_supported(acl_lab: AclLab, layout: str) -> None:
+    """Parser/package identity outranks the engine-shaped report marker without changing fabric."""
     root = acl_lab.root / layout
     files = _native(root / "fabric")
     if layout != "promoted":
@@ -220,6 +226,7 @@ def test_fabric_layouts_remain_supported(acl_lab: AclLab, layout: str) -> None:
 
 @pytest.mark.parametrize("layout", ["bundle", "unit", "parser"])
 def test_correct_root_probe_remains_writable(acl_lab: AclLab, layout: str) -> None:
+    """The active root's sandbox, including its cache, must not inherit this gate's deny."""
     root = acl_lab.root / layout
     if layout == "bundle":
         _bundle(root)
@@ -235,6 +242,7 @@ def test_correct_root_probe_remains_writable(acl_lab: AclLab, layout: str) -> No
 
 @pytest.mark.parametrize("first", ["outer", "inner"])
 def test_nested_clears_preserve_the_other_gate(acl_lab: AclLab, first: str) -> None:
+    """Both physical removals are required; only outer-first asserts durable earned clearance."""
     outer, files = _bundle(acl_lab.root / "bundle")
     inner = outer / "pbip" / "Unit"
     (inner / "migration-spec.json").write_text("{}", encoding="utf-8")
@@ -263,6 +271,7 @@ def test_nested_clears_preserve_the_other_gate(acl_lab: AclLab, first: str) -> N
 def test_enforcement_requires_all_targets_but_residue_needs_any(
     acl_lab: AclLab, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """Empty artifact directories isolate coverage from the separate artifact/provenance violation."""
     root, files = _unit(acl_lab.root / "unit")
     for path in files:
         path.unlink()
@@ -284,6 +293,7 @@ def test_enforcement_requires_all_targets_but_residue_needs_any(
 def test_failed_clear_cannot_announce_success(
     acl_lab: AclLab, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """A successful process without an ACL effect cannot launder a residual physical barrier."""
     root, files = _bundle(acl_lab.root / "bundle")
     assert gate.apply_block(root, [SOURCE]) == 0
     real = gate._icacls
@@ -301,6 +311,7 @@ def test_failed_clear_cannot_announce_success(
 def test_unsupported_acl_refuses_before_claiming_enforcement(
     acl_lab: AclLab, caplog: pytest.LogCaptureFixture, location: str, fault: str
 ) -> None:
+    """Cannot-establish must neither change the existing permissions nor claim physical protection."""
     root, files = _bundle(acl_lab.root / "bundle")
     target = root / "pbip" if location == "anchor" else files[0]
     if fault == "protected":
@@ -319,6 +330,7 @@ def test_unsupported_acl_refuses_before_claiming_enforcement(
 def test_rearm_is_idempotent_and_partial_apply_can_retry(
     acl_lab: AclLab, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """A partial arm retains its stop; retry uses, rather than duplicates, its completed anchors."""
     root, files = _unit(acl_lab.root / "unit")
     real = gate._icacls
     fail_target = files[1].parents[1]
@@ -354,6 +366,7 @@ def _history(root: Path) -> None:
 
 @pytest.mark.parametrize("attributed", [True, False])
 def test_empty_legacy_fabric_cleanup_requires_same_root_history(acl_lab: AclLab, attributed: bool) -> None:
+    """An exact old empty-fabric deny needs this root's history and never authorizes deletion."""
     root, files = _bundle(acl_lab.root / "bundle")
     legacy = root / "fabric"
     legacy.mkdir()
@@ -372,6 +385,7 @@ def test_empty_legacy_fabric_cleanup_requires_same_root_history(acl_lab: AclLab,
 
 @pytest.mark.parametrize("fault", ["populated", "different-mask"])
 def test_legacy_cleanup_refuses_ambiguous_denies(acl_lab: AclLab, fault: str) -> None:
+    """Populated or differently permissioned legacy targets cannot be swept away."""
     root, _files = _bundle(acl_lab.root / "bundle")
     legacy = root / "fabric"
     legacy.mkdir()
@@ -388,6 +402,7 @@ def test_legacy_cleanup_refuses_ambiguous_denies(acl_lab: AclLab, fault: str) ->
 
 
 def test_native_unit_preserves_empty_legacy_fabric(acl_lab: AclLab) -> None:
+    """An old empty husk is tolerated but never mistaken for coverage of native artifacts."""
     root, files = _unit(acl_lab.root / "unit")
     (root / "fabric").mkdir()
     assert gate.apply_block(root, [SOURCE]) == 0
@@ -399,6 +414,7 @@ def test_native_unit_preserves_empty_legacy_fabric(acl_lab: AclLab) -> None:
 
 
 def test_ambiguous_populated_layout_refuses_without_changes(acl_lab: AclLab) -> None:
+    """Do not select one populated working tree and quietly leave the other writable."""
     root, files = _unit(acl_lab.root / "unit")
     _file(root / "fabric" / "conflicting.txt")
     assert gate.apply_block(root, [SOURCE]) != 0
@@ -407,8 +423,29 @@ def test_ambiguous_populated_layout_refuses_without_changes(acl_lab: AclLab) -> 
     _writable(files)
 
 
+@pytest.mark.parametrize("location", ["anchor", "descendant"])
+def test_reparse_target_refuses_without_denying_its_destination(acl_lab: AclLab, location: str) -> None:
+    """The read-only safety walk must not carry an anchor's permission mutation through a junction."""
+    from test_package_filesystem import link_directory  # pylint: disable=import-outside-toplevel
+
+    root, _files = _bundle(acl_lab.root / "bundle")
+    outside = _file(acl_lab.root / "outside" / "untouched.txt")
+    target = root / "pbip"
+    if location == "anchor":
+        target.rename(root / "retained-fixture")
+    else:
+        target = target / "Unit" / "linked-directory"
+    link_directory(target, outside.parent)
+    assert gate.apply_block(root, [SOURCE]) != 0
+    assert not (root / gate.MARKER).exists()
+    assert not (root / "fabric").exists()
+    assert not acl_lab.denies(outside.parent), "a rejected link must never carry the deny to its destination"
+    _writable([outside])
+
+
 @pytest.mark.parametrize("identity,anchor", [("migration-spec.json", "fabric"), ("engine-output-receipt.json", "pbip")])
 def test_empty_recognized_layout_creates_only_its_anchor(acl_lab: AclLab, identity: str, anchor: str) -> None:
+    """The approved receipt-only/parser clarification preserves the unchanged scope controls."""
     root = acl_lab.root / "empty"
     root.mkdir()
     (root / identity).write_text("{}", encoding="utf-8")
@@ -419,6 +456,7 @@ def test_empty_recognized_layout_creates_only_its_anchor(acl_lab: AclLab, identi
 
 @pytest.mark.parametrize("identity", [None, "migration-spec.json", "engine-output-receipt.json"])
 def test_clear_and_read_never_create_directories(tmp_path: Path, identity: str | None) -> None:
+    """Missing targets and probes remain missing after every read/clear consumer."""
     if identity:
         (tmp_path / identity).write_text("{}", encoding="utf-8")
     assert gate.inspect_physical_barrier(tmp_path) == ("clear", "physical_clear")
@@ -429,6 +467,7 @@ def test_clear_and_read_never_create_directories(tmp_path: Path, identity: str |
 
 
 def test_acl_query_failure_is_not_clear(acl_lab: AclLab, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed query yields path-free cannot-establish, never a clean physical verdict."""
     root, _files = _bundle(acl_lab.root / "bundle")
     _history(root)
     monkeypatch.setattr(gate, "_icacls", lambda _args: (5, "private-canary"))
@@ -440,6 +479,7 @@ def test_acl_query_failure_is_not_clear(acl_lab: AclLab, monkeypatch: pytest.Mon
 
 
 def test_non_windows_keeps_marker_only_behavior(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Off Windows the original marker-only workflow never invokes the Windows ACL boundary."""
     monkeypatch.setattr(gate.platform, "system", lambda: "Linux")
     monkeypatch.setattr(gate, "_icacls", lambda _args: pytest.fail("marker-only must not invoke Windows ACLs"))
     (tmp_path / "migration-spec.json").write_text("{}", encoding="utf-8")
