@@ -8,7 +8,7 @@
   not have Python installed yet -- because one of the things it checks for IS Python. A Python
   bootstrap check would be a chicken-and-egg. PowerShell ships with every supported Windows, and the
   whole pipeline targets Power BI Desktop (Windows-only) and uses Windows-specific facilities
-  (Get-AppxPackage for the Desktop MSIX, Get-OdbcDriver, the JSONC ~/.copilot config), so PowerShell
+  (Get-AppxPackage for the Desktop MSIX, Get-OdbcDriver, the JSONC Copilot home config), so PowerShell
   is the correct, dependency-free bootstrap.
 
   Verifies: Python + the parser's Python deps, the deterministic conversion engine (the installed
@@ -85,7 +85,8 @@ deploy discovers a stale id or missing access.
 param([switch]$Update, [switch]$CheckUpstream, [string]$Tenant, [string]$Subscription)
 
 $ErrorActionPreference = 'SilentlyContinue'
-$copilot = Join-Path $HOME '.copilot'
+$copilot = if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { Join-Path $HOME '.copilot' }
+$copilotOrigin = if ($env:COPILOT_HOME) { 'COPILOT_HOME' } else { 'default' }
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $results = New-Object System.Collections.Generic.List[object]
 
@@ -93,8 +94,14 @@ function Add-Check([string]$Name, [string]$Tier, [bool]$Ok, [string]$Detail, [st
     $results.Add([pscustomobject]@{ Name = $Name; Tier = $Tier; Ok = $Ok; Detail = $Detail; Hint = $Hint })
 }
 
+Write-Host "Copilot home: $copilot (origin: $copilotOrigin)"
+if ($env:COPILOT_HOME) {
+    Add-Check 'Copilot home' 'CRITICAL' (Test-Path -LiteralPath $copilot -PathType Container) `
+        "COPILOT_HOME: $copilot" 'Create the configured directory or correct COPILOT_HOME; no default-profile fallback.'
+}
+
 function Read-CopilotJson([string]$File) {
-    # ~/.copilot/*.json are JSONC (leading // comment lines). URL strings start with '"', not '//',
+    # Copilot home *.json are JSONC (leading // comment lines). URL strings start with '"', not '//',
     # so dropping comment-only lines is safe across PowerShell versions.
     $p = Join-Path $copilot $File
     if (-not (Test-Path $p)) { return $null }
@@ -262,7 +269,7 @@ if ($engineStatus -and $engineStatus.present -and $py) {
 #
 # This repo's reusable Power BI bundles are different: their marketplace/plugin name has changed once,
 # and a hard-coded name let the installed copy drift silently. Discover that plugin by content instead:
-# scan ~/.copilot/installed-plugins/*/*/skills for the bundle names emitted by build_plugin.py. Exactly
+# scan the Copilot home's installed-plugins/*/*/skills for build_plugin.py's bundle names. Exactly
 # one discovered install is acceptable; more than one is a critical shadowing hazard.
 $cfg = Read-CopilotJson 'config.json'
 $p = @{ name = 'powerbi-authoring'; market = 'fabric-collection'; tier = 'critical'
@@ -339,8 +346,8 @@ $mcp = Read-CopilotJson 'mcp-config.json'
 foreach ($srv in @(@('powerbi-modeling-mcp', 'recommended'), @('powerbi-remote', 'optional'))) {
     $has = $mcp -and $mcp.mcpServers.($srv[0])
     Add-Check "mcp: $($srv[0])" $srv[1] ([bool]$has) `
-        $(if ($has) { 'configured' } else { 'not in ~/.copilot/mcp-config.json' }) `
-        'Add via /mcp, or copy from .vscode/mcp.json into ~/.copilot/mcp-config.json (mcpServers).'
+        $(if ($has) { 'configured' } else { "not in $copilot\mcp-config.json" }) `
+        "Add via /mcp, or copy from .vscode/mcp.json into $copilot\mcp-config.json (mcpServers)."
 }
 
 Add-Cli 'npx' 'critical' 'Install Node.js; npx runs the powerbi-modeling MCP and the Desktop Bridge CLI.'
@@ -505,7 +512,7 @@ Add-Check 'Privacy Levels (manual)' 'optional' $true `
 
 # --- .NET SDK (builds tools/tmdl_oracle, the TMDL gate's parser) ---
 # NOTE: this replaced an older check for Microsoft.AnalysisServices.Tabular.dll under
-# ~/.copilot/installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that
+# the Copilot home's installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that
 # check could never pass. The .NET SDK is still needed to build/run the offline validator, but it does
 # NOT prove AMO/TOM or ADOMD assemblies exist in the NuGet cache; those file checks live below.
 #

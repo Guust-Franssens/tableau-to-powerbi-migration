@@ -39,6 +39,24 @@ def _preflight_source() -> str:
     return PREFLIGHT.read_text(encoding="utf-8")
 
 
+def test_copilot_home_selection_and_missing_directory_are_explicit() -> None:
+    source = _preflight_source()
+    assignments = re.findall(r"^\$copilot = (.+)$", source, re.MULTILINE)
+    assert assignments == ["if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { Join-Path $HOME '.copilot' }"], (
+        "select COPILOT_HOME once; never substitute the default after an existence check"
+    )
+    assert "$copilotOrigin = if ($env:COPILOT_HOME) { 'COPILOT_HOME' } else { 'default' }" in source
+    assert 'Write-Host "Copilot home: $copilot (origin: $copilotOrigin)"' in source
+    assert (
+        "if ($env:COPILOT_HOME) {\n"
+        "    Add-Check 'Copilot home' 'CRITICAL' (Test-Path -LiteralPath $copilot -PathType Container)"
+    ) in source
+    _assert_add_check_tier(source, "Copilot home", "CRITICAL")
+    assert '"not in $copilot\\mcp-config.json"' in source
+    assert "into $copilot\\mcp-config.json (mcpServers)." in source
+    assert "~/.copilot" not in source
+
+
 def _assert_add_check_tier(source: str, check_name: str, tier: str) -> None:
     """Assert EVERY emission of ``check_name`` carries ``tier`` - not merely one of them.
 
