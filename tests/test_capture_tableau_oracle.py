@@ -582,6 +582,52 @@ def test_zero_selected_views_exits_four(tmp_path):
     assert _write(tmp_path, []) == 4
 
 
+def test_select_views_filters_by_exact_workbook_luid(monkeypatch):
+    wanted = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+    other = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+    views = [
+        {"id": "view-1", "workbook": {"id": wanted}},
+        {"id": "view-2", "workbook": {"id": other}},
+    ]
+
+    class Session:
+        site_id = "site-id"
+
+        @staticmethod
+        def get_json(_path):
+            return {
+                "workbooks": {
+                    "workbook": [
+                        {"id": wanted, "name": "Duplicate caption"},
+                        {"id": other, "name": "Duplicate caption"},
+                    ]
+                }
+            }
+
+    monkeypatch.setattr(oracle, "list_views", lambda _session: views)
+
+    selected, names = oracle.select_views(Session(), None, 0, [wanted])
+
+    assert [view["id"] for view in selected] == ["view-1"]
+    assert names == {wanted: "Duplicate caption", other: "Duplicate caption"}
+
+
+def test_select_views_refuses_unknown_luid_without_caption_fallback(monkeypatch):
+    class Session:
+        site_id = "site-id"
+
+        @staticmethod
+        def get_json(_path):
+            return {"workbooks": {"workbook": [{"id": "known", "name": "Requested Caption"}]}}
+
+    monkeypatch.setattr(
+        oracle, "list_views", lambda _session: [{"id": "view", "workbook": {"id": "known"}}]
+    )
+
+    with pytest.raises(ValueError, match="unknown --workbook-id LUID"):
+        oracle.select_views(Session(), ["Requested Caption"], 0, ["missing"])
+
+
 def test_every_image_failed_exits_three(tmp_path):
     """Data success alone is not enough when the requested reference images all failed."""
     assert _write(tmp_path, [_record("ok", image_status="failed"), _record("ok", image_status="failed")]) == 3

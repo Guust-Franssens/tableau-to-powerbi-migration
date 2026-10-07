@@ -288,6 +288,24 @@ def test_zero_eligible_recovery_does_not_sign_in_or_create_batch(monkeypatch, tm
     assert not out.exists()
 
 
+def test_recovery_refuses_workbook_id_before_sign_in_or_export(monkeypatch, tmp_path):
+    run = _run_dir(tmp_path)
+    grouped = _grouped_reference(
+        tmp_path / "migrations" / "workbooks" / "workbook",
+        [_view(LUID_1, data=_failed())],
+    )
+    out = run / "oracle-retry"
+    session = _Session()
+    _configure(monkeypatch, tmp_path, session, grouped, out, run)
+    sys.argv.extend(["--workbook-id", WB_1])
+
+    with pytest.raises(oracle.OracleRecoveryRefusal, match="--workbook-id"):
+        oracle.main()
+
+    assert session.signins == 0
+    assert not out.exists()
+
+
 def test_data_truncated_is_not_a_recovery_target(monkeypatch, tmp_path):
     """Only render truncation belongs to the retry-eligible vocabulary."""
     run = _run_dir(tmp_path)
