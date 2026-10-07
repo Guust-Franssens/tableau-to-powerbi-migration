@@ -2184,6 +2184,87 @@ def test_negative_control_an_unswapped_source_still_verifies_clean(tmp_path: Pat
     assert proc.returncode == 0, f"an unchanged, correctly-cleared source must still verify clean:\n{out}"
 
 
+@pytest.mark.parametrize("changed_table", ["[other].[trips]", "[nyctaxi].[different]", None])
+def test_717_changed_physical_target_cannot_reuse_earned_clear(tmp_path, changed_table):
+    mig = tmp_path / "schema-target"
+    (mig / "fabric").mkdir(parents=True)
+    conn = {
+        "class": "databricks",
+        "server": "adb.example",
+        "http_path": "/sql/1.0/warehouses/fixture",
+        "database": "samples",
+        "schema": "default",
+        "powerbi_target": "live_source",
+    }
+    source = {"connection": conn, "tables": [{"name": "Display Trips", "table": "[nyctaxi].[trips]"}]}
+    spec_path = mig / "migration-spec.json"
+    spec_path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    key = pf._leg_key(source, 0, conn)
+    assert run_gate("block", str(mig), "--sources", key).returncode == 0
+    assert run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned").returncode == 0
+    (mig / "fabric" / "model.tmdl").write_text("table Fictitious", encoding="utf-8")
+    assert run_gate("verify", str(mig)).returncode == 0
+
+    source["tables"][0]["table"] = changed_table
+    spec_path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    changed_key = pf._leg_key(source, 0, conn)
+    assert changed_key != key, "schema, physical table and missing raw identity must each change the gate key"
+    assert run_gate("verify", str(mig)).returncode == 3, "current-spec verification must reject stale proof"
+    assert run_gate("block", str(mig), "--sources", changed_key).returncode == 0
+    assert json.loads((mig / cg.MARKER).read_text())["sources"] == [changed_key]
+
+
+def test_717_old_endpoint_only_key_cannot_clear_an_ordinary_target(tmp_path):
+    mig = tmp_path / "old-key"
+    (mig / "fabric").mkdir(parents=True)
+    conn = {"class": "sqlserver", "server": "sql.example", "database": "DB", "schema": "dbo"}
+    source = {"connection": conn, "tables": [{"name": "Alias", "table": "[dbo].[Orders]"}]}
+    (mig / "migration-spec.json").write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    old_identity = {"class": "sqlserver", "server": "sql.example", "database": "DB", "schema": "dbo"}
+    old_digest = hashlib.sha256(
+        json.dumps(old_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    old_key = f"source-key:{old_digest[:16]}"
+    new_key = pf._leg_key(source, 0, conn)
+    assert new_key != old_key
+    assert run_gate("block", str(mig), "--sources", old_key).returncode == 0
+    assert run_gate("clear", str(mig), "--reason", "old ordinary probe", "--earned").returncode == 0
+    (mig / "fabric" / "model.tmdl").write_text("table Fictitious", encoding="utf-8")
+    assert run_gate("verify", str(mig)).returncode == 3
+    assert run_gate("block", str(mig), "--sources", new_key).returncode == 0
+    assert (mig / cg.MARKER).exists()
+
+
+def test_717_reorder_and_alias_changes_reuse_proof_but_authorize_stays_global(tmp_path, monkeypatch):
+    mig = tmp_path / "stable-target"
+    (mig / "fabric").mkdir(parents=True)
+    conn = {"class": "sqlserver", "server": "sql.example", "database": "DB", "schema": "default"}
+    source = {
+        "connection": conn,
+        "tables": [{"name": "Alias A", "table": "[dbo].[Orders]"}, {"name": "Alias B", "table": "[dbo].[Items]"}],
+    }
+    path = mig / "migration-spec.json"
+    path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    key = pf._leg_key(source, 0, conn)
+    assert run_gate("block", str(mig), "--sources", key).returncode == 0
+    assert run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned").returncode == 0
+    source["tables"].reverse()
+    source["tables"][0]["name"] = "Renamed display"
+    path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    assert pf._leg_key(source, 0, conn) == key
+    assert run_gate("block", str(mig), "--sources", key).returncode == 0
+    assert not (mig / cg.MARKER).exists()
+    (mig / "fabric" / "model.tmdl").write_text("table Fictitious", encoding="utf-8")
+    assert run_gate("verify", str(mig)).returncode == 0
+
+    monkeypatch.setattr(cg, "_ancestry", lambda: ["python.exe", "pwsh.exe"])
+    assert cg.authorize(mig, "model-only test") == 0
+    source["tables"][0]["table"] = "[another].[Target]"
+    path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    assert pf._leg_key(source, 0, conn) != key
+    assert run_gate("verify", str(mig)).returncode == 0, "authentic human authorization remains global"
+
+
 # --- Requirement 1 (2nd bounded round, comment 5546182629): mixed-scope audit poisoning --------
 #
 # The single-entry cases above (a wholly unscoped copy, a wholly foreign-scope copy) already
@@ -3353,7 +3434,9 @@ def test_a_nonfinite_number_is_refused_as_such(tmp_path: Path) -> None:
         pytest.param(_projection(provider_state="blocked"), "unknown-value", id="provider-state-not-direct"),
         pytest.param(_projection(source_keys="nope"), "bad-type", id="source-keys-not-a-list"),
         pytest.param(_projection(source_keys=[1]), "bad-type", id="source-key-not-a-string"),
-        pytest.param(_projection(source_keys=[KEY_B, KEY_A]), "source-keys-unsorted", id="unsorted-keys"),
+        pytest.param(
+            _projection(source_keys=sorted([KEY_A, KEY_B], reverse=True)), "source-keys-unsorted", id="unsorted-keys"
+        ),
         pytest.param(_projection(source_keys=[KEY_A, KEY_A]), "source-keys-unsorted", id="duplicate-keys"),
         pytest.param(_projection(source_keys=["source-key:zzzz"]), "source-key-invalid", id="bad-key-syntax"),
         pytest.param(_projection(source_keys=["a.example"]), "source-key-invalid", id="display-name-as-key"),

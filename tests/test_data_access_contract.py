@@ -36,12 +36,18 @@ from package_role_identity import verify_phase1_role_identity
 from preflight_source_credentials import _leg_key
 from probe_live_source import _probe_leg, _probe_one_table
 
-LIVE = {"class": "sqlserver", "server": "source.example", "database": "db", "powerbi_target": "live_source"}
+LIVE = {
+    "class": "sqlserver",
+    "server": "source.example",
+    "database": "db",
+    "schema": "dbo",
+    "powerbi_target": "live_source",
+}
 OTHER = {**LIVE, "server": "other.example"}
 FLAT = {"class": "excel-direct", "powerbi_target": "flat_file"}
 REVIEW = {"class": "unknown", "server": "review.example", "powerbi_target": "unknown"}
-KEY = _leg_key({}, 0, LIVE)
-OTHER_KEY = _leg_key({}, 0, OTHER)
+KEY = _leg_key({"connection": LIVE, "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}]}, 0, LIVE)
+OTHER_KEY = _leg_key({"connection": OTHER, "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}]}, 0, OTHER)
 LOCAL = {
     "self_contained": True,
     "omissions": [],
@@ -60,7 +66,7 @@ def _spec(*connections: dict) -> dict:
             {
                 "name": f"source{index}",
                 "connection": dict(connection),
-                "tables": [{"name": "Orders"}],
+                "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
                 "fields": [{"kind": "column", "internal_name": "[ID]"}],
             }
             for index, connection in enumerate(connections)
@@ -365,7 +371,10 @@ def test_fixture_audit_helper_refuses_current_writer_shapes(root: Path, action: 
 
 def _earn(root: Path) -> None:
     assert gate.apply_block(root, [KEY]) == 0
-    assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders"}], "ID"), (1, False)) == (0, "DATA_OK")
+    assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders", "table": "[dbo].[Orders]"}], "ID"), (1, False)) == (
+        0,
+        "DATA_OK",
+    )
     assert gate.clear_block(root, "probe-cleared: DATA_OK from one leg", earned=True, sources=[KEY]) == 0
     assert _assess(root).state == "live_data_ok", "positive control: real keyed writers must earn"
 
@@ -761,8 +770,14 @@ def test_all_current_audit_writers_remain_readable(root: Path, monkeypatch: pyte
     assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [KEY, OTHER_KEY]
     with monkeypatch.context() as failed_refresh:
         failed_refresh.setattr(probe, "_refresh_and_classify", lambda *_args: (1, "ERROR"))
-        assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders"}], "ID"), (1, False)) == (1, "ERROR")
-    assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders"}], "ID"), (1, False)) == (0, "DATA_OK")
+        assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders", "table": "[dbo].[Orders]"}], "ID"), (1, False)) == (
+            1,
+            "ERROR",
+        )
+    assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders", "table": "[dbo].[Orders]"}], "ID"), (1, False)) == (
+        0,
+        "DATA_OK",
+    )
     assert gate.clear_block(root, "first leg", earned=True, sources=[KEY]) == 0
     assert gate.apply_block(root, [KEY]) == 0
     assert gate.apply_block(root, [KEY, KEY]) == 2
@@ -774,7 +789,10 @@ def test_all_current_audit_writers_remain_readable(root: Path, monkeypatch: pyte
     assert _clear_was_earned(root, [OTHER_KEY]) is None, "administrative clear must not earn the other key"
     assert gate.apply_block(root, [OTHER_KEY]) == 0
     assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [OTHER_KEY]
-    assert _probe_leg(root, OTHER_KEY, OTHER, ([{"name": "Orders"}], "ID"), (1, False)) == (0, "DATA_OK")
+    assert _probe_leg(root, OTHER_KEY, OTHER, ([{"name": "Orders", "table": "[dbo].[Orders]"}], "ID"), (1, False)) == (
+        0,
+        "DATA_OK",
+    )
     assert gate.clear_block(root, "second leg", earned=True, sources=[OTHER_KEY]) == 0
     assert _assess(root, spec=_spec(LIVE, OTHER)).state == "live_data_ok"
     assert not (root / gate.MARKER).exists()
@@ -952,7 +970,7 @@ def test_exceptional_attempts_record_safe_keyed_errors_before_cleanup(
     monkeypatch.setattr(probe, stage, fail)
     monkeypatch.setattr(probe, "_close", close)
     with pytest.raises(RuntimeError, match="private-cause"):
-        _probe_one_table(root, KEY, LIVE, ({"name": "Orders"}, "ID"), (1, False))
+        _probe_one_table(root, KEY, LIVE, ({"name": "Orders", "table": "[dbo].[Orders]"}, "ID"), (1, False))
     last = _rows(root)[-1]
     assert (last["action"], last["sources"]) == ("probe-error", [KEY])
     assert secret not in json.dumps(last)
@@ -965,17 +983,24 @@ def test_exceptional_attempts_record_safe_keyed_errors_before_cleanup(
 
 @pytest.mark.usefixtures("desktop")
 @pytest.mark.parametrize("source_index", [None, 0])
-def test_production_resolution_error_invalidates_old_key(root: Path, source_index: int | None) -> None:
-    """Both run_probe entry selections must record table-resolution errors for known legs."""
+def test_production_resolution_error_cannot_reuse_old_clearance(root: Path, source_index: int | None) -> None:
+    """Removing the ordinary identity records the current null-scope key, never reuses old proof."""
     _earn(root)
     spec = _spec(LIVE)
     spec["data_sources"][0]["tables"] = []
+    current_key = _leg_key(spec["data_sources"][0], 0, LIVE)
+    assert current_key != KEY, "unresolved identity must not inherit valid Orders proof"
     (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
     with pytest.raises(SystemExit) as error:
         probe.run_probe(root, source_index, 1, False)
     assert error.value.code == 1
-    assert (_rows(root)[-1]["action"], _rows(root)[-1]["sources"]) == ("probe-error", [KEY])
-    assert _assess(root).codes == ("probe-error",)
+    assert (_rows(root)[-1]["action"], _rows(root)[-1]["sources"]) == ("probe-error", [current_key])
+    current = _assess(root, spec=spec)
+    assert (current.state, current.codes, current.source_keys) == (
+        "cannot_establish",
+        ("source-key-set-changed",),
+        (),
+    )
 
 
 @pytest.mark.usefixtures("desktop")
@@ -983,7 +1008,10 @@ def test_live_key_skip_is_recorded_without_becoming_success(root: Path, monkeypa
     """A skipped terminal attempt invalidates old proof while retaining its original verdict."""
     _earn(root)
     monkeypatch.setattr(probe, "_refresh_and_classify", lambda *_args: (0, "SKIPPED"))
-    assert _probe_one_table(root, KEY, LIVE, ({"name": "Orders"}, "ID"), (1, False)) == (0, "SKIPPED")
+    assert _probe_one_table(root, KEY, LIVE, ({"name": "Orders", "table": "[dbo].[Orders]"}, "ID"), (1, False)) == (
+        0,
+        "SKIPPED",
+    )
     assert (_rows(root)[-1]["action"], _rows(root)[-1]["sources"]) == ("probe-skipped", [KEY])
     assert _assess(root).codes == ("live-probe-skipped",)
 

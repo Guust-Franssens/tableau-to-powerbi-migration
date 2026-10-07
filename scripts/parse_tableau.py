@@ -284,6 +284,9 @@ def _describe_named_connection(conn_el: etree._Element, mode: str) -> dict[str, 
         "database": _conn_attr(conn_el, "dbname"),
         "mode": mode,
     }
+    parent = conn_el.getparent()
+    if parent is not None and parent.get("name") is not None:
+        described["name"] = parent.get("name")
     _capture_connect_details(described, conn_el)
     described["powerbi_target"], described["powerbi_target_reason"] = powerbi_target(described["class"], mode)
     return described
@@ -442,6 +445,9 @@ def _parse_tables(ds_el: etree._Element, ids: IdRegistry) -> list[dict[str, Any]
                     "row_count": _unknown_row_count(),
                 }
             )
+            for attribute in ("table", "connection"):
+                if rel.get(attribute) is not None:
+                    tables[-1][attribute] = rel.get(attribute)
     return tables
 
 

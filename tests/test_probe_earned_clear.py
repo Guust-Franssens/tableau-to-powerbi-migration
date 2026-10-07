@@ -20,6 +20,7 @@ Two properties are pinned here, and the second matters more than the first:
 
 from __future__ import annotations
 
+import copy
 import json
 import sys
 from pathlib import Path
@@ -38,9 +39,25 @@ FEDERATED_FIXTURE = REPO / "tests" / "fixtures" / "federated_multi_connection.tw
 SOURCE_NAMES = ["A", "B"]
 NAMED = [
     pf._leg_key(
-        {"name": name, "connection": {}},
+        {
+            "name": name,
+            "connection": {
+                "class": "sqlserver",
+                "server": f"{name}.example",
+                "database": "db",
+                "schema": "dbo",
+                "powerbi_target": "live_source",
+            },
+            "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
+        },
         index,
-        {"class": "sqlserver", "server": f"{name}.example", "database": "db", "powerbi_target": "live_source"},
+        {
+            "class": "sqlserver",
+            "server": f"{name}.example",
+            "database": "db",
+            "schema": "dbo",
+            "powerbi_target": "live_source",
+        },
     )
     for index, name in enumerate(SOURCE_NAMES)
 ]
@@ -117,7 +134,7 @@ def test_run_probe_passes_marker_names_not_indices_or_counts(tmp_path: Path, mon
                 "database": "db",
                 "powerbi_target": "live_source",
             },
-            "tables": [{"name": "Orders"}],
+            "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
             "fields": [{"kind": "column", "internal_name": "[Order ID]"}],
         },
         {
@@ -128,7 +145,7 @@ def test_run_probe_passes_marker_names_not_indices_or_counts(tmp_path: Path, mon
                 "database": "db",
                 "powerbi_target": "live_source",
             },
-            "tables": [{"name": "Orders"}],
+            "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
             "fields": [{"kind": "column", "internal_name": "[Order ID]"}],
         },
     ]
@@ -158,7 +175,7 @@ def _bundle(tmp_path: Path, live_count: int, monkeypatch):
                 "database": "db",
                 "powerbi_target": "live_source",
             },
-            "tables": [{"name": "Orders"}],
+            "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
             "fields": [{"kind": "column", "internal_name": "[Order ID]"}],
         }
         for i in range(live_count)
@@ -196,7 +213,7 @@ def test_source_index_never_clears_unmatched_marker_names(tmp_path: Path, monkey
                 "database": "db",
                 "powerbi_target": "live_source",
             },
-            "tables": [{"name": "Orders"}],
+            "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
             "fields": [{"kind": "column", "internal_name": "[Order ID]"}],
         }
     ]
@@ -224,7 +241,7 @@ def test_duplicate_display_names_do_not_clear_an_uncontacted_sibling(tmp_path: P
                 "database": "db",
                 "powerbi_target": "live_source",
             },
-            "tables": [{"name": "Orders"}],
+            "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
             "fields": [{"kind": "column", "internal_name": "[Order ID]"}],
         },
         {
@@ -235,7 +252,7 @@ def test_duplicate_display_names_do_not_clear_an_uncontacted_sibling(tmp_path: P
                 "database": "db",
                 "powerbi_target": "live_source",
             },
-            "tables": [{"name": "Orders"}],
+            "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
             "fields": [{"kind": "column", "internal_name": "[Order ID]"}],
         },
     ]
@@ -308,7 +325,7 @@ def test_reorder_between_arm_and_clear_does_not_clear_an_uncontacted_endpoint(tm
         },
     ]
     for source in first:
-        source["tables"] = [{"name": "Orders"}]
+        source["tables"] = [{"name": "Orders", "table": "[dbo].[Orders]"}]
         source["fields"] = [{"kind": "column", "internal_name": "[Order ID]"}]
     swapped = [first[1], first[0]]
     names = [pf._leg_key(source, index, source["connection"]) for index, source in enumerate(first)]
@@ -372,11 +389,20 @@ def test_source_keys_survive_datasource_reordering() -> None:
 
 def test_snowflake_role_changes_the_source_key() -> None:
     """HIGH 1: a role changes the generated M query and therefore the credential proof identity."""
-    base = {"class": "snowflake", "server": "acct.snowflakecomputing.com", "database": "DB", "warehouse": "WH"}
+    base = {
+        "class": "snowflake",
+        "server": "acct.snowflakecomputing.com",
+        "database": "DB",
+        "schema": "PUBLIC",
+        "warehouse": "WH",
+    }
     analyst = {**base, "role": "ANALYST"}
     restricted = {**base, "role": "RESTRICTED"}
 
-    assert pf._leg_key({}, 0, analyst) != pf._leg_key({}, 0, restricted)
+    tables = [{"name": "Orders", "table": "[Orders]"}]
+    assert pf._leg_key({"connection": analyst, "tables": tables}, 0, analyst) != pf._leg_key(
+        {"connection": restricted, "tables": tables}, 0, restricted
+    )
     analyst_query, _ = pls.build_m_query(analyst, "Orders", "Order ID")
     restricted_query, _ = pls.build_m_query(restricted, "Orders", "Order ID")
     assert analyst_query != restricted_query
@@ -397,12 +423,16 @@ def test_schema_changes_the_source_key_for_probe_connectors() -> None:
     for base in cases:
         dbo = {**base, "schema": "dbo"}
         restricted = {**base, "schema": "restricted"}
-        assert pf._leg_key({}, 0, dbo) != pf._leg_key({}, 0, restricted)
+        tables = [{"name": "Orders", "table": "[Orders]"}]
+        assert pf._leg_key({"connection": dbo, "tables": tables}, 0, dbo) != pf._leg_key(
+            {"connection": restricted, "tables": tables}, 0, restricted
+        )
         assert pls.build_m_query(dbo, "Orders", "Order ID")[0] != pls.build_m_query(restricted, "Orders", "Order ID")[0]
 
 
 def _query_and_key(conn: dict) -> tuple[str, str]:
-    return pls.build_m_query(conn, "Orders", "Order ID")[0], pf._leg_key({}, 0, conn)
+    source = {"connection": conn, "tables": [{"name": "Orders", "table": "[Orders]"}]}
+    return pls.build_m_query(conn, "Orders", "Order ID")[0], pf._leg_key(source, 0, conn)
 
 
 class RecordingDict(dict):
@@ -571,10 +601,21 @@ def test_missing_endpoint_identity_refuses_a_source_key() -> None:
 
 def _federated(legs: list[dict]) -> dict:
     """One datasource whose connection wraps several named connections, as Tableau federates them."""
+    named = [
+        {
+            "database": leg.get("database") or leg.get("dbname") or "DB",
+            "schema": {"snowflake": "PUBLIC", "databricks": "default"}.get(leg["class"], "dbo"),
+            **leg,
+            "name": f"leg-{index}",
+        }
+        for index, leg in enumerate(legs)
+    ]
     return {
         "name": "Sales",
-        "connection": {"powerbi_target": "live_source", "class": "federated", "connections": legs},
-        "tables": [{"name": "Orders"}],
+        "connection": {"powerbi_target": "live_source", "class": "federated", "connections": named},
+        "tables": [
+            {"name": "Orders", "table": f"[{leg['schema']}].[Orders]", "connection": leg["name"]} for leg in named
+        ],
         "fields": [{"kind": "column", "internal_name": "[Order ID]"}],
     }
 
@@ -726,12 +767,38 @@ def test_a_federated_source_refuses_when_one_leg_fails(tmp_path: Path, monkeypat
     assert "probe-cleared" not in _audit_actions(d)
 
 
-def test_real_federated_fixture_builds_probe_queries_for_azure_sqldb() -> None:
-    """HIGH 4: the real federated fixture's Azure SQL leg must reach probe-query construction."""
+def test_reduced_federated_fixture_refuses_unrepresented_named_legs() -> None:
+    """Connection metadata for three legs with a relation on only one cannot prove all three."""
     source = parse_workbook(FEDERATED_FIXTURE)["data_sources"][0]
+    with pytest.raises(SystemExit) as raised:
+        pls._resolve_probe_targets([source], 0)  # pylint: disable=protected-access
+    assert raised.value.code == 1
+
+
+def test_complete_federated_xml_builds_probe_queries_for_azure_sqldb(tmp_path: Path) -> None:
+    """Every named leg has its own relation; the Azure SQL raw schema survives to M."""
+    workbook = tmp_path / "complete-federated.twb"
+    workbook.write_text(
+        """<workbook version="2024.1"><datasources><datasource name="complete">
+        <connection class="federated"><named-connections>
+        <named-connection name="sql"><connection class="azure_sqldb"
+            server="tableaumigration.database.windows.net" dbname="DB" /></named-connection>
+        <named-connection name="snow"><connection class="snowflake"
+            server="snow.example" dbname="DB" warehouse="WH" /></named-connection>
+        <named-connection name="lake"><connection class="databricks"
+            server="lake.example" dbname="DB" v-http-path="/sql/1.0/warehouses/x" /></named-connection>
+        </named-connections><relation type="join" join="inner">
+        <relation type="table" name="Orders" table="[dbo].[Orders]" connection="sql" />
+        <relation type="table" name="Shipments" table="[PUBLIC].[Shipments]" connection="snow" />
+        <relation type="table" name="Returns" table="[default].[Returns]" connection="lake" />
+        </relation></connection></datasource></datasources></workbook>""",
+        encoding="utf-8",
+    )
+    source = parse_workbook(workbook)["data_sources"][0]
     targets = pls._resolve_probe_targets([source], 0)  # pylint: disable=protected-access
     first_name, first_conn, tables, column = targets[0]
 
+    assert len(targets) == 3
     assert first_conn["class"] == "azure_sqldb"
     assert first_name.startswith("source-key:")
     query, note = pls.build_m_query(first_conn, tables[0]["name"], column)
@@ -748,8 +815,14 @@ def test_a_single_connection_source_still_earns_its_clear(tmp_path: Path, monkey
     """
     src = {
         "name": "Sales",
-        "connection": {"powerbi_target": "live_source", "class": "snowflake", "server": "a.invalid", "warehouse": "WH"},
-        "tables": [{"name": "Orders"}],
+        "connection": {
+            "powerbi_target": "live_source",
+            "class": "snowflake",
+            "server": "a.invalid",
+            "database": "DB",
+            "warehouse": "WH",
+        },
+        "tables": [{"name": "Orders", "table": "[PUBLIC].[Orders]"}],
         "fields": [{"kind": "column", "internal_name": "[Order ID]"}],
     }
     names = [key for key, _display, _verdict, _reason in pf._classify_legs(src, 0)]
@@ -775,14 +848,26 @@ def test_skipped_sources_never_contribute_clear_names(tmp_path: Path, monkeypatc
     """
     src_a = {
         "name": "A",
-        "connection": {"powerbi_target": "live_source", "class": "snowflake", "server": "a.example", "warehouse": "WH"},
-        "tables": [{"name": "Orders"}],
+        "connection": {
+            "powerbi_target": "live_source",
+            "class": "snowflake",
+            "server": "a.example",
+            "database": "DB",
+            "warehouse": "WH",
+        },
+        "tables": [{"name": "Orders", "table": "[PUBLIC].[Orders]"}],
         "fields": [{"kind": "column", "internal_name": "[Order ID]"}],
     }
     src_b = {
         "name": "B",
-        "connection": {"powerbi_target": "live_source", "class": "snowflake", "server": "b.example", "warehouse": "WH"},
-        "tables": [{"name": "Orders"}],
+        "connection": {
+            "powerbi_target": "live_source",
+            "class": "snowflake",
+            "server": "b.example",
+            "database": "DB",
+            "warehouse": "WH",
+        },
+        "tables": [{"name": "Orders", "table": "[PUBLIC].[Orders]"}],
         "fields": [{"kind": "column", "internal_name": "[Order ID]"}],
     }
     d = tmp_path / "u"
@@ -812,9 +897,15 @@ def test_skipped_sources_never_contribute_clear_names(tmp_path: Path, monkeypatc
 # clear for a source nobody contacted.
 # ---------------------------------------------------------------------------------------------
 
-PROBE_CONN = {"class": "sqlserver", "server": "probe-a.example", "database": "db", "powerbi_target": "live_source"}
-PROBE_KEY = pf._leg_key({}, 0, PROBE_CONN)
-PROBE_TABLES = [{"name": "Orders"}]
+PROBE_CONN = {
+    "class": "sqlserver",
+    "server": "probe-a.example",
+    "database": "db",
+    "schema": "dbo",
+    "powerbi_target": "live_source",
+}
+PROBE_TABLES = [{"name": "Orders", "table": "[dbo].[Orders]"}]
+PROBE_KEY = pf._leg_key({"connection": PROBE_CONN, "tables": PROBE_TABLES}, 0, PROBE_CONN)
 PROBE_LOCAL = {
     "self_contained": True,
     "omissions": [],
@@ -954,3 +1045,231 @@ def test_a_real_keyed_probe_run_is_what_the_pure_assessor_can_earn_from(tmp_path
     assert (regressed.state, regressed.codes) == ("blocked", ("stale-clear",)), (
         "an unkeyed success must not be earnable - if this still passes, the key is decorative"
     )
+
+
+@pytest.mark.parametrize(
+    "connection",
+    [
+        {"class": "sqlserver", "server": "sql.example", "database": "DB"},
+        {"class": "azure_sqldb", "server": "sql.example", "database": "DB"},
+        {"class": "azure_sql_dw", "server": "sql.example", "database": "DB"},
+        {"class": "azuresqldw", "server": "sql.example", "database": "DB"},
+        {
+            "class": "databricks",
+            "server": "lake.example",
+            "database": "DB",
+            "http_path": "/sql/1.0/warehouses/x",
+        },
+        {"class": "snowflake", "server": "snow.example", "database": "DB", "warehouse": "WH"},
+    ],
+    ids=["sqlserver", "azure_sqldb", "azure_sql_dw", "azuresqldw", "databricks", "snowflake"],
+)
+def test_raw_relation_schema_couples_probe_query_and_current_key(connection: dict) -> None:
+    """P1: raw Orders changes schema, so both emitted navigation and the arming key must change."""
+    queries: list[str] = []
+    keys: list[str] = []
+    for schema in ("sales", "restricted"):
+        source = {
+            "name": "Sales",
+            "connection": {**connection, "powerbi_target": "live_source"},
+            "tables": [{"name": "Display Alias", "table": f"[{schema}].[Orders]"}],
+        }
+        before = copy.deepcopy(source)
+        resolved, tables, reason = pf.resolve_probe_scope(source, source["connection"])
+        assert reason is None
+        assert resolved["schema"] == schema
+        assert tables[0]["name"] == "Orders", "navigation must use the raw table, never its display alias"
+        assert tables[0]["table"] == f"[{schema}].[Orders]"
+        assert source == before, "resolution must not rewrite parser evidence"
+        assert resolved is not source["connection"] and tables is not source["tables"]
+        targets = pls._resolve_probe_targets([source], 0)
+        assert len(targets) == 1
+        key, conn, probe_tables, column = targets[0]
+        assert key == pf._classify_legs(source, 0)[0][0] == pf._leg_key(source, 0, source["connection"])
+        query, _ = pls.build_m_query(conn, probe_tables[0]["name"], column)
+        if connection["class"] in {"sqlserver", "azure_sqldb", "azure_sql_dw", "azuresqldw"}:
+            assert f'Schema="{schema}",Item="Orders"' in query
+        else:
+            assert f'Name="{schema}",Kind="Schema"' in query
+            assert 'Name="Orders",Kind="Table"' in query
+        assert "Display Alias" not in query
+        queries.append(query)
+        keys.append(key)
+    assert queries[0] != queries[1]
+    assert keys[0] != keys[1], "a changed raw schema must invalidate the old proof key"
+
+
+@pytest.mark.parametrize("configured_schema", [None, "default"], ids=["missing-schema", "conflicting-default"])
+def test_databricks_nyctaxi_relation_overrides_missing_or_conflicting_schema(configured_schema: str | None) -> None:
+    """P1: recorded samples/nyctaxi/trips, not an alias or connector fallback, drives query and key."""
+    connection = {
+        "class": "databricks",
+        "server": "lake.example",
+        "database": "samples",
+        "http_path": "/sql/1.0/warehouses/x",
+        "powerbi_target": "live_source",
+    }
+    if configured_schema is not None:
+        connection["schema"] = configured_schema
+    source = {
+        "name": "Trips",
+        "connection": connection,
+        "tables": [{"name": "Display Alias", "table": "[nyctaxi].[trips]"}],
+    }
+    before = copy.deepcopy(source)
+    key, resolved, tables, column = pls._resolve_probe_targets([source], 0)[0]
+    assert source == before
+    assert resolved["schema"] == "nyctaxi"
+    assert tables == [{"name": "trips", "table": "[nyctaxi].[trips]"}]
+    query, _ = pls.build_m_query(resolved, tables[0]["name"], column)
+    assert 'Name="samples",Kind="Database"' in query
+    assert 'Name="nyctaxi",Kind="Schema"' in query
+    assert 'Name="trips",Kind="Table"' in query
+    assert "Display Alias" not in query and 'Name="default",Kind="Schema"' not in query
+    assert key == pf._leg_key(source, 0, connection) == pf._classify_legs(source, 0)[0][0]
+    same_scope = copy.deepcopy(source)
+    same_scope["connection"]["schema"] = "irrelevant"
+    assert pf._leg_key(same_scope, 0, same_scope["connection"]) == key
+
+
+def test_bad_table_fallback_stays_within_its_named_leg(tmp_path: Path, monkeypatch) -> None:
+    """P3: BAD_TABLE may try another own relation, never a sibling's same-display-name relation."""
+    source = _federated(
+        [
+            {"class": "sqlserver", "server": "one.example", "schema": "sales"},
+            {"class": "sqlserver", "server": "two.example", "schema": "restricted"},
+        ]
+    )
+    source["tables"] = [
+        {"name": "Orders", "table": "[restricted].[Orders]", "connection": "leg-1"},
+        {"name": "Missing", "table": "[sales].[Missing]", "connection": "leg-0"},
+        {"name": "Orders", "table": "[sales].[Orders]", "connection": "leg-0"},
+    ]
+    attempted: list[tuple[str, str, str, str]] = []
+
+    def _probe_table(_migration, key, conn, target, _opts):
+        table, _column = target
+        attempted.append((key, conn["schema"], table["connection"], table["name"]))
+        return (1, "BAD_TABLE") if table["name"] == "Missing" else (0, "DATA_OK")
+
+    monkeypatch.setattr(pls, "_host_resolves", lambda _server: True)
+    monkeypatch.setattr(pls, "_probe_one_table", _probe_table)
+    keys = [row[0] for row in pf._classify_legs(source, 0)]
+    reordered = copy.deepcopy(source)
+    reordered["tables"].reverse()
+    assert [row[0] for row in pf._classify_legs(reordered, 0)] == keys
+    targets = pls._resolve_probe_targets([source], 0)
+    assert [table["name"] for table in targets[0][2]] == ["Missing", "Orders"]
+    assert [table["connection"] for table in targets[0][2]] == ["leg-0", "leg-0"]
+    assert [table["connection"] for table in targets[1][2]] == ["leg-1"]
+    assert pls._probe_one(tmp_path, [source], 0, 1, False) == (0, "DATA_OK")
+    assert attempted == [
+        (keys[0], "sales", "leg-0", "Missing"),
+        (keys[0], "sales", "leg-0", "Orders"),
+        (keys[1], "restricted", "leg-1", "Orders"),
+    ]
+
+
+@pytest.mark.parametrize("reverse_legs", [False, True], ids=["legs-forward", "legs-reversed"])
+@pytest.mark.parametrize("reverse_relations", [False, True], ids=["relations-forward", "relations-reversed"])
+def test_same_table_on_two_named_schemas_requires_both_keys_to_earn(
+    tmp_path: Path, monkeypatch, reverse_legs: bool, reverse_relations: bool
+) -> None:
+    """P4: identical endpoint/table names on two named legs remain separate schema-bound proofs."""
+    source = _federated(
+        [
+            {"class": "sqlserver", "server": "shared.example", "schema": "sales"},
+            {"class": "sqlserver", "server": "shared.example", "schema": "restricted"},
+        ]
+    )
+    if reverse_legs:
+        source["connection"]["connections"].reverse()
+    if reverse_relations:
+        source["tables"].reverse()
+    keys = [row[0] for row in pf._classify_legs(source, 0)]
+    assert len(keys) == len(set(keys)) == 2
+    targets = pls._resolve_probe_targets([source], 0)
+    assert len(targets) == 2
+    for key, conn, tables, _column in targets:
+        assert key in keys
+        assert tables == [{"name": "Orders", "table": f"[{conn['schema']}].[Orders]", "connection": conn["name"]}], (
+            "each named leg must receive only its exact own raw relation"
+        )
+    root = tmp_path / "two-schemas"
+    (root / "fabric").mkdir(parents=True)
+    spec = {"data_sources": [source]}
+    (root / cg.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
+    cg.apply_block(root, keys)
+    _stub_desktop(monkeypatch)
+    queries: list[str] = []
+    build_query = pls.build_m_query
+
+    def _capture_query(*args, **kwargs):
+        query, note = build_query(*args, **kwargs)
+        queries.append(query)
+        return query, note
+
+    monkeypatch.setattr(pls, "build_m_query", _capture_query)
+    assert pls.run_probe(root, None, 1, False) == 0
+    assert len(queries) == 2
+    assert sum('Schema="sales",Item="Orders"' in query for query in queries) == 1
+    assert sum('Schema="restricted",Item="Orders"' in query for query in queries) == 1
+    attempts = _attempt_entries(root)
+    assert [entry["action"] for entry in attempts] == ["probe-data_ok", "probe-data_ok"]
+    assert [entry["sources"] for entry in attempts] == [[key] for key in keys]
+    assert not (root / cg.MARKER).exists()
+    earned = cg.assess_data_access(
+        root,
+        package_spec=spec,
+        package_data_sources=PROBE_LOCAL,
+        fallback_authorization="stop",
+        requested_scope="model_and_report",
+    )
+    assert earned.state == "live_data_ok" and set(earned.source_keys) == set(keys)
+
+
+@pytest.mark.parametrize("reverse_relations", [False, True], ids=["sales-first", "restricted-first"])
+def test_same_leg_multischema_refuses_before_effects_and_records_current_key(
+    tmp_path: Path, monkeypatch, reverse_relations: bool
+) -> None:
+    """N1: a leg spanning schemas cannot earn a clear by selecting whichever relation is first."""
+    source = {
+        "name": "Sales",
+        "connection": {key: value for key, value in PROBE_CONN.items() if key != "schema"},
+        "tables": [
+            {"name": "Orders", "table": "[sales].[Orders]"},
+            {"name": "Orders", "table": "[restricted].[Orders]"},
+        ],
+    }
+    if reverse_relations:
+        source["tables"].reverse()
+    keys = [row[0] for row in pf._classify_legs(source, 0)]
+    assert len(keys) == 1 and keys[0].startswith("source-key:")
+    root = tmp_path / "multischema"
+    (root / "fabric").mkdir(parents=True)
+    (root / cg.MIGRATION_SPEC).write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    cg.apply_block(root, keys)
+    probe_before = list((root / "_probe").rglob("*"))
+    reached: list[str] = []
+
+    def _forbidden(stage):
+        def _called(*_args, **_kwargs):
+            reached.append(stage)
+            raise AssertionError(f"ambiguous schema reached {stage}")
+
+        return _called
+
+    for name in ("build_m_query", "_host_resolves", "_write_probe_model", "_open_desktop"):
+        monkeypatch.setattr(pls, name, _forbidden(name))
+    with pytest.raises(SystemExit) as error:
+        pls.run_probe(root, None, 1, False)
+    assert error.value.code == 1
+    assert reached == [], "ambiguity must fail before builder, DNS, writes or Desktop launch"
+    assert list((root / "_probe").rglob("*")) == probe_before, "refusal must not write probe artifacts"
+    assert (root / cg.MARKER).exists()
+    marker = json.loads((root / cg.MARKER).read_text(encoding="utf-8"))
+    assert marker["sources"] == keys
+    attempts = _attempt_entries(root)
+    assert [entry["action"] for entry in attempts] == ["probe-error"]
+    assert attempts[0]["sources"] == keys, "failure must invalidate this leg's current arming key"
+    assert "probe-cleared" not in _audit_actions(root)

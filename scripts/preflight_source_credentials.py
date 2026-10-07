@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -147,15 +148,151 @@ def _norm_exact(value: object) -> str:
     return str(value or "").strip()
 
 
+def _safe_probe_literal(value: object) -> bool:
+    """Whether a decoded identifier can be passed verbatim in an M string."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and not any(ord(char) < 32 or 127 <= ord(char) <= 159 or char in "\u2028\u2029" for char in value)
+        and not any(char in value for char in ('"', "[", "]", "`"))
+        and "#(" not in value
+    )
+
+
+def _ordinary_identifier(value: object) -> list[str] | None:
+    """Decode a full, conservative Tableau one-, two- or three-part identifier."""
+    if not isinstance(value, str) or not value:
+        return None
+    component = r"(?:\[[^\[\]]+\]|[A-Za-z_][A-Za-z0-9_$]*)"
+    if re.fullmatch(rf"{component}(?:\.{component}){{0,2}}", value) is None:
+        return None
+    parts = re.findall(component, value)
+    if len({part.startswith("[") for part in parts}) != 1:
+        return None
+    decoded = [part[1:-1] if part.startswith("[") else part for part in parts]
+    return decoded if all(_safe_probe_literal(part) for part in decoded) else None
+
+
+def resolve_probe_scope(source: dict, leg: dict) -> tuple[dict, list[dict], str | None]:
+    """Resolve ordinary targets without changing persisted connection or relation evidence.
+
+    Custom SQL retains its existing datasource-wide candidate policy; its connection reference
+    is evidence only, pending the separate custom-SQL work.
+    """
+    # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+    connection = dict(leg)
+    raw_tables = source.get("tables") or []
+    custom = [dict(table) for table in raw_tables if table.get("source_relation") == "custom-sql" and table.get("name")]
+    ordinary = [table for table in raw_tables if table.get("source_relation") != "custom-sql"]
+
+    def refuse(reason: str) -> tuple[dict, list[dict], str]:
+        connection["schema"] = None
+        return connection, [], reason
+
+    if not ordinary:
+        if custom:
+            return connection, custom, None
+        return refuse("source has no table/column to probe: no named table or custom SQL relation")
+    klass = _norm_case_insensitive(leg.get("class"))
+    if klass not in {"databricks", "snowflake", "sqlserver", "azure_sqldb", "azure_sql_dw", "azuresqldw"}:
+        return refuse("ordinary probe connector is unknown; cannot establish physical target")
+    root = source.get("connection") or {}
+    legs = root.get("connections") or [root]
+    names: dict[str, list[dict]] = {}
+    for actual in legs:
+        if "name" in actual:
+            name = actual["name"]
+            if not isinstance(name, str) or not name.strip():
+                return refuse("connection leg name must be a nonblank string")
+            names.setdefault(name, []).append(actual)
+    if any(len(matches) != 1 for matches in names.values()):
+        return refuse("duplicate connection leg names make relation binding ambiguous")
+    bound = []
+    for table in ordinary:
+        if "connection" in table:
+            reference = table["connection"]
+            if not isinstance(reference, str) or not reference.strip():
+                return refuse("ordinary relation connection reference must be a nonblank string")
+            matches = names.get(reference, [])
+            if len(matches) != 1:
+                return refuse("ordinary relation connection reference does not identify exactly one leg")
+            owner = matches[0]
+        elif len(legs) == 1:
+            owner = legs[0]
+        else:
+            return refuse("ordinary relation has no connection reference in a multi-leg datasource")
+        if owner is leg or owner == leg:
+            bound.append(table)
+    if not bound:
+        if custom:
+            return connection, custom, None
+        return refuse("live connection leg has no bound ordinary candidate")
+
+    database = leg.get("database")
+    legacy_database = leg.get("dbname")
+    if database is not None and legacy_database is not None and database != legacy_database:
+        return refuse("database and legacy dbname disagree")
+    if database is None:
+        database = legacy_database
+    if database is not None and not _safe_probe_literal(database):
+        return refuse("recorded database is not a safe nonblank identifier")
+    connection["database"] = database
+    schemas = set()
+    candidates = []
+    for table in bound:
+        parts = _ordinary_identifier(table.get("table"))
+        if parts is None:
+            return refuse("ordinary relation requires a valid raw physical table identifier")
+        if len(parts) == 1:
+            schema = leg.get("schema")
+            if not _safe_probe_literal(schema):
+                return refuse("unqualified ordinary table requires its own valid explicit schema")
+        else:
+            if not _safe_probe_literal(database):
+                return refuse("qualified ordinary table requires a recorded database")
+            if len(parts) == 2 and parts[0].casefold() == database.casefold():
+                return refuse("two-part ordinary identifier is ambiguous with the recorded database")
+            if len(parts) == 3 and parts[0] != database:
+                return refuse("three-part ordinary identifier conflicts with the recorded database")
+            schema = parts[-2]
+        schemas.add(schema)
+        candidate = dict(table)
+        candidate["name"] = parts[-1]
+        candidates.append(candidate)
+    if len(schemas) != 1:
+        return refuse("ordinary connection leg spans multiple effective schemas")
+    connection["schema"] = next(iter(schemas))
+    return connection, candidates + custom, None
+
+
+def _key_from_resolved_scope(leg: dict, tables: list[dict], error: str | None) -> str:
+    """Hash exactly the ordinary navigation scope, or an explicitly unresolved scope."""
+    ordinary = [table["name"] for table in tables if table.get("source_relation") != "custom-sql"]
+    identity = _leg_identity(leg)
+    if error is not None:
+        identity["ordinary_tables"] = None
+    elif ordinary:
+        identity["ordinary_tables"] = sorted(set(ordinary))
+    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"source-key:{digest[:16]}"
+
+
 def _leg_key(src: dict, index: int, leg: dict) -> str:
     """Stable marker identity for one datasource connection leg.
 
     Positional keys (`source[0]`) are not identities: reordering the source list between arm and
-    clear can let proof from one endpoint occupy two keys. Hash the datasource's own stable token and
-    the connection endpoint shape instead. If that cannot distinguish two legs, duplicate-key checks
+    clear can let proof from one endpoint occupy two keys. Hash the connection endpoint and resolved
+    ordinary navigation scope instead. If that cannot distinguish two legs, duplicate-key checks
     in `credential_gate.py block` fail closed rather than letting them collapse.
     """
-    _ = src, index
+    _ = index
+    connection, tables, error = resolve_probe_scope(src, leg)
+    return _key_from_resolved_scope(connection, tables, error)
+
+
+def _leg_identity(leg: dict) -> dict:
+    """The existing connector endpoint identity, shared by resolved and unresolved scopes."""
     klass = _norm_case_insensitive(leg.get("class"))
     if not klass:
         raise ValueError("connection leg has no class; cannot derive a stable credential-gate key")
@@ -183,8 +320,7 @@ def _leg_key(src: dict, index: int, leg: dict) -> str:
         identity["schema"] = _norm_exact(leg.get("schema"))
     if leg.get("port") not in (None, ""):
         identity["port"] = str(leg.get("port")).strip()
-    digest = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-    return f"source-key:{digest[:16]}"
+    return identity
 
 
 def _leg_display(src: dict, index: int, leg: dict, leg_index: int, leg_count: int) -> str:
