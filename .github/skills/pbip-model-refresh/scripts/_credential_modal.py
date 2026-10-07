@@ -903,14 +903,153 @@ def describe_modal(modal: CredentialModal, source_hint: str | None = None) -> st
 
 
 def describe_dialog_finding(finding: DialogFinding) -> str:
-    """Human-readable evidence for a dialog we could not dismiss."""
-    window = finding.window
-    size = f"{window.width}x{window.height}" if window.width and window.height else "unknown size"
-    title = window.title or "(empty title)"
-    return (
-        f"kind={finding.kind}, window title={title!r}, class={window.class_name!r}, "
-        f"size={size}, evidence={finding.excerpt!r}"
-    )
+    """Closed metadata only: unknown UI prose is not safe verdict-line evidence."""
+    kind = finding.kind if finding.kind in DIALOG_KIND_VERDICTS else "unrecognized"
+    return f"kind={kind}, hwnd={finding.window.hwnd}; text withheld"
+
+
+_DIALOG_TEMPLATES = {
+    "privacy_warning": (
+        "Potential security risk",
+        "This file uses multiple data sources. Information in one data source might be shared with other "
+        "data sources without your knowledge. Only open this file if you trust the sender. "
+        "Do you want to open this file?",
+        frozenset({"OK", "Cancel"}),
+    ),
+    "package_session": (
+        "Something went wrong",
+        "Could not find a PackageSession for the given sessionID.",
+        frozenset({"Close", "Copy details to clipboard", "Report this issue", "Cancel"}),
+    ),
+}
+_DIALOG_MESSAGES = {
+    "privacy_warning": (
+        "Potential security risk: multiple-source sharing/trust warning (OK / Cancel). "
+        "The operator must decide whether to trust and open this file. "
+        "This is a file-trust decision, not evidence about the data source."
+    ),
+    "package_session": (
+        "Something went wrong: Desktop could not find a PackageSession for the given sessionID "
+        "(Close / Copy details to clipboard / Report this issue / Cancel). "
+        "This is a Desktop session error. Check unsaved-state safety before reopening; "
+        "source state remains unestablished."
+    ),
+    "WITHHELD": "Dialog text withheld; inspect this Desktop dialog locally. Source state unestablished.",
+    "CANNOT_READ": (
+        "Dialog text could not be read safely; inspect this Desktop dialog locally. Source state unestablished."
+    ),
+}
+
+
+def _diagnostic_template(payload: dict) -> str | None:
+    """Match the entire title/instruction/button structure, never keywords in arbitrary fields."""
+    title = " ".join(payload["Title"].split())
+    prose, buttons = [], set()
+    for item in payload["Items"]:
+        text = " ".join(item["Text"].split())
+        role, source = item["Role"], item["Source"]
+        if role == "ControlType.Button" and source == "Name":
+            buttons.add(text)
+        elif role in {"ControlType.Text", "ControlType.Document"} and source in {"Name", "TextPattern"}:
+            if text != title and text not in prose:
+                prose.append(text)
+        elif text:
+            return None
+    prose = [text for text in prose if text not in buttons]
+    for message_id, (expected_title, instruction, expected_buttons) in _DIALOG_TEMPLATES.items():
+        if title == expected_title and " ".join(prose) == instruction and buttons == expected_buttons:
+            return message_id
+    return None
+
+
+def _diagnostic_payload(raw: str, pid: int, hwnd: int) -> dict | None:
+    """Validate completeness and same-target attestations before interpreting any private text."""
+    if len(raw) > 131072 or not raw.strip().startswith("HARVEST:"):
+        return None
+    try:
+        payload = json.loads(raw.strip()[8:])
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if any(
+        type(payload.get(key)) is not int or payload[key] != value  # pylint: disable=unidiomatic-typecheck
+        for key, value in (("TargetPid", pid), ("TargetHwnd", hwnd))
+    ) or (
+        any(payload.get(key) is not True for key in ("TargetBefore", "TargetAfter"))
+        or any(payload.get(key) is not False for key in ("Truncated", "PatternsIncomplete"))
+    ):
+        return None
+    items = payload.get("Items")
+    if (
+        not isinstance(payload.get("Title"), str)
+        or len(payload["Title"]) > 8000
+        or not isinstance(items, list)
+        or len(items) > 4000
+        or any(
+            not isinstance(item, dict)
+            or any(not isinstance(item.get(key), str) for key in ("Text", "Role", "Source"))
+            or len(item["Text"]) > 8000
+            for item in items
+        )
+    ):
+        return None
+    return payload
+
+
+def diagnose_dialog(pid: int, window: DesktopWindow, *, timeout_seconds: float = 8.0) -> tuple[str, str | None, str]:
+    """Enrich one already-detected HWND, without changing any detector or gate result."""
+    if (
+        type(pid) is not int  # pylint: disable=unidiomatic-typecheck
+        or type(window.hwnd) is not int  # pylint: disable=unidiomatic-typecheck
+        or pid <= 0
+        or window.hwnd <= 0
+        or not 0 < timeout_seconds <= 8.0
+    ):
+        return "CANNOT_READ", None, "invalid_target"
+    try:
+        child = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(Path(__file__).with_name("probe_desktop_credential.ps1")),
+                "-HarvestHwnd",
+                str(window.hwnd),
+                "-DiagnosticPid",
+                str(pid),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout_seconds,
+            check=False,
+        )
+        payload = _diagnostic_payload(child.stdout, pid, window.hwnd) if child.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        return "CANNOT_READ", None, "read_failed"
+    if payload is None:
+        return "CANNOT_READ", None, "incomplete_read"
+    message_id = _diagnostic_template(payload)
+    return ("OBSERVED", message_id, "template_match") if message_id else ("WITHHELD", None, "unknown_template")
+
+
+def print_dialog_diagnostic(pid: int, window: DesktopWindow, *, stream=None) -> None:
+    """Print only closed diagnostic fields and predefined prose, never harvested text or stderr."""
+    status, message_id, reason = diagnose_dialog(pid, window)
+    record = {
+        "status": status,
+        "message_id": message_id,
+        "reason": reason,
+        "pid": str(pid),
+        "hwnd": str(window.hwnd),
+        "message": _DIALOG_MESSAGES[message_id or status],
+    }
+    # As with LOCAL_IMAGE, string-encoded numbers must not trip whole-transcript numeric scanners.
+    print("DIALOG_DIAGNOSTIC " + json.dumps(record).replace("0", r"\u0030"), file=stream, flush=True)
 
 
 # Per-kind operator guidance. Every string here is deliberately MARKER-FREE (issue #153): it must not
