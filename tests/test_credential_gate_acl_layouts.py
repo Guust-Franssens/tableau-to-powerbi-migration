@@ -79,6 +79,13 @@ class AclLab:
 
     def cleanup(self) -> None:
         """Restore inherited defaults only within the disposable tree, then assert no deny remains."""
+        self.unlink_reparse_entries()
+        self.command(self.root, "/inheritance:e", "/T", "/C", "/Q")
+        self.command(self.root, "/reset", "/T", "/C", "/Q")
+        assert "(DENY)" not in self.command(self.root, "/T").upper(), "test cleanup left a deny ACE"
+
+    def unlink_reparse_entries(self) -> None:
+        """Remove test-owned links themselves so recursive cleanup never follows their destinations."""
         for current, directories, files in os.walk(self.root, followlinks=False):
             for name in directories + files:
                 path = Path(current) / name
@@ -87,9 +94,19 @@ class AclLab:
                 elif getattr(path.lstat(), "st_file_attributes", 0) & 0x400:
                     path.rmdir()
             directories[:] = [name for name in directories if (Path(current) / name).exists()]
-        self.command(self.root, "/inheritance:e", "/T", "/C", "/Q")
-        self.command(self.root, "/reset", "/T", "/C", "/Q")
-        assert "(DENY)" not in self.command(self.root, "/T").upper(), "test cleanup left a deny ACE"
+
+    def cleanup_gate_roots(self) -> None:
+        """Bound each cleanup command to a gate fixture, not tens of thousands of unrelated test files."""
+        self.unlink_reparse_entries()
+        roots: set[Path] = set()
+        for current, _directories, files in os.walk(self.root, followlinks=False):
+            if {".credential-gate-audit.log", ".credential-gate-BLOCKED.json"} & set(files):
+                roots.add(Path(current))
+        for root in sorted(roots):
+            if roots.intersection(root.parents):
+                continue
+            self.command(root, "/remove:d", self.principal, "/T", "/C", "/Q")
+            assert "(DENY)" not in self.command(root, "/T").upper(), "session cleanup left a fixture deny"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -97,7 +114,7 @@ def acl_session_cleanup(tmp_path_factory: pytest.TempPathFactory) -> Iterator[No
     """Also clean test-owned denies from unchanged gate modules run in this same pytest session."""
     yield
     if sys.platform == "win32":
-        AclLab(tmp_path_factory.getbasetemp()).cleanup()
+        AclLab(tmp_path_factory.getbasetemp()).cleanup_gate_roots()
 
 
 @pytest.fixture(name="acl_lab")
@@ -325,6 +342,38 @@ def test_unsupported_acl_refuses_before_claiming_enforcement(
     assert not (root / gate.MARKER).exists(), "refusal must not claim writes_blocked"
     assert acl_lab.command(target) == before, "refusal must not repair or remove an existing ACL"
     _writable(files)
+
+
+def test_explicit_group_grant_cannot_override_inherited_gate(acl_lab: AclLab, caplog: pytest.LogCaptureFixture) -> None:
+    """A pre-existing explicit group grant is nonstandard too, even when inheritance is enabled."""
+    root, files = _bundle(acl_lab.root / "bundle")
+    identity = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "[System.Security.Principal.SecurityIdentifier]::new("
+            "[System.Security.Principal.WellKnownSidType]::WorldSid,$null).Value",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert identity.returncode == 0, "fixture group resolution failed"
+    acl_lab.command(files[0], "/grant", f"*{identity.stdout.strip()}:(F)")
+    before = acl_lab.command(files[0])
+    caplog.set_level(logging.INFO, logger="credential_gate")
+    result = gate.apply_block(root, [SOURCE])
+    writable = True
+    try:
+        files[0].write_text("fixture group write", encoding="utf-8")
+    except PermissionError:
+        writable = False
+    assert result != 0, f"a conflicting explicit group grant must refuse; arm={result}, writable={writable}"
+    assert "ENFORCED" not in caplog.text
+    assert not (root / gate.MARKER).exists()
+    assert writable and acl_lab.command(files[0]) == before
 
 
 def test_rearm_is_idempotent_and_partial_apply_can_retry(

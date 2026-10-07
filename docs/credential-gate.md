@@ -94,11 +94,14 @@ Bundles and native units never acquire a dummy `fabric`.
 
 ✅ The focused real-Windows controls in `tests/test_credential_gate_acl_layouts.py` check existing
 file writes, new descendants, reads, the writable probe and post-clear writes. `(OI)(CI)` propagates
-the deny to ordinary inheriting existing and future children. Protected DACLs and conflicting
-explicit current-principal permissions are checked **before mutation**: the gate refuses with
+the deny to ordinary inheriting existing and future children. Protected DACLs and non-gate
+explicit permissions are checked **before mutation**: the gate refuses with
 `CANNOT ESTABLISH`, a nonzero result and no `ENFORCED` claim. It does not repair permissions or
 promise to restore grants an ACL operation would remove. Exact, audit-attributable gate denies are
-the nesting/re-arm exception. A partial apply retains the stop and completed denies, but marks
+the nesting/re-arm exception. Explicit group grants can also override an inherited deny on a child:
+the supported ACL shape is deliberately limited to inherited permissions plus attributable gate
+denies, without attempting group-membership analysis. A partial apply retains the stop and completed
+denies, but marks
 `writes_blocked: false`; retry the same gate after resolving the refusal. Non-Windows retains only
 its marker and warning, never kernel enforcement.
 

@@ -508,7 +508,7 @@ def _acl_listing(path: Path) -> str:
 
 
 def _account_aces(path: Path) -> list[tuple[frozenset[str], frozenset[str]]]:
-    """Parse current-principal flags/rights, never a localized success sentence or a substring."""
+    """Admit inherited permissions, then select current-principal ACEs; no group-membership engine."""
     listing = _acl_listing(path)
     entries = []
     parsed = False
@@ -524,10 +524,14 @@ def _account_aces(path: Path) -> list[tuple[frozenset[str], frozenset[str]]]:
         if not groups or "".join(f"({group})" for group in groups) != "(" + permissions:
             raise ValueError("physical_acl_unreadable")
         parsed = True
+        flags = frozenset(group.upper() for group in groups[:-1])
         identity = principal.casefold()
         if identity != user and ("\\" in user or identity.rsplit("\\", 1)[-1] != user):
+            # An explicit group allow can override this account's inherited deny on a child.
+            if "I" not in flags:
+                raise ValueError("physical_acl_conflict")
             continue
-        entries.append((frozenset(group.upper() for group in groups[:-1]), frozenset(groups[-1].upper().split(","))))
+        entries.append((flags, frozenset(groups[-1].upper().split(","))))
     if not parsed:
         raise ValueError("physical_acl_unreadable")
     return entries
