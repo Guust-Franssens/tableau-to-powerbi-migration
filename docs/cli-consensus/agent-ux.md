@@ -14,39 +14,38 @@ never source or a giant README.
 ### Proposed command tree
 
 ```text
-t2p doctor [--paths] [--run <path>]                 NEW; wraps preflight.ps1/work_dirs checks (scripts/README.md:26,1228)
-t2p init <slug> [--runs-parent <short-root>]        wraps work_dirs.py (scripts/README.md:34-36,1228)
-t2p start [--workbook|--folder|--server ...] [--run <path>] NEW; composes route (scripts/README.md:38-46,64)
-t2p survey [--server ... --site ...]                wraps run_engine_survey.py (AGENTS.md:215)
-t2p plan                                             wraps assess_estate.py + tableau_lineage.py (AGENTS.md:215)
-t2p harvest                                          wraps harvest_estate_assets.py (AGENTS.md:215)
-t2p capture reference|oracle                         wraps capture_tableau_reference.py / capture_tableau_oracle.py (AGENTS.md:246-260)
-t2p convert                                          wraps parse_tableau.py or run_estate.py (AGENTS.md:216-217; scripts/README.md:76)
-t2p build                                            NEW; handoff/navigation, not a second converter
-t2p check [--scope model|report|integration|all]     wraps check_unit.py; bindings -> verify_bindings.py (docs/INDEX.md:8; docs/operator-runbook.md:1577)
-t2p status|next [--run <path>] | why <unit|gate|code> status wraps run_status.py; next/why NEW (scripts/README.md:77)
-t2p brief <unit>                                     NEW; renders existing brief + run evidence
-t2p resume --run <path>                              NEW; selects existing run (scripts/README.md:54-57)
-t2p deploy --run <path> --workspace <name> [--dry-run] wraps deploy_estate.py (AGENTS.md:323; docs/operator-runbook.md:1137-1153)
-t2p credentials list|reprobe --run <path>            wraps credential_gate.py / reprobe_blocked.py (docs/INDEX.md:10-17)
-t2p runs list|verify                                 wraps work_dirs.py (scripts/README.md:33-57,1228)
-t2p completion {bash,zsh,fish,powershell}             NEW; same registry as help
+t2p doctor [--paths] [--run <path>]                 CORE; wraps preflight.ps1/work_dirs (scripts/README.md:26,1228)
+t2p init <slug> [--runs-parent <short-root>]        ADVANCED; wraps work_dirs.py (scripts/README.md:34-36,1228)
+t2p start [--workbook|--folder|--server ...] [--run <path>] CORE; composes route (scripts/README.md:38-46,64)
+t2p survey [--server ... --site ...]                ADVANCED; wraps run_engine_survey.py (AGENTS.md:215)
+t2p plan                                             ADVANCED; wraps assess_estate.py + tableau_lineage.py (AGENTS.md:215)
+t2p harvest                                          ADVANCED; wraps harvest_estate_assets.py (AGENTS.md:215)
+t2p capture reference|oracle                         ADVANCED; wraps capture_tableau_reference.py / capture_tableau_oracle.py (AGENTS.md:246-260)
+t2p convert                                          ADVANCED; wraps parse_tableau.py or run_estate.py (AGENTS.md:216-217; scripts/README.md:76)
+t2p build                                            ADVANCED; NEW handoff, not a second converter
+t2p check [--scope model|report|integration|all]     CORE; wraps check_unit.py (docs/INDEX.md:8)
+t2p status|next [--run <path>] | why <unit|gate|code> CORE status wraps run_status.py; why ADVANCED (scripts/README.md:77)
+t2p brief <unit>                                     ADVANCED; NEW, renders existing brief + evidence
+t2p resume --run <path>                              ADVANCED; NEW, selects existing run (scripts/README.md:54-57)
+t2p deploy --run <path> --workspace <name> [--dry-run] CORE; wraps deploy_estate.py (AGENTS.md:323; docs/operator-runbook.md:1137-1153)
+t2p credentials list|reprobe --run <path>            ADVANCED; wraps credential_gate.py / reprobe_blocked.py (docs/INDEX.md:10-17)
+t2p runs list|verify                                 ADVANCED; wraps work_dirs.py (scripts/README.md:33-57,1228)
+t2p completion {bash,zsh,fish,powershell}             ADVANCED; NEW, same registry as help
 ```
 
-⚠️ Keep lifecycle verbs discoverable; nest capture modes, credentials and run utilities rather than
-expose 116 scripts as 116 commands (issue #734). `start` chooses the route; explicit stages are
-operator/recovery steps (`scripts/README.md:31-77`; `AGENTS.md:206-218`).
+⚠️ Core (6): doctor/start/status/next/check/deploy; advanced: the other listed commands. Internal
+helpers (`engine_source.py`, `tableau_env.py`, `migration_bundle.py`) stay out of help/personas; the
+facade invokes them, not as 116 script commands (issue #734; `scripts/README.md:67-72,1222`).
 
-⚠️ `completion {bash,zsh,fish,powershell}` must use the same registry as help. `NO_COLOR` and
-non-TTY suppress ANSI/spinners; stdout is data, stderr prose; every command prints absolute created
-paths. Prefer Python wrappers; keep PowerShell for preflight, which must run before Python exists
-(`scripts/README.md:11-26`). Windows path spelling is not path-budget proof (see §6).
+⚠️ Completion shares help's registry; `NO_COLOR`/non-TTY suppress color/spinners. Stdout is data,
+stderr prose; commands print created absolute paths. `start` prints physical run path first/last.
+Prefer Python except preflight, which precedes Python (`scripts/README.md:11-26`); Windows spelling is not budget proof (§6).
 
 ## 2. Inputs and references
 
 ✅ Local single-workbook route uses `.twb/.twbx` plus `reference/tableau-<exact dashboard name>.png`
-(`docs/start-with-one-workbook.md:66-102`). Folders use `run_estate.py --input <folder> --output
-<bundle>`; sites use `--server`, `--site`, then survey/assessment/lineage/harvest (`AGENTS.md:213-218`).
+(`docs/start-with-one-workbook.md:66-102`); folders use `run_estate.py --input <folder> --output <bundle>`,
+sites use `--server`/`--site` then survey/assessment/lineage/harvest (`AGENTS.md:213-218`).
 ✅ PAT secret comes from `.env` or exported environment, never CLI arguments (`AGENTS.md:262-263`;
 `docs/operator-runbook.md:349-364`).
 ✅ `capture_tableau_reference.py` adopts local/Public images; `capture_tableau_oracle.py` exports live
@@ -94,7 +93,7 @@ budget and pre-engine pass/over/unknown; repeat paths in `status`/`next`, never 
 
 ## 5. Stable JSON
 
-❌ No common envelope today. ⚠️ Proposed `schema: "t2p.v1"`:
+❌ No common envelope today. ⚠️ Proposed global `--json` for every command, using `schema: "t2p.v1"`:
 `{schema,ok,verdict,exit_code,paths,next,warnings,limitations}`. Add optional fields only in v1;
 breaking shape/meaning requires v2. `help json` documents codes/fields. `paths` references outputs;
 wrap `migration-spec.json`, receipt, `run.json`, journals and gate results without copying content or
@@ -145,7 +144,9 @@ README. Every example ends with next-step. Outputs illustrative.
 
 ```text
 $ t2p start --workbook ./source/Orders.twbx --reference-dir ./reference
-Run C:\repo\_runs\001-orders; 1 image adopted, not fidelity proof | NEXT: t2p convert --run C:\repo\_runs\001-orders | exit 0
+C:\repo\_runs\001-orders (first output line)
+1 image adopted, not fidelity proof | NEXT: t2p convert --run C:\repo\_runs\001-orders
+C:\repo\_runs\001-orders (last output line) | exit 0
 $ t2p start --folder ./workbooks
 Run C:\repo\_runs\002-estate; 3 units | NEXT: t2p check --run C:\repo\_runs\002-estate | exit 0
 $ t2p start --server https://tableau.example --site sales --env-file .env
@@ -171,8 +172,7 @@ All reports resolve | NEXT: t2p status --run C:\repo\_runs\002-estate | exit 0
 
 ## Open questions, cuts, verdict
 
-⚠️ Not verified: flags, event schema, Windows installation/completion, path projection, or lossless
-exit mapping. No issue/brief conflict found; the latest #734 comment's path fields are covered in §4/6.
+⚠️ Not verified: flags, event schema, Windows installation/completion, path projection, or lossless exit mapping. No issue/brief conflict found; the latest #734 comment's path fields are covered in §4/6.
 ❌ Scope conflict: `docs/INDEX.md:45-47` requires indexing eligible Markdown, but this one-file deliverable leaves INDEX unchanged; validation is not claimed.
 
 **Cut:** per-script verbs, cached status, duplicated policy, second database, source browsing.
