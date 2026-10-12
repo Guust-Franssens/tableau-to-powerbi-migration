@@ -31,24 +31,24 @@ child's current code and status in JSON; shared CLI exit mapping is below.
 
 | Verb | Wraps (one-to-one) | Reads → writes | Mutating? | Native exits / notes |
 |---|---|---|---|---|
-| `doctor` | `preflight.ps1` | environment → none | No | 0 / 1 |
-| `scope` | `assess_estate.py` | survey → assessment dir | Yes | 0 / 1 / 2 / 3; only after survey in current pipeline |
-| `start` | `start_migration.py` | selectors/env → allocated run and five-stage outputs | Yes | 0 / 1 / 3 / 130; 0 is capture-only |
-| `allocate` | `work_dirs.py` | unit, root → `_runs/.../run.json` | Yes | 0 / 1 / 2; `--verify`: 0/1/2/3 |
-| `survey` | `run_engine_survey.py` | Tableau → `assessment/estate_survey.json` | Yes/network | native 0 / 1 / 2 |
-| `harvest` | `harvest_estate_assets.py` | assessment/site → assets + parse sweep | Yes/network | native 0/1/2/3 |
-| `reference` | `capture_tableau_oracle.py` | Tableau → oracle manifest/renders/data | Yes/network | native 0–5 |
-| `build` | `run_estate.py` | assets/survey → bundle/receipts | Yes | native 0–11; 3 DoD, 9 rewrite, 10 path |
-| `credentials status|block|clear|verify|authorize|list` | `credential_gate.py` | marker/ACL/audit → verdict | Except block/clear/authorize | preserve subcommand exits; list 1 blocked, 3 forged, 4 bad root |
-| `unit prepare` | `package_unit.py` | bundle/brief/evidence → package | Yes | 0 / 2 / 3 / 5 / 6 (1, 4 legacy) |
-| `readiness` | `check_reference_readiness.py` | package/cohort → START_READY result | No | native 0 / 1 / 2 / 3 |
-| `validate` | `check_unit.py` | unit/package → layer or all-scope result | No | 0 / 1 / 2 / 4 / 64; only caller-pinned all-scope can COMPLETE |
-| `refresh` | `refresh_pbip_model.py` | PBIP/TMDL → cache | Yes | child-native; shim 2 if target missing |
-| `promote` | `promote_unit.py` | package/H → `migrations/.../fabric/` | Yes | native 0–6/64 |
-| `deploy --dry-run` / `deploy` | `deploy_estate.py` | bundle/workspace → plan or Fabric/journal | Dry-run no; deploy yes | 0 / 1 / 2 / 3; dry-run first, explicit deploy only |
-| `verify` | `verify_bindings.py` | workspace → optional JSON | No/network | 0 / 1 / 2 |
-| `feedback` | `build_migration_feedback.py` | run evidence → private bundle/payload | Yes/local | 0 / 1 / 2 / 3; never publish |
-| `status` / `next` / `resume` | `run_status.py` (one wrapper; no stage execution) | selected run → observations / one legal next command; resume re-derives, then returns control to caller | No | native 0 / 1 / 2; no current resume script |
+| `doctor` | `preflight.ps1` | environment → none | No | 0 / 1 [docs/operator-runbook.md:119-129] |
+| `scope` | `assess_estate.py` | survey → assessment dir | Yes | 0 / 1 / 2 / 3; only after survey [scripts/assess_estate.py:70-75,1813] |
+| `start` | `start_migration.py` | selectors/env → allocated run and five-stage outputs | Yes | 0 / 1 / 2 / 3 / 130; 0 is capture-only [scripts/start_migration.py:363,454] |
+| `allocate` | `work_dirs.py` | unit, root → `_runs/.../run.json` | Yes | 0 / 1 / 2; `--verify`: 0/1/2/3 [scripts/work_dirs.py:74-89,1346] |
+| `survey` | `run_engine_survey.py` | Tableau → `assessment/estate_survey.json` | Yes/network | child-native 0 / 1 / 2 [scripts/run_engine_survey.py:15-18,52-61] |
+| `harvest` | `harvest_estate_assets.py` | assessment/site → assets + parse sweep | Yes/network | native 0/1/2/3 [scripts/harvest_estate_assets.py:12-20,149-152] |
+| `reference` | `capture_tableau_oracle.py` | Tableau → oracle manifest/renders/data | Yes/network | native 0–5 [scripts/capture_tableau_oracle.py:2003-2007] |
+| `build` | `run_estate.py` | assets/survey → bundle/receipts | Yes | native 0–11; 3 DoD, 9 rewrite, 10 path [scripts/run_estate.py:204-214] |
+| `credentials status|block|clear|verify|authorize|list` | `credential_gate.py` | marker/ACL/audit → verdict | Except block/clear/authorize | preserve subcommand exits; list 1 blocked, 3 forged, 4 bad root [scripts/credential_gate.py:1196-1198,2491-2534] |
+| `unit prepare` | `package_unit.py` | bundle/brief/evidence → package | Yes | 0 / 2 / 3 / 5 / 6 (1, 4 legacy) [scripts/package_unit.py:123-137,397-403] |
+| `readiness` | `check_reference_readiness.py` | package/cohort → START_READY result | No | native 0 / 1 / 2 / 3 [scripts/check_reference_readiness.py:31-41,164-167] |
+| `validate` | `check_unit.py` | unit/package → layer or all-scope result | No | 0 / 1 / 2 / 4 / 64; only caller-pinned all-scope can COMPLETE [scripts/check_unit.py:6-13,93-97] |
+| `refresh` | `refresh_pbip_model.py` | PBIP/TMDL → cache | Yes | child-native; shim 2 if target missing [scripts/refresh_pbip_model.py:23-31] |
+| `promote` | `promote_unit.py` | package/H → `migrations/.../fabric/` | Yes | native 0–6/64 [scripts/promote_unit.py:64-73] |
+| `deploy --dry-run` / `deploy` | `deploy_estate.py` | bundle/workspace → plan or Fabric/journal | Dry-run no; deploy yes | 0 / 1 / 2 / 3; dry-run first, explicit deploy only [scripts/deploy_estate.py:169-182] |
+| `verify` | `verify_bindings.py` | workspace → optional JSON | No/network | 0 / 1 / 2 [scripts/verify_bindings.py:8-10,118-120] |
+| `feedback` | `build_migration_feedback.py` | run evidence → private bundle/payload | Yes/local | 0 / 1 / 2 / 3; never publish [scripts/build_migration_feedback.py:1580-1605] |
+| `status` / `next` / `resume` | `run_status.py` (one wrapper; no stage execution) | selected run → observations / one legal next command; resume re-derives, then returns control to caller | No | native 0 / 1 / 2; no current resume script [scripts/run_status.py:972-987] |
 
 ## `status`, `next`, and resume semantics
 
@@ -91,7 +91,7 @@ child's current code and status in JSON; shared CLI exit mapping is below.
 | Scoped → harvested → referenced | assets and parse-sweep; manifest records requested captures | `harvest_estate_assets.py`, capture owner |
 | Referenced → converted | valid inputs + canonical engine receipt + DoD/path reports | `run_estate.py`, `engine_source.py` |
 | Converted → credential-cleared | per-source probe/audit + verified ACL state | `credential_gate.py`; human for sign-in/authorize |
-| Converted → assembled → START_READY | package manifest/roles, issued brief, canonical data and fresh binding | `package_unit.py`; `check_reference_readiness.py` |
+| Credential decision + converted → assembled → START_READY | verified probe-clear, or explicit human `authorized_model_only` fallback, plus package manifest/roles, issued brief, canonical data, fresh binding and ready reference. Fallback is model-only and remains UNVALIDATED, never evidence of live reachability. [scripts/credential_gate.py:1548,2264-2310; scripts/check_reference_readiness.py:1429-1458] | `credential_gate.py`; `package_unit.py`; `check_reference_readiness.py` |
 | START_READY → built → refreshed | declared edits; structural TMDL/PBIR checks before refresh; persisted cache | builders; validation/refresh owners |
 | Refreshed → fidelity PASS → COMPLETE | reference supports requested claim; current all-scope caller H | validator; `check_unit.py --scope all --receipt-sha256 H` |
 | COMPLETE → promoted → deployed → verified | same H promotion; reviewed dry-run count; deployment journal; workspace binding check | `promote_unit.py`, `deploy_estate.py`, `verify_bindings.py` |
@@ -100,7 +100,7 @@ child's current code and status in JSON; shared CLI exit mapping is below.
 
 | Illegal transition | Detection today; refusal/exit (or explicit gap) |
 |---|---|
-| Builder before credential verdict | ACL blocks writes; `credential_gate.py verify` owns ACL/audit. No unified CLI transition guard exists; proposed wrapper refuses unless owner verdict is PASS. Missing/unreadable state is CANNOT-ESTABLISH. [scripts/README.md:86; scripts/credential_gate.py:2491-2534] |
+| Builder before credential decision | ACL blocks writes; `credential_gate.py verify` owns ACL/audit. No unified CLI transition guard exists; proposed wrapper requires verified clear or explicit human-authorized model-only build path. Missing/unreadable state is CANNOT-ESTABLISH. [scripts/README.md:86-87; scripts/credential_gate.py:2264-2310] |
 | Promote without checked COMPLETE | `promote_unit.py` calls `check_unit.py`; nonzero refuses unless explicit `--force`, which records “PROMOTED unchecked.” Force is not proposed as a normal CLI path. [scripts/promote_unit.py:64-83,135] |
 | Deploy without dry-run item-count agreement | **Gap:** `deploy_estate.py --dry-run` reports count but does not establish prior human agreement. Proposed CLI reruns dry-run and requires explicit matching count before separate deploy; no saved approval ledger. [scripts/README.md:93; docs/operator-runbook.md:497-510] |
 | Partial existing-bundle rerun with changed engine version | `run_estate.py` rewrite barrier exit 9; `--accept-engine-version-change` is explicit acknowledgment, never auto-added. [docs/operator-runbook.md:807-809,855-870] |
