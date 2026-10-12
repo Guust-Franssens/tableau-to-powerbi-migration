@@ -26,29 +26,30 @@ explicit. A gate's owner decides; a facade only invokes it and reports its evide
 
 ## Proposed command surface (thin wrappers only)
 
-**PROPOSAL:** one verb calls the named owner; no new policy implementation. `native` means retain the
-child's current code and status in JSON; shared CLI exit mapping is below.
+**PROPOSAL:** one command name, `t2p`; stage verbs map one-to-one to owners; navigation verbs compose read-only owner outputs, never gate logic. Core (default help): `doctor`, `start`, `status`, `next`, `resume`, `unit prepare`, `validate`, `credentials list`, `deploy --dry-run`.
+Advanced/support verbs are in advanced help. Underlying scripts are internal implementation names, remain callable for compatibility, but stay out of agent prompts.
+Every command has strong `--help`, human output, and versioned `--json`; relay child output live to stderr (keeping JSON stdout clean), redact secrets, preserve `native_exit`/owner evidence, and encode errors. The command registry/help is canonical; README/INDEX become generated summaries or pointers. [Issue #734: Desired agent experience, Tiering]
 
-| Verb | Wraps (one-to-one) | Reads → writes | Mutating? | Native exits / notes |
+| Tier / verb | Wraps (thin) | Reads → writes | Mutating? | Native exits / notes |
 |---|---|---|---|---|
-| `doctor` | `preflight.ps1` | environment → none | No | 0 / 1 [docs/operator-runbook.md:119-129] |
-| `scope` | `assess_estate.py` | survey → assessment dir | Yes | 0 / 1 / 2 / 3; only after survey [scripts/assess_estate.py:70-75,1813] |
-| `start` | `start_migration.py` | selectors/env → allocated run and five-stage outputs | Yes | 0 / 1 / 2 / 3 / 130; 0 is capture-only [scripts/start_migration.py:363,454] |
-| `allocate` | `work_dirs.py` | unit, root → `_runs/.../run.json` | Yes | 0 / 1 / 2; `--verify`: 0/1/2/3 [scripts/work_dirs.py:74-89,1346] |
-| `survey` | `run_engine_survey.py` | Tableau → `assessment/estate_survey.json` | Yes/network | child-native 0 / 1 / 2 [scripts/run_engine_survey.py:15-18,52-61] |
-| `harvest` | `harvest_estate_assets.py` | assessment/site → assets + parse sweep | Yes/network | native 0/1/2/3 [scripts/harvest_estate_assets.py:12-20,149-152] |
-| `reference` | `capture_tableau_oracle.py` | Tableau → oracle manifest/renders/data | Yes/network | native 0–5 [scripts/capture_tableau_oracle.py:2003-2007] |
-| `build` | `run_estate.py` | assets/survey → bundle/receipts | Yes | native 0–11; 3 DoD, 9 rewrite, 10 path [scripts/run_estate.py:204-214] |
-| `credentials status|block|clear|verify|authorize|list` | `credential_gate.py` | marker/ACL/audit → verdict | Except block/clear/authorize | preserve subcommand exits; list 1 blocked, 3 forged, 4 bad root [scripts/credential_gate.py:1196-1198,2491-2534] |
-| `unit prepare` | `package_unit.py` | bundle/brief/evidence → package | Yes | 0 / 2 / 3 / 5 / 6 (1, 4 legacy) [scripts/package_unit.py:123-137,397-403] |
-| `readiness` | `check_reference_readiness.py` | package/cohort → START_READY result | No | native 0 / 1 / 2 / 3 [scripts/check_reference_readiness.py:31-41,164-167] |
-| `validate` | `check_unit.py` | unit/package → layer or all-scope result | No | 0 / 1 / 2 / 4 / 64; only caller-pinned all-scope can COMPLETE [scripts/check_unit.py:6-13,93-97] |
-| `refresh` | `refresh_pbip_model.py` | PBIP/TMDL → cache | Yes | child-native; shim 2 if target missing [scripts/refresh_pbip_model.py:23-31] |
-| `promote` | `promote_unit.py` | package/H → `migrations/.../fabric/` | Yes | native 0–6/64 [scripts/promote_unit.py:64-73] |
-| `deploy --dry-run` / `deploy` | `deploy_estate.py` | bundle/workspace → plan or Fabric/journal | Dry-run no; deploy yes | 0 / 1 / 2 / 3; dry-run first, explicit deploy only [scripts/deploy_estate.py:169-182] |
-| `verify` | `verify_bindings.py` | workspace → optional JSON | No/network | 0 / 1 / 2 [scripts/verify_bindings.py:8-10,118-120] |
-| `feedback` | `build_migration_feedback.py` | run evidence → private bundle/payload | Yes/local | 0 / 1 / 2 / 3; never publish [scripts/build_migration_feedback.py:1580-1605] |
-| `status` / `next` / `resume` | `run_status.py` (one wrapper; no stage execution) | selected run → observations / one legal next command; resume re-derives, then returns control to caller | No | native 0 / 1 / 2; no current resume script [scripts/run_status.py:972-987] |
+| Core | `doctor` → `preflight.ps1` | environment → none | No | 0 / 1 [docs/operator-runbook.md:119-129] |
+| Advanced | `scope` → `assess_estate.py` | survey → assessment dir | Yes | 0 / 1 / 2 / 3; only after survey [scripts/assess_estate.py:70-75,1813] |
+| Core | `start` → `start_migration.py` | selectors/env → allocated run and five-stage outputs | Yes | 0 / 1 / 2 / 3 / 130; 0 is capture-only [scripts/start_migration.py:363,454] |
+| Advanced | `allocate` → `work_dirs.py` | unit, root → `_runs/.../run.json` | Yes | 0 / 1 / 2; `--verify`: 0/1/2/3 [scripts/work_dirs.py:74-89,1346] |
+| Advanced | `survey` → `run_engine_survey.py` | Tableau → `assessment/estate_survey.json` | Yes/network | child-native 0 / 1 / 2 [scripts/run_engine_survey.py:15-18,52-61] |
+| Advanced | `harvest` → `harvest_estate_assets.py` | assessment/site → assets + parse sweep | Yes/network | native 0/1/2/3 [scripts/harvest_estate_assets.py:12-20,149-152] |
+| Advanced | `reference` → `capture_tableau_oracle.py` | Tableau → oracle manifest/renders/data | Yes/network | native 0–5 [scripts/capture_tableau_oracle.py:2003-2007] |
+| Advanced | `build` → `run_estate.py` | assets/survey → bundle/receipts | Yes | native 0–11; 3 DoD, 9 rewrite, 10 path [scripts/run_estate.py:204-214] |
+| Core + advanced | Core `credentials list`; advanced `credentials status|block|clear|verify|authorize` → `credential_gate.py` | marker/ACL/audit → verdict | Except block/clear/authorize | preserve subcommand exits; list 1 blocked, 3 forged, 4 bad root [scripts/credential_gate.py:1196-1198,2491-2534] |
+| Core | `unit prepare` → `package_unit.py` | bundle/brief/evidence → package | Yes | 0 / 2 / 3 / 5 / 6 (1, 4 legacy) [scripts/package_unit.py:123-137,397-403] |
+| Advanced | `readiness` → `check_reference_readiness.py` | package/cohort → START_READY result | No | native 0 / 1 / 2 / 3 [scripts/check_reference_readiness.py:31-41,164-167] |
+| Core | `validate` → `check_unit.py` | unit/package → layer or all-scope result | No | 0 / 1 / 2 / 4 / 64; only caller-pinned all-scope can COMPLETE [scripts/check_unit.py:6-13,93-97] |
+| Advanced | `refresh` → `refresh_pbip_model.py` | PBIP/TMDL → cache | Yes | child-native; shim 2 if target missing [scripts/refresh_pbip_model.py:23-31] |
+| Advanced | `promote` → `promote_unit.py` | package/H → `migrations/.../fabric/` | Yes | native 0–6/64 [scripts/promote_unit.py:64-73] |
+| Core + advanced | Core `deploy --dry-run`; advanced `deploy` → `deploy_estate.py` | bundle/workspace → plan or Fabric/journal | Dry-run no; deploy yes | 0 / 1 / 2 / 3; dry-run first, explicit deploy only [scripts/deploy_estate.py:169-182] |
+| Advanced | `verify` → `verify_bindings.py` | workspace → optional JSON | No/network | 0 / 1 / 2 [scripts/verify_bindings.py:8-10,118-120] |
+| Advanced | `feedback` → `build_migration_feedback.py` | run evidence → private bundle/payload | Yes/local | 0 / 1 / 2 / 3; never publish [scripts/build_migration_feedback.py:1580-1605] |
+| Core | `status` / `next` / `resume` → `run_status.py` plus read-only gate artifacts (no stage execution) | selected run → observations / one legal next command; resume re-derives, then returns control to caller | No | native 0 / 1 / 2; no current resume script [scripts/run_status.py:972-987] |
 
 ## `status`, `next`, and resume semantics
 
@@ -57,9 +58,9 @@ child's current code and status in JSON; shared CLI exit mapping is below.
   `run_status.py --run ABS [--json]` is read-only/non-certifying: exit 0 says inputs were assessable,
   not START_READY/COMPLETE; it does not establish current readiness. Its JSON schema v2 is not the
   proposed facade schema v1. Use `python -B`. [scripts/README.md:77; scripts/run_status.py:1-8,972-987]
-- **PROPOSAL — `next`:** emit exactly one legal next command and its reason, or one human action at
-  the first authoritative blocker. Never auto-advance or call a later-stage gate to override an
-  earlier refusal.
+- **PROPOSAL — `next`:** explain present evidence, blocking authority, proof limits, then emit exactly
+  one legal command and its reason, or one human action at the first blocker. Never auto-advance or
+  call a later-stage gate to override an earlier refusal.
 - **PROPOSAL — contradictions/staleness:** current bytes and owning gate verdict outrank narrative,
   timestamps, directory presence, stale JSON, and a previous PASS. Re-run only the owning read-only
   gate where safe. Missing/changed evidence is `CANNOT-ESTABLISH`; absent baseline is
@@ -69,8 +70,8 @@ child's current code and status in JSON; shared CLI exit mapping is below.
   unverifiable, contradictory, foreign-scope, or incomplete package evidence; never allocate a
   replacement or relocate the old run. `--select-run` changes the checkout navigation note, so it is
   not the read-only status operation. [scripts/work_dirs.py:74-89,1336-1366]
-- JSON `status` **PROPOSAL**, derived fields only:
-  `schema_version: 1`; `run:{recorded_path,physical_path,runs_parent,root_kind,git_visibility,commit_safety,integrity}`;
+- JSON **PROPOSAL**, shared fields: `schema_version:1`, `command`, `outcome=OK|REFUSE|CANNOT_ESTABLISH|NEEDS_HUMAN|CHILD_FAILURE`, `native_exit`, `error:{code,message}`, `evidence[]`, `proof:{can[],cannot[]}`, `result`; stable per command.
+  For `status`, derived fields only: `run:{recorded_path,physical_path,runs_parent,root_kind,git_visibility,commit_safety,integrity}`;
   `paths:{longest_file,longest_directory,file_remaining,dir_remaining,projection,rerun_command}`;
   `stages:[{name,state,authority,evidence[],native_exit}]`;
   `blocker:{gate,reason,human_action}`; `next:{command,why}`.
@@ -80,7 +81,7 @@ child's current code and status in JSON; shared CLI exit mapping is below.
 - **Finding — current vocabularies differ:** oracle uses 0–5, `run_estate` uses 0–11 (including
   DoD=3), readiness uses 0/1/2/3, promotion uses 0–6/64, and credential `list` uses 0/1/3/4.
   [scripts/capture_tableau_oracle.py:2000-2007; docs/operator-runbook.md:793-810;
-  docs/reference-readiness.md:77-85; scripts/  scripts/promote_unit.py:64-73; scripts/README.md:86]
+  docs/reference-readiness.md:77-85; scripts/promote_unit.py:64-73; scripts/README.md:86]
 
 ## State transitions
 
@@ -190,6 +191,7 @@ oracle path despite its name; present the actual route, not a guessed alias. [sc
 ## Open questions / not verified
 
 - ❌ No `t2p` facade or `resume` command was found; command names and shared exit mapping are proposals.
+- ⚠️ V1 invocation remains open: `python scripts/t2p.py` versus installed `t2p`; Windows, cloud-agent and copied-toolkit behavior, persona cleanup, mutation tests, and blind-run comparison are not established by this design doc. [Issue #734: Questions to investigate, Acceptance]
 - ❌ No live Tableau, Fabric, credentials, Windows Desktop, or refresh was exercised; findings here
   are static source/document inspection only. Startup preflight could not run because this Linux
   sandbox has no `powershell` executable (exit 127), not because of an execution-policy refusal.
