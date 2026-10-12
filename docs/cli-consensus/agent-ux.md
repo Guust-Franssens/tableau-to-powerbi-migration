@@ -169,7 +169,7 @@ All reports resolve | NEXT: t2p status --run C:\repo\_runs\002-estate | exit 0
 ## Open questions, cuts, verdict
 
 ⚠️ Not verified: flags, event schema, Windows installation/completion, path projection, or lossless exit mapping. No issue/brief conflict found; the latest #734 comment's path fields are covered in §4/6.
-❌ Scope conflict: `docs/INDEX.md:45-47` requires indexing eligible Markdown, but this one-file deliverable leaves INDEX unchanged; validation is not claimed.
+❌ Scope conflict: `docs/INDEX.md:45-47` requires indexing eligible Markdown; `python scripts/check_navigation_index.py` exits 1 for this file. One-file scope forbids changing INDEX.
 
 **Cut:** per-script verbs, cached status, duplicated policy, second database, source browsing.
 **Verdict:** Essential: help, authoritative path/status/next, progress, stable errors, handoff.
