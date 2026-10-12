@@ -152,7 +152,7 @@ Existing artifacts/journal re-read; no state recreated | NEXT: t2p next --run C:
 $ t2p credentials reprobe --run C:\repo\_runs\002-estate
 REFUSE CREDENTIAL_REQUIRED; autopilot cannot fill modal | NEXT: human signs in, then t2p credentials reprobe --run C:\repo\_runs\002-estate | exit 1
 $ t2p doctor --paths --slug regional-sales
-OVER: file 271/259, dir 252/247; old run untouched | NEXT: t2p init regional-sales --runs-parent C:\r | exit 2
+OVER: file 271/259, dir 252/247; old run untouched | NEXT: t2p init regional-sales --runs-parent C:\r | exit 1
 $ t2p init regional-sales --runs-parent C:\r
 Run C:\r\0001-regional-sales | NEXT: t2p start --workbook ./Regional.twbx --run C:\r\0001-regional-sales | exit 0
 $ t2p deploy --run C:\repo\_runs\002-estate --workspace Landing --dry-run
