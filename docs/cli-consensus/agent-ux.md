@@ -154,7 +154,7 @@ REFUSE CREDENTIAL_REQUIRED; autopilot cannot fill modal | NEXT: human signs in, 
 $ t2p doctor --paths --slug regional-sales
 OVER: file 271/259, dir 252/247; old run untouched | NEXT: t2p init regional-sales --runs-parent C:\r | exit 1
 $ t2p init regional-sales --runs-parent C:\r
-Run C:\r\0001-regional-sales | NEXT: t2p start --workbook ./Regional.twbx --run C:\r\0001-regional-sales | exit 0
+Run C:\r\_runs\001-regional-sales | NEXT: t2p start --workbook ./Regional.twbx --run C:\r\_runs\001-regional-sales | exit 0
 $ t2p deploy --run C:\repo\_runs\002-estate --workspace Landing --dry-run
 Planned: 2 illustrative items; confirm first | NEXT: t2p deploy --run C:\repo\_runs\002-estate --workspace Landing | exit 0
 $ t2p deploy --run C:\repo\_runs\002-estate --workspace Landing
