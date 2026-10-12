@@ -23,7 +23,7 @@ t2p capture reference|oracle                         ADVANCED; wraps capture_tab
 t2p convert [--run <path>]                           ADVANCED; wraps parse_tableau.py or run_estate.py (AGENTS.md:216-217; scripts/README.md:76)
 t2p build                                            ADVANCED; NEW handoff, not a second converter
 t2p check [--run <path>] [--scope model|report|integration|all] CORE; wraps check_unit.py (docs/INDEX.md:8)
-t2p check bindings [--workspace <name>]             CORE; wraps verify_bindings.py (docs/operator-runbook.md:1577)
+t2p check bindings [--run <path>] [--workspace <name>] CORE; wraps verify_bindings.py (docs/operator-runbook.md:1577)
 t2p status|next [--run <path>] | why <unit|gate|code> CORE status wraps run_status.py; why ADVANCED (scripts/README.md:77)
 t2p brief <unit>                                     ADVANCED; NEW, renders existing brief + evidence
 t2p resume --run <path>                              ADVANCED; NEW, selects existing run (scripts/README.md:54-57)
