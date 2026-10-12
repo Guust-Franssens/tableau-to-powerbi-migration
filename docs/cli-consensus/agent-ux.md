@@ -93,11 +93,11 @@ budget and pre-engine pass/over/unknown; repeat paths in `status`/`next`, never 
 
 ## 5. Stable JSON
 
-❌ No common envelope today. ⚠️ Proposed global `--json` for every command, using `schema: "t2p.v1"`:
-`{schema,ok,verdict,exit_code,paths,next,warnings,limitations}`. Add optional fields only in v1;
-breaking shape/meaning requires v2. `help json` documents codes/fields. `paths` references outputs;
-wrap `migration-spec.json`, receipt, `run.json`, journals and gate results without copying content or
-policy (`docs/migration-spec.md:1-3`; `scripts/README.md:76-77`; `AGENTS.md:452-473`).
+❌ No common envelope. ⚠️ Global `--json` on every command returns `schema: "t2p.v1"` and
+`{schema,ok,verdict,exit_code,paths,next,warnings,limitations}`. Optional v1 fields only; breaking
+changes require v2; `help json` defines fields/codes. `paths` mirrors §4/6: absolute recorded, physical and run-parent paths; repo-local/external, git visibility/commit safety; longest current
+file/dir, remaining budgets (259/247), pre-engine pass/over/unknown, exact `--runs-parent` command,
+old-run-preserved and recorded/active-alias paths. Wrap artifacts, not content/policy (`docs/migration-spec.md:1-3`; `scripts/README.md:76-77`; `AGENTS.md:452-473`).
 
 ## 6. Exact paths and Windows budget
 
