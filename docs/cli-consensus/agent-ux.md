@@ -7,23 +7,23 @@
 ✅ Today: this script toolkit (`pyproject.toml:45-50`) routes to many scripts (`docs/INDEX.md:5-20`;
 `scripts/README.md:31-77`); live-site `start_migration.py` is the front door, not `t2p` (`scripts/README.md:38-52,60-65`).
 ❌ A cold caller cannot discover commands from `t2p`; no such console command is documented.
-⚠️ Proposal: registry-backed `t2p --help` and `t2p <noun> --help` (≤40 lines each), `t2p help <topic>` and
-`t2p explain <code>` (≤20); show purpose, inputs, outputs, next command, evidence owner and docs anchor,
-never source or a giant README.
+⚠️ Registry help: `t2p --help` / `<noun> --help` ≤40 lines; `help <topic>` / `explain <code>` ≤20.
+Show purpose, inputs, outputs, next command, evidence owner/docs anchor; never require source or giant README.
 
 ### Proposed command tree
 
 ```text
-t2p doctor [--paths] [--run <path>]                 CORE; wraps preflight.ps1/work_dirs (scripts/README.md:26,1228)
+t2p doctor [--paths] [--slug <slug>] [--run <path>] CORE; wraps preflight.ps1/work_dirs (scripts/README.md:26,1228)
 t2p init <slug> [--runs-parent <short-root>]        ADVANCED; wraps work_dirs.py (scripts/README.md:34-36,1228)
-t2p start [--workbook|--folder|--server ...] [--run <path>] CORE; composes route (scripts/README.md:38-46,64)
+t2p start [--workbook|--folder|--server ...] [--reference-dir <dir>] [--env-file .env] [--run <path>] CORE; composes route (scripts/README.md:38-46,64)
 t2p survey [--server ... --site ...]                ADVANCED; wraps run_engine_survey.py (AGENTS.md:215)
 t2p plan                                             ADVANCED; wraps assess_estate.py + tableau_lineage.py (AGENTS.md:215)
 t2p harvest                                          ADVANCED; wraps harvest_estate_assets.py (AGENTS.md:215)
 t2p capture reference|oracle                         ADVANCED; wraps capture_tableau_reference.py / capture_tableau_oracle.py (AGENTS.md:246-260)
-t2p convert                                          ADVANCED; wraps parse_tableau.py or run_estate.py (AGENTS.md:216-217; scripts/README.md:76)
+t2p convert [--run <path>]                           ADVANCED; wraps parse_tableau.py or run_estate.py (AGENTS.md:216-217; scripts/README.md:76)
 t2p build                                            ADVANCED; NEW handoff, not a second converter
-t2p check [--scope model|report|integration|all]     CORE; wraps check_unit.py (docs/INDEX.md:8)
+t2p check [--run <path>] [--scope model|report|integration|all] CORE; wraps check_unit.py (docs/INDEX.md:8)
+t2p check bindings [--workspace <name>]             CORE; wraps verify_bindings.py (docs/operator-runbook.md:1577)
 t2p status|next [--run <path>] | why <unit|gate|code> CORE status wraps run_status.py; why ADVANCED (scripts/README.md:77)
 t2p brief <unit>                                     ADVANCED; NEW, renders existing brief + evidence
 t2p resume --run <path>                              ADVANCED; NEW, selects existing run (scripts/README.md:54-57)
@@ -33,19 +33,13 @@ t2p runs list|verify                                 ADVANCED; wraps work_dirs.p
 t2p completion {bash,zsh,fish,powershell}             ADVANCED; NEW, same registry as help
 ```
 
-⚠️ Core (6): doctor/start/status/next/check/deploy; advanced: the other listed commands. Internal
-helpers (`engine_source.py`, `tableau_env.py`, `migration_bundle.py`) stay out of help/personas; the
-facade invokes them, not as 116 script commands (issue #734; `scripts/README.md:67-72,1222`).
+⚠️ Core (6): doctor/start/status/next/check/deploy; others are advanced. Internal helpers (`engine_source.py`, `tableau_env.py`, `migration_bundle.py`) stay out of help/personas and are facade-only (issue #734; `scripts/README.md:67-72,1222`).
 
-⚠️ Completion shares help's registry; `NO_COLOR`/non-TTY suppress color/spinners. Stdout is data,
-stderr prose; commands print created absolute paths. `start` prints physical run path first/last.
-Prefer Python except preflight, which precedes Python (`scripts/README.md:11-26`); Windows spelling is not budget proof (§6).
+⚠️ Completion shares help's registry; `NO_COLOR`/non-TTY suppress color/spinners; stdout=data, stderr=prose. Every command prints created absolute paths; `start` repeats its physical run path first/last. Prefer Python except preflight, which precedes Python (`scripts/README.md:11-26`); Windows spelling is not budget proof (§6).
 
 ## 2. Inputs and references
 
-✅ Local single-workbook route uses `.twb/.twbx` plus `reference/tableau-<exact dashboard name>.png`
-(`docs/start-with-one-workbook.md:66-102`); folders use `run_estate.py --input <folder> --output <bundle>`,
-sites use `--server`/`--site` then survey/assessment/lineage/harvest (`AGENTS.md:213-218`).
+✅ Local files/screenshots: `.twb/.twbx` + `reference/tableau-<exact dashboard name>.png` (`docs/start-with-one-workbook.md:66-102`); folders use `run_estate.py --input <folder> --output <bundle>`, sites use `--server`/`--site` then survey/assessment/lineage/harvest (`AGENTS.md:213-218`).
 ✅ PAT secret comes from `.env` or exported environment, never CLI arguments (`AGENTS.md:262-263`;
 `docs/operator-runbook.md:349-364`).
 ✅ `capture_tableau_reference.py` adopts local/Public images; `capture_tableau_oracle.py` exports live
@@ -59,9 +53,7 @@ command, not a retry.
 
 ## 3. Live progress
 
-✅ No common stream today: site survey emits nothing until done (`docs/operator-runbook.md:570-575`);
-deploy has an intent/outcome journal (`docs/operator-runbook.md:1144-1153,1162-1168`); refresh may run
-3600 s with conditional row-count/heartbeat evidence (`AGENTS.md:362-379`).
+✅ No common stream today: survey emits nothing until done (`docs/operator-runbook.md:570-575`); deploy uses an intent/outcome journal (`docs/operator-runbook.md:1144-1153,1162-1168`); refresh may run 3600 s with conditional progress (`AGENTS.md:362-379`).
 ❌ No common progress format is promised across these steps.
 ⚠️ Proposal: human progress on stderr; `--json-events` NDJSON on stdout or a chosen file. Events:
 `run`, `stage`, `state`, `elapsed_s`, `paths`, evidence reference. Otherwise stdout is data. Show
@@ -148,9 +140,13 @@ C:\repo\_runs\001-orders (first output line)
 1 image adopted, not fidelity proof | NEXT: t2p convert --run C:\repo\_runs\001-orders
 C:\repo\_runs\001-orders (last output line) | exit 0
 $ t2p start --folder ./workbooks
-Run C:\repo\_runs\002-estate; 3 units | NEXT: t2p check --run C:\repo\_runs\002-estate | exit 0
+C:\repo\_runs\002-estate (first output line)
+3 units | NEXT: t2p check --run C:\repo\_runs\002-estate
+C:\repo\_runs\002-estate (last output line) | exit 0
 $ t2p start --server https://tableau.example --site sales --env-file .env
-Survey→assessment→harvest→reference→bundle; secret from .env | NEXT: t2p brief sales | exit 0
+C:\repo\_runs\003-sales (first output line)
+Survey→assessment→harvest→reference→bundle; secret from .env | NEXT: t2p brief sales
+C:\repo\_runs\003-sales (last output line) | exit 0
 $ t2p resume --run C:\repo\_runs\002-estate
 Existing artifacts/journal re-read; no state recreated | NEXT: t2p next --run C:\repo\_runs\002-estate | exit 0
 $ t2p credentials reprobe --run C:\repo\_runs\002-estate
