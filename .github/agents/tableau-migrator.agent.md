@@ -109,9 +109,36 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
    **below the correctness floor**: stop; surface preflight's hints and request session-start repair.
 1. **Read the brief, then confirm inputs.** `migrations/workbooks/<name>/migration-brief.md` carries
    scope, **autonomy** (`guided`/`standard`/`autopilot`), **fidelity bar** (faithful vs modernise) and
-   the **wall policy** (stop, or degrade under `credential_gate.py authorize`). Obey it and pass the
-   fidelity bar and autonomy down in **every** delegation — subagents are stateless. **If the brief is
-   missing, do not invent one:** ask for those four answers in one message and write it yourself.
+   the **wall policy** (stop, or degrade under `credential_gate.py authorize`), **refresh strategy**
+   (`scripted`/`operator`/`xmla`) and **numeric comparison scope**. Obey it and pass the fidelity bar
+   and autonomy down in **every** delegation — subagents are stateless. **If the brief is missing
+   or incomplete, do not invent answers:** ask the six intake choices together in one message and
+   write it yourself. Reuse recorded answers; ask only missing choices, not a second intake.
+   **Numeric comparison scope (`numeric_obligation`)** — `none` (explicit commission without
+   numeric comparison) or `required` (numeric comparison is owed)? This is commissioned scope,
+   not a numeric result or a completion verdict. **Numeric scope has no default:** without the
+   human's `none` or `required`, **stop before packaging**; never infer it from available evidence.
+
+   Before `package_unit.py`, write complete `phase1-start-ready/v2` frontmatter at the top of the
+   brief, with **exactly five string keys**; replace every placeholder with the established identity
+   or agreed choice, never a guessed/default numeric value:
+
+   ```toml
+   +++
+   schema = "phase1-start-ready/v2"
+   unit = "<exact-unit>"
+   scope = "<topology-scope>"
+   fallback_authorization = "<agreed-fallback>"
+   numeric_obligation = "<agreed-numeric-obligation>"
+   +++
+   ```
+
+   Match `unit` exactly and `scope` to S2 topology: `model_only` for a datasource,
+   `model_and_report` for an owned workbook, `report_only_shared_model` for a consumer.
+   `fallback_authorization` is the agreed `stop` or `model_only_unvalidated`; `numeric_obligation`
+   is the human's `none` or `required`. Keep autonomy, fidelity, refresh and other narrative outside
+   the frontmatter; [the existing parser contract](../../scripts/README.md#current-packaged-numeric-scope-authority-363)
+   permits no extra keys.
    Autonomy governs choices, never physics — no level clears step 6. Inputs: a
    `.twb`/`.twbx` under `migrations/workbooks/<name>/source/`; the spec lands beside it as
    `migration-spec.json`. **If this workbook is one of several from an estate, model-first ordering is
@@ -136,13 +163,11 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
 4. **Triage before building.** From the spec or handover slice, summarize high/medium/low limitations
    and flag LOD/table-calc/DAX gaps, extract materialization decisions, unresolved shelf references
    and Tableau Groups.
-5. **Published data source — resolve or preserve UNKNOWN.** Run `python
-   scripts/published_datasource_registry.py --spec <spec>` or `--bundle <engine-bundle>`. A reusable
-   key means bind to the shared model; `UNKNOWN key` means the engine saw a published datasource name
-   but no stable key, so use Tableau lineage/export metadata — **never derive a key from the name**.
-   If that datasource must be migrated first, export the `.tds`/`.tdsx`; otherwise proceed only after
-   telling the user the model will be incomplete and **waiting for an explicit answer** — autopilot
-   does not waive this stop.
+5. **Published source — resolve or preserve UNKNOWN.** Registry/lineage output is planning
+   context, not provider authority. The retained #562 acquisition evidence and S2 must select the
+   exact datasource LUID/key and model binding; never rescue missing evidence with a registry name
+   or spec key. Acquire the required `.tds`/`.tdsx` and prepare its provider first. Unresolved,
+   missing, wrong or ambiguous providers block step 7; autonomy cannot waive this prerequisite.
 6. **Live-source reachability (MANDATORY before building — never skip).** Invoke
    `live-source-reachability` (`.github/skills/live-source-reachability/SKILL.md`) or read
    `docs/credential-gate.md` for the exact commands, flags and verdict routing. The rule: prove the
@@ -151,22 +176,87 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
    **one** attempt, so stop and ask. Never hand-clear the gate — trust only an earned `probe-cleared`
    audit line and the final `credential_gate.py verify` verdict. With no live source, record the skip
    and continue.
-7. **Delegate to `pbi-migration-validator` FIRST for triage.** It classifies every
+7. **Complete preparation before ANY validator/builder dispatch.**
+   <!-- BEGIN:strict-preparation -->
+   Keep the explicit selected run and exact unit from the brief; **never choose the latest run**.
+   Own the complete sequence rather than asking the operator to join helper paths:
+   - **Construct** with `package_unit.py`, one exact `--unit` and current v2 `--brief` per invocation,
+     selected `--assets`, applicable `--oracle` / accepted `--reference`, `--out` and original
+     `--gate-root`. Construct **provider first**, then consumers with the exact `--provider-package`
+     roots. Use the retained #562 published-dependency authority and S2 for the full cohort:
+     **no name/spec fallback**, guessed provider or omitted dependency.
+   - **Bind** with `set_data_folder.py --package <absolute-package>`, provider first, then consumers
+     with the same `--provider-package` roots. Resolve missing source/reference/brief/provider or
+     data-access authority before binding. Respect each command's exit and existing edit refusal;
+     never automatically discard, overwrite, reseal or pick another output to evade a refusal.
+   - **Check** the complete current provider/consumer cohort, **package-only**, with
+     `check_reference_readiness.py <provider-package> <consumer-package> --json - --quiet`.
+     For an owned model pass its one package. No external evidence override or bundle target.
+     Use this guard from the repository root, with `run_root`, `unit` and ordered `package_roots`
+     set to the exact selected identities, not paths recovered from a stored verdict:
+
+     ```python
+     import json
+     import subprocess
+     import sys
+     from pathlib import Path
+
+     sys.path.insert(0, str(Path("scripts")))
+     from package_filesystem import _ManifestError, parse_manifest_text
+
+     checked = subprocess.run(
+         [sys.executable, str(Path("scripts") / "check_reference_readiness.py"),
+          *map(str, package_roots), "--json", "-", "--quiet"],
+         capture_output=True, text=True, encoding="utf-8", check=False,
+     )
+     try:
+         verdict = parse_manifest_text(checked.stdout)
+     except _ManifestError:
+         verdict = None
+     print(f"Run {run_root}; unit {unit}; final checker exit {checked.returncode}.")
+     if not isinstance(verdict, dict):
+         print("CANNOT_ESTABLISH: expected one JSON object; no agent was dispatched.")
+         raise SystemExit(3)
+     print(json.dumps(verdict, ensure_ascii=True))
+     if checked.returncode != 0 or verdict.get("status") != "START_READY":
+         print("STOP: START_READY/0 was not established; no agent was dispatched.")
+         raise SystemExit(checked.returncode or 3)
+     print("START_READY/0: the complete current package cohort permits dispatch.")
+     ```
+
+   - **Dispatch** only when **process exit == 0 AND status == "START_READY"** from that invocation.
+     Missing/malformed/multiple JSON, process/JSON disagreement or any other status blocks.
+     ASSEMBLED, BOUND, ordinary READY, NOT_APPLICABLE, stored status, todo completion and package
+     exit 0 never substitute. Check a pre-existing ASSEMBLED package again on Continue.
+     Changed preparation inputs or an engine landing re-run invalidate the prepared cohort:
+     return here, preserving existing package edits rather than replacing them.
+   Only explicit **Export diagnostics** may select `--assemble-only`: diagnostic-only
+   ASSEMBLED / NOT_EVALUATED, no agent was dispatched. Default Migrate/Continue failure must
+   **never fall back** to diagnostics. The **orchestrator always prints a terminal outcome, even
+   with quiet helpers**: exact run/unit, discovered inputs, completed stages, blocking stage,
+   authoritative verdict and exit, and **one executable next action** for the actual blocker.
+   Low-level default quiet stays silent; explicit quiet diagnostics retain their notice.
+   Source/reference/brief/provider/data authority comes before binding; use the owning tool's
+   finding, not a new classifier. Manual reference support includes the merged #664 consumer;
+   START_READY remains separate from Phase-2 COMPLETE and cannot upgrade layout/text ceilings.
+   <!-- END:strict-preparation -->
+   **Now delegate to `pbi-migration-validator` FIRST for triage.** It classifies every
    `viz_fidelity[]` row `fixable` / `accepted-limitation` / `false-claim`, and **both builders consume
    that classification**; a builder sent at the raw list repairs a deliberate deferral — measured, one
    such row would silently re-scope six other table calcs. Give it the handover slice, the active
-   contract and the reference bundle (path/tool/grade from the brief; default
+   contract, the exact checked package `fabric/` tree and the reference bundle (path/tool/grade from the brief; default
    `migrations/workbooks/<name>/reference/`). **Name the mode** — triage / spot-check / sign-off are
    different jobs. After bounded recovery, follow the
    [manual-reference handoff](../../docs/reference-capture.md#one-manual-request-after-bounded-recovery).
 8. **Delegate to `pbi-semantic-builder`** with: the handover slice (its `requests[]` is the work
-   queue), the emitted model path, the active contract (parser specs carry table-calc addressing in
+   queue), the checked package's model path, the active contract (parser specs carry table-calc addressing in
    `worksheets[].encodings`) and the validator's model-side findings. Its job: prove the model loads,
    author the residual DAX, enrich for AI, hand back **refreshed and saved** — AI enrichment happens
    per-model **before** that sealing refresh.
    - Approvals land through `--approved-dax`, never by hand-editing `_Measures.tmdl`.
    - **The landing re-run is a BARRIER**: it deletes and recreates the whole bundle, so it must finish
-     before any report work begins. Never run report and model fixes concurrently on one bundle.
+     before any report work begins. Repeat step 7's preparation for changed output; a prior
+     START_READY cannot authorize a different package. Never run report and model fixes concurrently.
 9. **Delegate to `pbi-report-builder`** — only AFTER step 8's landing re-run, which recreates the
    `.Report` folder and would destroy its work. **Gates:** on the parser path
    `scripts/validate_spec.py <spec>` exits 0; with no spec, do not fabricate one. Always run `python

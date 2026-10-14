@@ -417,9 +417,10 @@ STATUS_ASSEMBLED = "ASSEMBLED"
 STATUS_BLOCKED = "BLOCKED"
 DISPATCH_READINESS_NOT_EVALUATED = "NOT_EVALUATED"
 NOT_START_READY_NOTICE = (
-    "NOT START_READY: dispatch readiness is unavailable and was not evaluated; #622 and the final "
-    "#562 consumer own that decision. Package construction and reference READY do not authorize "
-    "Phase-2 dispatch or clear the credential gate."
+    "NOT START_READY: the final package checker is AVAILABLE but NOT_EVALUATED by this constructor. "
+    "ASSEMBLED is diagnostic construction only; no agent was dispatched. "
+    "Run check_reference_readiness.py on the complete current provider/consumer package cohort; "
+    "only START_READY with process exit 0 authorizes dispatch."
 )
 DATA_ACCESS_PENDING = NOT_START_READY_NOTICE
 
@@ -2038,16 +2039,25 @@ README = """# {unit}
 
 Diagnostic handover package for one migration unit ({kind}). It may carry imported rows, reference
 evidence, source bytes and engine output; `package-manifest.json` names what is present and every
-omission. If it carries a location placeholder it is **not bound to a location**, so do this FIRST,
-wherever this folder now is, before opening the model. Use THIS FOLDER'S PATH, never a bare unit name.
-The order is bind, public stdout-only START_READY, diagnostic work, caller-pinned final check, then
-identical-token promotion:
+omission. Resolve missing source, current v2 brief, reference, provider and data-access prerequisites
+before binding. If it carries a location placeholder it is **not bound to a location**. Use THIS
+FOLDER'S PATH, never a bare unit name. The order is applicable binding, public stdout-only START_READY,
+diagnostic work, caller-pinned final check, then identical-token promotion:
 
     python scripts/set_data_folder.py --package <path-to-this-folder>
     python scripts/check_reference_readiness.py <path-to-this-folder> --json -
     python scripts/check_unit.py <path-to-this-folder>
     python scripts/check_unit.py <path-to-this-folder> --scope all --receipt-sha256 <caller-held-final-sha256>
     python scripts/promote_unit.py --package <path-to-this-folder> --slug <delivery-slug> --receipt-sha256 <caller-held-final-sha256>
+
+For a shared model, construct the exact provider first, pass it with `--provider-package` to consumer
+construction and binding, and check ALL provider/consumer package roots together. Never select a
+provider by name or spec fallback. The orchestrator uses `--json - --quiet`, parses one current JSON
+object and requires BOTH process exit 0 AND exact status `START_READY` before any validator/builder
+dispatch. Missing/malformed/multiple JSON, disagreement, ASSEMBLED, BOUND, ordinary READY and stored
+results cannot authorize dispatch. Quiet helper output never suppresses the orchestrator's terminal
+outcome. Only explicit **Export diagnostics** selects `--assemble-only`; Migrate/Continue never
+falls back to it. This constructor has dispatched no agent.
 
 Run the last two commands only AFTER the commissioned work and final-v3 evidence are ready, using
 the identical final token supplied by the caller: exactly 64 lowercase hex characters, no prefix.
@@ -6393,9 +6403,9 @@ def _run_totals(
 
 
 def _dispatch_readiness() -> dict[str, str]:
-    """The only readiness statement construction is allowed to make before #622."""
+    """The checker exists; construction neither evaluates it nor dispatches an agent."""
     return {
-        "availability": "UNAVAILABLE",
+        "availability": "AVAILABLE",
         "status": DISPATCH_READINESS_NOT_EVALUATED,
         "message": NOT_START_READY_NOTICE,
     }
@@ -6407,7 +6417,7 @@ def _mode(explicit: bool) -> dict[str, Any]:
         "name": ASSEMBLY_MODE,
         "explicit": explicit,
         "description": (
-            "This command is inherently construction-only before #622; --assemble-only makes that "
+            "This command is inherently construction-only; --assemble-only makes that "
             "existing behavior explicit and does not authorize dispatch."
         ),
     }
