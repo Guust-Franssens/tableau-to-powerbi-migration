@@ -321,6 +321,17 @@ convention edit into a red build. New craft learnings still belong in the skill 
    | `skill("sentinel-probe")` (**repo-local only**) | **SUCCESS**, base dir `…\tableau-to-pbi-migration\.github\skills\sentinel-probe` |
    | Its `SKILL_SENTINEL_ZEPHYR_74193` token | **QUOTED**, arriving only via the `skill` tool |
 
+   The 2026-07-31 report-skill row records the **then-current retired name**; it is historical
+   evidence, not an instruction to load it now.
+
+   | Post-maintenance probe | Date / versions / result |
+   |---|---|
+   | `skill("powerbi-report-cli")` from `pbi-report-builder` | **PENDING** — after #729 maintenance and a fresh session, record date, CLI version, plugin version and actual result. |
+
+   Disk inspection of `powerbi-authoring` 0.3.19 confirms the new skill exists; it is
+   **not a successful runtime probe**. Replace PENDING only with observed post-maintenance
+   evidence; unresolved names block dispatch, not permission to use the retired name.
+
    `sentinel-probe` is the load-bearing case: it exists in **no** plugin, so a correct quote of its
    token can only have come from `.github/skills/`. The probing agent attested it never opened the
    file by `view`/`grep`/shell, and its one prior filesystem touch was a `Get-ChildItem -Directory`

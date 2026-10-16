@@ -63,7 +63,7 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   (533 distinct weights out of 730 rows), not the row count — use `CountNonNull` if you want 730.
   A wrong value is not a field reference, so it passes validation but **silently aggregates wrong**.
   *(This corrects an earlier version of this file which claimed Max=2, Min=3, Count=4; the
-  `powerbi-report-authoring` references had it right.)*
+  report-authoring references had it right; current route: `powerbi-report-cli`, `authoring`.)*
 - **Projection-level `format` overrides ARE honoured by Desktop.** 🟢 render-verified (Desktop
   2.157.627.0, table-calcs migration): `proj.format = "MMMM yyyy"` on a `pivotTable` Rows projection
   rendered `January 2015` (from a `Short Date` model format), and `proj.format = "#,0"` on a Values
@@ -135,7 +135,7 @@ These pass `validate` but render wrong. Only a live Desktop screenshot catches t
   errors/warnings but Desktop showed the error glyph with no further detail. Root cause: both
   projections shared `nativeQueryRef: "Discount Band"` even though their `queryRef`s were correctly
   disambiguated (`Superstore Orders.Discount Band` vs `...Discount Band1`) — per
-  `references/expressions.md` "if duplicated across roles, append a number", this applies to
+  `references/authoring/expressions.md` "if duplicated across roles, append a number", this applies to
   **`nativeQueryRef` too, not just `queryRef`**. Fix: give the second projection a distinct
   `nativeQueryRef` (e.g. `"Discount Band1"`); re-validate and reload — the error disappears and the
   scatter renders normally. This is a second, independent instance of a validation-invisible bug class
@@ -262,8 +262,9 @@ engine bundles, so the denominator moves with whatever scratch is on the machine
 
 ## 2. Data colours and conditional formatting
 
-See the `powerbi-report-authoring` skill → `references/conditional-formatting.md`; for table-specific
-idioms see `.github/pbi.kb/visuals/table-cond-format.md`.
+See `powerbi-report-cli`, `authoring` → `references/authoring/conditional-formatting.md`
+and its `-part-02` through `-part-07` continuations; for table-specific idioms see
+`.github/pbi.kb/visuals/table-cond-format.md`.
 
 - **Discrete/banded data colours use `dataPoint.fill.solid.color.expr.Conditional.Cases[]`, NOT
   `fillRule.cases`** (`fillRule` is gradient/`linearGradient` only). Each case = a `Comparison`

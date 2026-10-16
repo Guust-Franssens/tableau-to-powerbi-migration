@@ -28,7 +28,7 @@ SKILLS_DIR = REPO_ROOT / ".github" / "skills"
 
 MARKETPLACE_NAME = "powerbi-playbook-collection"
 PLUGIN_NAME = "powerbi-playbook"
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 PUBLISH_REPO = "https://github.com/Guust-Franssens/powerbi-playbook"
 
 # Only source-tool-agnostic bundles ship. `sentinel-probe` is a diagnostic, and anything
