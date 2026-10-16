@@ -424,17 +424,35 @@ def test_every_replace_boundary_rolls_back(
     before = _snapshot(model)
     replace = set_ai_instructions.os.replace
     calls = 0
+    forward_order = []
+    failed = False
+    model_path = model / "definition" / "model.tmdl"
+    pbism = model / "definition.pbism"
+    expected_order = [culture, model_path, pbism]
 
     def failing_replace(source: Path, target: Path) -> None:
-        nonlocal calls
+        nonlocal calls, failed
         calls += 1
-        if calls == boundary:
-            raise OSError("injected replace boundary")
+        if not failed:
+            forward_order.append(target)
+            assert forward_order == expected_order[: len(forward_order)], "COMMIT_ORDER: culture, model, pbism"
+            if len(forward_order) == 1:
+                assert {k: v for k, v in _snapshot(model).items() if not k.endswith(".stage")} == before
+                for planned in expected_order:
+                    assert len(list(planned.parent.glob(f".{planned.name}.*.stage"))) == 1, "STAGE_ALL_FIRST"
+            assert json.loads(pbism.read_bytes())["settings"]["qnaEnabled"] is False, "QNA_NOT_ACTIVATED_EARLY"
+            if target == pbism:
+                assert set_ai_instructions.get_instructions(culture) == md.read_text(encoding="utf-8").strip()
+                assert b"ref cultureInfo en-US" in model_path.read_bytes(), "DEFINITION_READY_BEFORE_QNA"
+            if len(forward_order) == boundary:
+                failed = True
+                raise OSError("injected replace boundary")
         replace(source, target)
 
     monkeypatch.setattr(set_ai_instructions.os, "replace", failing_replace)
     assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 3
     assert calls >= boundary, "the intended replace assertion must be reached"
+    assert forward_order == expected_order[:boundary]
     assert _snapshot(model) == before
     assert not list(model.rglob("*.stage"))
     assert culture.parent.exists() is (not new_culture)
@@ -555,3 +573,84 @@ def test_qualified_backticked_table_is_an_explicit_reference(tmp_path: Path) -> 
     new_pin = hashlib.sha256(b"Use `'Ghost Table'[Real]`.").hexdigest().encode()
     culture.write_bytes(culture.read_bytes().replace(b"Real Table", b"Ghost Table").replace(old_pin, new_pin))
     assert cmd_check(tmp_path, True, model) == 1
+
+
+@pytest.mark.parametrize(
+    "table,field,other_field,bad,good",
+    [
+        ("A", "X", "Y", "Use 'A'[Y].", "Use 'A'[X]."),
+        ("A", "X", "Y", "Use `'A'[Y]`.", "Use `'A'[X]`."),
+        ("A", "X", "Y", "Use A[Y].", "Use A[X]."),
+        ("A", "X", "Y", "Use `A [Y]`.", "Use `A [X]`."),
+        ("A Table", "X Field", "Y Field", "Use `'A Table' [Y Field]`.", "Use `'A Table' [X Field]`."),
+        ("O'Brien", "X] Field", "Y] Field", "Use `'O''Brien'[Y]] Field]`.", "Use `'O''Brien'[X]] Field]`."),
+    ],
+)
+def test_qualified_references_require_the_field_in_that_table(
+    tmp_path: Path, table: str, field: str, other_field: str, bad: str, good: str
+) -> None:
+    """Names existing elsewhere are not evidence for the qualified pair."""
+    model, md, culture = _stamp_fixture(tmp_path)
+    tables = model / "definition" / "tables"
+    tables.mkdir()
+    model_file = model / "definition" / "model.tmdl"
+    for index, (name, column) in enumerate(((table, field), ("Other", other_field))):
+        quoted_table = "'" + name.replace("'", "''") + "'"
+        quoted_field = "'" + column.replace("'", "''") + "'"
+        (tables / f"T{index}.tmdl").write_text(f"table {quoted_table}\n\tcolumn {quoted_field}\n", encoding="utf-8")
+        model_file.write_bytes(model_file.read_bytes() + f"ref table {quoted_table}\n".encode())
+    known = model_object_names(model)
+    assert table in known and other_field in known, "the negative field must really exist elsewhere"
+    assert unresolved_references(good, known) == []
+    assert unresolved_references(bad, known), "QUALIFIED_PAIR: existence in another table is not resolution"
+    md.write_text(bad, encoding="utf-8")
+    before = _snapshot(model)
+    assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 3
+    assert _snapshot(model) == before
+    md.write_text(good, encoding="utf-8")
+    assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 0
+    assert cmd_check(tmp_path, True, model, md) == 0
+    old_pin = hashlib.sha256(good.encode()).hexdigest().encode()
+    new_pin = hashlib.sha256(bad.encode()).hexdigest().encode()
+    culture.write_bytes(
+        culture.read_bytes()
+        .replace(json.dumps(good, ensure_ascii=False).encode(), json.dumps(bad, ensure_ascii=False).encode())
+        .replace(old_pin, new_pin)
+    )
+    md.write_text(bad, encoding="utf-8")
+    assert cmd_check(tmp_path, True, model, md) == 1
+
+
+@pytest.mark.parametrize("owned_text", ["", "Unowned"])
+def test_orphan_marker_cannot_own_absent_instructions(tmp_path: Path, owned_text: str) -> None:
+    """An absent JSON member cannot be owned even by the hash of an empty string."""
+    pin = hashlib.sha256(owned_text.encode()).hexdigest()
+    model, md, _ = _stamp_fixture(tmp_path, marker=f'\tannotation T2P_CustomInstructionsSha256 = "{pin}"\n')
+    before = _snapshot(model)
+    assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 3
+    assert _snapshot(model) == before
+
+
+def test_marker_only_culture_refuses_without_writes(tmp_path: Path) -> None:
+    """A marker alone is not a metadata payload to overwrite or implicitly repair."""
+    model, md, culture = _stamp_fixture(tmp_path)
+    pin = hashlib.sha256(b"").hexdigest()
+    culture.write_text(f'cultureInfo en-US\n\tannotation T2P_CustomInstructionsSha256 = "{pin}"\n', encoding="utf-8")
+    before = _snapshot(model)
+    assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 3
+    assert _snapshot(model) == before
+
+
+def test_owned_empty_member_can_be_initialized_but_empty_stamp_never_passes(tmp_path: Path) -> None:
+    """An explicit empty string is distinguishable from absence; neither is an AI-ready stamp."""
+    pin = hashlib.sha256(b"").hexdigest()
+    model, md, _ = _stamp_fixture(tmp_path, "", f'\tannotation T2P_CustomInstructionsSha256 = "{pin}"\n')
+    instructions = md.read_bytes()
+    assert cmd_check(tmp_path, True, model, md) == 1
+    md.write_bytes(b" \r\n\t")
+    before = _snapshot(model)
+    assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 3
+    assert _snapshot(model) == before
+    md.write_bytes(instructions)
+    assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 0
+    assert cmd_check(tmp_path, True, model, md) == 0

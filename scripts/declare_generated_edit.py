@@ -4,9 +4,9 @@ purpose: run a generated-artifact fix script, record before/after hashes for tam
 usage:   python scripts/declare_generated_edit.py --bundle <dir> --target <generated-path>
                                            --script <_build/fix_*.py>
                                            [--purpose <one-line reason>] [-- <script-args>...]
-         Replace --target with --targets <path> <path> ... for one coupled, multi-file script run;
-         batch mode additionally requires check_migration_progress.py --tamper exit zero.
+         Replace --target with --targets <path> <path> ... for one coupled, multi-file script run.
 
+Batch mode additionally requires check_migration_progress.py --tamper exit zero.
 This is an audit wrapper, not an authorization system. It records what a replayable fix script did so
 ``check_migration_progress.py --tamper`` can distinguish declared repairs from silent drift. Anyone
 who can edit the bundle can also forge the JSON record; review still has to decide whether the script

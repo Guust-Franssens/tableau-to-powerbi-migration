@@ -139,27 +139,68 @@ def _ownership(text: str) -> tuple[str | None, re.Match | None]:
     return valid.group(1) or valid.group(2), match
 
 
-def model_object_names(model_dir: Path) -> set[str]:
-    """Declared table, column and measure names: the oracle for explicit markdown references."""
-    names: set[str] = set()
+class ModelObjectNames(set[str]):
+    """Keep set compatibility without discarding table membership needed by qualified references."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.table_fields: dict[str, set[str]] = {}
+
+
+def model_object_names(model_dir: Path) -> ModelObjectNames:
+    """Declared names and their owning tables, used to validate explicit instruction references."""
+    names = ModelObjectNames()
     definition = model_dir / "definition"
     for tmdl in list(definition.glob("tables/*.tmdl")) + list(definition.glob("*.tmdl")):
+        current_table = None
         for match in re.finditer(
-            r"^\s*(?:table|column|measure)\s+('((?:[^']|'')+)'|[^\s=]+)", read_utf8(tmdl), re.MULTILINE
+            r"^(?P<indent>[ \t]*)(?P<kind>table|column|measure)[ \t]+"
+            r"(?P<token>'(?P<quoted>(?:[^']|'')+)'|[^\s=]+)",
+            read_utf8(tmdl),
+            re.MULTILINE,
         ):
-            names.add((match.group(2) or match.group(1)).replace("''", "'"))
+            name = (match.group("quoted") or match.group("token")).replace("''", "'")
+            if match.group("kind") == "table":
+                current_table = name if not match.group("indent") else None
+                if current_table is not None:
+                    names.table_fields.setdefault(current_table, set())
+            elif current_table is not None:
+                names.table_fields[current_table].add(name)
+            names.add(name)
     return names
 
 
+_BRACKET_RE = re.compile(r"\[((?:[^\]`]|\]\])+)\]")
+_QUALIFIED_RE = re.compile(
+    r"(?P<table>'(?:[^']|'')+'|(?<![\w'])[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?P<gap>[ \t\r\n]*)\[(?P<field>(?:[^\]`]|\]\])+)\]"
+)
+
+
+def _is_template(name: str) -> bool:
+    return any(token in name for token in ("<", "...", "*"))
+
+
 def unresolved_references(md_text: str, known: set[str]) -> list[str]:
-    """Check explicit quoted/backticked tables and bracketed objects; allow template placeholders."""
-    cited = set(re.findall(r"`'((?:[^']|'')+)'(?=`|\s*\[)", md_text))
-    cited.update(re.findall(r"\[([^\[\]`]+)\]", md_text))
-    return sorted(
-        name
-        for name in cited
-        if not any(token in name for token in ("<", "...", "*")) and name.replace("''", "'") not in known
-    )
+    """Validate names and qualified table-field pairs; a flattened set cannot prove a pair."""
+    cited = {name.replace("''", "'") for name in re.findall(r"`'((?:[^']|'')+)'(?=`|\s*\[)", md_text)}
+    cited.update(match.group(1).replace("]]", "]") for match in _BRACKET_RE.finditer(md_text))
+    missing = {name for name in cited if not _is_template(name) and name not in known}
+    table_fields = getattr(known, "table_fields", {})
+    for match in _QUALIFIED_RE.finditer(md_text):
+        token = match.group("table")
+        table = token[1:-1].replace("''", "'") if token.startswith("'") else token
+        field = match.group("field").replace("]]", "]")
+        explicit = token.startswith("'") or not match.group("gap") or md_text[match.start() - 1 : match.start()] == "`"
+        if not explicit and table not in table_fields:
+            continue  # Prose such as "use [Measure]" is not an unquoted table claim.
+        if _is_template(table) or _is_template(field):
+            continue
+        if table not in table_fields:
+            missing.add(table)
+        elif field not in table_fields[table]:
+            missing.add(match.group(0))
+    return sorted(missing)
 
 
 def lint_instructions(md_text: str, known_names: set[str] | None = None) -> list[str]:
@@ -231,6 +272,8 @@ def _culture_edit(text: str, instructions: str, adopt_existing: str | None) -> s
     if "CustomInstructions" in obj and not isinstance(existing, str):
         raise ValueError("CustomInstructions must be a string")
     marker, match = _ownership(text)
+    if marker is not None and "CustomInstructions" not in obj:
+        raise ValueError("Ownership marker has no CustomInstructions member")
     if marker is not None and marker != text_sha256(existing or ""):
         raise ValueError("Ownership marker does not match existing text")
     if adopt_existing is not None and (existing != instructions or adopt_existing != text_sha256(existing or "")):

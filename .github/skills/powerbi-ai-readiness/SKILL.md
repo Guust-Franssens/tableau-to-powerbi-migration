@@ -42,6 +42,9 @@ send `annotations: []` to the Modeling MCP: that clears annotations, including o
   the **exact decoded instruction string**, not its JSON literal. Missing ownership on non-empty
   text, duplicate/malformed/mismatching markers refuse; a differing unowned value can never be adopted.
   An absent/empty value can be stamped, but an invalid marker still refuses.
+  A marker with **no `CustomInstructions` member** is invalid, even if it contains SHA-256(empty).
+  An explicitly present empty string with its correct marker can be initialized to non-empty text,
+  but empty markdown/stamped text is never an AI-ready stamp and strict checks refuse it.
 - Preserve every byte outside the instruction JSON value/member, marker annotation, necessary
   `ref cultureInfo` insertion and qna member. This includes key order, escaping, number lexemes,
   whitespace, LF/CRLF, trailing newline, `///` text and `contentType: json`. Reject BOMs, invalid
@@ -51,10 +54,18 @@ send `annotations: []` to the Modeling MCP: that clears annotations, including o
   transaction: power loss, concurrent writers, persistent rollback I/O failures and cross-process
   all-or-none visibility are not established. Use one writer on a closed Desktop model; a rollback
   failure is a hard refusal requiring recovery, never a success.
+  Replacement order is culture → model reference → pbism: all siblings must be staged before the
+  first replacement, and Q&A activation is last, after the instruction/reference definition is ready.
+  Tests observe every replace boundary and assert that order and caught-failure restoration.
+  Intermediate filesystem prefixes can be visible; this does not promise cross-file observational
+  atomicity or a filesystem transaction.
 - Hard gates: non-empty text, at most **10,000 decoded characters**, no unresolved explicitly marked
   table/object references, valid JSON and `qnaEnabled is true`. Missing/unreadable pbism or model,
   translations-only culture, and an unsafe culture identifier refuse before writes. Style/4,000-char
   context-rot lints remain advisory. This checks explicit names, not semantic correctness of prose.
+  Qualified references must resolve the **table-field pair**, not just two independently existing
+  names; quoted/backticked table names, escaped apostrophes/brackets and adjacent unquoted
+  qualifiers are checked. A plain flattened name set cannot establish a qualified pair.
 - `--check --strict --model <model> --md <md>` additionally requires stamped text == stripped md and
   marker == SHA-256(stamped text). Repeat **after** the final reopen/refresh/save: missing ownership
   after Desktop/MCP/service work must fail closed. Strict checks without explicit md retain legacy
