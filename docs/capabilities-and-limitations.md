@@ -50,8 +50,10 @@ workbook or unit, that source is cited so the claim is checkable.
    model's AI instructions into its culture TMDL and forces `qnaEnabled: true`. Getting to near-100%
    coverage is a required final phase of `pbi-semantic-builder`, so the generated model can answer
    Power BI Copilot / natural-language questions. What that does **not** prove is covered in the
-   skill's "Evidence and limits": the instructions provably survive publish, but "Copilot obeys them"
-   is unverified, and consumption additionally needs a post-deploy refresh.
+   skill's [bounded stamping policy](../.github/skills/powerbi-ai-readiness/SKILL.md#0-deliberate-deviation-owned-instruction-stamping):
+   direct stamping deliberately differs from upstream guidance; historical text round-trip evidence
+   does not prove ownership-marker survival or Copilot obedience, and consumption still requires
+   a post-deploy refresh and validation with real questions.
 7. **Full traceability.** Every parser decision, translation choice, and simplification is recorded in a
    structured `limitations_encountered` list. Nothing is silently guessed.
 

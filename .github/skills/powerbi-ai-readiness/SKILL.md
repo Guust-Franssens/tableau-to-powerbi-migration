@@ -10,6 +10,85 @@ Fabric data agents never see your report — they see **model metadata plus the 
 generate DAX from that. This skill covers the levers that are committable to Git, the exact storage
 mechanism, the two scripts that stamp and audit them, and — the largest part — **what to write**.
 
+## 0. Deliberate deviation: owned instruction stamping
+
+**Owner decision #731: direct stamping is a bounded exception, not general Prep-for-AI authoring.**
+The upstream `semantic-model-authoring` skill classifies these artifacts as user-configured and
+provides draft-only guidance (`references/semantic-model-ai-readiness.md`, v0.3.19, lines 22–35,
+104–108). This repository deliberately stamps only the default culture's
+`linguisticMetadata.CustomInstructions`, its own `T2P_CustomInstructionsSha256` Culture annotation,
+the necessary model culture reference, and `settings.qnaEnabled`. The versioned markdown is the
+editable source; the Modeling MCP cannot write this JSON key.
+
+Decision and re-evaluation: [local #731](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/731),
+[upstream #72](https://github.com/microsoft/skills-for-fabric/issues/72) (older stripping guidance),
+and [upstream #89](https://github.com/microsoft/skills-for-fabric/issues/89) (supported write path).
+Reopen the decision when upstream supplies that write path; retain direct TMDL only as fallback.
+Do not strip linguistic metadata. Preserve Entities, synonyms, unknown keys, translations, descriptions
+and unrelated annotations; this exception does not authorize their creation or modification. Never
+send `annotations: []` to the Modeling MCP: that clears annotations, including ownership evidence.
+
+### Ownership, preservation and failure contract
+
+- A non-empty existing value without a valid marker is **unowned: refuse**, even when identical to
+  the markdown. No overwrite option exists. Only an operator's explicit
+  `--adopt-existing <sha256>` can adopt an existing value that already equals the stripped markdown
+  and the pin. Adoption changes the marker only within the culture; qna/ref prerequisites still apply.
+  An agent/persona must never adopt or replace unowned text on its own.
+- Markdown retains the original stamper's universal-newline semantics (CRLF/CR → LF), then
+  `.strip()`. This normalization applies only to source markdown, never existing decoded
+  instructions or model bytes; ownership always hashes the exact decoded stamped string.
+- The single Culture annotation is `T2P_CustomInstructionsSha256 = "<64 lowercase hex>"`, hashing
+  the **exact decoded instruction string**, not its JSON literal. Missing ownership on non-empty
+  text, duplicate/malformed/mismatching markers refuse; a differing unowned value can never be adopted.
+  An absent/empty value can be stamped, but an invalid marker still refuses.
+  A marker with **no `CustomInstructions` member** is invalid, even if it contains SHA-256(empty).
+  An explicitly present empty string with its correct marker can be initialized to non-empty text,
+  but empty markdown/stamped text is never an AI-ready stamp and strict checks refuse it.
+- Preserve every byte outside the instruction JSON value/member, marker annotation, necessary
+  `ref cultureInfo` insertion and qna member. This includes key order, escaping, number lexemes,
+  whitespace, LF/CRLF, trailing newline, `///` text and `contentType: json`. Reject BOMs, invalid
+  UTF-8, malformed JSON (comments/trailing commas/non-finite constants included), and duplicate keys.
+- Validate **all** targets before writing, stage sibling files, atomically replace each target and
+  restore all prior replaced/created targets on a caught write failure. This is **not** a filesystem
+  transaction: power loss, concurrent writers, persistent rollback I/O failures and cross-process
+  all-or-none visibility are not established. Use one writer on a closed Desktop model; a rollback
+  failure is a hard refusal requiring recovery, never a success.
+  Replacement order is culture → model reference → pbism: all siblings must be staged before the
+  first replacement, and Q&A activation is last, after the instruction/reference definition is ready.
+  Tests observe every replace boundary and assert that order and caught-failure restoration.
+  Intermediate filesystem prefixes can be visible; this does not promise cross-file observational
+  atomicity or a filesystem transaction.
+- Hard gates: non-empty text, at most **10,000 decoded characters**, no unresolved explicitly marked
+  table/object references, valid JSON and `qnaEnabled is true`. Missing/unreadable pbism or model,
+  translations-only culture, and an unsafe culture identifier refuse before writes. Style/4,000-char
+  context-rot lints remain advisory. This checks explicit names, not semantic correctness of prose.
+  Qualified references must resolve the **table-field pair**, not just two independently existing
+  names; quoted/backticked table names, escaped apostrophes/brackets and adjacent unquoted
+  qualifiers are checked. A plain flattened name set cannot establish a qualified pair.
+  The declaration inventory reads direct table children only; words inside deeper expression
+  text cannot create columns, measures or tables, or change a later declaration's owning table.
+- `--check --strict --model <model> --md <md>` additionally requires stamped text == stripped md and
+  marker == SHA-256(stamped text). Repeat **after** the final reopen/refresh/save: missing ownership
+  after Desktop/MCP/service work must fail closed. Strict checks without explicit md retain legacy
+  coverage compatibility; they are not the ownership/source seal. Repo-wide `--check` stays advisory.
+
+### Evidence boundaries and deferred work
+
+| Evidence | Permitted claim / limit |
+|---|---|
+| Offline direct positive/negative tests and caught-failure injections | ✅ Disk stamping, byte preservation and rollback for tested failures; not Desktop openability or consumption |
+| Offline `TmdlSerializer` annotation parse (independent #731 plan review) | ✅ Parser accepts the marker; says nothing about saving/exporting it |
+| Historical 2026-07-30 Fabric round-trip of instruction text | ✅ That older unmarked payload survived that publish only; **not** evidence for ownership-marker survival |
+| Desktop save, Modeling MCP export, Fabric service round-trip with ownership marker | ⚠️ **Unmeasured**. Never claim survival or Copilot obedience; repeat the marker+md seal after each such flow |
+
+AI data schema (including AI visibility), synonyms authoring, verified answers, semantic indexing,
+Approved for Copilot, and tenant/workspace Copilot/Q&A settings remain **deferred**, not inferred from
+the file gate. Pull and inspect service-authored state before redeploy: uploading local model files
+can replace service-side Prep-for-AI state absent locally. A model refresh after deployment and real
+questions are still required to assess consumption. #730's reload/cache experiment is separate;
+do not pre-adopt a result or call this model "Copilot verified".
+
 ## Available scripts
 
 | Script | What it does |
@@ -27,8 +106,8 @@ from a copy in another repo.
 |---|---|---|---|
 | 1 | **Descriptions** on every table, column, measure | `/// ` lines in `definition/tables/*.tmdl` | ✅ committable, audited by `check_ai_readiness.py` |
 | 2 | **Enumerated domains** on categorical columns ("One of: A, B, C") | inside those descriptions | ✅ committable, audited |
-| 3 | **Synonyms** (linguistic schema `Entities`) | same `linguisticMetadata` JSON as #4 | ⚠️ committable in principle, **not exercised here** — no MCP write surface, and hand-authoring the entity/binding graph is error-prone. Fold abbreviation meanings into descriptions instead |
-| 4 | **AI instructions** (`CustomInstructions`) | `definition/cultures/<lcid>.tmdl` | ✅ committable, stamped by `set_ai_instructions.py` |
+| 3 | **Synonyms** (linguistic schema `Entities`) | same `linguisticMetadata` JSON as #4 | Preserved byte-for-byte; never authored here. Fold abbreviation meanings into descriptions instead |
+| 4 | **AI instructions** (`CustomInstructions`) | `definition/cultures/<lcid>.tmdl` | Stamped here by the deliberate exception in section 0, not general Prep-for-AI authoring permission |
 | 5 | **`qnaEnabled`** | `settings.qnaEnabled` in `definition.pbism` | ✅ committable — **and the one that silently voids 1–4 if false** |
 
 Why #2 matters specifically: DAX Copilot reads roughly the **first 200 chars** of each description, so
@@ -86,21 +165,45 @@ python scripts/check_ai_readiness.py <tree>/<slug> --strict   # exit 1 below 100
 python scripts/check_ai_readiness.py --all                    # every migration
 
 # stamp the instructions (also forces qnaEnabled: true) and lint them
-python scripts/set_ai_instructions.py --model <path to *.SemanticModel>
+python scripts/set_ai_instructions.py --plan --model <path to *.SemanticModel> --md <ai-instructions.md>
+python scripts/set_ai_instructions.py --model <path to *.SemanticModel> --md <ai-instructions.md>
 python scripts/set_ai_instructions.py --all                   # every migration that has an ai-instructions.md
 
 # report / gate
 python scripts/set_ai_instructions.py --check                                     # advisory, always exits 0
-python scripts/set_ai_instructions.py --check --strict --model <*.SemanticModel>  # GATE one model, exit 1
+python scripts/set_ai_instructions.py --check --strict --model <*.SemanticModel> --md <ai-instructions.md>
 ```
 
-**Use the scoped form as your hand-off gate.** `--check --strict` without `--model` scans every
+**Use the scoped, explicit-md form as your hand-off gate, after final refresh/save.** `--check --strict` without `--model` scans every
 migration tree, so it fails on any model that predates this layer — a repo-wide gate nobody can turn on
 is a gate that never runs. `--model` narrows it to the model you just built, which is the one you are
 actually accountable for. Advisory repo-wide `--check` still belongs in CI as a visible backlog counter.
 
 `--check` prints, per model: char count, lint flags, and a loud warning for **stamped but
 `qnaEnabled != true`** — the silent-no-op state.
+
+Exit codes: **0** stamp/plan/unchanged or advisory/gate pass; **1** strict findings;
+**2** CLI usage; **3** refused stamp (including caught I/O failures). `--plan` prints relative
+added/changed targets and STAMP / NO_CHANGE; it never writes. No `--only` mode exists.
+`--all` validates all eligible models before writing any; it never adopts.
+
+For a bundle, always pass `--md`; the migration-layout default cannot locate bundle instructions.
+Declare all changed targets printed by `--plan` in **one** host-repo wrapper call (paths below are
+illustrative; use the actual default culture and complete target list):
+
+```bash
+python scripts/declare_generated_edit.py --bundle <bundle> \
+  --targets pbip/<Model>.SemanticModel/definition/cultures/en-US.tmdl \
+    pbip/<Model>.SemanticModel/definition/model.tmdl pbip/<Model>.SemanticModel/definition.pbism \
+  --script <bundle>/_build/stamp_ai.py -- --model <model> --md <md>
+```
+
+The replay script calls this stamper **once** for the complete model. The wrapper snapshots all
+listed targets, records every changed file and requires `check_migration_progress.py --tamper`
+exit 0 in batch mode. An unlisted generated mutation must exit 1; a failed declaration/gate is not
+a successful seal. Single-target `--target` remains compatible. This wrapper belongs to the host
+repository, not the portable skill; copied skills can stamp without it. Package edits keep the
+host's existing informational package contract, never a bundle declaration workaround.
 
 ### Setting the descriptions themselves (levers 1–2), via the Modeling MCP
 
@@ -230,9 +333,10 @@ this table is the only place source-tool specifics belong.
 
 ## 6. Evidence and limits
 
-- ✅ **Survives publish, byte-for-byte.** Measured 2026-07-30: a model published via the Fabric items API
+- ✅ **Historical unmarked text survived one publish, byte-for-byte.** Measured 2026-07-30: a model published via the Fabric items API
   round-tripped through `getDefinition` with `definition/cultures/<lcid>.tmdl` intact and the
   `CustomInstructions` payload exactly as stamped.
+  This predates the ownership annotation; its survival remains unmeasured (section 0).
 - ⚠️ **"Copilot obeys it" is NOT proven by that.** A round-trip shows the text reached the service, not
   that it changed an answer. Verify on your own model with real questions before claiming it works.
 - ❌ **Two hard gates on consumption:** `qnaEnabled: true`, and — per Microsoft's guidance — a

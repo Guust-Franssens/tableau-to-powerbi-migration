@@ -4,7 +4,9 @@ purpose: run a generated-artifact fix script, record before/after hashes for tam
 usage:   python scripts/declare_generated_edit.py --bundle <dir> --target <generated-path>
                                            --script <_build/fix_*.py>
                                            [--purpose <one-line reason>] [-- <script-args>...]
+         Replace --target with --targets <path> <path> ... for one coupled, multi-file script run.
 
+Batch mode additionally requires check_migration_progress.py --tamper exit zero.
 This is an audit wrapper, not an authorization system. It records what a replayable fix script did so
 ``check_migration_progress.py --tamper`` can distinguish declared repairs from silent drift. Anyone
 who can edit the bundle can also forge the JSON record; review still has to decide whether the script
@@ -121,13 +123,26 @@ def append_declaration(
     )
 
 
+def record_targets(bundle: Path, script: Path, before: dict[Path, str | None]) -> dict[Path, str]:
+    """Record every changed target before any best-effort navigational registration."""
+    messages = {}
+    for target, baseline in before.items():
+        after = sha256_file(target) if target.is_file() else None
+        if baseline == after:
+            messages[target] = f"DECLARE: NO_CHANGE {target}"
+        else:
+            declaration = append_declaration(bundle, target, script, baseline, after)
+            messages[target] = f"DECLARE: RECORDED {target.relative_to(bundle).as_posix()} -> {declaration}"
+    return messages
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the fix script and record the target's resulting hash."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--bundle", required=True, type=Path, help="migration bundle with input_manifest.json")
-    parser.add_argument(
-        "--target", required=True, type=Path, help="generated artifact path, absolute or bundle-relative"
-    )
+    targets_group = parser.add_mutually_exclusive_group(required=True)
+    targets_group.add_argument("--target", type=Path, help="generated artifact path, absolute or bundle-relative")
+    targets_group.add_argument("--targets", nargs="+", type=Path, help="batch targets; snapshot all, run script once")
     parser.add_argument("--script", required=True, type=Path, help="replayable fix script to run")
     parser.add_argument(
         "--purpose", default="", help="one-line reason this replay script exists, for the navigational manifest"
@@ -136,10 +151,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     bundle = args.bundle.resolve()
-    target = resolve_target(bundle, args.target).resolve()
+    targets = [resolve_target(bundle, target).resolve() for target in (args.targets or [args.target])]
+    if len(set(targets)) != len(targets) or any(not target.is_relative_to(bundle) for target in targets):
+        parser.error("targets must be distinct files inside the bundle")
+    load_generated_run(bundle)
     script = args.script.resolve()
     script_args = args.script_args[1:] if args.script_args[:1] == ["--"] else args.script_args
-    before = sha256_file(target) if target.is_file() else None
+    before = {target: sha256_file(target) if target.is_file() else None for target in targets}
 
     result = subprocess.run([sys.executable, str(script), *script_args], cwd=bundle, check=False)
     if result.returncode != 0:
@@ -150,21 +168,26 @@ def main(argv: list[str] | None = None) -> int:
     # whether the best-effort navigational manifest write below succeeds. Compute the after-hash and
     # persist that declaration before attempting the (non-authoritative) replay-manifest row, so a
     # failure in the latter can never leave `target=after` with zero declarations.
-    after = sha256_file(target) if target.is_file() else None
-    if before == after:
-        message = f"DECLARE: NO_CHANGE {target}"
-    else:
-        declaration = append_declaration(bundle, target, script, before, after)
-        message = f"DECLARE: RECORDED {target.relative_to(bundle).as_posix()} -> {declaration}"
-
-    try:
-        registration = register_replay_script(bundle, script, target, args.purpose)
-    except OSError as exc:
-        print(message)
-        print(f"WARNING: navigational replay-manifest write failed for {target}: {exc}", file=sys.stderr)
-        return 0
-
-    print(f"{message} (registered {registration})")
+    messages = record_targets(bundle, script, before)
+    for target, message in messages.items():
+        try:
+            registration = register_replay_script(bundle, script, target, args.purpose)
+        except OSError as exc:
+            print(message)
+            print(f"WARNING: navigational replay-manifest write failed for {target}: {exc}", file=sys.stderr)
+        else:
+            print(f"{message} (registered {registration})")
+    if args.targets:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).with_name("check_migration_progress.py")),
+                "--bundle",
+                str(bundle),
+                "--tamper",
+            ],
+            check=False,
+        ).returncode
     return 0
 
 
