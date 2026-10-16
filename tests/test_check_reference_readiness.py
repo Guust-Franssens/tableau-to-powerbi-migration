@@ -4130,7 +4130,7 @@ def test_start_ready_stored_refusals_remain_the_canonical_refusal(
 def test_start_ready_provider_refusals_use_existing_s2_and_canonical_owners(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, stage: str, code: str
 ) -> None:
-    from test_package_start_handoffs import LIVE, MODEL_ONLY_PROJECTION
+    from test_package_start_handoffs import LIVE, MODEL_ONLY_PROJECTION, source_rows
 
     provider, consumer = _shared_source_pair(tmp_path / "packages")
     if fault == "wrong-model":
@@ -4148,7 +4148,7 @@ def test_start_ready_provider_refusals_use_existing_s2_and_canonical_owners(
     elif fault == "model-only-provider":
         path = provider / "migration-spec.json"
         payload = json.loads(path.read_bytes())
-        payload["data_sources"][0]["connection"] = LIVE
+        payload["data_sources"][0].update(source_rows(LIVE)[0])
         path.write_text(json.dumps(payload), encoding="utf-8")
         (provider / "data-access.json").write_text(json.dumps(MODEL_ONLY_PROJECTION), encoding="utf-8")
         brief = provider / "migration-brief.md"

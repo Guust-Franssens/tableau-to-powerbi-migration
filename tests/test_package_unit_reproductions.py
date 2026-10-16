@@ -735,7 +735,11 @@ def test_packaged_live_spec_uses_pure_parser_validation_not_the_gate_arming_cli(
 ) -> None:
     asset = tmp_path / "Live.tds"
     asset.write_text(
-        "<datasource name='Live'><connection class='sqlserver' server='source.example' dbname='db'/></datasource>",
+        "<datasource name='Live'><connection class='federated'><named-connections>"
+        "<named-connection name='orders-leg'><connection class='sqlserver' server='source.example' "
+        "dbname='db' schema='dbo'/></named-connection></named-connections>"
+        "<relation name='Orders' table='[dbo].[Orders]' connection='orders-leg' type='table'/>"
+        "</connection></datasource>",
         encoding="utf-8",
     )
     actual_run = subprocess.run
@@ -1027,6 +1031,26 @@ LOCAL_PROJECTION = {
     "codes": ["all-flat-file", "package-self-contained"],
 }
 
+DIRECT_KEYS = {
+    server: "source-key:"
+    + hashlib.sha256(
+        json.dumps(
+            {
+                "class": "sqlserver",
+                "server": server,
+                "database": "db",
+                "schema": "dbo",
+                "ordinary_tables": ["Orders"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    for server in ("source.example", "other.example")
+}
+DIRECT_KEY = DIRECT_KEYS["source.example"]
+OTHER_DIRECT_KEY = DIRECT_KEYS["other.example"]
+
 
 def _projection_fixture(package: Path, payload: dict) -> None:
     """Independent wire bytes and artifact declaration, sealed by the existing S2 fixture."""
@@ -1039,13 +1063,17 @@ def _projection_fixture(package: Path, payload: dict) -> None:
 
 
 def _direct_provider(
-    parent: Path, *, luid: str = DS_LUID, key: str = authority.KEY, connection: dict[str, Any] | None = None
+    parent: Path, *, luid: str = DS_LUID, key: str = DIRECT_KEY, connection: dict[str, Any] | None = None
 ) -> Path:
     """Supply direct connection metadata independently of the projection's claimed key."""
     package = s2.datasource_package(parent, unit="Shared", luid=luid, published_key=s2.PUBLISHED_KEY)
     spec_path = package / "migration-spec.json"
     spec = json.loads(spec_path.read_bytes())
-    spec["data_sources"][0]["connection"] = dict(authority.LIVE if connection is None else connection)
+    spec["data_sources"][0]["connection"] = {
+        **(authority.LIVE if connection is None else connection),
+        "name": "orders-leg",
+    }
+    spec["data_sources"][0]["tables"] = [{"name": "Orders", "table": "[dbo].[Orders]", "connection": "orders-leg"}]
     s2._write(spec_path, spec)
     _projection_fixture(
         package,
@@ -1068,7 +1096,7 @@ def _provider_consumer(parent: Path, provider: Path) -> Path:
 @pytest.mark.parametrize("change", ["projection-key", "connection-identity", "missing-connection"])
 def test_direct_provider_projection_is_grounded_in_current_held_metadata(tmp_path: Path, change: str) -> None:
     """A one-sided identity change reaches binding authority after clean S1/S2 and legal projection parsing."""
-    provider = _direct_provider(tmp_path / "provider", key="source-key:ab1baa4b3f77bb70")
+    provider = _direct_provider(tmp_path / "provider", key=DIRECT_KEY)
     held = pkg._binding_hold(provider)
     role = pkg.pri.verify_phase1_role_identity([provider])[0]
     assert role.verified is not None and role.verified.integrity.is_clean
@@ -1077,23 +1105,23 @@ def test_direct_provider_projection_is_grounded_in_current_held_metadata(tmp_pat
     assert isinstance(baseline, pkg.pri.PackageDataAccessHandoff)
     projection = pkg.data_access.parse_data_access(baseline.data_access.content.decode("utf-8"))
     assert projection.state == "live_data_ok"
-    assert projection.source_keys == baseline.facts.live_source_keys == ("source-key:ab1baa4b3f77bb70",), (
+    assert projection.source_keys == baseline.facts.live_source_keys == (DIRECT_KEY,), (
         "direct-provider source-key authority must derive the literal key from held connection metadata"
     )
     assert baseline.facts.direct_applicable and not baseline.facts.published_only
     assert not baseline.facts.has_review and baseline.facts.refusal_code is None
     pkg._binding_access(held, role, provider)
 
-    expected_keys = ("source-key:ab1baa4b3f77bb70",)
+    expected_keys = (DIRECT_KEY,)
     if change == "projection-key":
         payload = json.loads(baseline.data_access.content)
-        payload["source_keys"] = ["source-key:e625ce798a6d19bb"]
+        payload["source_keys"] = [OTHER_DIRECT_KEY]
         s2._write(provider / "data-access.json", payload)
     else:
         spec = json.loads(baseline.migration_spec.content)
         if change == "connection-identity":
             spec["data_sources"][0]["connection"]["server"] = "other.example"
-            expected_keys = ("source-key:e625ce798a6d19bb",)
+            expected_keys = (OTHER_DIRECT_KEY,)
         else:
             del spec["data_sources"][0]["connection"]
             expected_keys = ()
@@ -1112,9 +1140,7 @@ def test_direct_provider_projection_is_grounded_in_current_held_metadata(tmp_pat
         assert handoff.data_access.content == baseline.data_access.content
     projection = pkg.data_access.parse_data_access(handoff.data_access.content.decode("utf-8"))
     assert projection.state == "live_data_ok"
-    assert projection.source_keys == (
-        "source-key:e625ce798a6d19bb" if change == "projection-key" else "source-key:ab1baa4b3f77bb70",
-    )
+    assert projection.source_keys == (OTHER_DIRECT_KEY if change == "projection-key" else DIRECT_KEY,)
     assert handoff.facts.live_source_keys == expected_keys
     assert handoff.facts.refusal_code == ("source-key-invalid" if change == "missing-connection" else None)
     assert handoff.facts.direct_applicable is (change != "missing-connection")
@@ -1129,10 +1155,8 @@ def test_direct_provider_projection_is_grounded_in_current_held_metadata(tmp_pat
 def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
     tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool, repeated: bool
 ) -> None:
-    selected = _direct_provider(tmp_path / "selected", key="source-key:ab1baa4b3f77bb70")
-    other = _direct_provider(
-        tmp_path / "other", luid=s2.WB_LUID, key="source-key:e625ce798a6d19bb", connection=authority.OTHER
-    )
+    selected = _direct_provider(tmp_path / "selected", key=DIRECT_KEY)
+    other = _direct_provider(tmp_path / "other", luid=s2.WB_LUID, key=OTHER_DIRECT_KEY, connection=authority.OTHER)
     consumer = _provider_consumer(tmp_path, selected)
     if repeated:
         spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
@@ -1155,11 +1179,7 @@ def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
         handoff = role.data_access_handoff(provider)
         assert isinstance(handoff, pkg.pri.PackageDataAccessHandoff)
         assert handoff.migration_spec.root_identity == handoff.data_access.root_identity == str(provider)
-        connection, key = (
-            (authority.LIVE, "source-key:ab1baa4b3f77bb70")
-            if provider == selected
-            else (authority.OTHER, "source-key:e625ce798a6d19bb")
-        )
+        connection, key = (authority.LIVE, DIRECT_KEY) if provider == selected else (authority.OTHER, OTHER_DIRECT_KEY)
         projection = pkg.data_access.parse_data_access(handoff.data_access.content.decode("utf-8"))
         assert projection.state == "live_data_ok"
         assert projection.source_keys == handoff.facts.live_source_keys == (key,), (
@@ -1168,7 +1188,8 @@ def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
         assert json.loads(handoff.migration_spec.content)["data_sources"] == [
             {
                 "id": "ds-1",
-                "connection": connection,
+                "connection": {**connection, "name": "orders-leg"},
+                "tables": [{"name": "Orders", "table": "[dbo].[Orders]", "connection": "orders-leg"}],
                 "published_datasource": {"id": "Shared", "site": "sales-site", "key": s2.PUBLISHED_KEY},
             }
         ]
@@ -1194,7 +1215,7 @@ def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
     assert result.to_json() == {
         "schema": "phase1-data-access/v1",
         "state": "provider_inherited",
-        "source_keys": ["source-key:ab1baa4b3f77bb70"],
+        "source_keys": [DIRECT_KEY],
         "provider_unit": expected_reference,
         "provider_state": "live_data_ok",
         "validation": "validated",
@@ -1339,7 +1360,7 @@ def test_mixed_published_and_direct_consumers_refuse_the_authoritys_inheritance_
 
 def test_contradictory_luid_and_second_dependency_cannot_be_collapsed_by_name(tmp_path: Path, root: Path) -> None:
     selected = _direct_provider(tmp_path / "selected")
-    other = _direct_provider(tmp_path / "other", luid=s2.WB_LUID, key=authority.OTHER_KEY, connection=authority.OTHER)
+    other = _direct_provider(tmp_path / "other", luid=s2.WB_LUID, key=OTHER_DIRECT_KEY, connection=authority.OTHER)
     consumer = _provider_consumer(tmp_path, selected)
     spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
     spec["data_sources"].append(
@@ -1695,12 +1716,17 @@ def test_real_packaging_binds_only_the_exact_original_gate_root(
     bundle, oracle, _objects = _bundle(tmp_path, covered=None, datasource_only=True)
     asset = bundle.parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
     asset.write_text(
-        "<datasource name='Live'><connection class='sqlserver' server='source.example' dbname='db'/></datasource>",
+        "<datasource name='Live'><connection class='federated'><named-connections>"
+        "<named-connection name='orders-leg'><connection class='sqlserver' server='source.example' "
+        "dbname='db' schema='dbo'/></named-connection></named-connections>"
+        "<relation name='Orders' table='[dbo].[Orders]' connection='orders-leg' type='table'/>"
+        "</connection></datasource>",
         encoding="utf-8",
     )
     _write_input_manifest(bundle, list(asset.parent.glob("*")))
     report = json.loads((bundle / "report.json").read_text(encoding="utf-8"))
-    report["datasources"][0]["connection"] = dict(authority.LIVE)
+    report["datasources"][0]["connection"] = {**authority.LIVE, "name": "orders-leg"}
+    report["datasources"][0]["tables"] = [{"name": "Orders", "table": "[dbo].[Orders]", "connection": "orders-leg"}]
     s2._write(bundle / "report.json", report)
     authority._earn(bundle if selection == "default-engine" else root)
     observed = []

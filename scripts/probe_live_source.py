@@ -103,7 +103,12 @@ from _verdict_lines import (  # noqa: F401  # pylint: disable=unused-import
 from check_desktop_orphans import record_desktop_event
 from connection_target import LIVE_SOURCE, powerbi_target
 from migration_bundle import load_bundle
-from preflight_source_credentials import _leg_key
+from preflight_source_credentials import (
+    _key_from_resolved_scope,
+    _leg_key,
+    _safe_probe_literal,
+    resolve_probe_scope,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("probe_live_source")
@@ -278,10 +283,12 @@ def build_m_query(conn: dict, table: str, column: str, custom_sql: str | None = 
     klass = (conn.get("class") or "").lower()
     server = normalize_host(conn.get("server") or "")
     database = conn.get("database") or ""
-    schema = conn.get("schema") or "default"
+    schema = conn.get("schema")
     native = _m_sql_literal(custom_sql) if custom_sql else None
     if custom_sql is not None and not native:
         raise ValueError("custom SQL is empty after removing comments; reachability cannot be assessed")
+    if custom_sql is None and (not _safe_probe_literal(schema) or not _safe_probe_literal(table)):
+        raise ValueError("ordinary probe requires a valid explicit schema and physical table name")
 
     if klass == "databricks":
         http_path = conn.get("http_path")
@@ -564,19 +571,28 @@ def _resolve_probe_targets(
     credentials, but still probe any later custom-SQL relation rather than letting the cheap table
     stand in for it.
     """
-    if source_index >= len(sources):
+    if source_index < 0 or source_index >= len(sources):
         log.error("PROBE: ERROR source index %d out of range (%d sources)", source_index, len(sources))
         raise SystemExit(1)
     source = sources[source_index]
     conn = source.get("connection", {}) or {}
     legs = conn.get("connections") or [conn]
-    live_legs = [
-        (_leg_name(source, source_index, leg, len(legs), leg_index), leg)
-        for leg_index, leg in enumerate(legs)
-        if _connection_target(leg) == LIVE_SOURCE
-    ]
+    targets = []
+    errors = []
+    for leg_index, leg in enumerate(legs):
+        if _connection_target(leg) != LIVE_SOURCE:
+            continue
+        resolved, tables, error = resolve_probe_scope(source, leg)
+        try:
+            name = _key_from_resolved_scope(resolved, tables, error)
+        except ValueError as exc:
+            name = f"unstable-source[{source_index}].connection[{leg_index}]"
+            error = str(exc)
+        targets.append((name, resolved, tables, "ProbeOK"))
+        if error is not None:
+            errors.append((name, error))
 
-    if not live_legs:
+    if not targets:
         # SKIPPED, not DATA_OK. Exit 0 either way, but the verdicts mean different things - "nothing
         # to prove" is not "proven reachable" - and conflating two verdicts into one word is exactly
         # the defect class this script exists to fix. An orchestrator reading the last line would
@@ -584,13 +600,11 @@ def _resolve_probe_targets(
         log.info("PROBE: SKIPPED not a live source ('%s') - nothing to probe", conn.get("powerbi_target"))
         return []
 
-    with _recorded_attempt(migration, [name for name, _leg in live_legs]):
-        tables = [t for t in (source.get("tables") or []) if t.get("name")]
-        tables.sort(key=_is_custom_sql)
-        if not tables:
-            log.error("PROBE: ERROR source has no table/column to probe: no named table or custom SQL relation")
+    with _recorded_attempt(migration, [name for name, _error in errors]):
+        if errors:
+            log.error("PROBE: ERROR %s", "; ".join(dict.fromkeys(error for _name, error in errors)))
             raise SystemExit(1)
-    return [(name, leg, tables, "ProbeOK") for name, leg in live_legs]
+    return targets
 
 
 def _resolve_probe_target(sources: list[dict], source_index: int) -> tuple[dict, list[dict], str] | None:

@@ -43,6 +43,7 @@ SQLSERVER = {
     "class": "sqlserver",
     "server": "sql.example.com",
     "database": "DB",
+    "schema": "dbo",
     "powerbi_target": "live_source",
 }
 
@@ -56,6 +57,8 @@ def _source(tables: list[dict], fields: list[dict] | None = None) -> dict:
     for table in tables:
         if table.get("custom_sql") is not None:
             table["source_relation"] = "custom-sql"
+        elif table.get("name") and table.get("source_relation") != "custom-sql":
+            table.setdefault("table", f"[{table['name']}]")
     return {
         "connection": SNOWFLAKE,
         "tables": tables,
@@ -247,8 +250,12 @@ def test_ordinary_probe_projection_cannot_manufacture_rows_without_columns(conn:
     ],
     ids=["snowflake", "databricks", "sqlserver"],
 )
-def test_custom_sql_query_and_note_remain_byte_for_byte_unchanged(conn: dict, head: str, note: str) -> None:
+@pytest.mark.parametrize("schema_present", [True, False], ids=["schema-present", "schema-absent"])
+def test_custom_sql_query_and_note_remain_byte_for_byte_unchanged(
+    conn: dict, head: str, note: str, schema_present: bool
+) -> None:
     """Pin the pre-647 custom-SQL output independently of the ordinary-table projection."""
+    conn = dict(conn) if schema_present else {key: value for key, value in conn.items() if key != "schema"}
     m, actual_note = probe_live_source.build_m_query(conn, "Q", "Col", custom_sql="SELECT a FROM t")
 
     assert m == "let\n" + head + "    " + PROBE_PROJECTION + "\nin\n    probe"
@@ -280,7 +287,7 @@ def test_real_table_probe_still_opens_refreshes_and_returns_data_ok(tmp_path, mo
         tmp_path,
         "source-key:0000000000000000",
         SNOWFLAKE,
-        ({"name": "FLIGHTS", "custom_sql": None}, "Col"),
+        ({"name": "FLIGHTS", "table": "[PUBLIC].[FLIGHTS]", "custom_sql": None}, "Col"),
         (7, False),
     )
 

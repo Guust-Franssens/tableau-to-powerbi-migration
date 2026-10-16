@@ -760,8 +760,11 @@ def test_start_ready_original_proof_and_explicit_authorization_keep_their_own_ce
     bundle, oracle, _ = _bundle(tmp_path / "source", covered=None, datasource_only=True)
     asset = bundle.parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
     asset.write_text(
-        "<datasource name='Shared'><connection class='sqlserver' server='source.example' dbname='db'>"
-        "<relation name='Rows' table='[Rows]' type='table'/></connection></datasource>",
+        "<datasource name='Shared'><connection class='federated'><named-connections>"
+        "<named-connection name='orders-leg'><connection class='sqlserver' server='source.example' "
+        "dbname='db' schema='dbo'/></named-connection></named-connections>"
+        "<relation name='Orders' table='[dbo].[Orders]' connection='orders-leg' type='table'/>"
+        "</connection></datasource>",
         encoding="utf-8",
     )
     _write_input_manifest(bundle, sorted((bundle.parent / "assets").iterdir()))
@@ -783,7 +786,7 @@ def test_start_ready_original_proof_and_explicit_authorization_keep_their_own_ce
     )
     package = out / DS_UNIT
     stored = json.loads((package / "data-access.json").read_bytes())
-    assert stored["source_keys"] == ["source-key:ab1baa4b3f77bb70"]
+    assert stored["source_keys"] == [authority.KEY]
     assert stored["state"] == ("authorized_model_only" if authorized else "live_data_ok")
     assert _binding_cli(package)["exit_code"] == 0
     before = {str(path.relative_to(original)): path.read_bytes() for path in original.rglob("*") if path.is_file()}
