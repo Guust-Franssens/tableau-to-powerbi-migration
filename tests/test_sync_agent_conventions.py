@@ -369,9 +369,8 @@ def test_no_near_cap_warning_when_nothing_is_in_the_band(tmp_path: Path, caplog)
 # test would notice. That is the fail-open direction: a shorter AGENTS.md passes the gate harder.
 #
 # These are deliberately NOT a generalized documentation framework. They are a fixed anchor set of
-# the contracts a dispatcher executes: the session-start/migration-start timing split, the four input
-# routes, the five intake decisions, the brief path, Gate B, the post-round-2 scope freeze, the moved
-# incident evidence, and the size targets themselves. Anchors are semantic (a command, a decision
+# the contracts a dispatcher executes: session timing, front door, intake, private brief, dispatch,
+# Tableau comparison, and the live homes of moved safeguards. Anchors are semantic (a command, a decision
 # name, a link target), never a line number, and whitespace is normalized first so re-wrapping a
 # paragraph is not a failure. Prose around an anchor may be rewritten freely.
 # ---------------------------------------------------------------------------
@@ -380,6 +379,7 @@ AGENTS_MD = REPO_ROOT / "AGENTS.md"
 AGENT_OPS_MD = REPO_ROOT / "docs" / "agent-operations.md"
 OPERATOR_RUNBOOK_MD = REPO_ROOT / "docs" / "operator-runbook.md"
 README_MD = REPO_ROOT / "README.md"
+CONTRIBUTING_MD = REPO_ROOT / "CONTRIBUTING.md"
 DRY_RUN_OPERATOR_MD = REPO_ROOT / ".github" / "agents" / "dry-run-operator.agent.md"
 ORACLE_SCRIPT = REPO_ROOT / "scripts" / "capture_tableau_oracle.py"
 
@@ -387,7 +387,7 @@ ORACLE_SCRIPT = REPO_ROOT / "scripts" / "capture_tableau_oracle.py"
 # (`sac.prompt_size` - the whole file, CRLF included) so this cannot disagree with the tool that
 # fails the build. There is deliberately no lower bound: `dry-run-operator` is far below the persona
 # target and that is fine.
-AGENTS_SIZE_TARGET = 45_000
+AGENTS_SIZE_TARGET = 13_500
 PERSONA_SIZE_TARGET = 22_000
 
 # contract id -> (document, required anchors). Table-driven so the mutation proof below can delete
@@ -396,55 +396,49 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
     "session-start-timing": (
         AGENTS_MD,
         (
-            "powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update -CheckUpstream",
-            "| Session start (nothing in flight) | `preflight.ps1 -Update -CheckUpstream` |",
-            "| Migration start (orchestrator step 0) | `preflight.ps1` (plain) |",
-            "| Mid-migration | **don't upgrade the installed tooling** |",
+            r"powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 -Update -CheckUpstream",
+            "Migration-start preflight is **plain**; no tooling upgrades mid-migration.",
         ),
     ),
     "dispatcher-input-routes": (
         AGENTS_MD,
         (
-            "**A Tableau Server/Cloud site** (URL + PAT)",
-            "python scripts/run_engine_survey.py --server <host>",
-            "python scripts/assess_estate.py --out _assessment --survey _assessment/estate_survey.json",
-            "python scripts/tableau_lineage.py --plan",
-            "python scripts/harvest_estate_assets.py --out <dir>",
-            "python scripts/run_estate.py --input <dir>/assets --output <bundle>",
-            "**A folder of `.twb`/`.twbx`**",
-            "python scripts/run_estate.py --input <folder> --output <bundle>",
-            "**One `.twb`/`.twbx`**",
-            "python scripts/parse_tableau.py <file> -o <spec>",
-            "dispatch `@tableau-migrator`",
-            "**A `.tds`/`.tdsx`** (data source, no workbook)",
-            "`parse_tableau.py` accepts it directly",
+            r"**Start** `python scripts\start_migration.py`",
+            "repo-local `_runs` by default, `--runs-parent` opt-in",
+            "Do not pre-allocate another run or silently widen scope.",
+            "**Expert/manual fallback:** local folders, `.twb/.twbx`, `.tds/.tdsx`",
         ),
     ),
     "migration-brief-path": (
         AGENTS_MD,
-        ("`migrations/workbooks/<name>/migration-brief.md`",),
+        (
+            "**Issue each unit's current v2 brief before packaging**",
+            r"`<absolute-run>\assessment\briefs\<exact-unit>\migration-brief.md`",
+            "The front door creates no brief draft or `dispatch.md`.",
+        ),
     ),
     "five-intake-decisions": (
         AGENTS_MD,
         (
-            "**Confirm the plan from step 1**",
-            "**Autonomy** — see below. Default `standard`.",
-            "**Fidelity bar**",
-            "**If we hit a wall — stop, or degrade?**",
-            "**Who drives the data refreshes?** — see below. Default `scripted`.",
+            "**Ask once**, reusing answers: plan/order/destination",
+            "autonomy (`standard`)",
+            "fidelity bar including explicit numeric comparison `none|required`",
+            "Numeric scope has **no default**",
+            "stop-or-degrade policy",
+            "refresh strategy (`scripted`)",
         ),
     ),
     "credential-stop-outranks-autonomy": (
-        AGENTS_MD,
+        OPERATOR_RUNBOOK_MD,
         (
             "| `autopilot` | decide, log it | decide, flag in the summary | **ask — always** |",
             "No level clears the credential stop",
         ),
     ),
     "gate-b-one-block": (
-        AGENTS_MD,
+        OPERATOR_RUNBOOK_MD,
         (
-            "### Gate B — after parse + probe, before building",
+            "**Gate B — after parse + probe, before building.**",
             "**ONE block, not four serial stops**",
             "1. Published datasources",
             "2. Live sources that failed the probe",
@@ -453,7 +447,7 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
         ),
     ),
     "post-round-2-scope-freeze": (
-        AGENTS_MD,
+        CONTRIBUTING_MD,
         (
             "**After R2 freeze scope**",
             "a **new class or new proof mechanism** forces simplify/delete/split/descope",
@@ -462,33 +456,22 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
     ),
     "agent-operations-evidence-link": (
         AGENTS_MD,
-        (
-            "Incident evidence behind every rule below: [`docs/agent-operations.md`](docs/agent-operations.md).",
-            "Dumps, numbers and what remains unexplained: [`docs/agent-operations.md`](docs/agent-operations.md).",
-        ),
+        ("Read [operations](docs/agent-operations.md) before parallel work/crash recovery",),
     ),
     "agent-operations-backlink": (
         AGENT_OPS_MD,
         (
             "[`AGENTS.md`](../AGENTS.md)",
-            "`AGENTS.md` is the contract and this file is the reason",
+            "owns **delegation discipline, concurrency budgets and crash recovery**",
         ),
     ),
     "oracle-capture-exit-contract": (
-        AGENTS_MD,
+        OPERATOR_RUNBOOK_MD,
         (
             'Exit 4 is "no views selected"',
             "**exit 3** is a total non-credential failure",
             "`3` total non-credential failure",
             "`4` no views selected",
-        ),
-    ),
-    "flat-package-layout-root": (
-        AGENTS_MD,
-        (
-            "`--out` names this directory itself",
-            "`packages/<Unit>/`",
-            "nested `packages/<batch>/<Unit>/` remains readable for compatibility",
         ),
     ),
     "flat-package-layout-runbook": (
@@ -511,24 +494,17 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
     # ceilings. The contract is executable or it is nothing - a document that says "use a shorter
     # root" without the supported command is what sent an operator to a junction last time.
     "windows-short-root-allocation": (
-        AGENTS_MD,
+        OPERATOR_RUNBOOK_MD,
         (
-            "Repo-local `_runs` stays the default",
-            "`python scripts/work_dirs.py <slug> --runs-parent <short-parent> --json`",
-            "`python scripts/work_dirs.py --verify --runs-parent <short-parent>`",
-            "never a junction or symlink, and never weaken the ceiling",
+            "Repo-local `_runs` is the default",
+            r"python scripts/work_dirs.py <unit-name> --runs-parent C:\short\path --json",
+            r"python scripts/work_dirs.py --verify --runs-parent C:\short\path",
         ),
     ),
-    # #566 corrected an UNMEASURED half of that prohibition. The exception is narrow and must stay
-    # narrow: an alias is a Desktop-open convenience, never the run's identity and never a waiver,
-    # so the root contract carries the boundary as well as the permission.
+    # The root points to the canonical permission/boundary/recipe, not a second copy.
     "subst-desktop-open-fallback-root": (
         AGENTS_MD,
-        (
-            "ONE measured exception (2026-09-08, #566): a same-user `subst` alias may open an "
-            "already-built over-ceiling tree in Desktop when re-allocation is blocked",
-            "temporary, never the recorded path, waives no gate",
-        ),
+        ("[Path limits](docs/windows-path-limits.md) owns recovery.",),
     ),
     "subst-desktop-open-fallback-persona": (
         DRY_RUN_OPERATOR_MD,
@@ -541,9 +517,8 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
     "short-root-privacy-distinction-root": (
         AGENTS_MD,
         (
-            "`/_*` in `.gitignore` covers a **repo-local** run by construction",
-            "A short-root run lives outside the repo, where that rule never applies and nothing in "
-            "this checkout can commit it",
+            "verify in-repo output paths are ignored",
+            "[SECURITY.md](SECURITY.md) owns privacy",
         ),
     ),
     # The persona is the executable half: this repo's checkout IS the deep one, so its stage 1 must
@@ -667,12 +642,12 @@ def test_the_retired_wrong_tool_exit_claim_is_gone_from_the_capture_row() -> Non
     "wrong tool for this source" signal, so the old sentence told a reader to keep going after a
     capture that produced nothing.
     """
-    text = _normalized(AGENTS_MD)
+    text = _normalized(OPERATOR_RUNBOOK_MD)
     assert "exits 3** on an empty target" not in text
     assert '"wrong tool for this source"' not in text
 
 
-def test_agents_md_exit_semantics_match_the_oracle_script() -> None:
+def test_runbook_exit_semantics_match_the_oracle_script() -> None:
     """Independent oracle: the meanings come from the script's own documented contract, not from us.
 
     Both codes are asserted in the direction the finding corrected - 4 is a selection miss, 3 is a
@@ -682,7 +657,7 @@ def test_agents_md_exit_semantics_match_the_oracle_script() -> None:
     assert "``3`` total non-credential failure" in script
     assert "``4`` no views selected" in script
 
-    text = _normalized(AGENTS_MD)
+    text = _normalized(OPERATOR_RUNBOOK_MD)
     assert "`3` total non-credential failure" in text
     assert "`4` no views selected" in text
 
@@ -710,3 +685,82 @@ def test_every_persona_stays_within_the_project_size_target() -> None:
 def test_the_project_targets_bind_before_the_hard_cap() -> None:
     """A target above the enforced cap would be decorative - the cap would fail first, every time."""
     assert PERSONA_SIZE_TARGET < sac.PROMPT_CHAR_LIMIT
+
+
+DISPATCH_LINE = "4. **Dispatch `@tableau-migrator` per unit via the task/subagent tool**, providers first."
+FIDELITY_LINE = "5. **Done includes independent fidelity comparison against Tableau** on the shipped working tree:"
+NO_PATCH_BULLET = (
+    "- **Customer migration:** never silently patch toolkit/engine to clear a gate; stop, explain, "
+    "route and ask; run patched code only with explicit human approval; mark every result `patched` "
+    "in prose, not a gate/status; commit learnings in approved follow-up."
+)
+
+
+def test_the_opening_orders_front_door_intake_brief_dispatch_and_comparison() -> None:
+    text = _normalized(AGENTS_MD).split("<!-- BEGIN:shared-conventions -->", 1)[0]
+    steps = (
+        r"1. **Start** `python scripts\start_migration.py`",
+        "2. **Ask once**",
+        "3. **Issue each unit's current v2 brief before packaging**",
+        DISPATCH_LINE,
+        FIDELITY_LINE,
+    )
+    positions = [text.index(step) for step in steps]
+    assert positions == sorted(positions), "opening must route front door → intake → brief → dispatch → Tableau"
+
+
+def test_the_root_requires_task_dispatch_not_inline_substitution() -> None:
+    text = _normalized(AGENTS_MD)
+    assert DISPATCH_LINE in text, "task-tool tableau-migrator dispatch line missing"
+    assert "Unavailable dispatch is a blocker, not permission to work inline." in text
+    assert "current package-cohort **START_READY + process exit 0** before any builder/validator work" in text
+
+
+def test_the_root_requires_independent_tableau_comparison_before_done() -> None:
+    text = _normalized(AGENTS_MD)
+    assert FIDELITY_LINE in text, "independent Tableau fidelity line missing"
+    assert "Require `@pbi-migration-validator` sign-off" in text
+    assert "Desktop with data; labels/layout/interactions and commissioned values, within evidence ceilings." in text
+
+
+def test_the_shared_customer_rule_requires_approval_and_patched_disclosure() -> None:
+    text = _normalized(AGENTS_MD).split("<!-- BEGIN:shared-conventions -->", 1)[1]
+    assert NO_PATCH_BULLET in text, "shared no-patch approval/disclosure bullet missing"
+    assert "**Durable learnings go in committed files**" not in text
+
+
+def test_runs_are_invocation_scoped_and_multi_unit_cost_is_combined() -> None:
+    text = _normalized(AGENTS_MD)
+    assert "**one front-door invocation over a named scope**" in text
+    assert "**Multi-unit runs report one combined cost, not per-unit estimates.**" in text
+
+
+def test_the_root_size_target_is_13500() -> None:
+    assert AGENTS_SIZE_TARGET == 13_500, "root size target must remain 13,500"
+
+
+@pytest.mark.parametrize(
+    ("removed", "check", "assertion"),
+    [
+        (DISPATCH_LINE, test_the_root_requires_task_dispatch_not_inline_substitution, "task-tool tableau-migrator"),
+        (FIDELITY_LINE, test_the_root_requires_independent_tableau_comparison_before_done, "independent Tableau"),
+        (
+            NO_PATCH_BULLET,
+            test_the_shared_customer_rule_requires_approval_and_patched_disclosure,
+            "shared no-patch",
+        ),
+    ],
+)
+def test_deleting_a_runtime_rule_fails_its_direct_assertion(monkeypatch, removed, check, assertion) -> None:
+    """Delete from composed root text, then run the same direct test as the positive control."""
+    check()
+    text = _normalized(AGENTS_MD)
+    assert text.count(removed) == 1
+    read_document = _normalized
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_normalized",
+        lambda path: text.replace(removed, "", 1) if path == AGENTS_MD else read_document(path),
+    )
+    with pytest.raises(AssertionError, match=assertion):
+        check()

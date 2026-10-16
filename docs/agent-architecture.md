@@ -1,6 +1,6 @@
 # Agent architecture — what reaches an agent, and how to change it
 
-Why this file exists: this repo's four agents grew organically, and several conventions were written
+Why this file exists: this repo's five agents grew organically, and several conventions were written
 on assumptions that turned out to be wrong. This is the researched, cited baseline — what GitHub
 actually documents, what was measured here, and what is still unknown. Read it before changing
 anything under `.github/agents/`.
@@ -11,8 +11,8 @@ and by running the §6.1 subagent experiment. This area moves fast; re-check bef
 > **Scope split.** This file answers *what text reaches an agent, and how to change it*. What a
 > delegating session owes a **running** subagent — verifying its claims, host and Desktop concurrency
 > budgets, post-crash file forensics — lives in
-> [`docs/agent-operations.md`](agent-operations.md), with the rules themselves in
-> [`AGENTS.md`](../AGENTS.md).
+> [`docs/agent-operations.md`](agent-operations.md), which owns those rules and their evidence.
+> [`AGENTS.md`](../AGENTS.md) owns the customer runtime contract.
 
 > **Corrections landed 2026-07-31.** Three claims in the previous revision were wrong and had been
 > written from an unverified research summary: (a) "there is no `skills` property" — there is one, on
@@ -161,7 +161,7 @@ wrong output field". A fresh-session rerun separated the two; §6.2 has the outc
 
 | Content | Where it is | Reaches a subagent? |
 |---|---|---|
-| Shared conventions | Generated into all four personas by `scripts/sync_agent_conventions.py`, CI-gated for drift | Yes — because it is physically in each persona |
+| Shared conventions | Generated into all five personas by `scripts/sync_agent_conventions.py`, CI-gated for drift | Yes — because it is physically in each persona |
 | `docs/tableau-dax-translation-guide.md` (24k) | External; persona says "Read … before starting" | Only if the agent actually reads it — advisory |
 | `docs/migration-spec.md` (9k) | External; same instruction | Same |
 | `.github/pbi.kb/visual-cookbook.md` (10k) | External; referenced at point of use | Same |
@@ -227,8 +227,21 @@ each pair and fails on drift.
 
 ### Why the shared block stays generated into the personas
 
-It is tempting to move the ~6 KB shared-conventions block out of all four personas and into a
-`subagentStart` hook, reclaiming ~24 KB of budget. **Don't** — at least not for the conventions that
+`AGENTS.md` holds the canonical shared block. A subagent receives only its own persona, not the
+root or VS Code wrapper (§1), so duplication here is deliberate, not inherited configuration.
+**Edit the block in `AGENTS.md`, then run `uv run python scripts/sync_agent_conventions.py`**;
+never hand-edit a generated copy. The wrapper duplicates only session start and points to the root.
+
+`--check` reports three failures in one run, the path first: an invalid documented `<bundle>/…`
+directory (`--bundle <dir>` also resolves location-shaped paths on disk), drift, and a persona over
+the **30,000-char hard cap**, measured on the whole file including CRLF. It scans the block and each
+persona in full; write mode exits nonzero too — an error was propagated, not merely proposed.
+The project targets are **13,500** characters for the root and **22,000** for each of the five
+personas (`tests/test_sync_agent_conventions.py`); the historical measurements below are not current
+budget claims.
+
+It is tempting to move the ~6 KB shared-conventions block out of all five personas and into a
+`subagentStart` hook, reclaiming ~30 KB of budget. **Don't** — at least not for the conventions that
 must always hold. Ranked by how they fail:
 
 | Mechanism | Fails when | Failure mode |

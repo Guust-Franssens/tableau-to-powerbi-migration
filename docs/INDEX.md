@@ -50,7 +50,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 
 | Task | Path | Read when... |
 |---|---|---|
-| Start or route session | [`AGENTS.md`](../AGENTS.md) | Canonical workflow plus repo agent/skill map. |
+| Start or route session | [`AGENTS.md`](../AGENTS.md) | Customer runtime: front door → one intake → private v2 brief → task-tool dispatch → independent Tableau comparison. |
 | Understand toolkit | [`README.md`](../README.md) | Project purpose and quick start. |
 | Contribute safely | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Issue-to-plan-review-to-PR lifecycle, status labels, mechanical exception and validation expectations. |
 | Open a focused PR | [`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md) | Behavioral/mechanical paths, plan-review evidence, validation exits and exact blind-reviewed head SHA. |
@@ -67,7 +67,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Handle conduct | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Conduct/community questions. |
 | Handle security reports | [`SECURITY.md`](../SECURITY.md) | Security disclosure routing. |
 | Find migration guidance | [`docs/agent-architecture.md`](../docs/agent-architecture.md) | Root sessions, subagents, skill visibility. |
-| Operate delegated agents | [`docs/agent-operations.md`](../docs/agent-operations.md) | Monitoring a subagent's claims, host V8-heap and Desktop RAM concurrency budgets, and post-crash file forensics — the measured evidence behind `AGENTS.md`'s delegation rules. |
+| Operate delegated agents | [`docs/agent-operations.md`](../docs/agent-operations.md) | Authority and evidence for monitoring claims, host V8-heap/Desktop RAM budgets and post-crash file forensics. |
 | Find migration guidance | [`docs/agent-capability-wiring.md`](../docs/agent-capability-wiring.md) | Registry of shipped capabilities that must be visible to agents. |
 | Find migration guidance | [`docs/ai-instructions-authoring-guide.md`](../docs/ai-instructions-authoring-guide.md) | AI-instruction authoring redirect. |
 | Find migration guidance | [`docs/capabilities-and-limitations.md`](../docs/capabilities-and-limitations.md) | Automation capability boundaries. |
@@ -88,7 +88,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Find migration guidance | [`docs/reference-readiness.md`](../docs/reference-readiness.md) | Post-emission reference prerequisite for agentic work: completeness, evidence and grade; conversion/dispatch/fidelity boundaries. |
 | Migrate ONE workbook by hand | [`docs/start-with-one-workbook.md`](../docs/start-with-one-workbook.md) | Bring-your-own `.twb` + screenshots, no Tableau Server: the verified command sequence, the `tableau-<exact name>.png` naming contract, and the Desktop-connection prerequisite. |
 | Find migration guidance | [`docs/review-remediation-plan.md`](../docs/review-remediation-plan.md) | Route validation/review findings. |
-| Improve review throughput | [`docs/review-throughput-postmortem.md`](../docs/review-throughput-postmortem.md) | Measured 2026-09-01/02 review-round costs, causes, counterexamples, and the replacement brief contract. |
+| Improve review throughput | [`docs/review-throughput-postmortem.md`](../docs/review-throughput-postmortem.md) | Dated review-round costs, causes and counterexamples; live review contract in `CONTRIBUTING.md`. |
 | Find migration guidance | [`docs/tableau-dax-translation-guide.md`](../docs/tableau-dax-translation-guide.md) | Translate Tableau calcs/LODs/table calcs. |
 | Find migration guidance | [`docs/tableau-map-to-azuremaps.md`](../docs/tableau-map-to-azuremaps.md) | Translate Tableau maps to Azure Maps. |
 | Find migration guidance | [`docs/windows-path-limits.md`](../docs/windows-path-limits.md) | Windows MAX_PATH ceilings a shipped bundle must respect, how to DELETE a tree that is already over one (`\\?\` prefix plus a chmod handler, because git objects are read-only), and §6 the **measured `subst` fallback** for opening an over-ceiling PBIP in Desktop — temporary, same-user, never canonical, waives no path gate. |

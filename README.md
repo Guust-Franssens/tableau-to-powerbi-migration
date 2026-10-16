@@ -419,15 +419,15 @@ finished one-command agent handoff yet.
 
 This toolkit has two tiers. The **deterministic Tableau → PBIP conversion engine is not in this
 repo**; it is installed as the `tableau-fabric-skills@tableau-collection` Copilot plugin. This repo
-contains the parser, wrappers, examples, docs, and four Copilot agent personas that critique, enrich
+contains the parser, wrappers, examples, docs, and five Copilot agent personas that critique, enrich
 and fix the engine's output. The agents also build on Microsoft's official Fabric/Power BI skill
 plugin and talk to Power BI through **MCP servers**. Those dependencies are declared in the repo so a
 clone is self-configuring:
 
-- [`AGENTS.md`](AGENTS.md): auto-loaded by Copilot CLI. Declares the required plugins
-  (`powerbi-authoring@fabric-collection` from `microsoft/skills-for-fabric`, plus this repo's own
-  `powerbi-playbook@powerbi-playbook-collection`), the MCP servers, and the conventions every
-  agent inherits. **Read this first.**
+- [`AGENTS.md`](AGENTS.md): auto-loaded by Copilot CLI. Customer runtime contract: front door,
+  intake, briefs, task-tool dispatch and independent Tableau comparison. **Read this first.**
+  [Runbook §1.1](docs/operator-runbook.md#11-tooling) and `scripts/preflight.ps1` own plugin,
+  skill and MCP setup and repair hints.
 - [`.vscode/mcp.json`](.vscode/mcp.json): MCP server definitions (auto-read by VS Code Copilot; CLI
   users add the same with `/mcp`).
 - Repo-local agents (`.github/agents/`) are committed and load automatically. So are repo-local

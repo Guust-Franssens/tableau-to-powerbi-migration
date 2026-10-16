@@ -41,7 +41,7 @@ a20683f57acd1d70225876a96b1be82b2f8b56a541c594a9ea2f3c55d612464d  - **AUTOPILOT 
 fcf8a75033189636cf2cf0d2649e9eb5b1d98aa08655d14d01a4523a6a580e58  - On hitting the cap, **STOP and ask a specific, actionable 
 f548e1f4c08b94769618e89c284056ae280b36f9397daf1681c3ff9be855b15c  - **Report elapsed time** whenever an operation exceeds ~60 
 7113ea344407d2886d52f848e0e877dd7d14342db7ef6260f7d153419632ebe8  - **End every message with a clear next step or an explicit 
-db36d90cff4e07f5fefa80e8167ada5c1035dcffbf15ae72fcf17f970a772043  - **Durable learnings go in committed files** (agent `Gotcha
+e62210173d9db69bbea29b58fadb6a20d936ebb0ee3ad1188a8af9cb13f13e84  - **Customer migration:** never silently patch toolkit/engin
 0d0af1db0161518ddc296dbc64e7d32eca53791608e4d29779e3692de3daef21  - **Power BI Desktop cleanup is PID-scoped.** Concurrent ins
 f1d6acb7da4d733442fd76495ad69852e529e1ecd2a428ab1fa393e0374484d8  <!-- END:shared-conventions -->
 
