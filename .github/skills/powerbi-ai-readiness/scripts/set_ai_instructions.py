@@ -153,7 +153,7 @@ def model_object_names(model_dir: Path) -> set[str]:
 
 def unresolved_references(md_text: str, known: set[str]) -> list[str]:
     """Check explicit quoted/backticked tables and bracketed objects; allow template placeholders."""
-    cited = set(re.findall(r"`'((?:[^']|'')+)'`", md_text))
+    cited = set(re.findall(r"`'((?:[^']|'')+)'(?=`|\s*\[)", md_text))
     cited.update(re.findall(r"\[([^\[\]`]+)\]", md_text))
     return sorted(
         name

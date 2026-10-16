@@ -534,3 +534,24 @@ def test_all_validates_every_model_before_any_write(tmp_path: Path, monkeypatch:
     assert set_ai_instructions.main(["--all"]) == 0
     assert read_qna_enabled(first) is True
     assert read_qna_enabled(second) is True
+
+
+def test_qualified_backticked_table_is_an_explicit_reference(tmp_path: Path) -> None:
+    """A real column cannot hide a nonexistent table in a qualified markdown reference."""
+    model, md, _ = _stamp_fixture(tmp_path)
+    tables = model / "definition" / "tables"
+    tables.mkdir()
+    (tables / "Real.tmdl").write_text("table 'Real Table'\n\tcolumn Real\n", encoding="utf-8")
+    md.write_text("Use `'Ghost Table'[Real]`.", encoding="utf-8")
+    before = _snapshot(model)
+    assert unresolved_references(md.read_text(encoding="utf-8"), model_object_names(model)) == ["Ghost Table"]
+    assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 3
+    assert _snapshot(model) == before
+    md.write_text("Use `'Real Table'[Real]`.", encoding="utf-8")
+    assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 0
+    assert cmd_check(tmp_path, True, model, md) == 0
+    culture = model / "definition" / "cultures" / "en-US.tmdl"
+    old_pin = hashlib.sha256(b"Use `'Real Table'[Real]`.").hexdigest().encode()
+    new_pin = hashlib.sha256(b"Use `'Ghost Table'[Real]`.").hexdigest().encode()
+    culture.write_bytes(culture.read_bytes().replace(b"Real Table", b"Ghost Table").replace(old_pin, new_pin))
+    assert cmd_check(tmp_path, True, model) == 1
