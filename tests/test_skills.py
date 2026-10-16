@@ -283,7 +283,18 @@ def test_a_bundled_skill_passes_its_own_tests_after_being_copied_out_of_this_rep
         ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"),
     )
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", str(copied / "tests"), *_nested_marker_filter()],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--confcutdir",
+            str(copied),
+            "--basetemp",
+            str(tmp_path / "pytest-work"),
+            str(copied / "tests"),
+            *_nested_marker_filter(),
+        ],
         cwd=tmp_path,
         env=_repo_free_env(),
         capture_output=True,
@@ -423,6 +434,38 @@ def test_the_ai_instruction_section_template_is_stated_in_exactly_one_place() ->
         f"the AI-instruction section template is restated in {others} - link to "
         f"{SECTION_TEMPLATE_HOME.relative_to(REPO_ROOT).as_posix()} instead of copying it"
     )
+
+
+def test_ai_stamping_deviation_has_one_policy_home_and_sealed_handoff() -> None:
+    """Policy travels with the portable writer; other documents point to it, not a fork."""
+    canary = "Owner decision #731: direct stamping is a bounded exception"
+    text = SECTION_TEMPLATE_HOME.read_text(encoding="utf-8")
+    assert canary in text
+    others = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in _markdown_outside_the_agents_dir()
+        if path != SECTION_TEMPLATE_HOME and canary in path.read_text(encoding="utf-8")
+    ]
+    assert not others
+    for required in (
+        "microsoft/skills-for-fabric/issues/72",
+        "microsoft/skills-for-fabric/issues/89",
+        "--adopt-existing <sha256>",
+        "T2P_CustomInstructionsSha256",
+        "annotations: []",
+        "--check --strict --model <model> --md <md>",
+        "after",
+        "Unmeasured",
+        "AI visibility",
+        "verified answers",
+        "semantic indexing",
+        "tenant/workspace",
+        "--targets",
+        "power loss",
+    ):
+        assert required.lower() in text.lower(), required
+    capabilities = (REPO_ROOT / "docs" / "capabilities-and-limitations.md").read_text(encoding="utf-8")
+    assert "SKILL.md#0-deliberate-deviation-owned-instruction-stamping" in capabilities
 
 
 def test_powerbi_report_gotchas_keep_field_proven_report_defects_visible() -> None:

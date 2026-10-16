@@ -1,50 +1,37 @@
 """
-purpose: sync a semantic model's AI instructions (an editable markdown file) into the model's
-         culture linguisticMetadata.CustomInstructions key. That key is what Power BI Copilot and
-         Fabric data agents read as model-level AI instructions ("Prep data for AI" > AI instructions).
-         Writing the TMDL directly needs no XMLA call to land (and dodges the LCID-4096 refresh bug
-         on this box). That is about the WRITE only: it does not update an already-open Desktop
-         model, and whether it invalidates .pbi/cache.abf is UNMEASURED. Stamp BEFORE the final
-         reopen + refresh + save, not after.
+purpose: stamp owned CustomInstructions without rewriting unrelated model bytes.
 usage:   python .github/skills/powerbi-ai-readiness/scripts/set_ai_instructions.py
-             --model <*.SemanticModel> [--md <file.md>]
-             --all             # stamp every migration that has an ai-instructions.md
-             --check           # report every model (advisory, always exits 0)
-             --check --strict --model <*.SemanticModel>   # GATE one model (exit 1)
-         (ships inside the `powerbi-ai-readiness` skill; run it by its path from wherever the folder
-          was copied. `scripts/set_ai_instructions.py` in this repo is a forwarding shim.)
+             --model <*.SemanticModel> --md <instructions.md>
+         Add --plan to validate without writing; --check --strict is the scoped handoff gate.
 
-By convention, a model's editable source lives at <migration>/ai-instructions.md (two levels above the
-*.SemanticModel folder). The culture file (definition/cultures/<lcid>.tmdl) is the generated artifact.
-See this skill's SKILL.md for what to write and why each lever matters.
+This standalone skill deliberately edits culture TMDL; see SKILL.md section 0 for policy and limits.
+Sibling staging and per-file atomic replacement support caught-failure rollback, not a filesystem
+transaction. Close Desktop before stamping, then reopen/refresh/save and repeat the explicit-md gate.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
+import os
+from pathlib import Path
 import re
 import sys
-from pathlib import Path
+import uuid
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("set_ai_instructions")
-
-# The migration trees this scans. A repo that copies this skill substitutes its own layout; all three
-# share the <tree>/<slug>/fabric/<Name>.SemanticModel shape. A tree missing here is a tree whose
-# models are silently never stamped, which is why `tests/test_repo_layout.py` asserts the list.
 MIGRATION_TREES = ("examples", "migrations/workbooks", "migrations/datasources")
+HARD_CHAR_LIMIT = 10_000
+CONTEXT_ROT_SOFT_LIMIT = 4_000
+MARKER = "T2P_CustomInstructionsSha256"
+_META_RE = re.compile(r"(?m)^(?P<indent>[ \t]+)linguisticMetadata[ \t]*=[ \t\r\n]*")
 
 
 def host_root(start: Path | None = None) -> Path:
-    """The repo that OWNS the migrations, found by walking up for a known tree.
-
-    This file ships inside a skill folder, so its depth below the repo root is NOT fixed - it is two
-    levels down when called through the `scripts/` shim and four when the folder is copied into
-    another repo's `.github/skills/`. A hard-coded `parents[N]` silently resolved to the skill folder
-    itself, where every glob matches nothing and `--check` reports a clean zero models.
-    """
+    """Find the host migration repository, including when this skill is copied out."""
     for parent in (start or Path(__file__).resolve()).parents:
         if any((parent / tree).is_dir() for tree in MIGRATION_TREES):
             return parent
@@ -53,331 +40,419 @@ def host_root(start: Path | None = None) -> Path:
 
 REPO_ROOT = host_root()
 
-# Advisory authoring thresholds (see this skill's SKILL.md). Not enforced; warned.
-HARD_CHAR_LIMIT = 10_000  # Power BI's own cap
-CONTEXT_ROT_SOFT_LIMIT = 4_000  # above this, "informative yet tight" is at risk
+
+def read_utf8(path: Path) -> str:
+    """Decode strictly without newline translation; BOMs are refused, never normalized."""
+    text = path.read_bytes().decode("utf-8")
+    if text.startswith("\ufeff"):
+        raise ValueError(f"BOM is not supported: {path.name}")
+    return text
+
+
+def text_sha256(text: str) -> str:
+    """Hash the exact decoded instruction text, independently of JSON escaping."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def read_markdown(path: Path) -> str:
+    """Retain the original stamper's universal-newline markdown semantics, not model rewriting."""
+    return read_utf8(path).replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _unique_object(pairs: list[tuple]) -> dict:
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"Duplicate JSON key: {key}")
+        obj[key] = value
+    return obj
+
+
+def _invalid_constant(value: str) -> None:
+    raise ValueError(f"Invalid JSON constant: {value}")
+
+
+DECODER = json.JSONDecoder(object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+
+
+def _skip_space(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos] in " \t\r\n":
+        pos += 1
+    return pos
+
+
+def _object(text: str) -> tuple[dict, dict[str, tuple[int, int]]]:
+    """Validate JSON, then locate top-level value spans without dumping other members."""
+    obj = DECODER.decode(text)
+    if not isinstance(obj, dict):
+        raise ValueError("Expected a JSON object")
+    spans = {}
+    pos = text.index("{") + 1
+    while True:
+        pos = _skip_space(text, pos)
+        if text[pos] == "}":
+            return obj, spans
+        key, pos = DECODER.raw_decode(text, pos)
+        pos = _skip_space(text, pos)
+        pos = _skip_space(text, pos + 1)  # colon already validated by decode
+        start = pos
+        _, pos = DECODER.raw_decode(text, pos)
+        spans[key] = (start, pos)
+        pos = _skip_space(text, pos)
+        if text[pos] == ",":
+            pos += 1
+
+
+def _member(text: str, key: str, value: str) -> str:
+    obj, spans = _object(text)
+    if key in spans:
+        start, end = spans[key]
+        return text[:start] + value + text[end:]
+    end = text.rindex("}")
+    return text[:end] + ("," if obj else "") + json.dumps(key) + ": " + value + text[end:]
+
+
+def _metadata(text: str) -> tuple[int, int, dict]:
+    matches = list(_META_RE.finditer(text))
+    if len(matches) != 1:
+        raise ValueError("Expected exactly one linguisticMetadata block")
+    start = matches[0].end()
+    obj, end = DECODER.raw_decode(text, start)
+    if not isinstance(obj, dict) or not re.match(r"[ \t\r\n]*\r?\n[ \t]+contentType[ \t]*:[ \t]*json\b", text[end:]):
+        raise ValueError("Expected linguisticMetadata object and contentType: json")
+    return start, end, obj
+
+
+def _ownership(text: str) -> tuple[str | None, re.Match | None]:
+    candidates = list(re.finditer(rf"(?m)^[ \t]*annotation[ \t]+['\"]?{MARKER}\b[^\r\n]*", text))
+    if not candidates:
+        return None, None
+    if len(candidates) != 1:
+        raise ValueError("Duplicate ownership marker")
+    match = candidates[0]
+    valid = re.fullmatch(rf'[ \t]+annotation {MARKER} = (?:"([0-9a-f]{{64}})"|([0-9a-f]{{64}}))[ \t]*', match.group())
+    if not valid:
+        raise ValueError("Malformed ownership marker")
+    indent = _META_RE.search(text).group("indent")
+    if not match.group().startswith(indent + "annotation "):
+        raise ValueError("Ownership marker is not a Culture annotation")
+    return valid.group(1) or valid.group(2), match
 
 
 def model_object_names(model_dir: Path) -> set[str]:
-    """Every table / column / measure name declared in a model's TMDL.
-
-    Used to catch instructions that reference something the model does not have. Two such errors
-    shipped in this repo, both found by review rather than by tooling: wind-energy's instructions
-    described a disconnected spiral scaffold as "geography for the map", and told Copilot to compare
-    by "ANSP" - a term from a completely different migration. Both would actively steer Copilot to
-    the wrong table or a nonexistent concept, which is worse than having no instructions at all.
-    """
+    """Declared table, column and measure names: the oracle for explicit markdown references."""
     names: set[str] = set()
     definition = model_dir / "definition"
     for tmdl in list(definition.glob("tables/*.tmdl")) + list(definition.glob("*.tmdl")):
-        text = tmdl.read_text(encoding="utf-8", errors="replace")
-        for match in re.finditer(r"^\s*(?:table|column|measure)\s+('([^']+)'|[^\s=]+)", text, re.MULTILINE):
-            names.add((match.group(2) or match.group(1)).strip("'"))
+        for match in re.finditer(
+            r"^\s*(?:table|column|measure)\s+('((?:[^']|'')+)'|[^\s=]+)", read_utf8(tmdl), re.MULTILINE
+        ):
+            names.add((match.group(2) or match.group(1)).replace("''", "'"))
     return names
 
 
 def unresolved_references(md_text: str, known: set[str]) -> list[str]:
-    """Names the instructions cite in `'quotes'` or [brackets] that the model does not declare.
-
-    Deliberately only checks *explicitly marked* references - a bare word in prose is not a claim
-    about the schema, but `'NL Densification'` and `[Total Revenue]` are.
-    """
-    cited: set[str] = set()
-    cited.update(re.findall(r"`'([^']+)'`", md_text))
-    cited.update(re.findall(r"\[([A-Za-z][^\[\]`]{1,60})\]", md_text))
-    missing = []
-    for name in sorted(cited):
-        # Placeholders are intentional templates, not claims about the schema: `<metric> Delta`,
-        # `'* Parameter'` (a glob over several tables), `[... Cars Offset]`.
-        if any(token in name for token in ("<", "...", "*")) or name in known:
-            continue
-        missing.append(name)
-    return missing
+    """Check explicit quoted/backticked tables and bracketed objects; allow template placeholders."""
+    cited = set(re.findall(r"`'((?:[^']|'')+)'`", md_text))
+    cited.update(re.findall(r"\[([^\[\]`]+)\]", md_text))
+    return sorted(
+        name
+        for name in cited
+        if not any(token in name for token in ("<", "...", "*")) and name.replace("''", "'") not in known
+    )
 
 
 def lint_instructions(md_text: str, known_names: set[str] | None = None) -> list[str]:
-    """Return advisory warnings about instruction quality (context-rot, structure, metadata restating)."""
-    warnings: list[str] = []
-    n = len(md_text)
-    if n > HARD_CHAR_LIMIT:
-        warnings.append(f"exceeds Power BI's {HARD_CHAR_LIMIT}-char cap ({n}); it will be rejected/truncated")
-    elif n > CONTEXT_ROT_SOFT_LIMIT:
-        warnings.append(f"long ({n} chars > {CONTEXT_ROT_SOFT_LIMIT}); risk of context rot — trim to high-signal lines")
+    """Advisory style lints; hard validity is enforced separately."""
+    warnings = []
+    if len(md_text) > HARD_CHAR_LIMIT:
+        warnings.append(f"exceeds Power BI's {HARD_CHAR_LIMIT}-char cap")
+    elif len(md_text) > CONTEXT_ROT_SOFT_LIMIT:
+        warnings.append(f"long ({len(md_text)} chars > {CONTEXT_ROT_SOFT_LIMIT}); risk of context rot")
     if "#" not in md_text:
-        warnings.append("no markdown headings; use short sections, not a wall of prose")
+        warnings.append("no markdown headings")
     if "`" not in md_text and "[" not in md_text:
-        warnings.append("no field references (no `backticks`/[brackets]); ground each line in real objects")
-    if not re.search(r"(?im)^\s*#+\s*.*(avoid|do not|don't)", md_text) and "avoid" not in md_text.lower():
-        warnings.append("no 'things to avoid' guidance; call out misuse (e.g. parameter tables, re-aggregation)")
-    if known_names:
-        missing = unresolved_references(md_text, known_names)
-        if missing:
-            warnings.append(
-                "references objects this model does NOT declare: " + ", ".join(missing[:6]) + " - "
-                "instructions that name the wrong object steer Copilot wrong; verify against the TMDL"
-            )
+        warnings.append("no field references")
+    if "avoid" not in md_text.lower():
+        warnings.append("no 'things to avoid' guidance")
+    if known_names is not None and unresolved_references(md_text, known_names):
+        warnings.append("references objects this model does NOT declare")
     return warnings
 
 
-# Captures the `linguisticMetadata =` keyword, the JSON object (greedy to the closing brace that
-# precedes contentType, which never appears inside the JSON), and the trailing `contentType: json`
-# sub-property. Whitespace/newlines between `=`/`{` and `}`/`contentType` are normalized on write.
-_META_RE = re.compile(
-    r"(?s)(?P<pre>linguisticMetadata[ \t]*=)[ \t]*\n?[ \t]*"
-    r"(?P<json>\{.*\})(?P<post>\s*\n[ \t]*contentType[ \t]*:[ \t]*json)"
-)
+def _validate_instructions(text: str, model: Path) -> None:
+    if not text or len(text) > HARD_CHAR_LIMIT:
+        raise ValueError("Instructions must contain 1–10,000 decoded characters")
+    missing = unresolved_references(text, model_object_names(model))
+    if missing:
+        raise ValueError("Unresolved explicit object references: " + ", ".join(missing))
 
 
 def read_model_culture(model_dir: Path) -> str:
-    """Return the model's default culture (e.g. en-US) from model.tmdl, defaulting to en-US."""
-    model_tmdl = model_dir / "definition" / "model.tmdl"
-    if model_tmdl.is_file():
-        match = re.search(r"^\s*culture:\s*(\S+)", model_tmdl.read_text(encoding="utf-8"), re.MULTILINE)
-        if match:
-            return match.group(1)
-    return "en-US"
-
-
-def ensure_qna_enabled(model_dir: Path) -> bool:
-    """Ensure definition.pbism has settings.qnaEnabled = true (required for the model's Q&A / Copilot
-    natural-language experience to actually consume the linguistic metadata + AI instructions). Returns
-    True if the file was changed."""
-    pbism = model_dir / "definition.pbism"
-    if not pbism.is_file():
-        return False
-    obj = json.loads(pbism.read_text(encoding="utf-8"))
-    settings = obj.setdefault("settings", {})
-    if settings.get("qnaEnabled") is True:
-        return False
-    settings["qnaEnabled"] = True
-    pbism.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
-    log.info("  qna      set settings.qnaEnabled = true in definition.pbism")
-    return True
-
-
-def read_qna_enabled(model_dir: Path) -> bool | None:
-    """Return the current settings.qnaEnabled for a model, or None if the file/key is absent."""
-    pbism = model_dir / "definition.pbism"
-    if not pbism.is_file():
-        return None
-    return json.loads(pbism.read_text(encoding="utf-8")).get("settings", {}).get("qnaEnabled")
-
-
-def ensure_culture(model_dir: Path) -> Path:
-    """Create a minimal cultureInfo (+ ref in model.tmdl) if the model has none. Returns the culture file."""
-    culture = read_model_culture(model_dir)
-    cultures_dir = model_dir / "definition" / "cultures"
-    culture_path = cultures_dir / f"{culture}.tmdl"
-    if not culture_path.is_file():
-        cultures_dir.mkdir(parents=True, exist_ok=True)
-        # "2.0.0" is the LINGUISTIC-SCHEMA version, matching this repo's own Power BI-generated
-        # culture files (AirlineAllianceActivity: 2.0.0 with 27 Entities; PriceOfProsperity: 1.0.0).
-        # It was previously "4.2.0", which is the `version` of definition.pbism - a different schema,
-        # so it was a copy-paste from the wrong file.
-        # Measured 2026-07-30, to avoid overstating the risk: a model published to Fabric with
-        # "4.2.0" round-tripped through `getDefinition` with its CustomInstructions fully intact, so
-        # the service does NOT drop the payload on an odd version. This is therefore a correctness
-        # tidy-up (say what Power BI itself says), not a fix for an observed failure.
-        scaffold = (
-            f"cultureInfo {culture}\n\n"
-            f'\tlinguisticMetadata = {{"Version": "2.0.0", "Language": "{culture}"}}\n'
-            f"\t\tcontentType: json\n"
-        )
-        culture_path.write_text(scaffold, encoding="utf-8")
-        log.info("  created  %s", culture_path.relative_to(model_dir))
-
-    model_tmdl = model_dir / "definition" / "model.tmdl"
-    if model_tmdl.is_file():
-        text = model_tmdl.read_text(encoding="utf-8")
-        if not re.search(rf"^\s*ref\s+cultureInfo\s+{re.escape(culture)}\s*$", text, re.MULTILINE):
-            text = text.rstrip("\n") + f"\n\nref cultureInfo {culture}\n"
-            model_tmdl.write_text(text, encoding="utf-8")
-            log.info("  ref      added `ref cultureInfo %s` to model.tmdl", culture)
-    return culture_path
+    """Read the default culture; permit only a file-safe unquoted culture identifier."""
+    text = read_utf8(model_dir / "definition" / "model.tmdl")
+    match = re.search(r"(?m)^[ \t]*culture:[ \t]*(\S+)", text)
+    culture = match.group(1) if match else "en-US"
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*", culture):
+        raise ValueError("Unsupported culture identifier")
+    return culture
 
 
 def find_culture_file(model_dir: Path) -> Path:
-    """Return the culture TMDL file for a *.SemanticModel folder (prefers the model's culture, then en-US)."""
-    cultures = model_dir / "definition" / "cultures"
-    if not cultures.is_dir():
-        raise FileNotFoundError(f"No cultures folder under {model_dir}")
-    files = sorted(cultures.glob("*.tmdl"))
-    if not files:
-        raise FileNotFoundError(f"No culture .tmdl in {cultures}")
-    preferred = read_model_culture(model_dir).lower()
-    for f in files:
-        if f.stem.lower() == preferred:
-            return f
-    for f in files:
-        if f.stem.lower() == "en-us":
-            return f
-    return files[0]
+    """Only the model's default culture may be stamped or accepted by the gate."""
+    path = model_dir / "definition" / "cultures" / f"{read_model_culture(model_dir)}.tmdl"
+    if not path.is_file():
+        raise FileNotFoundError("No default culture file")
+    return path
 
 
 def default_md_for(model_dir: Path) -> Path:
-    """The editable markdown source lives at <migration>/ai-instructions.md."""
+    """Default only covers committed migration shapes; bundle callers must supply --md."""
     return model_dir.parent.parent / "ai-instructions.md"
 
 
-def _parse_metadata(text: str) -> re.Match[str]:
-    match = _META_RE.search(text)
-    if not match:
-        raise ValueError("Could not locate a `linguisticMetadata = { ... } contentType: json` block")
-    return match
-
-
 def get_instructions(culture_path: Path) -> str | None:
-    """Return the current CustomInstructions for a culture file, or None."""
-    match = _parse_metadata(culture_path.read_text(encoding="utf-8"))
-    obj = json.loads(match.group("json"))
-    return obj.get("CustomInstructions")
+    """Read the exact decoded value without newline normalization."""
+    return _metadata(read_utf8(culture_path))[2].get("CustomInstructions")
 
 
-def set_instructions(culture_path: Path, md_text: str) -> bool:
-    """Inject/replace CustomInstructions in the culture linguisticMetadata. Returns True if changed."""
-    text = culture_path.read_text(encoding="utf-8")
-    match = _parse_metadata(text)
-    obj = json.loads(match.group("json"))
-    obj["CustomInstructions"] = md_text
-    dumped = json.dumps(obj, ensure_ascii=False)
-    new_text = text[: match.start()] + f"{match.group('pre')} {dumped}" + match.group("post") + text[match.end() :]
-    if new_text == text:
-        return False
+def read_qna_enabled(model_dir: Path) -> bool | None:
+    """Read qna strictly; duplicate/malformed JSON is a refusal."""
+    obj, _ = _object(read_utf8(model_dir / "definition.pbism"))
+    settings = obj.get("settings", {})
+    if not isinstance(settings, dict):
+        raise ValueError("settings must be an object")
+    return settings.get("qnaEnabled")
 
-    # Round-trip guard: the rewritten block must still parse back to the same object.
-    check = _parse_metadata(new_text)
-    if json.loads(check.group("json")) != obj:
-        raise RuntimeError(f"Re-serialization of {culture_path} did not round-trip; aborting write")
 
-    culture_path.write_text(new_text, encoding="utf-8")
-    return True
+def _culture_edit(text: str, instructions: str, adopt_existing: str | None) -> str:
+    start, end, obj = _metadata(text)
+    existing = obj.get("CustomInstructions")
+    if "CustomInstructions" in obj and not isinstance(existing, str):
+        raise ValueError("CustomInstructions must be a string")
+    marker, match = _ownership(text)
+    if marker is not None and marker != text_sha256(existing or ""):
+        raise ValueError("Ownership marker does not match existing text")
+    if adopt_existing is not None and (existing != instructions or adopt_existing != text_sha256(existing or "")):
+        raise ValueError("Adoption requires the pinned existing text to equal the markdown")
+    if existing and marker is None and adopt_existing is None:
+        raise ValueError("Unowned CustomInstructions; explicit hash-pinned adoption required")
+    # Adoption is marker-only, including preservation of the original JSON escaping.
+    new_json = (
+        text[start:end]
+        if existing == instructions
+        else _member(text[start:end], "CustomInstructions", json.dumps(instructions, ensure_ascii=False))
+    )
+    owned_marker = f'{_META_RE.search(text).group("indent")}annotation {MARKER} = "{text_sha256(instructions)}"'
+    if match:
+        text = text[: match.start()] + owned_marker + text[match.end() :]
+    else:
+        # Put the annotation before translations/children, after all Culture properties.
+        tail = text[end:]
+        prop = re.match(r"[ \t\r\n]*\r?\n[ \t]+contentType[ \t]*:[ \t]*json[ \t]*", tail)
+        insert = end + prop.end()
+        eol = "\r\n" if "\r\n" in text else "\n"
+        text = text[:insert] + eol + owned_marker + text[insert:]
+    # The marker is after the JSON, so the original JSON offsets still apply.
+    return text[:start] + new_json + text[end:]
+
+
+def plan_stamp(model_dir: Path, md_path: Path, adopt_existing: str | None = None) -> dict[Path, bytes]:
+    """Compute and validate every output before touching the filesystem."""
+    instructions = read_markdown(md_path)
+    _validate_instructions(instructions, model_dir)
+    culture = read_model_culture(model_dir)
+    model_path = model_dir / "definition" / "model.tmdl"
+    model_text = read_utf8(model_path)
+    eol = "\r\n" if "\r\n" in model_text else "\n"
+    culture_path = model_dir / "definition" / "cultures" / f"{culture}.tmdl"
+    culture_text = (
+        read_utf8(culture_path)
+        if culture_path.exists()
+        else (
+            f"cultureInfo {culture}{eol}{eol}"
+            f'\tlinguisticMetadata = {{"Version": "2.0.0", "Language": "{culture}"}}{eol}'
+            f"\t\tcontentType: json{eol}"
+        )
+    )
+    if not re.search(rf"(?m)^cultureInfo {re.escape(culture)}[ \t]*\r?$", culture_text):
+        raise ValueError("Culture declaration does not match model culture")
+    culture_text = _culture_edit(culture_text, instructions, adopt_existing)
+    if not re.search(rf"(?m)^[ \t]*ref cultureInfo {re.escape(culture)}[ \t]*\r?$", model_text):
+        model_text += ("" if model_text.endswith("\n") else eol) + f"ref cultureInfo {culture}{eol}"
+    outputs = {
+        culture_path: culture_text,
+        model_path: model_text,
+        model_dir / "definition.pbism": _qna_edit(read_utf8(model_dir / "definition.pbism")),
+    }
+    if _metadata(culture_text)[2]["CustomInstructions"] != instructions:
+        raise ValueError("Instruction postcondition failed")
+    return {
+        path: text.encode("utf-8")
+        for path, text in outputs.items()
+        if not path.exists() or path.read_bytes() != text.encode("utf-8")
+    }
+
+
+def _qna_edit(pbism_text: str) -> str:
+    obj, spans = _object(pbism_text)
+    settings = obj.get("settings", {})
+    if not isinstance(settings, dict):
+        raise ValueError("settings must be an object")
+    if settings.get("qnaEnabled") is not True:
+        settings_text = pbism_text[slice(*spans["settings"])] if "settings" in spans else "{}"
+        pbism_text = _member(pbism_text, "settings", _member(settings_text, "qnaEnabled", "true"))
+    if _object(pbism_text)[0]["settings"]["qnaEnabled"] is not True:
+        raise ValueError("qnaEnabled postcondition failed")
+    return pbism_text
+
+
+def _stage(path: Path, content: bytes) -> Path:
+    sibling = path.with_name(f".{path.name}.{uuid.uuid4().hex}.stage")
+    try:
+        with sibling.open("xb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError:
+        sibling.unlink(missing_ok=True)
+        raise
+    return sibling
+
+
+def _restore(replaced: list[Path], originals: dict[Path, bytes | None]) -> None:
+    failures = []
+    for path in reversed(replaced):
+        try:
+            if originals[path] is None:
+                path.unlink()
+            else:
+                sibling = _stage(path, originals[path])
+                try:
+                    os.replace(sibling, path)
+                finally:
+                    sibling.unlink(missing_ok=True)
+        except OSError:
+            failures.append(path.name)
+    if failures:
+        raise OSError("Rollback incomplete; restore originals for: " + ", ".join(failures))
+
+
+def apply_plan(outputs: dict[Path, bytes]) -> None:
+    """Stage siblings, replace per file, roll back all prior replacements on caught failure."""
+    originals = {path: path.read_bytes() if path.exists() else None for path in outputs}
+    staged = {}
+    replaced = []
+    created_dirs = []
+    try:
+        for path, content in outputs.items():
+            if not path.parent.exists():
+                path.parent.mkdir()
+                created_dirs.append(path.parent)
+            staged[path] = _stage(path, content)
+        for path, sibling in staged.items():
+            os.replace(sibling, path)
+            replaced.append(path)
+    except OSError:
+        _restore(replaced, originals)
+        raise
+    finally:
+        for sibling in staged.values():
+            sibling.unlink(missing_ok=True)
+        for directory in reversed(created_dirs):
+            if not any(directory.iterdir()):
+                directory.rmdir()
+
+
+def stamp_one(model_dir: Path, md_path: Path, adopt_existing: str | None = None) -> bool:
+    """Stamp one model after full validation."""
+    outputs = plan_stamp(model_dir, md_path, adopt_existing)
+    apply_plan(outputs)
+    for warning in lint_instructions(read_markdown(md_path)):
+        log.warning("  [!] %s", warning)
+    return bool(outputs)
 
 
 def iter_models(root: Path) -> list[Path]:
-    """All *.SemanticModel folders across the three migration trees.
-
-    `examples/` holds this repo's worked examples; `migrations/workbooks/` and
-    `migrations/datasources/` hold the user's own workbook and published-data-source migrations.
-    All three share the <tree>/<slug>/fabric/ shape.
-    """
+    """Discover committed migration shapes."""
     return sorted(p for tree in MIGRATION_TREES for p in root.glob(f"{tree}/*/fabric/*.SemanticModel") if p.is_dir())
 
 
-def cmd_check(root: Path, strict: bool = False, model_dir: Path | None = None) -> int:
-    """Print a per-model report of which semantic models carry AI instructions.
-
-    Exit code matters: this was returning 0 unconditionally, so it printed "2/16 models have AI
-    instructions" and still exited GREEN - it could never be a CI gate or an agent handoff check,
-    which is precisely why the "MANDATORY" framing never produced the outcome. `--strict` makes it
-    fail-closed; the default stays advisory so the report can be read without blocking.
-
-    `model_dir` scopes the report to ONE model, which is what makes `--strict` usable by the agent
-    that just built it. Repo-wide `--strict` fails on every legacy model that predates this layer, so
-    without scoping the only runnable gate was the one that can never gate anything.
-    """
+def cmd_check(root: Path, strict: bool = False, model_dir: Path | None = None, md_path: Path | None = None) -> int:
+    """Scoped strict gates hard findings; repo-wide advisory remains exit zero."""
     models = [model_dir] if model_dir else iter_models(root)
-    if not models:
-        log.info("No models found under %s (%s)", root, ", ".join(MIGRATION_TREES))
-        return 0
-    missing = 0
-    silent_no_op = 0
+    findings = 0
     for model in models:
         try:
             culture = find_culture_file(model)
+            text = read_utf8(culture)
             instr = get_instructions(culture)
-        except (FileNotFoundError, ValueError) as exc:
-            # A brand-new model legitimately has no cultures folder - that is "not stamped yet",
-            # not an error, and the message must not leak an absolute path on a repo with a
-            # privacy gate.
-            reason = "no culture file yet" if isinstance(exc, FileNotFoundError) else str(exc)
-            log.info("  --  %-40s (%s)", model.name, reason)
-            missing += 1
-            continue
-        if instr:
-            flags = lint_instructions(instr, model_object_names(model))
+            if not isinstance(instr, str):
+                raise ValueError("No CustomInstructions")
+            _validate_instructions(instr, model)
             if read_qna_enabled(model) is not True:
-                flags.append("qnaEnabled is not true (Q&A/Copilot will ignore these instructions)")
-                silent_no_op += 1
-            suffix = f"  [!] {'; '.join(flags)}" if flags else ""
-            log.info("  OK  %-40s %d chars%s", model.name, len(instr), suffix)
-        else:
-            log.info("  --  %-40s (no CustomInstructions)", model.name)
-            missing += 1
-    log.info("%d/%d models have AI instructions", len(models) - missing, len(models))
-    if silent_no_op:
-        log.warning(
-            "%d model(s) are stamped but have qnaEnabled != true - the instructions are a SILENT NO-OP there.",
-            silent_no_op,
-        )
-    if strict and (missing or silent_no_op):
-        log.error(
-            "AI-READINESS FAILED (--strict): %d model(s) unstamped, %d stamped-but-disabled.",
-            missing,
-            silent_no_op,
-        )
-        return 1
-    return 0
-
-
-def stamp_one(model_dir: Path, md_path: Path) -> bool:
-    """Stamp a single model's culture with the markdown instructions; returns True if it changed."""
-    md_text = md_path.read_text(encoding="utf-8").strip()
-    if len(md_text) > HARD_CHAR_LIMIT:
-        raise ValueError(f"AI instructions exceed the {HARD_CHAR_LIMIT}-char limit ({len(md_text)}): {md_path}")
-    ensure_culture(model_dir)
-    ensure_qna_enabled(model_dir)
-    culture = find_culture_file(model_dir)
-    changed = set_instructions(culture, md_text)
-    verb = "stamped" if changed else "unchanged"
-    log.info("  %s  %s  <- %s (%d chars)", verb, culture.relative_to(model_dir), md_path.name, len(md_text))
-    for warning in lint_instructions(md_text):
-        log.warning("    [!] %s", warning)
-    return changed
-
-
-def cmd_all(root: Path) -> int:
-    """Stamp every migration that has an ai-instructions.md next to its fabric folder."""
-    changed = 0
-    for model in iter_models(root):
-        md_path = default_md_for(model)
-        if not md_path.is_file():
-            continue
-        if stamp_one(model, md_path):
-            changed += 1
-    log.info("Done. %d model(s) updated.", changed)
-    return 0
+                raise ValueError("qnaEnabled is not true")
+            marker, _ = _ownership(text)
+            if marker is not None and marker != text_sha256(instr):
+                raise ValueError("Ownership marker mismatch")
+            if md_path is not None:
+                if marker != text_sha256(instr):
+                    raise ValueError("Missing valid ownership marker")
+                if instr != read_markdown(md_path):
+                    raise ValueError("Stamped text differs from explicit markdown")
+            log.info("  OK  %s %d chars", model.name, len(instr))
+            for warning in lint_instructions(instr):
+                log.warning("  [!] %s", warning)
+        except (OSError, ValueError) as exc:
+            findings += 1
+            log.warning("  --  %s (%s)", model.name, exc)
+    log.info("%d/%d models pass AI instructions checks", len(models) - findings, len(models))
+    return 1 if strict and findings else 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point."""
+    """CLI entry point: usage 2, refused stamp 3, strict findings 1, success/advisory 0."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", type=Path, help="Path to a *.SemanticModel folder")
-    parser.add_argument(
-        "--md", type=Path, help="Markdown instructions file (defaults to <migration>/ai-instructions.md)"
-    )
-    parser.add_argument("--all", action="store_true", help="Stamp every migration that has an ai-instructions.md")
-    parser.add_argument("--check", action="store_true", help="Report which models have AI instructions")
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="With --check: exit 1 if any model is unstamped or stamped-but-qnaEnabled-false (CI gate)",
-    )
+    parser.add_argument("--model", type=Path)
+    parser.add_argument("--md", type=Path)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--all", action="store_true")
+    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--plan", action="store_true")
+    parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--adopt-existing", help="explicit SHA-256 pin; only adopts text equal to markdown")
     args = parser.parse_args(argv)
-
+    if args.all and args.model:
+        parser.error("--all cannot be combined with --model")
+    if args.strict and not args.check:
+        parser.error("--strict requires --check")
+    if args.md and not args.model:
+        parser.error("--md requires --model")
+    if args.adopt_existing and (not args.model or args.all or args.check):
+        parser.error("--adopt-existing requires a single stamp/plan target")
+    if args.adopt_existing and not re.fullmatch(r"[0-9a-f]{64}", args.adopt_existing):
+        parser.error("--adopt-existing must be a lowercase SHA-256")
     if args.check:
-        # `--model` scopes the report to one model. Repo-wide `--strict` fails on every model that
-        # predates this layer, so an agent gating the model it just built needs the scoped form.
-        return cmd_check(REPO_ROOT, strict=args.strict, model_dir=args.model.resolve() if args.model else None)
-    if args.all:
-        return cmd_all(REPO_ROOT)
-    if not args.model:
-        parser.error("provide --model, or use --all / --check")
-
-    model_dir = args.model.resolve()
-    md_path = (args.md or default_md_for(model_dir)).resolve()
-    if not md_path.is_file():
-        parser.error(f"instructions file not found: {md_path}")
-    stamp_one(model_dir, md_path)
+        return cmd_check(REPO_ROOT, args.strict, args.model, args.md)
+    if not args.model and not args.all:
+        parser.error("provide --model, --all or --check")
+    models = iter_models(REPO_ROOT) if args.all else [args.model.resolve()]
+    try:
+        outputs = {}
+        for model in models:
+            md_path = args.md or default_md_for(model)
+            if args.all and not md_path.is_file():
+                continue
+            outputs.update(plan_stamp(model, md_path, args.adopt_existing))
+        for path in outputs:
+            relative = path.relative_to(args.model.resolve()) if args.model else path.relative_to(REPO_ROOT)
+            log.info("%s %s", "changed" if path.exists() else "added", relative)
+        if not args.plan:
+            apply_plan(outputs)
+        log.info("STAMP" if outputs else "NO_CHANGE")
+    except (OSError, ValueError) as exc:
+        log.error("REFUSE: %s", exc)
+        return 3
     return 0
 
 
