@@ -580,6 +580,9 @@ def test_qualified_backticked_table_is_an_explicit_reference(tmp_path: Path) -> 
     [
         ("A", "X", "Y", "Use 'A'[Y].", "Use 'A'[X]."),
         ("A", "X", "Y", "Use `'A'[Y]`.", "Use `'A'[X]`."),
+        ("A", "X", "Y", "Use `'A'`[Y].", "Use `'A'`[X]."),
+        ("A", "X", "Y", "Use `A`[Y].", "Use `A`[X]."),
+        ("A", "X", "Y", "Use `'A'` `[Y]`.", "Use `'A'` `[X]`."),
         ("A", "X", "Y", "Use A[Y].", "Use A[X]."),
         ("A", "X", "Y", "Use `A [Y]`.", "Use `A [X]`."),
         ("A Table", "X Field", "Y Field", "Use `'A Table' [Y Field]`.", "Use `'A Table' [X Field]`."),

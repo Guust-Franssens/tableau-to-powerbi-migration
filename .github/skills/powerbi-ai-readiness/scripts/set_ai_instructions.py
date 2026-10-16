@@ -172,8 +172,9 @@ def model_object_names(model_dir: Path) -> ModelObjectNames:
 
 _BRACKET_RE = re.compile(r"\[((?:[^\]`]|\]\])+)\]")
 _QUALIFIED_RE = re.compile(
-    r"(?P<table>'(?:[^']|'')+'|(?<![\w'])[A-Za-z_][A-Za-z0-9_]*)"
-    r"(?P<gap>[ \t\r\n]*)\[(?P<field>(?:[^\]`]|\]\])+)\]"
+    r"(?P<code>`?)(?P<table>'(?:[^']|'')+'|(?<![\w'])[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?P<end_code>`?)(?P<gap>[ \t\r\n]*)(?P<field_code>`?)"
+    r"\[(?P<field>(?:[^\]`]|\]\])+)\]"
 )
 
 
@@ -191,7 +192,7 @@ def unresolved_references(md_text: str, known: set[str]) -> list[str]:
         token = match.group("table")
         table = token[1:-1].replace("''", "'") if token.startswith("'") else token
         field = match.group("field").replace("]]", "]")
-        explicit = token.startswith("'") or not match.group("gap") or md_text[match.start() - 1 : match.start()] == "`"
+        explicit = token.startswith("'") or not match.group("gap") or match.group("code") or match.group("end_code")
         if not explicit and table not in table_fields:
             continue  # Prose such as "use [Measure]" is not an unquoted table claim.
         if _is_template(table) or _is_template(field):
