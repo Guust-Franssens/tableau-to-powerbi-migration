@@ -40,6 +40,7 @@ def _preflight_source() -> str:
 
 
 def test_copilot_home_selection_and_missing_directory_are_explicit() -> None:
+    """A selected profile must never silently fall back to the default home."""
     source = _preflight_source()
     assignments = re.findall(r"^\$copilot = (.+)$", source, re.MULTILINE)
     assert assignments == ["if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { Join-Path $HOME '.copilot' }"], (
@@ -565,6 +566,363 @@ def _emitted(raw: str) -> str:
     marked = re.search(r"<<(.*)>>", raw, re.DOTALL)
     assert marked, f"harness produced no marked value: {raw!r}"
     return marked.group(1)
+
+
+_VERSION_FUNCS = "ConvertFrom-CliVersionOutput,Get-VersionFloorVerdict"
+_PLUGIN_FUNCS = _VERSION_FUNCS + ",Get-PluginVerdict"
+
+
+def _policy_source() -> str:
+    source = _preflight_source()
+    return source[source.index("$pluginPolicy = ") : source.index("function Get-PluginVerdict(")]
+
+
+def _ps_json(functions: str, body: str, values: dict | list) -> dict | list:
+    return json.loads(
+        _emitted(
+            _run_ps(
+                functions,
+                "$inputData = ConvertFrom-Json $env:CASES\n" + body,
+                {"CASES": json.dumps(values), "POLICY": _policy_source()},
+            )
+        )
+    )
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_version_floor_verdict_table() -> None:
+    """Independent expected outcomes include lexical traps and malformed/prerelease evidence."""
+    rows = [
+        ("0.3.11", "0.3.19", "0.3.19", "below-floor", "critical", False),
+        ("0.3.19", "0.3.19", "0.3.19", "known-good", "optional", True),
+        ("0.3.20", "0.3.19", "0.3.19", "above-known-good", "optional", False),
+        ("0.4.0", "0.4.0", "0.5.0", "between", "optional", False),
+        ("0.10.0", "0.4.0", "0.5.0", "above-known-good", "optional", False),
+        ("0.3.9", "0.3.19", "0.3.19", "below-floor", "critical", False),
+        *[
+            (raw, "1.0.0", "1.0.0", "unreadable", "critical", False)
+            for raw in ("", None, "garbage", "1.0.0.0.0", "1.0", "01.0.0", "999999999999.0.0", "noise\n1.0.0")
+        ],
+        ("1.0.0-beta.0", "1.0.0", "1.0.0", "prerelease", "critical", False),
+        ("0.3.0-beta.0", "0.4.0", "0.5.0", "prerelease", "critical", False),
+    ]
+    actual = _ps_json(
+        _VERSION_FUNCS,
+        "$out = @(foreach ($r in $inputData) { Get-VersionFloorVerdict $r[0] $r[1] $r[2] 'repair' })\n"
+        "Emit (ConvertTo-Json -InputObject $out -Compress)\n",
+        rows,
+    )
+    for row, verdict in zip(rows, actual, strict=True):
+        assert (verdict["Kind"], verdict["Tier"], verdict["Ok"]) == row[3:], row
+        if verdict["Tier"] == "critical":
+            assert verdict["Hint"] == "repair"
+        else:
+            assert verdict["Hint"] == ""
+        if verdict["Kind"] == "between":
+            assert "below known-good" in verdict["Detail"]
+        if verdict["Kind"] == "above-known-good":
+            assert "re-verify" in verdict["Detail"]
+            assert not re.search("install|downgrade", verdict["Detail"], re.I)
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_cli_version_output_parsing() -> None:
+    """Only a complete clean version response is accepted."""
+    rows = [
+        (["0.5.0"], "0.5.0"),
+        (["v0.5.0"], "0.5.0"),
+        ([" 0.5.0 "], "0.5.0"),
+        (["1.0.0-beta.0"], "1.0.0-beta.0"),
+        (["(node:1) DeprecationWarning", "0.5.0"], None),
+        (["0.5.0", "warning"], None),
+        (["0.5.0", "0.5.0"], None),
+        ([], None),
+        ([""], None),
+        (["noise"], None),
+        (["1.0.0.0.0"], None),
+    ]
+    actual = _ps_json(
+        _VERSION_FUNCS,
+        "$out = @(foreach ($r in $inputData) { "
+        "[pscustomobject]@{ Value = (ConvertFrom-CliVersionOutput $r[0]) } })\n"
+        "Emit (ConvertTo-Json -InputObject $out -Compress)\n",
+        rows,
+    )
+    assert [v["Value"] for v in actual] == [r[1] for r in rows]
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_plugin_verdict_fails_closed() -> None:
+    """Registry, effective manifest and capability must jointly satisfy policy."""
+    rows = [
+        ({}, "known-good", "optional", True),
+        ({"version": "0.3.11", "skill": False}, "below-floor", "critical", False),
+        ({"version": "0.3.20"}, "above-known-good", "optional", False),
+        ({"version": "0.3.20", "skill": False}, "skill-missing", "critical", False),
+        ({"skill": False}, "skill-missing", "critical", False),
+        ({"enabled": False}, "disabled", "critical", False),
+        ({"enabled": "true"}, "disabled", "critical", False),
+        ({"cache": False}, "cache-missing", "critical", False),
+        ({"absent": True}, "missing", "critical", False),
+        ({"duplicate": True}, "missing", "critical", False),
+        ({"name": "other"}, "missing", "critical", False),
+        ({"marketplace": "other"}, "missing", "critical", False),
+        ({"version": ""}, "unreadable", "critical", False),
+        ({"version": None}, "unreadable", "critical", False),
+        ({"version": "1.0.0-beta.0"}, "prerelease", "critical", False),
+        ({"manifest_version": "0.3.18"}, "manifest-mismatch", "critical", False),
+        ({"manifest_version": ""}, "unreadable", "critical", False),
+        ({"manifest_version": "0.3.19-beta.0"}, "prerelease", "critical", False),
+        ({"manifest_name": "other"}, "manifest-unreadable", "critical", False),
+        ({"manifest_absent": True}, "manifest-unreadable", "critical", False),
+    ]
+    cases = []
+    for overrides, *_ in rows:
+        case = {
+            "version": "0.3.19",
+            "enabled": True,
+            "cache": True,
+            "skill": True,
+            "name": "powerbi-authoring",
+            "marketplace": "fabric-collection",
+        }
+        case.update(overrides)
+        cases.append(case)
+    actual = _ps_json(
+        _PLUGIN_FUNCS,
+        ". ([scriptblock]::Create($env:POLICY))\n"
+        "$out = @(foreach ($r in $inputData) {\n"
+        " $entry = [pscustomobject]@{ name=$r.name; marketplace=$r.marketplace; version=$r.version;"
+        " enabled=$r.enabled; cache_path='synthetic-cache'; installed_at='synthetic'; source_sha='synthetic' }\n"
+        " $manifestVersion = $r.version\n"
+        " if ($r.PSObject.Properties.Name -contains 'manifest_version') { $manifestVersion=$r.manifest_version }\n"
+        " $manifestName = if ($r.manifest_name) { $r.manifest_name } else { 'powerbi-authoring' }\n"
+        " $manifest=[pscustomobject]@{name=$manifestName; version=$manifestVersion}\n"
+        " if ($r.manifest_absent) { $manifest=$null }\n"
+        " $entries=@($entry); if ($r.absent) { $entries=@() }; if ($r.duplicate) { $entries=@($entry,$entry) }\n"
+        " Get-PluginVerdict $entries $r.cache $manifest $r.skill $pluginPolicy\n"
+        "})\nEmit (ConvertTo-Json -InputObject $out -Compress)\n",
+        cases,
+    )
+    for row, verdict in zip(rows, actual, strict=True):
+        assert (verdict["Kind"], verdict["Tier"], verdict["Ok"]) == row[1:], row
+        if verdict["Tier"] == "critical":
+            assert "BETWEEN Copilot sessions" in verdict["Hint"]
+            assert "copilot plugin marketplace update fabric-collection" in verdict["Hint"]
+            assert "copilot plugin update powerbi-authoring@fabric-collection" in verdict["Hint"]
+            assert not re.search(r"--all|~/\.copilot|check-updates|STALE", verdict["Hint"])
+        else:
+            assert verdict["Hint"] == ""
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_upstream_verdict_never_advises_a_downgrade() -> None:
+    """Unknown evidence warns; an ahead installation never gets update advice."""
+    rows = [
+        ("0.3.18", "0.3.19", "behind", False),
+        ("0.3.19", "0.3.19", "current", True),
+        ("0.3.20", "0.3.19", "ahead", True),
+        *[("0.3.19", raw, "unknown", False) for raw in ("", "garbage", "0.3.20-beta.0", "1.0.0.0.0")],
+        ("", "0.3.19", "unknown", False),
+    ]
+    actual = _ps_json(
+        _VERSION_FUNCS + ",Get-UpstreamVerdict",
+        "$out=@(foreach ($r in $inputData) { Get-UpstreamVerdict $r[0] $r[1] 'BETWEEN sessions: update' })\n"
+        "Emit (ConvertTo-Json -InputObject $out -Compress)\n",
+        rows,
+    )
+    for row, verdict in zip(rows, actual, strict=True):
+        assert (verdict["Kind"], verdict["Ok"], verdict["Tier"]) == (*row[2:], "optional"), row
+        assert verdict["Hint"] == ("BETWEEN sessions: update" if row[2] == "behind" else "")
+
+
+def test_the_new_checks_are_wired_from_their_verdicts() -> None:
+    """The production emissions and only installer use the tested verdicts."""
+    source = _preflight_source()
+    assert source.count("Add-Check 'plugin: powerbi-authoring@fabric-collection'") == 1
+    assert "Add-Check 'plugin: powerbi-authoring@fabric-collection' $pv.Tier $pv.Ok $pv.Detail $pv.Hint" in source
+    assert 'Add-Check "version: $cliName" $v.Tier $v.Ok $v.Detail $v.Hint' in source
+    assert "if ($Update -and $v.Kind -eq 'below-floor') {" in source
+    loop = source[source.index("foreach ($cliName in $cliFloor.Keys)") : source.index("# --- PBIR")]
+    assert loop.count("& npm install") == 1
+    guard = loop[loop.index("if ($Update") : loop.index('Add-Check "version:')]
+    assert "& npm install" in guard and "(Get-CliVersion $cliName)" in guard
+    assert "if (-not $actual) { continue }" not in loop
+    assert "Get-Command $cliName" in loop
+    assert not re.search(r"&\s+copilot\b", source)
+    assert ".github\\plugin\\plugin.json" in source
+    assert "-PathType Container" in source[source.index("$pluginEntries =") : source.index("$skillPlugin =")]
+    assert "-PathType Leaf" in source[source.index("$pluginEntries =") : source.index("$skillPlugin =")]
+    upstream = source[source.index("if ($CheckUpstream) {") : source.index("# Get-DesktopPinVerdict")]
+    assert "Add-Check 'upstream: powerbi-authoring plugin' $uv.Tier $uv.Ok $uv.Detail $uv.Hint" in upstream
+    assert ".github/plugin/marketplace.json" in _policy_source()
+    assert ".claude-plugin/marketplace.json" not in _policy_source()
+
+
+def test_floors_never_drop_below_what_upstream_requires() -> None:
+    """Policy cannot fall below the capability and stable CLI minima."""
+    source = _preflight_source()
+
+    def numeric(value: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in value.split("."))
+
+    floor = dict(
+        re.findall(r"'(powerbi-[^']+)'\s*=\s*'([0-9.]+)'", re.search(r"\$cliFloor\s*=\s*@\{([^}]+)", source)[1])
+    )
+    known = dict(
+        re.findall(r"'(powerbi-[^']+)'\s*=\s*'([0-9.]+)'", re.search(r"\$cliKnownGood\s*=\s*@\{([^}]+)", source)[1])
+    )
+    for name, minimum in (("powerbi-report-author", "0.4.0"), ("powerbi-desktop", "1.0.0")):
+        assert numeric(minimum) <= numeric(floor[name]) <= numeric(known[name])
+    plugin_floor = re.search(r"floor = '([^']+)'", _policy_source())[1]
+    plugin_known = re.search(r"knownGood = '([^']+)'", _policy_source())[1]
+    assert numeric(plugin_floor) >= numeric("0.3.17")
+    assert numeric(plugin_floor) <= numeric(plugin_known)
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_cli_update_executes_only_below_floor_and_rereads_version() -> None:
+    """Execute the production loop with a recording npm, never a real installer."""
+    rows = [
+        ("0.3.0", False, "0.5.0", 0, "below-floor"),
+        ("0.3.0", True, "0.5.0", 1, "known-good"),
+        ("0.3.0", True, "", 1, "unreadable"),
+        ("0.3.0", True, "0.3.0", 1, "below-floor"),
+        ("0.4.0", True, "0.5.0", 0, "between"),
+        ("0.5.0", True, "0.5.0", 0, "known-good"),
+        ("0.6.0", True, "0.5.0", 0, "above-known-good"),
+        ("1.0.0-beta.0", True, "0.5.0", 0, "prerelease"),
+        ("", True, "0.5.0", 0, "unreadable"),
+    ]
+    source = _preflight_source()
+    loop = source[source.index("foreach ($cliName in $cliFloor.Keys)") : source.index("# --- PBIR")]
+    actual = _ps_json(
+        _VERSION_FUNCS,
+        "function Get-Command { return $true }\n"
+        "function Get-CliVersion { return $script:installed }\n"
+        "function npm { $script:installs++; $script:installed=$script:repaired }\n"
+        "function Add-Check($Name,$Tier,$Ok,$Detail,$Hint) { $script:emissions++ }\n"
+        "$cliFloor=@{'powerbi-report-author'='0.4.0'}\n"
+        "$cliKnownGood=@{'powerbi-report-author'='0.5.0'}\n"
+        "$cliPackage=@{'powerbi-report-author'='synthetic-package'}\n"
+        "$out=@(foreach ($r in $inputData) {\n"
+        " $script:installed=$r[0]; $Update=$r[1]; $script:repaired=$r[2]; $script:installs=0; $script:emissions=0\n"
+        + loop
+        + "\n [pscustomobject]@{ Installs=$script:installs; Kind=$v.Kind; Emissions=$script:emissions }\n"
+        "})\nEmit (ConvertTo-Json -InputObject $out -Compress)\n",
+        rows,
+    )
+    for row, verdict in zip(rows, actual, strict=True):
+        assert (verdict["Installs"], verdict["Kind"], verdict["Emissions"]) == (*row[3:], 1), row
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_cli_command_failure_and_noisy_output_are_not_versions() -> None:
+    """The real adapter must inspect command status and the complete output."""
+    actual = _ps_json(
+        _VERSION_FUNCS + ",Get-CliVersion",
+        "function synthetic-cli { $global:LASTEXITCODE=$script:code; $script:lines | Write-Output }\n"
+        "$out=@(foreach ($r in $inputData) {\n"
+        " $script:code=$r[0]; $script:lines=$r[1]\n"
+        " [pscustomobject]@{ Value=(Get-CliVersion 'synthetic-cli') }\n"
+        "})\nEmit (ConvertTo-Json -InputObject $out -Compress)\n",
+        [[0, ["0.5.0"]], [1, ["0.5.0"]], [0, ["noise", "0.5.0"]], [0, ["1.0.0-beta.0"]]],
+    )
+    assert [r["Value"] for r in actual] == ["0.5.0", None, None, "1.0.0-beta.0"]
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        ("valid", "known-good"),
+        ("cache-absent", "cache-missing"),
+        ("manifest-absent", "manifest-unreadable"),
+        ("manifest-invalid", "manifest-unreadable"),
+        ("lower-manifest-only", "manifest-unreadable"),
+        ("skill-directory", "skill-missing"),
+        ("skill-absent", "skill-missing"),
+        ("manifest-mismatch", "manifest-mismatch"),
+    ],
+)
+def test_plugin_production_reads_effective_manifest_and_capability_leaf(
+    tmp_path: Path, state: str, expected: str
+) -> None:
+    """Execute joint-verdict wiring over independent synthetic on-disk evidence."""
+    cache = tmp_path / "plugin"
+    if state != "cache-absent":
+        manifest = cache / ".github" / "plugin" / "plugin.json"
+        manifest.parent.mkdir(parents=True)
+        contents = {"name": "powerbi-authoring", "version": "0.3.18" if state == "manifest-mismatch" else "0.3.19"}
+        if state not in ("manifest-absent", "lower-manifest-only"):
+            manifest.write_text("{" if state == "manifest-invalid" else json.dumps(contents), encoding="utf-8")
+        # Lower-priority evidence must neither override nor rescue the effective manifest.
+        lower = cache / ".claude-plugin" / "plugin.json"
+        lower.parent.mkdir()
+        lower.write_text(json.dumps({"name": "powerbi-authoring", "version": "9.9.9"}), encoding="utf-8")
+        skill = cache / "skills" / "powerbi-report-cli" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        if state == "skill-directory":
+            skill.mkdir()
+        elif state != "skill-absent":
+            skill.write_text("synthetic capability", encoding="utf-8")
+    source = _preflight_source()
+    block = source[source.index("$pluginEntries =") : source.index("$skillPlugin =")]
+    actual = _ps_json(
+        _PLUGIN_FUNCS,
+        ". ([scriptblock]::Create($env:POLICY))\n"
+        "$cfg=[pscustomobject]@{installedPlugins=@([pscustomobject]@{name='powerbi-authoring';"
+        "marketplace='fabric-collection';enabled=$true;version='0.3.19';cache_path=$inputData.cache})}\n"
+        "function Add-Check($Name,$Tier,$Ok,$Detail,$Hint) { $script:emissions++ }\n"
+        "$script:emissions=0\n" + block + "\n"
+        "Emit (@{Kind=$pv.Kind;Emissions=$script:emissions} | ConvertTo-Json -Compress)\n",
+        {"cache": str(cache)},
+    )
+    assert actual == {"Kind": expected, "Emissions": 1}
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_plugin_upstream_fetch_ambiguity_and_failure_are_visible_unknown() -> None:
+    """Run the real catalog consumer, including its catch and cardinality check."""
+    rows = [
+        ({"plugins": [{"name": "powerbi-authoring", "version": "0.3.20"}]}, "behind"),
+        ({"plugins": [{"name": "powerbi-authoring", "version": "0.3.19"}]}, "current"),
+        ({"plugins": [{"name": "powerbi-authoring", "version": "0.3.18"}]}, "ahead"),
+        ({"plugins": []}, "unknown"),
+        ({"plugins": [{"name": "other", "version": "0.3.20"}]}, "unknown"),
+        ({"plugins": [{"name": "powerbi-authoring", "version": "0.3.20"}] * 2}, "unknown"),
+        ({"plugins": [{"name": "powerbi-authoring", "version": "0.3.20-beta.0"}]}, "unknown"),
+        ({"plugins": [{"name": "powerbi-authoring"}]}, "unknown"),
+        ("{", "unknown"),
+        (None, "unknown"),
+    ]
+    source = _preflight_source()
+    block = source[
+        source.index("    $latestPlugin = $null") : source.index("    # The deterministic engine is an unpacked")
+    ]
+    actual = _ps_json(
+        _VERSION_FUNCS + ",Get-UpstreamVerdict",
+        ". ([scriptblock]::Create($env:POLICY))\n"
+        "function Invoke-WebRequest { param($Uri)\n"
+        " if ($script:content -eq 'FETCH-FAIL') { throw 'synthetic unavailable' }\n"
+        " if ($Uri -ne $pluginPolicy.upstreamUrl) { throw 'wrong URL' }\n"
+        " [pscustomobject]@{Content=$script:content}\n"
+        "}\n"
+        "function Add-Check($Name,$Tier,$Ok,$Detail,$Hint) { $script:emissions++ }\n"
+        "$plugin=[pscustomobject]@{version='0.3.19'}\n"
+        "$out=@(foreach ($r in $inputData) {\n"
+        " $script:content=$r; $script:emissions=0\n" + block + "\n"
+        " [pscustomobject]@{Kind=$uv.Kind;Emissions=$script:emissions;Tier=$uv.Tier;Hint=$uv.Hint}\n"
+        "})\nEmit (ConvertTo-Json -InputObject $out -Compress)\n",
+        [
+            "FETCH-FAIL" if value is None else value if isinstance(value, str) else json.dumps(value)
+            for value, _ in rows
+        ],
+    )
+    for row, verdict in zip(rows, actual, strict=True):
+        assert (verdict["Kind"], verdict["Emissions"], verdict["Tier"]) == (row[1], 1, "optional"), row
+        if row[1] != "behind":
+            assert verdict["Hint"] == ""
 
 
 def _desktop_pin_verdict(

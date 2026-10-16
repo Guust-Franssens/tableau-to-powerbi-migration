@@ -166,17 +166,80 @@ hard-coded number.
 dependencies, Desktop assumptions and version floors, with a repair hint beside each miss. If setup
 guidance is thin, improve its hint through approved contributor work rather than adding a second recipe.
 `-Update` is a **floor check, not blind `@latest`**; at or above the floor it does nothing.
-`powerbi-report-author` **>= 0.1.4** is a correctness floor: older versions green-lit reports missing
+The current CLI floors/known-good matrix are `$cliFloor` / `$cliKnownGood` in `preflight.ps1`;
+the plugin policy is `$pluginPolicy`. These are correctness floors, not suggestions. Historically,
+older report validators green-lit reports missing
 `reportVersionAtImport`, which is required inside each `themeCollection` entry and forbidden at
 the top level. The `powerbi-report-gotchas` skill holds the mutation evidence and valid shape.
-`-CheckUpstream` compares installed npm bridges and the engine's `VERSION` with upstream; it neither
-upgrades nor fails the run.
+`-CheckUpstream` compares installed npm bridges, the engine's `VERSION`, and the Power BI plugin
+with upstream; it neither upgrades nor fails the run. The plugin uses the GitHub-native
+`.github/plugin/marketplace.json` catalog. Missing, ambiguous, malformed or prerelease upstream
+metadata prints advisory `unknown`, not an assumed current version.
+
+The **single** `plugin: powerbi-authoring@fabric-collection` verdict jointly checks exact registry
+identity, `enabled=true`, cache directory, effective `.github/plugin/plugin.json` name/version,
+registry/manifest agreement, and the `skills\powerbi-report-cli\SKILL.md` **file**. Cannot establish
+any of these, prerelease metadata or a version below the floor means a critical MISS. The capability
+file remains mandatory above the floor. This blocks the agent phase, not §2 steps 1–6.
+An on-PATH CLI with blank, noisy, malformed or prerelease version output also fails closed.
+Versions between floor and known-good are allowed-but-unmeasured WARNs; above known-good is a
+re-verification WARN with **no update/downgrade advice**.
 
 An installed skill plugin can shadow correct repo-local skills. Preflight blocks on `STALE in plugin`.
 `copilot plugin update` file-locks while a session is running; the lock blocks renaming, not content
 writes. Use `python scripts/sync_installed_skills.py` for content drift. Newly started sessions and
 subagents see the refreshed files; a running session keeps its old in-memory copy.
 Before removing a second engine copy, confirm it has no uncommitted or unpushed work.
+
+#### Updating the Power BI plugin and CLIs (between sessions)
+
+`-Update` repairs **only below-floor npm CLIs**, never the plugin, unreadable versions or prereleases.
+It does not install anything at/equal/above the floor. `sync_installed_skills.py` refreshes this
+repo's reusable bundles, **not** the upstream Power BI plugin.
+
+1. **Prepare, do not install in a running session.** Finish/checkpoint and push work; ensure no
+   migration or blind run is active. Save a dated private checkpoint outside git: selected
+   `COPILOT_HOME` config, registry (`copilot plugin list --json`), plugin directory (outside
+   `installed-plugins`), both shipped plugin manifests, `npm ls -g --depth=0`, raw CLI versions and
+   baseline plain preflight. Keep paths and profile contents private.
+2. Close every Copilot session deliberately. Continue from a **plain shell**, with no migrations
+   during this window. Running sessions lock the directory (`Access is denied / os error 5`) and
+   retain their old skill snapshot. Do not kill processes by name.
+3. Install the exact approved CLI **known-good versions from preflight**, not an unreviewed tag:
+
+   ```powershell
+   npm install -g @microsoft/powerbi-report-authoring-cli@<report-known-good> @microsoft/powerbi-desktop-bridge-cli@<bridge-known-good>
+   copilot plugin marketplace update fabric-collection
+   copilot plugin update powerbi-authoring@fabric-collection
+   ```
+
+   The plugin update cannot pin a version. Refresh the catalog first; a successful update command
+   can otherwise reinstall old content. Update **only** `powerbi-authoring`: never use `--all`,
+   never move `fabric-skills` or the conversion engine as part of this procedure. A failed fetch or
+   update stops the window; do not loop indefinitely.
+4. **Verify bytes and behavior independently of installer exits.** Require a plain plugin release
+   at/above `$pluginPolicy.floor`, registry = effective GitHub-native manifest, both shipped
+   manifests agreeing, `enabled=true`, and the capability file present. `.claude-plugin` agreement
+   is window evidence, not a second runtime authority. Exactly known-good is the measured target;
+   newer is WARN + re-verification, **not** a reason to downgrade. Confirm `fabric-skills` and
+   engine versions/content are unchanged; check both raw single-line CLI versions, help,
+   `powerbi-report-author doctor`, validator text/exit compatibility on the same corpus, and the
+   direct bridge CLI. A rejected bridge operation may exit nonzero: the current `bridge_json`
+   contract names that refusal `ReceiptError(DESKTOP_UNVERIFIED)`; do not demand `False` from
+   `bridge_reload`. Record live Desktop/MCP limitations separately (#730).
+5. Start a **fresh session**, run session-start preflight and the approved acceptance matrix.
+   Positive profile preflight, actual update/rollback evidence and consumer re-verification are
+   merge gates, not proven by offline fixtures. If a consumer needs code changes, stop and land
+   a separate prerequisite; do not expand the floor change.
+6. For the #729/#728 transition, blind-review #729's exact head, stack/review #728 on it, then
+   perform this window **before merging either**. Merge #729 with a merge commit preserving its
+   reviewed ancestry/tree, then retarget #728 without changing its reviewed head. If squashing or
+   rebasing, re-review the changed head. Keep migrations stopped until both land: updated skills
+   retire names the older personas still reference. If #728 cannot land, revert #729 rather than
+   leave that mismatch. Failed verification means **do not merge**.
+7. Restore the private checkpoint only for a broken update, then verify registry/content and CLI
+   versions again. Plugin backup restoration and exact previous CLI installs are rollback
+   candidates, **not a tested guarantee**. Never roll back merely for an above-known-good WARN.
 
 #### Preflight cannot start
 
