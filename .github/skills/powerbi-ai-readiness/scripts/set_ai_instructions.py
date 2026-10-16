@@ -152,20 +152,31 @@ def model_object_names(model_dir: Path) -> ModelObjectNames:
     names = ModelObjectNames()
     definition = model_dir / "definition"
     for tmdl in list(definition.glob("tables/*.tmdl")) + list(definition.glob("*.tmdl")):
+        text = read_utf8(tmdl)
+        child_indents = []
+        for line in text.splitlines():
+            stripped = line.lstrip(" \t")
+            if stripped and stripped != line and not stripped.startswith("//"):
+                child_indents.append(len(line[: len(line) - len(stripped)].expandtabs(4)))
+        child_indent = min(child_indents, default=0)
         current_table = None
         for match in re.finditer(
             r"^(?P<indent>[ \t]*)(?P<kind>table|column|measure)[ \t]+"
             r"(?P<token>'(?P<quoted>(?:[^']|'')+)'|[^\s=]+)",
-            read_utf8(tmdl),
+            text,
             re.MULTILINE,
         ):
             name = (match.group("quoted") or match.group("token")).replace("''", "'")
+            indent = match.group("indent")
             if match.group("kind") == "table":
-                current_table = name if not match.group("indent") else None
-                if current_table is not None:
-                    names.table_fields.setdefault(current_table, set())
-            elif current_table is not None:
+                if indent:
+                    continue
+                current_table = name
+                names.table_fields.setdefault(current_table, set())
+            elif current_table is not None and indent and len(indent.expandtabs(4)) == child_indent:
                 names.table_fields[current_table].add(name)
+            else:
+                continue
             names.add(name)
     return names
 

@@ -66,6 +66,8 @@ send `annotations: []` to the Modeling MCP: that clears annotations, including o
   Qualified references must resolve the **table-field pair**, not just two independently existing
   names; quoted/backticked table names, escaped apostrophes/brackets and adjacent unquoted
   qualifiers are checked. A plain flattened name set cannot establish a qualified pair.
+  The declaration inventory reads direct table children only; words inside deeper expression
+  text cannot create columns, measures or tables, or change a later declaration's owning table.
 - `--check --strict --model <model> --md <md>` additionally requires stamped text == stripped md and
   marker == SHA-256(stamped text). Repeat **after** the final reopen/refresh/save: missing ownership
   after Desktop/MCP/service work must fail closed. Strict checks without explicit md retain legacy

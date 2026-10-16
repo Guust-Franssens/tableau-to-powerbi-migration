@@ -657,3 +657,54 @@ def test_owned_empty_member_can_be_initialized_but_empty_stamp_never_passes(tmp_
     md.write_bytes(instructions)
     assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 0
     assert cmd_check(tmp_path, True, model, md) == 0
+
+
+@pytest.mark.parametrize("indent", ["\t", "  ", "    "])
+def test_expression_text_cannot_declare_schema_objects(tmp_path: Path, indent: str) -> None:
+    """AMO reads only X/Z/Text; deeper literal words are expression text, not schema declarations."""
+    model, md, _ = _stamp_fixture(tmp_path)
+    tables = model / "definition" / "tables"
+    tables.mkdir()
+    (tables / "A.tmdl").write_text(
+        "table A\n"
+        + indent
+        + "column X\n"
+        + indent * 2
+        + "dataType: int64\n"
+        + indent
+        + "measure Text =\n"
+        + indent * 3
+        + '"header\n'
+        + indent * 3
+        + "column Y\n"
+        + indent * 3
+        + "measure Phantom = 1\n"
+        + indent * 3
+        + "table Hidden\n"
+        + indent * 3
+        + 'footer"\n'
+        + indent
+        + "column Z\n"
+        + indent * 2
+        + "dataType: int64\n",
+        encoding="utf-8",
+    )
+    known = model_object_names(model)
+    assert {"A", "X", "Z", "Text"} <= known
+    assert not {"Y", "Phantom", "Hidden"} & known, "DECLARATION_SCOPE: expression text is not schema"
+    for field in ("X", "Z", "Text"):
+        assert unresolved_references(f"Use `'A'[{field}]`.", known) == []
+    md.write_text("Use `'A'[Y]`.", encoding="utf-8")
+    before = _snapshot(model)
+    assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 3
+    assert _snapshot(model) == before
+    md.write_text("Use `'A'[Z]`.", encoding="utf-8")
+    assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 0
+    assert cmd_check(tmp_path, True, model, md) == 0
+    table_file = tables / "A.tmdl"
+    table_file.write_bytes(
+        table_file.read_bytes() + (indent + "column Y\n" + indent * 2 + "dataType: int64\n").encode()
+    )
+    md.write_text("Use `'A'[Y]`.", encoding="utf-8")
+    assert set_ai_instructions.main(["--model", str(model), "--md", str(md)]) == 0
+    assert cmd_check(tmp_path, True, model, md) == 0
