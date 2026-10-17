@@ -2,10 +2,15 @@
 
 from pathlib import Path
 import re
+import sys
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import build_plugin  # noqa: E402  # pylint: disable=wrong-import-position
+
 RETIRED = re.compile(
     r"(?<![\w-])(powerbi-report-(?:planning|design|authoring|management)|check-updates|"
     r"semantic-model-consumption|powerbi-authoring-cli|powerbi-consumption-cli|"
@@ -31,7 +36,7 @@ def _persona(name: str) -> str:
 
 
 def test_retired_skill_census() -> None:
-    """No old names in live guidance; stale or broadened historical exceptions also fail."""
+    """Check guidance paths and contents; exclude provenance examples/migrations and negative tests."""
     paths = [ROOT / name for name in ("AGENTS.md", "README.md", "CONTRIBUTING.md")]
     for pattern in (
         ".github/agents/*.agent.md",
@@ -46,8 +51,14 @@ def test_retired_skill_census() -> None:
     found = []
     for path in paths:
         relative = path.relative_to(ROOT).as_posix()
+        assert not RETIRED.search(relative), f"Retired skill path: {relative}"
         found.extend((relative, line) for line in path.read_text(encoding="utf-8").splitlines() if RETIRED.search(line))
     assert sorted(found) == sorted(HISTORICAL), f"Retired skill references: {found}"
+
+
+def test_playbook_release_contract() -> None:
+    """Changed published skill content requires the independently approved 0.3.1 release."""
+    assert build_plugin.VERSION == "0.3.1"
 
 
 def test_current_modes_and_approval_stop() -> None:
