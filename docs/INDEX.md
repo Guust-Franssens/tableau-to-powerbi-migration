@@ -71,6 +71,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Find migration guidance | [`docs/agent-capability-wiring.md`](../docs/agent-capability-wiring.md) | Registry of shipped capabilities that must be visible to agents. |
 | Find migration guidance | [`docs/ai-instructions-authoring-guide.md`](../docs/ai-instructions-authoring-guide.md) | AI-instruction authoring redirect. |
 | Find migration guidance | [`docs/capabilities-and-limitations.md`](../docs/capabilities-and-limitations.md) | Automation capability boundaries. |
+| Review the unified CLI consensus | [`docs/cli-consensus/consensus.md`](cli-consensus/consensus.md) | Four independent designs plus one red-team report, synthesized into a narrow `t2p start`/`status` pilot, authority boundaries, path contract, deferrals and blind-run acceptance (Refs #734). |
 | Find migration guidance | [`docs/credential-gate-testing.md`](../docs/credential-gate-testing.md) | Credential-gate tests and audit behavior. |
 | Find migration guidance | [`docs/credential-gate.md`](../docs/credential-gate.md) | Live-source/Desktop credential wall. |
 | Find migration guidance | [`docs/customer-text-exposure.md`](../docs/customer-text-exposure.md) | Customer text/privacy exposure. |
