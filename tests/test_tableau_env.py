@@ -765,7 +765,12 @@ def test_pilot_diagnostic_alias_blank_conflict(tmp_path, source):
     import tableau_env
 
     path = tmp_path / ".env"
-    values = {"TABLEAU_SERVER": "https://synthetic.invalid", "TABLEAU_PAT_NAME": "name", "TABLEAU_PAT_VALUE": "secret"}
+    values = {
+        "TABLEAU_SERVER": "https://synthetic.invalid",
+        "TABLEAU_PAT_NAME": "name",
+        "TABLEAU_PAT_VALUE": "secret",
+        "OTHER_SETTING": " keep exact ",
+    }
     path.write_text(
         "\n".join(f"{key}={value}" for key, value in values.items()) if source == "file" else "", encoding="utf-8"
     )
@@ -776,6 +781,8 @@ def test_pilot_diagnostic_alias_blank_conflict(tmp_path, source):
     assert rows["TABLEAU_PAT_SECRET"]["source"] == {"file": "selected_env", "environment": "environment"}[source]
     assert rows["TABLEAU_PAT_SECRET"]["secret"] is True
     assert env["TABLEAU_PAT_SECRET"] == "secret"
+    if source == "environment":
+        assert env["OTHER_SETTING"] == " keep exact ", "diagnostics must not normalize unrelated process settings"
     assert "synthetic.invalid" not in str(diagnostic)
     _, diagnostic = tableau_env.diagnose_env(path, environ={"TABLEAU_PAT_SECRET": "same", "TABLEAU_PAT_VALUE": "same"})
     assert (

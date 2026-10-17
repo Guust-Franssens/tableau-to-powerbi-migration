@@ -324,7 +324,7 @@ def diagnose_env(
     checks = []
     normalized = []
     for source in (file_values, process):
-        clean = {key: value.strip() for key, value in source.items()}
+        clean = {key: value.strip() if key in ACCEPTED_ENV_KEYS else value for key, value in source.items()}
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             resolved = _normalise(clean)

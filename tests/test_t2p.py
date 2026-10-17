@@ -609,6 +609,21 @@ def test_doctor_provenance_control(monkeypatch, tmp_path, capsys):
     assert row["source"] == "environment", "winning source must be environment"
 
 
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_doctor_interrupt_is_safe_in_both_modes(monkeypatch, capsys, json_mode):
+    _config(monkeypatch)
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt("PRIVATE_INTERRUPT_CANARY")
+
+    monkeypatch.setattr(t2p.subprocess, "run", interrupt)
+    assert t2p.main(["doctor", *(["--json"] if json_mode else [])]) == 130
+    result, captured = _json(capsys)
+    assert result["status"] == "interrupted"
+    assert result["delegated_exit_code"] is None
+    assert "PRIVATE_INTERRUPT_CANARY" not in captured.out + captured.err
+
+
 def test_offline_help_output_journey(monkeypatch, tmp_path, capsys):
     """Help/output-only mechanics rehearsal, explicitly not live blind-run acceptance."""
     pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
