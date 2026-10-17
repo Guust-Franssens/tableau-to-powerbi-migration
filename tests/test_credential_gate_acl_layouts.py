@@ -276,12 +276,17 @@ def test_nested_clears_preserve_the_other_gate(acl_lab: AclLab, first: str) -> N
         assert gate._clear_was_earned(outer) == gate._clear_was_earned(inner) == "probe-cleared"
         assert gate.verify(outer) == gate.verify(inner) == 0
     else:
-        # This order asserts physical preservation only: the outer deny can prevent inner audit writes.
-        _earned_clear(inner)
+        assert _earned_clear(inner) != 0, "outer denial prevents the required preceding durable evidence"
         _denied(files)
         assert acl_lab.denies(outer / "pbip"), "inner clear removed the outer gate"
-        assert all("I" in flags for flags, _rights in acl_lab.denies(files[0].parents[1]))
+        inner_denies = acl_lab.denies(files[0].parents[1])
+        assert any("I" not in flags for flags, _rights in inner_denies), "failed evidence must retain the inner stop"
+        assert any("I" in flags for flags, _rights in inner_denies), "the inherited outer stop must remain"
+        assert (outer / gate.MARKER).exists() and (inner / gate.MARKER).exists()
         assert _earned_clear(outer) == 0
+        _denied(files)
+        assert _earned_clear(inner) == 0, "outer-first retry can now persist evidence before release"
+        assert gate.verify(outer) == gate.verify(inner) == 0
     _writable(files)
 
 

@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -34,6 +36,66 @@ import reprobe_blocked as rb  # noqa: E402  # pylint: disable=wrong-import-posit
 MARKER = credential_gate.MARKER
 OVERRIDE = credential_gate.OVERRIDE
 AUDIT = credential_gate.AUDIT
+
+
+@pytest.mark.parametrize("phase", ["selection", "before-probe", "after-probe"])
+def test_native_descriptor_contention_is_errored_at_every_reprobe_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    """A real held descriptor must outrank the marker-present fast path and a DATA_OK token."""
+    unit = _blocked_unit(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    held = None
+    monkeypatch.setattr(credential_gate, "TX_READER_TIMEOUT", 0.1)
+
+    def owner():
+        with credential_gate.gate_transaction(unit):
+            entered.set()
+            assert release.wait(10), "test owner was not released"
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+
+        def runner(_unit, _settings):
+            nonlocal held
+            calls.append("probe")
+            if phase == "after-probe":
+                held = pool.submit(owner)
+                assert entered.wait(5), "native owner did not acquire the descriptor"
+            return rb.ProbeOutcome(returncode=0, verdict="DATA_OK", timed_out=False, detail="fixture DATA_OK")
+
+        if phase != "after-probe":
+            held = pool.submit(owner)
+            assert entered.wait(5), "native owner did not acquire the descriptor"
+        try:
+            if phase == "selection":
+                result = rb.sweep([rb.UnitInput(unit)], _options(), runner=runner).results[0]
+            else:
+                result = rb.probe_unit(rb.UnitInput(unit), runner, _options())
+            assert result.category == rb.CAT_ERRORED, "descriptor contention must become errored, never skipped/earned"
+            assert calls == (["probe"] if phase == "after-probe" else []), "no retry or premature runner is allowed"
+        finally:
+            release.set()
+            if held is not None:
+                held.result(timeout=5)
+
+
+@pytest.mark.parametrize("phase", ["selection", "before-probe", "after-probe"])
+def test_unlocked_reprobe_mutation_fails_native_contention_assertion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    """The historical marker shortcut must fail the real boundary assertion, not an import/timer."""
+
+    def unlocked(unit):
+        if (unit / MARKER).exists():
+            return True
+        if credential_gate.status(unit):
+            raise credential_gate.GateTransactionError("transaction-cannot-establish")
+        return False
+
+    monkeypatch.setattr(rb, "unit_is_blocked", unlocked)
+    with pytest.raises(AssertionError, match="descriptor contention must become errored"):
+        test_native_descriptor_contention_is_errored_at_every_reprobe_boundary(tmp_path, monkeypatch, phase)
 
 
 def test_transaction_refusal_is_not_a_clean_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

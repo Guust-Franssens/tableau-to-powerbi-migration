@@ -31,6 +31,7 @@ import shutil
 import sys
 import time
 import types as reference_types
+from functools import partial
 from collections.abc import Callable
 from dataclasses import FrozenInstanceError
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -65,6 +66,65 @@ from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wr
 )
 
 UNIT = "Book"
+COMPANION_NAME = re.compile(r"\.credential-gate-tx-v1-[0-9a-f]{64}\.lock")
+
+
+def _package_entries(root: Path) -> list[Path]:
+    """Exclude only proved external companions, never arbitrary hidden files or directories."""
+    entries = []
+    for path in root.iterdir():
+        if COMPANION_NAME.fullmatch(path.name):
+            info = path.lstat()
+            assert path.is_file() and not path.is_symlink()
+            assert not getattr(info, "st_file_attributes", 0) & 0x400
+            assert info.st_size == 1 and info.st_nlink == 1
+        else:
+            entries.append(path)
+    return entries
+
+
+@pytest.mark.parametrize("policy", ["report", "handover", "precedence", "continuation", "alias"])
+def test_transaction_setup_mutations_fail_existing_policy_assertions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], policy: str
+) -> None:
+    """Regress only setup ordering/mapping; existing independent policy assertions must catch it."""
+    from test_credential_gate_transactions import _mutant  # pylint: disable=import-outside-toplevel
+
+    controls = {
+        "report": partial(test_a_truncated_engine_report_is_refused_rather_than_packaged_unclassified, tmp_path),
+        "handover": partial(test_a_truncated_handover_slice_is_refused_rather_than_silently_absent, tmp_path),
+        "precedence": partial(test_cannot_assess_outranks_every_verdict_about_content, tmp_path),
+        "continuation": partial(
+            test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker,
+            tmp_path,
+            monkeypatch,
+            capsys,
+        ),
+        "alias": partial(
+            test_construction_blocks_a_later_real_short_alias_without_overwriting_its_provider,
+            tmp_path,
+            monkeypatch,
+        ),
+    }
+    if policy == "alias":
+        _mutant(
+            pkg,
+            "package_unit",
+            "            except data_access.GateTransactionError:\n"
+            "                # A proven native destination alias retains its existing policy diagnostic.\n"
+            "                _claim_construction_directory(attempt, final)\n"
+            "                raise",
+            "            except data_access.GateTransactionError:\n                raise",
+            monkeypatch,
+        )
+        message = "native aliases must retain destination_alias"
+    else:
+        monkeypatch.setattr(pkg, "_gate_authority_root", lambda path: pkg.load_bundle(path).migration_dir)
+        message = "per-unit continuation must survive unreadable input" if policy == "continuation" else "cannot-assess"
+    with pytest.raises(AssertionError, match=message):
+        controls[policy]()
+
+
 WB_LUID = "11111111-2222-3333-4444-555555555555"
 OTHER_LUID = "99999999-8888-7777-6666-555555555555"
 EXPECTED_DISPATCH_READINESS = {
@@ -5698,7 +5758,13 @@ def test_the_second_digest_check_does_not_refuse_an_UNEDITED_package(tmp_path: P
     staging = pkg.staging_dir(_out(tmp_path), UNIT)
     assert not staging.exists(), f"the staging directory survived the run: {staging}"
     assert not staging.with_name(f"{staging.name}~").exists(), "the retired package survived the run"
-    leaked = sorted(path.name for path in _out(tmp_path).iterdir() if path.name.startswith("."))
+    companions = [path for path in _out(tmp_path).iterdir() if COMPANION_NAME.fullmatch(path.name)]
+    assert len(companions) == 1
+    assert companions[0].parent == root.parent and not companions[0].is_relative_to(root)
+    companion_identity = (companions[0].stat().st_dev, companions[0].stat().st_ino)
+    _package(tmp_path, bundle, oracle)
+    assert (companions[0].stat().st_dev, companions[0].stat().st_ino) == companion_identity
+    leaked = sorted(path.name for path in _package_entries(_out(tmp_path)) if path.name.startswith("."))
     assert leaked == [], f"packaging left hidden scratch behind in --out: {leaked}"
 
 
@@ -5759,7 +5825,9 @@ def test_a_failed_repackage_leaves_the_previous_package_intact(tmp_path: Path) -
         pkg._assemble_unit = boom
 
     assert sorted(path.name for path in root.iterdir()) == before
-    assert not [path for path in _out(tmp_path).iterdir() if path.name.startswith(".")], "staging dir left behind"
+    assert not [path for path in _package_entries(_out(tmp_path)) if path.name.startswith(".")], (
+        "staging dir left behind"
+    )
 
 
 def test_the_receipt_ships_this_units_output_PATHS_and_nothing_else(tmp_path: Path) -> None:
@@ -6149,7 +6217,7 @@ def test_selecting_one_engine_alias_still_blocks_before_it_can_overwrite_its_sib
     assert payload["construction"]["totals"] == {"requested": 1, "assembled": 0, "blocked": 1}
     assert prior["unit"] == UNIT.lower()
     assert (_out(tmp_path) / UNIT.lower() / pkg.MANIFEST_NAME).read_bytes() == before
-    assert [path.name for path in _out(tmp_path).iterdir()] == [UNIT.lower()]
+    assert [path.name for path in _package_entries(_out(tmp_path))] == [UNIT.lower()]
 
 
 def test_write_png_is_a_real_image_so_these_fixtures_could_fail(tmp_path: Path) -> None:
@@ -6749,7 +6817,10 @@ def test_a_length_refusal_from_the_FILESYSTEM_is_restated_with_a_path_and_a_reme
     with pytest.raises(pkg.PackagingError) as excinfo:
         pkg.package_unit(bundle, UNIT, out, oracle_dir=None, assets_dir=None)
     assert offender in str(excinfo.value) and "check_path_ceiling.py" in str(excinfo.value)
-    assert not list(out.iterdir()), "nothing may survive a refusal"
+    assert _package_entries(out) == [], "no package or scratch may survive a refusal"
+    companions = list(out.iterdir())
+    assert len(companions) == 1 and COMPANION_NAME.fullmatch(companions[0].name)
+    assert companions[0].parent == out and not companions[0].is_relative_to(out / UNIT)
 
     def _denied(*_args: object, **_kwargs: object) -> dict:
         raise OSError(errno.EACCES, "Permission denied", offender)
@@ -6922,7 +6993,9 @@ def test_a_truncated_engine_report_is_refused_rather_than_packaged_unclassified(
     """
     bundle, _ = _bundle(tmp_path)
     (bundle / "report.json").write_text('{"workbooks": [{"name": "Book"', encoding="utf-8")
-    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS, (
+        "unreadable report must remain cannot-assess"
+    )
     assert not (_out(tmp_path) / UNIT).exists(), "a package was written from input that could not be read"
 
 
@@ -6930,7 +7003,9 @@ def test_a_truncated_handover_slice_is_refused_rather_than_silently_absent(tmp_p
     """Reproduced: `exit 0`, and the handover slice simply not in the package."""
     bundle, _ = _bundle(tmp_path)
     (bundle / "handover" / f"{UNIT}.json").write_text('{"workbook": {"source_id"', encoding="utf-8")
-    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS
+    assert _cli(tmp_path, bundle, "--unit", UNIT) == pkg.EXIT_CANNOT_ASSESS, (
+        "unreadable handover must remain cannot-assess"
+    )
     assert not (_out(tmp_path) / UNIT).exists()
 
 
@@ -7009,7 +7084,7 @@ def test_cannot_assess_outranks_every_verdict_about_content(tmp_path: Path) -> N
     bundle, _ = _bundle(tmp_path)
     write_engine_report(bundle, workbooks=[UNIT, "Never_Emitted"])
     (bundle / "handover" / "Never_Emitted.json").write_text("{ truncated", encoding="utf-8")
-    assert _cli(tmp_path, bundle) == pkg.EXIT_CANNOT_ASSESS
+    assert _cli(tmp_path, bundle) == pkg.EXIT_CANNOT_ASSESS, "cannot-assess must outrank content findings"
     assert (_out(tmp_path) / UNIT / "package-manifest.json").is_file()
     assert not (_out(tmp_path) / "Never_Emitted").exists()
 
@@ -7437,7 +7512,7 @@ def test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_block
         "unaccounted": 0,
         "assembled": 11,
         "blocked": 3,
-    }
+    }, "per-unit continuation must survive unreadable input"
     assert construction["totals"] == {"requested": 14, "assembled": 11, "blocked": 3}
     assert [row["unit"] for row in payload["units"]] == assembled_names
     assert [row["unit"] for row in construction["assembled"]] == assembled_names
@@ -7477,7 +7552,7 @@ def test_construction_keeps_unicode_casefold_distinct_native_directories(tmp_pat
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["construction"]["totals"] == {"requested": 2, "assembled": 2, "blocked": 0}
     assert not (out / units[0]).samefile(out / units[1])
-    assert sorted(path.name for path in out.iterdir()) == units
+    assert sorted(path.name for path in _package_entries(out)) == units
     assert all(json.loads((out / unit / pkg.MANIFEST_NAME).read_bytes())["unit"] == unit for unit in units)
 
 
@@ -7533,9 +7608,11 @@ def test_construction_blocks_a_later_real_short_alias_without_overwriting_its_pr
     assert len(witnessed) == 1, "the test must reach real construction and publication"
     assert payload["construction"]["totals"] == {"requested": 2, "assembled": 1, "blocked": 1}
     assert [row["unit"] for row in payload["units"]] == [provider]
-    assert [(row["unit"], row["reason_code"]) for row in payload["failed"]] == [(alias, pkg.IDENTITY_DESTINATION_ALIAS)]
+    assert [(row["unit"], row["reason_code"]) for row in payload["failed"]] == [
+        (alias, pkg.IDENTITY_DESTINATION_ALIAS)
+    ], "native aliases must retain destination_alias"
     assert (out / provider / pkg.MANIFEST_NAME).read_bytes() == witnessed[0]
-    assert [path.name for path in out.iterdir()] == [provider]
+    assert [path.name for path in _package_entries(out)] == [provider]
     assert cmp.discover_package_roots(bundle, out) == [out / provider]
 
 
@@ -8170,7 +8247,7 @@ def test_post_rename_line_interrupt_hides_retired_manifest_before_reporting_stat
     report.write_text('{"stale": true}', encoding="utf-8")
 
     code = _run_with_line_interrupt(
-        pkg.replace_dir,
+        pkg._replace_dir_locked,
         "            cleanup = _discard_scratch(retired)",
         lambda: _batch_main(tmp_path, bundle, oracle, report),
         occurrence=2,

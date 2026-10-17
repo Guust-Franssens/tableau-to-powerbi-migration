@@ -2229,13 +2229,26 @@ def test_717_old_endpoint_only_key_cannot_clear_an_ordinary_target(tmp_path):
     assert new_key != old_key
     assert run_gate("block", str(mig), "--sources", old_key).returncode == 0
     assert run_gate("clear", str(mig), "--reason", "old ordinary probe", "--earned").returncode == 0
-    (mig / "fabric" / "model.tmdl").write_text("table Fictitious", encoding="utf-8")
-    assert run_gate("verify", str(mig)).returncode == 3
+    assert json.loads((mig / cg.MARKER).read_text(encoding="utf-8"))["sources"] == [new_key]
+    assert run_gate("status", str(mig)).returncode == 1
+    if platform.system() == "Windows":
+        with pytest.raises(PermissionError):
+            (mig / "fabric" / "model.tmdl").write_text("table Fictitious", encoding="utf-8")
+    else:
+        assert (mig / cg.MARKER).exists(), "non-Windows establishes only the serialized marker stop"
+    assert run_gate("verify", str(mig)).returncode != 0
     assert run_gate("block", str(mig), "--sources", new_key).returncode == 0
     assert (mig / cg.MARKER).exists()
+    assert (
+        run_gate("clear", str(mig), "--reason", "current target proof", "--earned", "--sources", new_key).returncode
+        == 0
+    )
+    assert run_gate("status", str(mig)).returncode == 0
+    (mig / "fabric" / "model.tmdl").write_text("table Fictitious", encoding="utf-8")
+    assert run_gate("verify", str(mig)).returncode == 0
 
 
-def test_717_reorder_and_alias_changes_reuse_proof_but_authorize_stays_global(tmp_path, monkeypatch):
+def test_717_reorder_and_alias_changes_reuse_proof_but_authorization_cannot_cover_future_keys(tmp_path, monkeypatch):
     mig = tmp_path / "stable-target"
     (mig / "fabric").mkdir(parents=True)
     conn = {"class": "sqlserver", "server": "sql.example", "database": "DB", "schema": "default"}
@@ -2262,7 +2275,14 @@ def test_717_reorder_and_alias_changes_reuse_proof_but_authorize_stays_global(tm
     source["tables"][0]["table"] = "[another].[Target]"
     path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
     assert pf._leg_key(source, 0, conn) != key
-    assert run_gate("verify", str(mig)).returncode == 0, "authentic human authorization remains global"
+    assert not cg._override_is_authentic(mig), "an authorization cannot invent a future target's epoch"
+    assert run_gate("verify", str(mig)).returncode != 0
+    future_key = pf._leg_key(source, 0, conn)
+    assert run_gate("block", str(mig), "--sources", future_key).returncode == 0
+    assert (mig / cg.MARKER).exists()
+    assert cg.authorize(mig, "new exact snapshot") == 0
+    assert cg._override_is_authentic(mig)
+    assert run_gate("verify", str(mig)).returncode == 0
 
 
 # --- Requirement 1 (2nd bounded round, comment 5546182629): mixed-scope audit poisoning --------

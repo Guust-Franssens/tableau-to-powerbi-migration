@@ -4203,6 +4203,12 @@ def render_shipping_advisory(budgets: list[PathBudget]) -> str | None:
     )
 
 
+def _gate_authority_root(path: Path) -> Path:
+    """Select the coordination address without parsing unrelated per-unit input evidence."""
+    resolved = path.resolve()
+    return resolved.parent if resolved.is_file() else resolved
+
+
 def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many-branches,too-many-statements
     bundle: Path,
     unit: str,
@@ -4300,13 +4306,18 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
             if budget.refused:
                 raise PackagePathTooLong(budget)
             out_root.mkdir(parents=True, exist_ok=True)
-            original_root = load_bundle(bundle if gate_root is None else gate_root).migration_dir
-            transaction.enter_context(
-                data_access.gate_transactions(
-                    [original_root, final, *provider_packages],
-                    aliases={staging_dir(out_root, unit): final, retired_dir(final): final},
+            original_root = _gate_authority_root(bundle if gate_root is None else gate_root)
+            try:
+                transaction.enter_context(
+                    data_access.gate_transactions(
+                        [original_root, final, *provider_packages],
+                        aliases={staging_dir(out_root, unit): final, retired_dir(final): final},
+                    )
                 )
-            )
+            except data_access.GateTransactionError:
+                # A proven native destination alias retains its existing policy diagnostic.
+                _claim_construction_directory(attempt, final)
+                raise
             attempt.prior = _claim_construction_directory(attempt, final)
             if attempt.prior is not None and not discard_edits:
                 _refuse_if_edited(unit, final)
@@ -6359,7 +6370,8 @@ def bind_package(
             transient: root for root in roots for transient in (staging_dir(root.parent, root.name), retired_dir(root))
         }
         with data_access.gate_transactions(
-            list(roots), aliases=aliases,
+            list(roots),
+            aliases=aliases,
             timeout=data_access.TX_READER_TIMEOUT if inspect else data_access.TX_WRITER_TIMEOUT,
         ):
             return _bind_package_locked(
