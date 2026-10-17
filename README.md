@@ -158,8 +158,8 @@ original dashboards belongs to their respective Tableau Public authors.
     semantic model (star schema, relationships, measures), using
     [`docs/tableau-dax-translation-guide.md`](docs/tableau-dax-translation-guide.md) as its playbook.
   - `pbi-report-builder`: turns worksheets and dashboards into a PBIR report (pages, visuals,
-    bookmarks), chaining the official `powerbi-report-planning`, `powerbi-report-design`, and
-    `powerbi-report-authoring` skills.
+    bookmarks), using the official `powerbi-report-cli` skill (`authoring` for repairs,
+    `design` then `authoring` for a missing page).
   - `pbi-migration-validator`: a read-only critic that compares the built report against the Tableau
     original figure by figure, on both visuals and numbers, and reports discrepancies back to the
     orchestrator (it never edits files itself).
@@ -375,7 +375,7 @@ scripts/parse_tableau.py  ──────►  migration-spec.json
      │    then runs the AI/Copilot-readiness pass.
      │
      ├──► pbi-report-builder (agent)  ──►  PBIR report (pages/visuals/bookmarks)
-     │    Chains powerbi-report-planning, design, authoring,
+     │    Uses powerbi-report-cli (authoring/design modes),
      │    reusing the .github/pbi.kb visual cookbook.
      │
      └──► pbi-migration-validator (agent)  ──►  figure-by-figure fidelity findings

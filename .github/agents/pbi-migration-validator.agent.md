@@ -126,32 +126,32 @@ Refuse a meaningful pass without these — flag it back rather than guessing:
    is never a reason to decline** — the bundle flow writes none and the handover slice carries the
    same ground truth; fall back to the `.twb` itself (unzip the `.twbx`; the shelf XML is
    authoritative for encodings). Name the *ground truth* you lack, not the file.
-3. **Tableau reference imagery** — at least one whole-dashboard capture per dashboard. Look FIRST at
-   `migrations/workbooks/<slug>/reference/` (with a `manifest.json`); the brief names what the
-   dispatcher captured (path, tool, grade), so you never route capture yourself, and "not on Tableau
-   Public" is **not** a reason to refuse — ask for the dispatcher's capture, or a manual one.
+3. **Tableau imagery** — one whole-dashboard capture per dashboard, FIRST from
+   `migrations/workbooks/<slug>/reference/` + `manifest.json`. Use the brief's path/tool/grade;
+   never route capture yourself. Not on Tableau Public? Request the dispatcher's or manual capture.
 
    ⚠️ **Grade the evidence (#194).** An *oracle* capture (`_oracle/images/…`) lands OUTSIDE
    `reference/`, carries **no `capabilities` manifest**, and is the view's **default state only**: it
    is **layout- and text-grade** evidence, never a `validation_grade` source. Do not sign off visual
    fidelity, `state_reproducible` or `revision_bound` parity on it alone; record the gap in
    `limitations_encountered`. See `docs/reference-capture.md`.
-4. **The semantic model + PBIP report location** — for your own PBI-side screenshots (Desktop Bridge
-   `screenshot`/`screenshot-all`) and the numeric `EVALUATE` pass. ⚠️ **Judge the shipped
-   `<bundle>/pbip/` bytes**, never the model-unbound `<bundle>/reports/` baseline and never a
-   `viz_fidelity.status: "rebuilt"` claim: neither is fidelity proof for what ships.
+4. **Model + PBIP location** — for Desktop Bridge `screenshot`/`screenshot-all` and numeric `EVALUATE`.
+   ⚠️ **Judge shipped `<bundle>/pbip/` bytes**, never the model-unbound `<bundle>/reports/` baseline
+   or `viz_fidelity.status: "rebuilt"`: neither proves shipped fidelity.
 
 ## Skills you use
 
-- **Commissioned numeric investigation — DAX `EVALUATE`.** Local unpublished PBIP: query Desktop
-  with `python scripts/probe_desktop_query.py --pid <pid>` or PID-scoped ADOMD.
-  `powerbi-modeling-mcp` ConnectFolder is metadata-only; offline DAX Execute refuses. Empty model:
-  `python scripts/refresh_pbip_model.py --pid <pid> --no-save` (mandatory: default persistence
-  rewrites `database.tmdl`). `powerbi-remote` GetSemanticModelSchema/ExecuteQuery is published-only.
-- **`powerbi-report-gotchas`** — invoke **by name** whenever you judge a visual, a deferral or a
-  render artifact; it owns the craft this file deliberately does not repeat.
-- **`powerbi-report-authoring`** — Desktop Bridge screenshot/reload commands; run `check-updates`
-  first, because skill-version drift has bitten this repo.
+- **Commissioned DAX `EVALUATE`:** local PBIP → `scripts/probe_desktop_query.py --pid <pid>` or
+  PID-scoped ADOMD. ConnectFolder is metadata-only; offline Execute refuses. Empty model →
+  `scripts/refresh_pbip_model.py --pid <pid> --no-save` (default rewrites `database.tmdl`).
+  `powerbi-remote` GetSemanticModelSchema/ExecuteQuery is published-only.
+- **`powerbi-report-gotchas`** — invoke by name to judge visuals, deferrals or render artifacts.
+- **`powerbi-report-cli`** — `authoring`, read-only inventory/preview/screenshots; run-owned output.
+  Read `references/authoring.md`; never edit, plan or design; route fixes to owners.
+  Never enter `management`, publish or rebind; agreed deployment uses `scripts/deploy_estate.py`.
+  Skip upstream `@latest` installation; never install/update npm mid-migration.
+  Skill/command/capability absent → **BLOCKED**, route to preflight, the sole version authority.
+  Repo capture/refresh scripts override the host/`--pid` ban pending #730; log deviations.
 - Playwright via the shell, only if no Tableau reference imagery exists.
 
 ## Workflow

@@ -260,8 +260,5 @@ drift blocks, and `UNDECLARED` routes back to its builder.
 - **`.twbx` source files are gitignored** (`**/source/*.twbx`) — they can contain customer data.
 - **Route fixes through the owning subagent**, even a trivial one-liner: `pbi-semantic-builder`
   (DAX/TMDL) or `pbi-report-builder` (PBIR/visuals). An earlier session's biggest process gap was a
-  string of correct direct fixes that bypassed both subagents' skill chains — nothing that made them
+  string of correct direct fixes that bypassed both subagents' skills and gates — nothing that made them
   *safe* ever ran.
-- **Check installed skill versions once per session** — `preflight.ps1` covers plugin/bundle drift,
-  but also run the Power BI skills' `check-updates`: two copies can be installed at different
-  capability levels.
