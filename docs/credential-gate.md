@@ -520,7 +520,8 @@ the existing #702 descriptor lock. Earned siblings are not reset. If all supplie
 proof or applicable human permission, a skip is safe only when every omitted pending root key is
 already marker-named and **all** Windows anchors are denied/read back. Otherwise arm returns `2`
 and requests a complete-scope retry. It never manufactures omitted audit scope. Non-Windows coverage
-means marker-only, not kernel enforcement.
+means marker-only, not kernel enforcement. Unreadable ACL/audit evidence, BUSY or changed transaction
+identities retain #702's nonzero cannot-establish refusal; those are not a blind complete-scope retry.
 
 Human build-only permission is distinct from proof: it requires both the override file and a
 canonical human `authorize` row after each exact keyed arm epoch. A later measurement is appended
