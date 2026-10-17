@@ -83,7 +83,16 @@ def _package_entries(root: Path) -> list[Path]:
     return entries
 
 
-@pytest.mark.parametrize("policy", ["report", "handover", "precedence", "continuation", "alias"])
+@pytest.mark.parametrize(
+    "policy",
+    [
+        "report",
+        "handover",
+        "precedence",
+        "continuation",
+        pytest.param("alias", marks=pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")),
+    ],
+)
 def test_transaction_setup_mutations_fail_existing_policy_assertions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], policy: str
 ) -> None:
