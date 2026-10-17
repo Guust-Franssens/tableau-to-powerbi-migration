@@ -148,6 +148,12 @@ The transaction orders are:
    A caught release failure restores the prior marker where possible, marking ACL coverage
    uncertain; a hard crash may instead leave only the restrictive Windows ACL.
 
+A completed **partial** clear can still project the selected keys' earned data proof while the
+root remains blocked for siblings. This does not permit root writes: the marker must exclude the
+selected keys and exactly equal the complete pending-root set. An interrupted marker update still
+names the selected keys, and an interrupted full release has no matching pending siblings; neither
+can credit the write-ahead evidence alone.
+
 Marker/authorization replacement uses a same-directory file, flush/fsync and atomic replacement
 (Windows write-through rename; POSIX directory fsync). Audit append is checked, flushed and fsynced;
 I/O failure propagates instead of silently crediting a transition. Generic `_audit` accepts only

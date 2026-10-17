@@ -225,6 +225,32 @@ def test_write_ahead_crash_retains_stop_and_reader_rejects_credit(unit, monkeypa
     assert gate.status(root) == 0
 
 
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_scoped_projection_distinguishes_completed_partial_clear_from_interruption(
+    unit, monkeypatch: pytest.MonkeyPatch, interrupted: bool
+) -> None:
+    root, keys = unit
+    gate.record_probe_attempt(root, "DATA_OK", "fixture A", [keys[0]])
+    with monkeypatch.context() as patch:
+        if interrupted:
+            patch.setattr(
+                gate, "_durable_write", lambda *_args: (_ for _ in ()).throw(OSError("fixture partial update"))
+            )
+        result = gate.clear_block(root, "fixture A", earned=True, sources=[keys[0]])
+    assert (result != 0) is interrupted
+    spec = json.loads((root / gate.MIGRATION_SPEC).read_text(encoding="utf-8"))
+    spec["data_sources"] = spec["data_sources"][:1]
+    assessment = gate.assess_data_access(
+        root,
+        package_spec=spec,
+        package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
+        fallback_authorization="stop",
+        requested_scope="model_and_report",
+    )
+    assert assessment.state == ("blocked" if interrupted else "live_data_ok")
+    assert gate.status(root) != 0, "a scoped data projection must never release the sibling's root barrier"
+
+
 @pytest.mark.parametrize("windows", [True, False])
 def test_clear_evidence_precedes_platform_release(unit, monkeypatch: pytest.MonkeyPatch, windows: bool) -> None:
     root, keys = unit

@@ -1405,7 +1405,7 @@ def _transaction_pending(migration: Path, extra: list[str] | None = None, *, inc
     """Full-root keys veto release without widening an audit row's exact caller scope."""
     entries = _audit_entries(migration) or []
     established = _established_sources(migration)
-    recorded = [key for entry in entries for key in (_entry_sources(entry) or [])]
+    recorded = [key for entry in entries for key in (_entry_sources(entry) or []) if SOURCE_KEY_RE.fullmatch(key)]
     keys = list(dict.fromkeys([*established, *recorded, *(extra or [])]))
     if include_current and ((migration / MIGRATION_SPEC).is_file() or (migration / "input_manifest.json").is_file()):
         current, refusal = _gate_root_live_keys(migration)
@@ -2719,9 +2719,23 @@ def _assess_direct(
         physical = inspect_physical_barrier(gate_root)[0]
         if physical == "cannot_establish":
             return _cannot_establish("transaction-refused")
-        if physical != "clear":
+        if physical != "clear" and not _completed_partial_clear(gate_root, live_keys):
             return _assessment("blocked", codes=["marker-only"], source_keys=live_keys)
     return result
+
+
+def _completed_partial_clear(root: Path, selected: tuple[str, ...]) -> bool:
+    """A completed scoped projection is not permission to release the root's sibling stop."""
+    marked = set(_established_sources(root))
+    if not marked or marked.intersection(selected):
+        return False
+    keys, refusal = _gate_root_live_keys(root)
+    entries = _audit_entries(root)
+    if refusal or entries is None:
+        return False
+    states, authorized = _data_access_ledger(entries, tuple(sorted(keys)))
+    pending = {key for key, code in states.items() if code is not None}
+    return not authorized and marked == pending
 
 
 def _assess_direct_locked(
