@@ -125,6 +125,10 @@ ambiguous final 8.3/trailing-dot spellings, case-sensitive Windows parents and u
 aliases refuse `CANNOT_ESTABLISH`; they never receive independent permissive locks.
 Unavailable object IDs or unreadable Windows case metadata also refuse rather than treating two
 unknown identities, or an unqueried case flag, as proof.
+POSIX parent tokens use the opened directory's device/inode identity, not a bind-mount's spelling;
+different spellings of the same proved parent must not create different companions.
+Parent components are checked before collapsing `..`, including before joining an existing alias
+binding; normalization must not erase an unproved reparse component.
 
 The persistent companion is
 `<root-parent>\.credential-gate-tx-v1-<sha256>.lock`, **outside the authority/package root**. It is a
@@ -160,6 +164,9 @@ even a selected sibling's otherwise-earned projection; unrelated historical disp
 create new physical source obligations.
 Legacy empty/unknown-source arms remain stops, but an empty scope earns no current live key and
 cannot release its barrier.
+An all-flat local-byte projection with no gate history makes no claim about the origin bundle's
+ACL layout. It still acquires the transaction; a busy/unsafe companion or corrupt present audit
+refuses. The package binder independently checks the shipped package's physical barrier.
 
 Marker/authorization replacement uses a same-directory file, flush/fsync and atomic replacement
 (Windows write-through rename; POSIX directory fsync). Audit append is checked, flushed and fsynced;

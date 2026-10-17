@@ -6358,7 +6358,10 @@ def bind_package(
         aliases = {
             transient: root for root in roots for transient in (staging_dir(root.parent, root.name), retired_dir(root))
         }
-        with data_access.gate_transactions(list(roots), aliases=aliases):
+        with data_access.gate_transactions(
+            list(roots), aliases=aliases,
+            timeout=data_access.TX_READER_TIMEOUT if inspect else data_access.TX_WRITER_TIMEOUT,
+        ):
             return _bind_package_locked(
                 package_root, inspect=inspect, sanitize=sanitize, provider_packages=provider_packages
             )

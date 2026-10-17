@@ -260,6 +260,26 @@ def test_scoped_projection_distinguishes_completed_partial_clear_from_interrupti
     assert gate.status(root) != 0, "a scoped data projection must never release the sibling's root barrier"
 
 
+def test_local_byte_projection_without_a_gate_does_not_invent_an_origin_acl_requirement(
+    unit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _keys = unit
+
+    def no_physical_claim(_root):
+        raise AssertionError("local-byte proof is not an origin-root writability claim")
+
+    monkeypatch.setattr(gate, "inspect_physical_barrier", no_physical_claim)
+    result = gate.assess_data_access(
+        root,
+        package_spec={"data_sources": [{"connection": {"class": "csv", "powerbi_target": "flat_file"}}]},
+        package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
+        fallback_authorization="stop",
+        requested_scope="model_and_report",
+    )
+    assert result.state == "local_import_ready"
+    assert gate.status(root) != 0, "local bytes must not declare this origin's live keys earned"
+
+
 @pytest.mark.parametrize("windows", [True, False])
 def test_clear_evidence_precedes_platform_release(unit, monkeypatch: pytest.MonkeyPatch, windows: bool) -> None:
     root, keys = unit
@@ -322,6 +342,25 @@ def test_generic_audit_cannot_impersonate_transition(unit) -> None:
         gate._audit(root, "probe-error", "fixture", keys)
     gate._audit(root, "engine-receipt", "sha256=" + "0" * 64)
     assert gate._audit_entries(root)[-1]["action"] == "engine-receipt"
+
+
+def test_probe_attempt_cannot_bypass_the_repository_scope_refusal(unit) -> None:
+    root, keys = unit
+    (root / "AGENTS.md").write_text("fixture checkout marker", encoding="utf-8")
+    with pytest.raises(gate.GateTransactionError, match="scope-refused"):
+        gate.record_probe_attempt(root, "ERROR", "fixture refused scope", [keys[0]])
+    assert not (root / gate.MARKER).exists()
+    assert not (root / "fabric").exists(), "refused authority roots must never acquire a physical stop"
+    assert not (root / gate.AUDIT).exists()
+
+
+def test_unprovable_source_identity_retains_a_stop_without_a_success_row(unit) -> None:
+    root, keys = unit
+    assert gate.apply_block(root, ["source-key:unprovable"]) != 0
+    assert (root / gate.MARKER).exists(), "invalid identity evidence must not silently drop the physical stop"
+    assert not (root / gate.AUDIT).exists(), "an unprovable source must not receive a success-shaped arm row"
+    assert gate.clear_block(root, "unrelated proof", earned=True, sources=[keys[0]]) != 0
+    assert (root / gate.MARKER).exists() and gate.status(root) != 0
 
 
 def test_native_descriptor_contention_death_and_persistent_external_file(tmp_path: Path) -> None:
@@ -589,6 +628,27 @@ def test_parent_replacement_and_reparse_are_not_silent_aliases(tmp_path: Path) -
             root.mkdir(parents=True)
 
 
+def test_dotdot_cannot_erase_an_unproved_parent_component(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    parent = tmp_path / "parent"
+    (parent / "ordinary").mkdir(parents=True)
+    root = parent / "Unit"
+    root.mkdir()
+    path = parent / "ordinary" / ".." / "Unit"
+    assert gate.coordination_root(path).canonical == gate.coordination_root(root).canonical
+    safe = gate._safe_entry
+
+    def unproved(location, **kwargs):
+        if location == parent / "ordinary":
+            raise gate.GateTransactionError("fixture reparse component")
+        return safe(location, **kwargs)
+
+    with gate.gate_transactions([root]):
+        monkeypatch.setattr(gate, "_safe_entry", unproved)
+        with pytest.raises(gate.GateTransactionError, match="reparse component"):
+            gate.coordination_root(path)
+        assert gate.status(path) == 3, "an alias binding must not bypass validation of the original parent chain"
+
+
 def test_public_wrappers_join_without_reacquiring(unit, monkeypatch: pytest.MonkeyPatch) -> None:
     root, keys = unit
     count = []
@@ -829,6 +889,31 @@ def _mutant(module, name: str, old: str, new: str, monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(module, name, mutant)
 
 
+def _omitted_mutex_schedule(unit: tuple[Path, list[str]], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate marker lost updates from torn audit writes; all three writers must succeed first."""
+    root, _keys = unit
+    gate._audit(root, "engine-receipt", "sha256=" + "0" * 64)
+    write, append = gate._durable_write, gate._append_audit
+    staged = threading.Barrier(3)
+    marker_mutex = threading.Lock()
+    audit_mutex = threading.Lock()
+
+    def same_snapshot(location, name, text):
+        if name == gate.MARKER:
+            staged.wait(timeout=10)
+        with marker_mutex:
+            return write(location, name, text)
+
+    def complete_row(*args, **kwargs):
+        with audit_mutex:
+            return append(*args, **kwargs)
+
+    monkeypatch.setattr(gate, "_descriptor_lock", lambda *_args: None)
+    monkeypatch.setattr(gate, "_durable_write", same_snapshot)
+    monkeypatch.setattr(gate, "_append_audit", complete_row)
+    test_concurrent_first_arms_preserve_union_and_exact_rows(unit)
+
+
 @pytest.mark.parametrize(
     "mutation",
     [
@@ -880,9 +965,8 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
             check = partial(test_reader_busy_never_reports_clear, control, monkeypatch)
             message = "reader without"
         else:
-            monkeypatch.setattr(gate, "_descriptor_lock", lambda *_args: None)
-            check = partial(test_stale_skip_cannot_overtake_pending_attempt, unit, monkeypatch)
-            message = "attempt must not commit|pending attempt must remain"
+            check = partial(_omitted_mutex_schedule, unit, monkeypatch)
+            message = "assignment must not lose"
     elif mutation == "reader-skips-inconsistent-sibling":
         _mutant(
             gate,

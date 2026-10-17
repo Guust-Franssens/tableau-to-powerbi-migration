@@ -162,14 +162,28 @@ def _opened_parent(path: Path) -> tuple[str, tuple[int, int]]:
     try:
         if _identity(before) != _identity(os.fstat(descriptor)):
             raise GateTransactionError("transaction-parent-changed")
-        return str(path.resolve(strict=True)), _identity(before)
+        identity = _identity(before)
+        return f"posix-directory:{identity[0]}:{identity[1]}", identity
     finally:
         os.close(descriptor)
 
 
+def _root_path(root: Path) -> Path:
+    """Do not erase a reparse component through lexical ``..`` normalization."""
+    original = Path(root)
+    if not original.is_absolute():
+        original = Path.cwd() / original
+    if os.name == "nt" and str(original).startswith("\\\\"):
+        raise GateTransactionError("transaction-alias-unproved")
+    if ".." in original.parts:
+        for ancestor in reversed((original.parent, *original.parent.parents)):
+            _safe_entry(ancestor, directory=True)
+    return Path(os.path.abspath(original))
+
+
 def coordination_root(root: Path) -> CoordinationRoot:
     """Canonical opened existing parent plus final leaf; refuse aliases we cannot prove."""
-    root = Path(os.path.abspath(root))
+    root = _root_path(root)
     canonical_parent, identity = _opened_parent(root.parent)
     leaf = root.name
     if not leaf or leaf in (".", ".."):
@@ -260,7 +274,8 @@ def _descriptor_lock(descriptor: int, acquire: bool) -> None:
 
 
 def _authority(root: Path) -> CoordinationRoot:
-    spelling = os.path.normcase(os.path.abspath(root))
+    root = _root_path(root)
+    spelling = os.path.normcase(str(root))
     for alias, authority in _COORDINATION.get():
         if spelling == alias:
             return authority
@@ -491,9 +506,6 @@ def _block_refusal(migration: Path, sources: list[str], force_scope: bool) -> in
         log.error("REFUSING to arm the gate: duplicate source key(s) are not unique identities: %s", duplicates)
         _append_audit(migration, "violation", f"duplicate source keys at block: {duplicates}", sources=sources)
         return 2
-    if not _valid_audit_sources(sources):
-        return 2
-
     refusal = _scope_refusal(migration)
     if not refusal:
         return None
@@ -1434,6 +1446,9 @@ def record_probe_attempt(migration: Path, verdict: str, detail: str, sources: li
         raise ValueError("invalid probe transition")
     with gate_transaction(migration):
         _trusted_transition(migration)
+        forced = any(entry["action"] == "block-forced-scope" for entry in (_audit_entries(migration) or []))
+        if not forced and _block_refusal(migration, sources, False) is not None:
+            raise GateTransactionError("transaction-scope-refused")
         # DATA_OK also remains blocked until its paired clear. Do not invalidate siblings' epochs.
         if _apply_pending_block(migration, sources):
             raise GateTransactionError("transaction-arm-failed")
@@ -2719,6 +2734,8 @@ def _assess_direct(
 ) -> DataAccessAssessment:
     """Conjoin the existing ledger policy with the physical state under the same descriptor."""
     result = _assess_direct_locked(gate_root, live_keys, has_review, package_data_sources, policy)
+    if result.state == "local_import_ready" and _no_gate_history(gate_root):
+        return result
     if result.state in DIRECT_ACCEPTED_STATES:
         physical = inspect_physical_barrier(gate_root)[0]
         if physical == "cannot_establish":
@@ -2728,6 +2745,18 @@ def _assess_direct(
         if physical != "clear" and not _completed_partial_clear(gate_root, live_keys):
             return _assessment("blocked", codes=["marker-only"], source_keys=live_keys)
     return result
+
+
+def _no_gate_history(root: Path) -> bool:
+    """Local-byte proof needs no origin ACL layout when no credential transition ever occurred."""
+    if any(os.path.lexists(root / name) for name in (MARKER, OVERRIDE)):
+        return False
+    entries, refusal = _read_audit_trail(root)
+    if refusal == AUDIT_MISSING and not os.path.lexists(root / AUDIT):
+        return True
+    if entries is None:
+        raise GateTransactionError("transaction-audit-untrusted")
+    return all(entry["action"] in ("engine-receipt", "violation") for entry in entries)
 
 
 def _completed_partial_clear(root: Path, selected: tuple[str, ...]) -> bool:
@@ -2746,11 +2775,17 @@ def _completed_partial_clear(root: Path, selected: tuple[str, ...]) -> bool:
 
 def _missing_physical_stop(root: Path) -> bool:
     """A committed keyed pending writer cannot be represented by a writable, markerless root."""
+    writers = [
+        entry
+        for entry in (_audit_entries(root) or [])
+        if entry["action"] in BLOCK_ACTIONS or entry["action"] in (*PROBE_ATTEMPT_CODES, PROBE_DATA_OK)
+    ]
+    if not writers:
+        return False
     pending = set(_transaction_pending(root))
-    for entry in _audit_entries(root) or []:
-        if entry["action"] in BLOCK_ACTIONS or entry["action"] in (*PROBE_ATTEMPT_CODES, PROBE_DATA_OK):
-            if pending.intersection(key for key in (_entry_sources(entry) or []) if SOURCE_KEY_RE.fullmatch(key)):
-                return True
+    for entry in writers:
+        if pending.intersection(key for key in (_entry_sources(entry) or []) if SOURCE_KEY_RE.fullmatch(key)):
+            return True
     return False
 
 

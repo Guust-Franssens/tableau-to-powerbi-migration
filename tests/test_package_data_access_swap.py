@@ -67,11 +67,13 @@ def test_binding_cohort_acquires_sorted_authorities_before_inspection(
     authorities = [gate.coordination_root(root) for root in (provider, consumer)]
     expected = [authority.canonical for authority in sorted(authorities, key=lambda item: item.companion.name)]
     entered = []
+    waits = []
     enter = gate.GateTransaction.__enter__
     hold = pkg._binding_hold
 
     def counted(transaction):
         entered.append(transaction.authority.canonical)
+        waits.append(transaction.timeout)
         return enter(transaction)
 
     def inspected(root):
@@ -83,6 +85,7 @@ def test_binding_cohort_acquires_sorted_authorities_before_inspection(
     result = pkg.bind_package(str(consumer), inspect=True, provider_packages=[str(provider)])
     assert result.exit_code != 3
     assert entered == expected, "no participant may acquire a fresh staging/retired/package token"
+    assert waits == [2.0, 2.0], "public read-only binding inspection uses the approved reader deadline"
 
 
 def test_first_package_generation_receives_final_token(tmp_path: Path) -> None:
