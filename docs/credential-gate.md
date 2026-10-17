@@ -159,14 +159,14 @@ root remains blocked for siblings. This does not permit root writes: the marker 
 selected keys and exactly equal the complete pending-root set. An interrupted marker update still
 names the selected keys, and an interrupted full release has no matching pending siblings; neither
 can credit the write-ahead evidence alone.
-A markerless/writable root with a committed keyed pending writer is inconsistent and refuses
-even a selected sibling's otherwise-earned projection; unrelated historical display labels never
-create new physical source obligations.
+Root-wide status/verification still refuses a missing committed stop. A selected key's data proof
+is not a claim of root writability; unrelated historical display labels never create new physical
+source obligations.
 Legacy empty/unknown-source arms remain stops, but an empty scope earns no current live key and
 cannot release its barrier.
-An all-flat local-byte projection with no gate history makes no claim about the origin bundle's
-ACL layout. It still acquires the transaction; a busy/unsafe companion or corrupt present audit
-refuses. The package binder independently checks the shipped package's physical barrier.
+An all-flat local-byte projection makes no credential claim and does not consume an unrelated
+origin audit or ACL layout. It still acquires the transaction; a busy/unsafe companion refuses.
+The package binder independently checks the shipped package's physical barrier.
 
 Marker/authorization replacement uses a same-directory file, flush/fsync and atomic replacement
 (Windows write-through rename; POSIX directory fsync). Audit append is checked, flushed and fsynced;

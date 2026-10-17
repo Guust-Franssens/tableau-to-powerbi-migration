@@ -2733,60 +2733,29 @@ def _assess_direct(
     policy: tuple[str, str],
 ) -> DataAccessAssessment:
     """Conjoin the existing ledger policy with the physical state under the same descriptor."""
-    result = _assess_direct_locked(gate_root, live_keys, has_review, package_data_sources, policy)
-    if result.state == "local_import_ready" and _no_gate_history(gate_root):
+    result, trail = _assess_direct_locked(gate_root, live_keys, has_review, package_data_sources, policy)
+    if result.state == "local_import_ready":
         return result
     if result.state in DIRECT_ACCEPTED_STATES:
         physical = inspect_physical_barrier(gate_root)[0]
         if physical == "cannot_establish":
             return _cannot_establish("transaction-refused")
-        if physical == "clear" and _missing_physical_stop(gate_root):
-            return _cannot_establish("transaction-refused")
-        if physical != "clear" and not _completed_partial_clear(gate_root, live_keys):
+        if physical != "clear" and not _completed_partial_clear(gate_root, live_keys, trail or []):
             return _assessment("blocked", codes=["marker-only"], source_keys=live_keys)
     return result
 
 
-def _no_gate_history(root: Path) -> bool:
-    """Local-byte proof needs no origin ACL layout when no credential transition ever occurred."""
-    if any(os.path.lexists(root / name) for name in (MARKER, OVERRIDE)):
-        return False
-    entries, refusal = _read_audit_trail(root)
-    if refusal == AUDIT_MISSING and not os.path.lexists(root / AUDIT):
-        return True
-    if entries is None:
-        raise GateTransactionError("transaction-audit-untrusted")
-    return all(entry["action"] in ("engine-receipt", "violation") for entry in entries)
-
-
-def _completed_partial_clear(root: Path, selected: tuple[str, ...]) -> bool:
+def _completed_partial_clear(root: Path, selected: tuple[str, ...], entries: list[dict]) -> bool:
     """A completed scoped projection is not permission to release the root's sibling stop."""
     marked = set(_established_sources(root))
     if not marked or marked.intersection(selected):
         return False
     keys, refusal = _gate_root_live_keys(root)
-    entries = _audit_entries(root)
-    if refusal or entries is None:
+    if refusal:
         return False
     states, authorized = _data_access_ledger(entries, tuple(sorted(keys)))
     pending = {key for key, code in states.items() if code is not None}
     return not authorized and marked == pending
-
-
-def _missing_physical_stop(root: Path) -> bool:
-    """A committed keyed pending writer cannot be represented by a writable, markerless root."""
-    writers = [
-        entry
-        for entry in (_audit_entries(root) or [])
-        if entry["action"] in BLOCK_ACTIONS or entry["action"] in (*PROBE_ATTEMPT_CODES, PROBE_DATA_OK)
-    ]
-    if not writers:
-        return False
-    pending = set(_transaction_pending(root))
-    for entry in writers:
-        if pending.intersection(key for key in (_entry_sources(entry) or []) if SOURCE_KEY_RE.fullmatch(key)):
-            return True
-    return False
 
 
 def _assess_direct_locked(
@@ -2795,23 +2764,23 @@ def _assess_direct_locked(
     has_review: bool,
     package_data_sources: object,
     policy: tuple[str, str],
-) -> DataAccessAssessment:
+) -> tuple[DataAccessAssessment, list[dict] | None]:
     """Assess direct authority against package facts and one same-root ledger snapshot."""
     fallback_authorization, requested_scope = policy
     local_complete, local_refusal = _package_local_facts(package_data_sources)
     if local_refusal:
-        return _cannot_establish(local_refusal)
+        return _cannot_establish(local_refusal), None
 
     trail, evidence_refusal = _direct_evidence(gate_root, live_keys, fallback_authorization)
     if evidence_refusal:
-        return _cannot_establish(evidence_refusal)
+        return _cannot_establish(evidence_refusal), None
 
     key_codes, ledger_authorized = _data_access_ledger(trail or [], live_keys)
     authorized, auth_mismatch = _authorization_state(
         gate_root, ledger_authorized, fallback_authorization, requested_scope, trail or []
     )
     if not has_review and local_complete and not any(key_codes.values()):
-        return _accepted_direct(live_keys, requested_scope)
+        return _accepted_direct(live_keys, requested_scope), trail
     if (
         authorized
         and live_keys
@@ -2826,8 +2795,10 @@ def _assess_direct_locked(
             validation="unvalidated",
             effective_scope="model_only",
             max_phase2_claim="structural_only",
-        )
-    return _blocked_assessment(live_keys, key_codes, _package_findings(has_review, local_complete, auth_mismatch))
+        ), trail
+    return _blocked_assessment(
+        live_keys, key_codes, _package_findings(has_review, local_complete, auth_mismatch)
+    ), trail
 
 
 def assess_data_access(  # pylint: disable=too-many-arguments

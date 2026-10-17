@@ -301,7 +301,7 @@ def test_clear_evidence_precedes_platform_release(unit, monkeypatch: pytest.Monk
 
 
 @pytest.mark.parametrize("repaired", [False, True])
-def test_scoped_projection_never_hides_a_committed_sibling_without_its_stop(unit, repaired: bool) -> None:
+def test_scoped_data_proof_does_not_claim_root_clearance(unit, repaired: bool) -> None:
     root, keys = unit
     _earn(root, keys)
     gate.record_probe_attempt(root, "ERROR", "fixture B", [keys[1]])
@@ -318,9 +318,8 @@ def test_scoped_projection_never_hides_a_committed_sibling_without_its_stop(unit
         fallback_authorization="stop",
         requested_scope="model_and_report",
     )
-    assert result.state == ("live_data_ok" if repaired else "cannot_establish"), (
-        "scoped proof must not hide a committed sibling without its stop"
-    )
+    assert result.state == "live_data_ok", "a sibling cannot invalidate the selected key's genuine proof"
+    assert gate.status(root) == (0 if repaired else 3), "the root-wide authority must still refuse the missing stop"
     assert (root / gate.MARKER).exists() is False
 
 
@@ -930,7 +929,6 @@ def _omitted_mutex_schedule(unit: tuple[Path, list[str]], monkeypatch: pytest.Mo
         "transient-package-token",
         "unlink-on-release",
         "replacement-credited",
-        "reader-skips-inconsistent-sibling",
     ],
 )
 def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=too-many-branches,too-many-statements
@@ -967,16 +965,6 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
         else:
             check = partial(_omitted_mutex_schedule, unit, monkeypatch)
             message = "assignment must not lose"
-    elif mutation == "reader-skips-inconsistent-sibling":
-        _mutant(
-            gate,
-            "_assess_direct",
-            'if physical == "clear" and _missing_physical_stop(gate_root):',
-            "if False:",
-            monkeypatch,
-        )
-        check = partial(test_scoped_projection_never_hides_a_committed_sibling_without_its_stop, unit, False)
-        message = "scoped proof must not hide"
     elif mutation == "unlock-before-append":
         _mutant(
             gate,
