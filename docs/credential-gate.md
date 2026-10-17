@@ -123,6 +123,8 @@ identity/final spelling, appends the final leaf and hashes versioned bytes. Wind
 case-normalized volume-GUID path, collapsing proved drive/subst/case aliases. Reparse parents,
 ambiguous final 8.3/trailing-dot spellings, case-sensitive Windows parents and unproved network/UNC
 aliases refuse `CANNOT_ESTABLISH`; they never receive independent permissive locks.
+Unavailable object IDs or unreadable Windows case metadata also refuse rather than treating two
+unknown identities, or an unqueried case flag, as proof.
 
 The persistent companion is
 `<root-parent>\.credential-gate-tx-v1-<sha256>.lock`, **outside the authority/package root**. It is a

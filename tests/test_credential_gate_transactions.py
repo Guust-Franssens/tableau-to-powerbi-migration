@@ -487,6 +487,48 @@ def test_canonical_case_and_relative_aliases_share_one_token(tmp_path: Path) -> 
             gate.coordination_root(Path(r"\\uncontacted.example.invalid\share\Unit"))
 
 
+def test_unavailable_native_object_identity_is_not_a_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "Unit"
+    root.mkdir()
+    assert gate.status(root) == 0
+    safe, fstat = gate._safe_entry, os.fstat
+
+    def unknown(info):
+        return SimpleNamespace(st_dev=info.st_dev, st_ino=0, st_size=info.st_size)
+
+    monkeypatch.setattr(gate, "_safe_entry", lambda path, **kwargs: unknown(safe(path, **kwargs)))
+    monkeypatch.setattr(gate.os, "fstat", lambda descriptor: unknown(fstat(descriptor)))
+    assert gate.status(root) == 3, "two unavailable object IDs are not proof of identity"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")
+@pytest.mark.parametrize(("readable", "flags"), [(False, 0), (True, 1)])
+def test_unproved_or_case_sensitive_parent_is_not_a_clear(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readable: bool, flags: int
+) -> None:
+    import ctypes  # pylint: disable=import-outside-toplevel
+    from ctypes import wintypes  # pylint: disable=import-outside-toplevel
+
+    root = tmp_path / "Unit"
+    root.mkdir()
+    assert gate.status(root) == 0
+    library = ctypes.WinDLL
+    kernel = library("kernel32", use_last_error=True)
+
+    def query(_handle, _kind, output, _size):
+        ctypes.cast(output, ctypes.POINTER(wintypes.DWORD)).contents.value = flags
+        return readable
+
+    proxy = SimpleNamespace(
+        CreateFileW=kernel.CreateFileW,
+        GetDriveTypeW=kernel.GetDriveTypeW,
+        GetFinalPathNameByHandleW=kernel.GetFinalPathNameByHandleW,
+        GetFileInformationByHandleEx=query,
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: proxy)
+    assert gate.status(root) == 3, "unproved case semantics must refuse, not normalize by assumption"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="`subst` is Windows-only")
 def test_windows_subst_alias_uses_the_opened_parent_identity(tmp_path: Path) -> None:
     import ctypes  # pylint: disable=import-outside-toplevel

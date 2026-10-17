@@ -81,6 +81,8 @@ class CoordinationRoot(NamedTuple):
 
 
 def _identity(info: os.stat_result) -> tuple[int, int]:
+    if not info.st_ino:
+        raise GateTransactionError("transaction-identity-unproved")
     return info.st_dev, info.st_ino
 
 
@@ -139,7 +141,9 @@ def _windows_directory(path: Path) -> tuple[str, tuple[int, int]]:  # pylint: di
         flags = wintypes.DWORD()
         query = kernel.GetFileInformationByHandleEx
         query.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
-        if query(handle, 23, ctypes.byref(flags), ctypes.sizeof(flags)) and flags.value & 1:
+        if not query(handle, 23, ctypes.byref(flags), ctypes.sizeof(flags)):
+            raise GateTransactionError("transaction-case-unproved")
+        if flags.value & 1:
             raise GateTransactionError("transaction-case-sensitive-parent")
         return buffer.value.casefold(), _identity(opened)
     finally:
