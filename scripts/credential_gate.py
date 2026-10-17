@@ -2551,13 +2551,17 @@ def _data_access_ledger(
 
 def _authorization_state(
     gate_root: Path,
-    ledger_authorized: frozenset[str],
+    key_codes: dict[str, str | None],
+    permission: frozenset[str],
     fallback_authorization: str,
     requested_scope: str,
-    trail: list[dict],
 ) -> tuple[bool, bool]:
     """(complete authorization, mismatched inputs), using the same already-read audit snapshot."""
-    authorized = ledger_authorized and _override_is_authentic(gate_root, entries=trail)
+    authorized = (
+        bool(permission)
+        and (gate_root / OVERRIDE).is_file()
+        and all(code is None or key in permission for key, code in key_codes.items())
+    )
     wants = fallback_authorization == "model_only_unvalidated"
     if authorized and wants and requested_scope == "model_only":
         return True, False
@@ -2770,7 +2774,7 @@ def _assess_direct_locked(
 
     key_codes, ledger_authorized = _data_access_ledger(trail or [], live_keys)
     authorized, auth_mismatch = _authorization_state(
-        gate_root, ledger_authorized, fallback_authorization, requested_scope, trail or []
+        gate_root, key_codes, ledger_authorized, fallback_authorization, requested_scope
     )
     if not has_review and local_complete and not any(key_codes.values()):
         return _accepted_direct(live_keys, requested_scope), trail

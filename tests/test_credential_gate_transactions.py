@@ -222,6 +222,32 @@ def test_permission_is_never_global_or_future(unit, monkeypatch: pytest.MonkeyPa
     assert set(_marker(root)) == set(keys if kind != "new-root" else keys[1:])
 
 
+def test_scoped_human_permission_preserves_new_siblings_without_authorizing_them(
+    unit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, keys = unit
+    monkeypatch.setattr(gate, "_ancestry", lambda: [])
+    path = root / gate.MIGRATION_SPEC
+    complete = path.read_text(encoding="utf-8")
+    selected = {"data_sources": json.loads(complete)["data_sources"][:1]}
+    path.write_text(json.dumps(selected), encoding="utf-8")
+    assert gate.apply_block(root, keys[:1]) == 0
+    assert gate.authorize(root, "Fixture Human") == 0
+    path.write_text(complete, encoding="utf-8")
+    assert gate.apply_block(root, keys) == 0
+    assert _marker(root) == keys[1:]
+    assessment = gate.assess_data_access(
+        root,
+        package_spec=selected,
+        package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
+        fallback_authorization="model_only_unvalidated",
+        requested_scope="model_only",
+    )
+    assert assessment.state == "authorized_model_only", "exact historical permission survives without a global grant"
+    assert not gate._override_is_authentic(root), "the root hook must not authorize new sibling epochs"
+    assert _marker(root) == keys[1:] and gate.status(root) != 0
+
+
 def _child(root: Path, code: str) -> subprocess.Popen:
     return subprocess.Popen(
         [sys.executable, "-u", "-c", f"import sys; sys.path.insert(0, {str(SCRIPTS)!r}); " + code, str(root)],
