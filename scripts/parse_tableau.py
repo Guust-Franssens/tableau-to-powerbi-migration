@@ -2159,9 +2159,9 @@ def main() -> None:
     )
     # Arm the live-source credential gate here, at the earliest moment a live source is known and
     # before any builder runs. Measured: an agent built the model 95s BEFORE invoking the gate when
-    # arming was a later workflow step. Idempotent, no-op for extract-only workbooks, never fatal.
+    # arming was a later workflow step. Exit 1 is the ordinary live-source stop, not an arm failure.
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 sys.executable,
                 str(Path(__file__).parent / "preflight_source_credentials.py"),
@@ -2172,8 +2172,12 @@ def main() -> None:
             check=False,
             timeout=120,
         )
+        if result.returncode not in (0, 1):
+            logger.error("Credential gate transaction failed; parsing is not cleared for build.")
+            sys.exit(3)
     except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning("Could not arm the credential gate: %s", exc)
+        logger.error("Could not arm the credential gate: %s", exc)
+        sys.exit(3)
 
 
 if __name__ == "__main__":

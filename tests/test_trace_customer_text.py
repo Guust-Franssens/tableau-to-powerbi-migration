@@ -286,16 +286,24 @@ def test_inject_handles_a_bare_datasource(tmp_path: Path) -> None:
     assert entries
     assert "ZZINJECTZZ" in out.read_text(encoding="utf-8")
 
-    result = subprocess.run(
-        [sys.executable, str(REPO_ROOT / "scripts" / "parse_tableau.py"), str(out), "-o", str(tmp_path / "ds.json")],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr[-2000:]
-    assert "ZZINJECTZZ" in (tmp_path / "ds.json").read_text(encoding="utf-8")
+    unit = tmp_path / "parsed-datasource"
+    spec = unit / "migration-spec.json"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "parse_tableau.py"), str(out), "-o", str(spec)],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert "ZZINJECTZZ" in spec.read_text(encoding="utf-8")
+    finally:
+        if sys.platform == "win32" and unit.exists():
+            from test_credential_gate_acl_layouts import AclLab  # pylint: disable=import-outside-toplevel
+
+            AclLab(unit).cleanup()
 
 
 @pytest.mark.parametrize("token", ["ZZINJECTZZ001", "ZZTRACEZZ123", "ZZINJECTZZ1000"])

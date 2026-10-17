@@ -10,6 +10,7 @@ change the custom-SQL path.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -51,6 +52,15 @@ PROBE_PROJECTION = (
     'without_probe = Table.RemoveColumns(one, {"ProbeOK"}, MissingField.Ignore),\n'
     '    probe = Table.SelectColumns(Table.AddColumn(without_probe, "ProbeOK", each 1), {"ProbeOK"})'
 )
+
+
+@pytest.fixture(autouse=True)
+def _canonical_marker_only_probe_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Custom-SQL verdicts stay independent of Windows ACL tooling and have an attributable root."""
+    import credential_gate as gate  # pylint: disable=import-outside-toplevel
+
+    (tmp_path / gate.MIGRATION_SPEC).write_text(json.dumps({"data_sources": []}), encoding="utf-8")
+    monkeypatch.setattr(gate.platform, "system", lambda: "Linux")
 
 
 def _source(tables: list[dict], fields: list[dict] | None = None) -> dict:

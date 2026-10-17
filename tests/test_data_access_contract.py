@@ -399,8 +399,20 @@ def _earn(root: Path) -> None:
 
 
 def _authorize(root: Path, sources: list[str] | None = None) -> None:
-    assert gate.apply_block(root, [KEY] if sources is None else sources) == 0
-    assert gate.authorize(root, "Fixture Human") == 0
+    current, refusal = gate._gate_root_live_keys(root)
+    assert refusal is None
+    armed = sorted(current) if sources is None else sources
+    assert gate.apply_block(root, armed) == 0
+    result = gate.authorize(root, "Fixture Human")
+    if current <= set(armed):
+        assert result == 0
+    elif any(gate.SOURCE_KEY_RE.fullmatch(source) for source in armed):
+        assert result != 0, "partial keyed arms cannot release the complete current root"
+        assert (root / gate.MARKER).exists() and gate.status(root) != 0
+    else:
+        assert result == 0, "legacy human authorization remains readable, never current keyed proof"
+        states, authorized = gate._data_access_ledger(_rows(root), tuple(sorted(current)))
+        assert not authorized and set(states.values()) == {"source-key-set-changed"}
 
 
 @pytest.mark.usefixtures("desktop")
@@ -535,7 +547,7 @@ def test_forged_authorization_never_qualifies(root: Path, shape: str) -> None:
     _write_rows(root, rows)
     result = _assess(root, authorized=True)
     expected = (
-        ("blocked", ("authorization-mismatch", "stale-clear"))
+        ("blocked", ("authorization-mismatch", "marker-only"))
         if shape == "directory"
         else ("cannot_establish", ("audit-malformed",))
     )
@@ -598,7 +610,7 @@ def test_authorization_writer_reader_platform_parity(  # pylint: disable=too-man
     """A real writer refusal is the independent oracle for a forged row's lack of authority."""
     monkeypatch.setattr(gate.platform, "system", lambda: system)
     monkeypatch.setattr(gate, "_ancestry", lambda: chain)
-    assert gate.apply_block(root, [KEY]) == 0
+    assert gate.apply_block(root, [KEY, OTHER_KEY]) == 0
     assert gate.authorize(root, "Fixture Human") == writer_exit
     detail = f"by=Fixture Human; chain={chain}"
     if writer_exit:
@@ -726,7 +738,9 @@ def test_authorization_cannot_override_authority_failures(root: Path, fault: str
     elif fault == "invalid-key":
         spec = _spec({**LIVE, "server": None})
     elif fault == "new-key":
-        spec = _spec(OTHER)
+        future = {**OTHER, "server": "future.example"}
+        (root / gate.MIGRATION_SPEC).write_text(json.dumps(_spec(LIVE, OTHER, future)), encoding="utf-8")
+        spec = _spec(future)
     result = _assess(root, spec=spec, authorized=True)
     code = (
         "forced-scope"
@@ -803,8 +817,8 @@ def test_all_current_audit_writers_remain_readable(root: Path, monkeypatch: pyte
     assert gate.clear_block(root, "duplicate refusal", earned=True, sources=[KEY, KEY]) == 1
     assert _assess(root).state == "live_data_ok"
     assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [OTHER_KEY]
-    assert gate.clear_block(root, "manual diagnostic", earned=False) == 0
-    assert not (root / gate.MARKER).exists()
+    assert gate.clear_block(root, "manual diagnostic", earned=False) != 0
+    assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [OTHER_KEY]
     assert _clear_was_earned(root, [OTHER_KEY]) is None, "administrative clear must not earn the other key"
     assert gate.apply_block(root, [OTHER_KEY]) == 0
     assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [OTHER_KEY]
@@ -824,7 +838,9 @@ def test_all_current_audit_writers_remain_readable(root: Path, monkeypatch: pyte
         ("engine-receipt", None),
         ("probe-error", None),
         ("block-marker-only", [KEY, OTHER_KEY]),
+        ("block-marker-only", [KEY]),
         ("probe-error", [KEY]),
+        ("block-marker-only", [KEY]),
         ("probe-data_ok", [KEY]),
         ("probe-cleared", [KEY]),
         ("block-skipped", None),
@@ -832,10 +848,10 @@ def test_all_current_audit_writers_remain_readable(root: Path, monkeypatch: pyte
         ("violation", [KEY, KEY]),
         ("manual-clear", None),
         ("block-marker-only", [OTHER_KEY]),
+        ("block-marker-only", [OTHER_KEY]),
         ("probe-data_ok", [OTHER_KEY]),
         ("probe-cleared", [OTHER_KEY]),
         ("authorize", None),
-        ("probe-cleared", [OTHER_KEY]),
         ("block-skipped", None),
     ]
     assert [row["action"] for row in rows] == [action for action, _sources in expected], "exact writer action sequence"
@@ -1016,10 +1032,12 @@ def test_production_resolution_error_cannot_reuse_old_clearance(root: Path, sour
     assert (_rows(root)[-1]["action"], _rows(root)[-1]["sources"]) == ("probe-error", [current_key])
     current = _assess(root, spec=spec)
     assert (current.state, current.codes, current.source_keys) == (
-        "cannot_establish",
-        ("source-key-set-changed",),
-        (),
+        "blocked",
+        ("probe-error",),
+        (current_key,),
     )
+    assert (_rows(root)[-2]["action"], _rows(root)[-2]["sources"]) == ("block-marker-only", [current_key])
+    assert current.max_phase2_claim == "none"
 
 
 @pytest.mark.usefixtures("desktop")

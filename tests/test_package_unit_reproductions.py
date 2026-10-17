@@ -854,8 +854,9 @@ def test_producer_uses_current_keyed_authority_without_writes(
                 row.pop("sources", None)
         authority._write_rows(root, rows)
     elif fault == "manual":
-        assert authority.gate.clear_block(root, "manual diagnostic", earned=False) == 0
-        assert not (root / authority.gate.MARKER).exists()
+        assert authority.gate.clear_block(root, "manual diagnostic", earned=False) != 0
+        assert (root / authority.gate.MARKER).exists()
+        assert authority.gate.status(root) != 0
         assert _clear_was_earned(root, [authority.KEY]) is None
         assert [row["action"] for row in _rows(root)] == ["block-marker-only", "manual-clear"]
     candidate = _assessment_candidate(tmp_path, authority._spec(authority.LIVE))
@@ -899,7 +900,7 @@ def test_mixed_direct_sources_need_every_key_and_all_local_bytes(
             (action, [key])
             for key in keys
             if not (fault == "unearned-key" and key == authority.OTHER_KEY)
-            for action in ("probe-data_ok", "probe-cleared")
+            for action in ("block-marker-only", "probe-data_ok", "probe-cleared")
         ],
     ]
     candidate = _assessment_candidate(tmp_path, authority._spec(*connections))
@@ -920,10 +921,10 @@ def test_mixed_direct_sources_need_every_key_and_all_local_bytes(
     [
         ("none", ("authorized_model_only", ("brief-model-only", "human-authorize"))),
         ("bare-override", ("cannot_establish", ("audit-missing",))),
-        ("stop", ("blocked", ("authorization-mismatch", "stale-clear"))),
-        ("workbook", ("blocked", ("authorization-mismatch", "stale-clear"))),
-        ("review", ("blocked", ("stale-clear", "unknown-target"))),
-        ("local-missing", ("blocked", ("local-import-incomplete", "stale-clear"))),
+        ("stop", ("blocked", ("authorization-mismatch", "marker-only"))),
+        ("workbook", ("blocked", ("authorization-mismatch", "marker-only"))),
+        ("review", ("blocked", ("marker-only", "unknown-target"))),
+        ("local-missing", ("blocked", ("local-import-incomplete", "marker-only"))),
     ],
 )
 def test_authorization_never_downgrades_scope_or_overrides_missing_prerequisites(

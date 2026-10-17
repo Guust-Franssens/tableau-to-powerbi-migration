@@ -54,6 +54,15 @@ requires_validator = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _canonical_marker_only_probe_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Probe/verdict controls use a real unit address, without unrelated native ACL subprocesses."""
+    import credential_gate as gate  # pylint: disable=import-outside-toplevel
+
+    (tmp_path / gate.MIGRATION_SPEC).write_text('{"data_sources": []}', encoding="utf-8")
+    monkeypatch.setattr(gate.platform, "system", lambda: "Linux")
+
+
 @pytest.fixture(name="scaffold")
 def scaffold_fixture() -> dict[str, str]:
     """The scaffold exactly as the probe emits it, keyed by relative path."""

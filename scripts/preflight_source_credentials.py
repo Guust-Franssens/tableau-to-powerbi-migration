@@ -104,10 +104,7 @@ def _write_gate_marker(migration: Path, sources: list[str]) -> Path | None:
     once a human has seen the gate, and removing it would make the toolkit unusable for a customer
     who genuinely wants a structural-only pass.
     """
-    if (migration / GATE_OVERRIDE).exists():
-        log.warning("Gate OVERRIDDEN by %s - build-only run authorized by the user.", GATE_OVERRIDE)
-        return None
-    subprocess.run(
+    result = subprocess.run(
         [
             sys.executable,
             str(Path(__file__).parent / "credential_gate.py"),
@@ -117,7 +114,10 @@ def _write_gate_marker(migration: Path, sources: list[str]) -> Path | None:
             *sources,
         ],
         check=False,
+        timeout=120,
     )
+    if result.returncode:
+        raise OSError("credential gate transaction refused")
     marker = migration / GATE_MARKER
     return marker if marker.exists() else None
 
@@ -125,7 +125,7 @@ def _write_gate_marker(migration: Path, sources: list[str]) -> Path | None:
 def _clear_gate_marker(migration: Path) -> None:
     """Release the gate: no live source needs a credential."""
     if (migration / GATE_MARKER).exists():
-        subprocess.run(
+        result = subprocess.run(
             [
                 sys.executable,
                 str(Path(__file__).parent / "credential_gate.py"),
@@ -135,7 +135,10 @@ def _clear_gate_marker(migration: Path) -> None:
                 "no-live-sources",
             ],
             check=False,
+            timeout=120,
         )
+        if result.returncode:
+            raise OSError("credential gate transaction refused")
 
 
 def _norm_case_insensitive(value: object) -> str:
@@ -400,7 +403,11 @@ def cmd_classify(bundle_path: Path) -> int:
         # invites exactly that reading ("the human fixes it later, I continue now"). Persona prose
         # already said "Unconditional" and lost, so the imperative lives here, in tool output, which
         # agents follow far more literally than their own instructions.
-        written = _write_gate_marker(bundle.migration_dir, blocked_names)
+        try:
+            written = _write_gate_marker(bundle.migration_dir, blocked_names)
+        except (OSError, subprocess.SubprocessError):
+            log.error("Credential gate CANNOT_ESTABLISH: arming transaction failed.")
+            return 3
         _print_stop_directive(needs)
         _print_remediation()
         if written:
@@ -415,7 +422,11 @@ def cmd_classify(bundle_path: Path) -> int:
                 GATE_OVERRIDE,
             )
     else:
-        _clear_gate_marker(bundle.migration_dir)
+        try:
+            _clear_gate_marker(bundle.migration_dir)
+        except (OSError, subprocess.SubprocessError):
+            log.error("Credential gate CANNOT_ESTABLISH: clearing transaction failed.")
+            return 3
         log.info("No live sources: all extract/flat (CSV + DataFolder). No credential gate for this workbook.")
     if review:
         log.warning("%d source(s) need manual review (unrecognised class).", review)

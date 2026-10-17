@@ -875,9 +875,9 @@ def _record_attempt(migration: Path, verdict: str, what: str, sources: list[str]
     Evidence written after slow cleanup is evidence you can lose.
     """
     sys.path.insert(0, str(Path(__file__).parent))
-    from credential_gate import _audit  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+    from credential_gate import record_probe_attempt  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
-    _audit(migration, f"probe-{verdict.lower()}", what, sources=list(sources))
+    record_probe_attempt(migration, verdict, what, sources=list(sources))
 
 
 @contextmanager

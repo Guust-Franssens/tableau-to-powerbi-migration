@@ -297,7 +297,15 @@ def unit_is_blocked(unit: Path) -> bool:
     has no marker (authorize removes it), so marker-presence already excludes that case; a forged
     override is surfaced from `list --json` input state instead.
     """
-    return (unit / GATE_MARKER).exists()
+    import credential_gate as gate  # pylint: disable=import-outside-toplevel
+
+    with gate.gate_transaction(unit, timeout=gate.TX_READER_TIMEOUT):
+        if (unit / GATE_MARKER).exists():
+            return True
+        state = gate.status(unit)
+        if state:
+            raise gate.GateTransactionError("transaction-cannot-establish")
+        return False
 
 
 def _units_from_json(payload: object) -> list[UnitInput]:
@@ -404,7 +412,9 @@ def _anomaly(unit: Path, reason: str) -> UnitResult:
     return UnitResult(unit=unit, category=CAT_ANOMALY, verdict=None, reason=reason, elapsed_sec=0.0)
 
 
-def _classify_selection(unit: UnitInput, resolved: Path) -> tuple[bool, UnitResult | None, bool]:
+def _classify_selection(  # pylint: disable=too-many-return-statements
+    unit: UnitInput, resolved: Path
+) -> tuple[bool, UnitResult | None, bool]:
     """Decide selection for one resolved unit: (probe_it, pre_result, forged).
 
     `list --json` state is authoritative for classification, so FORGED-OVERRIDE flags the sweep
@@ -424,6 +434,8 @@ def _classify_selection(unit: UnitInput, resolved: Path) -> tuple[bool, UnitResu
     principle; a genuine disagreement is reported as an ANOMALY (non-zero) rather than skipped.
     """
     state = (unit.state or "").strip().upper()
+    if state in ("BUSY", "CANNOT_ESTABLISH", "CANNOT-ESTABLISH"):
+        return False, _errored(resolved, f"state={state}; credential transaction was not established"), False
     if state == FORGED_STATE:
         return (
             False,
@@ -472,7 +484,11 @@ def select(units: list[UnitInput]) -> tuple[list[UnitInput], list[UnitResult], b
         if resolved in seen:
             continue
         seen.add(resolved)
-        probe_it, pre_result, unit_forged = _classify_selection(unit, resolved)
+        try:
+            probe_it, pre_result, unit_forged = _classify_selection(unit, resolved)
+        except OSError:
+            pre_results.append(_errored(resolved, "credential gate BUSY/CANNOT_ESTABLISH; not skipped"))
+            continue
         forged = forged or unit_forged
         if probe_it:
             to_probe.append(UnitInput(path=resolved, state=BLOCKED_STATE, relative=unit.relative))
@@ -516,9 +532,13 @@ def _default_probe_runner(unit: Path, options: SweepOptions) -> ProbeOutcome:
     return ProbeOutcome(returncode=proc.returncode, verdict=verdict, timed_out=False, detail=detail)
 
 
-def classify(outcome: ProbeOutcome, blocked_after: bool) -> tuple[str, str | None, str]:
+def classify(  # pylint: disable=too-many-return-statements
+    outcome: ProbeOutcome, blocked_after: bool
+) -> tuple[str, str | None, str]:
     """Map a probe outcome + ground-truth gate state to (category, verdict, reason). Pure."""
     verdict = outcome.verdict
+    if verdict == "DATA_OK" and outcome.returncode != 0:
+        return CAT_ERRORED, verdict, "probe/gate transaction failed; no earned clear established"
     if not blocked_after:
         # Ground truth: the gate is DOWN. A DATA_OK probe is the only thing that EARNS that on this
         # path, so DATA_OK -> newly-earned. If the gate is down but the probe did NOT report DATA_OK,
@@ -548,7 +568,11 @@ def classify(outcome: ProbeOutcome, blocked_after: bool) -> tuple[str, str | Non
 def probe_unit(unit: UnitInput, runner, options: SweepOptions) -> UnitResult:
     """Probe one blocked unit once and classify it from the ground-truth gate transition."""
     path = unit.path
-    if not unit_is_blocked(path):
+    try:
+        blocked_before = unit_is_blocked(path)
+    except OSError:
+        return _errored(path, "credential gate BUSY/CANNOT_ESTABLISH before probe")
+    if not blocked_before:
         # Re-checked at probe time: the gate may have cleared since it was listed (verify before
         # repeating). Probing a unit that is no longer blocked would waste a Desktop launch.
         return _skip(path, "no longer blocked at probe time (cleared since it was listed)")
@@ -568,7 +592,10 @@ def probe_unit(unit: UnitInput, runner, options: SweepOptions) -> UnitResult:
             elapsed_sec=time.monotonic() - start,
         )
     elapsed = time.monotonic() - start
-    category, verdict, reason = classify(outcome, unit_is_blocked(path))
+    try:
+        category, verdict, reason = classify(outcome, unit_is_blocked(path))
+    except OSError:
+        return _errored(path, "credential gate BUSY/CANNOT_ESTABLISH after probe")
     if elapsed > 60:
         log.info("  %s took %.0fs", path, elapsed)
     return UnitResult(unit=path, category=category, verdict=verdict, reason=reason, elapsed_sec=elapsed)
