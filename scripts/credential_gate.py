@@ -2719,6 +2719,8 @@ def _assess_direct(
         physical = inspect_physical_barrier(gate_root)[0]
         if physical == "cannot_establish":
             return _cannot_establish("transaction-refused")
+        if physical == "clear" and _missing_physical_stop(gate_root):
+            return _cannot_establish("transaction-refused")
         if physical != "clear" and not _completed_partial_clear(gate_root, live_keys):
             return _assessment("blocked", codes=["marker-only"], source_keys=live_keys)
     return result
@@ -2736,6 +2738,16 @@ def _completed_partial_clear(root: Path, selected: tuple[str, ...]) -> bool:
     states, authorized = _data_access_ledger(entries, tuple(sorted(keys)))
     pending = {key for key, code in states.items() if code is not None}
     return not authorized and marked == pending
+
+
+def _missing_physical_stop(root: Path) -> bool:
+    """A committed keyed pending writer cannot be represented by a writable, markerless root."""
+    pending = set(_transaction_pending(root))
+    for entry in _audit_entries(root) or []:
+        if entry["action"] in BLOCK_ACTIONS or entry["action"] in (*PROBE_ATTEMPT_CODES, PROBE_DATA_OK):
+            if pending.intersection(key for key in (_entry_sources(entry) or []) if SOURCE_KEY_RE.fullmatch(key)):
+                return True
+    return False
 
 
 def _assess_direct_locked(

@@ -271,6 +271,30 @@ def test_clear_evidence_precedes_platform_release(unit, monkeypatch: pytest.Monk
     assert seen == (["marker", "acl"] if windows else ["marker"])
 
 
+@pytest.mark.parametrize("repaired", [False, True])
+def test_scoped_projection_never_hides_a_committed_sibling_without_its_stop(unit, repaired: bool) -> None:
+    root, keys = unit
+    _earn(root, keys)
+    gate.record_probe_attempt(root, "ERROR", "fixture B", [keys[1]])
+    if repaired:
+        _earn(root, [keys[1]])
+    else:
+        (root / gate.MARKER).unlink()  # Deliberately corrupt only this marker-only test fixture.
+    spec = json.loads((root / gate.MIGRATION_SPEC).read_text(encoding="utf-8"))
+    spec["data_sources"] = spec["data_sources"][:1]
+    result = gate.assess_data_access(
+        root,
+        package_spec=spec,
+        package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
+        fallback_authorization="stop",
+        requested_scope="model_and_report",
+    )
+    assert result.state == ("live_data_ok" if repaired else "cannot_establish"), (
+        "scoped proof must not hide a committed sibling without its stop"
+    )
+    assert (root / gate.MARKER).exists() is False
+
+
 def test_torn_audit_never_rearms_or_clears(unit) -> None:
     root, keys = unit
     assert gate.apply_block(root, keys) == 0
@@ -709,6 +733,7 @@ def _mutant(module, name: str, old: str, new: str, monkeypatch: pytest.MonkeyPat
         "transient-package-token",
         "unlink-on-release",
         "replacement-credited",
+        "reader-skips-inconsistent-sibling",
     ],
 )
 def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=too-many-branches,too-many-statements
@@ -746,6 +771,16 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
             monkeypatch.setattr(gate, "_descriptor_lock", lambda *_args: None)
             check = partial(test_stale_skip_cannot_overtake_pending_attempt, unit, monkeypatch)
             message = "attempt must not commit|pending attempt must remain"
+    elif mutation == "reader-skips-inconsistent-sibling":
+        _mutant(
+            gate,
+            "_assess_direct",
+            'if physical == "clear" and _missing_physical_stop(gate_root):',
+            "if False:",
+            monkeypatch,
+        )
+        check = partial(test_scoped_projection_never_hides_a_committed_sibling_without_its_stop, unit, False)
+        message = "scoped proof must not hide"
     elif mutation == "unlock-before-append":
         _mutant(
             gate,

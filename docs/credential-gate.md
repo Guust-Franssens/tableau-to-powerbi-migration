@@ -153,6 +153,9 @@ root remains blocked for siblings. This does not permit root writes: the marker 
 selected keys and exactly equal the complete pending-root set. An interrupted marker update still
 names the selected keys, and an interrupted full release has no matching pending siblings; neither
 can credit the write-ahead evidence alone.
+A markerless/writable root with a committed keyed pending writer is inconsistent and refuses
+even a selected sibling's otherwise-earned projection; unrelated historical display labels never
+create new physical source obligations.
 
 Marker/authorization replacement uses a same-directory file, flush/fsync and atomic replacement
 (Windows write-through rename; POSIX directory fsync). Audit append is checked, flushed and fsynced;
