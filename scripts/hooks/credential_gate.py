@@ -64,6 +64,7 @@ GUARDED_SUFFIXES = (".tmdl", ".pbism", ".pbir", ".pbip", ".platform")
 # Security-through-obscurity is explicitly NOT the goal - MAI reading this comment changes nothing,
 # because the denial does not depend on the agent not knowing about it.
 CONTROL_FILES = (OVERRIDE.lower(), MARKER.lower())
+_COMPANION_RE = re.compile(r"\.credential-gate-tx-v1-[0-9a-f]{64}\.lock", re.IGNORECASE)
 
 _CORE_GATE = None
 
@@ -133,8 +134,9 @@ _CONTROL_FILE_MUTATION_RE = re.compile(
     re.IGNORECASE,
 )
 
-# `credential_gate.py clear` has NO internal defense against being run unearned: `clear_block()`
-# lifts the ACL unconditionally and only labels the audit entry differently (`manual-clear` vs
+# Legacy `credential_gate.py clear` has no process-lineage defense against being run unearned.
+# Current keyed pending obligations now veto release; legacy teardown still labels the audit
+# differently (`manual-clear` vs
 # `probe-cleared`) for `verify` to flag AFTERWARDS - detection, not prevention. `authorize` DOES
 # self-defend via `_has_copilot_ancestor`, but `clear` does not, so THIS hook is the only thing
 # stopping a subagent from lifting its own armed gate by invoking the documented teardown verb
@@ -240,10 +242,91 @@ def _writes_a_control_file(payload: dict, tool: str, cwd: Path) -> bool:
     """
     if tool.lower() not in WRITE_TOOLS:
         return False
-    for value in _path_arguments(payload):
+    values = _path_arguments(payload)
+    if tool.lower() == "apply_patch":
+        values.extend(match.group(1) for match in _APPLY_PATCH_HEADER_RE.finditer(_extract_args_text(payload)))
+    for value in values:
         target = Path(value)
         target = target if target.is_absolute() else (cwd / target)
-        if target.name in (OVERRIDE, MARKER):
+        if target.name in (OVERRIDE, MARKER) or _COMPANION_RE.fullmatch(target.name):
+            return True
+    return False
+
+
+def _companion_targets(words: list[str], verb: str) -> list[str]:
+    """PowerShell content is not a destination; copy/move's second positional argument is."""
+    paths, positional = [], []
+    target_flags = {"-path", "-literalpath", "-destination", "-target", "-filepath"}
+    value_flags = {"-value", "-inputobject", "-encoding", "-itemtype", "-type", "-name"}
+    index = 1
+    while index < len(words):
+        word = words[index].lower()
+        if word in target_flags | value_flags and index + 1 < len(words):
+            if word in target_flags:
+                paths.append(words[index + 1])
+            index += 2
+            continue
+        if not word.startswith("-"):
+            positional.append(words[index])
+        index += 1
+    if paths:
+        return paths
+    if verb in {"set-content", "add-content", "out-file", "new-item"}:
+        return positional[:1]
+    return positional
+
+
+def _companion_mutation(payload: dict) -> bool:  # pylint: disable=too-many-branches
+    """Only command-position mutations or redirection targets, never quoted prose/test bodies."""
+    command = None
+    for key in ("toolInput", "tool_input", "toolArgs", "tool_args"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                continue
+        if isinstance(value, dict) and isinstance(value.get("command"), str):
+            command = value["command"]
+            break
+    if command is None:
+        return False
+    words = re.findall(r""""(?:\\.|[^"])*"|'[^']*'|>>?|[;&|\n]|[^\s;&|\n>]+""", command)
+    segments: list[list[str]] = [[]]
+    for word in words:
+        if word in (";", "&", "|", "\n"):
+            segments.append([])
+        else:
+            segments[-1].append(word)
+    verbs = {
+        "remove-item",
+        "rename-item",
+        "move-item",
+        "copy-item",
+        "set-content",
+        "add-content",
+        "out-file",
+        "new-item",
+        "del",
+        "erase",
+        "rm",
+        "mv",
+        "cp",
+        "touch",
+        "tee",
+        "unlink",
+    }
+    for segment in segments:
+        if not segment:
+            continue
+        executable = segment[0].strip("\"'").rsplit("\\", 1)[-1].lower()
+        targets = _companion_targets(segment, executable) if executable in verbs else []
+        for index, word in enumerate(segment):
+            if word in (">", ">>") and index + 1 < len(segment):
+                targets.append(segment[index + 1])
+            elif word.startswith(">"):
+                targets.append(word.lstrip(">"))
+        if any(_COMPANION_RE.fullmatch(word.strip("\"'").replace("\\", "/").rsplit("/", 1)[-1]) for word in targets):
             return True
     return False
 
@@ -278,6 +361,32 @@ def _path_arguments(payload: dict) -> list[str]:
 
 
 def _blocking_marker(target: Path) -> Path | None:
+    """Snapshot all relevant authorities under sorted locks; busy/unsafe means deny."""
+    core = _core_gate_module()
+    if core is None:
+        return target / MARKER
+    try:
+        roots = []
+        for parent in (target, *target.parents):
+            if not parent.is_dir() or parent.parent == parent:
+                continue
+            if any((parent / name).exists() for name in (MARKER, OVERRIDE, AUDIT, *core.SCOPE_MARKERS)):
+                roots.append(parent)
+            elif core.coordination_root(parent).companion.exists():
+                roots.append(parent)
+        with core.gate_transactions(roots, timeout=core.TX_HOOK_TIMEOUT):
+            marker = _blocking_marker_locked(target)
+            if marker is not None:
+                return marker
+            for root in roots:
+                if not (root / MARKER).exists() and core.status(root) != 0:
+                    return root / MARKER
+            return None
+    except (OSError, ValueError):
+        return target / MARKER
+
+
+def _blocking_marker_locked(target: Path) -> Path | None:
     """Return the BLOCKED marker governing `target`, or None.
 
     Walks upward from the target: a marker governs everything beneath the directory it sits in,
@@ -337,7 +446,11 @@ def _override_is_authentic(scope: Path) -> bool:
     core = _core_gate_module()
     if core is None:
         return False
-    return bool(core._override_is_authentic(scope))  # pylint: disable=protected-access
+    try:
+        with core.gate_transaction(scope, timeout=core.TX_HOOK_TIMEOUT):
+            return core.status(scope) == 0 and bool(core._override_is_authentic(scope))  # pylint: disable=protected-access
+    except (OSError, ValueError):
+        return False
 
 
 def _earned_clear_shields(scope: Path, marker: Path) -> bool:
@@ -354,7 +467,11 @@ def _earned_clear_shields(scope: Path, marker: Path) -> bool:
     core = _core_gate_module()
     if core is None:
         return False
-    return core._redundant_rearm(scope, sources) == "probe-cleared"  # pylint: disable=protected-access
+    try:
+        with core.gate_transactions([scope, marker.parent], timeout=core.TX_HOOK_TIMEOUT):
+            return core.status(scope) == 0 and core._redundant_rearm(scope, sources) == "probe-cleared"  # pylint: disable=protected-access
+    except (OSError, ValueError):
+        return False
 
 
 def _extract_args_text(payload: dict) -> str:
@@ -558,8 +675,10 @@ def main() -> int:
     #    file literally named after the marker/override, gated or not). Shell commands are judged on
     #    whether they MUTATE, and denied only when the SPECIFIC migration they name is currently
     #    armed - see `_targets_an_armed_gate` for why target-awareness matters here.
-    control_hit = (tool_l in WRITE_TOOLS and _writes_a_control_file(payload, str(tool), cwd)) or (
-        tool_l in SHELL_TOOLS and _mutates_control_surface(text) and _targets_an_armed_gate(text, cwd)
+    control_hit = (
+        (tool_l in WRITE_TOOLS and _writes_a_control_file(payload, str(tool), cwd))
+        or (tool_l in SHELL_TOOLS and _mutates_control_surface(text) and _targets_an_armed_gate(text, cwd))
+        or (tool_l in SHELL_TOOLS and _companion_mutation(payload))
     )
     if control_hit:
         return _deny(

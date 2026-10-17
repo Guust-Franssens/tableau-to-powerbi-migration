@@ -98,7 +98,8 @@ the deny to ordinary inheriting existing and future children. Protected DACLs an
 explicit permissions are checked **before mutation**: the gate refuses with
 `CANNOT ESTABLISH`, a nonzero result and no `ENFORCED` claim. It does not repair permissions or
 promise to restore grants an ACL operation would remove. Exact, audit-attributable gate denies are
-the nesting/re-arm exception. Explicit group grants can also override an inherited deny on a child:
+the nesting/re-arm exception; a durable pending marker also attributes an interrupted arm for
+retry, before its arm row could be committed. Explicit group grants can override an inherited deny on a child:
 the supported ACL shape is deliberately limited to inherited permissions plus attributable gate
 denies, without attempting group-membership analysis. A partial apply retains the stop and completed
 denies, but marks
@@ -111,8 +112,64 @@ probe in **`<bundle>\_probe`**. Earn the outer clear before using `<unit>\_probe
 unit's gate metadata. Clearing the outer gate preserves the inner explicit denies; clearing the
 inner first preserves the outer inherited deny and cannot announce physical clearance. Both
 physical removals are necessary. The child-first order proves only ACE preservation: the enclosing
-deny can prevent the inner audit append, and `_audit` durability remains separate #702 work.
+deny can prevent the inner durable audit append; that transaction returns nonzero.
 Only the outer-first route is the supported earned-clear workflow.
+
+### Same-root transactions and interrupted releases (#702)
+
+All participants coordinate on **one logical authority root**, not on each physical ACL anchor.
+`coordination_root()` opens the existing parent without following a reparse entry, obtains its OS
+identity/final spelling, appends the final leaf and hashes versioned bytes. Windows uses a
+case-normalized volume-GUID path, collapsing proved drive/subst/case aliases. Reparse parents,
+ambiguous final 8.3/trailing-dot spellings, case-sensitive Windows parents and unproved network/UNC
+aliases refuse `CANNOT_ESTABLISH`; they never receive independent permissive locks.
+
+The persistent companion is
+`<root-parent>\.credential-gate-tx-v1-<sha256>.lock`, **outside the authority/package root**. It is a
+regular one-byte, single-link file. Writers wait at most 10 seconds, readers 2 seconds, hooks
+0.5 seconds per authority. Windows locks its byte with `msvcrt`; POSIX uses `flock`. Process death
+releases the descriptor; the companion stays. **Never unlink it on release, to recover a busy lock,
+or because a recorded PID seems old.** There is no PID file, daemon, database or recovery ledger.
+An unsafe companion, timeout, identity change or untrusted/torn audit returns a non-success verdict.
+Public wrappers join a held transaction instead of reacquiring its descriptor.
+
+The transaction orders are:
+
+1. **Arm or record an attempt:** read the locked snapshot; union established marker obligations
+   with the exact new keys; atomically persist the marker; deny/read back every Windows #724
+   anchor; append/fsync the exact arm and then attempt. The arm row never borrows sibling keys.
+   `probe-data_ok` remains physically blocked until its paired clear.
+2. **Clear or authorize:** append/fsync the evidence before release; recompute complete current
+   exact-key obligations; retain the stop while any key is pending. An authentic human
+   authorization must cover the current armed epoch. Windows removes the marker **before** ACL
+   removal/readback, so interruption retains the deny. Marker-only platforms remove the marker
+   last. A surviving marker or ACL is still BLOCKED/CANNOT_ESTABLISH even with a durable clear or
+   authorization row. Retrying may finish release, but evidence alone never establishes release.
+   A caught release failure restores the prior marker where possible, marking ACL coverage
+   uncertain; a hard crash may instead leave only the restrictive Windows ACL.
+
+Marker/authorization replacement uses a same-directory file, flush/fsync and atomic replacement
+(Windows write-through rename; POSIX directory fsync). Audit append is checked, flushed and fsynced;
+I/O failure propagates instead of silently crediting a transition. Generic `_audit` accepts only
+`engine-receipt`/`violation`; probes use `record_probe_attempt`. Parser/preflight/probe/reprobe and
+package publication do not treat coordination failure as successful clearance.
+
+Package construction/binding acquires supplied original/final/provider roots in canonical sorted
+order. Staging and retired generations receive the **immutable final-root token**, held across
+retire, swap, rollback and final verification. Companions are not package members.
+
+The hook's exact companion-name protection checks structured write targets and command-position
+shell mutations; quoted explanations, test bodies and hash reads remain allowed. This is
+defense-in-depth only (#718), not an expansion of #725 or a replacement for descriptor locking.
+On non-Windows this guarantees **serialized marker authority only**, never kernel write denial.
+Same-user POSIX unlink/replacement is outside exclusion: identity checks refuse before crediting
+commit, rather than claiming that an unlinked inode serialized the replacement.
+
+Tests: `tests/test_credential_gate_transactions.py`, `tests/test_package_data_access_swap.py` and
+`tests/test_reprobe_blocked.py`; native ACL composition remains covered by the unchanged
+`test_credential_gate_acl_layouts.py`. Tests use disposable roots; none proves live credentials,
+source reachability or Desktop behavior. #698's ordered policy remains separate: PR #700 must
+rebuild its policy onto this API and #724, not replace them wholesale.
 
 Arm and marker-present verification require **all** expected anchors to be denied, with supported
 inheritance. Markerless/post-clear inspection treats **any** residual expected/legacy deny as
@@ -288,10 +345,11 @@ the wrong scope for a question. Field report 2026-08-26, an SES engineer on a ~4
 python scripts/credential_gate.py list <estate-root>          # add --json for an agent
 ```
 
-Exit `1` = something is still blocked (**the resume signal**), `3` = a forged override exists
+Exit `1` = something is still blocked (**the resume signal**), `3` = a forged override or
+`CANNOT_ESTABLISH` transaction exists
 anywhere — deliberately outranking the workflow signal, so a bypass attempt cannot hide behind
 ordinary state — `4` = a bad `<estate-root>`, `0` = nothing gated. States are derived from
-artifacts, never prose: `BLOCKED`, `cleared-earned`, `authorized-unearned`, `FORGED-OVERRIDE`,
+artifacts, never prose: `BLOCKED`, `cleared-earned`, `authorized-unearned`, `FORGED-OVERRIDE`, `CANNOT_ESTABLISH`,
 `clean`.
 
 ⚠️ **Do not alarm on exit `2` alone.** `3` keeps a mistyped root off the security code, but
@@ -301,10 +359,10 @@ parseable JSON on stdout is a usage error. (Blind review 2026-08-27 measured a n
 a non-directory, a missing argument and an unknown flag *all* returning `2` — the most alarming
 state in the vocabulary, raised by a typo.)
 
-⚠️ **`list` reads the marker/override/audit FILES, not the ACL.** A unit whose marker was removed
-while the kernel write-deny survives reports as `clean` here. That direction is safe — it
-under-reports "blocked" and cannot help produce an unvalidated artifact — but it is why `list` is a
-**resume signal, never a ship gate**. `verify` stays the authoritative pre-ship check.
+⚠️ **`list` discovers units from marker/override/audit files**, then takes each root's transaction.
+A markerless discovered unit also checks physical ACL state: a surviving deny is BLOCKED, and
+busy/unsafe/inconsistent evidence is `CANNOT_ESTABLISH`, never `clean`. Discovery is not an estate
+completeness proof; `list` remains a **resume signal, never a ship gate**.
 
 **The two exits are NOT equivalent, and the lossy one is the one people reach for:**
 
@@ -355,13 +413,14 @@ human-readable count (`"2 live source(s)"`) as `--sources`; `clear_block` diffs 
 marker's real source names, nothing matched, and the partial-clear branch left **every** named-source
 gate armed while still writing `probe-cleared` and exiting 0. The earned route was therefore broken
 on every real estate, which is why `authorize` looked like the only thing that worked.
-`clear` exists for teardown and must keep existing, so it cannot self-defend by refusing. It lifts
-the ACL and records `manual-clear`; the probe's own `--earned` clear records `probe-cleared`. Only
-the latter is evidence. `verify` treats artifacts built after a `manual-clear` as **UNVALIDATED**.
+`clear` remains for legacy teardown and records `manual-clear`, which earns nothing. It now
+refuses to release a root with any current keyed pending obligation. The probe's own `--earned`
+clear records `probe-cleared`; `verify` still treats artifacts built after a legacy `manual-clear`
+as **UNVALIDATED**.
 
 ⚠️ Note the asymmetry: `authorize` refuses to run from inside a Copilot session (process-lineage
-check), but `clear` has **no such check** — so the tool-call hook is the only thing preventing an
-agent from lifting its own armed gate with the documented teardown verb. That is why the hook
+check), but legacy `clear` has **no such lineage check** — the hook still prevents an agent from
+using that teardown escape on an armed legacy gate. That is why the hook
 matches `clear`, and why it does so *target-aware* (only when the specific directory named by the
 command is currently armed).
 

@@ -30,8 +30,13 @@ import re
 import stat
 import subprocess
 import sys
+import time
+import uuid
 from collections.abc import Mapping
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
 from typing import NamedTuple
 
@@ -51,6 +56,347 @@ log = logging.getLogger("credential_gate")
 MARKER = ".credential-gate-BLOCKED.json"
 OVERRIDE = ".credential-gate-AUTHORIZED"
 AUDIT = ".credential-gate-audit.log"
+
+TX_PREFIX = ".credential-gate-tx-v1-"
+TX_WRITER_TIMEOUT = 10.0
+TX_READER_TIMEOUT = 2.0
+TX_HOOK_TIMEOUT = 0.5
+_TRANSACTIONS: ContextVar[tuple] = ContextVar("gate_transactions", default=())
+_COORDINATION: ContextVar[tuple] = ContextVar("gate_coordination", default=())
+_VIEWS: ContextVar[tuple] = ContextVar("gate_views", default=())
+
+
+class GateTransactionError(OSError):
+    """A closed coordination refusal; never include private paths or syscall messages."""
+
+
+class CoordinationRoot(NamedTuple):
+    """Immutable final address, independent of a package generation's transient name."""
+
+    parent: Path
+    leaf: str
+    parent_identity: tuple[int, int]
+    canonical: str
+    companion: Path
+
+
+def _identity(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
+
+
+def _safe_entry(path: Path, *, directory: bool = False) -> os.stat_result:
+    info = path.lstat()
+    kind = stat.S_ISDIR if directory else stat.S_ISREG
+    if is_reparse_entry(info) or not kind(info.st_mode) or (not directory and info.st_nlink != 1):
+        raise GateTransactionError("transaction-unsafe-entry")
+    return info
+
+
+def _windows_directory(path: Path) -> tuple[str, tuple[int, int]]:  # pylint: disable=too-many-locals
+    """Open the directory itself, not its reparse target, and ask the OS for its final spelling."""
+    import ctypes  # pylint: disable=import-outside-toplevel
+    import msvcrt  # pylint: disable=import-outside-toplevel,import-error
+    from ctypes import wintypes  # pylint: disable=import-outside-toplevel
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    drive_type = kernel.GetDriveTypeW
+    drive_type.argtypes = [wintypes.LPCWSTR]
+    drive_type.restype = wintypes.UINT
+    if drive_type(path.anchor) == 4:
+        raise GateTransactionError("transaction-alias-unproved")
+    for ancestor in (path, *path.parents):
+        _safe_entry(ancestor, directory=True)
+    create = kernel.CreateFileW
+    create.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create.restype = wintypes.HANDLE
+    handle = create(str(path), 0, 7, None, 3, 0x02000000 | 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise GateTransactionError("transaction-parent-open")
+    descriptor = msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    try:
+        before = _safe_entry(path, directory=True)
+        opened = os.fstat(descriptor)
+        if _identity(before) != _identity(opened):
+            raise GateTransactionError("transaction-parent-changed")
+        final_name = kernel.GetFinalPathNameByHandleW
+        final_name.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+        final_name.restype = wintypes.DWORD
+        buffer = ctypes.create_unicode_buffer(32768)
+        # Volume GUID spelling collapses drive-letter/subst aliases. Unproved UNC aliases refuse.
+        count = final_name(handle, buffer, len(buffer), 1)
+        if not count:
+            raise GateTransactionError("transaction-alias-unproved")
+        if not count or count >= len(buffer):
+            raise GateTransactionError("transaction-parent-path")
+        flags = wintypes.DWORD()
+        query = kernel.GetFileInformationByHandleEx
+        query.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+        if query(handle, 23, ctypes.byref(flags), ctypes.sizeof(flags)) and flags.value & 1:
+            raise GateTransactionError("transaction-case-sensitive-parent")
+        return buffer.value.casefold(), _identity(opened)
+    finally:
+        os.close(descriptor)
+
+
+def _opened_parent(path: Path) -> tuple[str, tuple[int, int]]:
+    if os.name == "nt" and str(path).startswith("\\\\"):
+        raise GateTransactionError("transaction-alias-unproved")
+    if os.name == "nt":
+        return _windows_directory(path)
+    for ancestor in (path, *path.parents):
+        _safe_entry(ancestor, directory=True)
+    before = _safe_entry(path, directory=True)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if _identity(before) != _identity(os.fstat(descriptor)):
+            raise GateTransactionError("transaction-parent-changed")
+        return str(path.resolve(strict=True)), _identity(before)
+    finally:
+        os.close(descriptor)
+
+
+def coordination_root(root: Path) -> CoordinationRoot:
+    """Canonical opened existing parent plus final leaf; refuse aliases we cannot prove."""
+    root = Path(os.path.abspath(root))
+    canonical_parent, identity = _opened_parent(root.parent)
+    leaf = root.name
+    if not leaf or leaf in (".", ".."):
+        raise GateTransactionError("transaction-root-invalid")
+    if os.path.lexists(root):
+        _safe_entry(root, directory=True)
+    if os.name == "nt":
+        if leaf.rstrip(". ") != leaf or ":" in leaf or "~" in leaf:
+            raise GateTransactionError("transaction-alias-unproved")
+        leaf = leaf.casefold()
+    canonical = f"credential-gate/transaction/v1\0{canonical_parent}\0{identity[0]}:{identity[1]}\0{leaf}"
+    digest = hashlib.sha256(canonical.encode("utf-8", "surrogatepass")).hexdigest()
+    return CoordinationRoot(root.parent, leaf, identity, canonical, root.parent / f"{TX_PREFIX}{digest}.lock")
+
+
+class GateTransaction:
+    """One persistent descriptor, released by close/process death, never by unlink."""
+
+    def __init__(self, authority: CoordinationRoot, timeout: float) -> None:
+        self.authority = authority
+        self.timeout = timeout
+        self.descriptor = -1
+
+    def check(self) -> None:
+        """Detect replacement even on POSIX, where unlinking a locked inode is possible."""
+        authority = self.authority
+        canonical, identity = _opened_parent(authority.parent)
+        if identity != authority.parent_identity or not authority.canonical.startswith(
+            f"credential-gate/transaction/v1\0{canonical}\0"
+        ):
+            raise GateTransactionError("transaction-parent-changed")
+        info = _safe_entry(authority.companion)
+        opened = os.fstat(self.descriptor)
+        if _identity(info) != _identity(opened) or info.st_size != 1 or opened.st_size != 1:
+            raise GateTransactionError("transaction-companion-changed")
+
+    def __enter__(self) -> GateTransaction:
+        path = self.authority.companion
+        try:
+            created = False
+            try:
+                descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+                created = True
+            except FileExistsError:
+                _safe_entry(path)
+                descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+            self.descriptor = descriptor
+            if created:
+                os.write(descriptor, b"\0")
+                os.fsync(descriptor)
+            self.check()
+            deadline = time.monotonic() + self.timeout
+            while True:
+                try:
+                    _descriptor_lock(descriptor, True)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise GateTransactionError("transaction-busy") from None
+                    time.sleep(0.025)
+            self.check()
+            return self
+        except BaseException:
+            if self.descriptor >= 0:
+                os.close(self.descriptor)
+                self.descriptor = -1
+            raise
+
+    def __exit__(self, kind, value, traceback) -> None:
+        try:
+            if kind is None:
+                self.check()
+        finally:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+
+def _descriptor_lock(descriptor: int, acquire: bool) -> None:
+    if os.name == "nt":
+        import msvcrt  # pylint: disable=import-outside-toplevel,import-error
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_NBLCK if acquire else msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl  # pylint: disable=import-outside-toplevel,import-error
+
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB if acquire else fcntl.LOCK_UN)
+
+
+def _authority(root: Path) -> CoordinationRoot:
+    spelling = os.path.normcase(os.path.abspath(root))
+    for alias, authority in _COORDINATION.get():
+        if spelling == alias:
+            return authority
+    return coordination_root(root)
+
+
+@contextmanager
+def gate_transaction(root: Path, *, timeout: float = TX_WRITER_TIMEOUT):
+    """Join an explicitly held authority without reacquiring its OS lock."""
+    authority = _authority(root)
+    for transaction in _TRANSACTIONS.get():
+        if transaction.authority.canonical == authority.canonical:
+            transaction.check()
+            yield transaction
+            transaction.check()
+            return
+    with GateTransaction(authority, timeout) as transaction:
+        token = _TRANSACTIONS.set((*_TRANSACTIONS.get(), transaction))
+        try:
+            yield transaction
+        finally:
+            _TRANSACTIONS.reset(token)
+
+
+@contextmanager
+def gate_transactions(
+    roots: list[Path], *, aliases: Mapping[Path, Path] | None = None, timeout: float = TX_WRITER_TIMEOUT
+):
+    """Hold sorted final-root companions across package publication, verification and rollback."""
+    authorities = {}
+    bindings = list(_COORDINATION.get())
+    by_spelling = {}
+    for root in roots:
+        authority = _authority(root)
+        spelling = os.path.normcase(os.path.abspath(root))
+        authorities[authority.canonical] = (root, authority)
+        by_spelling[spelling] = authority
+        bindings.append((spelling, authority))
+    for alias, final in (aliases or {}).items():
+        authority = by_spelling.get(os.path.normcase(os.path.abspath(final)))
+        if authority is None:
+            raise GateTransactionError("transaction-alias-without-authority")
+        bindings.insert(0, (os.path.normcase(os.path.abspath(alias)), authority))
+    token = _COORDINATION.set(tuple(bindings))
+    try:
+        with ExitStack() as stack:
+            for root, _coordination in sorted(authorities.values(), key=lambda item: item[1].companion.name):
+                stack.enter_context(gate_transaction(root, timeout=timeout))
+            yield
+    finally:
+        _COORDINATION.reset(token)
+
+
+def _coordinated(*, reader: bool = False, refusal=3):
+    """The public boundary owns locking; helpers only join the already-held descriptor."""
+
+    def decorate(function):
+        @wraps(function)
+        def run(root, *args, **kwargs):
+            try:
+                with gate_transaction(root, timeout=TX_READER_TIMEOUT if reader else TX_WRITER_TIMEOUT):
+                    identity = _identity(_safe_entry(root, directory=True))
+                    spec = root / MIGRATION_SPEC
+                    snapshot = spec.read_bytes() if spec.is_file() else None
+                    token = _VIEWS.set((*_VIEWS.get(), (root, identity, snapshot)))
+                    try:
+                        result = function(root, *args, **kwargs)
+                        _check_transaction(root)
+                        return result
+                    finally:
+                        _VIEWS.reset(token)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                if refusal is None:
+                    raise
+                log.error("credential gate CANNOT_ESTABLISH: transaction refused")
+                return refusal() if callable(refusal) else refusal
+
+        return run
+
+    return decorate
+
+
+def _check_transaction(root: Path) -> None:
+    for location, identity, snapshot in _VIEWS.get():
+        if _identity(_safe_entry(location, directory=True)) != identity:
+            raise GateTransactionError("transaction-root-changed")
+        spec = location / MIGRATION_SPEC
+        current = spec.read_bytes() if spec.is_file() else None
+        if snapshot != current:
+            raise GateTransactionError("transaction-spec-changed")
+    authority = _authority(root)
+    for transaction in _TRANSACTIONS.get():
+        if transaction.authority.canonical == authority.canonical:
+            transaction.check()
+            return
+    raise GateTransactionError("transaction-not-held")
+
+
+def _sync_directory(directory: Path) -> None:
+    if os.name != "nt":
+        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def _durable_write(root: Path, name: str, text: str) -> None:
+    _check_transaction(root)
+    target = root / name
+    if os.path.lexists(target):
+        _safe_entry(target)
+    scratch = target.with_name(f"{name}.{uuid.uuid4().hex}.writing")
+    try:
+        with scratch.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _check_transaction(root)
+        if os.name == "nt":
+            import ctypes  # pylint: disable=import-outside-toplevel
+
+            move = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+            move.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+            if not move(str(scratch), str(target), 1 | 8):  # replace, write-through
+                raise GateTransactionError("transaction-replace-failed")
+        else:
+            os.replace(scratch, target)
+        _sync_directory(root)
+    finally:
+        scratch.unlink(missing_ok=True)
+
+
+def _durable_unlink(root: Path, name: str) -> None:
+    _check_transaction(root)
+    if os.path.lexists(root / name):
+        _safe_entry(root / name)
+        (root / name).unlink()
+        _sync_directory(root)
+
 
 # Why a trusted audit trail could not be read. Members of the closed `cannot_establish` vocabulary
 # below, defined here because `_read_audit_trail` - the single parser - is the only place that can
@@ -139,7 +485,9 @@ def _block_refusal(migration: Path, sources: list[str], force_scope: bool) -> in
     duplicates = _duplicate_sources(sources)
     if duplicates:
         log.error("REFUSING to arm the gate: duplicate source key(s) are not unique identities: %s", duplicates)
-        _audit(migration, "violation", f"duplicate source keys at block: {duplicates}", sources=sources)
+        _append_audit(migration, "violation", f"duplicate source keys at block: {duplicates}", sources=sources)
+        return 2
+    if not sources or not _valid_audit_sources(sources):
         return 2
 
     refusal = _scope_refusal(migration)
@@ -157,16 +505,26 @@ def _block_refusal(migration: Path, sources: list[str], force_scope: bool) -> in
         )
         return 2
     log.warning("--force-scope: arming the gate on a target that failed the scope check (%s).", refusal)
-    _audit(migration, "block-forced-scope", refusal)
+    _append_audit(migration, "block-forced-scope", refusal)
     return None
 
 
 def _audit(migration: Path, action: str, detail: str, sources: list[str] | None = None) -> None:
-    """Append a tamper-evident-ish record of every gate transition.
+    """Generic producers cannot impersonate transitions; failure is never suppressed."""
+    if action not in ("engine-receipt", "violation"):
+        raise ValueError("dedicated gate transition required")
+    with gate_transaction(migration):
+        _append_audit(migration, action, detail, sources)
 
-    Issue #354 (B3): every entry names the SCOPE it was written for so `_audit_entries`, the sole
-    reader, can refuse an entry copied/hardlinked/symlinked in from a different migration.
-    """
+
+def _append_audit(migration: Path, action: str, detail: str, sources: list[str] | None = None) -> None:
+    """Append and fsync one canonical row under the authority's descriptor."""
+    _check_transaction(migration)
+    path = migration / AUDIT
+    if os.path.lexists(path):
+        _safe_entry(path)
+        if _audit_entries(migration) is None:
+            raise GateTransactionError("transaction-audit-untrusted")
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "action": action,
@@ -176,12 +534,23 @@ def _audit(migration: Path, action: str, detail: str, sources: list[str] | None 
     }
     if sources is not None:
         entry["sources"] = sources
-    line = json.dumps(entry)
+    if not _canonical_audit_fields(entry):
+        raise GateTransactionError("transaction-audit-shape")
+    line = (json.dumps(entry) + "\n").encode("utf-8")
+    descriptor = os.open(
+        path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0), 0o600
+    )
     try:
-        with (migration / AUDIT).open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-    except OSError:
-        pass
+        if _identity(_safe_entry(path)) != _identity(os.fstat(descriptor)):
+            raise GateTransactionError("transaction-audit-changed")
+        _check_transaction(migration)
+        if os.write(descriptor, line) != len(line):
+            raise GateTransactionError("transaction-audit-torn")
+        os.fsync(descriptor)
+        _check_transaction(migration)
+    finally:
+        os.close(descriptor)
+    _sync_directory(migration)
 
 
 def _valid_audit_sources(value: object, *, diagnostic: bool = False) -> bool:
@@ -276,7 +645,16 @@ def _read_audit_trail(migration: Path) -> tuple[list[dict] | None, str | None]:
     if not path.is_file():
         return None, AUDIT_MISSING
     try:
+        before = _safe_entry(path)
         text = path.read_text(encoding="utf-8")
+        after = _safe_entry(path)
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ) or not text.endswith("\n"):
+            return None, AUDIT_MALFORMED
     except (OSError, UnicodeError):
         return None, AUDIT_MALFORMED
     scope = str(migration.resolve())
@@ -543,7 +921,8 @@ def _gate_ace(flags: frozenset[str], rights: frozenset[str]) -> bool:
 
 def _attributable_anchor(path: Path) -> bool:
     """Exact gate-shaped explicit denies are the only nesting/re-arm exception."""
-    return _gate_was_ever_applied(path.parent) and path in denied_dirs(path.parent, create=False)
+    pending_arm = (path.parent / MARKER).is_file() and bool(_established_sources(path.parent))
+    return (_gate_was_ever_applied(path.parent) or pending_arm) and path in denied_dirs(path.parent, create=False)
 
 
 def _checked_acl_tree(
@@ -618,13 +997,14 @@ def _mark_unenforced(migration: Path) -> None:
             payload = json.loads(marker.read_text(encoding="utf-8"))
             if isinstance(payload, dict):
                 payload["writes_blocked"] = False
-                marker.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                _durable_write(migration, MARKER, json.dumps(payload, indent=2) + "\n")
     except (OSError, ValueError):
         pass
 
 
 # The existing authority owns this one additional read-only boundary; no fourth producer module.
 # pylint: disable=too-many-lines
+@_coordinated(reader=True, refusal=("cannot_establish", "transaction-refused"))
 def inspect_physical_barrier(root: Path) -> tuple[str, str]:  # pylint: disable=too-many-return-statements,too-many-branches
     """Read only the physical stop, never audit/proof/authorization; return fixed path-free codes."""
     try:
@@ -882,6 +1262,7 @@ def _redundant_rearm(migration: Path, sources: list[str]) -> str | None:
     return _clear_was_earned(migration, sources)
 
 
+@_coordinated()
 def apply_block(migration: Path, sources: list[str], force_scope: bool = False) -> int:
     """Write the marker and deny write access to the output folder.
 
@@ -896,37 +1277,39 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
     same conflation was fixed in the classifier's console output first; the file kept the old claim,
     so the two disagreed and the file won.
     """
+    _trusted_transition(migration)
     refusal_code = _block_refusal(migration, sources, force_scope)
     if refusal_code is not None:
         return refusal_code
 
     if (migration / OVERRIDE).exists():
         if _override_is_authentic(migration):
+            if (migration / MARKER).exists() or _has_deny_ace(migration):
+                return 3
             log.warning("Override present and audit-backed: gate NOT applied - human authorized a build-only run.")
-            _audit(migration, "block-skipped", "authentic override")
+            _append_audit(migration, "block-skipped", "authentic override")
             return 0
         log.error(
             "IGNORING FORGED OVERRIDE: %s exists with no 'authorize' audit entry - applying the gate anyway.", OVERRIDE
         )
-        _audit(migration, "violation", "forged override ignored at block time")
+        _append_audit(migration, "violation", "forged override ignored at block time")
 
     already = _redundant_rearm(migration, sources)
-    if already:
+    if already and not _transaction_pending(migration, sources):
         log.warning(
             "Gate NOT re-applied: these sources were already proven by '%s'. Re-arming a gate "
             "that a probe has satisfied is what invited a real bypass (see _redundant_rearm). "
             "Re-probe explicitly if you need to re-verify reachability.",
             already,
         )
-        _audit(migration, "block-skipped", f"already earned by {already}; sources={sources}")
+        _append_audit(migration, "block-skipped", f"already earned by {already}; sources={sources}")
         return 0
 
-    pending_sources = sources
-    if sources:
-        states, authorized = _earned_sources(migration)
-        pending_sources = [] if authorized else [source for source in sources if not states.get(source)]
+    pending_sources = [
+        source for source in sources if source in _transaction_pending(migration, sources, include_current=False)
+    ]
     if sources and not pending_sources:
-        _audit(migration, "block-skipped", f"already earned by source state; sources={sources}")
+        _append_audit(migration, "block-skipped", f"already earned by source state; sources={sources}")
         return 0
     return _apply_pending_block(migration, pending_sources)
 
@@ -957,10 +1340,10 @@ def _apply_pending_block(migration: Path, pending_sources: list[str]) -> int:
                 "UNREACHABLE) decide. Only the probe can tell a missing credential (a human must "
                 "act) from a wrong hostname (nobody needs to sign in)."
             ),
-            "sources": pending_sources,
+            "sources": list(dict.fromkeys([*_established_sources(migration), *pending_sources])),
             "applied": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        (migration / MARKER).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _durable_write(migration, MARKER, json.dumps(payload, indent=2) + "\n")
     except (OSError, ValueError, subprocess.SubprocessError):
         _mark_unenforced(migration)
         _acl_refusal()
@@ -971,11 +1354,9 @@ def _apply_pending_block(migration: Path, pending_sources: list[str]) -> int:
         log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
         # Same `sources=` detail as the enforced path. Without it `_last_block_sources` cannot read
         # this entry, so the redundant-re-arm check fails closed forever on non-Windows.
-        _audit(migration, "block-marker-only", _sources_detail(pending_sources), sources=pending_sources)
+        _append_audit(migration, "block-marker-only", _sources_detail(pending_sources), sources=pending_sources)
         return 0
 
-    # History also attributes completed anchors after a partial failure; no new target ledger.
-    _audit(migration, "block", _sources_detail(pending_sources), sources=pending_sources)
     try:
         for directory in targets:
             if any("I" not in flags and _gate_ace(flags, rights) for flags, rights in _account_aces(directory)):
@@ -986,14 +1367,73 @@ def _apply_pending_block(migration: Path, pending_sources: list[str]) -> int:
         if not _all_targets_denied(migration):
             raise ValueError("physical_acl_incomplete")
         payload["writes_blocked"] = True
-        (migration / MARKER).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        _durable_write(migration, MARKER, json.dumps(payload, indent=2) + "\n")
     except (OSError, ValueError, subprocess.SubprocessError):
         _mark_unenforced(migration)
         _acl_refusal()
         return 1
+    _append_audit(migration, "block", _sources_detail(pending_sources), sources=pending_sources)
     log.info("ENFORCED: write denied on every resolved model/report target.")
     log.info("PROBE SANDBOX: %s (build the 1-table reachability probe here)", probe)
     return 0
+
+
+def _trusted_transition(migration: Path) -> None:
+    _check_transaction(migration)
+    if os.path.lexists(migration / AUDIT) and _audit_entries(migration) is None:
+        raise GateTransactionError("transaction-audit-untrusted")
+    if os.path.lexists(migration / OVERRIDE):
+        _safe_entry(migration / OVERRIDE)
+    if os.path.lexists(migration / MARKER):
+        _established_sources(migration)
+
+
+def _established_sources(migration: Path) -> list[str]:
+    """Unreadable obligations are poison, never an empty marker to overwrite or remove."""
+    marker = migration / MARKER
+    if not os.path.lexists(marker):
+        return []
+    _safe_entry(marker)
+    payload = json.loads(marker.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_keys)
+    sources = payload.get("sources") if isinstance(payload, dict) else None
+    if not _valid_audit_sources(sources):
+        raise GateTransactionError("transaction-marker-untrusted")
+    return sources
+
+
+def _transaction_pending(migration: Path, extra: list[str] | None = None, *, include_current: bool = True) -> list[str]:
+    """Full-root keys veto release without widening an audit row's exact caller scope."""
+    entries = _audit_entries(migration) or []
+    established = _established_sources(migration)
+    recorded = [key for entry in entries for key in (_entry_sources(entry) or [])]
+    keys = list(dict.fromkeys([*established, *recorded, *(extra or [])]))
+    if include_current and ((migration / MIGRATION_SPEC).is_file() or (migration / "input_manifest.json").is_file()):
+        current, refusal = _gate_root_live_keys(migration)
+        if refusal:
+            raise GateTransactionError("transaction-spec-untrusted")
+        keys = list(dict.fromkeys([*keys, *sorted(current)]))
+    canonical = tuple(key for key in keys if SOURCE_KEY_RE.fullmatch(key))
+    codes, authorized = _data_access_ledger(entries, canonical)
+    if authorized and _override_is_authentic(migration, entries=entries):
+        return []
+    legacy, legacy_authorized = _earned_sources(migration)
+    legacy_authorized = legacy_authorized and _override_is_authentic(migration, entries=entries)
+    failures = set(PROBE_ATTEMPT_CODES.values())
+    return [key for key in keys if not (legacy_authorized or legacy.get(key)) or codes.get(key) in failures]
+
+
+@_coordinated(refusal=None)
+def record_probe_attempt(migration: Path, verdict: str, detail: str, sources: list[str]) -> None:
+    """A measurement becomes committed only after its pending physical stop is established."""
+    action = f"probe-{verdict.lower()}"
+    if action not in (*PROBE_ATTEMPT_CODES, PROBE_DATA_OK) or not sources or not _valid_audit_sources(sources):
+        raise ValueError("invalid probe transition")
+    with gate_transaction(migration):
+        _trusted_transition(migration)
+        # DATA_OK also remains blocked until its paired clear. Do not invalidate siblings' epochs.
+        if _apply_pending_block(migration, sources):
+            raise GateTransactionError("transaction-arm-failed")
+        _append_audit(migration, action, detail, sources)
 
 
 def _marker_sources(migration: Path) -> list[str]:
@@ -1013,6 +1453,7 @@ def _unmatched_earned_sources(migration: Path, marker_sources: list[str], earned
     return [source for source in earned_sources if source not in marker_set and not states.get(source)]
 
 
+@_coordinated()
 def clear_block(migration: Path, reason: str, earned: bool = False, sources: list[str] | None = None) -> int:
     """Remove the ACL and marker.
 
@@ -1021,6 +1462,7 @@ def clear_block(migration: Path, reason: str, earned: bool = False, sources: lis
     after one are reported as UNVALIDATED. The verb has to keep existing for teardown, but it must
     never quietly confer the guarantee.
     """
+    _trusted_transition(migration)
     marker = migration / MARKER
     detail = reason
     earned_sources = sources if sources is not None else _last_block_sources(migration)
@@ -1028,7 +1470,9 @@ def clear_block(migration: Path, reason: str, earned: bool = False, sources: lis
         duplicates = _duplicate_sources(earned_sources)
         if duplicates:
             log.error("credential gate NOT cleared (%s): duplicate earned source key(s): %s", reason, duplicates)
-            _audit(migration, "violation", f"duplicate source keys at clear: {duplicates}", sources=earned_sources)
+            _append_audit(
+                migration, "violation", f"duplicate source keys at clear: {duplicates}", sources=earned_sources
+            )
             return 1
         marker_sources = _marker_sources(migration)
         unknown_sources = _unmatched_earned_sources(migration, marker_sources, earned_sources)
@@ -1040,26 +1484,53 @@ def clear_block(migration: Path, reason: str, earned: bool = False, sources: lis
             )
             return 1
         detail = f"{_sources_detail(earned_sources)}; reason={reason}"
-        remaining_sources = [source for source in marker_sources if source not in set(earned_sources)]
-        if remaining_sources:
+    _append_audit(
+        migration,
+        "probe-cleared" if earned else "manual-clear",
+        detail,
+        sources=earned_sources if earned else None,
+    )
+    remaining_sources = _transaction_pending(migration)
+    if not earned:
+        # The teardown verb still earns nothing. It cannot release a current keyed live source.
+        remaining_sources = [key for key in remaining_sources if SOURCE_KEY_RE.fullmatch(key)]
+    if remaining_sources:
+        if not marker.exists():
+            if _apply_pending_block(migration, remaining_sources):
+                return 3
+        else:
             payload = json.loads(marker.read_text(encoding="utf-8"))
             payload["sources"] = remaining_sources
-            marker.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-            log.info("credential gate PARTIALLY CLEARED (%s); still blocked: %s", reason, remaining_sources)
-            _audit(migration, "probe-cleared", detail, sources=earned_sources)
-            return 0
-
-    if platform.system() == "Windows":
-        try:
-            _clear_acl_targets(migration)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            _acl_refusal()
-            return 1
-    if marker.exists():
-        marker.unlink()
+            _durable_write(migration, MARKER, json.dumps(payload, indent=2) + "\n")
+        log.info("credential gate PARTIALLY CLEARED (%s); still blocked: %s", reason, remaining_sources)
+        # Source-scoped success does not claim the root was released.
+        return 0 if earned and earned_sources and not set(earned_sources).intersection(remaining_sources) else 1
+    _release_physical(migration)
     log.info("credential gate CLEARED (%s)", reason)
-    _audit(migration, "probe-cleared" if earned else "manual-clear", detail, sources=earned_sources if earned else None)
     return 0
+
+
+def _release_physical(migration: Path) -> None:
+    """Write-ahead evidence alone never credits an interrupted release."""
+    _check_transaction(migration)
+    previous = (migration / MARKER).read_text(encoding="utf-8") if (migration / MARKER).is_file() else None
+    try:
+        if platform.system() == "Windows":
+            _has_deny_ace(migration)  # Refuse an unqueryable barrier before changing its marker.
+            _durable_unlink(migration, MARKER)
+            _clear_acl_targets(migration)
+        else:
+            _durable_unlink(migration, MARKER)
+        _check_transaction(migration)
+        state, _code = inspect_physical_barrier(migration)
+        if state != "clear":
+            raise GateTransactionError("transaction-release-incomplete")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        if previous is not None:
+            payload = json.loads(previous)
+            payload["writes_blocked"] = False
+            _durable_write(migration, MARKER, json.dumps(payload, indent=2) + "\n")
+        raise
 
 
 def _override_is_authentic(migration: Path, *, entries: list[dict] | None = None) -> bool:
@@ -1074,6 +1545,11 @@ def _override_is_authentic(migration: Path, *, entries: list[dict] | None = None
         entries = _audit_entries(migration)
     if entries is None:
         return False
+    keys = {key for entry in entries for key in (_entry_sources(entry) or []) if SOURCE_KEY_RE.fullmatch(key)}
+    if keys:
+        current = _current_live_source_keys(migration)
+        keys.update(current or ())
+        return _data_access_ledger(entries, tuple(sorted(keys)))[1]
     return any(entry.get("action") == "authorize" for entry in entries)
 
 
@@ -1115,6 +1591,7 @@ def _has_copilot_ancestor(chain: list[str]) -> bool:
     return any("copilot" in name.lower() for name in chain)
 
 
+@_coordinated()
 def authorize(migration: Path, who: str) -> int:
     """Record a human's explicit build-only authorization and lift the ACL.
 
@@ -1129,19 +1606,25 @@ def authorize(migration: Path, who: str) -> int:
         log.error("  command is impersonating the user - measured 2026-08-02, one did exactly that.")
         log.error("  If you are a human: run this from a plain terminal, outside any Copilot session.")
         log.error("  Process chain seen: %s", " <- ".join(chain))
-        _audit(migration, "violation", f"authorize refused; chain={chain}")
+        _append_audit(migration, "violation", f"authorize refused; chain={chain}")
         return 2
-    (migration / OVERRIDE).write_text(
+    _trusted_transition(migration)
+    _durable_write(
+        migration,
+        OVERRIDE,
         f"Build-only migration authorized by {who} at "
         f"{datetime.now(timezone.utc).isoformat(timespec='seconds')}.\n"
         "Validation against live data was explicitly deferred by a human.\n",
-        encoding="utf-8",
     )
-    _audit(migration, "authorize", f"by={who}; chain={chain}")
-    return clear_block(migration, f"user-authorized-build-only ({who})", earned=True)
+    _append_audit(migration, "authorize", f"by={who}; chain={chain}")
+    if _transaction_pending(migration):
+        return 1
+    _release_physical(migration)
+    return 0
 
 
-def status(migration: Path) -> int:
+@_coordinated(reader=True)
+def status(migration: Path) -> int:  # pylint: disable=too-many-return-statements
     """Report the marker and physical state. Exit 1 blocked, 3 cannot establish."""
     blocked = (migration / MARKER).exists()
     override = (migration / OVERRIDE).exists()
@@ -1156,10 +1639,21 @@ def status(migration: Path) -> int:
     except (OSError, ValueError, subprocess.SubprocessError):
         _acl_refusal()
         return 3
-    return 1 if denied or (blocked and not override) else 0
+    if blocked or denied:
+        return 1
+    if os.path.lexists(migration / AUDIT):
+        if _audit_entries(migration) is None:
+            return 3
+    if os.path.lexists(migration / AUDIT) or (migration / MIGRATION_SPEC).is_file():
+        if any(SOURCE_KEY_RE.fullmatch(key) for key in _transaction_pending(migration)):
+            return 3
+    if override and not _override_is_authentic(migration):
+        return 3
+    return 0
 
 
-def _unit_state(unit: Path) -> str:
+@_coordinated(reader=True, refusal="CANNOT_ESTABLISH")
+def _unit_state(unit: Path) -> str:  # pylint: disable=too-many-return-statements
     """Classify one unit's gate state from artifacts on disk, never from prose.
 
     Ordered most-alarming-first, because a forged override coexisting with a marker is a bypass
@@ -1169,10 +1663,13 @@ def _unit_state(unit: Path) -> str:
     override = (unit / OVERRIDE).exists()
     if override and not _override_is_authentic(unit):
         return "FORGED-OVERRIDE"
-    if override:
-        return "authorized-unearned"
     if marker:
         return "BLOCKED"
+    current = status(unit)
+    if current:
+        return "BLOCKED" if current == 1 else "CANNOT_ESTABLISH"
+    if override:
+        return "authorized-unearned"
     entries = _audit_entries(unit)
     if entries is None:
         return "clean"
@@ -1194,7 +1691,7 @@ def list_units(root: Path, as_json: bool = False) -> int:
     enumerate what is gated, an agent cannot discover what became retryable and cannot resume.
 
     Exit codes are for scripting, and deliberately rank the security signal above the workflow one:
-    **3 = a forged override exists anywhere**, 1 = something is still blocked, 0 = nothing gated,
+    **3 = a forged override or cannot-establish transaction exists**, 1 = still blocked, 0 = nothing gated,
     4 = a bad `<root>`. **2 is reserved for argparse's usage errors** and is never returned here.
 
     That numbering is the *second* correction to this contract, and the reason is worth keeping.
@@ -1206,11 +1703,9 @@ def list_units(root: Path, as_json: bool = False) -> int:
     instead. Two independent reviewers landed on this, and `3 = forged` now also matches
     `reprobe_blocked.py` -- its sibling in the documented pipeline -- which had the two codes swapped.
 
-    ⚠️ **This reads the marker/override/audit FILES, not the ACL.** `_has_deny_ace` is the real
-    enforcement state, so a unit whose marker was removed while the write-deny ACE survives reports
-    here as `clean`. That direction is safe -- it under-reports "blocked" and cannot help produce an
-    unvalidated artifact -- but it is why `list` is a *resume signal*, never a ship gate. `verify`
-    remains the authoritative pre-ship check.
+    Discovery uses marker/override/audit files, not a recursive ACL census. Each discovered root's
+    locked snapshot reconciles physical state too; a surviving deny cannot become `clean`.
+    This is still a resume signal, never a ship gate or estate-completeness proof.
     """
     units = sorted({p.parent for name in (MARKER, OVERRIDE, AUDIT) for p in root.rglob(name)})
     rows = [
@@ -1242,7 +1737,7 @@ def list_units(root: Path, as_json: bool = False) -> int:
             log.info("    A credential caches machine-wide, so ONE sign-in may earn several of these.")
 
     states = {r["state"] for r in rows}
-    if "FORGED-OVERRIDE" in states:
+    if states & {"FORGED-OVERRIDE", "CANNOT_ESTABLISH", "BUSY"}:
         return 3
     return 1 if "BLOCKED" in states else 0
 
@@ -1278,8 +1773,9 @@ def _gate_was_ever_applied(migration: Path) -> bool:
     it fires for every extract-only migration -- i.e. exactly the shape most likely to be run
     offline, where a spurious "do not ship" is most likely to be believed.
 
-    The signal is the audit log: `apply_block` writes a BLOCK_ACTIONS entry before it does anything
-    else, so a gate that was ever applied always left one. Same trust model as `_clear_was_earned`
+    The signal is a committed arm row. An interrupted arm can leave only its physical marker/ACL;
+    readers retain that stop rather than interpreting missing commit evidence as release.
+    Same trust model as `_clear_was_earned`
     (an accountability trail, not proof) -- and no weaker, because anyone who could delete the log to
     fake "never gated" could equally append a fake `probe-cleared` to fake "earned".
     """
@@ -1524,13 +2020,30 @@ def _verify_one(migration: Path) -> int:
     return 0
 
 
+@_coordinated(reader=True)
 def verify(migration: Path) -> int:
     """Verify one audit-bearing migration/bundle target.
 
     Exit 0 = earned/legitimately never needed; 1 = failed/unearned; 3 = no attributable audit.
     A ship-destination copy is not its audit-bearing origin (#354). Exit 3 is never clean.
     """
-    return _verify_one(migration)
+    if ((migration / MARKER).exists() or os.path.lexists(migration / AUDIT)) and _audit_entries(migration) is None:
+        _log_cannot_assess("untrusted audit trail")
+        return 3
+    result = _verify_one(migration)
+    if (
+        result == 0
+        and not (migration / MARKER).exists()
+        and any(SOURCE_KEY_RE.fullmatch(key) for key in _transaction_pending(migration))
+    ):
+        return 3
+    if (
+        result == 0
+        and _override_is_authentic(migration)
+        and ((migration / MARKER).exists() or _has_deny_ace(migration))
+    ):
+        return 3
+    return result
 
 
 # Phase-1 authority is read-only: verify() appends audit rows and cannot produce this projection.
@@ -1595,6 +2108,7 @@ CANNOT_CODES = frozenset(
         "provider-missing",
         "provider-ambiguous",
         "provider-foreign",
+        "transaction-refused",
     }
 )
 DATA_ACCESS_CODES = ACCEPTED_CODES | BLOCKING_CODES | CANNOT_CODES
@@ -2191,7 +2705,26 @@ def _accepted_direct(live_keys: tuple[str, ...], requested_scope: str) -> DataAc
     )
 
 
+@_coordinated(reader=True, refusal=lambda: _cannot_establish("transaction-refused"))
 def _assess_direct(
+    gate_root: Path,
+    live_keys: tuple[str, ...],
+    has_review: bool,
+    package_data_sources: object,
+    policy: tuple[str, str],
+) -> DataAccessAssessment:
+    """Conjoin the existing ledger policy with the physical state under the same descriptor."""
+    result = _assess_direct_locked(gate_root, live_keys, has_review, package_data_sources, policy)
+    if result.state in DIRECT_ACCEPTED_STATES:
+        physical = inspect_physical_barrier(gate_root)[0]
+        if physical == "cannot_establish":
+            return _cannot_establish("transaction-refused")
+        if physical != "clear":
+            return _assessment("blocked", codes=["marker-only"], source_keys=live_keys)
+    return result
+
+
+def _assess_direct_locked(
     gate_root: Path,
     live_keys: tuple[str, ...],
     has_review: bool,

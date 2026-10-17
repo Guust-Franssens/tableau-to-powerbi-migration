@@ -36,6 +36,37 @@ OVERRIDE = credential_gate.OVERRIDE
 AUDIT = credential_gate.AUDIT
 
 
+def test_transaction_refusal_is_not_a_clean_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Busy/unsafe state is a refusal, not a markerless success."""
+    unit = _clean_unit(tmp_path)
+
+    def busy(_unit):
+        raise credential_gate.GateTransactionError("transaction-busy")
+
+    monkeypatch.setattr(rb, "unit_is_blocked", busy)
+    selected, results, forged = rb.select([rb.UnitInput(unit)])
+    assert not selected and not forged
+    assert len(results) == 1 and results[0].category == rb.CAT_ERRORED
+    assert (
+        rb.probe_unit(rb.UnitInput(unit), _runner_that("DATA_OK", clears=False), _options()).category == rb.CAT_ERRORED
+    )
+
+
+def test_data_ok_with_transaction_failure_is_not_earned() -> None:
+    """A DATA_OK token does not override the failing probe/gate process result."""
+    outcome = rb.ProbeOutcome(returncode=3, verdict="DATA_OK", timed_out=False, detail="fixture refusal")
+    assert rb.classify(outcome, False)[0] == rb.CAT_ERRORED
+
+
+@pytest.mark.parametrize("state", ["BUSY", "CANNOT_ESTABLISH", "CANNOT-ESTABLISH"])
+def test_transaction_refusal_from_list_is_not_a_skippable_clear(tmp_path: Path, state: str) -> None:
+    """A failed authority observation cannot be laundered through the caller-supplied state."""
+    unit = _clean_unit(tmp_path)
+    selected, results, forged = rb.select([rb.UnitInput(unit, state=state)])
+    assert not selected and not forged
+    assert len(results) == 1 and results[0].category == rb.CAT_ERRORED
+
+
 # --------------------------------------------------------------------------------------------------
 # helpers
 # --------------------------------------------------------------------------------------------------
