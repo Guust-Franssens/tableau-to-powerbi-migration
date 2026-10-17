@@ -91,7 +91,7 @@ Direct start/status/work_dirs/path scripts retain arguments, output, exit and ar
 No replacement of guidance/personas before benefit; no direct-script path policy changes in v1.
 
 ## 5. Read-only doctor contract
-Delegate plain `powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1` (no -Update/-CheckUpstream)
+Delegate unchanged plain `powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1` (no -Update/-CheckUpstream), child env `PYTHONDONTWRITEBYTECODE=1`; use `python -B` for doctor-owned Python invocations
 and `tableau_env.resolve_env` with selected env (default repo .env); no install/plugin mutation, run allocation,
 login, source probe, Tableau authentication or migration network call. It does not replace session-start preflight.
 ✅ Resolver normalizes each source then overlays process on file, absent site defaults empty:
@@ -137,7 +137,7 @@ survey 7→no later stages→1; bundle 10 retained; preflight failure; launch fa
 Status controls: direct/facade codes/observations, repeated byte/tree hashes, absent fresh bytecode prefix; trap network/process/write.
 Doctor controls: fixed process/file fixtures vs direct resolver/preflight; aliases, precedence, blank/conflict,
 missing/malformed/unreadable file, empty SITE, absent optional keys, preflight 0/1/launch and interrupt in both modes.
-Trap writes/login/migration network; assert no run/cache/config byte changes; inject canaries in every value
+Direct clean-tree test snapshots files/bytes/mtimes, runs doctor and its preflight child, asserts no additions/deletions/byte/mtime changes including no `__pycache__`/`.pyc`. Trap writes/login/migration network; assert no run/cache/config byte changes; inject canaries in every value
 and raw preflight/warnings/exceptions. Mutate value/length/hash leaks, source attribution and -Update; named assertions kill each.
 Mutations in isolated copies: remove doctor/start/status branch; disconnect path gate; force unknown→PASS;
 drop native stage record; suppress post-reference bundle; normalize exit; buffer progress; enable
