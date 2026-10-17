@@ -133,6 +133,15 @@ def test_current_uncovered_key_vetoes_full_release(unit) -> None:
     assert set(_marker(root)) == set(keys[1:]), "complete current root keys, not just marker/caller, veto release"
 
 
+@pytest.mark.parametrize("earned", [False, True])
+def test_legacy_empty_arm_cannot_release_any_current_live_key(unit, earned: bool) -> None:
+    root, keys = unit
+    assert gate.apply_block(root, []) == 0, "legacy unknown-source stops remain supported"
+    assert gate.clear_block(root, "empty scope earns no current key", earned=earned) != 0
+    assert set(_marker(root)) == set(keys)
+    assert gate.status(root) != 0
+
+
 @pytest.mark.parametrize("first", ["clear", "attempt"])
 def test_clear_and_new_attempt_serialize_in_either_order(  # pylint: disable=too-many-locals
     unit, monkeypatch: pytest.MonkeyPatch, first: str
@@ -342,6 +351,67 @@ def test_native_descriptor_contention_death_and_persistent_external_file(tmp_pat
         if child.poll() is None:
             child.kill()
         child.communicate(timeout=10)
+
+
+@pytest.mark.skipif(
+    os.name != "nt", reason="write-deny enforcement is an icacls ACL; the marker-only path cannot block a write"
+)
+def test_windows_death_after_marker_removal_retains_kernel_stop_and_can_retry(tmp_path: Path) -> None:
+    from test_credential_gate_acl_layouts import AclLab  # pylint: disable=import-outside-toplevel
+
+    lab = AclLab(tmp_path / "acl")
+    child = None
+    try:
+        root = lab.root / "Unit"
+        artifact = root / "fabric" / "model.tmdl"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("fixture definition", encoding="utf-8")
+        source = {
+            "connection": {
+                "class": "sqlserver",
+                "server": "fixture.example.invalid",
+                "database": "fixture",
+                "schema": "dbo",
+                "powerbi_target": "live_source",
+            },
+            "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
+        }
+        spec = {"data_sources": [source]}
+        (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
+        key = preflight._classify_legs(source, 0)[0][0]
+        gate.record_probe_attempt(root, "DATA_OK", "fixture DATA_OK", [key])
+        assert lab.denies(artifact.parent), "independent native oracle must observe the initial deny"
+        child = _child(
+            root,
+            "from pathlib import Path; import credential_gate as g; import os; "
+            "g._clear_acl_targets=lambda root: os._exit(23); "
+            f"g.clear_block(Path(sys.argv[1]), 'fixture', earned=True, sources={[key]!r})",
+        )
+        child.communicate(timeout=40)
+        assert child.returncode == 23, "crash must reach marker-before-ACL removal, not an earlier failure"
+        assert not (root / gate.MARKER).exists()
+        assert gate._audit_entries(root)[-1]["action"] == "probe-cleared"
+        assert lab.denies(artifact.parent), "durable clear evidence must not erase a surviving kernel stop"
+        with pytest.raises(PermissionError):
+            artifact.write_text("not permitted", encoding="utf-8")
+        assert gate.status(root) != 0
+        assessment = gate.assess_data_access(
+            root,
+            package_spec=spec,
+            package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
+            fallback_authorization="stop",
+            requested_scope="model_and_report",
+        )
+        assert assessment.state == "blocked"
+        with gate.gate_transaction(root, timeout=1):
+            assert gate.coordination_root(root).companion.stat().st_size == 1
+        assert gate.clear_block(root, "retry fixture", earned=True, sources=[key]) == 0
+        artifact.write_text("permitted after retry", encoding="utf-8")
+    finally:
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.communicate(timeout=10)
+        lab.cleanup()
 
 
 def test_reader_busy_never_reports_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -487,7 +487,7 @@ def _block_refusal(migration: Path, sources: list[str], force_scope: bool) -> in
         log.error("REFUSING to arm the gate: duplicate source key(s) are not unique identities: %s", duplicates)
         _append_audit(migration, "violation", f"duplicate source keys at block: {duplicates}", sources=sources)
         return 2
-    if not sources or not _valid_audit_sources(sources):
+    if not _valid_audit_sources(sources):
         return 2
 
     refusal = _scope_refusal(migration)
