@@ -2,10 +2,10 @@
 
 ## Decision and scope
 
-**❌ BLOCKED for live implementation: no safe pre-network projection is established.**
-This is a plan, not approval to bypass a guard or to ship an always-refusing pilot as useful.
+**❌ BLOCKED / implementation N=0 until #751 lands and is exact-head reviewed.**
+No product implementation is authorized; no safe pre-network projection is established.
 Base: `511bb2098d179f2190943e45c650739c8c794fea`; issue: <https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/749>.
-⚠️ Proposed contracts below need independent plan approval before behavioral coding.
+Owner decisions: [#749 comment](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/749#issuecomment-6232833887); path-owner dependency: [#751](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/751).
 Only these commands are contemplated:
 ```text
 python -B scripts/t2p.py start --project <exact-name|LUID> [--env <path>] [--runs-parent <path>] [--json]
@@ -39,8 +39,8 @@ Neither the requested selector nor a cached prior survey proves a current upper 
 owner contract proves that choosing `C:\t2p` fixes this missing information.
 **Decision:** with current evidence, both default and explicit-short-root starts are CANNOT_ESTABLISH.
 Require explicit `--runs-parent` for a short-root retry, but never treat the flag itself as proof.
-Unblock only with an independently reviewed owner-level bound/identity contract; if that needs more
-files or a new naming policy, split/replan, not an opportunistic guard in this facade.
+Unblock only after #751 lands with exact-head review of its owner-level bound/identity contract.
+Consume that owner result; any additional facade policy/scanner/state file requires replan.
 
 ## 2. Location and output contract
 
@@ -54,20 +54,20 @@ including failure/interrupt; preserve that same location in JSON. Never discover
 Human reports recorded run/root, selected/physical location, repo-local/external relationship, git
 visibility (`ignored|visible|unknown`), commit safety (`not_for_git|unsafe|unknown`); JSON withholds other roots.
 Only the existing output guard establishes ignore safety; external is not synonymous with ignored.
-For status, do not launch git; visibility is `unknown` unless supported without additional operations.
+For status, do not launch git; underivable visibility is null with reason `not_derivable_read_only`.
 Path report always has ceilings 259/247, current longest file/directory locators and lengths,
 remaining budgets (ceiling minus measured UTF-16 length), projection verdict and reason.
-Unknown measurements/margins are null, never zero; a current scan never proves projected PASS.
-Status v1 may report these measurements unknown: its authority does not currently supply a path scan.
+Status always emits every path field; underivable values are null with stable per-field reasons
+(`not_recorded|not_derivable_read_only|identity_unestablished`), never zero or projected PASS.
 Do not call `check_path_ceiling.scan` from status: it launches git and would widen the read boundary:
 `scripts/check_path_ceiling.py:292-315,374-409,415-455`.
-Private human output includes exact shell-correct rerun argv/display, retaining project and optional env:
-`python -B <absolute-toolkit>/scripts/t2p.py start --project <original> --runs-parent C:\t2p`.
-This is a new invocation, old run retained; label it “short-root candidate; projection still required”.
-JSON argv AND display replace toolkit, selector, env and short-root tokens with safe placeholders;
-mark `rerun_complete:false`. Exact JSON rerun/root disclosure needs approval; do not silently leak it.
+Exact private rerun argv/display requires every argument recorded (project, env/default, toolkit/root):
+Shape: `python -B <recorded-toolkit>/scripts/t2p.py start --project <recorded> [--env <recorded-env>] --runs-parent <recorded-parent>`.
+Otherwise emit a partial/candidate command marked non-authoritative, or unavailable with a reason.
+New invocation only, old run retained; shorter-root candidate still requires the #751 owner decision.
+JSON redacts toolkit/selector/env/root tokens; mark partial/non-authoritative, never exact or safe.
 An active `subst` spelling, if known, is separately labelled temporary/non-authoritative; otherwise
-alias state is unknown. Never create/discover aliases by launching processes in status or store one
+alias is null with reason `not_derivable_read_only`. Never launch alias discovery in status or store one
 in run identity; aliases waive no physical ceiling:
 `docs/windows-path-limits.md:100-112,265-271,339-371,408-417`.
 
@@ -82,7 +82,7 @@ as today. Do not rewrite this into first-native-failure exit/stop semantics:
 `tests/test_start_migration.py:697-736`.
 Conditional implementation: add an optional in-memory observer/progress-stream seam to that owner,
 defaulting to today's behavior; report allocation, preflight, stage completion and final wrapper result.
-Stage records: fixed stage/owner, native code (null for not launched/launch failure), explicit state,
+Stage records: fixed stage/owner, `native_exit_code` (null for not launched/launch failure), explicit state,
 safe relative expected artifact locator and evidence-check outcome; distinguish skipped from failed.
 No persisted ledger/result file. Record native results where obtained, not from printed prose.
 JSON mode explicitly routes child stdout AND stderr plus owner progress to stderr, live/unbuffered;
@@ -90,11 +90,11 @@ Python-only stdout redirection is insufficient for inherited child descriptors. 
 One JSON object on stdout, including syntax/refusal/interrupt errors; human uses those records plus private paths.
 Pin this shape in tests (schema is an inline contract, no schema framework/new dependency):
 ```json
-{"schema_version":"t2p/v1","command":"start","status":"cannot_establish","exit_code":3,"authority":"t2p.path-policy","native_exit_code":null,"stages":[],"evidence":[],"artifacts":[],"run_location":null,"path_report":{},"limitations":[],"proof_boundary":{"established":[],"not_established":[]}}
+{"schema_version":"t2p/v1","command":"start","status":"cannot_establish","exit_code":3,"authority":"start_migration.py","delegated_exit_code":null,"stages":[],"evidence":[],"artifacts":[],"run_location":null,"path_report":{},"limitations":[],"proof_boundary":{"established":[],"not_established":[]}}
 ```
-Statuses: `ok|findings|refused|cannot_establish|error|interrupted`; authority names the actual owner.
-After delegation, outer exit equals exact owner exit; native_exit_code is that wrapper/diagnostic code,
-not the first leaf code. Before delegation only: syntax=2, refusal=1, unknown=3, launch/error=1,
+Statuses: `ok|findings|cannot_establish|error|interrupted`; refusal uses owner details, not a new status.
+After delegation, outer exit equals exact owner exit; `delegated_exit_code` is the wrapper/diagnostic code.
+`native_exit_code` occurs only in stage records. Before delegation: syntax=2, refusal=1, unknown=3, error=1,
 interrupt=130; pin ownership as well as integers. `findings` may have native diagnostic exit 0.
 Evidence/artifact entries contain owner plus safe relative locator (digest only if already supplied).
 Stable keys/nullability and deterministic ordering; additive fields compatible, incompatible shape=new schema.
@@ -112,20 +112,20 @@ Missing/moved/contradictory identity => cannot-establish, no descendant scan or 
 START_READY, COMPLETE, fidelity, credential reachability or deployment:
 `scripts/run_status.py:851-939,972-987`.
 Direct start/status/work_dirs/path scripts retain arguments, output, exit and artifact behavior.
-No replacement of script guidance/personas before pilot benefit; no direct-script projection retrofit.
+No replacement of guidance/personas before pilot benefit; #751 alone owns direct-script path changes.
 
 ## 5. Closed surface, slices and independent controls
 
-**This PR: exactly one added file, this plan; no product/test/index edits or issue comments.**
-Conditional later implementation surface **N=7 files**: new `scripts/t2p.py`, `tests/test_t2p.py`;
+**This PR: docs-only, exactly `docs/t2p-pilot-plan.md` and `docs/INDEX.md`; implementation N=0.**
+Only after #751 lands and is exact-head reviewed, proposed surface (7 files): `scripts/t2p.py`, `tests/test_t2p.py`;
 edit `scripts/start_migration.py`, `tests/test_start_migration.py`, `scripts/README.md`,
-`docs/agent-capability-wiring.md`, `docs/INDEX.md`. No other implementation files are authorized.
+`docs/agent-capability-wiring.md`, `docs/INDEX.md`. This is conditional inventory, not authorization.
 Shared files are the front door and those three documentation inventories. All other files unchanged.
 Read surface: argv/environment, owner allocation/run.json, native stage results and existing owner
 artifacts, run-status observations; joins are selector→catalog→harvest→oracle→bundle and recorded→physical
 identity, all retained in owners. Residuals: unknown remote bounds, non-atomic reads, unsafe/unavailable
 locations and unknown visibility/measurements. No new scanner or mutable-read authority.
-Slice 0: independent path/exception review; BLOCKED now. Stop here unless approved evidence unblocks it.
+Slice 0: #751 lands and is exact-head reviewed; BLOCKED/N=0 now. Stop; no product coding or blind run.
 Slice 1: owner observer seam with unchanged defaults; slice 2: two explicit argparse branches/envelopes;
 slice 3: tests/inventory/help, Windows review, then blind run. New surface/class => split/replan.
 Direct controls use the same owner, argv, environment and fixed external fixture artifacts, not facade
@@ -142,16 +142,16 @@ status write/next. Each must fail its named scope/guard/stage/exit/stream/read-o
 
 ## 6. Validation, blind run 2 and stop conditions
 
-For implementation: targeted pytest for t2p/start_migration/run_status/work_dirs/check_path_ceiling,
-then scripts-help (including cp1252), repo-layout and agent-capability tests; stage new scripts first.
-Run existing ruff check/format-check and pylint on edited Python, navigation/capability/convention gates,
-privacy check, full pytest under the documented engine policy, secret scan and blind diff review.
-✅ Inventory/help gates: `tests/test_scripts_help.py:51-71,102-173`;
-`tests/test_repo_layout.py:290-319`;
-`scripts/check_agent_capabilities.py:173-237`.
-Plan-only checks: line count ≤160, citation/manual scope review, diff/secret checks, navigation gate.
-❌ One-file scope leaves this page unindexed: report navigation failure, do not exempt it or edit INDEX;
-owner must approve a separate index change before green merge (`scripts/check_navigation_index.py:39-66`).
+Exact commands below run from the toolkit root; future commands are NOT authorization to implement.
+Docs now: `wc -l docs/t2p-pilot-plan.md` (≤160); `git diff --check`;
+`python -B scripts/check_navigation_index.py`; `python -B scripts/set_data_folder.py --check`.
+Future, stage new scripts first: `pytest -q tests/test_t2p.py tests/test_start_migration.py tests/test_run_status.py tests/test_work_dirs.py tests/test_check_path_ceiling.py`;
+`pytest -q tests/test_scripts_help.py tests/test_repo_layout.py tests/test_agent_capabilities.py`.
+`ruff format --check scripts/t2p.py scripts/start_migration.py tests/test_t2p.py tests/test_start_migration.py`;
+`ruff check scripts/t2p.py scripts/start_migration.py tests/test_t2p.py tests/test_start_migration.py`;
+`pylint scripts/t2p.py scripts/start_migration.py`; `python -B scripts/check_agent_capabilities.py`;
+`python -B scripts/sync_agent_conventions.py --check`; repeat docs gates; secret scan and blind diff review.
+Full gate: `T2P_ENGINE_TESTS_NOT_CHECKED_REASON=covered-by-pinned-engine-integration-job uv run pytest -q`.
 Blind run 2 is NOT authorized while blocked. After approval, cold independent Windows session gets
 only `t2p --help`/output, no source/full README; same `20 - Supply Chain`, environment and comparable
 oracle/reference coverage as run 1. Verify first/last physical path, live output, exits and read-only status.
