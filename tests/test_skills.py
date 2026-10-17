@@ -72,8 +72,13 @@ DESKTOP_VERDICT_TOKENS = (
     "DIALOG_NEEDS_HUMAN",
     "DIALOG_UNRECOGNIZED",
     "DIALOG_UNREADABLE",
+    "READY",
+    "CREDENTIAL_REQUIRED",
+    "HUMAN_ACTION_REQUIRED",
+    "UNKNOWN_DIALOG",
+    "UNREADABLE_DIALOG",
 )
-AMNESTY_BLOCK_LEAD = "> ✅ **Length amnesty, current state:"
+AMNESTY_BLOCK_LEAD = "### One read-only Desktop observer"
 PREFLIGHT_STEP_LEAD = "3. **Local:**"
 # The canonical clean-run paragraph: `DATA_OK` is earned, and an active dialog or any authoritative
 # non-success token outranks a stale or late one. Bounded to its own paragraph so the next one cannot
@@ -282,6 +287,18 @@ def test_a_bundled_skill_passes_its_own_tests_after_being_copied_out_of_this_rep
         tmp_path / skill_dir.name,
         ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"),
     )
+    if skill_dir.name == "pbip-model-refresh":
+        for name in (
+            "_desktop_observer.py",
+            "_desktop_uia.ps1",
+            "credential_modal_signature.regex",
+            "blocking_prompt_signature.regex",
+            "benign_dialog_signature.regex",
+            "benign_chrome_signature.regex",
+        ):
+            assert (copied / "scripts" / name).is_file(), f"portable observer dependency missing: {name}"
+        assert not (copied / "scripts" / "_credential_modal.py").exists()
+        assert not (copied / "scripts" / "probe_desktop_credential.ps1").exists()
     result = subprocess.run(
         [
             sys.executable,
@@ -516,7 +533,11 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
     """
     guidance = {
         "pbip-model-refresh verdict table": _verdict_rows(PBIP_REFRESH_SKILL),
-        "pbip-model-refresh length-amnesty status": _block_from(PBIP_REFRESH_SKILL, AMNESTY_BLOCK_LEAD),
+        "pbip-model-refresh length-amnesty status": _block_from(
+            PBIP_REFRESH_SKILL,
+            AMNESTY_BLOCK_LEAD,
+            ends="> ⚠️ **Do not wait blindly",
+        ),
         "data-source-credentials verdict table": _verdict_rows(CREDENTIAL_DOC),
         "data-source-credentials preflight step": _block_from(CREDENTIAL_DOC, PREFLIGHT_STEP_LEAD, ends="4. "),
         "scripts/README arbiter row": _table_row(SCRIPTS_README, "probe_desktop_credential.ps1"),
@@ -531,13 +552,13 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
         ("pbip-model-refresh verdict table", "Act on the prompt visible in Desktop"),
         ("pbip-model-refresh verdict table", "the remedy is **not** established either"),
         ("pbip-model-refresh verdict table", "A bounded observation"),
-        ("pbip-model-refresh length-amnesty status", "issue #406 is closed"),
+        ("pbip-model-refresh length-amnesty status", "#406 remains closed"),
         ("data-source-credentials verdict table", "do not stack"),
         ("data-source-credentials verdict table", "does **not** establish which action"),
         ("data-source-credentials verdict table", "A bounded observation only"),
         ("data-source-credentials preflight step", "bounded observation"),
-        ("scripts/README arbiter row", "not proof of a cached credential"),
-        ("scripts/README arbiter row", "gate of record"),
+        ("scripts/README arbiter row", "Retired compatibility shim"),
+        ("scripts/README arbiter row", "no observation or Refresh occurs"),
     ]:
         assert needle in guidance[name], f"{name} no longer states {needle!r}"
 

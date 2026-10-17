@@ -1,5 +1,8 @@
 # Agent navigation index
 
+Desktop observation authority and its source-proof boundary:
+[`desktop-observer-simplification.md`](desktop-observer-simplification.md) (slice 1).
+
 Map of maps for agent-facing knowledge. Start here, then open the matching index or direct file.
 
 ## Start here for a migration unit

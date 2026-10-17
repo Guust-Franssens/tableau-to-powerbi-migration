@@ -22,9 +22,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import _credential_modal
+import _desktop_observer
 import refresh_pbip_model
-from test_credential_modal_detection import (
+from test_desktop_observer import (
     DIALOG_HWND,
     MAIN_HWND,
     _FakeProgressMonitor,
@@ -180,14 +180,10 @@ def test_terminal_diagnostic_runs_once_after_either_refresh_wait_branch(
     terminal = []
     calls = []
     window = owned_dialog(hwnd=DIALOG_HWND)
-    finding = _credential_modal.classify_dialog(window)
+    finding = _desktop_observer.classify_dialog(window)
 
-    def state(_pid: int, *, in_flight: bool = False):
-        return (
-            _credential_modal.CredentialDetection(dialog=finding)
-            if in_flight
-            else _credential_modal.CredentialDetection()
-        )
+    def state(_pid: int, *, in_flight: bool = False, **_kwargs):
+        return _desktop_observer.Observation(dialog=finding) if in_flight else _desktop_observer.Observation()
 
     original_join = refresh_pbip_model._join_refresh_worker
 
@@ -208,7 +204,7 @@ def test_terminal_diagnostic_runs_once_after_either_refresh_wait_branch(
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_TIMEOUT_SECONDS", 1)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_WALL_CLOCK_GRACE_SECONDS", 0.05)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.02)
-    monkeypatch.setattr(_credential_modal, "diagnose_dialog", diagnose)
+    monkeypatch.setattr(_desktop_observer, "diagnose_dialog", diagnose)
     argv = ["--pid", "111", "--no-save", "--refresh-absolute-timeout-seconds", "1"]
     if not progress_enabled:
         argv.append("--no-progress")
@@ -229,7 +225,7 @@ def test_timeout_diagnostic_does_not_invent_a_dialog_or_source_state(monkeypatch
 
     monkeypatch.setattr(refresh_pbip_model, "refresh", timeout)
     monkeypatch.setattr(
-        _credential_modal, "diagnose_dialog", lambda *_a: pytest.fail("a timeout has no detected HWND to enrich")
+        _desktop_observer, "diagnose_dialog", lambda *_a: pytest.fail("a timeout has no detected HWND to enrich")
     )
     args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "111", "--no-save"])
     assert refresh_pbip_model._refresh_and_save(111, 1234, None, args) == 3
@@ -252,12 +248,10 @@ def _visual_refresh(
     window = {"value": owned_dialog()}
     outcome = {}
 
-    def state(pid, *, in_flight=False):
+    def state(pid, *, in_flight=False, **_kwargs):
         if not in_flight:
-            return _credential_modal.CredentialDetection()
-        return _credential_modal.inspect_credential_modal(
-            pid, lambda _pid: [window["value"], main_window()], operation_in_flight=True
-        )
+            return _desktop_observer.Observation()
+        return _desktop_observer.inspect_desktop_observer(pid, lambda _pid: [window["value"], main_window()])
 
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", state)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.005)
@@ -392,7 +386,7 @@ def test_visual_write_failure_is_detail_free_and_does_not_change_the_worker(
         path.write_bytes(data[:20])  # a partial output must be cleaned as well
         raise OSError("PRIVATE_DIALOG_TEXT authentication 10054 C:\\private\\source")
 
-    monkeypatch.setattr(_credential_modal, "_write_private_image", fail_write)
+    monkeypatch.setattr(_desktop_observer, "_write_private_image", fail_write)
     thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
     try:
         assert visual_runtime.noticed.wait(2)
@@ -409,7 +403,7 @@ def test_visual_write_failure_is_detail_free_and_does_not_change_the_worker(
 
 
 def test_visual_unsupported_platform_is_loud_nonsemantic_once(monkeypatch, parked, visual_runtime) -> None:
-    monkeypatch.setattr(_credential_modal.sys, "platform", "linux")
+    monkeypatch.setattr(_desktop_observer.sys, "platform", "linux")
     thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
     try:
         assert visual_runtime.noticed.wait(2)
@@ -423,7 +417,7 @@ def test_visual_unsupported_platform_is_loud_nonsemantic_once(monkeypatch, parke
 
 
 def test_visual_expiry_deletes_without_waiting_for_refresh_exit(monkeypatch, parked, visual_runtime) -> None:
-    monkeypatch.setattr(_credential_modal, "IMAGE_LIFETIME_SECONDS", 0.08)
+    monkeypatch.setattr(_desktop_observer, "IMAGE_LIFETIME_SECONDS", 0.08)
     thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
     try:
         assert visual_runtime.noticed.wait(2)
@@ -463,7 +457,7 @@ def test_visual_inspector_can_delete_early(monkeypatch, parked, visual_runtime) 
 def test_visual_cleanup_failure_is_loud_preserves_result_and_expiry_retries(
     monkeypatch, parked, visual_runtime, capsys
 ) -> None:
-    monkeypatch.setattr(_credential_modal, "IMAGE_LIFETIME_SECONDS", 0.15)
+    monkeypatch.setattr(_desktop_observer, "IMAGE_LIFETIME_SECONDS", 0.15)
     unlink = Path.unlink
     attempts = []
 
@@ -501,7 +495,7 @@ def test_visual_capture_keeps_unreadable_deadline_and_never_becomes_a_verdict(
         assert visual_runtime.noticed.wait(2)
         thread.join(2)
         assert not thread.is_alive()
-        assert isinstance(outcome.get("error"), _credential_modal.DialogFoundError), (
+        assert isinstance(outcome.get("error"), _desktop_observer.DialogFoundError), (
             f"acquisition is NOT a semantic verdict: {outcome}"
         )
         assert outcome["error"].finding.verdict == "DIALOG_UNREADABLE"
@@ -537,7 +531,7 @@ def test_visual_does_not_mask_later_positive_semantic_text(monkeypatch, parked, 
         window["value"] = owned_dialog(("Please specify how to connect",))
         thread.join(2)
         assert not thread.is_alive()
-        assert isinstance(outcome.get("error"), _credential_modal.CredentialMissingError)
+        assert isinstance(outcome.get("error"), _desktop_observer.CredentialMissingError)
         assert not list(visual_runtime.root.glob("_ui-image-*.png"))
     finally:
         released.set()
@@ -564,7 +558,7 @@ def test_visual_notice_and_path_cannot_trip_the_real_parent_text_classifier(
     private_cwd = visual_runtime.root / "authentication-10054-oauth"
     private_cwd.mkdir()
     monkeypatch.chdir(private_cwd)
-    monkeypatch.setattr(_credential_modal.uuid, "uuid4", lambda: SimpleNamespace(hex="1005403abcdef" + "0" * 20))
+    monkeypatch.setattr(_desktop_observer.uuid, "uuid4", lambda: SimpleNamespace(hex="1005403abcdef" + "0" * 20))
     visual_runtime.api.pid = visual_runtime.api.owner_pid = 10054
     thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, pid=10054)
     try:
@@ -586,7 +580,7 @@ def test_visual_notice_and_path_cannot_trip_the_real_parent_text_classifier(
 
 
 def test_visual_requires_explicit_scratch_and_never_falls_back_to_cwd(monkeypatch, parked, visual_runtime) -> None:
-    monkeypatch.delenv(_credential_modal.IMAGE_DIRECTORY_ENV)
+    monkeypatch.delenv(_desktop_observer.IMAGE_DIRECTORY_ENV)
     thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
     try:
         assert visual_runtime.noticed.wait(2)
@@ -624,7 +618,7 @@ def test_visual_explicit_api_scratch_overrides_environment(monkeypatch, parked, 
 
 @pytest.mark.parametrize("bad_field", ["hash", "dimensions", "boolean_check", "missing_check"])
 def test_visual_rejects_incomplete_or_unbound_child_metadata(monkeypatch, parked, visual_runtime, bad_field) -> None:
-    acquire = _credential_modal._capture_exact_image
+    acquire = _desktop_observer._capture_exact_image
 
     def damaged(*args, **kwargs):
         result = acquire(*args, **kwargs)
@@ -638,7 +632,7 @@ def test_visual_rejects_incomplete_or_unbound_child_metadata(monkeypatch, parked
             result["ownership_checks"].pop("after_write")
         return result
 
-    monkeypatch.setattr(_credential_modal, "_capture_exact_image", damaged)
+    monkeypatch.setattr(_desktop_observer, "_capture_exact_image", damaged)
     thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
     try:
         assert visual_runtime.noticed.wait(2)
@@ -679,10 +673,10 @@ def test_visual_acquisition_timeout_kills_only_its_child_and_preserves_refresh(
     monkeypatch, parked, visual_runtime
 ) -> None:
     """Inject the child timeout after startup; the separate startup control owns the real watchdog."""
-    child_type = _credential_modal.subprocess.Popen
+    child_type = _desktop_observer.subprocess.Popen
 
     def never_returns(child, timeout):
-        assert 0 < timeout <= _credential_modal.IMAGE_CAPTURE_SECONDS
+        assert 0 < timeout <= _desktop_observer.IMAGE_CAPTURE_SECONDS
         assert not child.finished.is_set()
         raise subprocess.TimeoutExpired(child.argv, timeout)
 
@@ -703,7 +697,7 @@ def test_visual_acquisition_timeout_kills_only_its_child_and_preserves_refresh(
 
 def test_visual_capture_in_flight_is_cancelled_when_worker_finishes(monkeypatch, parked, visual_runtime) -> None:
     entered = threading.Event()
-    child_type = _credential_modal.subprocess.Popen
+    child_type = _desktop_observer.subprocess.Popen
 
     def wait_for_exit(child, timeout):
         entered.set()
@@ -750,11 +744,11 @@ def test_wait_completion_must_be_observed_before_the_original_deadline(
     """A delayed observation/join must not launder a late completion into success in either branch."""
     clock = _FakeClock()
     monkeypatch.setattr(refresh_pbip_model, "time", clock)
-    monkeypatch.setattr(_credential_modal, "time", clock)
+    monkeypatch.setattr(_desktop_observer, "time", clock)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.1)
-    state = _credential_modal.CredentialDetection()
+    state = _desktop_observer.Observation()
     if unreadable:
-        state = _credential_modal.inspect_credential_modal(111, lambda _pid: [owned_dialog(), main_window()])
+        state = _desktop_observer.inspect_desktop_observer(111, lambda _pid: [owned_dialog(), main_window()])
 
     class Worker:
         def is_alive(self):
@@ -763,7 +757,7 @@ def test_wait_completion_must_be_observed_before_the_original_deadline(
         def join(self, timeout):
             clock.now += min(timeout, 0.1)
 
-    def delayed_inspection(_pid):
+    def delayed_inspection(_pid, **_kwargs):
         clock.now = completed_at
         return state
 
@@ -771,13 +765,13 @@ def test_wait_completion_must_be_observed_before_the_original_deadline(
     arguments = dict(
         desktop_pid=111,
         source_hint=None,
-        initial_state=_credential_modal.CredentialDetection(),
+        initial_state=_desktop_observer.Observation(),
         total_timeout=1.0,
         progress_monitor=_FakeProgressMonitor() if mode == "progress" else None,
         observation_mode=mode == "observation",
     )
     if unreadable and completed_at >= 1.0:
-        with pytest.raises(_credential_modal.DialogFoundError) as error:
+        with pytest.raises(_desktop_observer.DialogFoundError) as error:
             refresh_pbip_model._join_refresh_worker(Worker(), **arguments)
         assert error.value.finding.verdict == "DIALOG_UNREADABLE"
     else:
@@ -789,9 +783,9 @@ def test_wait_completion_must_be_observed_before_the_original_deadline(
 @pytest.mark.parametrize("progress", [False, True])
 def test_evidence_worker_construction_cannot_restart_the_refresh_deadline(monkeypatch, progress) -> None:
     clock = _FakeClock()
-    evidence_type = _credential_modal.ModalVisualEvidence
+    evidence_type = _desktop_observer.ModalVisualEvidence
     monkeypatch.setattr(refresh_pbip_model, "time", clock)
-    monkeypatch.setattr(_credential_modal, "time", clock)
+    monkeypatch.setattr(_desktop_observer, "time", clock)
 
     def delayed_construction(*args, **kwargs):
         clock.now = 2.0
@@ -803,7 +797,7 @@ def test_evidence_worker_construction_cannot_restart_the_refresh_deadline(monkey
         worker,
         desktop_pid=111,
         source_hint=None,
-        initial_state=_credential_modal.CredentialDetection(),
+        initial_state=_desktop_observer.Observation(),
         total_timeout=1.0,
         progress_monitor=_FakeProgressMonitor() if progress else None,
     )
@@ -861,7 +855,7 @@ def test_delayed_observer_never_blocks_refresh_wait_or_teardown(monkeypatch, par
         resume.wait(5)
         observed.set()
 
-    monkeypatch.setattr(_credential_modal.ModalVisualEvidence, "observe", delayed_observation)
+    monkeypatch.setattr(_desktop_observer.ModalVisualEvidence, "observe", delayed_observation)
     thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, progress=progress, timeout=0.5)
     try:
         assert entered.wait(2), "the observer never received the queued target"
@@ -874,7 +868,7 @@ def test_delayed_observer_never_blocks_refresh_wait_or_teardown(monkeypatch, par
         if finishes:
             assert outcome.get("result", (False,))[0] is True, "optional evidence must not reject a timely refresh"
         else:
-            assert isinstance(outcome.get("error"), _credential_modal.DialogFoundError), outcome
+            assert isinstance(outcome.get("error"), _desktop_observer.DialogFoundError), outcome
             assert outcome["error"].finding.verdict == "DIALOG_UNREADABLE"
     finally:
         released.set()
@@ -889,12 +883,12 @@ def test_delayed_evidence_startup_cannot_hold_the_deadline_or_publish_after_exit
 ) -> None:
     entered, resume, observed = threading.Event(), threading.Event(), threading.Event()
     target, name = {
-        "directory": (_credential_modal, "_evidence_directory"),
-        "lease": (_credential_modal, "_open_private_image"),
-        "process": (_credential_modal.subprocess, "Popen"),
+        "directory": (_desktop_observer, "_evidence_directory"),
+        "lease": (_desktop_observer, "_open_private_image"),
+        "process": (_desktop_observer.subprocess, "Popen"),
     }[phase]
     original = getattr(target, name)
-    observe = _credential_modal.ModalVisualEvidence.observe
+    observe = _desktop_observer.ModalVisualEvidence.observe
 
     def delayed_startup(*args, **kwargs):
         entered.set()
@@ -908,13 +902,13 @@ def test_delayed_evidence_startup_cannot_hold_the_deadline_or_publish_after_exit
             observed.set()
 
     monkeypatch.setattr(target, name, delayed_startup)
-    monkeypatch.setattr(_credential_modal.ModalVisualEvidence, "observe", observe_until_clean)
+    monkeypatch.setattr(_desktop_observer.ModalVisualEvidence, "observe", observe_until_clean)
     thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, timeout=0.25)
     try:
         assert entered.wait(2), "the startup control never reached the requested boundary"
         thread.join(2)
         assert not thread.is_alive(), "evidence startup held the refresh deadline"
-        assert isinstance(outcome.get("error"), _credential_modal.DialogFoundError), outcome
+        assert isinstance(outcome.get("error"), _desktop_observer.DialogFoundError), outcome
         assert outcome["error"].finding.verdict == "DIALOG_UNREADABLE"
         assert not observed.is_set(), "control requires startup still to be delayed at refresh exit"
     finally:
@@ -932,9 +926,9 @@ def test_process_startup_uses_the_acquisition_budget_without_stopping_refresh(
     monkeypatch, parked, visual_runtime
 ) -> None:
     entered, resume, observed = threading.Event(), threading.Event(), threading.Event()
-    popen = _credential_modal.subprocess.Popen
-    observe = _credential_modal.ModalVisualEvidence.observe
-    monkeypatch.setattr(_credential_modal, "IMAGE_CAPTURE_SECONDS", 0.1)
+    popen = _desktop_observer.subprocess.Popen
+    observe = _desktop_observer.ModalVisualEvidence.observe
+    monkeypatch.setattr(_desktop_observer, "IMAGE_CAPTURE_SECONDS", 0.1)
 
     def delayed_process(*args, **kwargs):
         entered.set()
@@ -947,8 +941,8 @@ def test_process_startup_uses_the_acquisition_budget_without_stopping_refresh(
         finally:
             observed.set()
 
-    monkeypatch.setattr(_credential_modal.subprocess, "Popen", delayed_process)
-    monkeypatch.setattr(_credential_modal.ModalVisualEvidence, "observe", observe_until_clean)
+    monkeypatch.setattr(_desktop_observer.subprocess, "Popen", delayed_process)
+    monkeypatch.setattr(_desktop_observer.ModalVisualEvidence, "observe", observe_until_clean)
     thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
     try:
         assert entered.wait(2)

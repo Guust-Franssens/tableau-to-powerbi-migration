@@ -48,10 +48,16 @@ CLOCK_FUNCTIONS = {"monotonic", "perf_counter"}
 # This one gives two child processes 10s to reach a rendezvous barrier; under two concurrent
 # whole-suite parallel runs (44 workers on 22 cores) they did not both start in time (issue #387).
 MEASURED_LARGER_BUDGETS = frozenset(
-    {"tests/test_check_migration_progress.py::test_declare_wrapper_concurrent_writers_keep_both_declarations"}
+    {
+        "tests/test_check_migration_progress.py::test_declare_wrapper_concurrent_writers_keep_both_declarations",
+        # #741: the 0.1s API deadline is an implicit rendezvous budget, not an elapsed assertion.
+        # It failed before worker entry under concurrent validation; the quiet tier passes.
+        ".github/skills/pbip-model-refresh/tests/test_canary_data_gate.py::"
+        "test_read_result_waits_for_worker_termination_not_queue_publication",
+    }
 )
 
-BUNDLE_TESTS = ".github/skills/pbip-model-refresh/tests/test_credential_modal_detection.py"
+BUNDLE_TESTS = ".github/skills/pbip-model-refresh/tests/test_desktop_observer.py"
 
 
 def _pyproject() -> dict:
@@ -152,8 +158,10 @@ def _launches_the_live_desktop(func: ast.FunctionDef) -> bool:
     """
     for node in ast.walk(func):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id == "_run_probe_against_wpf_modal":
+            if node.func.id in {"_run_probe_against_wpf_modal", "_NativeWindowProbe"}:
                 return True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "CreateWindowExW":
+            return True
         if isinstance(node, ast.Constant) and node.value == "-ReadyFile":
             return True
     return False
@@ -220,7 +228,7 @@ def test_every_live_ui_test_declares_itself_serial() -> None:
     would move the boundary rather than remove it: all of them share the mechanism.
     """
     live = _live_desktop_tests_with_marks()
-    assert len(live) >= 7, f"expected the bundle's live WPF regressions to be found, got {sorted(live)}"
+    assert len(live) >= 6, f"expected the retained native/UIA GUI regressions to be found, got {sorted(live)}"
     unmarked = sorted(node for node, marked in live.items() if not marked)
     assert not unmarked, (
         "these tests drive a real WPF window through UI Automation but do not carry "
@@ -296,7 +304,7 @@ def test_every_sub_second_wall_clock_test_declares_itself_timing() -> None:
 
 def test_the_markers_actually_deselect_those_tests() -> None:
     """The markers are inert unless `-m` really removes those node ids from a collected run."""
-    excluded = _sub_second_budget_tests() | set(_live_desktop_tests_with_marks())
+    excluded = _sub_second_budget_tests() | set(_live_desktop_tests_with_marks()) | MEASURED_LARGER_BUDGETS
     assert excluded, "nothing derived - this test would pass vacuously"
     target = sorted(excluded)[0].split("::")[0]
     in_target = sorted(node for node in excluded if node.startswith(target + "::"))

@@ -21,7 +21,6 @@ import time
 import queue
 import traceback
 from dataclasses import FrozenInstanceError, replace
-from types import SimpleNamespace
 
 import pytest
 
@@ -299,6 +298,22 @@ def test_canary_observation_uses_the_bound_query_and_actual_returned_rows(monkey
     assert not hasattr(observations[0], "persisted")
 
 
+def test_bound_queries_supply_the_callers_exact_process_start_to_every_observation(monkeypatch):
+    """Every inspection in a bound read receives the original held creation token."""
+    conn = _Conn([("Orders", False)], {"Orders": 1})
+    bound = _bound_connection(monkeypatch, conn)
+    received = []
+
+    def inspect_state(pid, **kwargs):
+        received.append(kwargs.get("expected_process_start"))
+        return probe_desktop_query.Observation(pid=str(pid), process_started_at=bound.identity.process_start)
+
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", inspect_state)
+    assert probe_desktop_query.probe_observations(bound, ["Orders"])[0].returned_rows == 1
+    assert len(received) >= 2
+    assert all(start == "100" for start in received), "every observation must receive the caller-held exact start"
+
+
 @pytest.mark.parametrize(
     "canaries",
     [None, [], [""], [" "], [True], "Orders", {"Orders": 1}, ["Orders", "orders"]],
@@ -358,11 +373,25 @@ def test_query_result_is_not_returned_after_bound_identity_changes(monkeypatch, 
         ("dialog", "REFRESH_IN_PROGRESS"),
         ("process_gone", "DESKTOP_GONE"),
         ("desktop_unready", "DESKTOP_UNREADY"),
-        ("unknown_reason", "CREDENTIAL_UNKNOWN"),
+        ("unknown_reason", "DIALOG_UNREADABLE"),
     ],
 )
 def test_observation_refusals_are_one_attempt_and_do_not_query(monkeypatch, field, code):
-    state = probe_desktop_query.CredentialDetection(**{field: SimpleNamespace(verdict=code)})
+    from _desktop_observer import DesktopWindow  # pylint: disable=import-outside-toplevel
+
+    target = DesktopWindow("", "", 100, 100, hwnd=222)
+    value = code
+    if field == "modal":
+        value = probe_desktop_query.CredentialModal("", target)
+    elif field == "dialog":
+        kind = {
+            "DIALOG_NEEDS_HUMAN": "needs-human",
+            "DIALOG_UNREADABLE": "unreadable",
+            "DIALOG_UNRECOGNIZED": "unrecognized",
+            "REFRESH_IN_PROGRESS": "benign",
+        }[code]
+        value = probe_desktop_query.DialogFinding(kind, code, target)
+    state = probe_desktop_query.Observation(**{field: value})
     calls = []
     monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda pid, **_: calls.append(pid) or state)
     with pytest.raises(probe_desktop_query.ObservationUnavailable, match=f"^{code}$"):
@@ -374,9 +403,9 @@ def test_late_credential_refusal_interrupts_the_bounded_read(monkeypatch):
     release = threading.Event()
     calls = []
 
-    def inspect_state(_pid, *, in_flight=False):
+    def inspect_state(_pid, *, in_flight=False, **_kwargs):
         calls.append(in_flight)
-        return probe_desktop_query.CredentialDetection(modal=object() if in_flight else None)
+        return probe_desktop_query.Observation(modal=object() if in_flight else None)
 
     monkeypatch.setattr(probe_desktop_query, "_credential_state", inspect_state)
     try:
@@ -555,6 +584,7 @@ def test_canary_error_privacy_has_an_unchanged_legacy_control(monkeypatch, capsy
         assert caught.value is error and caught.value.__cause__ is cause and caught.value.__notes__ == [sentinel]
 
 
+@pytest.mark.timing
 def test_read_result_waits_for_worker_termination_not_queue_publication(monkeypatch):
     entered, release = threading.Event(), threading.Event()
     workers, published = [], []
@@ -593,8 +623,8 @@ def test_inspection_failure_after_queued_read_still_refuses(monkeypatch):
         if threading.current_thread().name == "observation-inspection":
             inspecting.set()
             assert release.wait(5)
-            return probe_desktop_query.CredentialDetection(modal=object())
-        return probe_desktop_query.CredentialDetection()
+            return probe_desktop_query.Observation(modal=object())
+        return probe_desktop_query.Observation()
 
     def read():
         assert inspecting.wait(3), "inspection must be in flight before the read completes"

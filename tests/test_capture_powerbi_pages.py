@@ -17,7 +17,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 # ruff: noqa: E402  (the sys.path insert above must precede this import)
 import capture_powerbi_pages as capture
-import _credential_modal as modal  # pylint: disable=wrong-import-position
+import _desktop_observer as modal  # pylint: disable=wrong-import-position
 from probe_desktop_query import DesktopIdentity
 from refresh_pbip_model import ImageObservation
 from test_iteration_receipt import (
@@ -34,18 +34,18 @@ from test_iteration_receipt import (
 )
 
 
-@pytest.fixture(name="dialog_capture")
+@pytest.fixture(name="dialog_capture", autouse=True)
 def dialog_capture_fixture(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Supply only a synthetic detector result, with the real fixed diagnostic renderer."""
     calls = []
     window = modal.DesktopWindow("PRIVATE_TEST_VALUE", "", 400, 300, hwnd=222)
     finding = modal.DialogFinding("unrecognized", "DIALOG_UNRECOGNIZED", window, "PRIVATE_TEST_VALUE")
 
-    def inspect_pid(pid: int):
+    def inspect_pid(pid: int, **_kwargs):
         calls.append(pid)
-        return modal.CredentialDetection(dialog=finding)
+        return modal.Observation(dialog=finding)
 
-    monkeypatch.setattr(capture, "inspect_credential_modal", inspect_pid)
+    monkeypatch.setattr(capture, "observe", inspect_pid)
     monkeypatch.setattr(modal, "diagnose_dialog", lambda *_a: ("OBSERVED", "package_session", "template_match"))
     return calls
 
@@ -133,7 +133,7 @@ def test_capture_dialog_diagnostic_failure_cannot_replace_capture_failure(
     def unavailable(_pid: int):
         raise RuntimeError("PRIVATE_TEST_VALUE OAuth 403")
 
-    monkeypatch.setattr(capture, "inspect_credential_modal", unavailable)
+    monkeypatch.setattr(capture, "observe", unavailable)
     capture._report_dialog(111)
     output = capsys.readouterr()
     assert "could not be read safely" in output.err and "PRIVATE_TEST_VALUE" not in output.err
@@ -941,3 +941,21 @@ def test_a1_return_must_describe_the_requested_operations(
         )
     assert _code(lambda: _prepared_iteration(package)) == ("A1_CANARY_SET" if change == "canary_set" else "SCHEMA")
     assert not _path(package).parent.exists()
+
+
+def test_capture_diagnostic_keeps_the_held_start_after_fatal_preparation(
+    a1: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fatal preparation must not discard the identity used by the terminal diagnostic."""
+    package, bound, _, _ = a1
+    received = []
+
+    def observe(pid: int, **kwargs):
+        received.append(kwargs.get("expected_process_start"))
+        return modal.Observation(pid=str(pid), process_started_at=bound.identity.process_start)
+
+    monkeypatch.setattr(capture, "observe", observe)
+    monkeypatch.setattr(capture, "refresh", lambda *_args, **_kwargs: object())
+    assert _code(lambda: _prepared_iteration(package)) == "A1_OBSERVATION_INVALID"
+    assert received == [bound.identity.process_start], "a held identity must survive a fatal preparation refusal"
