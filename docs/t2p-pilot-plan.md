@@ -138,7 +138,7 @@ Status controls: direct/facade codes/observations, repeated byte/tree hashes, ab
 Doctor controls: fixed process/file fixtures vs direct resolver/preflight; aliases, precedence, blank/conflict,
 missing/malformed/unreadable file, empty SITE, absent optional keys, preflight 0/1/launch and interrupt in both modes.
 Direct clean-tree test snapshots files/bytes/mtimes, runs doctor and its preflight child, asserts no additions/deletions/byte/mtime changes including no `__pycache__`/`.pyc`. Trap writes/login/migration network; assert no run/cache/config byte changes; inject canaries in every value
-and raw preflight/warnings/exceptions. Mutate value/length/hash leaks, source attribution and -Update; named assertions kill each.
+and raw preflight/warnings/exceptions. Mutate value/length/hash leaks, source attribution and -Update; named assertions kill each. In an isolated copy, remove/unset `PYTHONDONTWRITEBYTECODE` for the preflight child; the clean-tree/no-pyc assertion must fail on that intended assertion, not merely exit nonzero.
 Mutations in isolated copies: remove doctor/start/status branch; disconnect path gate; force unknown→PASS;
 drop native stage record; suppress post-reference bundle; normalize exit; buffer progress; enable
 status write/next. Each must fail its named scope/guard/stage/exit/stream/read-only assertion.
