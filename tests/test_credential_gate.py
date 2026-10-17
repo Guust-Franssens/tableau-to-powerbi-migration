@@ -267,12 +267,12 @@ def _deny_rights_for_current_account(target: Path) -> tuple[int, str, list[froze
 
 
 def _assert_gate_fully_cleared(migration: Path) -> None:
-    """Asserted teardown: `clear` must exit 0 AND the kernel deny must actually be gone.
+    """Asserted test-owned teardown: the physical release must leave no kernel deny.
 
     #543's state-2 node called no cleanup at all and leaked a real deny ACE into the temp tree; the
-    module `migration` fixture does call `clear`, but discards its exit code, so a failed
-    `/remove:d` would leave a denied directory behind and still look like clean teardown. A failure
-    here fails/errors the test and carries the icacls output as evidence rather than swallowing it.
+    A canonical pending source cannot use manual `clear` as a release. Cleanup therefore uses the
+    locked physical helper on this test's own root, then checks raw ACEs and a real write. A failed
+    `/remove:d` must fail/error the test rather than leaving a denied directory behind.
     """
     _strip_fixture_barrier(migration)
     if platform.system() != "Windows":
