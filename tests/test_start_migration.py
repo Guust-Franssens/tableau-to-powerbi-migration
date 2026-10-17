@@ -827,3 +827,54 @@ def test_empty_explicit_session_id_does_not_fall_back_to_environment(monkeypatch
     assert excinfo.value.code == 2
     assert pipeline.guard_calls == []
     assert pipeline.preflight == [] and pipeline.commands == []
+
+
+@pytest.mark.parametrize(
+    "codes,expected",
+    [
+        ({}, 0),
+        ({"run_engine_survey.py": 7}, 1),
+        ({"capture_tableau_oracle.py": 4}, 1),
+        ({"run_estate.py": 10}, 1),
+    ],
+)
+def test_optional_observer_preserves_direct_frontdoor(monkeypatch, tmp_path, capsys, codes, expected):
+    """An observer changes no producer command, wrapper result or reference continuation."""
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, exit_codes=codes)
+    records = []
+    assert frontdoor.main(["--project", "Finance"], observer=records.append) == expected
+    assert records[0]["event"] == "allocated"
+    assert Path(records[0]["run"]).is_absolute()
+    stages = [row for row in records if row["event"] == "stage"]
+    assert stages[0] == {
+        "event": "stage",
+        "stage": "preflight",
+        "native_exit_code": 0,
+        "state": "ok",
+        "artifact": None,
+    }
+    if "run_engine_survey.py" in codes:
+        assert [row["stage"] for row in stages] == ["preflight", "survey"]
+    else:
+        assert stages[-1]["stage"] == "bundle"
+    assert all(not Path(row["artifact"]).is_absolute() for row in stages if row["artifact"])
+    assert len(pipeline.commands) == len(stages) - 1
+
+
+def test_optional_diagnostic_env_blocks_before_allocation(monkeypatch, tmp_path, capsys):
+    """Strict pilot metadata is opt-in; legacy permissive env behavior stays the default."""
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+    for key in ENV:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("TABLEAU_SERVER", raising=False)
+    monkeypatch.delenv("TABLEAU_PAT_VALUE", raising=False)
+    selected = tmp_path / "selected.env"
+    selected.write_text("TABLEAU_PAT_SECRET= \t\n", encoding="utf-8")
+    records = []
+    assert (
+        frontdoor.main(["--project", "Finance", "--env", str(selected)], observer=records.append, diagnostic_env=True)
+        == 1
+    )
+    assert [row["event"] for row in records] == ["configuration"]
+    assert not list(pipeline.root.glob("_runs/*")), "diagnostic failure must not allocate"
+    assert pipeline.commands == []

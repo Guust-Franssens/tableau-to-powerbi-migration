@@ -757,3 +757,28 @@ def test_the_structural_guard_sees_ordinary_environ_aliases():
     ]
     for src in aliased:
         assert _direct_environ_reads(ast.parse(src)), f"{src!r} slipped past the structural guard"
+
+
+@pytest.mark.parametrize("source", ["file", "environment"])
+def test_pilot_diagnostic_alias_blank_conflict(tmp_path, source):
+    """The optional API reports provenance/alias conflicts without exposing values."""
+    import tableau_env
+
+    path = tmp_path / ".env"
+    values = {"TABLEAU_SERVER": "https://synthetic.invalid", "TABLEAU_PAT_NAME": "name", "TABLEAU_PAT_VALUE": "secret"}
+    path.write_text(
+        "\n".join(f"{key}={value}" for key, value in values.items()) if source == "file" else "", encoding="utf-8"
+    )
+    env, diagnostic = tableau_env.diagnose_env(path, environ=values if source == "environment" else {})
+    rows = {row["key"]: row for row in diagnostic["checks"]}
+    assert diagnostic["status"] == "READY_TO_ATTEMPT"
+    assert rows["TABLEAU_PAT_SECRET"]["state"] == "deprecated-alias"
+    assert rows["TABLEAU_PAT_SECRET"]["source"] == {"file": "selected_env", "environment": "environment"}[source]
+    assert rows["TABLEAU_PAT_SECRET"]["secret"] is True
+    assert env["TABLEAU_PAT_SECRET"] == "secret"
+    assert "synthetic.invalid" not in str(diagnostic)
+    env, diagnostic = tableau_env.diagnose_env(path, environ={"TABLEAU_PAT_SECRET": " \t "})
+    assert diagnostic["status"] == "BLOCKED_CONFIG"
+    assert env["TABLEAU_PAT_SECRET"] == ""
+    _, diagnostic = tableau_env.diagnose_env(path, environ={"TABLEAU_PAT_SECRET": "one", "TABLEAU_PAT_VALUE": "two"})
+    assert next(row for row in diagnostic["checks"] if row["key"] == "TABLEAU_PAT_SECRET")["state"] == "conflict"

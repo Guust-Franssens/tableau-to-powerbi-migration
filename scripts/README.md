@@ -1251,3 +1251,54 @@ rebuild the artifact after editing its source.
 | `trace_customer_text.py` | The artifact table in [`docs/customer-text-exposure.md`](../docs/customer-text-exposure.md) — **which artifacts carry the customer's field names, formulas and titles into an agent's context.** `inject` stamps uniquely-greppable, instruction-shaped sentinels into a `.twb`/`.tds`/`.twbx`; `trace` reports where they landed, in file NAMES as well as content, plus the sentinels that reached nothing (the negative result that bounds the claim). Answers a privacy question and a prompt-injection one with the same run, and neither answer survives an engine upgrade — the engine is not pinned, so re-run it rather than trusting the committed table. |
 | `provision_tableau_estate.py` | **The Tableau site as code** — the one direction the rest of the toolkit does not go. `capture` enumerates a site, downloads every asset and writes a re-appliable manifest; `apply` recreates projects (shallowest-first), groups, then **datasources before workbooks**, because a workbook published first silently rebinds to nothing; `seed` gives every empty leaf project something migratable, and `--refresh-seeded` republishes existing seeds after a template change. Projects are keyed by path **segments, never a joined string** — the trial site has a project literally named `R/D`, which made a `/`-joined identity ambiguous and mislabelled its seed. Asset filenames come from what TSC *returns*, never guessed: it appends its own suffix (`X.twbx.twbx`) and hands back `.twb` for an unpackaged workbook. `capture` **refuses an `--out` git does not ignore** (`--allow-unignored-out` overrides): `manifest.json` names every project, workbook and datasource on a live site, and this repo is public. `--refresh-seeded` **downloads a candidate before overwriting it** — `Seed - ` is a naming convention, not proof of authorship, so a genuine workbook of that name is refused rather than replaced by the stub, and `--dry-run` runs the same check so the plan reports the refusal the run would make. Permission RULES and group **membership** are deliberately not reproduced — LUIDs differ on a fresh site, and a half-correct permission model is worse than an absent one; ownership, tags, certification, workbook descriptions and extract data are not reproduced either, and `apply` prints that whole list. `content_permissions` and `show_tabs` **are** captured and re-applied on create. | after any hand-edit of the trial site, and before a trial lapses |
 | `make_seed_workbook.py` | Builds the ~1.8 KB self-contained `.twbx` that `provision_tableau_estate.py seed` publishes: one CSV, one worksheet, one dashboard. Exists because **an empty project is an inert fixture** — the trial site's 11-deep `ZZ Deep` chain and every deliberately hostile project name (`R/D`, `R+D`, `Trailing dot.`, `Ventes françaises`) held nothing, so the path handling they were built to stress was never exercised. Two non-obvious requirements, both measured against Tableau Cloud: a `<windows>` entry per sheet (or publish fails *"not associated with any window"*), and `<metadata-records>` for every column (without them the engine cannot type a model and the whole estate comes back `DOD_FAILED, bound=0/N`). Every attribute in the template is **single-quoted**, so names are escaped with quotes included — `saxutils.escape` alone covers only `&`/`<`/`>`, and a project named `L'Équipe` stopped the file being XML. Sheet names truncate the **raw** base then append the suffix: slicing an escaped string splits entities, and composing first made the worksheet and dashboard collide at 54 characters. The internal `.twb` entry name is sanitised, decoupled from the display name, so a `/` in the name cannot create a directory inside the archive. | called by `provision_tableau_estate.py seed` |
+## Narrow `t2p.py` pilot (Refs #749)
+
+This opt-in pilot does not replace direct scripts, dispatcher guidance or gates. The frozen
+[pilot plan](../docs/t2p-pilot-plan.md) supersedes the earlier consensus's path timing and exit names.
+
+```text
+python -B scripts/t2p.py doctor [--env <path>] [--json]
+python -B scripts/t2p.py start --project <exact-name|LUID> [--env <path>] [--runs-parent <path>] [--storage-decision <path>] [--session-id <UUID>] [--json]
+python -B scripts/t2p.py status --run <absolute-local-run> [--json]
+```
+
+`doctor` captures **plain** preflight privately and reports canonical configuration presence/source,
+alias/blank/conflict states and secret flags only. No value, length, digest, server/site/PAT name or
+host path is displayed. `READY_TO_ATTEMPT` means preflight=0 and consistent required presence, not
+authentication, reachability, path safety or readiness. Exit 1 is blocked configuration/preflight,
+3 is unknown input/launch/unexpected preflight result; syntax=2 and interrupt=130. The child receives
+`PYTHONDONTWRITEBYTECODE=1`. Read-only means no toolkit/run/config changes, not zero platform diagnostic
+traffic: plain preflight may inspect Azure/Fabric. No update, login, migration source probe or allocation.
+
+`start` delegates **one** existing `start_migration.py` owner, including its output guard, allocator,
+site-wide assessment, post-harvest/pre-conversion path gate and reference-failure bundle continuation.
+Initial path decision is `cannot_establish` / `unknown_until_harvest`, at either root. No root-only PASS,
+relocation, guessed number or facade path scanner. Preserve wrapper exits 0/1/3/130; stage native codes
+are separate, e.g. reference 4 -> bundle attempted -> wrapper 1. Exit 0 is capture-only, never fidelity,
+START_READY, COMPLETE or deployment. Human first/last markers name the run (or NOT_ALLOCATED root);
+allocation is reported before children. Over-ceiling diagnostics retain the old run and the existing
+owner's exact direct-script new-run command. The facade's rerun field remains unavailable because it
+has no complete recorded invocation; it never guesses an authoritative rerun.
+
+`status` calls `run_status.build_status` only. It does not launch git/processes, scan path ceilings,
+perform network requests, repair, allocate or establish liveness/readiness. It preserves diagnostic
+exit and ordered finding/unit multiplicity; customer labels are withheld. Stored outcomes are
+last-observed, not freshly certified. It omits `next_action`; missing/moved identity is
+`cannot_establish`, with no derived path. Underivable path/location fields are null with stable reasons.
+
+JSON stdout is one `t2p/v1` envelope, also for syntax/launch/interrupt failures. Common fields:
+`command`, `status`, `exit_code`, `authority`, `delegated_exit_code`, `stages`, `checks`, `evidence`,
+`artifacts`, `run_location`, `runs_root`, `path_report`, `limitations`, `proof_boundary`.
+`native_exit_code` exists only inside stage records; `delegated_exit_code` belongs to the wrapper/
+diagnostic owner (doctor has two owners, so null). Child start diagnostics, including OS stdout/stderr,
+stream live to stderr in JSON mode and remain **private native output**, not public-safe attachments.
+Absolute run locations are local-only. Doctor never forwards raw preflight output.
+Path reports expose the 259/247 UTF-16 ceilings; absent owner measurements remain null, never PASS.
+Schema shape is pinned inline in `scripts/t2p.py`; additive fields are compatible, breaking changes
+require a new version. General statuses are `ok|findings|cannot_establish|error|interrupted`;
+doctor uses `READY_TO_ATTEMPT|BLOCKED_CONFIG|CANNOT_ESTABLISH`.
+
+Only these three explicit verbs exist: no file/folder/datasource/site/server selectors, `next`,
+router, state DB, credential, build, package, validation, promotion, deployment or dispatch command.
+Offline tests validate mechanics, not blind-run benefit. Live blind run 2 remains an independent
+same-project/same-oracle acceptance step; no journey/documentation replacement is authorized yet.
