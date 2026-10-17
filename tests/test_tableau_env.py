@@ -777,6 +777,10 @@ def test_pilot_diagnostic_alias_blank_conflict(tmp_path, source):
     assert rows["TABLEAU_PAT_SECRET"]["secret"] is True
     assert env["TABLEAU_PAT_SECRET"] == "secret"
     assert "synthetic.invalid" not in str(diagnostic)
+    _, diagnostic = tableau_env.diagnose_env(path, environ={"TABLEAU_PAT_SECRET": "same", "TABLEAU_PAT_VALUE": "same"})
+    assert (
+        next(row for row in diagnostic["checks"] if row["key"] == "TABLEAU_PAT_SECRET")["state"] == "deprecated-alias"
+    )
     env, diagnostic = tableau_env.diagnose_env(path, environ={"TABLEAU_PAT_SECRET": " \t "})
     assert diagnostic["status"] == "BLOCKED_CONFIG"
     assert env["TABLEAU_PAT_SECRET"] == ""

@@ -250,7 +250,9 @@ def test_start_owner_parity_and_native_stages(monkeypatch, tmp_path, capsys, nat
         for command in pipeline.commands
         if "capture_tableau_oracle.py" in " ".join(command)
     )
-    assert all(options["stdout"] is None and options["stderr"] is None for options in pipeline.options)
+    assert all(options["stdout"] is None and options["stderr"] is None for options in pipeline.options), (
+        "stage output must stream without buffering"
+    )
 
 
 def test_start_preallocation_block_has_no_path(monkeypatch, capsys):
@@ -275,10 +277,11 @@ def test_native_descriptor_output_is_live_and_json_stdout_single(tmp_path):
         encoding="utf-8",
     )
     (scripts / "start_migration.py").write_text(
-        "import os,time\n"
+        "import os,time,subprocess,sys\n"
         "def main(argv, *, observer=None, diagnostic_env=False):\n"
         "    observer({'event':'allocated','run':os.path.dirname(__file__),'output_guard':'passed'})\n"
         "    os.write(1,b'LIVE_FD1\\n'); os.write(2,b'LIVE_FD2\\n')\n"
+        "    subprocess.run([sys.executable,'-B','-c',\"import os; os.write(1,b'LIVE_CHILD_FD1\\\\n'); os.write(2,b'LIVE_CHILD_FD2\\\\n')\"],check=True)\n"
         "    time.sleep(2)\n"
         "    observer({'event':'stage','stage':'bundle','native_exit_code':10,'state':'failed','artifact':'bundle/report.json'})\n"
         "    return 1\n",
@@ -294,10 +297,11 @@ def test_native_descriptor_output_is_live_and_json_stdout_single(tmp_path):
         reader = threading.Thread(target=lambda: [lines.put(line) for line in process.stderr], daemon=True)
         reader.start()
         progress = []
-        while not any("LIVE_FD2" in line for line in progress):
+        while not any("LIVE_CHILD_FD2" in line for line in progress):
             progress.append(lines.get(timeout=10))
         assert process.poll() is None, "progress must stream before delegated completion"
         assert any("LIVE_FD1" in line for line in progress), "OS stdout must be routed to stderr"
+        assert any("LIVE_CHILD_FD1" in line for line in progress), "inherited child stdout must be routed to stderr"
         output = process.stdout.read()
         assert process.wait(timeout=15) == 1
         reader.join(timeout=5)
@@ -529,6 +533,13 @@ def test_start_reaches_existing_postharvest_gate(monkeypatch, tmp_path, capsys, 
             "os.dup2(saved, 1)",
             "test_native_descriptor_output_is_live_and_json_stdout_single",
             "OS stdout must be routed to stderr",
+        ),
+        (
+            "start_migration.py",
+            '"stdout": None, "stderr": None',
+            '"stdout": subprocess.PIPE, "stderr": subprocess.PIPE',
+            "test_start_owner_parity_and_native_stages",
+            "stage output must stream without buffering",
         ),
         (
             "t2p.py",

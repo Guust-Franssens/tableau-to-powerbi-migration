@@ -353,7 +353,7 @@ def diagnose_env(
             else "blank"
             if present and not values[present[0]].strip()
             else "deprecated-alias"
-            if present and present[0] != key
+            if any(spelling != key for spelling in present)
             else "set"
             if present
             else "missing"
