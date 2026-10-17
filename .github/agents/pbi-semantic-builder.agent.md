@@ -109,7 +109,7 @@ translation guide is your reference for every calculated field.
   `CustomInstructions`, `qnaEnabled`, `ai-instructions.md`).
 - **pbip-model-refresh skill** — refreshing a local PBIP, persisting to `cache.abf`, the pid-binding
   rule, and the edit → refresh → save order.
-- **`semantic-model-authoring`** — TMDL mechanics: tables/columns, relationships, measures, deploy.
+- **`semantic-model-authoring`** — load current TMDL mechanics; apply the CustomInstructions override below.
 - **Read-only DAX (`EVALUATE`) — your validation surface.** For a local PBIP, DAX execution needs a
   model open in Desktop: `python scripts/probe_desktop_query.py --pid <pid>` or an equivalent
   pid-scoped ADOMD query. `powerbi-modeling-mcp` **ConnectFolder is metadata-only** offline
@@ -189,54 +189,33 @@ enrich it, and hand it over refreshed.
 
 ### Declare every TMDL edit — sign-off reads hashes, not intent
 
-Every file under a `*.SemanticModel` folder is hash-baselined in `input_manifest.json`, and the
-orchestrator runs `check_migration_progress.py --bundle <b> --tamper` before sign-off: it exits **1**
-on any generated file that changed without a declaration. `scripts/declare_generated_edit.py` is the
-**only** thing that writes one — it runs your script and records the before/after hashes:
+Wrap generated model edits **before writing** with `scripts/declare_generated_edit.py`, retaining
+engine-baselined before/after hashes. For AI, follow `powerbi-ai-readiness`'s `--plan` inventory and
+one `--targets` batch: snapshot every target, stamp once, record every changed file. Single-file
+`--target` remains valid; never split a multi-file stamp into per-target runs.
 
-```bash
-python scripts/declare_generated_edit.py --bundle <b> \
-  --target pbip/<WB>/<M>.SemanticModel/definition/cultures/en-US.tmdl \
-  --script <b>/_build/fix_ai.py -- --only pbip/<WB>/<M>.SemanticModel/definition/cultures/en-US.tmdl
-```
-
-Three measured ways to leave the gate RED:
-
-- **One `--target` per run** — a re-run prints `DECLARE: NO_CHANGE` and records nothing, so a script
-  rewriting N files leaves N-1 UNDECLARED; give it `--only <bundle-relative path>` after `--` and run
-  the wrapper once per target.
-- **Never hand-edit first** — the wrapper hashes the target *before* running your script, and only a
-  declaration baselined on the engine's hash is accepted.
-- **Declare as you edit, before the step-8 refresh** — a later touch invalidates the declaration, and
-  a `definition/*.tmdl` write after the refresh staleness-kills `cache.abf`.
-
-Order: declared edits → refresh/save (self-declares its `database.tmdl` bump) → `--tamper`, which must
-exit 0 (`DECLARED_DRIFT` passes, `DRIFT` does not). Only that bump and the `.pbi/` sidecars are
-pre-covered.
+Never hand-edit first or count `DECLARE: NO_CHANGE` as a declaration. Order: declared edits →
+reopen/refresh/save → `check_migration_progress.py --bundle <b> --tamper` exit 0 → AI seal below.
+Only the refresh's `database.tmdl` bump and `.pbi/` sidecars are pre-covered; package edits retain
+the existing informational contract.
 
 ## Prep the model for AI (Copilot readiness)
 
-**Read the `powerbi-ai-readiness` skill and follow it**
-([SKILL.md](../skills/powerbi-ai-readiness/SKILL.md)) — it owns the recipe. What it cannot know is
-your place in this pipeline:
+**Load `powerbi-ai-readiness`** ([SKILL.md](../skills/powerbi-ai-readiness/SKILL.md)) — the sole AI
+policy/mechanics source. **Deliberate override:** load current `semantic-model-authoring`, but this
+repo deliberately overrides its no-authoring policy **only for repo-owned `CustomInstructions`**,
+under the local skill's ownership/preservation contract. Obey the skill's ownership refusal.
+This persona never invokes `--adopt-existing`, adopts or replaces unowned/human instructions, or
+edits portal/service AI artifacts.
 
-- **When and who:** the **last phase** of the build — after every measure and column exists and is
-  validated, before step 8's sealing refresh — and yours alone, because it edits TMDL.
-- **Source of truth:** author `migrations/workbooks/<slug>/ai-instructions.md`
-  (`docs/ai-instructions-authoring-guide.md`) and generate the culture TMDL from it, grounding every
-  line in *this* model.
-- **Your gate before hand-off**, scoped to the model you built (`<model>` =
-  `migrations/workbooks/<slug>/fabric/<Name>.SemanticModel`; the last command must exit 0):
-
-  ```bash
-  python scripts/check_unit.py migrations/workbooks/<slug> --scope model
-  python scripts/set_ai_instructions.py --model <model>
-  python scripts/set_ai_instructions.py --check --strict --model <model>
-  ```
-
-- **In the estate/bundle flow** `<model>` is `<bundle>/pbip/<wb>/<Name>.SemanticModel`: run the same
-  commands against it, record coverage you could not machine-check plus anything deferred in
-  `limitations_encountered`, and never report "AI-ready" because a checker declined to run.
+After all model objects exist and are validated, author grounded `<md>` (`ai-instructions.md`) for
+the handed-in working `<model>` (`.SemanticModel`); pass `--md` explicitly, including bundle flow.
+Stamp via the skill before step 8. After the sealing reopen → refresh → save, require exit 0:
+`python scripts/set_ai_instructions.py --check --strict --model <model> --md <md>`.
+Any refusal, unavailable check, missing explicit `<md>`, or non-zero exit blocks handoff and cannot
+be reported as AI-ready. Require `qnaEnabled: true` through the skill; repeat the seal after later
+model-tool saves/exports. Defer service-only AI artifacts per the skill; record unmeasured
+survival/coverage in `limitations_encountered`.
 
 ## Gotchas
 
@@ -282,13 +261,11 @@ passes too:
 7. **Model-wide measure-name uniqueness is verified** — no duplicate measure name anywhere, and no
    measure name equal to a column name in the same table. `TmdlSerializer` catches neither, so assert
    it programmatically (skill §4).
-8. **The model is Copilot-ready** — descriptions everywhere, categorical columns enumerating their
-   domain values, synonyms where the display name is not natural language; `check_unit.py --scope
-   model` reports ~100% description coverage.
-9. **Model-level AI instructions are stamped (MANDATORY).** A grounded
-   `migrations/workbooks/<slug>/ai-instructions.md` is written into the culture `CustomInstructions`
-   via `set_ai_instructions.py --model …`; `--check` shows OK with **no `[!]` advisories**, and
-   `python scripts/check_datamodel.py <SemanticModel>` exits 0.
+8. **AI metadata is audited** — descriptions plus enumerated categorical domains per
+   `powerbi-ai-readiness`; `check_unit.py --scope model` reports ~100% description coverage.
+   Preserve existing synonyms; never author them.
+9. **Owned AI instructions pass the post-seal gate above (MANDATORY).**
+   `python scripts/check_datamodel.py <SemanticModel>` also exits 0; style advisories are not blockers.
 10. **REFRESHED and PERSISTED — the step-8 handoff gate.** Require exactly **`REFRESH: DATA_OK +
    PERSISTED`**: a real row came back **and** `<Name>.SemanticModel/.pbi/cache.abf` advanced.
    **Ordering is part of the gate** — Desktop discards the cache when `definition/*.tmdl` is newer, so
