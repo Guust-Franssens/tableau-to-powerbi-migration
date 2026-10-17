@@ -67,9 +67,56 @@ def _armed(tmp_path: Path) -> Path:
     """A migration whose gate is armed with NAMED sources -- what the real classifier produces."""
     d = tmp_path / "unit"
     (d / "fabric").mkdir(parents=True)
-    cg.apply_block(d, list(NAMED), force_scope=True)
+    _arm_sources(d, _named_sources())
     assert (d / cg.MARKER).exists(), "fixture must start armed, or it proves nothing"
     return d
+
+
+def _named_sources() -> list[dict]:
+    """Current raw source facts matching NAMED, not a forced or display-only arm."""
+    return [
+        {
+            "name": name,
+            "connection": {
+                "class": "sqlserver",
+                "server": f"{name}.example",
+                "database": "db",
+                "schema": "dbo",
+                "powerbi_target": "live_source",
+            },
+            "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
+        }
+        for name in SOURCE_NAMES
+    ]
+
+
+def _arm_sources(root: Path, sources: list[dict]) -> list[str]:
+    (root / cg.MIGRATION_SPEC).write_text(json.dumps({"data_sources": sources}), encoding="utf-8")
+    keys = [
+        key
+        for index, source in enumerate(sources)
+        for key, _display, verdict, _reason in pf._classify_legs(source, index)
+        if verdict == "needs-credential"
+    ]
+    assert cg.apply_block(root, keys) == 0
+    return keys
+
+
+def _record_success(root: Path, sources: list[str]) -> None:
+    """A synthetic returned row still uses the real ordered observation writer."""
+    cg.record_probe_attempt(root, "DATA_OK", "fixture row returned", sources)
+
+
+def _successful_probe_one(root: Path, sources: list[dict], index: int, *_args) -> tuple[int, str]:
+    keys = [
+        key
+        for key, _display, verdict, _reason in pf._classify_legs(sources[index], index)
+        if verdict == "needs-credential"
+    ]
+    if not keys:
+        return 0, "SKIPPED"
+    _record_success(root, keys)
+    return 0, "DATA_OK"
 
 
 def _audit_actions(d: Path) -> list[str]:
@@ -79,6 +126,7 @@ def _audit_actions(d: Path) -> list[str]:
 def test_proving_every_live_source_fully_clears_a_named_source_gate(tmp_path: Path) -> None:
     """The #346 regression. Before the fix this left the marker in place and status at 1."""
     d = _armed(tmp_path)
+    _record_success(d, NAMED)
     pls._lift_gate(d, "2 live source leg(s)", NAMED)
 
     assert not (d / cg.MARKER).exists(), "gate must be fully lifted when every live source was proved"
@@ -93,6 +141,7 @@ def test_the_count_string_is_never_sent_as_a_source_name(tmp_path: Path) -> None
     `--sources`, it matches no marker entry and the partial-clear branch silently re-arms the bug.
     """
     d = _armed(tmp_path)
+    _record_success(d, NAMED)
     pls._lift_gate(d, "2 live source leg(s)", NAMED)
 
     detail = " ".join(
@@ -165,7 +214,7 @@ def _bundle(tmp_path: Path, live_count: int, monkeypatch):
     """A bundle with `live_count` live sources whose names match the armed gate."""
     d = tmp_path / f"u{live_count}"
     (d / "fabric").mkdir(parents=True)
-    cg.apply_block(d, list(NAMED), force_scope=True)
+    _arm_sources(d, _named_sources())
     sources = [
         {
             "name": SOURCE_NAMES[i],
@@ -173,6 +222,7 @@ def _bundle(tmp_path: Path, live_count: int, monkeypatch):
                 "class": "sqlserver",
                 "server": f"{SOURCE_NAMES[i]}.example",
                 "database": "db",
+                "schema": "dbo",
                 "powerbi_target": "live_source",
             },
             "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
@@ -184,7 +234,7 @@ def _bundle(tmp_path: Path, live_count: int, monkeypatch):
         sources = [{"connection": {"powerbi_target": "flat_file"}}]
     bundle = type("B", (), {"data_sources": sources, "kind": "spec", "label": "x", "migration_dir": d})()
     monkeypatch.setattr(pls, "load_bundle", lambda _p: bundle)
-    monkeypatch.setattr(pls, "_probe_one", lambda *_a, **_k: (0, "DATA_OK"))
+    monkeypatch.setattr(pls, "_probe_one", _successful_probe_one)
     return d
 
 
@@ -203,7 +253,7 @@ def test_source_index_never_clears_unmatched_marker_names(tmp_path: Path, monkey
     """A probe may only clear marker names it actually matches."""
     d = tmp_path / "unmatched"
     (d / "fabric").mkdir(parents=True)
-    cg.apply_block(d, ["source-key:not-in-probe"], force_scope=True)
+    _arm_sources(d, _named_sources()[:1])
     sources = [
         {
             "name": "not-in-marker",
@@ -257,7 +307,7 @@ def test_duplicate_display_names_do_not_clear_an_uncontacted_sibling(tmp_path: P
         },
     ]
     keys = [pf._leg_key(source, index, source["connection"]) for index, source in enumerate(sources)]
-    cg.apply_block(d, keys, force_scope=True)
+    assert _arm_sources(d, sources) == keys
     contacted: list[str] = []
 
     monkeypatch.setattr(
@@ -278,16 +328,19 @@ def test_duplicate_display_names_do_not_clear_an_uncontacted_sibling(tmp_path: P
 
 
 def test_semicolon_in_source_key_does_not_forget_real_clear(tmp_path: Path) -> None:
-    """HIGH 1: structured audit sources survive semicolons in source identities."""
+    """A historical display identity remains readable/teardown-compatible, never current proof."""
     d = tmp_path / "semicolon"
     (d / "fabric").mkdir(parents=True)
     key = "source[0];west"
-    cg.apply_block(d, [key], force_scope=True)
-
-    assert cg.clear_block(d, "probe", earned=True, sources=[key]) == 0
-    assert cg._clear_was_earned(d) == "probe-cleared"  # pylint: disable=protected-access
+    (d / cg.MIGRATION_SPEC).write_text("{}", encoding="utf-8")
+    with cg.gate_transaction(d):
+        cg._append_audit(d, "block-marker-only", cg._sources_detail([key]), [key])
+    (d / cg.MARKER).write_text(json.dumps({"sources": [key]}), encoding="utf-8")
+    assert cg._audit_entries(d) is not None
+    assert cg._clear_was_earned(d) is None  # pylint: disable=protected-access
+    assert cg.clear_block(d, "historical teardown") == 0
     (d / "fabric" / "Model.tmdl").write_text("table x", encoding="utf-8")
-    assert cg.verify(d) == 0
+    assert cg.verify(d) != 0, "a historical display label can never certify a current build"
 
 
 def test_refusing_to_clear_does_not_report_success(tmp_path: Path, monkeypatch) -> None:
@@ -331,7 +384,7 @@ def test_reorder_between_arm_and_clear_does_not_clear_an_uncontacted_endpoint(tm
     names = [pf._leg_key(source, index, source["connection"]) for index, source in enumerate(first)]
     d = tmp_path / "reordered"
     (d / "fabric").mkdir(parents=True)
-    cg.apply_block(d, names, force_scope=True)
+    assert _arm_sources(d, first) == names
     contacted: list[str] = []
     current_sources = first
 
@@ -624,8 +677,8 @@ def _run_with(tmp_path: Path, monkeypatch, src: dict, names: list[str], reachabl
     """Arm the gate with `names`, then run a FULL probe over `src`. Returns (rc, migration dir)."""
     d = tmp_path / "u"
     (d / "fabric").mkdir(parents=True)
-    cg.apply_block(d, names, force_scope=True)
-    monkeypatch.setattr(pls, "_probe_one", lambda *_a, **_k: (0, "DATA_OK" if reachable else "SKIPPED"))
+    assert _arm_sources(d, [src]) == names
+    monkeypatch.setattr(pls, "_probe_one", _successful_probe_one if reachable else lambda *_a, **_k: (0, "SKIPPED"))
     monkeypatch.setattr(
         pls,
         "load_bundle",
@@ -678,11 +731,12 @@ def test_a_federated_source_clears_after_all_legs_are_contacted(tmp_path: Path, 
     names = [key for key, _display, _verdict, _reason in pf._classify_legs(src, 0)]
     d = tmp_path / "federated-all"
     (d / "fabric").mkdir(parents=True)
-    cg.apply_block(d, names, force_scope=True)
+    assert _arm_sources(d, [src]) == names
     contacted: list[str] = []
 
     def _probe_leg(_migration, leg_name, _conn, _target, _opts):
         contacted.append(leg_name)
+        _record_success(d, [leg_name])
         return 0, "DATA_OK"
 
     monkeypatch.setattr(pls, "_probe_leg", _probe_leg)
@@ -708,7 +762,13 @@ def test_marker_with_more_leg_keys_than_probe_refuses(tmp_path: Path, monkeypatc
     names = [key for key, _display, _verdict, _reason in pf._classify_legs(src, 0)]
     d = tmp_path / "marker-has-extra-leg"
     (d / "fabric").mkdir(parents=True)
-    cg.apply_block(d, [*names, "source-key:extra"], force_scope=True)
+    assert _arm_sources(d, [src]) == names
+    # Historical reader control: retain a legacy marker obligation alongside genuine keyed arms.
+    with cg.gate_transaction(d):
+        cg._append_audit(d, "block-marker-only", cg._sources_detail(["legacy extra"]), ["legacy extra"])
+    payload = json.loads((d / cg.MARKER).read_text(encoding="utf-8"))
+    payload["sources"].append("legacy extra")
+    (d / cg.MARKER).write_text(json.dumps(payload), encoding="utf-8")
     contacted: list[str] = []
 
     def _probe_leg(_migration, leg_name, _conn, _target, _opts):
@@ -745,7 +805,7 @@ def test_a_federated_source_refuses_when_one_leg_fails(tmp_path: Path, monkeypat
     names = [key for key, _display, _verdict, _reason in pf._classify_legs(src, 0)]
     d = tmp_path / "federated-one-fails"
     (d / "fabric").mkdir(parents=True)
-    cg.apply_block(d, names, force_scope=True)
+    assert _arm_sources(d, [src]) == names
     contacted: list[str] = []
 
     def _probe_leg(_migration, leg_name, _conn, _target, _opts):
@@ -872,7 +932,7 @@ def test_skipped_sources_never_contribute_clear_names(tmp_path: Path, monkeypatc
     }
     d = tmp_path / "u"
     (d / "fabric").mkdir(parents=True)
-    cg.apply_block(d, ["one", "two"], force_scope=True)
+    _arm_sources(d, [src_a, src_b])
     monkeypatch.setattr(pls, "_probe_one", lambda *_a, **_k: (0, "SKIPPED"))
     monkeypatch.setattr(
         pls,

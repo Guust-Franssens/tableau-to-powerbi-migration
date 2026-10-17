@@ -64,6 +64,164 @@ def _earn(root: Path, keys: list[str]) -> None:
     assert gate.clear_block(root, "fixture DATA_OK", earned=True, sources=keys) == 0
 
 
+@pytest.mark.parametrize("action", [*gate.PROBE_ATTEMPT_CODES, gate.PROBE_DATA_OK])
+def test_latest_historical_attempt_invalidates_every_clear_projection(unit, action: str) -> None:
+    root, keys = unit
+    _earn(root, keys)
+    with gate.gate_transaction(root):
+        gate._append_audit(root, action, "historical keyed attempt without its physical stop", [keys[0]])
+    assert gate._clear_was_earned(root, [keys[0]]) is None, "latest attempt must invalidate the earned projection"
+    assert gate.apply_block(root, [keys[0]]) == 0
+    assert _marker(root) == [keys[0]], "latest attempt must restore exactly its pending physical stop"
+    assert gate.status(root) != 0
+    _earn(root, [keys[0]])
+    assert gate.status(root) == 0, "a fresh keyed pair must restore proof"
+
+
+@pytest.mark.parametrize("history", ["unarmed", "arm", "manual-clear", "probe-cleared", "probe-data_ok", "probe-error"])
+def test_every_non_none_canonical_code_stays_pending(unit, history: str) -> None:
+    root, keys = unit
+    if history != "unarmed":
+        assert gate.apply_block(root, keys) == 0
+        if history not in ("arm",):
+            with gate.gate_transaction(root):
+                detail = gate._sources_detail(keys) if history == "probe-cleared" else "historical observation"
+                gate._append_audit(root, history, detail, None if history == "manual-clear" else keys)
+    assert set(gate._transaction_pending(root)) == set(keys), "every non-None canonical code must remain pending"
+
+
+@pytest.mark.parametrize("scope", ["empty", "legacy", "foreign", "substitution", "duplicate", "malformed"])
+def test_supported_arm_closes_current_source_domain_without_effects(unit, scope: str) -> None:
+    root, keys = unit
+    supplied = {
+        "empty": [],
+        "legacy": ["fixture display"],
+        "foreign": ["source-key:ffffffffffffffff"],
+        "substitution": [keys[0], keys[1], "source-key:ffffffffffffffff"],
+        "duplicate": [keys[0], keys[0]],
+        "malformed": ["source-key:broken"],
+    }[scope]
+    assert gate.apply_block(root, supplied) == 2, "membership, not display or cardinality, defines supported scope"
+    assert not (root / gate.MARKER).exists(), "refused scope must not acquire a physical stop"
+    assert not (root / "fabric").exists()
+
+
+@pytest.mark.parametrize("covered", [False, True])
+def test_exact_skip_requires_omitted_pending_root_coverage(unit, covered: bool) -> None:
+    root, keys = unit
+    _earn(root, keys)
+    with gate.gate_transaction(root):
+        gate._append_audit(root, gate.PROBE_DATA_OK, "historical unmatched sibling success", [keys[1]])
+    if covered:
+        assert gate.apply_block(root, [keys[1]]) == 0
+    before = (root / gate.MARKER).read_bytes() if covered else None
+    assert gate.apply_block(root, [keys[0]]) == (0 if covered else 2), "omitted pending root veto must survive"
+    assert ((root / gate.MARKER).read_bytes() if covered else None) == before
+    arms = [row["sources"] for row in gate._audit_entries(root) if row["action"] in gate.BLOCK_ACTIONS]
+    assert arms == [keys, [keys[1]]] if covered else arms == [keys], "skip must not synthesize omitted arm scope"
+
+
+def test_new_unarmed_root_key_vetoes_an_earned_subset_skip(unit) -> None:
+    root, keys = unit
+    path = root / gate.MIGRATION_SPEC
+    complete = path.read_text(encoding="utf-8")
+    sources = json.loads(complete)["data_sources"]
+    path.write_text(json.dumps({"data_sources": sources[:1]}), encoding="utf-8")
+    _earn(root, keys[:1])
+    path.write_text(complete, encoding="utf-8")
+    assert gate.apply_block(root, keys[:1]) == 2, "a newly discovered unarmed root key requires complete-scope retry"
+    assert not (root / gate.MARKER).exists(), "refusal must not invent an omitted key's arm epoch"
+    assert gate.apply_block(root, keys) == 0
+    assert _marker(root) == keys[1:], "complete retry must preserve the earned sibling"
+
+
+@pytest.mark.parametrize("layout", ["parser", "native"])
+@pytest.mark.parametrize("coverage", ["complete", "missing-deny", "readback-error", "unnamed"])
+def test_exact_skip_checks_marker_names_and_every_resolved_anchor(
+    unit, monkeypatch: pytest.MonkeyPatch, layout: str, coverage: str
+) -> None:
+    from test_data_access_contract import _StatefulIcacls  # pylint: disable=import-outside-toplevel
+
+    root, keys = unit
+    _earn(root, keys)
+    if layout == "native":
+        targets = [root / "Fixture.SemanticModel", root / "Fixture.Report"]
+    else:
+        targets = [root / "fabric"]
+    for target in targets:
+        target.mkdir(exist_ok=True)
+    permissions = _StatefulIcacls(*targets)
+    monkeypatch.setattr(gate.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(gate, "_user", lambda: permissions.PRINCIPAL)
+    monkeypatch.setattr(gate, "_icacls", permissions)
+    with gate.gate_transaction(root):
+        gate._append_audit(root, gate.PROBE_DATA_OK, "historical unpaired sibling", [keys[1]])
+    assert gate.apply_block(root, [keys[1]]) == 0
+    if coverage == "missing-deny":
+        permissions.states[permissions.key(targets[-1])] = "clear"
+    elif coverage == "readback-error":
+        permissions.inject("query", targets[-1], "nonzero")
+    elif coverage == "unnamed":
+        payload = json.loads((root / gate.MARKER).read_text(encoding="utf-8"))
+        payload["sources"] = [keys[2]]
+        (root / gate.MARKER).write_text(json.dumps(payload), encoding="utf-8")
+    assert gate.apply_block(root, [keys[0]]) == (
+        0 if coverage == "complete" else (3 if coverage == "readback-error" else 2)
+    ), "omitted-key coverage needs marker membership and successful readback of every anchor"
+    assert _marker(root) == ([keys[2]] if coverage == "unnamed" else [keys[1]])
+
+
+@pytest.mark.parametrize(
+    "verdict", [action.removeprefix("probe-").upper() for action in gate.PROBE_ATTEMPT_CODES] + ["DATA_OK"]
+)
+def test_authorized_observation_preserves_exact_permission_until_new_arm(
+    unit, monkeypatch: pytest.MonkeyPatch, verdict: str
+) -> None:
+    root, keys = unit
+    monkeypatch.setattr(gate, "_ancestry", lambda: [])
+    assert gate.apply_block(root, keys) == 0
+    assert gate.authorize(root, "Fixture Human") == 0
+    arms = [row for row in gate._audit_entries(root) if row["action"] in gate.BLOCK_ACTIONS]
+    gate.record_probe_attempt(root, verdict, "exact authorized observation", [keys[0]])
+    assert not (root / gate.MARKER).exists(), "authorized measurement must not synthesize a new arm"
+    assert gate._override_is_authentic(root), "measurement alone must not revoke human permission"
+    assert [row for row in gate._audit_entries(root) if row["action"] in gate.BLOCK_ACTIONS] == arms
+    assert gate._clear_was_earned(root, [keys[0]]) is None, "human permission must never become measured proof"
+    assert gate.status(root) == 0
+    with gate.gate_transaction(root):
+        assert gate._apply_pending_block(root, [keys[0]]) == 0
+    assert not gate._override_is_authentic(root), "a real new arm epoch needs renewed permission"
+    assert gate.status(root) != 0
+
+
+@pytest.mark.parametrize("kind", ["file-only", "audit-only", "before-arm", "legacy", "new-root"])
+def test_permission_is_never_global_or_future(unit, monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
+    root, keys = unit
+    monkeypatch.setattr(gate, "_ancestry", lambda: [])
+    if kind in ("before-arm", "legacy"):
+        with gate.gate_transaction(root):
+            if kind == "legacy":
+                gate._append_audit(root, "block-marker-only", gate._sources_detail(["legacy"]), ["legacy"])
+            gate._append_audit(root, "authorize", "by=Fixture Human; chain=[]")
+        (root / gate.OVERRIDE).write_text("historical permission\n", encoding="utf-8")
+    elif kind == "file-only":
+        (root / gate.OVERRIDE).write_text("unbacked file\n", encoding="utf-8")
+    elif kind == "audit-only":
+        assert gate.apply_block(root, keys) == 0
+        with gate.gate_transaction(root):
+            gate._append_audit(root, "authorize", "by=Fixture Human; chain=[]")
+    else:
+        spec = json.loads((root / gate.MIGRATION_SPEC).read_text(encoding="utf-8"))
+        (root / gate.MIGRATION_SPEC).write_text(json.dumps({"data_sources": spec["data_sources"][:1]}))
+        assert gate.apply_block(root, [keys[0]]) == 0
+        assert gate.authorize(root, "Fixture Human") == 0
+        (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec))
+    assert not gate._override_is_authentic(root), "permission must cover exact current keyed arm epochs"
+    assert gate.apply_block(root, keys) == 0
+    assert (root / gate.MARKER).exists(), "global/future authorization must not bypass a current pending key"
+    assert set(_marker(root)) == set(keys if kind != "new-root" else keys[1:])
+
+
 def _child(root: Path, code: str) -> subprocess.Popen:
     return subprocess.Popen(
         [sys.executable, "-u", "-c", f"import sys; sys.path.insert(0, {str(SCRIPTS)!r}); " + code, str(root)],
@@ -136,7 +294,10 @@ def test_current_uncovered_key_vetoes_full_release(unit) -> None:
 @pytest.mark.parametrize("earned", [False, True])
 def test_legacy_empty_arm_cannot_release_any_current_live_key(unit, earned: bool) -> None:
     root, keys = unit
-    assert gate.apply_block(root, []) == 0, "legacy unknown-source stops remain supported"
+    # Historical compatibility fixture, not a supported new empty-scope writer.
+    with gate.gate_transaction(root):
+        gate._append_audit(root, "block-marker-only", "sources=[]", [])
+    (root / gate.MARKER).write_text(json.dumps({"sources": []}), encoding="utf-8")
     assert gate.clear_block(root, "empty scope earns no current key", earned=earned) != 0
     assert set(_marker(root)) == set(keys)
     assert gate.status(root) != 0
@@ -356,8 +517,9 @@ def test_probe_attempt_cannot_bypass_the_repository_scope_refusal(unit) -> None:
 def test_unprovable_source_identity_retains_a_stop_without_a_success_row(unit) -> None:
     root, keys = unit
     assert gate.apply_block(root, ["source-key:unprovable"]) != 0
-    assert (root / gate.MARKER).exists(), "invalid identity evidence must not silently drop the physical stop"
+    assert not (root / gate.MARKER).exists(), "invalid arm scope must be refused before physical effects"
     assert not (root / gate.AUDIT).exists(), "an unprovable source must not receive a success-shaped arm row"
+    assert gate.apply_block(root, keys) == 0
     assert gate.clear_block(root, "unrelated proof", earned=True, sources=[keys[0]]) != 0
     assert (root / gate.MARKER).exists() and gate.status(root) != 0
 
@@ -929,6 +1091,13 @@ def _omitted_mutex_schedule(unit: tuple[Path, list[str]], monkeypatch: pytest.Mo
         "transient-package-token",
         "unlink-on-release",
         "replacement-credited",
+        "latest-invalidation",
+        "failures-only-pending",
+        "current-membership",
+        "count-substitution",
+        "omitted-root-veto",
+        "global-future-authorization",
+        "authorized-attempt-rearm",
     ],
 )
 def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=too-many-branches,too-many-statements
@@ -947,6 +1116,56 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
         )
         check = partial(test_concurrent_first_arms_preserve_union_and_exact_rows, unit)
         message = "assignment must not lose"
+    elif mutation == "latest-invalidation":
+        _mutant(gate, "_apply_probe_attempt", '                state["earned"] = False\n', "", monkeypatch)
+        check = partial(test_latest_historical_attempt_invalidates_every_clear_projection, unit, gate.PROBE_DATA_OK)
+        message = "latest attempt must invalidate"
+    elif mutation == "failures-only-pending":
+        _mutant(
+            gate,
+            "_transaction_pending",
+            "codes[key] is not None",
+            "codes[key] in PROBE_ATTEMPT_CODES.values()",
+            monkeypatch,
+        )
+        check = partial(test_every_non_none_canonical_code_stays_pending, unit, "probe-data_ok")
+        message = "every non-None canonical code"
+    elif mutation in ("current-membership", "count-substitution"):
+        _mutant(
+            gate,
+            "_block_refusal",
+            "source_refusal or not set(sources) <= current",
+            "source_refusal" if mutation == "current-membership" else "source_refusal or len(sources) != len(current)",
+            monkeypatch,
+        )
+        check = partial(
+            test_supported_arm_closes_current_source_domain_without_effects,
+            unit,
+            "foreign" if mutation == "current-membership" else "substitution",
+        )
+        message = "membership, not display or cardinality"
+    elif mutation == "omitted-root-veto":
+        _mutant(gate, "apply_block", "if omitted and (", "if False and omitted and (", monkeypatch)
+        check = partial(test_exact_skip_requires_omitted_pending_root_coverage, unit, False)
+        message = "omitted pending root veto"
+    elif mutation == "global-future-authorization":
+        _mutant(
+            gate,
+            "_data_access_ledger",
+            'not forced and state["armed"] is not None and timestamp >= state["armed"]',
+            "not forced",
+            monkeypatch,
+        )
+        check = partial(test_permission_is_never_global_or_future, unit, monkeypatch, "before-arm")
+        message = "permission must cover exact current"
+    elif mutation == "authorized-attempt-rearm":
+        _mutant(
+            gate, "record_probe_attempt", "not permitted and _apply_pending_block", "_apply_pending_block", monkeypatch
+        )
+        check = partial(
+            test_authorized_observation_preserves_exact_permission_until_new_arm, unit, monkeypatch, "ERROR"
+        )
+        message = "authorized measurement must not synthesize"
     elif mutation == "caller-only-clear":
         _mutant(
             gate,

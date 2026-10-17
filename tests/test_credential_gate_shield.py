@@ -11,6 +11,10 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "scripts"))
+import credential_gate as gate  # noqa: E402  # pylint: disable=wrong-import-position
+import preflight_source_credentials as preflight  # noqa: E402  # pylint: disable=wrong-import-position
+
 GATE = REPO / "scripts" / "credential_gate.py"
 HOOK = REPO / "scripts" / "hooks" / "credential_gate.py"
 MARKER = ".credential-gate-BLOCKED.json"
@@ -35,12 +39,42 @@ def run_hook(payload: dict) -> dict:
     return json.loads(proc.stdout or "{}")
 
 
-def migration_fixture(root: Path) -> Path:
+def migration_fixture(root: Path, names: tuple[str, ...] = ("A",)) -> Path:
     """Create a minimal migration-shaped directory."""
     migration = root / "mig"
     (migration / "fabric").mkdir(parents=True)
-    (migration / "migration-spec.json").write_text("{}", encoding="utf-8")
+    sources = [
+        {
+            "name": name,
+            "connection": {
+                "class": "sqlserver",
+                "server": f"{name}.example.invalid",
+                "database": "fixture",
+                "powerbi_target": "live_source",
+            },
+        }
+        for name in names
+    ]
+    (migration / "migration-spec.json").write_text(json.dumps({"data_sources": sources}), encoding="utf-8")
     return migration
+
+
+def source_keys(migration: Path) -> list[str]:
+    """Use the actual classifier identities, not display/count aliases."""
+    sources = json.loads((migration / "migration-spec.json").read_text(encoding="utf-8"))["data_sources"]
+    return [preflight._classify_legs(source, index)[0][0] for index, source in enumerate(sources)]  # pylint: disable=protected-access
+
+
+def earn(migration: Path, sources: list[str]) -> None:
+    """Supported writers establish both current-epoch observations and their paired clears."""
+    gate.record_probe_attempt(migration, "DATA_OK", "fixture row returned", sources)
+    assert gate.clear_block(migration, "fixture DATA_OK", earned=True, sources=sources) == 0
+
+
+@pytest.fixture(autouse=True)
+def marker_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests qualify hook decisions, not native ACL composition."""
+    monkeypatch.setattr(gate.platform, "system", lambda: "Linux")
 
 
 def write_marker(path: Path, sources: list[str]) -> None:
@@ -55,6 +89,7 @@ def append_audit(migration: Path, action: str, detail: str) -> None:
         "action": action,
         "detail": detail,
         "user": "test",
+        "scope": str(migration.resolve()),
     }
     with (migration / AUDIT).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry) + "\n")
@@ -68,9 +103,9 @@ def hook_for_model_write(root: Path, migration: Path) -> dict:
 
 def test_probe_cleared_directory_shields_against_later_ancestor_marker(tmp_path: Path) -> None:
     migration = migration_fixture(tmp_path)
-    assert run_gate("block", str(migration), "--sources", "warehouse").returncode == 0
-    assert run_gate("clear", str(migration), "--reason", "DATA_OK", "--earned").returncode == 0
-    write_marker(tmp_path / MARKER, ["warehouse"])
+    keys = source_keys(migration)
+    earn(migration, keys)
+    write_marker(tmp_path / MARKER, keys)
 
     out = hook_for_model_write(tmp_path, migration)
 
@@ -80,7 +115,7 @@ def test_probe_cleared_directory_shields_against_later_ancestor_marker(tmp_path:
 def test_forged_bare_override_does_not_shield_from_an_ancestor_marker(tmp_path: Path) -> None:
     migration = migration_fixture(tmp_path)
     (migration / OVERRIDE).write_text("forged by agent", encoding="utf-8")
-    write_marker(tmp_path / MARKER, ["warehouse"])
+    write_marker(tmp_path / MARKER, source_keys(migration))
 
     out = hook_for_model_write(tmp_path, migration)
 
@@ -89,9 +124,9 @@ def test_forged_bare_override_does_not_shield_from_an_ancestor_marker(tmp_path: 
 
 def test_manual_clear_does_not_shield_from_an_ancestor_marker(tmp_path: Path) -> None:
     migration = migration_fixture(tmp_path)
-    assert run_gate("block", str(migration), "--sources", "warehouse").returncode == 0
-    assert run_gate("clear", str(migration), "--reason", "manual teardown").returncode == 0
-    write_marker(tmp_path / MARKER, ["warehouse"])
+    assert gate.apply_block(migration, source_keys(migration)) == 0
+    assert gate.clear_block(migration, "manual teardown") != 0
+    write_marker(tmp_path / MARKER, source_keys(migration))
 
     out = hook_for_model_write(tmp_path, migration)
 
@@ -106,10 +141,10 @@ def test_authorize_audit_entry_without_override_does_not_shield_from_ancestor_ma
     the reachable state where `_redundant_rearm` would return `authorize`.
     """
     migration = migration_fixture(tmp_path)
-    assert run_gate("block", str(migration), "--sources", "warehouse").returncode == 0
+    assert gate.apply_block(migration, source_keys(migration)) == 0
     (migration / MARKER).unlink()
-    append_audit(migration, "authorize", "by=test; chain=[]")
-    write_marker(tmp_path / MARKER, ["warehouse"])
+    append_audit(migration, "authorize", "by=test; chain=['fixture-terminal.exe']")
+    write_marker(tmp_path / MARKER, source_keys(migration))
 
     out = hook_for_model_write(tmp_path, migration)
 
@@ -117,10 +152,10 @@ def test_authorize_audit_entry_without_override_does_not_shield_from_ancestor_ma
 
 
 def test_probe_clear_for_one_source_does_not_cover_a_later_two_source_block(tmp_path: Path) -> None:
-    migration = migration_fixture(tmp_path)
-    assert run_gate("block", str(migration), "--sources", "warehouse_a").returncode == 0
-    assert run_gate("clear", str(migration), "--reason", "DATA_OK", "--earned").returncode == 0
-    write_marker(tmp_path / MARKER, ["warehouse_a", "warehouse_b"])
+    migration = migration_fixture(tmp_path, ("A", "B"))
+    keys = source_keys(migration)
+    earn(migration, keys[:1])
+    write_marker(tmp_path / MARKER, keys)
 
     out = hook_for_model_write(tmp_path, migration)
 
@@ -128,12 +163,12 @@ def test_probe_clear_for_one_source_does_not_cover_a_later_two_source_block(tmp_
 
 
 def test_probe_clear_before_later_rearm_does_not_count_as_current_shield(tmp_path: Path) -> None:
-    migration = migration_fixture(tmp_path)
-    assert run_gate("block", str(migration), "--sources", "warehouse_a").returncode == 0
-    assert run_gate("clear", str(migration), "--reason", "DATA_OK", "--earned").returncode == 0
-    assert run_gate("block", str(migration), "--sources", "warehouse_a", "warehouse_b").returncode == 0
-    assert run_gate("clear", str(migration), "--reason", "teardown after rearm").returncode == 0
-    write_marker(tmp_path / MARKER, ["warehouse_a", "warehouse_b"])
+    migration = migration_fixture(tmp_path, ("A", "B"))
+    keys = source_keys(migration)
+    earn(migration, keys)
+    gate.record_probe_attempt(migration, "ERROR", "fixture later blocker", keys[:1])
+    assert gate.clear_block(migration, "teardown after rearm") != 0
+    write_marker(tmp_path / MARKER, keys)
 
     out = hook_for_model_write(tmp_path, migration)
 
@@ -150,10 +185,29 @@ def test_marker_without_parseable_sources_fails_closed_even_after_empty_source_c
     parse failure, `_redundant_rearm` sees matching empty source lists and incorrectly shields.
     """
     migration = migration_fixture(tmp_path)
-    assert run_gate("block", str(migration)).returncode == 0
-    assert run_gate("clear", str(migration), "--reason", "DATA_OK", "--earned").returncode == 0
+    append_audit(migration, "block-marker-only", "sources=[]")
+    append_audit(migration, "probe-cleared", "sources=[]; reason=historical unkeyed clear")
     (tmp_path / MARKER).write_text(marker_text, encoding="utf-8")
 
     out = hook_for_model_write(tmp_path, migration)
 
     assert out.get("permissionDecision") == "deny", "unparseable marker sources must fail closed"
+
+
+def test_unmatched_historical_data_ok_cannot_shield_after_earned_pair(tmp_path: Path) -> None:
+    """A readable pre-transaction success row without its clear must invalidate the hook's view."""
+    migration = migration_fixture(tmp_path)
+    keys = source_keys(migration)
+    earn(migration, keys)
+    with gate.gate_transaction(migration):
+        gate._append_audit(migration, "probe-data_ok", "historical unpaired success", keys)  # pylint: disable=protected-access
+    write_marker(tmp_path / MARKER, keys)
+    assert hook_for_model_write(tmp_path, migration).get("permissionDecision") == "deny"
+
+
+def test_historical_display_clear_never_shields_a_current_key(tmp_path: Path) -> None:
+    migration = migration_fixture(tmp_path)
+    append_audit(migration, "block-marker-only", "sources=['A']")
+    append_audit(migration, "probe-cleared", "probe-cleared: DATA_OK from A")
+    write_marker(tmp_path / MARKER, source_keys(migration))
+    assert hook_for_model_write(tmp_path, migration).get("permissionDecision") == "deny"

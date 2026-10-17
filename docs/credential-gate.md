@@ -501,12 +501,34 @@ reachable minutes earlier, it did not re-probe — it ran `cd <variant>; clear .
 outright. **An unconditional re-arm adds no safety; it manufactures the dead end that makes bypassing
 look reasonable.**
 
-The skip is deliberately narrow, and fails closed on anything it cannot parse:
+✅ `scripts/credential_gate.py::_data_access_ledger(entries, R)` is the single ordered policy
+authority. Readers, verification, hook shielding and transitions project that same policy; none
+folds an independent legacy-success history. A canonical key earns proof only from keyed DATA_OK
+followed by keyed `probe-cleared` in its current arm epoch, respecting timestamps as well as file
+order. Every later recognized non-success **or unmatched DATA_OK** invalidates that proof.
+Every non-`None` canonical ledger code remains pending, not only explicit probe-failure codes.
 
-- the gate must be currently **earned** (`probe-cleared` / audit-backed `authorize`) — a bare
-  `manual-clear` still re-arms, so it cannot launder itself into permanent immunity;
-- the source list must be **identical** (order-insensitive) — a newly added live source has no
-  reachability evidence at all, so it still arms the gate.
+Supported arm input `S` must be nonempty, duplicate-free canonical keys contained in the readable
+current root `R`. Display names, counts, malformed keys, foreign keys and equal-count substitutions
+return `2`; they are never translated or replaced with root identities. Historical labels remain
+readable and manually teardown-compatible only: they cannot arm, authorize, skip or shield a current
+canonical source.
+
+Pending supplied keys arm only themselves: existing marker obligations are unioned before all
+resolved #724 anchors receive denies and readback, then the exact supplied arm is audited under
+the existing #702 descriptor lock. Earned siblings are not reset. If all supplied keys already have
+proof or applicable human permission, a skip is safe only when every omitted pending root key is
+already marker-named and **all** Windows anchors are denied/read back. Otherwise arm returns `2`
+and requests a complete-scope retry. It never manufactures omitted audit scope. Non-Windows coverage
+means marker-only, not kernel enforcement.
+
+Human build-only permission is distinct from proof: it requires both the override file and a
+canonical human `authorize` row after each exact keyed arm epoch. A later measurement is appended
+unchanged without synthesizing an arm that silently revokes that permission. An explicit new arm,
+or a new root key's epoch, requires renewed permission; neither an old authorization nor an override
+filename grants future/global scope. A later keyed DATA_OK + clear can upgrade permission to proof.
+`clear` and `authorize` still recompute complete-root pending obligations and preserve siblings;
+physical release occurs only when no obligation remains.
 
 ### Cleared migrations also shield themselves from unrelated ancestor markers
 
@@ -514,7 +536,8 @@ The hook walks upward from a write target, so a marker placed too high can other
 migration beneath it. A migration that already earned a `probe-cleared` for the **same source list**
 is treated as its own boundary: the hook reads the nearest audit log below an ancestor marker and
 reuses the same transition/source comparison as re-arming. A bare file is never a shield, and neither
-is `manual-clear`; only an audit-backed `probe-cleared` after the latest block counts.
+is `manual-clear`; only a current-epoch keyed DATA_OK + `probe-cleared` pair counts, with no newer
+invalidating observation. Human permission is never projected as probe-earned shielding.
 
 This deliberately stays audit-backed rather than adding a new "cleared" file. A file-only token would
 repeat the override failure mode: agents already forged control files, including via string fragments
