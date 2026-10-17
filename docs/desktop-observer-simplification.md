@@ -143,6 +143,12 @@ Citation shorthand: `S/` = `.github/skills/pbip-model-refresh/scripts/`; `T/` = 
 
 ## 12. Implemented slice 1 — Refs #741
 
+**Status: draft, blocked at the approved surface boundary.** The complete repository run exposed
+`tests/test_gui_marker_gate.py`'s hard-coded minimum of ten GUI/spawn sites; retiring the old PS parity
+fixtures leaves six retained native/UIA cases. That gate is **outside N=35**. It has not been edited,
+and duplicate GUI cases have not been added merely to satisfy its historical census. The owner must
+review the surface/deletion decision before this slice can claim a green repository gate or merge.
+
 This section describes the implementation against **511bb209**, not a retroactive qualification of
 the investigation above. The binding approval is
 [#741's slice-1 contract](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/741#issuecomment-6239850790).
@@ -204,9 +210,9 @@ test counts are definitions, **not** parametrized executions or Windows passes.
 
 | Fixed census | Before | After | Net |
 |---|---:|---:|---:|
-| Product, 15 files: physical lines | 12,670 | 12,403 | -267 |
+| Product, 15 files: physical lines | 12,670 | 12,407 | -263 |
 | Product functions | 476 | 492 | +16 |
-| Direct + halo tests, 22 files: physical lines | 24,916 | 22,899 | -2,017 |
+| Direct + halo tests, 22 files: physical lines | 24,916 | 22,927 | -1,989 |
 | Test definitions | 873 | 821 | -52 |
 
 The demonstrated gross PS classifier/click/poll block is **449 lines**: old `:187-536` plus
@@ -228,6 +234,17 @@ HWND controls, role/read-only provider guards and private GDI/ACL/PNG controls. 
 mixed/incomplete precedence, latches, late settlement, receipt compatibility and source/gate negatives.
 Copy-out runs remove host imports and require the backend/resources. Exact commands, execution
 counts, mutation outcomes and any baseline failures are recorded with the draft PR.
+
+Final targeted/caller/receipt/copy-out partition: **1,298 passed, three expected real-cache skips**.
+Quiet qualification: **eight timing/serial and six test-owned GUI controls passed**. All seven
+requested mutations passed their positive baseline and failed an executed assertion when broken.
+The full non-GUI partition ran to completion: **13,632 passed, 52 failed, 63 skipped**. It is not
+reported green. Four nested-pytest/conftest failures independently reproduce on 511bb209; other
+full-run residuals and the out-of-surface GUI census require owner reconciliation.
+
+Product ruff/pylint and navigation/capability/privacy/diff gates pass. The broad test-harness pylint
+command is not green: it already reports substantial import-resolution/style debt on approved base
+(7.92/10, exit 30); this slice does not waive or repair that unrelated debt to manufacture a clean run.
 
 No live Desktop, customer source, localization/MSHTML completeness, large real-report UIA latency,
 modern CLI behavior or blind-run-2 fidelity is certified by this slice. #146 policy, #498 MSHTML,

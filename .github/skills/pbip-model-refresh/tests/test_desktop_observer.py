@@ -3918,6 +3918,7 @@ def test_backend_timeout_kills_and_reaps_only_its_owned_child(monkeypatch) -> No
 
     class Child:
         """Controlled owned helper, with no real process or provider work."""
+
         returncode = None
 
         def communicate(self, *, timeout):

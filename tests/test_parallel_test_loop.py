@@ -487,7 +487,8 @@ def test_xdist_deselects_contended_tests_without_being_asked() -> None:
     which is the configuration measured to fail 3 times in 8 concurrent-pair runs.
     """
     contended = {node for node in _contended_nodes() if node.startswith(BUNDLE_TESTS + "::")}
-    assert len(contended) >= 13, f"expected the bundle's contended tests to be found, got {sorted(contended)}"
+    # #741 retains six native/UIA GUI controls and six timing controls in this renamed suite.
+    assert len(contended) >= 12, f"expected the bundle's contended tests to be found, got {sorted(contended)}"
     # `--run-gui` for the same reason as in `test_the_markers_actually_deselect_those_tests`: the
     # `gui` exclusion is orthogonal and always on, and three gui tests carry no contended marker, so
     # leaving it engaged would fold two mechanisms into one count. This test is about the xdist one.
