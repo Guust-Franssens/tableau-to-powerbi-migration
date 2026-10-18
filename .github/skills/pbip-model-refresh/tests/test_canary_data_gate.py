@@ -284,16 +284,30 @@ def _bound_connection(monkeypatch, conn):
 
 
 @pytest.mark.parametrize(
-    "epoch,after_identity",
-    [(100.062, 100.062), (100.062, 100.078), (100.0, 100.0), (100.062, 220.063)],
-    ids=["equal-coarse-tick", "next-coarse-tick", "equal-exact-epoch", "expired"],
+    "epoch,after_identity,at_observation",
+    [
+        (100.062, 100.062, 100.062),
+        (100.062, 100.078, 100.078),
+        (100.062, 100.062, 100.078),
+        (100.0, 100.0, 100.0),
+        (100.062, 220.063, 220.063),
+        (100.062, 220.061, 220.063),
+    ],
+    ids=[
+        "equal-coarse-tick",
+        "next-coarse-tick",
+        "next-handoff-tick",
+        "equal-exact-epoch",
+        "expired",
+        "expired-at-handoff",
+    ],
 )
 def test_healthy_binding_survives_unexpired_deadline_roundtrip(
-    monkeypatch: pytest.MonkeyPatch, epoch: float, after_identity: float
+    monkeypatch: pytest.MonkeyPatch, epoch: float, after_identity: float, at_observation: float
 ) -> None:
-    """Internal subtraction roundoff must not refuse an otherwise unexpired binding."""
+    """Binding must survive roundoff without restarting its original absolute deadline."""
     conn = _Conn([("Orders", False)], {"Orders": 1})
-    readings = iter((epoch, after_identity))
+    readings = iter((epoch, after_identity, at_observation))
     watches = []
     original_watch = probe_desktop_query.watch
 
@@ -302,19 +316,20 @@ def test_healthy_binding_survives_unexpired_deadline_roundtrip(
         watches.append(owner)
         return owner
 
-    monkeypatch.setattr(probe_desktop_query, "time", SimpleNamespace(monotonic=lambda: next(readings, after_identity)))
+    monkeypatch.setattr(probe_desktop_query, "time", SimpleNamespace(monotonic=lambda: next(readings, at_observation)))
     monkeypatch.setattr(probe_desktop_query, "watch", record_watch)
-    if after_identity >= epoch + 120:
-        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TIMEOUT$"):
-            _bound_connection(monkeypatch, conn)
-        assert not conn.queries and not watches
-        return
 
     bound = None
+    refusal = None
     try:
         bound = _bound_connection(monkeypatch, conn)
-    except probe_desktop_query.ObservationUnavailable:
-        pass
+    except probe_desktop_query.ObservationUnavailable as error:
+        refusal = error.args
+    if max(after_identity, at_observation) >= epoch + 120:
+        assert not conn.queries and not watches, "expired_binding_must_not_query_or_watch"
+        assert refusal == ("TIMEOUT",), "expired_binding_must_refuse_with_timeout"
+        return
+
     assert bound is not None, "healthy_binding_must_reach_catalogue_before_refusal"
     assert bound.catalogue == conn.Database
     assert bound.identity == probe_desktop_query.DesktopIdentity(111, "100", 222, "101", 52001)
@@ -322,7 +337,7 @@ def test_healthy_binding_survives_unexpired_deadline_roundtrip(
     assert len(watches) == 1
     owner = watches[0]
     assert (owner.pid, owner.expected_process_start) == (111, "100")
-    assert owner.deadline <= epoch + 120
+    assert owner.deadline <= epoch + 120, "watch_must_not_extend_original_binding_deadline"
     assert owner.closed
 
 
