@@ -171,40 +171,68 @@ Add-Cli 'powerbi-report-author' 'critical' 'npm install -g @microsoft/powerbi-re
 #                  `-Update` repairs this, and only this.
 #   * KNOWN-GOOD - the version the agent Gotchas were verified against. ABOVE it is not an error, but
 #                  it does mean version-specific prose may be stale -> WARN, don't "fix" it.
-$cliFloor     = @{ 'powerbi-report-author' = '0.1.4'; 'powerbi-desktop' = '0.1.2' }
-$cliKnownGood = @{ 'powerbi-report-author' = '0.1.4'; 'powerbi-desktop' = '0.1.2' }
+$cliFloor     = @{ 'powerbi-report-author' = '0.4.0'; 'powerbi-desktop' = '1.0.0' }
+$cliKnownGood = @{ 'powerbi-report-author' = '0.5.0'; 'powerbi-desktop' = '1.0.0' }
 $cliPackage   = @{ 'powerbi-report-author' = '@microsoft/powerbi-report-authoring-cli'
                    'powerbi-desktop'       = '@microsoft/powerbi-desktop-bridge-cli' }
 
+function ConvertFrom-CliVersionOutput([string[]]$Lines) {
+    $raw = ($Lines -join "`n").Trim()
+    # Match the WHOLE output: noise followed by a valid version is not evidence of a clean command.
+    if ($raw -cmatch '\Av?((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?)\z') {
+        return $Matches[1]
+    }
+    return $null
+}
+
+function Get-VersionFloorVerdict([string]$Installed, [string]$Floor, [string]$KnownGood, [string]$FixHint) {
+    $v = [pscustomobject]@{ Kind = 'unreadable'; Tier = 'critical'; Ok = $false
+        Detail = 'version unreadable (expected one plain release version)'; Hint = $FixHint }
+    if ($Installed -cmatch '\A[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+\z') {
+        $v.Kind = 'prerelease'; $v.Detail = "$Installed is a prerelease, not a plain release"
+        return $v
+    }
+    if ($Installed -cnotmatch '\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z') { return $v }
+    try { $number = [version]$Installed } catch { return $v }
+    if (-not ($number -ge [version]$Floor)) {
+        $v.Kind = 'below-floor'; $v.Detail = "$Installed is BELOW the $Floor correctness floor"
+        return $v
+    }
+    $v.Tier = 'optional'; $v.Hint = ''
+    if ($number -lt [version]$KnownGood) {
+        $v.Kind = 'between'; $v.Detail = "$Installed (below known-good $KnownGood; allowed, unmeasured)"
+    }
+    elseif ($number -eq [version]$KnownGood) {
+        $v.Kind = 'known-good'; $v.Ok = $true; $v.Detail = "$Installed (known-good)"
+    }
+    else {
+        $v.Kind = 'above-known-good'; $v.Detail = "$Installed (above known-good $KnownGood; re-verify version-specific behaviour)"
+    }
+    return $v
+}
+
 function Get-CliVersion([string]$Cmd) {
-    if (-not (Get-Command $Cmd -ErrorAction SilentlyContinue)) { return $null }
-    $raw = (& $Cmd --version 2>&1 | Select-Object -First 1) -replace '[^0-9.]', ''
-    if ($raw -match '^\d+(\.\d+)+$') { return $raw } else { return $null }
+    try {
+        $lines = @(& $Cmd --version 2>&1)
+        if (-not $? -or $LASTEXITCODE -ne 0) { return $null }
+        return ConvertFrom-CliVersionOutput $lines
+    }
+    catch { return $null }
 }
 
 foreach ($cliName in $cliFloor.Keys) {
-    $actual = Get-CliVersion $cliName
-    if (-not $actual) { continue }
+    if (-not (Get-Command $cliName -ErrorAction SilentlyContinue)) { continue }
+    $fixHint = "At SESSION START only: run this script with -Update, or inspect the CLI and install a plain release of $($cliPackage[$cliName]) meeting the floor. See docs/operator-runbook.md."
+    $v = Get-VersionFloorVerdict (Get-CliVersion $cliName) $cliFloor[$cliName] $cliKnownGood[$cliName] $fixHint
 
     # -Update: repair ONLY a below-floor install. Never a blind upgrade to @latest.
-    if ($Update -and ([version]$actual -lt [version]$cliFloor[$cliName])) {
-        Write-Host ("  [..  ] $cliName $actual is below the {0} correctness floor - upgrading ..." -f $cliFloor[$cliName])
+    if ($Update -and $v.Kind -eq 'below-floor') {
+        Write-Host ("  [..  ] $cliName is below the {0} correctness floor - upgrading ..." -f $cliFloor[$cliName])
         & npm install -g "$($cliPackage[$cliName])@latest" 2>&1 | Out-Null
-        $actual = (Get-CliVersion $cliName), $actual | Where-Object { $_ } | Select-Object -First 1
+        $v = Get-VersionFloorVerdict (Get-CliVersion $cliName) $cliFloor[$cliName] $cliKnownGood[$cliName] $fixHint
     }
 
-    $floorOk = [version]$actual -ge [version]$cliFloor[$cliName]
-    $drifted = $floorOk -and ([version]$actual -ne [version]$cliKnownGood[$cliName])
-    $detail = if (-not $floorOk) { "$actual is BELOW the $($cliFloor[$cliName]) correctness floor" }
-              elseif ($drifted)  { "$actual (above known-good $($cliKnownGood[$cliName]))" }
-              else               { "$actual (known-good)" }
-    $hint = if (-not $floorOk) {
-        "Run this script with -Update at SESSION START, or: npm install -g $($cliPackage[$cliName])@latest"
-    } else {
-        "Version moved past the matrix in AGENTS.md - re-verify the version-specific Gotchas in .github/agents/ before trusting them."
-    }
-    # Below the floor is a real correctness failure; above known-good is only an advisory.
-    Add-Check "version: $cliName" $(if ($floorOk) { 'optional' } else { 'critical' }) $(-not $drifted -and $floorOk) $detail $hint
+    Add-Check "version: $cliName" $v.Tier $v.Ok $v.Detail $v.Hint
 }
 
 # --- PBIR JSON-schema reachability (does `validate` actually run its schema layer this session?) ---
@@ -264,23 +292,60 @@ if ($engineStatus -and $engineStatus.present -and $py) {
 }
 
 # --- Skill plugins ---
-# `powerbi-authoring` is still checked by configured plugin identity, because it supplies the official
-# planning/design/authoring/semantic-model skills the builder personas chain.
-#
 # This repo's reusable Power BI bundles are different: their marketplace/plugin name has changed once,
 # and a hard-coded name let the installed copy drift silently. Discover that plugin by content instead:
 # scan the Copilot home's installed-plugins/*/*/skills for build_plugin.py's bundle names. Exactly
 # one discovered install is acceptable; more than one is a critical shadowing hazard.
 $cfg = Read-CopilotJson 'config.json'
-$p = @{ name = 'powerbi-authoring'; market = 'fabric-collection'; tier = 'critical'
-       hint = 'In Copilot: /plugin -> add marketplace microsoft/skills-for-fabric -> enable powerbi-authoring. See AGENTS.md.' }
-$plugin = $null
-if ($cfg -and $cfg.installedPlugins) {
-    $plugin = $cfg.installedPlugins | Where-Object { $_.name -eq $p.name -and $_.marketplace -eq $p.market } | Select-Object -First 1
+$pluginPolicy = @{ name = 'powerbi-authoring'; market = 'fabric-collection'
+    floor = '0.3.19'; knownGood = '0.3.19'; skill = 'powerbi-report-cli'
+    upstreamUrl = 'https://raw.githubusercontent.com/microsoft/skills-for-fabric/main/.github/plugin/marketplace.json'
+    hint = 'Plugin repair happens BETWEEN Copilot sessions (Access is denied / os error 5 while the directory is locked). Close every session, then from a plain shell: copilot plugin marketplace update fabric-collection; copilot plugin update powerbi-authoring@fabric-collection. Update this plugin only. Confirm enabled state/version/content with copilot plugin list --json; an exit code alone can hide a stale catalog. See docs/operator-runbook.md, Updating the Power BI plugin and CLIs.' }
+
+function Get-PluginVerdict($Entries, [bool]$CacheExists, $Manifest, [bool]$SkillPresent, $Policy) {
+    $entriesArray = @($Entries | Where-Object { $null -ne $_ })
+    $v = [pscustomobject]@{ Kind = 'missing'; Tier = 'critical'; Ok = $false
+        Detail = 'expected exactly one powerbi-authoring@fabric-collection registry entry'; Hint = $Policy.hint }
+    if ($entriesArray.Count -ne 1) { return $v }
+    $entry = $entriesArray[0]
+    if ($entry.name -cne $Policy.name -or $entry.marketplace -cne $Policy.market) { return $v }
+    if ($entry.enabled -isnot [bool] -or $entry.enabled -ne $true) {
+        $v.Kind = 'disabled'; $v.Detail = 'plugin is not enabled'; return $v
+    }
+    if (-not $CacheExists) { $v.Kind = 'cache-missing'; $v.Detail = 'plugin cache directory missing'; return $v }
+    if (-not $Manifest -or $Manifest.name -cne $Policy.name) {
+        $v.Kind = 'manifest-unreadable'; $v.Detail = 'effective .github/plugin/plugin.json unreadable or wrong name'; return $v
+    }
+    $v = Get-VersionFloorVerdict $entry.version $Policy.floor $Policy.knownGood $Policy.hint
+    $mv = Get-VersionFloorVerdict $Manifest.version $Policy.floor $Policy.knownGood $Policy.hint
+    if ($mv.Kind -in @('unreadable', 'prerelease')) { return $mv }
+    if ($entry.version -cne $Manifest.version) {
+        return [pscustomobject]@{ Kind = 'manifest-mismatch'; Tier = 'critical'; Ok = $false
+            Detail = 'registry and effective manifest versions disagree'; Hint = $Policy.hint }
+    }
+    if ($v.Tier -eq 'critical') { return $v }
+    if (-not $SkillPresent) {
+        $v.Kind = 'skill-missing'; $v.Tier = 'critical'; $v.Ok = $false
+        $v.Detail = 'required skills/powerbi-report-cli/SKILL.md leaf missing'; $v.Hint = $Policy.hint
+    }
+    return $v
 }
-$pluginOk = $plugin -and (Test-Path $plugin.cache_path)
-Add-Check "plugin: $($p.name)@$($p.market)" $p.tier ([bool]$pluginOk) `
-    $(if ($pluginOk) { "v$($plugin.version)" } else { 'not installed/enabled' }) $p.hint
+
+$pluginEntries = @($cfg.installedPlugins | Where-Object {
+    $_.name -ceq $pluginPolicy.name -and $_.marketplace -ceq $pluginPolicy.market
+})
+$plugin = $pluginEntries | Select-Object -First 1
+$cacheExists = $plugin -and $plugin.cache_path -and (Test-Path -LiteralPath $plugin.cache_path -PathType Container)
+$manifest = $null
+$skillPresent = $false
+if ($cacheExists) {
+    # Copilot's GitHub-native manifest takes precedence over .claude-plugin.
+    try { $manifest = Get-Content -LiteralPath (Join-Path $plugin.cache_path '.github\plugin\plugin.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+    catch { $manifest = $null }
+    $skillPresent = Test-Path -LiteralPath (Join-Path $plugin.cache_path "skills\$($pluginPolicy.skill)\SKILL.md") -PathType Leaf
+}
+$pv = Get-PluginVerdict $pluginEntries ([bool]$cacheExists) $manifest $skillPresent $pluginPolicy
+Add-Check 'plugin: powerbi-authoring@fabric-collection' $pv.Tier $pv.Ok $pv.Detail $pv.Hint
 
 $skillPlugin = $null
 $skillRaw = $null
@@ -368,18 +433,40 @@ Add-Cli 'powerbi-desktop' 'critical' 'npm install -g @microsoft/powerbi-desktop-
 #   * being behind is NOT an error. The timing rule still governs: upgrading mid-migration is worse
 #     than being slightly old. So this never fails the run and never upgrades anything - it tells you
 #     what to look at BETWEEN migrations.
+function Get-UpstreamVerdict([string]$Installed, [string]$Upstream, [string]$UpdateHint) {
+    $v = [pscustomobject]@{ Kind = 'unknown'; Tier = 'optional'; Ok = $false
+        Detail = 'unknown (upstream or installed version unavailable/invalid)'; Hint = '' }
+    $iv = Get-VersionFloorVerdict $Installed '0.0.0' '0.0.0' ''
+    $uv = Get-VersionFloorVerdict $Upstream '0.0.0' '0.0.0' ''
+    if ($iv.Tier -eq 'critical' -or $uv.Tier -eq 'critical') { return $v }
+    if ([version]$Installed -lt [version]$Upstream) {
+        $v.Kind = 'behind'; $v.Detail = "$Installed installed, $Upstream available"; $v.Hint = $UpdateHint
+    }
+    elseif ([version]$Installed -eq [version]$Upstream) {
+        $v.Kind = 'current'; $v.Ok = $true; $v.Detail = "$Installed (current)"
+    }
+    else { $v.Kind = 'ahead'; $v.Ok = $true; $v.Detail = "$Installed (ahead of upstream $Upstream)" }
+    return $v
+}
+
 if ($CheckUpstream) {
     foreach ($cliName in $cliFloor.Keys) {
         $installed = Get-CliVersion $cliName
         if (-not $installed) { continue }
-        $latest = (& npm view $cliPackage[$cliName] version 2>$null | Select-Object -First 1)
-        if ($latest -match '^\d+(\.\d+)+$') {
-            $behind = [version]$installed -lt [version]$latest
-            Add-Check "upstream: $cliName" 'optional' (-not $behind) `
-                $(if ($behind) { "$installed installed, $latest available" } else { "$installed (latest)" }) `
-                "Between migrations only: npm install -g $($cliPackage[$cliName])@latest, then re-verify the version-specific Gotchas in .github/agents/."
-        }
+        $latest = ConvertFrom-CliVersionOutput @(& npm view $cliPackage[$cliName] version 2>$null)
+        $uv = Get-UpstreamVerdict $installed $latest "Between migrations only: npm install -g $($cliPackage[$cliName])@latest, then re-verify version-specific behaviour."
+        Add-Check "upstream: $cliName" $uv.Tier $uv.Ok $uv.Detail $uv.Hint
     }
+
+    $latestPlugin = $null
+    try {
+        $catalog = (Invoke-WebRequest -Uri $pluginPolicy.upstreamUrl -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop).Content | ConvertFrom-Json -ErrorAction Stop
+        $matches = @($catalog.plugins | Where-Object { $_.name -ceq $pluginPolicy.name })
+        if ($matches.Count -eq 1) { $latestPlugin = $matches[0].version }
+    }
+    catch { $latestPlugin = $null }
+    $uv = Get-UpstreamVerdict $plugin.version $latestPlugin $pluginPolicy.hint
+    Add-Check 'upstream: powerbi-authoring plugin' $uv.Tier $uv.Ok $uv.Detail $uv.Hint
 
     # The deterministic engine is an unpacked marketplace plugin with no `.git`, so there is no local
     # SHA to compare. Ask upstream for the VERSION file itself - one HTTP GET, and it compares the

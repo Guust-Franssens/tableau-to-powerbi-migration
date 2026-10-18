@@ -1,131 +1,94 @@
-# Bounded gotcha deduplication plan — Refs #732
+# Compact migration cores — Refs #732 / #733
 
-## Verdict and evidence ceiling
-**DRAFT; plan only, not approval to implement.** Recommend a small pointer pass, not a skill purge.
-✅ Re-census baseline: current `master` **b3d3db619cd4ecb9b399f9632b6e12d1bf9c65a5**, inspected 2026-10-17; merged rather than rebased to preserve published ancestry. Compared with the original 511bb209 baseline, master adds only the CLI pilot plan/index entry; all cited gotcha/product source bytes are unchanged.
-Plan PR **N=2**: this document and its `docs/INDEX.md` entry only. No product, tests, pins, plugin, dependencies or installed profiles change.
-Invariant: remove procedural duplication only where a reachable upstream authority covers the same rule; retain the local failure boundary and evidence ceiling.
-Fail-open loss of credentials, fidelity, ownership, persistence or stale-save protection blocks implementation/merge; unresolved capability refuses, never silently degrades.
-⚠️ Savings below are planning estimates, not measured implementation savings. Zero deletion now is acceptable.
+## Approved supersession and scope
 
-### Sources and status (not all “approved” work has landed)
-- [#732](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/732) has no comments. No full skills-history report was found in current tracked filenames or the inspected issue comments; #728/#729 preserve its reported 0.3.11-versus-0.3.19 comparison, not an independently recovered report.
-- Merged [#720](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/pull/720): dispatch/independent Tableau comparison; retain `AGENTS.md:10-40,90-157` and `CONTRIBUTING.md:20-30,62-89`, not a new root/persona diet.
-- Merged [#723](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/pull/723): exact-HWND diagnostic-only harvest; merged [#726](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/pull/726): working-artifact ACLs, writable probe, nested-gate preservation. Neither permits UI evidence to clear a gate.
-- Merged [#746](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/pull/746), approved `d7a3ebfc`: owned AI stamping/batch declarations; preserve its deliberate upstream-policy exception (`A:13-90` below), not the superseded unrestricted-stamping prose.
-- Merged [#748](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/pull/748): `docs/cli-consensus/consensus.md:3-33,110-157` recommends a conditional narrow pilot, not CLI replacement of existing authorities.
-- Draft [#745](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/pull/745), review approval [1823251d](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/pull/745#issuecomment-6226016837): repo floors only; closed-session maintenance and fresh-session positive acceptance still block merge.
-- Draft [#747](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/pull/747), reviewed `57cd4310`: #728 modes/reference migration, stacked on #745; local plugin **0.3.1** publication/installed synchronization remain pending.
-- Draft [#752](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/pull/752), review approval [86190257](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/pull/752#issuecomment-6234247776): semantic-persona wiring; waits for #745 → #747 and integration with merged #746. No runtime reload result.
-- [#730 measurement contract](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/730#issuecomment-6233480308) authorizes XMLA/ImageSave versus UI refresh/observer/UI Save A/B and optional crossover arms; it reports **no winner**.
-- “Merged #741 architecture” means the landed `docs/desktop-observer-simplification.md:1-138`, not a merged PR #741: [#741 is an open issue](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/741). Its [approved slice-1 amendments](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/741#issuecomment-6239850790) override the proposal: held process-start identity, lossless identity strings, settlement/latch precedence, N=35 atomic caller migration. Observer implementation/reload retirement is not done.
+✅ Owner approval `approve_compact_gotcha_core=true` and independent same-reviewer conformance
+**APPROVE — amended artifact conforms** (`b339f945`, 2026-10-18) authorize the amended **N=10**
+implementation, not runtime acceptance or publication. The
+[approved issue plan](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/732#issuecomment-6248826479)
+records the invariant, controls, ownership and non-goals. Base:
+`d3ecae21d659af883da6be02ec2a9a1dfe1f3cc5`, tree `76366fa269f08a328c97744dcfd8dff4042d85dd`.
 
-### Upstream authority, version and citation key
-✅ Public raw `main` retrieved 2026-10-17: [`powerbi-authoring` manifest](https://github.com/microsoft/skills-for-fabric/blob/main/plugins/powerbi-authoring/.github/plugin/plugin.json#L2-L18) and [marketplace](https://github.com/microsoft/skills-for-fabric/blob/main/.github/plugin/marketplace.json) declare **0.3.19**. This is a dated mutable-main snapshot, not an immutable tag: attempted `v0.3.19` reference URLs returned 404.
-Authenticated GitHub access to upstream was SSO-refused; public raw files were readable. No installed-profile/runtime equivalence is claimed.
-`U` = upstream [`plugins/powerbi-authoring/skills/`](https://github.com/microsoft/skills-for-fabric/tree/main/plugins/powerbi-authoring/skills); `UR` = `U/powerbi-report-cli/references/`; `US` = `U/semantic-model-authoring/references/`. All upstream citations below are from that **0.3.19** snapshot.
-Stable implementation pointers should use the loaded skill's mode/topic and heading, not copied prose or upstream line numbers as runtime APIs:
-- `UR/authoring.md:13-36` (completion gate), `authoring/screenshot-review.md:1-75`; `powerbi-report-cli/SKILL.md:33-105` selects intent/mode, not a CLI `--mode` argument.
-- `UR/authoring/expressions.md:176-194` (aggregation); `authoring/slicers-part-02.md:298-330` (selection); `authoring/map.md:18-48` (map policy/shapeMap).
-- `US/tmdl-guidelines.md:164-225` and `UR/authoring/field-parameters.md:26-108` (model/report halves); `US/semantic-model-ai-readiness.md:22-43` (preservation/Q&A prerequisite).
-- `UR/authoring/model-binding.md:20-67,114-155` (binding forms); `UR/management.md:82-99` (publishing floor).
-- `UR/authoring/preview-part-04.md:11-48` separates definition reload, Calculate/targeted Full, DAX verification; `UR/authoring-part-03.md:170-182` forbids public PID/direct-host bypass. Guidance is not this repo's measured success.
-Local key: `R` = `.github/skills/powerbi-report-gotchas/SKILL.md`; `S` = `.github/skills/powerbi-semantic-model-gotchas/SKILL.md`; `F` = `.github/skills/pbip-model-refresh/SKILL.md`; `A` = `.github/skills/powerbi-ai-readiness/SKILL.md`; `K` = `.github/pbi.kb/visual-cookbook.md`; `V/` = `.github/pbi.kb/visuals/`.
-These expand to repository-relative path:line citations at the baseline, not machine paths. Four skills total **3,613 physical lines / 282,745 LF characters**.
-Disposition: **P** delete to pointer now (textually ready; release prerequisites still apply); **M** defer until #729 maintenance; **B** defer until #730 measurement; **K** keep unique/measured; **C** stale/contradicted, correct; **H** historical evidence, retain dated and qualified.
+This full replacement supersedes [PR #759's D1 plan](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/pull/759),
+not its historical evidence. The
+[original census at the immutable base](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/blob/d3ecae21d659af883da6be02ec2a9a1dfe1f3cc5/docs/gotcha-dedup-plan.md)
+retains its dated measurements, corrections and unresolved observations. D1's small pointer pass
+was not authority for this stronger rewrite; neither its old status labels nor its estimates are
+current implementation results.
 
-## Census: every section of the four local skills
-Grouped rows partition substantive sections; mixed rows identify the narrower replacement span. Kept/frontmatter/headings imply zero removal.
-| Local path:lines / claim | Class; authority and boundary | Estimated net removal (lines / LF chars) |
-|---|---|---:|
-| `R:11-16` validation insufficient | P generic procedure → `UR/authoring.md:13-36`; K local schema-skip, binding-target and independent Tableau comparison invariant | 2–3 / 150–250 |
-| `R:18-20` 2.11.0 dead / 2.9.0 newest | C; visualContainer **2.10/2.11/2.12 published 2026-09-29**, **2.13.0 published 2026-10-15** ([2.13 source](https://github.com/microsoft/json-schemas/blob/main/fabric/item/report/definition/visualContainer/2.13.0/schema.json), dates per [review amendment](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/pull/759#issuecomment-6241330358)). Never substitute “2.12 newest”; publication is not this host's endpoint reachability. Keep schema-unreachable ≠ checked; no blanket schema bump | 0 |
-| `R:22-41`; `S:15-31` portability/engine audit | H; dated #486 engine audit is not Desktop/CLI remeasurement | 0 |
-| `R:47-59,67-111,126-202` numeric roles, Else, coordinates, formats/expansion, labels, hierarchy, grain, FP symptom, numeric Single, textbox, scatter refs, small-multiples sort, home table | K measured render failures and model/report ownership; generic topic overlap does not reproduce these controls (`UR/authoring/{map,expressions,table,cartesian}.md`) | 0 |
-| `R:60-66` aggregation enum | P → `UR/authoring/expressions.md:193-194`; H retain dated 730-row/533-distinct correction, not another enum table | 2–3 / 150–250 |
-| `R:112-125` slicer preselection | P only payload-location explanation → `UR/authoring/slicers-part-02.md:298-330`; H keep engine #130 correction; M recheck duplicate-name warning; K typed literal rule | 2–3 / 150–300 |
-| `R:203-261` literal types, three-state control, estate counts | K/H; datatype-specific Tableau/engine evidence, never turn corpus counts into universal claims | 0 |
-| `R:263-289` colour cases/projected driver/scopeId/string helpers/direct hex | M generic syntax → upstream conditional-formatting topic after CLI check; K retain measured silent fallbacks and `check_field_bindings.py` coverage | 0 now |
-| `R:291-342,407-417` byPath, two report trees, shared datasource, shipped bytes | K cross-tree handover; C remove implication that agents may repoint pristine `reports/` (`R:415-417`) against `AGENTS.md:94-119`; upstream binding forms do not own promotion | 0 |
-| `R:343-351,385-406` filters/bar/header/literals/theme/scale | M ordinary encoding → upstream expressions/cartesian/formatting after installed-version check; K scale and old measured schema failures remain dated | 0 now |
-| `R:352-384` commuting fix scripts/type-specific properties/key order | K measured validation versus inferred rendering distinction; not generic upstream authoring procedure | 0 |
-| `R:418-445` required-role/stub diagnosis | H preserve #143 retraction before original observation; no live “bind the stub” prescription | 0 |
-| `R:446-474` generated edits | K repo declaration/tamper/seal contract; report single-target rule is not AI batch stamping permission | 0 |
-| `R:475-499` tableEx/matrix blanks and source projection | K measured Tableau crosstab fidelity; upstream table recipe is not a falsifying reproduction | 0 |
-| `R:501-504` only modern map / Bing warning | P generic prohibition → `UR/authoring/map.md:18-48`; K modal diagnostic observation, C heading must allow specialized shapeMap | 1–2 / 50–100 |
-| `R:506-557,572-599` Bing colour, choropleth, viewport, basemap, routes, unrendered properties/tooltips | K/H measured encodings, Tableau geography/tenant dependency, explicit structural-only ceiling; upstream map recipe alone does not supersede them | 0 |
-| `R:558-570` shapeMap “unusable” / “still holds” | C → upstream specialized-supported classification; H retain second-hand negative and engine-version correction, explicitly not locally reproduced or universal | 0 |
-| `R:601-609` scatter measures/dot strip | K measured role failure + Tableau translation; revisit generic recipe only with equivalent upstream example | 0 |
-| `R:613-640,646-647` stable screenshots | K entire-digest dwell, screenshot time excluded, partial-plateau limitation; H old timings/version stamp remain observations | 0 |
-| `R:641-645,648-670` verbs/verify/save/XMLA/banner/MSIX/reload races | B runtime-dependent; K cache and stale-save boundaries. C “PBIP stores no data cache” overbroad beside cache.abf instructions; M version stamps, not their measured history | 0 now |
-| `R:671-676` bridge serialization / structural fallback sign-off | C structural fallback cannot earn COMPLETE: `AGENTS.md:34-40,111-114`; B remeasure serialization, preserve sibling ownership | 0 |
-| `R:678-798` references/Automatic marks/stacking/shelves/tooltips/sorts/identity/pivots/defaults | K Tableau translation; H #424 fixed-direction reproduction; P only repeated generic slicer encoding, retain source-default obligation | 0 now |
-| `R:799-871` idiom research/handover/emptied roles/Last-filter deferral | K/H reader protocol, severity/version corrections and source numeric semantics; no upstream Power BI replacement | 0 |
-| `S:10-13,33-64` shape≠rows, ATTR/CASE/gauges/captions/non-tabular fields | K Tableau mapping and local verification boundary | 0 |
-| `S:66-215` grammar/indentation/oracle/ref quoting/BOM/order/names/schema/GUID | K/H real-parser and false-green evidence; M generic TMDL prose only after equivalent upstream guarantees checked; C literal “nothing gates” statements need reconciliation with cited oracle before changing | 0 now |
-| `S:216-231,542-543` field-parameter binding/metadata | P → `US/tmdl-guidelines.md:164-225` + report-side topic; K first-open Desktop rewrite warning and source-specific example. If the report reference is unavailable to the semantic role, retain minimal model-side bracketed `[Value1..3]`/ParameterMetadata rule in S; do not rely on another role's loaded context | 10–13 / 850–1,150 |
-| `S:232-244,248-308` PLACEHOLDER, check_datamodel, names, culture/.xls | K measured query-time and locale corruption; UI refresh success in one case does not select #730's winner | 0 |
-| `S:309-325` rediscovery/empty MCP result/Calculate/cleanup | M/B; C blank response alone cannot prove write success, nor banner disappearance data correctness; require identity and independent DAX readback | 0 now |
-| `S:327-541,544-571` integrity/table calcs/cache/binning/sort/geo/scale | K Tableau grains, sort dependencies, ownership, ImageSave alignment; H deleted #218 gate and #425 counterexamples; do not recreate grammar/axis-proof machinery | 0 |
-| `S:572-780,791-943` live proof/credential/crashes/federation/legacy .xls | K/H reachability through shipped artifact, no credential acquisition, exact source identity, culture/row controls; C `S:670-674` no-probe prohibition contradicts current writable one-table `_probe` (`docs/desktop-observer-simplification.md:58-62`), #741 owns reconciliation | 0 |
-| `S:781-790,944-985` wrong PID/MCP connection cross-talk | B/M exact-version remeasurement; K explicit returned connection and independent model fingerprint; no assumed modern fix | 0 now |
-| `S:986-1087` navigation keys/edit-open hangs/stale Save | K navigation/stale-save safety and H dated hangs; B close/reopen exclusivity, never delete on preview success alone | 0 |
-| `S:1088-1139` modal enumeration/allowlist/CPU heuristic | K credential stop; C duplicated mutating UIA recipes route to #741's read-only observer, not wholesale pointer to upstream preview | 0 |
-| `S:1141-1405` handover/openability/retractions/dispatchers | K/H parser queues, independent runtime proof, unknown causes, partial dispatcher annotations and SWITCH-versus-FP choice; retain unresolved contradictory ACMU provenance | 0 |
-| `F:1-753` scripts/diagnosis/images/refresh/progress/processing/persistence observations | K portable local mechanics and #723 diagnostic-only limits; #741 owns observer prose reduction, not upstream authoring; H timings are dated, not guarantees | 0 |
-| `F:754-811` cache/order/reopen | K cache identity/cold-reopen control; B exclusive close/reopen claim, metadata-only invalidation expressly unmeasured | 0 now |
-| `F:812-962` stale Save/ImageSave/UIA/PID/portability | K persistence/atomicity/compatibility/identity; H explicit Save reproduction is not idle-autosave evidence; B UI Save replacement only after #730, no removal of cache.abf | 0 |
-| `A:1-102` owned stamping/metadata preservation/batch/strict handoff | K #746 sole local exception; upstream `US/semantic-model-ai-readiness.md:22-33` is stricter and cannot replace this policy | 0 |
-| `A:103-158` levers/storage/Q&A | P only `A:117-121` generic prerequisite → `US/semantic-model-ai-readiness.md:37-43`; K actual qna=true enforcement, opaque metadata preservation and ownership | 1–2 / 80–160 |
-| `A:159-375` commands/strict checks/instruction design/idioms/limits/reuse/sources/tools | K local mechanism + Tableau names/domains/grains; M generic advisory prose if equivalent upstream investment/description guidance is verified; no portal/synonym-authoring permission | 0 now |
+The sole integration/pin owner works sequentially: **A5** (two skills, this index, build metadata,
+`test_skills.py`) then **B5** (R/S personas' necessary citations/generated indexes, reference and
+openability tests, sanctioned pins). #733's authored persona diet is separate; five shared paths
+remain under serial integration ownership. No AI/refresh/live-source implementation, shared
+convention, translation guide, cookbook, gate, fixture or workflow change is authorized here.
 
-## Adjacent prose and cookbook census (closed residuals, not a second purge)
-| Exact local surface | Disposition / authority |
+## Current owners and retained contract
+
+This is a **host-repository-only, optional symptom index**, not mandatory default reading or a
+portable plugin procedure. Missing history leaves current attribution `CANNOT_ESTABLISH`, not an
+observed defect. Missing required host tooling blocks only its affected operation; never improvise.
+
+| Current responsibility | Owner and reachability |
 |---|---|
-| `docs/tableau-dax-translation-guide.md:1-214,230-642` | K/H Tableau semantics, LOD/window/offset/context-transition/BLANK/fidelity; #728 owns retired-skill query route at `:558`. |
-| Same guide `:215-229` | P duplicate FP grammar → upstream TMDL/field-parameter topics; keep first-open rewrite and Tableau consumption decision at `:195-214`; estimate 8–10 lines / 650–900 chars. |
-| `scripts/deploy_estate.py:18-40` | P binding forms `:21-35` → `UR/authoring/model-binding.md:20-30,114-155`; retain model-first ordering, measured schema rejection and LRO-readback rule `:37-40`, journal/resume `:42-64`. Defer script-docstring edit to a separate approved surface; estimate 6–9 lines / 400–650 chars, no code change. |
-| `docs/capabilities-and-limitations.md:1-307` | K source-specific automation/limits and Tableau comparison at `:60-115`; H dated 16-run findings. P generic authoring mechanics → upstream topics while retaining the independent-value boundary; C `:75` multiline-DAX universal must defer to S's measured indentation rule. No deletion in D1 outside its closed surface. |
-| `docs/ai-instructions-authoring-guide.md:1-25` | P retain the existing stable local-skill redirect `:3-5`; H move rationale. C levers/synonyms/publish-survival summary `:16-25` must reflect A/#746's ownership/preservation limits, not imply unrestricted stamping or synonym authoring. Keep local policy pointer rather than replacing it with upstream's stricter default. |
-| `README.md:31-94,142-184,208-389,399-533,577-619` | K front door, Tableau scope, byPath, privacy and human/runtime limits; P existing skill/runbook pointers. C retired report names `:161-162,378` belong to #747; H counts and version-dependent capability claims need dated provenance, not a new current guarantee. No persona diet here. |
-| `.github/copilot-instructions.md:1-28` | K mandatory session-start flags/refusal and dispatcher boundaries; P retain AGENTS/runbook/index pointers. Shared/persona text stays #733; no upstream authoring pointer replaces this runtime contract. |
-| `scripts/README.md:1-1253` | K command/output/exit/gate authority and portable forwarding/cached-data smoke prerequisite `:1157-1173`; P existing bundle pointers, not copied upstream procedures; H measured examples remain dated. No script inventory, shim or gate deletion. |
-| `docs/operator-runbook.md:98-312,474-594,1280-1364,1713-1815,1817-2043` | K maintenance-only updates, refresh/credential stops, binding/LRO readback, verification ceilings and PID cleanup; P generic Power BI syntax may point to selected upstream modes, not replace repo lifecycle. H recorded timings/tenant findings stay qualified; M tooling matrix belongs to #745/#729, B reload/persist claims to #730. Remaining Tableau intake/harvest/repair prose is K/H. |
-| `docs/deterministic-tier-integration.md:1-574` | H v2/v3/v4 architectural experiments and dated upstream engine inventories, especially `:178-247`; K immutable-baseline/single-writer/identity and emitter-claim ≠ verification at `:292-308`. C old schema/AI-uncontested assertions `:216-225` are historical, not current upstream powerbi-authoring facts. P current authorities via AGENTS/local skills, never implement old persona-split proposals under #732. |
-| `fixtures/upstream-repros/README.md:1-32`; `fixtures/upstream-repros/issue-171-measure-names-parameter/README.md:1-11`; `fixtures/upstream-repros/issue-168-case-one-bad-branch/README.md:1-7`; `tests/fixtures/datasource-field-parameter-page/README.md:1-90` | P retain repro-index pointers; H exact engine-version/partial-reproduction evidence; K Tableau Measure Names gap, dispatcher input and path-envelope fail-open control. Upstream field-parameter recipe is not proof these engine repros are fixed; no fixture/readme deletion or conversion of structural evidence into render success. |
-| `scripts/preflight.ps1:163-222` | M #729 owns floors/parser/doctor, #745 does not authorize widening into schema rewrites; C stale-schema premise must not disable doctor. |
-| `K:1-54,117-296` | K confidence/binding/source-value/precedence/reachability contracts; H CLI 0.1.4 inventory, old probe outcomes and engine defects, not current capability promises. |
-| `K:55-115`; `tests/test_repo_layout.py:360-436` | C stale “2.9.0 newest”/2.10–2.13 dead table and pin-derived universal ban; retain dated fetch/mutation evidence. Publication dates above supersede the old table; developer.microsoft.com live reachability remains unverified here. Pin acceptance needs published authority plus invalid-position negative control, not “raise newest” alone; visualContainer version is separate from definition.pbir binding schema. |
-| `V/azureMap.md:1-384` | K/H source basemap, series-veto, multi-location, measure-filter and tenant-negative measurements; ordinary role/template prose is M, not proof the measured defects vanished. |
-| `V/shapeMap.md:1-47` | K explicit render-uncertain template and inferred Series trade-off; C reconcile global “unusable” in R, not promote this template to render-verified. |
-| `V/shape.md:1-84`; `actionButton.md:1-72`; `forecast.md:1-78`; `step-line.md:1-28`; `textSlicer.md:1-35` | K/H captured shape/text/action quirks, forecast negative/human route, step-line evidence, Input-slicer tooling limits; M generic recipe overlap only. |
-| `V/table-cond-format.md:1-34`; `table-databars.md:1-35`; `smallmultiples.md:1-20`; `reference-lines.md:1-25`; `error-bars.md:1-24`; `zoom-slider.md:1-20` | M role/property snapshots versus upstream table/conditional-formatting/cartesian; K Tableau mapping and structural-only confidence; no proven net deletion yet. |
-| `V/areaChart.md:1-20`; `stackedAreaChart.md:1-19`; `hundredPercentStackedAreaChart.md:1-19`; `hundredPercentStackedColumnChart.md:1-19`; `lineClusteredColumnComboChart.md:1-20`; `lineStackedColumnComboChart.md:1-20` | M ordinary roles/formatting → upstream cartesian; K local Tableau idiom/tier. |
-| `V/card.md:1-30`; `multiRowCard.md:1-31`; `kpi.md:1-33`; `donutChart.md:1-33`; `pieChart.md:1-32`; `funnel.md:1-32`; `treemap.md:1-33`; `waterfallChart.md:1-34`; `ribbonChart.md:1-35`; `heatMap.md:1-36`; `decompositionTreeVisual.md:1-40`; `keyDriversVisual.md:1-38` | M upstream visual-topic equivalents need per-recipe verification; K source mapping, exact bindings and unverified-render caveats. All paired `.visual.json` fixtures stay unchanged. |
-| `AGENTS.md:87-157`; `docs/agent-architecture.md:25-79,260-330`; `CONTRIBUTING.md:150-184` | K dispatch, stateless skill loading, shared generation/pins, publication shadowing; #733 owns persona diet. Issue #732's quoted builder `:221-231` is historical, not verified current-line evidence. Persona internals are an explicit uninspected residual; no deletion/size estimate or complete persona-census claim. |
-| `scripts/build_plugin.py:33-49` | C old CFBF-based holdback rationale contradicts current `F:859-875` and ABF tests; held-back refresh skill still is not in `SHIPPED_SKILLS`. Correction is a separate evidence-backed slice, not D1; never infer publication or change shipped bundles. |
-Savings arithmetic: four-skill P rows **18–26 lines / 1,430–2,210 LF chars net**; guide + separate optional deployment header **14–19 / 1,050–1,550**. Overall **32–45 lines / 2,480–3,760 LF chars**, not issue #732's presumed 60–80. Remeasure actual spans/replacements at implementation, including any retained model-side FP rule; corrections may add text. Moving evidence earns zero deletion credit.
+| Generic report procedures | Installed `powerbi-report-cli`: existing report → `authoring`; missing page → `design` then `authoring`; selected `references/<mode>.md` and its needed topics. Missing/retired skill, wrong mode or unavailable topic blocks that operation. |
+| Generic model procedures | Installed `semantic-model-authoring` existing-model workflow and `references/tmdl-guidelines.md`; report-side field parameters use the report CLI's authoring topic. Keep the inline constructor guard until both resolve in a fresh semantic role. |
+| Tableau/source and shipped report contract | Host `.github\skills\powerbi-report-gotchas\SKILL.md` §§3/8/10: exact IDs/captions, pivots, nesting/grain/scale, effective first-open defaults, post-aggregation LAST and independent source comparison. |
+| Tableau/model and queue contract | Host `.github\skills\powerbi-semantic-model-gotchas\SKILL.md` §§1–4/8 plus `docs\tableau-dax-translation-guide.md`: roles/targets/parameters, LOD/table-calculation context, original requests and distinct denominators; selfcheck is an engine claim. |
+| Custody/binding/declarations | Host `AGENTS.md`, `scripts\promote_unit.py`, `scripts\declare_generated_edit.py` and their tests. Repair only working/shipped bytes; shared promotion rewrites `byPath` and checks its target. Bundle edits require replay/declaration and `--tamper` exit 0; packages retain their separate contract. |
+| Capture, reload, rows and persistence | Host `.github\skills\pbip-model-refresh\SKILL.md`, especially “Order matters,” “How persistence actually works” and “Bind to the right instance.” Held out of the playbook; resolve the host path or block the dependent handoff. Every commissioned import/live table needs current-model canaries and commissioned durability/cold-reopen proof. |
+| Credentials and shipped-artifact live proof | Host `.github\skills\live-source-reachability\SKILL.md` alone; not shipped by the playbook. Native verdicts/retry rules prevail. An unchanged credential retry is not remediation. |
+| AI policy | Shipped, locally owned `powerbi-ai-readiness` §0 is the sole stamping/batch/strict-seal policy. Generic upstream AI guidance does not replace this bounded exception. |
 
-## Ownership, slices and stop conditions
-**This plan PR: N=2**, `docs/gotcha-dedup-plan.md` + `docs/INDEX.md`, per review approval; navigation must pass, with no checker weakening or exclusions. Other adjacent prose is dispositioned above, not silently added to D1.
-**Order:** #745 review/closed-session maintenance/fresh-session #729 acceptance → #747/#728 merge + publish/sync **0.3.1** → integrated #752 → #732 content release (expected **0.3.2**, recheck current release first) → rebase/re-census #741 onto that release. No concurrent S edits with #741; #733 can proceed only on disjoint files, with shared blocks/personas exclusively owned there. #730 independently gates reload retirement.
-1. **D1 content, proposed N=10 after dependencies:** R, S, A, translation guide, K, `scripts/build_plugin.py` (**version only**), `tests/test_skills.py`, `tests/test_build_plugin.py`, `tests/test_power_bi_skill_references.py` (via #747), `tests/test_repo_layout.py`. No personas/shared block/preflight/F/fixtures/index. Preserve headings/inbound anchors. Reuse existing direct tests; no new census/mutation framework. Missing mode/topic = BLOCKED/preflight, no upstream `@latest` install mid-migration.
-2. **D1 correction boundary:** schema and shapeMap facts only within R/K and existing test contracts; keep dated evidence and schema-vs-binding separation. Preserve existing artifact schema URLs unless independently justified; no claim that publication proves live endpoint reachability. Adjacent prose corrections, holdback rationale and deployment header need their own approved surfaces, not D1 expansion.
-3. **B1 measurement, no deletion budget:** #730 owns trigger/observe/verify/persist arms on the supported matrix: exact PID/report/model/process identity; current-TMDL fingerprint; DAX row canaries; prompt/unknown/localization; conflicting/double refresh; churn/hashes; compatibility/cache; source-unavailable cold reopen; stale-session Save negative. No screenshot/UIA/mtime can earn DATA_OK. Retain XMLA/ImageSave/close-reopen until the candidate wins every commissioned control; failure/ambiguity → measured gap and upstream report, not automatic fallback approval.
-4. **Observer/persona work stays outside #732:** #741 owns F/modal/observer consumers and N=35 contracts, integrating only after #732's S/R edits/release; #728/#747 owns retired names/modes + 0.3.1; #733 owns disjoint persona/shared-convention diet; #752 owns semantic wiring. One exclusive owner per shared file; no concurrent S edits. Never hand-edit generated blocks or trust old line numbers after integration.
-5. **Optional deployment-prose slice, N=1:** `scripts/deploy_estate.py` header only, after explicit approval; keep binding-schema rejection, ordering, LRO and crash-journal safety. No new publishing permission or deployment.
-Published skills are shadowed by installed bytes (`CONTRIBUTING.md:163-165`; `scripts/build_plugin.py:26-50,130-159`). Master is **0.3.0**, #747 reserves **0.3.1**; D1 expects **0.3.2**, recheck before implementation, update the exact assertion `tests/test_power_bi_skill_references.py:59-61` at reviewed #747 `57cd4310`. Build/check into ignored output, compare shipped bytes and run copied-bundle controls. Release, authorized publication/sync of **developer and blind-profile** copies, and fresh-role canaries are content-completion gates, not optional follow-up. No other-repository publication or installed update occurs in this plan task; no plan bump/pins.
+Missing, stale, inaccessible or ambiguous evidence → `CANNOT_ESTABLISH`/BLOCKED; observed mismatch →
+REFUSE/finding. Neither becomes PASS. Credential owners keep their native vocabulary. Structural
+validation, one arbitrary row, `PERSISTED`, mtime or a screenshot cannot establish fidelity, full
+table coverage or durable cold reopen. Returned connection names still need independent current
+contents/definition checks against the intended working model.
 
-## Acceptance and direct reversal controls (proposed, not run here)
-Existing checks: `python scripts/check_navigation_index.py`; `git diff --check`; for implementation after #747, `uv run pytest -q tests/test_skills.py tests/test_build_plugin.py tests/test_power_bi_skill_references.py tests/test_repo_layout.py`. No new tooling.
-D1 must preserve explicit local invariants beside resolvable pointers; reuse existing direct tests and reject removed rules, not merely find surviving keywords elsewhere:
-- After #747/#752 and installed sync, run separate fresh-role canaries: report builder invokes `powerbi-report-cli` in authoring mode and resolves required report topics; semantic builder invokes semantic-model-authoring and resolves TMDL/field-parameter/AI topics plus local A policy. Verify actual tool resolution/content, not disk presence or inherited parent context. If S cannot resolve report-side FP guidance, keep its minimal model-side bracket/metadata rule. Missing capability or canary failure blocks content completion.
-- Positive: each pointer resolves in supported 0.3.19-or-reverified content, actual selected mode, retained local caveat; negative: retired/missing skill/topic or inverted prerequisite refuses. Mutate pointer target and remove the FP first-open rewrite warning; require named assertions to fail.
-- Remove cache identity/cold-reopen requirement, stale-session no-Save rule, or credential human-stop individually: direct skill-contract assertions fail. Do not claim existing runtime tests alone detect prose deletion.
-- Runtime regression controls remain `tests/test_capture_powerbi_pages.py:163-237` (partial plateau/blocking time) and bundled `test_persist_atomicity.py:531-615,692-798,838-950,2100-2124` (ABF completeness, atomicity, alignment/rollback, no unsafe UI fallback). Reverse dwell accounting and accept a truncated cache; intended assertions must fail.
-- `tests/test_credential_gate_acl_layouts.py:1-540` and #741's identity/unknown-dialog controls retain writable `_probe`, denied artifacts and no UI-derived DATA_OK. Mutate observer “quiet = DATA_OK” only in its owning approved slice, never add a second classifier for this doc cleanup.
-- `tests/test_repo_layout.py` schema negative: inject nonnumeric `position.x` under a supported schema; parser must reject the intended defect. Replace “specialized shapeMap” with universal unusability: direct prose assertion must fail. Network failure is cannot-establish, not a mutation kill.
-- Keep Tableau PLACEHOLDER/non-tabular/small-multiples/home-table/default/grain rules and both byPath cases. Remove each safety clause or substitute shared-model plain copy; direct contract tests plus existing field-binding/promotion fixtures must fail at named assertions, not collection/setup.
-If personas later change under #733: regenerate shared block only via `scripts/sync_agent_conventions.py`, pins via `tests/test_openability_claim_citations.py --update`; run capability/sync/openability/pin checks on the owning diff. D1 changes none of those bytes.
-Stop on newly discovered surface/defect class after R1: simplify/split/descope, not another guard; freeze scope after R2 (`CONTRIBUTING.md:62-89`). No new proof framework without its four-part escalation evidence.
-Before release: secret/privacy scan, byte/line before-after accounting including replacement pointers/tests, independent issue+diff-only review at exact final SHA. Disclose unverified runtime/profile/schema reachability; shorter prompts are not evidence of faithful migrations.
+Pending [#730's measurement contract](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/730#issuecomment-6233480308),
+the supported host capture/reload/identity and custody/persist/export rules outrank generic upstream
+assumptions. ❌ No winner, universal MCP/reload ban or workaround retirement is established here.
+Published schema definitions do not prove this host can reach their endpoints; unreachable/skipped
+checks stay unverified. No “2.9 newest,” “ShapeMap unusable” or “PBIP has no data cache” claim survives
+in the compact cores; no schema bump or “all old defects fixed” claim replaces them.
+
+## Load diagnostics only for a matching symptom
+
+Optional immutable history is evidence, **not a current procedure or required context load**.
+
+| Symptom | Existing owner / bounded historical lead |
+|---|---|
+| Stale definitions, save conflict, empty cold reopen | Refresh owner's sections above; [#641](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/641) distinguishes observation from durability. [Pinned R §7](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/blob/d3ecae21d659af883da6be02ec2a9a1dfe1f3cc5/.github/skills/powerbi-report-gotchas/SKILL.md#L611-L676) and [S §7.2](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/blob/d3ecae21d659af883da6be02ec2a9a1dfe1f3cc5/.github/skills/powerbi-semantic-model-gotchas/SKILL.md#L1057-L1087): explicit stale UI Save measured 2026-08-21; Desktop version unrecorded, idle autosave not reproduced. Bridge 0.1.2 observations are not bridge 1.0.0 results; only measured #730 evidence can retire safeguards. |
+| Wrong-model query / concurrent MCP target changes | [Pinned S lines 934–975](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/blob/d3ecae21d659af883da6be02ec2a9a1dfe1f3cc5/.github/skills/powerbi-semantic-model-gotchas/SKILL.md#L934-L975), measured 2026-08-08 / 2026-08-18, MCP version unrecorded. Returned connection plus independent contents/current-definition identity remains the rule, not a universal MCP prohibition. |
+| Legacy `.xls`, locale/navigation, partial render | Load only matching original [S §§6–7](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/blob/d3ecae21d659af883da6be02ec2a9a1dfe1f3cc5/.github/skills/powerbi-semantic-model-gotchas/SKILL.md#L850-L1139) or pinned R §7 and the relevant existing repro/test. The subsection's dated environment is its ceiling; unrecorded versions stay unknown. Reproduce currently before attributing a present defect. |
+| Automatic-mark or translated-calculation disagreement | Existing `tests\test_issue_424_chart_type_pin.py`, `fixtures\upstream-repros\README.md`, upstream #184 and local #425 are symptom leads, not current-emitter/runtime promises. Source shelves/images and authorized numeric results govern. |
+
+## Release and acceptance record
+
+✅ Public playbook metadata checked 2026-10-18: **0.3.0**. Stage **0.3.2** locally; the frozen,
+unpublished 0.3.1 build remains evidence, not a prerequisite to publish/install. `SHIPPED_SKILLS`
+is unchanged: AI readiness and the two compact migration cores. Refresh/live-source machinery,
+translation/declaration/gate owners and this index require the host checkout, not just the plugin.
+
+Approved LF-normalized replacement accounting (Unicode characters including final LF; physical
+lines; conservative CRLF adds one character per LF):
+
+| Default skill load | Pinned before LF chars / lines | Compact LF chars / lines | Conservative CRLF before → after |
+|---|---:|---:|---:|
+| Report | 71,124 / 872 | 5,722 / 48 | 71,996 → 5,770 |
+| Semantic | 101,002 / 1,356 | 6,032 / 50 | 102,358 → 6,082 |
+| Pair | **172,126 / 2,228** | **11,754 / 98** | **174,354 → 11,852** |
+
+Source default-core reduction: **160,372 LF characters / 93.2%**, not tokens, cost, latency or
+fidelity improvement. Tests/pointers/generated indexes have their own before/after accounting in
+the implementation PR; do not credit deletions without their growth. Whole-role net context and
+actual runtime savings remain unestablished: count mandatory upstream modes/topics/local owners
+once per role from post-publication transcripts, not optional history as compulsory corpus.
+
+❌ Publication/install/profile-sync consent is absent. Build/check/copy only into ignored output;
+never update installed plugins or profiles while sessions are open. A later separately authorized
+0.3.2 publication and closed-session sync must verify exact bytes and genuinely fresh-role owner
+resolution before dependent #733 deletions. Static tests/builds do not prove content was consumed.
+Live Desktop/data/cache durability, fresh-role resolution, #730 retirement and two-lane blind
+acceptance remain unverified. Next: exact-head independent issue+diff-only review and CI; no
+ready/merge/publication verdict is implied.
