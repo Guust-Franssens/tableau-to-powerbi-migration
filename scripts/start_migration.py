@@ -384,7 +384,8 @@ def _observed_bundle_entry() -> int:
     if os.name == "nt":
         import msvcrt  # pylint: disable=import-outside-toplevel,import-error
 
-        descriptor = msvcrt.open_osfhandle(int(handle), os.O_WRONLY | os.O_BINARY)
+        binary_flag: int = getattr(os, "O_BINARY", 0)
+        descriptor = msvcrt.open_osfhandle(int(handle), os.O_WRONLY | binary_flag)
     else:
         descriptor = int(handle)
     os.set_inheritable(descriptor, False)
