@@ -124,6 +124,37 @@ def test_forced_canonical_scope_never_becomes_permission_or_proof(unit, monkeypa
     assert set(_marker(root)) == set(keys) and gate.status(root) != 0
 
 
+def test_historical_forced_decision_vetoes_preexisting_permission(unit, monkeypatch: pytest.MonkeyPatch) -> None:
+    root, keys = unit
+    monkeypatch.setattr(gate, "_ancestry", lambda: [])
+    assert gate.apply_block(root, keys) == 0
+    assert gate.authorize(root, "Fixture Human") == 0
+    with gate.gate_transaction(root):
+        gate._append_audit(root, "block-forced-scope", "historical interrupted forced target decision")
+    assert not gate._override_is_authentic(root), "forced history must not preserve a permissive root projection"
+    assert gate.status(root) != 0
+    assert gate.apply_block(root, keys) == 0
+    assert set(_marker(root)) == set(keys)
+
+
+def test_backdated_historical_authorize_does_not_revoke_an_existing_exact_permission(
+    unit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, keys = unit
+    monkeypatch.setattr(gate, "_ancestry", lambda: [])
+    assert gate.apply_block(root, keys) == 0
+    assert gate.authorize(root, "Fixture Human") == 0
+    # A historical row cannot be emitted with this timestamp by the supported current writer.
+    with gate.gate_transaction(root):
+        row = dict(gate._audit_entries(root)[-1])
+        row["ts"] = "2000-01-01T00:00:00+00:00"
+        with (root / gate.AUDIT).open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row) + "\n")
+    assert gate._override_is_authentic(root), "only a new arm may reset an established keyed permission"
+    gate.record_probe_attempt(root, "ERROR", "fixture authorized observation", keys[:1])
+    assert gate.status(root) == 0 and not (root / gate.MARKER).exists()
+
+
 @pytest.mark.parametrize("covered", [False, True])
 def test_exact_skip_requires_omitted_pending_root_coverage(unit, covered: bool) -> None:
     root, keys = unit
@@ -1142,6 +1173,7 @@ def _omitted_mutex_schedule(unit: tuple[Path, list[str]], monkeypatch: pytest.Mo
         "omitted-root-veto",
         "global-future-authorization",
         "authorized-attempt-rearm",
+        "forced-permission",
     ],
 )
 def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=too-many-branches,too-many-statements
@@ -1211,6 +1243,12 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
             test_authorized_observation_preserves_exact_permission_until_new_arm, unit, monkeypatch, "ERROR"
         )
         message = "authorized measurement must not synthesize"
+    elif mutation == "forced-permission":
+        _mutant(
+            gate, "_data_access_ledger", 'if state["permission"] and not forced', 'if state["permission"]', monkeypatch
+        )
+        check = partial(test_historical_forced_decision_vetoes_preexisting_permission, unit, monkeypatch)
+        message = "forced history must not preserve"
     elif mutation == "caller-only-clear":
         _mutant(
             gate,

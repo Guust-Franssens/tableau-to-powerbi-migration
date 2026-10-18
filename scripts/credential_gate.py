@@ -2535,7 +2535,8 @@ def _data_access_ledger(
             forced = True
         elif action == "authorize":
             for state in tracked.values():
-                state["permission"] = not forced and state["armed"] is not None and timestamp >= state["armed"]
+                if not forced and state["armed"] is not None and timestamp >= state["armed"]:
+                    state["permission"] = True
         elif action == "manual-clear":
             for state in tracked.values():
                 state["manual"] = True
@@ -2545,7 +2546,7 @@ def _data_access_ledger(
             _apply_probe_attempt(tracked, action, sources, timestamp)
     return (
         {key: "forced-scope" if forced else _key_block_code(state) for key, state in tracked.items()},
-        frozenset(key for key, state in tracked.items() if state["permission"]),
+        frozenset(key for key, state in tracked.items() if state["permission"] and not forced),
     )
 
 
