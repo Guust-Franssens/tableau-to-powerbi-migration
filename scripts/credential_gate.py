@@ -499,15 +499,39 @@ def _sources_detail(sources: list[str]) -> str:
     return f"sources_json={json.dumps(sources, ensure_ascii=False)}"
 
 
-def _block_refusal(migration: Path, sources: list[str], force_scope: bool) -> int | None:
+def _canonical_source_refusal(sources: object, current: frozenset[str], source_refusal: str | None) -> str | None:
+    """Why a current writer's explicit source scope cannot bind to this root."""
+    if source_refusal:
+        refusal = "the current root source domain is unreadable"
+    elif not current:
+        refusal = "the current root declares no canonical live source keys"
+    elif not isinstance(sources, list) or not sources:
+        refusal = "the supplied source scope must be a nonempty list"
+    elif not all(isinstance(source, str) and SOURCE_KEY_RE.fullmatch(source) for source in sources):
+        refusal = "every supplied source must be a canonical source-key identity"
+    elif len(set(sources)) != len(sources):
+        refusal = "the supplied source scope contains duplicate identities"
+    elif not set(sources) <= current:
+        refusal = "the supplied source scope is not contained in the current root"
+    else:
+        refusal = None
+    return refusal
+
+
+def _block_refusal(
+    migration: Path,
+    sources: list[str],
+    force_scope: bool,
+    current: frozenset[str],
+    source_refusal: str | None,
+) -> int | None:
     """Return a refusal code for invalid block inputs, or None when arming may proceed."""
-    duplicates = _duplicate_sources(sources)
-    if duplicates:
-        log.error("REFUSING to arm the gate: duplicate source key(s) are not unique identities: %s", duplicates)
-        _append_audit(migration, "violation", f"duplicate source keys at block: {duplicates}", sources=sources)
+    refusal = _canonical_source_refusal(sources, current, source_refusal)
+    if refusal:
+        log.error("REFUSING to arm the gate: %s.", refusal)
         return 2
-    refusal = _scope_refusal(migration)
-    if not refusal:
+    scope_refusal = _scope_refusal(migration)
+    if not scope_refusal:
         return None
     if not force_scope:
         log.error(
@@ -517,11 +541,11 @@ def _block_refusal(migration: Path, sources: list[str], force_scope: bool) -> in
             "already earned a clearance. This is usually a wrong working directory: pass the "
             "migration or bundle directory explicitly. Use --force-scope only if you really do "
             "mean to gate everything below this path.",
-            refusal,
+            scope_refusal,
         )
         return 2
-    log.warning("--force-scope: arming the gate on a target that failed the scope check (%s).", refusal)
-    _append_audit(migration, "block-forced-scope", refusal)
+    log.warning("--force-scope: arming the gate on a target that failed the scope check (%s).", scope_refusal)
+    _append_audit(migration, "block-forced-scope", scope_refusal)
     return None
 
 
@@ -733,49 +757,43 @@ def _parse_legacy_probe_source(detail: str) -> list[str] | None:
     return [detail[len(marker) :]] if detail.startswith(marker) and detail[len(marker) :] else None
 
 
-def _earned_sources(migration: Path) -> tuple[dict[str, str | None], bool]:
-    """Source-level gate evidence from the append-only audit log.
-
-    A later block invalidates only the sources it names. This is the concurrency fix for sibling
-    agents sharing one bundle: source Y being re-armed must not erase source X's previously earned
-    proof, because those are independent reachability facts.
-    """
-    entries = _audit_entries(migration)
+def _earned_sources(
+    migration: Path,
+    *,
+    current: frozenset[str] | None = None,
+    entries: list[dict] | None = None,
+) -> tuple[dict[str, str | None], bool]:
+    """Current canonical proof and permission; historical labels remain diagnostic only."""
+    if entries is None:
+        entries = _audit_entries(migration)
     if entries is None:
         return {}, False
-    states: dict[str, tuple[str | None, str]] = {}
-    authorized = False
-    last_block_sources: list[str] = []
-    for entry in entries:
-        action = entry.get("action")
-        ts = str(entry.get("ts") or "")
-        detail = str(entry.get("detail") or "")
-        if action in BLOCK_ACTIONS:
-            sources = _entry_sources(entry)
-            last_block_sources = sources or []
-            for source in last_block_sources:
-                states[source] = (None, ts)
-        elif action == "authorize":
-            authorized = True
-        elif action == "probe-cleared":
-            sources = _entry_sources(entry) or _parse_legacy_probe_source(detail) or last_block_sources
-            for source in sources:
-                _earned, blocked_at = states.get(source, (None, ""))
-                if ts >= blocked_at:
-                    states[source] = ("probe-cleared", blocked_at)
-    return {source: earned for source, (earned, _blocked_at) in states.items()}, authorized
+    refusal = None
+    if current is None:
+        current, refusal = _gate_root_live_keys(migration)
+    if refusal or not current:
+        return {}, False
+    codes, authorized = _data_access_ledger(entries, tuple(sorted(current)))
+    forced = any(entry.get("action") == "block-forced-scope" for entry in entries)
+    permission = authorized and not forced and (migration / OVERRIDE).is_file()
+    states = {key: "probe-cleared" if not forced and code is None else None for key, code in codes.items()}
+    return states, permission
 
 
-def _clear_was_earned(migration: Path, sources: list[str] | None = None) -> str | None:
-    """Return probe-cleared/authorize only for an audit-backed lift; a bare clear earns nothing.
+def _clear_was_earned(
+    migration: Path,
+    sources: list[str] | None = None,
+    *,
+    current: frozenset[str] | None = None,
+    entries: list[dict] | None = None,
+) -> str | None:
+    """Return probe-cleared only for a current keyed pair; permission is not measured proof.
 
     Source ordering preserves sibling clearances but invalidates each re-armed source's proof.
     Same-user forgery remains possible: this text audit is accountability, not non-repudiation.
     A genuine probe also leaves an independent one-row query in the source system's query history.
     """
-    states, authorized = _earned_sources(migration)
-    if authorized:
-        return "authorize"
+    states, _authorized = _earned_sources(migration, current=current, entries=entries)
     if sources is not None:
         return "probe-cleared" if sources and all(states.get(source) for source in sources) else None
     if not states:
@@ -1269,13 +1287,19 @@ def _last_block_sources(migration: Path) -> list[str] | None:
     return found
 
 
-def _redundant_rearm(migration: Path, sources: list[str]) -> str | None:
+def _redundant_rearm(
+    migration: Path,
+    sources: list[str],
+    *,
+    current: frozenset[str],
+    entries: list[dict] | None = None,
+) -> str | None:
     """Skip only an earned lift covering EVERY incoming source, never a bare manual clear.
 
     Unconditional re-arming invited a measured bypass on an already-proven source (2026-08-03).
     Conversely, a new/unproven source must re-arm; sibling proof cannot cover it.
     """
-    return _clear_was_earned(migration, sources)
+    return _clear_was_earned(migration, sources, current=current, entries=entries)
 
 
 @_coordinated()
@@ -1294,12 +1318,14 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
     so the two disagreed and the file won.
     """
     _trusted_transition(migration)
-    refusal_code = _block_refusal(migration, sources, force_scope)
+    current, source_refusal = _gate_root_live_keys(migration)
+    refusal_code = _block_refusal(migration, sources, force_scope, current, source_refusal)
     if refusal_code is not None:
         return refusal_code
 
+    entries = _audit_entries(migration) or []
     if (migration / OVERRIDE).exists():
-        if _override_is_authentic(migration):
+        if _override_is_authentic(migration, entries=entries, current=current):
             if (migration / MARKER).exists() or _has_deny_ace(migration):
                 return 3
             log.warning("Override present and audit-backed: gate NOT applied - human authorized a build-only run.")
@@ -1310,8 +1336,10 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
         )
         _append_audit(migration, "violation", "forged override ignored at block time")
 
-    already = _redundant_rearm(migration, sources)
-    if already and not _transaction_pending(migration, sources):
+    already = _redundant_rearm(migration, sources, current=current, entries=entries)
+    pending = _transaction_pending(migration, sources, current=current)
+    pending_sources = [source for source in sources if source in pending]
+    if already and not pending:
         log.warning(
             "Gate NOT re-applied: these sources were already proven by '%s'. Re-arming a gate "
             "that a probe has satisfied is what invited a real bypass (see _redundant_rearm). "
@@ -1321,10 +1349,7 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
         _append_audit(migration, "block-skipped", f"already earned by {already}; sources={sources}")
         return 0
 
-    pending_sources = [
-        source for source in sources if source in _transaction_pending(migration, sources, include_current=False)
-    ]
-    if sources and not pending_sources:
+    if not pending_sources:
         _append_audit(migration, "block-skipped", f"already earned by source state; sources={sources}")
         return 0
     return _apply_pending_block(migration, pending_sources)
@@ -1417,37 +1442,50 @@ def _established_sources(migration: Path) -> list[str]:
     return sources
 
 
-def _transaction_pending(migration: Path, extra: list[str] | None = None, *, include_current: bool = True) -> list[str]:
+def _transaction_pending(
+    migration: Path,
+    extra: list[str] | None = None,
+    *,
+    include_current: bool = True,
+    current: frozenset[str] | None = None,
+) -> list[str]:
     """Full-root keys veto release without widening an audit row's exact caller scope."""
     entries = _audit_entries(migration) or []
     established = _established_sources(migration)
     recorded = [key for entry in entries for key in (_entry_sources(entry) or []) if SOURCE_KEY_RE.fullmatch(key)]
     keys = list(dict.fromkeys([*established, *recorded, *(extra or [])]))
-    if include_current and ((migration / MIGRATION_SPEC).is_file() or (migration / "input_manifest.json").is_file()):
-        current, refusal = _gate_root_live_keys(migration)
+    if include_current and (
+        current is not None or (migration / MIGRATION_SPEC).is_file() or (migration / "input_manifest.json").is_file()
+    ):
+        refusal = None
+        if current is None:
+            current, refusal = _gate_root_live_keys(migration)
         if refusal:
             raise GateTransactionError("transaction-spec-untrusted")
         keys = list(dict.fromkeys([*keys, *sorted(current)]))
     canonical = tuple(key for key in keys if SOURCE_KEY_RE.fullmatch(key))
     codes, authorized = _data_access_ledger(entries, canonical)
-    if authorized and _override_is_authentic(migration, entries=entries):
+    if any(entry.get("action") == "block-forced-scope" for entry in entries):
+        return keys
+    if authorized and _override_is_authentic(migration, entries=entries, current=current):
         return []
-    legacy, legacy_authorized = _earned_sources(migration)
-    legacy_authorized = legacy_authorized and _override_is_authentic(migration, entries=entries)
-    failures = set(PROBE_ATTEMPT_CODES.values())
-    return [key for key in keys if not (legacy_authorized or legacy.get(key)) or codes.get(key) in failures]
+    return [key for key in keys if key not in codes or codes[key] is not None]
 
 
 @_coordinated(refusal=None)
 def record_probe_attempt(migration: Path, verdict: str, detail: str, sources: list[str]) -> None:
     """A measurement becomes committed only after its pending physical stop is established."""
     action = f"probe-{verdict.lower()}"
-    if action not in (*PROBE_ATTEMPT_CODES, PROBE_DATA_OK) or not sources or not _valid_audit_sources(sources):
+    if action not in (*PROBE_ATTEMPT_CODES, PROBE_DATA_OK):
         raise ValueError("invalid probe transition")
     with gate_transaction(migration):
         _trusted_transition(migration)
+        current, source_refusal = _gate_root_live_keys(migration)
+        refusal = _canonical_source_refusal(sources, current, source_refusal)
+        if refusal:
+            raise GateTransactionError("transaction-source-refused")
         forced = any(entry["action"] == "block-forced-scope" for entry in (_audit_entries(migration) or []))
-        if not forced and _block_refusal(migration, sources, False) is not None:
+        if not forced and _scope_refusal(migration) is not None:
             raise GateTransactionError("transaction-scope-refused")
         # DATA_OK also remains blocked until its paired clear. Do not invalidate siblings' epochs.
         if _apply_pending_block(migration, sources):
@@ -1465,11 +1503,74 @@ def _marker_sources(migration: Path) -> list[str]:
     return [str(source) for source in marker_sources] if isinstance(marker_sources, list) else []
 
 
-def _unmatched_earned_sources(migration: Path, marker_sources: list[str], earned_sources: list[str]) -> list[str]:
+def _unmatched_earned_sources(
+    migration: Path,
+    marker_sources: list[str],
+    earned_sources: list[str],
+    *,
+    current: frozenset[str],
+    entries: list[dict],
+) -> list[str]:
     """Earned sources that neither remain in the marker nor have prior source-level evidence."""
-    states, _authorized = _earned_sources(migration)
+    states, _authorized = _earned_sources(migration, current=current, entries=entries)
     marker_set = set(marker_sources)
     return [source for source in earned_sources if source not in marker_set and not states.get(source)]
+
+
+def _earned_clear_ready(entries: list[dict], current: frozenset[str], sources: list[str]) -> bool:
+    """Ask the existing ordered reducer whether a hypothetical keyed clear would earn every source."""
+    if any(entry.get("action") == "block-forced-scope" for entry in entries):
+        return False
+    hypothetical = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "action": PROBE_CLEARED,
+        "sources": sources,
+    }
+    codes, _authorized = _data_access_ledger([*entries, hypothetical], tuple(sorted(current)))
+    return all(codes.get(source) is None for source in sources)
+
+
+def _earned_clear_inputs(
+    migration: Path, reason: str, sources: object
+) -> tuple[list[str] | None, frozenset[str] | None, int | None]:
+    """Validate one explicit earned-clear scope before any success or physical effect."""
+    current, source_refusal = _gate_root_live_keys(migration)
+    earned_sources = None
+    result = None
+    if source_refusal:
+        log.error("credential gate CANNOT_ESTABLISH (%s): current root source domain is unreadable.", reason)
+        result = 3
+    else:
+        refusal = _canonical_source_refusal(sources, current, None)
+        if refusal:
+            log.error("credential gate NOT cleared (%s): %s.", reason, refusal)
+            result = 1
+        else:
+            earned_sources = sources
+            entries = _audit_entries(migration) or []
+            marker = migration / MARKER
+            marker_sources = _established_sources(migration) if marker.exists() else []
+            unknown_sources = _unmatched_earned_sources(
+                migration,
+                marker_sources,
+                earned_sources,
+                current=current,
+                entries=entries,
+            )
+            if unknown_sources:
+                log.error(
+                    "credential gate NOT cleared (%s): source(s) have no current marker or prior proof: %s",
+                    reason,
+                    unknown_sources,
+                )
+                result = 1
+            elif not _earned_clear_ready(entries, current, earned_sources):
+                log.error(
+                    "credential gate NOT cleared (%s): no current keyed DATA_OK evidence for every source.",
+                    reason,
+                )
+                result = 1
+    return earned_sources, current, result
 
 
 @_coordinated()
@@ -1484,24 +1585,12 @@ def clear_block(migration: Path, reason: str, earned: bool = False, sources: lis
     _trusted_transition(migration)
     marker = migration / MARKER
     detail = reason
-    earned_sources = sources if sources is not None else _last_block_sources(migration)
-    if earned and earned_sources:
-        duplicates = _duplicate_sources(earned_sources)
-        if duplicates:
-            log.error("credential gate NOT cleared (%s): duplicate earned source key(s): %s", reason, duplicates)
-            _append_audit(
-                migration, "violation", f"duplicate source keys at clear: {duplicates}", sources=earned_sources
-            )
-            return 1
-        marker_sources = _marker_sources(migration)
-        unknown_sources = _unmatched_earned_sources(migration, marker_sources, earned_sources)
-        if marker.exists() and unknown_sources:
-            log.error(
-                "credential gate NOT cleared (%s): earned source(s) not named by the marker: %s",
-                reason,
-                unknown_sources,
-            )
-            return 1
+    earned_sources = None
+    current = None
+    if earned:
+        earned_sources, current, refusal_code = _earned_clear_inputs(migration, reason, sources)
+        if refusal_code is not None:
+            return refusal_code
         detail = f"{_sources_detail(earned_sources)}; reason={reason}"
     _append_audit(
         migration,
@@ -1509,7 +1598,7 @@ def clear_block(migration: Path, reason: str, earned: bool = False, sources: lis
         detail,
         sources=earned_sources if earned else None,
     )
-    remaining_sources = _transaction_pending(migration)
+    remaining_sources = _transaction_pending(migration, current=current)
     if not earned:
         # The teardown verb still earns nothing. It cannot release a current keyed live source.
         remaining_sources = [key for key in remaining_sources if SOURCE_KEY_RE.fullmatch(key)]
@@ -1552,7 +1641,12 @@ def _release_physical(migration: Path) -> None:
         raise
 
 
-def _override_is_authentic(migration: Path, *, entries: list[dict] | None = None) -> bool:
+def _override_is_authentic(
+    migration: Path,
+    *,
+    entries: list[dict] | None = None,
+    current: frozenset[str] | None = None,
+) -> bool:
     """Require the override FILE and a canonical authorization; either alone earns nothing.
 
     The assessor supplies its already-validated same-root snapshot, avoiding a second mutable read
@@ -1564,12 +1658,12 @@ def _override_is_authentic(migration: Path, *, entries: list[dict] | None = None
         entries = _audit_entries(migration)
     if entries is None:
         return False
-    keys = {key for entry in entries for key in (_entry_sources(entry) or []) if SOURCE_KEY_RE.fullmatch(key)}
-    if keys:
-        current = _current_live_source_keys(migration)
-        keys.update(current or ())
-        return _data_access_ledger(entries, tuple(sorted(keys)))[1]
-    return any(entry.get("action") == "authorize" for entry in entries)
+    refusal = None
+    if current is None:
+        current, refusal = _gate_root_live_keys(migration)
+    if refusal or not current or any(entry.get("action") == "block-forced-scope" for entry in entries):
+        return False
+    return _data_access_ledger(entries, tuple(sorted(current)))[1]
 
 
 def _ancestry() -> list[str]:
@@ -1858,22 +1952,26 @@ def _source_set_mismatch_reason(migration: Path) -> str | None:
     mismatches; dropping keys does not. Global human authorization bypasses this comparison.
     No earned sources, or unreadable/empty current keys, cannot establish a positive mismatch.
     """
-    states, authorized = _earned_sources(migration)
-    if authorized:
-        return None
-    recorded = {source for source, earned in states.items() if earned}
-    if not recorded:
-        return None
-    current = _current_live_source_keys(migration)
-    if not current:
-        return None
-    uncovered = current - recorded
-    if not uncovered:
-        return None
-    return (
-        f"{migration}'s {MIGRATION_SPEC} now names live source key(s) {sorted(uncovered)} not "
-        f"covered by the recorded clearance for {sorted(recorded)}"
-    )
+    entries = _audit_entries(migration)
+    reason = None
+    if entries is not None:
+        current, refusal = _gate_root_live_keys(migration)
+        if not refusal and current and not _override_is_authentic(migration, entries=entries, current=current):
+            historical = {
+                source
+                for entry in entries
+                for source in (_entry_sources(entry) or [])
+                if SOURCE_KEY_RE.fullmatch(source)
+            }
+            codes, _authorized = _data_access_ledger(entries, tuple(sorted(historical)))
+            recorded = {source for source, code in codes.items() if code is None}
+            uncovered = current - recorded if recorded else set()
+            if uncovered:
+                reason = (
+                    f"{migration}'s {MIGRATION_SPEC} now names live source key(s) {sorted(uncovered)} not "
+                    f"covered by the recorded clearance for {sorted(recorded)}"
+                )
+    return reason
 
 
 def _no_audit_trail_reason(migration: Path, artifacts: list[Path]) -> str | None:
@@ -2008,7 +2106,13 @@ def _verify_one(migration: Path) -> int:
     # no probe ever run. Enforcement cannot prevent that (clear has to exist for teardown), but it
     # must never pass silently, or the guarantee is gone via the front door.
     pre_gate_engine_artifacts, gate_artifacts = _split_pre_gate_engine_artifacts(migration, artifacts)
-    if artifacts and not deny and not _clear_was_earned(migration) and _gate_was_ever_applied(migration):
+    if (
+        artifacts
+        and not deny
+        and not authentic
+        and not _clear_was_earned(migration)
+        and _gate_was_ever_applied(migration)
+    ):
         log.error("GATE VERIFY: UNEARNED CLEAR - artifacts exist, but no successful probe and no")
         log.error("  human authorization is recorded in the audit log. The gate was lifted without")
         log.error("  proving the source is reachable, so this model is UNVALIDATED. Do not ship it.")
