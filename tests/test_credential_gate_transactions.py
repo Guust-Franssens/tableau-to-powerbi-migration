@@ -295,6 +295,12 @@ def test_scoped_human_permission_preserves_new_siblings_without_authorizing_them
     assert assessment.state == "authorized_model_only", "exact historical permission survives without a global grant"
     assert not gate._override_is_authentic(root), "the root hook must not authorize new sibling epochs"
     assert _marker(root) == keys[1:] and gate.status(root) != 0
+    gate.record_probe_attempt(root, "DATA_OK", "fixture authorized source returned a row", keys[:1])
+    assert gate.clear_block(root, "fixture source proof", earned=True, sources=keys[:1]) == 0, (
+        "exact permission must allow its keyed DATA_OK to upgrade without releasing siblings"
+    )
+    assert gate._clear_was_earned(root, keys[:1]) == "probe-cleared"
+    assert _marker(root) == keys[1:] and gate.status(root) != 0
 
 
 def _child(root: Path, code: str) -> subprocess.Popen:
@@ -1174,6 +1180,8 @@ def _omitted_mutex_schedule(unit: tuple[Path, list[str]], monkeypatch: pytest.Mo
         "global-future-authorization",
         "authorized-attempt-rearm",
         "forced-permission",
+        "permission-upgrade",
+        "authorization-as-proof",
     ],
 )
 def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=too-many-branches,too-many-statements
@@ -1249,6 +1257,31 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
         )
         check = partial(test_historical_forced_decision_vetoes_preexisting_permission, unit, monkeypatch)
         message = "forced history must not preserve"
+    elif mutation == "permission-upgrade":
+        _mutant(
+            gate,
+            "_unmatched_earned_sources",
+            "permission if (migration / OVERRIDE).is_file() else frozenset()",
+            "frozenset()",
+            monkeypatch,
+        )
+        check = partial(test_scoped_human_permission_preserves_new_siblings_without_authorizing_them, unit, monkeypatch)
+        message = "exact permission must allow"
+    elif mutation == "authorization-as-proof":
+        _mutant(
+            gate,
+            "_clear_was_earned",
+            "    states, _authorized = _earned_sources(migration)\n",
+            (
+                "    states, _authorized = _earned_sources(migration)\n"
+                '    if _authorized:\n        return "probe-cleared"\n'
+            ),
+            monkeypatch,
+        )
+        check = partial(
+            test_authorized_observation_preserves_exact_permission_until_new_arm, unit, monkeypatch, "ERROR"
+        )
+        message = "human permission must never become measured proof"
     elif mutation == "caller-only-clear":
         _mutant(
             gate,

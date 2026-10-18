@@ -3,8 +3,8 @@ purpose: enforce the live-source credential gate at the FILESYSTEM level, so an 
          model physically cannot be written, and record every gate decision for audit.
 usage:   python scripts/credential_gate.py status  <migration-dir>
          python scripts/credential_gate.py list    <estate-root> [--json]
-         python scripts/credential_gate.py block   <migration-dir> --sources "a" "b"
-         python scripts/credential_gate.py clear    <migration-dir> --reason probe-data-ok
+         python scripts/credential_gate.py block   <migration-dir> --sources <canonical-source-key> [...]
+         python scripts/credential_gate.py clear   <migration-dir> --reason legacy-teardown
          python scripts/credential_gate.py verify   <migration-dir>
 
 The kernel ACL stops ordinary writes regardless of tool or command spelling; prose and hooks alone
@@ -1445,10 +1445,17 @@ def _marker_sources(migration: Path) -> list[str]:
 
 
 def _unmatched_earned_sources(migration: Path, marker_sources: list[str], earned_sources: list[str]) -> list[str]:
-    """Earned sources that neither remain in the marker nor have prior source-level evidence."""
-    states, _authorized = _earned_sources(migration)
+    """Match identities to the marker or exact epoch evidence, not permission to measured proof.
+
+    A permitted key can upgrade outside a sibling marker; the ledger still requires its DATA_OK pair.
+    """
+    entries = _audit_entries(migration) or []
+    current, refusal = _gate_root_live_keys(migration)
+    codes, permission = _data_access_ledger(entries, tuple(sorted(current))) if not refusal else ({}, frozenset())
+    permitted = permission if (migration / OVERRIDE).is_file() else frozenset()
+    known = {key for key, code in codes.items() if code is None} | permitted
     marker_set = set(marker_sources)
-    return [source for source in earned_sources if source not in marker_set and not states.get(source)]
+    return [source for source in earned_sources if source not in marker_set and source not in known]
 
 
 @_coordinated()
@@ -3066,7 +3073,9 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name)
         p.add_argument("migration", type=Path)
         if name == "block":
-            p.add_argument("--sources", nargs="*", default=[])
+            p.add_argument(
+                "--sources", nargs="*", default=[], help="nonempty canonical source-key scope from this root"
+            )
             p.add_argument(
                 "--force-scope",
                 action="store_true",
@@ -3078,7 +3087,7 @@ def main(argv: list[str] | None = None) -> int:
         if name == "clear":
             p.add_argument("--reason", default="manual")
             p.add_argument("--earned", action="store_true", help=argparse.SUPPRESS)
-            p.add_argument("--sources", nargs="*", help="source(s) proven by this earned clear")
+            p.add_argument("--sources", nargs="*", help="canonical source-key(s) proven by this earned clear")
         if name == "authorize":
             p.add_argument("--who", required=True, help="who is authorizing this unvalidated build")
     args = parser.parse_args(argv)

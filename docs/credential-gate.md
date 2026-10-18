@@ -316,7 +316,7 @@ python scripts/probe_live_source.py --spec <migration-dir>/migration-spec.json
 # the gate itself
 python scripts/credential_gate.py status    <migration-dir>   # is it gated?
 python scripts/credential_gate.py list      <estate-root>     # which units are gated? (--json)
-python scripts/credential_gate.py block     <migration-dir> --sources "a" "b"
+python scripts/credential_gate.py block     <migration-dir> --sources <canonical-source-key> [...]
 python scripts/credential_gate.py clear     <migration-dir> --reason probe-data-ok
 python scripts/credential_gate.py authorize <migration-dir> --who "<name>"   # humans only
 python scripts/credential_gate.py verify    <migration-dir>   # exit 1 = violation
@@ -506,7 +506,8 @@ authority. Readers, verification, hook shielding and transitions project that sa
 folds an independent legacy-success history. A canonical key earns proof only from keyed DATA_OK
 followed by keyed `probe-cleared` in its current arm epoch, respecting timestamps as well as file
 order. Every later recognized non-success **or unmatched DATA_OK** invalidates that proof.
-Every non-`None` canonical ledger code remains pending, not only explicit probe-failure codes.
+Without applicable per-key human permission, every non-`None` canonical ledger code remains pending,
+not only explicit probe-failure codes.
 
 Supported arm input `S` must be nonempty, duplicate-free canonical keys contained in the readable
 current root `R`. Display names, counts, malformed keys, foreign keys and equal-count substitutions
