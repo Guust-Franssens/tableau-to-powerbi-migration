@@ -762,21 +762,21 @@ def _earned_sources(
     *,
     current: frozenset[str] | None = None,
     entries: list[dict] | None = None,
-) -> tuple[dict[str, str | None], bool]:
+) -> tuple[dict[str, str | None], frozenset[str]]:
     """Current canonical proof and permission; historical labels remain diagnostic only."""
     if entries is None:
         entries = _audit_entries(migration)
     if entries is None:
-        return {}, False
+        return {}, frozenset()
     refusal = None
     if current is None:
         current, refusal = _gate_root_live_keys(migration)
     if refusal or not current:
-        return {}, False
-    codes, authorized = _data_access_ledger(entries, tuple(sorted(current)))
-    forced = any(entry.get("action") == "block-forced-scope" for entry in entries)
-    permission = authorized and not forced and (migration / OVERRIDE).is_file()
-    states = {key: "probe-cleared" if not forced and code is None else None for key, code in codes.items()}
+        return {}, frozenset()
+    codes, permission = _data_access_ledger(entries, tuple(sorted(current)))
+    if not (migration / OVERRIDE).is_file():
+        permission = frozenset()
+    states = {key: "probe-cleared" if code is None else None for key, code in codes.items()}
     return states, permission
 
 
@@ -793,7 +793,7 @@ def _clear_was_earned(
     Same-user forgery remains possible: this text audit is accountability, not non-repudiation.
     A genuine probe also leaves an independent one-row query in the source system's query history.
     """
-    states, _authorized = _earned_sources(migration, current=current, entries=entries)
+    states, _permission = _earned_sources(migration, current=current, entries=entries)
     if sources is not None:
         return "probe-cleared" if sources and all(states.get(source) for source in sources) else None
     if not states:
@@ -1291,15 +1291,29 @@ def _redundant_rearm(
     migration: Path,
     sources: list[str],
     *,
-    current: frozenset[str],
+    current: frozenset[str] | None = None,
     entries: list[dict] | None = None,
 ) -> str | None:
-    """Skip only an earned lift covering EVERY incoming source, never a bare manual clear.
+    """Skip only exact current proof or permission, never a bare manual clear.
 
     Unconditional re-arming invited a measured bypass on an already-proven source (2026-08-03).
     Conversely, a new/unproven source must re-arm; sibling proof cannot cover it.
     """
-    return _clear_was_earned(migration, sources, current=current, entries=entries)
+    states, permission = _earned_sources(migration, current=current, entries=entries)
+    if sources and all(states.get(source) for source in sources):
+        return "probe-cleared"
+    if sources and set(sources) <= permission:
+        return "authorize"
+    return None
+
+
+def _omitted_pending_covered(migration: Path, omitted: set[str]) -> bool:
+    """An exact-scope skip may rely only on an already complete root-wide stop."""
+    if not omitted <= set(_established_sources(migration)):
+        return False
+    if platform.system() == "Windows":
+        return _all_targets_denied(migration)
+    return (migration / MARKER).is_file()
 
 
 @_coordinated()
@@ -1324,33 +1338,42 @@ def apply_block(migration: Path, sources: list[str], force_scope: bool = False) 
         return refusal_code
 
     entries = _audit_entries(migration) or []
-    if (migration / OVERRIDE).exists():
-        if _override_is_authentic(migration, entries=entries, current=current):
-            if (migration / MARKER).exists() or _has_deny_ace(migration):
-                return 3
-            log.warning("Override present and audit-backed: gate NOT applied - human authorized a build-only run.")
-            _append_audit(migration, "block-skipped", "authentic override")
-            return 0
+    _states, permission = _earned_sources(migration, current=current, entries=entries)
+    if (migration / OVERRIDE).exists() and not permission:
         log.error(
-            "IGNORING FORGED OVERRIDE: %s exists with no 'authorize' audit entry - applying the gate anyway.", OVERRIDE
+            "IGNORING FORGED OR STALE OVERRIDE: %s has no current exact-key permission - applying the gate anyway.",
+            OVERRIDE,
         )
-        _append_audit(migration, "violation", "forged override ignored at block time")
+        _append_audit(migration, "violation", "forged or stale override ignored at block time")
 
-    already = _redundant_rearm(migration, sources, current=current, entries=entries)
-    pending = _transaction_pending(migration, sources, current=current)
+    pending = _transaction_pending(migration, sources, current=current, entries=entries)
     pending_sources = [source for source in sources if source in pending]
-    if already and not pending:
-        log.warning(
-            "Gate NOT re-applied: these sources were already proven by '%s'. Re-arming a gate "
-            "that a probe has satisfied is what invited a real bypass (see _redundant_rearm). "
-            "Re-probe explicitly if you need to re-verify reachability.",
-            already,
-        )
-        _append_audit(migration, "block-skipped", f"already earned by {already}; sources={sources}")
-        return 0
-
     if not pending_sources:
-        _append_audit(migration, "block-skipped", f"already earned by source state; sources={sources}")
+        omitted = set(pending) - set(sources)
+        if omitted:
+            try:
+                covered = _omitted_pending_covered(migration, omitted)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                _acl_refusal()
+                return 3
+            if not covered:
+                log.error(
+                    "REFUSING to skip: omitted pending root keys are uncovered; retry with complete source scope."
+                )
+                return 2
+        already = _redundant_rearm(migration, sources, current=current, entries=entries)
+        if already:
+            log.warning(
+                "Gate NOT re-applied: these sources already have current '%s' authority. "
+                "Re-arming a gate that a probe has satisfied is what invited a real bypass; "
+                "re-probe explicitly if you need to re-verify reachability.",
+                already,
+            )
+        _append_audit(
+            migration,
+            "block-skipped",
+            f"already satisfied by {already or 'exact source state'}; sources={sources}",
+        )
         return 0
     return _apply_pending_block(migration, pending_sources)
 
@@ -1448,9 +1471,11 @@ def _transaction_pending(
     *,
     include_current: bool = True,
     current: frozenset[str] | None = None,
+    entries: list[dict] | None = None,
 ) -> list[str]:
     """Full-root keys veto release without widening an audit row's exact caller scope."""
-    entries = _audit_entries(migration) or []
+    if entries is None:
+        entries = _audit_entries(migration) or []
     established = _established_sources(migration)
     recorded = [key for entry in entries for key in (_entry_sources(entry) or []) if SOURCE_KEY_RE.fullmatch(key)]
     keys = list(dict.fromkeys([*established, *recorded, *(extra or [])]))
@@ -1464,12 +1489,9 @@ def _transaction_pending(
             raise GateTransactionError("transaction-spec-untrusted")
         keys = list(dict.fromkeys([*keys, *sorted(current)]))
     canonical = tuple(key for key in keys if SOURCE_KEY_RE.fullmatch(key))
-    codes, authorized = _data_access_ledger(entries, canonical)
-    if any(entry.get("action") == "block-forced-scope" for entry in entries):
-        return keys
-    if authorized and _override_is_authentic(migration, entries=entries, current=current):
-        return []
-    return [key for key in keys if key not in codes or codes[key] is not None]
+    codes, permission = _data_access_ledger(entries, canonical)
+    permitted = permission if (migration / OVERRIDE).is_file() else frozenset()
+    return [key for key in keys if key not in codes or (codes[key] is not None and key not in permitted)]
 
 
 @_coordinated(refusal=None)
@@ -1484,11 +1506,14 @@ def record_probe_attempt(migration: Path, verdict: str, detail: str, sources: li
         refusal = _canonical_source_refusal(sources, current, source_refusal)
         if refusal:
             raise GateTransactionError("transaction-source-refused")
-        forced = any(entry["action"] == "block-forced-scope" for entry in (_audit_entries(migration) or []))
+        entries = _audit_entries(migration) or []
+        forced = any(entry["action"] == "block-forced-scope" for entry in entries)
         if not forced and _scope_refusal(migration) is not None:
             raise GateTransactionError("transaction-scope-refused")
         # DATA_OK also remains blocked until its paired clear. Do not invalidate siblings' epochs.
-        if _apply_pending_block(migration, sources):
+        _codes, permission = _data_access_ledger(entries, tuple(sorted(current)))
+        permitted = (migration / OVERRIDE).is_file() and set(sources) <= permission
+        if not permitted and _apply_pending_block(migration, sources):
             raise GateTransactionError("transaction-arm-failed")
         _append_audit(migration, action, detail, sources)
 
@@ -1512,21 +1537,20 @@ def _unmatched_earned_sources(
     entries: list[dict],
 ) -> list[str]:
     """Earned sources that neither remain in the marker nor have prior source-level evidence."""
-    states, _authorized = _earned_sources(migration, current=current, entries=entries)
+    states, permission = _earned_sources(migration, current=current, entries=entries)
     marker_set = set(marker_sources)
-    return [source for source in earned_sources if source not in marker_set and not states.get(source)]
+    known = {source for source, state in states.items() if state} | set(permission)
+    return [source for source in earned_sources if source not in marker_set and source not in known]
 
 
 def _earned_clear_ready(entries: list[dict], current: frozenset[str], sources: list[str]) -> bool:
     """Ask the existing ordered reducer whether a hypothetical keyed clear would earn every source."""
-    if any(entry.get("action") == "block-forced-scope" for entry in entries):
-        return False
     hypothetical = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "action": PROBE_CLEARED,
         "sources": sources,
     }
-    codes, _authorized = _data_access_ledger([*entries, hypothetical], tuple(sorted(current)))
+    codes, _permission = _data_access_ledger([*entries, hypothetical], tuple(sorted(current)))
     return all(codes.get(source) is None for source in sources)
 
 
@@ -1661,9 +1685,10 @@ def _override_is_authentic(
     refusal = None
     if current is None:
         current, refusal = _gate_root_live_keys(migration)
-    if refusal or not current or any(entry.get("action") == "block-forced-scope" for entry in entries):
+    if refusal or not current:
         return False
-    return _data_access_ledger(entries, tuple(sorted(current)))[1]
+    codes, permission = _data_access_ledger(entries, tuple(sorted(current)))
+    return bool(permission) and all(code is None or key in permission for key, code in codes.items())
 
 
 def _ancestry() -> list[str]:
@@ -1947,31 +1972,19 @@ def _current_live_source_keys(migration: Path) -> set[str] | None:
 def _source_set_mismatch_reason(migration: Path) -> str | None:
     """Why a trusted clearance no longer covers what the spec names TODAY, or None when it does.
 
-    Compare current `_leg_key` identities with the COMPLETE per-source earned ledger (#354).
-    The last block alone loses earlier, independently earned sources. Only a new uncovered key
-    mismatches; dropping keys does not. Global human authorization bypasses this comparison.
+    Compare current identities with the ordered ledger's proof and exact permission. The last arm
+    alone loses independently earned siblings; a human permission never covers a future key.
     No earned sources, or unreadable/empty current keys, cannot establish a positive mismatch.
     """
     entries = _audit_entries(migration)
-    reason = None
-    if entries is not None:
-        current, refusal = _gate_root_live_keys(migration)
-        if not refusal and current and not _override_is_authentic(migration, entries=entries, current=current):
-            historical = {
-                source
-                for entry in entries
-                for source in (_entry_sources(entry) or [])
-                if SOURCE_KEY_RE.fullmatch(source)
-            }
-            codes, _authorized = _data_access_ledger(entries, tuple(sorted(historical)))
-            recorded = {source for source, code in codes.items() if code is None}
-            uncovered = current - recorded if recorded else set()
-            if uncovered:
-                reason = (
-                    f"{migration}'s {MIGRATION_SPEC} now names live source key(s) {sorted(uncovered)} not "
-                    f"covered by the recorded clearance for {sorted(recorded)}"
-                )
-    return reason
+    current, refusal = _gate_root_live_keys(migration)
+    if entries is None or refusal or not current:
+        return None
+    codes, _permission = _data_access_ledger(entries, tuple(sorted(current)))
+    unarmed = {key for key, code in codes.items() if code == "source-key-set-changed"}
+    if unarmed:
+        return f"current source key(s) {sorted(unarmed)} lack a current keyed arm epoch"
+    return None
 
 
 def _no_audit_trail_reason(migration: Path, artifacts: list[Path]) -> str | None:
@@ -2575,7 +2588,15 @@ def _package_local_facts(package_data_sources: object) -> tuple[bool, str | None
 
 def _new_key_state() -> dict:
     """One live key's per-epoch ledger slot."""
-    return {"armed": None, "data_ok": None, "earned": False, "stale": False, "manual": False, "failure": None}
+    return {
+        "armed": None,
+        "data_ok": None,
+        "earned": False,
+        "stale": False,
+        "manual": False,
+        "failure": None,
+        "permission": False,
+    }
 
 
 def _apply_arm(tracked: dict[str, dict], sources: list[str] | None, timestamp: datetime) -> None:
@@ -2637,10 +2658,12 @@ def _key_block_code(state: dict) -> str | None:
     return "marker-only"
 
 
-def _data_access_ledger(entries: list[dict], live_keys: tuple[str, ...]) -> tuple[dict[str, str | None], bool]:
+def _data_access_ledger(
+    entries: list[dict], live_keys: tuple[str, ...]
+) -> tuple[dict[str, str | None], frozenset[str]]:
     """Fold one trusted snapshot by file order, retaining each key's arm/measurement timestamps."""
     tracked = {key: _new_key_state() for key in live_keys}
-    authorized = False
+    forced = False
     for entry in entries:
         action = entry["action"]
         timestamp = datetime.fromisoformat(entry["ts"])
@@ -2650,11 +2673,12 @@ def _data_access_ledger(entries: list[dict], live_keys: tuple[str, ...]) -> tupl
             sources = None
         if action in BLOCK_ACTIONS:
             _apply_arm(tracked, sources, timestamp)
-            authorized = False
+        elif action == "block-forced-scope":
+            forced = True
         elif action == "authorize":
-            authorized = bool(tracked) and all(
-                state["armed"] is not None and timestamp >= state["armed"] for state in tracked.values()
-            )
+            for state in tracked.values():
+                if not forced and state["armed"] is not None and timestamp >= state["armed"]:
+                    state["permission"] = True
         elif action == "manual-clear":
             for state in tracked.values():
                 state["manual"] = True
@@ -2662,14 +2686,25 @@ def _data_access_ledger(entries: list[dict], live_keys: tuple[str, ...]) -> tupl
             _apply_clear(tracked, sources, timestamp)
         elif action.startswith("probe-"):
             _apply_probe_attempt(tracked, action, sources, timestamp)
-    return {key: _key_block_code(state) for key, state in tracked.items()}, authorized
+    return (
+        {key: "forced-scope" if forced else _key_block_code(state) for key, state in tracked.items()},
+        frozenset(key for key, state in tracked.items() if state["permission"] and not forced),
+    )
 
 
 def _authorization_state(
-    gate_root: Path, ledger_authorized: bool, fallback_authorization: str, requested_scope: str, trail: list[dict]
+    gate_root: Path,
+    key_codes: dict[str, str | None],
+    permission: frozenset[str],
+    fallback_authorization: str,
+    requested_scope: str,
 ) -> tuple[bool, bool]:
     """(complete authorization, mismatched inputs), using the same already-read audit snapshot."""
-    authorized = ledger_authorized and _override_is_authentic(gate_root, entries=trail)
+    authorized = (
+        bool(permission)
+        and (gate_root / OVERRIDE).is_file()
+        and all(code is None or key in permission for key, code in key_codes.items())
+    )
     wants = fallback_authorization == "model_only_unvalidated"
     if authorized and wants and requested_scope == "model_only":
         return True, False
@@ -2772,11 +2807,9 @@ def _inherit_from_provider(provider: object, requested_scope: str) -> DataAccess
 
 
 def _live_evidence_refusal(gate_root: Path, live_keys: tuple[str, ...], trail: list[dict] | None) -> str | None:
-    """Reject forced scope and missing root-key coverage before interpreting per-key evidence."""
+    """Reject missing root-key coverage before interpreting the ordered ledger."""
     if trail is None:
         return None  # caller already turned this into an audit-* refusal
-    if any(entry.get("action") == "block-forced-scope" for entry in trail):
-        return "forced-scope"
     if not live_keys:
         return None
     root_keys, refusal = _gate_root_live_keys(gate_root)
@@ -2857,9 +2890,10 @@ def _completed_partial_clear(root: Path, selected: tuple[str, ...], entries: lis
     keys, refusal = _gate_root_live_keys(root)
     if refusal:
         return False
-    states, authorized = _data_access_ledger(entries, tuple(sorted(keys)))
-    pending = {key for key, code in states.items() if code is not None}
-    return not authorized and marked == pending
+    states, permission = _data_access_ledger(entries, tuple(sorted(keys)))
+    permitted = permission if (root / OVERRIDE).is_file() else frozenset()
+    pending = {key for key, code in states.items() if code is not None and key not in permitted}
+    return marked == pending
 
 
 def _assess_direct_locked(
@@ -2879,9 +2913,9 @@ def _assess_direct_locked(
     if evidence_refusal:
         return _cannot_establish(evidence_refusal), None
 
-    key_codes, ledger_authorized = _data_access_ledger(trail or [], live_keys)
+    key_codes, permission = _data_access_ledger(trail or [], live_keys)
     authorized, auth_mismatch = _authorization_state(
-        gate_root, ledger_authorized, fallback_authorization, requested_scope, trail or []
+        gate_root, key_codes, permission, fallback_authorization, requested_scope
     )
     if not has_review and local_complete and not any(key_codes.values()):
         return _accepted_direct(live_keys, requested_scope), trail

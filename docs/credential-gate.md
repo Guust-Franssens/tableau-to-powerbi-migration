@@ -99,6 +99,20 @@ skip, hook shielding or an earned clear. Current positive history is:
 its override file and a current keyed arm epoch, and remains **unvalidated permission**, not
 measured proof.
 
+One locked, file-ordered ledger fold owns those decisions. For each current canonical key, the
+latest relevant attempt controls measured eligibility: every later recognized non-success
+invalidates earlier probe proof, and a later keyed `probe-data_ok` also requires its own later keyed
+`probe-cleared`. The ledger does not group all successes separately from all failures, so an older
+green row can never outvote a newer blocker. Backdated success, forced-scope history, legacy labels,
+foreign/torn audit, file-only override and audit-only authorization remain non-authoritative.
+
+Human permission is exact-key and epoch-scoped. `authorize` grants permission only to keys that
+already have a current canonical arm when its row is appended. A later measurement is an
+observation: it can invalidate measured proof, but it does not silently revoke human permission or
+synthesize a new arm. Only an explicit later arm resets permission for the keys it names. Permission
+can let a selected key run the real probe and then upgrade through its own DATA_OK/clear pair, but
+permission itself never becomes DATA_OK proof.
+
 The public refusal mappings are intentionally different:
 
 | Boundary | Result | Effects |
@@ -185,18 +199,25 @@ Public wrappers join a held transaction instead of reacquiring its descriptor.
 
 The transaction orders are:
 
-1. **Arm or record an attempt:** read the locked snapshot; union established marker obligations
-   with the exact new keys; atomically persist the marker; deny/read back every Windows #724
-   anchor; append/fsync the exact arm and then attempt. The arm row never borrows sibling keys.
-   `probe-data_ok` remains physically blocked until its paired clear.
-2. **Clear or authorize:** append/fsync the evidence before release; recompute complete current
-   exact-key obligations; retain the stop while any key is pending. An authentic human
-   authorization must cover the current armed epoch. Windows removes the marker **before** ACL
-   removal/readback, so interruption retains the deny. Marker-only platforms remove the marker
-   last. A surviving marker or ACL is still BLOCKED/CANNOT_ESTABLISH even with a durable clear or
-   authorization row. Retrying may finish release, but evidence alone never establishes release.
-   A caught release failure restores the prior marker where possible, marking ACL coverage
-   uncertain; a hard crash may instead leave only the restrictive Windows ACL.
+1. **Arm or record an attempt:** read one locked audit/spec snapshot and fold the ordered ledger.
+   An ordinary pending observation unions established marker obligations with the exact selected
+   keys, atomically persists the marker, denies/read-backs every Windows #724 anchor, appends/fsyncs
+   the exact arm, then appends/fsyncs the attempt. The arm row never borrows sibling keys.
+   If every selected key instead has applicable exact human permission, the observation is appended
+   without manufacturing an arm or physical stop. `probe-data_ok` remains measured-but-unearned
+   until its paired clear.
+2. **Skip, clear or authorize:** a selected-scope skip is considered only after complete current-root
+   pending state is known. Any omitted pending key must already be named by the marker and, on
+   Windows, every resolved #724 anchor must be denied and readable; otherwise block returns `2` and
+   asks for a complete-scope retry without inventing omitted audit scope. Clear/authorize
+   append/fsync evidence before release, then recompute every current exact-key obligation. The
+   whole root releases only when every required key has current proof or applicable exact
+   permission. Windows removes the marker **before** ACL removal/readback, so interruption retains
+   the deny. Marker-only platforms remove the marker last. A surviving marker or ACL is still
+   BLOCKED/CANNOT_ESTABLISH even with durable evidence. Retrying may finish release, but evidence
+   alone never establishes release. A caught release failure restores the prior marker where
+   possible, marking ACL coverage uncertain; a hard crash may instead leave only the restrictive
+   Windows ACL.
 
 A completed **partial** clear can still project the selected keys' earned data proof while the
 root remains blocked for siblings. This does not permit root writes: the marker must exclude the
@@ -232,9 +253,9 @@ commit, rather than claiming that an unlinked inode serialized the replacement.
 
 Tests: `tests/test_credential_gate_transactions.py`, `tests/test_package_data_access_swap.py` and
 `tests/test_reprobe_blocked.py`; native ACL composition remains covered by the unchanged
-`test_credential_gate_acl_layouts.py`. Tests use disposable roots; none proves live credentials,
-source reachability or Desktop behavior. #698's ordered policy remains separate: PR #700 must
-rebuild its policy onto this API and #724, not replace them wholesale.
+`test_credential_gate_acl_layouts.py`. The ordered-policy controls also cover later-attempt
+invalidation, exact permission epochs, omitted-root skip coverage and permission-to-proof upgrade.
+Tests use disposable roots; none proves live credentials, source reachability or Desktop behavior.
 
 Arm and marker-present verification require **all** expected anchors to be denied, with supported
 inheritance. Markerless/post-clear inspection treats **any** residual expected/legacy deny as
@@ -558,11 +579,18 @@ look reasonable.**
 The skip is deliberately narrow, and fails closed on anything it cannot parse:
 
 - every supplied key must be an explicit canonical member of the once-resolved current root;
+- the latest relevant attempt for each selected key wins: a newer failure/refusal or unmatched
+  `probe-data_ok` invalidates an older earned clear until a new keyed clear follows;
 - probe proof and human permission remain separate: current keyed `probe-cleared` can skip the
   matching measured scope, while an authentic override can permit only its current keyed armed
-  epoch. Permission never becomes probe proof;
+  epoch. Authorized observations do not synthesize an arm, and permission never becomes probe proof;
+- if selected keys are already satisfied but another current-root key is pending, the skip is safe
+  only when that omitted key is already marker-named and every Windows anchor still has the gate
+  deny. An uncovered sibling requires a complete-scope retry;
+- root release is complete-root only: selected-key proof or permission never asserts that sibling
+  obligations, the marker or the ACL have been released;
 - a bare `manual-clear`, legacy/display label, unkeyed row, forced history, file-only override or
-  audit-only authorization never skips;
+  audit-only/backdated authorization never skips;
 - a newly added or replaced live source has no evidence for its new identity and still arms.
 
 ### Cleared migrations also shield themselves from unrelated ancestor markers
