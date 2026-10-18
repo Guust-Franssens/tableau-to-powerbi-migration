@@ -11,6 +11,7 @@ and Tableau references; it does not establish fidelity, START_READY, COMPLETE or
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import shlex
@@ -18,11 +19,12 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harvest_estate_assets as harvest  # noqa: E402  # pylint: disable=wrong-import-position
@@ -314,9 +316,153 @@ def _stop_process(process: subprocess.Popen) -> None:
             process.wait()
 
 
-def _run_child(name: str, index: int, command: list[str], env: dict[str, str], output: Path) -> StageResult:
+def _path_gate_record(projection: dict | None, allowed: bool | None) -> dict:
+    """Select numeric evidence from the owner's result, never source names or another bound."""
+    state = projection.get("status") if projection else None
+    verdict = (
+        "PASS"
+        if allowed is True and state == "ok"
+        else "OVER_CEILING"
+        if allowed is False and state == "over_ceiling"
+        else "CANNOT_ESTABLISH"
+    )
+    measurements = {}
+    for kind in ("file", "directory"):
+        rows = [row for row in (projection or {}).get("paths", []) if row["kind"] == kind]
+        if rows:
+            longest = max(rows, key=lambda row: row["length"])
+            measurements[kind] = {"length": longest["length"], "ceiling": longest["ceiling"]}
+    return {
+        "event": "path_gate",
+        "owner": "run_estate.py",
+        "verdict": verdict,
+        "reason": {
+            "PASS": "owner_projection_fits",
+            "OVER_CEILING": "owner_projection_over_ceiling",
+            "CANNOT_ESTABLISH": "owner_projection_unavailable",
+        }[verdict],
+        "evidence": "bundle#pre_conversion_path_projection",
+        "measurements": measurements,
+    }
+
+
+@contextmanager
+def _observe_path_gate(owner: Any, observer: Callable[[dict], None]) -> Iterator[None]:
+    """Observe the exact child gate and its own projection without changing either result."""
+    original_projection = owner.project_estate_path_ceiling
+    original_gate = owner.preflight_estate_path_ceiling
+    projection = None
+
+    def project(*args: Any, **kwargs: Any) -> dict:
+        nonlocal projection
+        projection = original_projection(*args, **kwargs)
+        return projection
+
+    def gate(*args: Any, **kwargs: Any) -> tuple[bool, str]:
+        allowed = None
+        try:
+            result = original_gate(*args, **kwargs)
+            allowed = result[0]
+            return result
+        finally:
+            observer(_path_gate_record(projection, allowed))
+
+    owner.project_estate_path_ceiling = project
+    owner.preflight_estate_path_ceiling = gate
+    try:
+        yield
+    finally:
+        owner.project_estate_path_ceiling = original_projection
+        owner.preflight_estate_path_ceiling = original_gate
+
+
+def _observed_bundle_entry() -> int:
+    """Internal child bootstrap: one inherited pipe, unchanged run_estate argv and gate."""
+    import run_estate  # pylint: disable=import-outside-toplevel
+
+    handle, script, *arguments = sys.argv[1:]
+    if os.name == "nt":
+        import msvcrt  # pylint: disable=import-outside-toplevel,import-error
+
+        descriptor = msvcrt.open_osfhandle(int(handle), os.O_WRONLY | os.O_BINARY)
+    else:
+        descriptor = int(handle)
+    os.set_inheritable(descriptor, False)
+    sys.argv = [script, *arguments]
+    with os.fdopen(descriptor, "w", encoding="utf-8") as channel:
+
+        def emit(record: dict) -> None:
+            channel.write(json.dumps(record, ensure_ascii=True) + "\n")
+            channel.flush()
+
+        with _observe_path_gate(run_estate, emit):
+            return run_estate.main(arguments)
+
+
+@contextmanager
+def _path_gate_channel(command: list[str], observer: Callable[[dict], None]) -> Iterator[tuple[list[str], dict]]:
+    """Keep structured observations separate from inherited live stdout/stderr; no state file."""
+    script_indexes = [index for index, token in enumerate(command) if token.endswith(".py")]
+    if not script_indexes:
+        raise ValueError("bundle script argument unavailable")
+    script_index = script_indexes[0]
+    read_descriptor, write_descriptor = os.pipe()
+    os.set_inheritable(write_descriptor, True)
+    options: dict[str, Any]
+    if os.name == "nt":
+        import msvcrt  # pylint: disable=import-outside-toplevel,import-error
+
+        handle = msvcrt.get_osfhandle(write_descriptor)
+        startup = subprocess.STARTUPINFO()
+        startup.lpAttributeList = {"handle_list": [handle]}
+        options = {"startupinfo": startup, "close_fds": True}
+    else:
+        handle = write_descriptor
+        options = {"pass_fds": (write_descriptor,)}
+    bootstrap = (
+        "import sys;sys.path.insert(0,sys.argv.pop(2));"
+        "import start_migration;raise SystemExit(start_migration._observed_bundle_entry())"
+    )
+    observed_command = [
+        *command[:script_index],
+        "-c",
+        bootstrap,
+        str(handle),
+        str(Path(command[script_index]).parent),
+        *command[script_index:],
+    ]
+
+    def receive() -> None:
+        with os.fdopen(read_descriptor, "r", encoding="utf-8") as channel:
+            line = channel.readline()
+            if line:
+                observer(json.loads(line))
+
+    reader = threading.Thread(target=receive, name="path-gate-observer")
+    reader.start()
+    try:
+        yield observed_command, options
+    finally:
+        os.close(write_descriptor)
+        reader.join()
+
+
+def _run_child(  # pylint: disable=too-many-arguments,too-many-locals
+    name: str,
+    index: int,
+    command: list[str],
+    env: dict[str, str],
+    output: Path,
+    *,
+    observer: Callable[[dict], None] | None = None,
+    channel_options: dict | None = None,
+) -> StageResult:
+    if name == "bundle" and observer is not None:
+        with _path_gate_channel(command, observer) as (observed_command, inherited_options):
+            return _run_child(name, index, observed_command, env, output, channel_options=inherited_options)
     print(f"[{index}/5] {name} - started {time.strftime('%H:%M:%S')}", flush=True)
     options: dict[str, Any] = {"cwd": str(REPO_ROOT), "env": env, "stdout": None, "stderr": None}
+    options.update(channel_options or {})
     if os.name == "nt":
         options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     else:
@@ -486,6 +632,8 @@ def main(
 
     def run_child(name: str, index: int, command: list[str], environment: dict[str, str], output: Path) -> StageResult:
         try:
+            if name == "bundle" and observer is not None:
+                return _run_child(name, index, command, environment, output, observer=observer)
             return _run_child(name, index, command, environment, output)
         except KeyboardInterrupt:
             emit({"event": "stage", "stage": name, "native_exit_code": None, "state": "interrupted", "artifact": None})

@@ -370,8 +370,9 @@ def test_explicit_branch_reaches_owner(monkeypatch, capsys, command):
 
 
 @pytest.mark.parametrize("root_kind", ["repo", "external"])
-@pytest.mark.parametrize("gate", ["over_ceiling", "cannot_establish"])
-def test_start_reaches_existing_postharvest_gate(monkeypatch, tmp_path, capsys, root_kind, gate):
+@pytest.mark.parametrize("gate", ["ok", "over_ceiling", "cannot_establish"])
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_start_reaches_existing_postharvest_gate(monkeypatch, tmp_path, capsys, root_kind, gate, json_mode):
     """Join the facade to the real conversion entry point; intercept only external work."""
     import run_estate
     import start_migration
@@ -398,32 +399,136 @@ def test_start_reaches_existing_postharvest_gate(monkeypatch, tmp_path, capsys, 
         },
     )
 
-    def projection(*_args, **_kwargs):
+    original_projection = run_estate.project_estate_path_ceiling
+
+    def projection(*args, **kwargs):
         gate_calls.append("post_harvest")
         assert any("harvest_estate_assets.py" in " ".join(command) for command in pipeline.commands)
-        return False, "SYNTHETIC " + gate
+        return original_projection(*args, **kwargs)
 
-    monkeypatch.setattr(run_estate, "preflight_estate_path_ceiling", projection)
+    monkeypatch.setattr(run_estate, "project_estate_path_ceiling", projection)
+    monkeypatch.setattr(run_estate, "_input_candidates", lambda *_a: [Path("synthetic.twb")])
     monkeypatch.setattr(
-        run_estate, "run_engine", lambda *a, **k: pytest.fail("non-pass path gate must prevent conversion")
+        run_estate,
+        "_engine_unit_names",
+        lambda *_a: {
+            "ok": ["W"],
+            "over_ceiling": ["W" * 300],
+            "cannot_establish": None,
+        }[gate],
     )
+    conversion_calls = []
 
-    def child(name, index, command, env, output):
+    def engine(*_args, **_kwargs):
+        assert gate == "ok", "non-pass path gate must prevent conversion"
+        conversion_calls.append("permitted")
+        return 7, "synthetic later engine failure"
+
+    monkeypatch.setattr(run_estate, "run_engine", engine)
+
+    def child(name, index, command, env, output, *, observer=None):
         if name != "bundle":
             return original(name, index, command, env, output)
-        code = run_estate.main(command[command.index("--input") :])
+        with start_migration._observe_path_gate(run_estate, observer):
+            code = run_estate.main(command[command.index("--input") :])
         return start_migration.StageResult(name, code, output)
 
     monkeypatch.setattr(start_migration, "_run_child", child)
-    arguments = ["start", "--project", "Finance", "--json"]
+    arguments = ["start", "--project", "Finance", *(["--json"] if json_mode else [])]
     if root_kind == "external":
         arguments.extend(["--runs-parent", str(tmp_path / "external")])
     assert t2p.main(arguments) == 1
     out, _err = _captured(capsys, pipeline)
-    result = json.loads(out)
+    result = json.loads(out) if json_mode else json.JSONDecoder().raw_decode(out, out.index('{\n  "artifacts"'))[0]
     assert gate_calls == ["post_harvest"], "existing path gate must be reached after harvest"
-    assert result["stages"][-1]["native_exit_code"] == 10, "non-pass path gate must retain native 10"
+    expected_native = run_estate.EXIT_ENGINE_FAILED if gate == "ok" else 10
+    assert result["stages"][-1]["native_exit_code"] == expected_native, "non-pass path gate must retain native 10"
     assert result["path_report"]["initial_decision"] == "cannot_establish", "unknown must not become PASS"
+    report = result["path_report"]
+    assert (
+        report["projection_verdict"]
+        == {
+            "ok": "PASS",
+            "over_ceiling": "OVER_CEILING",
+            "cannot_establish": "CANNOT_ESTABLISH",
+        }[gate]
+    ), "authoritative owner path verdict must be exposed"
+    assert any(row["locator"] == "bundle#pre_conversion_path_projection" for row in result["evidence"])
+    assert conversion_calls == (["permitted"] if gate == "ok" else [])
+    if gate != "cannot_establish":
+        assert isinstance(report["longest_file_utf16"]["value"], int)
+        assert report["remaining_file_utf16"]["value"] == 259 - report["longest_file_utf16"]["value"]
+    else:
+        assert report["longest_file_utf16"] == {"value": None, "reason": "not_recorded"}
+
+
+@pytest.mark.parametrize("source", ["environment", "selected_env"])
+@pytest.mark.parametrize("site", [None, "", " \t "])
+def test_doctor_valid_default_and_optional_absence(monkeypatch, tmp_path, capsys, source, site):
+    values = {key: value for key, value in ENV.items() if key != "TABLEAU_SITE"}
+    if site is not None:
+        values["TABLEAU_SITE"] = site
+    selected = tmp_path / "selected.env"
+    selected.write_text(
+        "\n".join(f"{key}={value}" for key, value in values.items()) if source == "selected_env" else "# empty\n",
+        encoding="utf-8",
+    )
+    if source == "environment":
+        for key, value in values.items():
+            monkeypatch.setenv(key, value)
+    monkeypatch.setattr(t2p.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, b"", b""))
+    assert t2p.main(["doctor", "--env", str(selected), "--json"]) == 0
+    result, _ = _json(capsys)
+    row = next(row for row in result["checks"] if row["key"] == "TABLEAU_SITE")
+    assert (row["state"], row["reason"], row["remedy"]) == ("set", "default_site", "none"), (
+        "valid Default site must not prescribe repair"
+    )
+    assert row["source"] == ("default" if site is None else source)
+    for row in result["checks"]:
+        if not row["required"] and row["state"] == "missing":
+            assert row["remedy"] == "none", "optional missing keys must not prescribe repair"
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_status_customer_labels_are_withheld(monkeypatch, tmp_path, capsys, json_mode):
+    import run_status
+
+    labels = ["PRIVATE_UNIT_CANARY_73", "PRIVATE_FINDING_CANARY_84", "PRIVATE_PACKAGE_CANARY_95"]
+    unit, finding, package = labels
+    observed = {
+        "run_location": {"state": "intact"},
+        "findings": [
+            {
+                "code": "UNSCOPED_PACKAGE",
+                "reason": "preserve_and_inspect_association",
+                "unassessable": False,
+                "unit": finding,
+                "source": f"packages/{finding}",
+            }
+        ],
+        "units": [
+            {
+                "unit": unit,
+                "kind": "workbook",
+                "scope": "scoped",
+                "generated_working_copy": "present",
+                "handover": "present",
+                "occurrences": [{"unit": unit, "source": f"bundle/{unit}", "kind": "workbook", "status": "observed"}],
+                "package": {"unit": package, "relative_path": f"packages/{package}"},
+                "current_certification": "NOT_CHECKED",
+            }
+        ],
+        "unscoped_packages": [{"unit": package, "relative_path": f"packages/{package}"}],
+    }
+    monkeypatch.setattr(run_status, "build_status", lambda _run: (observed, 0))
+    assert t2p.main(["status", "--run", str(tmp_path), *(["--json"] if json_mode else [])]) == 0
+    captured = capsys.readouterr()
+    for label in labels:
+        assert label not in captured.out + captured.err, f"status leaked customer label: {label}"
+    result = json.loads(captured.out)
+    jsonschema.validate(result, t2p.ENVELOPE_SCHEMA)
+    assert len(result["observations"]["units"]) == len(result["observations"]["findings"]) == 1
+    assert result["observations"]["unscoped_package_count"] == 1
 
 
 @pytest.mark.parametrize(
@@ -554,6 +659,34 @@ def test_start_reaches_existing_postharvest_gate(monkeypatch, tmp_path, capsys, 
             'result["authority"] = "run_status.py"\n    result["next_action"] = "mutant"',
             "test_status_readonly_and_owner_parity",
             "status must not route or suggest",
+        ),
+        (
+            "start_migration.py",
+            "observer(_path_gate_record(projection, allowed))",
+            "pass",
+            "test_start_reaches_existing_postharvest_gate",
+            "authoritative owner path verdict must be exposed",
+        ),
+        (
+            "tableau_env.py",
+            "if default_site:",
+            "if default_site and not present:",
+            "test_doctor_valid_default_and_optional_absence",
+            "valid Default site must not prescribe repair",
+        ),
+        (
+            "tableau_env.py",
+            "key in required and state in",
+            "state in",
+            "test_doctor_valid_default_and_optional_absence",
+            "optional missing keys must not prescribe repair",
+        ),
+        (
+            "t2p.py",
+            '"ordinal": index,',
+            '"ordinal": index, "unit": row["unit"],',
+            "test_status_customer_labels_are_withheld",
+            "status leaked customer label: PRIVATE_UNIT_CANARY_73",
         ),
     ],
 )

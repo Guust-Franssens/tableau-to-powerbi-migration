@@ -330,8 +330,30 @@ def start(args: argparse.Namespace, result: dict) -> int:
                 }
                 result["evidence"].append(reference)
                 result["artifacts"].append(dict(reference))
-            if name == "bundle":
+            if name == "bundle" and result["path_report"]["projection_verdict"] is None:
                 result["path_report"]["projection_reason"] = "not_recorded"
+        elif event == "path_gate":
+            report = result["path_report"]
+            report["projection_verdict"] = record["verdict"]
+            report["projection_reason"] = record["reason"]
+            result["evidence"].append(
+                {
+                    "owner": record["owner"],
+                    "locator": record["evidence"],
+                    "check": "owner_gate_observed",
+                }
+            )
+            for kind in ("file", "directory"):
+                for field in (f"longest_{kind}_utf16", f"remaining_{kind}_utf16", f"longest_{kind}_locator"):
+                    report[field] = {"value": None, "reason": "not_recorded"}
+            for kind, measurement in record["measurements"].items():
+                report[f"{kind}_ceiling_utf16"] = measurement["ceiling"]
+                report[f"longest_{kind}_utf16"] = {"value": measurement["length"], "reason": None}
+                report[f"remaining_{kind}_utf16"] = {
+                    "value": measurement["ceiling"] - measurement["length"],
+                    "reason": None,
+                }
+                report[f"longest_{kind}_locator"] = {"value": None, "reason": "customer_label_withheld"}
         elif event == "configuration":
             result["checks"] = record["checks"]
             result["limitations"].append(record["reason"])

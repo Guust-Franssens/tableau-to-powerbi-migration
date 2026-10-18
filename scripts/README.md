@@ -1293,7 +1293,14 @@ JSON stdout is one `t2p/v1` envelope, also for syntax/launch/interrupt failures.
 diagnostic owner (doctor has two owners, so null). Child start diagnostics, including OS stdout/stderr,
 stream live to stderr in JSON mode and remain **private native output**, not public-safe attachments.
 Absolute run locations are local-only. Doctor never forwards raw preflight output.
-Path reports expose the 259/247 UTF-16 ceilings; absent owner measurements remain null, never PASS.
+Path reports expose the 259/247 UTF-16 ceilings. The actual post-harvest owner gate reports
+`PASS|OVER_CEILING|CANNOT_ESTABLISH` through the optional in-memory front-door observer: a private
+inherited pipe carries structured evidence separately from live stdout/stderr. The owner projection
+and gate run once, unchanged; no prose parsing, second projection, new policy or result file.
+Numeric longest-path measurements/budgets come from that projection; customer-bearing locators are
+withheld. If the gate has not run, its verdict stays null rather than implying PASS.
+Explicit empty/whitespace `TABLEAU_SITE` is the valid Default site (`set`, `default_site`, no remedy).
+Optional missing configuration keys likewise prescribe no repair.
 Schema shape is pinned inline in `scripts/t2p.py`; additive fields are compatible, breaking changes
 require a new version. General statuses are `ok|findings|cannot_establish|error|interrupted`;
 doctor uses `READY_TO_ATTEMPT|BLOCKED_CONFIG|CANNOT_ESTABLISH`.

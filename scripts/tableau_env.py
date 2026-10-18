@@ -358,8 +358,11 @@ def diagnose_env(
             if present
             else "missing"
         )
-        if key == "TABLEAU_SITE" and not present:
-            state, source = "set", "default"
+        default_site = key == "TABLEAU_SITE" and (not present or not values[present[0]].strip())
+        if default_site:
+            state = "set"
+            if not present:
+                source = "default"
         checks.append(
             {
                 "key": key,
@@ -367,11 +370,11 @@ def diagnose_env(
                 "source": source,
                 "required": key in required,
                 "secret": key in secrets,
-                "reason": "default_site" if key == "TABLEAU_SITE" and not present else state,
+                "reason": "default_site" if default_site else state,
                 "remedy": "use_canonical_key"
                 if state == "deprecated-alias"
                 else "resolve_configuration"
-                if state in {"missing", "blank", "conflict"}
+                if state == "conflict" or (key in required and state in {"missing", "blank"})
                 else "none",
             }
         )

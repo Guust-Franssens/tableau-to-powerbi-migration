@@ -793,3 +793,23 @@ def test_pilot_diagnostic_alias_blank_conflict(tmp_path, source):
     assert env["TABLEAU_PAT_SECRET"] == ""
     _, diagnostic = tableau_env.diagnose_env(path, environ={"TABLEAU_PAT_SECRET": "one", "TABLEAU_PAT_VALUE": "two"})
     assert next(row for row in diagnostic["checks"] if row["key"] == "TABLEAU_PAT_SECRET")["state"] == "conflict"
+
+
+@pytest.mark.parametrize("site", [None, "", " \t "])
+def test_diagnostic_default_site_and_optional_absence(tmp_path, site):
+    path = tmp_path / ".env"
+    path.write_text("", encoding="utf-8")
+    values = {
+        "TABLEAU_SERVER_URL": "https://synthetic.invalid",
+        "TABLEAU_PAT_NAME": "name",
+        "TABLEAU_PAT_SECRET": "secret",
+    }
+    if site is not None:
+        values["TABLEAU_SITE"] = site
+    resolved, diagnostic = te.diagnose_env(path, environ=values)
+    row = next(row for row in diagnostic["checks"] if row["key"] == "TABLEAU_SITE")
+    assert resolved["TABLEAU_SITE"] == ""
+    assert (row["state"], row["reason"], row["remedy"]) == ("set", "default_site", "none")
+    assert all(row["remedy"] == "none" for row in diagnostic["checks"] if not row["required"])
+    assert diagnostic["status"] == "READY_TO_ATTEMPT"
+    assert te.resolve_env(path, environ=values)["TABLEAU_SITE"] == (site or "")
