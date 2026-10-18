@@ -35,6 +35,7 @@ must appear below unless the script docstring marks it `internal: true` with an 
 
 | Script | Status | Reason |
 |---|---|---|
+| `scripts/t2p.py` | `agent-facing` | Opt-in narrow doctor/start/status pilot; documented in `scripts/README.md`, not a replacement for direct scripts or gates. |
 | `scripts/assess_estate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/build_plugin.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/build_reconcile_items.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
