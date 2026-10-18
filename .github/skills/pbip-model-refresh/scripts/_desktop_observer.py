@@ -1543,7 +1543,7 @@ def _harvest(
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     try:
-        output, _ = child.communicate(timeout=max(0.0, deadline - time.monotonic()))
+        output, _ = child.communicate(timeout=min(timeout_s, max(0.0, deadline - time.monotonic())))
         if child.returncode != 0:
             raise ValueError("backend_failed")
         return _harvest_payload(output.decode("utf-8-sig"), pid, expected_process_start)
