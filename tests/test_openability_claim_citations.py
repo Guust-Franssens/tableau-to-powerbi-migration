@@ -174,9 +174,9 @@ are headings that do reach an agent as instruction text.
 specific blocks by hash so the failure message can stay *specific* for the case issue #312 is about,
 and so this coverage can never go quiet by deletion. Nothing about pass/fail depends on reading it.
 
-The skill bundle is pinned by heading. It cites the field twice as an *indictment* (a model whose
-every decimal was inflated 493x while the selfcheck reported ``ok: true``), and that prose should
-stay free to evolve.
+The compact skill is checked at its current queue heading and engine-claim boundary. Historical
+incident wording is not required default context; the whole-persona and adversarial pins below
+remain unchanged in power.
 """
 
 from __future__ import annotations
@@ -200,10 +200,9 @@ PIN_FILE = Path(__file__).with_name("persona_pins.txt")
 PIN_PATH = PIN_FILE.relative_to(REPO).as_posix()
 UPDATE_COMMAND = "python tests/test_openability_claim_citations.py --update"
 
-# The skill bundle that owns the full breakdown (scope, measured false-green rate, which ``checks``
-# omissions are vacuous and which are genuine, and how far the TMDL oracle actually gets).
+# The compact queue/engine-claim owner, not a mandatory incident archive.
 GOTCHAS_SKILL = ".github/skills/powerbi-semantic-model-gotchas/SKILL.md"
-GOTCHAS_HEADING = "### `openability_selfcheck.ok` is the engine's CLAIM, not a verified open"
+GOTCHAS_HEADING = "## 8. Reading the handover queue"
 
 # The generated region. Collapsed in each persona, pinned once under this key.
 SYNC_BEGIN = "<!-- BEGIN:shared-conventions -->"
@@ -312,14 +311,17 @@ class Block:
 
     @property
     def sha(self) -> str:
+        """The reviewed-text digest, not the display label."""
         return digest(self.text)
 
     @property
     def label(self) -> str:
+        """A diagnostic excerpt that never decides pin equality."""
         return excerpt(self.text)
 
     @property
     def lines_covered(self) -> range:
+        """Source coverage, including any collapsed generated lines."""
         return range(self.line, self.line + self.span)
 
 
@@ -568,6 +570,7 @@ def parse_pins(text: str) -> dict[str, list[tuple[str, str]]]:
 
 
 def load_pins() -> dict[str, list[tuple[str, str]]]:
+    """Load the sanctioned pin artifact or fail rather than inventing a baseline."""
     if not PIN_FILE.exists():
         raise AssertionError(f"{PIN_FILE} is missing. Regenerate it with:\n    {UPDATE_COMMAND}")
     return parse_pins(read_source(PIN_FILE))
@@ -621,7 +624,8 @@ REQUIRED: tuple[tuple[str, str, str], ...] = (
     (
         "pbi-semantic-builder.agent.md",
         "c51b41e87515c03b8c765fc5c34209f3e33b760cddc2f3c227b01252506232dc",
-        "the semantic builder's step 1, which routes the detail to the gotchas skill section 8",
+        "the semantic builder's step 1, which routes original requests and the engine-claim ceiling "
+        "to compact section 8",
     ),
 )
 
@@ -658,7 +662,8 @@ def _fix_instructions(key: str) -> str:
         "bytes, and the pinned blocks are proven to rebuild the file, so nothing -- indentation, a "
         "tab, a blank line, a re-wrap -- is normalized away. Nothing is classified as being 'about' "
         "anything either: three earlier versions of this test tried that and each lost to a rendering "
-        f"or a synonym it had not listed (see this file's docstring, and {GOTCHAS_SKILL} section 8). "
+        "or a synonym it had not listed (see this file's docstring for pin history, and "
+        f"{GOTCHAS_SKILL} section 8 for the current engine-claim boundary). "
         "So an added or reworded instruction fails here by construction, and clearing it is a "
         "deliberate act.\n\n"
         f"TO FIX -- if you changed this on purpose:\n\n    {UPDATE_COMMAND}\n\n"
@@ -889,15 +894,53 @@ def test_a_block_this_pin_exists_for_is_still_present(name: str, sha: str, label
     )
 
 
-def test_the_gotchas_skill_owns_the_full_breakdown() -> None:
-    """The uncapped bundle, not a near-cap persona, is where the measured detail lives."""
+def test_the_compact_skill_preserves_the_engine_claim_boundary() -> None:
+    """Pin the current obligation, not deleted incident prose or a phantom historical heading."""
     text = read_source(REPO / GOTCHAS_SKILL)
     assert GOTCHAS_HEADING in text, (
-        f"{GOTCHAS_SKILL} no longer carries the section heading pinned by issue #312:\n"
-        f"  {GOTCHAS_HEADING}\n"
-        "That section is what the personas point at instead of restating the detail inside a "
-        "30,000-char cap. Restore it, or repoint the personas in the same commit."
+        f"{GOTCHAS_SKILL} lost the compact queue heading: {GOTCHAS_HEADING}. "
+        "Repoint the persona and its obligation together; do not add a phantom heading."
     )
+    queue = text.split(GOTCHAS_HEADING, 1)[1]
+    for boundary, rule in (
+        ("original requests", "Repair from `requests[]` with formula/role/target table"),
+        ("separate denominators", "requests, measure stubs and calculated-column stubs as distinct denominators"),
+        (
+            "engine claim",
+            "`openability_selfcheck.ok` is the engine's claim, not an observed Desktop open or source match",
+        ),
+        ("independent handoff", "hand the exact shipped model/evidence to the independent validator"),
+    ):
+        assert rule in queue, f"compact queue lost {boundary}"
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "diagnostic"),
+    [
+        (GOTCHAS_HEADING, "## 9. Historical full breakdown", "lost the compact queue heading"),
+        ("Repair from `requests[]`", "Repair from `needs_review[]`", "compact queue lost original requests"),
+        (
+            "not an observed Desktop open or source match",
+            "proof of verified openability",
+            "compact queue lost engine claim",
+        ),
+    ],
+)
+def test_compact_queue_reversals_hit_the_current_obligation(
+    monkeypatch: pytest.MonkeyPatch, before: str, after: str, diagnostic: str
+) -> None:
+    """These must fail the contract itself, not an unrelated persona pin or import guard."""
+    target = REPO / GOTCHAS_SKILL
+    original_read = read_source
+    source = original_read(target)
+    assert source.count(before) == 1
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "read_source",
+        lambda path: source.replace(before, after) if path == target else original_read(path),
+    )
+    with pytest.raises(AssertionError, match=diagnostic):
+        test_the_compact_skill_preserves_the_engine_claim_boundary()
 
 
 # ---------------------------------------------------------------------------------------------

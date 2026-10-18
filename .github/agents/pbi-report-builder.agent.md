@@ -190,8 +190,9 @@ its hash) are in `powerbi-report-gotchas` §3; `--tamper` must exit 0.
 5. **Fix with the smallest blast radius first.** Prefer formatting/layout over changing a visual's
    type or field wells — a type change re-opens the encoding question the engine already answered.
    Where you do change it, justify against the reference, not taste, and research the mapping per
-   *idiom* through `powerbi-report-gotchas` §9 plus the live CLI. Never write field-well or formatting
-   JSON from memory. ⚠️ **An encoding the CLI and the cached §9 guidance cannot establish is a HUMAN
+   *idiom* through `powerbi-report-gotchas` §8 and the selected `powerbi-report-cli` authoring topic
+   plus the live CLI. Never write field-well or formatting JSON from memory.
+   ⚠️ **An encoding the CLI and the authorized source evidence cannot establish is a HUMAN
    STOP, not a guess.** Ask a human to configure that one visual in Desktop, read the resulting
    `visual.json` as ground truth, then record it (skill `visuals/<type>.md`) so nobody re-asks.
 6. Wire the source intent the engine's input format cannot carry: the parameter-equality idiom (a
@@ -221,7 +222,8 @@ Structural validation is not optional, on the initial build and on every later f
    never install/update npm mid-migration. Skill/command/capability absent → **BLOCKED**, route to preflight.
    No retired-name or by-hand fallback. Run `powerbi-report-author validate` each batch.
 3. **Additional checks:** no overlapping visuals; no table/matrix `Values` well with inactive
-   siblings (§4); correct `definition.pbir` binding (§3). A cross-tree `byPath` into shared
+   siblings (source projection §8; upstream authoring table topic); correct `definition.pbir`
+   binding (§3). A cross-tree `byPath` into shared
    `datasources/<ds-slug>/` is correct — never copy its model beside the report to "fix" it.
    Cloud: `{"byConnection": {"connectionString": "semanticmodelid=<guid>"}}`.
 4. **After validation**, load latest PBIR; screenshot each affected page to a run-owned path and
@@ -242,15 +244,8 @@ a visual validates clean but renders wrong: [SKILL.md](../skills/powerbi-report-
 
 | § | Skill section |
 |---|---|
-| 1 | Validation-invisible rendering bugs |
-| 2 | Data colours and conditional formatting |
 | 3 | PBIR mechanics |
-| 4 | Crosstabs and tables — a recurring fragility class |
-| 5 | Maps — Azure Maps is the only non-deprecated option |
-| 6 | Scatter |
-| 7 | Desktop verification mechanics |
 | 8 | Reading the source spec |
-| 9 | Keeping the visual mapping current (research per idiom, not per instance) |
 | 10 | Reading the report-side handover queue |
 <!-- END:generated-skill-index:powerbi-report-gotchas -->
 
@@ -276,9 +271,9 @@ passes too (at minimum #3–#5 for the visual you touched):
    you *authored*, the full `layout_contract`; for one you repaired, that your fix introduced no
    overlap (the common way a resize breaks a neighbour).
 7. **Every percentage/scaled field's `formatString` was checked against a real sampled value via
-   DAX**, not assumed from the field name (§3).
+   DAX**, not assumed from the field name (core §8; `scripts\probe_desktop_query.py` or read-only query tool).
 8. **Every table/matrix field projection was checked against the real Tableau worksheet**, especially
-   any single-active-field pattern (§4).
+   any single-active-field pattern (core §8; upstream authoring table topic).
 9. **Every slicer driving the default view has an explicit default value** — nothing renders an
    all-rows aggregate on first load (§8).
 10. **Every `measure_names_values_pivot` and `UNRESOLVED:` reference in `limitations_encountered` was
