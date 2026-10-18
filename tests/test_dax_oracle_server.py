@@ -300,17 +300,18 @@ def test_certify_without_the_engine_refuses_rather_than_passing_vacuously():
 def desktop_executor_fixture(monkeypatch: pytest.MonkeyPatch) -> tuple:
     """ADOMD and detector seams with separate open/read observations; no Desktop is contacted."""
     sys.path.insert(0, str(dos.SKILL_SCRIPTS))
-    import _credential_modal as modal  # pylint: disable=import-outside-toplevel
+    import _desktop_observer as modal  # pylint: disable=import-outside-toplevel
     import probe_desktop_query as pdq  # pylint: disable=import-outside-toplevel
 
     events = []
-    state = SimpleNamespace(current=modal.CredentialDetection())
+    state = SimpleNamespace(current=modal.Observation())
     window = modal.DesktopWindow("PRIVATE_TEST_VALUE", "", 400, 300, hwnd=222)
     finding = modal.DialogFinding("unrecognized", "DIALOG_UNRECOGNIZED", window, "PRIVATE_TEST_VALUE")
-    blocked = modal.CredentialDetection(dialog=finding)
+    blocked = modal.Observation(dialog=finding)
 
-    def inspect_pid(pid: int):
+    def inspect_pid(pid: int, *, expected_process_start: str):
         assert pid == 111, "the explicit PID must never be widened or inferred"
+        assert expected_process_start == "638963424000000001", "the caller must supply its held exact start"
         events.append("check")
         return state.current
 
@@ -334,6 +335,11 @@ def desktop_executor_fixture(monkeypatch: pytest.MonkeyPatch) -> tuple:
     )
     monkeypatch.setattr(pdq, "_load_adomd", lambda: lambda _dsn: connection)
     monkeypatch.setattr(pdq, "_credential_state", inspect_pid)
+    monkeypatch.setattr(
+        pdq,
+        "desktop_identity",
+        lambda pid, port=None: pdq.DesktopIdentity(pid, "638963424000000001", 112, "638963424000000002", port or 55001),
+    )
     monkeypatch.setattr(modal, "diagnose_dialog", lambda *_a: ("OBSERVED", "package_session", "template_match"))
     return events, state, blocked, connection, modal
 
@@ -374,7 +380,7 @@ def test_desktop_persistent_requests_are_each_checked(desktop_executor: tuple, c
     execute = dos.adomd_executor(55001, 111)
 
     def requests():
-        for current in (modal.CredentialDetection(), blocked, modal.CredentialDetection()):
+        for current in (modal.Observation(), blocked, modal.Observation()):
             state.current = current
             yield '{"dax":"EVALUATE ROW(\\"v\\", 1)"}\n'
 
@@ -399,7 +405,7 @@ def test_desktop_nonclean_states_never_reach_open(desktop_executor: tuple, condi
         if condition == "modal"
         else "PRIVATE_TEST_VALUE"
     )
-    state.current = modal.CredentialDetection(**{condition: value})
+    state.current = modal.Observation(**{condition: value})
     result = dos.make_oracle(dos.adomd_executor(55001, 111))('EVALUATE ROW("v", 1)')
     assert events == ["check"] and set(result) == {"error"}
     assert "PRIVATE_TEST_VALUE" not in json.dumps(result)

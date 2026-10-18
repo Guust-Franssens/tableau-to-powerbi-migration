@@ -698,22 +698,12 @@ And prefer evidence from the **source system** when you can get it: for a server
 Measured 2026-08-01 (`logistics-live-dbx`, Databricks `.../warehouses/764e5801f0e0fac8`, one-table
 probe): `refresh_pbip_model.py --pid <pid>` produced **no output for ~7 minutes**. There is no error to
 wait for — the mashup engine is parked on Desktop's credential modal, which only a human can answer, so
-the XMLA refresh never returns. Waiting longer cannot change the outcome; **diagnose in seconds
-instead**, and note the modal is *in-app*, so a top-level-window scan finds nothing (`FindAll(Children)`
-returns only the main `LogisticsLive` window). Scan **descendants** of the Desktop window:
-
-```powershell
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$root = [System.Windows.Automation.AutomationElement]::RootElement
-$cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, <pid>)
-$win  = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
-$win.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition) |
-  ForEach-Object { $_.Current.Name } | Where-Object { $_ -match "signed in|Personal Access|httpPath|incomplete or no data" }
-```
-
-It returns the verdict *and* the exact data source the credential is keyed to:
-`You aren't signed in.` / `{"host":"adb-….azuredatabricks.net","httpPath":"/sql/1.0/warehouses/…"}` /
-`Some of the tables have incomplete or no data.` — quotable evidence for the user, in ~10 seconds.
+the XMLA refresh never returns. Diagnose with the portable `pbip-model-refresh` skill's
+`_desktop_observer.observe` / `watch`, supplying the caller-held exact process-start identity.
+The bounded `_desktop_uia.ps1` backend enumerates exact-PID top-level/owned windows and collects
+role-bearing UIA facts. Do not paste a new descendant-name filter or select UIA's first root child:
+that recreates a second, weaker classifier. Public observations contain closed diagnostics, not raw
+source addresses or UI text. `READY` never proves source reachability; the one-row query remains the gate.
 
 Then stop the refresh and confirm the negative three ways before reporting: `probe_desktop_query.py`
 → `PREFLIGHT: NO_DATA` (the model loads and the DAX runs — 13 columns bound — it just has 0 rows), **no
@@ -1087,52 +1077,13 @@ instance (the pid-binding rule).
 
 ### 7.3 Scan for ALL modal windows, not just credential phrases
 
-§5's UIA recipe filters descendant names to sign-in wording (`signed in|Personal Access|…`). That
-filter **misses any other modal**, and any modal blocks refresh just as effectively. Here a
-`Bing map visuals are going away` deprecation dialog — shown on **every open** of a report
-containing Bing map visuals, so it recurs on every automated cycle — silently blocked the refresh,
-and a credential-filtered scan reported "no modal found".
-
-So **enumerate every child window and REPORT whether it is modal** (detect on `IsModal`, not on
-text) — but **do not blanket-close them.** A modal can be a save prompt, an error dialog, an upgrade
-nag, a security warning or a **credential/sign-in prompt**, and dismissing the wrong one destroys
-work or silently defeats the stop-and-ask rule this bundle enforces elsewhere (§5: a missing
-credential goes to a human, it is never worked around). Close only modals on an **explicit allowlist
-of known, side-effect-free nuisance dialogs** — the `Bing map visuals are going away` deprecation
-dialog is the canonical entry. **A credential/sign-in modal is NEVER auto-dismissed** — closing it
-does not supply the credential, it just turns a recoverable stop-and-ask into a silent empty refresh;
-surface the exact data source and escalate, exactly as §5 requires. Anything else not on the
-allowlist: report it and leave it open for the caller to decide.
-
-```powershell
-# Auto-close ONLY these known, side-effect-free nuisance dialogs (they recur every cycle):
-$modalAllowlist  = 'Bing map visuals are going away'
-# Wording that marks a credential/sign-in modal - NEVER auto-close; escalate to a human (see §5):
-$credentialModal = 'signed in|Personal Access|Sign in|credential|account|password'
-
-$wcond = New-Object System.Windows.Automation.PropertyCondition(
-    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-    [System.Windows.Automation.ControlType]::Window)
-foreach ($d in $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $wcond)) {
-    $wp   = $d.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
-    $name = $d.Current.Name
-    if (-not $wp.Current.IsModal) { continue }
-    "MODAL: $name"                                     # always REPORT every modal found
-    if ($name -match $credentialModal) {
-        "  -> credential/sign-in modal: DO NOT close - escalate to a human (see §5)"; continue
-    }
-    if ($name -match $modalAllowlist) {
-        $wp.Close()                                    # WindowPattern.Close beats clicking a button
-        "  -> closed (allowlisted nuisance dialog)"
-    } else {
-        "  -> not on allowlist: left open, reporting it for the caller to decide"
-    }
-}
-```
-
-Dismiss via `WindowPattern.Close()` on the `WindowsForms10.*` host — invoking the WebView's own
-`Close Dialog` button is unreliable. **Never** click an action button you did not intend
-(`Upgrade to Azure Maps` would rewrite the report layer, which belongs to `pbi-report-builder`).
+The old descendant-name recipe missed non-sign-in dialogs (measured: the recurring Bing-map warning).
+Use §5's shared read-only observer for every unexplained candidate, not another regex/`IsModal`
+classifier. It does not click, focus, restore or close anything. Positive human prompts outrank
+progress, while unknown/incomplete observations remain non-clean. Credential prompts still require
+a human; no automation supplies or dismisses them. Leave action decisions with the caller/operator.
+The whole-template `package_session` diagnostic identifies a local Desktop session error without
+turning it into a credential claim. Do not infer source access from quiet windows or screenshots.
 
 **Corollary — an idle `msmdsrv` is diagnostic.** During the "hang", the child `msmdsrv` had
 accumulated only ~16 s CPU over an hour. A blocked-on-modal refresh is *idle*, not busy; a genuinely

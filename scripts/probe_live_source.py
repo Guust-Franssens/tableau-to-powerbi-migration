@@ -66,10 +66,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import queue
 import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -119,7 +121,7 @@ SKILL_SCRIPTS = Path(__file__).parent.parent / ".github" / "skills" / "pbip-mode
 # number that can silently invert against it (issue #156). We import the child's constants rather than
 # retype them so the two files cannot drift apart: a change to the child's ceiling moves the parent's
 # bound with it, by construction. `SKILL_SCRIPTS` must lead sys.path so the child's siblings
-# (`probe_desktop_query`, `_credential_modal`, ...) resolve to the real skill copies, not the
+# (`probe_desktop_query`, `_desktop_observer`, ...) resolve to the real skill copies, not the
 # forwarding shims in this `scripts/` dir. The clr/ADOMD load is lazy inside the child, so this import
 # is cheap (~0.1s) and needs no Power BI Desktop.
 sys.path.insert(0, str(SKILL_SCRIPTS))
@@ -129,6 +131,11 @@ from refresh_pbip_model import (  # noqa: E402  # pylint: disable=wrong-import-p
     REFRESH_TIMEOUT_SECONDS,
     REFRESH_WALL_CLOCK_GRACE_SECONDS,
 )
+from probe_desktop_query import (  # noqa: E402  # pylint: disable=wrong-import-position,no-name-in-module
+    ObservationUnavailable,
+    _validate_identity,
+)
+from _desktop_observer import observation_refusal_events  # noqa: E402  # pylint: disable=wrong-import-position,import-error
 
 # How far the parent (the backstop to the child's backstop) must outlast the child before SIGKILLing
 # it. The ordering is the whole point: the child's own deadline path yields a FAR better verdict than
@@ -400,8 +407,9 @@ def _classify_failure(text: str, network_fault_observed: bool) -> tuple[str, str
     text. A dispatch table would hide exactly that.
     """
     # pylint: disable=too-many-return-statements
-    low = text.lower()
-    raw = _error_excerpt(text)
+    source_text = "\n".join(line for line in text.splitlines() if not line.startswith("DESKTOP_OBSERVATION "))
+    low = source_text.lower()
+    raw = _error_excerpt(source_text)
     # The AUTHORITATIVE child verdicts first (`_verdict_lines.classify_child_verdict`): DESKTOP_GONE
     # and DESKTOP_UNREADY (issue #158) and the DIALOG family (issue #376). Each is a verdict LINE the
     # child emitted after looking at the machine, so no free-text scan below may override it.
@@ -698,47 +706,116 @@ def _open_desktop(pbip: Path) -> int:
     raise SystemExit(1)
 
 
+def _run_refresh(command: list[str], *, timeout: float, **_options) -> subprocess.CompletedProcess:
+    """Stream validated observer metadata while retaining operation transcripts and one deadline."""
+    from _desktop_observer import observation_token  # pylint: disable=import-outside-toplevel,import-error
+
+    deadline = time.monotonic() + timeout
+    child = subprocess.Popen(  # pylint: disable=consider-using-with
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+    )
+    lines = queue.Queue()
+    captured = []
+
+    def read() -> None:
+        try:
+            for line in child.stdout:
+                lines.put(line)
+        finally:
+            lines.put(None)
+
+    reader = threading.Thread(target=read, name="probe-refresh-output", daemon=True)
+    reader.start()
+    try:
+        while True:
+            if time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                line = lines.get(timeout=max(0.0, deadline - time.monotonic()))
+            except queue.Empty:
+                raise subprocess.TimeoutExpired(command, timeout) from None
+            if line is None:
+                break
+            captured.append(line)
+            if line.startswith("DESKTOP_OBSERVATION "):
+                try:
+                    observation_token(line.removeprefix("DESKTOP_OBSERVATION ").strip())
+                except (ValueError, TypeError, KeyError):
+                    log.warning("Desktop observation unavailable: invalid event; source state unestablished")
+                else:
+                    print(line.rstrip(), file=sys.stderr, flush=True)
+        child.wait(timeout=max(0.0, deadline - time.monotonic()))
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired(command, timeout)
+        return subprocess.CompletedProcess(command, child.returncode, "".join(captured), "")
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+        reader.join(timeout=1)
+        child.stdout.close()
+
+
 def _wait_for_catalog(pid: int, timeout_sec: int = 240) -> bool:
-    """Block until Desktop has actually loaded a model catalog, or give up.
+    """Wait for positive exact-PID/start/AS/catalogue binding, not absence of an error substring.
 
-    `powerbi-desktop open` waits for the BRIDGE to answer, which happens well before the model is
-    loaded into the Analysis Services instance. Refreshing in that window fails with "no catalog
-    found on the Desktop Analysis Services instance" - not a connection error at all, but a race.
-
-    That race cost a wrong conclusion, which is why this exists: an unresolvable host produced the
-    same "no catalog" message as a merely-slow load, so a bad-host test appeared to pass while a
-    known-good source intermittently failed. Two very different causes were indistinguishable.
-    Waiting removes the race, so anything still reporting "no catalog" afterwards genuinely failed
-    to load and can be classified honestly.
-
-    ⚠️ The timeout is a FALSE-VERDICT budget, not a convenience. Timing out here reports
-    UNREACHABLE - a definitive "your address is wrong" - so a value that is merely too short
-    manufactures exactly the misdiagnosis this script exists to prevent. Measured 2026-08-02: at 90s
-    the FIRST cell of a four-cell batch reported UNREACHABLE for a known-good Databricks warehouse
-    that returned DATA_OK on the very next run of the identical spec. A cold Desktop start (or
-    contention right after a sibling instance closed) simply exceeded the budget. Raised to 240s:
-    the cost of waiting on a genuinely dead host is a couple of idle minutes, while the cost of
-    being too eager is a confident wrong answer sending someone to fix an address that was fine.
-    The DNS pre-check in `_probe_one` already catches the truly-unresolvable case in under a second,
-    so almost nothing legitimate reaches this timeout anyway.
-
-    Uses the skill's documented CLI rather than importing its internals - the readiness signal is
-    "does this stop saying no catalog", which its exit output already carries.
+    Bridge readiness is not model readiness. Each bind child receives the remaining absolute
+    240-second budget; terminal prompt/session/process observations refuse after one attempt.
+    The historical 90-second wait falsely rejected a known-good cold start, hence the retained
+    240-second ceiling. Neither READY nor this catalogue binding certifies live-source rows.
     """
     deadline = time.monotonic() + timeout_sec
     waited = 0.0
     while time.monotonic() < deadline:
-        proc = subprocess.run(
-            [sys.executable, str(SKILL_SCRIPTS / "probe_desktop_query.py"), "--pid", str(pid)],
-            capture_output=True,
-            text=True,
-            check=False,
+        remaining = deadline - time.monotonic()
+        command = (
+            "import sys,json;from dataclasses import asdict;"
+            "sys.path.insert(0,sys.argv[1]);"
+            "from probe_desktop_query import bind_desktop;"
+            "print(json.dumps(asdict(bind_desktop(int(sys.argv[2])))))"
         )
-        if "no catalog" not in (proc.stdout + proc.stderr).lower():
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", command, str(SKILL_SCRIPTS), str(pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=max(0.001, remaining),
+            )
+            terminal = observation_refusal_events(
+                (
+                    line.removeprefix("DESKTOP_OBSERVATION ")
+                    for line in proc.stderr.splitlines()
+                    if line.startswith("DESKTOP_OBSERVATION ")
+                ),
+                terminal_only=True,
+            )
+            if terminal is not None:
+                raise ObservationUnavailable(terminal)
+            binding = json.loads(proc.stdout) if proc.returncode == 0 else None
+            valid_shape = (
+                isinstance(binding, dict)
+                and set(binding) == {"identity", "catalogue"}
+                and isinstance(binding["identity"], dict)
+            )
+            if valid_shape:
+                _validate_identity(binding["identity"], pid)
+            ready = (
+                valid_shape
+                and isinstance(binding["catalogue"], str)
+                and str(uuid.UUID(binding["catalogue"])) == binding["catalogue"]
+            )
+        except (ValueError, TypeError, subprocess.TimeoutExpired):
+            ready = False
+        if ready and time.monotonic() < deadline:
             if waited:
                 log.info("model catalog ready after %.0fs", waited)
             return True
-        time.sleep(3)
+        time.sleep(min(3, max(0.0, deadline - time.monotonic())))
         waited += 3
         # Surface a slow load rather than letting it look like a hang - the shared conventions
         # require reporting elapsed time on anything past ~60s.
@@ -790,7 +867,7 @@ def _refresh_and_classify(pid: int, table: str, timeout_sec: int, network_fault_
     )
     started = time.monotonic()
     try:
-        refresh = subprocess.run(
+        refresh = _run_refresh(
             [
                 sys.executable,
                 str(SKILL_SCRIPTS / "refresh_pbip_model.py"),
@@ -1183,6 +1260,8 @@ def _probe_one_table(
     migration: Path, leg_name: str, conn: dict, target: tuple[dict, str], opts: tuple[int, bool]
 ) -> tuple[int, str]:
     """Record every keyed terminal outcome, including preprocessing, before Desktop cleanup."""
+    # The model, binding refusal, audit and owned-Desktop cleanup share one lifecycle boundary.
+    # pylint: disable=too-many-locals
     pid = None
     desktop_event = None
     try:
@@ -1200,7 +1279,14 @@ def _probe_one_table(
             pid = _open_desktop(pbip)
             desktop_event = _record_desktop_lifecycle(migration, "desktop-open", pid, pbip)
             log.info("desktop pid %d", pid)
-            if not _wait_for_catalog(pid):
+            try:
+                catalogue_ready = _wait_for_catalog(pid)
+            except ObservationUnavailable as error:
+                token = error.args[0]
+                verdict, _ = _classify_failure(f"PREFLIGHT: {token}", network_fault_observed=False)
+                log.error("PROBE: %s Desktop binding refused (%s); source state unestablished", verdict, token)
+                return finish(1, verdict)
+            if not catalogue_ready:
                 return finish(1, _classify_catalog_timeout(conn))
             log.info("model loaded - refreshing")
             return finish(*_refresh_and_classify(pid, table, opts[0], _network_fault_observed(conn)))

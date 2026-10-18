@@ -206,7 +206,7 @@ def test_ordinary_probe_requires_child_row_evidence(
     monkeypatch.setattr(probe_live_source, "_network_fault_observed", lambda _conn: False)
     monkeypatch.setattr(probe_live_source, "_record_desktop_lifecycle", lambda *_args: {})
     monkeypatch.setattr(probe_live_source, "_close", lambda _pid, _pbip: True)
-    monkeypatch.setattr(probe_live_source.subprocess, "run", _refresh)
+    monkeypatch.setattr(probe_live_source, "_run_refresh", _refresh)
 
     code, verdict = probe_live_source._probe_one(tmp_path, [source], 0, 7, False)
 
@@ -271,3 +271,62 @@ def test_717_cli_metadata_refusal_is_error_before_any_effect(tmp_path, monkeypat
     assert entries[-1]["sources"] == [key]
     assert not any(entry["action"] in {"probe-cleared", "probe-data_ok"} for entry in entries)
     assert (tmp_path / cg.MARKER).exists()
+
+
+@pytest.mark.parametrize("fault", [None, "ready_only", "wrong_pid", "numeric_start", "nonzero"])
+def test_catalogue_wait_requires_positive_binding_and_one_absolute_budget(monkeypatch, fault: str | None) -> None:
+    """Only a validated binding succeeds, and retries consume one absolute budget."""
+    # pylint: disable=protected-access
+    binding = {
+        "identity": {
+            "pid": 111,
+            "process_start": "638963424000000001",
+            "as_pid": 112,
+            "as_process_start": "638963424000000002",
+            "port": 52001,
+        },
+        "catalogue": "74100000-0000-4000-8000-000000000001",
+    }
+    if fault == "wrong_pid":
+        binding["identity"]["pid"] = 222
+    elif fault == "numeric_start":
+        binding["identity"]["process_start"] = 638963424000000001
+    clock = [0.0]
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs["timeout"]))
+        return subprocess.CompletedProcess(
+            command,
+            1 if fault == "nonzero" else 0,
+            stdout="READY" if fault == "ready_only" else json.dumps(binding),
+            stderr="",
+        )
+
+    monkeypatch.setattr(probe_live_source.subprocess, "run", run)
+    monkeypatch.setattr(probe_live_source.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(probe_live_source.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    assert probe_live_source._wait_for_catalog(111, timeout_sec=4) is (fault is None)
+    assert len(calls) == (1 if fault is None else 2)
+    assert all("bind_desktop" in command[2] for command, _ in calls), "READY is not catalogue binding"
+    assert [timeout for _, timeout in calls] == ([4] if fault is None else [4, 1])
+
+
+@pytest.mark.parametrize(
+    "state,code", [("CREDENTIAL_REQUIRED", "CREDENTIAL_MISSING"), ("HUMAN_ACTION_REQUIRED", "DIALOG_NEEDS_HUMAN")]
+)
+def test_catalogue_wait_settles_a_positive_terminal_prompt_once(monkeypatch, state: str, code: str) -> None:
+    """A positive human prompt is terminal, not a transient catalogue startup."""
+    # pylint: disable=protected-access
+    from test_probe_live_source_verdict import desktop_event  # pylint: disable=import-outside-toplevel
+
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 3, stdout="", stderr=desktop_event(state))
+
+    monkeypatch.setattr(probe_live_source.subprocess, "run", run)
+    with pytest.raises(probe_live_source.ObservationUnavailable, match=f"^{code}$"):
+        probe_live_source._wait_for_catalog(111)
+    assert len(calls) == 1, "a positive human prompt is not a transient catalogue startup"

@@ -1,5 +1,9 @@
 # Desktop observer simplification — Refs #741
 
+**Implementation note:** sections 1–11 preserve the pre-implementation investigation and estimates.
+The approved amendments and implemented slice-1 contract in §12 supersede the proposed identity types,
+timestamps and API examples below. The historical census is not rewritten to look like the new tree.
+
 ## 1. Executive recommendation
 ⚠️ **Recommend a Python observer in the portable refresh skill, with one bounded, harvest-only PowerShell backend.** Retire the standalone refresh-clicking credential arbiter; consolidate classification, observation scheduling, diagnostics and private-image lifecycle, not source proof.
 Land observation/caller contracts first. Modern CLI-first reload is a subsequent implementation choice, conditional on #729/#730; the `t2p` command is a thin presentation adapter conditional on #734.
@@ -136,3 +140,113 @@ Citation shorthand: `S/` = `.github/skills/pbip-model-refresh/scripts/`; `T/` = 
 ## 11. What remains unverified
 ⚠️ All net savings, live Desktop/UIA latency, localization, connector prompts, DPI completeness, crash cleanup, MSHTML extraction, modern CLI/bridge behavior and blind-run-2 fidelity are unmeasured here. No tests or tool availability can substitute for that future qualification; blind run 2 must show actual observer state, not guessed source status.
 ✅ Session preflight could not start (`powershell` unavailable); static source/GitHub/upstream-document inspection only. No source data, screenshots or retained private evidence was created. This revision changes **only this report and its `docs/INDEX.md` navigation entry** (`scripts/check_navigation_index.py:50-66`); all implementation edits above are proposals, not product changes in this PR.
+
+## 12. Implemented slice 1 — Refs #741
+
+**Status: draft, blocked at the approved surface boundary.** The complete repository run exposed
+`tests/test_gui_marker_gate.py`'s hard-coded minimum of ten GUI/spawn sites; retiring the old PS parity
+fixtures leaves six retained native/UIA cases. That gate is **outside N=35**. It has not been edited,
+and duplicate GUI cases have not been added merely to satisfy its historical census. The owner must
+review the surface/deletion decision before this slice can claim a green repository gate or merge.
+
+This section describes the implementation against **511bb209**, not a retroactive qualification of
+the investigation above. The binding approval is
+[#741's slice-1 contract](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/741#issuecomment-6239850790).
+The independent review's amendments take precedence over the earlier proposal.
+
+### Authority and identity
+
+- `S/_desktop_observer.py` owns the classifier, whole-template interpretation, same-snapshot fold,
+  shared bounded latch, scheduling defaults, closed operation diagnostics and existing private image
+  lease. `S/_desktop_uia.ps1` only harvests Win32/UIA facts. It contains no signatures, verdict
+  classifier, Refresh invocation, click, save or polling arbiter.
+- `observe(pid, *, hwnd=None, expected_process_start=None, timeout_s=8, evidence=None)` returns a
+  frozen `Observation`; `watch(..., deadline, operation_id, expected_process_start=...)` owns an
+  invocation deadline and helper settlement. Bound callers supply their **held** start token, not a
+  later PID rediscovery. Watch admission, cancellation and record publication share a lock.
+- In `desktop.harvest.v1` and `desktop.observation.v1`, PID and creation identity are canonical
+  decimal **strings**; HWND/owner are canonical hexadecimal strings or null. Creation identity is
+  the existing lossless UTC-tick token, **not** an RFC3339 value round-tripped through Python
+  `datetime`. `observed_at` remains a UTC display timestamp. Existing receipt binding schemas keep
+  their literal bounded-integer PID fields; they are not silently versioned or coerced.
+- Duplicate/extra keys, wrong identities, lossy numeric handles/ticks, invalid flags, incomplete
+  providers, truncation and late transport cannot establish a clean observation. Owner-enabled
+  facts remain three-valued; changed owner/enabled facts do not earn an exoneration.
+- The root/candidate exclusions remain the approved native-window policy: an identified application
+  frame, an attested enabled owner, or an unowned zero-area window. Completeness concerns enumeration,
+  target attestations and required candidate harvests; it is **not** a claim to read an application's
+  entire document/DOM. Positive prompt evidence survives modality exclusions and outranks progress.
+  Editable/password values and non-read-only document patterns are not read.
+
+### Outcomes, receipts and private evidence
+
+`READY` means only complete observation with no unexplained candidate. It cannot mean refresh,
+query, persistence or source success. Callers retain operation exit bands and phase decisions;
+progress is factual and is never rewritten to READY. Query publication waits for started inspection
+helpers to settle. Refresh may finish with retained nonterminal uncertainty, without erasing it.
+First established terminal wins; a same-snapshot stronger state follows the shared precedence.
+
+Only the existing correct-table, conflict-free one-row Power BI path plus required live-leg coverage
+can earn `DATA_OK`; only the credential gate changes physical denial. `_probe` stays writable.
+Observer events are validated separately and excluded from connector free-text scanning. Neither
+READY, an image nor processing completion is row proof.
+
+Receipt versions 2/3 and their literal readers/enums remain unchanged. A trusted explicit adapter
+maps runtime `DESKTOP_GONE` and `REFRESH_IN_PROGRESS` to `TOOL_UNAVAILABLE`; unknown codes reject.
+Observer JSON is never stamped as successful A1 processing/persistence measurement.
+
+The exact-window, owner-only DACL, reparse/exclusive-file, delete-on-close, DPI/extent and <=60-second
+private-image lease are retained. There is no OCR, retained-evidence repair or image-based gate clear.
+The root `scripts/probe_desktop_credential.ps1` accepts every old parameter set and **always** exits
+3 with fixed `VERDICT: UNKNOWN`: no observation or Refresh is performed and no arguments are echoed.
+The portable bundle contains the new Python/backend names and all four unchanged regex resources,
+not a dead arbiter forwarder.
+
+### Measured deletion census
+
+Same file sets and counting rules as §2, with the reviewed receipt/root-shim additions. Renames and
+moved safeguards earn **zero** deletion credit. Counts are physical lines and AST/named-PS functions;
+test counts are definitions, **not** parametrized executions or Windows passes.
+
+| Fixed census | Before | After | Net |
+|---|---:|---:|---:|
+| Product, 15 files: physical lines | 12,670 | 12,407 | -263 |
+| Product functions | 476 | 492 | +16 |
+| Direct + halo tests, 22 files: physical lines | 24,916 | 22,927 | -1,989 |
+| Test definitions | 873 | 821 | -52 |
+
+The demonstrated gross PS classifier/click/poll block is **449 lines**: old `:187-536` plus
+`:854-952`. The new contracts, lossless transport, helper settlement and caller adapters consume much
+of the saving. **The earlier 650–1,100 product-line estimate was not achieved**; it was an explicitly
+unverified hypothesis, not a measured result. The architectural reduction is two classifiers to one,
+one mutating PS arbiter to zero, and no caller-owned UI-text classifier. The operation-source parser,
+physical gate, source coverage, persistence, locks and private-image safeguards are not deleted.
+
+### Closed surface and limits
+
+The atomic surface remains **35 paths / 32 logical files / three renames**: the runtime/caller,
+receipt, root shim, bundled/root harness, two skill guides, scripts README, credential/gate/design/
+parallel-loop/index docs and workflow comment listed in the approved plan. Four regexes, root Python
+shims, credential gate/lift/probe construction and ABF/lock/verdict modules remain unchanged.
+
+Windows qualification uses **test-owned windows only**, including native ownership, same-PID/start/
+HWND controls, role/read-only provider guards and private GDI/ACL/PNG controls. Pure fixtures cover
+mixed/incomplete precedence, latches, late settlement, receipt compatibility and source/gate negatives.
+Copy-out runs remove host imports and require the backend/resources. Exact commands, execution
+counts, mutation outcomes and any baseline failures are recorded with the draft PR.
+
+Final targeted/caller/receipt/copy-out partition: **1,298 passed, three expected real-cache skips**.
+Quiet qualification: **eight timing/serial and six test-owned GUI controls passed**. All seven
+requested mutations passed their positive baseline and failed an executed assertion when broken.
+The full non-GUI partition ran to completion: **13,632 passed, 52 failed, 63 skipped**. It is not
+reported green. Four nested-pytest/conftest failures independently reproduce on 511bb209; other
+full-run residuals and the out-of-surface GUI census require owner reconciliation.
+
+Product ruff/pylint and navigation/capability/privacy/diff gates pass. The broad test-harness pylint
+command is not green: it already reports substantial import-resolution/style debt on approved base
+(7.92/10, exit 30); this slice does not waive or repair that unrelated debt to manufacture a clean run.
+
+No live Desktop, customer source, localization/MSHTML completeness, large real-report UIA latency,
+modern CLI behavior or blind-run-2 fidelity is certified by this slice. #146 policy, #498 MSHTML,
+#704/#709 retained-artifact transactions, #730 reload/processing policy and public CLI exposure remain
+separate. This implementation is **Refs #741**, not closure of its remaining qualification.

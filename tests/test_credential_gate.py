@@ -1432,7 +1432,7 @@ def test_refresh_timeout_is_not_final_no_credential(monkeypatch: pytest.MonkeyPa
     def raise_timeout(*_args, **_kwargs):  # noqa: ANN002, ANN003
         raise subprocess.TimeoutExpired(cmd="refresh", timeout=1)
 
-    monkeypatch.setattr(probe_live_source.subprocess, "run", raise_timeout)
+    monkeypatch.setattr(probe_live_source, "_run_refresh", raise_timeout)
 
     assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False) == (1, "ERROR")
     assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=True) == (

@@ -160,16 +160,10 @@ jobs:
   # "Windows only." That mismatch is not cosmetic - it makes the Linux job STRUCTURALLY incapable of
   # failing on this bundle's most important code path.
   #
-  # Why: `_credential_state` guards on `os.name != "nt"` and returns a bare `CredentialDetection()`
-  # off Windows. Every field of that defaults to None, which is byte-identical to the state a
-  # healthy, windowed, unblocked Power BI Desktop produces. So off Windows the detector does not
-  # report "I cannot inspect this" - it reports "everything is fine", and every caller believes it.
-  #
-  # Measured (issue #182, PR #168): 17 tests drove `main(["--pid", "111", ...])` against a pid that
-  # does not exist. On ubuntu-latest that read as healthy and CI went GREEN; on Windows the same
-  # tests produced a real `process_gone` detection and exited 1. CI was green on a branch that was
-  # red on every machine that can actually run the code, and only a human reproducing it locally
-  # found out.
+  # Historical issue #182: Linux once returned an empty healthy detection for unsupported native
+  # observation. #741 makes that explicitly UNREADABLE_DIALOG/unsupported. Portable fixtures supply
+  # explicit snapshots; this Windows job still qualifies the actual bounded Win32/UIA backend.
+  # Test-owned top-level windows remain opt-in GUI/serial, never live Desktop/customer sources.
   #
   # Deliberately scoped to the bundle's own tests, NOT the whole suite: this job exists to cover the
   # one platform the bundle runs on, not to duplicate the Linux gates on a slower runner. Measured

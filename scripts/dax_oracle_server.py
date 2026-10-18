@@ -162,23 +162,27 @@ def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[di
 
     # The root CLI lint pass cannot resolve the runtime-added skill path.
     # pylint: disable-next=import-outside-toplevel,import-error
-    from _credential_modal import print_dialog_diagnostic
+    from _desktop_observer import legacy_token, print_dialog_diagnostic
 
     connection = None
+    held_identity = None
 
     def refuse_nonclean_desktop() -> None:
+        nonlocal held_identity
         if pid is None:
             return
-        state = pdq._credential_state(pid)  # pylint: disable=protected-access,no-member
-        token, window = None, None
-        if state.modal is not None:
-            token, window = "CREDENTIAL_MISSING", state.modal.window
-        elif state.dialog is not None:
-            token, window = state.dialog.verdict, state.dialog.window
-        elif state.process_gone or state.desktop_unready or state.unknown_reason:
-            token = (
-                "DESKTOP_GONE" if state.process_gone else ("DESKTOP_UNREADY" if state.desktop_unready else "UNKNOWN")
-            )
+        identity = pdq.desktop_identity(pid, port)  # pylint: disable=no-member
+        if held_identity is None:
+            held_identity = identity
+        if identity != held_identity:
+            raise RuntimeError("Desktop query refused (PID_REUSED); source state unestablished")
+        state = pdq._credential_state(  # pylint: disable=protected-access,no-member
+            pid,
+            expected_process_start=held_identity.process_start,
+        )
+        token = legacy_token(state)
+        finding = state.modal or state.dialog
+        window = finding.window if finding else None
         if token is not None:
             if window is not None:
                 print_dialog_diagnostic(pid, window, stream=sys.stderr)
@@ -205,6 +209,8 @@ def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[di
             rows = []
             while reader.Read():
                 rows.append({c: _json_safe(reader.GetValue(i)) for i, c in enumerate(columns)})
+            if pid is not None and pdq.desktop_identity(pid, port) != held_identity:  # pylint: disable=no-member
+                raise RuntimeError("Desktop query refused (PID_REUSED); source state unestablished")
             return rows
         finally:
             reader.Close()

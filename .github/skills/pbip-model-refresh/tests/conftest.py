@@ -111,21 +111,24 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 # The path above must be in place before the skill's own modules import, hence the E402 waiver.
-from _credential_modal import CredentialDetection  # noqa: E402
+from _desktop_observer import Observation  # noqa: E402
 
 
-def _healthy_desktop(_pid: int, **_kwargs) -> CredentialDetection:
+def _healthy_desktop(_pid: int, **_kwargs) -> Observation:
     """The baseline every CLI test implicitly assumes: a Desktop that is up, windowed and unblocked.
 
     ``**_kwargs`` swallows ``probe_desktop_query._credential_state``'s keyword-only ``in_flight``
     (issue #376) so ONE stub still stands in for both entry points' signatures.
     """
-    return CredentialDetection()
+    return Observation(
+        pid=str(_pid),
+        process_started_at=_kwargs.get("expected_process_start") or "638963424000000001",
+    )
 
 
 # Read by `test_the_two_entry_points_get_an_explicit_desktop_state_baseline`, so the fixture below
 # cannot silently stop applying. Asserting on the RETURNED VALUE could not do that job: on Linux the
-# real `_credential_state` also returns a bare `CredentialDetection()`, so a value check is a test that
+# real `_credential_state` also returns a bare `Observation()`, so a value check is a test that
 # cannot fail on the one platform CI runs.
 _healthy_desktop.is_test_baseline = True
 
@@ -135,7 +138,7 @@ def healthy_desktop_state(monkeypatch: pytest.MonkeyPatch) -> None:
     """Give every test an EXPLICIT, platform-independent Desktop-inspection state.
 
     Without this, `_credential_state` is whatever the host OS makes it, because both entry points open
-    with ``if os.name != "nt": return CredentialDetection()``. A test that drives `main(["--pid","111"])`
+    with ``if os.name != "nt": return Observation()``. A test that drives `main(["--pid","111"])`
     without stubbing it therefore exercises *different code on different platforms*: a benign healthy
     state on Linux, and - since pid 111 does not exist - a real `process_gone` detection on Windows.
     Measured 2026-08-15: that split let 17 tests pass green on `ubuntu-latest` CI while failing on
@@ -143,14 +146,14 @@ def healthy_desktop_state(monkeypatch: pytest.MonkeyPatch) -> None:
     production change that started honouring `process_gone` at t=0.
 
     Removing the `os.name` guard instead would make it worse, not better: on Linux
-    `_enumerate_pid_windows_with_count` raises `Win32EnumerationError`, which `inspect_credential_modal`
+    `_enumerate_pid_windows_with_count` raises `Win32EnumerationError`, which `inspect_desktop_observer`
     converts to `unknown_reason`, so every un-stubbed CLI test would exit 3 there. The guard is what
     keeps the module importable off Windows; the defect was the tests' reliance on its return value.
 
     The seam this uses already existed - `_credential_state` is a module-level name, and
-    `inspect_credential_modal` takes injectable `enumerate_windows` / `process_is_alive` callables - so
+    `inspect_desktop_observer` takes injectable `enumerate_windows` / `process_is_alive` callables - so
     a test that wants the REAL detector logic on any platform composes it explicitly (see
-    `test_credential_modal_detection.py`'s injected-primitive tests). This fixture only fixes the
+    `test_desktop_observer.py`'s injected-primitive tests). This fixture only fixes the
     default. Any test needing another state overrides it with its own `monkeypatch.setattr`, which wins
     because the test body runs after this fixture.
     """

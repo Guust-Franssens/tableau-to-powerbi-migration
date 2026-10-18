@@ -25,16 +25,11 @@ so `dotnet add` cannot silently no-op on a net10 default:
   refuse a wrong-instance bind, and persist `cache.abf` (AMO `ImageSave`, UI-Automation fallback).
 - [**`scripts/probe_desktop_query.py`**](scripts/probe_desktop_query.py) - read-only preflight: port
   discovery, ADOMD loading, table listing, and the one-row DAX probe. `refresh_pbip_model.py`
-  imports from this file and from nothing else.
-- [**`scripts/probe_desktop_credential.ps1`**](scripts/probe_desktop_credential.ps1) - the arbiter a
-  refresh TIMEOUT names: a UI-Automation check for a data-source sign-in modal, so "slow" and
-  "blocked" are told apart by evidence, not guessed. Ships **inside** the bundle, so the instruction
-  the script prints at runtime resolves to a file that is actually here. **Only `CREDENTIAL_MISSING`
-  (exit 1) is the credential-specific hard stop**, because only it has positive authentication-specific
-  evidence; every other observation lands in the exit-3 band (`REFRESH_IN_PROGRESS` /
-  `DIALOG_NEEDS_HUMAN` / `DIALOG_UNRECOGNIZED` / `DIALOG_UNREADABLE` / `UNKNOWN`). Exit 3 is *not*
-  "nobody is needed": it means non-clean, and its tokens ask for a wait, an inspection, or the action
-  the visible prompt names — see the verdict table below.
+  shares the observation authority below with refresh.
+- [**`scripts/_desktop_observer.py`**](scripts/_desktop_observer.py) - the sole read-only classifier,
+  exact-identity observation supervisor, closed diagnostics and private short-lived image leases.
+- [**`scripts/_desktop_uia.ps1`**](scripts/_desktop_uia.ps1) - private bounded Win32/UIA fact harvest;
+  no policy, clicks, Refresh invocation or polling arbiter. It is not a user-facing command.
 - [**`tests/`**](tests) - the regression suite for both, runnable from this folder
   (`pytest tests`). It is what makes the portability claim below checkable rather than aspirational.
 
@@ -275,8 +270,7 @@ stay byte-identical.
 > and it was wrong: measured 2026-08-04 it fired on 2 of 5 Desktop instances opened on the *same*
 > bundle that refreshed cleanly on the other 3 (38.8 s on a good run, >87 s on a slow one, against a
 > 90 s ceiling — a ~3 s margin). It now reports `REFRESH: TIMEOUT` with the cause **UNKNOWN** and
-> names the arbiter (`scripts/probe_desktop_credential.ps1`, which **ships in this bundle** — the
-> script prints its absolute path at runtime so the instruction always points at a file that is here).
+> names the bundled row-query path (`scripts/probe_desktop_query.py`), not a mutating modal arbiter.
 >
 > **Timeouts are mode-specific.** The legacy `--no-progress` and
 > `--calculate-only` / `--measures-only` paths use a **300 s XMLA ceiling plus 30 s wall-clock grace**.
@@ -296,325 +290,41 @@ stay byte-identical.
 > read as harmless). In both cases a human must look at Desktop before the run proceeds. Check this
 > first before suspecting the bridge or filing an upstream defect.
 
-> ⚠️ **A big window is NOT evidence of a credential wall — the arbiter no longer says it is
-> (issue #367).** `probe_desktop_credential.ps1` used to decide "blocking" from geometry alone: any
-> visible non-main window >= 100x100 was returned as a blocking dialog and reported
-> `VERDICT: BLOCKED_BY_DIALOG`, **exit 1 — the same hard-stop band as a real credential wall**. A Power
-> BI Refresh progress dialog satisfies that trivially. Field report, 2026-08-28: running three
-> concurrent refreshes, the probe returned a blocking verdict for one unit; screenshotting the window
-> showed Power BI's own Refresh progress dialog, stalled behind a Snowflake warehouse cold start. A
-> false credential wall is expensive precisely *because* the toolkit treats a real one as a hard stop
-> that no retry may override.
->
-> It now classifies each candidate window from **what it says**, and only `CREDENTIAL_MISSING` reaches
-> exit 1:
->
-> | verdict | exit | what was actually observed |
-> |---|---|---|
-> | `CREDENTIAL_MISSING` | 1 | text matched `credential_modal_signature.regex`. The hard stop. |
-> | `CREDENTIAL_PRESENT` | 0 | a refresh was invoked and **no** credential prompt was detected before this probe's own deadline. A bounded observation, not proof of a cached credential, of a running refresh, or of a live Desktop — a process that dies mid-poll enumerates zero windows and lands here. Never the gate of record: confirm with the one-row data probe. |
-> | `REFRESH_IN_PROGRESS` | 3 | a dialog whose **whole content** positively reads as refresh progress was already up **at t=0**: another refresh owns this instance. Wait for it or cancel the stale one; do not stack a second refresh. |
-> | `DIALOG_NEEDS_HUMAN` | 3 | a **known** human-blocking prompt matched — the **native-database-query approval modal**, an approval request, or an `Authentication required` notice. Not exit 1, because the credential signature did not match; but the remedy is **not** established either, since that one signature spans an approval *and* an authentication notice. Act on the prompt visible in Desktop. Never suppressed, and it outranks any progress text in the same window. |
-> | `DIALOG_UNRECOGNIZED` | 3 | a dialog is up whose text matched **no** signature, **or** which shows progress text *alongside* prose that is not progress status. We read it and could not account for it, and the signature list is not exhaustive — so the credential state is **undetermined in both directions**. A human must look at the screen. |
-> | `DIALOG_UNREADABLE` | 3 | a dialog is up that could not be **shown to be harmless**: no text at all, or only a reassuring **caption**, or benign-looking content read from an **incomplete** harvest (truncated, timed out, or a pattern that threw). Its content was never established, so the credential state is **undetermined in both directions**. Deliberately distinct from `DIALOG_UNRECOGNIZED`: *absent is not empty*, and "we could not establish it" is a weaker state of knowledge than "we read it and it did not match". |
-> | `UNKNOWN` | 3 | no window for the pid, a minimized owner, or no Refresh control was ever invoked. |
->
-> **Which way it errs, and why.** A false *positive* here terminates at exit 1 and escalates to a
-> human, so nothing downstream ever runs. A false *negative* lands on `CREDENTIAL_PRESENT`, which the
-> repo already treats as untrustworthy on its own — `docs/data-source-credentials.md` records three
-> false `CREDENTIAL_PRESENT` results against a serverless warehouse, which is why the one-row data
-> probe is the gate of record. One direction has a backstop; the other does not. So this arbiter errs
-> **away from declaring a hard stop** — but never into silence: an unclassifiable dialog is *latched*
-> during the poll loop and reported at the deadline, so it can neither halt a healthy run nor be
-> erased by a quiet timeout.
->
-> Two supporting mechanisms:
-> - **Modality is used ONE WAY.** `IsWindowEnabled(GetWindow(hwnd, GW_OWNER))` returning true proves a
->   window blocks nothing, and exonerates it. The converse is not used: Power BI's refresh dialog also
->   disables its owner, so a disabled owner would convict the innocent. No owner at all reports `null`
->   — the test did not apply, which is not the same as passing it.
-> - **`scripts/benign_dialog_signature.regex`** is the progress vocabulary ("Evaluating", "N rows
->   loaded", "Waiting for other queries"). ⚠️ It is **inferred** from Power BI's refresh UI, not
->   captured from a live dialog, and it is deliberately not load-bearing: a miss only downgrades
->   `REFRESH_IN_PROGRESS` to `DIALOG_UNRECOGNIZED` — both exit 3. Only the progress token concludes
->   anything ("a refresh already owns this pid; wait or cancel"); `DIALOG_UNRECOGNIZED` concludes
->   nothing about the credential state in either direction. Keep its
->   alternatives narrow and anchored; a broad pattern here is the one way this file could hide a real
->   modal, and `test_the_benign_signature_can_never_shadow_a_credential_prompt` gates exactly that. If
->   you ever have a real progress dialog on screen, capture its exact text and tighten this file.
+### One read-only Desktop observer (#741)
 
-> ⚠️ **Win32 child-HWND text does NOT see inside a WPF dialog — and the burden of proof runs ONE WAY.**
-> WPF renders its entire visual tree into **one** HWND, so `EnumChildWindows` harvests nothing and only
-> the window **caption** survives. Two blind-review rounds on 2026-08-29 found two different silent
-> false negatives here, and the second was worse than the first:
->
-> | attempt | rule | how it broke |
-> |---|---|---|
-> | 1 | benign by **caption** | a WPF modal captioned `Refresh` whose content read `Enter your credentials` → suppressed → **`CREDENTIAL_PRESENT`, exit 0** |
-> | 2 | benign by caption **+ "we harvested some text"** | a `Cancel` button satisfied that. Beaten three ways: `TextPattern`-only content, content past the element cap, and a split defeated by an interposed element |
->
-> Round 2's root cause is the lesson: `ContentRead` was a **proxy** for *"we read the credential-bearing
-> content"*, and **no proxy can carry that weight**. A silent false negative on a hard stop is strictly
-> worse than the loud false positive #367 removed — and note the old size-only detector caught all of
-> this *by accident*, precisely because it never trusted text it had not read.
->
-> **The rule now: a dialog is suppressed only when we POSITIVELY READ benign CONTENT** — never because
-> we read *something* and the caption looked reassuring. Measured, same owned WPF modal:
->
-> | build | result |
-> |---|---|
-> | before | `refresh invoked: True` → *no credential modal within 12s* → **`CREDENTIAL_PRESENT`, exit 0** |
-> | now | `credential modal detected: 'Enter your credentials'` → **`CREDENTIAL_MISSING`, exit 1** |
->
-> Four mechanisms, each doing one job:
->
-> 1. **UIA harvest** — `Get-AutomationHarvest` reads `Name`, `ValuePattern` **and `TextPattern`** for
->    every candidate's descendants. `TextPattern` is not optional: a read-only `RichTextBox` with an
->    **empty `Name`** exposes its text only there. ⚠️ `LegacyIAccessiblePattern` is **not available** —
->    the type does not exist in the managed `System.Windows.Automation` API (verified; it is UIA-COM
->    only), so MSAA-bridged-only content is unreadable from here. That gap is survivable *only* because
->    completeness is never assumed.
-> 2. **`HarvestComplete`, and it must be a real Boolean.** Truncated by the element cap, timed out, or
->    any pattern read that threw → not complete → benign-looking content is reported
->    `DIALOG_UNREADABLE`, not suppressed. `-eq $true` is **coercive**: integer `1` and the string
->    `"true"` both passed it and both cleared a window in review. The test is
->    `($v -is [bool]) -and $v`.
-> 3. **A killable child process per harvest.** `FindAll` is a synchronous cross-process COM call —
->    `try/catch` cannot interrupt it and neither can a background thread. Measured against a modal
->    sleeping 120 s on its own UI thread: **6.2 s bounded vs 70.5 s in-process**, same verdict both
->    times. The defect was purely the budget, so only a *time* assertion can see it.
-> 4. **The prose join skips interactive elements.** WPF splits a sentence across elements, and an
->    interposed `Cancel` button between `Enter your` and `credentials` defeated a naive whole-window
->    join.
->
-> **The join stays asymmetric, on purpose.** The **credential** signature reads individual elements
-> *and* the prose join (maximum recall for the detector that convicts). The **benign** signature reads
-> individual **content** elements only — never the caption, never a join. Joining can manufacture a
-> phrase — two adjacent table names reading `Account` `Key` join to the signature `Account Key` — and
-> the direction matters: on the credential path that is a **loud** false stop a human resolves by
-> looking at the screen; on the benign path it would be a **silent** false clear.
->
-> **The net effect is deliberately conservative.** Every uncertainty — unread content, a truncated
-> harvest, a wedged provider, an unknown field type, prose nobody can explain — lands in the exit-3
-> band, which is loud and recoverable. A mostly-conservative arbiter with a narrow proven-benign path is
-> a better artifact than a clever one with a residual silent clear.
+`_desktop_observer.observe(pid, expected_process_start=<held exact UTC tick string>)` returns an
+immutable `desktop.observation.v1` snapshot; `watch` owns one invocation deadline, latches and helper
+settlement. PID/start/HWND/owner identities are lossless strings in JSON. `_desktop_uia.ps1` supplies
+bounded Win32 enumeration and role-bearing UIA facts only. Python owns all root/candidate selection,
+signatures, complete-template matching and precedence. No caller classifies UI text.
 
-> ⚠️ **One benign element must not account for a whole window — and the native-query modal is why.**
-> Round 3 of review found that the **first** content element matching the progress signature classified
-> the entire window, so `Evaluating` sitting beside
-> *"Permission is required to run this native database query"* was suppressed → **exit 0**. That prompt
-> is documented as a live hazard three sections below, and
-> `tests/test_credential_modal_detection.py` already treated it as blocking — the bundle would have
-> contradicted itself. Three changes, in order of how much they carry:
->
-> 1. **`scripts/blocking_prompt_signature.regex`** — known human-blocking prompts (native-query
->    approval, `Authentication required`). Matched **before** benign and **before** the enabled-owner
->    exoneration, and reported as **`DIALOG_NEEDS_HUMAN`, exit 3** — a human must act, but the token
->    does not establish *which* action, because that one signature spans an approval **and** an
->    authentication notice. It stays out of the exit-1 band whose documented meaning is *"sign in
->    once"*, and the human reads the prompt on screen.
-> 2. **The whole content is scanned before benign is concluded.** Progress text plus prose that is not
->    progress status is `mixed-content` → `DIALOG_UNRECOGNIZED`. The backstop for prompts in *neither*
->    signature was, at this round, a word count: a content element of **5+ words** that is not itself
->    recognised status vetoed suppression, while short data labels (`Orders`, `1,204 rows loaded`,
->    `Cancel`) did not. ⚠️ **That word count is history** — the length-amnesty finding below (PR #400
->    blind review, finding 5) replaced it with an enumerated chrome allowlist, because length is not
->    evidence.
-> 3. **The benign expressions are whole-element status patterns**, not substrings. `\bLoading data\b`
->    matched inside *"Loading data requires authentication"*. Every alternative is now anchored, so a
->    status word buried in a sentence is not a status.
->
-> ⚠️ **And validate the harvest child's payload, not just its JSON.** The parent computed
-> `(-not $p.Truncated) -and (-not $p.PatternsIncomplete)`. A missing property is `$null`, and
-> `-not $null` is `$true`, so a well-formed-but-schema-incomplete payload became `HarvestComplete`
-> **`$true`** — a *real Boolean*, which then sailed straight through the strict
-> `Test-HarvestComplete` guard because the coercion had already happened upstream of it. The child must
-> now exit 0, and both flags must **exist** and be actual Booleans. Items are still merged when they
-> parse (unread text only lowers credential recall), but `Complete` stays false.
->
-> **Notice the shape all three review rounds share: MISSING EVIDENCE READ AS GOOD EVIDENCE.** A caption
-> standing in for content; "we read something" standing in for "we read the thing that matters"; the
-> first benign element standing in for the whole window; a missing JSON property standing in for a
-> completed harvest. If you extend this probe — or write any other detector whose output can stop a
-> pipeline — that is the failure to look for first.
->
-> ✅ **The Python fast check now classifies too (issue #376).** `_credential_modal` had the same
-> size-only defect on a **more dangerous** path: `inspect_credential_modal` returned the first visible
-> non-main window >= 100x100 as a `blocking_dialog`, and `refresh_pbip_model.py` /
-> `probe_desktop_query.py` — **the gate of record** — printed `BLOCKED_BY_DIALOG` at **exit 1**, which
-> `probe_live_source` maps to `NO_CREDENTIAL` ("you may NOT build; a human must sign in; terminate the
-> run"). It now reads the window and speaks the **same vocabulary as the arbiter** — `CREDENTIAL_MISSING`
-> (exit 1, the only hard stop), `REFRESH_IN_PROGRESS` / `DIALOG_NEEDS_HUMAN` / `DIALOG_UNRECOGNIZED` /
-> `DIALOG_UNREADABLE` (all **exit 3**). `BLOCKED_BY_DIALOG` is **retired** from the Python path.
->
-> Measured before/after on the same synthesised windows, all 702x355 and non-main so size cannot
-> separate them:
->
-> | window | before | after |
-> |---|---|---|
-> | `Refresh` + `Evaluating...` | `BLOCKED_BY_DIALOG`, **exit 1** | `REFRESH_IN_PROGRESS`, exit 3 (and **ignored** while our own refresh is in flight) |
-> | `Please specify how to connect` | `CREDENTIAL_MISSING`, exit 1 | unchanged |
-> | native-query approval | `BLOCKED_BY_DIALOG`, **exit 1** | `DIALOG_NEEDS_HUMAN`, exit 3 |
-> | no text at all | `BLOCKED_BY_DIALOG`, exit 1 | `DIALOG_UNREADABLE`, exit 3 |
-> | `Save changes?` | `BLOCKED_BY_DIALOG`, exit 1 | `DIALOG_UNRECOGNIZED`, exit 3 |
-> | credential text in an **80x60** window | **no finding at all** | `CREDENTIAL_MISSING`, exit 1 |
->
-> That last row is the half nobody had noticed: the 100x100 filter gated the **hard stop** as well as
-> the classification, because `match_credential_modal` was fed only the size-filtered candidates. A
-> credential prompt in a smaller window produced **no finding at all** — a silent false negative on the
-> one verdict that matters most. It now scans **every window, any class, any size**, exactly as
-> `Test-CredentialModal` always has.
->
-> **Three deliberate divergences from the arbiter**, each because Win32 child-HWND text is strictly less
-> evidence than a UIA harvest. Do not "fix" them by copying the arbiter:
->
-> | arbiter mechanism | Python | why |
-> |---|---|---|
-> | prose **join** before the credential match | **not ported** | the join needs a control-type signal to skip an interposed `Cancel`; Win32 has none, so the only join available is the naive whole-window one the arbiter discarded — and a join can *manufacture* a phrase (`Account` + `Key` → `Account Key`). That error lands on the one verdict #376 says to err away from. Recall lost this way routes to `unrecognized`/`unreadable` (exit 3, loud), and the arbiter is the escalation path. |
-> | enabled-owner **exoneration** | **not ported** | it is a *suppression* path needing owner/enabled state this module does not harvest, and unverifiable here without a live Desktop. Omitting it costs one more exit 3. |
-> | `benign-unverified` (truncated harvest) | **not needed** | a text read that throws fails the whole enumeration (`Win32EnumerationError` → `unknown_reason`), so a partial read never reaches the classifier. |
->
-> **One asymmetry, and it is deliberate:** a proven-benign progress dialog is reported at **t=0**
-> (`REFRESH_IN_PROGRESS` — it is somebody else's refresh; do not stack a second on it) and **ignored**
-> once our own operation is in flight. Nothing else is ever ignored. In the bounded refresh wait a
-> dialog finding is **latched** rather than raised, so it cannot abort a refresh that may still finish;
-> in `probe_desktop_query`'s poll it is **acted on**, because that loop has no deadline of its own and
-> a latched dialog behind a wedged query would wait for ever.
->
-> **Downstream, honestly:** `probe_live_source` now recognises the dialog tokens **structurally**
-> (`scripts/_verdict_lines.py`'s `DIALOG_VERDICT_RE` → `classify_child_verdict`) and maps them to
-> **`ERROR`** — *"the probe itself could not run"*. `rc != 0`, the gate stays armed, and nothing claims
-> a credential wall we never observed.
->
-> ⚠️ **That structural step is load-bearing, not tidiness.** Blind review of PR #400 measured what
-> happened without it: the parent fell through to `CREDENTIAL_MARKERS`, an **unanchored scan of the
-> whole transcript**, so `DIALOG_NEEDS_HUMAN` quoting its own evidence excerpt `Authentication
-> required` — an alternative that genuinely lives in `blocking_prompt_signature.regex` — was relabelled
-> `NO_CREDENTIAL`. The parent contradicted the child on a single word and fired *"a human must sign in;
-> terminate the run"*. Adding the tokens to the **credential-stop** family instead would have been the
-> other wrong answer: it asserts the very wall the child says it did not see.
+| Observation | Existing operation adapter | Meaning |
+|---|---|---|
+| `READY` | no refusal | Complete observation, not operation success or source proof. |
+| `CREDENTIAL_REQUIRED` | `CREDENTIAL_MISSING` | Positive credential-specific evidence; a human acts locally. |
+| `HUMAN_ACTION_REQUIRED` | `DIALOG_NEEDS_HUMAN` | Act on the prompt visible in Desktop; the remedy is **not** established either. |
+| `REFRESH_IN_PROGRESS` | `REFRESH_IN_PROGRESS` | A bounded observation of progress; at preflight **do not stack** a refresh. |
+| `UNKNOWN_DIALOG` | `DIALOG_UNRECOGNIZED` | Read but unaccounted-for content; credential state **undetermined in both directions**. |
+| `UNREADABLE_DIALOG` | `DIALOG_UNREADABLE` | Content could not be established; credential state **undetermined in both directions**. |
+| `DESKTOP_SESSION_ERROR` / `NO_WINDOW` / `PROCESS_GONE` | `DESKTOP_UNREADY` / `DESKTOP_UNREADY` / `DESKTOP_GONE` | Local Desktop state, not a warehouse or credential diagnosis. |
 
-> ⚠️ **Blind review of PR #400 found the same defect class INSIDE the fix, four more times. Read this
-> before touching the classifier — three of the four were "we could not establish it" quietly becoming
-> "clean" again.**
->
-> | # | what collapsed into the clean bucket | fix |
-> |---|---|---|
-> | 5 | **A length heuristic stood in for evidence.** `MIN_PROMPT_WORDS = 5` excused every unmatched element under five words, so `Refresh` + `Evaluating...` + **`Please enter your password`** classified `benign` and was **suppressed entirely** in flight. `Password:` (two words) too. Neither matches `credential_modal_signature.regex`, so the prepass did not rescue them. **In that shape the fix was worse than the bug** — the repo's rule is that a credential modal is never worked around. | The amnesty is **gone**. Any content element that is not recognised progress status vetoes dismissal, unless it is in the **enumerated** `benign_chrome_signature.regex` (`Cancel`/`OK`/`Close`) — a positive claim about specific strings that carry no prompt, not a claim about their size. |
-> | 3 | **A geometry threshold stood in for harmlessness — the original defect, surviving inside its own fix.** `dialog_candidates` still rejected everything under 100x100, and the all-window credential prepass only rescued *known-signature* text. Measured: a visible **80x60** unreadable owned window beside a normal main window returned `modal=None, dialog=None, unknown_reason=None` — byte-identical to a healthy Desktop. | **No size test at all.** Every visible non-main window is classified. Two exclusions remain and both are positive claims: **zero-area** windows (they rasterise nothing, so they show a human nothing) and the named `HELPER_WINDOW_CLASSES`. |
-> | 4 | **A report title fabricated a hard stop.** The all-window prepass read the Desktop **main** window, caption and children, so a report legitimately named `Account Key` / `Personal Access Token` / `Databricks Client Credentials` produced `CREDENTIAL_MISSING` at exit 1. | The **identified main window** is excluded from the prepass — and only it. Every real dialog is still scanned at every size and in every class, so an unusual modal class stays detectable. ⚠️ Helper windows are excluded from *classification* but **not** from the prepass: Power BI's AAD sign-in renders in the `Internet Explorer_Hidden` web view, so credential text really can appear there. |
-> | 1 | **Production bypassed the semantics the tests were checking.** `_join_refresh_worker` overrode `join_with_credential_poll`'s in-flight default with the t=0 `_credential_state`, the progress-monitor branch called the t=0 **raise** helper, and the final timeout check repeated it — so a proven-benign progress dialog **stopped the refresh it belonged to**. Measured in both branches: `DialogFoundError(REFRESH_IN_PROGRESS)` on the first poll, with the detector receiving **no `in_flight` argument at all**. The existing test asserted the *helper's* default identity, which production overrode: a test passing for the wrong reason. | Both wait branches and the final check use `_in_flight_credential_state`, and the progress branch latches through the shared `raise_latched_verdict` instead of raising at t=0 semantics. Its latches used to be computed and **discarded**, so it always degraded to a bare `TimeoutError`. The test now asserts on **production's call site** — the argument the detector actually receives. |
->
-> **The through-line, and the rule that comes out of it:** a fix that adds a *suppression* path has to
-> make its positive claim actually positive. "Short", "big enough", "we read something", "the caption
-> looked fine" are all the same mistake wearing different clothes.
+`NATIVE_QUERY_APPROVAL` is reserved; the broad existing prompt signature cannot establish that
+specific remedy. Positive prompts outrank progress; incomplete/unknown evidence is latched and cannot
+be erased by later quiet polls. Whole-template diagnostics use the original harvest, not a second
+read. Name/readonly TextPattern are read; editable/password values are excluded. Short unknown prose
+has no amnesty (#406 remains closed). Ambiguous roots exclude nothing; enabled-owner and unowned
+zero-area exclusions retain their one-way evidence rules.
 
-> ⚠️ **Round 3 killed three PROXIES at once — blocking is now decided from MODALITY. Read this before
-> adding any exclusion.** The round-2 fix replaced one unsound proxy (size) with three more — a class
-> prefix, zero area, and a helper-class name allowlist — and the reviewer defeated **all three** with
-> native Win32 experiments. They are the same mistake: answering *"is this window blocking a human?"*
-> by looking at something else.
->
-> | proxy | native repro that defeated it | now |
-> |---|---|---|
-> | `Internet Explorer_Hidden` **name** allowlist | a visible **900×700** host reading `Password:` / `Sign in` / `Continue?` — or nothing at all — returned `modal=None, dialog=None, unknown=None`. Keeping it in the *prepass* only ever rescued **exact signature matches**. | no name is consulted anywhere |
-> | `WindowsForms10.Window.8` **class prefix** | that prefix names a WinForms **family**, not one HWND: an owner **and its owned `FixedDialog`** both reported the exact class `WindowsForms10.Window.8.app.0.2b2196a_r3_ad1`. A real credential dialog was removed from the prepass *and* from classification. | the frame is identified by **ownership** |
-> | **zero area** | a real `WS_VISIBLE` **owned 0×0** window built with `CreateWindowEx`, owner disabled: `owned-visible=True owner-win32-enabled=False rect=0x0`. Genuinely blocking, and on the unbounded query-poll path suppressing it is a false clear **that is also a hang**. | zero area suppresses only **conjoined with unowned** |
->
-> **Win32 answers the question directly, so it is asked directly: a modal disables its owner.**
-> `DesktopWindow` now carries `owner_hwnd` (`GetWindow(GW_OWNER)`) and a **three-valued**
-> `owner_enabled` (`IsWindowEnabled(owner)`), and exactly three things are excluded from
-> classification, each a positive claim:
->
-> | exclusion | the claim it makes |
-> |---|---|
-> | `main_frame(...)` | it is the application, and the thing dialogs block. Identity is **enumerated, not inferred**: every rendering unowned window is a possible root, as is the **unowned root of any ownership chain** (walked transitively). **Ambiguity fails closed**: two or more possible roots, or a chain that cannot be resolved, returns `None`, which excludes nothing. |
-> | `is_proven_non_blocking(...)` | an **enabled owner** proves this window blocks nothing. One-way: a *disabled* owner never convicts (Power BI's own refresh dialog disables it too) and `None` — no owner — means the test **did not apply**, which is not the same as passing it. |
-> | `renders_nothing(...)` | **unowned AND zero-area**: no owner to disable *and* no pixels to display. Both conjuncts are required; either alone is one of the dead proxies. |
->
-> ⚠️ **Round 4: "first owner" was itself a proxy for "the root", and it hid a credential modal.** The
-> traversal originally stopped at the first ownership edge. An owned window can own another popup, so a
-> Z-order of **`tooltip → credential dialog → frame`** made the *credential dialog* the frame — and the
-> frame is excluded from the prepass **and** from classification, so the modal vanished. Three native
-> reproductions, all missing it:
->
-> | construction | before |
-> |---|---|
-> | nested chain `tooltip → credential dialog → frame` | frame = the `#32770` credential dialog; **no modal** |
-> | unowned `Internet Explorer_Hidden` ahead of the real frame, reading `Enter your credentials` | selected as the frame; prepass skipped it; **no modal** |
-> | that misidentified dialog owning an *enabled* tooltip, frame busy with benign refresh content, `operation_in_flight=True` | **no modal, no dialog finding, no unknown state** |
->
-> **Two rules came out of it, and both are load-bearing.** Follow ownership *transitively*; and where
-> identity is **ambiguous, fail closed** — return `None` and exclude nothing. The cost of failing
-> closed is a loud exit 3; the cost of guessing is a real modal disappearing.
->
-> ⚠️ **Round 5: transitive ownership was still an INFERENCE, and the fourth topology defeated it.**
-> Round 4's traversal collected only the roots reachable *through ownership chains*, so an **unowned**
-> credential host that happened to own one **enabled tooltip** became the sole collected root — and was
-> crowned the application. Measured, with our own refresh in flight:
->
-> | window | what it exposed |
-> |---|---|
-> | real unowned frame | `Refresh`, `Evaluating...` — suppressed as our own progress, in flight |
-> | unowned `Internet Explorer_Hidden` | `Enter your credentials` — **excluded as "the frame"** |
-> | enabled tooltip owned by that host | the only owned window, so the only ownership root was its owner |
->
-> → `modal=None dialog=None unknown_reason=None desktop_unready=None process_gone=None`. A false clean
-> on the gate of record. **So identity is now ENUMERATED**: every rendering unowned window is a
-> possible root *alongside* every ownership root, and an ownership-derived root gets no priority —
-> a root reached through a tooltip is not better evidence than a window sitting there rendering pixels.
-> Exactly one possible root identifies the frame; anything else returns `None` and excludes nothing.
->
-> ⚠️ **There is no authority to ask — MEASURED, not assumed.** `Process.MainWindowHandle` looks like
-> independent evidence and is not: .NET's `ProcessManager.MainWindowFinder` runs `EnumWindows` and
-> stops at the **first visible, unowned window** of the pid — `main_frame`'s own fallback convention,
-> in another process, *without* the `renders_nothing` guard. Measured natively against real
-> `CreateWindowExW` windows:
->
-> | experiment | what the authority returned |
-> |---|---|
-> | round 5's topology, 6 runs | the **credential host** in 5, the real frame in 1 — wrong *and* unstable |
-> | an unowned **0×0** window created last | the **0×0 window**, which can show a human nothing |
-> | raise either window to `HWND_TOPMOST` in turn | the answer **follows Z-order** — same window set, two answers |
-> | the classic shape: a genuinely **owned** modal | the real frame ✅ — but the ownership walk already agrees there, so it adds nothing |
->
-> It is therefore never consulted: as primary evidence it re-crowns the credential host, and as a
-> tie-breaker it lets a hidden 0×0 helper unseat the real frame on a healthy Desktop.
-> `test_the_process_main_window_handle_is_a_z_order_answer_not_an_identity` pins the measurement so a
-> future .NET change is noticed rather than assumed.
->
-> **What excluding nothing costs, stated plainly:** a spurious `DIALOG_UNRECOGNIZED` (exit 3) on the
-> real frame — or, for a report titled like a prompt, a spurious `CREDENTIAL_MISSING` (exit 1). Both
-> are loud: somebody looks at the screen and sees no dialog. Excluding the *wrong* window is silent,
-> and produces a finished model for a source nobody reached.
->
-> The arbiter's one-way enabled-owner exoneration is therefore **ported**, not skipped — that
-> divergence note in the module docstring is gone.
->
-> ✅ **Proven against real windows, not just dataclasses.**
-> `test_the_win32_harvest_reads_real_ownership_and_owner_enabled_state` builds the reviewer's own
-> reproduction with `CreateWindowEx` in the test process and asserts the production harvest reads
-> `owner_hwnd`/`owner_enabled` from Win32 — every synthesised-window test passes a mutation that
-> hard-codes those fields, so only a native one can see it. ⚠️ Set ctypes **argtypes/restype**
-> explicitly if you extend it: an untyped `GetModuleHandleW` truncates the 64-bit `HINSTANCE` and
-> `RegisterClassW` then faults — a `faulthandler` access-violation dump on a test that still reported
-> a pass. That is the same rule `_configure_user32` states in production.
+Queries refuse immediately and publish results only after all started observation helpers have
+settled. Refresh retains nonterminal uncertainty while its own operation may finish. The single
+absolute deadline includes native startup/IPC; only owned helpers are killed/reaped. Non-Windows
+observation is explicitly unreadable/unsupported, never an empty healthy state. Optional exact-window
+images keep the private <=60-second lease and cannot change observation, row or gate outcomes.
 
-> ✅ **Length amnesty, current state: the arbiter has none, and issue #406 is closed.**
-> `probe_desktop_credential.ps1` once carried the same five-word amnesty the Python detector did — the
-> measured shape was `Refresh` + `Evaluating` + `Please enter your password` → `benign` →
-> `REFRESH_IN_PROGRESS`, and suppressed to `$null` under `-RefreshInFlight`; `Password:` likewise. It
-> was filed rather than fixed in passing (the precedent that created #376), and it has since been
-> removed: short unknown text now vetoes suppression, and the **enumerated** chrome allowlist is the
-> only exemption. Do not re-add a size or length test on either side.
->
-> **Reachability, stated rather than hidden.** Removing the amnesty costs the detector its
-> `benign` path whenever a dialog exposes a table name as child text (`Orders` is not progress status
-> and not chrome, so it vetoes). That is the sanctioned trade: `benign` is used only to avoid aborting
-> **our own** in-flight operation, so losing it costs extra **exit 3**s, never a silent clear.
-> ⚠️ Unobserved in this corpus whether Power BI's real refresh dialog exposes table names as child
-> HWNDs — no Desktop was available. If it does, expect `DIALOG_UNRECOGNIZED` where you hoped for
-> `REFRESH_IN_PROGRESS`; that is loud and recoverable, and it is the direction this bundle errs in.
+The old standalone `probe_desktop_credential.ps1` arbiter is retired. The source repo's root shim
+accepts every legacy parameter set but always returns fixed `VERDICT: UNKNOWN`, exit 3, with no
+observation or Refresh. No `CREDENTIAL_PRESENT` remains in runtime. Use the existing Python
+refresh/query entry points, then inspect the held Desktop locally when they refuse.
 
 > ⚠️ **Do not wait blindly for `NO_BRIDGE` / `not_connected` — bound the bridge wait, then prove the
 > executable by PID.** Field report, 2026-08-18, two machines: a box with two Desktop versions
@@ -679,10 +389,10 @@ stay byte-identical.
 > Options UI, export again, diff. On MSIX, set it through the UI once per agent profile.
 >
 > **If the probe or a refresh stalls on a custom-SQL source, check for this modal before concluding
-> anything about credentials.** ✅ **Both detectors now classify it by name.**
+> anything about credentials.** ✅ **The shared observer reports the broad positive prompt.**
 > `scripts/blocking_prompt_signature.regex` recognises `native database quer(y|ies)` /
-> `requires your approval`, and both `probe_desktop_credential.ps1` (issue #367) and the Python
-> `_credential_modal.classify_dialog` (issue #376) report **`DIALOG_NEEDS_HUMAN`, exit 3** — checked
+> `requires your approval`, and the sole Python
+> `_desktop_observer.classify_dialog` authority reports **`DIALOG_NEEDS_HUMAN`, exit 3** — checked
 > *before* the progress signature, so a refresh dialog in the same window cannot suppress it. Round 3
 > of #367's review found exactly that suppression and it exited 0; see the verdict table above.
 > Until #376 the Python path reported this as `BLOCKED_BY_DIALOG` at exit 1, i.e. as a sign-in wall,
@@ -925,9 +635,9 @@ one instance that is running".
 ## Reusing this in another migration repo
 
 Nothing here is Tableau-specific, the input is already a Power BI model. **Copy this folder.**
-`SKILL.md`, the two Python scripts it runs, the `probe_desktop_credential.ps1` arbiter they name at
-runtime, and the tests that gate them are one unit: the scripts import only each other, name the
-arbiter by their own bundled path, and `tests/conftest.py` resolves them at `../scripts`, so the
+`SKILL.md`, the query/refresh scripts, `_desktop_observer.py`, `_desktop_uia.ps1`, four regex resources
+and bundled tests are one portable unit. The Python siblings import no host-repo modules;
+`tests/conftest.py` resolves them at `../scripts`, so the
 suite — and every runtime instruction the scripts print — runs from wherever the folder lands. Drop
 it in the target repo's skill location (`.github/skills/`) or promote it to a global one such as
 `~/.copilot/skills/`, then prove the copy on the spot:

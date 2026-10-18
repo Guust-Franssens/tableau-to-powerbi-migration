@@ -13,6 +13,22 @@ so these public names are load-bearing.
 from __future__ import annotations
 
 import re
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / ".github" / "skills" / "pbip-model-refresh" / "scripts"))
+# pylint: disable=wrong-import-position,import-error
+from _desktop_observer import observation_refusal_events  # noqa: E402
+
+
+def observation_refusal(text: str) -> str | None:
+    """Observer events explain refusals, never rows or operation success."""
+    return observation_refusal_events(
+        line.removeprefix("DESKTOP_OBSERVATION ")
+        for line in text.splitlines()
+        if line.startswith("DESKTOP_OBSERVATION ")
+    )
+
 
 # The child (`refresh_pbip_model.py` / `probe_desktop_query.py`) speaks in machine-readable verdict
 # LINES: `REFRESH:`/`PREFLIGHT:`/`PROBE:` followed by a token. These regexes match those lines
@@ -89,7 +105,7 @@ def _has_credential_stop_verdict(text: str) -> bool:
     line - never a substring of the transcript. Issue #153: the child's own reassuring "no blocking
     dialog" banner used to name these tokens in prose, and an unanchored scan let that message classify
     a successful refresh as ``NO_CREDENTIAL``. This is the structural half of the fix; the banner reword
-    (``_credential_modal.print_refresh_banner``) is the belt-and-braces half.
+    (``_desktop_observer.print_refresh_banner``) is the belt-and-braces half.
     """
     return any(CREDENTIAL_STOP_VERDICT_RE.match(line) for line in text.splitlines())
 
@@ -155,6 +171,7 @@ def _has_timeout_verdict(text: str) -> bool:
 # earn a clear, whatever else its transcript says. Kept as one list so a new verdict family is wired
 # into the success gate by adding it here, not by lengthening a boolean chain someone has to read.
 NON_SUCCESS_VERDICT_CHECKS = (
+    observation_refusal,
     _has_credential_stop_verdict,
     _has_desktop_gone_verdict,
     _has_desktop_unready_verdict,
@@ -196,6 +213,12 @@ def classify_child_verdict(text: str, raw: str) -> tuple[str, str] | None:
     # branch is precisely the defect this function was corrected for. Same waiver, same reason, as
     # `probe_live_source._classify_failure`.
     # pylint: disable=too-many-return-statements
+    observed = observation_refusal(text)
+    if observed is not None:
+        return (
+            "NO_CREDENTIAL" if observed == "CREDENTIAL_MISSING" else "ERROR",
+            f"Desktop observation refused ({observed}); source state remains unestablished.",
+        )
     if _has_desktop_gone_verdict(text):
         return (
             "ERROR",
@@ -254,7 +277,7 @@ def classify_child_verdict(text: str, raw: str) -> tuple[str, str] | None:
             "the refresh timed out at the child's own deadline. The child could not distinguish a "
             "slow source from a blocked credential modal - its diagnostic prose names both hypotheses "
             "but has confirmed neither. Do not classify this as NO_CREDENTIAL without positive "
-            "evidence of a sign-in prompt. Run the arbiter (probe_desktop_credential.ps1) to settle "
+            "evidence of a sign-in prompt. Inspect the held Desktop locally, then re-run the one-row query to settle "
             "it. Raw: " + raw,
         )
     return None

@@ -39,6 +39,20 @@ SECOND = "page-trend"
 PID = 1234
 
 
+@pytest.fixture(autouse=True)
+def offline_desktop_observation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Receipt tests own synthetic process identities; never inspect an unrelated real PID."""
+    from _desktop_observer import Observation  # pylint: disable=import-outside-toplevel,import-error
+
+    monkeypatch.setattr(
+        capture,
+        "observe",
+        lambda pid, **kwargs: Observation(
+            pid=str(pid), process_started_at=kwargs.get("expected_process_start") or "100"
+        ),
+    )
+
+
 def write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
@@ -1484,3 +1498,22 @@ def test_cli_has_no_numeric_request_or_supplied_operand_route(option: str) -> No
     with pytest.raises(SystemExit) as caught:
         capture.parse_args(["iterate", "--package", "unit", "--pid", str(PID), option, "supplied"])
     assert caught.value.code == capture.EXIT_USAGE
+
+
+@pytest.mark.parametrize("code", receipt.MEASUREMENT_REFUSALS)
+def test_observer_adapter_preserves_literal_receipt_refusal_vocabulary(code: str) -> None:
+    """The trusted runtime adapter does not widen or rewrite persisted v2/v3 refusal enums."""
+    assert receipt.observer_measurement_refusal(code) == code
+
+
+@pytest.mark.parametrize("code", ["DESKTOP_GONE", "REFRESH_IN_PROGRESS"])
+def test_new_runtime_codes_have_explicit_backward_receipt_mapping(code: str) -> None:
+    """Only explicitly adapted runtime codes enter the unchanged receipt vocabulary."""
+    assert receipt.observer_measurement_refusal(code) == "TOOL_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("code", ["READY", "DATA_OK", "UNKNOWN_NEW_CODE"])
+def test_unknown_or_success_observer_codes_are_not_receipt_refusals(code: str) -> None:
+    """Success and unknown codes cannot be silently stamped as measurement refusals."""
+    with pytest.raises(ValueError):
+        receipt.observer_measurement_refusal(code)

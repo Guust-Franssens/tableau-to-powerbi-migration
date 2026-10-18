@@ -151,8 +151,8 @@ from _verdict import (  # noqa: F401  # pylint: disable=unused-import
     _emit_data_verdict,
     derive_data_verdict,
 )
-from _credential_modal import (
-    CredentialDetection,
+from _desktop_observer import (
+    Observation,
     CredentialMissingError,
     CredentialModal,
     CredentialUnknownError,
@@ -161,18 +161,15 @@ from _credential_modal import (
     DialogFinding,
     DialogFoundError,
     ModalVisualEvidence,
-    describe_dialog_finding,
-    describe_modal,
-    dialog_guidance,
-    inspect_credential_modal,
+    observe,
+    emit_observation,
     join_with_credential_poll,
-    print_dialog_observed_notice,
-    print_dialog_diagnostic,
-    print_indeterminate_state_notice,
     print_refresh_banner,
+    print_refresh_heartbeat,
     print_refresh_unknown_banner,
-    raise_latched_verdict,
     raise_terminal_detection,
+    print_operation_refusal,
+    POLL_INTERVAL_SECONDS,
     source_hint_from_model,
 )
 
@@ -231,7 +228,7 @@ REFRESH_ABSOLUTE_TIMEOUT_SECONDS = 3600.0
 # wall-clock abort. The outer bound only exists to catch the case XMLA provably cannot interrupt:
 # a mashup engine parked on a sign-in modal in another process.
 REFRESH_WALL_CLOCK_GRACE_SECONDS = 30
-REFRESH_CREDENTIAL_POLL_SECONDS = 5.0
+REFRESH_CREDENTIAL_POLL_SECONDS = POLL_INTERVAL_SECONDS
 REFRESH_HEARTBEAT_SECONDS = 30.0
 
 # A TMDL table declaration sits at column 0 of `definition/tables/<Name>.tmdl`; the name is quoted
@@ -250,136 +247,77 @@ GENERATED_EDIT_DECLARATIONS_DIR = Path("_build") / "generated-edit-declarations"
 # The credential arbiter that settles a refresh TIMEOUT (slow source vs. sign-in modal). Resolved
 # relative to THIS file so the runtime recovery instruction always points at the copy that ships
 # INSIDE the bundle - it must not name a path that only exists in the host repo (issue #118).
-CREDENTIAL_PROBE = Path(__file__).resolve().parent / "probe_desktop_credential.ps1"
+CREDENTIAL_PROBE = Path(__file__).resolve().parent / "probe_desktop_query.py"
 
 
-def _credential_state(pid: int, *, in_flight: bool = False) -> CredentialDetection:
-    """Return the credential-modal inspection state for ``pid``.
+def _credential_state(
+    pid: int,
+    *,
+    in_flight: bool = False,
+    expected_process_start: str | None = None,
+    timeout_s: float = 8.0,
+) -> Observation:
+    """Return one factual snapshot; in-flight progress policy belongs to the caller."""
+    # Phase remains with the caller; the shared observer never suppresses factual progress.
+    # pylint: disable=unused-argument
+    state = observe(pid, expected_process_start=expected_process_start, timeout_s=timeout_s)
+    emit_observation(state)
+    return state
 
-    ``in_flight`` is set for every poll that runs AFTER this process started the refresh it is waiting
-    on: there a positively-read progress dialog is our own, and aborting on it aborts a healthy run.
-    Only ``benign`` is affected; everything else still surfaces.
-    """
-    if os.name != "nt":
-        return CredentialDetection()
-    return inspect_credential_modal(pid, operation_in_flight=in_flight)
 
-
-def _in_flight_credential_state(pid: int) -> CredentialDetection:
+def _in_flight_credential_state(
+    pid: int,
+    *,
+    expected_process_start: str | None = None,
+    timeout_s: float = 8.0,
+) -> Observation:
     """Single-argument in-flight detector for the two wait loops (#376 review, finding 1).
 
     Deliberately looks ``_credential_state`` up through the module global on every call, so a test that
     monkeypatches ``_credential_state`` still takes effect through this indirection - and so production
     and the tests exercise one function rather than two.
     """
-    return _credential_state(pid, in_flight=True)
+    return _credential_state(
+        pid,
+        in_flight=True,
+        expected_process_start=expected_process_start,
+        timeout_s=timeout_s,
+    )
 
 
-def _raise_if_blocked(pid: int, state: CredentialDetection, source_hint: str | None = None) -> None:
-    """Raise the appropriate exception for a t=0 observation that must stop the run before it starts.
-
-    Unlike the in-flight poll (``_credential_modal._raise_detection``), a :class:`DialogFinding` DOES
-    raise here: at t=0 the dialog is somebody else's, we have not started anything, and stacking a
-    refresh on top of an unclassified dialog is exactly what the 2026-08-28 field report had to unpick
-    by hand. Mid-wait the same finding is latched instead, so it cannot abort a refresh already running.
-    """
-    if state.modal is not None:
-        raise CredentialMissingError(pid, state.modal, source_hint)
+def _raise_if_blocked(pid: int, state: Observation, source_hint: str | None = None) -> None:
+    """Preflight refuses every dialog; in-flight waits latch only nonterminal uncertainty."""
+    raise_terminal_detection(pid, state, source_hint)
     if state.dialog is not None:
         raise DialogFoundError(pid, state.dialog)
-    if state.process_gone is not None:
-        raise DesktopGoneError(pid, state.process_gone)
 
 
 def _emit_credential_missing(pid: int, modal: CredentialModal, source_hint: str | None = None) -> None:
-    """Print the distinct credential verdict."""
-    print(f"REFRESH: CREDENTIAL_MISSING pid={pid}; {describe_modal(modal, source_hint)}")
+    """Emit a closed positive-prompt operation refusal, never private provider/source text."""
+    # pylint: disable=unused-argument
+    print_operation_refusal("REFRESH", pid, "CREDENTIAL_MISSING")
 
 
 def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
-    """Print the verdict for a dialog that could NOT be shown to be harmless (issue #376).
-
-    Replaces ``_emit_blocked_by_dialog``. The token now names what was actually observed -
-    ``DIALOG_NEEDS_HUMAN`` / ``DIALOG_UNREADABLE`` / ``DIALOG_UNRECOGNIZED`` / ``REFRESH_IN_PROGRESS``,
-    the same vocabulary ``probe_desktop_credential.ps1`` speaks - instead of ``BLOCKED_BY_DIALOG``,
-    which this module emitted at exit 1 from a SIZE-ONLY test and which the parent classifier maps to
-    ``NO_CREDENTIAL``. Nothing here can establish that a dialog blocks a DATA SOURCE, so nothing here
-    may enter the credential hard-stop band; all of these are exit 3.
-
-    Exit 3 does not make them equivalent: ``DIALOG_NEEDS_HUMAN`` matched a known human-blocking prompt
-    (which action it needs is decided by the visible prompt, not by the token) and ``REFRESH_IN_PROGRESS``
-    positively read a refresh already running on this pid - wait or cancel, never stack. The unreadable
-    and unrecognized tokens are the uncertain pair: they rule a sign-in prompt neither in nor out.
-
-    Both lines are deliberately MARKER-FREE (issue #153): a failing child's whole transcript is scanned
-    as free text by ``probe_live_source``, so prose naming a sign-on problem would re-create exactly
-    the false hard stop this verdict exists to avoid.
-    """
-    print(f"REFRESH: {finding.verdict} pid={pid}; {describe_dialog_finding(finding)}")
-    print_dialog_diagnostic(pid, finding.window)
-    print(f"  {dialog_guidance(finding)}")
+    """Keep the CLI seam; formatting and same-snapshot diagnostics have one authority."""
+    print_operation_refusal("REFRESH", pid, finding.verdict, finding=finding)
 
 
 def _emit_credential_unknown(pid: int, reason: str) -> None:
-    """Print the distinct indeterminate verdict for a latched, unrecoverable UNKNOWN (issue #154).
-
-    ``CREDENTIAL_UNKNOWN`` is a THIRD verdict, deliberately not collapsed into a dialog finding
-    (we did not SEE a dialog) nor into a bare ``TIMEOUT`` (we did not observe a healthy source): the
-    owner window went iconic, hiding its owned modal dialogs, and that evidence provably does not come
-    back. ``reason`` is the detector's marker-free string, and the guidance below is marker-free too,
-    so the classification is carried STRUCTURALLY by the ``REFRESH: CREDENTIAL_UNKNOWN`` verdict line
-    (matched by ``probe_live_source.CREDENTIAL_STOP_VERDICT_RE``), never by prose (issue #153).
-    """
-    print(f"REFRESH: CREDENTIAL_UNKNOWN pid={pid}; {reason}")
-    print(
-        "  This run stayed indeterminate to the deadline: the owner window was iconic at least once,\n"
-        "  which hides its owned modal dialogs from enumeration, and that evidence does not return when\n"
-        "  the window is restored. This is NOT a slow source - do not simply wait or retry longer.\n"
-        "  SETTLE IT - restore the Power BI Desktop window, complete whatever dialog it is showing, and\n"
-        "  run the arbiter that ships beside this script rather than guessing:\n"
-        f'    powershell -File "{CREDENTIAL_PROBE}" -DesktopPid {pid}'
-    )
+    """Retain the existing deadline-uncertainty token without inventing its cause."""
+    # pylint: disable=unused-argument
+    print_operation_refusal("REFRESH", pid, "CREDENTIAL_UNKNOWN")
 
 
 def _emit_desktop_gone(pid: int, reason: str) -> None:
-    """Print the distinct terminal verdict for a Power BI Desktop that has exited/crashed (issue #158).
-
-    ``DESKTOP_GONE`` is a DEFINITIVE local-environment failure, not a fact about the data source: the
-    tracked process enumerated zero windows and is no longer running, so the probe never got to observe
-    the source at all. It must never degrade to a slow-source timeout. It is also distinct from
-    ``DESKTOP_UNREADY`` (zero windows while the process is still ALIVE - starting up or wedged, so it
-    may yet recover) and from ``CREDENTIAL_UNKNOWN`` (a minimized owner window, whose hidden owned
-    dialogs make the credential state indeterminate).
-    ``reason`` is the detector's marker-free string and the guidance below is marker-free too, so the
-    parent classifier keys on the ``REFRESH: DESKTOP_GONE`` verdict line, never on prose (issue #153).
-    """
-    print(f"REFRESH: DESKTOP_GONE pid={pid}; {reason}")
-    print(
-        "  Power BI Desktop is no longer running: it enumerated zero windows and the process id is\n"
-        "  gone, so this probe never reached the data source. Do NOT report this as a slow or broken\n"
-        "  source - the source was never contacted. Re-open the model in Power BI Desktop, confirm it\n"
-        "  is running, and re-run the probe against the new process id."
-    )
+    """Local process failure is not a source conclusion; never reflect supplied prose."""
+    # pylint: disable=unused-argument
+    print_operation_refusal("REFRESH", pid, "DESKTOP_GONE")
 
 
 def _emit_desktop_unready(pid: int, reason: str) -> None:
-    """Print the terminal local-error verdict for an ALIVE Desktop that owns no window (issue #158).
-
-    A live, working Desktop always owns at least its main window, so zero windows plus a live process
-    means it is starting up or wedged: its dialog state cannot be read, and nothing was learned about
-    the data source. It is emitted as its own ``DESKTOP_UNREADY`` verdict, at the ERROR-family exit 2,
-    for two reasons. It is not ``CREDENTIAL_UNKNOWN`` (exit 3), because no human sign-in fixes a
-    window-less process and that verdict would route the run to the credential layer. It is not
-    ``DESKTOP_GONE``, because the process may still recover. ``reason`` is the detector's marker-free
-    string and the guidance below is marker-free too, so the parent classifier keys on the
-    ``REFRESH: DESKTOP_UNREADY`` verdict line, never on prose (issue #153).
-    """
-    print(f"REFRESH: DESKTOP_UNREADY pid={pid}; {reason}")
-    print(
-        "  Power BI Desktop is running but has no window, so this probe cannot inspect its local state.\n"
-        "  Wait for Desktop to finish starting, or restart it if it is wedged, then re-run the probe.\n"
-        "  The data source was not tested; do not report this as a source or sign-in problem."
-    )
+    """Use the shared local window/session diagnostic, retaining the caller's exit band."""
+    print_operation_refusal("REFRESH", pid, "DESKTOP_UNREADY", reason=reason)
 
 
 def _catalog_id(conn) -> str:
@@ -401,18 +339,26 @@ def _join_refresh_worker(
     *,
     desktop_pid: int | None,
     source_hint: str | None,
-    initial_state: CredentialDetection | None,
+    initial_state: Observation | None,
     total_timeout: float,
     progress_monitor: RefreshProgressMonitor | None,
     observation_mode: bool = False,
     evidence_dir: Path | None = None,
+    completed_at: Callable[[], float | None] | None = None,
 ) -> bool:
     """Attach non-verdict visual evidence to the actual in-flight callback in BOTH wait branches."""
     deadline = time.monotonic() + total_timeout
     with ModalVisualEvidence(evidence_dir, deadline=deadline) as evidence:
 
-        def detector(pid: int) -> CredentialDetection:
-            state = _in_flight_credential_state(pid)
+        def detector(pid: int) -> Observation:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("observation deadline exhausted before start")
+            state = _in_flight_credential_state(
+                pid,
+                expected_process_start=initial_state.process_started_at if initial_state else None,
+                timeout_s=min(8.0, remaining),
+            )
             if worker.is_alive():
                 evidence.enqueue(pid, state)
             return state
@@ -427,6 +373,7 @@ def _join_refresh_worker(
             observation_mode=observation_mode,
             detector=detector,
             deadline=deadline,
+            completed_at=completed_at,
         )
 
 
@@ -435,12 +382,13 @@ def _wait_refresh_worker(
     *,
     desktop_pid: int | None,
     source_hint: str | None,
-    initial_state: CredentialDetection | None,
+    initial_state: Observation | None,
     total_timeout: float,
     progress_monitor: RefreshProgressMonitor | None,
     observation_mode: bool,
-    detector: Callable[[int], CredentialDetection],
+    detector: Callable[[int], Observation],
     deadline: float,
+    completed_at: Callable[[], float | None] | None = None,
 ) -> bool:
     """Wait for the refresh thread, with credential polling and optional progress liveness.
 
@@ -451,72 +399,27 @@ def _wait_refresh_worker(
     refresh it was reporting on. Measured: ``DialogFoundError(REFRESH_IN_PROGRESS)`` on the first poll,
     with no ``in_flight`` argument reaching the detector at all.
     """
-    if progress_monitor is None and not observation_mode:
-        if desktop_pid is None:
-            worker.join(max(0.0, deadline - time.monotonic()))
-            return not worker.is_alive() and time.monotonic() < deadline
-        return join_with_credential_poll(
-            worker,
-            pid=desktop_pid,
-            total_timeout=total_timeout,
-            heartbeat_seconds=REFRESH_HEARTBEAT_SECONDS,
-            poll_seconds=REFRESH_CREDENTIAL_POLL_SECONDS,
-            source_hint=source_hint,
-            detector=detector,
-            initial_state=initial_state,
-            deadline=deadline,
-        )
-
-    started = deadline - total_timeout
-    next_heartbeat = REFRESH_HEARTBEAT_SECONDS
-    latched_unknown = initial_state.unknown_reason if initial_state else None
-    latched_desktop_unready = initial_state.desktop_unready if initial_state else None
-    latched_dialog = initial_state.dialog if initial_state else None
-    while worker.is_alive():
-        elapsed = time.monotonic() - started
-        absolute_remaining = max(0.0, total_timeout - elapsed)
-        if absolute_remaining <= 0:
-            break
-        if progress_monitor is not None:
-            progress_monitor.print_liveness_warning_if_due()
-        wait_for = min(
-            absolute_remaining,
-            progress_monitor.seconds_until_liveness_warning() if progress_monitor is not None else absolute_remaining,
-            REFRESH_CREDENTIAL_POLL_SECONDS,
-            max(0.0, next_heartbeat - elapsed),
-        )
-        worker.join(min(absolute_remaining, max(0.01, wait_for)))
-        if desktop_pid is not None:
-            state = detector(desktop_pid)
-            raise_terminal_detection(desktop_pid, state, source_hint)
-            if state.dialog is not None and latched_dialog is None:
-                latched_dialog = state.dialog
-                if not observation_mode:
-                    print_dialog_observed_notice(desktop_pid, state.dialog)
-            if state.desktop_unready and latched_desktop_unready is None:
-                latched_desktop_unready = state.desktop_unready
-            if state.unknown_reason and latched_unknown is None:
-                latched_unknown = state.unknown_reason
-                if not observation_mode:
-                    print_indeterminate_state_notice(desktop_pid, state.unknown_reason)
-        elapsed = time.monotonic() - started
-        if elapsed >= next_heartbeat and worker.is_alive():
-            if progress_monitor is not None:
-                progress_monitor.print_evidence_heartbeat(elapsed, total_timeout)
-            next_heartbeat += REFRESH_HEARTBEAT_SECONDS
-    if worker.is_alive() or time.monotonic() >= deadline:
-        # The latches used to be computed here and DISCARDED, so this branch always degraded to the
-        # caller's bare TimeoutError - which the parent classifier blames on a slow source. Raise them
-        # exactly as `join_with_credential_poll` does, from the same shared helper.
-        if desktop_pid is not None:
-            raise_latched_verdict(
-                desktop_pid,
-                desktop_unready=latched_desktop_unready,
-                dialog=latched_dialog,
-                unknown=latched_unknown,
-            )
-        return False
-    return True
+    if desktop_pid is None and progress_monitor is None:
+        worker.join(max(0.0, deadline - time.monotonic()))
+        return not worker.is_alive() and time.monotonic() < deadline
+    return join_with_credential_poll(
+        worker,
+        pid=desktop_pid,
+        total_timeout=total_timeout,
+        heartbeat_seconds=REFRESH_HEARTBEAT_SECONDS,
+        poll_seconds=REFRESH_CREDENTIAL_POLL_SECONDS,
+        source_hint=source_hint,
+        detector=detector,
+        initial_state=initial_state,
+        deadline=deadline,
+        before_wait=progress_monitor.print_liveness_warning_if_due if progress_monitor else None,
+        wait_limit=progress_monitor.seconds_until_liveness_warning if progress_monitor else None,
+        heartbeat=progress_monitor.print_evidence_heartbeat
+        if progress_monitor
+        else (None if observation_mode else print_refresh_heartbeat),
+        notices=not observation_mode,
+        completed_at=completed_at,
+    )
 
 
 # pylint: disable=too-many-arguments,too-many-locals,too-many-statements
@@ -528,7 +431,7 @@ def refresh(
     refresh_type: str = REFRESH_TYPE_FULL,
     desktop_pid: int | None = None,
     source_hint: str | None = None,
-    initial_state: CredentialDetection | None = None,
+    initial_state: Observation | None = None,
     progress_enabled: bool = True,
     progress_liveness_sec: float = REFRESH_PROGRESS_LIVENESS_SECONDS,
     absolute_timeout_sec: float = REFRESH_ABSOLUTE_TIMEOUT_SECONDS,
@@ -607,7 +510,7 @@ def _refresh(
     refresh_type: str,
     desktop_pid: int | None,
     source_hint: str | None,
-    initial_state: CredentialDetection | None,
+    initial_state: Observation | None,
     progress_enabled: bool,
     progress_liveness_sec: float,
     absolute_timeout_sec: float,
@@ -625,12 +528,19 @@ def _refresh(
     targets = tuple(tables or ())
 
     result: dict[str, tuple[bool, str] | BaseException | RefreshObservation] = {}
+    finished: dict[str, float] = {}
     progress_monitor: RefreshProgressMonitor | None = None
     command_timeout = timeout_sec
     total_timeout = timeout_sec + REFRESH_WALL_CLOCK_GRACE_SECONDS
     untraced_absolute_backstop = False
     if desktop_pid is not None:
-        state = initial_state or _credential_state(desktop_pid)
+        state = initial_state or (
+            _credential_state(desktop_pid, expected_process_start=bound.identity.process_start)
+            if bound
+            else _credential_state(desktop_pid)
+        )
+        if bound is not None and state.process_started_at not in {None, bound.identity.process_start}:
+            raise ObservationUnavailable("PID_REUSED")
         _raise_if_blocked(desktop_pid, state, source_hint)
         initial_state = state
     if progress_enabled and refresh_type == REFRESH_TYPE_FULL:
@@ -662,7 +572,7 @@ def _refresh(
                     flush=True,
                 )
     if desktop_pid is not None and not return_observation:
-        state = initial_state or CredentialDetection()
+        state = initial_state or Observation()
         if progress_monitor is None:
             if untraced_absolute_backstop:
                 if state.unknown_reason:
@@ -742,6 +652,8 @@ def _refresh(
             # `main` classifies on the exception text, and an unhandled thread exception would reach
             # it as "worker returned no result" - a generic failure masking a specific, actionable one.
             result["ok"] = exc
+        finally:
+            finished["at"] = time.monotonic()
 
     worker = threading.Thread(target=_run, name="xmla-refresh", daemon=True)
     try:
@@ -757,21 +669,9 @@ def _refresh(
             progress_monitor=progress_monitor,
             observation_mode=return_observation,
             evidence_dir=evidence_dir,
+            completed_at=lambda: finished.get("at"),
         )
         if not completed or worker.is_alive():
-            if desktop_pid is not None:
-                # The FINAL check, and it is in-flight too (#376 review, finding 1): by here the
-                # refresh is ours, so a proven-benign progress dialog is ours and must not decide the
-                # verdict. A finding we could NOT account for still does - via the latch helper, not
-                # the t=0 raise helper, which would have converted our own progress dialog into a stop.
-                state = _in_flight_credential_state(desktop_pid)
-                raise_terminal_detection(desktop_pid, state, source_hint)
-                raise_latched_verdict(
-                    desktop_pid,
-                    desktop_unready=state.desktop_unready,
-                    dialog=state.dialog,
-                    unknown=state.unknown_reason,
-                )
             raise TimeoutError(
                 f"refresh did not return within {total_timeout}s "
                 f"(XMLA CommandTimeout was {command_timeout}s; cause unestablished)"
@@ -1924,7 +1824,7 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
     port: int,
     cache: Path | None,
     args: argparse.Namespace,
-    initial_state: CredentialDetection | None = None,
+    initial_state: Observation | None = None,
 ) -> int | None:
     """Run the refresh and (unless suppressed) persist it. Returns an exit code, or None to continue.
 
@@ -1975,7 +1875,7 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
                 f"  CAUSE UNKNOWN: cause unestablished. Inspect Desktop PID {pid} locally before retrying. "
                 "A deadline alone does not identify a dialog or establish the state of the data source.\n"
                 "  The existing arbiter is available after local inspection (it may invoke Refresh):\n"
-                f'    powershell -File "{CREDENTIAL_PROBE}" -DesktopPid {pid}'
+                f'    python "{CREDENTIAL_PROBE}" --pid {pid}'
             )
             return 3
         print(f"REFRESH: ERROR {text}")

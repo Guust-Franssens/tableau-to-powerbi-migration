@@ -1,5 +1,10 @@
 # The two-tier test loop
 
+**#741 naming update:** the portable observer suite is now
+`.github/skills/pbip-model-refresh/tests/test_desktop_observer.py`. Measurements below predate the
+consolidation; renaming a suite does not remeasure it. Native test-owned Win32 windows, as well as
+the retained WinForms/UIA fixtures, are discovered for `serial`; GUI execution remains opt-in.
+
 The full suite is the dominant cost in every agent iteration, and agents run it repeatedly. This page
 is the measured answer to "how do I run it fast without making it lie to me?".
 
@@ -72,7 +77,7 @@ one machine actually create. If you re-measure, measure that.
 ## The hazard that is real: wall-clock budgets, not shared state
 
 Across eight parallel runs of the first campaign, exactly **one** node id ever disagreed:
-`test_credential_modal_detection.py::test_refresh_main_returns_credential_missing_fast_at_t0`, which
+`test_desktop_observer.py::test_refresh_main_returns_credential_missing_fast_at_t0`, which
 took **0.941 s against a 0.5 s budget** on worker `gw9`. Isolation experiments:
 
 | condition | samples | failures |
