@@ -764,3 +764,204 @@ def test_deleting_a_runtime_rule_fails_its_direct_assertion(monkeypatch, removed
     )
     with pytest.raises(AssertionError, match=assertion):
         check()
+
+
+SEMANTIC_BUILDER_MD = REPO_ROOT / ".github" / "agents" / "pbi-semantic-builder.agent.md"
+
+
+def test_semantic_ai_policy_is_skill_owned_with_a_narrow_override() -> None:
+    text = _normalized(SEMANTIC_BUILDER_MD)
+    assert "**Load `powerbi-ai-readiness`**" in text, "AI skill must be loaded"
+    assert "sole AI policy/mechanics source" in text, "AI policy belongs to the local skill"
+    assert "load current `semantic-model-authoring`" in text, "current upstream skill must be loaded"
+    assert "no-authoring policy **only for repo-owned `CustomInstructions`**" in text, "override must stay narrow"
+    assert "Obey the skill's ownership refusal." in text, "ownership refusal must govern the persona"
+    assert "never invokes `--adopt-existing`" in text, "persona must not invoke adoption"
+    assert "never invokes `--adopt-existing`, adopts or replaces unowned/human instructions" in text, (
+        "persona must refuse unowned/human instructions even when text matches"
+    )
+    assert "or edits portal/service AI artifacts" in text, "persona must not edit portal/service AI artifacts"
+    assert "Defer service-only AI artifacts per the skill" in text, "service-only work must remain deferred"
+    assert "record unmeasured survival/coverage in `limitations_encountered`" in text, "survival is not established"
+    # #730 owns the still-unmeasured reload/cache result, not this wiring change.
+    assert "`reload`" not in text, "do not pre-adopt a reload/runtime result"
+
+
+def test_semantic_ai_stamp_is_one_declared_batch() -> None:
+    text = _normalized(SEMANTIC_BUILDER_MD)
+    assert "**before writing** with `scripts/declare_generated_edit.py`" in text, "declare before writing"
+    assert "`--plan` inventory and one `--targets` batch" in text, "plan all targets in one batch"
+    assert "snapshot every target, stamp once, record every changed file" in text, (
+        "execute one stamp and record all edits"
+    )
+    assert "never split a multi-file stamp into per-target runs" in text, "per-target AI stamping must be forbidden"
+    assert "Never hand-edit first or count `DECLARE: NO_CHANGE` as a declaration" in text, (
+        "no retrospective declarations"
+    )
+    assert "`check_migration_progress.py --bundle <b> --tamper` exit 0" in text, "generated edits must pass tamper gate"
+
+
+def test_semantic_ai_handoff_requires_the_post_seal_explicit_md_gate() -> None:
+    text = _normalized(SEMANTIC_BUILDER_MD)
+    assert "author grounded `<md>` (`ai-instructions.md`)" in text, "source instructions must be grounded"
+    assert "pass `--md` explicitly, including bundle flow" in text, "explicit markdown applies to bundles too"
+    assert "Stamp via the skill before step 8." in text, "stamp before the sealing refresh"
+    seal = "After the sealing reopen → refresh → save, require exit 0:"
+    assert seal in text, "handoff check must follow the sealing reopen/refresh/save"
+    command = "`python scripts/set_ai_instructions.py --check --strict --model <model> --md <md>`"
+    assert command in text, "handoff needs the scoped strict model+md command"
+    assert text.index(seal) < text.index(command), "strict gate must be after seal"
+    assert (
+        "Any refusal, unavailable check, missing explicit `<md>`, or non-zero exit blocks handoff "
+        "and cannot be reported as AI-ready"
+    ) in text, "every unestablished seal blocks handoff and AI-ready claims"
+    assert "Require `qnaEnabled: true` through the skill" in text, "qnaEnabled must be true through the skill"
+    assert "repeat the seal after later model-tool saves/exports" in text, "later model-tool writes require resealing"
+
+
+def test_semantic_ai_done_preserves_synonyms_and_allows_style_advisories() -> None:
+    text = _normalized(SEMANTIC_BUILDER_MD)
+    assert "**AI metadata is audited**" in text, "audit metadata without claiming Copilot obedience"
+    assert "Preserve existing synonyms; never author them." in text, "synonyms must be preserved, not authored"
+    assert "**Owned AI instructions pass the post-seal gate above (MANDATORY).**" in text, "DoD must use post-seal gate"
+    assert "style advisories are not blockers" in text, "style advisories must remain nonblocking"
+    assert "no `[!]` advisories" not in text, "old advisory-as-blocker rule must not survive"
+
+
+def test_semantic_persona_is_net_negative_without_raising_its_target() -> None:
+    text = SEMANTIC_BUILDER_MD.read_text(encoding="utf-8")
+    size = max(sac.prompt_size(SEMANTIC_BUILDER_MD), len(text.replace("\n", "\r\n")))
+    assert size < 21_990, "semantic persona must shrink from its reviewed conservative CRLF baseline"
+    assert size <= PERSONA_SIZE_TARGET == 22_000, "semantic persona must retain the 22,000 target"
+
+
+@pytest.mark.parametrize(
+    ("check", "before", "after", "assertion"),
+    [
+        (
+            test_semantic_ai_policy_is_skill_owned_with_a_narrow_override,
+            "no-authoring policy **only for repo-owned `CustomInstructions`**",
+            "no-authoring policy for all Prep-for-AI artifacts",
+            "override must stay narrow",
+        ),
+        (
+            test_semantic_ai_policy_is_skill_owned_with_a_narrow_override,
+            "Obey the skill's ownership refusal.",
+            "Ignore the skill's ownership refusal.",
+            "ownership refusal must govern",
+        ),
+        (
+            test_semantic_ai_policy_is_skill_owned_with_a_narrow_override,
+            "never invokes `--adopt-existing`",
+            "may invoke `--adopt-existing` when existing text equals the markdown",
+            "persona must not invoke adoption",
+        ),
+        (
+            test_semantic_ai_policy_is_skill_owned_with_a_narrow_override,
+            "adopts or replaces unowned/human instructions",
+            "may adopt equal-text unowned/human instructions or replace them",
+            "persona must refuse unowned/human",
+        ),
+        (
+            test_semantic_ai_policy_is_skill_owned_with_a_narrow_override,
+            "or edits portal/service AI artifacts",
+            "but may edit portal/service AI artifacts",
+            "persona must not edit portal/service",
+        ),
+        (
+            test_semantic_ai_stamp_is_one_declared_batch,
+            "`--plan` inventory and one `--targets` batch",
+            "`--plan` inventory and one `--target` run per file",
+            "plan all targets in one batch",
+        ),
+        (
+            test_semantic_ai_stamp_is_one_declared_batch,
+            "snapshot every target, stamp once, record every changed file",
+            "snapshot each target, stamp per target, record only the last file",
+            "execute one stamp and record all edits",
+        ),
+        (
+            test_semantic_ai_stamp_is_one_declared_batch,
+            "never split a multi-file stamp into per-target runs",
+            "allow splitting a multi-file stamp into per-target runs",
+            "per-target AI stamping must be forbidden",
+        ),
+        (
+            test_semantic_ai_handoff_requires_the_post_seal_explicit_md_gate,
+            "After the sealing reopen → refresh → save, require exit 0:",
+            "Before the sealing reopen → refresh → save, require exit 0:",
+            "handoff check must follow",
+        ),
+        (
+            test_semantic_ai_handoff_requires_the_post_seal_explicit_md_gate,
+            "--check --strict --model <model> --md <md>",
+            "--check --strict --model <model>",
+            "handoff needs the scoped strict model",
+        ),
+        (
+            test_semantic_ai_handoff_requires_the_post_seal_explicit_md_gate,
+            "--check --strict --model <model> --md <md>",
+            "--check --model <model> --md <md>",
+            "handoff needs the scoped strict model",
+        ),
+        (
+            test_semantic_ai_handoff_requires_the_post_seal_explicit_md_gate,
+            "non-zero exit blocks handoff and cannot be reported as AI-ready",
+            "non-zero exit permits handoff and can be reported as AI-ready",
+            "every unestablished seal blocks",
+        ),
+        (
+            test_semantic_ai_handoff_requires_the_post_seal_explicit_md_gate,
+            "Require `qnaEnabled: true` through the skill",
+            "Allow `qnaEnabled: false` through the skill",
+            "qnaEnabled must be true",
+        ),
+        (
+            test_semantic_ai_done_preserves_synonyms_and_allows_style_advisories,
+            "Preserve existing synonyms; never author them.",
+            "Preserve existing synonyms; author missing synonyms.",
+            "synonyms must be preserved",
+        ),
+        (
+            test_semantic_ai_done_preserves_synonyms_and_allows_style_advisories,
+            "style advisories are not blockers",
+            "style advisories are blockers",
+            "style advisories must remain nonblocking",
+        ),
+        (
+            test_semantic_ai_policy_is_skill_owned_with_a_narrow_override,
+            "record unmeasured survival/coverage",
+            "`reload` re-reads edited TMDL and preserves cache/markers; record unmeasured survival/coverage",
+            "do not pre-adopt a reload/runtime result",
+        ),
+    ],
+)
+def test_reversing_semantic_ai_boundaries_fails_the_intended_assertion(
+    monkeypatch, check, before: str, after: str, assertion: str
+) -> None:
+    check()
+    text = _normalized(SEMANTIC_BUILDER_MD)
+    assert text.count(before) == 1, "mutation must change exactly one production anchor"
+    read_document = _normalized
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_normalized",
+        lambda path: text.replace(before, after, 1) if path == SEMANTIC_BUILDER_MD else read_document(path),
+    )
+    with pytest.raises(AssertionError, match=assertion):
+        check()
+
+
+def test_semantic_ai_contracts_tolerate_whitespace_rewrapping(monkeypatch) -> None:
+    text = SEMANTIC_BUILDER_MD.read_text(encoding="utf-8")
+    rewrapped = "\n\t".join(text.split())
+    read_document = _normalized
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_normalized",
+        lambda path: " ".join(rewrapped.split()) if path == SEMANTIC_BUILDER_MD else read_document(path),
+    )
+    test_semantic_ai_policy_is_skill_owned_with_a_narrow_override()
+    test_semantic_ai_stamp_is_one_declared_batch()
+    test_semantic_ai_handoff_requires_the_post_seal_explicit_md_gate()
+    test_semantic_ai_done_preserves_synonyms_and_allows_style_advisories()

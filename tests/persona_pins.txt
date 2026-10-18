@@ -339,7 +339,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e6c96c70a53e3fcbff71ec3ec16f7f1fb2c70d8c7c71cab979f1ea7e8ab8131f  - **`powerbi-semantic-model-gotchas`** ~ read **first**, bef
 43e90ee0f3a8da763f3738baf9a07af3b983890f9f452d37789c7b570077164f  - **`powerbi-ai-readiness`** ~ the Copilot-readiness recipe 
 7b8513334df907ab8ab36af51b114edb5546eff0b2b6bf629ff6ea362fbb9808  - **pbip-model-refresh skill** ~ refreshing a local PBIP, pe
-956e963c3a251abb4416c997bd8d1703d5328fe5795e9af21a736861084e8943  - **`semantic-model-authoring`** ~ TMDL mechanics: tables/co
+d9fa5d945bfb01c1b27b718863d21a42c6856d5fb6d33914ca7ff01037a2e9db  - **`semantic-model-authoring`** ~ load current TMDL mechani
 e8b661e053bf0b3dc71667f3c2230bd7a2760d408627e9cc7b079bc10f29daf5  - **Read-only DAX (`EVALUATE`) ~ your validation surface.** 
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 c65764226ef96d0065f94b0981d70205ed9bf0ac6927ead84b43e3089ebfbcf5  ## What you receive ~ a model that EXISTS
@@ -375,29 +375,15 @@ a7ffd476ffb12c36c9bdc7b092041e604c2765dc36e427073f53a2384c1ae5fc  7. **Enrich fo
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 4a6a85703b8eeb9994d998da641a2d5278e723302427cc2dbf5722114087a766  ### Declare every TMDL edit ~ sign-off reads hashes, not int
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-de83942d24efe590debddd9392c3f1803c0b1c0ff50b4fe0be84ba79309702d4  Every file under a `*.SemanticModel` folder is hash-baseline
+b0ec9d6264979f24a2e87680397be0f4525dda145a5bfcd9327efc87b7a7ed5a  Wrap generated model edits **before writing** with `scripts/
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-61ebd4e662f30e055d9f6ec19ef92e365b24d45e149ba8289255ddeb7b239497  ```bash python scripts/declare_generated_edit.py --bundle <b
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-60bc8937365ea7047286079b972c194ec25bb296806675fc0846f4b44e21f346  Three measured ways to leave the gate RED:
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-93b49a3ac137d3cae23dc79444e93a0bb403b1579a7822ea27d1397d9fab4344  - **One `--target` per run** ~ a re-run prints `DECLARE: NO_
-b5960724a2c3411b603439612f1aeb42747141e789657f8767583d8cf1a03cd1  - **Never hand-edit first** ~ the wrapper hashes the target 
-7058213a8e5a17adde95e0b5abf3f496410e79b69d2f8e2928140b46226ad1af  - **Declare as you edit, before the step-8 refresh** ~ a lat
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-f067c0d17f2094928a6d210e55412ab27bc09ae1fac50f0de2e548e4a5e9b66d  Order: declared edits ~ refresh/save (self-declares its `dat
+367ce27a6fd8b7acc99acac42f5011977640bdaa02ccf738c05568beda595887  Never hand-edit first or count `DECLARE: NO_CHANGE` as a dec
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 a1dccf0f95e53908c34f457a8c9f7f78e90bc612d504a88d07f2cc1f5d16dbc5  ## Prep the model for AI (Copilot readiness)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-6e18d7b36b28a8354ad4b86954e6ed1f0054e59e97355bf89bd0cb1d404885ca  **Read the `powerbi-ai-readiness` skill and follow it** ([SK
+83a1f53cee240945b5b809a85c4d4ee2f3f42331bea51957cb3da00570966da7  **Load `powerbi-ai-readiness`** ([SKILL.md](../skills/powerb
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-db0feb35ba29bcf067d170ff0435bc76b59932b13debc5137791230c6d6f1db5  - **When and who:** the **last phase** of the build ~ after 
-4158744872e98d63d013c1854e81397d7afbfeea339dbe23eb1755591ad4dea3  - **Source of truth:** author `migrations/workbooks/<slug>/a
-840df3a5061453339602e4776d1a2da0b5efae4df43286ab71f8cda85a15ccb1  - **Your gate before hand-off**, scoped to the model you bui
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-f9dcfcc8b22e6d17a16dd3446ea07ec66064c8ba3fcffcb9e7c4e8e588b5cd77  ```bash python scripts/check_unit.py migrations/workbooks/<s
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-2f380ff784b418b6a6cc7b1988a643518d767effbebd17c8027da92333790d0b  - **In the estate/bundle flow** `<model>` is `<bundle>/pbip/
+bfb20edb59f013e192e25bd7d9c4018dc5ab47e356b481abccd478a67cf0995b  After all model objects exist and are validated, author grou
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 b6b35f02e0cde87fbb098396fde2ebb44cc33b7d82e173a84948ba42d3386245  ## Gotchas
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -431,8 +417,8 @@ b7960b51fba458f499af6dc52fe43d9f9a30a1e32df540a94083037230486a8f  3. **Every non
 601bf9325f86ec8af91159f86dfacb17e14076f8c66b561c3478d1d6af4f6298  5. **Every `requests[]` entry's fate is recorded** ~ landed 
 bfd40acff14d599ec5221bdd97a0bc42b447ad58749e7164f0ca7bfb31742c18  6. **Renames are grep-verified** ~ every DAX expression refe
 5528ce08cf1f39acd2d71ae94ce403058e628c51d8c0336521996906a9d89f27  7. **Model-wide measure-name uniqueness is verified** ~ no d
-7afb4c2a10d59e3b528df4e01137a23d60f96b8dd819d668138040d52b6e6a57  8. **The model is Copilot-ready** ~ descriptions everywhere,
-a49b0e588ed1e93554f1ed29326bfb5bdb8176a035c9197f0d4ed6e4f2ceb32e  9. **Model-level AI instructions are stamped (MANDATORY).** 
+3c01100dccbe11c296a27167631f45425aa08caee07a561c6ab92de698974e67  8. **AI metadata is audited** ~ descriptions plus enumerated
+831520bea08cf94669c03aa72a4223a7c71e7c4fc9b3b9c19d3a4b29b142c472  9. **Owned AI instructions pass the post-seal gate above (MA
 4575362ecd02f2414e441b523d05045fad56d02303d80fb7821cfb02a76c61ae  10. **REFRESHED and PERSISTED ~ the step-8 handoff gate.** R
 b509098589ab977d60338d46df291ba9973e357c26af45c4281cc615e844773b  11. **Every TMDL edit is declared and `--tamper` exits 0.** 
 
