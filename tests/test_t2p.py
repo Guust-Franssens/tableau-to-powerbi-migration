@@ -8,9 +8,11 @@ import os
 from pathlib import Path
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import threading
+from types import SimpleNamespace
 
 import jsonschema
 import pytest
@@ -52,6 +54,20 @@ def _json(capsys):
     return result, captured
 
 
+def _preflight_bytes(*blockers, warnings=0):
+    return json.dumps(
+        {"critical_missing": len(blockers), "recommended_warnings": warnings, "blockers": list(blockers)}
+    ).encode()
+
+
+PIN_BLOCKER = {
+    "id": "desktop_pin",
+    "source": "process_environment",
+    "reason": "configured_path_missing",
+    "remedy": "refresh_current_process_pin",
+}
+
+
 @pytest.mark.parametrize("json_mode", [False, True])
 @pytest.mark.parametrize("preflight_code,expected", [(0, 0), (1, 1), (7, 3), (None, 3)])
 def test_doctor_private_presence_only(monkeypatch, tmp_path, capsys, json_mode, preflight_code, expected):
@@ -83,25 +99,53 @@ def test_doctor_private_presence_only(monkeypatch, tmp_path, capsys, json_mode, 
     assert _snapshot(tmp_path) == before, "doctor must not mutate its configuration/tree"
     assert len(calls) == 1
     command, options = calls[0]
-    assert command[:4] == ["powershell", "-ExecutionPolicy", "Bypass", "-File"], "doctor must delegate plain preflight"
-    assert len(command) == 5, "doctor must delegate plain preflight without update/upstream flags"
+    assert command == [
+        "powershell",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(t2p.ROOT / "scripts" / "preflight.ps1"),
+        "-DoctorDiagnostics",
+    ], "doctor must delegate plain preflight with only the internal presentation switch"
     assert options["stdout"] == options["stderr"] == subprocess.PIPE
-    presence = json.loads(captured.out)
-    assert presence["limitations"] == ["presence_only", "presence_only_not_authentication"], (
-        "doctor value/length/digest leak assertion"
-    )
-    assert all(
-        set(row) == {"key", "state", "source", "required", "secret", "reason", "remedy"} for row in presence["checks"]
-    ), "doctor value/length/digest leak assertion"
+    assert captured.err == "Checking existing preflight; no upgrades or Tableau login.\n"
     if json_mode:
         result = json.loads(captured.out)
+        assert result["limitations"] == ["presence_only", "presence_only_not_authentication"], (
+            "doctor value/length/digest leak assertion"
+        )
+        assert all(
+            set(row) == {"key", "state", "source", "required", "secret", "reason", "remedy"} for row in result["checks"]
+        ), "doctor value/length/digest leak assertion"
         jsonschema.validate(result, t2p.ENVELOPE_SCHEMA)
+        details = result["doctor_details"]
+        assert set(details) == {"configuration_aliases", "preflight"}
+        assert set(details["preflight"]) == {
+            "availability",
+            "reason",
+            "critical_missing",
+            "recommended_warnings",
+            "blockers",
+        }
+        assert all(set(group) == {"key", "winning_key", "sources"} for group in details["configuration_aliases"])
+        assert all(
+            set(origin) == {"source", "keys", "conflict"}
+            for group in details["configuration_aliases"]
+            for origin in group["sources"]
+        ), "doctor detail has closed value-free fields, never derivatives"
         assert result["delegated_exit_code"] is None
         assert result["run_location"] is result["path_report"] is None
         assert result["stages"][0]["native_exit_code"] == preflight_code
         assert len(result["checks"]) == len(tableau_env.CANONICAL_ENV_KEYS) + len(
             tableau_env.DATASOURCE_CREDENTIAL_KEYS
         )
+        assert len(captured.out.splitlines()) == 1, "JSON stdout must be one object and newline"
+    else:
+        assert captured.out.startswith("DOCTOR "), "human doctor must render a verdict, not the JSON envelope"
+        assert "(exit " + str(expected) + ")" in captured.out
+        assert "Recommended-warning count: unavailable." in captured.out
+        assert "Rerun doctor: python -B scripts\\t2p.py doctor --env <same-selected-env>" in captured.out
+        assert "No run, login or repair command was started." in captured.out
 
 
 @pytest.mark.parametrize(
@@ -688,6 +732,144 @@ def test_status_customer_labels_are_withheld(monkeypatch, tmp_path, capsys, json
             "test_status_customer_labels_are_withheld",
             "status leaked customer label: PRIVATE_UNIT_CANARY_73",
         ),
+        (
+            "tableau_env.py",
+            '"source": label,',
+            '"source": "environment" if label == "selected_env" else "selected_env",',
+            "test_doctor_all_blockers_sources_and_safe_remedies",
+            "losing-file conflict must be located in the selected file",
+        ),
+        (
+            "tableau_env.py",
+            "for candidate in (file_values, process)\n        )",
+            "for candidate in (process,)\n        )",
+            "test_doctor_all_blockers_sources_and_safe_remedies",
+            "losing-source conflict must retain the original refusal",
+        ),
+        (
+            "t2p.py",
+            "preserve it under {key} BEFORE removing {legacy}",
+            "preserve it under {legacy} BEFORE removing {key}",
+            "test_doctor_all_blockers_sources_and_safe_remedies",
+            "canonical PAT preservation must precede legacy removal",
+        ),
+        pytest.param(
+            "preflight.ps1",
+            "blockers = @($critical | ForEach-Object",
+            "blockers = @($critical | Select-Object -Skip 1 | ForEach-Object",
+            "test_preflight_contract.py::test_doctor_actual_windows_child[blocked-ids1]",
+            "all actual failed-critical blockers must be retained",
+            marks=pytest.mark.skipif(
+                os.name != "nt", reason="requires Windows PowerShell/PowerShell 7 on Windows and NTFS"
+            ),
+        ),
+        pytest.param(
+            "preflight.ps1",
+            "-DoctorReason 'configured_path_missing'",
+            "-DoctorReason 'not_set'",
+            "test_preflight_contract.py::test_doctor_actual_windows_child[blocked-ids1]",
+            "dead Desktop needs the exact owner ID/source/reason/remedy tuple",
+            marks=pytest.mark.skipif(
+                os.name != "nt", reason="requires Windows PowerShell/PowerShell 7 on Windows and NTFS"
+            ),
+        ),
+        (
+            "t2p.py",
+            "verified, reload it and rerun doctor in the SAME invocation",
+            "verified, persist it again with setx for a later invocation",
+            "test_doctor_all_blockers_sources_and_safe_remedies",
+            "dead Desktop needs a current-process same-invocation remedy",
+        ),
+        (
+            "t2p.py",
+            "Do not merely persist it again with setx or remove the pin to pass.",
+            "Remove the pin to pass.",
+            "test_doctor_all_blockers_sources_and_safe_remedies",
+            "dead Desktop must not be repersisted or unpinned just to pass",
+        ),
+        (
+            "t2p.py",
+            '"-DoctorDiagnostics",',
+            '"-DoctorDiagnostics", "-CheckUpstream",',
+            "test_doctor_private_presence_only",
+            "doctor must delegate plain preflight",
+        ),
+        pytest.param(
+            "preflight.ps1",
+            "reason = $DoctorReason; remedy = $DoctorRemedy",
+            "reason = $Detail; remedy = $DoctorRemedy",
+            "test_preflight_contract.py::test_doctor_actual_windows_child[blocked-ids1]",
+            "owner safe records must never copy dynamic detail/hint/path/helper output",
+            marks=pytest.mark.skipif(
+                os.name != "nt", reason="requires Windows PowerShell/PowerShell 7 on Windows and NTFS"
+            ),
+        ),
+        (
+            "t2p.py",
+            "except (ValueError, TypeError, UnicodeError, RecursionError):\n        return unavailable",
+            'except (ValueError, TypeError, UnicodeError, RecursionError):\n        return {"availability":"available",'
+            '"reason":"available","critical_missing":1,"recommended_warnings":0,"blockers":'
+            '[{"id":"desktop_pin","source":"process_environment","reason":"configured_path_missing",'
+            '"remedy":"refresh_current_process_pin"}]}',
+            "test_doctor_unavailable_detail_preserves_native_policy",
+            "malformed/noisy/unknown detail must be unavailable, never a guessed cause",
+        ),
+        (
+            "t2p.py",
+            "code = child.returncode",
+            "code = 1 if child.returncode == 7 else child.returncode",
+            "test_doctor_unavailable_detail_preserves_native_policy",
+            "native 1 stays blocked; unexpected native 7 stays unknown",
+        ),
+        (
+            "t2p.py",
+            'unknown = configuration["status"] == "CANNOT_ESTABLISH" or code not in {0, 1}',
+            'unknown = configuration["status"] == "CANNOT_ESTABLISH" or code not in {0, 1} or '
+            '(code == 1 and result["doctor_details"]["preflight"]["availability"] == "unavailable")',
+            "test_doctor_unavailable_detail_preserves_native_policy",
+            "native 1 stays blocked; unexpected native 7 stays unknown",
+        ),
+        (
+            "t2p.py",
+            "if json_mode:\n        print(json.dumps(result",
+            'if json_mode:\n        print("prose")\n        print(json.dumps(result',
+            "test_doctor_channels_remain_distinct",
+            "JSON stdout must be one object and newline",
+        ),
+        (
+            "t2p.py",
+            "_doctor_human(result, args)\n    else:",
+            "_print_safe(json.dumps(result, sort_keys=True))\n    else:",
+            "test_doctor_channels_remain_distinct",
+            "human doctor must render a verdict, not the JSON envelope",
+        ),
+        (
+            "t2p.py",
+            '        for blocker in detail["blockers"]:\n            lines.extend',
+            '        for blocker in detail["blockers"][:1]:\n            lines.extend',
+            "test_doctor_all_blockers_sources_and_safe_remedies",
+            "every safe preflight blocker must be rendered",
+        ),
+        pytest.param(
+            "preflight.ps1",
+            "if ($DoctorDiagnostics) {\n    Write-Output",
+            "if ($DoctorDiagnostics) {\n    [IO.File]::WriteAllText((Join-Path $env:USERPROFILE 'mutant-write'), 'changed')\n    Write-Output",
+            "test_preflight_contract.py::test_doctor_actual_windows_child[ready-ids0]",
+            "actual-child monitored synthetic tree must remain byte/mtime/tree unchanged",
+            marks=pytest.mark.skipif(
+                os.name != "nt", reason="requires Windows PowerShell/PowerShell 7 on Windows and NTFS"
+            ),
+        ),
+        pytest.param(
+            "preflight.ps1",
+            "if ($DoctorDiagnostics) {\n    Write-Output",
+            "if ($DoctorDiagnostics) {\n    Invoke-WebRequest -Uri 'https://synthetic.invalid/' | Out-Null\n    Write-Output",
+            "test_preflight_contract.py::test_doctor_actual_windows_child[ready-ids0]",
+            "actual-child forbidden network/updater/installer/login command must not be invoked",
+            marks=pytest.mark.skipif(
+                os.name != "nt", reason="requires Windows PowerShell/PowerShell 7 on Windows and NTFS"
+            ),
+        ),
     ],
 )
 def test_isolated_mutations_fail_intended_assertion(tmp_path, file, before, after, selector, assertion):
@@ -697,14 +879,16 @@ def test_isolated_mutations_fail_intended_assertion(tmp_path, file, before, afte
     scripts.mkdir(parents=True)
     for source in (REPO_ROOT / "scripts").glob("*.py"):
         shutil.copyfile(source, scripts / source.name)
+    shutil.copyfile(REPO_ROOT / "scripts" / "preflight.ps1", scripts / "preflight.ps1")
     tests = isolated / "tests"
     tests.mkdir()
-    for name in ("test_t2p.py", "test_start_migration.py"):
+    for name in ("test_t2p.py", "test_start_migration.py", "test_preflight_contract.py"):
         shutil.copyfile(REPO_ROOT / "tests" / name, tests / name)
     target = scripts / file
     source = target.read_text(encoding="utf-8")
     assert before in source, "mutation anchor must exist"
     target.write_text(source.replace(before, after, 1), encoding="utf-8")
+    module, node = selector.split("::", 1) if "::" in selector else ("test_t2p.py", selector)
     outcome = subprocess.run(
         [
             sys.executable,
@@ -714,7 +898,8 @@ def test_isolated_mutations_fail_intended_assertion(tmp_path, file, before, afte
             "-q",
             "-o",
             "addopts=",
-            str(tests / "test_t2p.py") + "::" + selector,
+            str(tests / module) + "::" + node,
+            "--tb=short",
             "--basetemp",
             str(isolated / "_test"),
         ],
@@ -751,9 +936,16 @@ def test_doctor_interrupt_is_safe_in_both_modes(monkeypatch, capsys, json_mode):
 
     monkeypatch.setattr(t2p.subprocess, "run", interrupt)
     assert t2p.main(["doctor", *(["--json"] if json_mode else [])]) == 130
-    result, captured = _json(capsys)
-    assert result["status"] == "interrupted"
-    assert result["delegated_exit_code"] is None
+    captured = capsys.readouterr()
+    if json_mode:
+        result = json.loads(captured.out)
+        jsonschema.validate(result, t2p.ENVELOPE_SCHEMA)
+        assert result["status"] == "interrupted"
+        assert result["delegated_exit_code"] is None
+        assert result["stages"] == [], "interruption must not invent a completed child"
+        assert len(captured.out.splitlines()) == 1
+    else:
+        assert captured.out.startswith("DOCTOR interrupted (exit 130)\n")
     assert "PRIVATE_INTERRUPT_CANARY" not in captured.out + captured.err
 
 
@@ -783,3 +975,334 @@ def test_offline_help_output_journey(monkeypatch, tmp_path, capsys):
             result["proof_boundary"]["not_established"]
         )
     assert len(pipeline.commands) == 5, "offline harness must exercise the existing five-stage owner"
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_doctor_all_blockers_sources_and_safe_remedies(monkeypatch, tmp_path, capsys, json_mode):
+    """One result explains all blockers, including a losing-file conflict, without acting on them."""
+    _config(monkeypatch)
+    monkeypatch.delenv("TABLEAU_PAT_NAME")
+    path = tmp_path / "PRIVATE_SELECTED_PATH_CANARY.env"
+    path.write_text("TABLEAU_PAT_SECRET=PRIVATE_CANONICAL_CANARY\nTABLEAU_PAT_VALUE=PRIVATE_LEGACY_CANARY\n")
+    import_blocker = {
+        "id": "python_lxml",
+        "source": None,
+        "reason": "import_failed",
+        "remedy": "sync_python_dependencies",
+    }
+    monkeypatch.setattr(
+        t2p.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(
+            a, 1, _preflight_bytes(PIN_BLOCKER, import_blocker, warnings=2), b""
+        ),
+    )
+    monkeypatch.setattr(socket, "socket", lambda *a, **k: pytest.fail("doctor must not open a socket"))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("doctor must not launch another process"))
+    monkeypatch.setattr(work_dirs, "allocate_run", lambda *a, **k: pytest.fail("doctor must not allocate"))
+    before = _snapshot(tmp_path)
+    with monkeypatch.context() as writes:
+        writes.setattr(Path, "write_text", lambda *a, **k: pytest.fail("doctor must not write"))
+        writes.setattr(Path, "write_bytes", lambda *a, **k: pytest.fail("doctor must not write"))
+        assert t2p.main(["doctor", "--env", str(path), *(["--json"] if json_mode else [])]) == 1
+    captured = capsys.readouterr()
+    assert _snapshot(tmp_path) == before
+    assert all(
+        canary not in captured.out + captured.err
+        for canary in ("PRIVATE_CANONICAL_CANARY", "PRIVATE_LEGACY_CANARY", path.name, str(tmp_path), *ENV.values())
+    ), "doctor must not disclose values or host paths"
+    if json_mode:
+        result = json.loads(captured.out)
+        detail = result["doctor_details"]
+        pat = next(row for row in result["checks"] if row["key"] == "TABLEAU_PAT_SECRET")
+        assert pat["source"] == "environment", "process remains the effective source"
+        assert pat["state"] == "conflict", "losing-source conflict must retain the original refusal"
+        group = next(row for row in detail["configuration_aliases"] if row["key"] == "TABLEAU_PAT_SECRET")
+        assert group["sources"] == [
+            {"source": "selected_env", "keys": ["TABLEAU_PAT_SECRET", "TABLEAU_PAT_VALUE"], "conflict": True},
+            {"source": "environment", "keys": ["TABLEAU_PAT_SECRET"], "conflict": False},
+        ], "losing-file conflict must be located in the selected file"
+        assert detail["preflight"]["blockers"] == [PIN_BLOCKER, import_blocker], (
+            "complete owner blockers must not be lost"
+        )
+        assert detail["preflight"]["recommended_warnings"] == 2
+    else:
+        assert "TABLEAU_PAT_NAME: missing; effective source: absent." in captured.out
+        assert (
+            "Effective source: process environment; conflict to resolve: selected environment file." in captured.out
+        ), "losing-file conflict must be located in the selected file"
+        assert "preserve it under TABLEAU_PAT_SECRET BEFORE removing TABLEAU_PAT_VALUE" in captured.out, (
+            "canonical PAT preservation must precede legacy removal"
+        )
+        assert "If TABLEAU_PAT_VALUE holds the intended value, move it to TABLEAU_PAT_SECRET first." in captured.out
+        assert "PBI_DESKTOP_PATH is configured but its target was not found" in captured.out
+        assert "Preflight blocker: Python cannot import lxml; reason: import_failed." in captured.out, (
+            "every safe preflight blocker must be rendered"
+        )
+        assert "inherited process environment" in captured.out
+        assert "reload it and rerun doctor in the SAME invocation" in captured.out, (
+            "dead Desktop needs a current-process same-invocation remedy"
+        )
+        assert "Do not merely persist it again with setx or remove the pin to pass." in captured.out, (
+            "dead Desktop must not be repersisted or unpinned just to pass"
+        )
+        assert "Recommended warnings: 2 (non-blocking)." in captured.out
+        assert "Preflight owner: preflight.ps1; native exit: 1." in captured.out
+
+
+@pytest.mark.parametrize(
+    "legacy,equal", [("TABLEAU_SERVER", False), ("TABLEAU_PAT_VALUE", False), ("TABLEAU_PAT_VALUE", True)]
+)
+def test_doctor_alias_warning_is_nonblocking(monkeypatch, tmp_path, capsys, legacy, equal):
+    _config(monkeypatch)
+    canonical = "TABLEAU_SERVER_URL" if legacy == "TABLEAU_SERVER" else "TABLEAU_PAT_SECRET"
+    monkeypatch.setenv(legacy, ENV[canonical])
+    if not equal:
+        monkeypatch.delenv(canonical)
+    monkeypatch.setattr(t2p, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        t2p.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, _preflight_bytes(warnings=3), b"")
+    )
+    assert t2p.main(["doctor"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("DOCTOR READY_TO_ATTEMPT (exit 0)\n")
+    assert f"Alias warning in process environment: {legacy} is deprecated; use {canonical}." in captured.out
+    assert "Recommended warnings: 3 (non-blocking)." in captured.out
+    assert "Rerun doctor: python -B scripts\\t2p.py doctor\n" in captured.out
+    assert "--env <same-selected-env>" not in captured.out
+
+
+@pytest.mark.parametrize("native,expected", [(0, 0), (1, 1), (7, 3)])
+@pytest.mark.parametrize(
+    "stdout,stderr",
+    [
+        (b"", b""),
+        (b"PRIVATE_MALFORMED_DESKTOP_PAT_CAUSE", b""),
+        (b"[" * 1100 + b"]" * 1100, b""),
+        (b'noise\n{"critical_missing":0,"recommended_warnings":0,"blockers":[]}', b""),
+        (_preflight_bytes(), b"PRIVATE_HOST_PLUGIN_PATH\x1b[31mCANARY"),
+        (b'{"critical_missing":1,"recommended_warnings":0,"blockers":[]}', b""),
+        (b'{"critical_missing":true,"recommended_warnings":0,"blockers":[]}', b""),
+        (b'{"critical_missing":0,"recommended_warnings":false,"blockers":[]}', b""),
+        (b'{"critical_missing":0,"recommended_warnings":-1,"blockers":[]}', b""),
+        (b'{"critical_missing":0,"blockers":[]}', b""),
+        (_preflight_bytes({**PIN_BLOCKER, "id": "PRIVATE_UNKNOWN_ID"}), b""),
+        (_preflight_bytes({**PIN_BLOCKER, "reason": "PRIVATE_UNKNOWN_REASON"}), b""),
+        (_preflight_bytes({**PIN_BLOCKER, "source": "PRIVATE_HOST_PATH"}), b""),
+        (_preflight_bytes({**PIN_BLOCKER, "remedy": "PRIVATE_HELPER_OUTPUT"}), b""),
+        (_preflight_bytes({**PIN_BLOCKER, "Detail": "PRIVATE_HINT_CANARY"}), b""),
+    ],
+)
+def test_doctor_unavailable_detail_preserves_native_policy(
+    monkeypatch, tmp_path, capsys, native, expected, stdout, stderr
+):
+    _config(monkeypatch)
+    monkeypatch.setattr(t2p, "ROOT", tmp_path)
+    monkeypatch.setattr(t2p.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, native, stdout, stderr))
+    assert t2p.main(["doctor", "--json"]) == expected, "native 1 stays blocked; unexpected native 7 stays unknown"
+    result, captured = _json(capsys)
+    detail = result["doctor_details"]["preflight"]
+    assert (detail["availability"], detail["critical_missing"], detail["recommended_warnings"], detail["blockers"]) == (
+        "unavailable",
+        None,
+        None,
+        [],
+    ), "malformed/noisy/unknown detail must be unavailable, never a guessed cause"
+    assert result["stages"][0]["native_exit_code"] == native, "retain exact unexpected native evidence"
+    assert "PRIVATE_" not in captured.out + captured.err and "\x1b" not in captured.out + captured.err
+    assert t2p.main(["doctor"]) == expected
+    human = capsys.readouterr()
+    assert "Recommended-warning count: unavailable." in human.out
+    assert "powershell -ExecutionPolicy Bypass -File scripts\\preflight.ps1" in human.out
+    assert "PBI_DESKTOP_PATH" not in human.out, "do not guess Desktop/PAT from raw prose"
+    assert "Do not change Tableau credentials on this evidence." in human.out
+
+
+@pytest.mark.parametrize(
+    "native,expected,status",
+    [(0, 0, "READY_TO_ATTEMPT"), (1, 1, "BLOCKED_CONFIG"), (7, 3, "CANNOT_ESTABLISH"), (None, 3, "CANNOT_ESTABLISH")],
+)
+@pytest.mark.parametrize(
+    "configuration", ["ready", "missing", "blank", "conflict", "default_site", "malformed", "absent", "unreadable"]
+)
+def test_doctor_preexisting_json_is_byte_equivalent(
+    monkeypatch, tmp_path, capsys, native, expected, status, configuration
+):
+    """Pinned base fixture semantics: exclude only the one permitted additive property."""
+    _config(monkeypatch)
+    monkeypatch.setattr(t2p, "ROOT", tmp_path)
+    selected, reason = tmp_path / "selected.env", "presence_only"
+    arguments = ["doctor", "--json"]
+    if configuration == "missing":
+        monkeypatch.delenv("TABLEAU_PAT_NAME")
+    elif configuration == "blank":
+        monkeypatch.setenv("TABLEAU_PAT_SECRET", " \t ")
+    elif configuration == "conflict":
+        monkeypatch.setenv("TABLEAU_PAT_VALUE", "PRIVATE_ALIAS_CANARY")
+    elif configuration == "default_site":
+        monkeypatch.delenv("TABLEAU_SITE")
+    elif configuration in {"malformed", "absent", "unreadable"}:
+        arguments.extend(["--env", str(selected)])
+        if configuration == "malformed":
+            selected.write_text("PRIVATE_MALFORMED_LINE_CANARY", encoding="utf-8")
+        elif configuration == "unreadable":
+            selected.mkdir()
+        reason = {
+            "malformed": "selected_env_malformed",
+            "absent": "selected_env_missing",
+            "unreadable": "selected_env_unreadable",
+        }[configuration]
+        expected, status = 3, "CANNOT_ESTABLISH"
+    if configuration in {"missing", "blank", "conflict"}:
+        reason = "configuration_inconsistent"
+        if native in {0, 1}:
+            expected, status = 1, "BLOCKED_CONFIG"
+
+    def child(*a, **k):
+        if native is None:
+            raise OSError("PRIVATE_LAUNCH_EXCEPTION")
+        return subprocess.CompletedProcess(
+            a, native, _preflight_bytes(PIN_BLOCKER) if native == 1 else _preflight_bytes(), b""
+        )
+
+    monkeypatch.setattr(t2p.subprocess, "run", child)
+    assert t2p.main(arguments) == expected
+    result, _ = _json(capsys)
+    result.pop("doctor_details")
+    checks = [
+        {
+            "key": key,
+            "state": "set" if index < 4 else "missing",
+            "source": "environment" if index < 4 else "absent",
+            "required": key in {"TABLEAU_SERVER_URL", "TABLEAU_PAT_NAME", "TABLEAU_PAT_SECRET"},
+            "secret": key in {"TABLEAU_PAT_SECRET", "TABLEAU_DBX_TOKEN", "TABLEAU_SF_PASSWORD"},
+            "reason": "set" if index < 4 else "missing",
+            "remedy": "none",
+        }
+        for index, key in enumerate(
+            (
+                "TABLEAU_SERVER_URL",
+                "TABLEAU_SITE",
+                "TABLEAU_PAT_NAME",
+                "TABLEAU_PAT_SECRET",
+                "TABLEAU_REST_API_VERSION",
+                "TABLEAU_PRODUCT_VERSION",
+                "TABLEAU_DBX_TOKEN",
+                "TABLEAU_SF_PASSWORD",
+                "TABLEAU_SF_USER",
+            )
+        )
+    ]
+    rows = {row["key"]: row for row in checks}
+    if configuration == "missing":
+        rows["TABLEAU_PAT_NAME"].update(
+            state="missing", source="absent", reason="missing", remedy="resolve_configuration"
+        )
+    elif configuration in {"blank", "conflict"}:
+        rows["TABLEAU_PAT_SECRET"].update(state=configuration, reason=configuration, remedy="resolve_configuration")
+    elif configuration == "default_site":
+        rows["TABLEAU_SITE"].update(source="default", reason="default_site")
+    baseline = {
+        "schema_version": "t2p/v1",
+        "command": "doctor",
+        "status": status,
+        "exit_code": expected,
+        "authority": "preflight.ps1+tableau_env.py",
+        "delegated_exit_code": None,
+        "stages": [
+            {
+                "stage": "preflight",
+                "owner": "preflight.ps1",
+                "native_exit_code": native,
+                "state": "ok" if native == 0 else "cannot_establish" if native is None else "failed",
+                "artifact": None,
+            }
+        ],
+        "checks": checks,
+        "evidence": [],
+        "artifacts": [],
+        "run_location": None,
+        "runs_root": None,
+        "run_location_reason": "not_applicable_no_run",
+        "path_report": None,
+        "limitations": [reason, "presence_only_not_authentication"],
+        "proof_boundary": {
+            "established": ["configuration_presence", "plain_preflight_result"],
+            "not_established": [
+                "credential_validity",
+                "source_reachability",
+                "path_safety",
+                "process_liveness",
+                "START_READY",
+                "fidelity",
+                "COMPLETE",
+                "deployability",
+            ],
+        },
+    }
+    assert json.dumps(result, sort_keys=True).encode() == json.dumps(baseline, sort_keys=True).encode(), (
+        "every pre-existing JSON field/record must remain byte-equivalent"
+    )
+
+
+def test_doctor_progress_is_fixed_and_flushed_before_child(monkeypatch, tmp_path, capsys):
+    _config(monkeypatch)
+    monkeypatch.setattr(t2p, "ROOT", tmp_path)
+    writes, events = [], []
+
+    def child(*a, **k):
+        assert "".join(writes) == "Checking existing preflight; no upgrades or Tableau login.\n"
+        assert events == ["flush"], "fixed progress must flush before waiting for the child"
+        return subprocess.CompletedProcess(a, 0, _preflight_bytes(), b"")
+
+    monkeypatch.setattr(t2p.subprocess, "run", child)
+    with monkeypatch.context() as streams:
+        streams.setattr(sys, "stderr", SimpleNamespace(write=writes.append, flush=lambda: events.append("flush")))
+        assert t2p.main(["doctor", "--json"]) == 0
+    _json(capsys)
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_doctor_syntax_is_safe_and_noninteractive(capsys, json_mode):
+    assert t2p.main(["doctor", "--PRIVATE_\x1b[31mARG", *(["--json"] if json_mode else [])]) == 2
+    captured = capsys.readouterr()
+    assert "PRIVATE_" not in captured.out + captured.err and "\x1b" not in captured.out + captured.err
+    if json_mode:
+        assert json.loads(captured.out)["status"] == "error"
+        assert len(captured.out.splitlines()) == 1
+    else:
+        assert captured.out.startswith("DOCTOR error (exit 2)\n")
+
+
+def test_doctor_channels_remain_distinct(monkeypatch, tmp_path, capsys):
+    """Catch channel reversals on the intended assertion, before a JSON decoder can fail."""
+    _config(monkeypatch)
+    monkeypatch.setattr(t2p, "ROOT", tmp_path)
+    monkeypatch.setattr(
+        t2p.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, _preflight_bytes(), b"")
+    )
+    assert t2p.main(["doctor", "--json"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("{") and captured.out.endswith("}\n") and len(captured.out.splitlines()) == 1, (
+        "JSON stdout must be one object and newline"
+    )
+    assert json.loads(captured.out)["status"] == "READY_TO_ATTEMPT"
+    assert t2p.main(["doctor"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("DOCTOR READY_TO_ATTEMPT (exit 0)\n"), (
+        "human doctor must render a verdict, not the JSON envelope"
+    )
+
+
+def test_doctor_details_never_extend_start_or_status(monkeypatch, tmp_path, capsys):
+    """Reach both unchanged owners, not just the common envelope constructor."""
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+    _config(monkeypatch)
+    monkeypatch.setattr(t2p, "ROOT", pipeline.root)
+    assert t2p.main(["start", "--project", "Finance", "--json"]) == 0
+    output, _ = _captured(capsys, pipeline)
+    result = json.loads(output)
+    assert "doctor_details" not in result
+    assert t2p.main(["status", "--run", result["run_location"]["physical_run"], "--json"]) in {0, 1}
+    result, _ = _json(capsys)
+    assert "doctor_details" not in result
