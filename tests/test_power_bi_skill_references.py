@@ -57,8 +57,8 @@ def test_retired_skill_census() -> None:
 
 
 def test_playbook_release_contract() -> None:
-    """Changed published skill content requires the independently approved 0.3.1 release."""
-    assert build_plugin.VERSION == "0.3.1"
+    """Stage the approved compact cores once; publication/installation is separately authorized."""
+    assert build_plugin.VERSION == "0.3.2"
 
 
 def test_current_modes_and_approval_stop() -> None:
@@ -95,11 +95,33 @@ def test_no_management_or_mid_migration_install(name: str) -> None:
 
 
 def test_current_references_and_query_surfaces() -> None:
-    """Read-only EVALUATE routes to query tools, not a made-up consumption skill alias."""
+    """Selected mode/topic pointers are finite; disk checks do not prove fresh-role resolution."""
     gotchas = _text(".github/skills/powerbi-report-gotchas/SKILL.md")
-    for reference in ("expressions", "conditional-formatting"):
-        assert f"references/authoring/{reference}.md" in gotchas
-    assert not re.search(r"references/(?!authoring/|design/)[a-z-]+\.md", gotchas)
+    assert "Portable upstream procedures: installed `powerbi-report-cli`" in gotchas, "report upstream owner"
+    assert "existing report → `authoring`; missing page → `design` then `authoring`" in gotchas, "report intent mode"
+    assert "Modes select `references/<mode>.md`, not CLI flags" in gotchas, "selected-mode entry"
+    assert set(re.findall(r"`(references/[^`]+\.md)`", gotchas)) == {
+        "references/<mode>.md",
+        *(
+            f"references/authoring/{topic}.md"
+            for topic in (
+                "expressions",
+                "conditional-formatting",
+                "field-parameters",
+                "slicers-part-02",
+                "map",
+                "model-binding",
+                "screenshot-review",
+            )
+        ),
+    }, "report authoring topics"
+    semantic = _text(".github/skills/powerbi-semantic-model-gotchas/SKILL.md")
+    assert "installed `semantic-model-authoring` existing-model workflow" in semantic, "semantic upstream owner"
+    assert set(re.findall(r"`(references/[^`]+\.md)`", semantic)) == {
+        "references/tmdl-guidelines.md",
+        "references/authoring/field-parameters.md",
+    }, "semantic parameter topics"
+    assert "Until fresh S resolves both parameter topics, keep this constructor guard" in semantic
     guide = _text("docs/tableau-dax-translation-guide.md")
     query = guide.split("LOD expressions are the highest-risk", 1)[1].split("before trusting it.", 1)[0]
     for token in (
@@ -114,6 +136,139 @@ def test_current_references_and_query_surfaces() -> None:
         assert token in query
     assert "semantic-model-authoring" not in query
     assert "references/design/chart-selection.md" in guide
+
+
+def test_compact_core_citations_keep_their_meaning() -> None:
+    """Surviving numbers are not evidence that a citation still points to the same rule."""
+    report = _persona("pbi-report-builder")
+    semantic = _persona("pbi-semantic-builder")
+    mapping = report.split("*idiom* through", 1)[1].split("\n6.", 1)[0]
+    assert "`powerbi-report-gotchas` §8" in mapping, "mapping source-intent citation"
+    assert "`powerbi-report-cli` authoring topic" in mapping, "mapping procedure owner"
+    assert "§9" not in mapping, "removed report section"
+    scale = report.split("7. **Every percentage/scaled", 1)[1].split("\n8.", 1)[0]
+    assert "core §8" in scale and r"scripts\probe_desktop_query.py" in scale, "scale source/query citation"
+    uniqueness = semantic.split("7. **Model-wide measure-name uniqueness", 1)[1].split("\n8.", 1)[0]
+    assert r"scripts\check_datamodel.py" in uniqueness and "skill §2" in uniqueness, (
+        "uniqueness executable-owner citation"
+    )
+    rows = semantic.split("`PERSISTED` alone", 1)[1].split("\n11.", 1)[0]
+    assert "skill §4; host live-source owner" in rows, "row-proof owner citation"
+    assert "Held out of the playbook; resolve" in semantic, "held-out refresh owner"
+
+
+@pytest.mark.parametrize(
+    ("path", "before", "after", "diagnostic"),
+    [
+        (
+            ".github/skills/powerbi-report-gotchas/SKILL.md",
+            "installed `powerbi-report-cli`",
+            "installed `missing-skill`",
+            "report upstream owner",
+        ),
+        (
+            ".github/skills/powerbi-report-gotchas/SKILL.md",
+            "installed `powerbi-report-cli`",
+            "installed `powerbi-report-authoring`",
+            "report upstream owner",
+        ),
+        (
+            ".github/skills/powerbi-report-gotchas/SKILL.md",
+            "existing report → `authoring`",
+            "existing report → `planning`",
+            "report intent mode",
+        ),
+        (
+            ".github/skills/powerbi-report-gotchas/SKILL.md",
+            "references/authoring/expressions.md",
+            "references/expressions.md",
+            "report authoring topics",
+        ),
+        (
+            ".github/skills/powerbi-report-gotchas/SKILL.md",
+            "references/authoring/slicers-part-02.md",
+            "references/authoring/slicers-part-20.md",
+            "report authoring topics",
+        ),
+        (
+            ".github/skills/powerbi-report-gotchas/SKILL.md",
+            "`references/authoring/map.md`, ",
+            "",
+            "report authoring topics",
+        ),
+        (
+            ".github/skills/powerbi-semantic-model-gotchas/SKILL.md",
+            "installed `semantic-model-authoring`",
+            "installed `missing-skill`",
+            "semantic upstream owner",
+        ),
+        (
+            ".github/skills/powerbi-semantic-model-gotchas/SKILL.md",
+            "references/authoring/field-parameters.md",
+            "references/design/field-parameters.md",
+            "semantic parameter topics",
+        ),
+    ],
+)
+def test_missing_retired_or_wrong_mode_pointers_fail_their_owner_assertion(
+    monkeypatch: pytest.MonkeyPatch, path: str, before: str, after: str, diagnostic: str
+) -> None:
+    """Direct pointer negatives, not a fabricated installed-skill registry or runtime canary."""
+    original_read = Path.read_text
+    target = ROOT / path
+    source = original_read(target, encoding="utf-8")
+    assert source.count(before) == 1
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda current, *args, **kwargs: (
+            source.replace(before, after) if current == target else original_read(current, *args, **kwargs)
+        ),
+    )
+    with pytest.raises(AssertionError, match=diagnostic):
+        test_current_references_and_query_surfaces()
+
+
+@pytest.mark.parametrize(
+    ("name", "before", "after", "diagnostic"),
+    [
+        (
+            "pbi-report-builder",
+            "core §8; `scripts\\probe_desktop_query.py`",
+            "core §3; `scripts\\probe_desktop_query.py`",
+            "scale source/query citation",
+        ),
+        (
+            "pbi-semantic-builder",
+            "`scripts\\check_datamodel.py` (skill §2)",
+            "`scripts\\check_datamodel.py` (skill §4)",
+            "uniqueness executable-owner citation",
+        ),
+        (
+            "pbi-report-builder",
+            "*idiom* through `powerbi-report-gotchas` §8",
+            "*idiom* through `powerbi-report-gotchas` §9",
+            "mapping source-intent citation",
+        ),
+    ],
+)
+def test_same_number_or_removed_section_reversals(
+    monkeypatch: pytest.MonkeyPatch, name: str, before: str, after: str, diagnostic: str
+) -> None:
+    """Reintroducing the old meaning must fail even if the old section number still exists."""
+    original_read = Path.read_text
+    target = ROOT / ".github" / "agents" / f"{name}.agent.md"
+    source = original_read(target, encoding="utf-8")
+    assert source.count(before) == 1
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda current, *args, **kwargs: (
+            source.replace(before, after) if current == target else original_read(current, *args, **kwargs)
+        ),
+    )
+    with pytest.raises(AssertionError, match=diagnostic):
+        test_compact_core_citations_keep_their_meaning()
 
 
 def test_historical_probe_and_pending_current_probe() -> None:

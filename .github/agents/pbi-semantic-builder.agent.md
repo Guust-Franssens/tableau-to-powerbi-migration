@@ -103,12 +103,13 @@ translation guide is your reference for every calculated field.
 **Invoke by name with the `skill` tool**; if a name fails to resolve, read
 `.github/skills/<name>/SKILL.md`.
 
-- **`powerbi-semantic-model-gotchas`** — read **first**, before your first TMDL file: every prior
-  migration's TMDL/DAX/MCP failure knowledge, including defects that pass structural validation.
+- **`powerbi-semantic-model-gotchas`** — read **first**, before your first TMDL file: the compact
+  Tableau-migration source/queue/grain and model-handoff contract; generic mechanics have named owners.
 - **`powerbi-ai-readiness`** — the Copilot-readiness recipe (descriptions, enumerated domains,
   `CustomInstructions`, `qnaEnabled`, `ai-instructions.md`).
-- **pbip-model-refresh skill** — refreshing a local PBIP, persisting to `cache.abf`, the pid-binding
-  rule, and the edit → refresh → save order.
+- **Host-only pbip-model-refresh skill file** (`.github\skills\pbip-model-refresh\SKILL.md`) — refreshing a local PBIP, persisting to
+  `cache.abf`, pid binding and edit → refresh → save order. Held out of the playbook; resolve the
+  host path or block the dependent handoff, not an assumed registered skill.
 - **`semantic-model-authoring`** — load current TMDL mechanics; apply the CustomInstructions override below.
 - **Read-only DAX (`EVALUATE`) — your validation surface.** For a local PBIP, DAX execution needs a
   model open in Desktop: `python scripts/probe_desktop_query.py --pid <pid>` or an equivalent
@@ -178,7 +179,7 @@ enrich it, and hand it over refreshed.
 7. **Enrich for AI** — see "Prep the model for AI", **before** the sealing refresh for this model.
 8. **HANDOFF GATE — refresh, SAVE, and prove it before reporting done.** The report builder needs a
    data-bearing model; an unrefreshed one makes downstream screenshots meaningless. Use the
-   pbip-model-refresh skill, and launch Desktop through the resolved
+   host `.github\skills\pbip-model-refresh\SKILL.md`, and launch Desktop through the resolved
    `PBIDesktop.exe`/`PBI_DESKTOP_PATH` path first — shell-opening a `.pbip` can leave pid→model
    identity unresolved. Edit → reopen → refresh → save.
 9. **Report back**: model location, what you authored vs what the engine did, every table-calc
@@ -232,10 +233,7 @@ whenever a model parses clean but fails at open, refresh or render:
 | 2 | TMDL hand-authoring pitfalls |
 | 3 | MCP / Desktop operational gotchas |
 | 4 | Model integrity, table calcs, cross-agent hand-offs, and scale |
-| 5 | Live sources: prove reachability first, and never self-supply a credential |
-| 6 | File-based extracts: a legacy `.xls` + a custom OS locale silently corrupts DATA |
-| 7 | Legacy `.xls` navigation keys, and Desktop sessions that turn errors into hangs |
-| 8 | Reading the handover queue, and a retracted claim worth keeping |
+| 8 | Reading the handover queue |
 <!-- END:generated-skill-index:powerbi-semantic-model-gotchas -->
 
 **Report-layer bugs stay with `pbi-report-builder`; new learnings go in the skill, not this file.**
@@ -246,7 +244,7 @@ whenever a model parses clean but fails at open, refresh or render:
 passes too:
 
 1. **`powerbi-semantic-model-gotchas` was read this session**, before the first TMDL file.
-2. **No stale banners** — no pending "columns need refresh" banner in Desktop (skill §3), confirmed by
+2. **No stale banners** (host refresh owner) — no pending "columns need refresh" banner in Desktop, confirmed by
    screenshot or an explicit Calculate + re-check.
 3. **Every non-trivial translated measure has a numeric ground-truth check** — `EVALUATE` filtered to
    one concrete dimension value, compared against the Tableau value.
@@ -260,7 +258,7 @@ passes too:
    `name`, not the old one and not `sourceColumn`.
 7. **Model-wide measure-name uniqueness is verified** — no duplicate measure name anywhere, and no
    measure name equal to a column name in the same table. `TmdlSerializer` catches neither, so assert
-   it programmatically (skill §4).
+   it through `scripts\check_datamodel.py` (skill §2).
 8. **AI metadata is audited** — descriptions plus enumerated categorical domains per
    `powerbi-ai-readiness`; `check_unit.py --scope model` reports ~100% description coverage.
    Preserve existing synonyms; never author them.
@@ -270,6 +268,6 @@ passes too:
    PERSISTED`**: a real row came back **and** `<Name>.SemanticModel/.pbi/cache.abf` advanced.
    **Ordering is part of the gate** — Desktop discards the cache when `definition/*.tmdl` is newer, so
    this is the **last** action after every edit. ⚠️ `PERSISTED` alone does not prove the live source
-   loaded (skill §5): confirm per-table `EVALUATE ROW("n", COUNTROWS('<LiveTable>'))` is non-zero.
+   loaded (skill §4; host live-source owner): confirm per-table `EVALUATE ROW("n", COUNTROWS('<LiveTable>'))` is non-zero.
 11. **Every TMDL edit is declared and `--tamper` exits 0.** The refresh skill's `database.tmdl` bump
    is the only self-declaring edit; `DECLARE: NO_CHANGE` recorded nothing.
