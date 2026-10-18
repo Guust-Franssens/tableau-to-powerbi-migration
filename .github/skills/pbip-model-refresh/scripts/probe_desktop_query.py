@@ -313,6 +313,7 @@ def _observation_call(
     timeout_seconds: float,
     *,
     expected_process_start: str | None = None,
+    _binding_deadline: float | None = None,
 ) -> _T:
     """Bound reads, including credential inspection. Timed-out native work is not cancellable.
 
@@ -325,7 +326,11 @@ def _observation_call(
         raise ObservationUnavailable("TIMEOUT")
     outcome = queue.Queue()
     stopped = threading.Event()
-    deadline = time.monotonic() + timeout_seconds
+    now = time.monotonic()
+    if _binding_deadline is not None and now >= _binding_deadline:
+        raise ObservationUnavailable("TIMEOUT")
+    # Binding already paid for identity discovery; its absolute deadline must not restart here.
+    deadline = now + timeout_seconds if _binding_deadline is None else _binding_deadline
     supervisor = watch(
         pid,
         deadline=deadline,
@@ -415,10 +420,12 @@ def bind_desktop(pid: int, supplied_port: int | None = None) -> BoundDesktop:
         finally:
             _close_observation_connection(connection)
 
-    remaining = deadline - time.monotonic()
+    remaining = min(OBSERVATION_TIMEOUT_SECONDS, deadline - time.monotonic())
     if remaining <= 0:
         raise ObservationUnavailable("TIMEOUT")
-    return _observation_call(pid, discover, remaining, expected_process_start=identity.process_start)
+    return _observation_call(
+        pid, discover, remaining, expected_process_start=identity.process_start, _binding_deadline=deadline
+    )
 
 
 def recheck_bound(bound: BoundDesktop, connection, *, observation_mode: bool = False) -> None:
