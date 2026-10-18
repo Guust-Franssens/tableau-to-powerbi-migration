@@ -514,11 +514,11 @@ def _block_refusal(migration: Path, sources: list[str], force_scope: bool) -> in
         _append_audit(migration, "violation", f"duplicate source keys at block: {duplicates}", sources=sources)
         return 2
     refusal = _scope_refusal(migration)
+    current, source_refusal = _gate_root_live_keys(migration)
+    if (source_refusal is None and not set(sources) <= current) or (not refusal and source_refusal):
+        log.error("REFUSING to arm the gate: source scope is not contained in a readable current root.")
+        return 2
     if not refusal:
-        current, source_refusal = _gate_root_live_keys(migration)
-        if source_refusal or not set(sources) <= current:
-            log.error("REFUSING to arm the gate: source scope is not contained in the readable current root.")
-            return 2
         return None
     if not force_scope:
         log.error(

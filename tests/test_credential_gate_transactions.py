@@ -91,8 +91,11 @@ def test_every_non_none_canonical_code_stays_pending(unit, history: str) -> None
 
 
 @pytest.mark.parametrize("scope", ["empty", "legacy", "foreign", "substitution", "duplicate", "malformed"])
-def test_supported_arm_closes_current_source_domain_without_effects(unit, scope: str) -> None:
+@pytest.mark.parametrize("force_scope", [False, True])
+def test_supported_arm_closes_current_source_domain_without_effects(unit, scope: str, force_scope: bool) -> None:
     root, keys = unit
+    if force_scope:
+        (root / "AGENTS.md").write_text("fixture rejected broad scope", encoding="utf-8")
     supplied = {
         "empty": [],
         "legacy": ["fixture display"],
@@ -101,9 +104,24 @@ def test_supported_arm_closes_current_source_domain_without_effects(unit, scope:
         "duplicate": [keys[0], keys[0]],
         "malformed": ["source-key:broken"],
     }[scope]
-    assert gate.apply_block(root, supplied) == 2, "membership, not display or cardinality, defines supported scope"
+    assert gate.apply_block(root, supplied, force_scope=force_scope) == 2, (
+        "membership, not display or cardinality, defines supported scope"
+    )
     assert not (root / gate.MARKER).exists(), "refused scope must not acquire a physical stop"
     assert not (root / "fabric").exists()
+    if scope != "duplicate":
+        assert not (root / gate.AUDIT).exists(), "refused source scope must not poison the root's arm history"
+
+
+def test_forced_canonical_scope_never_becomes_permission_or_proof(unit, monkeypatch: pytest.MonkeyPatch) -> None:
+    root, keys = unit
+    monkeypatch.setattr(gate, "_ancestry", lambda: [])
+    (root / "AGENTS.md").write_text("fixture deliberately broad target", encoding="utf-8")
+    assert gate.apply_block(root, keys, force_scope=True) == 0
+    assert gate.authorize(root, "Fixture Human") != 0
+    assert not gate._override_is_authentic(root)
+    assert gate._clear_was_earned(root) is None
+    assert set(_marker(root)) == set(keys) and gate.status(root) != 0
 
 
 @pytest.mark.parametrize("covered", [False, True])
@@ -1160,14 +1178,15 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
         _mutant(
             gate,
             "_block_refusal",
-            "source_refusal or not set(sources) <= current",
-            "source_refusal" if mutation == "current-membership" else "source_refusal or len(sources) != len(current)",
+            "source_refusal is None and not set(sources) <= current",
+            "False" if mutation == "current-membership" else "source_refusal is None and len(sources) != len(current)",
             monkeypatch,
         )
         check = partial(
             test_supported_arm_closes_current_source_domain_without_effects,
             unit,
             "foreign" if mutation == "current-membership" else "substitution",
+            False,
         )
         message = "membership, not display or cardinality"
     elif mutation == "omitted-root-veto":
