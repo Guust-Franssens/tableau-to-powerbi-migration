@@ -321,7 +321,7 @@ def diagnose_env(
     groups = {"TABLEAU_SERVER_URL": _SERVER_URL_KEYS, "TABLEAU_PAT_SECRET": _PAT_SECRET_KEYS}
     required = {"TABLEAU_SERVER_URL", "TABLEAU_PAT_NAME", "TABLEAU_PAT_SECRET"}
     secrets = {"TABLEAU_PAT_SECRET", "TABLEAU_SF_PASSWORD", "TABLEAU_DBX_TOKEN"}
-    checks = []
+    checks, configuration_aliases = [], []
     normalized = []
     for source in (file_values, process):
         clean = {key: value.strip() if key in ACCEPTED_ENV_KEYS else value for key, value in source.items()}
@@ -347,6 +347,25 @@ def diagnose_env(
             len({candidate[spelling].strip() for spelling in spellings if spelling in candidate}) > 1
             for candidate in (file_values, process)
         )
+        if key in groups and present:
+            configuration_aliases.append(
+                {
+                    "key": key,
+                    "winning_key": present[0],
+                    "sources": [
+                        {
+                            "source": label,
+                            "keys": [spelling for spelling in spellings if spelling in candidate],
+                            "conflict": len(
+                                {candidate[spelling].strip() for spelling in spellings if spelling in candidate}
+                            )
+                            > 1,
+                        }
+                        for label, candidate in (("selected_env", file_values), ("environment", process))
+                        if any(spelling in candidate for spelling in spellings)
+                    ],
+                }
+            )
         state = (
             "conflict"
             if conflict
@@ -385,6 +404,7 @@ def diagnose_env(
         "status": "CANNOT_ESTABLISH" if file_reason else "BLOCKED_CONFIG" if blocked else "READY_TO_ATTEMPT",
         "reason": file_reason or ("configuration_inconsistent" if blocked else "presence_only"),
         "checks": checks,
+        "configuration_aliases": configuration_aliases,
     }
 
 

@@ -1,7 +1,7 @@
 # Narrow `t2p doctor/start/status` pilot plan — Refs #749
 ## Decision and scope
 **⚠️ Narrow pilot: accept the existing post-harvest/pre-conversion path gate; no #751 dependency.**
-This PR is documentation only; initial path decision is CANNOT_ESTABLISH / `unknown_until_harvest`, never PASS.
+Original pilot plan; this amendment changes doctor presentation only. Initial path decision stays CANNOT_ESTABLISH / `unknown_until_harvest`, never PASS.
 Base: `511bb2098d179f2190943e45c650739c8c794fea`; issue: <https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/749>.
 Owner decisions: [path timing](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/749#issuecomment-6233864458), [doctor addition](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/749#issuecomment-6239785454); retain other independent-review amendments.
 ```text
@@ -91,38 +91,38 @@ Direct start/status/work_dirs/path scripts retain arguments, output, exit and ar
 No replacement of guidance/personas before benefit; no direct-script path policy changes in v1.
 
 ## 5. Read-only doctor contract
-Delegate unchanged plain `powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1` (no -Update/-CheckUpstream), child env `PYTHONDONTWRITEBYTECODE=1`; use `python -B` for doctor-owned Python invocations
-and `tableau_env.resolve_env` with selected env (default repo .env); no install/plugin mutation, run allocation,
-login, source probe, Tableau authentication or migration network call. It does not replace session-start preflight.
+Run the same plain preflight checks once, adding only internal `-DoctorDiagnostics` (no -Update/-CheckUpstream), child env `PYTHONDONTWRITEBYTECODE=1`; invoke doctor with `python -B`.
+Use the existing `tableau_env.diagnose_env` owner with selected env (default repo .env); no install/plugin mutation, allocation,
+login, source probe or Tableau authentication. `--env` selects Tableau input, not all host/Fabric configuration; session-start preflight remains separate.
 ✅ Resolver normalizes each source then overlays process on file, absent site defaults empty:
 `scripts/tableau_env.py:194-208,243-289,314-330`; canonical/optional keys: `scripts/tableau_env.py:47-75`.
-❌ Current loader ignores malformed lines/missing files; require tests truthiness, not whitespace/conflict:
-`scripts/tableau_env.py:194-208,292-310`. Extend that owner with one optional structured diagnostic API,
-used by doctor AND facade-start via front-door opt-in; keep legacy direct defaults, no facade parser/policy.
+✅ The existing opt-in diagnostic owner handles malformed/explicit-missing files, whitespace and conflicts; legacy direct defaults stay unchanged.
+Ordinary doctor renders a human verdict, all configuration/failed-critical blockers, owner/native evidence, safe manual actions and warning count.
+Explicit JSON preserves every existing field/check/stage/proof/limitation/null; optional doctor-only `doctor_details` adds present alias groups and preflight detail.
 Report canonical key, states `set|missing|blank|conflict|deprecated-alias`, source `environment|selected_env|default|absent`,
 required/optional, secret flag (PAT_SECRET/SF_PASSWORD/DBX_TOKEN; aliases inherit) and fixed safe reason/remedy.
 All names TABLEAU_-prefixed: require SERVER_URL/PAT_NAME/PAT_SECRET; SERVER/PAT_VALUE warn; SITE empty/default valid.
 List canonical optional version keys and DATASOURCE_CREDENTIAL_KEYS as optional presence, never authentication.
-Detect differing canonical/alias values within a source before normalization; cross-source override is not conflict.
-Shared owner pins whitespace, winning provenance; explicit missing/unreadable/malformed file => unknown; absent default file may use process.
+Only SERVER_URL/SERVER and PAT_SECRET/PAT_VALUE gain alias metadata: winning spelling plus present source/key/conflict rows; a losing-file conflict remains located there.
+Preserve the privately intended PAT under PAT_SECRET BEFORE removing PAT_VALUE; move a legacy intended value first. Default site/optional absences retain existing checks only.
 Doctor JSON uses `schema_version:t2p/v1`, `command:doctor`, `status:READY_TO_ATTEMPT|BLOCKED_CONFIG|CANNOT_ESTABLISH`;
 `checks` carries safe records, preflight stage retains native code, delegated_exit_code is null (two owners).
 Outer exits: 0 only if preflight=0 and required config consistent; 1 missing/blank/conflict or preflight=1; 3 unreadable/malformed/unknown source, launch or unexpected preflight code;
 unknown overrides blocked; syntax 2 and interrupt 130 retain error/interrupted envelopes. No global child-code meaning.
 run_location/path_report null (`not_applicable_no_run`); never values, secret length/digest/prefix/suffix,
 server/site/PAT name, host paths, exception prose or --show-values, on stdout OR stderr in either mode.
-Hold raw preflight output privately in memory; expose only exit and fixed progress, never parse prose as evidence.
-✅ Plain preflight exits 0/1 but prints host details and may read Azure/Fabric (`scripts/preflight.ps1:817-911,921-952`).
-Read-only is no toolkit/run/config mutation, not zero platform-diagnostic traffic; no login/source calls.
-Test host-cache effects too; if plain preflight violates read-only/privacy, stop/replan, never silently change flags.
+Capture both child streams privately; closed owner codes contain ALL failed-critical blockers plus recommended-warning COUNT, no passing/optional/manual census.
+Missing/noisy/malformed/unknown detail is unavailable with null counts/empty blockers; native 0/1 policy stays unchanged. Run plain preflight privately without -Update for unavailable causes, never guess PAT/Desktop.
+Flush `Checking existing preflight; no upgrades or Tableau login.` to stderr; human stdout is not JSON. Rerun retains `--env <same-selected-env>` when selected; paths stay private.
+Dead Desktop guidance refreshes the inherited process pin and retries in the SAME invocation after verifying saved intent; never persistence-only/unpin-to-pass. Doctor intentionally writes nothing; existing Azure/Fabric traffic and external host caches remain possible, not an offline/zero-write promise.
 READY_TO_ATTEMPT proves no PAT validity, reachability, datasource credentials, path safety, START_READY/fidelity/COMPLETE.
 
 ## 6. Closed surface, slices and independent controls
-**This PR: docs-only, exactly `docs/t2p-pilot-plan.md` and `docs/INDEX.md`; implementation N=0.**
-Proposed later surface (9 files): new `scripts/t2p.py`, `tests/test_t2p.py`; edit shared resolver
+**Original plan-only PR: `docs/t2p-pilot-plan.md` and `docs/INDEX.md`; doctor-only presentation amendment: N=8 existing files, no new files or lifecycle scope.**
+Original pilot proposal (9 files; historical): new `scripts/t2p.py`, `tests/test_t2p.py`; edit shared resolver
 `scripts/tableau_env.py`, `tests/test_tableau_env.py` for diagnostic metadata only (no second policy);
 edit `scripts/start_migration.py`, `tests/test_start_migration.py`, `scripts/README.md`,
-`docs/agent-capability-wiring.md`, `docs/INDEX.md`. This is conditional inventory, not authorization.
+`docs/agent-capability-wiring.md`, `docs/INDEX.md`. This historical inventory does not expand the doctor-only amendment.
 Shared: front door, resolver and three documentation inventories; all other files unchanged.
 Reads: argv/process/env file, preflight, allocation/run.json, stages/artifacts/status; owner joins selector→catalog→harvest→oracle→bundle,
 recorded→physical, canonical↔alias/file↔process. Residuals: remote bounds, non-atomic reads, unsafe paths, unknown measures, host-cache effects.
@@ -135,10 +135,10 @@ unknown permits harvest but never claims PASS; post-harvest unknown/over-ceiling
 Pin wrapper/native pairs: reference 4→bundle attempted→wrapper 1; invalid reference→bundle→3;
 survey 7→no later stages→1; bundle 10 retained; preflight failure; launch failure; interruption/reaping.
 Status controls: direct/facade codes/observations, repeated byte/tree hashes, absent fresh bytecode prefix; trap network/process/write.
-Doctor controls: fixed process/file fixtures vs direct resolver/preflight; aliases, precedence, blank/conflict,
-missing/malformed/unreadable file, empty SITE, absent optional keys, preflight 0/1/launch and interrupt in both modes.
-Direct clean-tree test snapshots files/bytes/mtimes, runs doctor and its preflight child, asserts no additions/deletions/byte/mtime changes including no `__pycache__`/`.pyc`. Trap writes/login/migration network; assert no run/cache/config byte changes; inject canaries in every value
-and raw preflight/warnings/exceptions. Mutate value/length/hash leaks, source attribution and -Update; named assertions kill each. In an isolated copy, remove/unset `PYTHONDONTWRITEBYTECODE` for the preflight child; the clean-tree/no-pyc assertion must fail on that intended assertion, not merely exit nonzero.
+Doctor controls: fixed fixtures pin unchanged JSON/native policy, both alias groups, losing-file conflicts, all blockers, safe PAT/current-process Desktop remedies, default SITE/optional absence,
+unavailable detail/native 0/1/7/launch/syntax/interrupt, human/JSON channels, flushed progress, exact one-child argv and private canaries/derivatives.
+Mandatory full Windows child uses a synthetic toolkit/profile, allowlisted environment and PATH stubs; snapshots bytes/mtimes/tree and command logs catch writes/network/updater/login calls.
+This proves only the monitored fixture/stub path, not real host-cache behavior. Existing mutation helper exercises all twelve doctor reversals on intended assertions; no new runner/proof framework. Preserve existing no-pyc/start/status/path/stream/label controls.
 Mutations in isolated copies: remove doctor/start/status branch; disconnect path gate; force unknown→PASS;
 drop native stage record; suppress post-reference bundle; normalize exit; buffer progress; enable
 status write/next. Each must fail its named scope/guard/stage/exit/stream/read-only assertion.

@@ -222,6 +222,91 @@ def _stage(name: str, code: int | None, state: str, artifact: str | None = None)
     }
 
 
+def _doctor_preflight(stdout: bytes, stderr: bytes, native: int | None) -> dict:
+    """Accept one complete, closed owner document; raw streams never become diagnostics."""
+    # pylint: disable=too-many-return-statements
+    unavailable = {
+        "availability": "unavailable",
+        "reason": "invalid_detail",
+        "critical_missing": None,
+        "recommended_warnings": None,
+        "blockers": [],
+    }
+    if native is None or native not in {0, 1}:
+        return {**unavailable, "reason": "launch_unavailable" if native is None else "unexpected_native"}
+    if stderr and stderr.strip():
+        return {**unavailable, "reason": "noisy_detail"}
+    if not stdout or not stdout.strip():
+        return {**unavailable, "reason": "missing_detail"}
+    try:
+        detail = json.loads(stdout)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        return unavailable
+    if not isinstance(detail, dict) or set(detail) != {"critical_missing", "recommended_warnings", "blockers"}:
+        return unavailable
+    if any(
+        not isinstance(detail[key], int) or isinstance(detail[key], bool) or detail[key] < 0
+        for key in ("critical_missing", "recommended_warnings")
+    ):
+        return unavailable
+    if (
+        not isinstance(detail["blockers"], list)
+        or detail["critical_missing"] != len(detail["blockers"])
+        or bool(detail["critical_missing"]) != bool(native)
+    ):
+        return unavailable
+    allowed = {
+        "copilot_home": ({"configured_directory_missing"}, "verify_copilot_home"),
+        "python_runtime": ({"runtime_unavailable_or_old"}, "install_python"),
+        "python_lxml": ({"import_failed"}, "sync_python_dependencies"),
+        "python_jsonschema": ({"import_failed"}, "sync_python_dependencies"),
+        "node_runtime": ({"runtime_unavailable_or_old"}, "install_node"),
+        "report_author": ({"command_missing"}, "install_report_author"),
+        "report_author_version": ({"unreadable", "prerelease", "below-floor"}, "inspect_cli_release"),
+        "desktop_bridge_version": ({"unreadable", "prerelease", "below-floor"}, "inspect_cli_release"),
+        "engine_plugin": ({"plugin_missing"}, "install_engine_plugin"),
+        "engine_source": ({"alternative_copy", "verdict_unavailable"}, "inspect_engine_source"),
+        "authoring_plugin": (
+            {
+                "missing",
+                "disabled",
+                "cache-missing",
+                "manifest-unreadable",
+                "unreadable",
+                "prerelease",
+                "manifest-mismatch",
+                "below-floor",
+                "skill-missing",
+            },
+            "repair_authoring_plugin_between_sessions",
+        ),
+        "reusable_skill_plugins": ({"multiple_installs"}, "inspect_duplicate_skill_plugins"),
+        "skill_bundles": ({"bundle_missing"}, "sync_installed_skills"),
+        "published_skill_bundles": ({"content_stale"}, "sync_and_publish_skills"),
+        "npx": ({"command_missing"}, "install_node"),
+        "desktop_bridge": ({"command_missing"}, "install_desktop_bridge"),
+        "desktop_install": ({"executable_missing"}, "install_desktop"),
+        "desktop_pin": ({"configured_path_missing"}, "refresh_current_process_pin"),
+        "dotnet": ({"command_missing"}, "install_dotnet"),
+        "adomd_client": ({"assembly_missing"}, "restore_adomd"),
+        "fabric_tenant": ({"tenant_mismatch"}, "scope_intended_tenant"),
+    }
+    for blocker in detail["blockers"]:
+        if (
+            not isinstance(blocker, dict)
+            or set(blocker) != {"id", "source", "reason", "remedy"}
+            or not isinstance(blocker["id"], str)
+            or blocker["id"] not in allowed
+            or not isinstance(blocker["reason"], str)
+        ):
+            return unavailable
+        reasons, remedy = allowed[blocker["id"]]
+        source = "process_environment" if blocker["id"] == "desktop_pin" else None
+        if blocker["reason"] not in reasons or blocker["remedy"] != remedy or blocker["source"] != source:
+            return unavailable
+    return {"availability": "available", "reason": "available", **detail}
+
+
 def doctor(args: argparse.Namespace, result: dict) -> int:
     """Capture plain diagnostics privately; emit only owner-generated presence records."""
     from tableau_env import diagnose_env  # pylint: disable=import-outside-toplevel
@@ -230,11 +315,22 @@ def doctor(args: argparse.Namespace, result: dict) -> int:
     _values, configuration = diagnose_env(args.env or ROOT / ".env", explicit=args.env is not None)
     result["checks"] = configuration["checks"]
     result["limitations"] = [configuration["reason"], "presence_only_not_authentication"]
+    result["doctor_details"] = {
+        "configuration_aliases": configuration["configuration_aliases"],
+        "preflight": _doctor_preflight(b"", b"", None),
+    }
     environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-    print("DOCTOR plain preflight; output withheld; no login or run.", file=sys.stderr, flush=True)
+    print("Checking existing preflight; no upgrades or Tableau login.", file=sys.stderr, flush=True)
     try:
         child = subprocess.run(
-            ["powershell", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts" / "preflight.ps1")],
+            [
+                "powershell",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ROOT / "scripts" / "preflight.ps1"),
+                "-DoctorDiagnostics",
+            ],
             cwd=ROOT,
             env=environment,
             stdout=subprocess.PIPE,
@@ -242,6 +338,9 @@ def doctor(args: argparse.Namespace, result: dict) -> int:
             check=False,
         )
         code = child.returncode
+        result["doctor_details"]["preflight"] = _doctor_preflight(
+            getattr(child, "stdout", b""), getattr(child, "stderr", b""), code
+        )
     except OSError:
         code = None
     result["stages"] = [
@@ -252,6 +351,176 @@ def doctor(args: argparse.Namespace, result: dict) -> int:
     result["status"] = "CANNOT_ESTABLISH" if unknown else "BLOCKED_CONFIG" if blocked else "READY_TO_ATTEMPT"
     result["proof_boundary"]["established"] = ["configuration_presence", "plain_preflight_result"]
     return 3 if unknown else 1 if blocked else 0
+
+
+def _doctor_configuration_lines(result: dict) -> list[str]:
+    sources = {
+        "environment": "process environment",
+        "selected_env": "selected environment file",
+        "default": "default",
+        "absent": "absent",
+    }
+    lines = []
+    file_actions = {
+        "selected_env_missing": "selected environment file is missing; restore or explicitly select the intended file.",
+        "selected_env_unreadable": "selected environment file is unreadable; privately check its access and encoding.",
+        "selected_env_malformed": "selected environment file is malformed; privately correct its KEY=VALUE syntax.",
+    }
+    for reason in result["limitations"]:
+        if reason in file_actions:
+            lines.append("Configuration: " + file_actions[reason])
+    aliases = {row["key"]: row for row in result.get("doctor_details", {}).get("configuration_aliases", [])}
+    for row in result["checks"]:
+        key, state, source = row["key"], row["state"], sources[row["source"]]
+        if row["required"]:
+            lines.append(f"{key}: {state}; effective source: {source}. Values withheld.")
+        if row["required"] and state in {"missing", "blank"}:
+            lines.append(f"Action: privately supply the intended {key} in the selected file or invoking process.")
+        if key not in aliases:
+            continue
+        legacy = "TABLEAU_PAT_VALUE" if key == "TABLEAU_PAT_SECRET" else "TABLEAU_SERVER"
+        for origin in aliases[key]["sources"]:
+            if legacy not in origin["keys"]:
+                continue
+            location = sources[origin["source"]]
+            if origin["conflict"]:
+                lines.append(f"{key}: conflict in {location}; spellings: {key} (canonical), {legacy} (deprecated).")
+                lines.append(f"Effective source: {source}; conflict to resolve: {location}.")
+            else:
+                lines.append(f"Alias warning in {location}: {legacy} is deprecated; use {key}.")
+            noun = "credential" if key == "TABLEAU_PAT_SECRET" else "setting"
+            lines.append(
+                f"Action: privately confirm the intended {noun}; preserve it under {key} BEFORE removing {legacy}"
+                f" in that source. If {legacy} holds the intended value, move it to {key} first."
+            )
+    site = next((row for row in result["checks"] if row["key"] == "TABLEAU_SITE"), None)
+    if site:
+        lines.append(
+            "TABLEAU_SITE: valid default."
+            if site["reason"] == "default_site"
+            else f"TABLEAU_SITE: {site['state']}; source: {sources[site['source']]}; value withheld."
+        )
+        lines.append("Optional source credentials: presence only, not validated; absence needs no repair.")
+    return lines
+
+
+def _doctor_blocker_lines(blocker: dict) -> list[str]:
+    labels = {
+        "copilot_home": "configured Copilot home directory was not found",
+        "python_runtime": "Python is unavailable, unreadable or below 3.11",
+        "python_lxml": "Python cannot import lxml",
+        "python_jsonschema": "Python cannot import jsonschema",
+        "node_runtime": "Node.js is unavailable, unreadable or below 20",
+        "report_author": "powerbi-report-author is not on PATH",
+        "report_author_version": "powerbi-report-author release does not satisfy its existing floor check",
+        "desktop_bridge_version": "powerbi-desktop release does not satisfy its existing floor check",
+        "engine_plugin": "canonical conversion-engine plugin is missing",
+        "engine_source": "engine single-source requirement could not be satisfied",
+        "authoring_plugin": "powerbi-authoring plugin does not satisfy its existing joint check",
+        "reusable_skill_plugins": "multiple reusable-skill plugin installations were found",
+        "skill_bundles": "installed reusable-skill bundles are incomplete",
+        "published_skill_bundles": "installed reusable-skill content differs from the toolkit",
+        "npx": "npx is not on PATH",
+        "desktop_bridge": "powerbi-desktop is not on PATH",
+        "desktop_install": "Power BI Desktop executable was not found",
+        "desktop_pin": "PBI_DESKTOP_PATH is configured but its target was not found",
+        "dotnet": ".NET SDK is not on PATH",
+        "adomd_client": "ADOMD.NET client assembly is missing from the active NuGet cache",
+        "fabric_tenant": "Fabric token does not match the explicitly intended tenant",
+    }
+    actions = {
+        "verify_copilot_home": "privately verify COPILOT_HOME and create/correct the intended directory manually.",
+        "install_python": "manually install/select Python 3.11+ on this process's PATH, then rerun.",
+        "sync_python_dependencies": "activate the intended Python environment and run uv sync manually.",
+        "install_node": "manually install/select Node.js 20+ including npx on this process's PATH.",
+        "install_report_author": "manually install @microsoft/powerbi-report-authoring-cli per setup guidance.",
+        "inspect_cli_release": "privately inspect that CLI; select a plain release meeting the existing preflight floor"
+        " at session start only, using docs/operator-runbook.md.",
+        "install_engine_plugin": "install the canonical tableau-fabric-skills plugin between sessions"
+        " per setup guidance.",
+        "inspect_engine_source": "run python -B scripts\\engine_source.py --json privately; inspect alternative copies"
+        " and uncommitted/unpushed work before any manual removal, or restore a usable resolver/Python invocation.",
+        "repair_authoring_plugin_between_sessions": "close Copilot sessions; manually inspect/repair only"
+        " powerbi-authoring@fabric-collection per docs/operator-runbook.md, then verify enabled/version/content.",
+        "inspect_duplicate_skill_plugins": "privately inspect duplicate skill-plugin installations;"
+        " retain the intended copy and remove a duplicate manually between sessions.",
+        "sync_installed_skills": "manually refresh installed bundles with scripts\\sync_installed_skills.py;"
+        " install/update a new bundle's plugin only between sessions.",
+        "sync_and_publish_skills": "manually synchronize installed skills and publish the intended toolkit content"
+        " using setup guidance before trusting runtime results.",
+        "install_desktop_bridge": "manually install @microsoft/powerbi-desktop-bridge-cli per setup guidance.",
+        "install_desktop": "manually install Power BI Desktop, then verify and pin the intended executable.",
+        "refresh_current_process_pin": "refresh the inherited PBI_DESKTOP_PATH in the process invoking doctor/Power BI."
+        " A saved User setting does not update an already-running parent/session. If that saved pin is independently"
+        " verified, reload it and rerun doctor in the SAME invocation; otherwise verify the installed executable and"
+        " repin manually per setup guidance. Do not merely persist it again with setx or remove the pin to pass.",
+        "install_dotnet": "manually install the .NET SDK per setup guidance.",
+        "restore_adomd": "manually restore the separate ADOMD.NET client package into the active NuGet cache"
+        " with a supported target framework; follow docs/operator-runbook.md.",
+        "scope_intended_tenant": "privately verify intended identity; scope preflight with -Subscription for"
+        " a subscription in that tenant. Do not rewrite the shared Azure CLI profile just to pass.",
+    }
+    lines = [f"Preflight blocker: {labels[blocker['id']]}; reason: {blocker['reason']}."]
+    if blocker["source"] == "process_environment":
+        lines.append("Effective source: inherited process environment. This is not a PAT diagnosis.")
+    lines.append("Action: " + actions[blocker["remedy"]])
+    return lines
+
+
+def _doctor_human(result: dict, args: argparse.Namespace | None) -> None:
+    """Doctor alone has a human view; start/status keep their existing renderers."""
+    lines = [f"DOCTOR {result['status']} (exit {result['exit_code']})"]
+    lines.extend(_doctor_configuration_lines(result))
+    stage = next((row for row in result["stages"] if row["stage"] == "preflight"), None)
+    detail = result.get("doctor_details", {}).get("preflight", {})
+    native = stage["native_exit_code"] if stage else None
+    lines.append(f"Preflight owner: preflight.ps1; native exit: {native if native is not None else 'unavailable'}.")
+    if detail.get("availability") == "available":
+        lines.append(f"Recommended warnings: {detail['recommended_warnings']} (non-blocking).")
+        for blocker in detail["blockers"]:
+            lines.extend(_doctor_blocker_lines(blocker))
+        lines.append("Preflight: passed." if native == 0 else "Preflight: blocked.")
+    else:
+        lines.append("Recommended-warning count: unavailable.")
+        if native == 1:
+            lines.append("Preflight blocked, but its safe cause could not be established.")
+        elif native == 0:
+            lines.append("Preflight passed; structured detail unavailable, so not every diagnostic was explained.")
+        elif native is not None:
+            lines.append(f"Unexpected preflight native exit {native}.")
+        else:
+            lines.append("Preflight did not complete; toolchain readiness is unknown.")
+        if result["exit_code"] in {2, 130} or native is None:
+            lines.append(
+                {
+                    2: "Action: use python -B scripts\\t2p.py doctor --help for the supported syntax.",
+                    130: "Action: rerun the same doctor after the interruption.",
+                }.get(
+                    result["exit_code"],
+                    "Action: restore a usable PowerShell/toolkit invocation, then rerun the same doctor.",
+                )
+            )
+        else:
+            lines.append(
+                "Action: run plain preflight directly in a private terminal without -Update, then rerun doctor."
+            )
+            lines.append("  powershell -ExecutionPolicy Bypass -File scripts\\preflight.ps1")
+        lines.append("Do not change Tableau credentials on this evidence.")
+    if result["status"] == "READY_TO_ATTEMPT":
+        lines.append("Next, only when approved: python -B scripts\\t2p.py start --project <exact-name-or-LUID>")
+        lines.append("Keep the same --env selection if supplied.")
+    rerun = "python -B scripts\\t2p.py doctor"
+    if args is not None and args.env is not None:
+        rerun += " --env <same-selected-env>"
+    lines.extend(
+        [
+            "Rerun doctor: " + rerun,
+            "No run, login or repair command was started.",
+            "Presence/preflight only; not authentication, reachability, path safety, START_READY, fidelity,"
+            " COMPLETE or deployment approval.",
+        ]
+    )
+    _print_safe("\n".join(lines))
 
 
 @contextmanager
@@ -475,6 +744,8 @@ def main(argv: list[str] | None = None) -> int:
     result["exit_code"] = code
     if json_mode:
         print(json.dumps(result, ensure_ascii=True, sort_keys=True), flush=True)
+    elif command == "doctor":
+        _doctor_human(result, args)
     else:
         _print_safe(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2))
     if args is not None and args.command == "start":

@@ -28,6 +28,7 @@ PREFLIGHT = REPO_ROOT / "scripts" / "preflight.ps1"
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import deploy_estate as de  # noqa: E402  # pylint: disable=wrong-import-position
+import t2p  # noqa: E402  # pylint: disable=wrong-import-position
 
 TENANT_CHECK = "Fabric token tenant"
 DESKTOP_PIN_CHECK = "PBI_DESKTOP_PATH (bridge exe pin)"
@@ -349,7 +350,7 @@ def test_the_tenant_check_reports_exactly_once_whatever_happens() -> None:
     # and the plugin cache and cannot run in CI - but it is exactly where a correct verdict can still
     # be thrown away: rewriting `$verdict.Tier` to `'optional'` leaves every executed test green.
     assert re.search(
-        rf"(?m)^Add-Check '{re.escape(TENANT_CHECK)}' \$verdict\.Tier \$verdict\.Ok \$verdict\.Detail \$tenantHint$",
+        rf"(?m)^Add-Check '{re.escape(TENANT_CHECK)}' \$verdict\.Tier \$verdict\.Ok \$verdict\.Detail \$tenantHint `$",
         block,
     ), "the rendered tier/status/detail must come from the verdict object, not from a literal"
 
@@ -1445,3 +1446,368 @@ def test_an_undecodable_token_yields_nothing_rather_than_a_wrong_answer(token: s
     the advisory WARN the script emits for an absent tid.
     """
     assert _decode(token) == "NULL"
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_doctor_summary_is_blockers_only_with_one_shared_aggregate() -> None:
+    """All critical failures retain order; recommended is count-only and manual/optional stay out."""
+    actual = _ps_json(
+        "Add-Check,Get-PreflightSummary",
+        "$results=New-Object System.Collections.Generic.List[object]\n"
+        "foreach ($r in $inputData) {\n"
+        " Add-Check 'PRIVATE_NAME_CANARY' $r[0] $r[1] 'PRIVATE_DETAIL_CANARY' 'PRIVATE_HINT_CANARY' "
+        "-DoctorId $r[2] -DoctorReason $r[3] -DoctorRemedy $r[4]\n"
+        "}\nEmit (Get-PreflightSummary $results | ConvertTo-Json -Depth 4 -Compress)\n",
+        [
+            ["critical", True, "passing", "private", "private"],
+            ["recommended", False, "warning", "private", "private"],
+            ["optional", False, "optional", "private", "private"],
+            ["optional", True, "manual", "private", "private"],
+            ["critical", False, "python_lxml", "import_failed", "sync_python_dependencies"],
+            ["CRITICAL", False, "python_jsonschema", "import_failed", "sync_python_dependencies"],
+        ],
+    )
+    assert actual == {
+        "critical_missing": 2,
+        "recommended_warnings": 1,
+        "blockers": [
+            {"id": "python_lxml", "source": None, "reason": "import_failed", "remedy": "sync_python_dependencies"},
+            {
+                "id": "python_jsonschema",
+                "source": None,
+                "reason": "import_failed",
+                "remedy": "sync_python_dependencies",
+            },
+        ],
+    }, "all critical blockers, count equality and owner order must survive projection"
+    source = _preflight_source()
+    assert source.count("$summary = Get-PreflightSummary $results") == 1
+    render = source[source.index("# --- Render ---") :]
+    assert "$criticalMissing++" not in render and "$recommendedWarnings++" not in render
+    assert "$criticalMissing = $summary.critical_missing" in source
+    assert "$recommendedWarnings = $summary.recommended_warnings" in source
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_doctor_merged_version_and_plugin_critical_reasons_are_projected() -> None:
+    """Execute all merged critical decision kinds through their production Add-Check wiring."""
+    source = _preflight_source()
+    cli_emission = source[source.index("    $doctorCliId =") : source.index("# --- PBIR")].rsplit("\n}", 1)[0]
+    plugin_emission = source[
+        source.index("Add-Check 'plugin: powerbi-authoring@fabric-collection'") : source.index("$skillPlugin =")
+    ]
+    kinds = [
+        ("missing", {"absent": True}),
+        ("disabled", {"enabled": False}),
+        ("cache-missing", {"cache": False}),
+        ("manifest-unreadable", {"manifest": False}),
+        ("unreadable", {"version": "garbage"}),
+        ("prerelease", {"version": "0.3.19-beta.0"}),
+        ("manifest-mismatch", {"manifest_version": "0.3.18"}),
+        ("below-floor", {"version": "0.3.11"}),
+        ("skill-missing", {"skill": False}),
+    ]
+    actual = _ps_json(
+        _PLUGIN_FUNCS + ",Add-Check,Get-PreflightSummary",
+        ". ([scriptblock]::Create($env:POLICY))\n"
+        "$results=New-Object System.Collections.Generic.List[object]\n"
+        "$cliName='powerbi-report-author'\n"
+        "foreach ($version in @('noise','0.5.0-beta.0','0.3.0')) {\n"
+        " $v=Get-VersionFloorVerdict $version '0.4.0' '0.5.0' 'PRIVATE_HINT_CANARY'\n"
+        + cli_emission
+        + "\n}\nforeach ($r in $inputData) {\n"
+        " $entry=[pscustomobject]@{name='powerbi-authoring';marketplace='fabric-collection';"
+        "enabled=$true;version='0.3.19'}\n"
+        " if ($r.PSObject.Properties.Name -contains 'enabled') { $entry.enabled=$r.enabled }\n"
+        " if ($r.version) { $entry.version=$r.version }\n"
+        " $entries=@($entry); if ($r.absent) { $entries=@() }\n"
+        " $manifest=[pscustomobject]@{name='powerbi-authoring';version=$entry.version}\n"
+        " if ($r.manifest_version) { $manifest.version=$r.manifest_version }\n"
+        " if ($r.PSObject.Properties.Name -contains 'manifest' -and -not $r.manifest) { $manifest=$null }\n"
+        " $cache=-not ($r.PSObject.Properties.Name -contains 'cache' -and -not $r.cache)\n"
+        " $skill=-not ($r.PSObject.Properties.Name -contains 'skill' -and -not $r.skill)\n"
+        " $pv=Get-PluginVerdict $entries $cache $manifest $skill $pluginPolicy\n"
+        + plugin_emission
+        + "\n}\nEmit (Get-PreflightSummary $results | ConvertTo-Json -Depth 4 -Compress)\n",
+        [overrides for _, overrides in kinds],
+    )
+    assert actual["critical_missing"] == len(actual["blockers"]) == 12
+    assert [(row["id"], row["reason"], row["remedy"], row["source"]) for row in actual["blockers"]] == [
+        *[
+            ("report_author_version", kind, "inspect_cli_release", None)
+            for kind in ("unreadable", "prerelease", "below-floor")
+        ],
+        *[("authoring_plugin", kind, "repair_authoring_plugin_between_sessions", None) for kind, _ in kinds],
+    ], "every merged CLI/plugin critical reason needs its exact safe owner code/remedy"
+
+
+def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) -> tuple:
+    """Full script, synthetic profile/toolkit, command stubs only; not a real-host cache claim."""
+    # Keep this one fixture's setup, invocation and monitored snapshot together.
+    # pylint: disable=too-many-locals
+    root = tmp_path / ("doctor" if diagnostics else "direct")
+    scripts, profile, commands = root / "scripts", root / "PRIVATE_PROFILE_PATH_CANARY", root / "commands"
+    for path in (scripts, profile, commands, root / "scratch", root / "azure"):
+        path.mkdir(parents=True)
+    shutil.copyfile(PREFLIGHT, scripts / "preflight.ps1")
+    (root / ".env").write_text("", encoding="utf-8")
+    log = root / "commands.jsonl"
+    log.write_text("", encoding="utf-8")
+    copilot, cache = profile / "copilot", profile / "authoring"
+    for path in (copilot, cache / ".github" / "plugin", cache / "skills" / "powerbi-report-cli"):
+        path.mkdir(parents=True)
+    (cache / ".github" / "plugin" / "plugin.json").write_text(
+        json.dumps({"name": "powerbi-authoring", "version": "0.3.19"}), encoding="utf-8"
+    )
+    (cache / "skills" / "powerbi-report-cli" / "SKILL.md").write_text("synthetic", encoding="utf-8")
+    (copilot / "config.json").write_text(
+        json.dumps(
+            {
+                "installedPlugins": [
+                    {
+                        "name": "powerbi-authoring",
+                        "marketplace": "fabric-collection",
+                        "enabled": True,
+                        "version": "0.3.19",
+                        "cache_path": str(cache),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (copilot / "mcp-config.json").write_text(json.dumps({"mcpServers": {"powerbi-modeling-mcp": {}}}), encoding="utf-8")
+    nuget = profile / "nuget"
+    for package, dll in (
+        ("microsoft.analysisservices.netcore.retail.amd64", "Microsoft.AnalysisServices.Tabular.dll"),
+        ("microsoft.analysisservices.adomdclient.netcore.retail.amd64", "Microsoft.AnalysisServices.AdomdClient.dll"),
+    ):
+        leaf = nuget / package / "synthetic" / dll
+        leaf.parent.mkdir(parents=True)
+        if mode != "blocked":
+            leaf.write_text("synthetic assembly, never loaded", encoding="utf-8")
+    desktop = root / "desktop" / "bin" / "PBIDesktop.exe"
+    desktop.parent.mkdir(parents=True)
+    if mode != "blocked":
+        desktop.write_text("synthetic executable, never launched", encoding="utf-8")
+    for parent in (root / ".github" / "skills", profile / "skills"):
+        leaf = parent / "synthetic_bundle" / "SKILL.md"
+        leaf.parent.mkdir(parents=True)
+        leaf.write_text("different" if mode == "blocked" and parent == profile / "skills" else "same", encoding="utf-8")
+    (commands / "stub.py").write_text(
+        "import json,os,sys\nfrom pathlib import Path\n"
+        "tool,*args=sys.argv[1:]\nmode=os.environ['PREFLIGHT_CASE']\n"
+        "with Path(os.environ['STUB_LOG']).open('a',encoding='utf-8') as log: "
+        "log.write(json.dumps([tool,*args])+'\\n')\n"
+        "if tool=='python':\n"
+        " if args==['--version']: print('Python 3.10.0' if mode=='blocked' else 'Python 3.11.9')\n"
+        " elif args[0]=='-c': sys.exit(1 if mode=='blocked' and args[1] in "
+        "('import lxml','import jsonschema') else 0)\n"
+        " elif Path(args[0]).name=='engine_source.py':\n"
+        "  print(json.dumps({'present':mode!='blocked','alternatives':['PRIVATE_ENGINE_PATH_CANARY'] "
+        "if mode=='blocked' else [],'version':'9.9.9','root':'PRIVATE_ENGINE_PATH_CANARY',"
+        "'install_hint':'PRIVATE_HELPER_HINT_CANARY'}))\n"
+        " elif Path(args[0]).name=='check_engine_receipts.py': print('PRIVATE_RECEIPT_OUTPUT_CANARY')\n"
+        " elif Path(args[0]).name=='skill_plugin_source.py':\n"
+        "  print(json.dumps({'status':'multiple' if mode=='multiple' else 'found',"
+        "'detail':'PRIVATE_PLUGIN_DETAIL_CANARY','identity':'PRIVATE_PLUGIN_ID_CANARY',"
+        "'plugin_root':'PRIVATE_PLUGIN_PATH_CANARY','skills_dir':str(Path(os.environ['USERPROFILE'])/'skills'),"
+        "'shipped_skills':['synthetic_bundle','missing_bundle'] if mode=='blocked' else ['synthetic_bundle']}))\n"
+        " else: sys.exit(91)\n"
+        "elif tool=='node': print('v18.0.0' if mode=='blocked' else 'v20.0.0')\n"
+        "elif tool=='powerbi-report-author': print(('noise\\n0.5.0' if mode=='blocked' else '0.5.0') "
+        "if args==['--version'] else '{\"ok\":true}')\n"
+        "elif tool=='powerbi-desktop': print('1.0.0-beta.0' if mode=='blocked' else '1.0.0')\n",
+        encoding="utf-8",
+    )
+    for tool in (
+        "python",
+        "node",
+        "powerbi-report-author",
+        "powerbi-desktop",
+        "npx",
+        "dotnet",
+        "az",
+        "uv",
+        "npm",
+        "copilot",
+        "git",
+        "curl",
+        "wget",
+        "pip",
+        "setx",
+    ):
+        if mode == "missing" and tool in {
+            "python",
+            "node",
+            "powerbi-report-author",
+            "powerbi-desktop",
+            "npx",
+            "dotnet",
+        }:
+            continue
+        (commands / f"{tool}.cmd").write_text(f'@"{sys.executable}" -B "%~dp0stub.py" {tool} %*\n', encoding="utf-8")
+    launcher = root / "launch.ps1"
+    launcher.write_text(
+        "$ErrorActionPreference='Stop'\n"
+        "Set-Variable -Name HOME -Value $env:USERPROFILE -Force\n"
+        "function Get-AppxPackage { if ($env:PREFLIGHT_CASE -ne 'blocked') { "
+        "[pscustomobject]@{InstallLocation=(Join-Path $env:FIXTURE_ROOT 'desktop');Version='2.157.627.0'} } }\n"
+        "function Get-OdbcDriver { }\n"
+        'function Invoke-WebRequest { [IO.File]::AppendAllText($env:STUB_LOG,\'["network","Invoke-WebRequest"]\'+"`n");'
+        " [pscustomobject]@{Content='{}'} }\n"
+        "function Invoke-RestMethod { [IO.File]::AppendAllText($env:STUB_LOG,"
+        '\'["network","Invoke-RestMethod"]\'+"`n") }\n'
+        "function Test-Path { param($Path,$LiteralPath,$PathType)\n"
+        " $target=if ($LiteralPath) { $LiteralPath } else { $Path }\n"
+        " if ($target -eq 'C:\\Program Files\\Microsoft Power BI Desktop\\bin\\PBIDesktop.exe') { return $false }\n"
+        " if (-not ([IO.Path]::GetFullPath($target)).StartsWith($env:FIXTURE_ROOT+'\\',"
+        "[StringComparison]::OrdinalIgnoreCase)) { throw 'non-synthetic path' }\n"
+        " Microsoft.PowerShell.Management\\Test-Path @PSBoundParameters\n}\n"
+        "& (Join-Path $env:FIXTURE_ROOT 'scripts\\preflight.ps1') @args\nexit $LASTEXITCODE\n",
+        encoding="utf-8",
+    )
+    environment = {
+        **{key: os.environ[key] for key in ("SystemRoot", "WINDIR", "COMSPEC") if key in os.environ},
+        "PATH": str(commands),
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "HOME": str(profile),
+        "USERPROFILE": str(profile),
+        "APPDATA": str(profile / "appdata"),
+        "LOCALAPPDATA": str(profile / "localappdata"),
+        "COPILOT_HOME": str(profile / "missing-copilot" if mode == "blocked" else copilot),
+        "NUGET_PACKAGES": str(nuget),
+        "AZURE_CONFIG_DIR": str(root / "azure"),
+        "TEMP": str(root / "scratch"),
+        "TMP": str(root / "scratch"),
+        "PBI_DESKTOP_PATH": str(desktop),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "FIXTURE_ROOT": str(root),
+        "PREFLIGHT_CASE": mode,
+        "STUB_LOG": str(log),
+    }
+    before = {
+        str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file() and path != log
+    }
+    child = subprocess.run(
+        [
+            shutil.which("powershell") or _PS,
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(launcher),
+            *(["-DoctorDiagnostics"] if diagnostics else []),
+        ],
+        env=environment,
+        cwd=root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+        check=False,
+    )
+    after = {
+        str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file() and path != log
+    }
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert after == before, "actual-child monitored synthetic tree must remain byte/mtime/tree unchanged"
+    assert all(call[0] in {"python", "node", "powerbi-report-author", "powerbi-desktop"} for call in calls), (
+        "actual-child forbidden network/updater/installer/login command must not be invoked"
+    )
+    assert all(call[1:] == ["--version"] for call in calls if call[0] in {"node", "powerbi-desktop"})
+    assert all(call[1:] in (["--version"], ["doctor"]) for call in calls if call[0] == "powerbi-report-author")
+    return child, calls
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or _PS is None, reason="requires Windows PowerShell/PowerShell 7 on Windows and NTFS"
+)
+@pytest.mark.parametrize(
+    "mode,ids",
+    [
+        ("ready", set()),
+        (
+            "blocked",
+            {
+                "copilot_home",
+                "python_runtime",
+                "python_lxml",
+                "python_jsonschema",
+                "node_runtime",
+                "report_author_version",
+                "desktop_bridge_version",
+                "engine_plugin",
+                "engine_source",
+                "authoring_plugin",
+                "skill_bundles",
+                "published_skill_bundles",
+                "desktop_install",
+                "desktop_pin",
+                "adomd_client",
+            },
+        ),
+        (
+            "missing",
+            {"python_runtime", "node_runtime", "report_author", "desktop_bridge", "engine_source", "npx", "dotnet"},
+        ),
+        ("multiple", {"reusable_skill_plugins"}),
+    ],
+)
+def test_doctor_actual_windows_child(tmp_path: Path, mode: str, ids: set) -> None:
+    """Actual full Windows child, bounded synthetic observations only; never workstation credentials."""
+    child, calls = _synthetic_preflight_child(tmp_path, mode, diagnostics=True)
+    assert child.stderr == "", "actual doctor child must withhold ordinary host rendering and helper noise"
+    assert "PRIVATE_" not in child.stdout, "owner safe records must never copy dynamic detail/hint/path/helper output"
+    detail = json.loads(child.stdout)
+    assert {row["id"] for row in detail["blockers"]} == ids, "all actual failed-critical blockers must be retained"
+    assert detail["critical_missing"] == len(detail["blockers"]) == len(ids), "owner count must equal all blockers"
+    assert all(set(row) == {"id", "source", "reason", "remedy"} for row in detail["blockers"])
+    assert detail["recommended_warnings"] == {"blocked": 2, "missing": 1}.get(mode, 0)
+    assert child.returncode == (1 if ids else 0), "doctor and direct native exits use the same shared aggregate"
+    if mode == "blocked":
+        assert next(row for row in detail["blockers"] if row["id"] == "desktop_pin") == {
+            "id": "desktop_pin",
+            "source": "process_environment",
+            "reason": "configured_path_missing",
+            "remedy": "refresh_current_process_pin",
+        }, "dead Desktop needs the exact owner ID/source/reason/remedy tuple"
+    safe = t2p._doctor_preflight(child.stdout.encode(), b"", child.returncode)  # pylint: disable=protected-access
+    assert safe["availability"] == "available" and safe["blockers"] == detail["blockers"], (
+        "facade must accept and retain every complete known owner blocker"
+    )
+    direct, direct_calls = _synthetic_preflight_child(tmp_path, mode, diagnostics=False)
+    assert direct.returncode == child.returncode
+    assert direct.stdout.count("[MISS]") == detail["critical_missing"]
+    assert direct.stdout.startswith("Copilot home: ") and "== CRITICAL ==" in direct.stdout
+    assert ("2 recommended warning(s)" in direct.stdout) == (mode == "blocked")
+    assert ("1 recommended warning(s)" in direct.stdout) == (mode == "missing")
+    assert [call[0] for call in direct_calls] == [call[0] for call in calls], "plain checks run once in both modes"
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_doctor_explicit_tenant_mismatch_projection_is_value_free() -> None:
+    """Existing explicit-only critical family; doctor itself never adds a -Tenant argument."""
+    source = _preflight_source()
+    emission = source[source.index("Add-Check 'Fabric token tenant'") : source.index("$workspaceCheck =")]
+    actual = _ps_json(
+        "Get-TenantVerdict,Remove-SurroundingQuotes,Test-TenantIdShape,Add-Check,Get-PreflightSummary",
+        "$results=New-Object System.Collections.Generic.List[object]\n"
+        "$verdict=Get-TenantVerdict $inputData[0] $inputData[1] $true $true\n"
+        "$tenantHint='PRIVATE_HINT_CANARY'\n" + emission + "\n"
+        "Emit (Get-PreflightSummary $results | ConvertTo-Json -Depth 4 -Compress)\n",
+        [_TID, _OTHER_TID],
+    )
+    assert actual == {
+        "critical_missing": 1,
+        "recommended_warnings": 0,
+        "blockers": [
+            {"id": "fabric_tenant", "source": None, "reason": "tenant_mismatch", "remedy": "scope_intended_tenant"}
+        ],
+    }, "explicit tenant mismatch retains only the fixed safe owner codes"
