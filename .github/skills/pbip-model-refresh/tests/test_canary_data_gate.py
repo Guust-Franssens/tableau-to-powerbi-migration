@@ -21,6 +21,7 @@ import time
 import queue
 import traceback
 from dataclasses import FrozenInstanceError, replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -280,6 +281,49 @@ def _bound_connection(monkeypatch, conn):
     monkeypatch.setattr(probe_desktop_query, "desktop_identity", lambda *_: identity)
     _wire(monkeypatch, probe_desktop_query, conn)
     return probe_desktop_query.bind_desktop(111, 52001)
+
+
+@pytest.mark.parametrize(
+    "epoch,after_identity",
+    [(100.062, 100.062), (100.062, 100.078), (100.0, 100.0), (100.062, 220.063)],
+    ids=["equal-coarse-tick", "next-coarse-tick", "equal-exact-epoch", "expired"],
+)
+def test_healthy_binding_survives_unexpired_deadline_roundtrip(
+    monkeypatch: pytest.MonkeyPatch, epoch: float, after_identity: float
+) -> None:
+    """Internal subtraction roundoff must not refuse an otherwise unexpired binding."""
+    conn = _Conn([("Orders", False)], {"Orders": 1})
+    readings = iter((epoch, after_identity))
+    watches = []
+    original_watch = probe_desktop_query.watch
+
+    def record_watch(pid: int, **kwargs: object) -> object:
+        owner = original_watch(pid, **kwargs)
+        watches.append(owner)
+        return owner
+
+    monkeypatch.setattr(probe_desktop_query, "time", SimpleNamespace(monotonic=lambda: next(readings, after_identity)))
+    monkeypatch.setattr(probe_desktop_query, "watch", record_watch)
+    if after_identity >= epoch + 120:
+        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^TIMEOUT$"):
+            _bound_connection(monkeypatch, conn)
+        assert not conn.queries and not watches
+        return
+
+    bound = None
+    try:
+        bound = _bound_connection(monkeypatch, conn)
+    except probe_desktop_query.ObservationUnavailable:
+        pass
+    assert bound is not None, "healthy_binding_must_reach_catalogue_before_refusal"
+    assert bound.catalogue == conn.Database
+    assert bound.identity == probe_desktop_query.DesktopIdentity(111, "100", 222, "101", 52001)
+    assert conn.queries == ["SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS"]
+    assert len(watches) == 1
+    owner = watches[0]
+    assert (owner.pid, owner.expected_process_start) == (111, "100")
+    assert owner.deadline <= epoch + 120
+    assert owner.closed
 
 
 @pytest.mark.parametrize("count", [0, 1])

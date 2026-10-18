@@ -415,7 +415,7 @@ def bind_desktop(pid: int, supplied_port: int | None = None) -> BoundDesktop:
         finally:
             _close_observation_connection(connection)
 
-    remaining = deadline - time.monotonic()
+    remaining = min(OBSERVATION_TIMEOUT_SECONDS, deadline - time.monotonic())
     if remaining <= 0:
         raise ObservationUnavailable("TIMEOUT")
     return _observation_call(pid, discover, remaining, expected_process_start=identity.process_start)
