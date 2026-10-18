@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
+import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -30,6 +33,76 @@ ENV = {
     "TABLEAU_PAT_NAME": "synthetic-name",
     "TABLEAU_PAT_SECRET": "synthetic-secret",
 }
+
+
+@pytest.mark.parametrize(
+    "state,verdict,native",
+    [
+        ("ok", "PASS", 7),
+        ("over_ceiling", "OVER_CEILING", 10),
+        ("cannot_establish", "CANNOT_ESTABLISH", 10),
+    ],
+)
+@pytest.mark.parametrize("observed", [False, True])
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_bundle_child_private_path_gate_channel(tmp_path, capfd, state, verdict, native, observed, json_mode):
+    """A real child reports its actual gate over IPC without changing stdout/stderr or exit."""
+    import t2p
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for source in (REPO_ROOT / "scripts").glob("*.py"):
+        shutil.copyfile(source, scripts / source.name)
+    (scripts / "run_estate.py").write_text(
+        "import os,sys\n"
+        f"STATE={state!r}\n"
+        "def project_estate_path_ceiling(*args):\n"
+        "    return {'status':STATE,'paths':[] if STATE=='cannot_establish' else [\n"
+        "        {'kind':'file','length':210,'ceiling':259,'path':'PRIVATE_PATH_LABEL'},\n"
+        "        {'kind':'directory','length':200,'ceiling':247,'path':'PRIVATE_PATH_LABEL'}]}\n"
+        "def preflight_estate_path_ceiling(*args):\n"
+        "    result=project_estate_path_ceiling(*args)\n"
+        "    return result['status']=='ok', 'PRIVATE_GATE_PROSE'\n"
+        "def main(argv):\n"
+        "    os.write(1,b'NATIVE_CHILD_STDOUT\\n'); os.write(2,b'NATIVE_CHILD_STDERR\\n')\n"
+        "    allowed,_=preflight_estate_path_ceiling()\n"
+        "    return 7 if allowed else 10\n"
+        "if __name__=='__main__': raise SystemExit(main(sys.argv[1:]))\n",
+        encoding="utf-8",
+    )
+    records = []
+    command = [sys.executable, "-u", "-B", str(scripts / "run_estate.py"), "--input", "synthetic"]
+    with t2p._native_to_stderr() if json_mode else nullcontext():
+        result = frontdoor._run_child(
+            "bundle",
+            5,
+            command,
+            {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            tmp_path / "report.json",
+            observer=records.append if observed else None,
+        )
+    captured = capfd.readouterr()
+    assert result.code == native, "structured observer must preserve native child exit"
+    assert "NATIVE_CHILD_STDERR" in captured.err
+    if json_mode:
+        assert not captured.out, "structured observer must preserve JSON stdout isolation"
+        assert "NATIVE_CHILD_STDOUT" in captured.err
+    else:
+        assert "NATIVE_CHILD_STDOUT" in captured.out
+    assert "PRIVATE_PATH_LABEL" not in str(records)
+    if observed:
+        assert len(records) == 1
+        assert records[0]["verdict"] == verdict, "actual child owner verdict must reach observer"
+        assert records[0]["measurements"] == (
+            {}
+            if state == "cannot_establish"
+            else {
+                "file": {"length": 210, "ceiling": 259},
+                "directory": {"length": 200, "ceiling": 247},
+            }
+        )
+    else:
+        assert records == [], "direct default must not introduce an observer channel"
 
 
 def _survey(*, project: bool = False, workbook: bool = False, unmatched=None, empty: bool = False) -> dict:
@@ -827,3 +900,54 @@ def test_empty_explicit_session_id_does_not_fall_back_to_environment(monkeypatch
     assert excinfo.value.code == 2
     assert pipeline.guard_calls == []
     assert pipeline.preflight == [] and pipeline.commands == []
+
+
+@pytest.mark.parametrize(
+    "codes,expected",
+    [
+        ({}, 0),
+        ({"run_engine_survey.py": 7}, 1),
+        ({"capture_tableau_oracle.py": 4}, 1),
+        ({"run_estate.py": 10}, 1),
+    ],
+)
+def test_optional_observer_preserves_direct_frontdoor(monkeypatch, tmp_path, capsys, codes, expected):
+    """An observer changes no producer command, wrapper result or reference continuation."""
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, exit_codes=codes)
+    records = []
+    assert frontdoor.main(["--project", "Finance"], observer=records.append) == expected
+    assert records[0]["event"] == "allocated"
+    assert Path(records[0]["run"]).is_absolute()
+    stages = [row for row in records if row["event"] == "stage"]
+    assert stages[0] == {
+        "event": "stage",
+        "stage": "preflight",
+        "native_exit_code": 0,
+        "state": "ok",
+        "artifact": None,
+    }
+    if "run_engine_survey.py" in codes:
+        assert [row["stage"] for row in stages] == ["preflight", "survey"]
+    else:
+        assert stages[-1]["stage"] == "bundle"
+    assert all(not Path(row["artifact"]).is_absolute() for row in stages if row["artifact"])
+    assert len(pipeline.commands) == len(stages) - 1
+
+
+def test_optional_diagnostic_env_blocks_before_allocation(monkeypatch, tmp_path, capsys):
+    """Strict pilot metadata is opt-in; legacy permissive env behavior stays the default."""
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+    for key in ENV:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.delenv("TABLEAU_SERVER", raising=False)
+    monkeypatch.delenv("TABLEAU_PAT_VALUE", raising=False)
+    selected = tmp_path / "selected.env"
+    selected.write_text("TABLEAU_PAT_SECRET= \t\n", encoding="utf-8")
+    records = []
+    assert (
+        frontdoor.main(["--project", "Finance", "--env", str(selected)], observer=records.append, diagnostic_env=True)
+        == 1
+    )
+    assert [row["event"] for row in records] == ["configuration"]
+    assert not list(pipeline.root.glob("_runs/*")), "diagnostic failure must not allocate"
+    assert pipeline.commands == []

@@ -258,3 +258,8 @@ Base: ``
 .github/skills/powerbi-report-gotchas/SKILL.md
 .github/skills/powerbi-semantic-model-gotchas/SKILL.md
 ```
+<!-- Narrow CLI pilot is opt-in; direct-script guidance remains authoritative. -->
+
+The opt-in `scripts/t2p.py` doctor/start/status pilot is documented in
+[`scripts/README.md`](../scripts/README.md). It adds no readiness authority or dispatcher replacement;
+the approved bounds remain [`docs/t2p-pilot-plan.md`](t2p-pilot-plan.md).

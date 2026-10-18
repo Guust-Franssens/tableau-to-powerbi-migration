@@ -11,6 +11,7 @@ and Tableau references; it does not establish fidelity, START_READY, COMPLETE or
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import shlex
@@ -18,16 +19,17 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import harvest_estate_assets as harvest  # noqa: E402  # pylint: disable=wrong-import-position
 import work_dirs  # noqa: E402  # pylint: disable=wrong-import-position
-from tableau_env import engine_child_env, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
+from tableau_env import diagnose_env, engine_child_env, require, resolve_env  # noqa: E402  # pylint: disable=wrong-import-position
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = Path(__file__).resolve()
@@ -314,9 +316,154 @@ def _stop_process(process: subprocess.Popen) -> None:
             process.wait()
 
 
-def _run_child(name: str, index: int, command: list[str], env: dict[str, str], output: Path) -> StageResult:
+def _path_gate_record(projection: dict | None, allowed: bool | None) -> dict:
+    """Select numeric evidence from the owner's result, never source names or another bound."""
+    state = projection.get("status") if projection else None
+    verdict = (
+        "PASS"
+        if allowed is True and state == "ok"
+        else "OVER_CEILING"
+        if allowed is False and state == "over_ceiling"
+        else "CANNOT_ESTABLISH"
+    )
+    measurements = {}
+    for kind in ("file", "directory"):
+        rows = [row for row in (projection or {}).get("paths", []) if row["kind"] == kind]
+        if rows:
+            longest = max(rows, key=lambda row: row["length"])
+            measurements[kind] = {"length": longest["length"], "ceiling": longest["ceiling"]}
+    return {
+        "event": "path_gate",
+        "owner": "run_estate.py",
+        "verdict": verdict,
+        "reason": {
+            "PASS": "owner_projection_fits",
+            "OVER_CEILING": "owner_projection_over_ceiling",
+            "CANNOT_ESTABLISH": "owner_projection_unavailable",
+        }[verdict],
+        "evidence": "bundle#pre_conversion_path_projection",
+        "measurements": measurements,
+    }
+
+
+@contextmanager
+def _observe_path_gate(owner: Any, observer: Callable[[dict], None]) -> Iterator[None]:
+    """Observe the exact child gate and its own projection without changing either result."""
+    original_projection = owner.project_estate_path_ceiling
+    original_gate = owner.preflight_estate_path_ceiling
+    projection = None
+
+    def project(*args: Any, **kwargs: Any) -> dict:
+        nonlocal projection
+        projection = original_projection(*args, **kwargs)
+        return projection
+
+    def gate(*args: Any, **kwargs: Any) -> tuple[bool, str]:
+        allowed = None
+        try:
+            result = original_gate(*args, **kwargs)
+            allowed = result[0]
+            return result
+        finally:
+            observer(_path_gate_record(projection, allowed))
+
+    owner.project_estate_path_ceiling = project
+    owner.preflight_estate_path_ceiling = gate
+    try:
+        yield
+    finally:
+        owner.project_estate_path_ceiling = original_projection
+        owner.preflight_estate_path_ceiling = original_gate
+
+
+def _observed_bundle_entry() -> int:
+    """Internal child bootstrap: one inherited pipe, unchanged run_estate argv and gate."""
+    import run_estate  # pylint: disable=import-outside-toplevel
+
+    handle, script, *arguments = sys.argv[1:]
+    if os.name == "nt":
+        import msvcrt  # pylint: disable=import-outside-toplevel,import-error
+
+        binary_flag: int = getattr(os, "O_BINARY", 0)
+        descriptor = msvcrt.open_osfhandle(int(handle), os.O_WRONLY | binary_flag)
+    else:
+        descriptor = int(handle)
+    os.set_inheritable(descriptor, False)
+    sys.argv = [script, *arguments]
+    with os.fdopen(descriptor, "w", encoding="utf-8") as channel:
+
+        def emit(record: dict) -> None:
+            channel.write(json.dumps(record, ensure_ascii=True) + "\n")
+            channel.flush()
+
+        with _observe_path_gate(run_estate, emit):
+            return run_estate.main(arguments)
+
+
+@contextmanager
+def _path_gate_channel(command: list[str], observer: Callable[[dict], None]) -> Iterator[tuple[list[str], dict]]:
+    """Keep structured observations separate from inherited live stdout/stderr; no state file."""
+    script_indexes = [index for index, token in enumerate(command) if token.endswith(".py")]
+    if not script_indexes:
+        raise ValueError("bundle script argument unavailable")
+    script_index = script_indexes[0]
+    read_descriptor, write_descriptor = os.pipe()
+    os.set_inheritable(write_descriptor, True)
+    options: dict[str, Any]
+    if os.name == "nt":
+        import msvcrt  # pylint: disable=import-outside-toplevel,import-error
+
+        handle = msvcrt.get_osfhandle(write_descriptor)
+        startup = subprocess.STARTUPINFO()
+        startup.lpAttributeList = {"handle_list": [handle]}
+        options = {"startupinfo": startup, "close_fds": True}
+    else:
+        handle = write_descriptor
+        options = {"pass_fds": (write_descriptor,)}
+    bootstrap = (
+        "import sys;sys.path.insert(0,sys.argv.pop(2));"
+        "import start_migration;raise SystemExit(start_migration._observed_bundle_entry())"
+    )
+    observed_command = [
+        *command[:script_index],
+        "-c",
+        bootstrap,
+        str(handle),
+        str(Path(command[script_index]).parent),
+        *command[script_index:],
+    ]
+
+    def receive() -> None:
+        with os.fdopen(read_descriptor, "r", encoding="utf-8") as channel:
+            line = channel.readline()
+            if line:
+                observer(json.loads(line))
+
+    reader = threading.Thread(target=receive, name="path-gate-observer")
+    reader.start()
+    try:
+        yield observed_command, options
+    finally:
+        os.close(write_descriptor)
+        reader.join()
+
+
+def _run_child(  # pylint: disable=too-many-arguments,too-many-locals
+    name: str,
+    index: int,
+    command: list[str],
+    env: dict[str, str],
+    output: Path,
+    *,
+    observer: Callable[[dict], None] | None = None,
+    channel_options: dict | None = None,
+) -> StageResult:
+    if name == "bundle" and observer is not None:
+        with _path_gate_channel(command, observer) as (observed_command, inherited_options):
+            return _run_child(name, index, observed_command, env, output, channel_options=inherited_options)
     print(f"[{index}/5] {name} - started {time.strftime('%H:%M:%S')}", flush=True)
     options: dict[str, Any] = {"cwd": str(REPO_ROOT), "env": env, "stdout": None, "stderr": None}
+    options.update(channel_options or {})
     if os.name == "nt":
         options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     else:
@@ -349,7 +496,7 @@ def _finish_stage(result: StageResult, index: int, status: str, detail: str = ""
     print(f"[{index}/5] {result.name} - {status} exit={native}{suffix} out={result.output}", flush=True)
 
 
-def _preflight(env: dict[str, str]) -> int:
+def _preflight(env: dict[str, str], *, observer: Callable[[dict], None] | None = None) -> int:
     command = [
         "powershell",
         "-ExecutionPolicy",
@@ -357,13 +504,23 @@ def _preflight(env: dict[str, str]) -> int:
         "-File",
         str(REPO_ROOT / "scripts" / "preflight.ps1"),
     ]
+    native = None
+    state = "launch_failed"
     try:
-        return subprocess.run(command, cwd=REPO_ROOT, env=env, check=False).returncode
+        native = subprocess.run(command, cwd=REPO_ROOT, env=env, check=False).returncode
+        state = "ok" if native == 0 else "failed"
+        return native
     except KeyboardInterrupt:
+        state = "interrupted"
         return 130
     except OSError as exc:
         print(f"Migration preflight could not start: {type(exc).__name__}", file=sys.stderr, flush=True)
         return 1
+    finally:
+        if observer is not None:
+            observer(
+                {"event": "stage", "stage": "preflight", "native_exit_code": native, "state": state, "artifact": None}
+            )
 
 
 def _scope_label(args: argparse.Namespace, env: dict[str, str]) -> tuple[str, str]:
@@ -448,10 +605,41 @@ def _summary(run: Path, bundle: Path, oracle: Path, overall: int, *, fidelity: s
 
 # This entry point is intentionally the five-stage composition; stage contracts stay adjacent here.
 # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    observer: Callable[[dict], None] | None = None,
+    diagnostic_env: bool = False,
+) -> int:
     """Run survey, assessment, harvest, reference capture and deterministic conversion."""
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    def emit(record: dict) -> None:
+        if observer is not None:
+            observer(record)
+
+    def finish(result: StageResult, index: int, state: str, detail: str = "") -> None:
+        _finish_stage(result, index, state, detail)
+        emit(
+            {
+                "event": "stage",
+                "stage": result.name,
+                "native_exit_code": result.code,
+                "state": state.lower(),
+                "artifact": str(result.output.relative_to(root)),
+            }
+        )
+
+    def run_child(name: str, index: int, command: list[str], environment: dict[str, str], output: Path) -> StageResult:
+        try:
+            if name == "bundle" and observer is not None:
+                return _run_child(name, index, command, environment, output, observer=observer)
+            return _run_child(name, index, command, environment, output)
+        except KeyboardInterrupt:
+            emit({"event": "stage", "stage": name, "native_exit_code": None, "state": "interrupted", "artifact": None})
+            raise
+
     if args.project is not None and not args.project:
         parser.error("--project must not be empty")
     if args.workbook is not None and not args.workbook:
@@ -469,10 +657,17 @@ def main(argv: list[str] | None = None) -> int:
         artifacts=FRONT_DOOR_ARTIFACTS,
         hint=FRONT_DOOR_HINT,
     ):
+        emit({"event": "output_guard", "state": "blocked"})
         print(f"Output guard refused before allocation. {FRONT_DOOR_HINT}", file=sys.stderr, flush=True)
         return 1
     try:
-        env = resolve_env(env_path)
+        if diagnostic_env:
+            env, diagnostic = diagnose_env(env_path, explicit=argv is not None and "--env" in argv)
+            emit({"event": "configuration", **diagnostic})
+            if diagnostic["status"] != "READY_TO_ATTEMPT":
+                return 3 if diagnostic["status"] == "CANNOT_ESTABLISH" else 1
+        else:
+            env = resolve_env(env_path)
         require(env)
     except (OSError, ValueError, SystemExit) as exc:
         print(f"Cannot establish Tableau environment: {exc}", file=sys.stderr, flush=True)
@@ -495,6 +690,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Run allocation refused: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return 1
     root = run.root.resolve()
+    emit({"event": "allocated", "run": str(root), "output_guard": "passed"})
     assessment = root / "assessment"
     survey_path = assessment / "estate_survey.json"
     asset_root = root
@@ -508,7 +704,7 @@ def main(argv: list[str] | None = None) -> int:
     invalid = False
     fidelity = "fidelity NOT VERIFIED"
     try:
-        preflight_code = _preflight(child_env)
+        preflight_code = _preflight(child_env, observer=observer) if observer is not None else _preflight(child_env)
         if preflight_code == 130:
             print("Migration interrupted during preflight.", flush=True)
             return _finalize(root, bundle, oracle_root, True, False, fidelity, code=130)
@@ -535,19 +731,19 @@ def main(argv: list[str] | None = None) -> int:
             survey_command.extend(["--project", args.project])
         if args.workbook:
             survey_command.extend(["--workbook", args.workbook])
-        result = _run_child("survey", 1, survey_command, child_env, survey_path)
+        result = run_child("survey", 1, survey_command, child_env, survey_path)
         if result.code != 0:
-            _finish_stage(result, 1, "FAILED")
+            finish(result, 1, "FAILED")
             failed = True
             return _finalize(root, bundle, oracle_root, failed, invalid, fidelity)
         try:
             survey, _survey_rows, survey_ids = _survey_workbooks(survey_path, args)
             survey_counts = f"workbooks={len(survey_ids)} required_sources={len(survey['required_datasources'])}"
         except EvidenceError as exc:
-            _finish_stage(result, 1, "CANNOT_ESTABLISH", str(exc))
+            finish(result, 1, "CANNOT_ESTABLISH", str(exc))
             invalid = True
             return _finalize(root, bundle, oracle_root, failed, invalid, fidelity)
-        _finish_stage(result, 1, "OK", survey_counts)
+        finish(result, 1, "OK", survey_counts)
 
         assess_command = [
             *common_python,
@@ -559,9 +755,9 @@ def main(argv: list[str] | None = None) -> int:
             "--survey",
             str(survey_path),
         ]
-        result = _run_child("assessment", 2, assess_command, child_env, assessment)
+        result = run_child("assessment", 2, assess_command, child_env, assessment)
         if result.code != 0:
-            _finish_stage(result, 2, "FAILED")
+            finish(result, 2, "FAILED")
             failed = True
             return _finalize(root, bundle, oracle_root, failed, invalid, fidelity)
         try:
@@ -577,10 +773,10 @@ def main(argv: list[str] | None = None) -> int:
                 else "workbooks=unavailable"
             )
         except (EvidenceError, KeyError) as exc:
-            _finish_stage(result, 2, "CANNOT_ESTABLISH", str(exc))
+            finish(result, 2, "CANNOT_ESTABLISH", str(exc))
             invalid = True
             return _finalize(root, bundle, oracle_root, failed, invalid, fidelity)
-        _finish_stage(result, 2, "OK", db_counts)
+        finish(result, 2, "OK", db_counts)
 
         harvest_command = [
             *common_python,
@@ -596,19 +792,19 @@ def main(argv: list[str] | None = None) -> int:
             harvest_command.extend(["--workbook-id", workbook_luid])
         elif project_luid:
             harvest_command.extend(["--project-id", project_luid])
-        result = _run_child("harvest", 3, harvest_command, child_env, asset_root / "parse-sweep.json")
+        result = run_child("harvest", 3, harvest_command, child_env, asset_root / "parse-sweep.json")
         if result.code != 0:
-            _finish_stage(result, 3, "FAILED")
+            finish(result, 3, "FAILED")
             failed = True
             return _finalize(root, bundle, oracle_root, failed, invalid, fidelity)
         try:
             expected = _expected_harvest(assessment / "estate.db", project_luid, workbook_luid)
             totals = _verify_harvest(asset_root / "parse-sweep.json", asset_root / "parse-sweep-totals.json", expected)
         except EvidenceError as exc:
-            _finish_stage(result, 3, "CANNOT_ESTABLISH", str(exc))
+            finish(result, 3, "CANNOT_ESTABLISH", str(exc))
             invalid = True
             return _finalize(root, bundle, oracle_root, failed, invalid, fidelity)
-        _finish_stage(result, 3, "OK", f"assets={totals['total']}")
+        finish(result, 3, "OK", f"assets={totals['total']}")
 
         oracle_command = [
             *common_python,
@@ -622,16 +818,16 @@ def main(argv: list[str] | None = None) -> int:
         ]
         for luid in selected_workbooks:
             oracle_command.extend(["--workbook-id", luid])
-        result = _run_child("reference", 4, oracle_command, child_env, oracle_root / "oracle-manifest.json")
+        result = run_child("reference", 4, oracle_command, child_env, oracle_root / "oracle-manifest.json")
         if result.code == 0:
             try:
                 manifest = _verify_oracle(oracle_root / "oracle-manifest.json", selected_workbooks)
-                _finish_stage(result, 4, "OK", f"views={manifest['view_count']}")
+                finish(result, 4, "OK", f"views={manifest['view_count']}")
             except EvidenceError as exc:
-                _finish_stage(result, 4, "CANNOT_ESTABLISH", str(exc))
+                finish(result, 4, "CANNOT_ESTABLISH", str(exc))
                 invalid = True
         else:
-            _finish_stage(result, 4, "FAILED")
+            finish(result, 4, "FAILED")
             failed = True
 
         bundle_command = [
@@ -646,7 +842,7 @@ def main(argv: list[str] | None = None) -> int:
         ]
         if args.storage_decision:
             bundle_command.extend(["--storage-decision", str(args.storage_decision)])
-        result = _run_child("bundle", 5, bundle_command, child_env, bundle / "report.json")
+        result = run_child("bundle", 5, bundle_command, child_env, bundle / "report.json")
         if result.code == 10:
             engine_state = _engine_started(bundle)
             if engine_state is False:
@@ -665,22 +861,22 @@ def main(argv: list[str] | None = None) -> int:
                 "Rerun in a new run (old run retained): " + _front_door_command(args, env_path, short_root),
                 flush=True,
             )
-            _finish_stage(result, 5, "FAILED")
+            finish(result, 5, "FAILED")
             failed = True
         elif result.code != 0:
-            _finish_stage(result, 5, "FAILED")
+            finish(result, 5, "FAILED")
             failed = True
         else:
             try:
                 report = _verify_bundle(bundle)
-                _finish_stage(
+                finish(
                     result,
                     5,
                     "OK",
                     f"workbooks={len(report['workbooks'])} datasources={len(report['datasources'])}",
                 )
             except EvidenceError as exc:
-                _finish_stage(result, 5, "CANNOT_ESTABLISH", str(exc))
+                finish(result, 5, "CANNOT_ESTABLISH", str(exc))
                 invalid = True
     except KeyboardInterrupt:
         print("Migration interrupted; invocation-owned child work was cancelled and reaped.", flush=True)
