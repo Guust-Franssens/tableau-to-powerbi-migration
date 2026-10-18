@@ -33,6 +33,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
+import preflight_source_credentials as preflight  # noqa: E402
 import probe_live_source  # noqa: E402  # pylint: disable=wrong-import-position
 from test_probe_live_custom_sql import DATABRICKS, SNOWFLAKE, SQLSERVER  # noqa: E402
 from test_probe_live_source_verdict import _import_skill_modules  # noqa: E402
@@ -56,10 +57,9 @@ requires_validator = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True)
 def _canonical_marker_only_probe_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Probe/verdict controls use a real unit address, without unrelated native ACL subprocesses."""
+    """Probe/verdict controls avoid unrelated native ACL subprocesses."""
     import credential_gate as gate  # pylint: disable=import-outside-toplevel
 
-    (tmp_path / gate.MIGRATION_SPEC).write_text('{"data_sources": []}', encoding="utf-8")
     monkeypatch.setattr(gate.platform, "system", lambda: "Linux")
 
 
@@ -178,6 +178,9 @@ def test_ordinary_probe_requires_child_row_evidence(
     child, verdict_module, _ = _import_skill_modules()
     observed: list[str] = []
     source = {"connection": conn, "tables": [{"name": "Orders", "table": f"[{conn['schema']}].[Orders]"}]}
+    (tmp_path / "migration-spec.json").write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    expected_key = preflight._leg_key(source, 0, conn)
+    assert probe_live_source._resolve_probe_targets([source], 0, tmp_path)[0][0] == expected_key
 
     def _open(pbip: Path) -> int:
         tmdl = next(pbip.parent.glob("*.SemanticModel/definition/tables/*.tmdl")).read_text(encoding="utf-8")

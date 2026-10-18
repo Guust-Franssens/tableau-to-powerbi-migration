@@ -64,6 +64,142 @@ def _earn(root: Path, keys: list[str]) -> None:
     assert gate.clear_block(root, "fixture DATA_OK", earned=True, sources=keys) == 0
 
 
+def _transition_state(root: Path) -> dict[str, bytes | None]:
+    """Exact transition-owned bytes; invalid inputs may change none of them."""
+    return {
+        name: (root / name).read_bytes() if (root / name).is_file() else None
+        for name in (gate.MARKER, gate.AUDIT, gate.OVERRIDE)
+    }
+
+
+def _invalid_scope(keys: list[str], kind: str) -> object:
+    return {
+        "wrong-type": keys[0],
+        "empty": [],
+        "legacy": ["3 live source(s)"],
+        "malformed": ["source-key:broken"],
+        "duplicate": [keys[0], keys[0]],
+        "foreign": ["source-key:ffffffffffffffff"],
+        "substitution": [keys[0], keys[1], "source-key:ffffffffffffffff"],
+    }[kind]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["wrong-type", "empty", "legacy", "malformed", "duplicate", "foreign", "substitution"],
+)
+@pytest.mark.parametrize("force_scope", [False, True])
+def test_arm_requires_exact_current_canonical_scope_without_effects(unit, kind: str, force_scope: bool) -> None:
+    root, keys = unit
+    if force_scope:
+        (root / "AGENTS.md").write_text("fixture broad target", encoding="utf-8")
+    assert gate.apply_block(root, _invalid_scope(keys, kind), force_scope=force_scope) == 2, (
+        "unsupported source scope must return 2"
+    )
+    assert _transition_state(root) == {gate.MARKER: None, gate.AUDIT: None, gate.OVERRIDE: None}
+    assert not (root / "fabric").exists(), "identity refusal must precede target-shape and ACL effects"
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["wrong-type", "empty", "legacy", "malformed", "duplicate", "foreign", "substitution"],
+)
+def test_probe_attempt_requires_exact_current_membership_without_effects(unit, kind: str) -> None:
+    root, keys = unit
+    before = _transition_state(root)
+    with pytest.raises((ValueError, gate.GateTransactionError), match="source|probe transition"):
+        gate.record_probe_attempt(root, "ERROR", "fixture refused attempt", _invalid_scope(keys, kind))
+    assert _transition_state(root) == before
+    assert not (root / "fabric").exists()
+
+
+def test_forced_attempt_still_requires_current_source_membership(unit) -> None:
+    root, keys = unit
+    (root / "AGENTS.md").write_text("fixture broad target", encoding="utf-8")
+    assert gate.apply_block(root, keys, force_scope=True) == 0
+    before = _transition_state(root)
+    with pytest.raises(gate.GateTransactionError, match="source-refused"):
+        gate.record_probe_attempt(root, "ERROR", "fixture foreign attempt", ["source-key:ffffffffffffffff"])
+    assert _transition_state(root) == before
+    assert not any(row["action"] == "probe-error" for row in gate._audit_entries(root))
+
+
+def test_force_scope_cannot_repair_an_unreadable_current_domain(unit) -> None:
+    root, keys = unit
+    (root / "AGENTS.md").write_text("fixture broad target", encoding="utf-8")
+    (root / gate.MIGRATION_SPEC).write_text("{", encoding="utf-8")
+    assert gate.apply_block(root, keys, force_scope=True) == 2
+    assert _transition_state(root) == {gate.MARKER: None, gate.AUDIT: None, gate.OVERRIDE: None}
+    assert not (root / "fabric").exists()
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "wrong-type",
+        "empty",
+        "legacy",
+        "malformed",
+        "duplicate",
+        "foreign",
+        "substitution",
+        "replaced-root",
+        "unreadable-root",
+    ],
+)
+def test_earned_clear_requires_explicit_current_membership_before_effects(unit, kind: str) -> None:
+    root, keys = unit
+    assert gate.apply_block(root, keys) == 0
+    gate.record_probe_attempt(root, "DATA_OK", "fixture DATA_OK", keys)
+    supplied = _invalid_scope(keys, kind) if kind not in {"replaced-root", "unreadable-root"} else keys
+    if kind == "replaced-root":
+        spec = json.loads((root / gate.MIGRATION_SPEC).read_text(encoding="utf-8"))
+        for index, source in enumerate(spec["data_sources"]):
+            source["connection"]["server"] = f"replacement-{index}.example.invalid"
+        (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
+    elif kind == "unreadable-root":
+        (root / gate.MIGRATION_SPEC).write_text("{", encoding="utf-8")
+    before = _transition_state(root)
+    result = gate.clear_block(root, "fixture refused clear", earned=True, sources=supplied)
+    assert result == (3 if kind == "unreadable-root" else 1)
+    assert _transition_state(root) == before, "refused earned clear must have no transition effects"
+
+
+def test_current_identity_without_data_ok_cannot_append_an_earned_clear(unit) -> None:
+    root, keys = unit
+    assert gate.apply_block(root, keys) == 0
+    before = _transition_state(root)
+    assert gate.clear_block(root, "fixture no measurement", earned=True, sources=keys) == 1
+    assert _transition_state(root) == before
+
+
+@pytest.mark.parametrize("transition", ["arm", "attempt", "earned-clear"])
+def test_each_source_bearing_transition_uses_one_immutable_current_domain(
+    unit, monkeypatch: pytest.MonkeyPatch, transition: str
+) -> None:
+    root, keys = unit
+    if transition != "arm":
+        assert gate.apply_block(root, keys) == 0
+    if transition == "earned-clear":
+        gate.record_probe_attempt(root, "DATA_OK", "fixture DATA_OK", keys)
+    calls = []
+
+    def alternating(_root: Path) -> tuple[frozenset[str], str | None]:
+        calls.append(True)
+        if len(calls) == 1:
+            return frozenset(keys), None
+        return frozenset({"source-key:ffffffffffffffff"}), None
+
+    monkeypatch.setattr(gate, "_gate_root_live_keys", alternating)
+    if transition == "arm":
+        assert gate.apply_block(root, keys) == 0
+    elif transition == "attempt":
+        gate.record_probe_attempt(root, "ERROR", "fixture ERROR", keys[:1])
+    else:
+        assert gate.clear_block(root, "fixture DATA_OK", earned=True, sources=keys) == 0
+    assert calls == [True], "one transition must not mix two independently resolved current domains"
+
+
 def _child(root: Path, code: str) -> subprocess.Popen:
     return subprocess.Popen(
         [sys.executable, "-u", "-c", f"import sys; sys.path.insert(0, {str(SCRIPTS)!r}); " + code, str(root)],
@@ -90,8 +226,8 @@ def test_stale_skip_cannot_overtake_pending_attempt(unit, monkeypatch: pytest.Mo
     snapshot, release = threading.Event(), threading.Event()
     read = gate._redundant_rearm
 
-    def pause(location, sources):
-        result = read(location, sources)
+    def pause(location, sources, **kwargs):
+        result = read(location, sources, **kwargs)
         snapshot.set()
         assert release.wait(5)
         return result
@@ -133,13 +269,12 @@ def test_current_uncovered_key_vetoes_full_release(unit) -> None:
     assert set(_marker(root)) == set(keys[1:]), "complete current root keys, not just marker/caller, veto release"
 
 
-@pytest.mark.parametrize("earned", [False, True])
-def test_legacy_empty_arm_cannot_release_any_current_live_key(unit, earned: bool) -> None:
-    root, keys = unit
-    assert gate.apply_block(root, []) == 0, "legacy unknown-source stops remain supported"
-    assert gate.clear_block(root, "empty scope earns no current key", earned=earned) != 0
-    assert set(_marker(root)) == set(keys)
-    assert gate.status(root) != 0
+def test_empty_arm_refuses_without_transition_effects(unit) -> None:
+    root, _keys = unit
+    assert gate.apply_block(root, []) == 2
+    assert not (root / gate.MARKER).exists()
+    assert not (root / gate.AUDIT).exists()
+    assert not (root / "fabric").exists()
 
 
 @pytest.mark.parametrize("first", ["clear", "attempt"])
@@ -353,13 +488,39 @@ def test_probe_attempt_cannot_bypass_the_repository_scope_refusal(unit) -> None:
     assert not (root / gate.AUDIT).exists()
 
 
-def test_unprovable_source_identity_retains_a_stop_without_a_success_row(unit) -> None:
+def test_current_identity_cannot_bypass_the_repository_scope_refusal(unit) -> None:
     root, keys = unit
-    assert gate.apply_block(root, ["source-key:unprovable"]) != 0
-    assert (root / gate.MARKER).exists(), "invalid identity evidence must not silently drop the physical stop"
-    assert not (root / gate.AUDIT).exists(), "an unprovable source must not receive a success-shaped arm row"
-    assert gate.clear_block(root, "unrelated proof", earned=True, sources=[keys[0]]) != 0
-    assert (root / gate.MARKER).exists() and gate.status(root) != 0
+    (root / "AGENTS.md").write_text("fixture checkout marker", encoding="utf-8")
+    assert gate.apply_block(root, keys[:1]) == 2
+    assert not (root / gate.MARKER).exists()
+    assert not (root / "fabric").exists()
+    assert not (root / gate.AUDIT).exists()
+
+
+def test_historical_labels_are_readable_but_never_current_proof_or_permission(
+    unit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, keys = unit
+    monkeypatch.setattr(gate, "_ancestry", lambda: [])
+    with gate.gate_transaction(root):
+        gate._append_audit(root, "block-marker-only", gate._sources_detail(["legacy display"]), ["legacy display"])
+        gate._append_audit(root, gate.PROBE_CLEARED, "probe-cleared: DATA_OK from legacy display")
+        gate._append_audit(root, "authorize", "by=Fixture Human; chain=[]")
+    (root / gate.OVERRIDE).write_text("historical fixture permission\n", encoding="utf-8")
+    assert gate._audit_entries(root) is not None, "historical rows must remain readable for diagnostics"
+    assert gate._clear_was_earned(root, keys[:1]) is None, "historical labels cannot become current proof"
+    assert not gate._override_is_authentic(root), "historical labels cannot become current permission"
+    assert gate.apply_block(root, keys[:1]) == 0
+    assert _marker(root) == keys[:1], "historical evidence must not skip the current canonical arm"
+
+
+def test_unprovable_source_identity_refuses_without_a_success_row(unit) -> None:
+    root, keys = unit
+    assert gate.apply_block(root, ["source-key:unprovable"]) == 2
+    assert not (root / gate.MARKER).exists(), "invalid identity must be refused before a physical stop"
+    assert not (root / gate.AUDIT).exists(), "invalid identity must not receive any transition row"
+    assert gate.clear_block(root, "unrelated proof", earned=True, sources=[keys[0]]) == 1
+    assert not (root / gate.MARKER).exists() and not (root / gate.AUDIT).exists()
 
 
 def test_native_descriptor_contention_death_and_persistent_external_file(tmp_path: Path) -> None:
@@ -705,12 +866,75 @@ def test_preflight_propagates_failed_transaction(unit, monkeypatch: pytest.Monke
     assert preflight.cmd_classify(root / gate.MIGRATION_SPEC) == 3, "preflight must propagate transaction refusal"
 
 
+def test_preflight_invalid_source_identity_is_cannot_establish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "unkeyable"
+    root.mkdir()
+    (root / gate.MIGRATION_SPEC).write_text(
+        json.dumps(
+            {
+                "data_sources": [
+                    {
+                        "name": "OnlyName",
+                        "connection": {
+                            "class": "sqlserver",
+                            "mode": "live",
+                            "powerbi_target": "live_source",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(gate.platform, "system", lambda: "Linux")
+    assert preflight.cmd_classify(root / gate.MIGRATION_SPEC) == 3, (
+        "invalid arm scope must be cannot-establish, not an ordinary live stop"
+    )
+    assert not (root / gate.MARKER).exists()
+
+
+def test_preflight_failed_no_live_clear_is_cannot_establish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "no-live"
+    root.mkdir()
+    (root / gate.MIGRATION_SPEC).write_text(
+        json.dumps(
+            {
+                "data_sources": [
+                    {
+                        "name": "Local",
+                        "connection": {
+                            "class": "excel-direct",
+                            "mode": "extract",
+                            "powerbi_target": "flat_file",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / gate.MARKER).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(preflight.subprocess, "run", lambda *_args, **_kwargs: subprocess.CompletedProcess([], 3))
+    assert preflight.cmd_classify(root / gate.MIGRATION_SPEC) == 3, (
+        "failed no-live teardown must not report a successful no-live branch"
+    )
+
+
 def test_probe_attempt_does_not_swallow_transaction_failure(unit, monkeypatch: pytest.MonkeyPatch) -> None:
     root, keys = unit
     monkeypatch.setattr(gate.os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("fixture fsync")))
     with pytest.raises(OSError):
         probe._record_attempt(root, "DATA_OK", "fixture", keys)
     assert not (root / gate.AUDIT).exists()
+
+
+def test_gate_lift_refuses_a_failed_clear_process(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import _gate_lift as lift  # pylint: disable=import-outside-toplevel
+
+    monkeypatch.setattr(lift.subprocess, "run", lambda *_args, **_kwargs: subprocess.CompletedProcess([], 3))
+    assert not lift.lift_gate(tmp_path, "fixture", ["source-key:0000000000000000"]), (
+        "failed clear process must never be credited as an earned lift"
+    )
 
 
 def test_audit_fsync_failure_is_not_a_successful_clear(unit, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -916,6 +1140,26 @@ def _omitted_mutex_schedule(unit: tuple[Path, list[str]], monkeypatch: pytest.Mo
 @pytest.mark.parametrize(
     "mutation",
     [
+        "arm-noncanonical",
+        "arm-membership",
+        "count-substitution",
+        "synthesize-scope",
+        "dedupe-scope",
+        "force-identity",
+        "attempt-membership",
+        "earned-clear-membership",
+        "earned-clear-synthesis",
+        "second-root-resolution",
+        "scope-guard",
+        "historical-proof",
+        "historical-permission",
+        "invalid-block-live-stop",
+        "no-live-clear-suppression",
+        "probe-suppression",
+        "gate-lift-suppression",
+        "reprobe-suppression",
+        "engine-mirror-dedupe",
+        "engine-collision",
         "marker-assignment",
         "caller-only-clear",
         "reader-without-lock",
@@ -937,7 +1181,186 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
     """Each defect must reach its named invariant assertion, not an import/timeout/unrelated error."""
     control = tmp_path / "control"
     control.mkdir()
-    if mutation == "marker-assignment":
+    if mutation == "arm-noncanonical":
+        monkeypatch.setattr(gate, "_canonical_source_refusal", lambda *_args, **_kwargs: None)
+        check = partial(test_arm_requires_exact_current_canonical_scope_without_effects, unit, "legacy", False)
+        message = "unsupported source scope must return 2"
+    elif mutation in ("arm-membership", "count-substitution", "force-identity"):
+        replacement = {
+            "arm-membership": (
+                "elif not set(sources) <= current:",
+                "elif False:",
+                "foreign",
+                False,
+            ),
+            "count-substitution": (
+                "elif not set(sources) <= current:",
+                "elif len(sources) != len(current):",
+                "substitution",
+                False,
+            ),
+            "force-identity": (
+                "elif not set(sources) <= current:",
+                "elif False:",
+                "foreign",
+                True,
+            ),
+        }[mutation]
+        _mutant(gate, "_canonical_source_refusal", replacement[0], replacement[1], monkeypatch)
+        check = partial(
+            test_arm_requires_exact_current_canonical_scope_without_effects,
+            unit,
+            replacement[2],
+            replacement[3],
+        )
+        message = "unsupported source scope must return 2"
+    elif mutation in ("synthesize-scope", "dedupe-scope"):
+        old = "current, source_refusal = _gate_root_live_keys(migration)\n"
+        injected = (
+            old + "    sources = sorted(current)\n"
+            if mutation == "synthesize-scope"
+            else old + "    sources = list(dict.fromkeys(sources))\n"
+        )
+        _mutant(gate, "apply_block", old, injected, monkeypatch)
+        check = partial(
+            test_arm_requires_exact_current_canonical_scope_without_effects,
+            unit,
+            "empty" if mutation == "synthesize-scope" else "duplicate",
+            False,
+        )
+        message = "unsupported source scope must return 2"
+    elif mutation == "attempt-membership":
+        _mutant(
+            gate,
+            "record_probe_attempt",
+            "refusal = _canonical_source_refusal(sources, current, source_refusal)",
+            "refusal = None",
+            monkeypatch,
+        )
+        check = partial(test_probe_attempt_requires_exact_current_membership_without_effects, unit, "foreign")
+        message = "DID NOT RAISE"
+    elif mutation == "earned-clear-membership":
+        root, keys = unit
+
+        def accept_foreign(_migration, _reason, sources):
+            return sources, frozenset(keys), None
+
+        monkeypatch.setattr(gate, "_earned_clear_inputs", accept_foreign)
+        check = partial(test_earned_clear_requires_explicit_current_membership_before_effects, unit, "foreign")
+        message = "refused earned clear must have no transition effects"
+    elif mutation == "earned-clear-synthesis":
+        _mutant(
+            gate,
+            "clear_block",
+            "earned_sources, current, refusal_code = _earned_clear_inputs(migration, reason, sources)",
+            (
+                "earned_sources, current, refusal_code = _earned_clear_inputs("
+                "migration, reason, sources if sources is not None else _last_block_sources(migration))"
+            ),
+            monkeypatch,
+        )
+        root, keys = unit
+        assert gate.apply_block(root, keys) == 0
+        gate.record_probe_attempt(root, "DATA_OK", "fixture DATA_OK", keys)
+
+        def check():
+            assert gate.clear_block(root, "fixture omitted scope", earned=True) == 1, (
+                "omitted earned-clear scope must not synthesize the last block"
+            )
+
+        message = "omitted earned-clear scope"
+    elif mutation == "second-root-resolution":
+        _mutant(
+            gate,
+            "_transaction_pending",
+            "if current is None:\n            current, refusal = _gate_root_live_keys(migration)",
+            "if True:\n            current, refusal = _gate_root_live_keys(migration)",
+            monkeypatch,
+        )
+        check = partial(test_each_source_bearing_transition_uses_one_immutable_current_domain, unit, monkeypatch, "arm")
+        message = "one transition must not mix"
+    elif mutation == "scope-guard":
+        _mutant(
+            gate, "_block_refusal", "scope_refusal = _scope_refusal(migration)", "scope_refusal = None", monkeypatch
+        )
+        check = partial(test_current_identity_cannot_bypass_the_repository_scope_refusal, unit)
+        message = "assert 0 == 2"
+    elif mutation in ("historical-proof", "historical-permission"):
+        root, keys = unit
+        if mutation == "historical-proof":
+            monkeypatch.setattr(gate, "_earned_sources", lambda *_args, **_kwargs: ({keys[0]: "probe-cleared"}, False))
+            message = "historical labels cannot become current proof"
+        else:
+            monkeypatch.setattr(gate, "_override_is_authentic", lambda *_args, **_kwargs: True)
+            message = "historical labels cannot become current permission"
+        check = partial(test_historical_labels_are_readable_but_never_current_proof_or_permission, unit, monkeypatch)
+    elif mutation == "invalid-block-live-stop":
+        _mutant(preflight, "_write_gate_marker", "if result.returncode:", "if False:", monkeypatch)
+        check = partial(test_preflight_invalid_source_identity_is_cannot_establish, control, monkeypatch)
+        message = "invalid arm scope must be cannot-establish"
+    elif mutation == "no-live-clear-suppression":
+        _mutant(preflight, "_clear_gate_marker", "if result.returncode:", "if False:", monkeypatch)
+        check = partial(test_preflight_failed_no_live_clear_is_cannot_establish, control, monkeypatch)
+        message = "failed no-live teardown"
+    elif mutation == "probe-suppression":
+        _mutant(
+            probe,
+            "_record_attempt",
+            "    record_probe_attempt(migration, verdict, what, sources=list(sources))\n",
+            (
+                "    try:\n"
+                "        record_probe_attempt(migration, verdict, what, sources=list(sources))\n"
+                "    except OSError:\n"
+                "        pass\n"
+            ),
+            monkeypatch,
+        )
+        check = partial(test_probe_attempt_does_not_swallow_transaction_failure, unit, monkeypatch)
+        message = "DID NOT RAISE"
+    elif mutation == "gate-lift-suppression":
+        import _gate_lift as lift  # pylint: disable=import-outside-toplevel
+
+        _mutant(lift, "lift_gate", "if proc.returncode != 0:", "if False:", monkeypatch)
+        check = partial(test_gate_lift_refuses_a_failed_clear_process, control, monkeypatch)
+        message = "failed clear process"
+    elif mutation == "reprobe-suppression":
+        import reprobe_blocked as reprobe  # pylint: disable=import-outside-toplevel
+        from test_reprobe_blocked import (  # pylint: disable=import-outside-toplevel
+            test_data_ok_with_transaction_failure_is_not_earned,
+        )
+
+        _mutant(
+            reprobe,
+            "classify",
+            'if verdict == "DATA_OK" and outcome.returncode != 0:',
+            "if False:",
+            monkeypatch,
+        )
+        check = test_data_ok_with_transaction_failure_is_not_earned
+        message = "assert 'newly-earned' == 'errored'"
+    elif mutation in ("engine-mirror-dedupe", "engine-collision"):
+        import migration_bundle  # pylint: disable=import-outside-toplevel
+        from test_credential_gate_scope import (  # pylint: disable=import-outside-toplevel
+            test_engine_distinct_records_colliding_to_one_key_refuse,
+            test_engine_exact_mirrors_are_one_current_fact,
+        )
+
+        monkeypatch.setattr(gate.platform, "system", lambda: "Linux")
+        if mutation == "engine-mirror-dedupe":
+            _mutant(migration_bundle, "_dedupe_dicts", "    return out\n", "    return items\n", monkeypatch)
+            check = partial(test_engine_exact_mirrors_are_one_current_fact, control, "mirror")
+            message = "exact engine mirrors"
+        else:
+            _mutant(
+                gate,
+                "_package_spec_facts",
+                "if len(set(keys)) != len(keys):",
+                "if False:",
+                monkeypatch,
+            )
+            check = partial(test_engine_distinct_records_colliding_to_one_key_refuse, control)
+            message = "distinct projected records"
+    elif mutation == "marker-assignment":
         _mutant(
             gate,
             "_apply_pending_block",
@@ -951,8 +1374,11 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
         _mutant(
             gate,
             "clear_block",
-            "remaining_sources = _transaction_pending(migration)",
-            "remaining_sources = [key for key in marker_sources if key not in (earned_sources or [])]",
+            "remaining_sources = _transaction_pending(migration, current=current)",
+            (
+                "remaining_sources = [key for key in _established_sources(migration) "
+                "if key not in (earned_sources or [])]"
+            ),
             monkeypatch,
         )
         check = partial(test_current_uncovered_key_vetoes_full_release, unit)
@@ -1038,5 +1464,5 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
         monkeypatch.setattr(gate.GateTransaction, "check", unchecked)
         check = partial(test_changed_companion_identity_cannot_establish_clear, control, monkeypatch)
         message = "replaced companion must not be credited"
-    with pytest.raises(AssertionError, match=message):
+    with pytest.raises((AssertionError, pytest.fail.Exception), match=message):
         check()

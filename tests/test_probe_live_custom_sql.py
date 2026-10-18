@@ -19,6 +19,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
+import preflight_source_credentials as preflight  # noqa: E402  # pylint: disable=wrong-import-position
 import probe_live_source  # noqa: E402  # pylint: disable=wrong-import-position
 from parse_tableau import parse_workbook  # noqa: E402
 
@@ -56,10 +57,9 @@ PROBE_PROJECTION = (
 
 @pytest.fixture(autouse=True)
 def _canonical_marker_only_probe_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Custom-SQL verdicts stay independent of Windows ACL tooling and have an attributable root."""
+    """Custom-SQL verdicts stay independent of Windows ACL tooling."""
     import credential_gate as gate  # pylint: disable=import-outside-toplevel
 
-    (tmp_path / gate.MIGRATION_SPEC).write_text(json.dumps({"data_sources": []}), encoding="utf-8")
     monkeypatch.setattr(gate.platform, "system", lambda: "Linux")
 
 
@@ -74,6 +74,12 @@ def _source(tables: list[dict], fields: list[dict] | None = None) -> dict:
         "tables": tables,
         "fields": [{"kind": "column", "internal_name": "[Col]"}] if fields is None else fields,
     }
+
+
+def _persist_source(root: Path, source: dict) -> str:
+    """Persist the exact current fact whose canonical key the probe writer records."""
+    (root / "migration-spec.json").write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    return preflight._leg_key(source, 0, source["connection"])
 
 
 def test_custom_sql_scaffold_contains_the_sql_and_projects_a_probe_column():
@@ -140,6 +146,7 @@ def test_parser_self_closing_text_relation_cannot_clear_as_a_physical_table(tmp_
     source = parse_workbook(twb)["data_sources"][0]
     assert source["tables"][0]["source_relation"] == "custom-sql"
     assert source["tables"][0]["custom_sql"] is None
+    _persist_source(tmp_path, source)
 
     monkeypatch.setattr(probe_live_source, "_host_resolves", lambda _server: True)
     monkeypatch.setattr(probe_live_source, "_open_desktop", lambda _pbip: 123)
@@ -155,6 +162,7 @@ def test_empty_custom_sql_after_a_real_table_cannot_clear_the_source(tmp_path, m
             {"name": "EMPTY_QUERY", "custom_sql": ""},
         ]
     )
+    _persist_source(tmp_path, source)
     original_probe = probe_live_source._probe_one_table
     attempted = []
 
@@ -274,6 +282,8 @@ def test_custom_sql_query_and_note_remain_byte_for_byte_unchanged(
 
 def test_real_table_probe_still_opens_refreshes_and_returns_data_ok(tmp_path, monkeypatch):
     events = []
+    source = _source([{"name": "FLIGHTS", "table": "[PUBLIC].[FLIGHTS]", "custom_sql": None}])
+    key = _persist_source(tmp_path, source)
 
     def _open(pbip: Path) -> int:
         tmdl = next(pbip.parent.glob("*.SemanticModel/definition/tables/*.tmdl")).read_text(encoding="utf-8")
@@ -295,7 +305,7 @@ def test_real_table_probe_still_opens_refreshes_and_returns_data_ok(tmp_path, mo
 
     rc, verdict = probe_live_source._probe_one_table(  # pylint: disable=protected-access
         tmp_path,
-        "source-key:0000000000000000",
+        key,
         SNOWFLAKE,
         ({"name": "FLIGHTS", "table": "[PUBLIC].[FLIGHTS]", "custom_sql": None}, "Col"),
         (7, False),
@@ -321,6 +331,17 @@ def test_a_line_comment_cannot_swallow_the_rest_of_the_collapsed_query():
 
 
 def test_custom_sql_probe_without_enumerated_columns_clears_when_refresh_returns_data(tmp_path, monkeypatch):
+    source = _source(
+        [
+            {
+                "name": "Flight_Level_Query",
+                "source_relation": "custom-sql",
+                "custom_sql": "SELECT a FROM raw.flights",
+            }
+        ],
+        fields=[],
+    )
+    key = _persist_source(tmp_path, source)
     monkeypatch.setattr(probe_live_source, "_open_desktop", lambda _pbip: 123)
     monkeypatch.setattr(probe_live_source, "_wait_for_catalog", lambda _pid: True)
     monkeypatch.setattr(probe_live_source, "_network_fault_observed", lambda _conn: False)
@@ -329,7 +350,7 @@ def test_custom_sql_probe_without_enumerated_columns_clears_when_refresh_returns
 
     rc, verdict = probe_live_source._probe_one_table(  # pylint: disable=protected-access
         tmp_path,
-        "source-key:0000000000000000",
+        key,
         SNOWFLAKE,
         (
             {
@@ -360,11 +381,13 @@ def test_custom_sql_without_enumerated_columns_is_resolvable():
 
 
 def test_unreachable_custom_sql_source_remains_refused(tmp_path, monkeypatch):
+    source = _source([{"name": "Q", "source_relation": "custom-sql", "custom_sql": "SELECT 1"}], fields=[])
+    _persist_source(tmp_path, source)
     monkeypatch.setattr(probe_live_source, "_host_resolves", lambda _server: False)
 
     rc, verdict = probe_live_source._probe_one(  # pylint: disable=protected-access
         tmp_path,
-        [_source([{"name": "Q", "source_relation": "custom-sql", "custom_sql": "SELECT 1"}], fields=[])],
+        [source],
         0,
         1,
         False,
@@ -440,6 +463,7 @@ def test_mixed_source_proves_credentials_and_custom_sql(tmp_path, caplog, monkey
             {"name": "REAL_TABLE", "custom_sql": None},
         ]
     )
+    _persist_source(tmp_path, source)
     attempted = []
 
     def _probe_table(_migration: Path, _leg_name: str, _conn: dict, target: tuple[dict, str], _opts: tuple[int, bool]):
