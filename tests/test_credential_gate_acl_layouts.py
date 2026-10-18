@@ -25,8 +25,21 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import credential_gate as gate  # noqa: E402  # pylint: disable=wrong-import-position
+import preflight_source_credentials as preflight  # noqa: E402  # pylint: disable=wrong-import-position
 
-SOURCE = "fixture-source"
+LIVE_SOURCE = {
+    "name": "fixture orders",
+    "connection": {
+        "class": "sqlserver",
+        "server": "fixture.example.invalid",
+        "database": "fixture",
+        "schema": "dbo",
+        "powerbi_target": "live_source",
+    },
+    "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
+}
+SOURCE = preflight._classify_legs(LIVE_SOURCE, 0)[0][0]
+LEGACY_SOURCE = "fixture-source"
 RIGHTS = frozenset({"WD", "AD", "WA"})
 WINDOWS_REASON = "write-deny enforcement is an icacls ACL; the marker-only path cannot block a write"
 
@@ -146,16 +159,21 @@ def _native(root: Path, kinds: tuple[str, ...] = ("SemanticModel", "Report")) ->
     return files
 
 
-def _bundle(root: Path) -> tuple[Path, list[Path]]:
+def _source_document(*, live: bool = True) -> str:
+    """Real parser/engine source facts; empty catalogs are reserved for legacy/read-only controls."""
+    return json.dumps({"data_sources": [LIVE_SOURCE] if live else []})
+
+
+def _bundle(root: Path, *, live: bool = True) -> tuple[Path, list[Path]]:
     files = _native(root / "pbip" / "Unit")
-    (root / "report.json").write_text("{}", encoding="utf-8")
+    (root / "report.json").write_text(_source_document(live=live), encoding="utf-8")
     (root / "input_manifest.json").write_text("{}", encoding="utf-8")
     return root, files
 
 
 def _unit(root: Path, kinds: tuple[str, ...] = ("SemanticModel", "Report")) -> tuple[Path, list[Path]]:
     files = _native(root, kinds)
-    (root / "migration-spec.json").write_text("{}", encoding="utf-8")
+    (root / "migration-spec.json").write_text(_source_document(), encoding="utf-8")
     return root, files
 
 
@@ -181,6 +199,11 @@ def _writable(files: list[Path]) -> None:
 
 
 def _earned_clear(root: Path) -> int:
+    try:
+        gate.record_probe_attempt(root, "DATA_OK", "fixture returned a row", [SOURCE])
+    except OSError:
+        # An enclosing gate can prevent the inner root's preceding durable evidence.
+        return 3
     return gate.clear_block(root, "fixture DATA_OK", earned=True, sources=[SOURCE])
 
 
@@ -227,13 +250,12 @@ def test_fabric_layouts_remain_supported(acl_lab: AclLab, layout: str) -> None:
     """Parser/package identity outranks the engine-shaped report marker without changing fabric."""
     root = acl_lab.root / layout
     files = _native(root / "fabric")
-    if layout != "promoted":
-        (root / "migration-spec.json").write_text("{}", encoding="utf-8")
+    (root / "migration-spec.json").write_text(_source_document(), encoding="utf-8")
     if "package" in layout:
         (root / "package-manifest.json").write_text("{}", encoding="utf-8")
     if layout == "mixed-package":
         (root / "report.json").write_text("{}", encoding="utf-8")
-    assert gate.apply_block(root, [SOURCE], force_scope=layout == "promoted") == 0
+    assert gate.apply_block(root, [SOURCE]) == 0
     _denied(files)
     assert gate.denied_dirs(root, create=False) == [root / "fabric"]
     assert not (root / "pbip").exists(), "a package's report.json must not invent pbip"
@@ -251,7 +273,7 @@ def test_correct_root_probe_remains_writable(acl_lab: AclLab, layout: str) -> No
         _unit(root)
     else:
         root.mkdir()
-        (root / "migration-spec.json").write_text("{}", encoding="utf-8")
+        (root / "migration-spec.json").write_text(_source_document(), encoding="utf-8")
     assert gate.apply_block(root, [SOURCE]) == 0
     _probe_write(root)
     assert _earned_clear(root) == 0
@@ -262,7 +284,7 @@ def test_nested_clears_preserve_the_other_gate(acl_lab: AclLab, first: str) -> N
     """Both physical removals are required; only outer-first asserts durable earned clearance."""
     outer, files = _bundle(acl_lab.root / "bundle")
     inner = outer / "pbip" / "Unit"
-    (inner / "migration-spec.json").write_text("{}", encoding="utf-8")
+    (inner / "migration-spec.json").write_text(_source_document(), encoding="utf-8")
     assert gate.apply_block(inner, [SOURCE]) == 0
     assert gate.apply_block(outer, [SOURCE]) == 0
     _probe_write(outer)
@@ -309,6 +331,7 @@ def test_enforcement_requires_all_targets_but_residue_needs_any(
     assert gate.status(root) == 1
     acl_lab.remove(files[0].parents[1])
     assert gate.inspect_physical_barrier(root) == ("clear", "physical_clear")
+    assert _earned_clear(root) == 0
     assert gate.status(root) == 0
 
 
@@ -407,13 +430,14 @@ def test_rearm_is_idempotent_and_partial_apply_can_retry(
 
 
 def _history(root: Path) -> None:
+    """A historical legacy-only arm, never a supported new producer or measured proof."""
     record = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "action": "block",
-        "detail": 'sources_json=["fixture-source"]',
+        "detail": f"sources_json={json.dumps([LEGACY_SOURCE])}",
         "user": "fixture-actor",
         "scope": str(root.resolve()),
-        "sources": [SOURCE],
+        "sources": [LEGACY_SOURCE],
     }
     (root / gate.AUDIT).write_text(json.dumps(record) + "\n", encoding="utf-8")
 
@@ -421,7 +445,7 @@ def _history(root: Path) -> None:
 @pytest.mark.parametrize("attributed", [True, False])
 def test_empty_legacy_fabric_cleanup_requires_same_root_history(acl_lab: AclLab, attributed: bool) -> None:
     """An exact old empty-fabric deny needs this root's history and never authorizes deletion."""
-    root, files = _bundle(acl_lab.root / "bundle")
+    root, files = _bundle(acl_lab.root / "bundle", live=False)
     legacy = root / "fabric"
     legacy.mkdir()
     acl_lab.deny(legacy)
@@ -440,7 +464,7 @@ def test_empty_legacy_fabric_cleanup_requires_same_root_history(acl_lab: AclLab,
 @pytest.mark.parametrize("fault", ["populated", "different-mask"])
 def test_legacy_cleanup_refuses_ambiguous_denies(acl_lab: AclLab, fault: str) -> None:
     """Populated or differently permissioned legacy targets cannot be swept away."""
-    root, _files = _bundle(acl_lab.root / "bundle")
+    root, _files = _bundle(acl_lab.root / "bundle", live=False)
     legacy = root / "fabric"
     legacy.mkdir()
     _history(root)
@@ -499,10 +523,12 @@ def test_reparse_target_refuses_without_denying_its_destination(acl_lab: AclLab,
 
 @pytest.mark.parametrize("identity,anchor", [("migration-spec.json", "fabric"), ("engine-output-receipt.json", "pbip")])
 def test_empty_recognized_layout_creates_only_its_anchor(acl_lab: AclLab, identity: str, anchor: str) -> None:
-    """The approved receipt-only/parser clarification preserves the unchanged scope controls."""
+    """Current parser/engine source documents preserve anchor selection without existing artifacts."""
     root = acl_lab.root / "empty"
     root.mkdir()
-    (root / identity).write_text("{}", encoding="utf-8")
+    (root / identity).write_text(_source_document() if identity == "migration-spec.json" else "{}", encoding="utf-8")
+    if identity == "engine-output-receipt.json":
+        (root / "report.json").write_text(_source_document(), encoding="utf-8")
     assert gate.apply_block(root, [SOURCE]) == 0
     assert {path.name for path in root.iterdir() if path.is_dir()} == {anchor, "_probe"}
     assert _earned_clear(root) == 0
@@ -523,7 +549,8 @@ def test_clear_and_read_never_create_directories(tmp_path: Path, identity: str |
 def test_acl_query_failure_is_not_clear(acl_lab: AclLab, monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed query yields path-free cannot-establish, never a clean physical verdict."""
     root, _files = _bundle(acl_lab.root / "bundle")
-    _history(root)
+    assert gate.apply_block(root, [SOURCE]) == 0
+    assert _earned_clear(root) == 0
     monkeypatch.setattr(gate, "_icacls", lambda _args: (5, "private-canary"))
     result = gate.inspect_physical_barrier(root)
     assert result == ("cannot_establish", "physical_acl_query_failed")
@@ -536,7 +563,7 @@ def test_non_windows_keeps_marker_only_behavior(tmp_path: Path, monkeypatch: pyt
     """Off Windows the original marker-only workflow never invokes the Windows ACL boundary."""
     monkeypatch.setattr(gate.platform, "system", lambda: "Linux")
     monkeypatch.setattr(gate, "_icacls", lambda _args: pytest.fail("marker-only must not invoke Windows ACLs"))
-    (tmp_path / "migration-spec.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "migration-spec.json").write_text(_source_document(), encoding="utf-8")
     assert gate.apply_block(tmp_path, [SOURCE]) == 0
     _probe_write(tmp_path)
     records = [json.loads(line) for line in (tmp_path / gate.AUDIT).read_text(encoding="utf-8").splitlines()]
