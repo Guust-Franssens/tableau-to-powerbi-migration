@@ -853,7 +853,9 @@ def test_status_customer_labels_are_withheld(monkeypatch, tmp_path, capsys, json
         pytest.param(
             "preflight.ps1",
             "if ($DoctorDiagnostics) {\n    Write-Output",
-            "if ($DoctorDiagnostics) {\n    [IO.File]::WriteAllText((Join-Path $env:USERPROFILE 'mutant-write'), 'changed')\n    Write-Output",
+            "if ($DoctorDiagnostics) {\n"
+            "    [IO.File]::WriteAllText((Join-Path $env:USERPROFILE 'mutant-write'), 'changed')\n"
+            "    Write-Output",
             "test_preflight_contract.py::test_doctor_actual_windows_child[ready-ids0]",
             "actual-child monitored synthetic tree must remain byte/mtime/tree unchanged",
             marks=pytest.mark.skipif(
@@ -863,7 +865,9 @@ def test_status_customer_labels_are_withheld(monkeypatch, tmp_path, capsys, json
         pytest.param(
             "preflight.ps1",
             "if ($DoctorDiagnostics) {\n    Write-Output",
-            "if ($DoctorDiagnostics) {\n    Invoke-WebRequest -Uri 'https://synthetic.invalid/' | Out-Null\n    Write-Output",
+            "if ($DoctorDiagnostics) {\n"
+            "    Invoke-WebRequest -Uri 'https://synthetic.invalid/' | Out-Null\n"
+            "    Write-Output",
             "test_preflight_contract.py::test_doctor_actual_windows_child[ready-ids0]",
             "actual-child forbidden network/updater/installer/login command must not be invoked",
             marks=pytest.mark.skipif(
@@ -1054,6 +1058,7 @@ def test_doctor_all_blockers_sources_and_safe_remedies(monkeypatch, tmp_path, ca
     "legacy,equal", [("TABLEAU_SERVER", False), ("TABLEAU_PAT_VALUE", False), ("TABLEAU_PAT_VALUE", True)]
 )
 def test_doctor_alias_warning_is_nonblocking(monkeypatch, tmp_path, capsys, legacy, equal):
+    """Canonical/legacy alias warnings must preserve the existing ready result."""
     _config(monkeypatch)
     canonical = "TABLEAU_SERVER_URL" if legacy == "TABLEAU_SERVER" else "TABLEAU_PAT_SECRET"
     monkeypatch.setenv(legacy, ENV[canonical])
@@ -1096,6 +1101,7 @@ def test_doctor_alias_warning_is_nonblocking(monkeypatch, tmp_path, capsys, lega
 def test_doctor_unavailable_detail_preserves_native_policy(
     monkeypatch, tmp_path, capsys, native, expected, stdout, stderr
 ):
+    """Reject unsafe owner details without normalizing the native or outer exit."""
     _config(monkeypatch)
     monkeypatch.setattr(t2p, "ROOT", tmp_path)
     monkeypatch.setattr(t2p.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, native, stdout, stderr))
@@ -1158,7 +1164,7 @@ def test_doctor_preexisting_json_is_byte_equivalent(
         if native in {0, 1}:
             expected, status = 1, "BLOCKED_CONFIG"
 
-    def child(*a, **k):
+    def child(*a, **_kwargs):
         if native is None:
             raise OSError("PRIVATE_LAUNCH_EXCEPTION")
         return subprocess.CompletedProcess(
@@ -1246,11 +1252,12 @@ def test_doctor_preexisting_json_is_byte_equivalent(
 
 
 def test_doctor_progress_is_fixed_and_flushed_before_child(monkeypatch, tmp_path, capsys):
+    """The child must observe the fixed progress write and flush before it starts."""
     _config(monkeypatch)
     monkeypatch.setattr(t2p, "ROOT", tmp_path)
     writes, events = [], []
 
-    def child(*a, **k):
+    def child(*a, **_kwargs):
         assert "".join(writes) == "Checking existing preflight; no upgrades or Tableau login.\n"
         assert events == ["flush"], "fixed progress must flush before waiting for the child"
         return subprocess.CompletedProcess(a, 0, _preflight_bytes(), b"")
@@ -1264,6 +1271,7 @@ def test_doctor_progress_is_fixed_and_flushed_before_child(monkeypatch, tmp_path
 
 @pytest.mark.parametrize("json_mode", [False, True])
 def test_doctor_syntax_is_safe_and_noninteractive(capsys, json_mode):
+    """Reject unknown arguments without reflecting private values or control text."""
     assert t2p.main(["doctor", "--PRIVATE_\x1b[31mARG", *(["--json"] if json_mode else [])]) == 2
     captured = capsys.readouterr()
     assert "PRIVATE_" not in captured.out + captured.err and "\x1b" not in captured.out + captured.err
