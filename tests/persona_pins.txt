@@ -145,16 +145,16 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 2e63d62bf8d58b3f9dc5c6c405828e6efb9e75ddff5463c524c2a1654628226d  1. **`handover/<workbook>.json`** ~ the deterministic tier's
 5c250025b626ebd248af01ea4ed6ffe201b96b3d72375fd6d3628c5b82001c72  2. **The active contract** ~ `migration-spec.json` (parser p
-b05257ecf3fccd460995215c7f370cf4da4a4f1d5925c99d06daaa4feadc0b27  3. **Tableau reference imagery** ~ at least one whole-dashbo
+a8ae4ab58cc7bed3027d2126af7692403cebf4e984290a83550b7c41efe18558  3. **Tableau imagery** ~ one whole-dashboard capture per das
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 3e6ba3b1878ed98d00d26d3ecc0df219b1d88aa173cbe388beefe6fa75c85c5c  ~~ **Grade the evidence (#194).** An *oracle* capture (`_ora
-ca3b734fcd76e0c13055e53e4d822e839f5b68a50dcb8152adbbe78126efbbfd  4. **The semantic model + PBIP report location** ~ for your 
+ebc94370c2b963dd2da803a91e2e856c83884eeb69b817d4af87fd2d7bb92271  4. **Model + PBIP location** ~ for Desktop Bridge `screensho
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 4788b3fab4787493d9cd4edba4f93dc90ee2dbff3e0a32c659709e0b1c700ac4  ## Skills you use
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-c7808a315e5d78fdcfdfdc8379757e100609a3f3dedf9cb2013c5ffa2d2c61a6  - **Commissioned numeric investigation ~ DAX `EVALUATE`.** L
-80baf511ac3c725221b93704a90dc8ed49c25d42c28def35cfa448e62fc5d50b  - **`powerbi-report-gotchas`** ~ invoke **by name** whenever
-efdd02d18841d3c6c715dbedd0017ba96443a0057785bd86e8dece79addaeadc  - **`powerbi-report-authoring`** ~ Desktop Bridge screenshot
+9572fb5e84be3c040145207a39e6c4f8b573bf20164d4b0dc81cee05bd75a5cc  - **Commissioned DAX `EVALUATE`:** local PBIP ~ `scripts/pro
+1aa36ba1d8367edf406072c6abb11d8e0011e246311bb83cd02e84f0d4786de0  - **`powerbi-report-gotchas`** ~ invoke by name to judge vis
+cada00868b612ad77f37815d4b9b650b48a827e09b599cc49d1207553a08b3c4  - **`powerbi-report-cli`** ~ `authoring`, read-only inventor
 57666be140c4096bb304f2330fbf7e773ba49cb318fd88f4806e72e87c8250dd  - Playwright via the shell, only if no Tableau reference ima
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 7136000e494604c07769c55da3f0ec4ea85eef9508d8840bc71ec8a6e745b742  ## Workflow
@@ -217,7 +217,7 @@ aefdcc49f4c456b5c1ae0c85c43b560259b6029549f8cd5dc8d76b7e405e259c  6. **Every `vi
 5d01855228e6e66f3c93c286f6f3e6f0de97f5e35be854a22bcfbc274e9b1cb0  7. **`improvement_opportunities[]` is separate and influence
 
 [pbi-report-builder.agent.md]
-b69a3d01d377081a841904a00b4a08aec58416d24df6f0f5358f13bc6dbd35f7  --- name: pbi-report-builder description: Repairs and finish
+29df9b184e7b0e3f5b19ca6c6855787efaec86eb84b1db10ebb8f1306e6588cb  --- name: pbi-report-builder description: Repairs and finish
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 1619a2419072ad672acb549b02d8fbc9aafa6c1be51168b3266f68b4fd9dd4fa  # PBI Report Builder ~ Subagent
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -227,10 +227,10 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 9ae7206393ac99c216de34528936d2f0aa7a8542e200f6bced762618375e1ff7  ## Skills you use, in this order
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-ccdbeb71c305d9dde1c04c84c9e511643e41649cd2ab09c13dbcadc834d50537  0. **`powerbi-report-gotchas`** ~ read **first**, before pla
-b96b1be9c52837e1e7e197e1644e0e319fde264c551e1930ba76950c12a441b5  1. **`powerbi-report-planning`** ~ **`powerbi-report-design`
-b44deb03c3e051d509a6937b6dcd97dd6cd9b345fca1cf1931495071c7a60069  2. **`powerbi-report-author` CLI** ~ the live vocabulary and
-ae40d45becbd9f6fa6a1d7c19fee3eda2be4ab6f9a7e6e6763e183a889a7be6a  3. **Read-only DAX ~ several of your own rules require it.**
+a0b236928372bbf789ecab86dfda7fd13cf5505d7d754f9af599ae3d212725d8  0. **`powerbi-report-gotchas`** ~ read **first**, before the
+da34149a3ac5663367b6ffacb9566b5145ee32d402f81ce2157b398fc851621e  1. **`powerbi-report-cli`** ~ load once; select by intent, n
+0177c5dd4a8e62a26c7f1c36bef7b8d21e95822dd9fca3d1b51bec91d11db7e0  2. **`powerbi-report-author` CLI** ~ installed vocabulary be
+8df198ad3044977a45d7aa182cc75719b7ac4d7c7c47e3eab12edaa40a75f6a3  3. **Read-only DAX:** DoD #7 and `formatString` need a sampl
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e58eb59805f135f49dc07aa510d4f779e7bdf078433e9f565401d84e1bfc1cca  ## What you receive ~ a report that already EXISTS
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -270,16 +270,16 @@ ee005084dfa5dadca9a52d0914548f08dc570a216e33c74fb1adc5386a57b5ee  7. **Validate 
 a9f62166fd6821ad5ccc8f14a26a39c1c74f56a22d962f672e0685c23d7c335f  8. **Write the change as a `_build/fix_*.py` and declare it*
 55a97bd81a591e72a526a24ffc9b0d715d870e3725e1f449a72741e7a2e09a13  9. **Report back**: what you repaired, what you left as an a
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-0f529bcfbc65de91f5cdcf82dfcf3f31a2d791b0adb58ea65b864a27892274af  **If a page must be built from scratch** (rare), fall back t
+b94385692e99c4163e160800b8c48578ce1b7f6f384d4c6d8e2f37bb1637e8f8  **Missing page:** use skill 1's contract, then an **empty la
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 42ea29f482eefe3c0d5cad54cff000597de7f59df7153049fac8a2b954365f3e  ## Mandatory validation (before any screenshot review)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 12cefe7df43da6f2defdd2f2f8ce9ace3f86688f45acac4f6e9de3ddd60384b9  Structural validation is not optional, on the initial build 
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 78b13627974bb5ef142ac5624c7934df186a3e348463b4e97ba7a9bc8f0ae267  1. `python scripts/check_unit.py <unit-or-bundle> --scope re
-b0eea806e8ec9a491a59ebea18170c369b1a8a082bec108f358f59ec7eaab80d  2. **Confirm the CLI-driven flow is available** ~ run the `p
-cbcc2ac38afe8597beb60281fb6be0443b67990630023d07798fc6d8661c750f  3. **If only an older skill copy is active**, do the equival
-180facfbbfa231308eac4c1b3df59885b7b4eaf389100df0585dc1944fcdcfc4  4. **Only after structural validation passes**, do the visua
+8c2484dda2576795888b3aaffc180e863c934b906c39cdb94f908d2207a60e28  2. **Preflight is the sole version authority.** Skip upstrea
+b75bc18dc001548a01f777e7efb6f339b52a512be0794ddb78b2597c33a1dbbb  3. **Additional checks:** no overlapping visuals; no table/m
+c0d7005270708708ebef38a1bde324299352924cd4f8ea2527929473a3cd9e0b  4. **After validation**, load latest PBIR; screenshot each a
 5dd1d3092f540df00ec8633218e189f3ee5418396468449da01cce34436ab49c  5. **A clean Bridge/MCP response is NOT proof the report ren
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 b6b35f02e0cde87fbb098396fde2ebb44cc33b7d82e173a84948ba42d3386245  ## Gotchas
@@ -490,5 +490,4 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 6269a8db2a9087924f8da9da46b4376357c6b2caad6b89d7215762e737a62cd6  - **Keep this repo customer-agnostic** ~ customer context li
 0a564aeb85cb9af6faa89893a3a070a6d6b31b110290a62124fd2c13fda17bda  - **Never fabricate row data.** Extract-based (`.hyper`) sou
 f8eae8329aa5d71139eb9564b4f187693a59bf62826ad66fb18ca30bd9e756f8  - **`.twbx` source files are gitignored** (`**/source/*.twbx
-0452ad6dd29c79bda12a7cbaa310457b9d2f6000298efa3e9fa17b623b575c92  - **Route fixes through the owning subagent**, even a trivia
-5ec35ff1460f5c931c42b40921b0cd5c14efd7353e58c468751840580ee95de9  - **Check installed skill versions once per session** ~ `pre
+9ae072c2e34dfe521acb18404b4f83bb8e3ab74094b2674fc32931e4304c2d2f  - **Route fixes through the owning subagent**, even a trivia

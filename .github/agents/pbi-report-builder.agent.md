@@ -1,6 +1,6 @@
 ---
 name: pbi-report-builder
-description: Repairs and finishes the Power BI PBIR report that the deterministic Tableau conversion engine already emitted and bound - visual fidelity, layout and filters, judged against the Tableau reference. Invokes powerbi-report-gotchas, and chains powerbi-report-planning/design/authoring only where a page must be built from scratch.
+description: Repairs and finishes the Power BI PBIR report that the deterministic Tableau conversion engine already emitted and bound - visual fidelity, layout and filters, judged against the Tableau reference. Uses powerbi-report-gotchas and powerbi-report-cli (authoring; design only for a missing page).
 ---
 
 # PBI Report Builder — Subagent
@@ -97,19 +97,22 @@ You repair and finish the PBIR report the deterministic tier already emitted and
 
 ## Skills you use, in this order
 
-0. **`powerbi-report-gotchas`** — read **first**, before planning turns into authoring. It owns the
-   PBIR/Desktop craft this file does not repeat; the generated section index under "Gotchas" routes
-   you. [SKILL.md](../skills/powerbi-report-gotchas/SKILL.md).
-1. **`powerbi-report-planning`** → **`powerbi-report-design`** → **`powerbi-report-authoring`** — the
-   full chain, needed only where a page must be built **from scratch** (rare). Point the design skill
-   at the model `pbi-semantic-builder` handed over.
-2. **`powerbi-report-author` CLI** — the live vocabulary and your self-check: `catalog
-   list|describe`, `formatting describe-object|describe-property`, `expr encode`, and
-   `preview-visuals|preview-pages|preview-filters`. It reflects the **installed** version, so it beats
-   any static doc — but it describes what you may *declare*, never what **renders**: a green
-   `catalog`/`validate` result is not evidence that a visual draws.
-3. **Read-only DAX — several of your own rules require it.** DoD #7 and the `formatString` gotcha need
-   a *real* sampled value (`0.00%` vs `0.00"%"`), which no field name implies. Use a pid-scoped
+0. **`powerbi-report-gotchas`** — read **first**, before the first `authoring` edit; use the generated
+   "Gotchas" index. [SKILL.md](../skills/powerbi-report-gotchas/SKILL.md).
+1. **`powerbi-report-cli`** — load once; select by intent, not a CLI mode parameter.
+   Existing report: directly to `authoring`; missing page: `design` contract, then `authoring`.
+   Read `references/<mode>.md` first; announce switches. Use the handed-over model.
+   Greenfield only: `planning`; persist `_brief/report-spec.md`, return `approval_pending` to the
+   orchestrator and **end the turn** until explicit later human approval of the locked spec.
+   No edit/scaffold of PBIR or semantic files, synthetic data, Fabric writes or publish before approval.
+   A migration brief counts only with explicit approval of that locked spec; autonomy is not approval.
+   **Never enter `management`, publish or rebind**; agreed deployment uses `scripts/deploy_estate.py`.
+2. **`powerbi-report-author` CLI** — installed vocabulary beats static docs: `catalog list|describe`,
+   `formatting describe-object|describe-property`, `expr encode`,
+   `preview-visuals|preview-pages|preview-filters`. Green `catalog`/`validate` proves declaration,
+   never rendering.
+3. **Read-only DAX:** DoD #7 and `formatString` need a sampled value (`0.00%` vs `0.00"%"`),
+   never inferred from a field name. Use a PID-scoped
    Desktop query (`python scripts/probe_desktop_query.py --pid <pid>`); `powerbi-modeling-mcp`
    **ConnectFolder is metadata-only** offline. Read-only inspection does not cross layer ownership —
    a model change still goes back to `pbi-semantic-builder`.
@@ -203,11 +206,10 @@ its hash) are in `powerbi-report-gotchas` §3; `--tamper` must exit 0.
    scripts/validate_spec.py <spec>`; with no spec, say that gate is not applicable and run
    `check_unit.py --scope report`, then `--scope integration`.
 
-**If a page must be built from scratch** (rare), fall back to the full chain (skill 1), inserting
-**an empty layout skeleton, gestalt-checked against the reference before any field is bound**. When
-*fixing* an existing report, re-follow `powerbi-report-authoring`'s "Edit an existing report"
-workflow instead of a one-off direct edit — measured, 5+ checkpoints of ad hoc PBIR/MCP edits ran
-none of the validation, anti-pattern or design-consistency guardrails.
+**Missing page:** use skill 1's contract, then an **empty layout skeleton,
+gestalt-checked against the reference before binding fields**. Existing repairs use `authoring`'s
+Quick Start and `references/authoring/authoring-workflows.md` inventory, not ad hoc edits —
+measured, 5+ checkpoints of ad hoc PBIR/MCP edits ran none of the guardrails.
 
 ## Mandatory validation (before any screenshot review)
 
@@ -215,17 +217,17 @@ Structural validation is not optional, on the initial build and on every later f
 
 1. `python scripts/check_unit.py <unit-or-bundle> --scope report` — it includes integration checks and
    names omitted model-only checks; its verdict does not replace the routing rules above.
-2. **Confirm the CLI-driven flow is available** — run the `powerbi-report-authoring` skill's
-   `check-updates` once per session. The current skill ships `powerbi-report-author validate`
-   (structural/schema/cross-reference/role-binding) and the `powerbi-desktop` bridge.
-3. **If only an older skill copy is active**, do the equivalent by hand before every screenshot
-   review: every `visual.json` field reference resolves against the real TMDL; every page is listed in
-   `pages/pages.json`; no two visuals overlap; no table/matrix `Values` well has the
-   single-active-field-with-inactive-siblings pattern (`powerbi-report-gotchas` §4); and
-   `definition.pbir`'s model reference is correct — a cross-tree `byPath` into a shared
-   `datasources/<ds-slug>/` model is **correct**, not a defect to "fix" by copying the model in beside
-   your report (§3); cloud equivalent `{"byConnection": {"connectionString": "semanticmodelid=<guid>"}}`.
-4. **Only after structural validation passes**, do the visual/numeric Desktop screenshot review.
+2. **Preflight is the sole version authority.** Skip upstream `@latest` installation;
+   never install/update npm mid-migration. Skill/command/capability absent → **BLOCKED**, route to preflight.
+   No retired-name or by-hand fallback. Run `powerbi-report-author validate` each batch.
+3. **Additional checks:** no overlapping visuals; no table/matrix `Values` well with inactive
+   siblings (§4); correct `definition.pbir` binding (§3). A cross-tree `byPath` into shared
+   `datasources/<ds-slug>/` is correct — never copy its model beside the report to "fix" it.
+   Cloud: `{"byConnection": {"connectionString": "semanticmodelid=<guid>"}}`.
+4. **After validation**, load latest PBIR; screenshot each affected page to a run-owned path and
+   review visually/numerically. Repo capture/refresh scripts retain precedence pending #730's
+   `preview --reload-with-model` measurement; do not apply upstream's host/`--pid` ban to them.
+   Log deviations.
 5. **A clean Bridge/MCP response is NOT proof the report renders error-free.** Errors *inside*
    Desktop's rendering (a visual error glyph, a card failing to evaluate, a refresh banner) are not
    reliably surfaced through the bridge — always cross-check an actual screenshot.

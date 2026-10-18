@@ -291,8 +291,10 @@ A **literal** RHS (`'…'[Completed Flights] = 1`) and an **explicit** `FILTER(A
 | `{INCLUDE [Dim] : SUM([Measure])}` | Needs a finer grain first: `<OUTER>X(VALUES('T'[Dim]), CALCULATE(SUM('T'[Measure])))` — **`<OUTER>` is read off the SHELF, not the formula**; see below |
 
 LOD expressions are the highest-risk translation category — always validate the DAX result against
-a known Tableau value (via `semantic-model-consumption` EVALUATE, or a Python replica against the
-extract CSV when no live engine) before trusting it. **With no Tableau site to query, try
+a known Tableau value (read-only `EVALUATE`: `scripts/probe_desktop_query.py` for local PBIP;
+`powerbi-modeling-mcp` `dax_query_operations` for a connected, loaded model; `powerbi-remote`
+`ExecuteQuery` for a published model; otherwise a Python replica against the extract CSV)
+before trusting it. **With no Tableau site to query, try
 `scripts/extract_twbx_result_cache.py <wb>.twbx` first**: a packaged `.twbx` usually carries
 `TwbxExternalCache/TwbxResultsCacheV3/` — Tableau Desktop's *own* cached result tuples for the
 queries it last ran, LOD queries included (the `.key` sidecar even flags `has-lod-calcs='true'`).
@@ -555,8 +557,8 @@ Several worksheets (e.g. `CDD_0_1`) use a Tableau-specific trick: a single `Circ
 fixed continuous axis, annotated with `Min`/`Max`/`Average` reference lines, to fake a gauge (classic
 Tableau has no native gauge mark). **This maps directly, and better, to Power BI's native Gauge
 visual** (Value / Minimum / Maximum / Target fields) — a fidelity *improvement* over the source, not
-a workaround. This is a `pbi-report-builder` concern (see `powerbi-report-design`'s chart-selection
-reference), noted here because it's discovered from the same `reference_lines` data the semantic
+a workaround. This is a `pbi-report-builder` concern (see `powerbi-report-cli`, `design` mode,
+`references/design/chart-selection.md`), noted here because it's discovered from the same `reference_lines` data the semantic
 layer also touches (Min/Max/Average become the Gauge's Minimum/Maximum/Target measures).
 
 ## 8. Capabilities & limitations (what to tell the customer)
