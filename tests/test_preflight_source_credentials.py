@@ -36,7 +36,7 @@ if str(SCRIPTS) not in sys.path:
 # ruff: noqa: E402  (the sys.path insert above must precede these imports)
 # pylint: disable=wrong-import-position,import-error
 from connection_target import FLAT_FILE, LIVE_SOURCE, powerbi_target
-from credential_gate import clear_block
+import credential_gate as gate
 from preflight_source_credentials import GATE_MARKER, classify_source, cmd_classify
 import preflight_source_credentials as pf
 
@@ -133,14 +133,11 @@ def test_unkeyable_live_source_arms_gate_instead_of_clearing(tmp_path: Path, cap
     )
     caplog.set_level("INFO", logger="preflight_source_credentials")
 
-    try:
-        assert cmd_classify(spec) == 1
-        marker = json.loads((tmp_path / GATE_MARKER).read_text(encoding="utf-8"))
-        assert marker["sources"] == ["unstable-source[0].connection[0]"]
-        messages = "\n".join(record.getMessage() for record in caplog.records)
-        assert "No live sources" not in messages
-    finally:
-        clear_block(tmp_path, "test-teardown")
+    assert cmd_classify(spec) == 3
+    assert not (tmp_path / GATE_MARKER).exists()
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "CANNOT_ESTABLISH" in messages
+    assert "No live sources" not in messages
 
 
 def _717_source(identifier, **connection):
@@ -328,11 +325,69 @@ def test_missing_class_does_not_launder_live_source_to_extract_only(tmp_path: Pa
     )
     caplog.set_level("INFO", logger="preflight_source_credentials")
 
+    assert cmd_classify(spec) == 3
+    assert not (tmp_path / GATE_MARKER).exists()
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "CANNOT_ESTABLISH" in messages
+    assert "No live sources" not in messages
+
+
+def test_canonical_live_source_arms_the_real_gate(tmp_path: Path) -> None:
+    """The positive producer writes exactly the classifier key, not a display or count alias."""
+    source = {
+        "name": "Orders",
+        "connection": {
+            "class": "sqlserver",
+            "server": "preflight.example.invalid",
+            "database": "fixture",
+            "schema": "dbo",
+            "powerbi_target": LIVE_SOURCE,
+        },
+        "tables": [{"name": "Orders", "table": "[dbo].[Orders]"}],
+    }
+    spec = tmp_path / "migration-spec.json"
+    spec.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    key = pf._leg_key(source, 0, source["connection"])
+
     try:
         assert cmd_classify(spec) == 1
         marker = json.loads((tmp_path / GATE_MARKER).read_text(encoding="utf-8"))
-        assert marker["sources"] == ["unstable-source[0].connection[0]"]
-        messages = "\n".join(record.getMessage() for record in caplog.records)
-        assert "No live sources" not in messages
+        assert marker["sources"] == [key]
     finally:
-        clear_block(tmp_path, "test-teardown")
+        with gate.gate_transaction(tmp_path):
+            gate._release_physical(tmp_path)
+
+
+def test_failed_no_live_clear_is_preflight_and_parser_cannot_establish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No-live success cannot outrun a failed teardown transition."""
+    import parse_tableau  # pylint: disable=import-outside-toplevel
+
+    spec = tmp_path / "migration-spec.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "data_sources": [
+                    {
+                        "name": "Local",
+                        "connection": {"class": "excel-direct", "mode": "extract", "powerbi_target": FLAT_FILE},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    caplog.set_level("INFO", logger="preflight_source_credentials")
+    monkeypatch.setattr(pf, "_clear_gate_marker", lambda _root: (_ for _ in ()).throw(OSError("fixture clear")))
+    assert cmd_classify(spec) == 3
+    assert "No live sources" not in "\n".join(record.getMessage() for record in caplog.records)
+
+    source = Path(__file__).parent / "fixtures" / "federated_multi_connection.twb"
+    monkeypatch.setattr(
+        parse_tableau.subprocess, "run", lambda *_args, **_kwargs: __import__("subprocess").CompletedProcess([], 3)
+    )
+    monkeypatch.setattr(sys, "argv", ["parse_tableau.py", str(source), "-o", str(tmp_path / "parsed.json")])
+    with pytest.raises(SystemExit) as failure:
+        parse_tableau.main()
+    assert failure.value.code == 3

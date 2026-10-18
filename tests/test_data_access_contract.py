@@ -406,13 +406,33 @@ def _authorize(root: Path, sources: list[str] | None = None) -> None:
     result = gate.authorize(root, "Fixture Human")
     if current <= set(armed):
         assert result == 0
-    elif any(gate.SOURCE_KEY_RE.fullmatch(source) for source in armed):
+    else:
         assert result != 0, "partial keyed arms cannot release the complete current root"
         assert (root / gate.MARKER).exists() and gate.status(root) != 0
-    else:
-        assert result == 0, "legacy human authorization remains readable, never current keyed proof"
-        states, authorized = gate._data_access_ledger(_rows(root), tuple(sorted(current)))
-        assert not authorized and set(states.values()) == {"source-key-set-changed"}
+
+
+def _historical_authorization(root: Path, sources: list[str]) -> None:
+    """Readable pre-canonical arm/authorization history, never a supported current writer."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    rows = [
+        {
+            "ts": now,
+            "action": "block-marker-only",
+            "detail": gate._sources_detail(sources),
+            "user": "fixture-history",
+            "scope": str(root.resolve()),
+            "sources": sources,
+        },
+        {
+            "ts": now,
+            "action": "authorize",
+            "detail": "by=Fixture Human; chain=[]",
+            "user": "fixture-history",
+            "scope": str(root.resolve()),
+        },
+    ]
+    _write_rows(root, rows)
+    (root / gate.OVERRIDE).write_text("historical fixture permission\n", encoding="utf-8")
 
 
 @pytest.mark.usefixtures("desktop")
@@ -708,7 +728,10 @@ def test_authorization_cannot_override_review_legs(root: Path, connections: tupl
 @pytest.mark.parametrize("arms", [[], [OTHER_KEY], ["legacy display"]])
 def test_authorization_requires_current_keyed_arm(root: Path, arms: list[str]) -> None:
     """Readable legacy/empty/sibling arms cannot invent this package's current epoch."""
-    _authorize(root, arms)
+    if arms == [OTHER_KEY]:
+        _authorize(root, arms)
+    else:
+        _historical_authorization(root, arms)
     assert _audit_entries(root) is not None, "a readable historic arm is not necessarily current key coverage"
     result = _assess(root, authorized=True)
     assert (result.state, result.codes) == ("cannot_establish", ("source-key-set-changed",))
@@ -716,7 +739,7 @@ def test_authorization_requires_current_keyed_arm(root: Path, arms: list[str]) -
 
 def test_authorization_without_any_arm_cannot_establish(root: Path) -> None:
     """The production authorization writer does not itself create a current arm."""
-    assert gate.authorize(root, "Fixture Human") == 0
+    assert gate.authorize(root, "Fixture Human") != 0
     assert _audit_entries(root) is not None
     result = _assess(root, authorized=True)
     assert (result.state, result.codes) == ("cannot_establish", ("source-key-set-changed",))
@@ -727,10 +750,11 @@ def test_authorization_cannot_override_authority_failures(root: Path, fault: str
     """Invalid identities, unmatched source sets and forced scope outrank authorization."""
     spec = _spec(LIVE)
     if fault == "forced-scope":
-        (root / gate.MIGRATION_SPEC).unlink()
+        (root / "AGENTS.md").write_text("fixture rejected broad scope", encoding="utf-8")
         assert gate.apply_block(root, [KEY], force_scope=True) == 0
-        (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
-    _authorize(root)
+        assert gate.authorize(root, "Fixture Human") != 0
+    else:
+        _authorize(root)
     if fault == "duplicate-package":
         spec = _spec(LIVE, LIVE)
     elif fault == "duplicate-root":
@@ -844,8 +868,6 @@ def test_all_current_audit_writers_remain_readable(root: Path, monkeypatch: pyte
         ("probe-data_ok", [KEY]),
         ("probe-cleared", [KEY]),
         ("block-skipped", None),
-        ("violation", [KEY, KEY]),
-        ("violation", [KEY, KEY]),
         ("manual-clear", None),
         ("block-marker-only", [OTHER_KEY]),
         ("block-marker-only", [OTHER_KEY]),
@@ -868,10 +890,12 @@ def test_legacy_unkeyed_success_is_readable_but_not_earned(root: Path) -> None:
     """The pre-key probe writer remains readable, without becoming evidence for any key."""
     assert gate.apply_block(root, [KEY]) == 0
     _append_fixture_audit(root, "probe-data_ok", "Orders -> DATA_OK")
-    assert gate.clear_block(root, "legacy success", earned=True, sources=[KEY]) == 0
+    before = _rows(root)
+    assert gate.clear_block(root, "legacy success", earned=True, sources=[KEY]) != 0
     assert _audit_entries(root) == _rows(root)
+    assert _rows(root) == before, "refused clear must not append success-shaped evidence"
     result = _assess(root)
-    assert (result.state, result.codes) == ("blocked", ("stale-clear",))
+    assert (result.state, result.codes) == ("blocked", ("marker-only",))
     _earn(root)
 
 

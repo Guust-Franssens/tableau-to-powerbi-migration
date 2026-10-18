@@ -71,6 +71,49 @@ problem before the probe has returned one.
 | **Lifted by** | a successful one-row probe (`probe-cleared`), or an audit-backed human `authorize` |
 | **Audited by** | `credential_gate.py verify` — the authoritative pre-ship check |
 
+### Canonical source identity at every transition
+
+Every current source-bearing writer uses the same closed contract. For one arm, probe attempt or
+earned clear, the gate resolves the current root's live-source domain **once** as `R`, keeps that
+immutable result through the transition, and still performs #702's end-of-transaction root/spec
+change check. The caller supplies `S` explicitly. A supported `S` is a nonempty JSON/Python list of
+unique canonical identities matching `source-key:<16 lowercase hex>`, with `S ⊆ R`.
+
+The root adapter is deliberate:
+
+- a parser `migration-spec.json` is validated from its **raw** `data_sources` list before any
+  loader can deduplicate or filter it;
+- an engine bundle uses `migration_bundle.load_bundle`'s canonical projection. Exact copies in
+  `report.json` and `handover/*.json`, or identical duplicates in one engine document, are one
+  fact. Distinct records that collapse to one canonical key refuse as `source-key-invalid`;
+- unreadable, empty or unkeyable current domains never become an empty/legacy fallback.
+
+Validation happens before target shape, `--force-scope`, marker, ACL, success-audit, proof,
+permission, skip, release or epoch effects. `--force-scope` waives only the target-shape refusal:
+it cannot waive source syntax, uniqueness, current-root readability or exact membership.
+
+Historical display labels and unkeyed rows remain readable for diagnostics and genuine manual
+teardown. They are never rewritten into current keys and never grant current proof, permission,
+skip, hook shielding or an earned clear. Current positive history is:
+`block` → keyed `probe-data_ok` → keyed `probe-cleared`; a human authorization additionally needs
+its override file and a current keyed arm epoch, and remains **unvalidated permission**, not
+measured proof.
+
+The public refusal mappings are intentionally different:
+
+| Boundary | Result | Effects |
+|---|---:|---|
+| invalid/untrusted/nonmember `block S` | API/CLI **2** | no marker, ACL, success/skip row or source epoch |
+| invalid/nonmember probe-attempt `S` | `ValueError` / transaction refusal; probe nonzero | no attempt row |
+| invalid, omitted, empty or nonmember earned-clear `S` | clear API/CLI **1** | no `probe-cleared`, marker, ACL or epoch change |
+| unreadable current `R` during earned clear | **3 / CANNOT_ESTABLISH** | no transition effect |
+| failed preflight live arm **or no-live manual clear** | preflight **3**, parser **3** | never an `ENFORCED` or successful `No live sources` claim |
+
+`clear_block(..., earned=True)` never fills `S` from the last block or marker. Canonical identity is
+necessary but not sufficient: every named key still needs current-epoch keyed `DATA_OK` evidence.
+Manual `earned=False` clear remains the administrative teardown verb, including preflight's
+no-live-source branch; it earns no proof and cannot release a current keyed pending obligation.
+
 ### Physical targets and nested gates
 
 One resolver in `scripts/credential_gate.py` feeds arm/re-arm, clear, status and physical inspection:
@@ -88,7 +131,8 @@ package containing all three still uses `fabric`, not a newly invented `pbip`.
 Otherwise existing `pbip`, `report.json`, `engine-output-receipt.json` or `input_manifest.json`
 identify the bundle target. In particular, a receipt-only bundle creates `pbip`, and a parser root
 creates `fabric` if needed. The existing scope guard still refuses bare unforced directories;
-`--force-scope` permits the legacy `fabric` fallback, not ambiguous populated layouts.
+`--force-scope` permits the legacy `fabric` fallback only after the canonical source contract has
+passed, and never permits ambiguous populated layouts.
 Reparse/unsafe targets and conflicting populated layouts refuse rather than picking one tree.
 Bundles and native units never acquire a dummy `fabric`.
 
@@ -162,8 +206,9 @@ can credit the write-ahead evidence alone.
 Root-wide status/verification still refuses a missing committed stop. A selected key's data proof
 is not a claim of root writability; unrelated historical display labels never create new physical
 source obligations.
-Legacy empty/unknown-source arms remain stops, but an empty scope earns no current live key and
-cannot release its barrier.
+Historical empty/unknown-source arm rows remain readable as old stop/diagnostic evidence. A new arm
+with an empty, display-name, duplicate, malformed or foreign scope is refused before any transition
+effect and can never release a barrier.
 An all-flat local-byte projection makes no credential claim and does not consume an unrelated
 origin audit or ACL layout. It still acquires the transaction; a busy/unsafe companion refuses.
 The package binder independently checks the shipped package's physical barrier.
@@ -316,11 +361,16 @@ python scripts/probe_live_source.py --spec <migration-dir>/migration-spec.json
 # the gate itself
 python scripts/credential_gate.py status    <migration-dir>   # is it gated?
 python scripts/credential_gate.py list      <estate-root>     # which units are gated? (--json)
-python scripts/credential_gate.py block     <migration-dir> --sources "a" "b"
-python scripts/credential_gate.py clear     <migration-dir> --reason probe-data-ok
+python scripts/credential_gate.py block     <migration-dir> --sources source-key:0123456789abcdef
+python scripts/credential_gate.py clear     <migration-dir> --reason probe-data-ok --earned --sources source-key:0123456789abcdef
 python scripts/credential_gate.py authorize <migration-dir> --who "<name>"   # humans only
 python scripts/credential_gate.py verify    <migration-dir>   # exit 1 = violation
 ```
+
+The two writer examples require keys emitted by the classifier/probe for that exact current root.
+Display names, counts, old labels and keys copied from another root are unsupported. Omitting
+`--sources` from an earned clear, or supplying bare `--sources`, exits **1** without inferring the
+last block. The ordinary `clear --reason ...` form is manual teardown and never earns proof.
 
 ### Where to run `verify` — the bundle, never the ship copy
 
@@ -414,29 +464,33 @@ distinct violations:
 
 ### `clear` earns nothing; only the probe does
 
-`--source-index` can earn a **partial** clear, but only in the marker's own keyspace (#347). The
+The gate API can record a **partial** source clear, but only in the current root's canonical
+keyspace (#347); whole-root release still retains every pending sibling. The probe's current
+`--source-index` route conservatively refuses to lift a marker naming additional legs. The
 classifier arms the gate with stable connection-leg fingerprints such as
 `source-key:1d15832d4d2a857a` (the human display name is separate because Tableau names can
 duplicate, reorder or contain punctuation); the probe now iterates `connection.connections[]` and
-passes exactly the keys it reached to `clear --sources`. If only one keyed leg is proven, the
-restored #357 cardinality guard refuses the clear unless the marker names exactly that one leg.
+passes exactly the keys it reached to `clear --earned --sources`.
 
-The fail-open guard is now simpler and stricter: an empty proof list never clears anything. Do not
+The fail-open guard is now simpler and stricter: `None`, an empty proof list, duplicates,
+noncanonical labels, foreign keys and same-count substitutions never clear anything. Do not
 replace that with set arithmetic over datasource indices. Blind review found the first attempt —
 `set(live) >= set(all_live)` — was **fail-open**: a superset test is vacuously true against an empty
 set, so a bundle with **0** live sources cleared the gate on ZERO proof (`SKIPPED nothing to probe`,
 then marker deleted, ACL removed, an EARNED `probe-cleared` written). Counts, display names and
-datasource names are the wrong keyspace; only marker source keys may clear marker source keys.
+datasource names are the wrong keyspace; only explicit current-root canonical source keys can earn
+their matching clear.
 
 That refusal is the conservative half of the #346 fix. Until 2026-08-27 the probe passed a
 human-readable count (`"2 live source(s)"`) as `--sources`; `clear_block` diffs that against the
 marker's real source names, nothing matched, and the partial-clear branch left **every** named-source
 gate armed while still writing `probe-cleared` and exiting 0. The earned route was therefore broken
 on every real estate, which is why `authorize` looked like the only thing that worked.
-`clear` remains for legacy teardown and records `manual-clear`, which earns nothing. It now
+`clear` remains for legacy teardown and records `manual-clear`, which earns nothing. It
 refuses to release a root with any current keyed pending obligation. The probe's own `--earned`
-clear records `probe-cleared`; `verify` still treats artifacts built after a legacy `manual-clear`
-as **UNVALIDATED**.
+clear requires explicit `--sources`, verifies current membership and current keyed `DATA_OK`, then
+records `probe-cleared`; `verify` still treats artifacts built after a legacy `manual-clear` as
+**UNVALIDATED**.
 
 ⚠️ Note the asymmetry: `authorize` refuses to run from inside a Copilot session (process-lineage
 check), but legacy `clear` has **no such lineage check** — the hook still prevents an agent from
@@ -503,18 +557,22 @@ look reasonable.**
 
 The skip is deliberately narrow, and fails closed on anything it cannot parse:
 
-- the gate must be currently **earned** (`probe-cleared` / audit-backed `authorize`) — a bare
-  `manual-clear` still re-arms, so it cannot launder itself into permanent immunity;
-- the source list must be **identical** (order-insensitive) — a newly added live source has no
-  reachability evidence at all, so it still arms the gate.
+- every supplied key must be an explicit canonical member of the once-resolved current root;
+- probe proof and human permission remain separate: current keyed `probe-cleared` can skip the
+  matching measured scope, while an authentic override can permit only its current keyed armed
+  epoch. Permission never becomes probe proof;
+- a bare `manual-clear`, legacy/display label, unkeyed row, forced history, file-only override or
+  audit-only authorization never skips;
+- a newly added or replaced live source has no evidence for its new identity and still arms.
 
 ### Cleared migrations also shield themselves from unrelated ancestor markers
 
 The hook walks upward from a write target, so a marker placed too high can otherwise govern every
-migration beneath it. A migration that already earned a `probe-cleared` for the **same source list**
-is treated as its own boundary: the hook reads the nearest audit log below an ancestor marker and
-reuses the same transition/source comparison as re-arming. A bare file is never a shield, and neither
-is `manual-clear`; only an audit-backed `probe-cleared` after the latest block counts.
+migration beneath it. A migration with current keyed `probe-cleared` proof covering the relevant
+current source set is treated as its own boundary: the hook reads the nearest audit log below an
+ancestor marker and reuses the same canonical transition/source comparison as re-arming. A bare file,
+legacy label, unkeyed/forced row or `manual-clear` is never a shield; only the current keyed
+measurement/clear pair counts.
 
 This deliberately stays audit-backed rather than adding a new "cleared" file. A file-only token would
 repeat the override failure mode: agents already forged control files, including via string fragments
