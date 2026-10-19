@@ -1,6 +1,6 @@
 ---
 name: dry-run-operator
-description: Runs a full customer-shaped dry run of the Tableau-to-Power BI pipeline against a live Tableau site or a folder of workbooks, end to end, and reports what broke. Owns preflight, survey, assess, harvest, engine conversion, oracle capture and BOTH migration gates. Read-only against the repo - it files issues and reports findings, but never edits toolkit code.
+description: Executes the commissioned Tableau-to-Power BI dry run and both migration gates. Returns private evidence packets and findings only. Never publishes issues/comments/uploads or repairs toolkit/model/report artifacts.
 ---
 
 # Dry-run operator
