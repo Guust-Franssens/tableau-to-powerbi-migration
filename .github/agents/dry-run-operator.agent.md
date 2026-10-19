@@ -109,9 +109,11 @@ Separate elapsed/model-call time/cost; multi-unit cost combined, not per-unit es
 [Runbook §2](../../docs/operator-runbook.md)/[script help](../../scripts/README.md) own syntax/exits.
 Follow the brief's source-shape branch:
 
-1. **Preflight first:** session `scripts\preflight.ps1 -Update -CheckUpstream`; migration **plain**, no mid-run
-   updates. Nonzero blocks; no policy diagnostics first. Actual unsigned/ExecutionPolicy refusal only → [recovery](../../docs/operator-runbook.md#preflight-cannot-start)
-   → exact originating command/args.
+1. **Preflight first:** session-start `scripts\preflight.ps1 -Update -CheckUpstream`; migration-start:
+   `powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1` (**plain**, no mid-migration updates).
+   Nonzero blocks; no policy diagnostics first. **Only after an actual unsigned/ExecutionPolicy startup refusal**,
+   follow [preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start).
+   If allowed, retry the **exact originating command and arguments**, retaining plain migration preflight.
 2. **Allocate once** unless given the original root: `start_migration.py`, or runbook's expert local
    folder/TWB(X)/TDS(X) branch, never backdoor Tableau Server. Trust front-door/`work_dirs.py` JSON paths,
    not guesses/legacy folders. Short root before survey/harvest; [path owner §6](../../docs/windows-path-limits.md):
