@@ -182,7 +182,7 @@ Required/unknown without actual **Power BI + Tableau results/filter/grain/contex
 typed nonzero **CANNOT_ESTABLISH(NUMERIC): Phase-2 COMPLETE was not established.**
 Retain raw missing counts/lists; no default-none, CSV/label override or ceiling upgrade.
 
-**BEFORE shipment**, live-source `scripts\credential_gate.py verify` at the **ORIGINAL armed
+**BEFORE shipment**, run `python scripts\credential_gate.py verify <bundle>` at the **ORIGINAL armed
 bundle/spec root** retains current-root/source/sibling coverage. No ship/probe/package/run-parent/
 sibling replacement. Paste verdict: refusal/legacy NONE/unassessable ≠ clean; copy/fallback/permission
 cannot clear the stop or create DATA_OK.
@@ -209,7 +209,12 @@ Shared transient caps/self-timer exceptions apply, never credential retries.
 Customer-run toolkit/engine gate defect: **STOP, route, ask**, never silently patch.
 
 Return counts/simplifications/findings/current limits/unverified scope, evidence/combined cost.
-Retrospective uses `phase-timings.json`/owner engine-vs-authored accounts →
+
+## Retrospective — MANDATORY
+
+Use `phase-timings.json`/owner engine-vs-authored accounts →
 [existing targets](../../docs/INDEX.md#retrospective-targets); nothing worth recording is valid.
+For approved follow-up only: `sync_agent_conventions.py` owns shared rules, `visual-cookbook.md`
+owns visual recipes; retain the 30,000-char hard cap and net-zero growth.
 End with verdict/next owner. No `tools:` allow-list ([architecture §2](../../docs/agent-architecture.md)).
 Keep evidence private under issued paths/[SECURITY.md](../../SECURITY.md), not toolkit text/code.
