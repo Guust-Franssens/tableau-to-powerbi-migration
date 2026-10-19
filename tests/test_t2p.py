@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gettext
 import hashlib
 import io
 import json
@@ -1109,11 +1110,26 @@ def test_status_scalar_controls_are_escaped(monkeypatch, capsys, json_mode):
 
 
 @pytest.mark.parametrize("json_mode", [False, True])
-def test_status_presentation_has_no_extra_io(monkeypatch, capsys, json_mode):
-    """Warm imports before trapping all presentation-side reads, probes and writes."""
+def test_status_presentation_has_no_extra_io(monkeypatch, tmp_path, capsys, json_mode):
+    """Allow cold parser metadata reads, then trap all presentation-side I/O."""
     observed, calls = _status_observed(), []
+    locale_lookups, find_locale = [], gettext.find
+
+    def cold_parser_locale(*_args, **_kwargs):
+        location = find_locale("t2p-parser-control", localedir=str(tmp_path), languages=["zz"])
+        locale_lookups.append(location)
+        return location
+
+    with monkeypatch.context() as parser_setup:
+        parser_setup.setattr(gettext, "find", cold_parser_locale)
+        parser = t2p.build_parser()
+    assert locale_lookups and all(value is None for value in locale_lookups), (
+        "cold parser locale metadata lookup must precede presentation traps"
+    )
+    monkeypatch.setattr(t2p, "build_parser", lambda: parser)
 
     def owner(run):
+        assert not calls, "status presentation reaches one owner and does not reread it"
         calls.append(run)
         return observed, 0
 
@@ -1164,6 +1180,8 @@ def test_status_presentation_has_no_extra_io(monkeypatch, capsys, json_mode):
             "kill",
         ):
             boundary.setattr(os, name, forbidden)
+        for name in ("exists", "lexists", "isdir", "isfile", "islink", "realpath"):
+            boundary.setattr(os.path, name, forbidden)
         for name in ("run", "Popen", "check_output", "check_call"):
             boundary.setattr(subprocess, name, forbidden)
         for name in ("socket", "create_connection", "getaddrinfo"):
