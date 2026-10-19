@@ -26,19 +26,18 @@ parse_tableau.py  ──►  GATE ARMED           writes denied on the layout's 
                        (reachability: UNPROVEN — nothing has been contacted yet)
                               │
                               ▼
-                  probe_live_source.py      builds a 1-table PBIP in the <migration>/_probe/
-                       THE MEASUREMENT      sandbox, opens Power BI Desktop, refreshes, and
-                              │             requires a real row back
+                  probe_live_source.py      ordinary tables: 1-table PBIP, Desktop refresh, real row
+                       THE MEASUREMENT      custom SQL: reuse prior same-scope ordinary DATA_OK,
+                              │             otherwise stop with no connection operation
                               ▼
-        ┌─────────────┬────────────────┬──────────────┬─────────────┬─────────┬───────┐
-        ▼             ▼                ▼              ▼             ▼         ▼       ▼
-     DATA_OK  OPERATOR_REQUIRED  NO_CREDENTIAL  ACCESS_DENIED  UNREACHABLE  ERROR  SKIPPED
+        DATA_OK / CONNECTION_OK_QUERY_UNVALIDATED / OPERATOR_REQUIRED / failure / SKIPPED
 ```
 
 | Verdict | What it means | What happens next |
 |---|---|---|
 | `DATA_OK` | Power BI returned a real row. | The gate lifts (`probe-cleared`); build for real. |
-| `OPERATOR_REQUIRED` | Custom SQL / cost / modal risk needs a human Desktop refresh. | STOP; run the PBIP in Desktop manually. |
+| `CONNECTION_OK_QUERY_UNVALIDATED` | An ordinary table already returned `DATA_OK` in this invocation on the exact same connection scope. Only that connection evidence is reused; the custom SQL was **not executed**. | **Exit 1; without existing exact-key human build-only permission, the gate stays armed.** Keyed observation only, no custom `proved_names`, `probe-cleared`, gate lift or new authorization. Genuine current human permission remains unvalidated and subject to the commissioned model-only scope. |
+| `OPERATOR_REQUIRED` | No same-invocation, same-scope ordinary `DATA_OK` exists for custom SQL. **No automatic custom connection operation or connection claim.** Unsupported custom-only connectors follow this path too. `probe_bundle.py` retains its separate operator handoff. | **Exit 1; STOP before custom M/PBIP generation, network checks or Desktop.** Without existing exact-key human build-only permission, the gate remains armed. Do not substitute shell proof or silently execute SQL, navigation or a generated constant. |
 | `NO_CREDENTIAL` | Positive authentication evidence: Power BI has no credential, or the one it has was rejected. | STOP; ask a human to sign in. No retry conjures a credential. |
 | `ACCESS_DENIED` | The classifier matched **access-denial-shaped** text (`403` / forbidden / access denied / permission denied / insufficient privilege / not authorized) in the refresh error, ahead of any credential marker. It does **not** establish that authentication succeeded, that the failure is permission-only, or that signing in again cannot help: the markers are bare, so `403 Unauthorized: authentication failed` and `403 Forbidden: access token revoked` both land here. | STOP; the gate stays armed. **Unchanged retry is not useful** — read the redacted detail and change what the source actually named: the credential or token when it speaks of authentication or an expired/revoked token, the permission or object grant when it names a principal, a grant or an object. Do not relabel it a timeout or a transient error. |
 | `UNREACHABLE` | Address/network/spec fault. | STOP; report the address/path. Nobody needs to sign in. |
@@ -48,6 +47,98 @@ parse_tableau.py  ──►  GATE ARMED           writes denied on the layout's 
 **The probe must go *through* Power BI.** A shell query (`sqlcmd`, a Python driver) authenticates as
 the *agent*, while Power BI uses Desktop's per-user credential store — so a shell probe can pass
 against a source Power BI cannot open. Only a Desktop refresh answers the question that matters.
+
+### Default custom SQL: reuse or no operation (#690)
+
+✅ **The default never sends customer SQL to Power BI.** `source_relation: "custom-sql"` always
+selects the custom path, including an absent/null payload. Ordinary admission is shape-only:
+`source_relation` is `"table"` or a legacy absent/null default, and `custom_sql` is absent/null.
+A non-null query fact with a missing/wrong discriminator, or an unrecognized relation discriminator,
+refuses the whole resolved leg as `OPERATOR_REQUIRED` **before DNS/M/PBIP/Desktop/refresh**, even
+when a same-named ordinary table could return a row. Empty strings, `false`, lists and objects are
+not null defaults; no SQL text parsing, normalization, truthiness or semantic classification is used.
+Malformed metadata never borrows a connection result or earns query proof/clearance.
+
+After unavoidable JSON parsing and this null/presence check, the probe-specific loader preserves
+each custom or malformed-source occurrence by reference: no query-content inspection, full-source
+serialization, hashing, copying or published-signal traversal. Correctly tagged custom payloads
+need not be accessed at all. It skips `custom_sql` during engine source discovery and deduplicates
+only supported ordinary sources, using their existing rule. Mixed ordinary/custom or malformed
+sources are retained without fingerprinting; their occurrence and connection metadata is unchanged.
+String/null payloads, including empty, large, comment-only and side-effect-shaped strings, stay
+opaque to probe behavior. JSON-native boolean/list/object payloads are malformed-input robustness
+negatives, not supported parser-spec positives; they may refuse fail-closed and never earn authority.
+There is **no custom-only probe PBIP**, connector navigation, eager metadata buffering, native SQL
+or generated constant. A custom-only source stops before DNS, Desktop open or refresh. The
+valid ordinary-table one-row path, including absent/null metadata defaults, and its existing
+connector/network behavior are unchanged. Refusals retain the original current source key;
+they do not repair the discriminator, erase query identity or substitute a physical table's proof.
+
+**Canonical identity is a separate permitted layer** (`allow_canonical_sql_identity_comparison=true`,
+owner-approved #690 clarification). The supported credential-gate writer re-resolves real persisted
+root facts inside its transaction. Its existing engine adapter may compare/serialize complete
+JSON-native sources **ephemerally in memory**, including query identity, solely to distinguish exact
+mirrors from distinct queries whose projected source keys collide. Exact mirrors remain one root
+fact; distinct records sharing a projected key refuse. This is not SQL interpretation, normalization,
+rewriting, logging, auditing, emission, transmission or execution, and identity comparison alone
+never grants proof or permission. The probe-specific loader's no-serialization rule is **not** an
+end-to-end ban on this canonical identity work. There is no zero-local-memory or serialization-cost
+claim. Arbitrary Python spy objects are not the persisted JSON interface.
+
+✅ **Reuse is invocation-local and conservative.** Only an ordinary table's actual Power BI
+`DATA_OK` in this invocation supplies evidence. Ordinary candidates in a mixed leg are tried
+first; a successful row leaves the custom query unvalidated. Existing ordinary-table failures
+remain failures; a missing-table fallback may reach the no-operation custom stop.
+
+The key snapshots the **entire declared connection mapping**, not merely `_leg_key`. It preserves
+SQL Server's server/port-or-instance/database, Databricks host/HTTP path/catalog, Snowflake
+account/warehouse/role/database, and every declared credential/authentication/session field.
+Only connector class and existing URL-host spelling normalization are applied. A mismatch,
+including additional metadata or a changed session hint, prevents reuse and never starts a
+replacement connection operation. **Separate `port` or `instance` fields make an observation
+ineligible for reuse**, including empty, malformed or conflicting declarations: ordinary M does
+not exercise those fields. Even a mixed leg's ordinary `DATA_OK` therefore ends at
+`OPERATOR_REQUIRED` for its custom relation. No new endpoint normalization or connector behavior is
+introduced; an endpoint already carried in `server` is still passed through by the existing M.
+No audit history, shell/ODBC success, connection-only result or earlier invocation seeds the cache.
+
+With same-scope ordinary proof, say:
+
+> Power BI reached this same connection scope through an ordinary table in this probe. Your custom SQL was not executed and remains unvalidated. Without existing exact-key human build-only permission, the gate stays armed; this result grants no permission.
+
+Without it, say:
+
+> Your custom SQL was not executed. No safe automated connection-only operation is currently available without catalog enumeration or a native-query approval prompt. No connection claim was earned. Without existing exact-key human build-only permission, the gate stays armed; this result grants no permission.
+
+Each approved message is one exact customer-facing log record, with no appended paragraphs.
+
+The gate's audit vocabulary is closed. **Both custom outcomes use the existing keyed `probe-error`
+envelope**, with distinct detail prefixes **`CONNECTION_OK_QUERY_UNVALIDATED:`** and
+**`OPERATOR_REQUIRED:`**. Their public verdicts remain distinct, not `ERROR`. This mapping is confined
+to the custom no-operation/reuse paths; other existing `OPERATOR_REQUIRED` producers are unchanged. Ordinary row attempts may
+retain their own `probe-data_ok` observation, but neither custom outcome earns `probe-cleared`,
+custom proof names, a gate lift, authorization or model-only permission.
+Both custom observations use the supported `credential_gate.record_probe_attempt` transaction,
+not raw audit appends or caller-owned arm/permission policy. Without applicable human permission,
+it establishes the required physical stop before committing the observation. Arm/record failure
+returns nonzero `ERROR` / `CANNOT_ESTABLISH`, not a claimed successful block. With genuine current
+exact-key human build-only permission, #698 preserves that permission without promoting validation.
+The probe neither creates nor revokes it. Connection evidence does **not** validate custom-query/
+object permissions, schema, rows, semantics, cost or refreshability. Brief-backed model-only scope
+is still required for degraded continuation; neither verdict nor unattended execution implies it.
+
+⚠️ #694 is a nonblocking enhancement for future connector strategies, not a prerequisite for this
+no-operation default. Generated health SQL would need connector/dialect-specific qualification and
+#146/#687's positively qualified native-approval handling; neither is implemented here. Exact
+customer-query execution remains the separate, explicit and cost-disclosed #692 scope.
+No `--custom-sql-mode exact` flag, SQL normalization, TOP/LIMIT/WHERE wrapper, zero-row `DATA_EMPTY`
+expansion, popup change or shipped-artifact `probe_bundle.py` change is included.
+
+Check the same audit root with `credential_gate.py status` and `verify`. A connection-only result
+leaves `status` blocked unless genuine current human permission already applies; permission remains
+unvalidated, never `DATA_OK`. `verify` still rejects unvalidated artifacts behind an armed gate. With no
+artifacts, the existing verifier may exit 0 for a correctly applied barrier—**that is not a clear
+or permission to build**. Do not interpret that compliance check as connection/query validation.
 
 ### The marker states a state, not a verdict
 

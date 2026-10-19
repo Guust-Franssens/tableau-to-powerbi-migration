@@ -23,17 +23,22 @@ import pytest
 from test_probe_earned_clear import cg as gate, pls as probe
 from test_package_role_identity import DS_LUID, PUBLISHED_KEY, datasource_package, workbook_package
 from credential_gate import (
+    _append_audit,
     _audit,
     _audit_entries,
     _clear_was_earned,
+    _durable_write,
     _DuplicateJsonKey,
+    _gate_root_live_keys,
     _override_is_authentic,
     _reject_duplicate_keys,
+    _sources_detail,
+    _transaction_pending,
     _valid_authorization_detail,
 )
 from package_filesystem import is_canonical_key
 from package_role_identity import verify_phase1_role_identity
-from probe_live_source import _probe_leg, _probe_one_table
+from probe_live_source import _probe_leg, _probe_one, _probe_one_table
 
 LIVE = {
     "class": "sqlserver",
@@ -335,6 +340,26 @@ def _rows(root: Path) -> list[dict]:
     return [json.loads(line) for line in (root / gate.AUDIT).read_text(encoding="utf-8").splitlines()]
 
 
+def _observe_probe_operations(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    operations = []
+    for stage in (
+        "_host_resolves",
+        "build_m_query",
+        "_write_probe_model",
+        "_open_desktop",
+        "_wait_for_catalog",
+        "_refresh_and_classify",
+    ):
+        operation = getattr(probe, stage)
+
+        def observe(*args: object, _stage: str = stage, _operation: Callable = operation, **kwargs: object) -> object:
+            operations.append(_stage)
+            return _operation(*args, **kwargs)
+
+        monkeypatch.setattr(probe, stage, observe)
+    return operations
+
+
 def _write_rows(root: Path, rows: list[dict]) -> None:
     (root / gate.AUDIT).write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
@@ -399,7 +424,7 @@ def _earn(root: Path) -> None:
 
 
 def _authorize(root: Path, sources: list[str] | None = None) -> None:
-    current, refusal = gate._gate_root_live_keys(root)
+    current, refusal = _gate_root_live_keys(root)
     assert refusal is None
     armed = sorted(current) if sources is None else sources
     assert gate.apply_block(root, armed) == 0
@@ -418,7 +443,7 @@ def _historical_authorization(root: Path, sources: list[str]) -> None:
         {
             "ts": now,
             "action": "block-marker-only",
-            "detail": gate._sources_detail(sources),
+            "detail": _sources_detail(sources),
             "user": "fixture-history",
             "scope": str(root.resolve()),
             "sources": sources,
@@ -971,40 +996,255 @@ def test_spec_fact_shapes_precede_classifier_fallback(root: Path, path: tuple, v
 
 @pytest.mark.usefixtures("desktop")
 @pytest.mark.parametrize("sql", ["", "-- comment only", "/* comment only */", None])
-def test_custom_sql_preprocessing_failure_invalidates_earned_key(root: Path, sql: str | None) -> None:
-    """Comment-only SQL cannot leave the same key's earlier earned state green."""
+def test_custom_sql_operator_required_invalidates_earned_key(root: Path, sql: str | None) -> None:
+    """Opaque custom payloads invalidate prior proof without earning connection evidence."""
     _earn(root)
+    before = _rows(root)
     table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": sql}
-    assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (1, "ERROR")
-    last = _rows(root)[-1]
-    assert (last["action"], last["sources"]) == ("probe-error", [KEY])
+    assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (1, "OPERATOR_REQUIRED")
+    rows = _rows(root)
+    last = rows[-1]
+    assert (last["action"], last.get("sources"), last["detail"]) == (
+        "probe-error",
+        [KEY],
+        "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned",
+    )
+    assert rows[: len(before)] == before
+    assert [(row["action"], row.get("sources")) for row in rows[len(before) : -1]] == [("block-marker-only", [KEY])], (
+        "custom SQL must append only its required physical arm and refusal, never earned proof or a clear"
+    )
     assert _assess(root).state == "blocked"
     assert _assess(root).codes == ("probe-error",)
 
 
 @pytest.mark.usefixtures("desktop")
-def test_malformed_custom_sql_type_also_records_its_terminal_error(root: Path) -> None:
-    """A preprocessing exception, rather than a handled ValueError, must still invalidate proof."""
+def test_nonstring_custom_sql_is_opaque_and_invalidates_earned_key(root: Path) -> None:
+    """A non-string payload requires a keyed refusal, not type inspection or an exception."""
     _earn(root)
+    before = _rows(root)
     table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": True}
-    with pytest.raises(TypeError):
-        _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False))
-    assert (_rows(root)[-1]["action"], _rows(root)[-1]["sources"]) == ("probe-error", [KEY])
+    assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (1, "OPERATOR_REQUIRED")
+    rows = _rows(root)
+    last = rows[-1]
+    assert (last["action"], last.get("sources"), last["detail"]) == (
+        "probe-error",
+        [KEY],
+        "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned",
+    )
+    assert rows[: len(before)] == before
+    assert [(row["action"], row.get("sources")) for row in rows[len(before) : -1]] == [("block-marker-only", [KEY])], (
+        "custom SQL must append only its required physical arm and refusal, never earned proof or a clear"
+    )
+    assert _assess(root).state == "blocked"
     assert _assess(root).codes == ("probe-error",)
 
 
 @pytest.mark.usefixtures("desktop")
-def test_custom_sql_success_is_keyed_and_earns_only_after_clear(root: Path) -> None:
-    """Real custom-query scaffolding reaches the same keyed attempt/clear boundary."""
+def test_custom_sql_without_ordinary_evidence_never_earns_proof(root: Path) -> None:
+    """Even valid SQL receives only a keyed refusal; no DATA_OK or clear is earned."""
     assert gate.apply_block(root, [KEY]) == 0
+    before = _rows(root)
     table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": "SELECT 'private-query-value'"}
-    assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (0, "DATA_OK")
-    last = _rows(root)[-1]
-    assert (last["action"], last["sources"]) == ("probe-data_ok", [KEY])
+    assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (1, "OPERATOR_REQUIRED")
+    rows = _rows(root)
+    last = rows[-1]
+    assert (last["action"], last.get("sources"), last["detail"]) == (
+        "probe-error",
+        [KEY],
+        "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned",
+    )
+    assert rows[: len(before)] == before
+    assert [(row["action"], row.get("sources")) for row in rows[len(before) : -1]] == [("block-marker-only", [KEY])], (
+        "custom SQL must append only its required physical arm and refusal, never earned proof or a clear"
+    )
     assert "private-query-value" not in json.dumps(last)
     assert _assess(root).state == "blocked"
-    assert gate.clear_block(root, "custom query returned a row", earned=True, sources=[KEY]) == 0
-    assert _assess(root).state == "live_data_ok"
+    assert _assess(root).codes == ("probe-error",)
+
+
+@pytest.mark.usefixtures("desktop")
+@pytest.mark.parametrize("permission", [False, True], ids=["earned-clear", "human-permission"])
+@pytest.mark.parametrize("reuse", [False, True], ids=["operator-required", "connection-only"])
+def test_custom_nonfinal_observation_respects_current_physical_authority(
+    root: Path, monkeypatch: pytest.MonkeyPatch, stateful_icacls: _StatefulIcacls, permission: bool, reuse: bool
+) -> None:
+    """Current writer histories and raw synthetic ACE rows distinguish re-arm from human permission."""
+    table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": "SELECT 'PRIVATE_SQL_690'"}
+    spec = _spec(LIVE)
+    spec["data_sources"][0]["tables"].append(table)
+    (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(gate.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(gate, "_ancestry", lambda: ["python.exe", "pwsh.exe", "explorer.exe"])
+    if permission:
+        _authorize(root)
+        assert _assess(root, authorized=True).state == "authorized_model_only"
+    else:
+        _earn(root)
+    target = stateful_icacls.key(root / "fabric")
+    assert stateful_icacls.states[target] == "clear"
+    assert not (root / gate.MARKER).exists() and gate.status(root) == 0
+    before = _rows(root)
+    outcome = (
+        _probe_one(root, spec["data_sources"], 0, 1, False)
+        if reuse
+        else _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False))
+    )
+    assert outcome == (1, "CONNECTION_OK_QUERY_UNVALIDATED" if reuse else "OPERATOR_REQUIRED")
+    assert _rows(root)[: len(before)] == before and _rows(root)[-1]["action"] == "probe-error"
+    assert _rows(root)[-1]["sources"] == [KEY]
+    assert not any(row["action"] in ("authorize", "probe-cleared") for row in _rows(root)[len(before) :])
+    with gate.gate_transaction(root):
+        assert _transaction_pending(root) == ([] if permission else [KEY])
+    if permission:
+        assert stateful_icacls.states[target] == "clear", "measurement must not silently revoke genuine permission"
+        assert not (root / gate.MARKER).exists() and gate.status(root) == 0
+        result = _assess(root, authorized=True)
+        assert (result.state, result.validation, result.max_phase2_claim) == (
+            "authorized_model_only",
+            "unvalidated",
+            "structural_only",
+        )
+    else:
+        assert stateful_icacls.states[target] == "restricted", "nonfinal custom SQL must re-arm the physical root"
+        assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [KEY]
+        assert gate.status(root) == 1
+        assert (_assess(root).state, _assess(root).codes) == ("blocked", ("probe-error",))
+    assert "PRIVATE_SQL_690" not in json.dumps(_rows(root)[len(before) :])
+
+
+@pytest.mark.usefixtures("desktop")
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            (permission, entry, relation),
+            id=f"{relation}-{entry}-{'genuine-human-permission' if permission else 'prior-earned-clear'}",
+        )
+        for permission in (False, True)
+        for entry in ("source", "table")
+        for relation in ("missing", "table", "text")
+    ],
+)
+def test_malformed_relation_refusal_preserves_current_keys_and_physical_authority(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stateful_icacls: _StatefulIcacls,
+    case: tuple[bool, str, str],
+) -> None:
+    """Prior ordinary proof must re-arm; genuine current permission remains only unvalidated."""
+    permission, entry, relation = case
+    spec = _spec(LIVE)
+    (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(gate.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(gate, "_ancestry", lambda: ["python.exe", "pwsh.exe", "explorer.exe"])
+    if permission:
+        _authorize(root)
+    else:
+        _earn(root)
+    table = spec["data_sources"][0]["tables"][0]
+    table["custom_sql"] = {
+        "missing": "EXEC dbo.PRIVATE_RELATION_690",
+        "table": False,
+        "text": {"query": "PRIVATE_RELATION_690"},
+    }[relation]
+    if relation != "missing":
+        table["source_relation"] = relation
+    (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
+    assert _gate_root_live_keys(root) == (frozenset({KEY}), None)
+    target = stateful_icacls.key(root / "fabric")
+    assert stateful_icacls.states[target] == "clear" and not (root / gate.MARKER).exists()
+    before = _rows(root)
+    permission_bytes = (root / gate.OVERRIDE).read_bytes() if permission else None
+    operations = _observe_probe_operations(monkeypatch)
+    result = (
+        _probe_one(root, spec["data_sources"], 0, 1, False)
+        if entry == "source"
+        else _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False))
+    )
+    assert not operations, "malformed relation metadata must not perform automatic operations"
+    rows = _rows(root)
+    assert rows[: len(before)] == before
+    assert not any(row["action"] in ("probe-data_ok", "probe-cleared", "authorize") for row in rows[len(before) :]), (
+        "malformed relation metadata must not earn query proof or clearance"
+    )
+    assert result == (1, "OPERATOR_REQUIRED")
+    assert (rows[-1]["action"], rows[-1]["sources"], rows[-1]["detail"]) == (
+        "probe-error",
+        [KEY],
+        "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned",
+    )
+    with gate.gate_transaction(root):
+        assert _transaction_pending(root) == ([] if permission else [KEY])
+    result = _assess(root, spec=spec, authorized=permission)
+    if permission:
+        assert stateful_icacls.states[target] == "clear"
+        assert not (root / gate.MARKER).exists() and gate.status(root) == 0
+        assert (root / gate.OVERRIDE).read_bytes() == permission_bytes
+        assert (result.state, result.validation, result.max_phase2_claim) == (
+            "authorized_model_only",
+            "unvalidated",
+            "structural_only",
+        )
+    else:
+        assert stateful_icacls.states[target] == "restricted", (
+            "malformed relation refusal must re-arm the physical root"
+        )
+        assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [KEY]
+        assert gate.status(root) == 1 and (result.state, result.codes) == ("blocked", ("probe-error",))
+    assert "PRIVATE_RELATION_690" not in json.dumps(rows[len(before) :])
+
+
+@pytest.mark.usefixtures("desktop")
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param((stage, malformed), id=f"{stage}-{'missing-tag' if malformed else 'custom-tag'}")
+        for stage in ("marker", "acl", "record")
+        for malformed in (False, True)
+    ],
+)
+def test_custom_arm_or_record_failure_never_commits_a_terminal_claim(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stateful_icacls: _StatefulIcacls,
+    caplog: pytest.LogCaptureFixture,
+    case: tuple[str, bool],
+) -> None:
+    """A real writer failure propagates cannot-establish, without claiming its physical stop succeeded."""
+    stage, malformed = case
+    table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": "SELECT 'PRIVATE_FAILURE_690'"}
+    if malformed:
+        del table["source_relation"]
+        table["table"] = "[dbo].[Orders]"
+    spec = _spec(LIVE)
+    spec["data_sources"][0]["tables"].append(table)
+    (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(gate.platform, "system", lambda: "Windows")
+    _earn(root)
+    assert gate.status(root) == 0
+    before = _rows(root)
+
+    def write(directory: Path, name: str, text: str) -> None:
+        if stage == "marker" and name == gate.MARKER:
+            raise OSError("PRIVATE_FAILURE_690")
+        _durable_write(directory, name, text)
+
+    def append(directory: Path, action: str, detail: str, sources: list[str] | None = None) -> None:
+        if stage == "record" and action == "probe-error":
+            raise OSError("PRIVATE_FAILURE_690")
+        _append_audit(directory, action, detail, sources)
+
+    monkeypatch.setattr(gate, "_durable_write", write)
+    monkeypatch.setattr(gate, "_append_audit", append)
+    if stage == "acl":
+        stateful_icacls.inject("apply", root / "fabric", "nonzero")
+    caplog.clear()
+    assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (3, "ERROR")
+    assert "CANNOT_ESTABLISH" in caplog.text
+    assert "PROBE: OPERATOR_REQUIRED" not in caplog.text
+    assert not any(row["action"].startswith("probe-") for row in _rows(root)[len(before) :])
+    assert "PRIVATE_FAILURE_690" not in caplog.text + json.dumps(_rows(root)[len(before) :])
+    assert not (root / gate.OVERRIDE).exists()
 
 
 @pytest.mark.usefixtures("desktop")
