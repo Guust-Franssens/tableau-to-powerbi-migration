@@ -164,7 +164,7 @@ def effects_fixture(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]
 
     def lift(_root: Path, _what: str, names: list[str]) -> bool:
         events.append(("lift", names))
-        return False
+        return gate.clear_block(_root, f"probe-cleared: DATA_OK from {_what}", earned=True, sources=names) == 0
 
     monkeypatch.setattr(probe_live_source, "build_m_query", build)
     monkeypatch.setattr(probe_live_source, "_write_probe_model", write)
@@ -262,8 +262,10 @@ def _protect_loaded_sql(monkeypatch: pytest.MonkeyPatch, *, memory_error: bool =
         loaded_sources.extend(sources)
         for source in sources:
             for index, table in enumerate(source.get("tables", [])):
-                if table.get("source_relation") == "custom-sql":
+                relation = table.get("source_relation")
+                if relation == "custom-sql":
                     source["tables"][index] = SqlReadTrap(table)
+                if relation not in (None, "table") or table.get("custom_sql") is not None:
                     protected.extend((document, sources, source, source["tables"]))
         return document
 
@@ -395,6 +397,170 @@ def test_malformed_json_payloads_never_execute_or_earn_authority(
     assert TOKEN not in caplog.text and "PROBE: DATA_OK" not in caplog.text
     assert SENTINEL not in caplog.text + json.dumps(entries) + repr(effects)
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("shape", ["spec", "engine"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            (ordinary, relation, payload),
+            id=f"{relation}-{payload}-{'same-name-ordinary' if ordinary else 'query-record-only'}",
+        )
+        for ordinary in (False, True)
+        for relation, payload in (
+            [
+                (relation, payload)
+                for relation in ("missing", "table", "null")
+                for payload in ("string", "empty", "false", "list", "object")
+            ]
+            + [
+                (relation, "null")
+                for relation in (
+                    "text",
+                    "unknown",
+                    "blank",
+                    "boolean",
+                    "list",
+                    "object",
+                    "join",
+                    "union",
+                    "pivot",
+                    "collection",
+                )
+            ]
+        )
+    ],
+)
+def test_malformed_relation_cannot_probe_or_clear_a_same_named_physical_table(
+    tmp_path: Path,
+    effects: list[tuple[str, object]],
+    caplog: pytest.LogCaptureFixture,
+    shape: str,
+    case: tuple[bool, str, str],
+) -> None:
+    """A successful ordinary route is available, but malformed relation facts must never enter it."""
+    ordinary, relation, payload = case
+    table = {
+        "name": "Q",
+        "table": "[dbo].[Q]",
+        "custom_sql": {
+            "string": f"EXEC dbo.{SENTINEL}",
+            "empty": "",
+            "false": False,
+            "list": [],
+            "object": {"query": [SIDE_EFFECT_SQL]},
+            "null": None,
+        }[payload],
+    }
+    if relation != "missing":
+        table["source_relation"] = {
+            "null": None,
+            "boolean": False,
+            "list": [],
+            "object": {},
+            "blank": "",
+        }.get(relation, relation)
+    source = {"connection": dict(SQLSERVER), "tables": [table]}
+    if ordinary:
+        source["tables"].insert(0, {"name": "Q", "table": "[dbo].[Q]"})
+    if shape == "spec":
+        path = _spec(tmp_path, [source])
+    else:
+        path = tmp_path / "report.json"
+        path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+        (tmp_path / gate.ENGINE_RECEIPT).write_text("{}", encoding="utf-8")
+    before = path.read_bytes()
+    key = preflight._leg_key(source, 0, SQLSERVER)
+    assert gate._gate_root_live_keys(tmp_path) == (frozenset({key}), None)
+    assert gate.apply_block(tmp_path, [key]) == 0
+    caplog.set_level("INFO", logger="probe_live_source")
+    code = probe_live_source.main(
+        ["--spec" if shape == "spec" else "--bundle", str(path if shape == "spec" else tmp_path)]
+    )
+    assert effects == [], "malformed relation metadata must not perform automatic operations"
+    entries = _audit(tmp_path)
+    assert not any(row["action"] in ("probe-data_ok", "probe-cleared", "authorize") for row in entries), (
+        "malformed relation metadata must not earn query proof or clearance"
+    )
+    assert code == 1
+    assert (entries[-1]["action"], entries[-1]["sources"], entries[-1]["detail"]) == (
+        "probe-error",
+        [key],
+        "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned",
+    )
+    assert json.loads((tmp_path / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [key]
+    with gate.gate_transaction(tmp_path):
+        assert gate._transaction_pending(tmp_path) == [key]
+    assert gate.status(tmp_path) == 1 and _assess_sources(tmp_path, [source]).state == "blocked"
+    assert not (tmp_path / gate.OVERRIDE).exists() and not list((tmp_path / "_probe").rglob("*.pbip"))
+    assert "PROBE: DATA_OK" not in caplog.text and TOKEN not in caplog.text
+    assert SENTINEL not in caplog.text + json.dumps(entries) + repr(effects)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("shape", ["spec", "engine", "engine-direct"])
+@pytest.mark.parametrize("relation", [None, "table", "unknown"], ids=["missing", "wrong", "unknown"])
+def test_probe_loader_does_not_fingerprint_or_discover_inside_malformed_queries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shape: str, relation: str | None
+) -> None:
+    """Malformed query facts stay by reference; nested payload sources are not probe candidates."""
+    table = {
+        "name": "Q",
+        "table": "[dbo].[Q]",
+        "custom_sql": {"data_sources": [_custom(UNSUPPORTED)], "private": SENTINEL},
+    }
+    if relation is not None:
+        table["source_relation"] = relation
+    source = {"connection": dict(SQLSERVER), "tables": [table]}
+    if shape == "spec":
+        path = _spec(tmp_path, [source])
+    else:
+        path = tmp_path
+        (path / "report.json").write_text(
+            json.dumps({"nested": [source] if shape == "engine-direct" else {"data_sources": [source]}}),
+            encoding="utf-8",
+        )
+    loaded = _protect_loaded_sql(monkeypatch)
+    bundle = probe_live_source.load_bundle(path)
+    assert len(bundle.data_sources) == 1
+    assert bundle.data_sources[0] is loaded[0], "malformed query source must remain opaque to probe loading"
+
+
+@pytest.mark.parametrize("shape", ["spec", "engine"])
+@pytest.mark.parametrize("relation", ["missing", "table", "null"])
+@pytest.mark.parametrize("payload", ["missing", "null"])
+def test_ordinary_relation_defaults_still_earn_real_row_proof(
+    tmp_path: Path,
+    effects: list[tuple[str, object]],
+    shape: str,
+    relation: str,
+    payload: str,
+) -> None:
+    """Absent/null defaults are not query facts; the opposite route really can earn a clear."""
+    table = {"name": "Q", "table": "[dbo].[Q]"}
+    if relation != "missing":
+        table["source_relation"] = None if relation == "null" else "table"
+    if payload == "null":
+        table["custom_sql"] = None
+    source = {"connection": dict(SQLSERVER), "tables": [table]}
+    if shape == "spec":
+        args = ["--spec", str(_spec(tmp_path, [source]))]
+    else:
+        (tmp_path / "report.json").write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+        (tmp_path / gate.ENGINE_RECEIPT).write_text("{}", encoding="utf-8")
+        args = ["--bundle", str(tmp_path)]
+    key = preflight._leg_key(source, 0, SQLSERVER)
+    assert gate.apply_block(tmp_path, [key]) == 0
+    assert probe_live_source.main(args) == 0
+    assert [value for kind, value in effects if kind == "m"] == ["Q"]
+    assert sum(kind == "refresh" for kind, _value in effects) == 1
+    assert [row["action"] for row in _audit(tmp_path) if row["action"].startswith("probe-")] == [
+        "probe-data_ok",
+        "probe-cleared",
+    ]
+    assert not (tmp_path / gate.MARKER).exists() and gate.status(tmp_path) == 0
+    assert _assess_sources(tmp_path, [source]).state == "live_data_ok"
 
 
 @pytest.mark.parametrize("same_query", [True, False], ids=["exact-mirror", "distinct-query-collision"])

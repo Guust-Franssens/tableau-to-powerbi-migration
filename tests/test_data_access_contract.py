@@ -340,6 +340,26 @@ def _rows(root: Path) -> list[dict]:
     return [json.loads(line) for line in (root / gate.AUDIT).read_text(encoding="utf-8").splitlines()]
 
 
+def _observe_probe_operations(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    operations = []
+    for stage in (
+        "_host_resolves",
+        "build_m_query",
+        "_write_probe_model",
+        "_open_desktop",
+        "_wait_for_catalog",
+        "_refresh_and_classify",
+    ):
+        operation = getattr(probe, stage)
+
+        def observe(*args: object, _stage: str = stage, _operation: Callable = operation, **kwargs: object) -> object:
+            operations.append(_stage)
+            return _operation(*args, **kwargs)
+
+        monkeypatch.setattr(probe, stage, observe)
+    return operations
+
+
 def _write_rows(root: Path, rows: list[dict]) -> None:
     (root / gate.AUDIT).write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
@@ -1093,16 +1113,109 @@ def test_custom_nonfinal_observation_respects_current_physical_authority(
 
 
 @pytest.mark.usefixtures("desktop")
-@pytest.mark.parametrize("stage", ["marker", "acl", "record"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            (permission, entry, relation),
+            id=f"{relation}-{entry}-{'genuine-human-permission' if permission else 'prior-earned-clear'}",
+        )
+        for permission in (False, True)
+        for entry in ("source", "table")
+        for relation in ("missing", "table", "text")
+    ],
+)
+def test_malformed_relation_refusal_preserves_current_keys_and_physical_authority(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stateful_icacls: _StatefulIcacls,
+    case: tuple[bool, str, str],
+) -> None:
+    """Prior ordinary proof must re-arm; genuine current permission remains only unvalidated."""
+    permission, entry, relation = case
+    spec = _spec(LIVE)
+    (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(gate.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(gate, "_ancestry", lambda: ["python.exe", "pwsh.exe", "explorer.exe"])
+    if permission:
+        _authorize(root)
+    else:
+        _earn(root)
+    table = spec["data_sources"][0]["tables"][0]
+    table["custom_sql"] = {
+        "missing": "EXEC dbo.PRIVATE_RELATION_690",
+        "table": False,
+        "text": {"query": "PRIVATE_RELATION_690"},
+    }[relation]
+    if relation != "missing":
+        table["source_relation"] = relation
+    (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
+    assert _gate_root_live_keys(root) == (frozenset({KEY}), None)
+    target = stateful_icacls.key(root / "fabric")
+    assert stateful_icacls.states[target] == "clear" and not (root / gate.MARKER).exists()
+    before = _rows(root)
+    permission_bytes = (root / gate.OVERRIDE).read_bytes() if permission else None
+    operations = _observe_probe_operations(monkeypatch)
+    result = (
+        _probe_one(root, spec["data_sources"], 0, 1, False)
+        if entry == "source"
+        else _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False))
+    )
+    assert not operations, "malformed relation metadata must not perform automatic operations"
+    rows = _rows(root)
+    assert rows[: len(before)] == before
+    assert not any(row["action"] in ("probe-data_ok", "probe-cleared", "authorize") for row in rows[len(before) :]), (
+        "malformed relation metadata must not earn query proof or clearance"
+    )
+    assert result == (1, "OPERATOR_REQUIRED")
+    assert (rows[-1]["action"], rows[-1]["sources"], rows[-1]["detail"]) == (
+        "probe-error",
+        [KEY],
+        "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned",
+    )
+    with gate.gate_transaction(root):
+        assert _transaction_pending(root) == ([] if permission else [KEY])
+    result = _assess(root, spec=spec, authorized=permission)
+    if permission:
+        assert stateful_icacls.states[target] == "clear"
+        assert not (root / gate.MARKER).exists() and gate.status(root) == 0
+        assert (root / gate.OVERRIDE).read_bytes() == permission_bytes
+        assert (result.state, result.validation, result.max_phase2_claim) == (
+            "authorized_model_only",
+            "unvalidated",
+            "structural_only",
+        )
+    else:
+        assert stateful_icacls.states[target] == "restricted", (
+            "malformed relation refusal must re-arm the physical root"
+        )
+        assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [KEY]
+        assert gate.status(root) == 1 and (result.state, result.codes) == ("blocked", ("probe-error",))
+    assert "PRIVATE_RELATION_690" not in json.dumps(rows[len(before) :])
+
+
+@pytest.mark.usefixtures("desktop")
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param((stage, malformed), id=f"{stage}-{'missing-tag' if malformed else 'custom-tag'}")
+        for stage in ("marker", "acl", "record")
+        for malformed in (False, True)
+    ],
+)
 def test_custom_arm_or_record_failure_never_commits_a_terminal_claim(
     root: Path,
     monkeypatch: pytest.MonkeyPatch,
     stateful_icacls: _StatefulIcacls,
     caplog: pytest.LogCaptureFixture,
-    stage: str,
+    case: tuple[str, bool],
 ) -> None:
     """A real writer failure propagates cannot-establish, without claiming its physical stop succeeded."""
+    stage, malformed = case
     table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": "SELECT 'PRIVATE_FAILURE_690'"}
+    if malformed:
+        del table["source_relation"]
+        table["table"] = "[dbo].[Orders]"
     spec = _spec(LIVE)
     spec["data_sources"][0]["tables"].append(table)
     (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")

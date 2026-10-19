@@ -51,10 +51,20 @@ execution route a migrator should invoke instead of carrying the mechanics inlin
    refreshing**. There is no connector navigation or native/generated SQL fallback, including for
    unsupported custom-only connectors.
 
-   The probe-specific loader keeps each custom-source occurrence by reference after JSON parsing.
-   It never reads, copies, serializes or hashes the payload, skips `custom_sql` during engine source
-   discovery, and does not traverse published-binding signals. Only ordinary sources use the existing
-   deduplication rule; mixed ordinary/custom sources are not fingerprinted either.
+   Ordinary admission is **shape/presence-only**: `source_relation` is `"table"` or a legacy absent/
+   null default, and `custom_sql` is absent/null. Non-null query facts with a missing/wrong tag, or
+   an unrecognized relation tag, stop the whole resolved leg before ordinary work, even if a
+   same-named physical table could return rows. Empty/false/list/object payloads are not null
+   defaults. They earn no connection reuse, query proof or clear; do not repair/normalize metadata
+   or inspect SQL contents to choose behavior. Correctly tagged custom relations keep the normal
+   reuse-or-stop contract.
+
+   The probe-specific loader keeps each custom or malformed-source occurrence by reference after
+   JSON parsing and this null/presence check. It never inspects, copies, serializes or hashes query
+   contents; correctly tagged custom payloads need not be accessed at all. It skips `custom_sql`
+   during engine source discovery and does not traverse published-binding signals. Only supported
+   ordinary sources use the existing deduplication rule; mixed/custom/malformed sources are not
+   fingerprinted. Valid ordinary absent/null defaults retain their existing row-proof behavior.
 
    This is a **probe-loader** boundary, not a prohibition on the supported gate's canonical root
    identity work. Under the owner-approved `allow_canonical_sql_identity_comparison=true` definition,

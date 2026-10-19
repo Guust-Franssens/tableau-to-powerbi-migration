@@ -50,18 +50,29 @@ against a source Power BI cannot open. Only a Desktop refresh answers the questi
 
 ### Default custom SQL: reuse or no operation (#690)
 
-✅ **The default never sends customer SQL to Power BI.** A custom relation is selected by
-`source_relation: "custom-sql"`. After unavoidable JSON parsing, the probe-specific loader preserves
-each custom-source occurrence by reference: no payload access, full-source serialization, hashing,
-copying or published-signal traversal. It skips `custom_sql` during engine source discovery and
-deduplicates only ordinary sources, using their existing rule. Mixed ordinary/custom sources are
-also retained without fingerprinting; their occurrence and connection metadata is unchanged.
+✅ **The default never sends customer SQL to Power BI.** `source_relation: "custom-sql"` always
+selects the custom path, including an absent/null payload. Ordinary admission is shape-only:
+`source_relation` is `"table"` or a legacy absent/null default, and `custom_sql` is absent/null.
+A non-null query fact with a missing/wrong discriminator, or an unrecognized relation discriminator,
+refuses the whole resolved leg as `OPERATOR_REQUIRED` **before DNS/M/PBIP/Desktop/refresh**, even
+when a same-named ordinary table could return a row. Empty strings, `false`, lists and objects are
+not null defaults; no SQL text parsing, normalization, truthiness or semantic classification is used.
+Malformed metadata never borrows a connection result or earns query proof/clearance.
+
+After unavoidable JSON parsing and this null/presence check, the probe-specific loader preserves
+each custom or malformed-source occurrence by reference: no query-content inspection, full-source
+serialization, hashing, copying or published-signal traversal. Correctly tagged custom payloads
+need not be accessed at all. It skips `custom_sql` during engine source discovery and deduplicates
+only supported ordinary sources, using their existing rule. Mixed ordinary/custom or malformed
+sources are retained without fingerprinting; their occurrence and connection metadata is unchanged.
 String/null payloads, including empty, large, comment-only and side-effect-shaped strings, stay
 opaque to probe behavior. JSON-native boolean/list/object payloads are malformed-input robustness
 negatives, not supported parser-spec positives; they may refuse fail-closed and never earn authority.
 There is **no custom-only probe PBIP**, connector navigation, eager metadata buffering, native SQL
 or generated constant. A custom-only source stops before DNS, Desktop open or refresh. The
-ordinary-table one-row path and its existing connector/network behavior are unchanged.
+valid ordinary-table one-row path, including absent/null metadata defaults, and its existing
+connector/network behavior are unchanged. Refusals retain the original current source key;
+they do not repair the discriminator, erase query identity or substitute a physical table's proof.
 
 **Canonical identity is a separate permitted layer** (`allow_canonical_sql_identity_comparison=true`,
 owner-approved #690 clarification). The supported credential-gate writer re-resolves real persisted

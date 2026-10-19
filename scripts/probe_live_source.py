@@ -37,6 +37,10 @@ A small result does not bound a non-folding query's execution cost. A custom-SQL
 reuse only ordinary-table DATA_OK connection evidence from this invocation's exact connection
 scope. Otherwise it returns OPERATOR_REQUIRED before generating M or a PBIP, opening Desktop,
 or checking the network. No catalog navigation or generated/native statement is attempted.
+Ordinary admission checks relation shape only: a missing/null legacy tag or "table", with an
+absent/null custom_sql field. Non-null query facts with a missing/wrong tag, or an unrecognized
+relation tag, refuse before ordinary work even when a same-named physical table could return rows.
+The null/presence check never interprets SQL or treats a falsey payload as an ordinary table.
 The original SQL remains untouched in the spec for separately authorized exact validation (#692).
 Reuse is CONNECTION_OK_QUERY_UNVALIDATED, exit 1: no custom-query/object permission, schema,
 row, semantics, cost or refreshability claim, no gate lift, and no model-only authorization.
@@ -252,11 +256,12 @@ def _find_probe_sources(value: object) -> Iterator[dict]:
 
 
 def load_bundle(path: Path) -> MigrationBundle:
-    """Load probe inputs without serializing, copying or comparing custom-SQL sources.
+    """Load probe inputs without fingerprinting custom or malformed relation sources.
 
     The shared loader fingerprints whole sources and traverses published-binding signals; neither
     is safe or needed for a custom no-operation verdict. Preserve each custom occurrence by
-    reference, including its complete connection metadata. Ordinary deduplication is unchanged.
+    reference, including malformed query facts and complete connection metadata. Only supported
+    ordinary relation shapes use the unchanged ordinary deduplication rule.
     """
     resolved = path.resolve()
     if not resolved.is_file() and not resolved.is_dir():
@@ -282,7 +287,7 @@ def load_bundle(path: Path) -> MigrationBundle:
             else _find_probe_sources(document)
         )
         for source in candidates:
-            if not any(_is_custom_sql(table) for table in source.get("tables") or []):
+            if all(_is_ordinary_table(table) for table in source.get("tables") or []):
                 marker = json.dumps(source, sort_keys=True, default=str)
                 if marker in seen:
                     continue
@@ -575,6 +580,11 @@ def _connection_target(conn: dict) -> str:
 def _is_custom_sql(table: dict) -> bool:
     """Use the parser's relation discriminator, including empty custom-SQL payloads."""
     return table.get("source_relation") == "custom-sql"
+
+
+def _is_ordinary_table(table: dict) -> bool:
+    """Admit physical/legacy-default relation shapes by null presence, never SQL contents."""
+    return table.get("source_relation") in (None, "table") and table.get("custom_sql") is None
 
 
 def _resolve_probe_targets(
@@ -1315,14 +1325,19 @@ def _probe_leg(  # pylint: disable=too-many-arguments
     *,
     known_connections: set[str] | None = None,
 ) -> tuple[int, str]:
-    """Probe one resolved connection leg."""
+    """Probe one resolved leg, refusing malformed relations before any ordinary operation."""
     with _recorded_attempt(migration, [leg_name]) as finish:
         tables = target[0]
+        malformed = any(not (_is_custom_sql(table) or _is_ordinary_table(table)) for table in tables)
         custom = any(_is_custom_sql(table) for table in tables)
         scope = _connection_scope(conn)
         reuse = scope is not None and scope in (known_connections or ())
-        if custom and (reuse or all(_is_custom_sql(table) for table in tables)):
-            return _reuse_connection(migration, leg_name) if reuse else _custom_sql_stop(migration, leg_name)
+        if malformed or (custom and (reuse or all(_is_custom_sql(table) for table in tables))):
+            return (
+                _reuse_connection(migration, leg_name)
+                if reuse and not malformed
+                else _custom_sql_stop(migration, leg_name)
+            )
         server = normalize_host(conn.get("server") or "")
         if server and not _host_resolves(server):
             log.error(
@@ -1338,21 +1353,21 @@ def _probe_leg(  # pylint: disable=too-many-arguments
     log.info("probing leg: %s", leg_name)
     for table in tables:
         if _is_custom_sql(table):
-            rc, verdict = _custom_sql_stop(migration, leg_name)
+            result = _custom_sql_stop(migration, leg_name)
         else:
-            rc, verdict = _probe_one_table(migration, leg_name, conn, (table, target[1]), opts)
-        if rc == 0 and verdict == "DATA_OK":
+            result = _probe_one_table(migration, leg_name, conn, (table, target[1]), opts)
+        if result == (0, "DATA_OK"):
             if custom:
                 if scope is not None and known_connections is not None:
                     known_connections.add(scope)
-                rc, verdict = (
+                result = (
                     _reuse_connection(migration, leg_name)
                     if scope is not None
                     else _custom_sql_stop(migration, leg_name)
                 )
-            return rc, verdict
-        if verdict != "BAD_TABLE":
-            return rc, verdict
+            return result
+        if result[1] != "BAD_TABLE":
+            return result
         if table is not tables[-1]:
             log.warning("table '%s' not found at the source - trying the next one in the spec", table.get("name"))
     return 1, "BAD_TABLE"
@@ -1364,7 +1379,7 @@ def _probe_one_table(
     """Record every keyed terminal outcome, including preprocessing, before Desktop cleanup."""
     # The model, binding refusal, audit and owned-Desktop cleanup share one lifecycle boundary.
     # pylint: disable=too-many-locals
-    if _is_custom_sql(target[0]):
+    if not _is_ordinary_table(target[0]):
         return _custom_sql_stop(migration, leg_name)
     pid = None
     desktop_event = None
