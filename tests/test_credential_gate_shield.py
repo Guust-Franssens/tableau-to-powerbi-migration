@@ -178,6 +178,25 @@ def test_probe_clear_before_later_rearm_does_not_count_as_current_shield(tmp_pat
     assert out.get("permissionDecision") == "deny", "a later block must invalidate earlier probe evidence"
 
 
+def test_unmatched_historical_data_ok_cannot_shield_after_earned_pair(tmp_path: Path) -> None:
+    migration = migration_fixture(tmp_path)
+    keys = source_keys(migration)
+    assert gate.apply_block(migration, keys) == 0
+    earn(migration, keys)
+    with gate.gate_transaction(migration):
+        gate._append_audit(
+            migration,
+            gate.PROBE_DATA_OK,
+            "historical keyed attempt without its physical stop",
+            keys,
+        )
+    write_marker(tmp_path / MARKER, keys)
+
+    out = hook_for_model_write(tmp_path, migration)
+
+    assert out.get("permissionDecision") == "deny", "the latest unmatched attempt must invalidate the shield"
+
+
 @pytest.mark.parametrize("marker_text", ['{"writes_blocked": true}', "not-json"])
 def test_marker_without_parseable_sources_fails_closed_even_after_empty_source_clear(
     tmp_path: Path, marker_text: str

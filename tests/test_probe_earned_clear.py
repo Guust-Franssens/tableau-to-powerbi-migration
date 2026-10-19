@@ -354,6 +354,21 @@ def test_refusing_to_clear_does_not_report_success(tmp_path: Path, monkeypatch) 
     assert pls.run_probe(d, None, 60, False) == 0, "the all-sources path must still succeed"
 
 
+def test_authorized_probe_observations_upgrade_to_proof_without_rearming(tmp_path: Path, monkeypatch) -> None:
+    """Human permission lets the real probe observe, but only DATA_OK plus clear earns proof."""
+    d = _bundle(tmp_path, 2, monkeypatch)
+    monkeypatch.setattr(cg, "_ancestry", lambda: ["python.exe", "pwsh.exe", "WindowsTerminal.exe"])
+    assert cg.authorize(d, "Fixture Human") == 0
+    arms = [row for row in cg._audit_entries(d) if row["action"] in cg.BLOCK_ACTIONS]
+    assert cg._clear_was_earned(d, NAMED) is None, "authorization alone must remain unvalidated permission"
+
+    assert pls.run_probe(d, None, 60, False) == 0
+
+    assert not (d / cg.MARKER).exists(), "authorized observations must not synthesize an intermediate arm"
+    assert [row for row in cg._audit_entries(d) if row["action"] in cg.BLOCK_ACTIONS] == arms
+    assert cg._clear_was_earned(d, NAMED) == "probe-cleared"
+
+
 def test_reorder_between_arm_and_clear_does_not_clear_an_uncontacted_endpoint(tmp_path: Path, monkeypatch) -> None:
     """HIGH 1: positional aliasing must not let probing A twice clear B."""
     first = [

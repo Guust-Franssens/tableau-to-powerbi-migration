@@ -1687,8 +1687,8 @@ def test_a_sibling_manual_clear_does_not_launder_an_unproven_source(tmp_path: Pa
     proc = run_gate("verify", str(mig))
     out = proc.stdout + proc.stderr
 
-    assert proc.returncode == 3, out
-    assert "CANNOT ASSESS" in out
+    assert proc.returncode == 1, out
+    assert "UNEARNED CLEAR" in out
 
 
 def test_rearming_with_a_NEW_source_still_arms(tmp_path: Path) -> None:
@@ -3866,20 +3866,38 @@ def test_data_access_rejects_backdated_epoch_evidence(tmp_path: Path, backdated_
     )
 
 
-def test_data_access_latest_success_still_needs_its_own_clear(tmp_path: Path) -> None:
+def test_data_access_latest_success_still_needs_its_own_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The latest attempt must precede its earning clear, including after another success."""
+    monkeypatch.setattr(cg.platform, "system", lambda: "Linux")
     root = _da_root(tmp_path, "repeated-success", LIVE_A)
-    _trail(
-        root,
-        ("block", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-cleared", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-    )
+    cg.record_probe_attempt(root, "DATA_OK", "fixture first row", [KEY_A])
+    assert cg.clear_block(root, "fixture first clear", earned=True, sources=[KEY_A]) == 0
+    cg.record_probe_attempt(root, "DATA_OK", "fixture later row", [KEY_A])
 
     assert _assess(root, _da_spec(LIVE_A)).state == "blocked"
-    _trail(root, ("probe-cleared", [KEY_A]))
+    assert cg.clear_block(root, "fixture later clear", earned=True, sources=[KEY_A]) == 0
     assert _assess(root, _da_spec(LIVE_A)).state == "live_data_ok"
+
+
+@pytest.mark.parametrize("historical", ["display", "empty", "unpaired"])
+def test_698_historical_rows_are_readable_without_manufacturing_current_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, historical: str
+) -> None:
+    """Historical compatibility is a reader contract, never a second earned-clear policy."""
+    monkeypatch.setattr(cg.platform, "system", lambda: "Linux")
+    root = _da_root(tmp_path, "historical", LIVE_A)
+    if historical == "unpaired":
+        cg.record_probe_attempt(root, "DATA_OK", "fixture row returned", [KEY_A])
+        assert cg.clear_block(root, "fixture", earned=True, sources=[KEY_A]) == 0
+        _trail(root, ("probe-data_ok", [KEY_A]))
+    else:
+        names = ["legacy display"] if historical == "display" else []
+        _trail(root, ("block-marker-only", names), ("probe-data_ok", names), ("probe-cleared", names))
+    assert cg._audit_entries(root) is not None, "reader compatibility must remain intact"
+    assert cg._clear_was_earned(root, [KEY_A]) is None, "historical rows cannot manufacture a keyed pair"
+    assert cg.apply_block(root, [KEY_A]) == 0
+    assert json.loads((root / cg.MARKER).read_text(encoding="utf-8"))["sources"] == [KEY_A]
+    assert cg.status(root) != 0
 
 
 @pytest.mark.parametrize(
