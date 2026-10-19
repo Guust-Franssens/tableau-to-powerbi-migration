@@ -25,6 +25,28 @@ HISTORICAL = {
     )
 }
 PERSONAS = ("pbi-report-builder", "pbi-migration-validator")
+SEMANTIC_AUTHORING_SKILL = "powerbi-authoring:semantic-model-authoring"
+SEMANTIC_MANDATORY_SELECTION = (
+    "- **`powerbi-authoring:semantic-model-authoring`** — load current TMDL mechanics; apply the\n"
+    "  CustomInstructions override below."
+)
+SEMANTIC_RESOLUTION_STOP = (
+    " If unavailable or ambiguous, block dependent authoring; do\n"
+    "  not retry an unqualified name, select another provider, or use a local-file fallback."
+)
+SEMANTIC_AI_SELECTION = (
+    "**Load `powerbi-ai-readiness`** ([SKILL.md](../skills/powerbi-ai-readiness/SKILL.md)) — the sole AI\n"
+    "policy/mechanics source. **Deliberate override:** load current "
+    "`powerbi-authoring:semantic-model-authoring`, but this\n"
+    "repo deliberately overrides its no-authoring policy **only for repo-owned `CustomInstructions`**,\n"
+    "under the local skill's ownership/preservation contract. Obey the skill's ownership refusal.\n"
+    "This persona never invokes `--adopt-existing`, adopts or replaces unowned/human instructions, or\n"
+    "edits portal/service AI artifacts."
+)
+SEMANTIC_LOCAL_FALLBACK = (
+    "**Invoke by name with the `skill` tool**; if a repo-local skill name fails to resolve, read\n"
+    "`.github/skills/<name>/SKILL.md`."
+)
 
 
 def _text(path: str) -> str:
@@ -136,6 +158,92 @@ def test_current_references_and_query_surfaces() -> None:
         assert token in query
     assert "semantic-model-authoring" not in query
     assert "references/design/chart-selection.md" in guide
+
+
+def test_semantic_authoring_provider_selection_is_exact_and_fail_closed() -> None:
+    """Both imperative sites select the official provider; local fallback cannot override its stop."""
+    text = _persona("pbi-semantic-builder")
+    assert text.count(SEMANTIC_MANDATORY_SELECTION) == 1, "mandatory semantic selection"
+    assert text.count(SEMANTIC_AI_SELECTION) == 1, "AI override semantic selection"
+    assert text.count(SEMANTIC_LOCAL_FALLBACK) == 1, "repo-local fallback boundary and resolution stop"
+    assert SEMANTIC_MANDATORY_SELECTION + SEMANTIC_RESOLUTION_STOP in text, (
+        "repo-local fallback boundary and resolution stop"
+    )
+
+
+@pytest.mark.parametrize(
+    ("site", "diagnostic"),
+    [
+        (SEMANTIC_MANDATORY_SELECTION, "mandatory semantic selection"),
+        (SEMANTIC_AI_SELECTION, "AI override semantic selection"),
+    ],
+    ids=["mandatory-selection", "AI-override"],
+)
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "semantic-model-authoring",
+        "fabric-skills:semantic-model-authoring",
+        "skills-for-fabric:semantic-model-authoring",
+        "powerbi-semantic-model-authoring",
+    ],
+    ids=["bare", "fabric-skills", "skills-for-fabric", "retired"],
+)
+def test_semantic_provider_reversals_fail_each_selection_then_restore(
+    monkeypatch: pytest.MonkeyPatch, site: str, diagnostic: str, replacement: str
+) -> None:
+    """Reverse only one literal requirement site; the other stays qualified throughout."""
+    original_read = Path.read_text
+    target = ROOT / ".github" / "agents" / "pbi-semantic-builder.agent.md"
+    source = original_read(target, encoding="utf-8")
+    test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
+    assert source.count(site) == 1 and site.count(SEMANTIC_AUTHORING_SKILL) == 1
+    reversed_site = site.replace(SEMANTIC_AUTHORING_SKILL, replacement)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            Path,
+            "read_text",
+            lambda current, *args, **kwargs: (
+                source.replace(site, reversed_site, 1) if current == target else original_read(current, *args, **kwargs)
+            ),
+        )
+        with pytest.raises(AssertionError, match=diagnostic):
+            test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
+    test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            SEMANTIC_LOCAL_FALLBACK,
+            "**Invoke by name with the `skill` tool**; if a name fails to resolve, read\n"
+            "`.github/skills/<name>/SKILL.md`.",
+        ),
+        (SEMANTIC_RESOLUTION_STOP, " If unavailable or ambiguous, retry an unqualified name."),
+    ],
+    ids=["unrestricted-fallback", "retry-after-ambiguity"],
+)
+def test_semantic_fallback_reversals_fail_the_stop_then_restore(
+    monkeypatch: pytest.MonkeyPatch, before: str, after: str
+) -> None:
+    """The stop itself must fail, not a selection census, pin mismatch or unrelated error."""
+    original_read = Path.read_text
+    target = ROOT / ".github" / "agents" / "pbi-semantic-builder.agent.md"
+    source = original_read(target, encoding="utf-8")
+    test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
+    assert source.count(before) == 1
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            Path,
+            "read_text",
+            lambda current, *args, **kwargs: (
+                source.replace(before, after, 1) if current == target else original_read(current, *args, **kwargs)
+            ),
+        )
+        with pytest.raises(AssertionError, match="repo-local fallback boundary and resolution stop"):
+            test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
+    test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
 
 
 def test_compact_core_citations_keep_their_meaning() -> None:

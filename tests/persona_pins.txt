@@ -327,12 +327,12 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 4788b3fab4787493d9cd4edba4f93dc90ee2dbff3e0a32c659709e0b1c700ac4  ## Skills you use
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-b766d1897dc07b147b16669f45d917eaa92d2ddecec3f967fb2c385171de7a60  **Invoke by name with the `skill` tool**; if a name fails to
+c05efca95d1b1090b443efc45523dec9ac14ab895f3b141536290868c3aed4ae  **Invoke by name with the `skill` tool**; if a repo-local sk
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 b7d40e7ad9c87ed0e082a9b69d30311fcf1437bd3a6bdbb6b9e2cbb09eca7582  - **`powerbi-semantic-model-gotchas`** ~ read **first**, bef
 43e90ee0f3a8da763f3738baf9a07af3b983890f9f452d37789c7b570077164f  - **`powerbi-ai-readiness`** ~ the Copilot-readiness recipe 
 4e8b274d306da505f0163c42fa735d5695260f092a96a5b7e71ff55fab985da6  - **Host-only pbip-model-refresh skill file** (`.github\skil
-d9fa5d945bfb01c1b27b718863d21a42c6856d5fb6d33914ca7ff01037a2e9db  - **`semantic-model-authoring`** ~ load current TMDL mechani
+5619c7482305946566ffc6fd7accc0e3ee5b35e4e11da2da774fa2cf1fd3ac8e  - **`powerbi-authoring:semantic-model-authoring`** ~ load cu
 e8b661e053bf0b3dc71667f3c2230bd7a2760d408627e9cc7b079bc10f29daf5  - **Read-only DAX (`EVALUATE`) ~ your validation surface.** 
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 c65764226ef96d0065f94b0981d70205ed9bf0ac6927ead84b43e3089ebfbcf5  ## What you receive ~ a model that EXISTS
@@ -374,7 +374,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 a1dccf0f95e53908c34f457a8c9f7f78e90bc612d504a88d07f2cc1f5d16dbc5  ## Prep the model for AI (Copilot readiness)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-83a1f53cee240945b5b809a85c4d4ee2f3f42331bea51957cb3da00570966da7  **Load `powerbi-ai-readiness`** ([SKILL.md](../skills/powerb
+feaba14fefdf17bd135c77a2516c6e3fea536c9ec211ad2c3bc63fffd7ef3d47  **Load `powerbi-ai-readiness`** ([SKILL.md](../skills/powerb
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 bfb20edb59f013e192e25bd7d9c4018dc5ab47e356b481abccd478a67cf0995b  After all model objects exist and are validated, author grou
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
