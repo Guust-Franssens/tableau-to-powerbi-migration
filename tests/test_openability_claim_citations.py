@@ -376,7 +376,7 @@ def excerpt(block: str) -> str:
         count = block.count(NEWLINE) or 1
         return f"({count} blank line{'s' if count > 1 else ''})"
     text = " ".join(block.split())
-    return "".join(char if 32 <= ord(char) < 127 else "~" for char in text)[:EXCERPT_CHARS]
+    return "".join(char if 32 <= ord(char) < 127 else "~" for char in text)[:EXCERPT_CHARS].rstrip()
 
 
 def _standalone(line: str) -> bool:
@@ -604,28 +604,24 @@ def findings(key: str, blocks: list[Block], pins: dict[str, list[tuple[str, str]
 REQUIRED: tuple[tuple[str, str, str], ...] = (
     (
         "pbi-migration-validator.agent.md",
-        "2e63d62bf8d58b3f9dc5c6c405828e6efb9e75ddff5463c524c2a1654628226d",
-        "the validator's input list, which calls the handover the engine's claims and never verification",
+        "b9c17c5644f5676e7fa461f454e655b428643c74e7a41d99c81be86c7a61021a",
+        "the validator's required authority, which calls the full handover engine claims and never verification",
     ),
     (
         "pbi-migration-validator.agent.md",
-        # Re-pointed 2026-09-03 (issue #486) from 6565d664fa…: the rule was REWORDED, not removed, so
-        # the coverage entry moves with it rather than being dropped. The audit added that the
-        # "30 of 44" figure is a 2.339.0 measurement nobody has re-run, and that the block's
-        # load-bearing half is the structural blindness, not the count.
-        "a8ba94b9f8f4076f13ddf3906335ce9328da8e449e597491206eeaeedb31dfaa",
+        # #733 retains the engine-claim ceiling in triage, not the obsolete incident/count paragraph.
+        "d87d3497b8ca33ead0f821135c3920453f62a34b1005cda1553b054892849214",
         "the validator's rule that `openability_selfcheck.ok` is adjudicated, never cited",
     ),
     (
         "pbi-semantic-builder.agent.md",
-        "31717b00b8d91479b4cc7f9ca14e35cbd6a979195a1d0632bace46dfb4b90db1",
-        "the semantic builder's handover-table row describing the field as one narrow input",
+        "527ebf928e014f82f041b9e2013739c32da0aa58aa27ae0f2722d1a3ebfcdd1d",
+        "the semantic builder's non-exhaustive engine-claim boundary, never Desktop/source proof",
     ),
     (
         "pbi-semantic-builder.agent.md",
-        "c51b41e87515c03b8c765fc5c34209f3e33b760cddc2f3c227b01252506232dc",
-        "the semantic builder's step 1, which routes original requests and the engine-claim ceiling "
-        "to compact section 8",
+        "b8e8db2040a735a523f679707eb6cc331864b209ea2868f33c0aa9000d26b6a1",
+        "the semantic builder's original requests, fixed roles, separate denominators and recorded object fates",
     ),
 )
 
@@ -723,6 +719,19 @@ def test_the_pin_is_exactly_what_regenerating_would_write() -> None:
     assert read_source(PIN_FILE) == render_pins(observed()), (
         f"{PIN_PATH} is stale or hand-edited. Regenerate it with:\n    {UPDATE_COMMAND}"
     )
+
+
+def test_pin_preview_trims_only_truncation_whitespace() -> None:
+    """A display suffix must not create a whitespace diff or normalize the signed source."""
+    source = "a" * 59 + " b\n"
+    block = Block(line=1, text=source, span=1)
+    expected_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    assert block.label == "a" * 59
+    assert render_pins({"preview": [block]}).endswith(f"{expected_sha}  {'a' * 59}\n")
+    assert block.text == source and block.sha == expected_sha
+    assert digest(source.replace(" b", " c")) != expected_sha
+    assert excerpt("ordinary label\n") == "ordinary label"
+    assert excerpt("\n\n") == "(2 blank lines)"
 
 
 @pytest.mark.parametrize("persona", personas(), ids=lambda p: p.name)
@@ -980,8 +989,12 @@ def _validator_text() -> str:
 
 
 def _rule_block(text: str) -> Block:
-    """The validator's `openability_selfcheck` rule bullet, selected by content, not by index."""
-    return next(block for block in segment(text, collapse_generated=True) if "is a claim too" in block.text)
+    """The current triage block retains the engine-claim ceiling after the authored diet."""
+    return next(
+        block
+        for block in segment(text, collapse_generated=True)
+        if "**`openability_selfcheck.ok`: adjudicate, never cite as proof**" in block.text
+    )
 
 
 @pytest.mark.parametrize("sentence", BYPASSES, ids=lambda s: s.replace("\n", " ")[:46])
@@ -1214,7 +1227,7 @@ def test_a_blank_line_inside_a_fence_is_part_of_the_identity() -> None:
 # ------------------------------------------------------------------------------------------
 def _table_header_line(lines: list[str]) -> int:
     """0-based index of the committed table header whose delimiter row follows it."""
-    return next(index for index, line in enumerate(lines) if line.strip() == "| class | meaning | who acts |")
+    return next(index for index, line in enumerate(lines) if line.strip() == "| stage | location | rule |")
 
 
 def test_a_blank_line_between_a_table_header_and_its_delimiter_fails() -> None:
@@ -1224,14 +1237,14 @@ def test_a_blank_line_between_a_table_header_and_its_delimiter_fails() -> None:
     blank lines, so no normalization rule could have caught it -- which is the evidence for pinning
     the artifact rather than an approximation of how it renders.
     """
-    text = _validator_text()
+    text = shared_region(_validator_text())
     lines = _lines(text)
     header = _table_header_line(lines)
     assert lines[header + 1].strip().startswith("|---"), "fixture expects the delimiter row next"
     spliced = "\n".join([*lines[: header + 1], "", *lines[header + 1 :]]) + "\n"
     assert spliced != text, "fixture did not splice"
-    assert _identity_moved(text, spliced), "BYPASS: the blank line was discarded"
-    assert findings(VALIDATOR, segment(spliced, collapse_generated=True))
+    assert _identity_moved(text, spliced, collapse=False), "BYPASS: the blank line was discarded"
+    assert findings(SHARED_KEY, segment(spliced))
 
 
 def test_a_blank_line_between_shared_list_items_fails() -> None:
@@ -1246,20 +1259,20 @@ def test_a_blank_line_between_shared_list_items_fails() -> None:
 
 
 def test_tabs_are_not_spaces() -> None:
-    """``_indent`` counts characters, not columns, so three tabs used to hash as three spaces.
+    """``_indent`` counts characters, not columns, so tabs used to hash as the same count of spaces.
 
-    Measured at fd65ce8 on this exact committed line: same digest, zero findings, 85 passed, exit 0 --
-    while a tab-indented row opens a ``<pre><code>`` block and detaches the header from its rows.
+    The old three-space authored table is gone; use the actual two-space shared custody table.
+    Equal character counts must still differ, including when tabs detach a table header from its rows.
     """
-    text = _validator_text()
+    text = shared_region(_validator_text())
     lines = _lines(text)
     header = _table_header_line(lines)
-    assert lines[header].startswith("   |") and "\t" not in lines[header], "fixture expects three spaces"
-    tabbed = "\t\t\t" + lines[header].lstrip()
+    assert lines[header].startswith("  |") and "\t" not in lines[header], "fixture expects two spaces"
+    tabbed = "\t\t" + lines[header].lstrip()
     assert digest(lines[header]) != digest(tabbed), "BYPASS: tabs and spaces hash alike"
     spliced = "\n".join([*lines[:header], tabbed, *lines[header + 1 :]]) + "\n"
-    assert _identity_moved(text, spliced)
-    assert findings(VALIDATOR, segment(spliced, collapse_generated=True))
+    assert _identity_moved(text, spliced, collapse=False)
+    assert findings(SHARED_KEY, segment(spliced))
 
 
 # ------------------------------------------------------------------------------------------
@@ -1281,7 +1294,7 @@ def test_an_exotic_line_separator_is_not_a_free_line_break(name: str, char: str)
     representation was blind here, so a mutation that routes ``segment`` back through ``splitlines``
     kills this test rather than merely changing its wording.
     """
-    text = _validator_text()
+    text = shared_region(_validator_text())
     lines = _lines(text)
     header = _table_header_line(lines)
     assert lines[header + 1].strip().startswith("|---"), "fixture expects the delimiter row next"
@@ -1289,8 +1302,8 @@ def test_an_exotic_line_separator_is_not_a_free_line_break(name: str, char: str)
 
     assert spliced != text, f"{name}: fixture did not splice"
     assert len(spliced.splitlines()) == len(lines), f"{name}: fixture is stale -- splitlines no longer hides {char!r}"
-    assert _identity_moved(text, spliced), f"BYPASS ({name}): {char!r} passed as a line break, identity unchanged"
-    assert findings(VALIDATOR, segment(spliced, collapse_generated=True)), f"BYPASS ({name}): the gate must fail"
+    assert _identity_moved(text, spliced, collapse=False), f"BYPASS ({name}): {char!r} passed as a line break"
+    assert findings(SHARED_KEY, segment(spliced)), f"BYPASS ({name}): the gate must fail"
 
 
 @pytest.mark.parametrize(("name", "char"), NOT_LINE_BREAKS, ids=str)
@@ -1302,11 +1315,11 @@ def test_reconstruction_does_not_rewrite_an_exotic_separator(name: str, char: st
     rewrite -- so it agreed with itself. Here the expected value is the spliced text itself, which
     ``reconstruct`` did not produce.
     """
-    text = _validator_text()
+    text = shared_region(_validator_text())
     lines = _lines(text)
     header = _table_header_line(lines)
     spliced = "\n".join(lines[: header + 1]) + char + "\n".join(lines[header + 1 :]) + "\n"
-    assert reconstruct(spliced, collapse=True) == spliced, (
+    assert reconstruct(spliced, collapse=False) == spliced, (
         f"{name}: reconstruct rewrote {char!r} instead of reproducing the document"
     )
 
@@ -1374,8 +1387,8 @@ def test_the_reflow_helper_is_idempotent() -> None:
 def test_changing_one_word_of_a_block_breaks_the_pin() -> None:
     """...and the other half of that boundary: prose changes are exactly what must be re-reviewed."""
     block = _rule_block(_validator_text())
-    assert "narrowest" in block.text
-    assert digest(block.text) != digest(block.text.replace("narrowest", "broadest"))
+    assert "non-exhaustive" in block.text
+    assert digest(block.text) != digest(block.text.replace("non-exhaustive", "exhaustive"))
 
 
 def test_duplicating_a_pinned_block_fails() -> None:
@@ -1396,10 +1409,11 @@ def test_moving_a_pinned_block_fails() -> None:
     comparison caught that, so the fixture stopped proving order-sensitivity at all and the mutation
     aimed at it went MISSED.
     """
-    text = _validator_text()
+    key = "pbi-semantic-builder.agent.md"
+    text = read_source(AGENTS_DIR / key)
     lines = _lines(text)
-    first = next(index for index, line in enumerate(lines) if line.strip().startswith("| `fixable`"))
-    assert lines[first + 1].strip().startswith("| `accepted-limitation`"), "fixture expects sibling rows"
+    first = next(index for index, line in enumerate(lines) if line.startswith("| 1 | Translating source fields |"))
+    assert lines[first + 1].startswith("| 2 | TMDL hand-authoring pitfalls |"), "fixture expects sibling rows"
     swapped_lines = [*lines[:first], lines[first + 1], lines[first], *lines[first + 2 :]]
     swapped = "\n".join(swapped_lines) + "\n"
     assert swapped != text, "fixture did not swap"
@@ -1407,7 +1421,7 @@ def test_moving_a_pinned_block_fails() -> None:
     after = [block.sha for block in segment(swapped, collapse_generated=True)]
     assert sorted(before) == sorted(after), "the swap must change ORDER ONLY, or this proves nothing"
     assert before != after, "BYPASS: the order change was invisible"
-    assert findings(VALIDATOR, segment(swapped, collapse_generated=True))
+    assert findings(key, segment(swapped, collapse_generated=True))
 
 
 def test_deleting_a_block_is_reported_as_removed() -> None:
