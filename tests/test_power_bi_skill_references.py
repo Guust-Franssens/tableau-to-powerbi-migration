@@ -26,27 +26,16 @@ HISTORICAL = {
 }
 PERSONAS = ("pbi-report-builder", "pbi-migration-validator")
 SEMANTIC_AUTHORING_SKILL = "powerbi-authoring:semantic-model-authoring"
-SEMANTIC_MANDATORY_SELECTION = (
-    "- **`powerbi-authoring:semantic-model-authoring`** — load current TMDL mechanics; apply the\n"
-    "  CustomInstructions override below."
-)
+SEMANTIC_MANDATORY_SELECTION = "**Load `powerbi-authoring:semantic-model-authoring`**"
 SEMANTIC_RESOLUTION_STOP = (
-    " If unavailable or ambiguous, block dependent authoring; do\n"
-    "  not retry an unqualified name, select another provider, or use a local-file fallback."
+    "Unavailable/ambiguous selection blocks dependent authoring: "
+    "no unqualified name, other provider or local-file fallback."
 )
 SEMANTIC_AI_SELECTION = (
-    "**Load `powerbi-ai-readiness`** ([SKILL.md](../skills/powerbi-ai-readiness/SKILL.md)) — the sole AI\n"
-    "policy/mechanics source. **Deliberate override:** load current "
-    "`powerbi-authoring:semantic-model-authoring`, but this\n"
-    "repo deliberately overrides its no-authoring policy **only for repo-owned `CustomInstructions`**,\n"
-    "under the local skill's ownership/preservation contract. Obey the skill's ownership refusal.\n"
-    "This persona never invokes `--adopt-existing`, adopts or replaces unowned/human instructions, or\n"
-    "edits portal/service AI artifacts."
+    "Invoke `powerbi-ai-readiness` §0 as sole local AI owner; "
+    "its narrow override below outranks generic upstream AI guidance."
 )
-SEMANTIC_LOCAL_FALLBACK = (
-    "**Invoke by name with the `skill` tool**; if a repo-local skill name fails to resolve, read\n"
-    "`.github/skills/<name>/SKILL.md`."
-)
+SEMANTIC_LOCAL_FALLBACK = r"Repo-local skill files resolve at `.github\skills\<name>\SKILL.md`."
 
 
 def _text(path: str) -> str:
@@ -85,34 +74,39 @@ def test_playbook_release_contract() -> None:
 
 def test_current_modes_and_approval_stop() -> None:
     """Existing repair is direct; greenfield cannot silently become a build."""
-    builder = _persona(PERSONAS[0])
-    validator = _persona(PERSONAS[1])
+    builder = " ".join(_persona(PERSONAS[0]).replace("**", "").split())
+    validator = " ".join(_persona(PERSONAS[1]).replace("**", "").split())
     for text in (builder, validator, _text("README.md")):
         assert "powerbi-report-cli" in text
-    assert re.search(r"existing report.*directly.*`authoring`", builder, re.I)
-    assert re.search(r"missing page.*`design`.*then `authoring`", builder, re.I)
+    assert "existing → `authoring`" in builder, "existing-report authoring"
+    assert "missing page → `design` then `authoring`" in builder, "missing-page design then authoring"
     assert "references/<mode>.md" in builder
-    assert "mode parameter" in builder
+    assert "by intent, not flags" in builder
     assert re.search(r"greenfield.*`planning`", builder, re.I)
     assert "_brief/report-spec.md" in builder
     assert "approval_pending" in builder
-    assert re.search(r"end the turn.*explicit.*later.*approval", builder, re.I | re.S)
-    assert re.search(r"no.*(?:edit|scaffold).*publish", builder, re.I)
-    assert "locked spec" in builder and "migration brief" in builder
-    assert re.search(r"`authoring`.*read-only.*inventory/preview/screenshots", validator, re.I)
-    assert re.search(r"never edit.*plan.*design", validator, re.I)
-    assert "run-owned" in validator
+    assert "end the turn. Require later explicit human approval of that locked spec" in builder, "human approval stop"
+    assert "not autonomy or assumed migration-brief approval" in builder, "approval cannot be inferred"
+    assert "Until then, no PBIR/semantic edit/scaffold, synthetic data or Fabric writes" in builder
+    assert re.search(r"`authoring`.*read-only inventory/preview/evidence", validator, re.I)
+    assert "No planning/design/management/publish/rebind/install/update/`@latest`" in validator
+    assert "V writes private review outputs only" in validator
 
 
 @pytest.mark.parametrize("name", PERSONAS)
 def test_no_management_or_mid_migration_install(name: str) -> None:
     """A prohibitive clause, not mere presence of 'latest' and 'preflight', is required."""
-    text = _persona(name)
-    assert re.search(r"never.*`management`.*publish.*rebind", text, re.I)
-    assert re.search(r"skip.*@latest.*install", text, re.I)
-    assert re.search(r"never.*install/update npm mid-migration", text, re.I)
-    assert re.search(r"(?:absent|missing|unavailable).*BLOCKED.*preflight", text, re.I)
-    assert "sole version authority" in text and "preflight" in text
+    text = " ".join(_persona(name).replace("**", "").split())
+    if name == "pbi-report-builder":
+        assert "Never `management`, publish or rebind" in text, "report publication stop"
+        assert "no install/update, including npm `@latest`" in text, "no mid-migration installation"
+        assert "Missing skill/command/capability → BLOCKED" in text, "missing capability blocks"
+        assert "route its operation to preflight, no DIY/retired names" in text, "no DIY fallback"
+        assert "Preflight is the sole version authority" in text
+    else:
+        assert "No planning/design/management/publish/rebind/install/update/`@latest`" in text
+        assert "Unavailable owner/capability → BLOCKED affected operation to M/preflight" in text
+        assert "never DIY/skipped-schema fallback sign-off" in text
     assert not re.search(r"\bnpm\s+(?:install|update|i|add)\b", text, re.I)
 
 
@@ -158,26 +152,30 @@ def test_current_references_and_query_surfaces() -> None:
         assert token in query
     assert "semantic-model-authoring" not in query
     assert "references/design/chart-selection.md" in guide
+    for name in ("pbi-semantic-builder", *PERSONAS):
+        text = " ".join(_persona(name).replace("**", "").split())
+        assert r"scripts\probe_desktop_query.py" in text, f"{name}: real local query owner"
+        assert re.search(r"ConnectFolder.*metadata-only", text), f"{name}: offline query ceiling"
+        assert re.search(r"`powerbi-remote`.*published", text), f"{name}: published-only query ceiling"
 
 
 def test_semantic_authoring_provider_selection_is_exact_and_fail_closed() -> None:
-    """Both imperative sites select the official provider; local fallback cannot override its stop."""
-    text = _persona("pbi-semantic-builder")
+    """One canonical load can replace duplicate imperatives without losing the AI override."""
+    text = " ".join(_persona("pbi-semantic-builder").split())
     assert text.count(SEMANTIC_MANDATORY_SELECTION) == 1, "mandatory semantic selection"
-    assert text.count(SEMANTIC_AI_SELECTION) == 1, "AI override semantic selection"
-    assert text.count(SEMANTIC_LOCAL_FALLBACK) == 1, "repo-local fallback boundary and resolution stop"
-    assert SEMANTIC_MANDATORY_SELECTION + SEMANTIC_RESOLUTION_STOP in text, (
-        "repo-local fallback boundary and resolution stop"
+    selections = re.findall(r"`((?:[\w-]+:)?(?:semantic-model-authoring|powerbi-semantic-model-authoring))`", text)
+    assert selections and all(name == SEMANTIC_AUTHORING_SKILL for name in selections), (
+        "every semantic selection qualified"
     )
+    assert SEMANTIC_AI_SELECTION in text, "AI policy override retained"
+    assert text.count(SEMANTIC_LOCAL_FALLBACK) == 1, "repo-local fallback boundary and resolution stop"
+    assert SEMANTIC_RESOLUTION_STOP in text, "repo-local fallback boundary and resolution stop"
 
 
 @pytest.mark.parametrize(
-    ("site", "diagnostic"),
-    [
-        (SEMANTIC_MANDATORY_SELECTION, "mandatory semantic selection"),
-        (SEMANTIC_AI_SELECTION, "AI override semantic selection"),
-    ],
-    ids=["mandatory-selection", "AI-override"],
+    "additional_selection",
+    [False, True],
+    ids=["canonical-load", "additional-imperative"],
 )
 @pytest.mark.parametrize(
     "replacement",
@@ -190,24 +188,29 @@ def test_semantic_authoring_provider_selection_is_exact_and_fail_closed() -> Non
     ids=["bare", "fabric-skills", "skills-for-fabric", "retired"],
 )
 def test_semantic_provider_reversals_fail_each_selection_then_restore(
-    monkeypatch: pytest.MonkeyPatch, site: str, diagnostic: str, replacement: str
+    monkeypatch: pytest.MonkeyPatch, additional_selection: bool, replacement: str
 ) -> None:
-    """Reverse only one literal requirement site; the other stays qualified throughout."""
+    """A wrong second selection must fail even while the canonical load remains correct."""
     original_read = Path.read_text
     target = ROOT / ".github" / "agents" / "pbi-semantic-builder.agent.md"
     source = original_read(target, encoding="utf-8")
     test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
-    assert source.count(site) == 1 and site.count(SEMANTIC_AUTHORING_SKILL) == 1
-    reversed_site = site.replace(SEMANTIC_AUTHORING_SKILL, replacement)
+    assert source.count(SEMANTIC_MANDATORY_SELECTION) == 1
+    changed = (
+        source + f"\nLoad `{replacement}` for authoring.\n"
+        if additional_selection
+        else source.replace(SEMANTIC_MANDATORY_SELECTION, f"**Load `{replacement}`**", 1)
+    )
     with monkeypatch.context() as patch:
         patch.setattr(
             Path,
             "read_text",
-            lambda current, *args, **kwargs: (
-                source.replace(site, reversed_site, 1) if current == target else original_read(current, *args, **kwargs)
-            ),
+            lambda current, *args, **kwargs: changed if current == target else original_read(current, *args, **kwargs),
         )
-        with pytest.raises(AssertionError, match=diagnostic):
+        with pytest.raises(
+            AssertionError,
+            match="every semantic selection qualified" if additional_selection else "mandatory semantic selection",
+        ):
             test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
     test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
 
@@ -217,10 +220,9 @@ def test_semantic_provider_reversals_fail_each_selection_then_restore(
     [
         (
             SEMANTIC_LOCAL_FALLBACK,
-            "**Invoke by name with the `skill` tool**; if a name fails to resolve, read\n"
-            "`.github/skills/<name>/SKILL.md`.",
+            r"If any skill fails, read `.github\skills\<name>\SKILL.md` as its fallback.",
         ),
-        (SEMANTIC_RESOLUTION_STOP, " If unavailable or ambiguous, retry an unqualified name."),
+        (SEMANTIC_RESOLUTION_STOP, "Unavailable/ambiguous selection permits another provider."),
     ],
     ids=["unrestricted-fallback", "retry-after-ambiguity"],
 )
@@ -230,7 +232,7 @@ def test_semantic_fallback_reversals_fail_the_stop_then_restore(
     """The stop itself must fail, not a selection census, pin mismatch or unrelated error."""
     original_read = Path.read_text
     target = ROOT / ".github" / "agents" / "pbi-semantic-builder.agent.md"
-    source = original_read(target, encoding="utf-8")
+    source = " ".join(original_read(target, encoding="utf-8").split())
     test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
     assert source.count(before) == 1
     with monkeypatch.context() as patch:
@@ -248,21 +250,20 @@ def test_semantic_fallback_reversals_fail_the_stop_then_restore(
 
 def test_compact_core_citations_keep_their_meaning() -> None:
     """Surviving numbers are not evidence that a citation still points to the same rule."""
-    report = _persona("pbi-report-builder")
-    semantic = _persona("pbi-semantic-builder")
-    mapping = report.split("*idiom* through", 1)[1].split("\n6.", 1)[0]
-    assert "`powerbi-report-gotchas` §8" in mapping, "mapping source-intent citation"
-    assert "`powerbi-report-cli` authoring topic" in mapping, "mapping procedure owner"
+    report = " ".join(_persona("pbi-report-builder").split())
+    semantic = " ".join(_persona("pbi-semantic-builder").split())
+    mapping = report.split("Prefer formatting/layout", 1)[1].split("Unknown encoding", 1)[0]
+    assert "source intent/core §8" in mapping, "mapping source-intent citation"
+    assert "current typed vocabulary" in mapping, "mapping procedure owner"
     assert "§9" not in mapping, "removed report section"
-    scale = report.split("7. **Every percentage/scaled", 1)[1].split("\n8.", 1)[0]
-    assert "core §8" in scale and r"scripts\probe_desktop_query.py" in scale, "scale source/query citation"
-    uniqueness = semantic.split("7. **Model-wide measure-name uniqueness", 1)[1].split("\n8.", 1)[0]
-    assert r"scripts\check_datamodel.py" in uniqueness and "skill §2" in uniqueness, (
-        "uniqueness executable-owner citation"
-    )
-    rows = semantic.split("`PERSISTED` alone", 1)[1].split("\n11.", 1)[0]
-    assert "skill §4; host live-source owner" in rows, "row-proof owner citation"
-    assert "Held out of the playbook; resolve" in semantic, "held-out refresh owner"
+    scale = report.split("Sample every percentage/scaled", 1)[1].split("6.", 1)[0]
+    assert "via real-model DAX" in scale and "core §8" in scale, "scale source/query citation"
+    assert r"scripts\probe_desktop_query.py" in report, "scale source/query citation"
+    assert r"scripts\check_datamodel.py <SemanticModel>" in semantic, "uniqueness executable-owner citation"
+    assert "local rename/reference and uniqueness checks; require final exits 0" in semantic
+    assert "real-row canaries for **every commissioned import/live table**" in semantic, "row-proof owner citation"
+    assert r".github\skills\pbip-model-refresh\SKILL.md" in semantic, "held-out refresh owner"
+    assert "Held out of the playbook: missing host path blocks dependent handoff" in semantic
 
 
 @pytest.mark.parametrize(
@@ -342,20 +343,20 @@ def test_missing_retired_or_wrong_mode_pointers_fail_their_owner_assertion(
     [
         (
             "pbi-report-builder",
-            "core §8; `scripts\\probe_desktop_query.py`",
-            "core §3; `scripts\\probe_desktop_query.py`",
+            "check `formatString` (core §8)",
+            "check `formatString` (core §3)",
             "scale source/query citation",
         ),
         (
             "pbi-semantic-builder",
-            "`scripts\\check_datamodel.py` (skill §2)",
-            "`scripts\\check_datamodel.py` (skill §4)",
+            r"`python scripts\check_datamodel.py <SemanticModel>`",
+            r"`python scripts\missing_datamodel.py <SemanticModel>`",
             "uniqueness executable-owner citation",
         ),
         (
             "pbi-report-builder",
-            "*idiom* through `powerbi-report-gotchas` §8",
-            "*idiom* through `powerbi-report-gotchas` §9",
+            "source intent/core §8",
+            "source intent/core §9",
             "mapping source-intent citation",
         ),
     ],
