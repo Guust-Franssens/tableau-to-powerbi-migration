@@ -1,7 +1,7 @@
 # Narrow `t2p doctor/start/status` pilot plan — Refs #749
 ## Decision and scope
 **⚠️ Narrow pilot: accept the existing post-harvest/pre-conversion path gate; no #751 dependency.**
-Original pilot plan; this amendment changes doctor presentation only. Initial path decision stays CANNOT_ESTABLISH / `unknown_until_harvest`, never PASS.
+Original pilot plus bounded doctor/status presentation amendments. Initial path decision stays CANNOT_ESTABLISH / `unknown_until_harvest`, never PASS.
 Base: `511bb2098d179f2190943e45c650739c8c794fea`; issue: <https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/749>.
 Owner decisions: [path timing](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/749#issuecomment-6233864458), [doctor addition](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/749#issuecomment-6239785454); retain other independent-review amendments.
 ```text
@@ -39,19 +39,14 @@ Before allocation, first/last human lines are `RUN NOT_ALLOCATED; runs_root=<res
 JSON has `run_location:null`, `runs_root:null` with reason `not_allocated_path_withheld`; invent no path.
 After allocation, first/last human lines are `RUN <absolute-physical-run>`, including failure/interrupt;
 print before children; preserve location in JSON, never discover “latest”. Doctor has no run/path claim.
-Human: recorded/selected/physical run/root, repo-local/external, git visibility `ignored|visible|unknown`,
-commit safety `not_for_git|unsafe|unknown`; JSON withholds other roots.
+Start keeps its existing run markers; status shows only the owner-accepted explicit run spelling (local-only, not publication consent).
 Only the existing output guard establishes ignore safety; external is not synonymous with ignored.
 For status, do not launch git; underivable visibility is null with reason `not_derivable_read_only`.
-Path fields always present: ceilings 259/247, longest file/directory locators/lengths, remaining UTF-16 budgets, projection verdict/reason.
-Underivable status values are null with stable per-field reasons
-(`unknown_until_harvest|not_recorded|not_derivable_read_only|identity_unestablished`), never fabricated PASS.
+Path fields remain: 259/247 ceilings, longest file/directory locators/lengths, remaining UTF-16 budgets and projection verdict/reason.
+Unknowns stay null with stable reasons (`unknown_until_harvest|not_recorded|not_derivable_read_only|identity_unestablished`), never fabricated PASS.
 No status scanner: `check_path_ceiling.scan` launches git (`scripts/check_path_ceiling.py:292-315,415-455`).
-Exact private rerun argv/display requires every argument recorded (project, env/default, toolkit/root):
-Shape: `python -B <recorded-toolkit>/scripts/t2p.py start --project <recorded> [--env <recorded-env>] --runs-parent <recorded-parent>`.
-Otherwise emit a partial/candidate command marked non-authoritative, or unavailable with a reason.
-New invocation only, old run retained; shorter-root candidate goes through the same existing owner gate.
-JSON redacts toolkit/selector/env/root tokens; mark partial/non-authoritative, never exact or safe.
+Facade rerun remains unavailable: a complete project/env/toolkit/parent invocation is not recorded; never guess an authoritative command.
+Existing owner new-run guidance retains the old run and the same path gate; status adds no continuation route.
 `subst` temporary/non-authoritative or null/`not_derivable_read_only`; no status discovery/run-identity alias/ceiling waiver:
 `docs/windows-path-limits.md:100-112,265-271,339-371,408-417`.
 
@@ -81,14 +76,18 @@ into envelopes. Start child streams remain private native diagnostics, not sanit
 doctor never forwards raw output; status omits toolkit/other absolute locations. Absolute run paths are local-only.
 
 ## 4. Status authority and compatibility
-Call `run_status.build_status` under `-B`; preserve code, multiplicity/findings and identity boundaries.
-No status subprocess, network, cache, write, repair, allocation or readiness gate.
-Omit its `next_action` from the facade projection (direct script remains unchanged); add no routing.
-Missing/moved/contradictory identity => cannot-establish, no descendant scan or derived run path.
-`active` is allocation metadata, stored results last-observed; no current liveness/readiness/fidelity/credential claim:
-`scripts/run_status.py:851-939,972-987`.
-Direct start/status/work_dirs/path scripts retain arguments, output, exit and artifact behavior.
-No replacement of guidance/personas before benefit; no direct-script path policy changes in v1.
+Ordinary status is an **anonymous interim human view**; **Refs #734 / #469 / #663, not Fixes**, and closes none.
+Call `run_status.build_status` once under `-B`; preserve identity boundaries, exact native diagnostic exit and **byte-for-byte v1 JSON**, including errors/interrupts.
+Human lead: Goal (this inspection), Now, Observed handoff, Need, Existing owner; handoff is always **NOT CHECKED**.
+Render every unit/occurrence in order (including duplicates); zero-based ordinals are ephemeral, not durable IDs.
+Keep findings run-level, never joined by position; show unscoped-package counts even with zero units and every folder/evidence state.
+Show inventory/allocation metadata and all safe phase fields/nested errors in owner order as **last observed**, not current checks; `active` is not liveness.
+Need: missing/unassessable/findings need inspection, with cause/operator/lifecycle decision unknown; otherwise no required decision is established.
+Condense path unknowns/static 259/247 UTF-16 ceilings and unavailable facts into two lines; exact named/openable artifacts and private locations are unavailable.
+Full denominator, readiness, credentials, liveness, fidelity, START_READY and COMPLETE remain **unestablished**; presence/history never makes handoff green.
+Missing/moved/refused/null identity shows no accepted/rejected or derived path; absent observations are unavailable, not an assessed empty inventory.
+Omit `next_action`; no extra read/process/network/scan/cache/write/repair/allocation/gate or legal next-command classifier.
+Direct owners, doctor/start, schema/parser/path computation and preparation guidance remain unchanged; named/private-location enrichment is separate, unplanned work.
 
 ## 5. Read-only doctor contract
 Run the same plain preflight checks once, adding only internal `-DoctorDiagnostics` (no -Update/-CheckUpstream), child env `PYTHONDONTWRITEBYTECODE=1`; invoke doctor with `python -B`.
@@ -118,7 +117,8 @@ Dead Desktop guidance refreshes the inherited process pin and retries in the SAM
 READY_TO_ATTEMPT proves no PAT validity, reachability, datasource credentials, path safety, START_READY/fidelity/COMPLETE.
 
 ## 6. Closed surface, slices and independent controls
-**Original plan-only PR: `docs/t2p-pilot-plan.md` and `docs/INDEX.md`; doctor-only presentation amendment: N=8 existing files, no new files or lifecycle scope.**
+**Historical plan-only PR: `docs/t2p-pilot-plan.md` and `docs/INDEX.md`; doctor presentation amendment: N=8 existing files.**
+Current status-only amendment N=4: `scripts/t2p.py`, `tests/test_t2p.py`, README pilot status subsection and this plan in place (≤160 lines); no new files/lifecycle authority.
 Original pilot proposal (9 files; historical): new `scripts/t2p.py`, `tests/test_t2p.py`; edit shared resolver
 `scripts/tableau_env.py`, `tests/test_tableau_env.py` for diagnostic metadata only (no second policy);
 edit `scripts/start_migration.py`, `tests/test_start_migration.py`, `scripts/README.md`,
