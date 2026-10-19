@@ -1,65 +1,23 @@
-"""Credential modal detection shared by the PBIP refresh/query scripts.
+"""purpose: read-only, exact-identity Desktop observations and private short-lived image leases.
+usage:   import observe, watch from the portable skill; callers retain operation/proof authority.
+internal: true
+internal-reason: Portable import authority and private image child; existing query/refresh entry points remain public.
 
-All three regexes in ``*_signature.regex`` beside this file are the same signatures used by
-``probe_desktop_credential.ps1``. Keep the detector's matching rules here and the signatures in those
-resources so the fast Python checks and the PowerShell arbiter cannot drift.
-
-⚠️ **A big window is NOT evidence of anything (issue #376).** Until this module was fixed,
-``inspect_credential_modal`` returned the FIRST visible non-main window >= 100x100 as a
-``blocking_dialog``, and both callers mapped that to ``BLOCKED_BY_DIALOG`` at **exit 1** - the same
-hard-stop band as a real credential wall, which ``probe_live_source`` then classifies ``NO_CREDENTIAL``
-("you may NOT build; a human must sign in"). A Power BI Refresh progress dialog satisfies >= 100x100
-trivially, so a working refresh could halt a migration and send someone to a sign-in screen that was
-never on show. That is the same defect #367 removed from the PowerShell arbiter, on a more dangerous
-path: this detector feeds ``probe_desktop_query.py``, the gate of record.
-
-**The burden of proof runs ONE WAY, exactly as in the arbiter:** a dialog is dismissed only when its
-CONTENT positively reads as recognised progress status. It is never dismissed because the caption
-looked reassuring, and never because we merely read *something*. Everything we could not account for -
-unreadable, caption-only, unrecognised, or progress text mixed with prose - surfaces as its own
-non-clean dialog finding at **exit 3**, which is loud and recoverable, and never enters the
-credential hard-stop band. Staying out of that band is a statement about the EVIDENCE, not about the
-source: an unaccounted-for window rules a sign-in prompt neither in nor out.
-
-Three deliberate divergences from ``probe_desktop_credential.ps1``, each because this detector has
-strictly LESS evidence than the arbiter (Win32 child-HWND text only; no UI Automation):
-
-* **No prose join.** The arbiter joins non-interactive elements before matching the credential
-  signature, which needs a control-type signal to exclude an interposed ``Cancel``. Win32 gives no
-  control type, so the only join available here is the naive whole-window one the arbiter discarded in
-  review - and a join can MANUFACTURE a phrase (two adjacent labels ``Account`` + ``Key`` join to the
-  signature ``Account Key``). That error would land on the one verdict issue #376 says to err away
-  from, so matching here stays per-element. The recall this costs routes to ``unrecognized`` /
-  ``unreadable`` (exit 3, loud), and the arbiter - which HAS the control-type signal - is the
-  escalation path.
-* **No ``benign-unverified`` kind.** The arbiter needs it because a UIA harvest can be truncated while
-  still returning text. Here a text read that throws fails the WHOLE enumeration
-  (``Win32EnumerationError`` -> ``unknown_reason``), so a partial read cannot reach the classifier in
-  the first place.
-
-⚠️ **Blocking is decided from MODALITY, never from class, size or name (#400 review round 3).** An
-earlier pass answered *"is this window blocking a human?"* with three correlates in turn - a
-``>= 100x100`` size test, a ``WindowsForms10.Window.8`` class prefix, and an
-``Internet Explorer_Hidden`` name allowlist - and native Win32 experiments defeated all three, each
-time by collapsing a real blocker into the healthy state. Win32 answers the question directly: a modal
-disables its owner. So :func:`main_frame`, :func:`is_proven_non_blocking` and :func:`renders_nothing`
-decide from ``GetWindow(GW_OWNER)`` and ``IsWindowEnabled(owner)``, and the arbiter's one-way
-enabled-owner exoneration is now ported here rather than skipped.
-
-⚠️ **Frame identity is ENUMERATED, and ambiguity excludes nothing (#400 review round 5).** The one
-thing this module does with the frame is EXCLUDE it, so a wrong identity is a silently missed prompt.
-:func:`main_frame` therefore counts every rendering unowned window as a possible root - not only those
-reachable through ownership chains, which is how an unowned credential host owning one enabled tooltip
-was crowned the application - and returns ``None`` for anything else. ``Process.MainWindowHandle`` is
-no authority either: measured, it is a Z-ORDER answer (see :func:`main_frame`).
+Python alone classifies native facts. _desktop_uia.ps1 only harvests, in one bounded child.
+READY is observation completeness, never source reachability, row evidence or a gate clear.
 """
+# pylint: disable=too-many-branches
 
 from __future__ import annotations
+
+# One portable authority includes the unchanged private-image lease; do not split its copy-out unit.
+# pylint: disable=too-many-lines
 
 import atexit
 import ctypes
 import hashlib
 import json
+import math
 import os
 import queue
 import re
@@ -73,7 +31,7 @@ import uuid
 import zlib
 from ctypes import wintypes
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import BinaryIO
@@ -88,6 +46,7 @@ SIGNATURE_PATH = Path(__file__).resolve().with_name("credential_modal_signature.
 BENIGN_SIGNATURE_PATH = Path(__file__).resolve().with_name("benign_dialog_signature.regex")
 BENIGN_CHROME_SIGNATURE_PATH = Path(__file__).resolve().with_name("benign_chrome_signature.regex")
 BLOCKING_SIGNATURE_PATH = Path(__file__).resolve().with_name("blocking_prompt_signature.regex")
+POLL_INTERVAL_SECONDS = 5.0
 CONNECTOR_SOURCE_RE = re.compile(
     r"\b(?P<kind>Sql\.Database|Snowflake\.Databases|Databricks\.[A-Za-z]+|Odbc\.DataSource|Web\.Contents)\s*\("
     r"\s*(?:\"(?P<double>[^\"]+)\"|'(?P<single>[^']+)')?",
@@ -97,21 +56,7 @@ CONNECTOR_SOURCE_RE = re.compile(
 
 @dataclass(frozen=True)
 class DesktopWindow:
-    """Visible top-level Power BI Desktop window plus descendant Win32 text and its MODALITY facts.
-
-    ``owner_hwnd`` / ``owner_enabled`` carry the only evidence that actually answers *"is this window
-    blocking a human?"* (#400 review round 3). They are THREE-valued on purpose:
-
-    * ``owner_enabled is True``  - the owner is enabled, which PROVES this window blocks nothing. A
-      modal disables its owner; an enabled owner is therefore a positive exoneration.
-    * ``owner_enabled is False`` - the owner is disabled. This does NOT convict: Power BI's own refresh
-      dialog disables the owner too. It only means the exoneration does not apply.
-    * ``owner_enabled is None``  - no owner, so the test did not apply. Not the same as passing it.
-
-    Nine fields, waived rather than split: this is one Win32 window record and every field is read
-    straight from the API. Grouping the modality pair behind a nested object would put an indirection
-    between a reader and the two values three review rounds turned on.
-    """
+    """Visible top-level Power BI Desktop window plus descendant Win32 text and its MODALITY facts."""
 
     # pylint: disable=too-many-instance-attributes
     title: str
@@ -123,6 +68,12 @@ class DesktopWindow:
     hwnd: int = 0
     owner_hwnd: int = 0
     owner_enabled: bool | None = None
+    complete: bool = True
+    reason: str = "complete"
+    items: tuple[tuple[str, str, str], ...] = ()
+    message_id: str | None = None
+    pid: str | None = None
+    process_started_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -140,17 +91,7 @@ class CredentialModal:
 
 @dataclass(frozen=True)
 class DialogFinding:
-    """A candidate dialog we could NOT dismiss, plus the classification that says why.
-
-    Replaces the old ``BlockingDialog`` (issue #376). The rename is the finding: this module can
-    establish that a window is UP and what it SAYS, never that it BLOCKS anything - so every
-    ``BLOCKED_BY_DIALOG`` it used to emit was an inference dressed as a finding, in the one verdict
-    class the toolkit treats as a hard stop.
-
-    ``kind`` is the classifier's own vocabulary (see :func:`classify_dialog`); ``verdict`` is the
-    machine-readable token the callers print. Both are carried so a caller can print the token and a
-    reader can still see which evidence produced it.
-    """
+    """A candidate dialog we could NOT dismiss, plus the classification that says why."""
 
     kind: str
     verdict: str
@@ -164,8 +105,11 @@ class DialogFinding:
 
 
 @dataclass(frozen=True)
-class CredentialDetection:
-    """Credential-dialog inspection result for a Desktop PID."""
+class Observation:
+    """Immutable observation; transport success and READY establish no operation outcome."""
+
+    # These are one immutable observation plus its private facts, not independent state owners.
+    # pylint: disable=too-many-instance-attributes
 
     modal: CredentialModal | None = None
     dialog: DialogFinding | None = None
@@ -173,6 +117,323 @@ class CredentialDetection:
     desktop_unready: str | None = None
     process_gone: str | None = None
     windows: tuple[DesktopWindow, ...] = ()
+    pid: str | None = None
+    process_started_at: str | None = None
+    complete: bool = True
+    reason: str = "complete"
+    operation_id: str | None = None
+    observation_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    observed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    elapsed_ms: float = 0.0
+    findings: tuple[DialogFinding, ...] = ()
+    target_window: DesktopWindow | None = None
+
+    @property
+    def state(self) -> str:
+        """Closed observer vocabulary, folded in safety precedence order."""
+        # pylint: disable=too-many-return-statements
+        if self.modal is not None:
+            return "CREDENTIAL_REQUIRED"
+        if self.process_gone is not None:
+            return "PROCESS_GONE"
+        if self.dialog is not None:
+            if self.dialog.window.message_id == "package_session":
+                return "DESKTOP_SESSION_ERROR"
+            return {
+                DIALOG_KIND_CREDENTIAL: "CREDENTIAL_REQUIRED",
+                DIALOG_KIND_NEEDS_HUMAN: "HUMAN_ACTION_REQUIRED",
+                DIALOG_KIND_BENIGN: "REFRESH_IN_PROGRESS",
+                DIALOG_KIND_MIXED_CONTENT: "UNKNOWN_DIALOG",
+                DIALOG_KIND_UNRECOGNIZED: "UNKNOWN_DIALOG",
+            }.get(self.dialog.kind, "UNREADABLE_DIALOG")
+        if self.desktop_unready is not None:
+            return "NO_WINDOW"
+        if self.unknown_reason is not None or not self.complete:
+            return "UNREADABLE_DIALOG"
+        return "READY"
+
+    def to_json(self) -> str:
+        """Serialize only closed metadata; raw window text never crosses the public boundary."""
+        window = self.modal.window if self.modal else (self.dialog.window if self.dialog else self.target_window)
+        raw = json.dumps(
+            {
+                "schema": "desktop.observation.v1",
+                "observation_id": self.observation_id,
+                "operation_id": self.operation_id,
+                "pid": self.pid,
+                "process_started_at": self.process_started_at,
+                "hwnd": _handle_string(window.hwnd) if window else None,
+                "owner_hwnd": _handle_string(window.owner_hwnd) if window else None,
+                "observed_at": self.observed_at,
+                "elapsed_ms": self.elapsed_ms,
+                "complete": self.complete,
+                "state": self.state,
+                "reason": self.reason,
+                "findings": [
+                    {
+                        "hwnd": _handle_string(finding.window.hwnd),
+                        "owner_hwnd": _handle_string(finding.window.owner_hwnd),
+                        "state": Observation(dialog=finding).state,
+                        "reason": _observation_reason(Observation(dialog=finding)),
+                        "message_id": finding.window.message_id,
+                        "complete": finding.window.complete,
+                    }
+                    for finding in self.findings
+                ],
+                "image": None,
+                "cannot_prove": ["source_reachability", "credential_validity", "data_correctness"],
+            },
+            allow_nan=False,
+        )
+        observation_token(raw)
+        return raw
+
+
+_LEGACY_TOKENS = {
+    "READY": None,
+    "CREDENTIAL_REQUIRED": "CREDENTIAL_MISSING",
+    "NATIVE_QUERY_APPROVAL": "DIALOG_NEEDS_HUMAN",
+    "HUMAN_ACTION_REQUIRED": "DIALOG_NEEDS_HUMAN",
+    "DESKTOP_SESSION_ERROR": "DESKTOP_UNREADY",
+    "UNKNOWN_DIALOG": "DIALOG_UNRECOGNIZED",
+    "UNREADABLE_DIALOG": "DIALOG_UNREADABLE",
+    "NO_WINDOW": "DESKTOP_UNREADY",
+    "REFRESH_IN_PROGRESS": "REFRESH_IN_PROGRESS",
+    "PROCESS_GONE": "DESKTOP_GONE",
+}
+_TERMINAL_STATES = frozenset(
+    {
+        "CREDENTIAL_REQUIRED",
+        "NATIVE_QUERY_APPROVAL",
+        "HUMAN_ACTION_REQUIRED",
+        "DESKTOP_SESSION_ERROR",
+        "PROCESS_GONE",
+    }
+)
+
+
+def legacy_token(observation: Observation) -> str | None:
+    """The sole trusted observer-to-operation vocabulary adapter."""
+    return _LEGACY_TOKENS[observation.state]
+
+
+def measurement_refusal(code: str) -> str:
+    """Explicit adaptation to unchanged receipt v2/v3 refusal enums; unknown codes reject."""
+    if code in {"DESKTOP_GONE", "REFRESH_IN_PROGRESS"}:
+        return "TOOL_UNAVAILABLE"
+    if code in {
+        "CREDENTIAL_MISSING",
+        "CREDENTIAL_UNKNOWN",
+        "DESKTOP_UNREADY",
+        "DIALOG_NEEDS_HUMAN",
+        "DIALOG_UNREADABLE",
+        "DIALOG_UNRECOGNIZED",
+        "IDENTITY_UNESTABLISHED",
+        "WRONG_PID_PORT",
+        "PID_REUSED",
+        "CATALOGUE_UNESTABLISHED",
+        "CATALOGUE_CHANGED",
+        "CANARIES_REQUIRED",
+        "TIMEOUT",
+        "TOOL_UNAVAILABLE",
+        "MODEL_LOCK_TIMEOUT",
+    }:
+        return code
+    raise ValueError("unknown observation refusal")
+
+
+def observation_token(raw: str) -> str | None:
+    """Validate a public event before adapting it; malformed/unknown evidence is never clean."""
+    # Closed protocol fields are checked explicitly, rather than delegated to a second schema owner.
+    # pylint: disable=too-many-branches
+    if len(raw.encode("utf-8")) > 131072:
+        raise ValueError("observation size")
+    payload = json.loads(raw, object_pairs_hook=_unique_object)
+    keys = {
+        "schema",
+        "observation_id",
+        "operation_id",
+        "pid",
+        "process_started_at",
+        "hwnd",
+        "owner_hwnd",
+        "observed_at",
+        "elapsed_ms",
+        "complete",
+        "state",
+        "reason",
+        "findings",
+        "image",
+        "cannot_prove",
+    }
+    if not isinstance(payload, dict) or set(payload) != keys or payload["schema"] != "desktop.observation.v1":
+        raise ValueError("observation shape")
+    for key in ("observation_id", "operation_id"):
+        if key == "operation_id" and payload[key] is None:
+            continue
+        if not isinstance(payload[key], str) or str(uuid.UUID(payload[key])) != payload[key]:
+            raise ValueError("observation id")
+    if not _decimal_identity(payload["pid"]) or not 0 < int(payload["pid"]) < 2**32:
+        raise ValueError("observation pid")
+    if type(payload["complete"]) is not bool or payload["state"] not in _LEGACY_TOKENS:  # pylint: disable=unidiomatic-typecheck
+        raise ValueError("observation state")
+    if payload["process_started_at"] is not None and not _decimal_identity(payload["process_started_at"]):
+        raise ValueError("observation start")
+    if payload["complete"] and payload["process_started_at"] is None:
+        raise ValueError("missing process start")
+    if payload["state"] == "READY" and not payload["complete"]:
+        raise ValueError("incomplete ready")
+    if payload["reason"] not in _REASONS:
+        raise ValueError("observation reason")
+    _handle_value(payload["hwnd"])
+    _handle_value(payload["owner_hwnd"])
+    elapsed = payload["elapsed_ms"]
+    if isinstance(elapsed, bool) or not isinstance(elapsed, (float, int)) or not math.isfinite(elapsed) or elapsed < 0:
+        raise ValueError("observation elapsed")
+    if not isinstance(payload["observed_at"], str) or not re.fullmatch(
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?(?:Z|\+00:00)", payload["observed_at"]
+    ):
+        raise ValueError("observation timestamp")
+    datetime.fromisoformat(payload["observed_at"].replace("Z", "+00:00"))
+    findings = payload["findings"]
+    if not isinstance(findings, list) or len(findings) > 4000:
+        raise ValueError("observation findings")
+    for finding in findings:
+        if not isinstance(finding, dict) or set(finding) != {
+            "hwnd",
+            "owner_hwnd",
+            "state",
+            "reason",
+            "message_id",
+            "complete",
+        }:
+            raise ValueError("observation finding")
+        _handle_value(finding["hwnd"], nullable=False)
+        _handle_value(finding["owner_hwnd"])
+        # Exact types reject bools and coercible values at the native identity boundary.
+        # pylint: disable=unidiomatic-typecheck
+        if (
+            finding["state"] not in _LEGACY_TOKENS
+            or finding["reason"] not in _REASONS
+            or finding["message_id"] not in {None, "privacy_warning", "package_session"}
+            or type(finding["complete"]) is not bool  # pylint: disable=unidiomatic-typecheck
+        ):
+            raise ValueError("observation finding enum")
+    if payload["complete"] and any(not finding["complete"] for finding in findings):
+        raise ValueError("observation completeness")
+    if payload["state"] == "READY" and (findings or payload["reason"] != "complete"):
+        raise ValueError("unexplained ready")
+    if payload["image"] is not None:
+        _validate_public_image(payload["image"])
+    if payload["cannot_prove"] != ["source_reachability", "credential_validity", "data_correctness"]:
+        raise ValueError("observation authority")
+    return _LEGACY_TOKENS[payload["state"]]
+
+
+def _validate_public_image(image: dict) -> None:
+    """Accept opaque lease metadata only; image acquisition has no observation/proof authority."""
+    if not isinstance(image, dict) or set(image) != {
+        "id",
+        "basename",
+        "status",
+        "width",
+        "height",
+        "sha256",
+        "expires_at",
+        "cleanup",
+    }:
+        raise ValueError("image shape")
+    if not isinstance(image["id"], str) or str(uuid.UUID(image["id"])) != image["id"]:
+        raise ValueError("image id")
+    if not isinstance(image["basename"], str) or not _IMAGE_NAME.fullmatch(image["basename"]):
+        raise ValueError("image basename")
+    if image["status"] not in {
+        "ACQUIRED",
+        "TARGET_CHANGED",
+        "BLANK_OR_INCOMPLETE",
+        "CAPTURE_FAILED",
+        "WRITE_FAILED",
+        "UNSUPPORTED",
+        "CAPTURE_CLEANUP_FAILED",
+    } or image["cleanup"] not in {"leased", "deleted", "failed"}:
+        raise ValueError("image enum")
+    for key in ("width", "height"):
+        if image[key] is not None and (type(image[key]) is not int or not 0 < image[key] <= 32768):  # pylint: disable=unidiomatic-typecheck
+            raise ValueError("image extent")
+    if image["sha256"] is not None and (
+        not isinstance(image["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", image["sha256"])
+    ):
+        raise ValueError("image hash")
+    expiry = image["expires_at"]
+    if expiry is not None and (
+        not isinstance(expiry, str)
+        or not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,7})?(?:Z|\+00:00)", expiry)
+    ):
+        raise ValueError("image expiry")
+    if expiry is not None:
+        datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+    if image["status"] == "ACQUIRED" and any(image[key] is None for key in ("width", "height", "sha256", "expires_at")):
+        raise ValueError("image acquisition")
+
+
+def emit_observation(observation: Observation, *, stream=None) -> None:
+    """Emit validated closed metadata on a diagnostic channel, never operation success."""
+    raw = observation.to_json()
+    observation_token(raw)
+    print("DESKTOP_OBSERVATION " + raw, file=stream or sys.stderr, flush=True)
+
+
+def observation_refusal_events(events: Iterable[str], *, terminal_only: bool = False) -> str | None:
+    """Fold validated events with the same first-terminal/retained-uncertainty lattice as watch."""
+    latched = None
+    for raw in events:
+        try:
+            token = observation_token(raw)
+            terminal = json.loads(raw)["state"] in _TERMINAL_STATES
+        except (ValueError, TypeError, KeyError):
+            token, terminal = "DIALOG_UNREADABLE", False
+        if terminal:
+            return token
+        if token not in {None, "REFRESH_IN_PROGRESS"} and latched is None:
+            latched = token
+    return None if terminal_only else latched
+
+
+class DesktopRefusal(RuntimeError):
+    """Closed operation adapter refusal, never reflected provider text."""
+
+    def __init__(self, observation: Observation) -> None:
+        self.observation = observation
+        self.code = legacy_token(observation)
+        if self.code is None:
+            raise ValueError("READY is not a refusal or an operation success")
+        super().__init__(self.code)
+
+
+@dataclass
+class _ObservationLatch:
+    """One bounded lattice for watch and legacy worker waits; raw history is not accumulated."""
+
+    terminal: Observation | None = None
+    snapshots: tuple[Observation, ...] = ()
+    desktop_unready: str | None = None
+    dialog: DialogFinding | None = None
+    unknown: str | None = None
+
+    def add(self, snapshot: Observation) -> Observation:
+        """Keep first terminal, first legacy refusal per band, and one snapshot per closed state."""
+        state = snapshot.state
+        if state not in {"READY", "REFRESH_IN_PROGRESS"} and not any(old.state == state for old in self.snapshots):
+            self.snapshots += (snapshot,)
+        if self.terminal is None and state in _TERMINAL_STATES:
+            self.terminal = snapshot
+        if self.desktop_unready is None and snapshot.desktop_unready:
+            self.desktop_unready = snapshot.desktop_unready
+        if self.dialog is None and snapshot.dialog is not None and state != "REFRESH_IN_PROGRESS":
+            self.dialog = snapshot.dialog
+        if self.unknown is None and snapshot.unknown_reason:
+            self.unknown = snapshot.unknown_reason
+        return self.terminal or snapshot
 
 
 class CredentialMissingError(RuntimeError):
@@ -186,17 +447,7 @@ class CredentialMissingError(RuntimeError):
 
 
 class DialogFoundError(RuntimeError):
-    """Power BI Desktop is showing a dialog that could NOT be shown to be harmless (issue #376).
-
-    Deliberately not named "blocked": this detector reads Win32 child-HWND text and can establish that
-    a window is up and what it says, never that it blocks anything. It replaces ``DialogBlockedError``,
-    whose ``BLOCKED_BY_DIALOG`` verdict sat in the exit-1 hard-stop band and was reached from a
-    SIZE-ONLY test - so a Power BI Refresh progress dialog produced the same verdict as a sign-in
-    prompt. Every outcome here is now exit 3: a human should look at the screen, and nothing about the
-    data source has been established. Exit 3 settles no credential question in either direction - a
-    known blocking prompt, a running refresh and a window nobody could read all land here, and only
-    the visible prompt says which action (if any) a person must take.
-    """
+    """Power BI Desktop is showing a dialog that could NOT be shown to be harmless (issue #376)."""
 
     def __init__(self, pid: int, finding: DialogFinding) -> None:
         self.pid = pid
@@ -205,20 +456,7 @@ class DialogFoundError(RuntimeError):
 
 
 class CredentialUnknownError(RuntimeError):
-    """Power BI Desktop's blocking-dialog state stayed indeterminate right up to the deadline.
-
-    Raised by :func:`join_with_credential_poll` when it LATCHED an indeterminate observation - the
-    owner window went iconic, which hides its owned modal dialogs from enumeration - that a later
-    ``none`` could not erase. It is a mandatory THIRD outcome, distinct from a detected block
-    (:class:`CredentialMissingError` / :class:`DialogFoundError`) and from a healthy deadline:
-    minimizing then restoring the owner destroys the dialog evidence for good (measured 2026-08-14,
-    issue #154), so ``none`` after the fact is indistinguishable from a genuinely healthy Desktop and
-    is NOT proof of health. Reporting a bare timeout here would blame a slow source for what is really
-    an unobservable dialog no automation can fill.
-
-    ``reason`` is the detector's own marker-free string, carried verbatim so the caller's verdict line
-    cannot smuggle a ``CREDENTIAL_MARKER`` into the parent classifier's free-text scan (issue #153).
-    """
+    """Power BI Desktop's blocking-dialog state stayed indeterminate right up to the deadline."""
 
     def __init__(self, pid: int, reason: str) -> None:
         self.pid = pid
@@ -227,19 +465,7 @@ class CredentialUnknownError(RuntimeError):
 
 
 class DesktopGoneError(RuntimeError):
-    """Power BI Desktop enumerated ZERO windows AND the process is no longer running (issue #158).
-
-    A live, working Desktop always owns at least its main window, so an empty enumeration is never
-    evidence of health - it means the process has exited, crashed, or (while still starting) has not
-    yet created a window. This class is the DEFINITIVE half of that split: the liveness check in
-    :func:`inspect_credential_modal` has confirmed the process is gone, so there is nothing left to
-    wait for. It is distinct from :class:`CredentialUnknownError` (process still ALIVE but momentarily
-    window-less - indeterminate, latched) and must never be reported as a slow source: the data source
-    is not implicated at all when Desktop itself has died.
-
-    ``reason`` is the detector's own marker-free string, carried verbatim so the caller's verdict line
-    cannot smuggle a ``CREDENTIAL_MARKER`` into the parent classifier's free-text scan (issue #153).
-    """
+    """Power BI Desktop enumerated ZERO windows AND the process is no longer running (issue #158)."""
 
     def __init__(self, pid: int, reason: str) -> None:
         self.pid = pid
@@ -315,13 +541,6 @@ class Win32EnumerationError(RuntimeError):
     """Win32 window enumeration failed before a reliable modal verdict could be formed."""
 
 
-def _winenumproc_type():
-    """Return the Win32 callback type lazily so the module imports on non-Windows CI."""
-    if os.name != "nt":
-        raise Win32EnumerationError("Win32 callback types are only available on Windows")
-    return ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-
-
 def _compile_signature(path: Path) -> re.Pattern[str]:
     """Compile one shared ``*_signature.regex`` resource."""
     return re.compile(path.read_text(encoding="utf-8").strip(), re.IGNORECASE)
@@ -344,22 +563,7 @@ def benign_dialog_signature() -> re.Pattern[str]:
 
 
 def benign_chrome_signature() -> re.Pattern[str]:
-    """Compile the enumerated allowlist of window chrome that cannot be a prompt (#376 review, 5).
-
-    This exists because the rule it replaced was a **length heuristic**, and length is not evidence.
-    ``MIN_PROMPT_WORDS = 5`` accepted any unmatched element under five words, so
-    ``Refresh`` + ``Evaluating...`` + ``Please enter your password`` classified ``benign`` and was
-    SUPPRESSED in flight - a real prompt swallowed in silence, on the very code path added to stop
-    that happening. Measured in review; ``Password:`` (two words) did it too.
-
-    The replacement is a **positive claim about specific strings**, not about their size: each
-    alternative is a whole-element, anchored control label that carries no prompt at all, so a window
-    whose only unexplained content is one of these still shows a human nothing to act on. Anything
-    else - a table name, a status phrase nobody recognised, a four-word prompt - VETOES dismissal and
-    lands in the exit-3 indeterminate band, which is exactly what that band is for.
-
-    Keep it tiny. Every alternative added here is a string that can never again veto a dismissal.
-    """
+    """Compile the enumerated allowlist of window chrome that cannot be a prompt (#376 review, 5)."""
     return _compile_signature(BENIGN_CHROME_SIGNATURE_PATH)
 
 
@@ -418,6 +622,13 @@ def _match_dialog_signatures(window: DesktopWindow, texts: Iterable[str]) -> Dia
     same window cannot erase a known human-blocking prompt (the round-3 defect in #390).
     """
     all_texts = tuple(texts)
+    prose = normalize_texts(
+        text
+        for text, role, source in window.items
+        if role in {"ControlType.Text", "ControlType.Document"} and source in {"Name", "TextPattern"}
+    )
+    if prose:
+        all_texts += (" ".join(prose),)
     signature = credential_signature()
     for text in all_texts:
         if signature.search(text):
@@ -430,42 +641,16 @@ def _match_dialog_signatures(window: DesktopWindow, texts: Iterable[str]) -> Dia
 
 
 def classify_dialog(window: DesktopWindow) -> DialogFinding:
-    """Classify ONE candidate window. Only ``benign`` is dismissible, and only it needs positive proof.
-
-    Kinds, in the order they are tested (see the module docstring for the divergences from
-    ``probe_desktop_credential.ps1``):
-
-    ``credential``        the credential signature matched a text element -> hard stop.
-    ``needs-human``       a KNOWN human-blocking prompt: the signature spans the native-query approval
-                          AND an authentication-required notice, so it establishes that a human must
-                          act, not which action. Tested BEFORE benign so a progress element in the
-                          same window cannot erase it.
-    ``mixed-content``     progress text AND content nobody could account for, in the same window. A
-                          first-match-wins loop would let one benign element erase everything after
-                          it, which is how ``Evaluating`` beside *"Permission is required to run this
-                          native database query"* cleared the arbiter at exit 0.
-    ``benign``            EVERY content element is either recognised progress status or enumerated
-                          chrome, and at least one IS progress status. The one dismissible kind.
-    ``benign-title-only`` the CAPTION matched the benign signature and no content did. A caption is not
-                          content, so this joins the unreadable band.
-    ``unreadable``        no readable text at all.
-    ``unrecognized``      readable text that matched no signature: we looked, and could not account for
-                          what we read. The signatures are a known-shapes list, so that settles the
-                          credential question in NEITHER direction. Distinct from ``unreadable`` on
-                          purpose - absent is not empty.
-
-    ⚠️ **There is no length amnesty, and there must never be one again (#376 review, finding 5).**
-    This used to accept any unmatched element of fewer than ``MIN_PROMPT_WORDS`` words, which meant
-    ``benign`` did not mean *positively benign*: ``Please enter your password`` (4 words) and
-    ``Password:`` (2) both classified ``benign`` beside ``Evaluating...``, and ``dialog_verdict`` then
-    SUPPRESSED them in flight. That is the same defect class this module was written to remove,
-    reintroduced on the new code path - and in that shape strictly worse than the bug it replaced,
-    because the repo's rule is that a credential modal is never worked around.
-    """
+    """Classify ONE candidate window. Only ``benign`` is dismissible, and only it needs positive proof."""
+    # pylint: disable=too-many-return-statements,too-many-branches
     title, all_texts, content = dialog_text_set(window)
     signature_hit = _match_dialog_signatures(window, all_texts)
     if signature_hit is not None:
         return signature_hit
+    if not window.complete:
+        return _finding(DIALOG_KIND_UNREADABLE, window, "")
+    if window.message_id:
+        return _finding(DIALOG_KIND_NEEDS_HUMAN, window, "")
 
     benign = benign_dialog_signature()
     chrome = benign_chrome_signature()
@@ -522,37 +707,7 @@ def _ownership_root(window: DesktopWindow, by_hwnd: dict[int, DesktopWindow]) ->
 
 
 def main_frame(windows: Iterable[DesktopWindow]) -> DesktopWindow | None:
-    """The application FRAME - the window dialogs block - or ``None`` when its identity is AMBIGUOUS.
-
-    Four review rounds have defeated four ways of *inferring* which window is the application: its SIZE
-    (round 1), a CLASS prefix plus a helper-name allowlist (round 2), the FIRST ownership edge (round
-    3), and transitive ownership that collected only the roots reachable from OWNED windows (round 4's
-    fix, broken in round 5 - an UNOWNED credential host owning one enabled tooltip was the only root
-    anybody collected, so it was crowned the frame and excluded from the prepass AND from
-    classification, while the real frame's progress text was suppressed in flight). Measured:
-    ``modal=None dialog=None unknown_reason=None`` - a false clean on the gate of record.
-
-    So this stops inferring and ENUMERATES. A window is a possible root in exactly two ways: it is
-    UNOWNED and renders something (:func:`renders_nothing` is the only filter, and it is the modality
-    rule rather than a size test); or it is the unowned root of some owned window's chain, walked
-    TRANSITIVELY - an owned window can own another popup, so "first owner" was itself a proxy for "the
-    root". An ownership-derived root gets NO priority over the rest; that is the round-5 fix, because a
-    root reached through a tooltip is not better evidence than a window rendering pixels.
-
-    Exactly one possible root identifies the frame. **Everything else returns ``None``, and ``None``
-    excludes NOTHING.** Excluding nothing costs a spurious ``DIALOG_UNRECOGNIZED`` (exit 3) - or, for a
-    report titled like a prompt, a spurious ``CREDENTIAL_MISSING`` (exit 1); both are LOUD. Excluding
-    the WRONG window is silent, and finishes a model for a source nobody reached.
-
-    ⚠️ **There is no authority to ask, and that was MEASURED (#400 review round 5).** .NET's
-    ``Process.MainWindowHandle`` is ``EnumWindows`` stopping at the first VISIBLE, UNOWNED window of the
-    pid - this function's own former fallback, in another process, minus the :func:`renders_nothing`
-    guard. Pinned by ``test_the_process_main_window_handle_is_a_z_order_answer_not_an_identity``: on
-    round 5's topology it named the CREDENTIAL HOST in 5 of 6 runs, it named an unowned **0x0** window
-    created last, and raising either of two windows to ``HWND_TOPMOST`` moved the answer - it reports
-    Z-ORDER. Only a genuinely OWNED modal gets a right answer out of it, where the ownership walk
-    already agrees, so it is not consulted. Full evidence: ``SKILL.md``, "Round 5".
-    """
+    """The application FRAME - the window dialogs block - or ``None`` when its identity is AMBIGUOUS."""
     windows = list(windows)
     by_hwnd = {window.hwnd: window for window in windows if window.hwnd}
     roots: list[DesktopWindow] = []
@@ -584,17 +739,7 @@ def is_proven_non_blocking(window: DesktopWindow) -> bool:
 
 
 def renders_nothing(window: DesktopWindow) -> bool:
-    """Is ``window`` incapable of showing a human anything, on TWO independent grounds?
-
-    Zero area alone is NOT sufficient and must never be used alone (#400 review round 3, finding 3): a
-    native experiment built a real ``WS_VISIBLE`` **owned 0x0** window and disabled its owner -
-    ``owned-visible=True owner-win32-enabled=False rect=0x0`` - which is a genuinely blocking shape. On
-    the unbounded query-poll path suppressing it leaves the worker blocked while every poll reports no
-    finding: a false clear that is also a hang.
-
-    So this requires BOTH: no owner to disable, AND no pixels to display. A window with neither
-    mechanism cannot block anyone.
-    """
+    """Is ``window`` incapable of showing a human anything, on TWO independent grounds?"""
     return not window.owner_hwnd and (window.width <= 0 or window.height <= 0)
 
 
@@ -603,31 +748,7 @@ def dialog_candidates(
     *,
     frame: DesktopWindow | None = None,
 ) -> list[DesktopWindow]:
-    """Every visible window worth CLASSIFYING - which is every one not POSITIVELY proven harmless.
-
-    ⚠️ **Three proxies died here across two review rounds. Do not add a fourth.** Size (>= 100x100),
-    class prefix, and a helper-class NAME allowlist were each an attempt to answer *"is this window
-    blocking a human?"* by looking at something else, and each one collapsed a real blocker into the
-    healthy state:
-
-    | proxy | what it hid |
-    |---|---|
-    | ``>= 100x100`` | a visible 80x60 unreadable owned dialog |
-    | ``WindowsForms10.Window.8`` prefix | an owned ``FixedDialog`` sharing its owner's exact class |
-    | ``Internet Explorer_Hidden`` name | the AAD sign-in host, whatever it displayed |
-
-    Win32 answers the question directly, so ask it directly. The three exclusions below are the only
-    ones, and each is a POSITIVE claim rather than a correlate:
-
-    * the identified :func:`main_frame` - it is the application, and the thing dialogs block. When
-      identity is AMBIGUOUS that function returns ``None`` and this exclusion simply does not happen
-      (#400 review round 5): a spurious finding on the real frame is loud and recoverable, whereas
-      excluding the wrong window is how a credential prompt disappears;
-    * :func:`is_proven_non_blocking` - an enabled owner proves this window blocks nothing;
-    * :func:`renders_nothing` - unowned AND zero-area: no owner to disable and no pixels to show.
-
-    Nothing is excluded for its size, its class, or its name.
-    """
+    """Every visible window worth CLASSIFYING - which is every one not POSITIVELY proven harmless."""
     windows = list(windows)
     frame = frame if frame is not None else main_frame(windows)
     return [
@@ -640,60 +761,52 @@ def dialog_candidates(
 def dialog_verdict(
     windows: Iterable[DesktopWindow],
     *,
-    operation_in_flight: bool = False,
     frame: DesktopWindow | None = None,
 ) -> DialogFinding | None:
-    """Fold per-window classifications into ONE finding, or ``None`` when nothing needs reporting.
+    """Fold factual classifications; the caller alone decides whether progress is its own."""
+    return _fold_findings(_window_findings(tuple(windows), frame))
 
-    ``operation_in_flight`` is set only once THIS process has started the refresh/query it is waiting
-    on. There, a PROVEN-benign progress dialog is our own and is ignored - and nothing else is. At t=0
-    it is somebody else's, and stacking a second refresh on it is exactly what the 2026-08-28 field
-    report had to unpick by hand.
-    """
-    found: dict[str, DialogFinding] = {}
-    for window in dialog_candidates(windows, frame=frame):
+
+def _window_findings(
+    windows: tuple[DesktopWindow, ...],
+    frame: DesktopWindow | None,
+) -> tuple[DialogFinding, ...]:
+    """Classify once; positive prompts survive every one-way modality exoneration."""
+    frame = frame if frame is not None else main_frame(windows)
+    candidates = {id(window) for window in dialog_candidates(windows, frame=frame)}
+    findings = []
+    for window in windows:
+        if window is frame:
+            continue
         finding = classify_dialog(window)
+        if id(window) in candidates or finding.kind in {DIALOG_KIND_CREDENTIAL, DIALOG_KIND_NEEDS_HUMAN}:
+            findings.append(finding)
+    return tuple(findings)
+
+
+def _fold_findings(findings: Iterable[DialogFinding]) -> DialogFinding | None:
+    """The sole same-snapshot precedence fold, shared by observations and pure policy controls."""
+    found: dict[str, DialogFinding] = {}
+    for finding in findings:
         if finding.kind == DIALOG_KIND_CREDENTIAL:
             return finding
         found.setdefault(finding.kind, finding)
     for kind in DIALOG_KIND_PRECEDENCE:
         if kind not in found:
             continue
-        if kind == DIALOG_KIND_BENIGN and operation_in_flight:
-            continue
         return found[kind]
     return None
 
 
-def match_credential_modal(
+def match_desktop_observer(
     windows: Iterable[DesktopWindow],
     *,
     frame: DesktopWindow | None = None,
 ) -> CredentialModal | None:
-    """First credential-signature match across every window EXCEPT the application frame.
-
-    Not restricted to :func:`dialog_candidates` (issue #376): it used to be, and the 100x100 filter
-    therefore gated the HARD STOP as well as the classification, so a credential prompt in a smaller
-    window returned no finding at all - a silent false negative on the one verdict that matters most.
-    It reads windows classification skips, too: an owned zero-area window, or one whose owner is
-    enabled, can still be carrying credential text.
-
-    ⚠️ The application frame is excluded (#376 review, finding 4). An unrestricted scan read the
-    Desktop caption and its child text, so a report legitimately named ``Account Key``,
-    ``Personal Access Token`` or ``Databricks Client Credentials`` produced ``CREDENTIAL_MISSING`` at
-    exit 1. The frame is identified by :func:`main_frame` - by OWNERSHIP, never by class - because a
-    class-prefix test also excluded a real owned credential dialog that shared its owner's class
-    (#400 review round 3, finding 2).
-    """
-    windows = list(windows)
-    frame = frame if frame is not None else main_frame(windows)
-    signature = credential_signature()
-    for window in windows:
-        if window is frame:
-            continue
-        for text in normalize_texts(window.texts):
-            if signature.search(text):
-                return CredentialModal(matched_text=text, window=window)
+    """First credential-signature match across every window EXCEPT the application frame."""
+    finding = dialog_verdict(windows, frame=frame)
+    if finding is not None and finding.kind == DIALOG_KIND_CREDENTIAL:
+        return CredentialModal(matched_text=finding.evidence, window=finding.window)
     return None
 
 
@@ -705,11 +818,6 @@ def _hwnd_value(hwnd) -> int:
 
 def _configure_user32(user32) -> None:
     """Set Win32 signatures explicitly so 64-bit handles are not truncated."""
-    callback_type = _winenumproc_type()
-    user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
-    user32.EnumWindows.restype = wintypes.BOOL
-    user32.EnumChildWindows.argtypes = [wintypes.HWND, callback_type, wintypes.LPARAM]
-    user32.EnumChildWindows.restype = wintypes.BOOL
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.GetWindowThreadProcessId.restype = wintypes.DWORD
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
@@ -720,113 +828,17 @@ def _configure_user32(user32) -> None:
     user32.GetWindow.restype = wintypes.HWND
     user32.IsIconic.argtypes = [wintypes.HWND]
     user32.IsIconic.restype = wintypes.BOOL
-    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-    user32.GetWindowTextLengthW.restype = ctypes.c_int
-    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-    user32.GetWindowTextW.restype = ctypes.c_int
-    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-    user32.GetClassNameW.restype = ctypes.c_int
     user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
     user32.GetWindowRect.restype = wintypes.BOOL
 
 
-def _window_text(user32, hwnd: int) -> str:
-    """Best-effort Win32 text for ``hwnd``."""
-    length = user32.GetWindowTextLengthW(hwnd)
-    if length <= 0:
-        return ""
-    buffer = ctypes.create_unicode_buffer(length + 1)
-    user32.GetWindowTextW(hwnd, buffer, length + 1)
-    return buffer.value
-
-
-def _class_name(user32, hwnd: int) -> str:
-    """Win32 class name for ``hwnd``."""
-    buffer = ctypes.create_unicode_buffer(256)
-    user32.GetClassNameW(hwnd, buffer, len(buffer))
-    return buffer.value
-
-
-def _child_texts(user32, hwnd: int) -> tuple[str, ...]:
-    """Text from child HWNDs of a candidate top-level window."""
-    texts: list[str] = []
-    errors: list[BaseException] = []
-
-    def callback(child_hwnd, _lparam):
-        try:
-            text = _window_text(user32, _hwnd_value(child_hwnd))
-            if text:
-                texts.append(text)
-        except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            errors.append(exc)
-        return True
-
-    enum_child_proc = _winenumproc_type()(callback)
-    user32.EnumChildWindows(hwnd, enum_child_proc, 0)
-    if errors:
-        raise Win32EnumerationError(f"child window enumeration callback failed: {errors[0]}") from errors[0]
-    return tuple(texts)
-
-
 def _enumerate_pid_windows_with_count(pid: int) -> tuple[list[DesktopWindow], int]:
-    """Enumerate visible top-level/owned windows for ``pid`` using Win32 ``EnumWindows``.
-
-    UI Automation root-child discovery misses Power BI connector dialogs because they are owned
-    windows, not root children. Win32 ``EnumWindows`` sees that shape and still scopes by PID, so
-    concurrent Desktop instances do not cross-contaminate.
-    """
-    if os.name != "nt":
-        raise Win32EnumerationError("Win32 window enumeration is only available on Windows")
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    _configure_user32(user32)
-    windows: list[DesktopWindow] = []
-    errors: list[BaseException] = []
-    visited = 0
-
-    def callback(hwnd, _lparam):
-        nonlocal visited
-        visited += 1
-        try:
-            hwnd_int = _hwnd_value(hwnd)
-            owner_pid = wintypes.DWORD(0)
-            user32.GetWindowThreadProcessId(hwnd_int, ctypes.byref(owner_pid))
-            if owner_pid.value != pid or not user32.IsWindowVisible(hwnd_int):
-                return True
-            rect = wintypes.RECT()
-            user32.GetWindowRect(hwnd_int, ctypes.byref(rect))
-            title = _window_text(user32, hwnd_int)
-            texts = tuple(text for text in (title, *_child_texts(user32, hwnd_int)) if text)
-            # The modality facts. `GW_OWNER` is the window a modal disables, and its enabled state is
-            # the only direct evidence of whether this window is blocking anyone (#400 review round 3).
-            # Deliberately three-valued: no owner means the test did not apply, which is NOT "passed".
-            owner_hwnd = _hwnd_value(user32.GetWindow(hwnd_int, GW_OWNER))
-            owner_enabled = bool(user32.IsWindowEnabled(owner_hwnd)) if owner_hwnd else None
-            windows.append(
-                DesktopWindow(
-                    title=title,
-                    class_name=_class_name(user32, hwnd_int),
-                    width=max(0, rect.right - rect.left),
-                    height=max(0, rect.bottom - rect.top),
-                    texts=texts,
-                    minimized=bool(user32.IsIconic(hwnd_int)),
-                    hwnd=hwnd_int,
-                    owner_hwnd=owner_hwnd,
-                    owner_enabled=owner_enabled,
-                )
-            )
-        except BaseException as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
-            errors.append(exc)
-        return True
-
-    enum_windows_proc = _winenumproc_type()(callback)
-    if not user32.EnumWindows(enum_windows_proc, 0):
-        error_code = ctypes.get_last_error()
-        raise Win32EnumerationError(f"EnumWindows failed with Win32 error {error_code}")
-    if errors:
-        raise Win32EnumerationError(f"window enumeration callback failed: {errors[0]}") from errors[0]
-    if visited == 0:
-        raise Win32EnumerationError("EnumWindows returned no callbacks")
-    return windows, visited
+    """Read backend facts for native qualification; production callers use observe with held identity."""
+    try:
+        _, windows = _harvest(str(pid), 8.0, None)
+        return list(windows), len(windows)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise Win32EnumerationError("backend unavailable") from error
 
 
 def enumerate_pid_windows(pid: int) -> list[DesktopWindow]:
@@ -835,37 +847,38 @@ def enumerate_pid_windows(pid: int) -> list[DesktopWindow]:
     return windows
 
 
-def inspect_credential_modal(
+def inspect_desktop_observer(
     pid: int,
     enumerate_windows: WindowEnumerator = enumerate_pid_windows,
     process_is_alive: ProcessLivenessCheck = _process_alive,
-    *,
-    operation_in_flight: bool = False,
-) -> CredentialDetection:
-    """Inspect ``pid`` for a credential modal, preserving indeterminate states.
-
-    Order is load-bearing and mirrors the arbiter's main flow: credential signature (every window, any
-    size) -> a classified dialog finding -> minimized owner -> zero windows. ``operation_in_flight``
-    is forwarded to :func:`dialog_verdict`; see :func:`inspect_credential_modal_in_flight`.
-    """
+) -> Observation:
+    """Fold exact-window facts; this pure-policy injection seam never suppresses progress."""
     # pylint: disable=too-many-return-statements
     try:
         windows = tuple(enumerate_windows(pid))
     except Win32EnumerationError as exc:
-        return CredentialDetection(unknown_reason=f"window enumeration failed: {exc}")
+        return Observation(unknown_reason=f"window enumeration failed: {exc}", complete=False, reason="backend_failed")
     frame = main_frame(windows)
-    modal = match_credential_modal(windows, frame=frame)
-    if modal is not None:
-        return CredentialDetection(modal=modal, windows=windows)
-    finding = dialog_verdict(windows, operation_in_flight=operation_in_flight, frame=frame)
+    findings = _window_findings(windows, frame)
+    finding = _fold_findings(findings)
     if finding is not None:
-        return CredentialDetection(dialog=finding, windows=windows)
+        complete = all(item.window.complete for item in findings)
+        if finding.kind == DIALOG_KIND_CREDENTIAL:
+            return Observation(
+                modal=CredentialModal(finding.evidence, finding.window),
+                windows=windows,
+                findings=findings,
+                complete=complete,
+            )
+        return Observation(dialog=finding, windows=windows, findings=findings, complete=complete)
     if frame is not None and frame.minimized:
-        return CredentialDetection(
+        return Observation(
             unknown_reason=(
                 "Power BI Desktop owner window is minimized; owned modal dialogs are hidden from enumeration"
             ),
             windows=windows,
+            complete=False,
+            reason="minimized",
         )
     if not windows:
         # A live, working Desktop always owns at least its main window, so ZERO windows is never proof
@@ -876,41 +889,125 @@ def inspect_credential_modal(
         # DESKTOP_GONE, exit 2). Both are LOCAL failures that must never be blamed on a slow source or
         # routed to the credential layer. `unknown_reason` is deliberately NOT set for either.
         if process_is_alive(pid):
-            return CredentialDetection(
+            return Observation(
                 desktop_unready=(
                     "Power BI Desktop enumerated no windows while its process is still running; a "
                     "window-less process is starting up or wedged and its dialog state cannot be read"
                 ),
                 windows=windows,
+                complete=False,
+                reason="no_window",
             )
-        return CredentialDetection(
+        return Observation(
             process_gone=(
                 "Power BI Desktop enumerated no windows and its process is no longer running; it "
                 "exited or crashed before any dialog state could be observed"
             ),
             windows=windows,
+            complete=False,
+            reason="process_gone",
         )
-    return CredentialDetection(windows=windows)
+    return Observation(windows=windows)
 
 
-def describe_modal(modal: CredentialModal, source_hint: str | None = None) -> str:
-    """Human-readable modal evidence for the verdict line."""
-    window = modal.window
-    size = f"{window.width}x{window.height}" if window.width and window.height else "unknown size"
-    source = f" source={source_hint};" if source_hint else ""
-    title = window.title or "(empty title)"
-    return f"{source} window title={title!r}, class={window.class_name!r}, size={size}, text={modal.excerpt!r}"
+def describe_modal(modal: CredentialModal, source_hint: str | None = None) -> str:  # pylint: disable=unused-argument
+    """Closed metadata only; neither source hints nor provider text are safe public evidence."""
+    return f"prompt_match; hwnd={_handle_string(modal.window.hwnd)}; text withheld"
 
 
 def describe_dialog_finding(finding: DialogFinding) -> str:
-    """Human-readable evidence for a dialog we could not dismiss."""
-    window = finding.window
-    size = f"{window.width}x{window.height}" if window.width and window.height else "unknown size"
-    title = window.title or "(empty title)"
-    return (
-        f"kind={finding.kind}, window title={title!r}, class={window.class_name!r}, "
-        f"size={size}, evidence={finding.excerpt!r}"
+    """Closed metadata only: unknown UI prose is not safe verdict-line evidence."""
+    kind = finding.kind if finding.kind in DIALOG_KIND_VERDICTS else "unrecognized"
+    return f"kind={kind}, hwnd={finding.window.hwnd}; text withheld"
+
+
+_DIALOG_TEMPLATES = {
+    "privacy_warning": (
+        "Potential security risk",
+        "This file uses multiple data sources. Information in one data source might be shared with other "
+        "data sources without your knowledge. Only open this file if you trust the sender. "
+        "Do you want to open this file?",
+        frozenset({"OK", "Cancel"}),
+    ),
+    "package_session": (
+        "Something went wrong",
+        "Could not find a PackageSession for the given sessionID.",
+        frozenset({"Close", "Copy details to clipboard", "Report this issue", "Cancel"}),
+    ),
+}
+_DIALOG_MESSAGES = {
+    "privacy_warning": (
+        "Potential security risk: multiple-source sharing/trust warning (OK / Cancel). "
+        "The operator must decide whether to trust and open this file. "
+        "This is a file-trust decision, not evidence about the data source."
+    ),
+    "package_session": (
+        "Something went wrong: Desktop could not find a PackageSession for the given sessionID "
+        "(Close / Copy details to clipboard / Report this issue / Cancel). "
+        "This is a Desktop session error. Check unsaved-state safety before reopening; "
+        "source state remains unestablished."
+    ),
+    "WITHHELD": "Dialog text withheld; inspect this Desktop dialog locally. Source state unestablished.",
+    "CANNOT_READ": (
+        "Dialog text could not be read safely; inspect this Desktop dialog locally. Source state unestablished."
+    ),
+}
+
+
+def _diagnostic_template(payload: dict) -> str | None:
+    """Match the entire title/instruction/button structure, never keywords in arbitrary fields."""
+    title = " ".join(payload["Title"].split())
+    prose, buttons = [], set()
+    for item in payload["Items"]:
+        text = " ".join(item["Text"].split())
+        role, source = item["Role"], item["Source"]
+        if role == "ControlType.Button" and source == "Name":
+            buttons.add(text)
+        elif role in {"ControlType.Text", "ControlType.Document"} and source in {"Name", "TextPattern"}:
+            if text != title and text not in prose:
+                prose.append(text)
+        elif text:
+            return None
+    prose = [text for text in prose if text not in buttons]
+    for message_id, (expected_title, instruction, expected_buttons) in _DIALOG_TEMPLATES.items():
+        if title == expected_title and " ".join(prose) == instruction and buttons == expected_buttons:
+            return message_id
+    return None
+
+
+def diagnose_dialog(pid: int, window: DesktopWindow, *, timeout_seconds: float = 8.0) -> tuple[str, str | None, str]:
+    """Explain the already harvested snapshot; never launch a second diagnostic observer."""
+    # Exact identity types deliberately reject bools and coercible values.
+    # pylint: disable=unidiomatic-typecheck
+    if (
+        type(pid) is not int
+        or type(window.hwnd) is not int
+        or pid <= 0
+        or window.hwnd <= 0
+        or not 0 < timeout_seconds <= 8.0
+    ):  # pylint: disable=unidiomatic-typecheck
+        return "CANNOT_READ", None, "invalid_target"
+    if window.pid != str(pid) or not window.complete or not window.items:
+        return "CANNOT_READ", None, "incomplete_read"
+    message_id = _diagnostic_template(
+        {"Title": window.title, "Items": [dict(zip(("Text", "Role", "Source"), item)) for item in window.items]}
     )
+    return ("OBSERVED", message_id, "template_match") if message_id else ("WITHHELD", None, "unknown_template")
+
+
+def print_dialog_diagnostic(pid: int, window: DesktopWindow, *, stream=None) -> None:
+    """Print only closed diagnostic fields and predefined prose, never harvested text or stderr."""
+    status, message_id, reason = diagnose_dialog(pid, window)
+    record = {
+        "status": status,
+        "message_id": message_id,
+        "reason": reason,
+        "pid": str(pid),
+        "hwnd": str(window.hwnd),
+        "message": _DIALOG_MESSAGES[message_id or status],
+    }
+    # As with LOCAL_IMAGE, string-encoded numbers must not trip whole-transcript numeric scanners.
+    print("DIALOG_DIAGNOSTIC " + json.dumps(record).replace("0", r"\u0030"), file=stream, flush=True)
 
 
 # Per-kind operator guidance. Every string here is deliberately MARKER-FREE (issue #153): it must not
@@ -955,23 +1052,45 @@ def dialog_guidance(finding: DialogFinding) -> str:
     return DIALOG_KIND_GUIDANCE.get(finding.kind, "look at the Desktop screen before continuing")
 
 
-def inspect_credential_modal_in_flight(
-    pid: int,
-    enumerate_windows: WindowEnumerator = enumerate_pid_windows,
-    process_is_alive: ProcessLivenessCheck = _process_alive,
-) -> CredentialDetection:
-    """:func:`inspect_credential_modal` for a poll running AFTER this process started the operation.
+_OPERATION_MESSAGES = {
+    "CREDENTIAL_MISSING": "A positive prompt was observed; a human must act locally. Source state unestablished.",
+    "CREDENTIAL_UNKNOWN": "Dialog evidence stayed indeterminate to the deadline; inspect Desktop before retrying.",
+    "DESKTOP_GONE": (
+        "Power BI Desktop enumerated no windows and its process is no longer running; it exited or crashed "
+        "before any dialog state could be observed"
+    ),
+    "DESKTOP_UNREADY": (
+        "Power BI Desktop enumerated no windows while its process is still running; a window-less process "
+        "is starting up or wedged and its dialog state cannot be read"
+    ),
+}
 
-    The only difference is that a PROVEN-benign progress dialog is ignored: at that point it is almost
-    certainly the refresh we ourselves triggered, and aborting on it would abort a healthy run. Nothing
-    else is ignored - an unreadable, caption-only, mixed or unrecognised dialog still surfaces.
-    """
-    return inspect_credential_modal(
-        pid,
-        enumerate_windows,
-        process_is_alive,
-        operation_in_flight=True,
-    )
+
+def print_operation_refusal(
+    prefix: str,
+    pid: int,
+    code: str,
+    *,
+    finding: DialogFinding | None = None,
+    reason: str | None = None,
+) -> None:
+    """Format existing operation tokens only; exit bands and operation results stay with callers."""
+    if prefix not in {"REFRESH", "PREFLIGHT"} or type(pid) is not int or not 0 < pid < 2**32:  # pylint: disable=unidiomatic-typecheck
+        raise ValueError("operation diagnostic identity")
+    if finding is not None:
+        if DIALOG_KIND_VERDICTS.get(finding.kind) != code:
+            raise ValueError("operation diagnostic vocabulary")
+        detail = describe_dialog_finding(finding)
+    elif code in _OPERATION_MESSAGES:
+        detail = _OPERATION_MESSAGES[code]
+        if code == "DESKTOP_UNREADY" and reason == "session_error":
+            detail = "Local Desktop session error; inspect this Desktop locally. Source state unestablished."
+    else:
+        raise ValueError("operation diagnostic vocabulary")
+    print(f"{prefix}: {code} pid={pid}; {detail}")
+    if finding is not None:
+        print_dialog_diagnostic(pid, finding.window)
+        print(f"  {dialog_guidance(finding)}")
 
 
 def source_hint_from_model(model_dir: Path | None) -> str | None:
@@ -1001,17 +1120,7 @@ def print_refresh_banner(
     grace_sec: int | float,
     operation: str = "refresh",
 ) -> None:
-    """Print the no-dialog, self-bounded refresh warning before the wait starts.
-
-    Deliberately does NOT name the verdict tokens it may later print, and interpolates NO caller-supplied
-    text - so unlike :func:`print_refresh_unknown_banner`, this banner's marker-free guarantee is total
-    and self-contained. This banner is emitted on the HEALTHY no-dialog path and is captured verbatim by
-    ``probe_live_source``'s classifier; naming ``CREDENTIAL_MISSING`` / ``BLOCKED_BY_DIALOG`` here (or
-    even the bare word "credential") made the reassuring message classify a successful refresh as
-    ``NO_CREDENTIAL`` (issue #153). The classifier now matches verdict LINES structurally, but keeping
-    control tokens out of free prose is the belt-and-braces half of that fix - so a future helpful edit
-    cannot re-arm the landmine.
-    """
+    """Print the no-dialog, self-bounded refresh warning before the wait starts."""
     total = timeout_sec + grace_sec
     if operation == "calculate":
         prefix = f"No blocking dialog on PID {pid}. Calculate in progress, bounded at "
@@ -1031,7 +1140,7 @@ def print_refresh_unknown_banner(pid: int, timeout_sec: int, grace_sec: int | fl
     """Print the bounded-refresh warning when the t=0 modal check is indeterminate.
 
     This banner's OWN static prose names no control tokens and not the bare word "credential" - but it
-    interpolates ``reason``, a caller-supplied string from ``inspect_credential_modal`` that the
+    interpolates ``reason``, a caller-supplied string from ``inspect_desktop_observer`` that the
     classifier scans along with everything else. So the marker-free guarantee for the UNKNOWN path is
     owned by the DETECTOR, not by this banner alone: the minimized-owner ``unknown_reason`` was reworded
     off the word "credential" (a ``CREDENTIAL_MARKER``) for exactly this reason (issue #153) - otherwise
@@ -1055,19 +1164,7 @@ def print_refresh_heartbeat(elapsed: float, total: float) -> None:
 
 
 def print_indeterminate_state_notice(pid: int, reason: str) -> None:
-    """Loudly note the first time the wait latches an indeterminate window state (issues #154, #158).
-
-    Two observations land here, and they mean the same thing - the dialog state can no longer be read
-    reliably: the owner window went iconic (minimize -> restore destroys the owned-dialog evidence for
-    good, measured 2026-08-14), or enumeration returned no windows while the process was still alive
-    (starting up or wedged, issue #158). Either way the wait latches it so a later ``none`` cannot pass
-    for health; this notice makes the transition visible in the transcript instead of silent.
-
-    Like every string this module prints into the refresh transcript, it is deliberately MARKER-FREE
-    (no ``CREDENTIAL_MARKER`` token, not even the bare word "credential") and is NOT a ``REFRESH:``
-    verdict line, so the parent classifier cannot mistake it for a verdict (issue #153). ``reason`` is
-    the detector's own marker-free string and carries the specific cause.
-    """
+    """Loudly note the first time the wait latches an indeterminate window state (issues #154, #158)."""
     print(
         f"PID {pid} entered an indeterminate window state mid-wait ({reason}); latching this "
         "observation - a later clear cannot un-see it, because the evidence a blocking dialog would "
@@ -1096,20 +1193,15 @@ def print_dialog_observed_notice(pid: int, finding: DialogFinding) -> None:
     )
 
 
-def raise_terminal_detection(pid: int, state: CredentialDetection, source_hint: str | None = None) -> None:
-    """Raise for the two observations that end a bounded wait IMMEDIATELY.
-
-    Only a matched credential signature and a confirmed-dead process qualify. A :class:`DialogFinding`
-    deliberately does NOT (issue #376): it is latched by the caller and surfaced at the deadline via
-    :func:`raise_latched_verdict`, so a dialog we could not read cannot cut short a refresh that was
-    going to succeed.
-
-    Public because ``refresh_pbip_model`` has a SECOND wait loop - the progress-monitor branch - which
-    must behave identically. It used to call the t=0 helper instead, so a proven-benign progress dialog
-    belonging to the current refresh aborted that refresh (#376 review, finding 1).
-    """
-    if state.modal is not None:
-        raise CredentialMissingError(pid, state.modal, source_hint)
+def raise_terminal_detection(pid: int, state: Observation, source_hint: str | None = None) -> None:
+    """Raise for the two observations that end a bounded wait IMMEDIATELY."""
+    if state.state == "CREDENTIAL_REQUIRED":
+        modal = state.modal or CredentialModal("", state.dialog.window)
+        raise CredentialMissingError(pid, modal, source_hint)
+    if state.state == "DESKTOP_SESSION_ERROR":
+        raise DesktopUnreadyError(pid, "session_error")
+    if state.state in {"HUMAN_ACTION_REQUIRED", "NATIVE_QUERY_APPROVAL"} and state.dialog is not None:
+        raise DialogFoundError(pid, state.dialog)
     if state.process_gone is not None:
         raise DesktopGoneError(pid, state.process_gone)
 
@@ -1136,112 +1228,581 @@ def raise_latched_verdict(
         raise CredentialUnknownError(pid, unknown)
 
 
-def _raise_detection(pid: int, state: CredentialDetection, source_hint: str | None) -> None:
-    """Backwards-compatible alias for :func:`raise_terminal_detection`."""
-    raise_terminal_detection(pid, state, source_hint)
-
-
 # pylint: disable=too-many-arguments
 def join_with_credential_poll(
     worker,
     *,
-    pid: int,
+    pid: int | None,
     total_timeout: float,
     heartbeat_seconds: float,
     poll_seconds: float,
     source_hint: str | None = None,
-    detector: Callable[[int], CredentialDetection] = inspect_credential_modal_in_flight,
-    initial_state: CredentialDetection | None = None,
+    detector: Callable[[int], Observation] | None = None,
+    initial_state: Observation | None = None,
     deadline: float | None = None,
+    before_wait: Callable[[], None] | None = None,
+    heartbeat: Callable[[float, float], None] | None = print_refresh_heartbeat,
+    wait_limit: Callable[[], float] | None = None,
+    notices: bool = True,
+    completed_at: Callable[[], float | None] | None = None,
 ) -> bool:
-    """Wait for ``worker`` while polling for a late credential dialog.
-
-    Returns True when the worker finished before the wall-clock deadline, False when the deadline
-    elapsed with the dialog state observably HEALTHY throughout. Raises immediately when the shared
-    detector matches the credential signature, or confirms Desktop is gone.
-
-    The default ``detector`` is the IN-FLIGHT variant: by the time this runs, the refresh being waited
-    on is ours, so a PROVEN-benign progress dialog is ours too and is ignored. Nothing else is.
-
-    A :class:`DialogFinding` - a dialog we could not dismiss - is LATCHED, not raised (issue #376). It
-    did not match the credential signature, so it must not abort a refresh that may still finish; but it
-    also means "no modal appeared" is no longer established, so it surfaces at the deadline as
-    :class:`DialogFoundError` rather than as a bare timeout blaming a slow source. Before #376 this
-    raised at once, on a SIZE-ONLY test, at the same exit code as a real sign-on wall - so a Power BI
-    refresh progress dialog aborted the very refresh it was reporting on.
-
-    Indeterminate (``unknown_reason``) observations are LATCHED, not ignored (issue #154). The owner
-    window going iconic hides its owned modal dialogs from enumeration, and - measured 2026-08-14 -
-    restoring it does NOT bring them back: minimize -> restore destroys the evidence permanently, after
-    which the detector reports ``none``, the SAME state as a genuinely healthy Desktop. A run that ever
-    went indeterminate therefore ends at the deadline with :class:`CredentialUnknownError`, so a later
-    ``none`` can never launder it into a bare timeout that blames a slow source.
-
-    Latch-and-keep-waiting (rather than ending the instant UNKNOWN is first seen) is deliberate and is
-    the false-positive-free choice: a worker that FINISHES clears the wait via ``return True`` below
-    regardless of any latch, so a refresh that completes within the deadline is never overridden - the
-    only run that ever surfaces the latched verdict is one that was going to hit the deadline anyway.
-    Ending early instead would let a single transient enumeration hiccup, or a healthy-but-minimized
-    slow refresh, cut off a run that would have succeeded.
-
-    A ``process_gone`` observation is different: it is TERMINAL, raising :class:`DesktopGoneError`
-    immediately (issue #158). Zero enumerated windows plus a confirmed-dead PID is definitive - Desktop
-    has exited or crashed, there is nothing left to wait for, and the data source is not implicated -
-    so unlike the latched-and-waited indeterminate case there is no value in running out the clock.
-
-    ``desktop_unready`` - zero windows while the process is still ALIVE - is the third shape, and sits
-    between the two: it is LATCHED like ``unknown_reason`` (a starting-up Desktop may still produce a
-    window and finish the refresh, so ending early would be a false positive), but at the deadline it
-    surfaces as :class:`DesktopUnreadyError`, a terminal local-error verdict, ahead of the credential
-    family. It is not a credential signal: no human sign-in fixes a window-less process, so routing it
-    to ``CredentialUnknownError`` would send someone to the wrong layer. Both zero-window states are
-    seeded from ``initial_state`` so an observation made only by the caller's t=0 pre-check cannot be
-    lost before the first poll.
-    """
+    """Wait for ``worker`` while polling for a late credential dialog."""
     # Waived, not shaved: the locals are eight injected parameters plus one latch per observation this
     # wait must not lose (unknown / desktop-unready / dialog). Folding the latches into a container
     # would hide exactly the thing this function exists to keep visible.
-    # pylint: disable=too-many-locals
+    # pylint: disable=too-many-locals,too-many-statements
     deadline = time.monotonic() + total_timeout if deadline is None else deadline
+    if detector is None and pid is not None:
+
+        def inspect(target: int) -> Observation:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("observation deadline exhausted before start")
+            return observe(
+                target,
+                timeout_s=min(8.0, remaining),
+                expected_process_start=initial_state.process_started_at if initial_state else None,
+            )
+
+        detector = inspect
+    latch = _ObservationLatch()
+    if initial_state is not None and pid is not None:
+        raise_terminal_detection(pid, latch.add(initial_state), source_hint)
     started = deadline - total_timeout
     next_heartbeat = heartbeat_seconds
-    latched_unknown = initial_state.unknown_reason if initial_state else None
-    latched_desktop_unready = initial_state.desktop_unready if initial_state else None
-    latched_dialog = initial_state.dialog if initial_state else None
     while worker.is_alive():
         elapsed = time.monotonic() - started
         remaining = max(0.0, total_timeout - elapsed)
         if remaining <= 0:
             break
-        worker.join(min(remaining, poll_seconds, max(0.0, next_heartbeat - elapsed)))
-        elapsed = time.monotonic() - started
-        state = detector(pid)
-        _raise_detection(pid, state, source_hint)
-        if state.dialog is not None and latched_dialog is None:
-            latched_dialog = state.dialog
-            print_dialog_observed_notice(pid, state.dialog)
-        if state.desktop_unready and latched_desktop_unready is None:
-            latched_desktop_unready = state.desktop_unready
-        if state.unknown_reason and latched_unknown is None:
-            latched_unknown = state.unknown_reason
-            print_indeterminate_state_notice(pid, state.unknown_reason)
-        if elapsed >= next_heartbeat and worker.is_alive():
-            print_refresh_heartbeat(elapsed, total_timeout)
-            next_heartbeat += heartbeat_seconds
-    if worker.is_alive() or time.monotonic() >= deadline:
-        state = detector(pid)
-        _raise_detection(pid, state, source_hint)
-        raise_latched_verdict(
-            pid,
-            desktop_unready=latched_desktop_unready or state.desktop_unready,
-            dialog=latched_dialog or state.dialog,
-            unknown=latched_unknown or state.unknown_reason,
+        if before_wait is not None:
+            before_wait()
+        worker.join(
+            min(
+                remaining,
+                poll_seconds,
+                max(0.01, next_heartbeat - elapsed),
+                max(0.01, wait_limit()) if wait_limit is not None else remaining,
+            )
         )
+        elapsed = time.monotonic() - started
+        if not worker.is_alive():
+            break
+        if time.monotonic() >= deadline:
+            break
+        if pid is not None:
+            try:
+                state = detector(pid)
+            except TimeoutError:
+                break
+            if time.monotonic() >= deadline and state.state in _TERMINAL_STATES:
+                state = Observation(pid=str(pid), complete=False, unknown_reason="timeout", reason="timeout")
+            prior_dialog, prior_unknown = latch.dialog, latch.unknown
+            raise_terminal_detection(pid, latch.add(state), source_hint)
+            if notices and prior_dialog is None and latch.dialog is not None:
+                print_dialog_observed_notice(pid, latch.dialog)
+            if notices and prior_unknown is None and latch.unknown is not None:
+                print_indeterminate_state_notice(pid, latch.unknown)
+        if elapsed >= next_heartbeat and worker.is_alive():
+            if heartbeat is not None:
+                heartbeat(elapsed, total_timeout)
+            next_heartbeat += heartbeat_seconds
+    settled_at = completed_at() if completed_at is not None else None
+    if not worker.is_alive() and settled_at is not None and settled_at < deadline:
+        return True
+    if worker.is_alive() or time.monotonic() >= deadline:
+        if pid is not None:
+            if latch.terminal is not None:
+                raise_terminal_detection(pid, latch.terminal, source_hint)
+            raise_latched_verdict(
+                pid,
+                desktop_unready=latch.desktop_unready,
+                dialog=latch.dialog,
+                unknown=latch.unknown,
+            )
         return False
     return True
 
 
 # pylint: enable=too-many-arguments
+
+
+_HARVEST_KEYS = {
+    "schema",
+    "pid",
+    "process_started_at_before",
+    "process_started_at_after",
+    "complete",
+    "reason",
+    "windows",
+}
+_WINDOW_KEYS = {
+    "hwnd",
+    "owner_hwnd",
+    "target_before",
+    "target_after",
+    "owner_before",
+    "owner_after",
+    "visible",
+    "minimized",
+    "enabled",
+    "owner_enabled",
+    "width",
+    "height",
+    "title",
+    "texts",
+    "items",
+    "truncated",
+    "patterns_incomplete",
+}
+_REASONS = frozenset(
+    {
+        "complete",
+        "prompt_match",
+        "template_match",
+        "progress_match",
+        "mixed_content",
+        "unknown_content",
+        "caption_only",
+        "no_text",
+        "timeout",
+        "truncated",
+        "patterns_incomplete",
+        "target_changed",
+        "minimized",
+        "ambiguous",
+        "unsupported",
+        "backend_failed",
+        "invalid_payload",
+        "no_window",
+        "process_gone",
+    }
+)
+
+
+def _handle_string(value: int) -> str | None:
+    return hex(value) if value else None
+
+
+def _decimal_identity(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[1-9][0-9]{0,19}", value) is not None
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+
+def _handle_value(value: object, *, nullable: bool = True) -> int:
+    if value is None and nullable:
+        return 0
+    if not isinstance(value, str) or not re.fullmatch(r"0x[1-9a-f][0-9a-f]{0,15}", value):
+        raise ValueError("handle")
+    return int(value, 16)
+
+
+def _window_fact(payload: dict) -> DesktopWindow:
+    """Validate native facts before interpreting private text; identity loss always refuses."""
+    # pylint: disable=too-many-branches,unidiomatic-typecheck
+    if not isinstance(payload, dict) or set(payload) != _WINDOW_KEYS:
+        raise ValueError("window shape")
+    hwnd = _handle_value(payload["hwnd"], nullable=False)
+    owner = _handle_value(payload["owner_hwnd"])
+    if any(payload[key] is not True for key in ("target_before", "target_after")) or any(
+        _handle_value(payload[key]) != owner for key in ("owner_before", "owner_after")
+    ):
+        raise ValueError("target_changed")
+    if (
+        any(
+            type(payload[key]) is not bool
+            for key in (  # pylint: disable=unidiomatic-typecheck
+                "visible",
+                "minimized",
+                "enabled",
+                "truncated",
+                "patterns_incomplete",
+            )
+        )
+        or payload["visible"] is not True
+    ):
+        raise ValueError("flags")
+    if payload["owner_enabled"] is not None and type(payload["owner_enabled"]) is not bool:  # pylint: disable=unidiomatic-typecheck
+        raise ValueError("owner")
+    if not owner and payload["owner_enabled"] is not None:
+        raise ValueError("owner")
+    if any(type(payload[key]) is not int or payload[key] < 0 for key in ("width", "height")):  # pylint: disable=unidiomatic-typecheck
+        raise ValueError("extent")
+    if not isinstance(payload["title"], str) or len(payload["title"]) > 8000:
+        raise ValueError("title")
+    items, texts = payload["items"], payload["texts"]
+    if not isinstance(items, list) or not isinstance(texts, list) or len(items) + len(texts) > 4000:
+        raise ValueError("elements")
+    if any(not isinstance(text, str) or len(text) > 8000 for text in texts):
+        raise ValueError("texts")
+    for item in items:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"Text", "Role", "Source"}
+            or any(not isinstance(value, str) or len(value) > 8000 for value in item.values())
+        ):
+            raise ValueError("item")
+        if item["Source"] not in {"Name", "TextPattern"} or not item["Role"].startswith("ControlType."):
+            raise ValueError("role")
+        if item["Role"] in {"ControlType.Edit", "ControlType.ComboBox"}:
+            raise ValueError("editable")
+    complete = not (
+        payload["truncated"] or payload["patterns_incomplete"] or (owner and payload["owner_enabled"] is None)
+    )
+    message = _diagnostic_template({"Title": payload["title"], "Items": items}) if complete else None
+    return DesktopWindow(
+        title=payload["title"],
+        class_name="",
+        width=payload["width"],
+        height=payload["height"],
+        texts=tuple(texts) + tuple(item["Text"] for item in items),
+        minimized=payload["minimized"],
+        hwnd=hwnd,
+        owner_hwnd=owner,
+        owner_enabled=payload["owner_enabled"],
+        complete=complete,
+        reason="truncated" if payload["truncated"] else ("patterns_incomplete" if not complete else "complete"),
+        items=tuple((item["Text"], item["Role"], item["Source"]) for item in items),
+        message_id=message,
+    )
+
+
+def _harvest_payload(
+    raw: str, pid: str, expected_process_start: str | None
+) -> tuple[str | None, tuple[DesktopWindow, ...]]:
+    if len(raw.encode("utf-8")) > 131072:
+        raise ValueError("payload size")
+    payload = json.loads(raw, object_pairs_hook=_unique_object)
+    if not isinstance(payload, dict) or set(payload) != _HARVEST_KEYS:
+        raise ValueError("harvest shape")
+    if payload["schema"] != "desktop.harvest.v1" or payload["pid"] != pid or not isinstance(payload["pid"], str):
+        raise ValueError("identity")
+    before, after = payload["process_started_at_before"], payload["process_started_at_after"]
+    if payload["complete"] is not True or payload["reason"] != "complete":
+        raise ValueError("incomplete")
+    if before is None and after is None and payload["windows"] == []:
+        return None, ()
+    if (
+        not _decimal_identity(before)
+        or before != after
+        or (expected_process_start is not None and before != expected_process_start)
+    ):
+        raise ValueError("target_changed")
+    windows = payload["windows"]
+    if not isinstance(windows, list) or len(windows) > 4000:
+        raise ValueError("windows")
+    if (
+        sum(
+            len(window.get("items", [])) + len(window.get("texts", []))
+            for window in windows
+            if isinstance(window, dict)
+        )
+        > 4000
+    ):
+        raise ValueError("elements")
+    result = tuple(replace(_window_fact(window), pid=pid, process_started_at=before) for window in windows)
+    if len({window.hwnd for window in result}) != len(result):
+        raise ValueError("duplicate window")
+    return before, result
+
+
+def _harvest(
+    pid: str,
+    timeout_s: float,
+    expected_process_start: str | None,
+    *,
+    _owner=None,
+) -> tuple[str | None, tuple[DesktopWindow, ...]]:
+    """One bounded child, no nested processes or native calls on uncancellable Python threads."""
+    if os.name != "nt":
+        raise OSError("unsupported")
+    deadline = time.monotonic() + timeout_s
+    start = subprocess.Popen if _owner is None else _owner.spawn
+    child = start(
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(Path(__file__).with_name("_desktop_uia.ps1")),
+            "-DesktopPid",
+            pid,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    try:
+        output, _ = child.communicate(timeout=min(timeout_s, max(0.0, deadline - time.monotonic())))
+        if child.returncode != 0:
+            raise ValueError("backend_failed")
+        return _harvest_payload(output.decode("utf-8-sig"), pid, expected_process_start)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+        if _owner is not None:
+            _owner.unregister(child)
+
+
+def observe(
+    pid: int | str,
+    *,
+    hwnd: int | str | None = None,
+    expected_process_start: str | None = None,
+    timeout_s: float = 8.0,
+    evidence=None,
+    _owner=None,
+) -> Observation:
+    """Read one immutable snapshot; callers holding an identity must supply its exact start token."""
+    started = time.monotonic()
+    if isinstance(pid, int) and not isinstance(pid, bool):
+        pid = str(pid)
+    if not _decimal_identity(pid) or not 0 < int(pid) < 2**32:
+        raise ValueError("pid")
+    if expected_process_start is not None and not _decimal_identity(expected_process_start):
+        raise ValueError("process start")
+    if (
+        isinstance(timeout_s, bool)
+        or not isinstance(timeout_s, (int, float))
+        or not math.isfinite(timeout_s)
+        or not 0 < timeout_s <= 8
+    ):
+        raise ValueError("timeout")
+    target = _handle_value(hwnd) if isinstance(hwnd, str) else hwnd
+    if target is not None and (type(target) is not int or target <= 0):  # pylint: disable=unidiomatic-typecheck
+        raise ValueError("hwnd")
+    state = Observation(pid=pid, complete=False, reason="unsupported", unknown_reason="unsupported")
+    try:
+        process_start, windows = (
+            _harvest(pid, timeout_s, expected_process_start)
+            if _owner is None
+            else _harvest(pid, timeout_s, expected_process_start, _owner=_owner)
+        )
+        if process_start is None:
+            state = Observation(pid=pid, complete=False, reason="process_gone", process_gone="process_gone")
+        elif target is not None and not any(window.hwnd == target for window in windows):
+            state = Observation(
+                pid=pid,
+                process_started_at=process_start,
+                complete=False,
+                reason="target_changed",
+                unknown_reason="target_changed",
+            )
+        else:
+            state = inspect_desktop_observer(int(pid), lambda _: windows)
+            state = replace(
+                state,
+                pid=pid,
+                process_started_at=process_start,
+                reason=_observation_reason(state),
+                target_window=next((window for window in windows if window.hwnd == target), None),
+            )
+            finding = state.modal or state.dialog
+            if target is not None and finding is not None and finding.window.hwnd != target:
+                state = Observation(
+                    pid=pid,
+                    process_started_at=process_start,
+                    complete=False,
+                    unknown_reason="ambiguous",
+                    reason="ambiguous",
+                    findings=state.findings,
+                    target_window=state.target_window,
+                )
+    except subprocess.TimeoutExpired:
+        state = replace(state, reason="timeout", unknown_reason="timeout")
+    except (OSError, ValueError, TypeError, UnicodeError) as error:
+        reason = str(error) if str(error) in _REASONS else "invalid_payload"
+        state = replace(state, reason=reason, unknown_reason=reason)
+    elapsed_ms = max(0.0, (time.monotonic() - started) * 1000)
+    if elapsed_ms > timeout_s * 1000:
+        state = Observation(pid=pid, complete=False, reason="timeout", unknown_reason="timeout")
+    state = replace(state, elapsed_ms=elapsed_ms)
+    if evidence is not None:
+        evidence.enqueue(int(pid), state)
+    return state
+
+
+def _observation_reason(state: Observation) -> str:
+    if state.modal:
+        return "prompt_match"
+    if state.dialog:
+        if not state.dialog.window.complete:
+            return state.dialog.window.reason
+        return {
+            DIALOG_KIND_NEEDS_HUMAN: "template_match" if state.dialog.window.message_id else "prompt_match",
+            DIALOG_KIND_BENIGN: "progress_match",
+            DIALOG_KIND_MIXED_CONTENT: "mixed_content",
+            DIALOG_KIND_BENIGN_TITLE_ONLY: "caption_only",
+            DIALOG_KIND_UNREADABLE: "no_text",
+        }.get(state.dialog.kind, "unknown_content")
+    if state.unknown_reason:
+        return "minimized"
+    if state.desktop_unready:
+        return "no_window"
+    return "complete"
+
+
+@dataclass
+class Watch:
+    """Invocation-local latch lattice; no background callback may mutate a settled observation."""
+
+    # One invocation owns these locks, children, identity, deadline and retained evidence together.
+    # pylint: disable=too-many-instance-attributes
+
+    pid: int | str
+    deadline: float
+    operation_id: str
+    expected_process_start: str | None = None
+    evidence: object = None
+    _latch: _ObservationLatch = field(default_factory=_ObservationLatch, repr=False)
+    closed: bool = False
+    _children: list = field(default_factory=list, repr=False)
+    _children_lock: object = field(default_factory=threading.Lock, repr=False)
+    _observe_lock: object = field(default_factory=threading.Lock, repr=False)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
+
+    @property
+    def latched(self) -> tuple[Observation, ...]:
+        """Representative immutable uncertainty records, bounded by the closed state vocabulary."""
+        return self._latch.snapshots
+
+    @property
+    def terminal(self) -> Observation | None:
+        """The first established terminal observation."""
+        return self._latch.terminal
+
+    def spawn(self, *args, **kwargs):
+        """Atomically admit one owned native child or refuse after the settlement barrier."""
+        with self._children_lock:
+            if self.closed:
+                raise OSError("timeout")
+            child = subprocess.Popen(*args, **kwargs)  # pylint: disable=consider-using-with
+            self._children.append(child)
+            return child
+
+    def unregister(self, child) -> None:
+        """Forget a helper only after its owning harvest has reaped it."""
+        with self._children_lock:
+            if child in self._children:
+                self._children.remove(child)
+
+    def close(self) -> None:
+        """Settle only this invocation's harvests; Desktop is never a termination target."""
+        with self._children_lock:
+            self.closed = True
+            for child in self._children:
+                if child.poll() is None:
+                    child.kill()
+                child.wait()
+            self._children.clear()
+
+    def observe(self, *, timeout_s: float = 8.0) -> Observation:
+        """Serialize snapshots against one caller deadline and held process identity."""
+        remaining = self.deadline - time.monotonic()
+        # A context manager cannot enforce the remaining acquisition deadline.
+        acquired = self._observe_lock.acquire(timeout=max(0.0, min(timeout_s, remaining)))  # pylint: disable=consider-using-with
+        try:
+            remaining = self.deadline - time.monotonic()
+            if not acquired or self.closed or remaining <= 0:
+                return Observation(pid=str(self.pid), complete=False, unknown_reason="timeout", reason="timeout")
+            snapshot = observe(
+                self.pid,
+                expected_process_start=self.expected_process_start,
+                timeout_s=min(timeout_s, remaining),
+                evidence=self.evidence,
+                _owner=self,
+            )
+            with self._children_lock:
+                if self.closed:
+                    return Observation(
+                        pid=str(self.pid),
+                        complete=False,
+                        reason="timeout",
+                        unknown_reason="timeout",
+                        operation_id=self.operation_id,
+                    )
+                if self.expected_process_start is None and snapshot.process_started_at is not None:
+                    self.expected_process_start = snapshot.process_started_at
+                return replace(snapshot, operation_id=self.operation_id)
+        finally:
+            if acquired:
+                self._observe_lock.release()
+
+    def record(self, observation: Observation) -> Observation:
+        """First terminal wins; uncertainty never disappears behind later quiet evidence."""
+        with self._children_lock:
+            if self.closed:
+                raise RuntimeError("watch settled")
+            if type(observation) is not Observation:  # pylint: disable=unidiomatic-typecheck
+                raise ValueError("observation")
+            if observation.pid != str(self.pid) or (
+                observation.state not in {"UNREADABLE_DIALOG", "PROCESS_GONE"}
+                and not _decimal_identity(observation.process_started_at)
+            ):
+                observation = Observation(
+                    pid=str(self.pid), complete=False, reason="target_changed", unknown_reason="target_changed"
+                )
+            if time.monotonic() >= self.deadline:
+                observation = Observation(pid=str(self.pid), complete=False, unknown_reason="timeout", reason="timeout")
+            observation = replace(observation, operation_id=self.operation_id)
+            if (
+                self.expected_process_start is not None
+                and observation.process_started_at != self.expected_process_start
+                and (observation.process_started_at is not None or observation.complete)
+                and observation.state != "PROCESS_GONE"
+            ):
+                observation = Observation(
+                    pid=str(self.pid),
+                    complete=False,
+                    unknown_reason="target_changed",
+                    reason="target_changed",
+                    operation_id=self.operation_id,
+                )
+            return self._latch.add(observation)
+
+    def __iter__(self):
+        if not self.closed and time.monotonic() >= self.deadline:
+            yield self.record(
+                Observation(pid=str(self.pid), complete=False, reason="timeout", unknown_reason="timeout")
+            )
+            return
+        while not self.closed and time.monotonic() < self.deadline:
+            yield self.record(self.observe(timeout_s=min(8.0, max(0.001, self.deadline - time.monotonic()))))
+            if self.terminal is not None:
+                return
+            time.sleep(min(POLL_INTERVAL_SECONDS, max(0.0, self.deadline - time.monotonic())))
+
+
+def watch(
+    pid: int | str, *, deadline: float, operation_id: str, expected_process_start: str | None = None, evidence=None
+) -> Watch:
+    """Create one observation supervisor without starting native work at import/construction time."""
+    canonical_pid = str(pid) if type(pid) is int else pid  # pylint: disable=unidiomatic-typecheck
+    if not _decimal_identity(canonical_pid) or not 0 < int(canonical_pid) < 2**32:
+        raise ValueError("pid")
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline):
+        raise ValueError("deadline")
+    if not isinstance(operation_id, str) or str(uuid.UUID(operation_id)) != operation_id:
+        raise ValueError("operation id")
+    if expected_process_start is not None and not _decimal_identity(expected_process_start):
+        raise ValueError("process start")
+    return Watch(pid, deadline, operation_id, expected_process_start, evidence)
 
 
 IMAGE_CAPTURE_SECONDS = 8.0
@@ -1598,7 +2159,7 @@ def _utc_stamp(when: datetime | None = None) -> str:
     return (when or datetime.now(timezone.utc)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def _image_record(pid: int, state: CredentialDetection, window: DesktopWindow, capture_id: str) -> dict:
+def _image_record(pid: int, state: Observation, window: DesktopWindow, capture_id: str) -> dict:
     frame = main_frame(state.windows)
     return {
         "schema": IMAGE_SCHEMA,
@@ -1656,7 +2217,7 @@ class ModalVisualEvidence:
         self._lock = threading.Lock()
         self._closed = False
         self._deadline = deadline
-        self._pending: queue.Queue[tuple[int, CredentialDetection, float] | None] = queue.Queue(maxsize=1)
+        self._pending: queue.Queue[tuple[int, Observation, float] | None] = queue.Queue(maxsize=1)
         configured = directory if directory is not None else os.environ.get(IMAGE_DIRECTORY_ENV)
         self._directory = Path(configured) if configured else None
         atexit.register(self.close)
@@ -1688,7 +2249,7 @@ class ModalVisualEvidence:
         request.record["cleanup_state"] = reason
         return True
 
-    def enqueue(self, pid: int, state: CredentialDetection) -> None:
+    def enqueue(self, pid: int, state: Observation) -> None:
         """Nonblocking handoff of an immutable detection; no filesystem, subprocess or thread startup."""
         if state.modal is not None or state.dialog is None or state.dialog.verdict != VERDICT_DIALOG_UNREADABLE:
             return
@@ -1716,7 +2277,7 @@ class ModalVisualEvidence:
                     record = _image_record(pid, state, state.dialog.window, uuid.uuid4().hex.replace("0", "x"))
                     self._notice(record, "CAPTURE_FAILED")
 
-    def observe(self, pid: int, state: CredentialDetection, *, deadline: float) -> None:
+    def observe(self, pid: int, state: Observation, *, deadline: float) -> None:
         """Background-only acquisition. Startup and capture share the queued attempt's deadline."""
         window = state.dialog.window
         with self._lock:

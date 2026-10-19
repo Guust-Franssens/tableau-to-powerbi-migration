@@ -145,10 +145,10 @@ def make_oracle(execute: Callable[[str], list[dict]]) -> Callable[[str], dict]:
     return oracle
 
 
-def adomd_executor(port: int) -> Callable[[str], list[dict]]:
+def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[dict]]:
     """A real `execute(dax) -> rows` bound to one Power BI Desktop instance's local AS engine.
 
-    The connection is opened ONCE and held: opening a PBIP and refreshing it costs minutes, which is
+    The connection is opened lazily ONCE and held: opening a PBIP and refreshing it costs minutes, which is
     exactly why his contract offers `persistent_oracle`. Reuses `probe_desktop_query.discover_port`'s
     pid-scoped lookup rather than re-deriving it - that function refuses to widen to "any msmdsrv on
     the machine", which in a parallel batch is the difference between querying your model and
@@ -160,24 +160,66 @@ def adomd_executor(port: int) -> Callable[[str], list[dict]]:
     # pylint: disable-next=import-outside-toplevel
     import probe_desktop_query as pdq  # noqa: PLC0415
 
-    # pylint: disable-next=protected-access,no-member  # the skill's ADOMD loader; resolved at runtime
-    connection = pdq._load_adomd()(f"Data Source=localhost:{port}")  # noqa: SLF001
-    connection.Open()
+    # The root CLI lint pass cannot resolve the runtime-added skill path.
+    # pylint: disable-next=import-outside-toplevel,import-error
+    from _desktop_observer import legacy_token, print_dialog_diagnostic
+
+    connection = None
+    held_identity = None
+
+    def refuse_nonclean_desktop() -> None:
+        nonlocal held_identity
+        if pid is None:
+            return
+        identity = pdq.desktop_identity(pid, port)  # pylint: disable=no-member
+        if held_identity is None:
+            held_identity = identity
+        if identity != held_identity:
+            raise RuntimeError("Desktop query refused (PID_REUSED); source state unestablished")
+        state = pdq._credential_state(  # pylint: disable=protected-access,no-member
+            pid,
+            expected_process_start=held_identity.process_start,
+        )
+        token = legacy_token(state)
+        finding = state.modal or state.dialog
+        window = finding.window if finding else None
+        if token is not None:
+            if window is not None:
+                print_dialog_diagnostic(pid, window, stream=sys.stderr)
+            raise RuntimeError(f"Desktop query refused ({token}); inspect this Desktop locally")
 
     def execute(dax: str) -> list[dict]:
+        nonlocal connection
+        if connection is None:
+            refuse_nonclean_desktop()
+            # pylint: disable-next=protected-access,no-member
+            candidate = pdq._load_adomd()(f"Data Source=localhost:{port}")
+            try:
+                candidate.Open()
+            except Exception:  # pylint: disable=broad-exception-caught
+                candidate.Close()
+                raise
+            connection = candidate
         command = connection.CreateCommand()
         command.CommandText = dax
+        refuse_nonclean_desktop()
         reader = command.ExecuteReader()
         try:
             columns = [reader.GetName(i) for i in range(reader.FieldCount)]
             rows = []
             while reader.Read():
                 rows.append({c: _json_safe(reader.GetValue(i)) for i, c in enumerate(columns)})
+            if pid is not None and pdq.desktop_identity(pid, port) != held_identity:  # pylint: disable=no-member
+                raise RuntimeError("Desktop query refused (PID_REUSED); source state unestablished")
             return rows
         finally:
             reader.Close()
 
-    execute.close = connection.Close  # type: ignore[attr-defined]
+    def close() -> None:
+        if connection is not None:
+            connection.Close()
+
+    execute.close = close  # type: ignore[attr-defined]
     return execute
 
 
@@ -288,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
 
     port = args.port or pdq.discover_port(args.pid)  # pylint: disable=no-member  # resolved at runtime
     log.info("bound to Power BI Desktop local AS on port %s", port)
-    execute = adomd_executor(port)
+    execute = adomd_executor(port, args.pid)
     oracle = make_oracle(execute)
     try:
         if args.certify:
@@ -300,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
         return serve(oracle)
     finally:
         close = getattr(execute, "close", None)
-        if close:
+        if close is not None:
             close()
 
 

@@ -42,6 +42,7 @@ import package_role_identity as pri  # noqa: E402  # pylint: disable=wrong-impor
 import package_unit as pkg  # noqa: E402  # pylint: disable=wrong-import-position
 import set_data_folder as sdf  # noqa: E402  # pylint: disable=wrong-import-position
 from test_check_reference_readiness import (  # noqa: E402  # pylint: disable=wrong-import-position
+    seal,
     write_engine_report,
     write_handover,
     write_oracle,
@@ -54,6 +55,7 @@ UNIT = "Minimal"
 DS_UNIT = "Shared_Extract"
 WB_LUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 DS_LUID = "11111111-2222-3333-4444-555555555555"
+PUBLISHED_KEY = "sales-site/shared_sales"
 
 
 def _write_pbir(bundle: Path, unit: str, objects: list) -> None:
@@ -403,8 +405,68 @@ def _shared_ready_cohort(parent: Path) -> tuple[Path, Path]:
     return provider, consumer
 
 
+def _stamp_resolved_published_pair(provider: Path, consumer: Path) -> None:  # pylint: disable=too-many-locals
+    """Opt in downstream binding fixtures only; refuse conflicting identity rather than repair it."""
+    publication = {"id": DS_UNIT, "site": "sales-site", "key": PUBLISHED_KEY}
+    snapshots = []
+    for root, kind, luid in ((provider, "datasource", DS_LUID), (consumer, "workbook", WB_LUID)):
+        manifest = json.loads((root / "package-manifest.json").read_bytes())
+        assert manifest["kind"] == kind
+        asset = root / manifest["artifacts"]["asset"]
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+        provenance = json.loads((root / "source-provenance.json").read_bytes())
+        (row,) = [item for item in provenance["inputs"] if item["input"]["file"] == asset.name]
+        assert row["input"]["sha256"] == digest
+        origin = row["origin"]
+        assert origin[f"{kind}_luid"] == luid
+        assert origin["match"] == ("packaged_bytes" if kind == "datasource" else "sha256")
+        spec = json.loads((root / manifest["artifacts"]["migration_spec"]).read_bytes())
+        assert spec["source"]["file_name"] == asset.name
+        if kind == "datasource":
+            assert manifest["unit"] == DS_UNIT
+            assert "published_dependencies" not in origin
+            (source,) = spec["data_sources"]
+            assert source.get("published_datasource") in (None, publication)
+            metadata = publication
+        else:
+            ((ordinal, source),) = [
+                (index, item) for index, item in enumerate(spec["data_sources"]) if "published_datasource" in item
+            ]
+            metadata = {**publication, "luid": DS_LUID}
+            assert source["published_datasource"] in ({"luid": DS_LUID}, metadata)
+            authority = {
+                "schema": "tableau-published-dependencies/v1",
+                "source_sha256": digest,
+                "workbook_luid": origin["workbook_luid"],
+                "source_match": "sha256",
+                "rows": [
+                    {
+                        "source_ordinal": ordinal,
+                        "published_key": PUBLISHED_KEY,
+                        "state": "resolved",
+                        "candidate_count": 1,
+                        "datasource_luid": DS_LUID,
+                    }
+                ],
+            }
+            # S2's fixture already carries P. Do not overwrite a contradictory or mistyped block.
+            if "published_dependencies" in origin:
+                assert json.dumps(origin["published_dependencies"], sort_keys=True) == json.dumps(
+                    authority, sort_keys=True
+                )
+            origin["published_dependencies"] = authority
+        source["published_datasource"] = metadata
+        snapshots.append((root, manifest, spec, provenance))
+    # Validate both identities before writing either package, then seal all fixture changes last.
+    for root, manifest, spec, provenance in snapshots:
+        (root / manifest["artifacts"]["migration_spec"]).write_text(json.dumps(spec), encoding="utf-8")
+        (root / "source-provenance.json").write_text(json.dumps(provenance), encoding="utf-8")
+        seal(root, **manifest)
+        assert pri.verify_s1(root).integrity.is_clean
+
+
 def _bound_shared_cohort(parent: Path) -> tuple[Path, Path]:
-    """A real BOUND local datasource and a report-only workbook selected by its declared LUID."""
+    """A real BOUND local datasource and a report-only workbook with source-bound published authority."""
     import test_check_reference_readiness as source_fixtures
 
     provider = _binding_package(parent / "selected", datasource=True)
@@ -433,7 +495,7 @@ def _bound_shared_cohort(parent: Path) -> tuple[Path, Path]:
         + hashlib.sha256(b"phase1-data-access/provider-unit/v1\0" + DS_UNIT.encode()).hexdigest()
     )
     projection_path.write_text(json.dumps(projection), encoding="utf-8")
-    source_fixtures._reseal_start_fixture(consumer)
+    _stamp_resolved_published_pair(provider, consumer)
     assert _binding_cli(provider)["inspection"]["state"] == "BOUND"
     assert _binding_cli(consumer, "--provider-package", str(provider))["inspection"]["state"] == "NOT_APPLICABLE"
     return provider, consumer
@@ -698,8 +760,11 @@ def test_start_ready_original_proof_and_explicit_authorization_keep_their_own_ce
     bundle, oracle, _ = _bundle(tmp_path / "source", covered=None, datasource_only=True)
     asset = bundle.parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
     asset.write_text(
-        "<datasource name='Shared'><connection class='sqlserver' server='source.example' dbname='db'>"
-        "<relation name='Rows' table='[Rows]' type='table'/></connection></datasource>",
+        "<datasource name='Shared'><connection class='federated'><named-connections>"
+        "<named-connection name='orders-leg'><connection class='sqlserver' server='source.example' "
+        "dbname='db' schema='dbo'/></named-connection></named-connections>"
+        "<relation name='Orders' table='[dbo].[Orders]' connection='orders-leg' type='table'/>"
+        "</connection></datasource>",
         encoding="utf-8",
     )
     _write_input_manifest(bundle, sorted((bundle.parent / "assets").iterdir()))
@@ -721,7 +786,7 @@ def test_start_ready_original_proof_and_explicit_authorization_keep_their_own_ce
     )
     package = out / DS_UNIT
     stored = json.loads((package / "data-access.json").read_bytes())
-    assert stored["source_keys"] == ["source-key:ab1baa4b3f77bb70"]
+    assert stored["source_keys"] == [authority.KEY]
     assert stored["state"] == ("authorized_model_only" if authorized else "live_data_ok")
     assert _binding_cli(package)["exit_code"] == 0
     before = {str(path.relative_to(original)): path.read_bytes() for path in original.rglob("*") if path.is_file()}

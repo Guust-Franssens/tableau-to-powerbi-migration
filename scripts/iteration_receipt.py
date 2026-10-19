@@ -26,6 +26,7 @@ import math
 import os
 import posixpath
 import re
+import sys
 import subprocess
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -76,6 +77,22 @@ MEASUREMENT_REFUSALS = (
     "TOOL_UNAVAILABLE",
     "MODEL_LOCK_TIMEOUT",
 )
+
+
+def observer_measurement_refusal(code: str) -> str:
+    """Adapt trusted runtime codes only; the persisted v2/v3 vocabulary is deliberately unchanged."""
+    skill_scripts = Path(__file__).resolve().parents[1] / ".github" / "skills" / "pbip-model-refresh" / "scripts"
+    if str(skill_scripts) not in sys.path:
+        sys.path.insert(0, str(skill_scripts))
+    # pylint: disable=import-outside-toplevel,import-error
+    from _desktop_observer import measurement_refusal
+
+    adapted = measurement_refusal(code)
+    if adapted not in MEASUREMENT_REFUSALS:
+        raise ValueError("not a measurement refusal")
+    return adapted
+
+
 MAX_SECONDS = 3600
 MAX_FRAMES = 1_000_000
 MAX_COUNT = (1 << 53) - 1

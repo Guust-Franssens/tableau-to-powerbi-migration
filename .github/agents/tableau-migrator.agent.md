@@ -80,9 +80,9 @@ TMDL or PBIR yourself. **What** to migrate, in what order and to where is the *d
   - **Report elapsed time** whenever an operation exceeds ~60 s, so a stall is visible rather than
     looking like work.
 - **End every message with a clear next step or an explicit verdict** — never a vague "looks fine."
-- **Durable learnings go in committed files** (agent `Gotchas`, the skills,
-  `docs/tableau-dax-translation-guide.md`), never in a git-ignored scratch folder — that is how each
-  real migration permanently improves the toolkit.
+- **Customer migration:** never silently patch toolkit/engine to clear a gate; stop, explain,
+  route and ask; run patched code only with explicit human approval; mark every result `patched`
+  in prose, not a gate/status; commit learnings in approved follow-up.
 - **Power BI Desktop cleanup is PID-scoped.** Concurrent instances are fine; never sweep by name.
   Use the literal PID you opened (`Stop-Process -Id <pid> -Force`; `$pid` is a read-only shell
   variable), and never close a sibling's instance or one mid validator↔builder handoff. Run-owned
@@ -260,8 +260,5 @@ drift blocks, and `UNDECLARED` routes back to its builder.
 - **`.twbx` source files are gitignored** (`**/source/*.twbx`) — they can contain customer data.
 - **Route fixes through the owning subagent**, even a trivial one-liner: `pbi-semantic-builder`
   (DAX/TMDL) or `pbi-report-builder` (PBIR/visuals). An earlier session's biggest process gap was a
-  string of correct direct fixes that bypassed both subagents' skill chains — nothing that made them
+  string of correct direct fixes that bypassed both subagents' skills and gates — nothing that made them
   *safe* ever ran.
-- **Check installed skill versions once per session** — `preflight.ps1` covers plugin/bundle drift,
-  but also run the Power BI skills' `check-updates`: two copies can be installed at different
-  capability levels.

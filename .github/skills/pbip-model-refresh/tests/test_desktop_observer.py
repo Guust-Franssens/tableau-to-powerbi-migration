@@ -10,10 +10,8 @@ import threading
 import time
 import ctypes
 import hashlib
-import inspect
 import json
 import os
-import re
 import shutil
 import struct
 import subprocess
@@ -26,11 +24,11 @@ from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
-import _credential_modal
+import _desktop_observer
 import probe_desktop_query
 import refresh_pbip_model
-from _credential_modal import (
-    CredentialDetection,
+from _desktop_observer import (
+    Observation,
     CredentialModal,
     CredentialUnknownError,
     DESKTOP_MAIN_CLASS_PREFIX,
@@ -41,10 +39,264 @@ from _credential_modal import (
     DesktopWindow,
     _enumerate_pid_windows_with_count,
     classify_dialog,
-    inspect_credential_modal,
+    inspect_desktop_observer,
     join_with_credential_poll,
 )
 from refresh_pbip_model import CredentialMissingError, refresh
+
+
+def diagnostic_payload(kind: str = "privacy_warning", *, pid: int = 111, hwnd: int = 222) -> dict:
+    """Observer-specified fixtures, independent of the product's template table."""
+    if kind == "privacy_warning":
+        title = "Potential security risk"
+        instruction = (
+            "This file uses multiple data sources. Information in one data source might be shared with other "
+            "data sources without your knowledge. Only open this file if you trust the sender. "
+            "Do you want to open this file?"
+        )
+        buttons = ["OK", "Cancel"]
+    else:
+        title = "Something went wrong"
+        instruction = "Could not find a PackageSession for the given sessionID."
+        buttons = ["Close", "Copy details to clipboard", "Report this issue", "Cancel"]
+    return {
+        "Title": title,
+        "TargetPid": pid,
+        "TargetHwnd": hwnd,
+        "TargetBefore": True,
+        "TargetAfter": True,
+        "Truncated": False,
+        "PatternsIncomplete": False,
+        "Items": [
+            {"Text": instruction, "Role": "ControlType.Text", "Source": "Name"},
+            *[{"Text": button_text, "Role": "ControlType.Button", "Source": "Name"} for button_text in buttons],
+        ],
+    }
+
+
+@pytest.mark.parametrize("module", [refresh_pbip_model, probe_desktop_query])
+@pytest.mark.parametrize("status", ["OBSERVED", "WITHHELD", "CANNOT_READ"])
+@pytest.mark.parametrize(
+    "token", ["DIALOG_UNREADABLE", "DIALOG_UNRECOGNIZED", "DIALOG_NEEDS_HUMAN", "REFRESH_IN_PROGRESS"]
+)
+def test_cli_diagnostic_preserves_detector_token_and_exit(monkeypatch, capsys, module, status: str, token: str) -> None:
+    """No diagnostic result may reclassify, suppress or clear the pre-read refusal."""
+    window = DesktopWindow("PRIVATE_TEST_VALUE", "", 100, 100, hwnd=222)
+    kind = next(key for key, value in _desktop_observer.DIALOG_KIND_VERDICTS.items() if value == token)
+    finding = DialogFinding(kind, token, window, "PRIVATE_TEST_VALUE")
+    calls = []
+
+    def diagnose(pid: int, target):
+        calls.append((pid, target))
+        return status, "privacy_warning" if status == "OBSERVED" else None, "template_match"
+
+    monkeypatch.setattr(_desktop_observer, "diagnose_dialog", diagnose)
+    monkeypatch.setattr(module, "_credential_state", lambda *_a, **_kw: Observation(dialog=finding))
+    monkeypatch.setattr(module, "discover_port", lambda *_a: pytest.fail("refused dialog reached port discovery"))
+    if module is refresh_pbip_model:
+        monkeypatch.setattr(module, "cache_file", lambda *_a: None)
+    code = module.main(["--pid", "111"])
+    out = capsys.readouterr().out
+    prefix = "REFRESH" if module is refresh_pbip_model else "PREFLIGHT"
+    assert code == 3, "diagnostic enrichment must preserve the existing refusal exit"
+    assert out.splitlines()[0].startswith(f"{prefix}: {token} "), "diagnostic changed the detector token"
+    assert calls == [(111, window)] and out.count("DIALOG_DIAGNOSTIC ") == 1
+    assert "PRIVATE_TEST_VALUE" not in out and "DATA_OK" not in out
+
+
+def test_query_poll_diagnostic_is_terminal_and_once(monkeypatch, capsys) -> None:
+    """A late query refusal is enriched only when the polling loop chooses to return."""
+    # The canonical bundled module is selected at runtime, not the root CLI shim.
+    # pylint: disable=no-member
+    states = iter([Observation(), dialog_state()])
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda *_a, **_kw: next(states))
+    monkeypatch.setattr(
+        probe_desktop_query.threading,
+        "Thread",
+        lambda **_kw: SimpleNamespace(start=lambda: None, is_alive=lambda: True, join=lambda _seconds: None),
+    )
+    calls = []
+
+    def diagnose(pid: int, window):
+        calls.append((pid, window))
+        return "WITHHELD", None, "unknown_template"
+
+    monkeypatch.setattr(_desktop_observer, "diagnose_dialog", diagnose)
+    assert probe_desktop_query._probe_with_credential_poll(111, 1234, None) == 3
+    out = capsys.readouterr().out
+    assert "PREFLIGHT: DIALOG_UNREADABLE" in out and len(calls) == 1
+
+
+def test_fixed_diagnostics_and_numeric_metadata_are_marker_free(monkeypatch, capsys) -> None:
+    """These are the parent's substring vocabulary, duplicated so the bundle remains portable."""
+    markers = (
+        "credential",
+        "sign in",
+        "signed in",
+        "authentication",
+        "unauthorized",
+        "access token",
+        "login",
+        "oauth",
+        "10054",
+        "forcibly closed",
+        "unrecognizable response",
+        "403",
+        "forbidden",
+        "access denied",
+        "permission denied",
+        "insufficient privilege",
+        "does not have permission",
+        "not authorized",
+        "not found",
+        "does not exist",
+        "cannot be found",
+        "invalid object name",
+        "table_or_view_not_found",
+        "unknown table",
+        "no such table",
+        "match any rows",
+        "no catalog",
+        "wrong_model",
+        "identity unverified",
+    )
+    for message in _desktop_observer._DIALOG_MESSAGES.values():
+        assert not any(marker in message.lower() for marker in markers), "fixed diagnostic carried a parent marker"
+    _desktop_observer.print_dialog_diagnostic(403, DesktopWindow("", "", 0, 0, hwnd=10054))
+    output = capsys.readouterr().out
+    assert not any(marker in output.lower() for marker in markers), "numeric metadata fabricated a verdict"
+    record = json.loads(output.removeprefix("DIALOG_DIAGNOSTIC "))
+    assert (record["pid"], record["hwnd"]) == ("403", "10054")
+
+
+_DIAGNOSTIC_WINDOW = r"""
+param([string]$Fixture, [string]$ReadyFile)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+$data = Get-Content -LiteralPath $Fixture -Raw | ConvertFrom-Json
+$frame = [System.Windows.Window]::new()
+$frame.Title = 'Test-owned frame'
+$frame.ShowActivated = $false
+$refresh = [System.Windows.Controls.Button]::new()
+$refresh.Content = 'Refresh'
+$refresh.Add_Click({ throw 'diagnostic harvest invoked Refresh' })
+$frame.Content = $refresh
+$frame.Show()
+$modal = [System.Windows.Window]::new()
+$modal.Title = $data.Title
+$modal.Width = 680; $modal.Height = 400
+$modal.WindowStyle = 'None'
+$modal.ShowActivated = $false
+$modal.Owner = $frame
+$panel = [System.Windows.Controls.StackPanel]::new()
+foreach ($item in $data.Items) {
+  if ($item.Role -eq 'ControlType.Button') {
+    $control = [System.Windows.Controls.Button]::new()
+    $control.Content = $item.Text
+    $control.Add_Click({ throw 'diagnostic harvest clicked a button' })
+  } else {
+    $control = [System.Windows.Controls.TextBlock]::new()
+    $control.Text = $item.Text
+    $control.TextWrapping = 'Wrap'
+  }
+  $null = $panel.Children.Add($control)
+}
+$modal.Content = $panel
+$modal.Add_ContentRendered({
+  $handle = [System.Windows.Interop.WindowInteropHelper]::new($modal).Handle.ToInt64()
+  [System.IO.File]::WriteAllText($ReadyFile, [string]$handle)
+  [Console]::WriteLine('READY')
+})
+$null = $modal.ShowDialog()
+"""
+
+
+def _diagnostic_window_command(tmp_path: Path, kind: str) -> list[str]:
+    """Prepare a test-owned window using the independent diagnostic fixtures."""
+    script, fixture = (tmp_path / name for name in ("dialog.ps1", "fixture.json"))
+    script.write_text(_DIAGNOSTIC_WINDOW, encoding="utf-8")
+    fixture.write_text(json.dumps(diagnostic_payload(kind)), encoding="utf-8")
+    return [
+        _powershell(),
+        "-Sta",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-Fixture",
+        str(fixture),
+    ]
+
+
+def _assert_test_owned_diagnostic_window(child: subprocess.Popen, ready: Path, kind: str) -> None:
+    """Bound startup, assert read-only diagnosis, and reap only the exact test-owned child."""
+    deadline = threading.Timer(10, child.kill)
+    try:
+        deadline.start()
+        try:
+            startup = child.stdout.readline().strip()
+        finally:
+            deadline.cancel()
+            deadline.join()
+        assert startup == b"READY", (
+            f"test-owned diagnostic window startup failed before READY "
+            f"(pid={child.pid}, exit={child.poll()}, output={startup!r})"
+        )
+        hwnd = int(ready.read_text(encoding="utf-8"))
+        state = _desktop_observer.observe(child.pid)
+        assert state.dialog is not None and state.dialog.window.hwnd == hwnd
+        held_start = state.process_started_at
+        exact = _desktop_observer.observe(child.pid, hwnd=hex(hwnd), expected_process_start=held_start)
+        assert exact.state == state.state and exact.process_started_at == held_start
+        changed = _desktop_observer.observe(
+            child.pid,
+            hwnd=hex(hwnd),
+            expected_process_start=str(int(held_start) + 1),
+        )
+        assert changed.state == "UNREADABLE_DIALOG" and changed.reason == "target_changed"
+        wrong_scope = _desktop_observer.observe(os.getpid(), hwnd=hex(hwnd))
+        assert wrong_scope.state == "UNREADABLE_DIALOG" and wrong_scope.reason == "target_changed"
+        observed = _desktop_observer.diagnose_dialog(child.pid, state.dialog.window)
+        assert observed == ("OBSERVED", kind, "template_match"), observed
+        # A real wrong-PID attempt must never borrow the same window's valid template.
+        assert _desktop_observer.diagnose_dialog(child.pid + 1, state.dialog.window)[0] == "CANNOT_READ"
+        assert child.poll() is None, "the read-only child must leave its target window running"
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=3)
+
+
+# Keep one function per GUI case and the real -ReadyFile argument at Popen for the AST marker census.
+@pytest.mark.gui
+@pytest.mark.serial
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
+def test_diagnostic_harvest_only_mode_reads_test_owned_privacy_warning(tmp_path: Path) -> None:
+    """Read the full privacy template without finding/clicking the owner's Refresh button."""
+    ready = tmp_path / "hwnd.txt"
+    with subprocess.Popen(
+        [*_diagnostic_window_command(tmp_path, "privacy_warning"), "-ReadyFile", str(ready)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    ) as child:
+        _assert_test_owned_diagnostic_window(child, ready, "privacy_warning")
+
+
+@pytest.mark.gui
+@pytest.mark.serial
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
+def test_diagnostic_harvest_only_mode_reads_test_owned_package_session(tmp_path: Path) -> None:
+    """Read the full session template without finding/clicking the owner's Refresh button."""
+    ready = tmp_path / "hwnd.txt"
+    with subprocess.Popen(
+        [*_diagnostic_window_command(tmp_path, "package_session"), "-ReadyFile", str(ready)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    ) as child:
+        _assert_test_owned_diagnostic_window(child, ready, "package_session")
 
 
 class _NativeCall:
@@ -99,7 +351,7 @@ class _ImageWin32:
         return self.thread
 
     def GetWindow(self, _hwnd, flag):
-        assert flag == _credential_modal.GW_OWNER
+        assert flag == _desktop_observer.GW_OWNER
         return self.owner
 
     def GetForegroundWindow(self):
@@ -171,18 +423,18 @@ def visual_runtime(monkeypatch, tmp_path):
     wire_records = []
     children = []
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv(_credential_modal.IMAGE_DIRECTORY_ENV, str(tmp_path))
-    monkeypatch.setattr(_credential_modal, "_evidence_directory", lambda directory, _name: directory)
-    monkeypatch.setattr(_credential_modal.sys, "platform", "win32")
-    monkeypatch.setattr(_credential_modal, "_image_user32", lambda: api)
+    monkeypatch.setenv(_desktop_observer.IMAGE_DIRECTORY_ENV, str(tmp_path))
+    monkeypatch.setattr(_desktop_observer, "_evidence_directory", lambda directory, _name: directory)
+    monkeypatch.setattr(_desktop_observer.sys, "platform", "win32")
+    monkeypatch.setattr(_desktop_observer, "_image_user32", lambda: api)
     monkeypatch.setattr(
-        _credential_modal.ctypes,
+        _desktop_observer.ctypes,
         "WinDLL",
         lambda name, **_k: {"gdi32": api.gdi, "dwmapi": api.dwm}[name],
         raising=False,
     )
-    monkeypatch.setattr(_credential_modal, "_write_private_image", api.write)
-    monkeypatch.setattr(_credential_modal.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(_desktop_observer, "_write_private_image", api.write)
+    monkeypatch.setattr(_desktop_observer.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
     real_print = print
 
     class Lease:
@@ -205,7 +457,7 @@ def visual_runtime(monkeypatch, tmp_path):
         assert delete_on_close is True
         return Lease(path)
 
-    monkeypatch.setattr(_credential_modal, "_open_private_image", open_lease)
+    monkeypatch.setattr(_desktop_observer, "_open_private_image", open_lease)
 
     def observe_print(message, **kwargs):
         real_print(message, **kwargs)
@@ -214,13 +466,13 @@ def visual_runtime(monkeypatch, tmp_path):
             wire_records.append(message)
             noticed.set()
 
-    monkeypatch.setattr(_credential_modal, "print", observe_print, raising=False)
+    monkeypatch.setattr(_desktop_observer, "print", observe_print, raising=False)
 
     class ImageChild:
         """Popen boundary double; communicate runs the real exact-target acquisition body."""
 
         def __init__(self, argv, **kwargs) -> None:
-            assert Path(argv[1]) == Path(_credential_modal.__file__).resolve()
+            assert Path(argv[1]) == Path(_desktop_observer.__file__).resolve()
             assert kwargs["creationflags"] == 0x08000000
             assert kwargs["stderr"] == subprocess.DEVNULL
             self.argv = argv
@@ -231,12 +483,12 @@ def visual_runtime(monkeypatch, tmp_path):
             children.append(self)
 
         def communicate(self, timeout):
-            assert 0 < timeout <= _credential_modal.IMAGE_CAPTURE_SECONDS
+            assert 0 < timeout <= _desktop_observer.IMAGE_CAPTURE_SECONDS
             pid, hwnd, owner = map(int, self.argv[2:5])
             window = DesktopWindow("", "", 0, 0, hwnd=hwnd, owner_hwnd=owner, owner_enabled=False)
             try:
-                payload = _credential_modal._capture_exact_image(pid, window, self.cwd / self.argv[5], existing=True)
-            except _credential_modal._ImageUnavailable as exc:
+                payload = _desktop_observer._capture_exact_image(pid, window, self.cwd / self.argv[5], existing=True)
+            except _desktop_observer._ImageUnavailable as exc:
                 code = str(exc)
                 payload = {"status": code, "ownership_checks": exc.checks}
             else:
@@ -257,7 +509,7 @@ def visual_runtime(monkeypatch, tmp_path):
             assert self.finished.wait(timeout), "child teardown must rendezvous before image cleanup"
             return self.returncode
 
-    monkeypatch.setattr(_credential_modal.subprocess, "Popen", ImageChild)
+    monkeypatch.setattr(_desktop_observer.subprocess, "Popen", ImageChild)
     return SimpleNamespace(
         api=api, noticed=noticed, records=records, wires=wire_records, children=children, root=tmp_path
     )
@@ -283,7 +535,7 @@ def dpi_runtime(visual_runtime):
 
 def _visual_child_result(runtime, capsys):
     basename = "_ui-image-" + "a" * 32 + ".png"
-    result = _credential_modal._image_child(["111", str(DIALOG_HWND), str(MAIN_HWND), basename])
+    result = _desktop_observer._image_child(["111", str(DIALOG_HWND), str(MAIN_HWND), basename])
     return result, json.loads(capsys.readouterr().out), runtime.root / basename
 
 
@@ -380,7 +632,7 @@ def test_visual_dpi_physical_extent_allows_invisible_borders(dpi_runtime, origin
     api.origin = origin
     api.extent = (643, 346)
     api.physical_bounds = (origin[0] + 8, origin[1] + 8, origin[0] + 635, origin[1] + 338)
-    assert _credential_modal._image_extent(api, DIALOG_HWND) == (643, 346), (
+    assert _desktop_observer._image_extent(api, DIALOG_HWND) == (643, 346), (
         "PrintWindow needs the whole physical window, not a visible-frame-sized crop that drops resize borders"
     )
 
@@ -391,7 +643,7 @@ def test_visual_native_file_is_private_readable_and_never_overwrites(tmp_path) -
     path = tmp_path / "_ui-image-native.png"
     expected = b"synthetic image control"
     try:
-        _credential_modal._write_private_image(path, expected)
+        _desktop_observer._write_private_image(path, expected)
         assert path.read_bytes() == expected
         escaped = str(path).replace("'", "''")
         command = (
@@ -414,8 +666,8 @@ def test_visual_native_file_is_private_readable_and_never_overwrites(tmp_path) -
         assert done.returncode == 0, "native ACL read failed"
         actual = json.loads(done.stdout)
         assert actual == {"protected": True, "sids": ["S-1-3-4"], "inherited": [False]}
-        with pytest.raises(_credential_modal._ImageUnavailable, match="WRITE_FAILED"):
-            _credential_modal._write_private_image(path, b"must not overwrite")
+        with pytest.raises(_desktop_observer._ImageUnavailable, match="WRITE_FAILED"):
+            _desktop_observer._write_private_image(path, b"must not overwrite")
         assert path.read_bytes() == expected
     finally:
         path.unlink(missing_ok=True)
@@ -423,7 +675,7 @@ def test_visual_native_file_is_private_readable_and_never_overwrites(tmp_path) -
 
 def test_visual_child_bad_arguments_cannot_echo_private_data_or_create_a_file(tmp_path) -> None:
     done = subprocess.run(
-        [sys.executable, str(Path(_credential_modal.__file__)), "PRIVATE authentication C:\\source"],
+        [sys.executable, str(Path(_desktop_observer.__file__)), "PRIVATE authentication C:\\source"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -522,8 +774,8 @@ def test_visual_native_lease_allows_shared_reader_and_dies_with_its_process(tmp_
     path = tmp_path / "_ui-image-process-exit.png"
     script = (
         "import sys,time; from pathlib import Path; "
-        f"sys.path.insert(0,{str(Path(_credential_modal.__file__).parent)!r}); "
-        "import _credential_modal as m; "
+        f"sys.path.insert(0,{str(Path(_desktop_observer.__file__).parent)!r}); "
+        "import _desktop_observer as m; "
         "lease=m._open_private_image(Path(sys.argv[1]),delete_on_close=True); "
         "lease.write(m._image_png(2,2,b'\\0\\0\\0'*2+b'\\xff\\xff\\xff'*2)); lease.flush(); "
         "print('READY',flush=True); time.sleep(60)"
@@ -534,7 +786,7 @@ def test_visual_native_lease_allows_shared_reader_and_dies_with_its_process(tmp_
         with _ready_native_process(["node", "-e", _NODE_IMAGE_READER], "reader") as reader:
             with _ready_native_process([sys.executable, "-c", script, str(path)], "lease") as child:
                 observed = _read_native_image(reader, path)
-                expected = _credential_modal._image_png(2, 2, b"\0\0\0" * 2 + b"\xff\xff\xff" * 2)
+                expected = _desktop_observer._image_png(2, 2, b"\0\0\0" * 2 + b"\xff\xff\xff" * 2)
                 assert observed == {"bytes": len(expected), "sha256": hashlib.sha256(expected).hexdigest()}
                 child.kill()
                 child.wait(timeout=3)
@@ -549,7 +801,7 @@ def test_visual_native_lease_allows_shared_reader_and_dies_with_its_process(tmp_
 @pytest.mark.skipif(sys.platform != "win32", reason="shared-delete handle behavior is Windows-only")
 def test_visual_native_external_handling_marks_file_for_deletion(tmp_path) -> None:
     path = tmp_path / "_ui-image-handled.png"
-    with _credential_modal._open_private_image(path, delete_on_close=True) as lease:
+    with _desktop_observer._open_private_image(path, delete_on_close=True) as lease:
         lease.write(b"synthetic")
         lease.flush()
         path.unlink()
@@ -562,31 +814,31 @@ def test_visual_private_stream_requires_real_windows_support(monkeypatch, tmp_pa
     def no_native_call(*_args, **_kwargs):
         pytest.fail("unsupported private-file flags must refuse before any Windows API call")
 
-    monkeypatch.setattr(_credential_modal.ctypes, "WinDLL", no_native_call, raising=False)
+    monkeypatch.setattr(_desktop_observer.ctypes, "WinDLL", no_native_call, raising=False)
     if missing == "platform":
-        monkeypatch.setattr(_credential_modal.sys, "platform", "linux")
+        monkeypatch.setattr(_desktop_observer.sys, "platform", "linux")
     else:
-        monkeypatch.setattr(_credential_modal.sys, "platform", "win32")
-        monkeypatch.delattr(_credential_modal.os, missing, raising=False)
-    with pytest.raises(_credential_modal._ImageUnavailable, match="UNSUPPORTED"):
-        _credential_modal._open_private_image(tmp_path / "_ui-image-unsupported.png")
+        monkeypatch.setattr(_desktop_observer.sys, "platform", "win32")
+        monkeypatch.delattr(_desktop_observer.os, missing, raising=False)
+    with pytest.raises(_desktop_observer._ImageUnavailable, match="UNSUPPORTED"):
+        _desktop_observer._open_private_image(tmp_path / "_ui-image-unsupported.png")
     assert not list(tmp_path.iterdir())
 
 
 def test_visual_enqueue_is_bounded_immutable_and_has_no_acquisition_side_effects(monkeypatch, tmp_path) -> None:
     # Freeze the consumer at its startup boundary so the queue, not a scheduler race, is the oracle.
-    monkeypatch.setattr(_credential_modal.threading.Thread, "start", lambda _self: None)
-    evidence = _credential_modal.ModalVisualEvidence(tmp_path)
+    monkeypatch.setattr(_desktop_observer.threading.Thread, "start", lambda _self: None)
+    evidence = _desktop_observer.ModalVisualEvidence(tmp_path)
 
     def forbidden(*_args, **_kwargs):
         pytest.fail("enqueue must not traverse storage, inspect pixels, launch a process or start a thread")
 
-    monkeypatch.setattr(_credential_modal, "_evidence_directory", forbidden)
-    monkeypatch.setattr(_credential_modal, "_image_user32", forbidden)
-    monkeypatch.setattr(_credential_modal.subprocess, "Popen", forbidden)
-    monkeypatch.setattr(_credential_modal.threading.Thread, "start", forbidden)
-    original = inspect_credential_modal(111, lambda _pid: [owned_dialog(), main_window()])
-    replacement = inspect_credential_modal(111, lambda _pid: [owned_dialog(hwnd=DIALOG_HWND + 9), main_window()])
+    monkeypatch.setattr(_desktop_observer, "_evidence_directory", forbidden)
+    monkeypatch.setattr(_desktop_observer, "_image_user32", forbidden)
+    monkeypatch.setattr(_desktop_observer.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(_desktop_observer.threading.Thread, "start", forbidden)
+    original = inspect_desktop_observer(111, lambda _pid: [owned_dialog(), main_window()])
+    replacement = inspect_desktop_observer(111, lambda _pid: [owned_dialog(hwnd=DIALOG_HWND + 9), main_window()])
     try:
         evidence.enqueue(111, original)
         evidence.enqueue(222, replacement)
@@ -615,9 +867,9 @@ def test_visual_directory_must_be_ignored_inside_a_checkout(tmp_path) -> None:
     tracked = repo / "source"
     tracked.mkdir()
     basename = "_ui-image-" + "a" * 32 + ".png"
-    assert _credential_modal._evidence_directory(safe, basename) == safe.resolve()
-    with pytest.raises(_credential_modal._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
-        _credential_modal._evidence_directory(tracked, basename)
+    assert _desktop_observer._evidence_directory(safe, basename) == safe.resolve()
+    with pytest.raises(_desktop_observer._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
+        _desktop_observer._evidence_directory(tracked, basename)
     assert not list(repo.rglob("*.png"))
 
 
@@ -630,13 +882,13 @@ def test_visual_directory_accepts_scratch_with_unrelated_ancestor_siblings(tmp_p
     unrelated = drive / sibling
     unrelated.mkdir()
     basename = "_ui-image-" + "a" * 32 + ".png"
-    assert _credential_modal._evidence_directory(safe, basename) == safe.resolve(), (
+    assert _desktop_observer._evidence_directory(safe, basename) == safe.resolve(), (
         "an unrelated ancestor sibling must not make private scratch an artifact"
     )
     contained = unrelated / "scratch"
     contained.mkdir()
-    with pytest.raises(_credential_modal._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
-        _credential_modal._evidence_directory(contained, basename)
+    with pytest.raises(_desktop_observer._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
+        _desktop_observer._evidence_directory(contained, basename)
     assert not list(tmp_path.rglob("*.png"))
 
 
@@ -647,8 +899,8 @@ def test_visual_directory_accepts_scratch_with_unrelated_ancestor_siblings(tmp_p
 def test_visual_directory_refuses_artifact_trees(tmp_path, artifact) -> None:
     directory = tmp_path / artifact / "scratch"
     directory.mkdir(parents=True)
-    with pytest.raises(_credential_modal._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
-        _credential_modal._evidence_directory(directory, "_ui-image-" + "a" * 32 + ".png")
+    with pytest.raises(_desktop_observer._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
+        _desktop_observer._evidence_directory(directory, "_ui-image-" + "a" * 32 + ".png")
     assert not list(tmp_path.rglob("*.png"))
 
 
@@ -664,11 +916,12 @@ def test_visual_directory_refuses_renamed_artifacts(tmp_path, marker, checkout) 
         assert result.returncode == 0
         (unit / ".gitignore").write_text("/scratch/\n", encoding="utf-8")
     for destination in (unit, directory):
-        with pytest.raises(_credential_modal._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
-            _credential_modal._evidence_directory(destination, "_ui-image-" + "a" * 32 + ".png")
+        with pytest.raises(_desktop_observer._ImageUnavailable, match="UNSAFE_EVIDENCE_DIR"):
+            _desktop_observer._evidence_directory(destination, "_ui-image-" + "a" * 32 + ".png")
 
 
 @pytest.mark.gui
+@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "win32", reason="native PrintWindow control is Windows-only")
 def test_visual_native_background_capture_reaches_production_without_focus(monkeypatch, tmp_path) -> None:
     """Real child/GDI/ACL/PNG against a physical-frame oracle; NOACTIVATE, never Desktop."""
@@ -772,14 +1025,14 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
         physical_size = (physical.right - physical.left, physical.bottom - physical.top)
         assert physical_size == (627, 330), "the independent DWM oracle must describe the complete fixture"
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv(_credential_modal.IMAGE_DIRECTORY_ENV, str(tmp_path))
-        monkeypatch.setattr(_credential_modal, "print", record, raising=False)
+        monkeypatch.setenv(_desktop_observer.IMAGE_DIRECTORY_ENV, str(tmp_path))
+        monkeypatch.setattr(_desktop_observer, "print", record, raising=False)
         monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: ParkedConnection(released))
         monkeypatch.setattr(refresh_pbip_model, "_catalog_id", lambda _conn: "catalog-native")
         monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.02)
 
-        def state(pid, *, in_flight=False):
-            return inspect_credential_modal(pid, operation_in_flight=True) if in_flight else CredentialDetection()
+        def state(pid, *, in_flight=False, **_kwargs):
+            return inspect_desktop_observer(pid) if in_flight else Observation()
 
         monkeypatch.setattr(refresh_pbip_model, "_credential_state", state)
 
@@ -802,7 +1055,7 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
         assert thread.is_alive()
         assert ui.GetForegroundWindow() == before, "capture must not alter foreground"
         with (
-            _credential_modal._open_private_image(tmp_path / notices[0]["path"], existing=True) as stream,
+            _desktop_observer._open_private_image(tmp_path / notices[0]["path"], existing=True) as stream,
             image_decoder.open(stream) as image,
         ):
             outside, inside = image.getpixel((0, 0)), image.getpixel((10, 10))
@@ -822,7 +1075,8 @@ def test_visual_native_background_capture_reaches_production_without_focus(monke
     finally:
         released.set()
         if thread is not None:
-            deadline = time.monotonic() + 3
+            # Settle the started bounded native/UIA helper (<=8s), not just the former Win32 call.
+            deadline = time.monotonic() + 12
             while thread.is_alive() and time.monotonic() < deadline:
                 # The production Win32 text check can send messages to this test's UI thread too.
                 pump()
@@ -994,9 +1248,9 @@ def modal() -> CredentialModal:
     )
 
 
-def modal_state() -> CredentialDetection:
-    """CredentialDetection containing the standard modal."""
-    return CredentialDetection(modal=modal())
+def modal_state() -> Observation:
+    """Observation containing the standard modal."""
+    return Observation(modal=modal())
 
 
 def unreadable_dialog_window() -> DesktopWindow:
@@ -1018,9 +1272,9 @@ def dialog_finding(window: DesktopWindow | None = None) -> DialogFinding:
     return classify_dialog(window or unreadable_dialog_window())
 
 
-def dialog_state(window: DesktopWindow | None = None) -> CredentialDetection:
-    """CredentialDetection carrying a real dialog finding."""
-    return CredentialDetection(dialog=dialog_finding(window))
+def dialog_state(window: DesktopWindow | None = None) -> Observation:
+    """Observation carrying a real dialog finding."""
+    return Observation(dialog=dialog_finding(window))
 
 
 def minimized_main_windows() -> list[DesktopWindow]:
@@ -1047,9 +1301,9 @@ def harvested_minimized_reason() -> str:
     """The REAL minimized-owner ``unknown_reason``, harvested from the detector (never hand-written).
 
     The prior #153 blind-spot was a test that hand-wrote a reason production could not emit; the latch
-    tests must assert against the exact string ``inspect_credential_modal`` really produces.
+    tests must assert against the exact string ``inspect_desktop_observer`` really produces.
     """
-    reason = inspect_credential_modal(999, lambda _pid: minimized_main_windows()).unknown_reason
+    reason = inspect_desktop_observer(999, lambda _pid: minimized_main_windows()).unknown_reason
     assert reason is not None, "detector did not report the minimized-owner UNKNOWN reason"
     return reason
 
@@ -1058,10 +1312,10 @@ def harvested_zero_window_alive_reason() -> str:
     """The REAL zero-window-but-alive readiness reason, harvested from the detector (issue #158).
 
     Never hand-written: the same #153 blind-spot discipline as the minimized reason - the latch tests
-    must assert the exact string ``inspect_credential_modal`` really produces when enumeration returns
+    must assert the exact string ``inspect_desktop_observer`` really produces when enumeration returns
     an empty list while the process is still alive.
     """
-    reason = inspect_credential_modal(999, lambda _pid: [], process_is_alive=lambda _pid: True).desktop_unready
+    reason = inspect_desktop_observer(999, lambda _pid: [], process_is_alive=lambda _pid: True).desktop_unready
     assert reason is not None, "detector did not report the zero-window alive DESKTOP_UNREADY reason"
     return reason
 
@@ -1073,7 +1327,7 @@ def harvested_desktop_gone_reason() -> str:
     ``DesktopGoneError`` tests assert the exact terminal string production emits, never a hand-written
     one.
     """
-    reason = inspect_credential_modal(999, lambda _pid: [], process_is_alive=lambda _pid: False).process_gone
+    reason = inspect_desktop_observer(999, lambda _pid: [], process_is_alive=lambda _pid: False).process_gone
     assert reason is not None, "detector did not report the process-gone terminal reason"
     return reason
 
@@ -1091,16 +1345,16 @@ def real_detector_for_zero_windows(*, alive: bool):
     """A `_credential_state` built from the REAL detector, with the Win32 primitives injected.
 
     The production `_credential_state` in both entry points opens with
-    ``if os.name != "nt": return CredentialDetection()``, so calling it un-stubbed runs *different code
+    ``if os.name != "nt": return Observation()``, so calling it un-stubbed runs *different code
     on different platforms*. That is not a reason to leave the classification untested off Windows:
-    `inspect_credential_modal` already takes `enumerate_windows` and `process_is_alive` as parameters,
+    `inspect_desktop_observer` already takes `enumerate_windows` and `process_is_alive` as parameters,
     so composing it with fakes here exercises the genuine branch logic - the same code Windows runs -
     on every platform, and drives it through the real CLI entry point rather than a hand-written
-    `CredentialDetection`.
+    `Observation`.
     """
 
-    def detect(pid: int, **_kwargs) -> CredentialDetection:
-        return inspect_credential_modal(pid, lambda _pid: [], process_is_alive=lambda _pid: alive)
+    def detect(pid: int, **_kwargs) -> Observation:
+        return inspect_desktop_observer(pid, lambda _pid: [], process_is_alive=lambda _pid: alive)
 
     return detect
 
@@ -1127,8 +1381,8 @@ def test_win32_fixture_finds_owned_dialog_and_keeps_instances_separate() -> None
         ],
         222: [main_window(title="cached-model")],
     }
-    hit = inspect_credential_modal(111, lambda pid: windows_by_pid[pid]).modal
-    miss = inspect_credential_modal(222, lambda pid: windows_by_pid[pid])
+    hit = inspect_desktop_observer(111, lambda pid: windows_by_pid[pid]).modal
+    miss = inspect_desktop_observer(222, lambda pid: windows_by_pid[pid])
 
     assert hit is not None
     assert hit.window.class_name.startswith("WindowsForms10.Window.20008")
@@ -1149,8 +1403,8 @@ def test_unreadable_owned_dialog_reports_unreadable_not_no_modal() -> None:
         ],
         46256: [main_window(title="cached", texts=("cached",))],
     }
-    blocked = inspect_credential_modal(58104, lambda pid: windows_by_pid[pid])
-    healthy = inspect_credential_modal(46256, lambda pid: windows_by_pid[pid])
+    blocked = inspect_desktop_observer(58104, lambda pid: windows_by_pid[pid])
+    healthy = inspect_desktop_observer(46256, lambda pid: windows_by_pid[pid])
 
     assert blocked.modal is None
     assert blocked.dialog is not None
@@ -1169,7 +1423,7 @@ def test_an_unowned_zero_area_helper_window_does_not_block() -> None:
     class at 900x700, and the same 0x0 shape with an owner, are both classified (see the round-3
     tests below).
     """
-    state = inspect_credential_modal(
+    state = inspect_desktop_observer(
         111,
         lambda _pid: [
             main_window(title="cached", texts=("cached",)),
@@ -1181,18 +1435,9 @@ def test_an_unowned_zero_area_helper_window_does_not_block() -> None:
     assert state.dialog is None
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="real Win32 EnumWindows callback is Windows-only")
-def test_real_win32_enumeration_callback_runs_against_this_process() -> None:
-    """Execute the real ctypes callback; it must not be an empty fallback that swallowed exceptions."""
-    windows, visited = _enumerate_pid_windows_with_count(os.getpid())
-
-    assert isinstance(windows, list)
-    assert visited > 0, "EnumWindows callback did not run; an empty fallback would hide detector failures"
-
-
 def test_minimized_owner_reports_unknown_not_no_dialog() -> None:
     """When the owner is minimized, Windows hides owned dialogs; absence is indeterminate."""
-    state = inspect_credential_modal(111, lambda _pid: [main_window(minimized=True)])
+    state = inspect_desktop_observer(111, lambda _pid: [main_window(minimized=True)])
 
     assert state.modal is None
     assert state.unknown_reason is not None
@@ -1206,7 +1451,7 @@ def test_zero_windows_alive_reports_desktop_unready_not_no_dialog() -> None:
     the process is still running (starting up or wedged) the detector must report ``desktop_unready``
     and must NOT set ``process_gone`` (the process is not gone) nor a modal/blocking dialog.
     """
-    state = inspect_credential_modal(111, lambda _pid: [], process_is_alive=lambda _pid: True)
+    state = inspect_desktop_observer(111, lambda _pid: [], process_is_alive=lambda _pid: True)
 
     assert state.modal is None
     assert state.dialog is None
@@ -1225,7 +1470,7 @@ def test_zero_windows_dead_reports_process_gone_not_no_dialog() -> None:
     as ``none`` (healthy) and must NOT be reported as ``unknown_reason`` (indeterminate/latch), because
     a dead process is not going to recover and the data source was never contacted.
     """
-    state = inspect_credential_modal(111, lambda _pid: [], process_is_alive=lambda _pid: False)
+    state = inspect_desktop_observer(111, lambda _pid: [], process_is_alive=lambda _pid: False)
 
     assert state.modal is None
     assert state.dialog is None
@@ -1278,7 +1523,7 @@ def test_direct_refresh_raises_desktop_gone_fast_at_t0(monkeypatch) -> None:
     detector, so this pins the terminal path against the exact string production emits.
     """
     reason = harvested_desktop_gone_reason()
-    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: CredentialDetection(process_gone=reason))
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: Observation(process_gone=reason))
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", explode("_load_adomd"))
 
     started = time.monotonic()
@@ -1302,7 +1547,7 @@ def test_refresh_poll_catches_late_modal(monkeypatch, parked) -> None:
     monkeypatch.setattr(
         refresh_pbip_model,
         "_credential_state",
-        lambda pid, **_kw: CredentialDetection(modal=late_modal(pid)),
+        lambda pid, **_kw: Observation(modal=late_modal(pid)),
     )
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
 
@@ -1317,7 +1562,7 @@ def test_refresh_poll_catches_late_modal(monkeypatch, parked) -> None:
 
 def test_refresh_banner_is_flushed_and_heartbeat_reports_elapsed_total(monkeypatch, parked, capsys) -> None:
     """The warning arrives before the wait, then emits elapsed/total countdowns."""
-    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid, **_kw: CredentialDetection())
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid, **_kw: Observation())
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_HEARTBEAT_SECONDS", 0.05)
     printed: list[dict[str, object]] = []
@@ -1350,7 +1595,7 @@ def test_unknown_refresh_banner_does_not_claim_no_dialog(monkeypatch, parked, ca
     monkeypatch.setattr(
         refresh_pbip_model,
         "_credential_state",
-        lambda _pid, **_kw: CredentialDetection(unknown_reason=reason),
+        lambda _pid, **_kw: Observation(unknown_reason=reason),
     )
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_HEARTBEAT_SECONDS", 0.05)
@@ -1368,10 +1613,10 @@ def test_unknown_refresh_banner_does_not_claim_no_dialog(monkeypatch, parked, ca
 def test_refresh_latches_unknown_seen_only_by_initial_precheck(monkeypatch, parked) -> None:
     """#154: UNKNOWN at t=0 cannot disappear before the first poll."""
     reason = harvested_minimized_reason()
-    states = iter([CredentialDetection(unknown_reason=reason)])
+    states = iter([Observation(unknown_reason=reason)])
 
-    def initial_unknown_then_healthy(_pid: int, **_kw) -> CredentialDetection:
-        return next(states, CredentialDetection())
+    def initial_unknown_then_healthy(_pid: int, **_kw) -> Observation:
+        return next(states, Observation())
 
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", initial_unknown_then_healthy)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
@@ -1395,10 +1640,10 @@ def test_refresh_latches_desktop_unready_seen_only_by_initial_precheck(monkeypat
     reachability argument.
     """
     reason = harvested_zero_window_alive_reason()
-    states = iter([CredentialDetection(desktop_unready=reason)])
+    states = iter([Observation(desktop_unready=reason)])
 
-    def initial_unready_then_healthy(_pid: int, **_kw) -> CredentialDetection:
-        return next(states, CredentialDetection())
+    def initial_unready_then_healthy(_pid: int, **_kw) -> Observation:
+        return next(states, Observation())
 
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", initial_unready_then_healthy)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.05)
@@ -1443,7 +1688,7 @@ class _ImmortalWorker:
 
 
 class _ScriptedEnumerator:
-    """Feed ``inspect_credential_modal`` a scripted sequence of window-lists; the last phase sticks."""
+    """Feed ``inspect_desktop_observer`` a scripted sequence of window-lists; the last phase sticks."""
 
     def __init__(self, phases: list[list[DesktopWindow]]) -> None:
         self._phases = phases
@@ -1456,31 +1701,22 @@ class _ScriptedEnumerator:
 
 
 def _real_detector(enumerator: _ScriptedEnumerator, process_is_alive=lambda _pid: True, *, in_flight: bool = False):
-    """A detector that drives the REAL inspect_credential_modal through the scripted enumerator.
-
-    ``process_is_alive`` is injected too (issue #158) so the zero-window liveness split is exercised
-    deterministically without a live PID; it defaults to "alive" and is only consulted when the
-    enumerator yields an empty window list. ``in_flight`` (issue #376) selects the variant
-    ``join_with_credential_poll`` uses by default, which ignores a positively-read progress dialog.
-    """
-    if in_flight:
-        return lambda pid: _credential_modal.inspect_credential_modal_in_flight(
-            pid, enumerator, process_is_alive=process_is_alive
-        )
-    return lambda pid: inspect_credential_modal(pid, enumerator, process_is_alive=process_is_alive)
+    """Inject only facts; caller-phase handling never changes the observer's factual state."""
+    del in_flight
+    return lambda pid: inspect_desktop_observer(pid, enumerator, process_is_alive=process_is_alive)
 
 
 def test_poll_loop_latches_minimize_restore_and_raises_unknown(monkeypatch) -> None:
     """#154 core: the measured minimize -> restore -> deadline sequence must latch and raise UNKNOWN.
 
-    Drives the REAL ``join_with_credential_poll`` and REAL ``inspect_credential_modal`` through an
+    Drives the REAL ``join_with_credential_poll`` and REAL ``inspect_desktop_observer`` through an
     injected fake enumerator. Poll 1 sees the iconic owner (UNKNOWN); every later poll sees the
     restored owner with the dialog gone (``none``). The first observation must be latched so the loop
     raises :class:`CredentialUnknownError` at the deadline instead of returning ``False`` (a bare
     timeout the parent blames on a slow source). This is the fails-before/passes-after test.
     """
     clock = _FakeClock()
-    monkeypatch.setattr(_credential_modal, "time", clock)
+    monkeypatch.setattr(_desktop_observer, "time", clock)
     worker = _ImmortalWorker(clock, step=0.4)
     enumerator = _ScriptedEnumerator([minimized_main_windows(), restored_main_windows()])
 
@@ -1506,7 +1742,7 @@ def test_poll_loop_without_unknown_returns_false(monkeypatch) -> None:
     ordinary ``TimeoutError``), proving the latch cannot fire without a real UNKNOWN observation.
     """
     clock = _FakeClock()
-    monkeypatch.setattr(_credential_modal, "time", clock)
+    monkeypatch.setattr(_desktop_observer, "time", clock)
     worker = _ImmortalWorker(clock, step=0.4)
     enumerator = _ScriptedEnumerator([restored_main_windows()])
 
@@ -1532,7 +1768,7 @@ def test_poll_loop_latches_unreadable_dialog_and_raises_at_the_deadline(monkeypa
     either. ``enumerator.calls >= 2`` is the part that fails if the raise is restored.
     """
     clock = _FakeClock()
-    monkeypatch.setattr(_credential_modal, "time", clock)
+    monkeypatch.setattr(_desktop_observer, "time", clock)
     worker = _ImmortalWorker(clock, step=0.4)
     enumerator = _ScriptedEnumerator([visible_unreadable_dialog_windows()])
 
@@ -1560,7 +1796,7 @@ def test_poll_loop_ignores_our_own_refresh_progress_dialog(monkeypatch) -> None:
     returns ``False``.
     """
     clock = _FakeClock()
-    monkeypatch.setattr(_credential_modal, "time", clock)
+    monkeypatch.setattr(_desktop_observer, "time", clock)
     worker = _ImmortalWorker(clock, step=0.4)
     enumerator = _ScriptedEnumerator([visible_progress_dialog_windows()])
 
@@ -1577,23 +1813,36 @@ def test_poll_loop_ignores_our_own_refresh_progress_dialog(monkeypatch) -> None:
     assert enumerator.calls >= 2
 
 
-def test_poll_loop_default_detector_is_the_in_flight_one() -> None:
-    """The in-flight variant must be the DEFAULT, not merely available (issue #376).
+def test_poll_loop_default_detector_is_the_shared_factual_observer(monkeypatch) -> None:
+    """The default wait invokes the factual observer with the held identity and remaining budget."""
+    clock = _FakeClock()
+    monkeypatch.setattr(_desktop_observer.time, "monotonic", clock.monotonic)
+    seen = []
+    progress = inspect_desktop_observer(111, lambda _pid: visible_progress_dialog_windows())
+    assert progress.state == "REFRESH_IN_PROGRESS"
 
-    Every production caller relies on the default: `refresh()` passes no `detector`. A wiring test is
-    the only thing that catches "the right function exists but nothing calls it" - the shape #390 hit
-    when a payload validator was behaviourally tested but never pinned as wired in.
-    """
-    default = inspect.signature(join_with_credential_poll).parameters["detector"].default
+    def observe(pid, **kwargs):
+        assert pid == 111
+        seen.append(kwargs)
+        return progress
 
-    assert default is _credential_modal.inspect_credential_modal_in_flight
-    assert default is not inspect_credential_modal
+    monkeypatch.setattr(_desktop_observer, "observe", observe)
+    assert not join_with_credential_poll(
+        _ImmortalWorker(clock, 1),
+        pid=111,
+        total_timeout=3,
+        heartbeat_seconds=100,
+        poll_seconds=1,
+        initial_state=Observation(process_started_at="100"),
+    )
+    assert seen and all(call["expected_process_start"] == "100" for call in seen)
+    assert all(0 < call["timeout_s"] <= 2 for call in seen)
 
 
 def test_poll_loop_raises_desktop_gone_when_process_dead(monkeypatch) -> None:
     """#158 PRIMARY (fails-before/passes-after): a dead Desktop is TERMINAL, raised immediately.
 
-    Drives the REAL ``join_with_credential_poll`` and REAL ``inspect_credential_modal`` through an
+    Drives the REAL ``join_with_credential_poll`` and REAL ``inspect_desktop_observer`` through an
     injected empty enumerator plus a liveness check that reports the process dead. Zero windows on a
     gone PID is definitive - Desktop exited/crashed and the source was never contacted - so the loop
     must raise :class:`DesktopGoneError` on the FIRST poll, never run out the clock and never return
@@ -1604,7 +1853,7 @@ def test_poll_loop_raises_desktop_gone_when_process_dead(monkeypatch) -> None:
     that fails before the change and passes after it.
     """
     clock = _FakeClock()
-    monkeypatch.setattr(_credential_modal, "time", clock)
+    monkeypatch.setattr(_desktop_observer, "time", clock)
     worker = _ImmortalWorker(clock, step=0.4)
     enumerator = _ScriptedEnumerator([[]])
 
@@ -1632,7 +1881,7 @@ def test_poll_loop_latches_desktop_unready_when_process_alive_zero_windows(monke
     credential UNKNOWN, or a bare timeout.
     """
     clock = _FakeClock()
-    monkeypatch.setattr(_credential_modal, "time", clock)
+    monkeypatch.setattr(_desktop_observer, "time", clock)
     worker = _ImmortalWorker(clock, step=0.4)
     enumerator = _ScriptedEnumerator([[]])
 
@@ -1672,7 +1921,7 @@ def test_refresh_and_save_wires_credential_unknown_to_exit_3(monkeypatch, capsys
 
     assert exit_code == 3, "CREDENTIAL_UNKNOWN must be exit 3, distinct from blocked's exit 1"
     assert "REFRESH: CREDENTIAL_UNKNOWN pid=111" in out
-    assert reason in out
+    assert "Dialog evidence stayed indeterminate" in out
 
 
 def test_refresh_and_save_wires_a_dialog_finding_to_exit_3(monkeypatch, capsys) -> None:
@@ -1766,7 +2015,7 @@ def test_refresh_main_returns_credential_missing_fast_at_t0(monkeypatch, tmp_pat
     assert exit_code == 1
     assert elapsed < 0.5, f"t=0 credential verdict waited {elapsed:.3f}s"
     assert "REFRESH: CREDENTIAL_MISSING" in out
-    assert "Sql.Database(server)" in out
+    assert "Sql.Database(server)" not in out, "provider/source text stays private"
 
 
 def test_refresh_main_returns_desktop_gone_before_port_discovery(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -1781,7 +2030,7 @@ def test_refresh_main_returns_desktop_gone_before_port_discovery(monkeypatch, tm
     monkeypatch.setattr(
         refresh_pbip_model,
         "_credential_state",
-        lambda _pid: CredentialDetection(process_gone=reason),
+        lambda _pid: Observation(process_gone=reason),
     )
     monkeypatch.setattr(refresh_pbip_model, "discover_port", explode("discover_port"))
 
@@ -1796,8 +2045,8 @@ def test_refresh_main_returns_desktop_gone_before_port_discovery(monkeypatch, tm
 def test_refresh_main_returns_desktop_unready_from_the_real_detector(monkeypatch, tmp_path: Path, capsys) -> None:
     """#158: an alive-but-window-less Desktop terminates the mutating CLI, on EVERY platform.
 
-    Composed from the real `inspect_credential_modal` with injected Win32 primitives rather than a
-    hand-built `CredentialDetection`, so the detector's own zero-window/alive branch and the CLI's
+    Composed from the real `inspect_desktop_observer` with injected Win32 primitives rather than a
+    hand-built `Observation`, so the detector's own zero-window/alive branch and the CLI's
     branch on it are proven as one chain - and proven identically on Linux CI and on Windows, which the
     un-stubbed `_credential_state` cannot do (its `os.name` guard returns a healthy state off Windows).
     """
@@ -1831,7 +2080,7 @@ def test_refresh_main_latches_unknown_from_its_own_precheck(monkeypatch, tmp_pat
     monkeypatch.setattr(
         refresh_pbip_model,
         "_credential_state",
-        lambda _pid: CredentialDetection(unknown_reason=reason),
+        lambda _pid: Observation(unknown_reason=reason),
     )
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda _pid: 52001)
     monkeypatch.setattr(refresh_pbip_model, "_identity_gate", lambda _port, _cache: True)
@@ -1874,7 +2123,7 @@ def test_probe_query_main_returns_desktop_gone_before_port_discovery(monkeypatch
     monkeypatch.setattr(
         probe_desktop_query,
         "_credential_state",
-        lambda _pid: CredentialDetection(process_gone=reason),
+        lambda _pid: Observation(process_gone=reason),
     )
     monkeypatch.setattr(probe_desktop_query, "discover_port", explode("discover_port"))
 
@@ -1908,12 +2157,12 @@ def test_the_two_entry_points_get_an_explicit_desktop_state_baseline() -> None:
 
     17 tests drive `main(["--pid", "111", ...])` without naming a Desktop state. If the baseline stops
     applying they fall back to the production `_credential_state`, whose result is decided by the host
-    OS: a healthy `CredentialDetection()` on Linux, and a real `process_gone` detection on Windows
+    OS: a healthy `Observation()` on Linux, and a real `process_gone` detection on Windows
     (pid 111 does not exist). Measured 2026-08-15, that split is exactly how 17 Windows-only failures
     passed green on `ubuntu-latest`.
 
     Asserting on the RETURNED VALUE could not catch it - off Windows the un-stubbed function also
-    returns a bare `CredentialDetection()`, so a value check is a test that cannot fail on the one
+    returns a bare `Observation()`, so a value check is a test that cannot fail on the one
     platform CI runs. The marker on the stub is checkable on every platform.
     """
     for module in (refresh_pbip_model, probe_desktop_query):
@@ -1953,7 +2202,7 @@ def test_probe_query_does_not_stop_for_power_bi_s_own_progress_dialog(monkeypatc
     monkeypatch.setattr(
         probe_desktop_query,
         "_credential_state",
-        lambda pid, **kw: inspect_credential_modal(pid, lambda _pid: windows, **kw),
+        lambda pid, **kw: inspect_desktop_observer(pid, lambda _pid: windows, **kw),
     )
     monkeypatch.setattr(probe_desktop_query, "discover_port", explode("discover_port"))
 
@@ -1976,12 +2225,12 @@ def test_probe_query_poll_ignores_a_progress_dialog_while_the_query_runs(monkeyp
     windows = visible_progress_dialog_windows()
     seen = {"in_flight": []}
 
-    def state(pid: int, *, in_flight: bool = False) -> CredentialDetection:
+    def state(pid: int, *, in_flight: bool = False, **_kwargs) -> Observation:
         seen["in_flight"].append(in_flight)
         # Healthy at t=0; the progress dialog appears once the probe is already running.
         if not in_flight:
-            return CredentialDetection()
-        return inspect_credential_modal(pid, lambda _pid: windows, operation_in_flight=in_flight)
+            return Observation()
+        return inspect_desktop_observer(pid, lambda _pid: windows)
 
     def fake_probe(_port: int, _tables: list[str] | None, emit=print) -> int:
         time.sleep(0.15)
@@ -2008,7 +2257,11 @@ def test_probe_query_returns_unknown_for_minimized_owner(monkeypatch, capsys) ->
     monkeypatch.setattr(
         probe_desktop_query,
         "_credential_state",
-        lambda _pid: CredentialDetection(unknown_reason="Power BI Desktop owner window is minimized"),
+        lambda _pid, **_kwargs: Observation(
+            unknown_reason="Power BI Desktop owner window is minimized",
+            complete=False,
+            reason="minimized",
+        ),
     )
     monkeypatch.setattr(probe_desktop_query, "discover_port", explode("discover_port"))
 
@@ -2016,7 +2269,7 @@ def test_probe_query_returns_unknown_for_minimized_owner(monkeypatch, capsys) ->
     out = capsys.readouterr().out
 
     assert exit_code == 3
-    assert out.startswith("PREFLIGHT: UNKNOWN")
+    assert out.startswith("PREFLIGHT: DIALOG_UNREADABLE")
     assert "minimized" in out
 
 
@@ -2039,7 +2292,7 @@ def test_probe_query_poll_catches_late_modal(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         probe_desktop_query,
         "_credential_state",
-        lambda pid, **_kw: CredentialDetection(modal=late_modal(pid)),
+        lambda pid, **_kw: Observation(modal=late_modal(pid)),
     )
     monkeypatch.setattr(probe_desktop_query, "PREFLIGHT_CREDENTIAL_POLL_SECONDS", 0.05)
     monkeypatch.setattr(probe_desktop_query, "discover_port", lambda _pid: 52001)
@@ -2075,7 +2328,7 @@ def test_probe_query_worker_cannot_print_after_credential_verdict(monkeypatch, c
     monkeypatch.setattr(
         probe_desktop_query,
         "_credential_state",
-        lambda pid, **_kw: CredentialDetection(modal=late_modal(pid)),
+        lambda pid, **_kw: Observation(modal=late_modal(pid)),
     )
     monkeypatch.setattr(probe_desktop_query, "PREFLIGHT_CREDENTIAL_POLL_SECONDS", 0.05)
     monkeypatch.setattr(probe_desktop_query, "discover_port", lambda _pid: 52001)
@@ -2095,11 +2348,11 @@ def test_probe_query_worker_cannot_print_after_credential_verdict(monkeypatch, c
 
 
 # ==================================================================================================
-# _credential_modal.classify_dialog - the PYTHON detector's own dialog classifiers (issue #376)
+# _desktop_observer.classify_dialog - the PYTHON detector's own dialog classifiers (issue #376)
 # ==================================================================================================
 #
 # The Python fast path had the same defect the PowerShell arbiter shed in #367, on a more dangerous
-# route: `inspect_credential_modal` returned the FIRST visible non-main window >= 100x100 as a
+# route: `inspect_desktop_observer` returned the FIRST visible non-main window >= 100x100 as a
 # `blocking_dialog`, and both callers mapped that to `BLOCKED_BY_DIALOG` at exit 1 - which
 # `probe_live_source` classifies `NO_CREDENTIAL`. It feeds `probe_desktop_query.py`, the gate of
 # record, so a Power BI Refresh progress dialog could halt a migration and send an operator to a
@@ -2160,8 +2413,8 @@ def test_only_the_credential_verdict_is_a_hard_stop() -> None:
     """
     hard_stop = {
         kind
-        for kind, verdict in _credential_modal.DIALOG_KIND_VERDICTS.items()
-        if verdict == _credential_modal.VERDICT_CREDENTIAL_MISSING
+        for kind, verdict in _desktop_observer.DIALOG_KIND_VERDICTS.items()
+        if verdict == _desktop_observer.VERDICT_CREDENTIAL_MISSING
     }
 
     assert hard_stop == {"credential"}, f"a non-credential kind reaches the hard-stop verdict: {hard_stop}"
@@ -2185,36 +2438,26 @@ def test_a_caption_alone_can_never_dismiss_a_dialog() -> None:
 def test_the_credential_scan_is_not_gated_by_the_size_filter() -> None:
     """#376's silent false NEGATIVE: the 100x100 filter used to gate the HARD STOP as well.
 
-    `match_credential_modal` was fed only `blocking_dialog_candidates(...)`, so a credential prompt in
+    `match_desktop_observer` was fed only `blocking_dialog_candidates(...)`, so a credential prompt in
     a smaller window produced NO finding at all - not even a dialog one. `Test-CredentialModal` in the
     PowerShell arbiter has always scanned every window; the two now agree.
     """
     small = owned_dialog(("Enter your credentials",), width=80, height=60)
 
-    state = inspect_credential_modal(111, lambda _pid: [small, main_window()])
+    state = inspect_desktop_observer(111, lambda _pid: [small, main_window()])
 
     assert state.modal is not None, "a credential prompt below the size filter must still be a hard stop"
     assert state.modal.window.width == 80
 
 
-def test_benign_is_suppressed_only_while_our_own_operation_is_in_flight() -> None:
-    """The one asymmetry: at t=0 a progress dialog is somebody ELSE's refresh, so it is reported.
-
-    Stacking a second refresh on a running one is exactly what the 2026-08-28 field report had to
-    unpick by hand. Once we have started our own, the same dialog is ours and must not end the wait.
-    Nothing but `benign` is affected - an unreadable dialog surfaces either way.
-    """
-    windows = visible_progress_dialog_windows()
-
-    at_t0 = inspect_credential_modal(111, lambda _pid: windows)
-    in_flight = inspect_credential_modal(111, lambda _pid: windows, operation_in_flight=True)
-    unreadable_in_flight = inspect_credential_modal(
-        111, lambda _pid: visible_unreadable_dialog_windows(), operation_in_flight=True
-    )
-
-    assert at_t0.dialog is not None and at_t0.dialog.verdict == "REFRESH_IN_PROGRESS"
-    assert in_flight.dialog is None
-    assert unreadable_in_flight.dialog is not None, "in-flight must only ever dismiss a PROVEN-benign dialog"
+def test_progress_is_factual_and_only_the_caller_interprets_its_phase(capsys) -> None:
+    """Caller phase may permit its own progress, but cannot rewrite the snapshot as READY."""
+    state = inspect_desktop_observer(111, lambda _pid: visible_progress_dialog_windows())
+    assert state.state == "REFRESH_IN_PROGRESS" and state.dialog is not None
+    assert probe_desktop_query._credential_verdict(111, state) == 3
+    assert probe_desktop_query._credential_verdict(111, state, in_flight=True) is None
+    assert state.state == "REFRESH_IN_PROGRESS", "caller phase must not rewrite the observation as READY"
+    assert "REFRESH_IN_PROGRESS" in capsys.readouterr().out
 
 
 def test_a_window_we_could_not_account_for_outranks_a_progress_dialog() -> None:
@@ -2229,7 +2472,7 @@ def test_a_window_we_could_not_account_for_outranks_a_progress_dialog() -> None:
         main_window(),
     ]
 
-    finding = _credential_modal.dialog_verdict(windows)
+    finding = _desktop_observer.dialog_verdict(windows)
 
     assert finding is not None
     assert finding.verdict == "DIALOG_UNREADABLE"
@@ -2261,15 +2504,15 @@ def test_the_python_detector_cannot_emit_blocked_by_dialog_again(capsys) -> None
 
     assert out.strip(), "the emitters printed nothing at all, so this test proved nothing"
     assert "BLOCKED_BY_DIALOG" not in out, "an emitter still prints the size-only hard-stop token"
-    assert "BLOCKED_BY_DIALOG" not in set(_credential_modal.DIALOG_KIND_VERDICTS.values())
-    assert not hasattr(_credential_modal, "blocking_dialog_candidates"), "the size-only detector came back"
-    assert "blocking_dialog" not in CredentialDetection.__dataclass_fields__, "the size-only field came back"
+    assert "BLOCKED_BY_DIALOG" not in set(_desktop_observer.DIALOG_KIND_VERDICTS.values())
+    assert not hasattr(_desktop_observer, "blocking_dialog_candidates"), "the size-only detector came back"
+    assert "blocking_dialog" not in Observation.__dataclass_fields__, "the size-only field came back"
 
 
 def test_every_finding_kind_has_operator_guidance() -> None:
     """A verdict with no guidance is a stop with no next step - and every emitter prints this line."""
-    reportable = set(_credential_modal.DIALOG_KIND_PRECEDENCE)
-    documented = set(_credential_modal.DIALOG_KIND_GUIDANCE)
+    reportable = set(_desktop_observer.DIALOG_KIND_PRECEDENCE)
+    documented = set(_desktop_observer.DIALOG_KIND_GUIDANCE)
 
     assert reportable <= documented, f"kinds with no guidance: {sorted(reportable - documented)}"
 
@@ -2296,7 +2539,7 @@ def test_short_prompt_beside_progress_text_is_never_dismissed(prompt: str) -> No
     ``MIN_PROMPT_WORDS = 5`` accepted every unmatched element under five words, so a real prompt
     sitting beside ``Evaluating...`` classified ``benign`` - and ``dialog_verdict`` then SUPPRESSED it
     entirely while our own operation was in flight. Measured on the PR-#400 build:
-    ``inspect_credential_modal(..., operation_in_flight=True)`` returned ``dialog=None``, i.e. the same
+    ``inspect_desktop_observer(...)`` returned ``dialog=None``, i.e. the same
     state as a healthy Desktop, for a window reading *"Please enter your password"*.
 
     In that shape the fix was worse than the bug: the repo's standing rule is that a credential modal
@@ -2307,7 +2550,7 @@ def test_short_prompt_beside_progress_text_is_never_dismissed(prompt: str) -> No
     window = owned_dialog(("Refresh", "Evaluating...", prompt), title="Refresh")
 
     finding = classify_dialog(window)
-    in_flight = _credential_modal.dialog_verdict([main_window(), window], operation_in_flight=True)
+    in_flight = _desktop_observer.dialog_verdict([main_window(), window])
 
     assert finding.kind == "mixed-content", f"{prompt!r} was accounted for by nothing and must veto"
     assert finding.verdict == "DIALOG_UNRECOGNIZED"
@@ -2343,8 +2586,6 @@ def test_caption_accounting_python() -> None:
     assert res_t0.kind == "unrecognized"
     assert res_t0.verdict == "DIALOG_UNRECOGNIZED"
     assert res_t0.evidence == "Password:"
-    in_flight_1 = _credential_modal.dialog_verdict([main_window(), w_title_only], operation_in_flight=True)
-    assert in_flight_1 is not None and in_flight_1.verdict == "DIALOG_UNRECOGNIZED"
 
     # 2. duplicated title+content prompt
     w_dup = owned_dialog(("Password:", "Evaluating", "Cancel"), title="Password:")
@@ -2352,16 +2593,12 @@ def test_caption_accounting_python() -> None:
     assert res_dup.kind == "mixed-content"
     assert res_dup.verdict == "DIALOG_UNRECOGNIZED"
     assert res_dup.evidence == "Password:"
-    in_flight_2 = _credential_modal.dialog_verdict([main_window(), w_dup], operation_in_flight=True)
-    assert in_flight_2 is not None and in_flight_2.verdict == "DIALOG_UNRECOGNIZED"
 
     # 3. known benign title with progress
     w_benign = owned_dialog(("Refresh", "Evaluating", "Cancel"), title="Refresh")
     res_benign = classify_dialog(w_benign)
     assert res_benign.kind == "benign"
     assert res_benign.verdict == "REFRESH_IN_PROGRESS"
-    in_flight_3 = _credential_modal.dialog_verdict([main_window(), w_benign], operation_in_flight=True)
-    assert in_flight_3 is None  # Suppressed in flight
 
     # 4. unknown title plus benign content
     w_unk_title = owned_dialog(("Evaluating", "Cancel"), title="Please enter your password")
@@ -2369,8 +2606,6 @@ def test_caption_accounting_python() -> None:
     assert res_unk.kind == "mixed-content"
     assert res_unk.verdict == "DIALOG_UNRECOGNIZED"
     assert res_unk.evidence == "Please enter your password"
-    in_flight_4 = _credential_modal.dialog_verdict([main_window(), w_unk_title], operation_in_flight=True)
-    assert in_flight_4 is not None and in_flight_4.verdict == "DIALOG_UNRECOGNIZED"
 
     # 5. whitespace/case variants
     w_case = owned_dialog(("password:", "Evaluating", "Cancel"), title="  PASSWORD:  ")
@@ -2378,24 +2613,18 @@ def test_caption_accounting_python() -> None:
     assert res_case.kind == "mixed-content"
     assert res_case.verdict == "DIALOG_UNRECOGNIZED"
     assert res_case.evidence == "PASSWORD:"
-    in_flight_5 = _credential_modal.dialog_verdict([main_window(), w_case], operation_in_flight=True)
-    assert in_flight_5 is not None and in_flight_5.verdict == "DIALOG_UNRECOGNIZED"
 
     # 6. credential-signature titles
     w_cred_title = owned_dialog(("Evaluating", "Cancel"), title="Please specify how to connect")
     res_cred = classify_dialog(w_cred_title)
     assert res_cred.kind == "credential"
     assert res_cred.verdict == "CREDENTIAL_MISSING"
-    in_flight_6 = _credential_modal.dialog_verdict([main_window(), w_cred_title], operation_in_flight=True)
-    assert in_flight_6 is not None and in_flight_6.verdict == "CREDENTIAL_MISSING"
 
     # 7. exact parity case: case-insensitive title deduplication with only chrome in content
     w_parity_refresh = owned_dialog(("REFRESH", "Cancel"), title="  Refresh  ")
     res_parity = classify_dialog(w_parity_refresh)
     assert res_parity.kind == "benign-title-only"
     assert res_parity.verdict == "DIALOG_UNREADABLE"
-    in_flight_parity = _credential_modal.dialog_verdict([main_window(), w_parity_refresh], operation_in_flight=True)
-    assert in_flight_parity is not None and in_flight_parity.verdict == "DIALOG_UNREADABLE"
 
     # 8. mixed-case unknown/password caption with duplicate title in content
     w_mixed_pwd = owned_dialog(
@@ -2405,28 +2634,24 @@ def test_caption_accounting_python() -> None:
     assert res_mixed_pwd.kind == "mixed-content"
     assert res_mixed_pwd.verdict == "DIALOG_UNRECOGNIZED"
     assert res_mixed_pwd.evidence == "Please Enter Your Password"
-    in_flight_mixed_pwd = _credential_modal.dialog_verdict([main_window(), w_mixed_pwd], operation_in_flight=True)
-    assert in_flight_mixed_pwd is not None and in_flight_mixed_pwd.verdict == "DIALOG_UNRECOGNIZED"
 
     # 9. control with a genuinely independent progress element beside case-insensitive title duplicate
     w_ctrl_refresh = owned_dialog(("REFRESH", "Evaluating", "Cancel"), title="  Refresh  ")
     res_ctrl = classify_dialog(w_ctrl_refresh)
     assert res_ctrl.kind == "benign"
     assert res_ctrl.verdict == "REFRESH_IN_PROGRESS"
-    in_flight_ctrl = _credential_modal.dialog_verdict([main_window(), w_ctrl_refresh], operation_in_flight=True)
-    assert in_flight_ctrl is None  # Suppressed in flight
 
 
 def test_python_mutation_drop_caption_accounting(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mutation test (Python): drop caption accounting in classify_dialog. Must fail named assertions."""
 
     def mutated_classify(window: DesktopWindow) -> DialogFinding:
-        title, all_texts, content = _credential_modal.dialog_text_set(window)
-        signature_hit = _credential_modal._match_dialog_signatures(window, all_texts)
+        title, all_texts, content = _desktop_observer.dialog_text_set(window)
+        signature_hit = _desktop_observer._match_dialog_signatures(window, all_texts)
         if signature_hit is not None:
             return signature_hit
-        benign = _credential_modal.benign_dialog_signature()
-        chrome = _credential_modal.benign_chrome_signature()
+        benign = _desktop_observer.benign_dialog_signature()
+        chrome = _desktop_observer.benign_chrome_signature()
         benign_hit = None
         unaccounted = None
         # MUTATION: dropped caption accounting (if title: ...)
@@ -2441,16 +2666,16 @@ def test_python_mutation_drop_caption_accounting(monkeypatch: pytest.MonkeyPatch
                 unaccounted = text
         if benign_hit is not None:
             if unaccounted is not None:
-                return _credential_modal._finding(_credential_modal.DIALOG_KIND_MIXED_CONTENT, window, unaccounted)
-            return _credential_modal._finding(_credential_modal.DIALOG_KIND_BENIGN, window, benign_hit)
+                return _desktop_observer._finding(_desktop_observer.DIALOG_KIND_MIXED_CONTENT, window, unaccounted)
+            return _desktop_observer._finding(_desktop_observer.DIALOG_KIND_BENIGN, window, benign_hit)
         if title and benign.search(title):
-            return _credential_modal._finding(_credential_modal.DIALOG_KIND_BENIGN_TITLE_ONLY, window, title)
+            return _desktop_observer._finding(_desktop_observer.DIALOG_KIND_BENIGN_TITLE_ONLY, window, title)
         if not all_texts:
-            return _credential_modal._finding(_credential_modal.DIALOG_KIND_UNREADABLE, window, "")
+            return _desktop_observer._finding(_desktop_observer.DIALOG_KIND_UNREADABLE, window, "")
         evidence = unaccounted if unaccounted is not None else all_texts[0]
-        return _credential_modal._finding(_credential_modal.DIALOG_KIND_UNRECOGNIZED, window, evidence)
+        return _desktop_observer._finding(_desktop_observer.DIALOG_KIND_UNRECOGNIZED, window, evidence)
 
-    monkeypatch.setattr(_credential_modal, "classify_dialog", mutated_classify)
+    monkeypatch.setattr(_desktop_observer, "classify_dialog", mutated_classify)
 
     cases = [
         owned_dialog(("Password:", "Evaluating", "Cancel"), title="Password:"),
@@ -2459,7 +2684,7 @@ def test_python_mutation_drop_caption_accounting(monkeypatch: pytest.MonkeyPatch
 
     failed_count = 0
     for w in cases:
-        finding = _credential_modal.classify_dialog(w)
+        finding = _desktop_observer.classify_dialog(w)
         if finding.kind != "mixed-content":
             failed_count += 1
 
@@ -2492,7 +2717,7 @@ def test_a_small_dialog_is_still_classified(width: int, height: int, texts, kind
     """
     dialog = owned_dialog(texts, title=texts[0] if texts else "", width=width, height=height)
 
-    state = inspect_credential_modal(111, lambda _pid: [dialog, main_window()])
+    state = inspect_desktop_observer(111, lambda _pid: [dialog, main_window()])
 
     assert state.dialog is not None, "an owned dialog must not vanish into the healthy state"
     assert state.dialog.kind == kind
@@ -2512,7 +2737,7 @@ def test_an_owned_dialog_sharing_its_owners_class_is_still_a_credential_wall() -
     frame = DesktopWindow("sample - Power BI Desktop", shared_class, 2011, 1298, ("sample",), hwnd=MAIN_HWND)
     dialog = owned_dialog(("Enter your credentials",), class_name=shared_class)
 
-    state = inspect_credential_modal(111, lambda _pid: [frame, dialog])
+    state = inspect_desktop_observer(111, lambda _pid: [frame, dialog])
 
     assert state.modal is not None, "an owned dialog sharing its owner's class is still a dialog"
     assert state.modal.window is dialog
@@ -2525,7 +2750,7 @@ def test_an_owned_dialog_sharing_its_owners_class_is_classified_when_unreadable(
     frame = DesktopWindow("sample", shared_class, 2011, 1298, ("sample",), hwnd=MAIN_HWND)
     dialog = owned_dialog(class_name=shared_class)
 
-    state = inspect_credential_modal(111, lambda _pid: [frame, dialog])
+    state = inspect_desktop_observer(111, lambda _pid: [frame, dialog])
 
     assert state.modal is None
     assert state.dialog is not None
@@ -2554,7 +2779,7 @@ def test_the_aad_host_is_classified_by_modality_not_by_its_name(texts, verdict: 
     """
     host = owned_dialog(texts, class_name="Internet Explorer_Hidden", width=900, height=700)
 
-    state = inspect_credential_modal(111, lambda _pid: [main_window(), host])
+    state = inspect_desktop_observer(111, lambda _pid: [main_window(), host])
 
     assert state.dialog is not None, "the AAD host must never collapse into the healthy state"
     assert state.dialog.verdict == verdict
@@ -2571,11 +2796,11 @@ def test_an_enabled_owner_is_the_only_thing_that_exonerates_a_dialog() -> None:
     disabled_owner = owned_dialog(owner_enabled=False)
     no_owner_test = DesktopWindow("", "Cls", 702, 355, (), hwnd=0x40004, owner_hwnd=MAIN_HWND, owner_enabled=None)
 
-    assert _credential_modal.is_proven_non_blocking(exonerated)
-    assert not _credential_modal.is_proven_non_blocking(disabled_owner)
-    assert not _credential_modal.is_proven_non_blocking(no_owner_test)
+    assert _desktop_observer.is_proven_non_blocking(exonerated)
+    assert not _desktop_observer.is_proven_non_blocking(disabled_owner)
+    assert not _desktop_observer.is_proven_non_blocking(no_owner_test)
 
-    kept = _credential_modal.dialog_candidates([main_window(), exonerated, disabled_owner, no_owner_test])
+    kept = _desktop_observer.dialog_candidates([main_window(), exonerated, disabled_owner, no_owner_test])
 
     assert exonerated not in kept, "an enabled owner is positive proof this window blocks nothing"
     assert disabled_owner in kept
@@ -2596,7 +2821,7 @@ def test_no_proxy_for_blocking_survives_in_the_candidate_rule() -> None:
     proxy anywhere behind :func:`dialog_candidates` can satisfy.
     """
     for gone in ("MIN_DIALOG_WIDTH", "MIN_DIALOG_HEIGHT", "HELPER_WINDOW_CLASSES", "is_desktop_main_window"):
-        assert not hasattr(_credential_modal, gone), f"{gone} is a proxy for blocking and must stay deleted"
+        assert not hasattr(_desktop_observer, gone), f"{gone} is a proxy for blocking and must stay deleted"
 
     classes = (
         DESKTOP_MAIN_CLASS_PREFIX + ".app.0.33c0d9d",  # the frame's own WinForms family (round 2)
@@ -2624,7 +2849,7 @@ def test_no_proxy_for_blocking_survives_in_the_candidate_rule() -> None:
                     owner_hwnd=MAIN_HWND if owned else 0,
                     owner_enabled=False if owned else None,
                 )
-                kept = _credential_modal.dialog_candidates([frame, window], frame=frame)
+                kept = _desktop_observer.dialog_candidates([frame, window], frame=frame)
                 verdicts[(owned, class_name, (width, height))] = window in kept
 
     assert all(verdicts.values()), (
@@ -2651,15 +2876,15 @@ def test_the_frame_is_identified_by_ownership_before_any_convention() -> None:
     decoy = DesktopWindow("decoy", "Cls", 300, 200, ("decoy",), hwnd=0x60006)
 
     # Ownership evidence wins even when the dialog is enumerated FIRST (Z-order puts a modal on top).
-    assert _credential_modal.main_frame([dialog, frame]) is frame
-    assert _credential_modal.main_frame([frame, dialog]) is frame
+    assert _desktop_observer.main_frame([dialog, frame]) is frame
+    assert _desktop_observer.main_frame([frame, dialog]) is frame
     # A second rendering unowned window is a second possible frame, so identity fails closed.
-    assert _credential_modal.main_frame([dialog, decoy, frame]) is None
-    assert _credential_modal.main_frame([decoy, frame, dialog]) is None
+    assert _desktop_observer.main_frame([dialog, decoy, frame]) is None
+    assert _desktop_observer.main_frame([decoy, frame, dialog]) is None
     # With nothing owned, one rendering unowned window is still unambiguous.
     lone = DesktopWindow("only", "Cls", 800, 600, ("only",), hwnd=0x50005)
-    assert _credential_modal.main_frame([lone]) is lone
-    assert _credential_modal.main_frame([]) is None
+    assert _desktop_observer.main_frame([lone]) is lone
+    assert _desktop_observer.main_frame([]) is None
 
 
 def test_an_unowned_window_that_renders_pixels_is_still_classified() -> None:
@@ -2672,12 +2897,12 @@ def test_an_unowned_window_that_renders_pixels_is_still_classified() -> None:
     frame = main_window()
     unowned_visible = DesktopWindow("", "Internet Explorer_Hidden", 900, 700, ("Password:",), hwnd=0x70007)
 
-    assert not _credential_modal.renders_nothing(unowned_visible)
+    assert not _desktop_observer.renders_nothing(unowned_visible)
 
-    kept = _credential_modal.dialog_candidates([frame, unowned_visible], frame=frame)
+    kept = _desktop_observer.dialog_candidates([frame, unowned_visible], frame=frame)
     assert unowned_visible in kept, "an unowned window with pixels must not vanish into healthy"
 
-    state = inspect_credential_modal(111, lambda _pid: [frame, unowned_visible])
+    state = inspect_desktop_observer(111, lambda _pid: [frame, unowned_visible])
 
     assert state.dialog is not None
     assert state.dialog.verdict == "DIALOG_UNRECOGNIZED"
@@ -2701,8 +2926,8 @@ def test_ownership_is_followed_transitively_to_the_unowned_root() -> None:
     )
 
     # Z-order puts the tooltip first, so a one-edge walk lands on the credential dialog.
-    assert _credential_modal.main_frame([tip, cred, frame]) is frame
-    state = inspect_credential_modal(111, lambda _pid: [tip, cred, frame])
+    assert _desktop_observer.main_frame([tip, cred, frame]) is frame
+    state = inspect_desktop_observer(111, lambda _pid: [tip, cred, frame])
 
     assert state.modal is not None, "a nested owner chain must not hide the credential dialog"
     assert state.modal.window is cred
@@ -2725,7 +2950,7 @@ def test_a_nested_chain_still_finds_the_modal_while_our_own_refresh_is_in_flight
         "", "tooltips_class32", 120, 24, ("hint",), hwnd=tip_hwnd, owner_hwnd=cred_hwnd, owner_enabled=True
     )
 
-    state = inspect_credential_modal(111, lambda _pid: [tip, cred, frame], operation_in_flight=True)
+    state = inspect_desktop_observer(111, lambda _pid: [tip, cred, frame])
 
     assert state.modal is not None
     assert state.modal.window is cred
@@ -2742,9 +2967,9 @@ def test_a_topmost_unowned_dialog_cannot_present_itself_as_the_application() -> 
     frame = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",), hwnd=0xF001)
     aad = DesktopWindow("", "Internet Explorer_Hidden", 900, 700, ("Enter your credentials",), hwnd=0x9001)
 
-    assert _credential_modal.main_frame([aad, frame]) is None, "ambiguous identity must fail closed"
+    assert _desktop_observer.main_frame([aad, frame]) is None, "ambiguous identity must fail closed"
 
-    state = inspect_credential_modal(111, lambda _pid: [aad, frame])
+    state = inspect_desktop_observer(111, lambda _pid: [aad, frame])
 
     assert state.modal is not None, "a topmost unowned dialog must not skip the prepass"
     assert state.modal.window is aad
@@ -2762,7 +2987,7 @@ def test_an_unowned_credential_host_owning_a_tooltip_is_never_crowned_the_frame(
     Measured on the round-4 build, exactly the shape this module exists to prevent::
 
         main_frame selected: the credential host
-        inspect_credential_modal -> modal=None dialog=None unknown_reason=None
+        inspect_desktop_observer -> modal=None dialog=None unknown_reason=None
                                     desktop_unready=None process_gone=None
     """
     frame_hwnd, cred_hwnd, tip_hwnd = 0xF001, 0x9001, 0x7003
@@ -2774,12 +2999,12 @@ def test_an_unowned_credential_host_owning_a_tooltip_is_never_crowned_the_frame(
         "", "tooltips_class32", 120, 24, ("hint",), hwnd=tip_hwnd, owner_hwnd=cred_hwnd, owner_enabled=True
     )
 
-    assert _credential_modal.main_frame([tip, cred, frame]) is None, "two rendering unowned windows are ambiguous"
-    kept = _credential_modal.dialog_candidates([tip, cred, frame])
+    assert _desktop_observer.main_frame([tip, cred, frame]) is None, "two rendering unowned windows are ambiguous"
+    kept = _desktop_observer.dialog_candidates([tip, cred, frame])
     assert cred in kept and frame in kept, "an ambiguous frame must exclude neither of them"
 
     for in_flight in (False, True):
-        state = inspect_credential_modal(111, lambda _pid: [tip, cred, frame], operation_in_flight=in_flight)
+        state = inspect_desktop_observer(111, lambda _pid: [tip, cred, frame])
         assert state.modal is not None, f"the prompt vanished with operation_in_flight={in_flight}"
         assert state.modal.window is cred
 
@@ -2801,7 +3026,7 @@ def test_an_unowned_host_with_unrecognised_text_still_surfaces_beside_our_own_re
         "", "tooltips_class32", 120, 24, ("hint",), hwnd=tip_hwnd, owner_hwnd=host_hwnd, owner_enabled=True
     )
 
-    state = inspect_credential_modal(111, lambda _pid: [tip, host, frame], operation_in_flight=True)
+    state = inspect_desktop_observer(111, lambda _pid: [tip, host, frame])
 
     assert state.modal is None
     assert state.dialog is not None, "an unaccounted window must never collapse into the healthy state"
@@ -2820,16 +3045,16 @@ def test_ambiguous_frame_identity_excludes_nothing() -> None:
     frame = DesktopWindow("sample", "WindowsForms10.Window.8.app.0.x", 2011, 1298, ("sample",), hwnd=0xF001)
     other = DesktopWindow("second", "Cls", 800, 600, ("second",), hwnd=0x9001)
 
-    assert _credential_modal.main_frame([frame, other]) is None
-    kept = _credential_modal.dialog_candidates([frame, other])
+    assert _desktop_observer.main_frame([frame, other]) is None
+    kept = _desktop_observer.dialog_candidates([frame, other])
 
     assert frame in kept and other in kept, "an ambiguous frame must not exclude a window"
 
     for owner_hwnd in (0xF001, 0x9001):
         tip = DesktopWindow("", "tooltips_class32", 120, 24, (), hwnd=0x7003, owner_hwnd=owner_hwnd, owner_enabled=True)
         windows = [tip, frame, other]
-        assert _credential_modal.main_frame(windows) is None, f"an owned tooltip must not crown hwnd {owner_hwnd:#x}"
-        kept = _credential_modal.dialog_candidates(windows)
+        assert _desktop_observer.main_frame(windows) is None, f"an owned tooltip must not crown hwnd {owner_hwnd:#x}"
+        kept = _desktop_observer.dialog_candidates(windows)
         assert frame in kept and other in kept, "neither possible frame may be excluded"
 
 
@@ -2840,10 +3065,11 @@ def test_an_unresolvable_owner_chain_fails_closed() -> None:
     left = DesktopWindow("", "Cls", 400, 300, (), hwnd=0xA001, owner_hwnd=0xA002, owner_enabled=False)
     right = DesktopWindow("", "Cls", 400, 300, (), hwnd=0xA002, owner_hwnd=0xA001, owner_enabled=False)
 
-    assert _credential_modal.main_frame([frame, orphan]) is None, "an unseen owner leaves the root unknown"
-    assert _credential_modal.main_frame([left, right]) is None, "a cycle leaves the root unknown"
+    assert _desktop_observer.main_frame([frame, orphan]) is None, "an unseen owner leaves the root unknown"
+    assert _desktop_observer.main_frame([left, right]) is None, "a cycle leaves the root unknown"
 
 
+@pytest.mark.serial
 @pytest.mark.gui
 @pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows")
 def test_the_win32_harvest_reads_real_ownership_and_owner_enabled_state() -> None:
@@ -2919,7 +3145,7 @@ def test_the_win32_harvest_reads_real_ownership_and_owner_enabled_state() -> Non
         user32.EnableWindow(frame_hwnd, False)
         time.sleep(0.2)
 
-        harvested, _visited = _enumerate_pid_windows_with_count(os.getpid())
+        harvested, _visited = _pump_native_harvest(os.getpid())
         by_hwnd = {window.hwnd: window for window in harvested}
         frame = by_hwnd.get(frame_hwnd)
         owned = by_hwnd.get(owned_hwnd)
@@ -2929,9 +3155,9 @@ def test_the_win32_harvest_reads_real_ownership_and_owner_enabled_state() -> Non
         assert owned.owner_hwnd == frame_hwnd, "ownership must come from GetWindow(GW_OWNER)"
         assert owned.owner_enabled is False, "owner_enabled must come from IsWindowEnabled(owner)"
         assert (owned.width, owned.height) == (0, 0), "the probe window really is 0x0"
-        assert not _credential_modal.renders_nothing(owned), "it HAS an owner, so zero area cannot suppress"
-        assert not _credential_modal.is_proven_non_blocking(owned), "a disabled owner is not an exoneration"
-        assert owned in _credential_modal.dialog_candidates(harvested, frame=frame)
+        assert not _desktop_observer.renders_nothing(owned), "it HAS an owner, so zero area cannot suppress"
+        assert not _desktop_observer.is_proven_non_blocking(owned), "a disabled owner is not an exoneration"
+        assert owned in _desktop_observer.dialog_candidates(harvested, frame=frame)
     finally:
         user32.DestroyWindow(owned_hwnd)
         user32.DestroyWindow(frame_hwnd)
@@ -3072,6 +3298,7 @@ def _dotnet_main_window_handle(pid: int) -> int:
     return int((proc.stdout or "0").strip() or 0)
 
 
+@pytest.mark.serial
 @pytest.mark.gui
 @pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows")
 def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_application() -> None:
@@ -3094,7 +3321,7 @@ def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_applicatio
         tip_hwnd = probe.top(probe.WS_POPUP, 520, 40, 120, 24, owner=cred_hwnd)
         time.sleep(0.2)
 
-        harvested, _visited = _enumerate_pid_windows_with_count(os.getpid())
+        harvested, _visited = _pump_native_harvest(os.getpid())
         ours = [window for window in harvested if window.hwnd in {frame_hwnd, cred_hwnd, tip_hwnd}]
         by_hwnd = {window.hwnd: window for window in ours}
 
@@ -3103,13 +3330,16 @@ def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_applicatio
         assert by_hwnd[cred_hwnd].owner_hwnd == 0, "the credential host is unowned - that is the whole shape"
         assert by_hwnd[tip_hwnd].owner_hwnd == cred_hwnd, "the tooltip is owned BY the credential host"
         assert by_hwnd[tip_hwnd].owner_enabled is True, "an enabled owner exonerates the tooltip itself"
-        assert by_hwnd[frame_hwnd].texts == ("Refresh", "Evaluating..."), "the frame reads as pure progress status"
+        frame = by_hwnd[frame_hwnd]
+        assert _desktop_observer.normalize_texts((frame.title, *frame.texts)) == ("Refresh", "Evaluating..."), (
+            "the frame reads as pure progress status"
+        )
 
-        assert _credential_modal.main_frame(ours) is None, "two rendering unowned windows cannot name one frame"
-        kept = _credential_modal.dialog_candidates(ours)
+        assert _desktop_observer.main_frame(ours) is None, "two rendering unowned windows cannot name one frame"
+        kept = _desktop_observer.dialog_candidates(ours)
         assert by_hwnd[cred_hwnd] in kept and by_hwnd[frame_hwnd] in kept, "ambiguity must exclude neither"
 
-        state = inspect_credential_modal(os.getpid(), lambda _pid: ours, operation_in_flight=True)
+        state = inspect_desktop_observer(os.getpid(), lambda _pid: ours)
 
         assert state.modal is not None, "the credential prompt vanished from a real three-window harvest"
         assert state.modal.window.hwnd == cred_hwnd
@@ -3117,6 +3347,7 @@ def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_applicatio
         probe.close()
 
 
+@pytest.mark.serial
 @pytest.mark.gui
 @pytest.mark.skipif(sys.platform != "win32", reason="creates real Win32 windows and shells out to PowerShell")
 def test_the_process_main_window_handle_is_a_z_order_answer_not_an_identity() -> None:
@@ -3163,18 +3394,18 @@ def test_the_process_main_window_handle_is_a_z_order_answer_not_an_identity() ->
 
         ghost_hwnd = probe.top(probe.WS_POPUP, 0, 0, 0, 0)
         probe.raise_topmost(ghost_hwnd)
-        harvested, _visited = _enumerate_pid_windows_with_count(os.getpid())
+        harvested, _visited = _pump_native_harvest(os.getpid())
         ghost = next(window for window in harvested if window.hwnd == ghost_hwnd)
 
         assert (ghost.width, ghost.height) == (0, 0), "the ghost really is 0x0"
-        assert _credential_modal.renders_nothing(ghost), "this module refuses a 0x0 unowned window as a frame"
+        assert _desktop_observer.renders_nothing(ghost), "this module refuses a 0x0 unowned window as a frame"
         assert _dotnet_main_window_handle(os.getpid()) == ghost_hwnd, (
             "the authority names a window that can show a human nothing"
         )
 
         # The load-bearing consequence: whatever the authority says, identity here stays ambiguous.
         ours = [window for window in harvested if window.hwnd in {frame_hwnd, cred_hwnd}]
-        assert _credential_modal.main_frame(ours) is None
+        assert _desktop_observer.main_frame(ours) is None
     finally:
         probe.close()
 
@@ -3194,7 +3425,7 @@ def test_a_report_title_cannot_fabricate_a_credential_prompt(report_name: str, c
     title = f"{report_name} - Power BI Desktop"
     main = DesktopWindow(title, "WindowsForms10.Window.8.app.0.x", 2011, 1298, (title,))
 
-    state = inspect_credential_modal(111, lambda _pid: [main])
+    state = inspect_desktop_observer(111, lambda _pid: [main])
     verdict = probe_desktop_query._credential_verdict(111, state)
 
     assert state.modal is None, f"a report named {report_name!r} is not a credential prompt"
@@ -3207,7 +3438,7 @@ def test_an_unusual_modal_class_is_still_scanned_for_the_credential_signature() 
     """The other half of finding 4: excluding the frame must not narrow real dialog coverage."""
     odd = owned_dialog(("Enter your credentials",), class_name="HwndWrapper[PBIDesktop.exe;;guid]", width=30, height=20)
 
-    state = inspect_credential_modal(111, lambda _pid: [main_window(), odd])
+    state = inspect_desktop_observer(111, lambda _pid: [main_window(), odd])
 
     assert state.modal is not None
     assert state.modal.window.class_name.startswith("HwndWrapper")
@@ -3224,9 +3455,9 @@ def test_the_credential_prepass_reads_windows_that_classification_skips() -> Non
     exonerated = owned_dialog(("Enter your credentials",), owner_enabled=True)
     frame = main_window()
 
-    assert exonerated not in _credential_modal.dialog_candidates([frame, exonerated]), "not classified"
+    assert exonerated not in _desktop_observer.dialog_candidates([frame, exonerated]), "not classified"
 
-    state = inspect_credential_modal(111, lambda _pid: [frame, exonerated])
+    state = inspect_desktop_observer(111, lambda _pid: [frame, exonerated])
 
     assert state.modal is not None, "an exonerated window is still scanned for the credential signature"
     assert state.modal.window is exonerated
@@ -3244,11 +3475,11 @@ def test_a_dialog_we_could_not_read_does_not_abort_a_refresh_that_completes(monk
     calls = {"n": 0}
     finished = threading.Event()
 
-    def state(pid: int, **kwargs) -> CredentialDetection:
+    def state(pid: int, **kwargs) -> Observation:
         calls["n"] += 1
         if calls["n"] == 1:
-            return CredentialDetection()
-        return inspect_credential_modal(pid, lambda _pid: windows, operation_in_flight=bool(kwargs.get("in_flight")))
+            return Observation()
+        return inspect_desktop_observer(pid, lambda _pid: windows)
 
     class _SlowThenDone:
         """A connection whose command returns after a couple of polls."""
@@ -3307,11 +3538,11 @@ def test_a_latched_dialog_surfaces_at_the_deadline_in_both_wait_branches(monkeyp
     calls = {"n": 0}
     healthy = [DesktopWindow("Report", "WindowsForms10.Window.8.app.0.1a2b3c", 2011, 1298, ("Report",))]
 
-    def state(pid: int, **kwargs) -> CredentialDetection:
+    def state(pid: int, **kwargs) -> Observation:
         calls["n"] += 1
         # 1 = the t=0 pre-check, 2-3 = the dialog is up, 4+ = it has gone again.
         windows = visible_unreadable_dialog_windows() if calls["n"] in (2, 3) else healthy
-        return inspect_credential_modal(pid, lambda _pid: windows, operation_in_flight=bool(kwargs.get("in_flight")))
+        return inspect_desktop_observer(pid, lambda _pid: windows)
 
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", state)
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _ParkedAdomd(released))
@@ -3357,12 +3588,12 @@ def test_the_production_refresh_path_polls_with_the_in_flight_detector(monkeypat
     windows = visible_progress_dialog_windows()
     released = threading.Event()
 
-    def state(pid: int, **kwargs) -> CredentialDetection:
+    def state(pid: int, **kwargs) -> Observation:
         calls["n"] += 1
         seen.append(kwargs.get("in_flight", "<not passed>"))
         if calls["n"] == 1:
-            return CredentialDetection()
-        return inspect_credential_modal(pid, lambda _pid: windows, operation_in_flight=bool(kwargs.get("in_flight")))
+            return Observation()
+        return inspect_desktop_observer(pid, lambda _pid: windows)
 
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", state)
     monkeypatch.setattr(refresh_pbip_model, "_load_adomd", lambda: lambda _dsn: _ParkedAdomd(released))
@@ -3392,2493 +3623,511 @@ def test_the_production_refresh_path_polls_with_the_in_flight_detector(monkeypat
     assert seen[0] is False or seen[0] == "<not passed>", "the t=0 check must NOT be in-flight"
 
 
-# ==================================================================================================
-# probe_desktop_credential.ps1 - the PowerShell arbiter's own dialog classifiers (issue #367)
-# ==================================================================================================
-#
-# The arbiter used to decide "blocking" from GEOMETRY alone: `Test-BlockingDialog` returned the first
-# visible non-main window >= 100x100 as a blocking dialog, and the caller printed
-# `VERDICT: BLOCKED_BY_DIALOG`, exit 1 - the same hard-stop band as a real credential wall. A Power BI
-# Refresh progress dialog satisfies that trivially, and on 2026-08-28 a field report caught it doing
-# exactly that under three concurrent refreshes: the "credential wall" was an ordinary progress dialog
-# stalled behind a Snowflake cold start.
-#
-# These tests drive the SHIPPED classifiers directly, through the `-LoadDetectorsOnly` dot-source seam,
-# with synthesised window objects. That seam exists so the part that decides a hard stop is testable on
-# a machine with no Power BI Desktop; everything past it (UI Automation, the Win32 shim, the refresh
-# invoke) still needs a live Desktop and is NOT covered here.
-
-PROBE_PS1 = Path(__file__).resolve().parents[1] / "scripts" / "probe_desktop_credential.ps1"
-CREDENTIAL_SIGNATURE = PROBE_PS1.parent / "credential_modal_signature.regex"
-BENIGN_SIGNATURE = PROBE_PS1.parent / "benign_dialog_signature.regex"
-BLOCKING_SIGNATURE = PROBE_PS1.parent / "blocking_prompt_signature.regex"
-
-_HARNESS = r"""
-param(
-  [Parameter(Mandatory = $true)][string]$Probe,
-  [string]$WindowsJson,
-  [string]$PayloadJson,
-  [int]$PayloadExit = 0,
-  [string]$GuidanceVerdict,
-  [string]$GuidanceKind = '',
-  [switch]$RefreshInFlight
-)
-$ErrorActionPreference = 'Stop'
-. $Probe -LoadDetectorsOnly
-if ($GuidanceVerdict) {
-  $lines = @(Get-VerdictGuidance -Verdict $GuidanceVerdict -Kind $GuidanceKind)
-  Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json ([ordered]@{ lines = $lines }) -Compress -Depth 4))
-  return
-}
-if ($PayloadJson) {
-  $payload = $null
-  try { $payload = ConvertFrom-Json (Get-Content -LiteralPath $PayloadJson -Raw) } catch { $payload = $null }
-  $result = ConvertTo-HarvestResult -Payload $payload -ExitCode $PayloadExit
-  $accepted = ($null -ne $result)
-  $shaped = [ordered]@{
-    accepted = $accepted
-    complete = $(if ($accepted) { [bool]$result.Complete } else { $false })
-    items    = $(if ($accepted) { @($result.Items).Count } else { 0 })
-  }
-  Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json $shaped -Compress -Depth 4))
-  return
-}
-$parsed = ConvertFrom-Json (Get-Content -LiteralPath $WindowsJson -Raw)
-$windows = @($parsed)
-$verdict = Get-DialogVerdict -Windows $windows -RefreshInFlight:$RefreshInFlight
-$credential = Test-CredentialModal -Windows $windows
-$payload = [ordered]@{
-  credential = $credential
-  verdict    = $(if ($null -eq $verdict) { $null } else { [string]$verdict.Verdict })
-  kind       = $(if ($null -eq $verdict) { $null } else { [string]$verdict.Kind })
-  exit_code  = $(if ($null -eq $verdict) { 0 } else { [int]$verdict.ExitCode })
-  evidence   = $(if ($null -eq $verdict) { $null } else { [string]$verdict.Evidence })
-  candidates = @(Select-DialogCandidate -Windows $windows).Count
-}
-Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json $payload -Compress -Depth 4))
-"""
-
-
 def _powershell() -> str:
-    """Path to Windows PowerShell or PowerShell Core (pwsh), or skip if unavailable."""
-    exe = shutil.which("powershell") or shutil.which("pwsh")
-    if not exe:
-        pytest.skip("no PowerShell interpreter on PATH")
-    return exe
+    """Resolve the native qualification host without opening Desktop."""
+    return shutil.which("powershell") or "powershell"
 
 
-def _window(**overrides) -> dict:
-    """A synthesised Desktop window, shaped exactly like `ConvertTo-ProbeWindow`'s output."""
-    window = {
-        "Title": "",
-        "ClassName": "#32770",
-        "Width": 600,
-        "Height": 400,
-        "Texts": [],
-        "Minimized": False,
-        # `None` = the window has no owner, so the modality test could not be applied at all. That is
-        # NOT the same as `False` (owner disabled), and the classifier must not treat it as such.
-        "OwnerEnabled": None,
-        # Texts belonging to interactive controls. Excluded from the PROSE JOIN only - an interposed
-        # `Cancel` button between `Enter your` and `credentials` defeated a naive whole-window join.
-        "InteractiveTexts": [],
-        # Whether the UIA harvest ran to completion: not truncated by the element cap, not timed out,
-        # no pattern read that threw. Defaults true here because most fixtures model a complete read;
-        # the fail-safe treatment of every non-Boolean value is pinned by its own test.
-        "HarvestComplete": True,
-    }
-    window.update(overrides)
-    return window
+def _pump_native_harvest(pid: int) -> tuple:
+    """Test-owned native windows must pump provider messages while the real child harvest runs."""
+    result = []
+    failures = []
 
-
-def classify(
-    tmp_path: Path,
-    windows: list[dict],
-    *,
-    refresh_in_flight: bool = False,
-    probe_ps1: Path | None = None,
-) -> dict:
-    """Run the SHIPPED classifiers over ``windows`` and return their verdict as a dict.
-
-    Deliberately routed through files and `-File` rather than `-Command`: a quoting slip in an inline
-    command is how a mutation run in this repo scored a false pass. A non-zero exit (a renamed or
-    deleted function, a parse error) raises here rather than degrading to an empty result, so a
-    mutation cannot pass by breaking the harness.
-    """
-    exe = _powershell()
-    harness = tmp_path / "classify.ps1"
-    harness.write_text(_HARNESS, encoding="utf-8")
-    payload = tmp_path / "windows.json"
-    payload.write_text(json.dumps(windows), encoding="utf-8")
-    target_probe = probe_ps1 if probe_ps1 is not None else PROBE_PS1
-    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(target_probe)]
-    argv += ["-WindowsJson", str(payload)]
-    if refresh_in_flight:
-        argv.append("-RefreshInFlight")
-    done = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
-    assert done.returncode == 0, f"harness failed ({done.returncode}):\n{done.stdout}\n{done.stderr}"
-    marker = "<<<PROBE-JSON>>>"
-    assert marker in done.stdout, f"harness produced no result payload:\n{done.stdout}\n{done.stderr}"
-    return json.loads(done.stdout.split(marker, 1)[1].strip().splitlines()[0])
-
-
-def harvest_result(tmp_path: Path, payload, *, exit_code: int = 0) -> dict:
-    """Run the SHIPPED payload validator over a raw child payload and return what it accepted."""
-    exe = _powershell()
-    harness = tmp_path / "classify.ps1"
-    harness.write_text(_HARNESS, encoding="utf-8")
-    blob = tmp_path / "payload.json"
-    blob.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
-    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(PROBE_PS1)]
-    argv += ["-PayloadJson", str(blob), "-PayloadExit", str(exit_code)]
-    done = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
-    assert done.returncode == 0, f"harness failed ({done.returncode}):\n{done.stdout}\n{done.stderr}"
-    marker = "<<<PROBE-JSON>>>"
-    assert marker in done.stdout, f"harness produced no result payload:\n{done.stdout}\n{done.stderr}"
-    return json.loads(done.stdout.split(marker, 1)[1].strip().splitlines()[0])
-
-
-REFRESH_PROGRESS = _window(
-    Title="Refresh",
-    ClassName="HwndWrapper[PBIDesktop.exe;;refresh]",
-    Texts=["Refresh", "1,204 rows loaded", "Cancel"],
-    InteractiveTexts=["Cancel"],
-    # A Power BI refresh dialog DOES disable its owner, so modality alone cannot tell it from a
-    # credential modal. Pinned false on purpose: the fix must not lean on the owner test.
-    OwnerEnabled=False,
-)
-CREDENTIAL_MODAL = _window(
-    Title="",
-    Texts=["Please specify how to connect", "Edit Credentials"],
-    OwnerEnabled=False,
-)
-# The review defect of 2026-08-29, as the collector actually produced it. A WPF modal renders its
-# whole visual tree into ONE HWND, so `EnumChildWindows` harvested nothing and only the caption
-# survived - a caption that matches the progress signature.
-WPF_CREDENTIAL_MODAL_SEEN_AS_CAPTION_ONLY = _window(
-    Title="Refresh",
-    ClassName="HwndWrapper[PBIDesktop.exe;;dialog]",
-    Texts=["Refresh"],
-    OwnerEnabled=False,
-    HarvestComplete=False,
-)
-# The second round's defect: a `Cancel` button was enough to satisfy the old "we read SOME text"
-# proxy, so a benign CAPTION cleared the window while the credential text stayed unread.
-WPF_CREDENTIAL_MODAL_WITH_ONLY_A_BUTTON_READ = _window(
-    Title="Refresh",
-    ClassName="HwndWrapper[PBIDesktop.exe;;dialog]",
-    Texts=["Refresh", "Cancel"],
-    InteractiveTexts=["Cancel"],
-    OwnerEnabled=False,
-    HarvestComplete=True,
-)
-# The same window once UI Automation supplies the visual text the Win32 collector could not see.
-WPF_CREDENTIAL_MODAL_WITH_UIA_TEXT = _window(
-    Title="Refresh",
-    ClassName="HwndWrapper[PBIDesktop.exe;;dialog]",
-    Texts=["Refresh", "Enter your credentials", "OK", "Cancel"],
-    InteractiveTexts=["OK", "Cancel"],
-    OwnerEnabled=False,
-    HarvestComplete=True,
-)
-
-
-def test_a_refresh_progress_dialog_is_not_reported_as_a_credential_block(tmp_path: Path) -> None:
-    """AC1. The field-reported false positive: an ordinary progress dialog is not a hard stop.
-
-    Two separate claims, and both matter. It must not be classified as a credential prompt, AND its
-    verdict must not land in the exit-1 hard-stop band - `BLOCKED_BY_DIALOG` was exit 1, the same code
-    a genuine credential wall uses, which is what made the false positive halt an unattended run.
-    """
-    result = classify(tmp_path, [REFRESH_PROGRESS])
-
-    assert result["candidates"] == 1, "the size pre-filter must still SELECT it; only the verdict changed"
-    assert result["credential"] is None
-    assert result["kind"] == "benign"
-    assert result["verdict"] != "BLOCKED_BY_DIALOG"
-    assert result["exit_code"] != 1, "a progress dialog must never reach the credential hard-stop band"
-
-
-def test_a_refresh_progress_dialog_during_our_own_refresh_is_ignored_entirely(tmp_path: Path) -> None:
-    """AC1/AC3. Once THIS script invoked the refresh, the progress dialog it caused is not a finding.
-
-    The distinction is the whole point of `-RefreshInFlight`: the same window means "somebody else is
-    refreshing, do not stack a second one" at t=0, and "your own refresh is running" in the poll loop.
-    """
-    assert classify(tmp_path, [REFRESH_PROGRESS], refresh_in_flight=True)["verdict"] is None
-
-
-def test_a_progress_dialog_already_up_at_t0_reports_refresh_in_progress(tmp_path: Path) -> None:
-    """AC3. Concurrent multi-instance refresh, as a first-class condition rather than setup noise.
-
-    The 2026-08-28 report ran three refreshes at once and had to cancel a stale duplicate by hand. A
-    progress dialog already open before this probe triggers anything is exactly that state, and the
-    verdict has to say so: not a credential wall (exit 1), not "all clear" (exit 0), but "Desktop is
-    busy, I could not probe" (exit 3).
-    """
-    result = classify(tmp_path, [REFRESH_PROGRESS])
-
-    assert result["verdict"] == "REFRESH_IN_PROGRESS"
-    assert result["exit_code"] == 3
-
-
-def test_a_genuine_credential_modal_is_still_detected(tmp_path: Path) -> None:
-    """AC2. The true positive must survive the fix for the false positive.
-
-    This is the "moved the boundary" guard: silencing the progress dialog by loosening the credential
-    path would pass every other test in this section and destroy the arbiter's only reason to exist.
-    """
-    result = classify(tmp_path, [CREDENTIAL_MODAL])
-
-    assert result["credential"] == "Please specify how to connect"
-    assert result["verdict"] == "CREDENTIAL_MISSING"
-    assert result["exit_code"] == 1
-
-
-def test_a_credential_modal_is_still_detected_behind_a_concurrent_refresh_dialog(tmp_path: Path) -> None:
-    """AC2/AC3. A benign classification must never mask a real modal on another window.
-
-    Ordering matters here and is easy to get wrong: iterate windows and return the first classification,
-    and a progress dialog enumerated first swallows the credential modal enumerated second. Run with
-    `refresh_in_flight` so the progress dialog is in its most-ignorable state.
-    """
-    result = classify(tmp_path, [REFRESH_PROGRESS, CREDENTIAL_MODAL], refresh_in_flight=True)
-
-    assert result["verdict"] == "CREDENTIAL_MISSING"
-    assert result["exit_code"] == 1
-
-
-def test_an_unreadable_dialog_is_a_third_verdict_not_one_of_the_other_two(tmp_path: Path) -> None:
-    """A window exposing no text at all: "we could not read it" is its own answer.
-
-    Absent is not empty. It must not collapse into `CREDENTIAL_MISSING` (we have no evidence of a
-    credential prompt) nor into "nothing here" (we have no evidence of health either).
-    """
-    result = classify(tmp_path, [_window(Texts=[], OwnerEnabled=False)])
-
-    assert result["kind"] == "unreadable"
-    assert result["verdict"] == "DIALOG_UNREADABLE"
-    assert result["exit_code"] == 3
-    assert result["credential"] is None
-
-
-def test_a_readable_but_unrecognized_dialog_is_distinct_from_an_unreadable_one(tmp_path: Path) -> None:
-    """The two ambiguous states are NOT the same state, and the verdict has to distinguish them.
-
-    "We read this window and nothing we know accounts for it" is strictly more knowledge than "we
-    could not read this window at all". Collapsing them loses the only fact that tells an operator
-    whether looking at the screen will help. Neither state establishes anything about the credential
-    itself - see the verdict-message contract at the end of this module.
-    """
-    unrecognized = classify(tmp_path, [_window(Title="Whoops", Texts=["Whoops", "Something went wrong"])])
-    unreadable = classify(tmp_path, [_window(Texts=[])])
-
-    assert unrecognized["kind"] == "unrecognized"
-    assert unrecognized["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert unrecognized["exit_code"] == 3
-    assert unrecognized["verdict"] != unreadable["verdict"], "the two ambiguous states must not collapse"
-    assert unrecognized["evidence"], "the readable case must carry the text it read, or it proves nothing"
-
-
-def test_an_unclassifiable_window_outranks_a_benign_one(tmp_path: Path) -> None:
-    """Precedence. `benign` is the only classification carrying positive evidence of harmlessness.
-
-    So it must never outrank a window nobody could classify - otherwise one progress dialog is enough
-    to hide every other window Desktop has open.
-
-    Asserted at t=0 FIRST, and that ordering is load-bearing: in flight the benign branch is skipped
-    anyway, so an in-flight-only assertion passes even when the precedence is reversed. Caught by
-    mutation - moving the benign return above the unreadable one went undetected until t=0 was covered.
-    """
-    windows = [REFRESH_PROGRESS, _window(Texts=[])]
-
-    assert classify(tmp_path, windows)["verdict"] == "DIALOG_UNREADABLE"
-    assert classify(tmp_path, windows, refresh_in_flight=True)["verdict"] == "DIALOG_UNREADABLE"
-
-
-def test_a_readable_unrecognized_window_outranks_a_benign_one(tmp_path: Path) -> None:
-    """Same precedence rule for the other ambiguous state, at t=0 where both are live."""
-    windows = [REFRESH_PROGRESS, _window(Title="Whoops", Texts=["Whoops", "Something went wrong"])]
-
-    assert classify(tmp_path, windows)["verdict"] == "DIALOG_UNRECOGNIZED"
-
-
-def test_an_enabled_owner_window_exonerates_a_dialog(tmp_path: Path) -> None:
-    """Modality is used ONE WAY: it can exonerate a window, never convict one.
-
-    A modal dialog disables its owner, so an enabled owner proves this window blocks nothing. The
-    converse does not hold - `REFRESH_PROGRESS` above pins `OwnerEnabled=False` precisely because Power
-    BI's own progress dialog also disables the owner - so a disabled owner is never treated as evidence.
-    """
-    exonerated = classify(tmp_path, [_window(Texts=["Something else"], OwnerEnabled=True)])
-    not_exonerated = classify(tmp_path, [_window(Texts=["Something else"], OwnerEnabled=False)])
-    no_owner = classify(tmp_path, [_window(Texts=["Something else"], OwnerEnabled=None)])
-
-    assert exonerated["verdict"] is None
-    assert not_exonerated["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert no_owner["verdict"] == "DIALOG_UNRECOGNIZED", "no owner means the test did not apply, not that it passed"
-
-
-def test_the_main_window_and_tiny_helper_windows_are_still_not_candidates(tmp_path: Path) -> None:
-    """The class and size pre-filters survive; they were never the defect, only their promotion to a verdict."""
-    main_window = _window(
-        Title="MyReport - Power BI Desktop",
-        ClassName="WindowsForms10.Window.8.app.0.141b42a_r6_ad1",
-        Width=1920,
-        Height=1080,
-        Texts=["MyReport - Power BI Desktop", "Refresh"],
-    )
-    tiny = _window(Width=10, Height=10)
-
-    result = classify(tmp_path, [main_window, tiny])
-
-    assert result["candidates"] == 0
-    assert result["verdict"] is None
-
-
-def test_the_arbiter_no_longer_derives_a_blocking_verdict_from_size_alone() -> None:
-    """Regression pin on the shipped file: the size-only detector and its exit-1 verdict are gone.
-
-    The behavioural tests above prove the classifiers are right; this proves the CALLERS were rewired to
-    them. A revert that restored `Test-BlockingDialog` while leaving the new functions in place would
-    pass every behavioural test in this section and still ship the defect.
-    """
-    body = PROBE_PS1.read_text(encoding="utf-8")
-
-    assert "function Test-BlockingDialog" not in body, "the size-only detector must not come back"
-    emitted = re.findall(r'VERDICT:\s*\{?0?\}?\s*"|VERDICT: ([A-Z_]+)', body)
-    assert "BLOCKED_BY_DIALOG" not in [name for name in emitted if name], (
-        "this arbiter must not emit BLOCKED_BY_DIALOG: it cannot establish that a dialog is blocking"
-    )
-    assert "exit $blocker.ExitCode" in body, "the t=0 branch must exit with the classifier's code, not a literal 1"
-
-
-def test_the_benign_signature_can_never_shadow_a_credential_prompt() -> None:
-    """The one way this fix could fail OPEN: a benign pattern broad enough to match a real modal.
-
-    In the poll loop a `benign` classification is IGNORED, so a credential prompt that matched the
-    benign signature would end the probe at `CREDENTIAL_PRESENT` - the fail-open the script's own header
-    calls worse than no arbiter. Platform-independent by design: it reads the two shipped resources, so
-    it gates on Linux CI too, where the PowerShell tests above skip.
-    """
-    benign = re.compile(BENIGN_SIGNATURE.read_text(encoding="utf-8").strip(), re.IGNORECASE)
-    credential_phrases = [
-        "You aren't signed in",
-        "Personal Access Token",
-        "Databricks Client Credentials",
-        "Please specify how to connect",
-        "Account Key",
-        "Enter your credentials",
-        "Permission is required to run this native database query",
-    ]
-
-    for phrase in credential_phrases:
-        assert not benign.search(phrase), f"benign signature must not match a credential prompt: {phrase!r}"
-
-
-def test_the_benign_signature_matches_real_refresh_progress_text() -> None:
-    """The progress vocabulary the arbiter is meant to recognise, pinned as data.
-
-    ⚠️ INFERRED from Power BI Desktop's refresh UI, not captured from a live dialog - so treat a miss as
-    a specificity gap, not a correctness one: an unmatched progress dialog degrades to
-    `DIALOG_UNRECOGNIZED`, which is still exit 3 and still not a credential wall.
-    """
-    benign = re.compile(BENIGN_SIGNATURE.read_text(encoding="utf-8").strip(), re.IGNORECASE)
-
-    for phrase in ["Refresh", "Evaluating", "1,204 rows loaded", "Waiting for other queries", "Loading data"]:
-        assert benign.search(phrase), f"benign signature should match progress text: {phrase!r}"
-    assert not benign.search("Refresh failed"), "'Refresh' is anchored so it cannot swallow arbitrary sentences"
-
-
-# --------------------------------------------------------------------------------------------------
-# WPF content harvest (blind review, 2026-08-29)
-# --------------------------------------------------------------------------------------------------
-#
-# The Win32 collector reads a window's caption plus its CHILD HWND text. WPF renders its whole visual
-# tree into ONE HWND, so a WPF dialog contributes nothing but its caption. A modal titled `Refresh`
-# whose content read `Enter your credentials` was therefore classified benign from the caption alone,
-# suppressed in-flight, and the probe exited 0 with `CREDENTIAL_PRESENT`.
-#
-# Measured here on an owned WPF modal (WinForms owner so it is excluded by class, WPF `TextBlock`
-# child, `ShowDialog()` disabling the owner, raised 0.8s after Refresh is invoked):
-#
-#   commit 0aa3767 : refresh invoked: True / no credential modal within 12s / CREDENTIAL_PRESENT  exit 0
-#   fixed          : refresh invoked: True / credential modal detected: 'Enter your credentials'  exit 1
-#
-# That is a SILENT false negative on a hard stop - strictly worse than the loud false positive #367
-# set out to remove. Two independent guards now cover it: the UIA harvest (below), and the
-# `ContentRead` gate that keeps a caption-only benign match indeterminate even if the harvest fails.
-
-CREDENTIAL_ALTERNATIVES = [
-    "You aren't signed in",
-    "Personal Access Token",
-    "Databricks Client Credentials",
-    "specify how to connect",
-    "Account Key",
-    "Enter your credentials",
-    "Please specify how to connect",
-]
-
-_FAKE_DESKTOP_APP = r"""
-param([Parameter(Mandatory = $true)][string]$ReadyFile)
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName PresentationFramework
-Add-Type -AssemblyName PresentationCore
-Add-Type -AssemblyName WindowsBase
-Add-Type -AssemblyName WindowsFormsIntegration
-[System.Windows.Forms.Application]::EnableVisualStyles()
-
-# WinForms owner: its class starts with WindowsForms10.Window.8, so the probe excludes it exactly as
-# it excludes the real Power BI Desktop main window.
-$script:form = New-Object System.Windows.Forms.Form
-$script:form.Text = 'Fake Desktop'
-$script:form.Width = 640
-$script:form.Height = 480
-
-# A WPF button hosted in the form. A plain WinForms Button surfaces to UI Automation as
-# ControlType.Pane with NO patterns (measured), so the probe's `Name -eq 'Refresh'` + Invoke scan
-# would never fire and the run would end at the not-invoked guard instead of testing anything.
-$button = New-Object System.Windows.Controls.Button
-$button.Content = 'Refresh'
-$hostControl = New-Object System.Windows.Forms.Integration.ElementHost
-$hostControl.Width = 140
-$hostControl.Height = 48
-$hostControl.Child = $button
-$script:form.Controls.Add($hostControl)
-
-# Raised on a timer so the click handler returns immediately - InvokePattern.Invoke() must not be
-# left waiting on a modal message loop.
-$script:timer = New-Object System.Windows.Forms.Timer
-$script:timer.Interval = 800
-$script:timer.Add_Tick({
-    $script:timer.Stop()
-    $modal = New-Object System.Windows.Window
-    $modal.Title = 'Refresh'
-    $modal.Width = 520
-    $modal.Height = 320
-    $panel = New-Object System.Windows.Controls.StackPanel
-    $block = New-Object System.Windows.Controls.TextBlock
-    $block.Text = 'Enter your credentials'
-    $null = $panel.Children.Add($block)
-    $modal.Content = $panel
-    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
-    $helper.Owner = $script:form.Handle
-    $null = $modal.ShowDialog()
-  })
-$button.Add_Click({ $script:timer.Start() })
-$script:form.Add_Shown({ Set-Content -LiteralPath $ReadyFile -Value 'ready' -Encoding ascii })
-[System.Windows.Forms.Application]::Run($script:form)
-"""
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-def test_an_owned_wpf_credential_modal_titled_refresh_is_a_hard_stop(tmp_path: Path) -> None:
-    """Live regression for the review defect: the whole script, against a real owned WPF modal.
-
-    The offline tests below pin the classifier's half of this. This one pins the COLLECTOR's half -
-    that the probe actually harvests text a WPF window only exposes through UI Automation - and it is
-    the only test here that exercises the real Win32 + UIA + refresh-invoke path end to end.
-    """
-    exe = _powershell()
-    app_script = tmp_path / "fake_desktop.ps1"
-    app_script.write_text(_FAKE_DESKTOP_APP, encoding="utf-8")
-    ready = tmp_path / "ready.txt"
-    app = subprocess.Popen(  # pylint: disable=consider-using-with
-        [exe, "-Sta", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(app_script), "-ReadyFile", str(ready)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
-        for _ in range(60):
-            if ready.exists():
-                break
-            time.sleep(0.5)
-        if not ready.exists():
-            pytest.skip("the WPF fixture app never showed a window (no interactive desktop?)")
-        done = subprocess.run(
-            [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(PROBE_PS1), "-DesktopPid", str(app.pid)]
-            + ["-TimeoutSec", "12"],
-            capture_output=True,
-            text=True,
-            timeout=180,
-            check=False,
-        )
-        if "refresh invoked: True" not in done.stdout:
-            pytest.skip(f"the fixture app exposed no invokable Refresh to UI Automation:\n{done.stdout}")
-
-        assert "Enter your credentials" in done.stdout, (
-            "the probe must harvest WPF visual text; child-HWND enumeration alone sees only the caption"
-        )
-        assert "VERDICT: CREDENTIAL_MISSING" in done.stdout
-        assert done.returncode == 1, (
-            f"a real credential modal must be a hard stop, not exit {done.returncode}:\n{done.stdout}"
-        )
-    finally:
-        app.kill()
-        app.wait(timeout=30)
-
-
-def test_a_caption_only_benign_match_stays_indeterminate(tmp_path: Path) -> None:
-    """The collector's half can fail; this is the guard that holds when it does.
-
-    A window whose CONTENT was never read cannot be evidence of harmlessness, however reassuring its
-    caption. `absent != empty`, applied one level down - so a `Refresh` caption over unread content is
-    reported as indeterminate rather than suppressed.
-    """
-    result = classify(tmp_path, [WPF_CREDENTIAL_MODAL_SEEN_AS_CAPTION_ONLY])
-
-    assert result["kind"] == "benign-title-only"
-    assert result["verdict"] == "DIALOG_UNREADABLE"
-    assert result["exit_code"] == 3
-
-
-def test_a_caption_only_benign_match_is_not_suppressed_in_flight(tmp_path: Path) -> None:
-    """The exact step that produced exit 0: in-flight suppression of a caption-only benign match.
-
-    In the poll loop a genuine `benign` window is ignored, because it is our own refresh. A
-    caption-only match must NOT get that treatment - nothing was read, so nothing was established, and
-    a suppressed observation leaves the deadline free to print CREDENTIAL_PRESENT.
-    """
-    result = classify(tmp_path, [WPF_CREDENTIAL_MODAL_SEEN_AS_CAPTION_ONLY], refresh_in_flight=True)
-
-    assert result["verdict"] == "DIALOG_UNREADABLE", "an unread window must stay latchable in flight"
-    assert result["exit_code"] == 3
-
-
-def test_uia_harvested_text_turns_the_same_window_into_a_credential_stop(tmp_path: Path) -> None:
-    """With the visual text merged in, the caption stops mattering: credential beats benign."""
-    result = classify(tmp_path, [WPF_CREDENTIAL_MODAL_WITH_UIA_TEXT], refresh_in_flight=True)
-
-    assert result["kind"] == "credential"
-    assert result["verdict"] == "CREDENTIAL_MISSING"
-    assert result["exit_code"] == 1
-    assert result["credential"] == "Enter your credentials"
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        pytest.param("__absent__", id="field-missing"),
-        pytest.param(None, id="null"),
-        pytest.param(False, id="false"),
-        pytest.param(0, id="int-0"),
-        pytest.param(1, id="int-1"),
-        pytest.param("true", id="str-true"),
-        pytest.param("false", id="str-false"),
-        pytest.param("", id="empty-string"),
-        pytest.param([], id="empty-list"),
-    ],
-)
-def test_only_a_real_boolean_true_can_authorise_suppression(tmp_path: Path, value) -> None:
-    """`-eq $true` is COERCIVE, and review proved it: integer `1` and the string `"true"` both cleared.
-
-    Anything that is not a Boolean is an unknown window shape - a future collector change, a caller
-    that predates the field, a JSON round-trip that widened a type - and an unknown shape must never be
-    able to authorise suppression. Only `$true` itself counts.
-    """
-    window = _window(Title="Refresh", Texts=["Refresh", "1,204 rows loaded"], OwnerEnabled=False)
-    if value == "__absent__":
-        del window["HarvestComplete"]
-    else:
-        window["HarvestComplete"] = value
-
-    result = classify(tmp_path, [window], refresh_in_flight=True)
-
-    assert result["kind"] == "benign-unverified", f"HarvestComplete={value!r} must not count as complete"
-    assert result["verdict"] == "DIALOG_UNREADABLE"
-    assert result["exit_code"] == 3
-
-
-def test_a_real_boolean_true_does_authorise_suppression(tmp_path: Path) -> None:
-    """The positive control for the test above - otherwise it could pass by refusing everything."""
-    window = _window(Title="Refresh", Texts=["Refresh", "1,204 rows loaded"], OwnerEnabled=False)
-    window["HarvestComplete"] = True
-
-    assert classify(tmp_path, [window], refresh_in_flight=True)["verdict"] is None
-
-
-def test_reading_only_a_button_does_not_authorise_a_benign_caption(tmp_path: Path) -> None:
-    """Round 2's defect: "we harvested SOME text" was a proxy for "we read the credential content".
-
-    A `Cancel` button satisfied it. Under the inverted rule the harvest being complete is necessary but
-    not sufficient - the BENIGN SIGNATURE ITSELF must match content, and `Cancel` does not. So the
-    three separate exploits that beat the old proxy (TextPattern-only content, content past the element
-    cap, a split defeated by an interposed element) all stop being silent clears at once: none of them
-    ever produced benign content to read.
-    """
-    result = classify(tmp_path, [WPF_CREDENTIAL_MODAL_WITH_ONLY_A_BUTTON_READ], refresh_in_flight=True)
-
-    assert result["kind"] != "benign", "a button label is not evidence that a dialog is harmless"
-    assert result["verdict"] == "DIALOG_UNREADABLE"
-    assert result["exit_code"] == 3
-
-
-def test_a_benign_caption_over_unreadable_content_is_never_suppressed(tmp_path: Path) -> None:
-    """Whatever the collector missed, a caption alone cannot clear a window - in flight or at t=0."""
-    for in_flight in (False, True):
-        result = classify(tmp_path, [WPF_CREDENTIAL_MODAL_SEEN_AS_CAPTION_ONLY], refresh_in_flight=in_flight)
-        assert result["kind"] == "benign-title-only", f"in_flight={in_flight}"
-        assert result["verdict"] == "DIALOG_UNREADABLE"
-        assert result["exit_code"] == 3
-
-
-def test_benign_content_from_a_truncated_harvest_is_not_benign(tmp_path: Path) -> None:
-    """Truncated must never read as "complete and clean" - the element cap was independently exploitable.
-
-    450 ordinary elements followed by the credential `TextBlock` cleared the window because the cap
-    silently stopped short. The cap still exists (it bounds the work), but hitting it now withholds the
-    right to suppress instead of quietly granting it.
-    """
-    window = _window(
-        Title="Refresh",
-        Texts=["Refresh", "Evaluating"],
-        OwnerEnabled=False,
-        HarvestComplete=False,
-    )
-
-    result = classify(tmp_path, [window], refresh_in_flight=True)
-
-    assert result["kind"] == "benign-unverified"
-    assert result["exit_code"] == 3
-
-
-def test_a_credential_signature_split_across_wpf_elements_still_convicts(tmp_path: Path) -> None:
-    """WPF splits one sentence across visual elements, so the signature must see the joined text.
-
-    Both readers are asserted: `Get-DialogVerdict` (the classifier) and `Test-CredentialModal` (the
-    all-windows scan the main body runs first). They are separate call sites and either one losing the
-    joined text re-opens the gap on its own.
-    """
-    window = _window(Title="Refresh", Texts=["Refresh", "Enter your", "credentials"], OwnerEnabled=False)
-
-    result = classify(tmp_path, [window], refresh_in_flight=True)
-
-    assert result["verdict"] == "CREDENTIAL_MISSING"
-    assert result["exit_code"] == 1
-    assert result["credential"] == "Refresh Enter your credentials", (
-        "Test-CredentialModal must search the joined text too, not just the classifier"
-    )
-
-
-def test_the_benign_signature_is_never_matched_against_joined_text(tmp_path: Path) -> None:
-    """The join is asymmetric on purpose, and the asymmetry is the safety property.
-
-    Joining can manufacture a phrase from adjacent fragments. On the credential path that yields a LOUD
-    false stop a human resolves by looking at the screen; on the benign path it would yield a SILENT
-    false clear. `Loading` + `data` must therefore not join into the benign signature `Loading data`.
-    """
-    window = _window(Title="Loading", Texts=["Loading", "data"], OwnerEnabled=False)
-
-    result = classify(tmp_path, [window])
-
-    assert result["kind"] == "unrecognized", "benign must read individual elements only, never the join"
-
-
-@pytest.mark.parametrize("phrase", CREDENTIAL_ALTERNATIVES)
-def test_every_credential_signature_alternative_is_still_a_hard_stop(tmp_path: Path, phrase: str) -> None:
-    """The full true-positive set, re-proved after the text pipeline was rewritten.
-
-    Fixing a false positive by eroding the true positives is the failure mode this whole change is
-    most exposed to, so the signature's alternatives are asserted one by one rather than sampled.
-    """
-    window = _window(Title="Refresh", Texts=["Refresh", phrase], OwnerEnabled=False)
-
-    result = classify(tmp_path, [window], refresh_in_flight=True)
-
-    assert result["verdict"] == "CREDENTIAL_MISSING", f"{phrase!r} must convict even under a benign caption"
-    assert result["exit_code"] == 1
-
-
-def test_the_pinned_alternative_list_still_covers_the_shipped_signature() -> None:
-    """If someone adds an alternative to the signature file, the parametrised set above must grow too.
-
-    Without this, the "all alternatives" claim quietly becomes "the alternatives that existed in 2026".
-    """
-    alternatives = [alt for alt in CREDENTIAL_SIGNATURE.read_text(encoding="utf-8").strip().split("|") if alt]
-    signature = re.compile(CREDENTIAL_SIGNATURE.read_text(encoding="utf-8").strip(), re.IGNORECASE)
-
-    assert len(alternatives) == len(CREDENTIAL_ALTERNATIVES), (
-        f"signature has {len(alternatives)} alternatives but {len(CREDENTIAL_ALTERNATIVES)} are exercised"
-    )
-    for phrase in CREDENTIAL_ALTERNATIVES:
-        assert signature.search(phrase), f"pinned phrase no longer matches the shipped signature: {phrase!r}"
-
-
-def test_the_probe_harvests_window_text_through_ui_automation() -> None:
-    """Regression pin on the collector: the harvest, its patterns, and its BOUNDS stay wired in.
-
-    The behavioural tests above take `Texts`/`HarvestComplete` as inputs. Only the live tests prove
-    they are produced, and those skip where there is no interactive desktop - so this keeps the wiring
-    gated everywhere, including on Linux CI.
-    """
-    body = PROBE_PS1.read_text(encoding="utf-8")
-
-    assert "function Get-AutomationHarvest" in body
-    assert "AutomationElement]::FromHandle" in body, "the harvest must start from the window handle"
-    assert "TextPattern]::Pattern" in body, (
-        "TextPattern is not optional: a read-only RichTextBox with an empty Name exposes its text only there"
-    )
-    assert "ValuePattern]::Pattern" in body
-    assert "$truncated = $true" in body, "hitting the element cap must be recorded, not silently absorbed"
-    assert "PatternsIncomplete" in body, "a pattern read that threw must withhold the right to suppress"
-    assert "ConvertTo-ProbeWindow" in body and "-Enrich:$isCandidate" in body, (
-        "Get-PidWindows must enrich candidate windows, or the classifiers only ever see the caption"
-    )
-    assert "function Get-BoundedAutomationHarvest" in body and "WaitForExit" in body and "Kill()" in body, (
-        "the harvest must run in a killable child process: a hung UIA provider cannot be cancelled in-process"
-    )
-    assert "ConvertTo-HarvestResult -Payload" in body and "-ExitCode $child.ExitCode" in body, (
-        "the collector must route the child payload through the validator, carrying the child's exit code - "
-        "the validator is behaviourally tested on its own, but nothing else pins that it is actually WIRED IN"
-    )
-
-
-def test_the_harvest_child_process_is_this_same_script() -> None:
-    """The bounded harvest re-invokes THIS file, so the bundle stays copyable as one folder.
-
-    A second script would have to be copied too, and `SKILL.md` promises that copying this one folder
-    takes the whole procedure with it.
-    """
-    body = PROBE_PS1.read_text(encoding="utf-8")
-
-    assert "$PSCommandPath" in body, "the child must be this script, not a sibling file"
-    assert "ParameterSetName -eq 'Harvest'" in body
-    assert "'HARVEST:'" in body, "the child's payload needs a marker the parent can find in its output"
-
-
-# --------------------------------------------------------------------------------------------------
-# Live regressions for the round-2 exploits (blind review, 2026-08-29)
-# --------------------------------------------------------------------------------------------------
-#
-# Each of these beat the previous `ContentRead` proxy and ended at CREDENTIAL_PRESENT, exit 0. They are
-# kept as LIVE tests, not synthesised ones, because every one of them lived in the COLLECTOR - the part
-# a synthesised window object cannot exercise by construction.
-
-_WPF_APP_PREAMBLE = r"""
-param([Parameter(Mandatory = $true)][string]$ReadyFile)
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName PresentationFramework
-Add-Type -AssemblyName PresentationCore
-Add-Type -AssemblyName WindowsBase
-Add-Type -AssemblyName WindowsFormsIntegration
-[System.Windows.Forms.Application]::EnableVisualStyles()
-$script:form = New-Object System.Windows.Forms.Form
-$script:form.Text = 'Fake Desktop'
-$script:form.Width = 640
-$script:form.Height = 480
-$button = New-Object System.Windows.Controls.Button
-$button.Content = 'Refresh'
-$hostControl = New-Object System.Windows.Forms.Integration.ElementHost
-$hostControl.Width = 140
-$hostControl.Height = 48
-$hostControl.Child = $button
-$script:form.Controls.Add($hostControl)
-$script:timer = New-Object System.Windows.Forms.Timer
-$script:timer.Interval = 800
-"""
-
-_WPF_APP_EPILOGUE = r"""
-$button.Add_Click({ $script:timer.Start() })
-$script:form.Add_Shown({ Set-Content -LiteralPath $ReadyFile -Value 'ready' -Encoding ascii })
-[System.Windows.Forms.Application]::Run($script:form)
-"""
-
-# Credential text in a read-only RichTextBox: reachable ONLY through TextPattern, with an empty Name,
-# and a Cancel button alongside it so the old "we harvested some text" proxy would have been satisfied.
-_MODAL_TEXTPATTERN_ONLY = r"""
-$script:timer.Add_Tick({
-    $script:timer.Stop()
-    $modal = New-Object System.Windows.Window
-    $modal.Title = 'Refresh'
-    $modal.Width = 520
-    $modal.Height = 320
-    $panel = New-Object System.Windows.Controls.StackPanel
-    $rich = New-Object System.Windows.Controls.RichTextBox
-    $rich.IsReadOnly = $true
-    $paragraph = New-Object System.Windows.Documents.Paragraph
-    $paragraph.Inlines.Add((New-Object System.Windows.Documents.Run('Enter your credentials')))
-    $rich.Document = New-Object System.Windows.Documents.FlowDocument($paragraph)
-    $null = $panel.Children.Add($rich)
-    $cancel = New-Object System.Windows.Controls.Button
-    $cancel.Content = 'Cancel'
-    $null = $panel.Children.Add($cancel)
-    $modal.Content = $panel
-    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
-    $helper.Owner = $script:form.Handle
-    $null = $modal.ShowDialog()
-  })
-"""
-
-# 450 ordinary elements ahead of the credential text: the old 400-element cap truncated silently and
-# the result was indistinguishable from "read it all, found nothing".
-_MODAL_PAST_THE_ELEMENT_CAP = r"""
-$script:timer.Add_Tick({
-    $script:timer.Stop()
-    $modal = New-Object System.Windows.Window
-    $modal.Title = 'Refresh'
-    $modal.Width = 520
-    $modal.Height = 320
-    $panel = New-Object System.Windows.Controls.StackPanel
-    for ($i = 0; $i -lt 450; $i++) {
-      $filler = New-Object System.Windows.Controls.TextBlock
-      $filler.Text = "row $i"
-      $null = $panel.Children.Add($filler)
-    }
-    $block = New-Object System.Windows.Controls.TextBlock
-    $block.Text = 'Enter your credentials'
-    $null = $panel.Children.Add($block)
-    $scroller = New-Object System.Windows.Controls.ScrollViewer
-    $scroller.Content = $panel
-    $modal.Content = $scroller
-    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
-    $helper.Owner = $script:form.Handle
-    $null = $modal.ShowDialog()
-  })
-"""
-
-# `Enter your` / `Cancel` / `credentials`: an interactive element interposed between the two halves of
-# the signature, which defeated a naive whole-window join.
-_MODAL_INTERPOSED_SPLIT = r"""
-$script:timer.Add_Tick({
-    $script:timer.Stop()
-    $modal = New-Object System.Windows.Window
-    $modal.Title = 'Refresh'
-    $modal.Width = 520
-    $modal.Height = 320
-    $panel = New-Object System.Windows.Controls.StackPanel
-    $first = New-Object System.Windows.Controls.TextBlock
-    $first.Text = 'Enter your'
-    $null = $panel.Children.Add($first)
-    $cancel = New-Object System.Windows.Controls.Button
-    $cancel.Content = 'Cancel'
-    $null = $panel.Children.Add($cancel)
-    $second = New-Object System.Windows.Controls.TextBlock
-    $second.Text = 'credentials'
-    $null = $panel.Children.Add($second)
-    $modal.Content = $panel
-    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
-    $helper.Owner = $script:form.Handle
-    $null = $modal.ShowDialog()
-  })
-"""
-
-# A modal that WEDGES its own UI thread. UI Automation's FindAll then blocks cross-process, which is
-# what held a `-TimeoutSec 1` probe for 15.1s and produced no verdict at all.
-_MODAL_WEDGED_UI_THREAD = r"""
-$script:timer.Add_Tick({
-    $script:timer.Stop()
-    $modal = New-Object System.Windows.Window
-    $modal.Title = 'Refresh'
-    $modal.Width = 520
-    $modal.Height = 320
-    $block = New-Object System.Windows.Controls.TextBlock
-    $block.Text = 'Enter your credentials'
-    $modal.Content = $block
-    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
-    $helper.Owner = $script:form.Handle
-    $modal.Add_ContentRendered({ Start-Sleep -Seconds 120 })
-    $null = $modal.ShowDialog()
-  })
-"""
-
-
-def _run_probe_against_wpf_modal(tmp_path: Path, modal_body: str, extra_args: list[str] | None = None):
-    """Launch the fake-Desktop app with ``modal_body``, run the probe, return the completed process.
-
-    ⚠️ **These live tests are CONTENTION-SENSITIVE, and that is not flakiness.** They drive a real GUI
-    process and a real cross-process UI Automation harvest, so running them alongside the whole skills
-    suite can slow the fixture enough that it never exposes an invokable `Refresh` (skip below), or slow
-    the harvest enough that it hits its own timeout and the verdict degrades to `DIALOG_UNREADABLE`.
-    Both are the fail-safe working: every degraded path lands in the exit-3 band, never a clear.
-    Measured 2026-08-29: a clean run is 100 passed; the same suite under a concurrent full-suite run
-    skipped one live test. Prefer asserting on the BAND (never exit 0, never suppressed) and reserve
-    exact-verdict assertions for the cases that are stable.
-    """
-    exe = _powershell()
-    app_script = tmp_path / "fake_desktop.ps1"
-    app_script.write_text(_WPF_APP_PREAMBLE + modal_body + _WPF_APP_EPILOGUE, encoding="utf-8")
-    ready = tmp_path / "ready.txt"
-    app = subprocess.Popen(  # pylint: disable=consider-using-with
-        [exe, "-Sta", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(app_script), "-ReadyFile", str(ready)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
-        for _ in range(60):
-            if ready.exists():
-                break
-            time.sleep(0.5)
-        if not ready.exists():
-            pytest.skip("the WPF fixture app never showed a window (no interactive desktop?)")
-        argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(PROBE_PS1)]
-        argv += ["-DesktopPid", str(app.pid)]
-        extra = extra_args or []
-        if "-TimeoutSec" not in extra:
-            argv += ["-TimeoutSec", "12"]
-        argv += extra
-        started = time.monotonic()
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=300, check=False)
-        done.elapsed = time.monotonic() - started  # type: ignore[attr-defined]
-        if "refresh invoked: True" not in done.stdout:
-            pytest.skip(f"the fixture app exposed no invokable Refresh to UI Automation:\n{done.stdout}")
-        return done
-    finally:
-        app.kill()
-        app.wait(timeout=30)
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-def test_credential_text_reachable_only_through_textpattern_is_a_hard_stop(tmp_path: Path) -> None:
-    """Exploit 1. `Name` + `ValuePattern` alone miss a read-only RichTextBox's content entirely."""
-    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_TEXTPATTERN_ONLY)
-
-    assert "VERDICT: CREDENTIAL_MISSING" in done.stdout, done.stdout
-    assert done.returncode == 1
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-def test_credential_text_beyond_the_element_cap_never_reads_as_clean(tmp_path: Path) -> None:
-    """Exploit 2. Truncation must not be indistinguishable from a complete, clean read.
-
-    Two acceptable outcomes and one forbidden one: read it all and convict (exit 1), or report the
-    harvest incomplete (exit 3). Never exit 0.
-    """
-    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_PAST_THE_ELEMENT_CAP, ["-HarvestMaxElements", "400"])
-
-    assert done.returncode != 0, f"a truncated harvest must never clear a window:\n{done.stdout}"
-    assert "CREDENTIAL_PRESENT" not in done.stdout
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-def test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it(tmp_path: Path) -> None:
-    """The same window with the shipped cap: read in full, and convicted."""
-    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_PAST_THE_ELEMENT_CAP)
-
-    assert "VERDICT: CREDENTIAL_MISSING" in done.stdout, done.stdout
-    assert done.returncode == 1
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-def test_a_signature_split_by_an_interposed_button_is_a_hard_stop(tmp_path: Path) -> None:
-    """Exploit 3. The prose join must skip interactive elements, or `Cancel` breaks the sentence."""
-    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_INTERPOSED_SPLIT)
-
-    assert "VERDICT: CREDENTIAL_MISSING" in done.stdout, done.stdout
-    assert done.returncode == 1
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-def test_a_wedged_uia_provider_still_produces_a_verdict(tmp_path: Path) -> None:
-    """The MEDIUM finding: an uncapped UIA walk let a 1s probe run 15s+ and emit nothing at all.
-
-    `FindAll` is a synchronous cross-process call, so neither `try/catch` nor a background thread can
-    interrupt it - only killing a child process can.
-
-    The bound is what this test is FOR, and it has to be tight enough to fail. Measured here against a
-    modal that sleeps 120s on its own UI thread, with `-TimeoutSec 1 -HarvestTimeoutSec 2`:
-
-        bounded child process : 6.2s   exit 3  VERDICT: DIALOG_UNREADABLE
-        in-process harvest    : 70.5s  exit 3  VERDICT: DIALOG_UNREADABLE
-
-    Note both eventually print the SAME verdict - the defect is purely the time budget, so an assertion
-    on the verdict alone cannot see it. A first draft used `elapsed < 120` and the mutation walked
-    straight through at 70.5s. 25s sits ~4x above the bounded case and ~3x below the unbounded one.
-    """
-    done = _run_probe_against_wpf_modal(
-        tmp_path, _MODAL_WEDGED_UI_THREAD, ["-TimeoutSec", "1", "-HarvestTimeoutSec", "2"]
-    )
-
-    assert "VERDICT:" in done.stdout, f"a wedged provider must not swallow the verdict:\n{done.stdout}"
-    assert "CREDENTIAL_PRESENT" not in done.stdout, "an unreadable window is not a clean bill of health"
-    assert done.returncode == 3
-    assert done.elapsed < 25, (
-        f"the probe inherited the provider's wedge instead of bounding it (took {done.elapsed:.1f}s)"
-    )
-
-
-# --------------------------------------------------------------------------------------------------
-# Round 3: one benign element must not erase the rest of the window, and a payload must be validated
-# --------------------------------------------------------------------------------------------------
-#
-# Both findings are the SAME root cause, for the third time on this branch: missing evidence read as
-# good evidence. Round 1 let a caption stand in for content; round 2 let "we read something" stand in
-# for "we read the thing that matters"; round 3 let the FIRST benign element stand in for the whole
-# window, and a MISSING JSON property stand in for a completed harvest.
-
-NATIVE_QUERY_PROMPT = "Permission is required to run this native database query"
-
-
-def test_a_native_query_approval_beside_progress_text_is_not_suppressed(tmp_path: Path) -> None:
-    """The finding this branch must not ship without: one `Evaluating` erased a known blocking prompt.
-
-    `Permission is required to run this native database query` is Power BI Desktop's native-database-
-    query approval modal. It is not hypothetical - `SKILL.md` documents it at length, notes that
-    migrated custom-SQL sources emit exactly the shape that triggers it, and instructs the reader to
-    check for it *before* concluding anything about credentials. A probe that suppressed it would make
-    this bundle contradict its own documentation.
-
-    Exit 3, not 1: a human must act, but the remedy is an approval, not a sign-in - so it must not be
-    reported in the band whose documented meaning is "sign in once".
-    """
-    window = _window(
-        Title="Refresh",
-        Texts=["Refresh", "Evaluating", NATIVE_QUERY_PROMPT],
-        OwnerEnabled=False,
-    )
-
-    result = classify(tmp_path, [window], refresh_in_flight=True)
-
-    assert result["kind"] == "needs-human"
-    assert result["verdict"] == "DIALOG_NEEDS_HUMAN"
-    assert result["exit_code"] == 3
-    assert NATIVE_QUERY_PROMPT in (result["evidence"] or ""), "the verdict must carry the prompt it found"
-
-
-def test_a_native_query_approval_outranks_an_enabled_owner(tmp_path: Path) -> None:
-    """Modality exonerates a window we know nothing about, not one we have identified as blocking."""
-    window = _window(Title="Refresh", Texts=["Refresh", NATIVE_QUERY_PROMPT], OwnerEnabled=True)
-
-    assert classify(tmp_path, [window], refresh_in_flight=True)["kind"] == "needs-human"
-
-
-def test_authentication_required_alongside_loading_data_is_not_suppressed(tmp_path: Path) -> None:
-    """The second round-3 case: `\\bLoading data\\b` matched as a substring of a real prompt.
-
-    Two independent guards now stop it: the benign expressions are WHOLE-ELEMENT status patterns, so
-    `Loading data requires authentication` is not progress text at all; and `Authentication required`
-    is itself a known human-blocking prompt.
-    """
-    window = _window(
-        Title="Authentication required",
-        Texts=["Authentication required", "Loading data requires authentication"],
-        OwnerEnabled=False,
-    )
-
-    result = classify(tmp_path, [window], refresh_in_flight=True)
-
-    assert result["exit_code"] == 3
-    assert result["verdict"] != "REFRESH_IN_PROGRESS"
-
-
-def test_unaccounted_prose_beside_progress_text_is_not_suppressed(tmp_path: Path) -> None:
-    """The backstop for a blocking prompt in NEITHER signature.
-
-    A window is a progress dialog only when its content is ACCOUNTED FOR: recognised status text, or
-    short enough that it cannot be a human-directed prompt. A sentence nobody can explain sitting
-    beside `Evaluating` means the progress dialog does not explain this window.
-    """
-    window = _window(
-        Title="Refresh",
-        Texts=["Refresh", "Evaluating", "Something entirely unknown is blocking this refresh now"],
-        OwnerEnabled=False,
-    )
-
-    result = classify(tmp_path, [window], refresh_in_flight=True)
-
-    assert result["kind"] == "mixed-content"
-    assert result["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert result["exit_code"] == 3
-
-
-def test_short_data_labels_beside_progress_text_do_not_block_suppression(tmp_path: Path) -> None:
-    """Issue #406 tradeoff test. Without length amnesty ($MinPromptWords removed), short data labels
-
-    (such as table names 'Orders', 'Customers') are no longer excused as benign. Every non-empty content
-    element must be either recognised status or enumerated chrome; unrecognised data labels veto benign
-    suppression and yield DIALOG_UNRECOGNIZED (exit 3) both at t=0 and under -RefreshInFlight.
-    This reachability cost is accepted to ensure short prompts like 'Password:' or 'Please enter your password'
-    are never suppressed in flight.
-    """
-    window = _window(
-        Title="Refresh",
-        Texts=["Refresh", "Orders", "Customers", "1,204 rows loaded", "Evaluating", "Cancel"],
-        InteractiveTexts=["Cancel"],
-        OwnerEnabled=False,
-    )
-
-    result_flight = classify(tmp_path, [window], refresh_in_flight=True)
-    assert result_flight["kind"] == "mixed-content"
-    assert result_flight["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert result_flight["exit_code"] == 3
-    assert result_flight["evidence"] in ("Orders", "Customers")
-
-    result_t0 = classify(tmp_path, [window])
-    assert result_t0["kind"] == "mixed-content"
-    assert result_t0["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert result_t0["exit_code"] == 3
-    assert result_t0["evidence"] in ("Orders", "Customers")
-
-
-@pytest.mark.parametrize(
-    "prompt",
-    [
-        "Please enter your password",  # 4 words - under old MIN_PROMPT_WORDS amnesty
-        "Password:",  # 2 words
-        "Sign in",
-        "Enter password",
-    ],
-)
-def test_powershell_short_prompt_beside_progress_text_is_never_dismissed(tmp_path: Path, prompt: str) -> None:
-    """Issue #406. Length is not evidence of harmlessness.
-
-    $MinPromptWords = 5 accepted every unmatched element under 5 words, so short prompts like "Password:"
-    or "Please enter your password" sitting beside "Evaluating" classified as benign and were suppressed
-    in flight ($null verdict). Without length amnesty, any unrecognised content text vetoes benign suppression.
-    """
-    window = _window(
-        Title="Refresh",
-        Texts=["Refresh", "Evaluating", prompt],
-        InteractiveTexts=["Cancel"],
-        OwnerEnabled=False,
-    )
-
-    in_flight = classify(tmp_path, [window], refresh_in_flight=True)
-    assert in_flight["kind"] == "mixed-content"
-    assert in_flight["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert in_flight["exit_code"] == 3
-    assert in_flight["evidence"] == prompt
-
-    t0 = classify(tmp_path, [window])
-    assert t0["kind"] == "mixed-content"
-    assert t0["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert t0["exit_code"] == 3
-    assert t0["evidence"] == prompt
-
-
-def test_powershell_only_enumerated_chrome_is_excused_beside_progress_text(tmp_path: Path) -> None:
-    """Issue #406. Benign suppression requires enumerated chrome (Cancel/OK/Close), not arbitrary short strings."""
-    chrome_cancel = _window(
-        Title="Refresh",
-        Texts=["Refresh", "Evaluating", "Cancel"],
-        InteractiveTexts=["Cancel"],
-        OwnerEnabled=False,
-    )
-    chrome_ok = _window(
-        Title="Refresh",
-        Texts=["Refresh", "Evaluating", "OK"],
-        InteractiveTexts=["OK"],
-        OwnerEnabled=False,
-    )
-    chrome_close = _window(
-        Title="Refresh",
-        Texts=["Refresh", "Evaluating", "Close"],
-        InteractiveTexts=["Close"],
-        OwnerEnabled=False,
-    )
-
-    for w in [chrome_cancel, chrome_ok, chrome_close]:
-        res_flight = classify(tmp_path, [w], refresh_in_flight=True)
-        assert res_flight["verdict"] is None
-
-        res_t0 = classify(tmp_path, [w])
-        assert res_t0["kind"] == "benign"
-        assert res_t0["verdict"] == "REFRESH_IN_PROGRESS"
-
-
-def test_caption_accounting_powershell(tmp_path: Path) -> None:
-    """Issue #406 caption accounting in PowerShell detector.
-
-    Covering t=0 and RefreshInFlight for:
-    1. title-only prompt
-    2. duplicated title+content prompt
-    3. known benign title with progress
-    4. unknown title plus benign content
-    5. whitespace/case variants
-    6. credential-signature titles
-    """
-    # 1. title-only prompt
-    w_title_only = _window(Title="Password:", Texts=["Password:"], OwnerEnabled=False)
-    res_1_t0 = classify(tmp_path, [w_title_only])
-    assert res_1_t0["kind"] == "unrecognized"
-    assert res_1_t0["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert res_1_t0["exit_code"] == 3
-    assert res_1_t0["evidence"] == "Password:"
-    res_1_flight = classify(tmp_path, [w_title_only], refresh_in_flight=True)
-    assert res_1_flight["kind"] == "unrecognized"
-    assert res_1_flight["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert res_1_flight["exit_code"] == 3
-
-    # 2. duplicated title+content prompt
-    w_dup = _window(Title="Password:", Texts=["Password:", "Evaluating", "Cancel"], OwnerEnabled=False)
-    res_2_t0 = classify(tmp_path, [w_dup])
-    assert res_2_t0["kind"] == "mixed-content"
-    assert res_2_t0["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert res_2_t0["exit_code"] == 3
-    assert res_2_t0["evidence"] == "Password:"
-    res_2_flight = classify(tmp_path, [w_dup], refresh_in_flight=True)
-    assert res_2_flight["kind"] == "mixed-content"
-    assert res_2_flight["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert res_2_flight["exit_code"] == 3
-
-    # 3. known benign title with progress
-    w_benign = _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Cancel"], OwnerEnabled=False)
-    res_3_t0 = classify(tmp_path, [w_benign])
-    assert res_3_t0["kind"] == "benign"
-    assert res_3_t0["verdict"] == "REFRESH_IN_PROGRESS"
-    assert res_3_t0["exit_code"] == 3
-    res_3_flight = classify(tmp_path, [w_benign], refresh_in_flight=True)
-    assert res_3_flight["verdict"] is None
-
-    # 4. unknown title plus benign content
-    w_unk = _window(Title="Please enter your password", Texts=["Evaluating", "Cancel"], OwnerEnabled=False)
-    res_4_t0 = classify(tmp_path, [w_unk])
-    assert res_4_t0["kind"] == "mixed-content"
-    assert res_4_t0["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert res_4_t0["exit_code"] == 3
-    assert res_4_t0["evidence"] == "Please enter your password"
-    res_4_flight = classify(tmp_path, [w_unk], refresh_in_flight=True)
-    assert res_4_flight["kind"] == "mixed-content"
-    assert res_4_flight["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert res_4_flight["exit_code"] == 3
-
-    # 5. whitespace/case variants
-    w_case = _window(Title="  PASSWORD:  ", Texts=["password:", "Evaluating", "Cancel"], OwnerEnabled=False)
-    res_5_t0 = classify(tmp_path, [w_case])
-    assert res_5_t0["kind"] == "mixed-content"
-    assert res_5_t0["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert res_5_t0["exit_code"] == 3
-    assert res_5_t0["evidence"] == "PASSWORD:"
-    res_5_flight = classify(tmp_path, [w_case], refresh_in_flight=True)
-    assert res_5_flight["kind"] == "mixed-content"
-    assert res_5_flight["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert res_5_flight["exit_code"] == 3
-
-    # 6. credential-signature titles
-    w_cred = _window(Title="Please specify how to connect", Texts=["Evaluating", "Cancel"], OwnerEnabled=False)
-    res_6_t0 = classify(tmp_path, [w_cred])
-    assert res_6_t0["kind"] == "credential"
-    assert res_6_t0["verdict"] == "CREDENTIAL_MISSING"
-    assert res_6_t0["exit_code"] == 1
-    res_6_flight = classify(tmp_path, [w_cred], refresh_in_flight=True)
-    assert res_6_flight["kind"] == "credential"
-    assert res_6_flight["verdict"] == "CREDENTIAL_MISSING"
-    assert res_6_flight["exit_code"] == 1
-
-    # 7. exact parity case: case-insensitive title deduplication with only chrome in content
-    w_parity_refresh = _window(Title="  Refresh  ", Texts=["REFRESH", "Cancel"], OwnerEnabled=False)
-    res_p_parity_t0 = classify(tmp_path, [w_parity_refresh])
-    assert res_p_parity_t0["kind"] == "benign-title-only"
-    assert res_p_parity_t0["verdict"] == "DIALOG_UNREADABLE"
-    assert res_p_parity_t0["exit_code"] == 3
-    res_p_parity_flight = classify(tmp_path, [w_parity_refresh], refresh_in_flight=True)
-    assert res_p_parity_flight["kind"] == "benign-title-only"
-    assert res_p_parity_flight["verdict"] == "DIALOG_UNREADABLE"
-    assert res_p_parity_flight["exit_code"] == 3
-
-    # 8. mixed-case unknown/password caption with duplicate title in content
-    w_mixed_pwd = _window(
-        Title="  Please Enter Your Password  ",
-        Texts=["PLEASE ENTER YOUR PASSWORD", "Evaluating", "Cancel"],
-        OwnerEnabled=False,
-    )
-    res_p_mixed_t0 = classify(tmp_path, [w_mixed_pwd])
-    assert res_p_mixed_t0["kind"] == "mixed-content"
-    assert res_p_mixed_t0["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert res_p_mixed_t0["exit_code"] == 3
-    assert res_p_mixed_t0["evidence"] == "Please Enter Your Password"
-    res_p_mixed_flight = classify(tmp_path, [w_mixed_pwd], refresh_in_flight=True)
-    assert res_p_mixed_flight["kind"] == "mixed-content"
-    assert res_p_mixed_flight["verdict"] == "DIALOG_UNRECOGNIZED"
-    assert res_p_mixed_flight["exit_code"] == 3
-
-    # 9. control with a genuinely independent progress element beside case-insensitive title duplicate
-    w_ctrl_refresh = _window(Title="  Refresh  ", Texts=["REFRESH", "Evaluating", "Cancel"], OwnerEnabled=False)
-    res_p_ctrl_t0 = classify(tmp_path, [w_ctrl_refresh])
-    assert res_p_ctrl_t0["kind"] == "benign"
-    assert res_p_ctrl_t0["verdict"] == "REFRESH_IN_PROGRESS"
-    assert res_p_ctrl_t0["exit_code"] == 3
-    res_p_ctrl_flight = classify(tmp_path, [w_ctrl_refresh], refresh_in_flight=True)
-    assert res_p_ctrl_flight["verdict"] is None
-
-
-def _setup_probe_copy(tmp_path: Path) -> Path:
-    """Copy probe_desktop_credential.ps1 and its sibling regex files into tmp_path."""
-    probe_dir = tmp_path / "probe_copy"
-    probe_dir.mkdir(exist_ok=True)
-    src_dir = PROBE_PS1.parent
-    for fname in [
-        "probe_desktop_credential.ps1",
-        "credential_modal_signature.regex",
-        "benign_dialog_signature.regex",
-        "benign_chrome_signature.regex",
-        "blocking_prompt_signature.regex",
-    ]:
-        (probe_dir / fname).write_text((src_dir / fname).read_text(encoding="utf-8"), encoding="utf-8")
-    return probe_dir / "probe_desktop_credential.ps1"
-
-
-def test_powershell_mutation_restore_amnesty(tmp_path: Path) -> None:
-    """Mutation test 1: restore $MinPromptWords amnesty. Must fail named assertions."""
-    mutated_script = _setup_probe_copy(tmp_path)
-    content = mutated_script.read_text(encoding="utf-8")
-    old_code = """    if ($t -match $chromeSig) {
-      continue
-    }"""
-    new_code = """    $words = @($t -split '\\s+' | Where-Object { $_ })
-    if ($words.Count -lt 5) { continue }"""
-    assert old_code in content, "mutation target anchor missing in probe script"
-    mutated_script.write_text(content.replace(old_code, new_code), encoding="utf-8")
-    assert "$words.Count -lt 5" in mutated_script.read_text(encoding="utf-8"), "mutation 1 failed to land on disk"
-
-    cases = [
-        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Please enter your password"], OwnerEnabled=False),
-        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Password:"], OwnerEnabled=False),
-    ]
-
-    failed_count = 0
-    for w in cases:
-        res = classify(tmp_path, [w], refresh_in_flight=True, probe_ps1=mutated_script)
-        if res["verdict"] != "DIALOG_UNRECOGNIZED":
-            failed_count += 1
-
-    assert failed_count == 2, f"Mutation score: expected 2 failed, got {failed_count} failed"
-
-
-def test_powershell_mutation_widen_allowlist(tmp_path: Path) -> None:
-    """Mutation test 2: widen chrome allowlist to .* . Must fail named assertions."""
-    mutated_script = _setup_probe_copy(tmp_path)
-    chrome_regex = mutated_script.parent / "benign_chrome_signature.regex"
-    chrome_regex.write_text(".*\n", encoding="utf-8")
-    assert chrome_regex.read_text(encoding="utf-8").strip() == ".*", "mutation 2 failed to land on disk"
-
-    cases = [
-        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Please enter your password"], OwnerEnabled=False),
-        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Password:"], OwnerEnabled=False),
-        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Orders"], OwnerEnabled=False),
-    ]
-
-    failed_count = 0
-    for w in cases:
-        res = classify(tmp_path, [w], refresh_in_flight=True, probe_ps1=mutated_script)
-        if res["verdict"] != "DIALOG_UNRECOGNIZED":
-            failed_count += 1
-
-    assert failed_count == 3, f"Mutation score: expected 3 failed, got {failed_count} failed"
-
-
-def test_powershell_mutation_remove_allowlist(tmp_path: Path) -> None:
-    """Mutation test 3: remove chrome allowlist entirely. Must fail named assertions."""
-    mutated_script = _setup_probe_copy(tmp_path)
-    chrome_regex = mutated_script.parent / "benign_chrome_signature.regex"
-    chrome_regex.write_text("$^\n", encoding="utf-8")
-    assert chrome_regex.read_text(encoding="utf-8").strip() == "$^", "mutation 3 failed to land on disk"
-
-    cases = [
-        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Cancel"], OwnerEnabled=False),
-        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "OK"], OwnerEnabled=False),
-        _window(Title="Refresh", Texts=["Refresh", "Evaluating", "Close"], OwnerEnabled=False),
-    ]
-
-    failed_count = 0
-    for w in cases:
-        res = classify(tmp_path, [w], refresh_in_flight=True, probe_ps1=mutated_script)
-        if res["verdict"] is not None:
-            failed_count += 1
-
-    assert failed_count == 3, f"Mutation score: expected 3 failed, got {failed_count} failed"
-
-
-def test_powershell_mutation_drop_caption_accounting(tmp_path: Path) -> None:
-    """Mutation test 4: drop caption accounting. Must fail named assertions."""
-    mutated_script = _setup_probe_copy(tmp_path)
-    content = mutated_script.read_text(encoding="utf-8")
-    old_code = """  if ($sets.Title) {
-    if (-not ($sets.Title -match $benignSig) -and -not ($sets.Title -match $chromeSig)) {
-      $unaccounted = $sets.Title
-    }
-  }"""
-    new_code = "  # dropped caption accounting"
-    assert old_code in content, "mutation target anchor missing in probe script"
-    mutated_script.write_text(content.replace(old_code, new_code), encoding="utf-8")
-    assert "# dropped caption accounting" in mutated_script.read_text(encoding="utf-8"), (
-        "mutation 4 failed to land on disk"
-    )
-
-    cases = [
-        _window(Title="Password:", Texts=["Password:", "Evaluating", "Cancel"], OwnerEnabled=False),
-        _window(Title="Please enter your password", Texts=["Evaluating", "Cancel"], OwnerEnabled=False),
-    ]
-
-    failed_count = 0
-    for w in cases:
-        res = classify(tmp_path, [w], refresh_in_flight=True, probe_ps1=mutated_script)
-        if res["verdict"] != "DIALOG_UNRECOGNIZED":
-            failed_count += 1
-
-    assert failed_count == 2, f"Mutation score: expected 2 failed, got {failed_count} failed"
-
-
-def test_the_benign_signature_matches_whole_elements_not_substrings() -> None:
-    """Platform-independent gate on the resource itself: no broad substring alternatives.
-
-    `\\bLoading data\\b` matched inside `Loading data requires authentication`. Every alternative is now
-    anchored, so a status word buried in a sentence is not a status.
-    """
-    benign = re.compile(BENIGN_SIGNATURE.read_text(encoding="utf-8").strip(), re.IGNORECASE)
-
-    for status in ["Refresh", "Evaluating", "Evaluating...", "Loading data", "1,204 rows loaded"]:
-        assert benign.search(status), f"a whole-element status must still match: {status!r}"
-    for sentence in [
-        "Loading data requires authentication",
-        "Refresh failed",
-        "Evaluating whether you have permission to sign in",
-        "Waiting for other queries and then a sign-in prompt",
-    ]:
-        assert not benign.search(sentence), f"a status word inside a sentence is not a status: {sentence!r}"
-
-
-def test_the_blocking_prompt_signature_covers_the_documented_native_query_modal() -> None:
-    """The prompt `SKILL.md` documents must actually be in the resource that recognises it."""
-    blocking = re.compile(BLOCKING_SIGNATURE.read_text(encoding="utf-8").strip(), re.IGNORECASE)
-
-    for phrase in [
-        NATIVE_QUERY_PROMPT,
-        "This native database query requires your approval",
-        "Authentication required",
-        "Authentication is required",
-    ]:
-        assert blocking.search(phrase), f"blocking signature must recognise: {phrase!r}"
-    for benign_status in ["Refresh", "Evaluating", "1,204 rows loaded", "Orders"]:
-        assert not blocking.search(benign_status), f"progress text must not be a blocking prompt: {benign_status!r}"
-
-
-@pytest.mark.parametrize(
-    "payload,exit_code,why",
-    [
-        pytest.param({"Items": []}, 0, "both flags missing", id="no-flags"),
-        pytest.param({"Items": [], "Truncated": False}, 0, "PatternsIncomplete missing", id="one-flag"),
-        pytest.param({"Items": [], "PatternsIncomplete": False}, 0, "Truncated missing", id="other-flag"),
-        pytest.param({"Items": [], "Truncated": None, "PatternsIncomplete": None}, 0, "null flags", id="null-flags"),
-        pytest.param({"Items": [], "Truncated": 0, "PatternsIncomplete": 0}, 0, "integer flags", id="int-flags"),
-        pytest.param(
-            {"Items": [], "Truncated": "false", "PatternsIncomplete": "false"}, 0, "string flags", id="str-flags"
-        ),
-        pytest.param(
-            {"Items": [], "Truncated": False, "PatternsIncomplete": False}, 4, "child failed", id="nonzero-exit"
-        ),
-    ],
-)
-def test_a_structurally_incomplete_child_payload_is_never_complete(tmp_path: Path, payload, exit_code, why) -> None:
-    """A missing property is `$null`, and `-not $null` is `$true` - so absence computed to "complete".
-
-    That coercion happened UPSTREAM of the strict `Test-HarvestComplete` guard, which is why the guard
-    did not save it: by the time it ran, the malformed value was already a real Boolean `$true`.
-    """
-    result = harvest_result(tmp_path, payload, exit_code=exit_code)
-
-    assert result["complete"] is False, f"payload must not be complete ({why})"
-
-
-def test_a_well_formed_child_payload_is_accepted_as_complete(tmp_path: Path) -> None:
-    """Positive control for the validator - otherwise it could pass by rejecting everything."""
-    payload = {
-        "Items": [{"Text": "Evaluating", "Interactive": False}],
-        "Truncated": False,
-        "PatternsIncomplete": False,
-    }
-
-    result = harvest_result(tmp_path, payload)
-
-    assert result["accepted"] is True
-    assert result["complete"] is True
-    assert result["items"] == 1
-
-
-def test_a_malformed_payloads_items_are_still_read_but_never_authorise_suppression(tmp_path: Path) -> None:
-    """Keeping the text costs nothing and can only raise credential recall; `Complete` still stays false."""
-    payload = {"Items": [{"Text": "Enter your credentials", "Interactive": False}], "Truncated": False}
-
-    result = harvest_result(tmp_path, payload)
-
-    assert result["items"] == 1, "unread text lowers credential recall, so salvage what parsed"
-    assert result["complete"] is False, "but a schema-incomplete payload can never authorise benign"
-
-
-def test_invalid_json_and_flagged_incompleteness_are_rejected(tmp_path: Path) -> None:
-    """The two shapes that were already safe, pinned so they stay that way."""
-    assert harvest_result(tmp_path, "{not json", exit_code=0)["accepted"] is False
-    truncated = {"Items": [], "Truncated": True, "PatternsIncomplete": False}
-    assert harvest_result(tmp_path, truncated)["complete"] is False
-    patterns = {"Items": [], "Truncated": False, "PatternsIncomplete": True}
-    assert harvest_result(tmp_path, patterns)["complete"] is False
-
-
-# `Evaluating` and the native-query approval prompt in ONE fully-harvested modal - the round-3 High,
-# reproduced end to end rather than only at the classifier.
-_MODAL_PROGRESS_PLUS_NATIVE_QUERY = r"""
-$script:timer.Add_Tick({
-    $script:timer.Stop()
-    $modal = New-Object System.Windows.Window
-    $modal.Title = 'Refresh'
-    $modal.Width = 560
-    $modal.Height = 320
-    $panel = New-Object System.Windows.Controls.StackPanel
-    $status = New-Object System.Windows.Controls.TextBlock
-    $status.Text = 'Evaluating'
-    $null = $panel.Children.Add($status)
-    $prompt = New-Object System.Windows.Controls.TextBlock
-    $prompt.Text = 'Permission is required to run this native database query'
-    $null = $panel.Children.Add($prompt)
-    $ok = New-Object System.Windows.Controls.Button
-    $ok.Content = 'Cancel'
-    $null = $panel.Children.Add($ok)
-    $modal.Content = $panel
-    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
-    $helper.Owner = $script:form.Handle
-    $null = $modal.ShowDialog()
-  })
-"""
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-def test_a_native_query_prompt_beside_progress_text_is_live_reported(tmp_path: Path) -> None:
-    """Round 3's High, end to end: a fully-harvested mixed window must not clear.
-
-    ⚠️ The live tests in this module drive a real GUI process and a real UI Automation harvest, so they
-    are CONTENTION-SENSITIVE: running them alongside the whole skills suite can slow the harvest enough
-    that it times out and the verdict degrades to `DIALOG_UNREADABLE`. That is the fail-safe working as
-    designed, not flakiness - every degraded path still lands in the exit-3 band. Assertions here are
-    therefore written against the BAND (never exit 0, never suppressed), with the exact verdict checked
-    only where it is stable.
-    """
-    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_PROGRESS_PLUS_NATIVE_QUERY)
-
-    assert done.returncode == 3, f"a native-query approval must never clear or be a credential stop:\n{done.stdout}"
-    assert "CREDENTIAL_PRESENT" not in done.stdout
-    assert "REFRESH_IN_PROGRESS" not in done.stdout, "one progress element must not suppress the whole window"
-
-
-# ==================================================================================================
-# probe_desktop_credential.ps1 - what each VERDICT token TELLS A HUMAN (issue #146, M1)
-# ==================================================================================================
-#
-# The classification is not under test here and does not change: the same windows produce the same
-# tokens and the same exit codes as before. What is under test is the PROSE the probe prints beside a
-# token, because master's prose over-claimed on exactly the tokens that establish the least.
-#
-# Master (da1ec87c) printed, for a dialog that matched NO signature:
-#
-#     "its text matches no credential-prompt signature, so this is not a credential wall"
-#     "it matched no credential-prompt signature, so this is NOT a credential wall and no sign-in is
-#      implied"
-#
-# Both are inferences dressed as findings. The signature files are a known-shapes list, not an
-# exhaustive one, and a UIA harvest is never provably complete (`LegacyIAccessiblePattern` is not
-# reachable from the managed API at all - the script says so itself). "Nothing matched" is therefore
-# the ABSENCE of a finding about the credential state, not a finding that no credential is needed. The
-# same sentence was also printed for `DIALOG_UNREADABLE`, where the content was never read at all, and
-# for `DIALOG_NEEDS_HUMAN`, where a human IS needed.
-#
-# The tests below drive the SHIPPED message table directly through the `-LoadDetectorsOnly` seam, and
-# then check that the production script is the thing that uses it.
-
-# Tokens whose evidence is "nothing matched" or "nothing was read". They may report what was observed
-# and send a human to the screen; they may not conclude anything about the credential state.
-AMBIGUOUS_VERDICTS = ("DIALOG_UNREADABLE", "DIALOG_UNRECOGNIZED", "UNKNOWN")
-
-# Claims none of the above can support. Compared case-insensitively against the whole message.
-UNSUPPORTED_CLAIMS = (
-    "not a credential wall",
-    "no sign-in is implied",
-    "no sign-in implied",
-    "not a credential prompt",
-    "no credential is needed",
-    "the credential is cached",
-    "credential sits behind",
-)
-
-# Master's wording, verbatim, for the mutation test below.
-OLD_DEFINITIVE_ASSERTION = "so this is not a credential wall and no sign-in is implied"
-
-VERDICT_MESSAGE_CONTRACT = {
-    # Positive signature match -> may name sign-in as the remedy.
-    "CREDENTIAL_MISSING": {
-        "required": (
-            "matched the connector credential-prompt signature",
-            "positive evidence",
-            "sign in once at the desktop screen",
-        ),
-        "forbidden": ("could not be established", "matched no signature"),
-    },
-    # Positive match on a KNOWN blocking prompt -> a human must act. WHICH action is NOT established:
-    # blocking_prompt_signature.regex is `native database quer(y|ies)|requires your approval|
-    # Authentication (is )?required`, so an authentication notice matches it too and "an approval, not
-    # a sign-in" is false for part of its own match set (review of PR #583).
-    "DIALOG_NEEDS_HUMAN": {
-        "required": (
-            "known blocking-prompt signature",
-            "a human must act at the desktop screen",
-            "does not establish which action",
-        ),
-        "forbidden": (
-            "an approval, not a sign-in",
-            "the remedy is an approval",
-            "must sign in",
-            "no verdict was established",
-        ),
-    },
-    # Content never established.
-    "DIALOG_UNREADABLE": {
-        "required": (
-            "content could not be established",
-            "nothing was determined about the credential state",
-            "neither confirmed nor ruled out",
-            "a human must look at the desktop screen",
-        ),
-        "forbidden": UNSUPPORTED_CLAIMS + ("must sign in",),
-    },
-    # Content read, nothing matched.
-    "DIALOG_UNRECOGNIZED": {
-        "required": (
-            "was read but matched no signature",
-            "not exhaustive",
-            "unaccounted for",
-            "nothing was determined about the credential state",
-            "a human must look at the desktop screen",
-        ),
-        "forbidden": UNSUPPORTED_CLAIMS + ("must sign in",),
-    },
-    # Positively read progress content -> wait or cancel, never stack.
-    "REFRESH_IN_PROGRESS": {
-        "required": (
-            "a refresh is already running on this pid",
-            "wait for it, or cancel the stale one",
-            "do not stack a second refresh",
-        ),
-        "forbidden": ("must sign in", "no verdict was established"),
-    },
-    # No verdict at all.
-    "UNKNOWN": {
-        "required": (
-            "no verdict was established",
-            "not determined, in either direction",
-        ),
-        "forbidden": UNSUPPORTED_CLAIMS + ("must sign in",),
-    },
-    # A refresh was invoked and no prompt appeared before the deadline. That is ALL that was observed:
-    # the poll loop enumerates zero windows for a process that has died, latches nothing, and reaches
-    # exactly this line - so the prose may not claim the refresh ran to the deadline, that Desktop
-    # stayed alive, or that no window was left unaccounted for (review of PR #583). Token and exit
-    # code are unchanged; only the claim is bounded.
-    "CREDENTIAL_PRESENT": {
-        "required": (
-            "a refresh was invoked",
-            "saw no credential prompt before its own deadline",
-            "absence of evidence, not proof of a cached credential",
-            "one-row data probe",
-        ),
-        "forbidden": (
-            "ran to the deadline",
-            "no window left unaccounted for",
-            "nothing unclassifiable",
-            "must sign in",
-        ),
-    },
-}
-
-
-def verdict_guidance(
-    tmp_path: Path,
-    verdict: str,
-    *,
-    kind: str = "",
-    probe_ps1: Path | None = None,
-) -> list[str]:
-    """Run the SHIPPED message table for one verdict token and return the lines it would print."""
-    exe = _powershell()
-    harness = tmp_path / "classify.ps1"
-    harness.write_text(_HARNESS, encoding="utf-8")
-    target_probe = probe_ps1 if probe_ps1 is not None else PROBE_PS1
-    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(target_probe)]
-    argv += ["-GuidanceVerdict", verdict, "-GuidanceKind", kind]
-    done = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
-    assert done.returncode == 0, f"harness failed ({done.returncode}):\n{done.stdout}\n{done.stderr}"
-    marker = "<<<PROBE-JSON>>>"
-    assert marker in done.stdout, f"harness produced no result payload:\n{done.stdout}\n{done.stderr}"
-    payload = json.loads(done.stdout.split(marker, 1)[1].strip().splitlines()[0])
-    lines = payload["lines"]
-    return [lines] if isinstance(lines, str) else list(lines)
-
-
-# The token-level lines each verdict prints, PINNED here as an INDEPENDENT oracle.
-#
-# Load-bearing: the production-path assertions below must not ask the script under test what it should
-# have said - that is how a message-swap mutation passes its own check. These strings are compared
-# byte-for-byte against the shipped table by `test_the_pinned_message_oracle_matches_the_shipped_table`,
-# so the pin cannot rot silently, and every other production assertion uses the pin.
-EXPECTED_TOKEN_LINES = {
-    "CREDENTIAL_MISSING": (
-        "  its text matched the connector credential-prompt signature - positive evidence of a sign-in prompt",
-        "  a human must sign in ONCE at the Desktop screen; no automation can fill this dialog",
-    ),
-    "DIALOG_NEEDS_HUMAN": (
-        "  its text matched a KNOWN blocking-prompt signature - the native database query approval, an approval request, or an 'authentication required' notice",
-        "  a human must act at the Desktop screen on the prompt shown there; this probe does not establish WHICH action that prompt needs, so read it before assuming",
-    ),
-    "DIALOG_UNREADABLE": (
-        "  its content could not be established, so NOTHING was determined about the credential state - a credential prompt is neither confirmed nor ruled out",
-        "  a human must look at the Desktop screen and say what this window is",
-    ),
-    "DIALOG_UNRECOGNIZED": (
-        "  its content was READ but matched no signature this probe knows, and the signature list is not exhaustive - so this window is unaccounted for and NOTHING was determined about the credential state",
-        "  a human must look at the Desktop screen and say what this window is",
-    ),
-    "REFRESH_IN_PROGRESS": (
-        "  its content positively reads as refresh progress: a refresh is already running on this pid, so the credential state could not be probed",
-        "  wait for it, or cancel the stale one; do not stack a second refresh on it",
-    ),
-    "CREDENTIAL_PRESENT": (
-        "  a refresh was invoked and this probe saw no credential prompt before its own deadline",
-        "  that is an absence of evidence, not proof of a cached credential: nothing here establishes that Desktop stayed alive and responsive, or that every window was accounted for - confirm with the one-row data probe",
-    ),
-    "UNKNOWN": (
-        "  no verdict was established: the credential state was not determined, in either direction",
-        "  nothing here establishes the credential state; re-probe a responsive Desktop, or look at the Desktop screen",
-    ),
-}
-
-# Walks the SHIPPED script's AST and pairs each `VERDICT:` emission with the guidance call in the same
-# statement block. Text search cannot do this: it cannot tell which block a line belongs to, and it
-# cannot compare the ARGUMENT a guidance call was handed with the token its neighbour emits.
-_EMISSION_AST_HARNESS = r"""
-param([Parameter(Mandatory = $true)][string]$Probe)
-$ErrorActionPreference = 'Stop'
-$errors = $null
-$tokens = $null
-$ast = [System.Management.Automation.Language.Parser]::ParseFile($Probe, [ref]$tokens, [ref]$errors)
-if ($errors.Count) { throw ("probe does not parse: " + $errors[0].Message) }
-
-function Get-OwningBlock {
-  param($Node)
-  while ($null -ne $Node) {
-    if ($Node -is [System.Management.Automation.Language.StatementBlockAst] -or
-        $Node -is [System.Management.Automation.Language.NamedBlockAst]) { return $Node }
-    $Node = $Node.Parent
-  }
-  return $null
-}
-
-$commands = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)
-$verdicts = @()
-$guides = @()
-foreach ($c in $commands) {
-  $name = ''
-  try { $name = [string]$c.GetCommandName() } catch { $name = '' }
-  if ($name -eq 'Write-Output' -and $c.Extent.Text -match 'VERDICT:') { $verdicts += $c }
-  elseif ($name -eq 'Write-VerdictGuidance') { $guides += $c }
-}
-
-$sites = @()
-foreach ($v in $verdicts) {
-  $vBlock = Get-OwningBlock -Node $v
-  $best = $null
-  foreach ($g in $guides) {
-    if (-not [object]::ReferenceEquals((Get-OwningBlock -Node $g), $vBlock)) { continue }
-    if ($null -eq $best) { $best = $g; continue }
-    $bestGap = [Math]::Abs($best.Extent.StartOffset - $v.Extent.StartOffset)
-    $thisGap = [Math]::Abs($g.Extent.StartOffset - $v.Extent.StartOffset)
-    if ($thisGap -lt $bestGap) { $best = $g }
-  }
-  $sites += [ordered]@{
-    line            = $v.Extent.StartLineNumber
-    verdict_text    = $v.Extent.Text
-    verdict_offset  = $v.Extent.StartOffset
-    guidance_text   = $(if ($null -eq $best) { $null } else { $best.Extent.Text })
-    guidance_offset = $(if ($null -eq $best) { -1 } else { $best.Extent.StartOffset })
-  }
-}
-Write-Output ('<<<PROBE-JSON>>>' + (ConvertTo-Json @($sites) -Compress -Depth 6))
-"""
-
-
-def _named_token(text: str, keyword: str) -> str:
-    """The token a command names: a quoted literal, or the expression it interpolates."""
-    literal = re.search(rf"{keyword}\s*'([A-Z_]+)'", text) or re.search(rf'{keyword}\s*"([A-Z_]+)"', text)
-    if literal:
-        return literal.group(1)
-    expression = re.search(rf"{keyword}\s*(\$[A-Za-z_][\w.]*)", text)
-    if expression:
-        return expression.group(1)
-    return f"<unparsed: {text}>"
-
-
-def _token_of_verdict(text: str) -> str:
-    """The token a `VERDICT:` emission prints - literal, or the expression it formats in."""
-    literal = re.search(r"VERDICT:\s*([A-Z_]+)", text)
-    if literal:
-        return literal.group(1)
-    formatted = re.search(r"-f\s*(\$[A-Za-z_][\w.]*)", text)
-    if formatted:
-        return formatted.group(1)
-    return f"<unparsed: {text}>"
-
-
-def emission_sites(probe_ps1: Path, tmp_path: Path) -> list[dict]:
-    """Every `VERDICT:` emission in ``probe_ps1``, paired with the guidance call in its own block."""
-    exe = _powershell()
-    harness = tmp_path / "emission_ast.ps1"
-    harness.write_text(_EMISSION_AST_HARNESS, encoding="utf-8")
-    argv = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(harness), "-Probe", str(probe_ps1)]
-    done = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
-    assert done.returncode == 0, f"AST harness failed ({done.returncode}):\n{done.stdout}\n{done.stderr}"
-    marker = "<<<PROBE-JSON>>>"
-    assert marker in done.stdout, f"AST harness produced no payload:\n{done.stdout}\n{done.stderr}"
-    raw = json.loads(done.stdout.split(marker, 1)[1].strip().splitlines()[0])
-    sites = []
-    for site in raw if isinstance(raw, list) else [raw]:
-        guidance_text = site["guidance_text"]
-        sites.append(
-            {
-                "line": site["line"],
-                "token": _token_of_verdict(site["verdict_text"]),
-                "guidance": None if guidance_text is None else _named_token(guidance_text, "-Verdict"),
-                "verdict_offset": site["verdict_offset"],
-                "guidance_offset": site["guidance_offset"],
-            }
-        )
-    return sites
-
-
-# Success-shaped claims the probe is not entitled to make anywhere - help block or runtime output.
-#
-# `CREDENTIAL_PRESENT` is an observation about one bounded window: a refresh was invoked and nothing
-# recognizable came up before the deadline. It is not a finding that a credential exists, that the
-# refresh proceeded or completed, that Desktop survived, that no dialog went unseen, or that an
-# unattended loop is safe - the poll loop enumerates zero windows for a process that has died and
-# reaches the same line. These are checked against the COMPLETE stdout of a real run, not against the
-# guidance table alone: the table was corrected first and the summary line beside it kept saying
-# "(refresh proceeded)".
-#
-# Each entry is the ASSERTIVE spelling of a retired claim, never a fragment that also appears inside
-# the disclaimers that replaced it - "the refresh proceeded or completed" is the honest sentence, so
-# banning the bare "refresh proceeded" would forbid the correction along with the defect.
-RETIRED_SUCCESS_CLAIMS = (
-    "(refresh proceeded)",
-    "refresh succeeded",
-    "refresh completed successfully",
-    "cached machine-wide",
-    "can run unattended",
-    "safe to run unattended",
-    "already has a cached credential",
-)
-
-
-def assert_no_retired_success_claim(stdout: str) -> None:
-    """No run, on any path, may print a success-shaped claim the probe cannot support."""
-    haystack = stdout.lower()
-    for claim in RETIRED_SUCCESS_CLAIMS:
-        assert claim not in haystack, f"the run printed the retired claim {claim!r}:\n{stdout}"
-
-
-def assert_production_pairs_guidance_with_its_token(stdout: str) -> str:
-    """The production-path invariant: what the run PRINTED explains the token it actually emitted.
-
-    Independent of the script under test - the expected lines come from the pinned oracle above, so a
-    swapped message or a mis-argued guidance call cannot mark its own homework. Degradation-proof by
-    construction: it reads whichever token the run ended on, which is what lets it hold for the live
-    fixtures, where contention can legitimately turn one exit-3 verdict into another.
-    """
-    lines = [line.rstrip() for line in stdout.splitlines()]
-    verdict_lines = [i for i, line in enumerate(lines) if line.startswith("VERDICT: ")]
-    assert len(verdict_lines) == 1, f"expected exactly one machine-readable verdict line:\n{stdout}"
-    index = verdict_lines[0]
-    token = lines[index][len("VERDICT: ") :].strip()
-    assert token in EXPECTED_TOKEN_LINES, f"unknown verdict token {token!r}:\n{stdout}"
-
-    expected = list(EXPECTED_TOKEN_LINES[token])
-    before = lines[:index]
-    positions = []
-    for line in expected:
-        assert line in before, f"{token} was emitted without its explanation {line!r}:\n{stdout}"
-        positions.append(before.index(line))
-    assert positions == sorted(positions), f"{token}'s explanation was printed out of order:\n{stdout}"
-
-    for other, other_lines in EXPECTED_TOKEN_LINES.items():
-        if other == token:
-            continue
-        for line in other_lines:
-            if line in expected:  # some sentences are shared between two ambiguous tokens
-                continue
-            assert line not in lines, f"{token} was explained with {other}'s message:\n{stdout}"
-    return token
-
-
-def assert_message_matches_its_evidence(verdict: str, lines: list[str]) -> None:
-    """The whole invariant, in one place, so the mutation test can assert it FAILS."""
-    assert lines, f"{verdict} printed no explanation at all"
-    blob = " ".join(lines).lower()
-    contract = VERDICT_MESSAGE_CONTRACT[verdict]
-    for phrase in contract["required"]:
-        assert phrase in blob, f"{verdict} must say {phrase!r}; it said: {lines!r}"
-    for phrase in contract["forbidden"]:
-        assert phrase not in blob, f"{verdict} claimed {phrase!r}, which its evidence cannot support: {lines!r}"
-
-
-@pytest.mark.parametrize("verdict", sorted(VERDICT_MESSAGE_CONTRACT))
-def test_every_verdict_token_says_only_what_its_evidence_supports(tmp_path: Path, verdict: str) -> None:
-    """Token-by-token, directly against the shipped table: no token over-claims or under-informs.
-
-    `CREDENTIAL_MISSING` matched the credential signature, so it may name sign-in as the remedy.
-    `DIALOG_NEEDS_HUMAN` matched a KNOWN human-blocking prompt, so it may say a human must act - but
-    not WHICH action: its signature spans the native-query approval AND `Authentication (is )?required`,
-    so prescribing an approval is false for part of its own match set. The three ambiguous tokens
-    matched nothing, so they may only report what was and was not established and send a human to the
-    screen.
-    """
-    assert_message_matches_its_evidence(verdict, verdict_guidance(tmp_path, verdict))
-
-
-@pytest.mark.parametrize("verdict", AMBIGUOUS_VERDICTS)
-def test_an_ambiguous_token_never_rules_a_credential_prompt_in_or_out(tmp_path: Path, verdict: str) -> None:
-    """The #146 regression itself, stated as its own assertion rather than only inside the contract.
-
-    Two directions, and both are failures: claiming the credential is fine (master's defect, which is
-    fail-open prose over a fail-closed exit code), and claiming a credential wall we never saw.
-    """
-    blob = " ".join(verdict_guidance(tmp_path, verdict)).lower()
-
-    for claim in UNSUPPORTED_CLAIMS:
-        assert claim not in blob, f"{verdict} ruled the credential state OUT with {claim!r}"
-    assert "must sign in" not in blob, f"{verdict} ruled a credential wall IN"
-    assert "look at the desktop screen" in blob, f"{verdict} must route this to a human"
-
-
-@pytest.mark.parametrize(
-    ("kind", "verdict", "observation"),
-    [
-        ("unreadable", "DIALOG_UNREADABLE", "exposes no readable text"),
-        ("benign-title-only", "DIALOG_UNREADABLE", "a caption is not content"),
-        ("benign-unverified", "DIALOG_UNREADABLE", "benign-looking is not benign"),
-        ("mixed-content", "DIALOG_UNRECOGNIZED", "does not explain the rest of this window"),
-    ],
-)
-def test_the_finer_observation_survives_beside_the_honest_token_message(
-    tmp_path: Path, kind: str, verdict: str, observation: str
-) -> None:
-    """Honesty must not cost detail: WHY the window is ambiguous is the most useful line printed.
-
-    Several kinds fold into one token, and the token-level sentence cannot tell them apart. The kind
-    line says what was observed; the token line says what that leaves undetermined.
-    """
-    lines = verdict_guidance(tmp_path, verdict, kind=kind)
-
-    assert any(observation in line for line in lines), f"{kind} lost its observation line: {lines!r}"
-    assert_message_matches_its_evidence(verdict, lines)
-
-
-def test_the_production_script_pairs_every_guidance_call_with_the_token_it_emits(tmp_path: Path) -> None:
-    """Every emission site, by AST: the guidance ARGUMENT is the token that site emits, and it is FIRST.
-
-    Replaces an earlier proximity check ("some Write-VerdictGuidance within four lines above"), which
-    was blind to the two failures that matter: a site handing the shared table the WRONG token, and a
-    site printing the token before its explanation. This walks the shipped script's statement blocks
-    and pairs each `VERDICT:` emission with the guidance call in the same block, comparing the token
-    each one names - literal to literal (`'UNKNOWN'` vs `"VERDICT: UNKNOWN"`) and expression to
-    expression (`$blocker.Verdict` vs `("VERDICT: {0}" -f $blocker.Verdict)`).
-
-    Every token in the contract must be reachable from some site, `CREDENTIAL_PRESENT` included; the
-    two variable sites cover the dialog band, which is exactly why they are compared by expression.
-    """
-    pairs = emission_sites(PROBE_PS1, tmp_path)
-
-    assert len(pairs) >= 8, f"expected every verdict band to have an emission site; found {len(pairs)}"
-    for site in pairs:
-        assert site["guidance"] is not None, f"site at line {site['line']} emits {site['token']!r} with no guidance"
-        assert site["guidance_offset"] < site["verdict_offset"], (
-            f"site at line {site['line']} prints its token before the explanation"
-        )
-        assert site["guidance"] == site["token"], (
-            f"site at line {site['line']} explains {site['guidance']!r} but emits {site['token']!r}"
-        )
-    literal_tokens = {site["token"] for site in pairs if not site["token"].startswith("$")}
-    expression_sites = [site for site in pairs if site["token"].startswith("$")]
-    assert {"UNKNOWN", "CREDENTIAL_MISSING", "CREDENTIAL_PRESENT"} <= literal_tokens, (
-        f"a literal-token band lost its emission site: {literal_tokens!r}"
-    )
-    assert len(expression_sites) == 2, (
-        f"the dialog band must be emitted from the blocker and latched sites: {expression_sites!r}"
-    )
-
-
-def test_no_public_help_text_still_carries_a_retracted_claim() -> None:
-    """The help block is the probe's public documentation - it may not out-claim the runtime either.
-
-    Five retractions now: the ambiguous-verdict assertions (#146 M1), the universal
-    "approval, not a sign-in" remedy for `DIALOG_NEEDS_HUMAN`, `CREDENTIAL_PRESENT`'s claim that the
-    refresh ran to the deadline with nothing unclassifiable up, the SYNOPSIS/DESCRIPTION pair that
-    said the probe detects a credential "cached machine-wide" and licenses a loop that "can run
-    unattended", and - the fifth - the opening sentence that said the probe "tells the two states
-    apart", which reads CREDENTIAL_PRESENT as the established mirror image of CREDENTIAL_MISSING when
-    it is only a bounded observation.
-
-    Scanned over the WHOLE help block, not the guidance table: the table was corrected first and the
-    help kept contradicting it, which is precisely how a reader ends up with the retired claim.
-    """
-    text = PROBE_PS1.read_text(encoding="utf-8")
-    help_block = text.split("#>", 1)[0].lower()
-
-    assert "dialog_unrecognized" in help_block, "the help block must still document the token"
-    assert "credential_present" in help_block, "the help block must still document the clear token"
-    for claim in (
-        "not a credential wall",
-        "no sign-in is implied",
-        "the remedy is an approval, not a sign-in",
-        "ran to the deadline with no credential",
-        "nothing unclassifiable up",
-        "tells the two states apart",
-        *RETIRED_SUCCESS_CLAIMS,
-    ):
-        assert claim not in help_block, f"the documented behaviour still asserts {claim!r}"
-
-
-def test_no_source_comment_still_carries_a_retracted_claim() -> None:
-    """The comments below the help block are read by the next maintainer, and they contradicted it.
-
-    The guidance table was corrected first (PR #583), then the help block; these three sentences sat
-    in the code around them still saying the retired thing, which is how a corrected message gets
-    "fixed" back. Each phrase is the ASSERTIVE spelling of a retracted claim and appears nowhere in
-    the replacement prose, so this scans the WHOLE script - including the quoted retractions in
-    `Get-VerdictGuidance`'s own docstring, which are deliberately worded as negations.
-    """
-    text = PROBE_PS1.read_text(encoding="utf-8").lower()
-
-    for claim, why in (
-        ("tells the two states apart", "CREDENTIAL_PRESENT is a bounded observation, not the mirror of MISSING"),
-        ("known to need a human but are not credential prompts", "the blocking signature spans an auth notice too"),
-        ("never exit 1 (human needed)", "exit 3 can still need a human; exit 1 is the credential-specific stop"),
-        ("still emits that token on its own path", "the Python fast check retired BLOCKED_BY_DIALOG too"),
-    ):
-        assert claim not in text, f"a source comment still asserts {claim!r} - {why}"
-
-
-def run_probe_against_windowless_pid(*, probe_ps1: Path | None = None, timeout_sec: str = "5"):
-    """Run the SHIPPED script for real against a live pid that owns no window, and return the process.
-
-    The cheapest genuine production path there is: no Desktop, no GUI, no seam. It reaches the first
-    emission site in the script, so it exercises the real `Write-VerdictGuidance` -> `VERDICT:` pairing
-    rather than the classifiers' dot-source entry point.
-    """
-    exe = _powershell()
-    target = probe_ps1 if probe_ps1 is not None else PROBE_PS1
-    holder = subprocess.Popen(  # a real, live pid that owns no visible window at all
-        [exe, "-NoProfile", "-Command", "Start-Sleep -Seconds 60"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    try:
-        return subprocess.run(
-            [
-                exe,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(target),
-                "-DesktopPid",
-                str(holder.pid),
-                "-TimeoutSec",
-                timeout_sec,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=180,
-            check=False,
-        )
-    finally:
-        holder.kill()
-        holder.wait(timeout=30)
-
-
-@pytest.mark.skipif(
-    sys.platform != "win32", reason="probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter"
-)
-def test_the_real_script_prints_the_honest_message_beside_its_token() -> None:
-    """Production invocation control: the shipped script, run for real, on a pid with no windows.
-
-    `-LoadDetectorsOnly` returns before any of the runtime emission code, so the seam tests above stop
-    short of it. This one runs the script the way `refresh_pbip_model.py` runs it and reads what
-    actually reached stdout: the machine-readable token, the exit code, and the prose beside them -
-    checked against the PINNED oracle, not against the script's own idea of what it should have said.
-    """
-    done = run_probe_against_windowless_pid()
-
-    assert done.returncode == 3, f"a pid with no windows must stay UNKNOWN/exit 3:\n{done.stdout}\n{done.stderr}"
-    assert assert_production_pairs_guidance_with_its_token(done.stdout) == "UNKNOWN"
-    assert_no_retired_success_claim(done.stdout)
-    stdout = done.stdout.lower()
-    for claim in UNSUPPORTED_CLAIMS:
-        assert claim not in stdout, f"the runtime still claims {claim!r}:\n{done.stdout}"
-
-
-def test_powershell_mutation_restore_the_definitive_credential_assertion(tmp_path: Path) -> None:
-    """Mutation 5: put master's wording back on both ambiguous tokens. The contract must FAIL.
-
-    A messaging test that cannot fail is worse than none, because it is credited as coverage. This
-    reinstates the exact sentence #146 was filed about and asserts each ambiguous token's contract
-    raises - and that the classification is untouched by the mutation, which is what makes it a
-    MESSAGING mutation rather than a behavioural one.
-    """
-    mutated_script = _setup_probe_copy(tmp_path)
-    content = mutated_script.read_text(encoding="utf-8")
-    targets = {
-        "DIALOG_UNREADABLE": (
-            "so NOTHING was determined about the credential state - "
-            "a credential prompt is neither confirmed nor ruled out"
-        ),
-        "DIALOG_UNRECOGNIZED": (
-            "and the signature list is not exhaustive - so this window is unaccounted for "
-            "and NOTHING was determined about the credential state"
-        ),
-    }
-    for verdict, anchor in targets.items():
-        assert anchor in content, f"mutation target anchor missing for {verdict}"
-        content = content.replace(anchor, OLD_DEFINITIVE_ASSERTION)
-    content = content.replace("  a human must look at the Desktop screen and say what this window is", "")
-    mutated_script.write_text(content, encoding="utf-8")
-    landed = mutated_script.read_text(encoding="utf-8")
-    assert landed.count(OLD_DEFINITIVE_ASSERTION) == 2, "mutation 5 failed to land on disk"
-
-    failed_count = 0
-    for verdict in targets:
-        lines = verdict_guidance(tmp_path, verdict, probe_ps1=mutated_script)
-        assert lines, f"{verdict} produced no lines at all, so the mutation broke the harness"
+    def read() -> None:
         try:
-            assert_message_matches_its_evidence(verdict, lines)
-        except AssertionError:
-            failed_count += 1
+            result.append(_enumerate_pid_windows_with_count(pid))
+        except BaseException as error:  # pylint: disable=broad-exception-caught
+            failures.append(error)
 
-    assert failed_count == 2, f"Mutation score: expected 2 failed, got {failed_count} failed"
-
-    # The mutation is messaging-only: the same window still produces the same token and exit code, so
-    # the contract above cannot be passing merely because classification changed underneath it.
-    unreadable = classify(tmp_path, [_window(Texts=[], OwnerEnabled=False)], probe_ps1=mutated_script)
-    assert unreadable["verdict"] == "DIALOG_UNREADABLE"
-    assert unreadable["exit_code"] == 3
-
-
-@pytest.mark.parametrize("verdict", sorted(EXPECTED_TOKEN_LINES))
-def test_the_pinned_message_oracle_matches_the_shipped_table(tmp_path: Path, verdict: str) -> None:
-    """The pin is only an independent oracle while it is also an ACCURATE one.
-
-    Every production assertion compares stdout against `EXPECTED_TOKEN_LINES` rather than against the
-    script's own table, so that a swapped message cannot mark its own homework. The cost of that is
-    that the pin can rot; this is the test that stops it, byte-for-byte, against the shipped table.
-    """
-    assert verdict_guidance(tmp_path, verdict) == list(EXPECTED_TOKEN_LINES[verdict])
-
-
-# A dialog whose content is read but matches nothing: unaccounted prose, no progress status, no
-# chrome-only excuse. Latched during our own refresh -> DIALOG_UNRECOGNIZED.
-_MODAL_UNRECOGNISED_PROSE = r"""
-$script:timer.Add_Tick({
-    $script:timer.Stop()
-    $modal = New-Object System.Windows.Window
-    $modal.Title = 'Notice'
-    $modal.Width = 520
-    $modal.Height = 320
-    $panel = New-Object System.Windows.Controls.StackPanel
-    $block = New-Object System.Windows.Controls.TextBlock
-    $block.Text = 'The workbook contains an element this build does not understand'
-    $null = $panel.Children.Add($block)
-    $modal.Content = $panel
-    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
-    $helper.Owner = $script:form.Handle
-    $null = $modal.ShowDialog()
-  })
-"""
-
-# A dialog that exposes no text at all - no caption, no content. Latched -> DIALOG_UNREADABLE.
-_MODAL_NO_TEXT_AT_ALL = r"""
-$script:timer.Add_Tick({
-    $script:timer.Stop()
-    $modal = New-Object System.Windows.Window
-    $modal.Title = ''
-    $modal.Width = 420
-    $modal.Height = 260
-    $modal.Content = (New-Object System.Windows.Controls.Grid)
-    $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
-    $helper.Owner = $script:form.Handle
-    $null = $modal.ShowDialog()
-  })
-"""
-
-# Nothing at all happens after the Refresh click: the probe polls to its deadline and clears.
-_MODAL_NONE = ""
-
-# A refresh progress dialog that is ALREADY UP before the probe starts. It needs its own fixture app,
-# not a modal body: the shared preamble writes its ready-file when the FORM is shown, which would race
-# the modal, and the shared runner skips when no Refresh was invoked - which is precisely what the
-# t=0 branch does, because it stops before invoking anything.
-_STARTUP_PROGRESS_APP = r"""
-param([Parameter(Mandatory = $true)][string]$ReadyFile)
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName PresentationFramework
-Add-Type -AssemblyName PresentationCore
-Add-Type -AssemblyName WindowsBase
-Add-Type -AssemblyName WindowsFormsIntegration
-[System.Windows.Forms.Application]::EnableVisualStyles()
-$script:form = New-Object System.Windows.Forms.Form
-$script:form.Text = 'Fake Desktop'
-$script:form.Width = 640
-$script:form.Height = 480
-$button = New-Object System.Windows.Controls.Button
-$button.Content = 'Refresh'
-$hostControl = New-Object System.Windows.Forms.Integration.ElementHost
-$hostControl.Width = 140
-$hostControl.Height = 48
-$hostControl.Child = $button
-$script:form.Controls.Add($hostControl)
-$script:ready = $ReadyFile
-$script:form.Add_Shown({
-    $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 300
-    $timer.Add_Tick({
-        $timer.Stop()
-        $modal = New-Object System.Windows.Window
-        $modal.Title = 'Refresh'
-        $modal.Width = 520
-        $modal.Height = 320
-        $panel = New-Object System.Windows.Controls.StackPanel
-        $status = New-Object System.Windows.Controls.TextBlock
-        $status.Text = 'Evaluating'
-        $null = $panel.Children.Add($status)
-        $cancel = New-Object System.Windows.Controls.Button
-        $cancel.Content = 'Cancel'
-        $null = $panel.Children.Add($cancel)
-        $modal.Content = $panel
-        $helper = New-Object System.Windows.Interop.WindowInteropHelper($modal)
-        $helper.Owner = $script:form.Handle
-        # Ready only once the modal is actually rendered: the probe must find it at t=0.
-        $modal.Add_ContentRendered({ Set-Content -LiteralPath $script:ready -Value 'ready' -Encoding ascii })
-        $null = $modal.ShowDialog()
-      })
-    $timer.Start()
-  })
-[System.Windows.Forms.Application]::Run($script:form)
-"""
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.PeekMessageW.argtypes = [
+        ctypes.POINTER(wintypes.MSG),
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.UINT,
+        wintypes.UINT,
+    ]
+    user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+    user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+    user32.DispatchMessageW.restype = ctypes.c_ssize_t
+    deadline = time.monotonic() + 12
+    message = wintypes.MSG()
+    while worker.is_alive() and time.monotonic() < deadline:
+        while user32.PeekMessageW(ctypes.byref(message), None, 0, 0, 1):
+            user32.TranslateMessage(ctypes.byref(message))
+            user32.DispatchMessageW(ctypes.byref(message))
+        worker.join(0.005)
+    assert not worker.is_alive(), "bounded native harvest did not settle"
+    if failures:
+        raise failures[0]
+    return result[0]
 
 
-def _assert_live_pairing(done, *, expected_token: str, expected_exit: int, label: str) -> None:
-    """Shared body for the live emission-path tests: the printed prose explains the printed token.
+def harvest_fixture(*, text: str = "Evaluating...", complete: bool = True) -> dict:
+    """Independent native protocol fixture: identities intentionally exceed binary64 precision."""
+    return {
+        "schema": "desktop.harvest.v1",
+        "pid": "111",
+        "process_started_at_before": "638963424000000001",
+        "process_started_at_after": "638963424000000001",
+        "complete": True,
+        "reason": "complete",
+        "windows": [
+            {
+                "hwnd": hwnd,
+                "owner_hwnd": owner,
+                "target_before": True,
+                "target_after": True,
+                "owner_before": owner,
+                "owner_after": owner,
+                "visible": True,
+                "minimized": False,
+                "enabled": owner is not None,
+                "owner_enabled": False if owner else None,
+                "width": 500,
+                "height": 400,
+                "title": title,
+                "texts": [],
+                "items": [
+                    {"Text": element, "Role": "ControlType.Text", "Source": "Name"} for element in content.splitlines()
+                ],
+                "truncated": False,
+                "patterns_incomplete": not complete if owner else False,
+            }
+            for hwnd, owner, title, content in (
+                ("0xfedcba9876543201", None, "Synthetic report", "Report"),
+                ("0xfedcba9876543211", "0xfedcba9876543201", "Refresh", text),
+            )
+        ],
+    }
 
-    Deliberately NOT a parametrized test. The repo's partition gates key a test by
-    `<file>::<function>` from the AST (`tests/test_gui_marker_gate.py`,
-    `tests/test_parallel_test_loop.py`), while pytest collects a parametrized case as
-    `<file>::<function>[id]`. One parametrized `gui` test therefore reads as an unmarked
-    window-spawner AND as a stale `gui` marker at the same time, and inflates every exact
-    deselection census - measured in run 34400693275, six gate failures from one decorator. Each
-    live case is its own function, and each calls `_run_probe_against_wpf_modal` in its OWN body so
-    both the `gui` scan (transitive) and the `serial` scan (function-scoped) can see it.
 
-    ⚠️ Contention can legitimately turn one exit-3 verdict into another (a slow harvest degrades to
-    `DIALOG_UNREADABLE`). The pairing assertion holds regardless - it reads whichever token the run
-    ended on - so the exact-token assertion is made only where the run is stable, and the exit-3
-    cases assert the BAND, which every degraded path preserves by design. Measured on a quiet
-    machine (2026-09-09): all five cases reached their intended token exactly, so the band form is
-    tolerance for contention, not cover for a case that never worked.
-    """
-    token = assert_production_pairs_guidance_with_its_token(done.stdout)
-    assert_no_retired_success_claim(done.stdout)
-    if expected_exit == 3:
-        assert done.returncode == 3, f"{label}: the exit-3 band must hold:\n{done.stdout}"
-        assert token in {"DIALOG_NEEDS_HUMAN", "DIALOG_UNRECOGNIZED", "DIALOG_UNREADABLE"}, (
-            f"{label}: expected an exit-3 dialog verdict, got {token}:\n{done.stdout}"
-        )
-    else:
-        assert done.returncode == expected_exit, f"{label}: wrong exit code:\n{done.stdout}"
-        assert token == expected_token, f"{label}: expected {expected_token}, got {token}:\n{done.stdout}"
+def fixture_observation(monkeypatch, payload: dict, *, hwnd: str | None = None) -> Observation:
+    """Keep the production transport parser/observer/classifier in the tested path."""
+
+    def harvest(pid, _timeout, expected):
+        return _desktop_observer._harvest_payload(json.dumps(payload), pid, expected)
+
+    monkeypatch.setattr(_desktop_observer, "_harvest", harvest)
+    return _desktop_observer.observe("111", hwnd=hwnd, expected_process_start="638963424000000001")
 
 
-@pytest.mark.gui
-@pytest.mark.serial
-def test_the_live_probe_explains_the_clear_path(tmp_path: Path) -> None:
-    """`CREDENTIAL_PRESENT`, live: a refresh is invoked, nothing comes up, and the probe exits 0.
-
-    The exit-0 path is the one a caller reads as "go ahead", so its COMPLETE output - summary line
-    included, not just the guidance table - has to stay observation-only. A fresh review found the
-    table already corrected while the line beside it still said "(refresh proceeded)".
-    """
-    done = _run_probe_against_wpf_modal(tmp_path, _MODAL_NONE)
-
-    _assert_live_pairing(
-        done,
-        expected_token="CREDENTIAL_PRESENT",
-        expected_exit=0,
-        label="no dialog at all -> the clear path",
+def test_exact_identity_and_lossless_native_values(monkeypatch) -> None:
+    """No float, datetime truncation or 32-bit HWND coercion can identify this exact process."""
+    state = fixture_observation(monkeypatch, harvest_fixture())
+    record = json.loads(state.to_json())
+    assert (record["pid"], record["process_started_at"], record["hwnd"], record["owner_hwnd"]) == (
+        "111",
+        "638963424000000001",
+        "0xfedcba9876543211",
+        "0xfedcba9876543201",
     )
-    assert_no_retired_success_claim(done.stdout)
-    assert "no credential modal and no other recognized dialog detected within" in done.stdout, (
-        f"the exit-0 summary line must state what was DETECTED, not that a refresh succeeded:\n{done.stdout}"
-    )
+    assert state.complete and state.state == "REFRESH_IN_PROGRESS"
+    assert _desktop_observer.observation_token(state.to_json()) == "REFRESH_IN_PROGRESS"
+    assert record["cannot_prove"] == ["source_reachability", "credential_validity", "data_correctness"]
 
 
-@pytest.mark.gui
-@pytest.mark.serial
-def test_the_live_probe_explains_a_credential_modal_caught_in_the_poll_loop(tmp_path: Path) -> None:
-    """`CREDENTIAL_MISSING`, live: the hard stop, from the poll-loop emission site."""
-    _assert_live_pairing(
-        _run_probe_against_wpf_modal(tmp_path, _MODAL_TEXTPATTERN_ONLY),
-        expected_token="CREDENTIAL_MISSING",
-        expected_exit=1,
-        label="a credential modal caught in the poll loop",
-    )
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-def test_the_live_probe_explains_a_known_blocking_prompt(tmp_path: Path) -> None:
-    """`DIALOG_NEEDS_HUMAN`, live: a native-query approval beside progress text, latched."""
-    _assert_live_pairing(
-        _run_probe_against_wpf_modal(tmp_path, _MODAL_PROGRESS_PLUS_NATIVE_QUERY),
-        expected_token="DIALOG_NEEDS_HUMAN",
-        expected_exit=3,
-        label="a known blocking prompt, latched",
-    )
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-def test_the_live_probe_explains_a_dialog_it_read_but_could_not_place(tmp_path: Path) -> None:
-    """`DIALOG_UNRECOGNIZED`, live: readable prose that matched no signature, latched."""
-    _assert_live_pairing(
-        _run_probe_against_wpf_modal(tmp_path, _MODAL_UNRECOGNISED_PROSE),
-        expected_token="DIALOG_UNRECOGNIZED",
-        expected_exit=3,
-        label="read, matched nothing, latched",
-    )
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-def test_the_live_probe_explains_a_dialog_it_could_not_read(tmp_path: Path) -> None:
-    """`DIALOG_UNREADABLE`, live: a modal exposing no text at all, latched."""
-    _assert_live_pairing(
-        _run_probe_against_wpf_modal(tmp_path, _MODAL_NO_TEXT_AT_ALL),
-        expected_token="DIALOG_UNREADABLE",
-        expected_exit=3,
-        label="no readable text at all, latched",
-    )
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-def test_the_live_probe_explains_a_refresh_already_in_progress(tmp_path: Path) -> None:
-    """The last production emission site: a dialog already up at t=0, before anything is invoked.
-
-    This is the branch the 2026-08-28 field report walked into, and the only one where
-    `REFRESH_IN_PROGRESS` can be emitted at all - the poll loop ignores our own progress dialog by
-    design.
-
-    The fixture app is launched HERE rather than through a helper, which is one of the two spellings
-    `tests/test_parallel_test_loop.py::_launches_the_live_desktop` recognises (the `-ReadyFile`
-    argument the app uses to announce its window). Its scan is function-scoped, so a private helper
-    hid a genuinely live test from the `serial` census - it is a live fixture either way, and the
-    marker is earned; this makes the classification legible to the gate that enforces it.
-    """
-    exe = _powershell()
-    app_script = tmp_path / "startup_dialog_app.ps1"
-    app_script.write_text(_STARTUP_PROGRESS_APP, encoding="utf-8")
-    ready = tmp_path / "startup_ready.txt"
-    app = subprocess.Popen(  # pylint: disable=consider-using-with
-        [exe, "-Sta", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(app_script), "-ReadyFile", str(ready)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    try:
-        for _ in range(60):
-            if ready.exists():
-                break
-            time.sleep(0.5)
-        if not ready.exists():
-            pytest.skip("the startup-dialog fixture never rendered its modal (no interactive desktop?)")
-        done = subprocess.run(
-            [
-                exe,
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(PROBE_PS1),
-                "-DesktopPid",
-                str(app.pid),
-                "-TimeoutSec",
-                "8",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
-        )
-    finally:
-        app.kill()
-        app.wait(timeout=30)
-
-    assert "refresh invoked" not in done.stdout, f"the t=0 branch must stop before invoking:\n{done.stdout}"
-    assert done.returncode == 3, f"a dialog up at t=0 must stop the probe at exit 3:\n{done.stdout}"
-    token = assert_production_pairs_guidance_with_its_token(done.stdout)
-    assert_no_retired_success_claim(done.stdout)
-    assert token in {"REFRESH_IN_PROGRESS", "DIALOG_UNREADABLE", "DIALOG_UNRECOGNIZED"}, (
-        f"expected the t=0 dialog band, got {token}:\n{done.stdout}"
-    )
-
-
-@pytest.mark.skipif(
-    sys.platform != "win32", reason="probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter"
-)
 @pytest.mark.parametrize(
-    ("mutation", "why"),
+    "hwnd,expected,reason",
     [
-        ("message-swap", "UNKNOWN's message body replaced with CREDENTIAL_PRESENT's"),
-        ("token-swap", "the UNKNOWN site asks the table for CREDENTIAL_PRESENT"),
-        ("order-swap", "the token is printed before its explanation"),
+        ("0xfedcba9876543211", "REFRESH_IN_PROGRESS", "progress_match"),
+        ("0xfedcba9876543201", "UNREADABLE_DIALOG", "ambiguous"),
+        ("0x123", "UNREADABLE_DIALOG", "target_changed"),
     ],
 )
-def test_production_emission_mutations_break_the_pairing(tmp_path: Path, mutation: str, why: str) -> None:
-    """Mutation 6-8: the three ways a guidance call can lie about the token beside it. All must FAIL.
+def test_explicit_hwnd_cannot_borrow_another_windows_finding(
+    monkeypatch, hwnd: str, expected: str, reason: str
+) -> None:
+    """Exact-window requests cannot borrow a sibling finding or a missing handle."""
+    state = fixture_observation(monkeypatch, harvest_fixture(), hwnd=hwnd)
+    assert (state.state, state.reason) == (expected, reason)
+    if reason != "target_changed":
+        assert json.loads(state.to_json())["hwnd"] == hwnd
 
-    Each mutation is MESSAGING-ONLY by construction - the token and the exit code are asserted to be
-    unchanged in the same run - so a pass here would mean the pairing assertion is vacuous rather than
-    that the arbiter still behaves.
-    """
-    mutated_script = _setup_probe_copy(tmp_path)
-    content = mutated_script.read_text(encoding="utf-8")
 
-    if mutation == "message-swap":
-        original = "\n".join(f'      $lines += "{line}"' for line in EXPECTED_TOKEN_LINES["UNKNOWN"])
-        replacement = "\n".join(f'      $lines += "{line}"' for line in EXPECTED_TOKEN_LINES["CREDENTIAL_PRESENT"])
-        assert original in content, "mutation anchor missing for the message swap"
-        content = content.replace(original, replacement)
-    elif mutation == "token-swap":
-        original = """  Write-Output "no window for pid $DesktopPid found"
-  Write-VerdictGuidance -Verdict 'UNKNOWN'"""
-        replacement = """  Write-Output "no window for pid $DesktopPid found"
-  Write-VerdictGuidance -Verdict 'CREDENTIAL_PRESENT'"""
-        assert original in content, "mutation anchor missing for the token swap"
-        content = content.replace(original, replacement)
+@pytest.mark.parametrize("text", ["Authentication required", "Enter your credentials"])
+def test_positive_prompt_outranks_enabled_owner_exoneration(monkeypatch, text: str) -> None:
+    """Positive prompt evidence must survive the one-way modality exclusion."""
+    payload = harvest_fixture(text=text)
+    payload["windows"][0]["enabled"] = True
+    payload["windows"][1]["owner_enabled"] = True
+    state = fixture_observation(monkeypatch, payload)
+    assert state.state in {"CREDENTIAL_REQUIRED", "HUMAN_ACTION_REQUIRED"}
+    assert len(state.findings) == 1, "positive evidence must not disappear from the public findings"
+
+
+def test_unknown_owner_enabled_fact_is_not_false_or_a_clean_exoneration(monkeypatch) -> None:
+    """A nullable owner fact is uncertainty, not an enabled-owner certificate."""
+    payload = harvest_fixture()
+    payload["windows"][1]["owner_enabled"] = None
+    state = fixture_observation(monkeypatch, payload)
+    assert state.state == "UNREADABLE_DIALOG" and not state.complete
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "pid_number",
+        "start_number",
+        "start_changed",
+        "start_reused",
+        "hwnd_number",
+        "owner_changed",
+        "target_after",
+        "extra",
+        "duplicate",
+    ],
+)
+def test_changed_or_lossy_identity_never_clean(monkeypatch, fault: str) -> None:
+    """Malformed, reused or numerically coerced identities cannot establish a clean snapshot."""
+    payload = harvest_fixture()
+    if fault == "pid_number":
+        payload["pid"] = 111
+    elif fault == "start_number":
+        payload["process_started_at_before"] = 638963424000000001
+    elif fault == "start_changed":
+        payload["process_started_at_after"] = "638963424000000002"
+    elif fault == "start_reused":
+        payload["process_started_at_before"] = payload["process_started_at_after"] = "638963424000000002"
+    elif fault == "hwnd_number":
+        payload["windows"][1]["hwnd"] = 0xFEDCBA9876543211
+    elif fault == "owner_changed":
+        payload["windows"][1]["owner_after"] = "0x123"
+    elif fault == "target_after":
+        payload["windows"][1]["target_after"] = False
+    elif fault == "extra":
+        payload["extra"] = True
     else:
-        original = """  Write-VerdictGuidance -Verdict 'UNKNOWN'
-  Write-Output "VERDICT: UNKNOWN"
-  exit 3
-}"""
-        replacement = """  Write-Output "VERDICT: UNKNOWN"
-  Write-VerdictGuidance -Verdict 'UNKNOWN'
-  exit 3
-}"""
-        assert original in content, "mutation anchor missing for the ordering swap"
-        content = content.replace(original, replacement, 1)
+        payload["windows"].append(payload["windows"][1])
+    state = fixture_observation(monkeypatch, payload)
+    assert state.state == "UNREADABLE_DIALOG" and not state.complete
+    assert _desktop_observer.legacy_token(state) == "DIALOG_UNREADABLE"
 
-    mutated_script.write_text(content, encoding="utf-8")
-    done = run_probe_against_windowless_pid(probe_ps1=mutated_script)
 
-    assert done.returncode == 3, f"{why}: the mutation must be messaging-only:\n{done.stdout}\n{done.stderr}"
-    assert "VERDICT: UNKNOWN" in done.stdout, f"{why}: the token must be unchanged:\n{done.stdout}"
-    with pytest.raises(AssertionError):
-        assert_production_pairs_guidance_with_its_token(done.stdout)
+@pytest.mark.parametrize(
+    "text,complete,expected",
+    [
+        ("Evaluating...", True, "REFRESH_IN_PROGRESS"),
+        ("Evaluating...", False, "UNREADABLE_DIALOG"),
+        ("Evaluating...\nPlease decide now", True, "UNKNOWN_DIALOG"),
+        ("Authentication required", False, "HUMAN_ACTION_REQUIRED"),
+        ("Enter your credentials", False, "CREDENTIAL_REQUIRED"),
+    ],
+)
+def test_completeness_and_mixed_prompt_precedence(monkeypatch, text: str, complete: bool, expected: str) -> None:
+    """Known prompts outrank progress while incomplete content remains non-clean."""
+    state = fixture_observation(monkeypatch, harvest_fixture(text=text, complete=complete))
+    assert state.state == expected
+    assert state.complete is complete
+
+
+@pytest.mark.parametrize(
+    "kind,state_name,token",
+    [
+        ("privacy_warning", "HUMAN_ACTION_REQUIRED", "DIALOG_NEEDS_HUMAN"),
+        ("package_session", "DESKTOP_SESSION_ERROR", "DESKTOP_UNREADY"),
+    ],
+)
+def test_complete_templates_use_the_original_harvest_only(
+    monkeypatch, capsys, kind: str, state_name: str, token: str
+) -> None:
+    """Whole-template diagnosis reuses one exact-target harvest without another child read."""
+    payload = harvest_fixture()
+    template = diagnostic_payload(kind)
+    payload["windows"][1].update(title=template["Title"], items=template["Items"])
+    state = fixture_observation(monkeypatch, payload)
+    assert state.state == state_name and _desktop_observer.legacy_token(state) == token
+    monkeypatch.setattr(
+        _desktop_observer.subprocess, "run", lambda *_a, **_kw: pytest.fail("second diagnostic harvest")
+    )
+    _desktop_observer.print_dialog_diagnostic(111, state.dialog.window)
+    record = json.loads(capsys.readouterr().out.removeprefix("DIALOG_DIAGNOSTIC "))
+    assert record["message_id"] == kind and record["status"] == "OBSERVED"
+    assert _desktop_observer.diagnose_dialog(112, state.dialog.window)[0] == "CANNOT_READ"
+
+
+def test_watch_lattice_preserves_uncertainty_and_first_terminal(monkeypatch) -> None:
+    """Quiet snapshots do not erase uncertainty or replace the first terminal state."""
+    uncertain = fixture_observation(monkeypatch, harvest_fixture(complete=False))
+    prompt = fixture_observation(monkeypatch, harvest_fixture(text="Authentication required"))
+    ready = Observation(pid="111", process_started_at="638963424000000001")
+    operation = "74100000-0000-4000-8000-000000000001"
+    with _desktop_observer.watch(
+        "111", deadline=time.monotonic() + 10, operation_id=operation, expected_process_start=ready.process_started_at
+    ) as supervisor:
+        supervisor.record(uncertain)
+        assert supervisor.record(ready).state == "READY"
+        assert supervisor.latched == (uncertain.__class__(**{**uncertain.__dict__, "operation_id": operation}),)
+        assert supervisor.record(prompt).state == "HUMAN_ACTION_REQUIRED"
+        assert supervisor.record(Observation(process_gone="gone")).state == "HUMAN_ACTION_REQUIRED"
+    with pytest.raises(RuntimeError, match="settled"):
+        supervisor.record(ready)
+
+
+def test_ready_is_neither_refusal_nor_operation_success(monkeypatch) -> None:
+    """READY is observation completeness, never a manufactured operation result."""
+    payload = harvest_fixture()
+    payload["windows"].pop()
+    state = fixture_observation(monkeypatch, payload)
+    assert state.state == "READY" and state.complete
+    assert _desktop_observer.legacy_token(state) is None
+    with pytest.raises(ValueError, match="not a refusal"):
+        raise _desktop_observer.DesktopRefusal(state)
+    assert "DATA_OK" not in state.to_json()
+
+
+@pytest.mark.parametrize("rows", [0, 1])
+def test_ready_cannot_short_circuit_the_real_row_query(monkeypatch, rows: int) -> None:
+    """Both row-positive and row-negative controls must execute the actual query path."""
+    queried = []
+    monkeypatch.setattr(
+        probe_desktop_query,
+        "_credential_state",
+        lambda pid, **_kwargs: Observation(pid=str(pid), process_started_at="638963424000000001"),
+    )
+
+    def query(_port, _tables, emit):
+        queried.append(1)
+        emit("PREFLIGHT: DATA_OK" if rows else "PREFLIGHT: NO_DATA")
+        return 0 if rows else 1
+
+    monkeypatch.setattr(probe_desktop_query, "probe", query)
+    assert probe_desktop_query._probe_with_credential_poll(111, 52001, ["Orders"]) == (0 if rows else 1)
+    assert queried == [1], "READY must never replace the actual row query"
+
+
+@pytest.mark.parametrize(
+    "role,expected", [("ControlType.Text", "CREDENTIAL_REQUIRED"), ("ControlType.Button", "UNREADABLE_DIALOG")]
+)
+def test_role_aware_prose_join_never_joins_an_interactive_decoy(monkeypatch, role: str, expected: str) -> None:
+    """Only noninteractive role-bearing prose may form a split signature."""
+    payload = harvest_fixture()
+    payload["windows"][1]["items"] = [
+        {"Text": "Enter your", "Role": "ControlType.Text", "Source": "Name"},
+        {"Text": "Cancel", "Role": "ControlType.Button", "Source": "Name"},
+        {"Text": "credentials", "Role": role, "Source": "Name"},
+    ]
+    assert fixture_observation(monkeypatch, payload).state == expected
+
+
+def test_backend_timeout_kills_and_reaps_only_its_owned_child(monkeypatch) -> None:
+    """A timed-out backend is cancelled and reaped without exposing its private output."""
+    events = []
+
+    class Child:
+        """Controlled owned helper, with no real process or provider work."""
+
+        returncode = None
+
+        def communicate(self, *, timeout):
+            events.append(("timeout", timeout))
+            raise subprocess.TimeoutExpired("private", timeout, output="PRIVATE_TEST_VALUE")
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            events.append("kill-owned")
+            self.returncode = -1
+
+        def wait(self):
+            events.append("reaped")
+
+    monkeypatch.setattr(_desktop_observer.subprocess, "Popen", lambda *_a, **_kw: Child())
+    if os.name != "nt":
+        pytest.skip("Desktop UIA qualification is Windows-only")
+    state = _desktop_observer.observe("111", expected_process_start="638963424000000001", timeout_s=0.2)
+    assert state.state == "UNREADABLE_DIALOG" and state.reason == "timeout"
+    assert events[0][0] == "timeout" and 0 < events[0][1] <= 0.2
+    assert events[1:] == ["kill-owned", "reaped"]
+    assert "PRIVATE_TEST_VALUE" not in state.to_json()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "numeric_pid",
+        "numeric_start",
+        "extra",
+        "duplicate",
+        "schema",
+        "unknown_state",
+        "incomplete_ready",
+        "missing_start",
+    ],
+)
+def test_public_event_schema_refuses_lossy_unknown_or_incomplete_clean(monkeypatch, fault: str) -> None:
+    """The public protocol rejects malformed identities, extra fields and incomplete READY."""
+    payload = harvest_fixture()
+    payload["windows"].pop()
+    raw = fixture_observation(monkeypatch, payload).to_json()
+    record = json.loads(raw)
+    if fault == "numeric_pid":
+        record["pid"] = 111
+    elif fault == "numeric_start":
+        record["process_started_at"] = 638963424000000001
+    elif fault == "extra":
+        record["raw_text"] = "PRIVATE_TEST_VALUE"
+    elif fault == "schema":
+        record["schema"] = "desktop.observation.v2"
+    elif fault == "unknown_state":
+        record["state"] = "DATA_OK"
+    elif fault == "incomplete_ready":
+        record["complete"] = False
+    elif fault == "missing_start":
+        record["process_started_at"] = None
+    if fault == "duplicate":
+        raw = raw[:-1] + ', "state": "READY"}'
+    else:
+        raw = json.dumps(record)
+    with pytest.raises(ValueError):
+        _desktop_observer.observation_token(raw)
+
+
+_HARVEST_PROVIDER_CONTROL = r"""
+param([string]$Backend, [string]$Case)
+$ErrorActionPreference = 'Stop'
+Add-Type @'
+using System;
+namespace System.Windows.Automation {
+  public enum TreeScope { Descendants }
+  public class Condition { public static Condition TrueCondition = new Condition(); }
+  public class Control { public string ProgrammaticName = "ControlType.Text"; }
+  public class Info {
+    public int ProcessId = 111, NativeWindowHandle = 222;
+    public Control ControlType = new Control();
+    public bool IsPassword;
+    public string Text = "STATIC_NAME";
+    public string Name { get { AutomationElement.Names++; return Text; } }
+  }
+  public class Range {
+    public string Text = "READONLY_DOCUMENT";
+    public object ReadOnly = true;
+    public object GetAttributeValue(object ignored) { return ReadOnly; }
+    public string GetText(int count) {
+      AutomationElement.Documents++;
+      return Text.Substring(0, Math.Min(count, Text.Length));
+    }
+  }
+  public class TextPattern {
+    public static object Pattern = new object(), IsReadOnlyAttribute = new object();
+    public Range DocumentRange = new Range();
+  }
+  public class AutomationElement {
+    public static int Names, Documents;
+    public static AutomationElement Root = new AutomationElement();
+    public Info Current = new Info();
+    public AutomationElement[] Children = new AutomationElement[0];
+    public TextPattern Text;
+    public static AutomationElement FromHandle(IntPtr ignored) { return Root; }
+    public AutomationElement[] FindAll(TreeScope scope, Condition condition) { return Children; }
+    public bool TryGetCurrentPattern(object pattern, out object value) { value = Text; return Text != null; }
+  }
+}
+'@
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Backend, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'backend did not parse' }
+$function = $ast.Find({param($node)
+  $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-AutomationHarvest'
+}, $true)
+if ($null -eq $function) { throw 'harvest function missing' }
+Invoke-Expression $function.Extent.Text
+$DesktopPid = '111'
+$script:remaining = 4000
+$root = [System.Windows.Automation.AutomationElement]::Root
+$child = [System.Windows.Automation.AutomationElement]::new()
+$root.Children = @($child)
+switch ($Case) {
+  root_pid { $root.Current.ProcessId = 112 }
+  reused { $root.Current.NativeWindowHandle = 223 }
+  child_pid { $child.Current.ProcessId = 112 }
+  password { $child.Current.IsPassword = $true; $child.Current.Text = 'PRIVATE_EDIT_VALUE' }
+  editable { $child.Current.ControlType.ProgrammaticName = 'ControlType.Edit'; $child.Current.Text = 'PRIVATE_EDIT_VALUE' }
+  combo { $child.Current.ControlType.ProgrammaticName = 'ControlType.ComboBox'; $child.Current.Text = 'PRIVATE_EDIT_VALUE' }
+  readonly_document {
+    $child.Current.ControlType.ProgrammaticName = 'ControlType.Document'
+    $child.Text = [System.Windows.Automation.TextPattern]::new()
+  }
+  editable_document {
+    $child.Current.ControlType.ProgrammaticName = 'ControlType.Document'
+    $child.Current.Text = 'PRIVATE_EDIT_VALUE'
+    $child.Text = [System.Windows.Automation.TextPattern]::new()
+    $child.Text.DocumentRange.ReadOnly = $false
+  }
+  unknown_readonly {
+    $child.Current.Text = 'PRIVATE_EDIT_VALUE'
+    $child.Text = [System.Windows.Automation.TextPattern]::new()
+    $child.Text.DocumentRange.ReadOnly = 'unknown'
+  }
+  oversized {
+    $child.Text = [System.Windows.Automation.TextPattern]::new()
+    $child.Text.DocumentRange.Text = 'x' * 8001
+  }
+  truncated {
+    $script:remaining = 1
+    $second = [System.Windows.Automation.AutomationElement]::new()
+    $second.Current.Text = 'PRIVATE_EDIT_VALUE'
+    $root.Children = @($child, $second)
+  }
+}
+$result = Get-AutomationHarvest -Handle ([IntPtr]222)
+@{ payload=$result; names=[System.Windows.Automation.AutomationElement]::Names
+   documents=[System.Windows.Automation.AutomationElement]::Documents } | ConvertTo-Json -Depth 8 -Compress
+"""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
+@pytest.mark.parametrize(
+    "case",
+    [
+        "complete",
+        "root_pid",
+        "reused",
+        "child_pid",
+        "password",
+        "editable",
+        "combo",
+        "readonly_document",
+        "editable_document",
+        "unknown_readonly",
+        "oversized",
+        "truncated",
+    ],
+)
+def test_native_harvest_provider_guards_precede_every_private_read(tmp_path: Path, case: str) -> None:
+    """Execute the real harvest function with independent providers; no Desktop or window is touched."""
+    script = tmp_path / "provider_control.ps1"
+    script.write_text(_HARVEST_PROVIDER_CONTROL, encoding="utf-8")
+    result = subprocess.run(
+        [
+            _powershell(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(script),
+            "-Backend",
+            str(Path(_desktop_observer.__file__).with_name("_desktop_uia.ps1")),
+            "-Case",
+            case,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert result.returncode == 0, "the controlled provider must execute before any guard assertion"
+    record = json.loads(result.stdout)
+    payload = record["payload"]
+    assert "PRIVATE_EDIT_VALUE" not in json.dumps(record), "editable/password/capped provider text was read"
+    if case in {"complete", "readonly_document"}:
+        assert payload["patterns_incomplete"] is False and payload["truncated"] is False
+        assert record["names"] == 1 and record["documents"] == (1 if case == "readonly_document" else 0)
+    elif case in {"oversized", "truncated"}:
+        assert payload["truncated"] is True
+        assert record["names"] == (1 if case == "truncated" else 0)
+    else:
+        assert payload["patterns_incomplete"] is True
+        assert record["names"] == record["documents"] == 0, "a private descendant was read before refusal"

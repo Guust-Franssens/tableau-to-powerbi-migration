@@ -699,6 +699,1206 @@ def test_the_generated_manifest_is_written_before_the_engine_receipt(tmp_path: P
 
 
 # ---------------------------------------------------------------------------
+# Site denominator and exact producer-owned scope bridge (issue #469, slice P)
+# ---------------------------------------------------------------------------
+
+
+class ScopeCase(NamedTuple):
+    """Synthetic survey_site, harvest and 2.368 engine shapes, authored independently of the bridge."""
+
+    source: Path
+    bundle: Path
+    survey_path: Path
+    sweep_path: Path
+    survey: dict
+    sweep: list[dict]
+    manifest: dict
+    report: dict
+
+
+def _scope_engine_input_record(path: Path) -> dict:
+    raw = path.read_bytes()
+    return {
+        "version": 1,
+        "status": "established",
+        "path": str(path.resolve()),
+        "size_bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def _scope_case(root: Path, workbook_count: int = 3) -> ScopeCase:
+    source = root / "assets"
+    workbooks = [
+        {
+            "name": "Same caption",
+            "luid": f"wb-{index}",
+            "project": "Display project",
+            "published_dependencies": [],
+            "dependencies_unknown": False,
+            "complexity_understated": False,
+        }
+        for index in range(workbook_count)
+    ]
+    required = [
+        {"datasource_name": "Same caption", "luid": f"ds-{index}", "project": "Another display project"}
+        for index in range(2)
+    ]
+    for index, datasource in enumerate(required):
+        workbooks[index]["published_dependencies"] = [
+            {
+                **datasource,
+                "status": "resolved",
+                "connection_datasource_id": f"opaque-{index}",
+                "candidates": [{"luid": datasource["luid"], "name": datasource["datasource_name"]}],
+            }
+        ]
+        workbooks[index]["complexity_understated"] = True
+    survey = {
+        "schema_version": "1.0",
+        "workbooks": workbooks,
+        "required_datasources": required,
+        "unresolved_dependencies": [],
+        "fetch_order": [
+            {"kind": kind, "luid": row["luid"], "name": "Unrelated display caption"}
+            for kind, rows in (("datasource", required), ("workbook", workbooks))
+            for row in rows
+        ],
+        "degraded": False,
+        "listing_errors": [],
+        "connection_read_errors": [],
+        "summary": {
+            "workbooks_total": workbook_count,
+            "workbooks_with_published_dependency": 2,
+            "required_datasources": 2,
+            "unresolved_dependencies": 0,
+            "dependencies_unknown": 0,
+            "listing_errors": 0,
+            "connection_read_errors": 0,
+            "degraded": False,
+            "scoped": False,
+        },
+        "scope": {
+            "scoped": False,
+            "projects": [],
+            "workbooks": [],
+            "workbooks_selected": workbook_count,
+            "workbooks_on_site": workbook_count,
+            "unmatched": [],
+            "datasource_index": "site-wide",
+        },
+    }
+    sweep, assets = [], []
+    report = _report()
+    report["datasources"] = []
+    for kind, rows, suffix, collection in (
+        ("workbook", workbooks, ".twb", "workbooks"),
+        ("datasource", required, ".tds", "datasources"),
+    ):
+        for index, row in enumerate(rows):
+            path = _write(source / f"{kind}{index}{suffix}", f'<{kind} name="fixture-{index}" />')
+            raw = path.read_bytes()
+            sweep.append(
+                {
+                    "kind": kind,
+                    "luid": row["luid"],
+                    "name": "Not a join key",
+                    "file": str(path),
+                    "engine_input": _scope_engine_input_record(path),
+                }
+            )
+            assets.append(
+                {
+                    "kind": kind,
+                    "name": "Different engine caption",
+                    "staged_input_path": str(path),
+                    "size_bytes": len(raw),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                }
+            )
+            report[collection].append({"name": f"Engine-{kind}-{index}", "source_id": str(path)})
+    return ScopeCase(
+        source,
+        root / "bundle",
+        root / "assessment" / "estate_survey.json",
+        root / "parse-sweep.json",
+        survey,
+        sweep,
+        {"source_kind": "LocalFilesSource", "assets": assets, "collisions": [], "duplicate_bytes": []},
+        report,
+    )
+
+
+def _persist_scope_inputs(case: ScopeCase) -> None:
+    _write(case.survey_path, json.dumps(case.survey, indent=2))
+    _write(case.sweep_path, json.dumps(case.sweep, indent=2))
+
+
+def _emit_scope_output(case: ScopeCase) -> None:
+    _write(case.bundle / "report.json", json.dumps(case.report))
+    _write(case.bundle / "input_manifest.json", json.dumps(case.manifest))
+
+
+def _read_scope_bridge(case: ScopeCase) -> dict:
+    return json.loads((case.bundle / "input_manifest.json").read_text(encoding="utf-8"))["scope_bridge"]
+
+
+def _build_scope_bridge(case: ScopeCase) -> dict:
+    _persist_scope_inputs(case)
+    captured = run_estate.capture_scope_inputs(case.survey_path, case.source)
+    _emit_scope_output(case)
+    run_estate.write_scope_bridge(case.bundle, case.report, captured)
+    return _read_scope_bridge(case)
+
+
+def _scope_unresolved_case(root: Path) -> ScopeCase:
+    case = _scope_case(root)
+    dependencies = [
+        {"status": "not_found", "connection_datasource_id": "opaque-missing-a", "candidates": []},
+        {
+            "status": "ambiguous",
+            "connection_datasource_id": "opaque-ambiguous",
+            "candidates": [{"luid": "ds-0"}, {"luid": "ds-1"}],
+        },
+        {"status": "not_found", "connection_datasource_id": "opaque-missing-b", "candidates": []},
+    ]
+    for dependency in dependencies:
+        dependency.update(datasource_name="Same caption", luid="")
+    case.survey["workbooks"][0]["published_dependencies"].extend(dependencies[:2])
+    case.survey["workbooks"][1]["published_dependencies"].insert(0, dependencies[2])
+    case.survey["unresolved_dependencies"] = [
+        {
+            **dependency,
+            "workbook": "Same caption",
+            "parent_workbook_luid": parent,
+            "dependency_ordinal": ordinal,
+        }
+        for dependency, parent, ordinal in zip(dependencies, ("wb-0", "wb-0", "wb-1"), (1, 2, 0))
+    ]
+    case.survey["summary"]["unresolved_dependencies"] = 3
+    return case
+
+
+def _scope_main(case: ScopeCase, monkeypatch, *extra: str) -> int:
+    engine = _versioned_engine(case.source.parent / "engine", "2.368.0")
+    monkeypatch.setattr(run_estate, "preflight_estate_path_ceiling", lambda *_: (True, "fixture path budget"))
+    monkeypatch.setattr(
+        run_estate, "stamp_inputs", lambda *_: run_estate.ProvenanceStampResult(True, "local_only", "fixture")
+    )
+    return run_estate.main(_landing_argv(engine, case.source, case.bundle, *extra))
+
+
+def test_scope_bridge_five_workbooks_are_not_the_two_the_engine_emitted(tmp_path: Path) -> None:
+    case = _scope_case(tmp_path, workbook_count=5)
+    case.report["workbooks"] = case.report["workbooks"][:2]
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["counts"] == {
+        "workbooks": 5,
+        "required_datasources": 2,
+        "unresolved_dependencies": 0,
+        "fetch_order": 7,
+    }
+    assert bridge["denominator_status"] == "established"
+    workbooks = [row for row in bridge["occurrences"] if row["kind"] == "workbook"]
+    assert [row["luid"] for row in workbooks] == ["wb-0", "wb-1", "wb-2", "wb-3", "wb-4"]
+    assert [row["status"] for row in workbooks] == ["established"] * 2 + ["cannot_establish"] * 3
+    assert bridge["status"] == "cannot_establish"
+
+
+def test_scope_bridge_empty_engine_keeps_every_denominator_occurrence(tmp_path: Path) -> None:
+    case = _scope_case(tmp_path)
+    case.report.update(workbooks=[], datasources=[])
+    case.manifest["assets"] = []
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["denominator_status"] == "established"
+    assert len(bridge["occurrences"]) == 5
+    assert all(row["status"] == "cannot_establish" and row["match"] is None for row in bridge["occurrences"])
+    assert bridge["status"] == "cannot_establish"
+
+
+def test_scope_bridge_empty_engine_still_publishes_a_sealed_denominator_via_main(tmp_path: Path, monkeypatch) -> None:
+    case = _scope_case(tmp_path)
+    case.report.update(workbooks=[], datasources=[])
+    case.manifest["assets"] = []
+    _persist_scope_inputs(case)
+
+    def _engine(*_args) -> tuple[int, str]:
+        _emit_scope_output(case)
+        return 0, ""
+
+    monkeypatch.setattr(run_estate, "run_engine", _engine)
+    code = _scope_main(case, monkeypatch, "--scope-survey", str(case.survey_path))
+    bridge = _read_scope_bridge(case)
+    receipt = json.loads((case.bundle / "engine-output-receipt.json").read_text(encoding="utf-8"))
+
+    assert len(bridge["occurrences"]) == 5
+    assert bridge["denominator_status"] == "established"
+    assert bridge["status"] == "cannot_establish"
+    assert (
+        receipt["input_manifest_sha256"]
+        == hashlib.sha256((case.bundle / "input_manifest.json").read_bytes()).hexdigest()
+    )
+    assert code == run_estate.EXIT_OK, "the bridge must not add a new conversion gate"
+
+
+def test_scope_bridge_established_chain_is_exact_and_additive(tmp_path: Path) -> None:
+    case = _scope_case(tmp_path)
+    case.manifest["unrelated_engine_field"] = {"preserve": True}
+    case.manifest["scope_bridge"] = {"version": 0, "stale": True}
+    bridge = _build_scope_bridge(case)
+
+    assert (bridge["version"], bridge["status"], bridge["denominator_status"]) == (1, "established", "established")
+    assert bridge["issues"] == []
+    first = bridge["occurrences"][0]
+    assert (first["survey_collection"], first["survey_index"], first["kind"], first["luid"]) == (
+        "workbooks",
+        0,
+        "workbook",
+        "wb-0",
+    )
+    assert first["match"] == {
+        "fetch_order_index": 2,
+        "parse_sweep_index": 0,
+        "input_asset_index": 0,
+        "sha256": hashlib.sha256((case.source / "workbook0.twb").read_bytes()).hexdigest(),
+        "report_collection": "workbooks",
+        "report_index": 0,
+        "source_id": str(case.source / "workbook0.twb"),
+    }
+    manifest = json.loads((case.bundle / "input_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["unrelated_engine_field"] == {"preserve": True}
+    assert manifest["assets"] == case.manifest["assets"]
+    assert "scope_bridge" not in case.report, "only the existing input manifest owns the bridge"
+
+
+@pytest.mark.parametrize(
+    ("kind", "suffixes", "landing_suffix", "selected_suffix"),
+    [
+        ("datasource", (".tds",), ".tds", ".tds"),
+        ("datasource", (".tdsx",), ".tdsx", ".tdsx"),
+        ("datasource", (".tdsx", ".tds"), ".tdsx", ".tds"),
+        ("workbook", (".twb",), ".twb", ".twb"),
+        ("workbook", (".twbx",), ".twbx", ".twbx"),
+        ("workbook", (".twb", ".twbx"), ".twbx", ".twbx"),
+    ],
+    ids=["ds-bare", "ds-archive-only", "ds-packaged-twin", "wb-bare", "wb-archive-only", "wb-packaged-twin"],
+)
+def test_scope_bridge_engine_input_packaged_and_bare(
+    tmp_path: Path, kind: str, suffixes: tuple[str, ...], landing_suffix: str, selected_suffix: str
+) -> None:
+    """The expected selected paths are literal controls, not a twin-selection implementation."""
+    case = _scope_case(tmp_path)
+    index = 0 if kind == "workbook" else 3
+    bare = Path(case.sweep[index]["file"])
+    xml = bare.read_bytes()
+    for suffix in suffixes:
+        if suffix.endswith("x"):
+            with zipfile.ZipFile(bare.with_suffix(suffix), "w") as archive:
+                archive.writestr("document" + bare.suffix, xml)
+    if bare.suffix not in suffixes:
+        bare.unlink()
+    landing = bare.with_suffix(landing_suffix)
+    selected = bare.with_suffix(selected_suffix)
+    entry = _scope_engine_input_record(selected)
+    case.sweep[index].update(file=str(landing), engine_input=entry)
+    case.manifest["assets"][index].update(
+        staged_input_path=str(selected), size_bytes=entry["size_bytes"], sha256=entry["sha256"]
+    )
+    collection = "workbooks" if kind == "workbook" else "datasources"
+    case.report[collection][0]["source_id"] = str(selected)
+    bridge = _build_scope_bridge(case)
+    row = bridge["occurrences"][index]
+
+    assert row["status"] == "established", "ENGINE_INPUT_SELECTED_BYTES: archive landing is not input identity"
+    assert row["match"]["source_id"] == str(selected)
+    assert row["match"]["sha256"] == hashlib.sha256(selected.read_bytes()).hexdigest()
+    assert bridge["denominator_status"] == bridge["status"] == "established"
+    assert bridge["counts"]["workbooks"] == 3 and bridge["counts"]["required_datasources"] == 2
+    if landing_suffix != selected_suffix:
+        assert not landing.samefile(selected)
+        assert hashlib.sha256(landing.read_bytes()).hexdigest() != row["match"]["sha256"]
+
+
+def test_scope_bridge_engine_input_missing_is_not_legacy_authority(tmp_path: Path) -> None:
+    case = _scope_case(tmp_path)
+    del case.sweep[0]["engine_input"]
+    bridge = _build_scope_bridge(case)
+    row = bridge["occurrences"][0]
+
+    assert row["status"] == "cannot_establish", "ENGINE_INPUT_AUTHORITY_REQUIRED: no legacy file fallback"
+    assert row["match"] is None and row["issues"] == ["engine_input_missing"]
+    assert bridge["denominator_status"] == "established"
+    assert len(bridge["occurrences"]) == 5
+    assert bridge["occurrences"][1]["status"] == "established"
+    manifest = json.loads((case.bundle / "input_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["assets"] == case.manifest["assets"], "unmatched input observations must survive"
+    assert json.loads((case.bundle / "report.json").read_text(encoding="utf-8")) == case.report
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["download_failed", "selection_unavailable", "missing", "ambiguous", "outside_assets", "unreadable", "unstable"],
+)
+def test_scope_bridge_engine_input_cannot_establish_is_authoritative(tmp_path: Path, reason: str) -> None:
+    case = _scope_case(tmp_path)
+    case.sweep[0]["engine_input"] = {"version": 1, "status": "cannot_establish", "reason": reason}
+    bridge = _build_scope_bridge(case)
+    row = bridge["occurrences"][0]
+
+    assert row["status"] == "cannot_establish", (
+        "ENGINE_INPUT_VERDICT_REQUIRED: the readable legacy file is not authority"
+    )
+    assert row["match"] is None and row["issues"] == [f"engine_input_{reason}"]
+    assert bridge["denominator_status"] == "established"
+    assert bridge["status"] == "cannot_establish"
+    assert len(bridge["occurrences"]) == 5
+
+
+@pytest.mark.parametrize("entry", [None, {}, [], False, {"version": 1, "status": "established"}])
+def test_scope_bridge_engine_input_malformed_envelope_never_falls_back(tmp_path: Path, entry: object) -> None:
+    case = _scope_case(tmp_path)
+    case.sweep[0]["engine_input"] = entry
+    bridge = _build_scope_bridge(case)
+    row = bridge["occurrences"][0]
+
+    assert row["status"] == "cannot_establish"
+    assert row["match"] is None and row["issues"] == ["engine_input_malformed"]
+    assert bridge["denominator_status"] == "established"
+    assert len(bridge["occurrences"]) == 5
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("version", 0),
+        ("version", 2),
+        ("version", True),
+        ("version", 1.0),
+        ("version", "1"),
+        ("status", "unknown"),
+        ("status", "cannot_establish"),
+        ("status", True),
+        ("path", None),
+        ("path", ""),
+        ("path", "assets/workbook0.twb"),
+        ("size_bytes", -1),
+        ("size_bytes", True),
+        ("size_bytes", 1.0),
+        ("size_bytes", "1"),
+        ("sha256", None),
+        ("sha256", ""),
+        ("sha256", "a" * 63),
+        ("sha256", "A" * 64),
+        ("sha256", "g" * 64),
+        ("extra", "not-in-v1"),
+    ],
+)
+def test_scope_bridge_engine_input_v1_fields_are_strict(tmp_path: Path, field: str, value: object) -> None:
+    case = _scope_case(tmp_path)
+    case.sweep[0]["engine_input"][field] = value
+    bridge = _build_scope_bridge(case)
+    row = bridge["occurrences"][0]
+
+    assert row["status"] == "cannot_establish", "ENGINE_INPUT_V1_REQUIRED: invalid fields cannot earn identity"
+    assert row["match"] is None and row["issues"] == ["engine_input_malformed"]
+    assert bridge["status"] == "cannot_establish"
+
+
+@pytest.mark.parametrize("reason", [None, [], {}, "new-reason", r"C:\private\estate_survey.json"])
+def test_scope_bridge_engine_input_unknown_reason_is_not_echoed(tmp_path: Path, reason: object, caplog) -> None:
+    case = _scope_case(tmp_path)
+    case.sweep[0]["engine_input"] = {"version": 1, "status": "cannot_establish", "reason": reason}
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["occurrences"][0]["issues"] == ["engine_input_malformed"]
+    assert "private" not in json.dumps(bridge) + caplog.text
+
+
+@pytest.mark.parametrize("field", ["path", "sha256", "size_bytes"])
+def test_scope_bridge_engine_input_requires_each_identity_field(tmp_path: Path, field: str) -> None:
+    case = _scope_case(tmp_path)
+    del case.sweep[0]["engine_input"][field]
+    row = _build_scope_bridge(case)["occurrences"][0]
+
+    assert row["status"] == "cannot_establish"
+    assert row["match"] is None and row["issues"] == ["engine_input_malformed"]
+
+
+@pytest.mark.parametrize("field", ["sha256", "size_bytes"])
+def test_scope_bridge_engine_input_record_must_match_current_bytes(tmp_path: Path, field: str) -> None:
+    case = _scope_case(tmp_path)
+    case.sweep[0]["engine_input"][field] = "0" * 64 if field == "sha256" else 0
+    row = _build_scope_bridge(case)["occurrences"][0]
+
+    assert row["status"] == "cannot_establish", (
+        "ENGINE_INPUT_BYTES_REQUIRED: correct legacy file cannot repair a bad record"
+    )
+    assert row["match"] is None and row["issues"] == ["engine_input_disagrees"]
+
+
+@pytest.mark.parametrize("landing", ["missing", "different-file", "none", "removed"])
+def test_scope_bridge_engine_input_ignores_legacy_file_changes(tmp_path: Path, landing: str) -> None:
+    case = _scope_case(tmp_path)
+    row = case.sweep[0]
+    if landing == "removed":
+        del row["file"]
+    else:
+        row["file"] = {
+            "missing": str(case.source / "not-landed.tdsx"),
+            "different-file": case.sweep[1]["file"],
+            "none": None,
+        }[landing]
+    row["download_error"] = "legacy parser metadata is not input identity"
+    bridge = _build_scope_bridge(case)
+    matched = bridge["occurrences"][0]
+
+    assert matched["status"] == "established", "ENGINE_INPUT_ONLY: legacy landing must not alter a valid join"
+    assert matched["match"]["source_id"] == str(case.source / "workbook0.twb")
+    assert bridge["status"] == "established"
+
+
+def test_scope_bridge_engine_input_does_not_infer_the_usual_twin_or_name(tmp_path: Path) -> None:
+    case = _scope_case(tmp_path)
+    chosen = _write(case.source / "chosen-by-producer.tds", "<datasource />")
+    entry = _scope_engine_input_record(chosen)
+    case.sweep[3]["engine_input"] = entry
+    case.manifest["assets"][3].update(
+        staged_input_path=str(chosen), size_bytes=entry["size_bytes"], sha256=entry["sha256"]
+    )
+    case.report["datasources"][0]["source_id"] = str(chosen)
+    bridge = _build_scope_bridge(case)
+    row = bridge["occurrences"][3]
+
+    assert row["status"] == "established"
+    assert row["match"]["source_id"] == str(chosen)
+    assert Path(case.sweep[3]["file"]).is_file() and case.sweep[3]["file"] != str(chosen)
+
+
+def test_scope_bridge_engine_input_missing_physical_file_never_uses_the_landing(tmp_path: Path) -> None:
+    case = _scope_case(tmp_path)
+    case.sweep[0]["engine_input"]["path"] = str(case.source / "missing-selected.twb")
+    row = _build_scope_bridge(case)["occurrences"][0]
+
+    assert row["status"] == "cannot_establish" and row["issues"] == ["engine_input_missing"]
+    assert row["match"] is None
+
+
+def test_scope_bridge_engine_input_unreadable_physical_file_is_unestablished(tmp_path: Path, monkeypatch) -> None:
+    case = _scope_case(tmp_path)
+    selected = Path(case.sweep[0]["engine_input"]["path"])
+    original = Path.lstat
+
+    def _lstat(path: Path, *args, **kwargs):
+        if path == selected:
+            raise PermissionError("not readable")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", _lstat)
+    row = _build_scope_bridge(case)["occurrences"][0]
+
+    assert row["status"] == "cannot_establish" and row["issues"] == ["engine_input_unreadable"]
+    assert row["match"] is None
+
+
+def test_scope_bridge_engine_input_changed_during_capture_is_unestablished(tmp_path: Path, monkeypatch) -> None:
+    case = _scope_case(tmp_path)
+    selected = Path(case.sweep[0]["engine_input"]["path"])
+    original = run_estate.sha256_file
+    changed = []
+
+    def _hash(path: Path) -> str:
+        digest = original(path)
+        if path == selected and not changed:
+            path.write_bytes(b'<workbook name="changed-length" />')
+            changed.append(path)
+        return digest
+
+    monkeypatch.setattr(run_estate, "sha256_file", _hash)
+    row = _build_scope_bridge(case)["occurrences"][0]
+
+    assert changed == [selected]
+    assert row["status"] == "cannot_establish" and row["issues"] == ["engine_input_file_unavailable"]
+    assert row["match"] is None
+
+
+@pytest.mark.parametrize("collection", ["workbooks", "required_datasources", "unresolved_dependencies", "fetch_order"])
+@pytest.mark.parametrize("value", [None, {}, "not-an-array", 0])
+def test_scope_bridge_requires_each_of_the_four_arrays(tmp_path: Path, collection: str, value: object) -> None:
+    case = _scope_case(tmp_path)
+    case.survey[collection] = value
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["denominator_status"] == "cannot_establish"
+    assert f"invalid_{collection}_array" in bridge["issues"]
+    assert bridge["counts"][collection] is None
+    assert all(row["match"] is None for row in bridge["occurrences"])
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value", "issue"),
+    [
+        ("", "schema_version", "2.0", "unsupported_survey_schema"),
+        ("", "degraded", True, "survey_degraded_or_unknown"),
+        ("", "degraded", 0, "survey_degraded_or_unknown"),
+        ("", "listing_errors", [{"error": "fixture"}], "survey_errors_or_unknown"),
+        ("", "connection_read_errors", [{"luid": "wb-0"}], "survey_errors_or_unknown"),
+        ("", "listing_errors", None, "survey_errors_or_unknown"),
+        ("summary", "degraded", True, "survey_degraded_or_unknown"),
+        ("summary", "workbooks_total", 2, "summary_counts_disagree"),
+        ("summary", "required_datasources", 0, "summary_counts_disagree"),
+        ("summary", "unresolved_dependencies", 1, "summary_counts_disagree"),
+        ("summary", "listing_errors", 1, "summary_counts_disagree"),
+        ("summary", "connection_read_errors", False, "summary_counts_disagree"),
+        ("summary", "dependencies_unknown", 1, "summary_counts_disagree"),
+        ("summary", "workbooks_with_published_dependency", 0, "summary_counts_disagree"),
+        ("scope", "workbooks_selected", 2, "scope_completeness_disagrees"),
+        ("scope", "workbooks_on_site", 4, "scope_completeness_disagrees"),
+        ("scope", "workbooks_selected", True, "scope_completeness_disagrees"),
+        ("scope", "workbooks_on_site", "3", "scope_completeness_disagrees"),
+        ("scope", "unmatched", ["unmatched token"], "scope_completeness_disagrees"),
+        ("scope", "datasource_index", "project-only", "scope_completeness_disagrees"),
+    ],
+)
+def test_scope_bridge_cannot_bless_degraded_or_contradictory_completeness(
+    tmp_path: Path, section: str, key: str, value: object, issue: str
+) -> None:
+    case = _scope_case(tmp_path)
+    target = case.survey[section] if section else case.survey
+    target[key] = value
+    bridge = _build_scope_bridge(case)
+
+    assert issue in bridge["issues"]
+    assert bridge["denominator_status"] == bridge["status"] == "cannot_establish"
+    assert len(bridge["occurrences"]) == 5
+    assert all(row["match"] is None for row in bridge["occurrences"])
+
+
+def test_scope_bridge_scoped_survey_is_complete_about_selected_subjects(tmp_path: Path) -> None:
+    case = _scope_case(tmp_path)
+    case.survey["scope"].update(scoped=True, projects=["A project"], workbooks_on_site=200)
+    case.survey["summary"]["scoped"] = True
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["status"] == "established"
+    assert bridge["counts"]["workbooks"] == 3, "site-wide total is not the selected denominator"
+
+
+@pytest.mark.parametrize("field", ["degraded", "listing_errors", "connection_read_errors", "scope", "summary"])
+def test_scope_bridge_legacy_survey_missing_completeness_is_unestablished(tmp_path: Path, field: str) -> None:
+    case = _scope_case(tmp_path)
+    del case.survey[field]
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["denominator_status"] == "cannot_establish"
+    assert len(bridge["occurrences"]) == 5
+
+
+@pytest.mark.parametrize(
+    "defect", ["unknown", "no-dependencies", "wrong-resolved-luid", "missing-required", "missing-fetch"]
+)
+def test_scope_bridge_reconciles_dependency_and_fetch_arrays(tmp_path: Path, defect: str) -> None:
+    case = _scope_case(tmp_path)
+    if defect == "unknown":
+        case.survey["workbooks"][0]["dependencies_unknown"] = True
+    elif defect == "no-dependencies":
+        case.survey["workbooks"][0]["published_dependencies"] = None
+    elif defect == "wrong-resolved-luid":
+        case.survey["workbooks"][0]["published_dependencies"][0]["luid"] = "different-ds"
+    elif defect == "missing-required":
+        case.survey["required_datasources"].pop()
+        case.survey["summary"]["required_datasources"] -= 1
+    else:
+        case.survey["fetch_order"].pop()
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["denominator_status"] == "cannot_establish"
+    assert bridge["issues"]
+    assert all(row["match"] is None for row in bridge["occurrences"])
+
+
+@pytest.mark.parametrize("collection", ["workbooks", "required_datasources", "fetch_order"])
+def test_scope_bridge_duplicate_scope_identity_retains_multiplicity(tmp_path: Path, collection: str) -> None:
+    case = _scope_case(tmp_path)
+    case.survey[collection].append(dict(case.survey[collection][0]))
+    bridge = _build_scope_bridge(case)
+
+    assert "duplicate_scope_identity" in bridge["issues"]
+    assert bridge["denominator_status"] == "cannot_establish"
+    assert bridge["counts"][collection] == len(case.survey[collection])
+    if collection != "fetch_order":
+        rows = [row for row in bridge["occurrences"] if row["survey_collection"] == collection]
+        assert [row["survey_index"] for row in rows] == list(range(len(case.survey[collection])))
+        assert rows[0]["luid"] == rows[-1]["luid"]
+    else:
+        assert len(bridge["fetch_order"]) == 6
+
+
+@pytest.mark.parametrize("empty_engine", [False, True])
+def test_scope_bridge_unresolved_exact_nested_identity_survives_receipt(
+    tmp_path: Path, monkeypatch, empty_engine: bool
+) -> None:
+    from credential_gate import _receipt_matches_bundle  # pylint: disable=import-outside-toplevel
+
+    case = _scope_unresolved_case(tmp_path)
+    case.survey["unresolved_dependencies"].reverse()
+    for dependency in case.survey["unresolved_dependencies"]:
+        dependency.update(workbook="Unrelated caption", datasource_name="Unrelated display")
+    if empty_engine:
+        case.report.update(workbooks=[], datasources=[])
+        case.manifest["assets"] = []
+    _persist_scope_inputs(case)
+    survey_sha256 = hashlib.sha256(case.survey_path.read_bytes()).hexdigest()
+
+    def _engine(*_args) -> tuple[int, str]:
+        _emit_scope_output(case)
+        return 0, ""
+
+    monkeypatch.setattr(run_estate, "run_engine", _engine)
+    code = _scope_main(case, monkeypatch, "--scope-survey", str(case.survey_path))
+    bridge = _read_scope_bridge(case)
+    rows = [row for row in bridge["occurrences"] if row["kind"] == "unresolved_dependency"]
+
+    assert [(row.get("parent_workbook_luid"), row.get("dependency_ordinal")) for row in rows] == [
+        ("wb-0", 1),
+        ("wb-0", 2),
+        ("wb-1", 0),
+    ], "UNRESOLVED_IDENTITY: preserve the exact nested parent LUID and dependency ordinal"
+    assert all(type(row["dependency_ordinal"]) is int for row in rows)
+    assert [row["connection_datasource_id"] for row in rows] == [
+        "opaque-missing-a",
+        "opaque-ambiguous",
+        "opaque-missing-b",
+    ]
+    assert [(row["survey_collection"], row["survey_index"]) for row in rows] == [
+        ("workbooks", 0),
+        ("workbooks", 0),
+        ("workbooks", 1),
+    ]
+    assert all(row["luid"] is None and row["match"] is None for row in rows)
+    assert all(row["issues"] == ["unresolved_dependency_artifact_unavailable"] for row in rows)
+    assert bridge["denominator_status"] == "established" and bridge["status"] == "cannot_establish"
+    assert (bridge["version"], bridge["survey_sha256"]) == (1, survey_sha256)
+    assert len(bridge["occurrences"]) == 8 and bridge["counts"]["unresolved_dependencies"] == 3
+    receipt = json.loads((case.bundle / "engine-output-receipt.json").read_text(encoding="utf-8"))
+    manifest_path = case.bundle / "input_manifest.json"
+    assert receipt["input_manifest_sha256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    assert _receipt_matches_bundle(case.bundle, receipt)
+    assert code == run_estate.EXIT_OK and not (case.bundle / "packages").exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["scope_bridge"]["occurrences"][-1]["dependency_ordinal"] = 99
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert not _receipt_matches_bundle(case.bundle, receipt), "UNRESOLVED_SEAL: the receipt covers occurrence identity"
+
+
+@pytest.mark.parametrize("unique_captions", [False, True])
+def test_scope_bridge_unresolved_caption_only_evidence_cannot_establish_denominator(
+    tmp_path: Path, unique_captions: bool
+) -> None:
+    case = _scope_unresolved_case(tmp_path)
+    for index, row in enumerate(case.survey["unresolved_dependencies"]):
+        parent = case.survey["workbooks"][0 if index < 2 else 1]
+        dependency = parent["published_dependencies"][row["dependency_ordinal"]]
+        if unique_captions:
+            parent["name"] = row["workbook"] = parent["luid"]
+            dependency["datasource_name"] = row["datasource_name"] = f"Unique dependency {index}"
+        for field in ("parent_workbook_luid", "dependency_ordinal", "connection_datasource_id", "luid"):
+            del row[field]
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["denominator_status"] == "cannot_establish", (
+        "UNRESOLVED_NO_NAME_JOIN: even unique matching captions cannot supply missing pointers"
+    )
+    assert "invalid_unresolved_dependency_identity" in bridge["issues"]
+    assert [(row.get("parent_workbook_luid"), row.get("dependency_ordinal")) for row in bridge["occurrences"][-3:]] == [
+        ("wb-0", 1),
+        ("wb-0", 2),
+        ("wb-1", 0),
+    ]
+    assert all(row["match"] is None for row in bridge["occurrences"])
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing-parent",
+        "missing-ordinal",
+        "missing-row",
+        "extra-row",
+        "duplicate-pointer",
+        "swapped-ordinals",
+        "cross-parent-pointers",
+        "nested-reorder",
+        "nested-cross-parent",
+        "moved-parent",
+        "wrong-key",
+        "missing-key",
+        "unknown-dependencies",
+        "missing-workbook-parent",
+        "duplicate-workbook-parent",
+        "malformed-dependency",
+        "contradictory-nested-parent",
+        "contradictory-nested-ordinal",
+    ],
+)
+def test_scope_bridge_unresolved_reconciliation_rejects_same_count_misassignment(tmp_path: Path, defect: str) -> None:
+    case = _scope_unresolved_case(tmp_path)
+    declared = case.survey["unresolved_dependencies"]
+    first, second = [workbook["published_dependencies"] for workbook in case.survey["workbooks"][:2]]
+    if defect == "missing-parent":
+        del declared[0]["parent_workbook_luid"]
+    elif defect == "missing-ordinal":
+        del declared[0]["dependency_ordinal"]
+    elif defect == "missing-row":
+        declared.pop()
+    elif defect == "extra-row":
+        declared.append({**declared[0], "dependency_ordinal": 99})
+    elif defect == "duplicate-pointer":
+        declared[1] = dict(declared[0])
+    elif defect == "swapped-ordinals":
+        declared[0]["dependency_ordinal"], declared[1]["dependency_ordinal"] = 2, 1
+    elif defect == "cross-parent-pointers":
+        for field in ("parent_workbook_luid", "dependency_ordinal"):
+            declared[0][field], declared[2][field] = declared[2][field], declared[0][field]
+    elif defect == "nested-reorder":
+        first[1], first[2] = first[2], first[1]
+    elif defect == "nested-cross-parent":
+        first[1], second[0] = second[0], first[1]
+    elif defect == "moved-parent":
+        second.append(first.pop())
+    elif defect == "wrong-key":
+        declared[0]["connection_datasource_id"] = "other-key"
+    elif defect == "missing-key":
+        del declared[0]["connection_datasource_id"]
+    elif defect == "unknown-dependencies":
+        case.survey["workbooks"][0]["dependencies_unknown"] = True
+    elif defect == "missing-workbook-parent":
+        del case.survey["workbooks"][0]["luid"]
+    elif defect == "duplicate-workbook-parent":
+        case.survey["workbooks"][1]["luid"] = "wb-0"
+    elif defect == "malformed-dependency":
+        first[1] = None
+    elif defect == "contradictory-nested-parent":
+        first[1]["parent_workbook_luid"] = "wb-1"
+        first[1]["dependency_ordinal"] = 1
+    else:
+        first[1]["parent_workbook_luid"] = "wb-0"
+        first[1]["dependency_ordinal"] = 2
+    case.survey["summary"]["unresolved_dependencies"] = len(declared)
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["denominator_status"] == "cannot_establish", (
+        f"UNRESOLVED_RECONCILIATION: {defect} cannot establish the denominator by equal counts"
+    )
+    assert bridge["status"] == "cannot_establish" and bridge["issues"]
+    assert bridge["counts"]["unresolved_dependencies"] == len(declared)
+    assert len(bridge["occurrences"]) == 8, "top-level discrepancies must not erase nested occurrences"
+    assert all(row["match"] is None for row in bridge["occurrences"])
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("parent_workbook_luid", None),
+        ("parent_workbook_luid", ""),
+        ("parent_workbook_luid", " wb-0"),
+        ("parent_workbook_luid", "wb-0 "),
+        ("parent_workbook_luid", "WB-0"),
+        ("parent_workbook_luid", "wb-2"),
+        ("parent_workbook_luid", "absent-parent"),
+        ("parent_workbook_luid", True),
+        ("parent_workbook_luid", 0),
+        ("parent_workbook_luid", []),
+        ("parent_workbook_luid", {}),
+        ("dependency_ordinal", None),
+        ("dependency_ordinal", "1"),
+        ("dependency_ordinal", True),
+        ("dependency_ordinal", 1.0),
+        ("dependency_ordinal", -1),
+        ("dependency_ordinal", 0),
+        ("dependency_ordinal", 3),
+        ("dependency_ordinal", []),
+        ("dependency_ordinal", {}),
+    ],
+)
+def test_scope_bridge_unresolved_pointer_requires_exact_type_parent_and_range(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    case = _scope_unresolved_case(tmp_path)
+    case.survey["unresolved_dependencies"][0][field] = value
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["denominator_status"] == "cannot_establish", (
+        "UNRESOLVED_POINTER: invalid parent/ordinal cannot establish the denominator"
+    )
+    assert len(bridge["occurrences"]) == 8 and all(row["match"] is None for row in bridge["occurrences"])
+
+
+@pytest.mark.parametrize(
+    "defect", ["resolved-candidate", "unresolved-status", "unresolved-candidates", "invalid-candidate"]
+)
+def test_scope_bridge_dependencies_consistency_requires_more_than_equal_counts(tmp_path: Path, defect: str) -> None:
+    case = _scope_case(tmp_path)
+    case.survey["workbooks"][0]["published_dependencies"].append(
+        {"datasource_name": "Display", "status": "not_found", "luid": "", "candidates": []}
+    )
+    unresolved = {
+        "workbook": "Same caption",
+        "datasource_name": "Display",
+        "status": "not_found",
+        "candidates": [],
+        "parent_workbook_luid": "wb-0",
+        "dependency_ordinal": 1,
+    }
+    case.survey["unresolved_dependencies"] = [unresolved]
+    case.survey["summary"]["unresolved_dependencies"] = 1
+    if defect == "resolved-candidate":
+        case.survey["workbooks"][0]["published_dependencies"][0]["candidates"][0]["luid"] = "not-ds-0"
+    elif defect == "unresolved-status":
+        unresolved["status"] = "ambiguous"
+    elif defect == "unresolved-candidates":
+        unresolved["candidates"] = [{"luid": "ds-0"}, {"luid": "ds-1"}]
+    else:
+        unresolved.update(status="ambiguous", candidates=[None, {"luid": "ds-1"}])
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["counts"]["unresolved_dependencies"] == 1
+    assert bridge["denominator_status"] == "cannot_establish"
+    assert any("dependency" in issue for issue in bridge["issues"])
+    assert len(bridge["occurrences"]) == 6
+
+
+def test_scope_bridge_ambiguous_candidates_reconcile_but_never_choose_a_datasource(tmp_path: Path) -> None:
+    case = _scope_case(tmp_path)
+    case.survey["workbooks"][0]["published_dependencies"].append(
+        {
+            "datasource_name": "Display",
+            "status": "ambiguous",
+            "luid": "",
+            "candidates": [{"luid": "ds-0"}, {"luid": "ds-1"}],
+        }
+    )
+    case.survey["unresolved_dependencies"] = [
+        {
+            "workbook": "Another caption",
+            "datasource_name": "Other display",
+            "status": "ambiguous",
+            "candidates": [{"luid": "ds-1"}, {"luid": "ds-0"}],
+            "parent_workbook_luid": "wb-0",
+            "dependency_ordinal": 1,
+        }
+    ]
+    case.survey["summary"]["unresolved_dependencies"] = 1
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["denominator_status"] == "established"
+    row = bridge["occurrences"][-1]
+    assert row["dependency_status"] == "ambiguous"
+    assert row["candidate_luids"] == ["ds-0", "ds-1"]
+    assert (row["parent_workbook_luid"], row["dependency_ordinal"]) == ("wb-0", 1)
+    assert row["status"] == "cannot_establish" and row["match"] is None
+
+
+def test_scope_bridge_reordering_changes_only_occurrence_indexes_not_identity(tmp_path: Path) -> None:
+    case = _scope_case(tmp_path)
+    for rows in (case.sweep, case.manifest["assets"], case.report["workbooks"], case.report["datasources"]):
+        rows.reverse()
+    for collection in ("workbooks", "required_datasources", "fetch_order"):
+        case.survey[collection].reverse()
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["status"] == "established"
+    first = bridge["occurrences"][0]
+    assert (first["luid"], first["survey_index"]) == ("wb-2", 0)
+    assert first["match"]["source_id"] == str(case.source / "workbook2.twb")
+    assert first["match"]["report_index"] == 0
+    assert first["match"]["parse_sweep_index"] == first["match"]["input_asset_index"] == 2
+    assert first["match"]["fetch_order_index"] == 0
+
+
+@pytest.mark.parametrize(
+    ("layer", "field", "value", "issue"),
+    [
+        ("sweep", "luid", "WB-0", "parse_sweep_missing_or_duplicate"),
+        ("sweep", "luid", " wb-0 ", "parse_sweep_missing_or_duplicate"),
+        ("sweep", "luid", None, "parse_sweep_missing_or_duplicate"),
+        ("sweep", "kind", "datasource", "parse_sweep_missing_or_duplicate"),
+        ("engine_input", "path", "workbook0.twb", "engine_input_malformed"),
+        ("engine_input", "status", "failed", "engine_input_malformed"),
+        ("manifest", "staged_input_path", None, "input_asset_missing_or_duplicate"),
+        ("manifest", "kind", "datasource", "input_asset_disagrees"),
+        ("manifest", "sha256", "0" * 64, "input_asset_disagrees"),
+        ("manifest", "sha256", None, "input_asset_disagrees"),
+        ("manifest", "size_bytes", True, "input_asset_disagrees"),
+        ("report", "source_id", None, "report_source_missing_or_duplicate"),
+        ("report", "source_id", "wb-0", "report_source_missing_or_duplicate"),
+    ],
+)
+def test_scope_bridge_exact_join_mutations_cannot_fall_back_to_names(
+    tmp_path: Path, layer: str, field: str, value: object, issue: str
+) -> None:
+    case = _scope_case(tmp_path)
+    target = {
+        "sweep": case.sweep[0],
+        "engine_input": case.sweep[0]["engine_input"],
+        "manifest": case.manifest["assets"][0],
+        "report": case.report["workbooks"][0],
+    }[layer]
+    target[field] = value
+    if layer != "engine_input":
+        target["name"] = "Same caption"
+    bridge = _build_scope_bridge(case)
+
+    row = bridge["occurrences"][0]
+    assert row["luid"] == "wb-0"
+    assert row["status"] == "cannot_establish"
+    assert row["match"] is None
+    assert issue in row["issues"]
+
+
+@pytest.mark.parametrize("layer", ["sweep", "manifest", "report", "report-other-kind"])
+def test_scope_bridge_duplicate_links_never_select_first(tmp_path: Path, layer: str) -> None:
+    case = _scope_case(tmp_path)
+    if layer == "sweep":
+        case.sweep.append(dict(case.sweep[0]))
+    elif layer == "manifest":
+        case.manifest["assets"].append(dict(case.manifest["assets"][0]))
+    else:
+        collection = "workbooks" if layer == "report" else "datasources"
+        case.report[collection].append(dict(case.report["workbooks"][0]))
+    bridge = _build_scope_bridge(case)
+
+    row = bridge["occurrences"][0]
+    assert row["status"] == "cannot_establish" and row["match"] is None
+    assert any("duplicate" in issue for issue in row["issues"])
+
+
+@pytest.mark.parametrize("layer", ["engine_input", "manifest", "report"])
+def test_scope_bridge_same_bytes_at_a_different_physical_file_are_not_a_join(tmp_path: Path, layer: str) -> None:
+    case = _scope_case(tmp_path)
+    twin = case.source / "same-bytes.twb"
+    twin.write_bytes((case.source / "workbook0.twb").read_bytes())
+    if layer == "engine_input":
+        case.sweep[0]["engine_input"]["path"] = str(twin)
+    elif layer == "manifest":
+        case.manifest["assets"][0]["staged_input_path"] = str(twin)
+    else:
+        case.report["workbooks"][0]["source_id"] = str(twin)
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["occurrences"][0]["status"] == "cannot_establish"
+    assert bridge["occurrences"][0]["match"] is None
+
+
+def test_scope_bridge_two_luids_claiming_one_physical_file_are_ambiguous(tmp_path: Path) -> None:
+    case = _scope_case(tmp_path)
+    case.sweep[1]["engine_input"] = dict(case.sweep[0]["engine_input"])
+    bridge = _build_scope_bridge(case)
+
+    assert all(row["match"] is None for row in bridge["occurrences"][:2])
+    assert all("engine_input_ambiguous" in row["issues"] for row in bridge["occurrences"][:2])
+
+
+def test_scope_bridge_relative_report_paths_use_only_the_invocation_directory(tmp_path: Path, monkeypatch) -> None:
+    case = _scope_case(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    for row in case.sweep:
+        row["file"] = str(Path(row["file"]).relative_to(tmp_path))
+    for collection in ("workbooks", "datasources"):
+        for row in case.report[collection]:
+            row["source_id"] = str(Path(row["source_id"]).relative_to(tmp_path))
+    bridge = _build_scope_bridge(case)
+
+    assert bridge["status"] == "established"
+    assert all(Path(row["engine_input"]["path"]).is_absolute() for row in case.sweep)
+    assert bridge["occurrences"][0]["match"]["source_id"] == str(Path("assets") / "workbook0.twb")
+
+
+def test_scope_bridge_never_hashes_an_engine_input_path_outside_assets(tmp_path: Path, monkeypatch) -> None:
+    case = _scope_case(tmp_path)
+    outside = _write(tmp_path / "outside" / "workbook0.twb", '<workbook name="outside" />')
+    case.sweep[0]["engine_input"]["path"] = str(outside)
+    original = run_estate.sha256_file
+
+    def _hash(path: Path) -> str:
+        assert path != outside, "the parse sweep cannot send the bridge outside --input"
+        return original(path)
+
+    monkeypatch.setattr(run_estate, "sha256_file", _hash)
+    bridge = _build_scope_bridge(case)
+    row = bridge["occurrences"][0]
+
+    assert row["match"] is None and row["issues"] == ["engine_input_outside_assets"]
+
+
+@pytest.mark.parametrize("manifest_updated", [True, False])
+def test_scope_bridge_detects_file_bytes_changed_during_engine_execution(
+    tmp_path: Path, manifest_updated: bool
+) -> None:
+    case = _scope_case(tmp_path)
+    _persist_scope_inputs(case)
+    snapshot = run_estate.capture_scope_inputs(case.survey_path, case.source)
+    path = case.source / "workbook0.twb"
+    path.write_bytes(b'<workbook name="changed" />')
+    if manifest_updated:
+        case.manifest["assets"][0].update(
+            size_bytes=path.stat().st_size, sha256=hashlib.sha256(path.read_bytes()).hexdigest()
+        )
+    _emit_scope_output(case)
+    run_estate.write_scope_bridge(case.bundle, case.report, snapshot)
+
+    row = _read_scope_bridge(case)["occurrences"][0]
+    assert row["match"] is None and "input_asset_disagrees" in row["issues"]
+
+
+@pytest.mark.parametrize("snapshot", ["survey", "sweep"])
+@pytest.mark.parametrize("defect", ["missing", "malformed", "wrong-root", "duplicate-keys"])
+def test_scope_bridge_bad_snapshots_fail_closed_without_discovery(
+    tmp_path: Path, monkeypatch, snapshot: str, defect: str
+) -> None:
+    case = _scope_case(tmp_path)
+    _persist_scope_inputs(case)
+    path = case.survey_path if snapshot == "survey" else case.sweep_path
+    if defect == "missing":
+        path.unlink()
+    elif defect == "duplicate-keys":
+        raw = json.dumps(case.survey)[:-1] + ', "schema_version": "1.0"}'
+        if snapshot == "sweep":
+            raw = json.dumps(case.sweep).replace('"kind": "workbook"', '"kind": "workbook", "kind": "workbook"', 1)
+        path.write_text(raw, encoding="utf-8")
+    else:
+        path.write_text(
+            {"malformed": "{", "wrong-root": '"not a snapshot"'}[defect],
+            encoding="utf-8",
+        )
+    _write(case.source / "parse-sweep.json", json.dumps(case.sweep))
+    _write(case.source.parent / "other-run" / "parse-sweep.json", json.dumps(case.sweep))
+    monkeypatch.setattr(run_estate.socket, "create_connection", lambda *_a, **_k: pytest.fail("network discovery"))
+    captured = run_estate.capture_scope_inputs(case.survey_path, case.source)
+    _emit_scope_output(case)
+    run_estate.write_scope_bridge(case.bundle, case.report, captured)
+    bridge = _read_scope_bridge(case)
+
+    assert bridge["status"] == "cannot_establish"
+    if snapshot == "sweep":
+        assert len(bridge["occurrences"]) == 5
+        assert "parse_sweep_unavailable" in bridge["issues"]
+    else:
+        assert bridge["denominator_status"] == "cannot_establish"
+    assert all(row["match"] is None for row in bridge["occurrences"])
+
+
+def test_scope_bridge_main_freezes_both_snapshots_before_engine_and_receipt_seals_final_manifest(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    from credential_gate import _receipt_matches_bundle  # pylint: disable=import-outside-toplevel
+
+    case = _scope_case(tmp_path)
+    _persist_scope_inputs(case)
+    expected_hashes = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest() for path in (case.survey_path, case.sweep_path)
+    }
+    reads = {path: 0 for path in expected_hashes}
+    original_read = Path.read_bytes
+    original_generated = run_estate.write_generated_artifact_manifest
+
+    def _read(path: Path) -> bytes:
+        if path in reads:
+            reads[path] += 1
+        return original_read(path)
+
+    def _engine(*_args) -> tuple[int, str]:
+        assert list(reads.values()) == [1, 1], "both snapshots must be read exactly once before launch"
+        case.survey_path.write_text("{}", encoding="utf-8")
+        case.sweep_path.write_text("[]", encoding="utf-8")
+        _emit_scope_output(case)
+        return 0, ""
+
+    def _generated(*args, **kwargs) -> Path:
+        bridge = _read_scope_bridge(case)
+        assert bridge["status"] == "established", "bridge precedes generated/input baselines and receipt"
+        assert not (case.bundle / "engine-output-receipt.json").exists()
+        return original_generated(*args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", _read)
+    monkeypatch.setattr(run_estate, "run_engine", _engine)
+    monkeypatch.setattr(run_estate, "write_generated_artifact_manifest", _generated)
+    with caplog.at_level("INFO", logger="run_estate"):
+        code = _scope_main(case, monkeypatch, "--scope-survey", str(case.survey_path))
+    bridge = _read_scope_bridge(case)
+    assert list(reads.values()) == [1, 1]
+    assert bridge["survey_sha256"] == expected_hashes[case.survey_path]
+    assert bridge["parse_sweep_sha256"] == expected_hashes[case.sweep_path]
+    assert bridge["counts"]["workbooks"] == 3
+    assert str(case.survey_path) not in caplog.text
+    assert str(case.survey_path) not in json.dumps(bridge)
+    receipt = json.loads((case.bundle / "engine-output-receipt.json").read_text(encoding="utf-8"))
+    manifest_path = case.bundle / "input_manifest.json"
+    assert receipt["input_manifest_sha256"] == hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    assert _receipt_matches_bundle(case.bundle, receipt)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["scope_bridge"]["occurrences"][0]["luid"] = "tampered"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert not _receipt_matches_bundle(case.bundle, receipt), "bridge changes must invalidate the existing seal"
+    assert code == run_estate.EXIT_OK
+
+
+@pytest.mark.parametrize("bridge", [None, {"version": 1, "status": "established"}, {"version": 999}, ["damaged"]])
+def test_scope_bridge_slice_only_preserves_existing_and_never_synthesizes(tmp_path: Path, monkeypatch, bridge) -> None:
+    case = _scope_case(tmp_path)
+    if bridge is not None:
+        case.manifest["scope_bridge"] = bridge
+    _emit_scope_output(case)
+    monkeypatch.setattr(run_estate, "capture_scope_inputs", lambda *_: pytest.fail("slice-only captured a survey"))
+    monkeypatch.setattr(run_estate, "run_engine", lambda *_: pytest.fail("slice-only ran the engine"))
+    code = run_estate.main(["--slice-only", "--output", str(case.bundle), "--scope-survey", str(case.survey_path)])
+    result = json.loads((case.bundle / "input_manifest.json").read_text(encoding="utf-8"))
+
+    assert result.get("scope_bridge") == bridge
+    assert ("scope_bridge" in result) is (bridge is not None)
+    assert not (case.bundle / "engine-output-receipt.json").exists()
+    assert code == run_estate.EXIT_OK
+
+
+@pytest.mark.parametrize("single", [False, True])
+def test_scope_bridge_no_survey_route_remains_unchanged_and_does_not_discover(
+    tmp_path: Path, monkeypatch, single: bool
+) -> None:
+    case = _scope_case(tmp_path)
+    _persist_scope_inputs(case)
+
+    def _engine(*_args) -> tuple[int, str]:
+        _emit_scope_output(case)
+        return 0, ""
+
+    monkeypatch.setattr(run_estate, "run_engine", _engine)
+    monkeypatch.setattr(run_estate, "capture_scope_inputs", lambda *_: pytest.fail("implicit scope discovery"))
+    monkeypatch.setattr(run_estate, "write_scope_bridge", lambda *_: pytest.fail("implicit scope publication"))
+    monkeypatch.setattr(run_estate.socket, "create_connection", lambda *_a, **_k: pytest.fail("network discovery"))
+    extra = ["--input", str(case.source / "workbook0.twb")] if single else []
+    assert _scope_main(case, monkeypatch, *extra) == run_estate.EXIT_OK
+    manifest = json.loads((case.bundle / "input_manifest.json").read_text(encoding="utf-8"))
+    assert "scope_bridge" not in manifest
+    assert manifest["assets"] == case.manifest["assets"]
+
+
+def test_scope_bridge_dry_run_never_reads_or_prints_the_absolute_survey_path(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    case = _scope_case(tmp_path)
+    monkeypatch.setattr(run_estate, "capture_scope_inputs", lambda *_: pytest.fail("dry-run read a survey"))
+    monkeypatch.setattr(run_estate, "run_engine", lambda *_: pytest.fail("dry-run launched engine"))
+    code = _scope_main(case, monkeypatch, "--scope-survey", str(case.survey_path), "--dry-run")
+
+    printed = capsys.readouterr()
+    assert str(case.survey_path) not in printed.out + printed.err
+    assert "scope-survey=supplied" in printed.out
+    assert not case.bundle.exists()
+    assert code == run_estate.EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # One engine, and the bundle says which one (issue #107)
 # ---------------------------------------------------------------------------
 

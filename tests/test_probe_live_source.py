@@ -33,6 +33,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
+import preflight_source_credentials as preflight  # noqa: E402
 import probe_live_source  # noqa: E402  # pylint: disable=wrong-import-position
 from test_probe_live_custom_sql import DATABRICKS, SNOWFLAKE, SQLSERVER  # noqa: E402
 from test_probe_live_source_verdict import _import_skill_modules  # noqa: E402
@@ -52,6 +53,14 @@ requires_validator = pytest.mark.skipif(
     VALIDATOR is None,
     reason="powerbi-report-author not installed (npm bridge CLI; absent on Linux CI)",
 )
+
+
+@pytest.fixture(autouse=True)
+def _canonical_marker_only_probe_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Probe/verdict controls avoid unrelated native ACL subprocesses."""
+    import credential_gate as gate  # pylint: disable=import-outside-toplevel
+
+    monkeypatch.setattr(gate.platform, "system", lambda: "Linux")
 
 
 @pytest.fixture(name="scaffold")
@@ -168,7 +177,10 @@ def test_ordinary_probe_requires_child_row_evidence(
     # pylint: disable=protected-access
     child, verdict_module, _ = _import_skill_modules()
     observed: list[str] = []
-    source = {"connection": conn, "tables": [{"name": "Orders"}]}
+    source = {"connection": conn, "tables": [{"name": "Orders", "table": f"[{conn['schema']}].[Orders]"}]}
+    (tmp_path / "migration-spec.json").write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    expected_key = preflight._leg_key(source, 0, conn)
+    assert probe_live_source._resolve_probe_targets([source], 0, tmp_path)[0][0] == expected_key
 
     def _open(pbip: Path) -> int:
         tmdl = next(pbip.parent.glob("*.SemanticModel/definition/tables/*.tmdl")).read_text(encoding="utf-8")
@@ -197,7 +209,7 @@ def test_ordinary_probe_requires_child_row_evidence(
     monkeypatch.setattr(probe_live_source, "_network_fault_observed", lambda _conn: False)
     monkeypatch.setattr(probe_live_source, "_record_desktop_lifecycle", lambda *_args: {})
     monkeypatch.setattr(probe_live_source, "_close", lambda _pid, _pbip: True)
-    monkeypatch.setattr(probe_live_source.subprocess, "run", _refresh)
+    monkeypatch.setattr(probe_live_source, "_run_refresh", _refresh)
 
     code, verdict = probe_live_source._probe_one(tmp_path, [source], 0, 7, False)
 
@@ -206,3 +218,118 @@ def test_ordinary_probe_requires_child_row_evidence(
         assert code == 1 and verdict != "DATA_OK"
     else:
         assert (code, verdict) == (0, "DATA_OK")
+
+
+@pytest.mark.parametrize("schema", [None, "", " ", 7, False, " bad", "bad ", 'a"b', "a#(b)", "a\nb"])
+def test_717_direct_builder_refuses_missing_or_unsafe_schema(schema):
+    with pytest.raises(ValueError):
+        probe_live_source.build_m_query({**DATABRICKS, "schema": schema}, "trips", "ProbeOK")
+
+
+@pytest.mark.parametrize("table", [None, "", " ", 7, False, " bad", "bad ", 'a"b', "a#(b)", "a\nb"])
+def test_717_direct_builder_refuses_missing_or_unsafe_physical_table(table):
+    with pytest.raises(ValueError):
+        probe_live_source.build_m_query(DATABRICKS, table, "ProbeOK")
+
+
+def test_717_direct_builder_accepts_recorded_default():
+    query, _ = probe_live_source.build_m_query(DATABRICKS, "trips", "ProbeOK")
+    assert 'sch = db{[Name="default",Kind="Schema"]}[Data]' in query
+    assert 'tbl = sch{[Name="trips",Kind="Table"]}[Data]' in query
+
+
+@pytest.mark.parametrize("source_index", [None, 0])
+@pytest.mark.parametrize("identifier", ["trips", "[samples].[trips]", "[other].[nyctaxi].[trips]", "a.b.c.d", None])
+def test_717_cli_metadata_refusal_is_error_before_any_effect(tmp_path, monkeypatch, caplog, source_index, identifier):
+    import credential_gate as cg  # noqa: PLC0415
+    import preflight_source_credentials as pf  # noqa: PLC0415
+
+    source = {
+        "connection": {**DATABRICKS, "database": "samples", "schema": None},
+        "tables": [{"name": "Alias", "table": identifier}],
+    }
+    spec_path = tmp_path / "migration-spec.json"
+    spec_path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    key = pf._leg_key(source, 0, source["connection"])
+    monkeypatch.setattr(cg, "_icacls", lambda _args: (0, ""))
+    cg.apply_block(tmp_path, [key], force_scope=True)
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append(True)
+        pytest.fail("metadata refusal reached an external effect or M builder")
+
+    for name in ("build_m_query", "_host_resolves", "_write_probe_model", "_open_desktop"):
+        monkeypatch.setattr(probe_live_source, name, forbidden)
+    try:
+        code = probe_live_source.run_probe(tmp_path, source_index, 1, False)
+    except SystemExit as refused:
+        code = refused.code
+    assert calls == []
+    assert "PROBE: ERROR" in caplog.text
+    assert "PROBE: SKIPPED" not in caplog.text
+    assert code != 0
+    entries = [json.loads(line) for line in (tmp_path / cg.AUDIT).read_text().splitlines()]
+    assert entries[-1]["action"] == "probe-error"
+    assert entries[-1]["sources"] == [key]
+    assert not any(entry["action"] in {"probe-cleared", "probe-data_ok"} for entry in entries)
+    assert (tmp_path / cg.MARKER).exists()
+
+
+@pytest.mark.parametrize("fault", [None, "ready_only", "wrong_pid", "numeric_start", "nonzero"])
+def test_catalogue_wait_requires_positive_binding_and_one_absolute_budget(monkeypatch, fault: str | None) -> None:
+    """Only a validated binding succeeds, and retries consume one absolute budget."""
+    # pylint: disable=protected-access
+    binding = {
+        "identity": {
+            "pid": 111,
+            "process_start": "638963424000000001",
+            "as_pid": 112,
+            "as_process_start": "638963424000000002",
+            "port": 52001,
+        },
+        "catalogue": "74100000-0000-4000-8000-000000000001",
+    }
+    if fault == "wrong_pid":
+        binding["identity"]["pid"] = 222
+    elif fault == "numeric_start":
+        binding["identity"]["process_start"] = 638963424000000001
+    clock = [0.0]
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs["timeout"]))
+        return subprocess.CompletedProcess(
+            command,
+            1 if fault == "nonzero" else 0,
+            stdout="READY" if fault == "ready_only" else json.dumps(binding),
+            stderr="",
+        )
+
+    monkeypatch.setattr(probe_live_source.subprocess, "run", run)
+    monkeypatch.setattr(probe_live_source.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(probe_live_source.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    assert probe_live_source._wait_for_catalog(111, timeout_sec=4) is (fault is None)
+    assert len(calls) == (1 if fault is None else 2)
+    assert all("bind_desktop" in command[2] for command, _ in calls), "READY is not catalogue binding"
+    assert [timeout for _, timeout in calls] == ([4] if fault is None else [4, 1])
+
+
+@pytest.mark.parametrize(
+    "state,code", [("CREDENTIAL_REQUIRED", "CREDENTIAL_MISSING"), ("HUMAN_ACTION_REQUIRED", "DIALOG_NEEDS_HUMAN")]
+)
+def test_catalogue_wait_settles_a_positive_terminal_prompt_once(monkeypatch, state: str, code: str) -> None:
+    """A positive human prompt is terminal, not a transient catalogue startup."""
+    # pylint: disable=protected-access
+    from test_probe_live_source_verdict import desktop_event  # pylint: disable=import-outside-toplevel
+
+    calls = []
+
+    def run(command, **_kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 3, stdout="", stderr=desktop_event(state))
+
+    monkeypatch.setattr(probe_live_source.subprocess, "run", run)
+    with pytest.raises(probe_live_source.ObservationUnavailable, match=f"^{code}$"):
+        probe_live_source._wait_for_catalog(111)
+    assert len(calls) == 1, "a positive human prompt is not a transient catalogue startup"

@@ -20,6 +20,7 @@ import json
 import inspect
 import os
 import re
+import subprocess
 import threading
 import traceback
 from dataclasses import FrozenInstanceError, asdict, replace
@@ -38,7 +39,7 @@ from probe_desktop_query import discover_port, table_names
 from refresh_pbip_model import _instance, _resolve_pid, same_model, tmdl_tables
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-CREDENTIAL_PROBE_PS1 = SKILL_ROOT / "scripts" / "probe_desktop_credential.ps1"
+CREDENTIAL_PROBE_PS1 = SKILL_ROOT / "scripts" / "_desktop_uia.ps1"
 REF_TABLE_RE = re.compile(r"^ref table\s+(?:'([^']+)'|(\S+))", re.MULTILINE)
 OBSERVED_IDENTITY = probe_desktop_query.DesktopIdentity(111, "100", 222, "101", 52001)
 OBSERVED_CATALOGUE = "11111111-2222-3333-4444-555555555555"
@@ -1316,7 +1317,7 @@ def test_compatibility_alignment_declares_generated_edit(tmp_path: Path) -> None
     assert declaration["script_identity"] == "pbip-model-refresh/refresh_pbip_model.py"
 
 
-def test_a_timeout_does_not_assert_a_credential_modal(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_a_timeout_does_not_assert_a_desktop_observer(monkeypatch, tmp_path: Path, capsys) -> None:
     """A refresh timeout must report the cause as UNKNOWN, never as "this needs a human".
 
     Regression test for the most expensive defect found on 2026-08-04. The old message named a
@@ -1337,7 +1338,7 @@ def test_a_timeout_does_not_assert_a_credential_modal(monkeypatch, tmp_path: Pat
     assert "REFRESH: TIMEOUT" in out
     assert "CAUSE UNKNOWN" in out
     assert "THIS NEEDS A HUMAN" not in out, "a timeout heuristic must not emit a stop-word instruction"
-    assert "probe_desktop_credential" in out, "it must name the arbiter that settles the cause"
+    assert "probe_desktop_query" in out, "it must name the bundled row-query path, not a retired arbiter"
     # #118: the arbiter it names must actually ship in the bundle, and the message must print its
     # bundled absolute path - a runtime instruction to run a file that is not here breaks the
     # bundle's self-containment claim.
@@ -1692,36 +1693,50 @@ def test_canaries_verify_the_whole_model_without_narrowing_the_refresh(monkeypat
     assert seen["probed"] == ["Orders"], "--canaries must be the probed set"
 
 
-def test_the_bundled_credential_arbiter_never_fails_open() -> None:
-    """The arbiter must not answer CREDENTIAL_PRESENT when it never managed to invoke a Refresh.
-
-    "No modal appeared" is evidence only if something was actually triggered. The copy that shipped at
-    the repo root reported PRESENT in that case - a fail-open arbiter, which is worse than no arbiter,
-    because an agent trusts it and builds against a source it cannot read.
-    """
+def test_the_bundled_backend_has_no_classifier_or_refresh_arbiter() -> None:
+    """Only Python may interpret facts; native harvesting has no successful operation verdict."""
     body = CREDENTIAL_PROBE_PS1.read_text(encoding="utf-8")
-    assert "if (-not $invoked)" in body, "the not-invoked branch is the fail-open guard"
-    guard = body.split("if (-not $invoked)", 1)[1].split("$deadline", 1)[0]
-    assert "VERDICT: UNKNOWN" in guard and "exit 3" in guard
-    assert "CREDENTIAL_PRESENT" not in guard
+    for forbidden in ("signature.regex", "CREDENTIAL_PRESENT", "Get-DialogClassification", "InvokePattern", "while ("):
+        assert forbidden not in body, f"parallel policy/arbiter returned: {forbidden}"
+    assert "desktop.harvest.v1" in body and "EnumWindows" in body
 
 
-def test_the_repo_root_credential_probe_is_a_forwarding_shim() -> None:
-    """One arbiter, not two. The root path is what the docs cite, so it must REACH this bundled copy.
-
-    Two same-named probes had silently diverged, and the one the documentation pointed at was the
-    fail-open one. HOST-repo fixture, so it skips where this bundle has been copied out.
-    """
-    for parent in SKILL_ROOT.parents:
-        root_probe = parent / "scripts" / "probe_desktop_credential.ps1"
-        if root_probe.exists():
-            body = root_probe.read_text(encoding="utf-8")
-            assert "@args" in body and "pbip-model-refresh" in body, (
-                "scripts/probe_desktop_credential.ps1 is a second arbiter again, not a forwarding shim"
-            )
-            assert "UIAutomationClient" not in body, "the shim must not carry its own UIA implementation"
-            return
-    pytest.skip("no host repo scripts/ folder next to this bundle")
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        [],
+        ["-DesktopPid", "111"],
+        ["-DesktopPid", "111", "-TimeoutSec", "1", "-HarvestTimeoutSec", "1", "-HarvestMaxElements", "10"],
+        ["-LoadDetectorsOnly"],
+        ["-HarvestHwnd", "123", "-DiagnosticPid", "111", "-HarvestMaxElements", "10"],
+    ],
+)
+def test_the_repo_root_credential_probe_is_a_retirement_shim(arguments) -> None:
+    """Every legacy parameter set refuses with fixed output; none can reach the raw backend."""
+    root_probe = next(
+        (
+            parent / "scripts" / "probe_desktop_credential.ps1"
+            for parent in SKILL_ROOT.parents
+            if (parent / "scripts" / "probe_desktop_credential.ps1").is_file()
+            and (parent / ".github" / "skills" / "pbip-model-refresh").resolve() == SKILL_ROOT
+        ),
+        None,
+    )
+    if root_probe is None:
+        pytest.skip("no host repo scripts/ folder next to this bundle")
+    if os.name != "nt":
+        pytest.skip("Desktop UIA qualification is Windows-only")
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-File", str(root_probe), *arguments],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 3 and result.stdout.splitlines()[0] == "VERDICT: UNKNOWN"
+    assert "no observation or Refresh performed" in result.stdout
+    assert "111" not in result.stdout and "CREDENTIAL_PRESENT" not in result.stdout
+    assert not result.stderr
 
 
 def _explode(name: str):
@@ -1751,36 +1766,28 @@ def test_timeout_recovery_command_quotes_a_path_with_spaces(monkeypatch, tmp_pat
     exit_code = refresh_pbip_model.main(["--pid", "111"])
     out = capsys.readouterr().out
     assert exit_code == 3
-    assert f'-File "{spaced}"' in out, "the arbiter path must be quoted for powershell -File"
+    assert f'python "{spaced}" --pid 111' in out, "the portable query recovery path must stay quoted"
 
 
-def test_credential_arbiter_enumerates_all_windows_and_fails_closed() -> None:
-    """The credential arbiter (#118) must not fail OPEN, and must inspect EVERY window for the pid.
-
-    It became "the arbiter" the timeout message points at, so a fail-open answer is worse than none
-    (round-2 major 5). The script needs live Desktop to execute, so these two fixes are
-    pinned structurally: it must enumerate all top-level/owned windows with Win32 `EnumWindows`, not
-    UIA root children, and when no Refresh control was ever invoked it must report
-    UNKNOWN rather than asserting a credential is present.
-
-    The not-invoked verdict is checked INSIDE the `if (-not $invoked) { ... }` block, not anywhere in
-    the file: a bare `VERDICT: UNKNOWN` search passed even when that branch was mutated to emit
-    `CREDENTIAL_PRESENT`, because a second `VERDICT: UNKNOWN` (the no-window guard) still matched
-    (round-3 major 5). Scoping the assertions to the block is what makes the test able to fail.
-    """
-    text = CREDENTIAL_PROBE_PS1.read_text(encoding="utf-8")
-    assert "Get-PidWindows" in text, "must enumerate windows via the all-windows helper"
-    assert "EnumWindows" in text, "must use Win32 EnumWindows for discovery (UIA root children miss owned dialogs)"
-    assert "FindFirst" not in text, "the single-window FindFirst scan was the fail-open enumeration bug"
-
-    block_match = re.search(r"if \(-not \$invoked\)\s*\{(.*?)\}", text, re.DOTALL)
-    assert block_match, "must guard the case where no Refresh was invoked with an `if (-not $invoked)` block"
-    block = block_match.group(1)
-    assert re.search(r"VERDICT:\s*UNKNOWN", block), "the not-invoked branch itself must report UNKNOWN"
-    assert re.search(r"\bexit\s+3\b", block), "the not-invoked branch must exit 3 (the UNKNOWN code)"
-    assert "CREDENTIAL_PRESENT" not in block, (
-        "the not-invoked branch must NOT report CREDENTIAL_PRESENT - that is the fail-open arbiter bug"
-    )
+def test_backend_exact_target_prepost_and_readonly_values_are_retained() -> None:
+    """The native backend keeps identity/role facts without becoming a second policy authority."""
+    body = CREDENTIAL_PROBE_PS1.read_text(encoding="utf-8")
+    for required in (
+        "EnumWindows",
+        "GetWindowThreadProcessId",
+        "owner_before",
+        "owner_after",
+        "target_before",
+        "target_after",
+        "process_started_at_before",
+        "process_started_at_after",
+        "IsPassword",
+        "ControlType.Edit",
+        "TextPattern",
+        "patterns_incomplete",
+    ):
+        assert required in body, f"native safeguard missing: {required}"
+    assert "ValuePattern" not in body
 
 
 def test_ui_save_fallback_when_cache_does_not_update_reports_not_persisted_without_contradiction(

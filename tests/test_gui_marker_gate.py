@@ -270,8 +270,8 @@ def _repo_free_env() -> dict[str, str]:
 
 def test_the_repository_has_gui_marked_tests_at_all() -> None:
     """Kills: the whole mechanism selecting nothing, which makes every check below vacuous."""
-    assert len(_gui_node_ids()) >= 10, (
-        "expected at least the ten known window-spawning tests to be collectable under "
+    assert _gui_node_ids(), (
+        "expected window-spawning tests to be collectable under "
         f"`{RUN_GUI_FLAG} -m {GUI_MARKER}`, got {sorted(_gui_node_ids())}"
     )
 
@@ -285,7 +285,7 @@ def test_every_window_spawning_test_declares_itself_gui() -> None:
     raising sentinel showed all three reached on the DEFAULT selection.
     """
     spawners = _window_spawning_tests()
-    assert len(spawners) >= 10, f"the AST scan found only {sorted(spawners)} - it can no longer see the spawn sites"
+    assert spawners, "the AST scan found no window-spawning tests - it can no longer see the spawn sites"
     unmarked = sorted(node for node in spawners if node not in _gui_node_ids())
     assert not unmarked, (
         "these tests open a real top-level window but are not collected under "

@@ -1,5 +1,8 @@
 # Agent navigation index
 
+Desktop observation authority and its source-proof boundary:
+[`desktop-observer-simplification.md`](desktop-observer-simplification.md) (slice 1).
+
 Map of maps for agent-facing knowledge. Start here, then open the matching index or direct file.
 
 ## Start here for a migration unit
@@ -50,7 +53,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 
 | Task | Path | Read when... |
 |---|---|---|
-| Start or route session | [`AGENTS.md`](../AGENTS.md) | Canonical workflow plus repo agent/skill map. |
+| Start or route session | [`AGENTS.md`](../AGENTS.md) | Customer runtime: front door → one intake → private v2 brief → task-tool dispatch → independent Tableau comparison. |
 | Understand toolkit | [`README.md`](../README.md) | Project purpose and quick start. |
 | Contribute safely | [`CONTRIBUTING.md`](../CONTRIBUTING.md) | Issue-to-plan-review-to-PR lifecycle, status labels, mechanical exception and validation expectations. |
 | Open a focused PR | [`.github/PULL_REQUEST_TEMPLATE.md`](../.github/PULL_REQUEST_TEMPLATE.md) | Behavioral/mechanical paths, plan-review evidence, validation exits and exact blind-reviewed head SHA. |
@@ -67,15 +70,19 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Handle conduct | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Conduct/community questions. |
 | Handle security reports | [`SECURITY.md`](../SECURITY.md) | Security disclosure routing. |
 | Find migration guidance | [`docs/agent-architecture.md`](../docs/agent-architecture.md) | Root sessions, subagents, skill visibility. |
-| Operate delegated agents | [`docs/agent-operations.md`](../docs/agent-operations.md) | Monitoring a subagent's claims, host V8-heap and Desktop RAM concurrency budgets, and post-crash file forensics — the measured evidence behind `AGENTS.md`'s delegation rules. |
+| Operate delegated agents | [`docs/agent-operations.md`](../docs/agent-operations.md) | Authority and evidence for monitoring claims, host V8-heap/Desktop RAM budgets and post-crash file forensics. |
 | Find migration guidance | [`docs/agent-capability-wiring.md`](../docs/agent-capability-wiring.md) | Registry of shipped capabilities that must be visible to agents. |
 | Find migration guidance | [`docs/ai-instructions-authoring-guide.md`](../docs/ai-instructions-authoring-guide.md) | AI-instruction authoring redirect. |
 | Find migration guidance | [`docs/capabilities-and-limitations.md`](../docs/capabilities-and-limitations.md) | Automation capability boundaries. |
+| Review the unified CLI consensus | [`docs/cli-consensus/consensus.md`](cli-consensus/consensus.md) | Four independent designs plus one red-team report, synthesized into a narrow `t2p start`/`status` pilot, authority boundaries, path contract, deferrals and blind-run acceptance (Refs #734). |
+| Review the CLI pilot plan | [`docs/t2p-pilot-plan.md`](t2p-pilot-plan.md) | Docs-only doctor/start/status plan; presence/source-only doctor, initially unknown_until_harvest, existing post-harvest/pre-conversion gate, no #751 dependency (Refs #749). |
 | Find migration guidance | [`docs/credential-gate-testing.md`](../docs/credential-gate-testing.md) | Credential-gate tests and audit behavior. |
 | Find migration guidance | [`docs/credential-gate.md`](../docs/credential-gate.md) | Live-source/Desktop credential wall. |
 | Find migration guidance | [`docs/customer-text-exposure.md`](../docs/customer-text-exposure.md) | Customer text/privacy exposure. |
 | Find migration guidance | [`docs/data-source-credentials.md`](../docs/data-source-credentials.md) | Tableau/database/warehouse credentials. |
 | Find migration guidance | [`docs/deterministic-tier-integration.md`](../docs/deterministic-tier-integration.md) | Engine and handoff integration. |
+| Review Desktop observer consolidation | [`docs/desktop-observer-simplification.md`](desktop-observer-simplification.md) | Architecture census, observer alternatives and unverified deletion hypotheses; preserves real-row proof and the physical credential gate (Refs #741). |
+| Review gotcha deduplication | [`docs/gotcha-dedup-plan.md`](gotcha-dedup-plan.md) | Bounded upstream/local claim dispositions, safety preservation, release/role-canary gates and ownership sequencing; plan only (Refs #732). |
 | Find migration guidance | [`docs/dry-run-findings-2026-08-11.md`](../docs/dry-run-findings-2026-08-11.md) | Durable F00x dry-run findings. |
 | Find migration guidance | [`docs/engine-gap-harvest.md`](../docs/engine-gap-harvest.md) | Attribute and classify the `reports/` vs `pbip/` delta into engine-gap evidence — provenance delegated to the `--tamper` gate's own adjudicator. |
 | Find migration guidance | [`docs/migration-phases.md`](../docs/migration-phases.md) | The three-phase pipeline shape: what each phase produces, where it lands, which gate guards each hop, the `_runs/<NNN>-<slug>` identity rule (never renamed/renumbered; one run per pipeline run, **not** per workbook), and the known gaps. |
@@ -88,7 +95,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Find migration guidance | [`docs/reference-readiness.md`](../docs/reference-readiness.md) | Post-emission reference prerequisite for agentic work: completeness, evidence and grade; conversion/dispatch/fidelity boundaries. |
 | Migrate ONE workbook by hand | [`docs/start-with-one-workbook.md`](../docs/start-with-one-workbook.md) | Bring-your-own `.twb` + screenshots, no Tableau Server: the verified command sequence, the `tableau-<exact name>.png` naming contract, and the Desktop-connection prerequisite. |
 | Find migration guidance | [`docs/review-remediation-plan.md`](../docs/review-remediation-plan.md) | Route validation/review findings. |
-| Improve review throughput | [`docs/review-throughput-postmortem.md`](../docs/review-throughput-postmortem.md) | Measured 2026-09-01/02 review-round costs, causes, counterexamples, and the replacement brief contract. |
+| Improve review throughput | [`docs/review-throughput-postmortem.md`](../docs/review-throughput-postmortem.md) | Dated review-round costs, causes and counterexamples; live review contract in `CONTRIBUTING.md`. |
 | Find migration guidance | [`docs/tableau-dax-translation-guide.md`](../docs/tableau-dax-translation-guide.md) | Translate Tableau calcs/LODs/table calcs. |
 | Find migration guidance | [`docs/tableau-map-to-azuremaps.md`](../docs/tableau-map-to-azuremaps.md) | Translate Tableau maps to Azure Maps. |
 | Find migration guidance | [`docs/windows-path-limits.md`](../docs/windows-path-limits.md) | Windows MAX_PATH ceilings a shipped bundle must respect, how to DELETE a tree that is already over one (`\\?\` prefix plus a chmod handler, because git objects are read-only), and §6 the **measured `subst` fallback** for opening an over-ceiling PBIP in Desktop — temporary, same-user, never canonical, waives no path gate. |
@@ -251,3 +258,8 @@ Base: ``
 .github/skills/powerbi-report-gotchas/SKILL.md
 .github/skills/powerbi-semantic-model-gotchas/SKILL.md
 ```
+<!-- Narrow CLI pilot is opt-in; direct-script guidance remains authoritative. -->
+
+The opt-in `scripts/t2p.py` doctor/start/status pilot is documented in
+[`scripts/README.md`](../scripts/README.md). It adds no readiness authority or dispatcher replacement;
+the approved bounds remain [`docs/t2p-pilot-plan.md`](t2p-pilot-plan.md).

@@ -1640,6 +1640,12 @@ def build_parser() -> argparse.ArgumentParser:
             "(repeatable)"
         ),
     )
+    parser.add_argument(
+        "--workbook-id",
+        action="append",
+        default=None,
+        help="exact published workbook LUID filter (repeatable; never matched as a caption)",
+    )
     parser.add_argument("--images", action="store_true", help="also capture /image?resolution=high per view")
     parser.add_argument(
         "--svg",
@@ -1729,12 +1735,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def select_views(
-    session: TableauSession, workbooks: list[str] | None, limit: int
+    session: TableauSession, workbooks: list[str] | None, limit: int, workbook_ids: list[str] | None = None
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Resolve the views to capture, plus a workbook-LUID -> name index for the manifest."""
     views = list_views(session)
     payload = session.get_json(f"/sites/{session.site_id}/workbooks?pageSize=1000")
     names = {wb["id"]: wb["name"] for wb in payload.get("workbooks", {}).get("workbook", [])}
+    if workbook_ids:
+        missing = [luid for luid in dict.fromkeys(workbook_ids) if luid not in names]
+        if missing:
+            raise ValueError("unknown --workbook-id LUID(s); refusing caption fallback")
+        wanted_ids = set(workbook_ids)
+        views = [v for v in views if (v.get("workbook") or {}).get("id") in wanted_ids]
     if workbooks:
         wanted = {w.lower() for w in workbooks}
         views = [v for v in views if names.get((v.get("workbook") or {}).get("id"), "").lower() in wanted]
@@ -2010,6 +2022,8 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
         conflicts = []
         if args.workbook:
             conflicts.append("--workbook")
+        if args.workbook_id:
+            conflicts.append("--workbook-id")
         if args.limit:
             conflicts.append("--limit")
         for flag, active in (
@@ -2082,7 +2096,7 @@ def main() -> int:  # pylint: disable=too-many-locals,too-many-branches,too-many
             recovery_legs = plan.legs
             recovery_metadata = plan.metadata
         else:
-            views, workbook_names = select_views(session, args.workbook, args.limit)
+            views, workbook_names = select_views(session, args.workbook, args.limit, args.workbook_id)
             ordinary_max_age = validate_max_age(args.max_age)
             max_age = ordinary_max_age
             recovery_legs = None

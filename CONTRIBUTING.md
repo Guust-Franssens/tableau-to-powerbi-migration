@@ -17,7 +17,7 @@ this reason).
    plan details are optional seeds, not a demand for a worktree or review link.
 2. **Plan, then independently review.** Before behavioral coding, turn those seeds into a bounded
    issue plan: affected consumers/shared files, controls, non-goals and dependencies. Follow the
-   [canonical review contract](AGENTS.md#the-review-contract--state-this-in-the-brief-before-coding),
+   [canonical review contract](#the-review-contract--state-this-in-the-brief-before-coding),
    not a copied essay. An independent simplicity/UX reviewer records a link and verdict:
    **approve, simplify, split, close/no-change, or blocked**. Only an approved revision proceeds.
 3. **Implement the approved scope.** Once ready, record the approved base SHA in the implementation
@@ -53,9 +53,48 @@ gate with a one-sentence justification; N/A fields need a reason. Validation exi
 confirmation and ordinary blind diff review at an exact head SHA remain required.
 Why these boundaries exist: [review-throughput post-mortem](docs/review-throughput-postmortem.md).
 
+### The review contract — state this in the brief BEFORE coding
+
+Measured over eight merged PRs (mean **7.75** pre-merge review rounds): the cause was **an unbounded
+claim fixed one site at a time** — 66 % of round-2+ findings shared a defect class with round N−1 of
+a *different* PR. Size, file contention, operator routing and proof machinery were each ruled out by
+a discriminating case, and the reviews were mostly right, so none of this means "review less". Data,
+method and limits: [`docs/review-throughput-postmortem.md`](docs/review-throughput-postmortem.md).
+⚠️ **Two rules an earlier edition proposed are contradicted — do not reintroduce them:** a hard
+artifact cap (new test files vs rounds is Spearman **−0.695**: *more* test files went with *fewer*
+rounds) and an absolute two-round cap (44 false-clean / wrong-object / security findings arrived
+after round 2, and those normally block a merge).
+
+1. **Invariant and direction.** State the exact pass / refuse / cannot-establish contract. Name the
+   fail-open consequence, the fail-closed consequence, and which one blocks merge.
+2. **Closed surface.** Enumerate every consumer, phase, transformation, identity-loss join and
+   mutable read that can affect the invariant (`N = ___`); name residuals explicitly. **If review
+   finds a new class or an unlisted surface after round 1, do not add another local guard —
+   simplify, delete, split, or descope.** This is the stop rule the 66 % recurrence argues for.
+3. **Independent oracle.** For each verdict name evidence *not produced by the code under test*, plus
+   one positive and one negative control. A proof must fail on its intended assertion; a non-zero
+   exit alone is not a kill.
+4. **Proof escalation.** Direct tests are the default. A new mutation runner, digest, census, anchor
+   map or pin requires **all four**: a real need (customer/repo reproduction, accepted requirement,
+   or a mandatory security/data-loss boundary); a severe consequence if the ordinary test is vacuous;
+   a **demonstrated** mutation that direct positive/negative tests miss; and evidence the mechanism
+   has power over *this* claim. ⚠️ The deciding factor is the **consequence of vacuity**, not file
+   type and not the guard's nominal direction. Machinery larger than the product change is a
+   **split trigger**.
+5. **Round route.** R1 reviews the invariant and the enumerated surface; R2 checks regressions and
+   whether the class is closed. **After R2 freeze scope**: a further defect *in the same class* may
+   be fixed; a **new class or new proof mechanism** forces simplify/delete/split/descope. Fail-open,
+   security and data-loss findings block; fail-closed, diagnostic and proof residuals become issues.
+6. **Integration.** Name shared/contended files and the base SHA. Bring the branch current once
+   before final review and **prove the reviewed tree's SHA** — a stale head is how a review round
+   gets spent on code that no longer exists.
+
+⚠️ No PR has yet used this contract prospectively, so its benefit is a testable hypothesis, not a
+measured result. Record what happens on the first ones that do, and correct it from that evidence.
+
 ## Environment setup
 
-The agent/skill/MCP dependencies are described in [`AGENTS.md`](AGENTS.md) and verified by the
+The agent/skill/MCP dependencies are described in [runbook §1.1](docs/operator-runbook.md#11-tooling) and verified by the
 preflight script (run it after cloning to see what's missing — it works even before Python is
 installed):
 
@@ -113,9 +152,9 @@ code unconditionally).
 
 ### New craft learnings go in a bundle, not a persona
 
-All four personas sit at **~98–99% of the 30,000-char cap** with no headroom — appending a gotcha to
-one puts it straight back over, and `sync_agent_conventions.py --check` now **fails the build** on
-that (use `--allow-over-cap` only for a deliberate, temporary overage). So PBIR/visual/Desktop
+All five personas must stay under the **22,000-char project target** and the **30,000-char hard cap**.
+`sync_agent_conventions.py --check` **fails the build** on a hard-cap overage
+(use `--allow-over-cap` only for a deliberate, temporary overage). PBIR/visual/Desktop
 learnings belong in `powerbi-report-gotchas`, and TMDL/DAX/MCP learnings in
 `powerbi-semantic-model-gotchas`. The orchestrator's step-12 retrospective has the full routing table.
 Rationale and the residual risk this accepts:

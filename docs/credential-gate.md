@@ -1,9 +1,10 @@
 # The live-source credential gate
 
 **What it does:** when a workbook has a **live** data source (Databricks, Snowflake, SQL Server…),
-this makes it **physically impossible** to write a semantic model or report for that source until a
-real measurement has proven the source can actually be read — rather than merely asking an agent not
-to.
+the Windows gate denies ordinary writes to the working model/report directories until a real
+measurement proves the source can be read (or a human authorizes an unvalidated build). Enforcement
+must first be established on every target; an unsupported ACL is a nonzero refusal, not a claim that
+writes are physically blocked.
 
 **Why it exists:** a semantic model built against a warehouse that was never contacted is
 **byte-identical** to one that refreshes perfectly. Nothing on disk tells you which you have. The
@@ -21,7 +22,7 @@ it is unproven.
 ## The lifecycle
 
 ```
-parse_tableau.py  ──►  GATE ARMED           writes are denied on <migration>/fabric/
+parse_tableau.py  ──►  GATE ARMED           writes denied on the layout's working artifact anchors
                        (reachability: UNPROVEN — nothing has been contacted yet)
                               │
                               ▼
@@ -35,8 +36,8 @@ parse_tableau.py  ──►  GATE ARMED           writes are denied on <migratio
 | Verdict | What it means | What happens next |
 |---|---|---|
 | `DATA_OK` | Power BI returned a real row. | The gate lifts (`probe-cleared`); build for real. |
-| `CONNECTION_OK_QUERY_UNVALIDATED` | An ordinary table already returned `DATA_OK` in this invocation on the exact same connection scope. Only that connection evidence is reused; the custom SQL was **not executed**. | **Exit 1; the gate stays armed.** Keyed observation only, no custom `proved_names`, `probe-cleared`, gate lift or new authorization. Stop unless an already valid brief/audit-backed degradation authorization permits model-only work. |
-| `OPERATOR_REQUIRED` | No same-invocation, same-scope ordinary `DATA_OK` exists for custom SQL. **No automatic custom connection operation or connection claim.** Unsupported custom-only connectors follow this path too. `probe_bundle.py` retains its separate operator handoff. | **Exit 1; STOP before custom M/PBIP generation, network checks or Desktop.** The gate remains armed. Do not substitute shell proof or silently execute SQL, navigation or a generated constant. |
+| `CONNECTION_OK_QUERY_UNVALIDATED` | An ordinary table already returned `DATA_OK` in this invocation on the exact same connection scope. Only that connection evidence is reused; the custom SQL was **not executed**. | **Exit 1; without existing exact-key human build-only permission, the gate stays armed.** Keyed observation only, no custom `proved_names`, `probe-cleared`, gate lift or new authorization. Genuine current human permission remains unvalidated and subject to the commissioned model-only scope. |
+| `OPERATOR_REQUIRED` | No same-invocation, same-scope ordinary `DATA_OK` exists for custom SQL. **No automatic custom connection operation or connection claim.** Unsupported custom-only connectors follow this path too. `probe_bundle.py` retains its separate operator handoff. | **Exit 1; STOP before custom M/PBIP generation, network checks or Desktop.** Without existing exact-key human build-only permission, the gate remains armed. Do not substitute shell proof or silently execute SQL, navigation or a generated constant. |
 | `NO_CREDENTIAL` | Positive authentication evidence: Power BI has no credential, or the one it has was rejected. | STOP; ask a human to sign in. No retry conjures a credential. |
 | `ACCESS_DENIED` | The classifier matched **access-denial-shaped** text (`403` / forbidden / access denied / permission denied / insufficient privilege / not authorized) in the refresh error, ahead of any credential marker. It does **not** establish that authentication succeeded, that the failure is permission-only, or that signing in again cannot help: the markers are bare, so `403 Unauthorized: authentication failed` and `403 Forbidden: access token revoked` both land here. | STOP; the gate stays armed. **Unchanged retry is not useful** — read the redacted detail and change what the source actually named: the credential or token when it speaks of authentication or an expired/revoked token, the permission or object grant when it names a principal, a grant or an object. Do not relabel it a timeout or a transient error. |
 | `UNREACHABLE` | Address/network/spec fault. | STOP; report the address/path. Nobody needs to sign in. |
@@ -55,10 +56,23 @@ each custom-source occurrence by reference: no payload access, full-source seria
 copying or published-signal traversal. It skips `custom_sql` during engine source discovery and
 deduplicates only ordinary sources, using their existing rule. Mixed ordinary/custom sources are
 also retained without fingerprinting; their occurrence and connection metadata is unchanged.
-Empty, nested/non-string, large, comment-only and side-effect-shaped payloads stay opaque.
+String/null payloads, including empty, large, comment-only and side-effect-shaped strings, stay
+opaque to probe behavior. JSON-native boolean/list/object payloads are malformed-input robustness
+negatives, not supported parser-spec positives; they may refuse fail-closed and never earn authority.
 There is **no custom-only probe PBIP**, connector navigation, eager metadata buffering, native SQL
 or generated constant. A custom-only source stops before DNS, Desktop open or refresh. The
 ordinary-table one-row path and its existing connector/network behavior are unchanged.
+
+**Canonical identity is a separate permitted layer** (`allow_canonical_sql_identity_comparison=true`,
+owner-approved #690 clarification). The supported credential-gate writer re-resolves real persisted
+root facts inside its transaction. Its existing engine adapter may compare/serialize complete
+JSON-native sources **ephemerally in memory**, including query identity, solely to distinguish exact
+mirrors from distinct queries whose projected source keys collide. Exact mirrors remain one root
+fact; distinct records sharing a projected key refuse. This is not SQL interpretation, normalization,
+rewriting, logging, auditing, emission, transmission or execution, and identity comparison alone
+never grants proof or permission. The probe-specific loader's no-serialization rule is **not** an
+end-to-end ban on this canonical identity work. There is no zero-local-memory or serialization-cost
+claim. Arbitrary Python spy objects are not the persisted JSON interface.
 
 ✅ **Reuse is invocation-local and conservative.** Only an ordinary table's actual Power BI
 `DATA_OK` in this invocation supplies evidence. Ordinary candidates in a mixed leg are tried
@@ -79,11 +93,11 @@ No audit history, shell/ODBC success, connection-only result or earlier invocati
 
 With same-scope ordinary proof, say:
 
-> Power BI reached this same connection scope through an ordinary table in this probe. Your custom SQL was not executed and remains unvalidated; the gate is still armed.
+> Power BI reached this same connection scope through an ordinary table in this probe. Your custom SQL was not executed and remains unvalidated. Without existing exact-key human build-only permission, the gate stays armed; this result grants no permission.
 
 Without it, say:
 
-> Your custom SQL was not executed. No safe automated connection-only operation is currently available without catalog enumeration or a native-query approval prompt. No connection claim was earned; the gate remains armed.
+> Your custom SQL was not executed. No safe automated connection-only operation is currently available without catalog enumeration or a native-query approval prompt. No connection claim was earned. Without existing exact-key human build-only permission, the gate stays armed; this result grants no permission.
 
 Each approved message is one exact customer-facing log record, with no appended paragraphs.
 
@@ -93,9 +107,14 @@ envelope**, with distinct detail prefixes **`CONNECTION_OK_QUERY_UNVALIDATED:`**
 to the custom no-operation/reuse paths; other existing `OPERATOR_REQUIRED` producers are unchanged. Ordinary row attempts may
 retain their own `probe-data_ok` observation, but neither custom outcome earns `probe-cleared`,
 custom proof names, a gate lift, authorization or model-only permission.
-Connection evidence does **not** validate custom-query/object permissions, schema, rows, semantics,
-cost or refreshability. An already valid brief/audit-backed degradation authorization is handled
-**outside** this probe. It cannot be inferred from either verdict or from unattended execution.
+Both custom observations use the supported `credential_gate.record_probe_attempt` transaction,
+not raw audit appends or caller-owned arm/permission policy. Without applicable human permission,
+it establishes the required physical stop before committing the observation. Arm/record failure
+returns nonzero `ERROR` / `CANNOT_ESTABLISH`, not a claimed successful block. With genuine current
+exact-key human build-only permission, #698 preserves that permission without promoting validation.
+The probe neither creates nor revokes it. Connection evidence does **not** validate custom-query/
+object permissions, schema, rows, semantics, cost or refreshability. Brief-backed model-only scope
+is still required for degraded continuation; neither verdict nor unattended execution implies it.
 
 ⚠️ #694 is a nonblocking enhancement for future connector strategies, not a prerequisite for this
 no-operation default. Generated health SQL would need connector/dialect-specific qualification and
@@ -105,7 +124,8 @@ No `--custom-sql-mode exact` flag, SQL normalization, TOP/LIMIT/WHERE wrapper, z
 expansion, popup change or shipped-artifact `probe_bundle.py` change is included.
 
 Check the same audit root with `credential_gate.py status` and `verify`. A connection-only result
-leaves `status` blocked; `verify` still rejects unvalidated artifacts behind that gate. With no
+leaves `status` blocked unless genuine current human permission already applies; permission remains
+unvalidated, never `DATA_OK`. `verify` still rejects unvalidated artifacts behind an armed gate. With no
 artifacts, the existing verifier may exit 0 for a correctly applied barrier—**that is not a clear
 or permission to build**. Do not interpret that compliance check as connection/query validation.
 
@@ -126,10 +146,221 @@ problem before the probe has returned one.
 | | |
 |---|---|
 | **Armed** | automatically, by `parse_tableau.py`, the moment a spec with a live source is written |
-| **Enforced by** | a Windows ACL that denies write on `<migration>/fabric/` |
+| **Enforced by** | Windows ACLs on the [working artifact anchors](#physical-targets-and-nested-gates), independent of whether a tool hook loads |
 | **Explained by** | a `preToolUse` / `permissionRequest` hook that turns the raw `PermissionError` into a reason, and ends the run |
 | **Lifted by** | a successful one-row probe (`probe-cleared`), or an audit-backed human `authorize` |
 | **Audited by** | `credential_gate.py verify` — the authoritative pre-ship check |
+
+### Canonical source identity at every transition
+
+Every current source-bearing writer uses the same closed contract. For one arm, probe attempt or
+earned clear, the gate resolves the current root's live-source domain **once** as `R`, keeps that
+immutable result through the transition, and still performs #702's end-of-transaction root/spec
+change check. The caller supplies `S` explicitly. A supported `S` is a nonempty JSON/Python list of
+unique canonical identities matching `source-key:<16 lowercase hex>`, with `S ⊆ R`.
+
+The root adapter is deliberate:
+
+- a parser `migration-spec.json` is validated from its **raw** `data_sources` list before any
+  loader can deduplicate or filter it;
+- an engine bundle uses `migration_bundle.load_bundle`'s canonical projection. Exact copies in
+  `report.json` and `handover/*.json`, or identical duplicates in one engine document, are one
+  fact. Distinct records that collapse to one canonical key refuse as `source-key-invalid`;
+- unreadable, empty or unkeyable current domains never become an empty/legacy fallback.
+
+Validation happens before target shape, `--force-scope`, marker, ACL, success-audit, proof,
+permission, skip, release or epoch effects. `--force-scope` waives only the target-shape refusal:
+it cannot waive source syntax, uniqueness, current-root readability or exact membership.
+
+Historical display labels and unkeyed rows remain readable for diagnostics and genuine manual
+teardown. They are never rewritten into current keys and never grant current proof, permission,
+skip, hook shielding or an earned clear. Current positive history is:
+`block` → keyed `probe-data_ok` → keyed `probe-cleared`; a human authorization additionally needs
+its override file and a current keyed arm epoch, and remains **unvalidated permission**, not
+measured proof.
+
+One locked, file-ordered ledger fold owns those decisions. For each current canonical key, the
+latest relevant attempt controls measured eligibility: every later recognized non-success
+invalidates earlier probe proof, and a later keyed `probe-data_ok` also requires its own later keyed
+`probe-cleared`. The ledger does not group all successes separately from all failures, so an older
+green row can never outvote a newer blocker. Backdated success, forced-scope history, legacy labels,
+foreign/torn audit, file-only override and audit-only authorization remain non-authoritative.
+The fold retains the full current root `R` even when a reader requests only `S ⊆ R`. A
+source-bearing transition row containing any canonical key outside `R` invalidates the **whole**
+current ledger's epochs as `source-key-set-changed`: neither its in-root members nor an earlier
+green history can supply proof or permission. Only later valid current keyed arms can establish
+new epochs; the foreign row never supplies one. Valid current siblings outside `S` remain legitimate
+row members. Historical rows remain readable, not new root obligations; generic engine
+receipts/violation diagnostics confer no transition authority.
+
+Human permission is exact-key and epoch-scoped. `authorize` grants permission only to keys that
+already have a current canonical arm when its row is appended. A later measurement is an
+observation: it can invalidate measured proof, but it does not silently revoke human permission or
+synthesize a new arm. Only an explicit later arm resets permission for the keys it names. Permission
+can let a selected key run the real probe and then upgrade through its own DATA_OK/clear pair, but
+permission itself never becomes DATA_OK proof.
+
+The public refusal mappings are intentionally different:
+
+| Boundary | Result | Effects |
+|---|---:|---|
+| invalid/untrusted/nonmember `block S` | API/CLI **2** | no marker, ACL, success/skip row or source epoch |
+| invalid/nonmember probe-attempt `S` | `ValueError` / transaction refusal; probe nonzero | no attempt row |
+| invalid, omitted, empty or nonmember earned-clear `S` | clear API/CLI **1** | no `probe-cleared`, marker, ACL or epoch change |
+| unreadable current `R` during earned clear | **3 / CANNOT_ESTABLISH** | no transition effect |
+| failed preflight live arm **or no-live manual clear** | preflight **3**, parser **3** | never an `ENFORCED` or successful `No live sources` claim |
+
+`clear_block(..., earned=True)` never fills `S` from the last block or marker. Canonical identity is
+necessary but not sufficient: every named key still needs current-epoch keyed `DATA_OK` evidence.
+Manual `earned=False` clear remains the administrative teardown verb, including preflight's
+no-live-source branch; it earns no proof and cannot release a current keyed pending obligation.
+
+### Physical targets and nested gates
+
+One resolver in `scripts/credential_gate.py` feeds arm/re-arm, clear, status and physical inspection:
+
+| Gate root | Explicit recursive write-deny anchor(s) |
+|---|---|
+| Native unit with immediate `*.SemanticModel` / `*.Report` directories | Each of those directories, including model-only/report-only units and unequal artifact names |
+| Parser migration or package | `<root>\fabric` |
+| Engine bundle | `<bundle>\pbip` |
+| Promoted migration or explicitly force-scoped legacy layout | `<root>\fabric` |
+
+Native artifacts take precedence, allowing an **empty** former `fabric`. Parser/package identity
+(`migration-spec.json` / `package-manifest.json`) then outranks a bundle-style `report.json`: a
+package containing all three still uses `fabric`, not a newly invented `pbip`.
+Otherwise existing `pbip`, `report.json`, `engine-output-receipt.json` or `input_manifest.json`
+identify the bundle target. In particular, a receipt-only bundle creates `pbip`, and a parser root
+creates `fabric` if needed. The existing scope guard still refuses bare unforced directories;
+`--force-scope` permits the legacy `fabric` fallback only after the canonical source contract has
+passed, and never permits ambiguous populated layouts.
+Reparse/unsafe targets and conflicting populated layouts refuse rather than picking one tree.
+Bundles and native units never acquire a dummy `fabric`.
+
+✅ The focused real-Windows controls in `tests/test_credential_gate_acl_layouts.py` check existing
+file writes, new descendants, reads, the writable probe and post-clear writes. `(OI)(CI)` propagates
+the deny to ordinary inheriting existing and future children. Protected DACLs and non-gate
+explicit permissions are checked **before mutation**: the gate refuses with
+`CANNOT ESTABLISH`, a nonzero result and no `ENFORCED` claim. It does not repair permissions or
+promise to restore grants an ACL operation would remove. Exact, audit-attributable gate denies are
+the nesting/re-arm exception; a durable pending marker also attributes an interrupted arm for
+retry, before its arm row could be committed. Explicit group grants can override an inherited deny on a child:
+the supported ACL shape is deliberately limited to inherited permissions plus attributable gate
+denies, without attempting group-membership analysis. A partial apply retains the stop and completed
+denies, but marks
+`writes_blocked: false`; retry the same gate after resolving the refusal. Non-Windows retains only
+its marker and warning, never kernel enforcement.
+
+**Outer gate first.** A bundle owns `pbip`; its nested unit owns the model/report directories,
+so the two gates never remove each other's explicit ACEs. While the bundle is blocked, build the
+probe in **`<bundle>\_probe`**. Earn the outer clear before using `<unit>\_probe` or writing the
+unit's gate metadata. Clearing the outer gate preserves the inner explicit denies; clearing the
+inner first preserves the outer inherited deny and cannot announce physical clearance. Both
+physical removals are necessary. The child-first order proves only ACE preservation: the enclosing
+deny can prevent the inner durable audit append; that transaction returns nonzero.
+Only the outer-first route is the supported earned-clear workflow.
+
+### Same-root transactions and interrupted releases (#702)
+
+All participants coordinate on **one logical authority root**, not on each physical ACL anchor.
+`coordination_root()` opens the existing parent without following a reparse entry, obtains its OS
+identity/final spelling, appends the final leaf and hashes versioned bytes. Windows uses a
+case-normalized volume-GUID path, collapsing proved drive/subst/case aliases. Reparse parents,
+ambiguous final 8.3/trailing-dot spellings, case-sensitive Windows parents and unproved network/UNC
+aliases refuse `CANNOT_ESTABLISH`; they never receive independent permissive locks.
+Unavailable object IDs or unreadable Windows case metadata also refuse rather than treating two
+unknown identities, or an unqueried case flag, as proof.
+POSIX parent tokens use the opened directory's device/inode identity, not a bind-mount's spelling;
+different spellings of the same proved parent must not create different companions.
+Parent components are checked before collapsing `..`, including before joining an existing alias
+binding; normalization must not erase an unproved reparse component.
+
+The persistent companion is
+`<root-parent>\.credential-gate-tx-v1-<sha256>.lock`, **outside the authority/package root**. It is a
+regular one-byte, single-link file. Writers wait at most 10 seconds, readers 2 seconds, hooks
+0.5 seconds per authority. Windows locks its byte with `msvcrt`; POSIX uses `flock`. Process death
+releases the descriptor; the companion stays. **Never unlink it on release, to recover a busy lock,
+or because a recorded PID seems old.** There is no PID file, daemon, database or recovery ledger.
+An unsafe companion, timeout, identity change or untrusted/torn audit returns a non-success verdict.
+Public wrappers join a held transaction instead of reacquiring its descriptor.
+
+The transaction orders are:
+
+1. **Arm or record an attempt:** read one locked audit/spec snapshot and fold the ordered ledger.
+   An ordinary pending observation unions established marker obligations with the exact selected
+   keys, atomically persists the marker, denies/read-backs every Windows #724 anchor, appends/fsyncs
+   the exact arm, then appends/fsyncs the attempt. The arm row never borrows sibling keys.
+   Partition the selected keys by applicable exact human permission, including the override file
+   and each key's current arm epoch. Arm only the selected keys **without** that permission;
+   preserve authorized selected keys even when another selected key is pending. Append the exact
+   observation for the **original** selected scope, not its pending subset. If every selected key
+   is permitted, append without manufacturing an arm or physical stop. Missing-file, expired-epoch
+   or forced-scope authorization is not applicable. `probe-data_ok` remains measured-but-unearned
+   until its paired clear; permission never prevents a later failure from invalidating data proof.
+2. **Skip, clear or authorize:** a selected-scope skip is considered only after complete current-root
+   pending state is known. Any omitted pending key must already be named by the marker and, on
+   Windows, every resolved #724 anchor must be denied and readable; otherwise block returns `2` and
+   asks for a complete-scope retry without inventing omitted audit scope. Clear/authorize
+   append/fsync evidence before release, then recompute every current exact-key obligation. The
+   whole root releases only when every required key has current proof or applicable exact
+   permission. Windows removes the marker **before** ACL removal/readback, so interruption retains
+   the deny. Marker-only platforms remove the marker last. A surviving marker or ACL is still
+   BLOCKED/CANNOT_ESTABLISH even with durable evidence. Retrying may finish release, but evidence
+   alone never establishes release. A caught release failure restores the prior marker where
+   possible, marking ACL coverage uncertain; a hard crash may instead leave only the restrictive
+   Windows ACL.
+
+A completed **partial** clear can still project the selected keys' earned data proof while the
+root remains blocked for siblings. This does not permit root writes: the marker must exclude the
+selected keys and exactly equal the complete pending-root set. An interrupted marker update still
+names the selected keys, and an interrupted full release has no matching pending siblings; neither
+can credit the write-ahead evidence alone.
+Root-wide status/verification still refuses a missing committed stop. A selected key's data proof
+is not a claim of root writability; unrelated historical display labels never create new physical
+source obligations.
+Historical empty/unknown-source arm rows remain readable as old stop/diagnostic evidence. A new arm
+with an empty, display-name, duplicate, malformed or foreign scope is refused before any transition
+effect and can never release a barrier.
+An all-flat local-byte projection makes no credential claim and does not consume an unrelated
+origin audit or ACL layout. It still acquires the transaction; a busy/unsafe companion refuses.
+The package binder independently checks the shipped package's physical barrier.
+
+Marker/authorization replacement uses a same-directory file, flush/fsync and atomic replacement
+(Windows write-through rename; POSIX directory fsync). Audit append is checked, flushed and fsynced;
+I/O failure propagates instead of silently crediting a transition. Generic `_audit` accepts only
+`engine-receipt`/`violation`; probes use `record_probe_attempt`. Parser/preflight/probe/reprobe and
+package publication do not treat coordination failure as successful clearance.
+
+Package construction/binding acquires supplied original/final/provider roots in canonical sorted
+order. Staging and retired generations receive the **immutable final-root token**, held across
+retire, swap, rollback and final verification. Companions are not package members.
+
+The hook's exact companion-name protection checks structured write targets and command-position
+shell mutations; quoted explanations, test bodies and hash reads remain allowed. This is
+defense-in-depth only (#718), not an expansion of #725 or a replacement for descriptor locking.
+On non-Windows this guarantees **serialized marker authority only**, never kernel write denial.
+Same-user POSIX unlink/replacement is outside exclusion: identity checks refuse before crediting
+commit, rather than claiming that an unlinked inode serialized the replacement.
+
+Tests: `tests/test_credential_gate_transactions.py`, `tests/test_package_data_access_swap.py` and
+`tests/test_reprobe_blocked.py`; native ACL composition remains covered by the unchanged
+`test_credential_gate_acl_layouts.py`. The ordered-policy controls also cover later-attempt
+invalidation, exact permission epochs, omitted-root skip coverage and permission-to-proof upgrade.
+Tests use disposable roots; none proves live credentials, source reachability or Desktop behavior.
+
+Arm and marker-present verification require **all** expected anchors to be denied, with supported
+inheritance. Markerless/post-clear inspection treats **any** residual expected/legacy deny as
+blocked; a failed query is cannot-establish, never clear. Clear and all read paths use `create=False`
+and never create a directory. A legitimate clear may also remove a former same-root `fabric` deny,
+but only when that directory is empty, its deny exactly matches the current principal/gate mask and
+same-root gate history attributes it. Unattributable, conflicting or populated residue refuses.
+Legacy cleanup neither creates nor deletes the directory. A failed removal/readback does not print
+`CLEARED`.
+
+Working-model `.pbi` caches are **not** exemptions: probe outside the working tree, earn the clear,
+then refresh/persist the working model. Loose `.pbip` launchers, atomic-replace/delete-child policy,
+same-user ACL tampering and same-root concurrency/durability are outside this change's guarantee.
+Pristine engine baselines remain read-only by migration convention, not additional gate anchors.
 
 ### Package data-access projection
 
@@ -200,9 +431,10 @@ decision and the unchanged reference evidence ceilings.
 ### Engine-produced bundles: detection, not prevention
 
 The deterministic engine runs before the agent tier and can emit `pbip/`, `reports/`,
-`semantic_models/`, and `data/` before this gate is armed. On that path the gate cannot honestly promise "no model exists";
-it promises that no **agent-tier** artifact is added while the source is unproven, and that pre-gate
-engine output is labelled as unvalidated until a probe clears the gate.
+`semantic_models/`, and `data/` before this gate is armed. On that path the gate cannot honestly
+promise "no model exists". It now denies subsequent ordinary agent-tier writes beneath `pbip`,
+while the wider audit still labels pre-gate engine output as unvalidated until a probe clears the
+gate. Detection of pre-gate output and prevention of working-tree edits are different controls.
 
 `verify` therefore classifies provenance-backed engine artifacts separately when all of these are true:
 
@@ -241,11 +473,16 @@ python scripts/probe_live_source.py --spec <migration-dir>/migration-spec.json
 # the gate itself
 python scripts/credential_gate.py status    <migration-dir>   # is it gated?
 python scripts/credential_gate.py list      <estate-root>     # which units are gated? (--json)
-python scripts/credential_gate.py block     <migration-dir> --sources "a" "b"
-python scripts/credential_gate.py clear     <migration-dir> --reason probe-data-ok
+python scripts/credential_gate.py block     <migration-dir> --sources source-key:0123456789abcdef
+python scripts/credential_gate.py clear     <migration-dir> --reason probe-data-ok --earned --sources source-key:0123456789abcdef
 python scripts/credential_gate.py authorize <migration-dir> --who "<name>"   # humans only
 python scripts/credential_gate.py verify    <migration-dir>   # exit 1 = violation
 ```
+
+The two writer examples require keys emitted by the classifier/probe for that exact current root.
+Display names, counts, old labels and keys copied from another root are unsupported. Omitting
+`--sources` from an earned clear, or supplying bare `--sources`, exits **1** without inferring the
+last block. The ordinary `clear --reason ...` form is manual teardown and never earns proof.
 
 ### Where to run `verify` — the bundle, never the ship copy
 
@@ -290,10 +527,11 @@ the wrong scope for a question. Field report 2026-08-26, an SES engineer on a ~4
 python scripts/credential_gate.py list <estate-root>          # add --json for an agent
 ```
 
-Exit `1` = something is still blocked (**the resume signal**), `3` = a forged override exists
+Exit `1` = something is still blocked (**the resume signal**), `3` = a forged override or
+`CANNOT_ESTABLISH` transaction exists
 anywhere — deliberately outranking the workflow signal, so a bypass attempt cannot hide behind
 ordinary state — `4` = a bad `<estate-root>`, `0` = nothing gated. States are derived from
-artifacts, never prose: `BLOCKED`, `cleared-earned`, `authorized-unearned`, `FORGED-OVERRIDE`,
+artifacts, never prose: `BLOCKED`, `cleared-earned`, `authorized-unearned`, `FORGED-OVERRIDE`, `CANNOT_ESTABLISH`,
 `clean`.
 
 ⚠️ **Do not alarm on exit `2` alone.** `3` keeps a mistyped root off the security code, but
@@ -303,10 +541,10 @@ parseable JSON on stdout is a usage error. (Blind review 2026-08-27 measured a n
 a non-directory, a missing argument and an unknown flag *all* returning `2` — the most alarming
 state in the vocabulary, raised by a typo.)
 
-⚠️ **`list` reads the marker/override/audit FILES, not the ACL.** A unit whose marker was removed
-while the kernel write-deny survives reports as `clean` here. That direction is safe — it
-under-reports "blocked" and cannot help produce an unvalidated artifact — but it is why `list` is a
-**resume signal, never a ship gate**. `verify` stays the authoritative pre-ship check.
+⚠️ **`list` discovers units from marker/override/audit files**, then takes each root's transaction.
+A markerless discovered unit also checks physical ACL state: a surviving deny is BLOCKED, and
+busy/unsafe/inconsistent evidence is `CANNOT_ESTABLISH`, never `clean`. Discovery is not an estate
+completeness proof; `list` remains a **resume signal, never a ship gate**.
 
 **The two exits are NOT equivalent, and the lossy one is the one people reach for:**
 
@@ -338,32 +576,37 @@ distinct violations:
 
 ### `clear` earns nothing; only the probe does
 
-`--source-index` can earn a **partial** clear, but only in the marker's own keyspace (#347). The
+The gate API can record a **partial** source clear, but only in the current root's canonical
+keyspace (#347); whole-root release still retains every pending sibling. The probe's current
+`--source-index` route conservatively refuses to lift a marker naming additional legs. The
 classifier arms the gate with stable connection-leg fingerprints such as
 `source-key:1d15832d4d2a857a` (the human display name is separate because Tableau names can
 duplicate, reorder or contain punctuation); the probe now iterates `connection.connections[]` and
-passes exactly the keys it reached to `clear --sources`. If only one keyed leg is proven, the
-restored #357 cardinality guard refuses the clear unless the marker names exactly that one leg.
+passes exactly the keys it reached to `clear --earned --sources`.
 
-The fail-open guard is now simpler and stricter: an empty proof list never clears anything. Do not
+The fail-open guard is now simpler and stricter: `None`, an empty proof list, duplicates,
+noncanonical labels, foreign keys and same-count substitutions never clear anything. Do not
 replace that with set arithmetic over datasource indices. Blind review found the first attempt —
 `set(live) >= set(all_live)` — was **fail-open**: a superset test is vacuously true against an empty
 set, so a bundle with **0** live sources cleared the gate on ZERO proof (`SKIPPED nothing to probe`,
 then marker deleted, ACL removed, an EARNED `probe-cleared` written). Counts, display names and
-datasource names are the wrong keyspace; only marker source keys may clear marker source keys.
+datasource names are the wrong keyspace; only explicit current-root canonical source keys can earn
+their matching clear.
 
 That refusal is the conservative half of the #346 fix. Until 2026-08-27 the probe passed a
 human-readable count (`"2 live source(s)"`) as `--sources`; `clear_block` diffs that against the
 marker's real source names, nothing matched, and the partial-clear branch left **every** named-source
 gate armed while still writing `probe-cleared` and exiting 0. The earned route was therefore broken
 on every real estate, which is why `authorize` looked like the only thing that worked.
-`clear` exists for teardown and must keep existing, so it cannot self-defend by refusing. It lifts
-the ACL and records `manual-clear`; the probe's own `--earned` clear records `probe-cleared`. Only
-the latter is evidence. `verify` treats artifacts built after a `manual-clear` as **UNVALIDATED**.
+`clear` remains for legacy teardown and records `manual-clear`, which earns nothing. It
+refuses to release a root with any current keyed pending obligation. The probe's own `--earned`
+clear requires explicit `--sources`, verifies current membership and current keyed `DATA_OK`, then
+records `probe-cleared`; `verify` still treats artifacts built after a legacy `manual-clear` as
+**UNVALIDATED**.
 
 ⚠️ Note the asymmetry: `authorize` refuses to run from inside a Copilot session (process-lineage
-check), but `clear` has **no such check** — so the tool-call hook is the only thing preventing an
-agent from lifting its own armed gate with the documented teardown verb. That is why the hook
+check), but legacy `clear` has **no such lineage check** — the hook still prevents an agent from
+using that teardown escape on an armed legacy gate. That is why the hook
 matches `clear`, and why it does so *target-aware* (only when the specific directory named by the
 command is currently armed).
 
@@ -426,18 +669,29 @@ look reasonable.**
 
 The skip is deliberately narrow, and fails closed on anything it cannot parse:
 
-- the gate must be currently **earned** (`probe-cleared` / audit-backed `authorize`) — a bare
-  `manual-clear` still re-arms, so it cannot launder itself into permanent immunity;
-- the source list must be **identical** (order-insensitive) — a newly added live source has no
-  reachability evidence at all, so it still arms the gate.
+- every supplied key must be an explicit canonical member of the once-resolved current root;
+- the latest relevant attempt for each selected key wins: a newer failure/refusal or unmatched
+  `probe-data_ok` invalidates an older earned clear until a new keyed clear follows;
+- probe proof and human permission remain separate: current keyed `probe-cleared` can skip the
+  matching measured scope, while an authentic override can permit only its current keyed armed
+  epoch. Authorized observations do not synthesize an arm, and permission never becomes probe proof;
+- if selected keys are already satisfied but another current-root key is pending, the skip is safe
+  only when that omitted key is already marker-named and every Windows anchor still has the gate
+  deny. An uncovered sibling requires a complete-scope retry;
+- root release is complete-root only: selected-key proof or permission never asserts that sibling
+  obligations, the marker or the ACL have been released;
+- a bare `manual-clear`, legacy/display label, unkeyed row, forced history, file-only override or
+  audit-only/backdated authorization never skips;
+- a newly added or replaced live source has no evidence for its new identity and still arms.
 
 ### Cleared migrations also shield themselves from unrelated ancestor markers
 
 The hook walks upward from a write target, so a marker placed too high can otherwise govern every
-migration beneath it. A migration that already earned a `probe-cleared` for the **same source list**
-is treated as its own boundary: the hook reads the nearest audit log below an ancestor marker and
-reuses the same transition/source comparison as re-arming. A bare file is never a shield, and neither
-is `manual-clear`; only an audit-backed `probe-cleared` after the latest block counts.
+migration beneath it. A migration with current keyed `probe-cleared` proof covering the relevant
+current source set is treated as its own boundary: the hook reads the nearest audit log below an
+ancestor marker and reuses the same canonical transition/source comparison as re-arming. A bare file,
+legacy label, unkeyed/forced row or `manual-clear` is never a shield; only the current keyed
+measurement/clear pair counts.
 
 This deliberately stays audit-backed rather than adding a new "cleared" file. A file-only token would
 repeat the override failure mode: agents already forged control files, including via string fragments
@@ -521,8 +775,9 @@ The probe has to *write* a throwaway model in order to measure anything — but 
 is armed. A v1 that put the sandbox inside `fabric/` deadlocked instantly: the measurement that lifts
 the gate was itself blocked by the gate.
 
-The sandbox is therefore `<migration>/_probe/`, a **sibling** of `fabric/`, never in `output_dirs()`.
-It needs no grant and no special ordering.
+The sandbox is therefore `<migration>/_probe/`, beside this gate's denied anchors, never inside
+one. It needs no grant exception. For nested gates, use the outer root's sandbox and clear the
+outer gate first, as described under [physical targets](#physical-targets-and-nested-gates).
 
 ---
 
@@ -601,7 +856,7 @@ Finding (1) is also why the idempotency rule above exists.
 
 > **Judge a run by ground truth, not by its own summary.** The haiku run that bypassed the gate
 > reported "Sign-off ready: YES" and never mentioned it. `verify` caught it; the summary did not.
-> See *Monitoring delegated work* in [`AGENTS.md`](../AGENTS.md).
+> See [agent operations §1](agent-operations.md#1-a-subagents-summary-is-a-claim-not-evidence).
 
 ### Both paths, re-verified against the shipped code (2026-08-03)
 

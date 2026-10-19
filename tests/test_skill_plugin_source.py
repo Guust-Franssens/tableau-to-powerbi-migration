@@ -6,6 +6,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = REPO_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -13,6 +15,7 @@ sys.path.insert(0, str(SCRIPTS))
 import build_plugin  # noqa: E402
 from build_plugin import SHIPPED_SKILLS  # noqa: E402
 from skill_plugin_source import PLUGIN_ROOT_ENV, discover_skill_plugin  # noqa: E402
+import skill_plugin_source as source  # noqa: E402
 
 
 def _make_plugin(root: Path, marketplace: str, plugin: str, skills: tuple[str, ...] = SHIPPED_SKILLS) -> Path:
@@ -23,6 +26,51 @@ def _make_plugin(root: Path, marketplace: str, plugin: str, skills: tuple[str, .
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(f"# {skill}\n", encoding="utf-8")
     return plugin_root
+
+
+@pytest.mark.parametrize("configured", [None, "", "relocated", "missing"])
+def test_copilot_home_discovery(tmp_path, monkeypatch, configured):
+    user = tmp_path / "user"
+    default = _make_plugin(user / ".copilot" / "installed-plugins", "collection", "plugin")
+    relocated = tmp_path / "relocated"
+    relocated_plugin = _make_plugin(relocated / "installed-plugins", "collection", "plugin")
+    monkeypatch.setattr(Path, "home", lambda: user)
+    monkeypatch.delenv(PLUGIN_ROOT_ENV, raising=False)
+    if configured is None:
+        monkeypatch.delenv("COPILOT_HOME", raising=False)
+    else:
+        monkeypatch.setenv("COPILOT_HOME", str(tmp_path / configured) if configured else "")
+    result = discover_skill_plugin()
+    if configured == "missing":
+        assert result.status == "missing"
+        assert result.plugin_root is None
+        assert str(tmp_path / "missing" / "installed-plugins") in result.detail
+    else:
+        assert result.ok
+        assert result.plugin_root == (relocated_plugin if configured else default)
+
+
+@pytest.mark.parametrize("override", ["installed", "environment", "explicit"])
+def test_overrides_win_without_resolving_home(tmp_path, monkeypatch, override):
+    installed = tmp_path / "override"
+    plugin = _make_plugin(installed, "collection", "plugin")
+    monkeypatch.setenv("COPILOT_HOME", str(tmp_path / "missing"))
+    monkeypatch.delenv(PLUGIN_ROOT_ENV, raising=False)
+
+    def forbidden_home():
+        pytest.fail("Copilot home must not be derived when an override wins")
+
+    monkeypatch.setattr(source, "copilot_home", forbidden_home)
+    if override == "installed":
+        result = discover_skill_plugin(installed_plugins_root=installed)
+    elif override == "environment":
+        monkeypatch.setenv(PLUGIN_ROOT_ENV, str(plugin))
+        result = discover_skill_plugin()
+    else:
+        monkeypatch.setenv(PLUGIN_ROOT_ENV, str(tmp_path / "wrong"))
+        result = discover_skill_plugin(plugin_root_override=plugin)
+    assert result.ok
+    assert result.plugin_root == plugin
 
 
 def test_single_install_found_by_bundle_content(tmp_path: Path) -> None:

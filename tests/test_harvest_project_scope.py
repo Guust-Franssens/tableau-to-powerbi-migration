@@ -31,6 +31,19 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import harvest_estate_assets as harvest  # noqa: E402  # pylint: disable=wrong-import-position
 
+
+def test_harvest_cli_output_refusal_keeps_its_override_hint(monkeypatch, tmp_path, caplog):
+    """Standalone harvest still offers its existing explicit override after a refusal."""
+    out = tmp_path / "unignored-output"
+    monkeypatch.setattr(sys, "argv", ["harvest_estate_assets.py", "--out", str(out)])
+    monkeypatch.setattr(harvest, "unignored_output_paths", lambda path, _artifacts: [path / "parse-sweep.json"])
+    monkeypatch.setattr(harvest, "engine_scripts_dir", lambda: pytest.fail("refusal must precede engine or sign-in"))
+
+    assert harvest.main() == harvest.EXIT_REFUSED_UNIGNORED_OUT
+    assert "Nothing was downloaded. Pass --allow-unignored-out to override this deliberately." in caplog.text
+    assert not out.exists()
+
+
 # The engine's own `_TRANSFER_UUID_PREFIX` (`migrate_estate.py`), copied so this suite stays offline.
 # Verified against engine 2.126.0: `strip_transfer_uuid('<uuid>_Meridian_Revenue_by_Region')` ->
 # `'Meridian_Revenue_by_Region'`, while `'Meridian_Revenue_by_Region--<uuid>'` comes back intact.
@@ -75,6 +88,25 @@ def test_project_id_selects_one_same_named_project_and_its_dependency(database: 
     assert selected == [("project-finance", "Finance")]
     assert (workbooks, in_project, pulled_in) == (1, 0, 1)
     assert todo == [("datasource", "ds-finance", "Ledger"), ("workbook", "wb-finance", "Monthly Report")]
+
+
+def test_workbook_id_selects_exact_workbook_and_cross_project_dependency(database: sqlite3.Connection) -> None:
+    todo, selected, workbooks, in_project, pulled_in = harvest.scoped_todo(
+        database, [], [], workbooks_only=False, workbook_ids=["wb-finance"]
+    )
+    assert selected == []
+    assert (workbooks, in_project, pulled_in) == (1, 0, 1)
+    assert todo == [("datasource", "ds-finance", "Ledger"), ("workbook", "wb-finance", "Monthly Report")]
+
+
+def test_workbook_id_refuses_missing_ids_instead_of_selecting_a_partial_set(database: sqlite3.Connection) -> None:
+    with pytest.raises(ValueError, match="no workbooks matched --workbook-id: wb-missing"):
+        harvest.scoped_todo(database, [], [], workbooks_only=False, workbook_ids=["wb-finance", "wb-missing"])
+
+
+def test_workbook_id_is_exclusive_with_project_scope(database: sqlite3.Connection) -> None:
+    with pytest.raises(ValueError, match="cannot be combined with project selectors"):
+        harvest.scoped_todo(database, ["Finance"], [], workbooks_only=False, workbook_ids=["wb-finance"])
 
 
 def test_project_name_selects_all_matching_projects_without_name_keyed_dependencies(
@@ -250,6 +282,26 @@ def test_the_sweep_parses_a_twb_that_landed_for_a_twbx_request(
     assert [row.get("download_error") for row in rows] == [None]
     assert rows[0]["file"] == str(landed)
     assert rows[0]["ours"]["ok"] and rows[0]["theirs"]["ok"]
+
+
+def test_the_sweep_accepts_exact_workbook_id_and_keeps_its_dependency(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, offline_sweep: list[Path]
+) -> None:
+    out = tmp_path / "_sweep"
+    (out / "assets").mkdir(parents=True)
+    workbook = out / "assets" / "wb-finance_Monthly_Report.twb"
+    workbook.write_text("<workbook/>", encoding="utf-8")
+    datasource = out / "assets" / "ds-finance_Ledger.tds"
+    datasource.write_text("<datasource/>", encoding="utf-8")
+    db = estate_db(tmp_path / "estate.db")
+    with sqlite3.connect(db) as con:
+        con.execute("INSERT INTO datasource VALUES ('ds-finance', 'Ledger', 'project-certified')")
+        con.execute("INSERT INTO dependency VALUES ('wb-finance', 'ds-finance', 'Ledger')")
+
+    rows = run_sweep(monkeypatch, out, db, "--skip-download", "--workbook-id", "wb-finance")
+
+    assert set(offline_sweep) == {workbook, datasource}
+    assert {row["luid"] for row in rows} == {"wb-finance", "ds-finance"}
 
 
 def test_the_sweep_does_not_re_download_an_assets_dir_from_before_the_luid_prefix(

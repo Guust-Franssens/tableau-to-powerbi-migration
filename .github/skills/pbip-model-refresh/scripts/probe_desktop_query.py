@@ -48,8 +48,8 @@ from typing import Callable, Iterator, NoReturn, TypeVar
 
 from _verdict import derive_data_verdict
 
-from _credential_modal import (
-    CredentialDetection,
+from _desktop_observer import (
+    Observation,
     CredentialMissingError,
     CredentialModal,
     CredentialUnknownError,
@@ -57,10 +57,12 @@ from _credential_modal import (
     DesktopUnreadyError,
     DialogFinding,
     DialogFoundError,
-    describe_dialog_finding,
-    describe_modal,
-    dialog_guidance,
-    inspect_credential_modal,
+    observe,
+    legacy_token,
+    emit_observation,
+    watch,
+    print_operation_refusal,
+    POLL_INTERVAL_SECONDS,
 )
 
 # ADOMD.NET assembly shipped in the nuget cache (netcore build).
@@ -82,7 +84,7 @@ def adomd_dll_globs() -> list[str]:
 # short retry - but a bounded one, because a miss must end in a loud failure, never a fallback.
 PORT_DISCOVERY_ATTEMPTS = 6
 PORT_DISCOVERY_INTERVAL_SECONDS = 2
-PREFLIGHT_CREDENTIAL_POLL_SECONDS = 5.0
+PREFLIGHT_CREDENTIAL_POLL_SECONDS = POLL_INTERVAL_SECONDS
 OBSERVATION_TIMEOUT_SECONDS = 120
 _T = TypeVar("_T")
 
@@ -284,54 +286,97 @@ def catalogue_id(connection, *, observation_mode: bool = False) -> str:
                 reader.Close()
 
 
-def _observation_credential_check(pid: int, *, in_flight: bool) -> None:
-    state = _credential_state(pid, in_flight=in_flight)
-    for found, code in (
-        (state.modal, "CREDENTIAL_MISSING"),
-        (state.dialog, state.dialog.verdict if state.dialog else ""),
-        (state.process_gone, "DESKTOP_GONE"),
-        (state.desktop_unready, "DESKTOP_UNREADY"),
-        (state.unknown_reason, "CREDENTIAL_UNKNOWN"),
-    ):
-        if found is not None:
-            raise ObservationUnavailable(code)
+def _observation_credential_check(
+    pid: int,
+    *,
+    in_flight: bool,
+    expected_process_start: str | None = None,
+    timeout_s: float = 8.0,
+    supervisor=None,
+) -> None:
+    state = _credential_state(
+        pid,
+        in_flight=in_flight,
+        expected_process_start=expected_process_start,
+        timeout_s=timeout_s,
+        supervisor=supervisor,
+    )
+    code = legacy_token(state)
+    if code is not None and not (in_flight and code == "REFRESH_IN_PROGRESS"):
+        raise ObservationUnavailable(code)
 
 
 @_observation_errors()
-def _observation_call(pid: int, operation: Callable[[], _T], timeout_seconds: float) -> _T:
+def _observation_call(
+    pid: int,
+    operation: Callable[[], _T],
+    timeout_seconds: float,
+    *,
+    expected_process_start: str | None = None,
+    _binding_deadline: float | None = None,
+) -> _T:
     """Bound reads, including credential inspection. Timed-out native work is not cancellable.
 
     Workers are daemon-only; results stay invocation-private until both workers terminate.
     This helper is for reads, NOT a lifecycle wrapper around refresh or persistence.
     """
+    # Both private workers, their result queue and helper settlement belong to this invocation.
+    # pylint: disable=too-many-locals,too-many-statements
     if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= OBSERVATION_TIMEOUT_SECONDS:  # pylint: disable=unidiomatic-typecheck
         raise ObservationUnavailable("TIMEOUT")
     outcome = queue.Queue()
     stopped = threading.Event()
+    now = time.monotonic()
+    if _binding_deadline is not None and now >= _binding_deadline:
+        raise ObservationUnavailable("TIMEOUT")
+    # Binding already paid for identity discovery; its absolute deadline must not restart here.
+    deadline = now + timeout_seconds if _binding_deadline is None else _binding_deadline
+    supervisor = watch(
+        pid,
+        deadline=deadline,
+        operation_id=str(uuid.uuid4()),
+        expected_process_start=expected_process_start,
+    )
+
+    def check(*, in_flight: bool) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ObservationUnavailable("TIMEOUT")
+        _observation_credential_check(
+            pid,
+            in_flight=in_flight,
+            expected_process_start=expected_process_start,
+            timeout_s=min(8.0, remaining),
+            supervisor=supervisor,
+        )
 
     def poll() -> None:
         try:
-            while not stopped.wait(0.1):
-                _observation_credential_check(pid, in_flight=True)
+            while not stopped.is_set():
+                check(in_flight=True)
+                if stopped.wait(PREFLIGHT_CREDENTIAL_POLL_SECONDS):
+                    break
         except BaseException as error:  # pylint: disable=broad-exception-caught
+            stopped.set()
             outcome.put((False, error))
 
     monitor = threading.Thread(target=poll, name="observation-inspection", daemon=True)
 
     def run() -> None:
         try:
-            _observation_credential_check(pid, in_flight=False)
+            check(in_flight=False)
             if stopped.is_set():
                 return
             monitor.start()
+            if stopped.is_set():
+                return
             result = operation()
             if not stopped.is_set():
-                _observation_credential_check(pid, in_flight=True)
+                check(in_flight=True)
                 outcome.put((True, result))
         except BaseException as error:  # pylint: disable=broad-exception-caught
             outcome.put((False, error))
 
-    deadline = time.monotonic() + timeout_seconds
     worker = threading.Thread(target=run, name="observation-read", daemon=True)
     worker.start()
     try:
@@ -341,7 +386,7 @@ def _observation_call(pid: int, operation: Callable[[], _T], timeout_seconds: fl
         stopped.set()
         worker.join(max(0, deadline - time.monotonic()))
         monitor.join(max(0, deadline - time.monotonic()))
-        if worker.is_alive() or monitor.is_alive() or time.monotonic() > deadline:
+        if worker.is_alive() or monitor.is_alive() or time.monotonic() >= deadline:
             raise ObservationUnavailable("TIMEOUT")
         # An in-flight inspection can refuse after the operation queued its private result.
         try:
@@ -354,15 +399,17 @@ def _observation_call(pid: int, operation: Callable[[], _T], timeout_seconds: fl
         raise ObservationUnavailable("TIMEOUT") from None
     finally:
         stopped.set()
+        supervisor.close()
     return value
 
 
 @_observation_errors()
 def bind_desktop(pid: int, supplied_port: int | None = None) -> BoundDesktop:
     """Bracket catalogue discovery with PID/start observations, within one bounded read."""
+    deadline = time.monotonic() + OBSERVATION_TIMEOUT_SECONDS
+    identity = desktop_identity(pid, supplied_port)
 
     def discover() -> BoundDesktop:
-        identity = desktop_identity(pid, supplied_port)
         connection = _load_adomd()(f"Data Source=localhost:{identity.port};Connect Timeout=30")
         try:
             connection.Open()
@@ -373,7 +420,12 @@ def bind_desktop(pid: int, supplied_port: int | None = None) -> BoundDesktop:
         finally:
             _close_observation_connection(connection)
 
-    return _observation_call(pid, discover, OBSERVATION_TIMEOUT_SECONDS)
+    remaining = min(OBSERVATION_TIMEOUT_SECONDS, deadline - time.monotonic())
+    if remaining <= 0:
+        raise ObservationUnavailable("TIMEOUT")
+    return _observation_call(
+        pid, discover, remaining, expected_process_start=identity.process_start, _binding_deadline=deadline
+    )
 
 
 def recheck_bound(bound: BoundDesktop, connection, *, observation_mode: bool = False) -> None:
@@ -409,7 +461,12 @@ def bound_call(
         finally:
             _close_observation_connection(connection)
 
-    return _observation_call(bound.identity.pid, read, timeout_seconds)
+    return _observation_call(
+        bound.identity.pid,
+        read,
+        timeout_seconds,
+        expected_process_start=bound.identity.process_start,
+    )
 
 
 @_observation_errors()
@@ -754,59 +811,49 @@ def probe(port: int, tables: list[str] | None, emit=print) -> int:
         conn.Close()
 
 
-def _credential_state(pid: int, *, in_flight: bool = False) -> CredentialDetection:
-    """Return the credential-modal inspection state for ``pid``.
-
-    ``in_flight`` is set for the polls that run WHILE the DAX probe is executing. There a
-    positively-read progress dialog is ignored: Desktop working is not a reason to abandon a read-only
-    one-row query, and aborting on it is the false stop issue #376 removed. Everything else - including
-    a dialog we could not read - still surfaces.
-    """
-    if os.name != "nt":
-        return CredentialDetection()
-    return inspect_credential_modal(pid, operation_in_flight=in_flight)
+def _credential_state(
+    pid: int,
+    *,
+    in_flight: bool = False,
+    expected_process_start: str | None = None,
+    timeout_s: float = 8.0,
+    supervisor=None,
+) -> Observation:
+    """Return one factual snapshot; in-flight progress policy belongs to the caller."""
+    # Phase remains a caller adapter input; it never changes the factual observer snapshot.
+    # pylint: disable=unused-argument
+    state = (
+        observe(pid, expected_process_start=expected_process_start, timeout_s=timeout_s)
+        if supervisor is None
+        else supervisor.observe(timeout_s=timeout_s)
+    )
+    emit_observation(state)
+    return state
 
 
 def _emit_credential_missing(pid: int, modal: CredentialModal) -> None:
-    """Print the distinct credential verdict."""
-    print(f"PREFLIGHT: CREDENTIAL_MISSING pid={pid}; {describe_modal(modal)}")
+    """Emit a closed positive-prompt operation refusal, never private provider/source text."""
+    # pylint: disable=unused-argument
+    print_operation_refusal("PREFLIGHT", pid, "CREDENTIAL_MISSING")
 
 
 def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
-    """Print the verdict for a dialog that could NOT be shown to be harmless (issue #376).
-
-    Replaces ``_emit_blocked_by_dialog``, whose ``BLOCKED_BY_DIALOG`` token sat at exit 1 - the
-    hard-stop band - and was reached from a SIZE-ONLY test, so a Power BI Refresh progress dialog
-    aborted THE GATE OF RECORD with a verdict the parent classifier reads as ``NO_CREDENTIAL``. The
-    token now names what was observed and every one of them is exit 3: "could not probe", never the
-    credential-specific hard stop. Exit 3 is not a clearance either - ``DIALOG_NEEDS_HUMAN`` and
-    ``REFRESH_IN_PROGRESS`` name a known blocker and a running refresh, while the unreadable and
-    unrecognized tokens settle nothing in either direction. Both lines are marker-free (issue #153).
-    """
-    print(f"PREFLIGHT: {finding.verdict} pid={pid}; {describe_dialog_finding(finding)}")
-    print(f"  {dialog_guidance(finding)}")
-
-
-def _emit_credential_unknown(pid: int, reason: str) -> None:
-    """Print an indeterminate credential-check verdict."""
-    print(f"PREFLIGHT: UNKNOWN pid={pid}; credential dialog check indeterminate: {reason}")
+    """Keep the CLI seam; formatting and same-snapshot diagnostics have one authority."""
+    print_operation_refusal("PREFLIGHT", pid, finding.verdict, finding=finding)
 
 
 def _emit_desktop_gone(pid: int, reason: str) -> None:
-    """Print the terminal local-error verdict for a dead Desktop."""
-    print(f"PREFLIGHT: DESKTOP_GONE pid={pid}; {reason}")
+    """Local process failure is not a source conclusion; never reflect supplied prose."""
+    # pylint: disable=unused-argument
+    print_operation_refusal("PREFLIGHT", pid, "DESKTOP_GONE")
 
 
 def _emit_desktop_unready(pid: int, reason: str) -> None:
-    """Print the local-error verdict for an ALIVE Desktop that owns no window (issue #158).
-
-    The live twin of ``DESKTOP_GONE``, and like it an ERROR-family exit 2 rather than
-    ``UNKNOWN``'s exit 3: a window-less process cannot be settled by a human signing in.
-    """
-    print(f"PREFLIGHT: DESKTOP_UNREADY pid={pid}; {reason}")
+    """Use the shared local window/session diagnostic, retaining the caller's exit band."""
+    print_operation_refusal("PREFLIGHT", pid, "DESKTOP_UNREADY", reason=reason)
 
 
-def _credential_verdict(pid: int, state: CredentialDetection) -> int | None:
+def _credential_verdict(pid: int, state: Observation, *, in_flight: bool = False) -> int | None:
     """Emit and return a terminal inspection verdict, or None when probing may continue.
 
     Exit-code bands, and why a dialog finding is no longer in the first one (issue #376):
@@ -817,30 +864,41 @@ def _credential_verdict(pid: int, state: CredentialDetection) -> int | None:
          land here, and an unreadable or unrecognized window settles the credential question in
          neither direction.
     """
-    if state.modal is not None:
-        _emit_credential_missing(pid, state.modal)
+    token = legacy_token(state)
+    if token is None or (in_flight and token == "REFRESH_IN_PROGRESS"):
+        return None
+    if token == "CREDENTIAL_MISSING":
+        modal = state.modal or CredentialModal("", state.dialog.window)
+        _emit_credential_missing(pid, modal)
         return 1
+    if token == "DESKTOP_GONE":
+        _emit_desktop_gone(pid, state.process_gone or "process_gone")
+        return 2
+    if token == "DESKTOP_UNREADY":
+        _emit_desktop_unready(pid, state.desktop_unready or "session_error")
+        return 2
     if state.dialog is not None:
         _emit_dialog_finding(pid, state.dialog)
-        return 3
-    if state.process_gone is not None:
-        _emit_desktop_gone(pid, state.process_gone)
-        return 2
-    if state.desktop_unready is not None:
-        _emit_desktop_unready(pid, state.desktop_unready)
-        return 2
-    if state.unknown_reason:
-        _emit_credential_unknown(pid, state.unknown_reason)
-        return 3
-    return None
+    else:
+        print(f"PREFLIGHT: {token} pid={pid}; {state.reason}")
+    return 3
 
 
-def _probe_with_credential_poll(pid: int | None, port: int, tables: list[str] | None) -> int:
+def _probe_with_credential_poll(
+    pid: int | None,
+    port: int,
+    tables: list[str] | None,
+    *,
+    expected_process_start: str | None = None,
+) -> int:
     """Run ``probe`` while polling for a late credential dialog owned by ``pid``."""
+    # pylint: disable=too-many-return-statements
     if pid is None:
         return probe(port, tables)
 
-    early_verdict = _credential_verdict(pid, _credential_state(pid))
+    deadline = time.monotonic() + OBSERVATION_TIMEOUT_SECONDS
+    initial = _credential_state(pid, expected_process_start=expected_process_start)
+    early_verdict = _credential_verdict(pid, initial)
     if early_verdict is not None:
         return early_verdict
 
@@ -859,14 +917,34 @@ def _probe_with_credential_poll(pid: int | None, port: int, tables: list[str] | 
     worker = threading.Thread(target=run_probe, name="desktop-query-probe", daemon=True)
     worker.start()
     while worker.is_alive():
-        worker.join(PREFLIGHT_CREDENTIAL_POLL_SECONDS)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print("PREFLIGHT: UNKNOWN; bounded query deadline elapsed")
+            return 3
+        worker.join(min(PREFLIGHT_CREDENTIAL_POLL_SECONDS, remaining))
         # ACT on a finding here rather than latching it the way `join_with_credential_poll` does: this
         # loop has NO deadline of its own (it runs until the probe thread returns), so a latched dialog
         # behind a wedged query would wait for ever. The in-flight detector already ignores a
         # positively-read progress dialog, so what reaches this point is something we could not read.
-        verdict = _credential_verdict(pid, _credential_state(pid, in_flight=True))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print("PREFLIGHT: UNKNOWN; bounded query deadline elapsed")
+            return 3
+        verdict = _credential_verdict(
+            pid,
+            _credential_state(
+                pid,
+                in_flight=True,
+                expected_process_start=initial.process_started_at,
+                timeout_s=min(8.0, remaining),
+            ),
+            in_flight=True,
+        )
         if verdict is not None:
             return verdict
+        if time.monotonic() >= deadline:
+            print("PREFLIGHT: UNKNOWN; observation completed after query deadline")
+            return 3
 
     outcome = result.get("outcome")
     if isinstance(outcome, BaseException):
@@ -906,13 +984,20 @@ def main(argv: list[str] | None = None) -> int:
     # Preference order: --canaries (the name that means the same thing in both scripts), then
     # --tables (plural), then --table as a one-name alias for old callers.
     tables = list(args.canaries or args.tables or ([args.table] if args.table else [])) or None
+    initial = None
     if args.pid is not None:
-        early_verdict = _credential_verdict(args.pid, _credential_state(args.pid))
+        initial = _credential_state(args.pid)
+        early_verdict = _credential_verdict(args.pid, initial)
         if early_verdict is not None:
             return early_verdict
     port = args.port or discover_port(args.pid)
     try:
-        return _probe_with_credential_poll(args.pid, port, tables)
+        return _probe_with_credential_poll(
+            args.pid,
+            port,
+            tables,
+            expected_process_start=initial.process_started_at if initial else None,
+        )
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         print(f"PREFLIGHT: ERROR {type(exc).__name__}: {exc}")
         return 2

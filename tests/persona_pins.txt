@@ -41,7 +41,7 @@ a20683f57acd1d70225876a96b1be82b2f8b56a541c594a9ea2f3c55d612464d  - **AUTOPILOT 
 fcf8a75033189636cf2cf0d2649e9eb5b1d98aa08655d14d01a4523a6a580e58  - On hitting the cap, **STOP and ask a specific, actionable 
 f548e1f4c08b94769618e89c284056ae280b36f9397daf1681c3ff9be855b15c  - **Report elapsed time** whenever an operation exceeds ~60 
 7113ea344407d2886d52f848e0e877dd7d14342db7ef6260f7d153419632ebe8  - **End every message with a clear next step or an explicit 
-db36d90cff4e07f5fefa80e8167ada5c1035dcffbf15ae72fcf17f970a772043  - **Durable learnings go in committed files** (agent `Gotcha
+e62210173d9db69bbea29b58fadb6a20d936ebb0ee3ad1188a8af9cb13f13e84  - **Customer migration:** never silently patch toolkit/engin
 0d0af1db0161518ddc296dbc64e7d32eca53791608e4d29779e3692de3daef21  - **Power BI Desktop cleanup is PID-scoped.** Concurrent ins
 f1d6acb7da4d733442fd76495ad69852e529e1ecd2a428ab1fa393e0374484d8  <!-- END:shared-conventions -->
 
@@ -77,7 +77,7 @@ f14c3cd0f5a9dc4e03df442b9361b5ceceea5be9f9092c0f64f25d766cd18edd  | # | stage | 
 90ca6627a0a6998e796eba9088bc3b51baaee14b344dce46689d17ef8bc6c2eb  | 2 | survey | `python scripts/run_engine_survey.py --server
 62d233210632c77f531ba603bdfd08d6073838f00c17848408b75476f7a6c792  | 3 | assess | `python scripts/assess_estate.py --out <run>/
 e888a3b8cf53a482e39f30173778a2e76d789b3d08e0cf1f826b7d537d778bb3  | 4 | harvest | `python scripts/harvest_estate_assets.py --o
-f583f9bfa584c624448841bf27f1866054ff653887487346852cd1819f79faf6  | 5 | engine | `python scripts/run_estate.py --input <run>/a
+c7177e555bbb09670a6d0053c9e0b6c475ccb2bd21243c36fbe3e95a0b70211e  | 5 | engine | `python scripts/run_estate.py --input <run>/a
 3af170b7f85096d6cc9f0a08c0a482edca2f993b9399793f1e4057df6f05c7f8  | 6 | oracle | `python scripts/capture_tableau_oracle.py --o
 977dfe8972ec0400bcbc3fdca64160fdd9294a649cb38cfc75a8e67339dfe92f  | 7 | **PRE-check** | `python scripts/check_reference_readin
 6f692a8af643b0e9bf4987fc5442f080d298fb20f9814dee8501b646ed9e85fa  | 8 | **POST-check** | `python scripts/check_unit.py <run>/b
@@ -85,6 +85,8 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 859d0070eaac435765a6f45ed27fb1e8e764267b0c512c2b452d86aeec526c6d  **Only after an actual unsigned/ExecutionPolicy startup refu
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 05fe13f2d5905006da515cf47b73944b0b9093366cd66c824af9d19075d7a6b4  ~~ **Credentials come from `.env` or exported environment va
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+b78d104ca175ae7ae2b5befb59bfdd33985ed03a67eae78b1264c93d4ef0ac90  **For site runs, pass the exact stage-2 survey at stage 5 (#
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 ea3f150cc48476f9756e7321caec9c910f268459fb5fee455df160c168e21cc1  ## How to read a gate ~ this is the part that is easy to get
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -143,16 +145,16 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 2e63d62bf8d58b3f9dc5c6c405828e6efb9e75ddff5463c524c2a1654628226d  1. **`handover/<workbook>.json`** ~ the deterministic tier's
 5c250025b626ebd248af01ea4ed6ffe201b96b3d72375fd6d3628c5b82001c72  2. **The active contract** ~ `migration-spec.json` (parser p
-b05257ecf3fccd460995215c7f370cf4da4a4f1d5925c99d06daaa4feadc0b27  3. **Tableau reference imagery** ~ at least one whole-dashbo
+a8ae4ab58cc7bed3027d2126af7692403cebf4e984290a83550b7c41efe18558  3. **Tableau imagery** ~ one whole-dashboard capture per das
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 3e6ba3b1878ed98d00d26d3ecc0df219b1d88aa173cbe388beefe6fa75c85c5c  ~~ **Grade the evidence (#194).** An *oracle* capture (`_ora
-ca3b734fcd76e0c13055e53e4d822e839f5b68a50dcb8152adbbe78126efbbfd  4. **The semantic model + PBIP report location** ~ for your 
+ebc94370c2b963dd2da803a91e2e856c83884eeb69b817d4af87fd2d7bb92271  4. **Model + PBIP location** ~ for Desktop Bridge `screensho
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 4788b3fab4787493d9cd4edba4f93dc90ee2dbff3e0a32c659709e0b1c700ac4  ## Skills you use
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-c7808a315e5d78fdcfdfdc8379757e100609a3f3dedf9cb2013c5ffa2d2c61a6  - **Commissioned numeric investigation ~ DAX `EVALUATE`.** L
-80baf511ac3c725221b93704a90dc8ed49c25d42c28def35cfa448e62fc5d50b  - **`powerbi-report-gotchas`** ~ invoke **by name** whenever
-efdd02d18841d3c6c715dbedd0017ba96443a0057785bd86e8dece79addaeadc  - **`powerbi-report-authoring`** ~ Desktop Bridge screenshot
+9572fb5e84be3c040145207a39e6c4f8b573bf20164d4b0dc81cee05bd75a5cc  - **Commissioned DAX `EVALUATE`:** local PBIP ~ `scripts/pro
+1aa36ba1d8367edf406072c6abb11d8e0011e246311bb83cd02e84f0d4786de0  - **`powerbi-report-gotchas`** ~ invoke by name to judge vis
+cada00868b612ad77f37815d4b9b650b48a827e09b599cc49d1207553a08b3c4  - **`powerbi-report-cli`** ~ `authoring`, read-only inventor
 57666be140c4096bb304f2330fbf7e773ba49cb318fd88f4806e72e87c8250dd  - Playwright via the shell, only if no Tableau reference ima
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 7136000e494604c07769c55da3f0ec4ea85eef9508d8840bc71ec8a6e745b742  ## Workflow
@@ -215,7 +217,7 @@ aefdcc49f4c456b5c1ae0c85c43b560259b6029549f8cd5dc8d76b7e405e259c  6. **Every `vi
 5d01855228e6e66f3c93c286f6f3e6f0de97f5e35be854a22bcfbc274e9b1cb0  7. **`improvement_opportunities[]` is separate and influence
 
 [pbi-report-builder.agent.md]
-b69a3d01d377081a841904a00b4a08aec58416d24df6f0f5358f13bc6dbd35f7  --- name: pbi-report-builder description: Repairs and finish
+29df9b184e7b0e3f5b19ca6c6855787efaec86eb84b1db10ebb8f1306e6588cb  --- name: pbi-report-builder description: Repairs and finish
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 1619a2419072ad672acb549b02d8fbc9aafa6c1be51168b3266f68b4fd9dd4fa  # PBI Report Builder ~ Subagent
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -225,10 +227,10 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 9ae7206393ac99c216de34528936d2f0aa7a8542e200f6bced762618375e1ff7  ## Skills you use, in this order
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-ccdbeb71c305d9dde1c04c84c9e511643e41649cd2ab09c13dbcadc834d50537  0. **`powerbi-report-gotchas`** ~ read **first**, before pla
-b96b1be9c52837e1e7e197e1644e0e319fde264c551e1930ba76950c12a441b5  1. **`powerbi-report-planning`** ~ **`powerbi-report-design`
-b44deb03c3e051d509a6937b6dcd97dd6cd9b345fca1cf1931495071c7a60069  2. **`powerbi-report-author` CLI** ~ the live vocabulary and
-ae40d45becbd9f6fa6a1d7c19fee3eda2be4ab6f9a7e6e6763e183a889a7be6a  3. **Read-only DAX ~ several of your own rules require it.**
+a0b236928372bbf789ecab86dfda7fd13cf5505d7d754f9af599ae3d212725d8  0. **`powerbi-report-gotchas`** ~ read **first**, before the
+da34149a3ac5663367b6ffacb9566b5145ee32d402f81ce2157b398fc851621e  1. **`powerbi-report-cli`** ~ load once; select by intent, n
+0177c5dd4a8e62a26c7f1c36bef7b8d21e95822dd9fca3d1b51bec91d11db7e0  2. **`powerbi-report-author` CLI** ~ installed vocabulary be
+8df198ad3044977a45d7aa182cc75719b7ac4d7c7c47e3eab12edaa40a75f6a3  3. **Read-only DAX:** DoD #7 and `formatString` need a sampl
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e58eb59805f135f49dc07aa510d4f779e7bdf078433e9f565401d84e1bfc1cca  ## What you receive ~ a report that already EXISTS
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -262,22 +264,22 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 706a34fddb12ff9704ba01adfb7c2b83341d207f88af403a6c5d81474883599e  2. **Read the baseline before changing anything.** Open the 
 ff1940b503b4bef0c29cfca93fdf676fa28a6df4e687509d924994336c59e118  3. **For broken bindings, run `python scripts/check_unit.py 
 632fbc62e608418e49268c769bfb8afb4bc9d3fe71ec0325a85bf125ab8cc6d5  4. **Take the validator's classification of `viz_fidelity`, 
-3d4777eec99cdce286deeb6e19a72b01a157f644ffe681be645a97c1bbe790d7  5. **Fix with the smallest blast radius first.** Prefer form
+75148a5f1148e66614c7072b578c27c43cd27f702ac80c1d302e1a2b2eb8dc30  5. **Fix with the smallest blast radius first.** Prefer form
 86ea080c45576ae9f17898f67fa16293ef7ef55bcb4b684deb752f34bae7cd93  6. Wire the source intent the engine's input format cannot c
 ee005084dfa5dadca9a52d0914548f08dc570a216e33c74fb1adc5386a57b5ee  7. **Validate structurally (below), then re-screenshot.** St
 a9f62166fd6821ad5ccc8f14a26a39c1c74f56a22d962f672e0685c23d7c335f  8. **Write the change as a `_build/fix_*.py` and declare it*
 55a97bd81a591e72a526a24ffc9b0d715d870e3725e1f449a72741e7a2e09a13  9. **Report back**: what you repaired, what you left as an a
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-0f529bcfbc65de91f5cdcf82dfcf3f31a2d791b0adb58ea65b864a27892274af  **If a page must be built from scratch** (rare), fall back t
+b94385692e99c4163e160800b8c48578ce1b7f6f384d4c6d8e2f37bb1637e8f8  **Missing page:** use skill 1's contract, then an **empty la
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 42ea29f482eefe3c0d5cad54cff000597de7f59df7153049fac8a2b954365f3e  ## Mandatory validation (before any screenshot review)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 12cefe7df43da6f2defdd2f2f8ce9ace3f86688f45acac4f6e9de3ddd60384b9  Structural validation is not optional, on the initial build 
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 78b13627974bb5ef142ac5624c7934df186a3e348463b4e97ba7a9bc8f0ae267  1. `python scripts/check_unit.py <unit-or-bundle> --scope re
-b0eea806e8ec9a491a59ebea18170c369b1a8a082bec108f358f59ec7eaab80d  2. **Confirm the CLI-driven flow is available** ~ run the `p
-cbcc2ac38afe8597beb60281fb6be0443b67990630023d07798fc6d8661c750f  3. **If only an older skill copy is active**, do the equival
-180facfbbfa231308eac4c1b3df59885b7b4eaf389100df0585dc1944fcdcfc4  4. **Only after structural validation passes**, do the visua
+8c2484dda2576795888b3aaffc180e863c934b906c39cdb94f908d2207a60e28  2. **Preflight is the sole version authority.** Skip upstrea
+59c93f2fa26bb51bb13b093a20ebe48467b596ee862840122228654b73678779  3. **Additional checks:** no overlapping visuals; no table/m
+c0d7005270708708ebef38a1bde324299352924cd4f8ea2527929473a3cd9e0b  4. **After validation**, load latest PBIR; screenshot each a
 5dd1d3092f540df00ec8633218e189f3ee5418396468449da01cce34436ab49c  5. **A clean Bridge/MCP response is NOT proof the report ren
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 b6b35f02e0cde87fbb098396fde2ebb44cc33b7d82e173a84948ba42d3386245  ## Gotchas
@@ -289,15 +291,8 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 f4c9cce5a311a73e3022fcaa6d44aa2a7f646e7a0254e7c2e7a96b11289daade  | ~ | Skill section |
 4199ba454d6d3ae83657120c2bb6bd674eefc0dd7d3cd4cc844171dc6725135b  |---|---|
-44480ca75d6626de632fa849fa01463e630f523149fcbdb7b8a02c1fcf0ed156  | 1 | Validation-invisible rendering bugs |
-c04dc08ea1a869c6c19e9bb98190c3ad30d7aa1138714ba9b6770f3c407bc69c  | 2 | Data colours and conditional formatting |
 71432756e8595c9fd21d395d0121783ba99c9bedc276342250a9d2b5acc40306  | 3 | PBIR mechanics |
-cc7ffcc291e75ea33e493ca11b0dd3e80319dd48be3663bc8daa566c9fc5c475  | 4 | Crosstabs and tables ~ a recurring fragility class |
-49cf8b1179185d6361379366a20ac38b921a59a5e24de783f446255abcdd4fc5  | 5 | Maps ~ Azure Maps is the only non-deprecated option |
-c95527e92b757f789cda16a3a45b5b5ecddd0abd5702962d6ec7fc57c485a562  | 6 | Scatter |
-cb9a075ba815bdcee30b4b5882e208cf77d0099b6193a0b829d8c25356b11fd9  | 7 | Desktop verification mechanics |
 17d5f4f508c89c276caad8301c3b1b002739773178d1cd917c05169cda9bcda7  | 8 | Reading the source spec |
-4b74fd7a89ab31f4d927e5555136df293a18fbf176c02b5b2f94b3cf04c35385  | 9 | Keeping the visual mapping current (research per idiom
 903d3cb7202f757fd9aea987b1a80053057029c68264972af79f682c97e10c87  | 10 | Reading the report-side handover queue |
 c7986a87d9cbac530d8c98e9320c76e4aa4573151028d7e8da41a6fbfcaabe9f  <!-- END:generated-skill-index:powerbi-report-gotchas -->
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -313,8 +308,8 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e43ed727f5ab96030ca4615ac516caa663f8434a4059b5d5e64de22523432559  4. **The whole-page gestalt was compared against the referen
 54d0af3f8a97b34da184658331a77ab4984167c7bc4a1a7f44ca5d79b754b600  5. **Structural validation passed** (see "Mandatory validati
 d7b4a74133b76fa5514e17af18c50422ef4f0310398fecd4da25ca50b23ba3a8  6. **No overlapping regions and nothing outside its page bou
-1cf374fb7dbe4354d538adafb3ce2a1706b13b713c86c67ca0dfb1d7ef9bf639  7. **Every percentage/scaled field's `formatString` was chec
-1a39a2835b3d784ebb1dd993bfcce20bc0ca6556fd8126dbbb9e341da71ed684  8. **Every table/matrix field projection was checked against
+cbd4f717bc98d891ac4085869a537c0d1961e2b104d78b7af4ca7552458a68e3  7. **Every percentage/scaled field's `formatString` was chec
+8f6ce7d069e56c234e953c3999fe06d0b868f84378452da1c3b0ca7360906212  8. **Every table/matrix field projection was checked against
 ab2ed268a38940e90c0ed51038d542003b205cce78bc3f2fadee266dc699ed22  9. **Every slicer driving the default view has an explicit d
 f0786fc7a81b4083a4d8f42702207a6218cd59b564306c11495883378eb51d97  10. **Every `measure_names_values_pivot` and `UNRESOLVED:` r
 a6d146d791f4fb5c81eef0cf2d4647f919d885729a1888a006798b438c842fc3  11. **Any `azureMap` with >1 `Column` projection in `Categor
@@ -332,12 +327,12 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 4788b3fab4787493d9cd4edba4f93dc90ee2dbff3e0a32c659709e0b1c700ac4  ## Skills you use
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-b766d1897dc07b147b16669f45d917eaa92d2ddecec3f967fb2c385171de7a60  **Invoke by name with the `skill` tool**; if a name fails to
+c05efca95d1b1090b443efc45523dec9ac14ab895f3b141536290868c3aed4ae  **Invoke by name with the `skill` tool**; if a repo-local sk
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-e6c96c70a53e3fcbff71ec3ec16f7f1fb2c70d8c7c71cab979f1ea7e8ab8131f  - **`powerbi-semantic-model-gotchas`** ~ read **first**, bef
+b7d40e7ad9c87ed0e082a9b69d30311fcf1437bd3a6bdbb6b9e2cbb09eca7582  - **`powerbi-semantic-model-gotchas`** ~ read **first**, bef
 43e90ee0f3a8da763f3738baf9a07af3b983890f9f452d37789c7b570077164f  - **`powerbi-ai-readiness`** ~ the Copilot-readiness recipe 
-7b8513334df907ab8ab36af51b114edb5546eff0b2b6bf629ff6ea362fbb9808  - **pbip-model-refresh skill** ~ refreshing a local PBIP, pe
-956e963c3a251abb4416c997bd8d1703d5328fe5795e9af21a736861084e8943  - **`semantic-model-authoring`** ~ TMDL mechanics: tables/co
+4e8b274d306da505f0163c42fa735d5695260f092a96a5b7e71ff55fab985da6  - **Host-only pbip-model-refresh skill file** (`.github\skil
+5619c7482305946566ffc6fd7accc0e3ee5b35e4e11da2da774fa2cf1fd3ac8e  - **`powerbi-authoring:semantic-model-authoring`** ~ load cu
 e8b661e053bf0b3dc71667f3c2230bd7a2760d408627e9cc7b079bc10f29daf5  - **Read-only DAX (`EVALUATE`) ~ your validation surface.** 
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 c65764226ef96d0065f94b0981d70205ed9bf0ac6927ead84b43e3089ebfbcf5  ## What you receive ~ a model that EXISTS
@@ -368,34 +363,20 @@ d2e8bc756877971a35a84beb3008821d7ecafc44f6436b633f99c522e067df90  - Land approva
 3bf8e2e52b2d45e79403e73dbcc6c4f04a2be0a05f185fbe6b313896bd1bd544  5. **Check the data model before Desktop sees it** ~ `python
 2fae4a0b24c21f70de2f1dcdc20c6d76b61e7b4d794af916175df7ff61f9c80f  6. **Validate a sample against Desktop.** Evaluate the non-t
 a7ffd476ffb12c36c9bdc7b092041e604c2765dc36e427073f53a2384c1ae5fc  7. **Enrich for AI** ~ see "Prep the model for AI", **before
-596e85390edf588b787423e4905ced92bceda70180bb65e4c45dddf6d3cd7b5d  8. **HANDOFF GATE ~ refresh, SAVE, and prove it before repor
+72b9ea387607c042999b7954f60e430758ee744b58742b87d7959f3fca070dc4  8. **HANDOFF GATE ~ refresh, SAVE, and prove it before repor
 6e3920211e3bb3cf727a9eb181c08b2ddaa4ae53451da15945136d1bda00fde0  9. **Report back**: model location, what you authored vs wha
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 4a6a85703b8eeb9994d998da641a2d5278e723302427cc2dbf5722114087a766  ### Declare every TMDL edit ~ sign-off reads hashes, not int
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-de83942d24efe590debddd9392c3f1803c0b1c0ff50b4fe0be84ba79309702d4  Every file under a `*.SemanticModel` folder is hash-baseline
+b0ec9d6264979f24a2e87680397be0f4525dda145a5bfcd9327efc87b7a7ed5a  Wrap generated model edits **before writing** with `scripts/
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-61ebd4e662f30e055d9f6ec19ef92e365b24d45e149ba8289255ddeb7b239497  ```bash python scripts/declare_generated_edit.py --bundle <b
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-60bc8937365ea7047286079b972c194ec25bb296806675fc0846f4b44e21f346  Three measured ways to leave the gate RED:
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-93b49a3ac137d3cae23dc79444e93a0bb403b1579a7822ea27d1397d9fab4344  - **One `--target` per run** ~ a re-run prints `DECLARE: NO_
-b5960724a2c3411b603439612f1aeb42747141e789657f8767583d8cf1a03cd1  - **Never hand-edit first** ~ the wrapper hashes the target 
-7058213a8e5a17adde95e0b5abf3f496410e79b69d2f8e2928140b46226ad1af  - **Declare as you edit, before the step-8 refresh** ~ a lat
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-f067c0d17f2094928a6d210e55412ab27bc09ae1fac50f0de2e548e4a5e9b66d  Order: declared edits ~ refresh/save (self-declares its `dat
+367ce27a6fd8b7acc99acac42f5011977640bdaa02ccf738c05568beda595887  Never hand-edit first or count `DECLARE: NO_CHANGE` as a dec
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 a1dccf0f95e53908c34f457a8c9f7f78e90bc612d504a88d07f2cc1f5d16dbc5  ## Prep the model for AI (Copilot readiness)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-6e18d7b36b28a8354ad4b86954e6ed1f0054e59e97355bf89bd0cb1d404885ca  **Read the `powerbi-ai-readiness` skill and follow it** ([SK
+feaba14fefdf17bd135c77a2516c6e3fea536c9ec211ad2c3bc63fffd7ef3d47  **Load `powerbi-ai-readiness`** ([SKILL.md](../skills/powerb
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-db0feb35ba29bcf067d170ff0435bc76b59932b13debc5137791230c6d6f1db5  - **When and who:** the **last phase** of the build ~ after 
-4158744872e98d63d013c1854e81397d7afbfeea339dbe23eb1755591ad4dea3  - **Source of truth:** author `migrations/workbooks/<slug>/a
-840df3a5061453339602e4776d1a2da0b5efae4df43286ab71f8cda85a15ccb1  - **Your gate before hand-off**, scoped to the model you bui
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-f9dcfcc8b22e6d17a16dd3446ea07ec66064c8ba3fcffcb9e7c4e8e588b5cd77  ```bash python scripts/check_unit.py migrations/workbooks/<s
-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-2f380ff784b418b6a6cc7b1988a643518d767effbebd17c8027da92333790d0b  - **In the estate/bundle flow** `<model>` is `<bundle>/pbip/
+bfb20edb59f013e192e25bd7d9c4018dc5ab47e356b481abccd478a67cf0995b  After all model objects exist and are validated, author grou
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 b6b35f02e0cde87fbb098396fde2ebb44cc33b7d82e173a84948ba42d3386245  ## Gotchas
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -410,10 +391,7 @@ f4c9cce5a311a73e3022fcaa6d44aa2a7f646e7a0254e7c2e7a96b11289daade  | ~ | Skill se
 1cd5aa4e41c9bdaf3b20ff9479808fb0b56e726f639973e4a96879ee2d39bced  | 2 | TMDL hand-authoring pitfalls |
 bf0e53655ef6111567d91398335feec7610cfaa2f10893343b3f6c4433c567c3  | 3 | MCP / Desktop operational gotchas |
 7a0a5787b09729a87a8fbf21dce9a4f47a1656b6e5f300ee4137944c70ef0dc0  | 4 | Model integrity, table calcs, cross-agent hand-offs, a
-6a680143f0d38c322bb5398881e3b0c57812d0b91ec5caef0c49110d2167a68b  | 5 | Live sources: prove reachability first, and never self
-2c9129ece7fdf256c8dda48fc60d5f4fae710ff1dcb734af1f5d0b3359c724da  | 6 | File-based extracts: a legacy `.xls` + a custom OS loc
-61b964cdf0b6c81a8c3405d0c447d7533d7698bb77cb1278125513718c257278  | 7 | Legacy `.xls` navigation keys, and Desktop sessions th
-7322fe5570b82d75eae2bbab6ee8ac408626c7a5a41609126a9f6c2157614e6b  | 8 | Reading the handover queue, and a retracted claim wort
+1c20aea8e8f4252061a125ce9061babe3f9756d048033f873488738085bae040  | 8 | Reading the handover queue |
 cc5e2fe3dc022889c6b52d8b9725ba1f13abfe22ab5128f4fc560ae6beec0372  <!-- END:generated-skill-index:powerbi-semantic-model-gotcha
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 a48de62bcdc2f9ce92a9f4c4cfe3c12b03db947b18ea948cc2c1515d20177cf3  **Report-layer bugs stay with `pbi-report-builder`; new lear
@@ -423,15 +401,15 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 183944114d235a06cc4e2c0c723c112788732a77c01fae1709001c5304a9d1e0  "It deployed without an error" is necessary, not sufficient;
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 fce279003f19a1f8ef60c8d68e7b1e1c22f1e08c6a00eb60935c62edc551fa1a  1. **`powerbi-semantic-model-gotchas` was read this session*
-0b1fbd58a0eb6c3b211b9f72d5e0a7db0be1db870d16a99863fdf3123ca245b2  2. **No stale banners** ~ no pending "columns need refresh" 
+eb208723a29db3c9477245cd1fbcf94919c463d657a9014996a8230de262b2bb  2. **No stale banners** (host refresh owner) ~ no pending "c
 b7960b51fba458f499af6dc52fe43d9f9a30a1e32df540a94083037230486a8f  3. **Every non-trivial translated measure has a numeric grou
 84eca374dc2107238480a657d50dfab849ed1eeb47e2cb1309ae1434598ba600  4. **No orphaned artifacts *among the objects you authored**
 601bf9325f86ec8af91159f86dfacb17e14076f8c66b561c3478d1d6af4f6298  5. **Every `requests[]` entry's fate is recorded** ~ landed 
 bfd40acff14d599ec5221bdd97a0bc42b447ad58749e7164f0ca7bfb31742c18  6. **Renames are grep-verified** ~ every DAX expression refe
-5528ce08cf1f39acd2d71ae94ce403058e628c51d8c0336521996906a9d89f27  7. **Model-wide measure-name uniqueness is verified** ~ no d
-7afb4c2a10d59e3b528df4e01137a23d60f96b8dd819d668138040d52b6e6a57  8. **The model is Copilot-ready** ~ descriptions everywhere,
-a49b0e588ed1e93554f1ed29326bfb5bdb8176a035c9197f0d4ed6e4f2ceb32e  9. **Model-level AI instructions are stamped (MANDATORY).** 
-4575362ecd02f2414e441b523d05045fad56d02303d80fb7821cfb02a76c61ae  10. **REFRESHED and PERSISTED ~ the step-8 handoff gate.** R
+193349dfd5bc93c6add31e418f15a624f78489fd6eaa6a5c0573396b8f98c5da  7. **Model-wide measure-name uniqueness is verified** ~ no d
+3c01100dccbe11c296a27167631f45425aa08caee07a561c6ab92de698974e67  8. **AI metadata is audited** ~ descriptions plus enumerated
+831520bea08cf94669c03aa72a4223a7c71e7c4fc9b3b9c19d3a4b29b142c472  9. **Owned AI instructions pass the post-seal gate above (MA
+b56d58cd6f4c9fb677b38b7a549c6b00400942723d461ff2ec56fc0c8e6caea3  10. **REFRESHED and PERSISTED ~ the step-8 handoff gate.** R
 b509098589ab977d60338d46df291ba9973e357c26af45c4281cc615e844773b  11. **Every TMDL edit is declared and `--tamper` exits 0.** 
 
 [tableau-migrator.agent.md]
@@ -488,5 +466,4 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 6269a8db2a9087924f8da9da46b4376357c6b2caad6b89d7215762e737a62cd6  - **Keep this repo customer-agnostic** ~ customer context li
 0a564aeb85cb9af6faa89893a3a070a6d6b31b110290a62124fd2c13fda17bda  - **Never fabricate row data.** Extract-based (`.hyper`) sou
 f8eae8329aa5d71139eb9564b4f187693a59bf62826ad66fb18ca30bd9e756f8  - **`.twbx` source files are gitignored** (`**/source/*.twbx
-0452ad6dd29c79bda12a7cbaa310457b9d2f6000298efa3e9fa17b623b575c92  - **Route fixes through the owning subagent**, even a trivia
-5ec35ff1460f5c931c42b40921b0cd5c14efd7353e58c468751840580ee95de9  - **Check installed skill versions once per session** ~ `pre
+9ae072c2e34dfe521acb18404b4f83bb8e3ab74094b2674fc32931e4304c2d2f  - **Route fixes through the owning subagent**, even a trivia

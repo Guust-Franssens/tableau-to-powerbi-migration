@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -28,7 +29,7 @@ SKILLS_DIR = REPO_ROOT / ".github" / "skills"
 SKILL_FILES = sorted(SKILLS_DIR.glob("*/SKILL.md"))
 BUNDLED_SKILLS = sorted(skill.parent for skill in SKILL_FILES if (skill.parent / "tests").is_dir())
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
-import build_plugin  # noqa: E402
+import build_plugin  # noqa: E402  # pylint: disable=wrong-import-position
 
 # A markdown link whose target is a relative path, i.e. not http(s):, mailto: or a #fragment.
 MD_LINK_RE = re.compile(r"\[[^\]]*\]\((?!https?:|mailto:|#)([^)\s]+)\)")
@@ -72,8 +73,13 @@ DESKTOP_VERDICT_TOKENS = (
     "DIALOG_NEEDS_HUMAN",
     "DIALOG_UNRECOGNIZED",
     "DIALOG_UNREADABLE",
+    "READY",
+    "CREDENTIAL_REQUIRED",
+    "HUMAN_ACTION_REQUIRED",
+    "UNKNOWN_DIALOG",
+    "UNREADABLE_DIALOG",
 )
-AMNESTY_BLOCK_LEAD = "> ✅ **Length amnesty, current state:"
+AMNESTY_BLOCK_LEAD = "### One read-only Desktop observer"
 PREFLIGHT_STEP_LEAD = "3. **Local:**"
 # The canonical clean-run paragraph: `DATA_OK` is earned, and an active dialog or any authoritative
 # non-success token outranks a stale or late one. Bounded to its own paragraph so the next one cannot
@@ -174,7 +180,7 @@ def test_semantic_model_gotchas_uses_live_validation_and_no_dead_bundled_claims(
     assert "scripts/_tools/TabularEditor/" not in source
     assert "bpa.ps1" not in source
 
-    command = "python scripts/check_datamodel.py <SemanticModel>"
+    command = r"python scripts\check_datamodel.py <SemanticModel>"
     assert command in source
     assert (REPO_ROOT / "scripts" / "check_datamodel.py").is_file()
 
@@ -282,8 +288,31 @@ def test_a_bundled_skill_passes_its_own_tests_after_being_copied_out_of_this_rep
         tmp_path / skill_dir.name,
         ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"),
     )
+    if skill_dir.name == "pbip-model-refresh":
+        for name in (
+            "_desktop_observer.py",
+            "_desktop_uia.ps1",
+            "credential_modal_signature.regex",
+            "blocking_prompt_signature.regex",
+            "benign_dialog_signature.regex",
+            "benign_chrome_signature.regex",
+        ):
+            assert (copied / "scripts" / name).is_file(), f"portable observer dependency missing: {name}"
+        assert not (copied / "scripts" / "_credential_modal.py").exists()
+        assert not (copied / "scripts" / "probe_desktop_credential.ps1").exists()
     result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", str(copied / "tests"), *_nested_marker_filter()],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "--confcutdir",
+            str(copied),
+            "--basetemp",
+            str(tmp_path / "pytest-work"),
+            str(copied / "tests"),
+            *_nested_marker_filter(),
+        ],
         cwd=tmp_path,
         env=_repo_free_env(),
         capture_output=True,
@@ -425,28 +454,186 @@ def test_the_ai_instruction_section_template_is_stated_in_exactly_one_place() ->
     )
 
 
+def test_ai_stamping_deviation_has_one_policy_home_and_sealed_handoff() -> None:
+    """Policy travels with the portable writer; other documents point to it, not a fork."""
+    canary = "Owner decision #731: direct stamping is a bounded exception"
+    text = SECTION_TEMPLATE_HOME.read_text(encoding="utf-8")
+    assert canary in text
+    others = [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in _markdown_outside_the_agents_dir()
+        if path != SECTION_TEMPLATE_HOME and canary in path.read_text(encoding="utf-8")
+    ]
+    assert not others
+    for required in (
+        "microsoft/skills-for-fabric/issues/72",
+        "microsoft/skills-for-fabric/issues/89",
+        "--adopt-existing <sha256>",
+        "T2P_CustomInstructionsSha256",
+        "annotations: []",
+        "--check --strict --model <model> --md <md>",
+        "after",
+        "Unmeasured",
+        "AI visibility",
+        "verified answers",
+        "semantic indexing",
+        "tenant/workspace",
+        "--targets",
+        "power loss",
+    ):
+        assert required.lower() in text.lower(), required
+    capabilities = (REPO_ROOT / "docs" / "capabilities-and-limitations.md").read_text(encoding="utf-8")
+    assert "SKILL.md#0-deliberate-deviation-owned-instruction-stamping" in capabilities
+
+
 def test_powerbi_report_gotchas_keep_field_proven_report_defects_visible() -> None:
-    """Regression guard for field-proven doc defects that previously generated broken reports."""
+    """Keep the compact migration invariant, not the incident's generic encoding recipe."""
     text = REPORT_GOTCHAS.read_text(encoding="utf-8")
-    collapsed = " ".join(text.split())
+    for boundary, rule in (
+        ("custody", "never pristine `reports`; that pass can differ by design and is not shippable evidence"),
+        ("shared binding", "per-workbook promotion copies its model; shared-datasource promotion rewrites `byPath`"),
+        ("resolved target", "Check the resolved target after promotion, not just the JSON shape"),
+        ("field identity", "every encoded table/property, measure home table and filter source"),
+        ("model identity", "Valid JSON/reference shape or a plausible sibling model is insufficient"),
+        ("source IDs", "Unresolved IDs or empty `pivoted_field_ids` are gaps to route, not names/fields to guess"),
+        ("pivot", "bind the resolved real fields rather than inventing a literal virtual pivot"),
+        ("grain", "A multi-field grouping must render at the source grain"),
+        (
+            "source encodings",
+            "shelf nesting, partition/address grain, aggregation, units/percent scale, tooltip intent",
+        ),
+        ("scale query", r"real-model query route (host `scripts\probe_desktop_query.py`"),
+        ("source comparison", "against the intended shipped model and authorized source results"),
+        ("default state", "effective first-open slicer/parameter selection, not merely the offered item set"),
+        ("LAST", "post-aggregation LAST filter hides marks: replacing it with a row filter can change"),
+        ("declaration", r"replay-scripted and declared through the host route (`scripts\declare_generated_edit.py`)"),
+        ("edit order", "not hand-edit-first; require `--tamper` exit 0"),
+        ("package contract", "Package edits follow their package contract, not bundle-only declaration/tamper rules"),
+        ("layer", "Report authoring grants no refresh, semantic repair, publishing or service-rebind authority"),
+        ("reference ceiling", "Thumbnails have only their declared evidence ceiling"),
+        ("independence", "return gaps to the independent validator, not a self-issued COMPLETE"),
+    ):
+        assert rule in text, f"report core lost {boundary}"
 
-    assert "prefer `defaultStyle 'blank_accessible'`" not in text
-    for needle in [
-        "checks reference **shape**, not reference **target**",
-        "A `lineChart` with a multi-level `Category` silently renders only the TOP level.",
-        "Match the source worksheet's basemap before choosing `defaultStyle`.",
-    ]:
-        assert needle in text
-    assert "filterConfig` restricts which items are offered and pre-selects nothing" in collapsed
 
-    # Defect 3's point is that section 1 and section 8 must AGREE on where a slicer default lives, so
-    # a half-regression has to fail too: one assertion per section, keyed on that section's own
-    # wording. A bare `in` check on the shared path cannot see a one-sided break - section 3 has it too.
-    for section, needle in [
-        ("section 1", "A slicer's pre-selection lives in `objects.general[0].properties.filter`"),
-        ("section 8", "via `objects.general[0].properties.filter`, never a top-level `filterConfig`"),
-    ]:
-        assert needle in collapsed, f"{section} no longer states where a slicer default lives"
+def test_semantic_core_keeps_source_roles_queue_and_parameter_binding() -> None:
+    """The source and original request inventory, not a successful parse, govern translation."""
+    text = SEMANTIC_GOTCHAS.read_text(encoding="utf-8")
+    for boundary, rule in (
+        ("source semantics", "first-match branches and ATTR's actual grain"),
+        ("captions", "Use resolved IDs/captions, not stale internal names"),
+        (
+            "source role",
+            "column/measure role, target table, parameter meaning, units and independent-source relationships",
+        ),
+        ("parameter intent", "Parameter equality is not automatically a numeric what-if control"),
+        ("non-columns", "Relationship anchors are not real data columns"),
+        ("spatial gap", "explicit supported representation/gap, not a forced scalar column"),
+        ("parameter brackets", "bracketed `sourceColumn` `[Value1]`/`[Value2]`/`[Value3]`"),
+        ("parameter metadata", "grouping/`ParameterMetadata` and first-open bindings"),
+        ("first open", "A clean parse cannot prove those bindings survived Desktop's first open"),
+        ("model checks", r"python scripts\check_datamodel.py <SemanticModel>"),
+        ("calc context", "actual axis, partition, ordering, filters and manual-sort grain"),
+        ("visual calc", "Prefer the engine's visual-calculation route for layout-sensitive addressing"),
+        ("calc proof", "A correct result at another date grain is insufficient"),
+        ("source oracle", "Python replicas/metadata are not independent source or live-row proof"),
+        (
+            "requests",
+            "Repair from `requests[]` with formula/role/target table, not the incomplete `needs_review[]` summary",
+        ),
+        ("denominators", "requests, measure stubs and calculated-column stubs as distinct denominators"),
+        ("selfcheck", "`openability_selfcheck.ok` is the engine's claim, not an observed Desktop open or source match"),
+    ):
+        assert rule in text, f"semantic core lost {boundary}"
+
+
+def test_compact_cores_keep_owner_availability_and_evidence_direction() -> None:
+    """Absent evidence is unknown, an observed mismatch is a finding, and neither is success."""
+    for path in (REPORT_GOTCHAS, SEMANTIC_GOTCHAS):
+        text = path.read_text(encoding="utf-8")
+        assert "Host-repo only:" in text, f"{path.parent.name}: host-only owners"
+        assert "Optional" in text and "history is not a" in text, f"{path.parent.name}: optional history"
+        assert "attribution is unestablished" in text, f"{path.parent.name}: missing history"
+        assert "Missing, stale, inaccessible or ambiguous evidence → `CANNOT_ESTABLISH`/BLOCKED" in text, (
+            f"{path.parent.name}: unavailable evidence status"
+        )
+        assert "observed mismatch → REFUSE/finding" in text, f"{path.parent.name}: observed mismatch status"
+        assert "Neither becomes PASS" in text, f"{path.parent.name}: no false pass"
+        assert "Credential stops retain" in text, f"{path.parent.name}: credential vocabulary"
+    report = REPORT_GOTCHAS.read_text(encoding="utf-8")
+    semantic = SEMANTIC_GOTCHAS.read_text(encoding="utf-8")
+    assert "If absent, block only the dependent migration operation" in report, "report missing host owner"
+    assert "Missing topic/owner blocks the affected operation" in report, "report missing upstream owner"
+    assert "unavailable owner blocks only the affected migration operation" in semantic, "semantic missing host owner"
+    assert "Missing topic blocks that operation, not permission to DIY" in semantic, "semantic missing upstream owner"
+    for relative in (
+        r"docs\tableau-dax-translation-guide.md",
+        r"scripts\check_datamodel.py",
+        r"scripts\probe_desktop_query.py",
+        r"scripts\declare_generated_edit.py",
+        r".github\skills\pbip-model-refresh\SKILL.md",
+        r".github\skills\live-source-reachability\SKILL.md",
+    ):
+        assert (REPO_ROOT / Path(relative.replace("\\", "/"))).is_file(), f"host owner missing: {relative}"
+
+
+def test_semantic_core_keeps_runtime_identity_and_policy_owners() -> None:
+    """Keep unresolved #730 safeguards without claiming a current runtime qualification."""
+    text = SEMANTIC_GOTCHAS.read_text(encoding="utf-8")
+    report = REPORT_GOTCHAS.read_text(encoding="utf-8")
+    for boundary, rule in (
+        ("connection", "Use the explicit returned `connectionName` on each supported operation"),
+        (
+            "current definition",
+            "independently check model contents/current definitions against the intended working model",
+        ),
+        ("implicit identity", "plausible sibling model is not target identity"),
+        ("custody", "Never save stale memory over newer working files or discard unexported work"),
+        ("held-out refresh", "held out of the playbook"),
+        ("refresh resolution", "Resolve that owner path in the fresh role or block the dependent handoff"),
+        ("local precedence", "local custody/persist/export rules outrank generic upstream claims"),
+        ("no retirement", "no unproved workaround retires"),
+        ("table coverage", "current-model row canaries for every commissioned import/live table"),
+        ("durability", "commissioned persistence/cold-reopen checks"),
+        (
+            "insufficient proof",
+            "One arbitrary row, `PERSISTED`, cache/mtime, a screenshot or a successful connection cannot",
+        ),
+        ("live owner", "it alone owns credential routing/shipped-artifact live proof and is not shipped"),
+        ("AI owner", "owned stamp/batch/strict final seal is unchanged, not replaced by generic upstream AI guidance"),
+        ("report layer", "Route PBIR findings to the report owner; never hand an unproved model to report repair"),
+    ):
+        assert rule in text, f"semantic runtime lost {boundary}"
+    assert "host's supported capture/reload/identity route outranks generic upstream" in report, (
+        "report local precedence"
+    )
+    assert "an unreachable/skipped schema check is unverified, not a pass" in report, "report skipped schema"
+
+
+def test_generated_core_metadata_is_a_host_contract_not_a_portable_encyclopedia(tmp_path: Path) -> None:
+    """Read every generated description and copied core; disk presence is not runtime resolution."""
+    output = tmp_path / "marketplace"
+    build_plugin.build(output)
+    surfaces = (
+        build_plugin.marketplace_manifest()["metadata"]["description"],
+        build_plugin.marketplace_manifest()["plugins"][0]["description"],
+        build_plugin.plugin_manifest()["description"],
+        (output / "README.md").read_text(encoding="utf-8"),
+    )
+    for text in surfaces:
+        assert "Tableau-migration" in text and "host" in text, "generated host scope"
+        assert not re.search(r"source-tool.agnostic|apply equally|production-ready", text, re.I), (
+            "universal scope claim"
+        )
+    for text in surfaces[1:]:
+        assert "not" in text and "greenfield authoring guides" in text, "greenfield scope"
+        assert "refresh/persistence" in text and "live-source proof" in text, "held-out operations"
+        assert "not bundled" in text, "host payload absent"
+    copied = output / "plugins" / build_plugin.PLUGIN_NAME / "skills"
+    assert {path.name for path in copied.iterdir()} == set(build_plugin.SHIPPED_SKILLS)
+    for source in (REPORT_GOTCHAS, SEMANTIC_GOTCHAS):
+        assert (copied / source.parent.name / source.name).read_bytes() == source.read_bytes()
+    assert not (output / "scripts").exists(), "host machinery was silently bundled"
 
 
 def test_azure_map_cookbook_does_not_recommend_dead_end_filter_or_blank_basemap_defaults() -> None:
@@ -473,7 +660,11 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
     """
     guidance = {
         "pbip-model-refresh verdict table": _verdict_rows(PBIP_REFRESH_SKILL),
-        "pbip-model-refresh length-amnesty status": _block_from(PBIP_REFRESH_SKILL, AMNESTY_BLOCK_LEAD),
+        "pbip-model-refresh length-amnesty status": _block_from(
+            PBIP_REFRESH_SKILL,
+            AMNESTY_BLOCK_LEAD,
+            ends="> ⚠️ **Do not wait blindly",
+        ),
         "data-source-credentials verdict table": _verdict_rows(CREDENTIAL_DOC),
         "data-source-credentials preflight step": _block_from(CREDENTIAL_DOC, PREFLIGHT_STEP_LEAD, ends="4. "),
         "scripts/README arbiter row": _table_row(SCRIPTS_README, "probe_desktop_credential.ps1"),
@@ -488,13 +679,13 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
         ("pbip-model-refresh verdict table", "Act on the prompt visible in Desktop"),
         ("pbip-model-refresh verdict table", "the remedy is **not** established either"),
         ("pbip-model-refresh verdict table", "A bounded observation"),
-        ("pbip-model-refresh length-amnesty status", "issue #406 is closed"),
+        ("pbip-model-refresh length-amnesty status", "#406 remains closed"),
         ("data-source-credentials verdict table", "do not stack"),
         ("data-source-credentials verdict table", "does **not** establish which action"),
         ("data-source-credentials verdict table", "A bounded observation only"),
         ("data-source-credentials preflight step", "bounded observation"),
-        ("scripts/README arbiter row", "not proof of a cached credential"),
-        ("scripts/README arbiter row", "gate of record"),
+        ("scripts/README arbiter row", "Retired compatibility shim"),
+        ("scripts/README arbiter row", "no observation or Refresh occurs"),
     ]:
         assert needle in guidance[name], f"{name} no longer states {needle!r}"
 
@@ -571,3 +762,298 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
             f"{CREDENTIAL_DOC.name} now permits a DATA_OK that was never earned ({permissive!r}): an "
             "active dialog or any authoritative non-success token must veto it"
         )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        (
+            REPORT_GOTCHAS,
+            "never pristine `reports`",
+            "ship pristine `reports`",
+            test_powerbi_report_gotchas_keep_field_proven_report_defects_visible,
+            "report core lost custody",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "shared-datasource promotion rewrites `byPath`",
+            "shared-datasource promotion copies its model",
+            test_powerbi_report_gotchas_keep_field_proven_report_defects_visible,
+            "report core lost shared binding",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "measure home table and filter source",
+            "measure home table",
+            test_powerbi_report_gotchas_keep_field_proven_report_defects_visible,
+            "report core lost field identity",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "are gaps to route, not names/fields to guess",
+            "are fields to guess",
+            test_powerbi_report_gotchas_keep_field_proven_report_defects_visible,
+            "report core lost source IDs",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "bind the resolved real fields",
+            "invent a literal pivot",
+            test_powerbi_report_gotchas_keep_field_proven_report_defects_visible,
+            "report core lost pivot",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "effective first-open slicer/parameter selection, not merely the offered item set",
+            "offered item set without a first-open selection",
+            test_powerbi_report_gotchas_keep_field_proven_report_defects_visible,
+            "report core lost default state",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "replacing it with a row filter can change",
+            "replace it with a row filter without changing",
+            test_powerbi_report_gotchas_keep_field_proven_report_defects_visible,
+            "report core lost LAST",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "replay-scripted and declared",
+            "hand-edited and declared",
+            test_powerbi_report_gotchas_keep_field_proven_report_defects_visible,
+            "report core lost declaration",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "replay-scripted and declared",
+            "replay-scripted without declaration",
+            test_powerbi_report_gotchas_keep_field_proven_report_defects_visible,
+            "report core lost declaration",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "not hand-edit-first",
+            "allow hand-edit-first",
+            test_powerbi_report_gotchas_keep_field_proven_report_defects_visible,
+            "report core lost edit order",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "`--tamper` exit 0",
+            "`--tamper` exit 1",
+            test_powerbi_report_gotchas_keep_field_proven_report_defects_visible,
+            "report core lost edit order",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "not bundle-only declaration/tamper rules",
+            "using bundle-only declaration/tamper rules",
+            test_powerbi_report_gotchas_keep_field_proven_report_defects_visible,
+            "report core lost package contract",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "If absent, block only the dependent migration operation",
+            "If absent, proceed without the owner",
+            test_compact_cores_keep_owner_availability_and_evidence_direction,
+            "report missing host owner",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "unavailable owner blocks only the affected migration operation",
+            "unavailable owner permits all operations",
+            test_compact_cores_keep_owner_availability_and_evidence_direction,
+            "semantic missing host owner",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "column/measure role, target table",
+            "measure-only role, arbitrary table",
+            test_semantic_core_keeps_source_roles_queue_and_parameter_binding,
+            "semantic core lost source role",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "`[Value1]`",
+            "`Value1`",
+            test_semantic_core_keeps_source_roles_queue_and_parameter_binding,
+            "semantic core lost parameter brackets",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "`ParameterMetadata`",
+            "`NoMetadata`",
+            test_semantic_core_keeps_source_roles_queue_and_parameter_binding,
+            "semantic core lost parameter metadata",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "Repair from `requests[]` with formula/role/target table",
+            "Repair from `needs_review[]` with formula/role/target table",
+            test_semantic_core_keeps_source_roles_queue_and_parameter_binding,
+            "semantic core lost requests",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "calculated-column stubs as distinct denominators",
+            "stubs as one denominator",
+            test_semantic_core_keeps_source_roles_queue_and_parameter_binding,
+            "semantic core lost denominators",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "not an observed Desktop open or source match",
+            "proof of a verified Desktop open and match",
+            test_semantic_core_keeps_source_roles_queue_and_parameter_binding,
+            "semantic core lost selfcheck",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "A correct result at another date grain is insufficient",
+            "A correct result at another date grain is sufficient",
+            test_semantic_core_keeps_source_roles_queue_and_parameter_binding,
+            "semantic core lost calc proof",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "Use the explicit returned `connectionName`",
+            "Use the implicit last connection",
+            test_semantic_core_keeps_runtime_identity_and_policy_owners,
+            "semantic runtime lost connection",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "model contents/current definitions",
+            "echoed connection metadata",
+            test_semantic_core_keeps_runtime_identity_and_policy_owners,
+            "semantic runtime lost current definition",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "row canaries for every commissioned import/live table",
+            "one arbitrary row canary",
+            test_semantic_core_keeps_runtime_identity_and_policy_owners,
+            "semantic runtime lost table coverage",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "successful connection cannot",
+            "successful connection can",
+            test_semantic_core_keeps_runtime_identity_and_policy_owners,
+            "semantic runtime lost insufficient proof",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "local custody/persist/export rules outrank generic upstream claims",
+            "generic upstream claims outrank local custody/persist/export rules",
+            test_semantic_core_keeps_runtime_identity_and_policy_owners,
+            "semantic runtime lost local precedence",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "host's supported capture/reload/identity route outranks generic upstream",
+            "generic upstream guidance outranks the host's capture/reload/identity route",
+            test_semantic_core_keeps_runtime_identity_and_policy_owners,
+            "report local precedence",
+        ),
+        (
+            REPORT_GOTCHAS,
+            "unreachable/skipped schema check is unverified, not a pass",
+            "unreachable/skipped schema check is a pass",
+            test_semantic_core_keeps_runtime_identity_and_policy_owners,
+            "report skipped schema",
+        ),
+        (
+            SEMANTIC_GOTCHAS,
+            "not replaced by generic upstream AI guidance",
+            "replaced by generic upstream AI guidance",
+            test_semantic_core_keeps_runtime_identity_and_policy_owners,
+            "semantic runtime lost AI owner",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "Unchanged retry is not useful",
+            "Unchanged retry is useful",
+            test_credential_guidance_states_only_what_the_desktop_arbiter_establishes,
+            "no longer states that unchanged retry is not useful for ACCESS_DENIED",
+        ),
+    ],
+    ids=lambda case: case[-1],
+)
+def test_compact_contract_reversals_fail_the_intended_assertion(
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[Path, str, str, Callable[[], None], str],
+) -> None:
+    """Mutate only in-memory guidance; an import error or a different guard is not a kill."""
+    path, before, after, check, diagnostic = case
+    original_read = Path.read_text
+    original = original_read(path, encoding="utf-8")
+    assert original.count(before) == 1, f"reversal must select exactly one rule: {before}"
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda source, *args, **kwargs: (
+            original.replace(before, after) if source == path else original_read(source, *args, **kwargs)
+        ),
+    )
+    with pytest.raises(AssertionError, match=re.escape(diagnostic)):
+        check()
+
+
+@pytest.mark.parametrize("path", [REPORT_GOTCHAS, SEMANTIC_GOTCHAS], ids=lambda path: path.parent.name)
+@pytest.mark.parametrize(
+    ("before", "after", "diagnostic"),
+    [
+        ("`CANNOT_ESTABLISH`/BLOCKED", "PASS", "unavailable evidence status"),
+        ("`CANNOT_ESTABLISH`/BLOCKED", "REFUSE/finding", "unavailable evidence status"),
+        ("observed mismatch → REFUSE/finding", "observed mismatch → `CANNOT_ESTABLISH`", "observed mismatch status"),
+    ],
+)
+def test_evidence_direction_reversals(
+    monkeypatch: pytest.MonkeyPatch, path: Path, before: str, after: str, diagnostic: str
+) -> None:
+    """Independently reverse unknown and mismatch in both cores, never through a setup failure."""
+    original_read = Path.read_text
+    text = original_read(path, encoding="utf-8")
+    assert text.count(before) == 1
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda source, *args, **kwargs: (
+            text.replace(before, after) if source == path else original_read(source, *args, **kwargs)
+        ),
+    )
+    with pytest.raises(AssertionError, match=re.escape(f"{path.parent.name}: {diagnostic}")):
+        test_compact_cores_keep_owner_availability_and_evidence_direction()
+
+
+@pytest.mark.parametrize("attribute", ["PLUGIN_DESCRIPTION", "README"])
+def test_generated_scope_rejects_a_universal_claim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, attribute: str
+) -> None:
+    """Both manifest descriptions and the README must reject the old all-source/greenfield claim."""
+    monkeypatch.setattr(
+        build_plugin, attribute, getattr(build_plugin, attribute) + "\nEvery skill is source-tool agnostic."
+    )
+    with pytest.raises(AssertionError, match="universal scope claim"):
+        test_generated_core_metadata_is_a_host_contract_not_a_portable_encyclopedia(tmp_path)
+
+
+def test_root_catalogue_scope_rejects_a_universal_claim(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The root catalogue summary is a separate generated marketing surface."""
+    manifest = build_plugin.marketplace_manifest()
+    manifest["metadata"]["description"] += " Every skill is source-tool agnostic."
+    monkeypatch.setattr(build_plugin, "marketplace_manifest", lambda: manifest)
+    with pytest.raises(AssertionError, match="universal scope claim"):
+        test_generated_core_metadata_is_a_host_contract_not_a_portable_encyclopedia(tmp_path)
+
+
+def test_compact_contract_noop_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reversal seam must accept the unchanged source through the same read path."""
+    original_read = Path.read_text
+    monkeypatch.setattr(Path, "read_text", original_read)
+    test_powerbi_report_gotchas_keep_field_proven_report_defects_visible()
+    test_semantic_core_keeps_source_roles_queue_and_parameter_binding()
+    test_compact_cores_keep_owner_availability_and_evidence_direction()
+    test_semantic_core_keeps_runtime_identity_and_policy_owners()
+    test_credential_guidance_states_only_what_the_desktop_arbiter_establishes()

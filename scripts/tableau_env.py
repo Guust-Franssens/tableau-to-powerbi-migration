@@ -289,6 +289,125 @@ def resolve_env(path: Path | None = None, *, environ: dict[str, str] | None = No
     return merged
 
 
+# The diagnostic is a closed per-key pass over two sources, not a second env-file policy.
+# pylint: disable=too-many-locals,too-many-branches
+def diagnose_env(
+    path: Path, *, explicit: bool = False, environ: dict[str, str] | None = None
+) -> tuple[dict[str, str], dict]:
+    """Resolve the opt-in pilot configuration and return value-free diagnostics.
+
+    Legacy callers retain their permissive loader. The pilot treats whitespace as blank and
+    checks aliases before normalization; a process override is not an alias conflict.
+    """
+    process = dict(os.environ) if environ is None else dict(environ)
+    file_values: dict[str, str] = {}
+    file_reason = None
+    try:
+        if not path.exists():
+            if explicit:
+                file_reason = "selected_env_missing"
+        else:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                key, separator, value = line.partition("=")
+                if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key.strip()):
+                    file_reason = "selected_env_malformed"
+                    continue
+                file_values[key.strip()] = value.strip()
+    except (OSError, UnicodeError, ValueError):
+        file_reason = "selected_env_unreadable"
+    groups = {"TABLEAU_SERVER_URL": _SERVER_URL_KEYS, "TABLEAU_PAT_SECRET": _PAT_SECRET_KEYS}
+    required = {"TABLEAU_SERVER_URL", "TABLEAU_PAT_NAME", "TABLEAU_PAT_SECRET"}
+    secrets = {"TABLEAU_PAT_SECRET", "TABLEAU_SF_PASSWORD", "TABLEAU_DBX_TOKEN"}
+    checks, configuration_aliases = [], []
+    normalized = []
+    for source in (file_values, process):
+        clean = {key: value.strip() if key in ACCEPTED_ENV_KEYS else value for key, value in source.items()}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            resolved = _normalise(clean)
+        # An explicitly blank winning key must not resurrect a losing alias/file value.
+        for canonical, spellings in groups.items():
+            present = [key for key in spellings if key in clean]
+            if present:
+                resolved[canonical] = clean[present[0]]
+        normalized.append(resolved)
+    merged = {**normalized[0], **normalized[1]}
+    merged.setdefault("TABLEAU_SITE", "")
+    for key in (*CANONICAL_ENV_KEYS, *sorted(DATASOURCE_CREDENTIAL_KEYS)):
+        spellings = groups.get(key, (key,))
+        source, values = "absent", {}
+        for label, candidate in (("selected_env", file_values), ("environment", process)):
+            if any(spelling in candidate for spelling in spellings):
+                source, values = label, candidate
+        present = [spelling for spelling in spellings if spelling in values]
+        conflict = any(
+            len({candidate[spelling].strip() for spelling in spellings if spelling in candidate}) > 1
+            for candidate in (file_values, process)
+        )
+        if key in groups and present:
+            configuration_aliases.append(
+                {
+                    "key": key,
+                    "winning_key": present[0],
+                    "sources": [
+                        {
+                            "source": label,
+                            "keys": [spelling for spelling in spellings if spelling in candidate],
+                            "conflict": len(
+                                {candidate[spelling].strip() for spelling in spellings if spelling in candidate}
+                            )
+                            > 1,
+                        }
+                        for label, candidate in (("selected_env", file_values), ("environment", process))
+                        if any(spelling in candidate for spelling in spellings)
+                    ],
+                }
+            )
+        state = (
+            "conflict"
+            if conflict
+            else "blank"
+            if present and not values[present[0]].strip()
+            else "deprecated-alias"
+            if any(spelling != key for spelling in present)
+            else "set"
+            if present
+            else "missing"
+        )
+        default_site = key == "TABLEAU_SITE" and (not present or not values[present[0]].strip())
+        if default_site:
+            state = "set"
+            if not present:
+                source = "default"
+        checks.append(
+            {
+                "key": key,
+                "state": state,
+                "source": source,
+                "required": key in required,
+                "secret": key in secrets,
+                "reason": "default_site" if default_site else state,
+                "remedy": "use_canonical_key"
+                if state == "deprecated-alias"
+                else "resolve_configuration"
+                if state == "conflict" or (key in required and state in {"missing", "blank"})
+                else "none",
+            }
+        )
+    blocked = any(
+        row["state"] == "conflict" or (row["required"] and row["state"] in {"missing", "blank"}) for row in checks
+    )
+    return merged, {
+        "status": "CANNOT_ESTABLISH" if file_reason else "BLOCKED_CONFIG" if blocked else "READY_TO_ATTEMPT",
+        "reason": file_reason or ("configuration_inconsistent" if blocked else "presence_only"),
+        "checks": checks,
+        "configuration_aliases": configuration_aliases,
+    }
+
+
 def require(env: dict[str, str], *keys: str) -> None:
     """Raise one actionable ``SystemExit`` naming every missing variable, not just the first.
 

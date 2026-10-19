@@ -495,6 +495,86 @@ def test_declare_wrapper_records_a_composed_path_fix_script(tmp_path):
     assert any("fix_post_engine.py" in note for note in notes)
 
 
+def test_batch_declaration_runs_stamper_once_and_tamper_requires_every_edit(tmp_path):
+    """Batch declares the real stamper's three outputs; an extra mutation must fail the gate."""
+    model = tmp_path / "pbip" / "M.SemanticModel"
+    (model / "definition").mkdir(parents=True)
+    (model / "definition" / "model.tmdl").write_bytes(b"model M\n\tculture: en-US\n")
+    (model / "definition.pbism").write_bytes(b'{"version":"4.2.0","settings":{}}')
+    baseline = {
+        path.relative_to(tmp_path).as_posix(): cmp_mod.sha256_file(path) for path in model.rglob("*") if path.is_file()
+    }
+    _write_manifest(tmp_path, baseline)
+    build = tmp_path / "_build"
+    build.mkdir()
+    md = build / "ai-instructions.md"
+    md.write_bytes(b"# Model\nLatest means max date; avoid today.")
+    stamper = REPO / ".github" / "skills" / "powerbi-ai-readiness" / "scripts" / "set_ai_instructions.py"
+    replay = build / "stamp.py"
+    replay.write_text(
+        "import runpy\nfrom pathlib import Path\n"
+        "counter = Path('_build/count')\n"
+        "counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1')\n"
+        f"runpy.run_path({str(stamper)!r}, run_name='__main__')\n",
+        encoding="utf-8",
+    )
+    targets = [
+        model / "definition" / "cultures" / "en-US.tmdl",
+        model / "definition" / "model.tmdl",
+        model / "definition.pbism",
+    ]
+    command = [
+        sys.executable,
+        str(DECLARE_SCRIPT),
+        "--bundle",
+        str(tmp_path),
+        "--targets",
+        *[str(p) for p in targets],
+        "--script",
+        str(replay),
+        "--",
+        "--model",
+        str(model),
+        "--md",
+        str(md),
+    ]
+    for count in (1, 2):
+        proc = subprocess.run(command, capture_output=True, text=True, check=False)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert (build / "count").read_text() == str(count)
+        assert cmp_mod.tamper_check(tmp_path)[0] == "DECLARED_DRIFT"
+    targets[-1].write_bytes(b'{"settings":{"qnaEnabled":true},"undeclared":1}')
+    # The idempotent stamp cannot conceal the unrelated mutation, even though it runs successfully.
+    proc = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "UNDECLARED" in proc.stdout + proc.stderr
+
+
+def test_batch_declaration_rejects_duplicate_or_outside_targets_before_script(tmp_path):
+    """Invalid closed target sets must not launch the replay script."""
+    _write_manifest(tmp_path, {})
+    replay = tmp_path / "never.py"
+    replay.write_text("raise AssertionError('must not launch')", encoding="utf-8")
+    for targets in ([tmp_path / "a", tmp_path / "a"], [tmp_path.parent / "outside"]):
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(DECLARE_SCRIPT),
+                "--bundle",
+                str(tmp_path),
+                "--targets",
+                *[str(p) for p in targets],
+                "--script",
+                str(replay),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 2
+        assert "targets must be distinct files inside the bundle" in proc.stderr
+
+
 @pytest.mark.timing
 def test_declare_wrapper_concurrent_writers_keep_both_declarations(tmp_path):
     """Two wrapper processes released by one barrier must not erase each other's declaration."""

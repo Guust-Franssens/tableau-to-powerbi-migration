@@ -10,7 +10,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import ntpath
 import re
+import subprocess
 import traceback
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -20,18 +22,54 @@ import pytest
 
 from test_probe_earned_clear import cg as gate, pls as probe
 from test_package_role_identity import DS_LUID, PUBLISHED_KEY, datasource_package, workbook_package
-from credential_gate import _audit, _audit_entries, _DuplicateJsonKey, _override_is_authentic, _reject_duplicate_keys
+from credential_gate import (
+    _append_audit,
+    _audit,
+    _audit_entries,
+    _clear_was_earned,
+    _durable_write,
+    _DuplicateJsonKey,
+    _gate_root_live_keys,
+    _override_is_authentic,
+    _reject_duplicate_keys,
+    _sources_detail,
+    _transaction_pending,
+    _valid_authorization_detail,
+)
 from package_filesystem import is_canonical_key
 from package_role_identity import verify_phase1_role_identity
-from preflight_source_credentials import _leg_key
-from probe_live_source import _probe_leg, _probe_one_table
+from probe_live_source import _probe_leg, _probe_one, _probe_one_table
 
-LIVE = {"class": "sqlserver", "server": "source.example", "database": "db", "powerbi_target": "live_source"}
+LIVE = {
+    "class": "sqlserver",
+    "server": "source.example",
+    "database": "db",
+    "schema": "dbo",
+    "name": "orders-leg",
+    "powerbi_target": "live_source",
+}
 OTHER = {**LIVE, "server": "other.example"}
 FLAT = {"class": "excel-direct", "powerbi_target": "flat_file"}
 REVIEW = {"class": "unknown", "server": "review.example", "powerbi_target": "unknown"}
-KEY = _leg_key({}, 0, LIVE)
-OTHER_KEY = _leg_key({}, 0, OTHER)
+
+
+def _ordinary_key(server: str, ordinary_tables: tuple[str, ...] | None = ("Orders",), *, schema: str = "dbo") -> str:
+    """Independent SHA-256 oracle for the documented dbo.Orders identity."""
+    identity = {
+        "class": "sqlserver",
+        "server": server,
+        "database": "db",
+        "schema": schema,
+        "ordinary_tables": list(ordinary_tables) if ordinary_tables is not None else None,
+    }
+    return (
+        "source-key:"
+        + hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:16]
+    )
+
+
+KEY = _ordinary_key("source.example")
+OTHER_KEY = _ordinary_key("other.example")
 LOCAL = {
     "self_contained": True,
     "omissions": [],
@@ -50,7 +88,9 @@ def _spec(*connections: dict) -> dict:
             {
                 "name": f"source{index}",
                 "connection": dict(connection),
-                "tables": [{"name": "Orders"}],
+                "tables": [
+                    {"name": "Orders", "table": "[dbo].[Orders]", "connection": connection.get("name", "orders-leg")}
+                ],
                 "fields": [{"kind": "column", "internal_name": "[ID]"}],
             }
             for index, connection in enumerate(connections)
@@ -81,6 +121,209 @@ def _root_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return unit
 
 
+class _StatefulIcacls:
+    """Model only registered paths and exact commands; return raw ACE rows, never a verdict."""
+
+    PRINCIPAL = "fixture-user"
+    DOMAIN = "FIXTURE"
+    RIGHTS = "(OI)(CI)(WD,AD,WA)"
+
+    def __init__(self, *paths: Path) -> None:
+        self.states = {self.key(path): "clear" for path in paths}
+        self.events: list[tuple[str, str]] = []
+        self.faults: dict[tuple[str, str], str] = {}
+
+    @staticmethod
+    def key(path: Path | str) -> str:
+        """Use Windows path identity even when the platform-parameter tests run on POSIX."""
+        return ntpath.normcase(ntpath.normpath(str(path)))
+
+    def inject(self, operation: str, path: Path, outcome: str) -> None:
+        """Keep faults persistent and scoped to one registered operation/target pair."""
+        assert operation in {"query", "apply", "remove"}, "unexpected icacls operation"
+        assert self.key(path) in self.states, "unexpected icacls target"
+        outcomes = {"nonzero", "timeout"} | (
+            {"empty", "restricted", "clear", "partial", "unparseable"}
+            if operation == "query"
+            else {"no-change", "partial"}
+        )
+        assert outcome in outcomes, "unexpected icacls fault"
+        self.faults[operation, self.key(path)] = outcome
+
+    def _listing(self, target: str, state: str) -> str:
+        identity = f"{self.DOMAIN}\\{self.PRINCIPAL}"
+        rows = [f"{identity}:(I)(OI)(CI)(F)", r"NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F)"]
+        if state == "restricted":
+            rows.insert(0, f"{identity}:(OI)(CI)(DENY)(WD,AD,WA)")
+        elif state == "partial":
+            rows.insert(0, f"{identity}:(OI)(DENY)(WD)")
+        return (
+            target
+            + " "
+            + ("\n" + " " * (len(target) + 1)).join(rows)
+            + ("\n\nSuccessfully processed 1 files; Failed processing 0 files")
+        )
+
+    def __call__(self, args: list[str]) -> tuple[int, str]:
+        assert isinstance(args, list) and args and all(isinstance(arg, str) for arg in args), (
+            "unexpected icacls command"
+        )
+        target = self.key(args[0])
+        assert target in self.states, "unexpected icacls target"
+        if args == [args[0]]:
+            operation = "query"
+        elif args == [args[0], "/deny", f"{self.PRINCIPAL}:{self.RIGHTS}"]:
+            operation = "apply"
+        elif args == [args[0], "/remove:d", self.PRINCIPAL]:
+            operation = "remove"
+        else:
+            raise AssertionError("unexpected icacls command")
+        self.events.append((operation, target))
+        fault = self.faults.get((operation, target))
+        if fault == "nonzero":
+            return 5, "Access is denied."
+        if fault == "timeout":
+            raise subprocess.TimeoutExpired(["icacls", *args], 30)
+        if operation == "query":
+            if fault == "empty":
+                return 0, ""
+            if fault == "unparseable":
+                return 0, "1 bestand verwerkt; 0 bestanden mislukt."
+            return 0, self._listing(args[0], fault or self.states[target])
+        if fault != "no-change":
+            self.states[target] = (
+                "partial" if fault == "partial" else ("restricted" if operation == "apply" else "clear")
+            )
+        return 0, f"processed file: {args[0]}\nSuccessfully processed 1 files; Failed processing 0 files"
+
+
+@pytest.fixture(name="stateful_icacls")
+def _stateful_icacls_fixture(root: Path, monkeypatch: pytest.MonkeyPatch) -> _StatefulIcacls:
+    """Keep principal resolution synthetic too; only the two platform-writer tests opt in."""
+    permissions = _StatefulIcacls(root / "fabric")
+    monkeypatch.setenv("USERNAME", permissions.PRINCIPAL)
+    monkeypatch.setenv("USER", permissions.PRINCIPAL)
+    monkeypatch.setenv("USERDOMAIN", permissions.DOMAIN)
+    monkeypatch.setattr(gate, "_user", lambda: permissions.PRINCIPAL)
+    monkeypatch.setattr(gate, "_icacls", permissions)
+    return permissions
+
+
+def test_stateful_icacls_keeps_independent_normalized_paths_and_raw_rows(tmp_path: Path) -> None:
+    """Neither a sibling's removal nor a differently cased query changes the target's state."""
+    target, sibling = tmp_path / "output folder", tmp_path / "sibling"
+    permissions = _StatefulIcacls(target, sibling)
+    assert permissions([str(target), "/deny", "fixture-user:(OI)(CI)(WD,AD,WA)"])[0] == 0
+    query = str(target).upper()
+    code, rows = permissions([query])
+    assert code == 0
+    assert rows.startswith(f"{query} FIXTURE\\fixture-user:(OI)(CI)(DENY)(WD,AD,WA)\n")
+    assert r"FIXTURE\fixture-user:(I)(OI)(CI)(F)" in rows
+    assert r"NT AUTHORITY\SYSTEM:(I)(OI)(CI)(F)" in rows
+    assert permissions([str(sibling), "/remove:d", "fixture-user"])[0] == 0
+    assert permissions.states == {permissions.key(target): "restricted", permissions.key(sibling): "clear"}
+    assert permissions([str(target), "/remove:d", "fixture-user"])[0] == 0
+    code, rows = permissions([str(target)])
+    assert code == 0 and rows.startswith(f"{target} FIXTURE\\fixture-user:(I)(OI)(CI)(F)\n")
+    assert "(DENY)" not in rows
+    assert permissions.states == {permissions.key(target): "clear", permissions.key(sibling): "clear"}
+    assert permissions.events == [
+        ("apply", permissions.key(target)),
+        ("query", permissions.key(target)),
+        ("remove", permissions.key(sibling)),
+        ("remove", permissions.key(target)),
+        ("query", permissions.key(target)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        [],
+        ["{target}", "/q"],
+        ["{target}", "/DENY", "fixture-user:(OI)(CI)(WD,AD,WA)"],
+        ["{target}", "/deny", "other-user:(OI)(CI)(WD,AD,WA)"],
+        ["{target}", "/deny", "fixture-user:(OI)(CI)(WD)"],
+        ["{target}", "fixture-user:(OI)(CI)(WD,AD,WA)", "/deny"],
+        ["{target}", "/remove", "fixture-user"],
+        ["{target}", "/remove:d", "other-user"],
+        ["{target}", "/remove:d", "fixture-user", "/t"],
+        ["{other}"],
+        ["{other}", "/deny", "fixture-user:(OI)(CI)(WD,AD,WA)"],
+        ["{other}", "/remove:d", "fixture-user"],
+    ],
+)
+def test_stateful_icacls_rejects_unexpected_commands_without_effects(tmp_path: Path, args: list[str]) -> None:
+    """Option spelling/order, rights, principal and target are part of the seam's exact contract."""
+    target = tmp_path / "fabric"
+    permissions = _StatefulIcacls(target)
+    command = [arg.replace("{target}", str(target)).replace("{other}", str(tmp_path / "other")) for arg in args]
+    with pytest.raises(AssertionError, match="unexpected icacls (command|target)"):
+        permissions(command)
+    assert not permissions.events
+    assert permissions.states == {permissions.key(target): "clear"}
+
+
+@pytest.mark.parametrize("operation", ["query", "apply", "remove"])
+@pytest.mark.parametrize("fault", ["nonzero", "timeout", "no-change", "partial"])
+def test_stateful_icacls_faults_are_operation_and_path_local(tmp_path: Path, operation: str, fault: str) -> None:
+    """A failed command cannot invent a transition or leak its fault into a sibling."""
+    target, sibling = tmp_path / "fabric", tmp_path / "sibling"
+    permissions = _StatefulIcacls(target, sibling)
+    commands = {
+        "query": [],
+        "apply": ["/deny", "fixture-user:(OI)(CI)(WD,AD,WA)"],
+        "remove": ["/remove:d", "fixture-user"],
+    }
+    if operation == "remove":
+        permissions([str(target), *commands["apply"]])
+    before = dict(permissions.states)
+    if operation == "query" and fault == "no-change":
+        with pytest.raises(AssertionError, match="unexpected icacls fault"):
+            permissions.inject(operation, target, fault)
+        return
+    permissions.inject(operation, target, fault)
+    if fault == "timeout":
+        with pytest.raises(subprocess.TimeoutExpired) as raised:
+            permissions([str(target), *commands[operation]])
+        assert raised.value.cmd == ["icacls", str(target), *commands[operation]]
+    else:
+        code, _output = permissions([str(target), *commands[operation]])
+        assert code == (5 if fault == "nonzero" else 0)
+    expected = {**before, permissions.key(target): "partial"} if fault == "partial" and operation != "query" else before
+    assert permissions.states == expected
+    assert permissions.events[-1] == (operation, permissions.key(target))
+    assert permissions([str(sibling), *commands[operation]])[0] == 0
+    assert permissions.states[permissions.key(sibling)] == ("restricted" if operation == "apply" else "clear")
+    assert permissions.states[permissions.key(target)] == expected[permissions.key(target)]
+    with pytest.raises(AssertionError, match="unexpected icacls target"):
+        permissions.inject(operation, tmp_path / "unregistered", fault)
+
+
+@pytest.mark.parametrize("override", ["empty", "restricted", "clear", "partial", "unparseable"])
+def test_stateful_icacls_query_overrides_do_not_change_physical_state(tmp_path: Path, override: str) -> None:
+    """Contradictory query evidence stays separate from the independent final-state oracle."""
+    target = tmp_path / "fabric"
+    permissions = _StatefulIcacls(target)
+    permissions([str(target), "/deny", "fixture-user:(OI)(CI)(WD,AD,WA)"])
+    permissions.inject("query", target, override)
+    code, rows = permissions([str(target)])
+    assert code == 0
+    if override == "empty":
+        assert rows == ""
+    elif override == "unparseable":
+        assert rows == "1 bestand verwerkt; 0 bestanden mislukt."
+    else:
+        rights = {
+            "clear": "(I)(OI)(CI)(F)",
+            "restricted": "(OI)(CI)(DENY)(WD,AD,WA)",
+            "partial": "(OI)(DENY)(WD)",
+        }
+        assert rows.startswith(f"{target} FIXTURE\\fixture-user:{rights[override]}\n")
+    assert permissions.states == {permissions.key(target): "restricted"}
+    assert permissions.events == [("apply", permissions.key(target)), ("query", permissions.key(target))]
+
+
 @pytest.fixture(name="desktop")
 def _desktop_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stub only external primitives; model construction, audit and gate-lift code stay real."""
@@ -101,16 +344,100 @@ def _write_rows(root: Path, rows: list[dict]) -> None:
     (root / gate.AUDIT).write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
+def _append_fixture_audit(root: Path, action: str, detail: str) -> None:
+    """Append only deliberate malformed/legacy reader fixtures, never a supported writer's output."""
+    legacy_rows = {
+        ("probe-error", "legacy unkeyed attempt"),
+        ("probe-data_ok", "Orders -> DATA_OK"),
+        ("block-marker-only", "sources=['legacy source']"),
+        ("block-marker-only", 'sources_json=["legacy source"]'),
+    }
+    forged_authorization = (
+        action == "authorize"
+        and detail.startswith("by=Fixture Human; chain=")
+        and not _valid_authorization_detail(detail)
+    )
+    assert (action, detail) in legacy_rows or forged_authorization, "only malformed/legacy reader fixtures"
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "action": action,
+        "detail": detail,
+        "user": "fixture-history",
+        "scope": str(root.resolve()),
+    }
+    with (root / gate.AUDIT).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+
+
+@pytest.mark.parametrize(
+    "action,detail",
+    [
+        ("engine-receipt", "sha256=" + "a" * 64),
+        ("violation", "duplicate source keys at block"),
+        ("authorize", "by=Fixture Human; chain=[]"),
+        ("block", "sources_json=" + json.dumps([KEY])),
+        ("block-marker-only", "sources_json=" + json.dumps([KEY])),
+        ("block-skipped", "authentic override"),
+        ("probe-error", "source probe -> ERROR"),
+        ("probe-data_ok", "source probe -> DATA_OK"),
+        ("probe-cleared", "sources_json=" + json.dumps([KEY]) + "; reason=earned"),
+        ("manual-clear", "manual diagnostic"),
+        ("unknown-action", "not a historical fixture"),
+    ],
+)
+def test_fixture_audit_helper_refuses_current_writer_shapes(root: Path, action: str, detail: str) -> None:
+    """The historical escape hatch cannot replace supported writers or append on refusal."""
+    assert not (root / gate.AUDIT).exists()
+    with pytest.raises(AssertionError, match="only malformed/legacy reader fixtures"):
+        _append_fixture_audit(root, action, detail)
+    assert not (root / gate.AUDIT).exists()
+
+
 def _earn(root: Path) -> None:
     assert gate.apply_block(root, [KEY]) == 0
-    assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders"}], "ID"), (1, False)) == (0, "DATA_OK")
+    assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders", "table": "[dbo].[Orders]"}], "ID"), (1, False)) == (
+        0,
+        "DATA_OK",
+    )
     assert gate.clear_block(root, "probe-cleared: DATA_OK from one leg", earned=True, sources=[KEY]) == 0
     assert _assess(root).state == "live_data_ok", "positive control: real keyed writers must earn"
 
 
 def _authorize(root: Path, sources: list[str] | None = None) -> None:
-    assert gate.apply_block(root, [KEY] if sources is None else sources) == 0
-    assert gate.authorize(root, "Fixture Human") == 0
+    current, refusal = _gate_root_live_keys(root)
+    assert refusal is None
+    armed = sorted(current) if sources is None else sources
+    assert gate.apply_block(root, armed) == 0
+    result = gate.authorize(root, "Fixture Human")
+    if current <= set(armed):
+        assert result == 0
+    else:
+        assert result != 0, "partial keyed arms cannot release the complete current root"
+        assert (root / gate.MARKER).exists() and gate.status(root) != 0
+
+
+def _historical_authorization(root: Path, sources: list[str]) -> None:
+    """Readable pre-canonical arm/authorization history, never a supported current writer."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    rows = [
+        {
+            "ts": now,
+            "action": "block-marker-only",
+            "detail": _sources_detail(sources),
+            "user": "fixture-history",
+            "scope": str(root.resolve()),
+            "sources": sources,
+        },
+        {
+            "ts": now,
+            "action": "authorize",
+            "detail": "by=Fixture Human; chain=[]",
+            "user": "fixture-history",
+            "scope": str(root.resolve()),
+        },
+    ]
+    _write_rows(root, rows)
+    (root / gate.OVERRIDE).write_text("historical fixture permission\n", encoding="utf-8")
 
 
 @pytest.mark.usefixtures("desktop")
@@ -245,7 +572,7 @@ def test_forged_authorization_never_qualifies(root: Path, shape: str) -> None:
     _write_rows(root, rows)
     result = _assess(root, authorized=True)
     expected = (
-        ("blocked", ("authorization-mismatch", "stale-clear"))
+        ("blocked", ("authorization-mismatch", "marker-only"))
         if shape == "directory"
         else ("cannot_establish", ("audit-malformed",))
     )
@@ -257,12 +584,11 @@ def test_forged_authorization_never_qualifies(root: Path, shape: str) -> None:
     [("Linux", []), ("Darwin", []), ("Windows", ["python.exe", "pwsh.exe", "WindowsTerminal.exe"])],
 )
 def test_authentic_authorization_written_on_each_platform(
-    root: Path, monkeypatch: pytest.MonkeyPatch, system: str, chain: list[str]
+    root: Path, monkeypatch: pytest.MonkeyPatch, stateful_icacls: _StatefulIcacls, system: str, chain: list[str]
 ) -> None:
     """Both current platform writers must produce readable, structural-only authorization."""
     monkeypatch.setattr(gate.platform, "system", lambda: system)
     monkeypatch.setattr(gate, "_ancestry", lambda: chain)
-    monkeypatch.setattr(gate, "_icacls", lambda _args: (0, ""))
     _authorize(root)
     result = _assess(root, authorized=True)
     assert (result.state, result.validation, result.max_phase2_claim) == (
@@ -273,6 +599,15 @@ def test_authentic_authorization_written_on_each_platform(
     assert gate.parse_data_access(result.dumps()) == result
     assert _audit_entries(root) == _rows(root)
     assert gate.verify(root) == 0
+    target = stateful_icacls.key(root / "fabric")
+    if system == "Windows":
+        assert [event for event in stateful_icacls.events if event[0] != "query"] == [
+            ("apply", target),
+            ("remove", target),
+        ]
+    else:
+        assert not stateful_icacls.events
+    assert stateful_icacls.states == {target: "clear"}, "accepted authorization must leave every path clear"
 
 
 @pytest.mark.parametrize(
@@ -289,23 +624,30 @@ def test_authentic_authorization_written_on_each_platform(
         pytest.param("Darwin", [], 0, id="darwin-empty"),
     ],
 )
-def test_authorization_writer_reader_platform_parity(
-    root: Path, monkeypatch: pytest.MonkeyPatch, system: str, chain: list[str], writer_exit: int
+def test_authorization_writer_reader_platform_parity(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stateful_icacls: _StatefulIcacls,
+    system: str,
+    chain: list[str],
+    writer_exit: int,
 ) -> None:
     """A real writer refusal is the independent oracle for a forged row's lack of authority."""
     monkeypatch.setattr(gate.platform, "system", lambda: system)
     monkeypatch.setattr(gate, "_ancestry", lambda: chain)
-    monkeypatch.setattr(gate, "_icacls", lambda _args: (0, ""))
-    assert gate.apply_block(root, [KEY]) == 0
+    assert gate.apply_block(root, [KEY, OTHER_KEY]) == 0
     assert gate.authorize(root, "Fixture Human") == writer_exit
     detail = f"by=Fixture Human; chain={chain}"
     if writer_exit:
         assert not (root / gate.OVERRIDE).exists()
         assert all(row["action"] != "authorize" for row in _rows(root))
-        _audit(root, "authorize", detail)
+        assert (root / gate.MARKER).is_file(), "a refused authorization must retain the physical marker"
+        _append_fixture_audit(root, "authorize", detail)
         (root / gate.OVERRIDE).write_text("TEST-ONLY forged override\n", encoding="utf-8")
     else:
         assert next(row["detail"] for row in _rows(root) if row["action"] == "authorize") == detail
+        assert not (root / gate.MARKER).exists()
+        assert (root / gate.OVERRIDE).is_file()
     before = _rows(root)
     result = _assess(root, authorized=True)
     if writer_exit:
@@ -321,6 +663,15 @@ def test_authorization_writer_reader_platform_parity(
         assert _override_is_authentic(root)
         assert _audit_entries(root) == before
     assert _rows(root) == before, "the reader must not rerun authorization or write evidence"
+    target = stateful_icacls.key(root / "fabric")
+    if system == "Windows":
+        expected_events = [("apply", target)] + ([] if writer_exit else [("remove", target)])
+        assert [event for event in stateful_icacls.events if event[0] != "query"] == expected_events
+    else:
+        assert not stateful_icacls.events
+    assert stateful_icacls.states == {target: "restricted" if writer_exit else "clear"}, (
+        "refusal must retain the restriction; accepted authorization must leave every path clear"
+    )
 
 
 @pytest.mark.parametrize("inherited", [False, True], ids=["direct", "inherited"])
@@ -382,7 +733,10 @@ def test_authorization_cannot_override_review_legs(root: Path, connections: tupl
 @pytest.mark.parametrize("arms", [[], [OTHER_KEY], ["legacy display"]])
 def test_authorization_requires_current_keyed_arm(root: Path, arms: list[str]) -> None:
     """Readable legacy/empty/sibling arms cannot invent this package's current epoch."""
-    _authorize(root, arms)
+    if arms == [OTHER_KEY]:
+        _authorize(root, arms)
+    else:
+        _historical_authorization(root, arms)
     assert _audit_entries(root) is not None, "a readable historic arm is not necessarily current key coverage"
     result = _assess(root, authorized=True)
     assert (result.state, result.codes) == ("cannot_establish", ("source-key-set-changed",))
@@ -390,7 +744,7 @@ def test_authorization_requires_current_keyed_arm(root: Path, arms: list[str]) -
 
 def test_authorization_without_any_arm_cannot_establish(root: Path) -> None:
     """The production authorization writer does not itself create a current arm."""
-    assert gate.authorize(root, "Fixture Human") == 0
+    assert gate.authorize(root, "Fixture Human") != 0
     assert _audit_entries(root) is not None
     result = _assess(root, authorized=True)
     assert (result.state, result.codes) == ("cannot_establish", ("source-key-set-changed",))
@@ -401,10 +755,11 @@ def test_authorization_cannot_override_authority_failures(root: Path, fault: str
     """Invalid identities, unmatched source sets and forced scope outrank authorization."""
     spec = _spec(LIVE)
     if fault == "forced-scope":
-        (root / gate.MIGRATION_SPEC).unlink()
+        (root / "AGENTS.md").write_text("fixture rejected broad scope", encoding="utf-8")
         assert gate.apply_block(root, [KEY], force_scope=True) == 0
-        (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
-    _authorize(root)
+        assert gate.authorize(root, "Fixture Human") != 0
+    else:
+        _authorize(root)
     if fault == "duplicate-package":
         spec = _spec(LIVE, LIVE)
     elif fault == "duplicate-root":
@@ -412,7 +767,9 @@ def test_authorization_cannot_override_authority_failures(root: Path, fault: str
     elif fault == "invalid-key":
         spec = _spec({**LIVE, "server": None})
     elif fault == "new-key":
-        spec = _spec(OTHER)
+        future = {**OTHER, "server": "future.example"}
+        (root / gate.MIGRATION_SPEC).write_text(json.dumps(_spec(LIVE, OTHER, future)), encoding="utf-8")
+        spec = _spec(future)
     result = _assess(root, spec=spec, authorized=True)
     code = (
         "forced-scope"
@@ -467,44 +824,83 @@ def test_native_engine_root_keeps_the_canonical_adapter(root: Path, authorized: 
 
 
 @pytest.mark.usefixtures("desktop")
-def test_all_current_audit_writers_remain_readable(root: Path) -> None:
-    """Diagnostics may lack sources, and duplicate-source refusal rows must not poison history."""
+def test_all_current_audit_writers_remain_readable(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Current keyed writers and explicit legacy input retain their exact sequence and scope."""
     _audit(root, "engine-receipt", "sha256=" + "a" * 64)
-    _audit(root, "probe-error", "legacy unkeyed attempt")
+    _append_fixture_audit(root, "probe-error", "legacy unkeyed attempt")
     assert gate.apply_block(root, [KEY, OTHER_KEY]) == 0
-    assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders"}], "ID"), (1, False)) == (0, "DATA_OK")
+    assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [KEY, OTHER_KEY]
+    with monkeypatch.context() as failed_refresh:
+        failed_refresh.setattr(probe, "_refresh_and_classify", lambda *_args: (1, "ERROR"))
+        assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders", "table": "[dbo].[Orders]"}], "ID"), (1, False)) == (
+            1,
+            "ERROR",
+        )
+    assert _probe_leg(root, KEY, LIVE, ([{"name": "Orders", "table": "[dbo].[Orders]"}], "ID"), (1, False)) == (
+        0,
+        "DATA_OK",
+    )
     assert gate.clear_block(root, "first leg", earned=True, sources=[KEY]) == 0
     assert gate.apply_block(root, [KEY]) == 0
     assert gate.apply_block(root, [KEY, KEY]) == 2
     assert gate.clear_block(root, "duplicate refusal", earned=True, sources=[KEY, KEY]) == 1
     assert _assess(root).state == "live_data_ok"
-    assert gate.clear_block(root, "manual diagnostic") == 0
+    assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [OTHER_KEY]
+    assert gate.clear_block(root, "manual diagnostic", earned=False) != 0
+    assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [OTHER_KEY]
+    assert _clear_was_earned(root, [OTHER_KEY]) is None, "administrative clear must not earn the other key"
+    assert gate.apply_block(root, [OTHER_KEY]) == 0
+    assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [OTHER_KEY]
+    assert _probe_leg(root, OTHER_KEY, OTHER, ([{"name": "Orders", "table": "[dbo].[Orders]"}], "ID"), (1, False)) == (
+        0,
+        "DATA_OK",
+    )
+    assert gate.clear_block(root, "second leg", earned=True, sources=[OTHER_KEY]) == 0
+    assert _assess(root, spec=_spec(LIVE, OTHER)).state == "live_data_ok"
+    assert not (root / gate.MARKER).exists()
+    assert not (root / gate.OVERRIDE).exists()
     assert gate.authorize(root, "Fixture Human") == 0
     assert gate.apply_block(root, [KEY]) == 0
     rows = _rows(root)
     assert _audit_entries(root) == rows, "each real writer's schema must survive the strict reader"
-    assert {row["action"] for row in rows} == {
-        "engine-receipt",
-        "probe-error",
-        "block-marker-only",
-        "probe-data_ok",
-        "probe-cleared",
-        "block-skipped",
-        "violation",
-        "manual-clear",
-        "authorize",
-    }
+    expected = [
+        ("engine-receipt", None),
+        ("probe-error", None),
+        ("block-marker-only", [KEY, OTHER_KEY]),
+        ("block-marker-only", [KEY]),
+        ("probe-error", [KEY]),
+        ("block-marker-only", [KEY]),
+        ("probe-data_ok", [KEY]),
+        ("probe-cleared", [KEY]),
+        ("block-skipped", None),
+        ("manual-clear", None),
+        ("block-marker-only", [OTHER_KEY]),
+        ("block-marker-only", [OTHER_KEY]),
+        ("probe-data_ok", [OTHER_KEY]),
+        ("probe-cleared", [OTHER_KEY]),
+        ("authorize", None),
+        ("block-skipped", None),
+    ]
+    assert [row["action"] for row in rows] == [action for action, _sources in expected], "exact writer action sequence"
+    assert {index: row["sources"] for index, row in enumerate(rows) if "sources" in row} == {
+        index: sources for index, (_action, sources) in enumerate(expected) if sources is not None
+    }, "exact keyed versus unkeyed writer sources"
+    assert not (root / gate.MARKER).exists()
+    assert (root / gate.OVERRIDE).is_file()
+    assert _override_is_authentic(root)
 
 
 @pytest.mark.usefixtures("desktop")
 def test_legacy_unkeyed_success_is_readable_but_not_earned(root: Path) -> None:
     """The pre-key probe writer remains readable, without becoming evidence for any key."""
     assert gate.apply_block(root, [KEY]) == 0
-    _audit(root, "probe-data_ok", "Orders -> DATA_OK")
-    assert gate.clear_block(root, "legacy success", earned=True, sources=[KEY]) == 0
+    _append_fixture_audit(root, "probe-data_ok", "Orders -> DATA_OK")
+    before = _rows(root)
+    assert gate.clear_block(root, "legacy success", earned=True, sources=[KEY]) != 0
     assert _audit_entries(root) == _rows(root)
+    assert _rows(root) == before, "refused clear must not append success-shaped evidence"
     result = _assess(root)
-    assert (result.state, result.codes) == ("blocked", ("stale-clear",))
+    assert (result.state, result.codes) == ("blocked", ("marker-only",))
     _earn(root)
 
 
@@ -512,7 +908,7 @@ def test_legacy_unkeyed_success_is_readable_but_not_earned(root: Path) -> None:
 @pytest.mark.parametrize("detail", ["sources=['legacy source']", 'sources_json=["legacy source"]'])
 def test_legacy_arm_names_stay_readable_without_becoming_current_coverage(root: Path, detail: str) -> None:
     """Pre-structured-source arms remain diagnostic history, never current keyed authority."""
-    _audit(root, "block-marker-only", detail)
+    _append_fixture_audit(root, "block-marker-only", detail)
     assert _audit_entries(root) == _rows(root)
     assert _assess(root).codes == ("source-key-set-changed",)
     _earn(root)
@@ -593,7 +989,10 @@ def test_custom_sql_operator_required_invalidates_earned_key(root: Path, sql: st
         [KEY],
         "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned",
     )
-    assert rows[:-1] == before, "custom SQL must append only its refusal, never earned proof or a clear"
+    assert rows[: len(before)] == before
+    assert [(row["action"], row.get("sources")) for row in rows[len(before) : -1]] == [("block-marker-only", [KEY])], (
+        "custom SQL must append only its required physical arm and refusal, never earned proof or a clear"
+    )
     assert _assess(root).state == "blocked"
     assert _assess(root).codes == ("probe-error",)
 
@@ -612,7 +1011,10 @@ def test_nonstring_custom_sql_is_opaque_and_invalidates_earned_key(root: Path) -
         [KEY],
         "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned",
     )
-    assert rows[:-1] == before, "custom SQL must append only its refusal, never earned proof or a clear"
+    assert rows[: len(before)] == before
+    assert [(row["action"], row.get("sources")) for row in rows[len(before) : -1]] == [("block-marker-only", [KEY])], (
+        "custom SQL must append only its required physical arm and refusal, never earned proof or a clear"
+    )
     assert _assess(root).state == "blocked"
     assert _assess(root).codes == ("probe-error",)
 
@@ -631,10 +1033,105 @@ def test_custom_sql_without_ordinary_evidence_never_earns_proof(root: Path) -> N
         [KEY],
         "OPERATOR_REQUIRED: custom SQL not executed; no connection claim earned",
     )
-    assert rows[:-1] == before, "custom SQL must append only its refusal, never earned proof or a clear"
+    assert rows[: len(before)] == before
+    assert [(row["action"], row.get("sources")) for row in rows[len(before) : -1]] == [("block-marker-only", [KEY])], (
+        "custom SQL must append only its required physical arm and refusal, never earned proof or a clear"
+    )
     assert "private-query-value" not in json.dumps(last)
     assert _assess(root).state == "blocked"
     assert _assess(root).codes == ("probe-error",)
+
+
+@pytest.mark.usefixtures("desktop")
+@pytest.mark.parametrize("permission", [False, True], ids=["earned-clear", "human-permission"])
+@pytest.mark.parametrize("reuse", [False, True], ids=["operator-required", "connection-only"])
+def test_custom_nonfinal_observation_respects_current_physical_authority(
+    root: Path, monkeypatch: pytest.MonkeyPatch, stateful_icacls: _StatefulIcacls, permission: bool, reuse: bool
+) -> None:
+    """Current writer histories and raw synthetic ACE rows distinguish re-arm from human permission."""
+    table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": "SELECT 'PRIVATE_SQL_690'"}
+    spec = _spec(LIVE)
+    spec["data_sources"][0]["tables"].append(table)
+    (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(gate.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(gate, "_ancestry", lambda: ["python.exe", "pwsh.exe", "explorer.exe"])
+    if permission:
+        _authorize(root)
+        assert _assess(root, authorized=True).state == "authorized_model_only"
+    else:
+        _earn(root)
+    target = stateful_icacls.key(root / "fabric")
+    assert stateful_icacls.states[target] == "clear"
+    assert not (root / gate.MARKER).exists() and gate.status(root) == 0
+    before = _rows(root)
+    outcome = (
+        _probe_one(root, spec["data_sources"], 0, 1, False)
+        if reuse
+        else _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False))
+    )
+    assert outcome == (1, "CONNECTION_OK_QUERY_UNVALIDATED" if reuse else "OPERATOR_REQUIRED")
+    assert _rows(root)[: len(before)] == before and _rows(root)[-1]["action"] == "probe-error"
+    assert _rows(root)[-1]["sources"] == [KEY]
+    assert not any(row["action"] in ("authorize", "probe-cleared") for row in _rows(root)[len(before) :])
+    with gate.gate_transaction(root):
+        assert _transaction_pending(root) == ([] if permission else [KEY])
+    if permission:
+        assert stateful_icacls.states[target] == "clear", "measurement must not silently revoke genuine permission"
+        assert not (root / gate.MARKER).exists() and gate.status(root) == 0
+        result = _assess(root, authorized=True)
+        assert (result.state, result.validation, result.max_phase2_claim) == (
+            "authorized_model_only",
+            "unvalidated",
+            "structural_only",
+        )
+    else:
+        assert stateful_icacls.states[target] == "restricted", "nonfinal custom SQL must re-arm the physical root"
+        assert json.loads((root / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [KEY]
+        assert gate.status(root) == 1
+        assert (_assess(root).state, _assess(root).codes) == ("blocked", ("probe-error",))
+    assert "PRIVATE_SQL_690" not in json.dumps(_rows(root)[len(before) :])
+
+
+@pytest.mark.usefixtures("desktop")
+@pytest.mark.parametrize("stage", ["marker", "acl", "record"])
+def test_custom_arm_or_record_failure_never_commits_a_terminal_claim(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stateful_icacls: _StatefulIcacls,
+    caplog: pytest.LogCaptureFixture,
+    stage: str,
+) -> None:
+    """A real writer failure propagates cannot-establish, without claiming its physical stop succeeded."""
+    table = {"name": "Query", "source_relation": "custom-sql", "custom_sql": "SELECT 'PRIVATE_FAILURE_690'"}
+    spec = _spec(LIVE)
+    spec["data_sources"][0]["tables"].append(table)
+    (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(gate.platform, "system", lambda: "Windows")
+    _earn(root)
+    assert gate.status(root) == 0
+    before = _rows(root)
+
+    def write(directory: Path, name: str, text: str) -> None:
+        if stage == "marker" and name == gate.MARKER:
+            raise OSError("PRIVATE_FAILURE_690")
+        _durable_write(directory, name, text)
+
+    def append(directory: Path, action: str, detail: str, sources: list[str] | None = None) -> None:
+        if stage == "record" and action == "probe-error":
+            raise OSError("PRIVATE_FAILURE_690")
+        _append_audit(directory, action, detail, sources)
+
+    monkeypatch.setattr(gate, "_durable_write", write)
+    monkeypatch.setattr(gate, "_append_audit", append)
+    if stage == "acl":
+        stateful_icacls.inject("apply", root / "fabric", "nonzero")
+    caplog.clear()
+    assert _probe_one_table(root, KEY, LIVE, (table, "ProbeOK"), (1, False)) == (3, "ERROR")
+    assert "CANNOT_ESTABLISH" in caplog.text
+    assert "PROBE: OPERATOR_REQUIRED" not in caplog.text
+    assert not any(row["action"].startswith("probe-") for row in _rows(root)[len(before) :])
+    assert "PRIVATE_FAILURE_690" not in caplog.text + json.dumps(_rows(root)[len(before) :])
+    assert not (root / gate.OVERRIDE).exists()
 
 
 @pytest.mark.usefixtures("desktop")
@@ -659,7 +1156,7 @@ def test_exceptional_attempts_record_safe_keyed_errors_before_cleanup(
     monkeypatch.setattr(probe, stage, fail)
     monkeypatch.setattr(probe, "_close", close)
     with pytest.raises(RuntimeError, match="private-cause"):
-        _probe_one_table(root, KEY, LIVE, ({"name": "Orders"}, "ID"), (1, False))
+        _probe_one_table(root, KEY, LIVE, ({"name": "Orders", "table": "[dbo].[Orders]"}, "ID"), (1, False))
     last = _rows(root)[-1]
     assert (last["action"], last["sources"]) == ("probe-error", [KEY])
     assert secret not in json.dumps(last)
@@ -672,17 +1169,26 @@ def test_exceptional_attempts_record_safe_keyed_errors_before_cleanup(
 
 @pytest.mark.usefixtures("desktop")
 @pytest.mark.parametrize("source_index", [None, 0])
-def test_production_resolution_error_invalidates_old_key(root: Path, source_index: int | None) -> None:
-    """Both run_probe entry selections must record table-resolution errors for known legs."""
+def test_production_resolution_error_cannot_reuse_old_clearance(root: Path, source_index: int | None) -> None:
+    """Removing the ordinary identity records the current null-scope key, never reuses old proof."""
     _earn(root)
     spec = _spec(LIVE)
     spec["data_sources"][0]["tables"] = []
+    current_key = _ordinary_key("source.example", None, schema="")
+    assert current_key != KEY, "unresolved identity must not inherit valid Orders proof"
     (root / gate.MIGRATION_SPEC).write_text(json.dumps(spec), encoding="utf-8")
     with pytest.raises(SystemExit) as error:
         probe.run_probe(root, source_index, 1, False)
     assert error.value.code == 1
-    assert (_rows(root)[-1]["action"], _rows(root)[-1]["sources"]) == ("probe-error", [KEY])
-    assert _assess(root).codes == ("probe-error",)
+    assert (_rows(root)[-1]["action"], _rows(root)[-1]["sources"]) == ("probe-error", [current_key])
+    current = _assess(root, spec=spec)
+    assert (current.state, current.codes, current.source_keys) == (
+        "blocked",
+        ("probe-error",),
+        (current_key,),
+    )
+    assert (_rows(root)[-2]["action"], _rows(root)[-2]["sources"]) == ("block-marker-only", [current_key])
+    assert current.max_phase2_claim == "none"
 
 
 @pytest.mark.usefixtures("desktop")
@@ -690,7 +1196,10 @@ def test_live_key_skip_is_recorded_without_becoming_success(root: Path, monkeypa
     """A skipped terminal attempt invalidates old proof while retaining its original verdict."""
     _earn(root)
     monkeypatch.setattr(probe, "_refresh_and_classify", lambda *_args: (0, "SKIPPED"))
-    assert _probe_one_table(root, KEY, LIVE, ({"name": "Orders"}, "ID"), (1, False)) == (0, "SKIPPED")
+    assert _probe_one_table(root, KEY, LIVE, ({"name": "Orders", "table": "[dbo].[Orders]"}, "ID"), (1, False)) == (
+        0,
+        "SKIPPED",
+    )
     assert (_rows(root)[-1]["action"], _rows(root)[-1]["sources"]) == ("probe-skipped", [KEY])
     assert _assess(root).codes == ("live-probe-skipped",)
 

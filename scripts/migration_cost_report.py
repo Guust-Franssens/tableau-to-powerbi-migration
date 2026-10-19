@@ -2,7 +2,7 @@
 purpose: report AI spend and model-call elapsed time for migrated Tableau units from Copilot telemetry.
 usage:   python scripts/migration_cost_report.py --runs-root _runs
          python scripts/migration_cost_report.py --runs-root migrations
-         python scripts/migration_cost_report.py --store %USERPROFILE%\\.copilot\\session-store.db
+         python scripts/migration_cost_report.py --store <copilot-home>/session-store.db
          python scripts/migration_cost_report.py --runs-root _runs --json
 
 This report is attribution-only. It joins explicit migration run metadata (`run.json`) to the local
@@ -30,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from copilot_home import copilot_home
+
 for _stream in (sys.stdout, sys.stderr):
     # pylint: disable-next=no-member  # astroid mis-infers TextIOWrapper.encoding as a class here
     if _stream is not None and _stream.encoding and _stream.encoding.lower() != "utf-8":
@@ -43,7 +45,6 @@ TOKEN_FIELDS = (
     "reasoning_tokens",
 )
 NUMERIC_FIELDS = (*TOKEN_FIELDS, "total_nano_aiu", "duration_ms")
-DEFAULT_STORE = Path.home() / ".copilot" / "session-store.db"
 ROOT_LABEL = "orchestrator/root"
 UNKNOWN = "unknown"
 MEASURED = "measured"
@@ -677,11 +678,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--store",
         type=Path,
-        default=DEFAULT_STORE,
-        help="Path to Copilot session-store.db (default: %%USERPROFILE%%\\.copilot\\session-store.db).",
+        default=None,
+        help="Path to session-store.db (default: Copilot home, COPILOT_HOME or ~/.copilot).",
     )
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.store is None:
+        args.store = copilot_home() / "session-store.db"
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:

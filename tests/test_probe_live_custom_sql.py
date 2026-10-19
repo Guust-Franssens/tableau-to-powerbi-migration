@@ -21,6 +21,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import credential_gate as gate  # noqa: E402
+import preflight_source_credentials as preflight  # noqa: E402
 import probe_live_source  # noqa: E402
 from parse_tableau import parse_workbook  # noqa: E402
 
@@ -44,6 +45,7 @@ SQLSERVER = {
     "class": "sqlserver",
     "server": "sql.example.com",
     "database": "DB",
+    "schema": "dbo",
     "powerbi_target": "live_source",
 }
 UNSUPPORTED = {"class": "oracle", "server": "oracle.example", "database": "DB", "powerbi_target": "live_source"}
@@ -54,10 +56,19 @@ EXPENSIVE_SQL = f"SELECT dbo.{SENTINEL}(f.payload) FROM huge_fact f CROSS JOIN h
 SIDE_EFFECT_SQL = f"EXEC dbo.{SENTINEL}; DROP TABLE private_fixture;"
 
 
+@pytest.fixture(autouse=True)
+def _canonical_marker_only_probe_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Custom-SQL verdicts stay independent of Windows ACL tooling."""
+    monkeypatch.setattr(gate.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(gate, "_ancestry", lambda: [])
+
+
 def _source(tables: list[dict], fields: list[dict] | None = None) -> dict:
     for table in tables:
         if table.get("custom_sql") is not None:
             table["source_relation"] = "custom-sql"
+        elif table.get("name") and table.get("source_relation") != "custom-sql":
+            table.setdefault("table", f"[{table['name']}]")
     return {
         "connection": dict(SNOWFLAKE),
         "tables": tables,
@@ -74,19 +85,50 @@ def _custom(conn: dict, sql: object = EXPENSIVE_SQL) -> dict:
 
 def _spec(root: Path, sources: list[dict]) -> Path:
     root.mkdir(parents=True, exist_ok=True)
+    for source in sources:
+        for table in source.get("tables", []):
+            if table.get("source_relation") != "custom-sql" and table.get("name"):
+                schema = source["connection"].get("schema")
+                table.setdefault("table", f"[{schema}].[{table['name']}]")
     path = root / "migration-spec.json"
     path.write_text(json.dumps({"data_sources": sources}), encoding="utf-8")
     return path
+
+
+def _persist_source(root: Path, source: dict) -> str:
+    """Persist the exact current fact whose canonical key the probe writer records."""
+    _spec(root, [source])
+    return preflight._leg_key(source, 0, source["connection"])
 
 
 def _audit(root: Path) -> list[dict]:
     return [json.loads(line) for line in (root / gate.AUDIT).read_text(encoding="utf-8").splitlines()]
 
 
+def _assess_sources(root: Path, sources: list[dict], *, authorized: bool = False) -> gate.DataAccessAssessment:
+    return gate.assess_data_access(
+        root,
+        package_spec={"data_sources": sources},
+        package_data_sources={
+            "self_contained": True,
+            "omissions": [],
+            "neutralized": [],
+            "retained_network": [],
+            "shipped": [],
+            "binding": None,
+            "parameter": None,
+            "bytes": 0,
+        },
+        fallback_authorization="model_only_unvalidated" if authorized else "stop",
+        requested_scope="model_only" if authorized else "model_and_report",
+    )
+
+
 @pytest.fixture(name="effects")
 def effects_fixture(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]:
     """Observe every operation while replacing only actual Desktop/network effects."""
     events: list[tuple[str, object]] = []
+    models: list[Path] = []
     original_build = probe_live_source.build_m_query
     original_write = probe_live_source._write_probe_model
 
@@ -100,7 +142,12 @@ def effects_fixture(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]
 
     def write(root: Path, query: str, table: str, column: str) -> Path:
         events.append(("pbip", query))
-        return original_write(root, query, table, column)
+        model = original_write(root, query, table, column)
+        tmdl = next(model.glob("*.SemanticModel/definition/tables/*.tmdl")).read_text(encoding="utf-8")
+        assert "column 'ProbeOK'" in tmdl and "sourceColumn: ProbeOK" in tmdl
+        assert "column 'Col'" not in tmdl
+        models.append(model)
+        return model
 
     def open_desktop(pbip: Path) -> int:
         events.append(("desktop", str(pbip)))
@@ -109,6 +156,9 @@ def effects_fixture(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]
     def refresh(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
         events.append(("refresh", argv))
         assert Path(argv[1]) == probe_live_source.SKILL_SCRIPTS / "refresh_pbip_model.py"
+        model = models[-1]
+        if any(SENTINEL in path.read_text(encoding="utf-8") for path in model.rglob("*.tmdl")):
+            events.append(("customer-sql-executed", 1))
         table = argv[argv.index("--tables") + 1]
         return subprocess.CompletedProcess(argv, 0, stdout=f"REFRESH: TABLES_OK '{table}'", stderr="")
 
@@ -125,7 +175,7 @@ def effects_fixture(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, object]]
     monkeypatch.setattr(probe_live_source, "_record_desktop_lifecycle", lambda *_args: {})
     monkeypatch.setattr(probe_live_source, "_close", lambda _pid, _path: observe("close"))
     monkeypatch.setattr(probe_live_source, "_lift_gate", lift)
-    monkeypatch.setattr(probe_live_source.subprocess, "run", refresh)
+    monkeypatch.setattr(probe_live_source, "_run_refresh", refresh)
     return events
 
 
@@ -161,7 +211,7 @@ def test_custom_only_has_no_automatic_operation(
     assert sum(SENTINEL in str(value) for kind, value in effects if kind in ("pbip", "refresh")) == 0
     _assert_terminal(tmp_path, code, "OPERATOR_REQUIRED", effects)
     assert spec.read_bytes() == before
-    assert not (tmp_path / "_probe").exists()
+    assert not list((tmp_path / "_probe").rglob("*.pbip"))
     assert SENTINEL not in caplog.text + (tmp_path / gate.AUDIT).read_text(encoding="utf-8")
     assert "PROBE: OPERATOR_REQUIRED" in caplog.text
     assert "Power BI reached" not in caplog.text and "PROBE: DATA_OK" not in caplog.text
@@ -199,8 +249,9 @@ class SqlReadTrap(dict):
 
 
 def _protect_loaded_sql(monkeypatch: pytest.MonkeyPatch, *, memory_error: bool = False) -> list[dict]:
-    """Instrument the JSON-read boundary, not a replacement bundle loader or probe result."""
+    """Trap probe loading, then restore JSON-native canonical reads before the real writer."""
     original_load, original_dumps, original_hash = json.load, json.dumps, hashlib.sha256
+    original_record = probe_live_source._record_attempt
     loaded_sources: list[dict] = []
     protected: list[object] = []
 
@@ -224,12 +275,19 @@ def _protect_loaded_sql(monkeypatch: pytest.MonkeyPatch, *, memory_error: bool =
         return original_dumps(value, *args, **kwargs)
 
     def sha256(value: bytes = b"", **kwargs: object) -> object:
-        assert SENTINEL.encode() not in value, "the default path hashed custom SQL"
+        assert SENTINEL.encode() not in value, "the probe loader hashed custom SQL"
         return original_hash(value, **kwargs)
+
+    def record(*args: object, **kwargs: object) -> None:
+        monkeypatch.setattr(json, "load", original_load)
+        monkeypatch.setattr(json, "dumps", original_dumps)
+        monkeypatch.setattr(hashlib, "sha256", original_hash)
+        original_record(*args, **kwargs)
 
     monkeypatch.setattr(json, "load", load)
     monkeypatch.setattr(json, "dumps", dumps)
     monkeypatch.setattr(hashlib, "sha256", sha256)
+    monkeypatch.setattr(probe_live_source, "_record_attempt", record)
     return loaded_sources
 
 
@@ -239,7 +297,7 @@ def _protect_loaded_sql(monkeypatch: pytest.MonkeyPatch, *, memory_error: bool =
         (shape, composition, payload)
         for shape in ("spec", "engine", "engine-direct")
         for composition in ("custom-only", "mixed-leg", "earlier-source")
-        for payload in ("object", "list", "string", "huge")
+        for payload in ("string", "null", "huge")
     ],
     ids="-".join,
 )
@@ -250,22 +308,23 @@ def test_cli_loader_leaves_payload_opaque(
     caplog: pytest.LogCaptureFixture,
     case: tuple[str, str, str],
 ) -> None:
-    """Nested/non-string/large SQL cannot abort CLI loading before a keyed terminal observation."""
+    """Probe loading is opaque; canonical JSON identity comparison is independently permitted."""
     shape, composition, payload = case
     custom = _custom(
         SQLSERVER,
         {
-            "object": {"data_sources": [_custom(UNSUPPORTED)], "binding_signal": {"published_ds_name": SENTINEL}},
-            "list": [{"nested": [SIDE_EFFECT_SQL, {"custom_sql": EXPENSIVE_SQL}]}],
             "string": SIDE_EFFECT_SQL,
+            "null": None,
             "huge": SENTINEL + ("x" * 2_000_000),
         }[payload],
     )
     sources = [custom]
     if composition == "mixed-leg":
-        custom["tables"].insert(0, {"name": "REAL_TABLE"})
+        custom["tables"].insert(0, {"name": "REAL_TABLE", "table": "[dbo].[REAL_TABLE]"})
     elif composition == "earlier-source":
-        sources.insert(0, {"connection": dict(SQLSERVER), "tables": [{"name": "REAL_TABLE"}]})
+        sources.insert(
+            0, {"connection": dict(SQLSERVER), "tables": [{"name": "REAL_TABLE", "table": "[dbo].[REAL_TABLE]"}]}
+        )
     if shape == "spec":
         path = _spec(tmp_path, sources)
         args = ["--spec", str(path)]
@@ -275,6 +334,7 @@ def test_cli_loader_leaves_payload_opaque(
             json.dumps({"nested": sources if shape == "engine-direct" else {"data_sources": sources}}),
             encoding="utf-8",
         )
+        (tmp_path / gate.ENGINE_RECEIPT).write_text("{}", encoding="utf-8")
         args = ["--bundle", str(tmp_path)]
     original_bytes = path.read_bytes()
     _protect_loaded_sql(monkeypatch, memory_error=payload == "huge")
@@ -282,16 +342,97 @@ def test_cli_loader_leaves_payload_opaque(
     try:
         code = probe_live_source.main(args)
     except MemoryError:
-        pytest.fail("custom payload processing prevented a keyed verdict/audit")
+        pytest.fail("the probe loader serialized a custom source before the supported writer")
     token = "OPERATOR_REQUIRED" if composition == "custom-only" else TOKEN
     _assert_terminal(tmp_path, code, token, effects)
-    assert _audit(tmp_path)[-1]["sources"] == [probe_live_source._leg_key({}, 0, SQLSERVER)]
+    assert _audit(tmp_path)[-1]["sources"] == [preflight._leg_key(sources[-1], 0, SQLSERVER)]
     assert [value for kind, value in effects if kind == "m"] == ([] if composition == "custom-only" else ["REAL_TABLE"])
     if composition == "custom-only":
         assert effects == [], "custom SQL must not perform automatic operations"
-        assert not (tmp_path / "_probe").exists()
+        assert not list((tmp_path / "_probe").rglob("*.pbip"))
     assert path.read_bytes() == original_bytes
     assert SENTINEL not in caplog.text + (tmp_path / gate.AUDIT).read_text(encoding="utf-8") + repr(effects)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [(shape, payload) for shape in ("spec", "engine") for payload in ("boolean", "list", "object")],
+    ids="-".join,
+)
+def test_malformed_json_payloads_never_execute_or_earn_authority(
+    tmp_path: Path,
+    effects: list[tuple[str, object]],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    case: tuple[str, str],
+) -> None:
+    """Non-schema JSON is a robustness negative, not a supported custom-query positive."""
+    shape, payload = case
+    source = _custom(
+        SQLSERVER,
+        {
+            "boolean": True,
+            "list": [SIDE_EFFECT_SQL, {"custom_sql": EXPENSIVE_SQL}],
+            "object": {"data_sources": [_custom(UNSUPPORTED)], "binding_signal": {"published_ds_name": SENTINEL}},
+        }[payload],
+    )
+    path = _spec(tmp_path, [source]) if shape == "spec" else tmp_path / "report.json"
+    if shape == "engine":
+        path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+        (tmp_path / gate.ENGINE_RECEIPT).write_text("{}", encoding="utf-8")
+    before = path.read_bytes()
+    _protect_loaded_sql(monkeypatch)
+    caplog.set_level("INFO", logger="probe_live_source")
+    code = probe_live_source.main(
+        ["--spec" if shape == "spec" else "--bundle", str(path if shape == "spec" else tmp_path)]
+    )
+    assert code != 0 and effects == [], "malformed custom SQL must not execute or create an automatic operation"
+    entries = _audit(tmp_path) if (tmp_path / gate.AUDIT).exists() else []
+    assert not any(row["action"] in ("probe-data_ok", "probe-cleared", "authorize") for row in entries)
+    assert not (tmp_path / gate.OVERRIDE).exists()
+    result = _assess_sources(tmp_path, [source])
+    assert result.state in ("blocked", "cannot_establish")
+    assert TOKEN not in caplog.text and "PROBE: DATA_OK" not in caplog.text
+    assert SENTINEL not in caplog.text + json.dumps(entries) + repr(effects)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("same_query", [True, False], ids=["exact-mirror", "distinct-query-collision"])
+def test_engine_query_identity_distinguishes_exact_mirrors_from_collisions(
+    tmp_path: Path, effects: list[tuple[str, object]], caplog: pytest.LogCaptureFixture, same_query: bool
+) -> None:
+    """Real canonical root facts compare full JSON sources, not only their projected gate keys."""
+    first = _custom(SQLSERVER)
+    second = _custom(SQLSERVER, EXPENSIVE_SQL if same_query else SIDE_EFFECT_SQL)
+    key = preflight._leg_key(first, 0, SQLSERVER)
+    assert key == preflight._leg_key(second, 1, SQLSERVER)
+    report = tmp_path / "report.json"
+    handover = tmp_path / "handover" / "fixture.json"
+    handover.parent.mkdir()
+    report.write_text(json.dumps({"data_sources": [first]}), encoding="utf-8")
+    handover.write_text(json.dumps({"data_sources": [second]}), encoding="utf-8")
+    (tmp_path / gate.ENGINE_RECEIPT).write_text("{}", encoding="utf-8")
+    before = (report.read_bytes(), handover.read_bytes())
+    current, refusal = gate._gate_root_live_keys(tmp_path)
+    assert (current, refusal) == ((frozenset({key}), None) if same_query else (frozenset(), "source-key-invalid")), (
+        "distinct queries must not collapse into one canonical root fact"
+    )
+    caplog.set_level("INFO", logger="probe_live_source")
+    code = probe_live_source.main(["--bundle", str(tmp_path)])
+    assert effects == [], "custom SQL must not perform automatic operations"
+    if same_query:
+        _assert_terminal(tmp_path, code, "OPERATOR_REQUIRED", effects)
+        assert _audit(tmp_path)[-1]["sources"] == [key]
+        assert gate.status(tmp_path) != 0
+    else:
+        assert code == 3 and "CANNOT_ESTABLISH" in caplog.text
+        assert not (tmp_path / gate.AUDIT).exists()
+        assert not (tmp_path / gate.MARKER).exists()
+        assert not (tmp_path / gate.OVERRIDE).exists()
+        assert "PROBE: OPERATOR_REQUIRED" not in caplog.text and TOKEN not in caplog.text
+    entries = _audit(tmp_path) if (tmp_path / gate.AUDIT).exists() else []
+    assert SENTINEL not in caplog.text + json.dumps(entries)
+    assert (report.read_bytes(), handover.read_bytes()) == before
 
 
 @pytest.mark.parametrize("shape", ["spec", "engine"])
@@ -323,9 +464,9 @@ def test_custom_payload_is_not_read_and_direct_table_entry_is_also_closed(
 ) -> None:
     """Both public resolution and the lower-level table entry honor the relation discriminator."""
     source = _custom(SQLSERVER)
+    key = _persist_source(tmp_path, source)
     source["tables"] = [SqlReadTrap(source["tables"][0])]
     assert probe_live_source._probe_one(tmp_path, [source], 0, 7, False) == (1, "OPERATOR_REQUIRED")
-    key = probe_live_source._leg_key(source, 0, source["connection"])
     assert probe_live_source._probe_one_table(
         tmp_path, key, source["connection"], (source["tables"][0], "ProbeOK"), (7, False)
     ) == (1, "OPERATOR_REQUIRED")
@@ -346,6 +487,7 @@ def test_parser_self_closing_text_relation_cannot_clear_as_a_physical_table(
     source = parse_workbook(twb)["data_sources"][0]
     assert source["tables"][0]["source_relation"] == "custom-sql"
     assert source["tables"][0]["custom_sql"] is None
+    _persist_source(tmp_path, source)
     assert probe_live_source._probe_one(tmp_path, [source], 0, 1, False) == (1, "OPERATOR_REQUIRED")
     assert effects == [], "custom SQL must not perform automatic operations"
 
@@ -371,7 +513,74 @@ def test_same_scope_ordinary_data_ok_reuses_only_connection_evidence(
     query = next(value for kind, value in effects if kind == "pbip")
     assert "Table.ColumnNames(tbl)" in query and "Value.NativeQuery" not in query
     assert SENTINEL not in repr(effects)
-    assert [entry["action"] for entry in _audit(tmp_path)] == ["probe-data_ok", "probe-error"]
+    assert [entry["action"] for entry in _audit(tmp_path) if entry["action"].startswith("probe-")] == [
+        "probe-data_ok",
+        "probe-error",
+    ]
+    assert not any(kind == "customer-sql-executed" for kind, _value in effects)
+
+
+@pytest.mark.parametrize("reuse", [False, True], ids=["operator-required", "connection-only"])
+def test_current_human_permission_stays_unvalidated_without_query_execution(
+    tmp_path: Path, effects: list[tuple[str, object]], caplog: pytest.LogCaptureFixture, reuse: bool
+) -> None:
+    """Permission is established by current writers, not inferred from a nonfinal measurement."""
+    sources = [_custom(SQLSERVER)]
+    if reuse:
+        sources.insert(0, {"connection": dict(SQLSERVER), "tables": [{"name": "REAL_TABLE"}]})
+    spec = _spec(tmp_path, sources)
+    keys, refusal = gate._gate_root_live_keys(tmp_path)
+    assert refusal is None
+    assert gate.apply_block(tmp_path, sorted(keys)) == 0
+    assert gate.authorize(tmp_path, "Fixture Human") == 0
+    assert _assess_sources(tmp_path, sources, authorized=True).state == "authorized_model_only"
+    before = _audit(tmp_path)
+    permission = (tmp_path / gate.OVERRIDE).read_bytes()
+    code = probe_live_source.main(["--spec", str(spec)])
+    assert code == 1
+    assert sum(value for kind, value in effects if kind == "customer-sql-executed") == 0, (
+        "the original slow query must never execute"
+    )
+    assert sum(kind == "refresh" for kind, _value in effects) == int(reuse)
+    assert [value for kind, value in effects if kind == "m"] == (["REAL_TABLE"] if reuse else [])
+    if not reuse:
+        assert effects == [], "custom SQL must not perform automatic operations"
+    rows = _audit(tmp_path)
+    assert rows[: len(before)] == before
+    assert not any(row["action"] in ("authorize", "probe-cleared") for row in rows[len(before) :])
+    assert rows[-1]["action"] == "probe-error"
+    assert rows[-1]["detail"].startswith((TOKEN if reuse else "OPERATOR_REQUIRED") + ":")
+    assert (tmp_path / gate.OVERRIDE).read_bytes() == permission
+    assert not (tmp_path / gate.MARKER).exists() and gate.status(tmp_path) == 0
+    result = _assess_sources(tmp_path, sources, authorized=True)
+    assert (result.state, result.validation, result.max_phase2_claim) == (
+        "authorized_model_only",
+        "unvalidated",
+        "structural_only",
+    )
+    assert SENTINEL not in caplog.text + json.dumps(rows) + repr(effects)
+
+
+def test_original_query_execution_mutation_fails_the_execution_counter(
+    tmp_path: Path,
+    effects: list[tuple[str, object]],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The independent stub's counter detects execution, not a setup/import/generic-exit failure."""
+    original = probe_live_source._custom_sql_stop
+
+    def execute(root: Path, key: str) -> tuple[int, str]:
+        probe_live_source._write_probe_model(
+            root, f'let q = Value.NativeQuery(source, "{EXPENSIVE_SQL}") in q', "Custom", "ProbeOK"
+        )
+        assert probe_live_source._refresh_and_classify(4242, "Custom", 7, False) == (0, "DATA_OK")
+        return original(root, key)
+
+    monkeypatch.setattr(probe_live_source, "_custom_sql_stop", execute)
+    with pytest.raises(AssertionError, match="the original slow query must never execute"):
+        test_current_human_permission_stays_unvalidated_without_query_execution(tmp_path, effects, caplog, False)
+    assert sum(value for kind, value in effects if kind == "customer-sql-executed") == 1
 
 
 @pytest.mark.parametrize(
@@ -386,6 +595,7 @@ def test_same_scope_ordinary_data_ok_reuses_only_connection_evidence(
         (SNOWFLAKE, "warehouse", "OTHER_WH"),
         (SNOWFLAKE, "role", "OTHER_ROLE"),
         (SNOWFLAKE, "database", "OTHER_DB"),
+        *[(conn, "schema", "other_schema") for conn in CONNECTIONS],
         *[(conn, "credential_scope", "different-principal") for conn in CONNECTIONS],
         *[(conn, "authentication", {"kind": "different"}) for conn in CONNECTIONS],
         (SQLSERVER, "class", "oracle"),
@@ -422,6 +632,22 @@ def test_scope_snapshot_is_immutable_and_reuse_does_not_survive_an_invocation(
     _assert_terminal(tmp_path, code, "OPERATOR_REQUIRED", effects)
 
 
+def test_qualified_physical_schema_cannot_borrow_declared_scope(
+    tmp_path: Path, effects: list[tuple[str, object]]
+) -> None:
+    """#647's real physical schema, not a conflicting declared hint, constrains connection reuse."""
+    ordinary = {
+        "connection": dict(SQLSERVER),
+        "tables": [{"name": "display", "table": "[private_schema].[REAL_TABLE]"}],
+    }
+    sources = [ordinary, _custom(SQLSERVER)]
+    code = probe_live_source.main(["--spec", str(_spec(tmp_path, sources))])
+    _assert_terminal(tmp_path, code, "OPERATOR_REQUIRED", effects)
+    query = next(value for kind, value in effects if kind == "pbip")
+    assert '[Schema="private_schema",Item="REAL_TABLE"]' in query
+    assert sum(kind == "refresh" for kind, _value in effects) == 1
+
+
 @pytest.mark.parametrize("same_source", [True, False], ids=["same-leg", "earlier-source"])
 @pytest.mark.parametrize(
     "endpoint",
@@ -435,8 +661,6 @@ def test_scope_snapshot_is_immutable_and_reuse_does_not_survive_an_invocation(
         {"port": "not-a-port"},
         {"port": -1},
         {"port": 70000},
-        {"port": False},
-        {"port": [1544]},
         {"instance": ""},
         {"instance": None},
         {"instance": 42},
@@ -464,6 +688,19 @@ def test_unexercised_endpoint_cannot_supply_reuse(
     )
     _assert_terminal(tmp_path, code, "OPERATOR_REQUIRED", effects)
     assert sum(kind == "refresh" for kind, _value in effects) == 1
+
+
+@pytest.mark.parametrize("port", [False, [1544]], ids=["boolean", "list"])
+def test_malformed_scope_cannot_become_ordinary_evidence(
+    tmp_path: Path, effects: list[tuple[str, object]], caplog: pytest.LogCaptureFixture, port: object
+) -> None:
+    """Current canonical input refusal is not a positive ordinary DATA_OK fixture."""
+    spec = _spec(tmp_path, [_custom({**SQLSERVER, "port": port})])
+    code = probe_live_source.main(["--spec", str(spec)])
+    assert code == 3 and effects == []
+    assert "CANNOT_ESTABLISH" in caplog.text
+    assert not (tmp_path / gate.AUDIT).exists() and not (tmp_path / gate.OVERRIDE).exists()
+    assert _assess_sources(tmp_path, [_custom({**SQLSERVER, "port": port})]).state == "cannot_establish"
 
 
 @pytest.mark.parametrize("server", ["sql.example.com", r"sql.example.com\REPORTING", "sql.example.com,1544"])
@@ -510,9 +747,10 @@ def test_ordinary_failures_never_seed_custom_reuse(
     """Only an actual DATA_OK earns reuse; BAD_TABLE may fall through to a no-operation stop."""
     source = _custom(SQLSERVER)
     source["tables"].insert(0, {"name": "REAL_TABLE"})
+    _persist_source(tmp_path, source)
     monkeypatch.setattr(
-        probe_live_source.subprocess,
-        "run",
+        probe_live_source,
+        "_run_refresh",
         lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 1, stdout=detail, stderr=""),
     )
     assert probe_live_source._probe_one(tmp_path, [source], 0, 7, False) == (1, expected)
@@ -540,6 +778,8 @@ def test_operator_required_is_a_real_nonzero_process_exit(tmp_path: Path, payloa
         "import pytest\n"
         "from test_probe_live_custom_sql import effects_fixture, probe_live_source, _protect_loaded_sql\n"
         "with pytest.MonkeyPatch.context() as patch:\n"
+        "    import credential_gate as gate\n"
+        "    patch.setattr(gate.platform, 'system', lambda: 'Linux')\n"
         "    events = effects_fixture.__wrapped__(patch)\n"
         "    _protect_loaded_sql(patch, memory_error=sys.argv[3] == 'huge')\n"
         "    code = probe_live_source.main(['--spec', sys.argv[2]])\n"
@@ -555,7 +795,7 @@ def test_operator_required_is_a_real_nonzero_process_exit(tmp_path: Path, payloa
     )
     assert child.returncode == 1
     assert "PROBE: OPERATOR_REQUIRED" in child.stderr
-    assert "No connection claim was earned; the gate remains armed." in child.stderr
+    assert "No connection claim was earned." in child.stderr
     assert "Traceback" not in child.stderr and SENTINEL not in child.stderr + child.stdout
     _assert_terminal(tmp_path, child.returncode, "OPERATOR_REQUIRED", [])
 
@@ -565,14 +805,16 @@ def test_customer_messages_match_the_two_evidence_states(caplog: pytest.LogCaptu
     probe_live_source._print_verdict_directive(TOKEN)
     assert [record.getMessage() for record in caplog.records] == [
         "Power BI reached this same connection scope through an ordinary table in this probe. "
-        "Your custom SQL was not executed and remains unvalidated; the gate is still armed."
+        "Your custom SQL was not executed and remains unvalidated. Without existing exact-key human "
+        "build-only permission, the gate stays armed; this result grants no permission."
     ], "connection-only customer LogRecord must equal the approved message"
     caplog.clear()
     probe_live_source._print_verdict_directive("OPERATOR_REQUIRED")
     assert [record.getMessage() for record in caplog.records] == [
         "Your custom SQL was not executed. No safe automated connection-only operation is currently "
         "available without catalog enumeration or a native-query approval prompt. "
-        "No connection claim was earned; the gate remains armed."
+        "No connection claim was earned. Without existing exact-key human build-only permission, "
+        "the gate stays armed; this result grants no permission."
     ], "operator-required customer LogRecord must equal the approved message"
     assert "Power BI reached" not in caplog.text and "SOURCE UNREACHABLE" not in caplog.text
 
@@ -662,7 +904,7 @@ def test_ordinary_credential_docs_remain_base_exact(relative: Path, expected: st
 
 @pytest.mark.parametrize("reuse", [False, True], ids=["operator-required", "connection-only"])
 def test_both_custom_outcomes_keep_the_real_audit_and_gate_armed(
-    tmp_path: Path, effects: list[tuple[str, object]], monkeypatch: pytest.MonkeyPatch, reuse: bool
+    tmp_path: Path, effects: list[tuple[str, object]], reuse: bool
 ) -> None:
     """The unchanged gate verifies unvalidated artifacts remain blocked for either verdict."""
     sources = [_custom(SQLSERVER)]
@@ -672,19 +914,18 @@ def test_both_custom_outcomes_keep_the_real_audit_and_gate_armed(
     artifact = tmp_path / "fabric" / "unfinished.pbip"
     artifact.parent.mkdir()
     artifact.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(gate.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(gate, "_user", lambda: "fixture")
-    monkeypatch.setattr(gate, "_icacls", lambda _args: (0, "fixture ACL"))
-    monkeypatch.setattr(gate, "_has_deny_ace", lambda root: (root / gate.MARKER).exists())
-    gate.apply_block(tmp_path, [probe_live_source._leg_key({}, 0, SQLSERVER)])
-    marker = (tmp_path / gate.MARKER).read_bytes()
+    keys, refusal = gate._gate_root_live_keys(tmp_path)
+    assert refusal is None and gate.apply_block(tmp_path, sorted(keys)) == 0
+    assert gate.status(tmp_path) == 1
     code = probe_live_source.main(["--spec", str(spec)])
     _assert_terminal(tmp_path, code, TOKEN if reuse else "OPERATOR_REQUIRED", effects)
-    assert (tmp_path / gate.MARKER).read_bytes() == marker
+    assert set(json.loads((tmp_path / gate.MARKER).read_text(encoding="utf-8"))["sources"]) == keys
+    with gate.gate_transaction(tmp_path):
+        assert set(gate._transaction_pending(tmp_path)) == keys
     assert gate.status(tmp_path) == 1 and gate.verify(tmp_path) == 1
     assert not (tmp_path / gate.OVERRIDE).exists()
     probe_live_source._record_attempt(
-        tmp_path, "OPERATOR_REQUIRED", "other existing producer", [probe_live_source._leg_key({}, 0, SQLSERVER)]
+        tmp_path, "OPERATOR_REQUIRED", "other existing producer", [preflight._leg_key(sources[-1], 0, SQLSERVER)]
     )
     assert _audit(tmp_path)[-1]["action"] == "probe-operator_required", "other operator producers must remain unchanged"
 
@@ -750,6 +991,7 @@ def test_real_table_probe_still_opens_refreshes_and_returns_data_ok(
 ) -> None:
     """Exercise ordinary M, PBIP and real child-verdict parsing with only external I/O stubbed."""
     source = {"connection": dict(SNOWFLAKE), "tables": [{"name": "FLIGHTS"}]}
+    _persist_source(tmp_path, source)
     assert probe_live_source._probe_one(tmp_path, [source], 0, 7, False) == (0, "DATA_OK")
     assert [kind for kind, _value in effects] == [
         "dns",
@@ -808,7 +1050,7 @@ def test_a_navigation_key_miss_classifies_as_bad_table_not_unclassified_error(te
 def test_real_tables_are_ordered_before_custom_sql_without_reading_the_query() -> None:
     """Resolution preserves the custom relation and raw bytes but schedules ordinary evidence first."""
     source = _custom(SNOWFLAKE)
-    source["tables"].append({"name": "REAL_TABLE"})
+    source["tables"].append({"name": "REAL_TABLE", "table": "[PUBLIC].[REAL_TABLE]"})
     _, tables, column = probe_live_source._resolve_probe_target([source], 0)
     assert [table["name"] for table in tables] == ["REAL_TABLE", "Q"]
     assert tables[-1]["custom_sql"] == EXPENSIVE_SQL and column == "ProbeOK"
@@ -831,8 +1073,11 @@ def test_real_tables_are_ordered_before_custom_sql_without_reading_the_query() -
         ),
         (
             "_record_attempt",
-            "_audit(migration, action, what, sources=list(sources))",
-            '_audit(migration, "probe-cleared", what, sources=list(sources))',
+            "record_probe_attempt(migration, verdict, what, sources=list(sources))",
+            'record_probe_attempt(migration, "DATA_OK", what, sources=list(sources))\n'
+            "    from credential_gate import clear_block\n"
+            '    assert clear_block(migration, "probe-cleared: mutation-injected DATA_OK", '
+            "earned=True, sources=list(sources)) == 0",
             "custom SQL must not earn clearance or authorization",
         ),
         (
@@ -858,7 +1103,8 @@ def test_verdict_mutations_fail_the_intended_assertion(
     exec(compile(original.replace(old, new), "<issue690-mutation>", "exec"), namespace)  # pylint: disable=exec-used
     monkeypatch.setattr(probe_live_source, function, namespace[function])
     if function == "_custom_sql_stop":
-        code, _token = probe_live_source._custom_sql_stop(tmp_path, probe_live_source._leg_key({}, 0, SQLSERVER))
+        key = _persist_source(tmp_path, _custom(SQLSERVER))
+        code, _token = probe_live_source._custom_sql_stop(tmp_path, key)
         with pytest.raises(AssertionError, match=message):
             _assert_terminal(tmp_path, code, "OPERATOR_REQUIRED", effects)
     else:

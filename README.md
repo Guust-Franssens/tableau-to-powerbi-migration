@@ -158,8 +158,8 @@ original dashboards belongs to their respective Tableau Public authors.
     semantic model (star schema, relationships, measures), using
     [`docs/tableau-dax-translation-guide.md`](docs/tableau-dax-translation-guide.md) as its playbook.
   - `pbi-report-builder`: turns worksheets and dashboards into a PBIR report (pages, visuals,
-    bookmarks), chaining the official `powerbi-report-planning`, `powerbi-report-design`, and
-    `powerbi-report-authoring` skills.
+    bookmarks), using the official `powerbi-report-cli` skill (`authoring` for repairs,
+    `design` then `authoring` for a missing page).
   - `pbi-migration-validator`: a read-only critic that compares the built report against the Tableau
     original figure by figure, on both visuals and numbers, and reports discrepancies back to the
     orchestrator (it never edits files itself).
@@ -375,7 +375,7 @@ scripts/parse_tableau.py  ──────►  migration-spec.json
      │    then runs the AI/Copilot-readiness pass.
      │
      ├──► pbi-report-builder (agent)  ──►  PBIR report (pages/visuals/bookmarks)
-     │    Chains powerbi-report-planning, design, authoring,
+     │    Uses powerbi-report-cli (authoring/design modes),
      │    reusing the .github/pbi.kb visual cookbook.
      │
      └──► pbi-migration-validator (agent)  ──►  figure-by-figure fidelity findings
@@ -419,15 +419,15 @@ finished one-command agent handoff yet.
 
 This toolkit has two tiers. The **deterministic Tableau → PBIP conversion engine is not in this
 repo**; it is installed as the `tableau-fabric-skills@tableau-collection` Copilot plugin. This repo
-contains the parser, wrappers, examples, docs, and four Copilot agent personas that critique, enrich
+contains the parser, wrappers, examples, docs, and five Copilot agent personas that critique, enrich
 and fix the engine's output. The agents also build on Microsoft's official Fabric/Power BI skill
 plugin and talk to Power BI through **MCP servers**. Those dependencies are declared in the repo so a
 clone is self-configuring:
 
-- [`AGENTS.md`](AGENTS.md): auto-loaded by Copilot CLI. Declares the required plugins
-  (`powerbi-authoring@fabric-collection` from `microsoft/skills-for-fabric`, plus this repo's own
-  `powerbi-playbook@powerbi-playbook-collection`), the MCP servers, and the conventions every
-  agent inherits. **Read this first.**
+- [`AGENTS.md`](AGENTS.md): auto-loaded by Copilot CLI. Customer runtime contract: front door,
+  intake, briefs, task-tool dispatch and independent Tableau comparison. **Read this first.**
+  [Runbook §1.1](docs/operator-runbook.md#11-tooling) and `scripts/preflight.ps1` own plugin,
+  skill and MCP setup and repair hints.
 - [`.vscode/mcp.json`](.vscode/mcp.json): MCP server definitions (auto-read by VS Code Copilot; CLI
   users add the same with `/mcp`).
 - Repo-local agents (`.github/agents/`) are committed and load automatically. So are repo-local

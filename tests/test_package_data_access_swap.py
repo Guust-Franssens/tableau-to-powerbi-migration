@@ -18,6 +18,91 @@ from test_package_data_access_snapshot import _binding_consumer, _files, _local_
 from test_package_unit_gates import UNIT, _binding_cli, _binding_package, pkg
 
 
+@pytest.mark.parametrize("rollback", [False, True])
+def test_gate_companion_survives_package_retire_swap_and_rollback(tmp_path: Path, rollback: bool) -> None:
+    """Every physical generation uses the immutable final authority, never its transient spelling."""
+    gate = pkg.data_access
+    final = tmp_path / "Unit"
+    staged = pkg.staging_dir(tmp_path, "Unit")
+    final.mkdir()
+    staged.mkdir()
+    (final / "original").write_text("old")
+    (staged / "candidate").write_text("new")
+    authority = gate.coordination_root(final)
+    checked = []
+
+    def verify_retired(retired):
+        assert gate._authority(retired).canonical == authority.canonical, "package generation must retain final token"
+        assert len(gate._TRANSACTIONS.get()) == 1
+        checked.append("retired")
+        if rollback:
+            raise ValueError("fixture rollback")
+
+    def verify_staged():
+        assert gate._authority(staged).canonical == authority.canonical, "package generation must retain final token"
+        assert len(gate._TRANSACTIONS.get()) == 1
+        checked.append("staged")
+
+    if rollback:
+        with pytest.raises(ValueError, match="fixture rollback"):
+            pkg.replace_dir(staged, final, verify_retired, verify_staged=verify_staged)
+        assert (final / "original").read_text() == "old"
+        assert checked == ["retired"]
+    else:
+        assert pkg.replace_dir(staged, final, verify_retired, verify_staged=verify_staged) is None
+        assert (final / "candidate").read_text() == "new"
+        assert checked == ["retired", "staged"]
+    assert authority.companion.exists() and authority.companion.stat().st_size == 1
+    assert not list(final.glob(".credential-gate-tx-*")), "in-package locks break membership and Windows rename"
+
+
+def test_binding_cohort_acquires_sorted_authorities_before_inspection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both provider and consumer descriptors precede every cohort inspection."""
+    provider = _binding_package(tmp_path / "provider", datasource=True)
+    assert _binding_cli(provider)["exit_code"] == 0
+    consumer = _binding_consumer(tmp_path, provider)
+    gate = pkg.data_access
+    authorities = [gate.coordination_root(root) for root in (provider, consumer)]
+    expected = [authority.canonical for authority in sorted(authorities, key=lambda item: item.companion.name)]
+    entered = []
+    waits = []
+    enter = gate.GateTransaction.__enter__
+    hold = pkg._binding_hold
+
+    def counted(transaction):
+        entered.append(transaction.authority.canonical)
+        waits.append(transaction.timeout)
+        return enter(transaction)
+
+    def inspected(root):
+        assert sorted(tx.authority.canonical for tx in gate._TRANSACTIONS.get()) == sorted(expected)
+        return hold(root)
+
+    monkeypatch.setattr(gate.GateTransaction, "__enter__", counted)
+    monkeypatch.setattr(pkg, "_binding_hold", inspected)
+    result = pkg.bind_package(str(consumer), inspect=True, provider_packages=[str(provider)])
+    assert result.exit_code != 3
+    assert entered == expected, "no participant may acquire a fresh staging/retired/package token"
+    assert waits == [2.0, 2.0], "public read-only binding inspection uses the approved reader deadline"
+
+
+def test_first_package_generation_receives_final_token(tmp_path: Path) -> None:
+    """A first publication cannot silently coordinate on the staging directory's spelling."""
+    gate = pkg.data_access
+    final = tmp_path / "First"
+    staged = pkg.staging_dir(tmp_path, "First")
+    staged.mkdir()
+    expected = gate.coordination_root(final)
+
+    def verify():
+        assert gate._authority(staged).canonical == expected.canonical, "package generation must retain final token"
+
+    assert pkg.replace_dir(staged, final, verify_staged=verify) is None
+    assert expected.companion.is_file()
+
+
 _DISCOVERY_RETURN_MODES = (
     "inspect",
     "idempotent",

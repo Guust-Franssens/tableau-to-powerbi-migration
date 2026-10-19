@@ -40,6 +40,11 @@ import iteration_receipt as receipt
 # Neither import loads CLR or starts native work; there is no alternate implementation.
 SKILL_SCRIPTS = Path(__file__).resolve().parents[1] / ".github" / "skills" / "pbip-model-refresh" / "scripts"
 sys.path.insert(0, str(SKILL_SCRIPTS))
+# The root CLI lint pass cannot resolve this runtime-added sibling path; copy/import tests cover it.
+from _desktop_observer import (  # noqa: E402  # pylint: disable=wrong-import-position,import-error
+    observe,
+    print_dialog_diagnostic,
+)
 from probe_desktop_query import (  # noqa: E402  # pylint: disable=wrong-import-position,no-name-in-module
     BoundDesktop,
     CanaryObservation,
@@ -77,6 +82,21 @@ def _emit(text: str, *, stream=None, flush: bool = False) -> None:
         except LookupError:
             text = text.encode("ascii", "backslashreplace").decode("ascii")
     print(text, file=stream, flush=flush)
+
+
+def _report_dialog(pid: str | int, *, expected_process_start: str | None = None) -> None:
+    """Best-effort terminal diagnostic for the explicit target; never change a capture result."""
+    if isinstance(pid, str) and pid.isascii() and pid.isdigit():
+        pid = int(pid)
+    if type(pid) is not int or pid <= 0:  # pylint: disable=unidiomatic-typecheck
+        return
+    try:
+        state = observe(pid, expected_process_start=expected_process_start)
+        finding = state.modal or state.dialog
+        if finding is not None:
+            print_dialog_diagnostic(pid, finding.window, stream=sys.stderr)
+    except Exception:  # pylint: disable=broad-exception-caught
+        _emit("Dialog text could not be read safely; inspect this Desktop locally.", stream=sys.stderr)
 
 
 @dataclass(frozen=True)
@@ -259,6 +279,7 @@ def capture_report(
         _emit("NEVER CONVERGED (still changing at max-wait, treat as PARTIAL): " + ", ".join(unstable))
     if failed:
         _emit("FAILED: " + ", ".join(failed))
+        _report_dialog(pid)
     return EXIT_CAPTURE_FAILED if failed or unstable else EXIT_OK
 
 
@@ -311,9 +332,13 @@ def _observe_a1(operation: Callable[[], Any], result_type: type, bound: BoundDes
     try:
         result = operation()
     except ObservationUnavailable as error:
-        if len(error.args) != 1 or error.args[0] not in receipt.MEASUREMENT_REFUSALS:
+        try:
+            reason = receipt.observer_measurement_refusal(error.args[0]) if len(error.args) == 1 else None
+        except (ValueError, TypeError):
+            reason = None
+        if reason is None:
             raise receipt.ReceiptError("A1_BINDING_UNESTABLISHED", "A1 refused observation authority") from error
-        return {"status": receipt.REFUSED, "reason": error.args[0], "observation": None}
+        return {"status": receipt.REFUSED, "reason": reason, "observation": None}
     except ModelLockTimeout:
         return {"status": receipt.REFUSED, "reason": "MODEL_LOCK_TIMEOUT", "observation": None}
     except CompatRollbackError as error:
@@ -340,7 +365,11 @@ def _observe_a1(operation: Callable[[], Any], result_type: type, bound: BoundDes
 
 
 def _prepare_a1(
-    target: receipt.PackageTarget, pid: int, requested: dict[str, Any]
+    target: receipt.PackageTarget,
+    pid: int,
+    requested: dict[str, Any],
+    *,
+    diagnostic_state: dict | None = None,
 ) -> tuple[dict[str, Any], BoundDesktop | None]:
     """Optional, explicit preparation through one held Desktop/AS/catalogue binding."""
     facts = {key: receipt.unestablished_fact() for key in ("binding", "refresh", "canaries", "persistence")}
@@ -355,6 +384,8 @@ def _prepare_a1(
     receipt._validate(receipt.BINDING_SCHEMA, asdict(bound))  # pylint: disable=protected-access
     if bound.identity.pid != pid:
         raise receipt.ReceiptError("A1_BINDING_MISMATCH", "A1 bound a different Desktop process")
+    if diagnostic_state is not None:
+        diagnostic_state["process_start"] = bound.identity.process_start
     facts["binding"] = {"status": receipt.OBSERVED, "reason": None, "observation": asdict(bound)}
     operations = (
         (
@@ -438,6 +469,22 @@ def run_iteration(  # pylint: disable=too-many-locals
     runtime: CaptureRuntime = DEFAULT_RUNTIME,
 ) -> dict[str, Any]:
     """Prepare a bound PID, capture, revalidate current facts and persist a producer-owned receipt."""
+    diagnostic_state = {}
+    try:
+        return _run_iteration(request, options, runtime, diagnostic_state)
+    finally:
+        held_pid = diagnostic_state.get("pid")
+        diagnose_on_exit = diagnostic_state.get("failed", False)
+        if held_pid is not None and diagnose_on_exit:
+            _report_dialog(held_pid, expected_process_start=diagnostic_state.get("process_start"))
+
+
+def _run_iteration(  # pylint: disable=too-many-locals
+    request: IterationRequest,
+    options: CaptureOptions,
+    runtime: CaptureRuntime,
+    diagnostic_state: dict,
+) -> dict[str, Any]:
     with receipt._named_refusals():  # pylint: disable=protected-access
         _validate_options(options, package=True)
         review = _request_review(request)
@@ -455,11 +502,17 @@ def run_iteration(  # pylint: disable=too-many-locals
         receipt.assert_shareable([{"page": page.page_id, "name": page.display_name} for page in selected])
         history = receipt.checked_history(request.package, request.previous_sha256)
         receipt.assert_desktop_binding(target, review["desktop_pid"], runtime.state_reader)
+        diagnostic_state.update(pid=review["desktop_pid"], failed=True)
         if runtime.reload(review["desktop_pid"]) is not True:
             raise receipt.ReceiptError("DESKTOP_UNVERIFIED", "the bound Desktop instance did not confirm reload")
         receipt.assert_desktop_binding(target, review["desktop_pid"], runtime.state_reader)
         preparation = {"requested": requested, "artifact_before": receipt.artifact_facts(target)}
-        observations, bound = _prepare_a1(target, review["desktop_pid"], requested)
+        observations, bound = _prepare_a1(
+            target,
+            review["desktop_pid"],
+            requested,
+            diagnostic_state=diagnostic_state,
+        )
         if (
             receipt.resolve_package(request.package) != target
             or receipt.report_inventory(target.report_dir) != inventory
@@ -498,6 +551,11 @@ def run_iteration(  # pylint: disable=too-many-locals
                 payload["judgement"]["findings"] = json.loads(json.dumps(previous.payload["judgement"]["findings"]))
             receipt.write_receipt(directory, payload)
             receipt._assert_snapshot(request.package, receipt.read_history(request.package))  # pylint: disable=protected-access
+            diagnostic_state["failed"] = any(
+                observations[key]["status"] != receipt.OBSERVED
+                for key, option in (("refresh", "refresh"), ("canaries", "canaries"), ("persistence", "persist"))
+                if requested[option]
+            )
             return payload
         except BaseException:
             shutil.rmtree(directory, ignore_errors=True)

@@ -8,7 +8,7 @@
   not have Python installed yet -- because one of the things it checks for IS Python. A Python
   bootstrap check would be a chicken-and-egg. PowerShell ships with every supported Windows, and the
   whole pipeline targets Power BI Desktop (Windows-only) and uses Windows-specific facilities
-  (Get-AppxPackage for the Desktop MSIX, Get-OdbcDriver, the JSONC ~/.copilot config), so PowerShell
+  (Get-AppxPackage for the Desktop MSIX, Get-OdbcDriver, the JSONC Copilot home config), so PowerShell
   is the correct, dependency-free bootstrap.
 
   Verifies: Python + the parser's Python deps, the deterministic conversion engine (the installed
@@ -82,19 +82,40 @@ deploy discovers a stale id or missing access.
         RECOMMENDED and OPTIONAL items are surfaced as warnings but do not stop a migration.
 #>
 #Requires -Version 5.1
-param([switch]$Update, [switch]$CheckUpstream, [string]$Tenant, [string]$Subscription)
+param([switch]$Update, [switch]$CheckUpstream, [string]$Tenant, [string]$Subscription, [switch]$DoctorDiagnostics)
 
 $ErrorActionPreference = 'SilentlyContinue'
-$copilot = Join-Path $HOME '.copilot'
+$copilot = if ($env:COPILOT_HOME) { $env:COPILOT_HOME } else { Join-Path $HOME '.copilot' }
+$copilotOrigin = if ($env:COPILOT_HOME) { 'COPILOT_HOME' } else { 'default' }
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $results = New-Object System.Collections.Generic.List[object]
 
-function Add-Check([string]$Name, [string]$Tier, [bool]$Ok, [string]$Detail, [string]$Hint = '') {
-    $results.Add([pscustomobject]@{ Name = $Name; Tier = $Tier; Ok = $Ok; Detail = $Detail; Hint = $Hint })
+function Add-Check([string]$Name, [string]$Tier, [bool]$Ok, [string]$Detail, [string]$Hint = '',
+    [string]$DoctorId = '', [string]$DoctorReason = '', [string]$DoctorRemedy = '', [string]$DoctorSource = '') {
+    $blocker = if ($Tier -eq 'critical' -and -not $Ok) {
+        [ordered]@{ id = $DoctorId; source = $(if ($DoctorSource) { $DoctorSource } else { $null })
+            reason = $DoctorReason; remedy = $DoctorRemedy }
+    } else { $null }
+    $results.Add([pscustomobject]@{ Name = $Name; Tier = $Tier; Ok = $Ok; Detail = $Detail; Hint = $Hint
+        DoctorBlocker = $blocker })
+}
+
+function Get-PreflightSummary($Checks) {
+    $critical = @($Checks | Where-Object { $_.Tier -eq 'critical' -and -not $_.Ok })
+    [pscustomobject]@{ critical_missing = $critical.Count
+        recommended_warnings = @($Checks | Where-Object { $_.Tier -eq 'recommended' -and -not $_.Ok }).Count
+        blockers = @($critical | ForEach-Object { $_.DoctorBlocker }) }
+}
+
+if (-not $DoctorDiagnostics) { Write-Host "Copilot home: $copilot (origin: $copilotOrigin)" }
+if ($env:COPILOT_HOME) {
+    Add-Check 'Copilot home' 'CRITICAL' (Test-Path -LiteralPath $copilot -PathType Container) `
+        "COPILOT_HOME: $copilot" 'Create the configured directory or correct COPILOT_HOME; no default-profile fallback.' `
+        -DoctorId 'copilot_home' -DoctorReason 'configured_directory_missing' -DoctorRemedy 'verify_copilot_home'
 }
 
 function Read-CopilotJson([string]$File) {
-    # ~/.copilot/*.json are JSONC (leading // comment lines). URL strings start with '"', not '//',
+    # Copilot home *.json are JSONC (leading // comment lines). URL strings start with '"', not '//',
     # so dropping comment-only lines is safe across PowerShell versions.
     $p = Join-Path $copilot $File
     if (-not (Test-Path $p)) { return $null }
@@ -105,9 +126,10 @@ function Read-CopilotJson([string]$File) {
     catch { return $null }
 }
 
-function Add-Cli([string]$Cmd, [string]$Tier, [string]$Hint) {
+function Add-Cli([string]$Cmd, [string]$Tier, [string]$Hint, [string]$DoctorId = '', [string]$DoctorRemedy = '') {
     $c = Get-Command $Cmd -ErrorAction SilentlyContinue
-    Add-Check "cli: $Cmd" $Tier ($null -ne $c) $(if ($c) { $c.Source } else { 'not on PATH' }) $Hint
+    Add-Check "cli: $Cmd" $Tier ($null -ne $c) $(if ($c) { $c.Source } else { 'not on PATH' }) $Hint `
+        -DoctorId $DoctorId -DoctorReason 'command_missing' -DoctorRemedy $DoctorRemedy
 }
 
 # --- Python (the bootstrap-critical one this whole file exists to check without needing Python) ---
@@ -120,7 +142,8 @@ if ($py) {
     try { $pyOk = [version](($ver -split '\s')[0]) -ge [version]'3.11' } catch { $pyOk = $false }
     Add-Check 'Python >= 3.11' 'critical' $pyOk `
         $(if ($ver) { $ver } else { 'no version reported (Microsoft Store alias stub?)' }) `
-        'Install Python 3.11+ (pyproject requires >=3.11); ensure it precedes the Store alias on PATH.'
+        'Install Python 3.11+ (pyproject requires >=3.11); ensure it precedes the Store alias on PATH.' `
+        -DoctorId 'python_runtime' -DoctorReason 'runtime_unavailable_or_old' -DoctorRemedy 'install_python'
     foreach ($m in @(
             @('lxml', 'critical', 'uv sync - the deterministic parser imports lxml.etree.'),
             @('jsonschema', 'critical', 'uv add jsonschema (validates migration-spec.json against the schema).'),
@@ -128,11 +151,13 @@ if ($py) {
             @('playwright', 'optional', 'uv add playwright (harvester + validator screenshots).'),
             @('PIL', 'optional', 'uv add pillow (showcase gallery composition).'))) {
         & python -c "import $($m[0])" 2>$null
-        Add-Check "python: $($m[0])" $m[1] ($LASTEXITCODE -eq 0) $(if ($LASTEXITCODE -eq 0) { 'importable' } else { 'not importable' }) $m[2]
+        Add-Check "python: $($m[0])" $m[1] ($LASTEXITCODE -eq 0) $(if ($LASTEXITCODE -eq 0) { 'importable' } else { 'not importable' }) $m[2] `
+            -DoctorId "python_$($m[0])" -DoctorReason 'import_failed' -DoctorRemedy 'sync_python_dependencies'
     }
 }
 else {
-    Add-Check 'Python >= 3.11' 'critical' $false 'not on PATH' 'Install Python 3.11+ (the deterministic parser and all scripts/ need it).'
+    Add-Check 'Python >= 3.11' 'critical' $false 'not on PATH' 'Install Python 3.11+ (the deterministic parser and all scripts/ need it).' `
+        -DoctorId 'python_runtime' -DoctorReason 'runtime_unavailable_or_old' -DoctorRemedy 'install_python'
 }
 
 $node = Get-Command node -ErrorAction SilentlyContinue
@@ -142,13 +167,16 @@ if ($node) {
     try { $nodeOk = [version]$nodeRaw -ge [version]'20.0.0' } catch { $nodeOk = $false }
     Add-Check 'Node.js >= 20' 'critical' $nodeOk `
         $(if ($nodeRaw) { $nodeRaw } else { 'no version reported' }) `
-        'Install Node.js 20+; npx and the Power BI bridge CLIs depend on it.'
+        'Install Node.js 20+; npx and the Power BI bridge CLIs depend on it.' `
+        -DoctorId 'node_runtime' -DoctorReason 'runtime_unavailable_or_old' -DoctorRemedy 'install_node'
 }
 else {
-    Add-Check 'Node.js >= 20' 'critical' $false 'node not on PATH' 'Install Node.js 20+; npx and the Power BI bridge CLIs depend on it.'
+    Add-Check 'Node.js >= 20' 'critical' $false 'node not on PATH' 'Install Node.js 20+; npx and the Power BI bridge CLIs depend on it.' `
+        -DoctorId 'node_runtime' -DoctorReason 'runtime_unavailable_or_old' -DoctorRemedy 'install_node'
 }
 
-Add-Cli 'powerbi-report-author' 'critical' 'npm install -g @microsoft/powerbi-report-authoring-cli (needs Node >= 20); provides validate + catalog/formatting/preview-*.'
+Add-Cli 'powerbi-report-author' 'critical' 'npm install -g @microsoft/powerbi-report-authoring-cli (needs Node >= 20); provides validate + catalog/formatting/preview-*.' `
+    -DoctorId 'report_author' -DoctorRemedy 'install_report_author'
 
 # --- npm CLI versions: correctness FLOOR + known-good matrix (see AGENTS.md) ---
 # These CLIs are unpinned GLOBAL installs (the official skill installs them with @latest), so they can
@@ -164,40 +192,70 @@ Add-Cli 'powerbi-report-author' 'critical' 'npm install -g @microsoft/powerbi-re
 #                  `-Update` repairs this, and only this.
 #   * KNOWN-GOOD - the version the agent Gotchas were verified against. ABOVE it is not an error, but
 #                  it does mean version-specific prose may be stale -> WARN, don't "fix" it.
-$cliFloor     = @{ 'powerbi-report-author' = '0.1.4'; 'powerbi-desktop' = '0.1.2' }
-$cliKnownGood = @{ 'powerbi-report-author' = '0.1.4'; 'powerbi-desktop' = '0.1.2' }
+$cliFloor     = @{ 'powerbi-report-author' = '0.4.0'; 'powerbi-desktop' = '1.0.0' }
+$cliKnownGood = @{ 'powerbi-report-author' = '0.5.0'; 'powerbi-desktop' = '1.0.0' }
 $cliPackage   = @{ 'powerbi-report-author' = '@microsoft/powerbi-report-authoring-cli'
                    'powerbi-desktop'       = '@microsoft/powerbi-desktop-bridge-cli' }
 
+function ConvertFrom-CliVersionOutput([string[]]$Lines) {
+    $raw = ($Lines -join "`n").Trim()
+    # Match the WHOLE output: noise followed by a valid version is not evidence of a clean command.
+    if ($raw -cmatch '\Av?((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?)\z') {
+        return $Matches[1]
+    }
+    return $null
+}
+
+function Get-VersionFloorVerdict([string]$Installed, [string]$Floor, [string]$KnownGood, [string]$FixHint) {
+    $v = [pscustomobject]@{ Kind = 'unreadable'; Tier = 'critical'; Ok = $false
+        Detail = 'version unreadable (expected one plain release version)'; Hint = $FixHint }
+    if ($Installed -cmatch '\A[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z.-]+\z') {
+        $v.Kind = 'prerelease'; $v.Detail = "$Installed is a prerelease, not a plain release"
+        return $v
+    }
+    if ($Installed -cnotmatch '\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\z') { return $v }
+    try { $number = [version]$Installed } catch { return $v }
+    if (-not ($number -ge [version]$Floor)) {
+        $v.Kind = 'below-floor'; $v.Detail = "$Installed is BELOW the $Floor correctness floor"
+        return $v
+    }
+    $v.Tier = 'optional'; $v.Hint = ''
+    if ($number -lt [version]$KnownGood) {
+        $v.Kind = 'between'; $v.Detail = "$Installed (below known-good $KnownGood; allowed, unmeasured)"
+    }
+    elseif ($number -eq [version]$KnownGood) {
+        $v.Kind = 'known-good'; $v.Ok = $true; $v.Detail = "$Installed (known-good)"
+    }
+    else {
+        $v.Kind = 'above-known-good'; $v.Detail = "$Installed (above known-good $KnownGood; re-verify version-specific behaviour)"
+    }
+    return $v
+}
+
 function Get-CliVersion([string]$Cmd) {
-    if (-not (Get-Command $Cmd -ErrorAction SilentlyContinue)) { return $null }
-    $raw = (& $Cmd --version 2>&1 | Select-Object -First 1) -replace '[^0-9.]', ''
-    if ($raw -match '^\d+(\.\d+)+$') { return $raw } else { return $null }
+    try {
+        $lines = @(& $Cmd --version 2>&1)
+        if (-not $? -or $LASTEXITCODE -ne 0) { return $null }
+        return ConvertFrom-CliVersionOutput $lines
+    }
+    catch { return $null }
 }
 
 foreach ($cliName in $cliFloor.Keys) {
-    $actual = Get-CliVersion $cliName
-    if (-not $actual) { continue }
+    if (-not (Get-Command $cliName -ErrorAction SilentlyContinue)) { continue }
+    $fixHint = "At SESSION START only: run this script with -Update, or inspect the CLI and install a plain release of $($cliPackage[$cliName]) meeting the floor. See docs/operator-runbook.md."
+    $v = Get-VersionFloorVerdict (Get-CliVersion $cliName) $cliFloor[$cliName] $cliKnownGood[$cliName] $fixHint
 
     # -Update: repair ONLY a below-floor install. Never a blind upgrade to @latest.
-    if ($Update -and ([version]$actual -lt [version]$cliFloor[$cliName])) {
-        Write-Host ("  [..  ] $cliName $actual is below the {0} correctness floor - upgrading ..." -f $cliFloor[$cliName])
+    if ($Update -and $v.Kind -eq 'below-floor') {
+        if (-not $DoctorDiagnostics) { Write-Host ("  [..  ] $cliName is below the {0} correctness floor - upgrading ..." -f $cliFloor[$cliName]) }
         & npm install -g "$($cliPackage[$cliName])@latest" 2>&1 | Out-Null
-        $actual = (Get-CliVersion $cliName), $actual | Where-Object { $_ } | Select-Object -First 1
+        $v = Get-VersionFloorVerdict (Get-CliVersion $cliName) $cliFloor[$cliName] $cliKnownGood[$cliName] $fixHint
     }
 
-    $floorOk = [version]$actual -ge [version]$cliFloor[$cliName]
-    $drifted = $floorOk -and ([version]$actual -ne [version]$cliKnownGood[$cliName])
-    $detail = if (-not $floorOk) { "$actual is BELOW the $($cliFloor[$cliName]) correctness floor" }
-              elseif ($drifted)  { "$actual (above known-good $($cliKnownGood[$cliName]))" }
-              else               { "$actual (known-good)" }
-    $hint = if (-not $floorOk) {
-        "Run this script with -Update at SESSION START, or: npm install -g $($cliPackage[$cliName])@latest"
-    } else {
-        "Version moved past the matrix in AGENTS.md - re-verify the version-specific Gotchas in .github/agents/ before trusting them."
-    }
-    # Below the floor is a real correctness failure; above known-good is only an advisory.
-    Add-Check "version: $cliName" $(if ($floorOk) { 'optional' } else { 'critical' }) $(-not $drifted -and $floorOk) $detail $hint
+    $doctorCliId = if ($cliName -eq 'powerbi-report-author') { 'report_author_version' } else { 'desktop_bridge_version' }
+    Add-Check "version: $cliName" $v.Tier $v.Ok $v.Detail $v.Hint `
+        -DoctorId $doctorCliId -DoctorReason $v.Kind -DoctorRemedy 'inspect_cli_release'
 }
 
 # --- PBIR JSON-schema reachability (does `validate` actually run its schema layer this session?) ---
@@ -234,15 +292,18 @@ if ($engineStatus) {
     $alternatives = @($engineStatus.alternatives)
     Add-Check 'engine: plugin installed' 'critical' ([bool]$engineStatus.present) `
         $(if ($engineStatus.present) { "VERSION $($engineStatus.version) at $($engineStatus.root)" } else { "not installed at $($engineStatus.root)" }) `
-        $engineStatus.install_hint
+        $engineStatus.install_hint `
+        -DoctorId 'engine_plugin' -DoctorReason 'plugin_missing' -DoctorRemedy 'install_engine_plugin'
     Add-Check 'engine: single source' 'critical' ($alternatives.Count -eq 0) `
         $(if ($alternatives.Count) { "ALTERNATIVE COPY: $($alternatives -join '; ')" } else { 'plugin only' }) `
-        'A second engine tree means two versions can build one pipeline with no record of which ran (#107). DELETE the alternative copy after confirming it has no uncommitted/unpushed work: git -C <path> status --porcelain; git -C <path> log --branches --not --remotes.'
+        'A second engine tree means two versions can build one pipeline with no record of which ran (#107). DELETE the alternative copy after confirming it has no uncommitted/unpushed work: git -C <path> status --porcelain; git -C <path> log --branches --not --remotes.' `
+        -DoctorId 'engine_source' -DoctorReason 'alternative_copy' -DoctorRemedy 'inspect_engine_source'
 }
 else {
     Add-Check 'engine: single source' 'critical' $false `
         $(if ($py) { 'engine_source.py did not report - is scripts/engine_source.py present?' } else { 'not verified (Python unavailable)' }) `
-        'Install Python 3.11+, then re-run. The engine single-source rule is enforced by scripts/engine_source.py --json.'
+        'Install Python 3.11+, then re-run. The engine single-source rule is enforced by scripts/engine_source.py --json.' `
+        -DoctorId 'engine_source' -DoctorReason 'verdict_unavailable' -DoctorRemedy 'inspect_engine_source'
 }
 
 # --- Engine receipt drift: bundles retain their provenance, so read it back --------------------------
@@ -257,23 +318,61 @@ if ($engineStatus -and $engineStatus.present -and $py) {
 }
 
 # --- Skill plugins ---
-# `powerbi-authoring` is still checked by configured plugin identity, because it supplies the official
-# planning/design/authoring/semantic-model skills the builder personas chain.
-#
 # This repo's reusable Power BI bundles are different: their marketplace/plugin name has changed once,
 # and a hard-coded name let the installed copy drift silently. Discover that plugin by content instead:
-# scan ~/.copilot/installed-plugins/*/*/skills for the bundle names emitted by build_plugin.py. Exactly
+# scan the Copilot home's installed-plugins/*/*/skills for build_plugin.py's bundle names. Exactly
 # one discovered install is acceptable; more than one is a critical shadowing hazard.
 $cfg = Read-CopilotJson 'config.json'
-$p = @{ name = 'powerbi-authoring'; market = 'fabric-collection'; tier = 'critical'
-       hint = 'In Copilot: /plugin -> add marketplace microsoft/skills-for-fabric -> enable powerbi-authoring. See AGENTS.md.' }
-$plugin = $null
-if ($cfg -and $cfg.installedPlugins) {
-    $plugin = $cfg.installedPlugins | Where-Object { $_.name -eq $p.name -and $_.marketplace -eq $p.market } | Select-Object -First 1
+$pluginPolicy = @{ name = 'powerbi-authoring'; market = 'fabric-collection'
+    floor = '0.3.19'; knownGood = '0.3.19'; skill = 'powerbi-report-cli'
+    upstreamUrl = 'https://raw.githubusercontent.com/microsoft/skills-for-fabric/main/.github/plugin/marketplace.json'
+    hint = 'Plugin repair happens BETWEEN Copilot sessions (Access is denied / os error 5 while the directory is locked). Close every session, then from a plain shell: copilot plugin marketplace update fabric-collection; copilot plugin update powerbi-authoring@fabric-collection. Update this plugin only. Confirm enabled state/version/content with copilot plugin list --json; an exit code alone can hide a stale catalog. See docs/operator-runbook.md, Updating the Power BI plugin and CLIs.' }
+
+function Get-PluginVerdict($Entries, [bool]$CacheExists, $Manifest, [bool]$SkillPresent, $Policy) {
+    $entriesArray = @($Entries | Where-Object { $null -ne $_ })
+    $v = [pscustomobject]@{ Kind = 'missing'; Tier = 'critical'; Ok = $false
+        Detail = 'expected exactly one powerbi-authoring@fabric-collection registry entry'; Hint = $Policy.hint }
+    if ($entriesArray.Count -ne 1) { return $v }
+    $entry = $entriesArray[0]
+    if ($entry.name -cne $Policy.name -or $entry.marketplace -cne $Policy.market) { return $v }
+    if ($entry.enabled -isnot [bool] -or $entry.enabled -ne $true) {
+        $v.Kind = 'disabled'; $v.Detail = 'plugin is not enabled'; return $v
+    }
+    if (-not $CacheExists) { $v.Kind = 'cache-missing'; $v.Detail = 'plugin cache directory missing'; return $v }
+    if (-not $Manifest -or $Manifest.name -cne $Policy.name) {
+        $v.Kind = 'manifest-unreadable'; $v.Detail = 'effective .github/plugin/plugin.json unreadable or wrong name'; return $v
+    }
+    $v = Get-VersionFloorVerdict $entry.version $Policy.floor $Policy.knownGood $Policy.hint
+    $mv = Get-VersionFloorVerdict $Manifest.version $Policy.floor $Policy.knownGood $Policy.hint
+    if ($mv.Kind -in @('unreadable', 'prerelease')) { return $mv }
+    if ($entry.version -cne $Manifest.version) {
+        return [pscustomobject]@{ Kind = 'manifest-mismatch'; Tier = 'critical'; Ok = $false
+            Detail = 'registry and effective manifest versions disagree'; Hint = $Policy.hint }
+    }
+    if ($v.Tier -eq 'critical') { return $v }
+    if (-not $SkillPresent) {
+        $v.Kind = 'skill-missing'; $v.Tier = 'critical'; $v.Ok = $false
+        $v.Detail = 'required skills/powerbi-report-cli/SKILL.md leaf missing'; $v.Hint = $Policy.hint
+    }
+    return $v
 }
-$pluginOk = $plugin -and (Test-Path $plugin.cache_path)
-Add-Check "plugin: $($p.name)@$($p.market)" $p.tier ([bool]$pluginOk) `
-    $(if ($pluginOk) { "v$($plugin.version)" } else { 'not installed/enabled' }) $p.hint
+
+$pluginEntries = @($cfg.installedPlugins | Where-Object {
+    $_.name -ceq $pluginPolicy.name -and $_.marketplace -ceq $pluginPolicy.market
+})
+$plugin = $pluginEntries | Select-Object -First 1
+$cacheExists = $plugin -and $plugin.cache_path -and (Test-Path -LiteralPath $plugin.cache_path -PathType Container)
+$manifest = $null
+$skillPresent = $false
+if ($cacheExists) {
+    # Copilot's GitHub-native manifest takes precedence over .claude-plugin.
+    try { $manifest = Get-Content -LiteralPath (Join-Path $plugin.cache_path '.github\plugin\plugin.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+    catch { $manifest = $null }
+    $skillPresent = Test-Path -LiteralPath (Join-Path $plugin.cache_path "skills\$($pluginPolicy.skill)\SKILL.md") -PathType Leaf
+}
+$pv = Get-PluginVerdict $pluginEntries ([bool]$cacheExists) $manifest $skillPresent $pluginPolicy
+Add-Check 'plugin: powerbi-authoring@fabric-collection' $pv.Tier $pv.Ok $pv.Detail $pv.Hint `
+    -DoctorId 'authoring_plugin' -DoctorReason $pv.Kind -DoctorRemedy 'repair_authoring_plugin_between_sessions'
 
 $skillPlugin = $null
 $skillRaw = $null
@@ -288,7 +387,8 @@ if (-not $skillPlugin) {
 elseif ($skillPlugin.status -eq 'multiple') {
     Add-Check 'plugin: reusable Power BI skill bundles' 'critical' $false `
         $skillPlugin.detail `
-        'Two installed copies of the same skill create an ambiguous shadowing order. Remove the duplicate before trusting skill output.'
+        'Two installed copies of the same skill create an ambiguous shadowing order. Remove the duplicate before trusting skill output.' `
+        -DoctorId 'reusable_skill_plugins' -DoctorReason 'multiple_installs' -DoctorRemedy 'inspect_duplicate_skill_plugins'
 }
 elseif ($skillPlugin.status -eq 'missing') {
     # Deliberately recommended, not critical: with NO installed copy, this repo's local .github/skills
@@ -319,11 +419,13 @@ else {
     # bytes that differ from the repo and can invalidate measurements.
     $detail = if ($missing.Count) { "NOT INSTALLED in discovered plugin: $($missing -join ', ')" } else { "$(@($skillPlugin.shipped_skills).Count) bundle(s) present" }
     Add-Check 'skill bundles installed' 'critical' ($missing.Count -eq 0) $detail `
-        'Refresh the installed copy in place: python scripts\sync_installed_skills.py. If the bundle is new, install/update the plugin BETWEEN sessions.'
+        'Refresh the installed copy in place: python scripts\sync_installed_skills.py. If the bundle is new, install/update the plugin BETWEEN sessions.' `
+        -DoctorId 'skill_bundles' -DoctorReason 'bundle_missing' -DoctorRemedy 'sync_installed_skills'
 
     Add-Check 'skill bundles match published plugin' 'critical' ($drift.Count -eq 0) `
         $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { 'in sync' }) `
-        'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of the marketplace repo>, commit+push. Do not trust a measurement taken against a stale bundle.'
+        'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of the marketplace repo>, commit+push. Do not trust a measurement taken against a stale bundle.' `
+        -DoctorId 'published_skill_bundles' -DoctorReason 'content_stale' -DoctorRemedy 'sync_and_publish_skills'
 }
 
 # Recommended means "warn, do not halt." A check is critical if any persona's Definition of Done
@@ -339,12 +441,14 @@ $mcp = Read-CopilotJson 'mcp-config.json'
 foreach ($srv in @(@('powerbi-modeling-mcp', 'recommended'), @('powerbi-remote', 'optional'))) {
     $has = $mcp -and $mcp.mcpServers.($srv[0])
     Add-Check "mcp: $($srv[0])" $srv[1] ([bool]$has) `
-        $(if ($has) { 'configured' } else { 'not in ~/.copilot/mcp-config.json' }) `
-        'Add via /mcp, or copy from .vscode/mcp.json into ~/.copilot/mcp-config.json (mcpServers).'
+        $(if ($has) { 'configured' } else { "not in $copilot\mcp-config.json" }) `
+        "Add via /mcp, or copy from .vscode/mcp.json into $copilot\mcp-config.json (mcpServers)."
 }
 
-Add-Cli 'npx' 'critical' 'Install Node.js; npx runs the powerbi-modeling MCP and the Desktop Bridge CLI.'
-Add-Cli 'powerbi-desktop' 'critical' 'npm install -g @microsoft/powerbi-desktop-bridge-cli - Desktop Bridge for open/reload/screenshot verification.'
+Add-Cli 'npx' 'critical' 'Install Node.js; npx runs the powerbi-modeling MCP and the Desktop Bridge CLI.' `
+    -DoctorId 'npx' -DoctorRemedy 'install_node'
+Add-Cli 'powerbi-desktop' 'critical' 'npm install -g @microsoft/powerbi-desktop-bridge-cli - Desktop Bridge for open/reload/screenshot verification.' `
+    -DoctorId 'desktop_bridge' -DoctorRemedy 'install_desktop_bridge'
 
 # --- Is anything NEWER available upstream? (-CheckUpstream, opt-in) -------------------------------
 #
@@ -361,18 +465,40 @@ Add-Cli 'powerbi-desktop' 'critical' 'npm install -g @microsoft/powerbi-desktop-
 #   * being behind is NOT an error. The timing rule still governs: upgrading mid-migration is worse
 #     than being slightly old. So this never fails the run and never upgrades anything - it tells you
 #     what to look at BETWEEN migrations.
+function Get-UpstreamVerdict([string]$Installed, [string]$Upstream, [string]$UpdateHint) {
+    $v = [pscustomobject]@{ Kind = 'unknown'; Tier = 'optional'; Ok = $false
+        Detail = 'unknown (upstream or installed version unavailable/invalid)'; Hint = '' }
+    $iv = Get-VersionFloorVerdict $Installed '0.0.0' '0.0.0' ''
+    $uv = Get-VersionFloorVerdict $Upstream '0.0.0' '0.0.0' ''
+    if ($iv.Tier -eq 'critical' -or $uv.Tier -eq 'critical') { return $v }
+    if ([version]$Installed -lt [version]$Upstream) {
+        $v.Kind = 'behind'; $v.Detail = "$Installed installed, $Upstream available"; $v.Hint = $UpdateHint
+    }
+    elseif ([version]$Installed -eq [version]$Upstream) {
+        $v.Kind = 'current'; $v.Ok = $true; $v.Detail = "$Installed (current)"
+    }
+    else { $v.Kind = 'ahead'; $v.Ok = $true; $v.Detail = "$Installed (ahead of upstream $Upstream)" }
+    return $v
+}
+
 if ($CheckUpstream) {
     foreach ($cliName in $cliFloor.Keys) {
         $installed = Get-CliVersion $cliName
         if (-not $installed) { continue }
-        $latest = (& npm view $cliPackage[$cliName] version 2>$null | Select-Object -First 1)
-        if ($latest -match '^\d+(\.\d+)+$') {
-            $behind = [version]$installed -lt [version]$latest
-            Add-Check "upstream: $cliName" 'optional' (-not $behind) `
-                $(if ($behind) { "$installed installed, $latest available" } else { "$installed (latest)" }) `
-                "Between migrations only: npm install -g $($cliPackage[$cliName])@latest, then re-verify the version-specific Gotchas in .github/agents/."
-        }
+        $latest = ConvertFrom-CliVersionOutput @(& npm view $cliPackage[$cliName] version 2>$null)
+        $uv = Get-UpstreamVerdict $installed $latest "Between migrations only: npm install -g $($cliPackage[$cliName])@latest, then re-verify version-specific behaviour."
+        Add-Check "upstream: $cliName" $uv.Tier $uv.Ok $uv.Detail $uv.Hint
     }
+
+    $latestPlugin = $null
+    try {
+        $catalog = (Invoke-WebRequest -Uri $pluginPolicy.upstreamUrl -UseBasicParsing -TimeoutSec 15 -ErrorAction Stop).Content | ConvertFrom-Json -ErrorAction Stop
+        $matches = @($catalog.plugins | Where-Object { $_.name -ceq $pluginPolicy.name })
+        if ($matches.Count -eq 1) { $latestPlugin = $matches[0].version }
+    }
+    catch { $latestPlugin = $null }
+    $uv = Get-UpstreamVerdict $plugin.version $latestPlugin $pluginPolicy.hint
+    Add-Check 'upstream: powerbi-authoring plugin' $uv.Tier $uv.Ok $uv.Detail $uv.Hint
 
     # The deterministic engine is an unpacked marketplace plugin with no `.git`, so there is no local
     # SHA to compare. Ask upstream for the VERSION file itself - one HTTP GET, and it compares the
@@ -466,7 +592,8 @@ if (-not $desktop) {
 }
 Add-Check 'Power BI Desktop' 'critical' ([bool]$desktop) `
     $(if ($desktop) { "$desktop (via $desktopVia)" } else { 'not found' }) `
-    'Install Power BI Desktop (Store/MSIX preferred) - needed for the refresh + screenshot verification loop.'
+    'Install Power BI Desktop (Store/MSIX preferred) - needed for the refresh + screenshot verification loop.' `
+    -DoctorId 'desktop_install' -DoctorReason 'executable_missing' -DoctorRemedy 'install_desktop'
 
 # The Desktop APP version is tracked like the two npm CLIs are, because it moves on its own schedule
 # and takes the bridge's exe discovery with it.
@@ -483,7 +610,8 @@ if ($appx) {
 $installedDesktop = if ($desktop -and $appx) { "$($appx.Version) at $desktop" } elseif ($desktop) { $desktop } else { 'not found' }
 $pinVerdict = Get-DesktopPinVerdict -Configured $desktopPathConfigured -Valid $desktopPathValid `
     -ConfiguredPath $env:PBI_DESKTOP_PATH -InstalledDesktop $installedDesktop -FallbackExe $desktop
-Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' $pinVerdict.Tier $pinVerdict.Ok $pinVerdict.Detail $pinVerdict.Hint
+Add-Check 'PBI_DESKTOP_PATH (bridge exe pin)' $pinVerdict.Tier $pinVerdict.Ok $pinVerdict.Detail $pinVerdict.Hint `
+    -DoctorId 'desktop_pin' -DoctorSource 'process_environment' -DoctorReason 'configured_path_missing' -DoctorRemedy 'refresh_current_process_pin'
 
 # --- Privacy Levels: a MANUAL prerequisite this script cannot verify -------------------------------
 # Opening a model that spans more than one data source raises a modal ("Potential security risk: This
@@ -505,14 +633,15 @@ Add-Check 'Privacy Levels (manual)' 'optional' $true `
 
 # --- .NET SDK (builds tools/tmdl_oracle, the TMDL gate's parser) ---
 # NOTE: this replaced an older check for Microsoft.AnalysisServices.Tabular.dll under
-# ~/.copilot/installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that
+# the Copilot home's installed-plugins. The powerbi-authoring plugin no longer bundles Tabular Editor, so that
 # check could never pass. The .NET SDK is still needed to build/run the offline validator, but it does
 # NOT prove AMO/TOM or ADOMD assemblies exist in the NuGet cache; those file checks live below.
 #
 # Since #254 this is load-bearing for a GATE, not only for an optional validator:
 # `check_datamodel.py` runs the TMDL oracle (tools/tmdl_oracle) to ask TmdlSerializer itself whether
 # each model parses. Without `dotnet` the gate reports UNASSESSABLE (exit 3) instead of a pass.
-Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the TMDL oracle (tools/tmdl_oracle) that check_datamodel.py uses. Issue #413 retired 4 of the 5 redundant per-example tmdl_validate copies; the quadruple-axis-charts one remains (its unique DAX [bracket]-reference check has no replacement yet) - dotnet is needed for both.'
+Add-Cli 'dotnet' 'critical' 'Install the .NET SDK - needed to build/run the TMDL oracle (tools/tmdl_oracle) that check_datamodel.py uses. Issue #413 retired 4 of the 5 redundant per-example tmdl_validate copies; the quadruple-axis-charts one remains (its unique DAX [bracket]-reference check has no replacement yet) - dotnet is needed for both.' `
+    -DoctorId 'dotnet' -DoctorRemedy 'install_dotnet'
 
 # --- AMO/TOM client assembly (the pbip-model-refresh skill's progress trace + ImageSave persist) ---
 # `dotnet` being on PATH proves only that a restore COULD run. It does not prove the restored package is
@@ -563,7 +692,8 @@ $adomdDll = Get-ChildItem -Path (Join-Path $nugetPackagesRoot 'microsoft.analysi
     -Recurse -Filter 'Microsoft.AnalysisServices.AdomdClient.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
 Add-Check 'ADOMD.NET client (Desktop probe/refresh)' 'critical' ([bool]$adomdDll) `
     $(if ($adomdDll) { $adomdDll.FullName } else { 'not in the nuget cache - probe_desktop_query.py / refresh_pbip_model.py cannot reach an open Desktop model' }) `
-    'Restore the ADOMD.NET client (a DIFFERENT nuget package from the TOM/AMO one the .NET-SDK check covers), forcing a supported TFM so the add cannot silently no-op on a net10 default: dotnet new console -o $env:TEMP\adomd --framework net8.0; dotnet add $env:TEMP\adomd package Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64 --version 19.84.1  (throwaway project; the restore populates the active NuGet global-packages cache the probe reads).'
+    'Restore the ADOMD.NET client (a DIFFERENT nuget package from the TOM/AMO one the .NET-SDK check covers), forcing a supported TFM so the add cannot silently no-op on a net10 default: dotnet new console -o $env:TEMP\adomd --framework net8.0; dotnet add $env:TEMP\adomd package Microsoft.AnalysisServices.AdomdClient.NetCore.retail.amd64 --version 19.84.1  (throwaway project; the restore populates the active NuGet global-packages cache the probe reads).' `
+    -DoctorId 'adomd_client' -DoctorReason 'assembly_missing' -DoctorRemedy 'restore_adomd'
 
 Add-Cli 'uv' 'optional' 'Install uv for env/dependency management (uv venv && uv sync).'
 Add-Cli 'az' 'optional' 'Azure CLI - only for Fabric REST / token-based operations.'
@@ -869,7 +999,8 @@ $tenantHint = switch ($verdict.Kind) {
     default { '' }
 }
 
-Add-Check 'Fabric token tenant' $verdict.Tier $verdict.Ok $verdict.Detail $tenantHint
+Add-Check 'Fabric token tenant' $verdict.Tier $verdict.Ok $verdict.Detail $tenantHint `
+    -DoctorId 'fabric_tenant' -DoctorReason 'tenant_mismatch' -DoctorRemedy 'scope_intended_tenant'
 
 $workspaceCheck = if (-not $workspace) {
     [pscustomobject]@{ Tier = 'optional'; Ok = $false; Detail = 'no landing-zone workspace declared - not checked'
@@ -914,17 +1045,24 @@ Add-Check 'ODBC Driver 18 (SQL)' 'optional' ($odbc -contains 'ODBC Driver 18 for
     $(if ($odbc) { ($odbc | Select-Object -Unique) -join '; ' } else { 'none' }) `
     'Only for direct SQL Analytics Endpoint / Warehouse queries.'
 
+# --- One aggregate feeds both presentations and the unchanged native exit. ---
+$summary = Get-PreflightSummary $results
+$criticalMissing = $summary.critical_missing
+$recommendedWarnings = $summary.recommended_warnings
+if ($DoctorDiagnostics) {
+    Write-Output (ConvertTo-Json -InputObject $summary -Depth 4 -Compress)
+    exit ([int]($criticalMissing -gt 0))
+}
+
 # --- Render ---
-$criticalMissing = 0
-$recommendedWarnings = 0
 foreach ($tier in @('critical', 'recommended', 'optional')) {
     Write-Host ''
     Write-Host "== $($tier.ToUpper()) =="
     foreach ($r in ($results | Where-Object { $_.Tier -eq $tier })) {
         $mark = if ($r.Ok) { 'OK  ' } elseif ($tier -eq 'critical') { 'MISS' } else { 'WARN' }
         Write-Host ("  [{0}] {1,-44} {2}" -f $mark, $r.Name, $r.Detail)
-        if (-not $r.Ok -and $tier -eq 'critical') { Write-Host "         -> $($r.Hint)"; $criticalMissing++ }
-        elseif (-not $r.Ok -and $tier -eq 'recommended') { Write-Host "         (recommended) $($r.Hint)"; $recommendedWarnings++ }
+        if (-not $r.Ok -and $tier -eq 'critical') { Write-Host "         -> $($r.Hint)" }
+        elseif (-not $r.Ok -and $tier -eq 'recommended') { Write-Host "         (recommended) $($r.Hint)" }
         elseif (-not $r.Ok -and $r.Hint) { Write-Host "         (optional) $($r.Hint)" }
     }
 }

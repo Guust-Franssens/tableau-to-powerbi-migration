@@ -10,6 +10,7 @@ passes any test written about its happy path.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,54 @@ def _make_engine_tree(root: Path, version: str = "2.126.0") -> Path:
     (skill / "VERSION").write_text(version + "\n", encoding="utf-8")
     (skill / "scripts" / "migrate_estate.py").write_text("# engine\n", encoding="utf-8")
     return root
+
+
+@pytest.mark.parametrize("configured", [None, "", "relocated", "missing"])
+def test_process_start_copilot_home(tmp_path: Path, configured: str | None) -> None:
+    """Resolve after setting the subprocess environment, never the parent import's hook."""
+    user = tmp_path / "user"
+    suffix = Path("installed-plugins/tableau-collection/tableau-fabric-skills")
+    default = _make_engine_tree(user / ".copilot" / suffix)
+    relocated = tmp_path / "relocated"
+    _make_engine_tree(relocated / suffix)
+    selected = tmp_path / configured if configured else user / ".copilot"
+    env = os.environ.copy()
+    env.update(HOME=str(user), USERPROFILE=str(user))
+    env.pop(engine_source.SIMULATE_ENGINE_ABSENT_ENV, None)
+    if configured is None:
+        env.pop("COPILOT_HOME", None)
+    else:
+        env["COPILOT_HOME"] = str(selected) if configured else ""
+    code = """
+import json
+import engine_source as engine
+try:
+    root = str(engine.engine_root())
+    error = None
+except engine.EngineNotFoundError as exc:
+    root = None
+    error = str(exc)
+print(json.dumps({
+    "root": root, "error": error,
+    "default": str(engine.DEFAULT_PLUGIN_ENGINE_ROOT),
+    "hook": str(engine.PLUGIN_ENGINE_ROOT),
+    "alternatives": [str(path) for path in engine.ALTERNATIVE_ENGINE_ROOTS],
+}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code], cwd=REPO_ROOT / "scripts", env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    verdict = json.loads(result.stdout)
+    assert verdict["default"] == str(selected / suffix)
+    assert verdict["hook"] == str(selected / suffix)
+    assert str(default) not in verdict["alternatives"]
+    if configured == "missing":
+        assert verdict["root"] is None, "a missing configured home must refuse, not use the default install"
+        assert str(selected / suffix) in verdict["error"]
+    else:
+        assert verdict["root"] == str(selected / suffix)
+        assert verdict["error"] is None
 
 
 # ---------------------------------------------------------------------------

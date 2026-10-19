@@ -1080,28 +1080,28 @@ def _role_blocked(
 ) -> dict[str, Any]:
     """The verdict for a package whose required roles or identity claims do not hold (#562 S2).
 
-    ⚠️ **FINDINGS, not CANNOT_ESTABLISH, and the difference is real.** S1 refuses because the package
-    cannot be described at all; here it describes itself perfectly well and what it describes is
-    wrong - a role nobody declared, a LUID that contradicts another, a provider that does not exist.
-    That is a defect an operator fixes, so it is reported as one; either way it is not a pass, and
-    no evidence is collected for it, because attribution to a unit whose identity does not hold is
-    exactly the thing that must not be produced.
-
-    Same privacy rule as every other refusal here: stable codes only, never a host path, never
-    customer text.
+    Missing/unestablished acquired dependency authority alone cannot establish identity. Any
+    established S2 role, authority or provider defect outranks that uncertainty as FINDINGS.
+    Neither refusal permits source, data, reference or binding helpers. Stable codes only.
     """
     unit = roles.unit or classification.unit_name or root.name or "target"
+    uncertain = (
+        any(row.state == pri.STATE_CANNOT_ESTABLISH for row in roles.dependencies)
+        and not any(row.blocks for row in roles.roles)
+        and set(roles.codes()) <= {pri.CODE_AUTHORITY_MISSING, pri.CODE_AUTHORITY_UNESTABLISHED}
+    )
+    status = STATUS_CANNOT_ESTABLISH if uncertain else STATUS_FINDINGS
     codes = ", ".join(roles.codes()) or roles.verdict
     detail = (
         f"role/identity BLOCKED: {codes} - this package's required roles or identity claims do not "
         "hold, so nothing found in it can be attributed to the unit it names and this gate forms NO "
         "opinion about its pages, which is NOT a pass"
     )
-    report = _merge(root, [UnitResult(unit=unit, status=STATUS_FINDINGS, detail=detail)], [], [])
+    report = _merge(root, [UnitResult(unit=unit, status=status, detail=detail)], [], [])
     if integrity is not None:
         report["package_integrity"] = [_integrity_block(classification, integrity)]
     report["role_identity"] = [_role_identity_block(classification, roles)]
-    return _package_verdict(report, STATUS_FINDINGS, "role_identity", roles.codes())
+    return _package_verdict(report, status, "role_identity", roles.codes())
 
 
 @dataclass(frozen=True)
@@ -1175,7 +1175,10 @@ def _typed_roles(role: Phase1RoleIdentityResult) -> bool:
         and type(role.roles) is tuple
         and all(type(row) is pri.RoleResult and row.state in states for row in role.roles)
         and type(role.dependencies) is tuple
-        and all(type(row) is pri.DependencyResult and row.state in states for row in role.dependencies)
+        and all(
+            type(row) is pri.DependencyResult and row.state in (*states, pri.STATE_CANNOT_ESTABLISH)
+            for row in role.dependencies
+        )
         and (role.source_identity is None or type(role.source_identity) is pri.SourceIdentity)
         and valid_source_codes(role.blockers)
     )

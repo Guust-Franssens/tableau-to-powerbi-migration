@@ -219,6 +219,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
+from contextlib import ExitStack
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, NamedTuple
 
@@ -4202,6 +4203,12 @@ def render_shipping_advisory(budgets: list[PathBudget]) -> str | None:
     )
 
 
+def _gate_authority_root(path: Path) -> Path:
+    """Select the coordination address without parsing unrelated per-unit input evidence."""
+    resolved = path.resolve()
+    return resolved.parent if resolved.is_file() else resolved
+
+
 def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many-branches,too-many-statements
     bundle: Path,
     unit: str,
@@ -4261,6 +4268,7 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
     more units after a failure, and a build landing on a stale staging path used to assemble into it
     and swap the combined contents into its own package - a success carrying another build's files.
     """
+    transaction = ExitStack()
     attempt = _ConstructionAttempt(
         completion if completion is not None else _ConstructionSlot(unit),
         identities if identities is not None else {},
@@ -4297,6 +4305,19 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
             budget = path_budget(bundle, unit, out_root, limits=limits, assets_dir=assets_dir)
             if budget.refused:
                 raise PackagePathTooLong(budget)
+            out_root.mkdir(parents=True, exist_ok=True)
+            original_root = _gate_authority_root(bundle if gate_root is None else gate_root)
+            try:
+                transaction.enter_context(
+                    data_access.gate_transactions(
+                        [original_root, final, *provider_packages],
+                        aliases={staging_dir(out_root, unit): final, retired_dir(final): final},
+                    )
+                )
+            except data_access.GateTransactionError:
+                # A proven native destination alias retains its existing policy diagnostic.
+                _claim_construction_directory(attempt, final)
+                raise
             attempt.prior = _claim_construction_directory(attempt, final)
             if attempt.prior is not None and not discard_edits:
                 _refuse_if_edited(unit, final)
@@ -4362,6 +4383,8 @@ def package_unit(  # pylint: disable=too-many-arguments,too-many-locals,too-many
         interruption.result = result
         cause = interrupted.__cause__ if isinstance(interrupted, AssemblyInterrupted) else interrupted
         raise interruption from cause
+    finally:
+        transaction.close()
 
 
 def _verify_construction_destination(attempt: _ConstructionAttempt) -> None:
@@ -4634,6 +4657,30 @@ def assert_package_destination(out_root: Path, unit: str) -> Path:
 
 
 def replace_dir(  # pylint: disable=too-many-arguments,too-many-branches
+    staged: Path,
+    final: Path,
+    verify: Callable[[Path], None] | None = None,
+    *,
+    verify_staged: Callable[[], None],
+    verify_final: Callable[[], None] | None = None,
+    verify_destination: Callable[[], None] | None = None,
+    verify_published: Callable[[], None] | None = None,
+) -> tuple[str, int, str] | None:
+    """Publish under the immutable final-root companion, including rollback and final checks."""
+    final.parent.mkdir(parents=True, exist_ok=True)
+    with data_access.gate_transactions([final], aliases={staged: final, retired_dir(final): final}):
+        return _replace_dir_locked(
+            staged,
+            final,
+            verify,
+            verify_staged=verify_staged,
+            verify_final=verify_final,
+            verify_destination=verify_destination,
+            verify_published=verify_published,
+        )
+
+
+def _replace_dir_locked(  # pylint: disable=too-many-arguments,too-many-branches
     staged: Path,
     final: Path,
     verify: Callable[[Path], None] | None = None,
@@ -5358,6 +5405,8 @@ def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-
             requested_scope=policy.requested_scope,
             provider=provider,
         )
+        if "transaction-refused" in assessment.codes:
+            raise data_access.GateTransactionError("transaction-refused")
         return _checked_data_access(
             data_access.reconcile_package_data_access(
                 assessment,
@@ -5367,6 +5416,8 @@ def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-
                 provider=provider,
             )
         ), notes
+    except data_access.GateTransactionError:
+        raise
     except (OSError, ValueError, TypeError, AttributeError, RecursionError, pfs._ManifestError):  # pylint: disable=protected-access
         # Readers and authority inputs may contain private text. Only this closed code escapes.
         return _cannot_data_access(), notes
@@ -6306,6 +6357,33 @@ def _binding_checked_result(
 
 
 def bind_package(
+    package_root: str,
+    *,
+    inspect: bool = False,
+    sanitize: bool = False,
+    provider_packages: Sequence[str] = (),
+) -> PackageBindingResult:
+    """Lock the entire supplied cohort before any authority read or publication."""
+    try:
+        roots = tuple(_binding_admit(str(value)) for value in (*provider_packages, package_root))
+        aliases = {
+            transient: root for root in roots for transient in (staging_dir(root.parent, root.name), retired_dir(root))
+        }
+        with data_access.gate_transactions(
+            list(roots),
+            aliases=aliases,
+            timeout=data_access.TX_READER_TIMEOUT if inspect else data_access.TX_WRITER_TIMEOUT,
+        ):
+            return _bind_package_locked(
+                package_root, inspect=inspect, sanitize=sanitize, provider_packages=provider_packages
+            )
+    except _BindingRefusal as error:
+        return PackageBindingResult("unchanged", error.exit_code, (error.code,), None)
+    except OSError:
+        return PackageBindingResult("cannot-establish", 3, ("binding_cannot_establish",), None)
+
+
+def _bind_package_locked(
     package_root: str,
     *,
     inspect: bool = False,

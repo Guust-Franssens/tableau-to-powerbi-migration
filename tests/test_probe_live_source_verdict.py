@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import io
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -38,17 +39,17 @@ def _import_skill_modules():
     """Import the CHILD-side modules the probe shells out to, from the SAME dir the probe resolves.
 
     Derived from ``probe_live_source.SKILL_SCRIPTS`` so the seam test binds to the real child, not a
-    hand-picked path. Returns (refresh_pbip_model, _verdict, _credential_modal).
+    hand-picked path. Returns (refresh_pbip_model, _verdict, _desktop_observer).
     """
     probe_live_source = _import_probe_live_source()
     skill_scripts = str(probe_live_source.SKILL_SCRIPTS)
     if skill_scripts not in sys.path:
         sys.path.insert(0, skill_scripts)
-    import _credential_modal  # noqa: PLC0415
+    import _desktop_observer  # noqa: PLC0415
     import _verdict  # noqa: PLC0415
     import refresh_pbip_model  # noqa: PLC0415
 
-    return refresh_pbip_model, _verdict, _credential_modal
+    return refresh_pbip_model, _verdict, _desktop_observer
 
 
 def test_requires_data_ok_verdict_token(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,8 +60,8 @@ def test_requires_data_ok_verdict_token(monkeypatch: pytest.MonkeyPatch) -> None
         "PREFLIGHT: DATA_OK_FROM_WORKER_AFTER_RELEASE\n"
     )
     monkeypatch.setattr(
-        probe_live_source.subprocess,
-        "run",
+        probe_live_source,
+        "_run_refresh",
         lambda *_args, **_kwargs: subprocess.CompletedProcess(args=["refresh"], returncode=1, stdout=stdout, stderr=""),
     )
 
@@ -90,7 +91,7 @@ def test_probe_argv_fed_through_real_emitter_is_accepted_by_the_parent(monkeypat
         captured["argv"] = list(cmd)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(probe_live_source.subprocess, "run", _capture)
+    monkeypatch.setattr(probe_live_source, "_run_refresh", _capture)
     probe_live_source._refresh_and_classify(123, "shipment", 1, network_fault_observed=False)
     argv = captured["argv"]
 
@@ -129,8 +130,8 @@ def test_probe_clears_gate_on_verbatim_live_databricks_success(monkeypatch: pyte
     probe_live_source = _import_probe_live_source()
     stdout = "  refresh: refreshed shipment\n  data   : 1 row(s) in 'shipment'\nREFRESH: TABLES_OK 'shipment'\n"
     monkeypatch.setattr(
-        probe_live_source.subprocess,
-        "run",
+        probe_live_source,
+        "_run_refresh",
         lambda *_a, **_k: subprocess.CompletedProcess(args=["refresh"], returncode=0, stdout=stdout, stderr=""),
     )
 
@@ -166,8 +167,8 @@ def test_nonzero_exit_is_never_read_as_success(monkeypatch: pytest.MonkeyPatch) 
     carries a success-looking verdict line for the probed table."""
     probe_live_source = _import_probe_live_source()
     monkeypatch.setattr(
-        probe_live_source.subprocess,
-        "run",
+        probe_live_source,
+        "_run_refresh",
         lambda *_a, **_k: subprocess.CompletedProcess(
             args=["refresh"], returncode=1, stdout="REFRESH: TABLES_OK 'shipment'\n", stderr=""
         ),
@@ -181,8 +182,8 @@ def test_wrong_table_tables_ok_does_not_clear_the_gate(monkeypatch: pytest.Monke
     """#115 end-to-end: even at exit 0, a TABLES_OK for a DIFFERENT table must leave the gate closed."""
     probe_live_source = _import_probe_live_source()
     monkeypatch.setattr(
-        probe_live_source.subprocess,
-        "run",
+        probe_live_source,
+        "_run_refresh",
         lambda *_a, **_k: subprocess.CompletedProcess(
             args=["refresh"], returncode=0, stdout="REFRESH: TABLES_OK 'some_other_table'\n", stderr=""
         ),
@@ -233,15 +234,15 @@ def _detector_unknown_reasons(credential_modal) -> list[str]:
 
     reasons: list[str] = []
     for enumerate_windows, process_is_alive in scenarios:
-        reason = credential_modal.inspect_credential_modal(
+        reason = credential_modal.inspect_desktop_observer(
             111, enumerate_windows=enumerate_windows, process_is_alive=process_is_alive
         ).unknown_reason
         assert reason, "scenario failed to drive the detector into an UNKNOWN state"
         reasons.append(reason)
 
-    # Backstop for 'catches a newly-added reason without editing a list': if inspect_credential_modal
+    # Backstop for 'catches a newly-added reason without editing a list': if inspect_desktop_observer
     # grows a THIRD unknown_reason branch, this trips so whoever adds it also adds a driver scenario.
-    branches = inspect.getsource(credential_modal.inspect_credential_modal).count("unknown_reason=")
+    branches = inspect.getsource(credential_modal.inspect_desktop_observer).count("unknown_reason=")
     assert branches == len(reasons), (
         f"detector emits {branches} unknown_reason branch(es) but this harness exercised {len(reasons)}; "
         "add a driver scenario in _detector_unknown_reasons so #153 stays covered."
@@ -327,8 +328,8 @@ def test_a_dialog_finding_keeps_the_gate_shut_without_claiming_a_credential_wall
             refresh_pbip_model._emit_dialog_finding(111, finding)
         stdout = buffer.getvalue()
         monkeypatch.setattr(
-            probe_live_source.subprocess,
-            "run",
+            probe_live_source,
+            "_run_refresh",
             lambda *_args, _out=stdout, **_kwargs: subprocess.CompletedProcess(
                 args=["refresh"], returncode=3, stdout=_out, stderr=""
             ),
@@ -754,8 +755,8 @@ def test_a_dialog_verdict_cannot_clear_the_live_source_gate(monkeypatch: pytest.
     for token in ("DIALOG_UNREADABLE", "DIALOG_UNRECOGNIZED", "DIALOG_NEEDS_HUMAN", "REFRESH_IN_PROGRESS"):
         stdout = f"REFRESH: {token} pid=111; kind=x\nREFRESH: TABLES_OK 'Orders'\nREFRESH: DATA_OK\n"
         monkeypatch.setattr(
-            probe_live_source.subprocess,
-            "run",
+            probe_live_source,
+            "_run_refresh",
             lambda *_args, _out=stdout, **_kwargs: subprocess.CompletedProcess(
                 args=["refresh"],
                 returncode=0,
@@ -808,8 +809,8 @@ def test_timeout_verdict_is_recognised_structurally_not_as_no_credential(
     child_exit = 3  # the real emitter returns 3
 
     monkeypatch.setattr(
-        probe_live_source.subprocess,
-        "run",
+        probe_live_source,
+        "_run_refresh",
         lambda *_a, **_k: subprocess.CompletedProcess(
             args=["refresh"],
             returncode=child_exit,
@@ -840,8 +841,8 @@ def test_timeout_verdict_cannot_clear_the_live_source_gate(
     """Defence in depth: a TIMEOUT verdict blocks success even beside a stale DATA_OK."""
     probe_live_source = _import_probe_live_source()
     monkeypatch.setattr(
-        probe_live_source.subprocess,
-        "run",
+        probe_live_source,
+        "_run_refresh",
         lambda *_a, **_k: subprocess.CompletedProcess(
             args=["refresh"],
             returncode=0,
@@ -870,7 +871,7 @@ def _harvest_minimized_reason(credential_modal) -> str:
         height=800,
         minimized=True,
     )
-    reason = credential_modal.inspect_credential_modal(
+    reason = credential_modal.inspect_desktop_observer(
         111, enumerate_windows=lambda _pid: [minimized_main]
     ).unknown_reason
     assert reason, "detector did not report the minimized-owner UNKNOWN reason"
@@ -921,8 +922,8 @@ def test_credential_unknown_full_child_transcript_classifies_as_no_credential(mo
     transcript = buffer.getvalue()
 
     monkeypatch.setattr(
-        probe_live_source.subprocess,
-        "run",
+        probe_live_source,
+        "_run_refresh",
         lambda *_a, **_k: subprocess.CompletedProcess(args=["refresh"], returncode=3, stdout=transcript, stderr=""),
     )
 
@@ -938,7 +939,7 @@ def _harvest_zero_window_alive_reason(credential_modal) -> str:
     Same #152/#153 discipline as ``_harvest_minimized_reason``: assert against the exact string the
     detector really emits when enumeration returns an empty list while the process is still alive.
     """
-    reason = credential_modal.inspect_credential_modal(
+    reason = credential_modal.inspect_desktop_observer(
         111, enumerate_windows=lambda _pid: [], process_is_alive=lambda _pid: True
     ).desktop_unready
     assert reason, "detector did not report the zero-window alive DESKTOP_UNREADY reason"
@@ -947,7 +948,7 @@ def _harvest_zero_window_alive_reason(credential_modal) -> str:
 
 def _harvest_desktop_gone_reason(credential_modal) -> str:
     """The REAL ``process_gone`` terminal string, harvested by driving the detector (issue #158)."""
-    reason = credential_modal.inspect_credential_modal(
+    reason = credential_modal.inspect_desktop_observer(
         111, enumerate_windows=lambda _pid: [], process_is_alive=lambda _pid: False
     ).process_gone
     assert reason, "detector did not report the process-gone terminal reason"
@@ -1020,8 +1021,8 @@ def test_desktop_gone_full_child_transcript_classifies_as_error(monkeypatch: pyt
     transcript = buffer.getvalue()
 
     monkeypatch.setattr(
-        probe_live_source.subprocess,
-        "run",
+        probe_live_source,
+        "_run_refresh",
         lambda *_a, **_k: subprocess.CompletedProcess(args=["refresh"], returncode=2, stdout=transcript, stderr=""),
     )
 
@@ -1044,7 +1045,7 @@ def test_zero_window_alive_emitter_and_parent_classify_as_local_error() -> None:
     """
     probe_live_source = _import_probe_live_source()
     refresh_pbip_model, _, credential_modal = _import_skill_modules()
-    state = credential_modal.inspect_credential_modal(
+    state = credential_modal.inspect_desktop_observer(
         111, enumerate_windows=lambda _pid: [], process_is_alive=lambda _pid: True
     )
 
@@ -1073,8 +1074,8 @@ def test_credential_stop_precedes_success_when_verdict_lines_contradict(monkeypa
     probe_live_source = _import_probe_live_source()
     transcript = "REFRESH: TABLES_OK 'Orders'\nREFRESH: CREDENTIAL_UNKNOWN pid=111; indeterminate"
     monkeypatch.setattr(
-        probe_live_source.subprocess,
-        "run",
+        probe_live_source,
+        "_run_refresh",
         lambda *_a, **_k: subprocess.CompletedProcess(args=["refresh"], returncode=0, stdout=transcript, stderr=""),
     )
 
@@ -1161,3 +1162,88 @@ def test_probe_timeout_default_threads_all_the_way_to_run_probe(
         f"{probe_live_source.PROBE_TIMEOUT_SECONDS}; the argparse default has drifted off the constant, so the "
         "child would be SIGKILLed before its own deadline can fire (issue #156 inversion)."
     )
+
+
+def desktop_event(state: str = "READY", *, complete: bool = True, image=None) -> str:
+    """Independent public protocol fixture; deliberately contains no row/source proof."""
+    return "DESKTOP_OBSERVATION " + json.dumps(
+        {
+            "schema": "desktop.observation.v1",
+            "observation_id": "74100000-0000-4000-8000-000000000001",
+            "operation_id": None,
+            "pid": "111",
+            "process_started_at": "638963424000000001",
+            "hwnd": None,
+            "owner_hwnd": None,
+            "observed_at": "2026-10-17T20:00:00Z",
+            "elapsed_ms": 1,
+            "complete": complete,
+            "state": state,
+            "reason": "complete" if state == "READY" else "unknown_content",
+            "findings": [],
+            "image": image,
+            "cannot_prove": ["source_reachability", "credential_validity", "data_correctness"],
+        }
+    )
+
+
+@pytest.mark.parametrize("screenshot", [False, True])
+def test_ready_and_private_image_never_earn_source_data_or_gate_clear(screenshot: bool) -> None:
+    """Valid READY and image metadata are negative controls for the source-proof gate."""
+    probe_live_source = _import_probe_live_source()
+    from _desktop_observer import observation_token  # pylint: disable=import-outside-toplevel,import-error
+
+    image = (
+        {
+            "id": "74100000-0000-4000-8000-000000000002",
+            "basename": "_ui-image-" + "a" * 32 + ".png",
+            "status": "ACQUIRED",
+            "width": 320,
+            "height": 240,
+            "sha256": "a" * 64,
+            "expires_at": "2026-10-17T20:01:00Z",
+            "cleanup": "leased",
+        }
+        if screenshot
+        else None
+    )
+    event = desktop_event(image=image)
+    assert observation_token(event.removeprefix("DESKTOP_OBSERVATION ")) is None, (
+        "control must be valid READY, not invalid JSON"
+    )
+    assert not probe_live_source._is_earned_success(event, "Orders", returncode=0), (
+        "screenshots/READY cannot clear the gate"
+    )
+    assert probe_live_source._classify_failure(event, network_fault_observed=False)[0] == "ERROR", (
+        "structured metadata must never enter connector free-text classification"
+    )
+    positive = event + "\nREFRESH: TABLES_OK 'Orders'"
+    assert probe_live_source._is_earned_success(positive, "Orders", returncode=0)
+    assert not probe_live_source._is_earned_success(positive, "Other", returncode=0)
+    assert not probe_live_source._is_earned_success(positive, "Orders", returncode=1)
+
+
+@pytest.mark.parametrize(
+    "state", ["UNKNOWN_DIALOG", "UNREADABLE_DIALOG", "HUMAN_ACTION_REQUIRED", "CREDENTIAL_REQUIRED"]
+)
+def test_nonclean_event_vetoes_a_late_success_without_free_text_reclassification(state: str) -> None:
+    """Non-clean structured events cannot be laundered by a later success line."""
+    probe_live_source = _import_probe_live_source()
+    event = desktop_event(state, complete=state != "UNREADABLE_DIALOG")
+    text = event + "\nREFRESH: TABLES_OK 'Orders'"
+    assert not probe_live_source._is_earned_success(text, "Orders", returncode=0)
+    verdict, _ = probe_live_source._classify_failure(text, network_fault_observed=False)
+    assert verdict == ("NO_CREDENTIAL" if state == "CREDENTIAL_REQUIRED" else "ERROR")
+
+
+def test_event_lattice_keeps_uncertainty_and_then_the_first_terminal() -> None:
+    """The parent consumes the shared uncertainty/first-terminal lattice."""
+    import _verdict_lines  # pylint: disable=import-outside-toplevel
+
+    unknown = desktop_event("UNKNOWN_DIALOG")
+    human = desktop_event("HUMAN_ACTION_REQUIRED")
+    credential = desktop_event("CREDENTIAL_REQUIRED")
+    assert _verdict_lines.observation_refusal(unknown + "\n" + desktop_event()) == "DIALOG_UNRECOGNIZED"
+    assert _verdict_lines.observation_refusal(unknown + "\n" + credential) == "CREDENTIAL_MISSING"
+    assert _verdict_lines.observation_refusal(human + "\n" + credential) == "DIALOG_NEEDS_HUMAN"
+    assert _verdict_lines.observation_refusal("DESKTOP_OBSERVATION {malformed OAuth 403}") == "DIALOG_UNREADABLE"

@@ -20,8 +20,10 @@ import pytest
 
 import test_data_access_contract as authority
 import test_package_role_identity as s2
-from test_data_access_contract import _desktop_fixture, _root_fixture  # noqa: F401  # existing pytest fixtures
+from test_data_access_contract import _desktop_fixture, _root_fixture, _rows  # noqa: F401  # existing pytest fixtures
 from test_package_unit_gates import DS_LUID, DS_UNIT, UNIT, _brief, _bundle, _write_input_manifest, _write_receipt, pkg
+from credential_gate import _clear_was_earned
+from probe_live_source import _probe_leg
 
 
 def selected_input(root: Path) -> tuple[Path, Path, dict[str, Any]]:
@@ -733,7 +735,11 @@ def test_packaged_live_spec_uses_pure_parser_validation_not_the_gate_arming_cli(
 ) -> None:
     asset = tmp_path / "Live.tds"
     asset.write_text(
-        "<datasource name='Live'><connection class='sqlserver' server='source.example' dbname='db'/></datasource>",
+        "<datasource name='Live'><connection class='federated'><named-connections>"
+        "<named-connection name='orders-leg'><connection class='sqlserver' server='source.example' "
+        "dbname='db' schema='dbo'/></named-connection></named-connections>"
+        "<relation name='Orders' table='[dbo].[Orders]' connection='orders-leg' type='table'/>"
+        "</connection></datasource>",
         encoding="utf-8",
     )
     actual_run = subprocess.run
@@ -833,7 +839,12 @@ def test_real_localized_bytes_and_exact_in_memory_facts_drive_projection(
 def test_producer_uses_current_keyed_authority_without_writes(
     tmp_path: Path, root: Path, fault: str, state: str, codes: tuple[str, ...]
 ) -> None:
-    authority._earn(root)
+    if fault in {"manual", "rearm"}:
+        assert authority.gate.apply_block(root, [authority.KEY]) == 0
+        assert (root / authority.gate.MARKER).is_file()
+        assert json.loads((root / authority.gate.MARKER).read_text(encoding="utf-8"))["sources"] == [authority.KEY]
+    else:
+        authority._earn(root)
     rows = authority._rows(root)
     if fault == "missing":
         (root / authority.gate.AUDIT).unlink()
@@ -843,10 +854,11 @@ def test_producer_uses_current_keyed_authority_without_writes(
                 row.pop("sources", None)
         authority._write_rows(root, rows)
     elif fault == "manual":
-        authority._write_rows(root, [row for row in rows if not row["action"].startswith("probe-")])
-        authority.gate._audit(root, "manual-clear", "fixture-only")
-    elif fault == "rearm":
-        authority.gate._audit(root, "block-marker-only", "sources_json=" + json.dumps([authority.KEY]), [authority.KEY])
+        assert authority.gate.clear_block(root, "manual diagnostic", earned=False) != 0
+        assert (root / authority.gate.MARKER).exists()
+        assert authority.gate.status(root) != 0
+        assert _clear_was_earned(root, [authority.KEY]) is None
+        assert [row["action"] for row in _rows(root)] == ["block-marker-only", "manual-clear"]
     candidate = _assessment_candidate(tmp_path, authority._spec(authority.LIVE))
     before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
     actual = _assess_candidate(candidate, root)
@@ -867,11 +879,30 @@ def test_mixed_direct_sources_need_every_key_and_all_local_bytes(
         keys.reverse()
         connections.reverse()
     assert authority.gate.apply_block(root, keys) == 0
+    connections_by_key = {authority.KEY: authority.LIVE, authority.OTHER_KEY: authority.OTHER}
     for key in keys:
         if fault == "unearned-key" and key == authority.OTHER_KEY:
             continue
-        authority.gate._audit(root, "probe-data_ok", "fixture row returned", [key])
+        assert _probe_leg(root, key, connections_by_key[key], ([{"name": "Orders"}], "ID"), (1, False)) == (
+            0,
+            "DATA_OK",
+        )
         assert authority.gate.clear_block(root, "fixture-earned", earned=True, sources=[key]) == 0
+    if fault == "unearned-key":
+        assert json.loads((root / authority.gate.MARKER).read_text(encoding="utf-8"))["sources"] == [
+            authority.OTHER_KEY
+        ]
+    else:
+        assert not (root / authority.gate.MARKER).exists()
+    assert [(row["action"], row["sources"]) for row in _rows(root)] == [
+        ("block-marker-only", keys),
+        *[
+            (action, [key])
+            for key in keys
+            if not (fault == "unearned-key" and key == authority.OTHER_KEY)
+            for action in ("block-marker-only", "probe-data_ok", "probe-cleared")
+        ],
+    ]
     candidate = _assessment_candidate(tmp_path, authority._spec(*connections))
     local = copy.deepcopy(authority.LOCAL)
     if fault == "incomplete-flat":
@@ -890,10 +921,10 @@ def test_mixed_direct_sources_need_every_key_and_all_local_bytes(
     [
         ("none", ("authorized_model_only", ("brief-model-only", "human-authorize"))),
         ("bare-override", ("cannot_establish", ("audit-missing",))),
-        ("stop", ("blocked", ("authorization-mismatch", "stale-clear"))),
-        ("workbook", ("blocked", ("authorization-mismatch", "stale-clear"))),
-        ("review", ("blocked", ("stale-clear", "unknown-target"))),
-        ("local-missing", ("blocked", ("local-import-incomplete", "stale-clear"))),
+        ("stop", ("blocked", ("authorization-mismatch", "marker-only"))),
+        ("workbook", ("blocked", ("authorization-mismatch", "marker-only"))),
+        ("review", ("blocked", ("marker-only", "unknown-target"))),
+        ("local-missing", ("blocked", ("local-import-incomplete", "marker-only"))),
     ],
 )
 def test_authorization_never_downgrades_scope_or_overrides_missing_prerequisites(
@@ -1001,6 +1032,26 @@ LOCAL_PROJECTION = {
     "codes": ["all-flat-file", "package-self-contained"],
 }
 
+DIRECT_KEYS = {
+    server: "source-key:"
+    + hashlib.sha256(
+        json.dumps(
+            {
+                "class": "sqlserver",
+                "server": server,
+                "database": "db",
+                "schema": "dbo",
+                "ordinary_tables": ["Orders"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    for server in ("source.example", "other.example")
+}
+DIRECT_KEY = DIRECT_KEYS["source.example"]
+OTHER_DIRECT_KEY = DIRECT_KEYS["other.example"]
+
 
 def _projection_fixture(package: Path, payload: dict) -> None:
     """Independent wire bytes and artifact declaration, sealed by the existing S2 fixture."""
@@ -1013,13 +1064,17 @@ def _projection_fixture(package: Path, payload: dict) -> None:
 
 
 def _direct_provider(
-    parent: Path, *, luid: str = DS_LUID, key: str = authority.KEY, connection: dict[str, Any] | None = None
+    parent: Path, *, luid: str = DS_LUID, key: str = DIRECT_KEY, connection: dict[str, Any] | None = None
 ) -> Path:
     """Supply direct connection metadata independently of the projection's claimed key."""
-    package = s2.datasource_package(parent, unit="Shared", luid=luid)
+    package = s2.datasource_package(parent, unit="Shared", luid=luid, published_key=s2.PUBLISHED_KEY)
     spec_path = package / "migration-spec.json"
     spec = json.loads(spec_path.read_bytes())
-    spec["data_sources"][0]["connection"] = dict(authority.LIVE if connection is None else connection)
+    spec["data_sources"][0]["connection"] = {
+        **(authority.LIVE if connection is None else connection),
+        "name": "orders-leg",
+    }
+    spec["data_sources"][0]["tables"] = [{"name": "Orders", "table": "[dbo].[Orders]", "connection": "orders-leg"}]
     s2._write(spec_path, spec)
     _projection_fixture(
         package,
@@ -1036,13 +1091,13 @@ def _direct_provider(
 def _provider_consumer(parent: Path, provider: Path) -> Path:
     package = parent / "Consumer"
     binding = os.path.relpath(provider / "fabric" / "Shared.SemanticModel", package / "fabric" / "Revenue.Report")
-    return s2.workbook_package(package, published={"luid": DS_LUID}, binding=binding.replace("\\", "/"))
+    return s2.workbook_package(package, published={"key": s2.PUBLISHED_KEY}, binding=binding.replace("\\", "/"))
 
 
 @pytest.mark.parametrize("change", ["projection-key", "connection-identity", "missing-connection"])
 def test_direct_provider_projection_is_grounded_in_current_held_metadata(tmp_path: Path, change: str) -> None:
     """A one-sided identity change reaches binding authority after clean S1/S2 and legal projection parsing."""
-    provider = _direct_provider(tmp_path / "provider", key="source-key:ab1baa4b3f77bb70")
+    provider = _direct_provider(tmp_path / "provider", key=DIRECT_KEY)
     held = pkg._binding_hold(provider)
     role = pkg.pri.verify_phase1_role_identity([provider])[0]
     assert role.verified is not None and role.verified.integrity.is_clean
@@ -1051,23 +1106,23 @@ def test_direct_provider_projection_is_grounded_in_current_held_metadata(tmp_pat
     assert isinstance(baseline, pkg.pri.PackageDataAccessHandoff)
     projection = pkg.data_access.parse_data_access(baseline.data_access.content.decode("utf-8"))
     assert projection.state == "live_data_ok"
-    assert projection.source_keys == baseline.facts.live_source_keys == ("source-key:ab1baa4b3f77bb70",), (
+    assert projection.source_keys == baseline.facts.live_source_keys == (DIRECT_KEY,), (
         "direct-provider source-key authority must derive the literal key from held connection metadata"
     )
     assert baseline.facts.direct_applicable and not baseline.facts.published_only
     assert not baseline.facts.has_review and baseline.facts.refusal_code is None
     pkg._binding_access(held, role, provider)
 
-    expected_keys = ("source-key:ab1baa4b3f77bb70",)
+    expected_keys = (DIRECT_KEY,)
     if change == "projection-key":
         payload = json.loads(baseline.data_access.content)
-        payload["source_keys"] = ["source-key:e625ce798a6d19bb"]
+        payload["source_keys"] = [OTHER_DIRECT_KEY]
         s2._write(provider / "data-access.json", payload)
     else:
         spec = json.loads(baseline.migration_spec.content)
         if change == "connection-identity":
             spec["data_sources"][0]["connection"]["server"] = "other.example"
-            expected_keys = ("source-key:e625ce798a6d19bb",)
+            expected_keys = (OTHER_DIRECT_KEY,)
         else:
             del spec["data_sources"][0]["connection"]
             expected_keys = ()
@@ -1086,9 +1141,7 @@ def test_direct_provider_projection_is_grounded_in_current_held_metadata(tmp_pat
         assert handoff.data_access.content == baseline.data_access.content
     projection = pkg.data_access.parse_data_access(handoff.data_access.content.decode("utf-8"))
     assert projection.state == "live_data_ok"
-    assert projection.source_keys == (
-        "source-key:e625ce798a6d19bb" if change == "projection-key" else "source-key:ab1baa4b3f77bb70",
-    )
+    assert projection.source_keys == (OTHER_DIRECT_KEY if change == "projection-key" else DIRECT_KEY,)
     assert handoff.facts.live_source_keys == expected_keys
     assert handoff.facts.refusal_code == ("source-key-invalid" if change == "missing-connection" else None)
     assert handoff.facts.direct_applicable is (change != "missing-connection")
@@ -1103,15 +1156,17 @@ def test_direct_provider_projection_is_grounded_in_current_held_metadata(tmp_pat
 def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
     tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool, repeated: bool
 ) -> None:
-    selected = _direct_provider(tmp_path / "selected", key="source-key:ab1baa4b3f77bb70")
-    other = _direct_provider(
-        tmp_path / "other", luid=s2.WB_LUID, key="source-key:e625ce798a6d19bb", connection=authority.OTHER
-    )
+    selected = _direct_provider(tmp_path / "selected", key=DIRECT_KEY)
+    other = _direct_provider(tmp_path / "other", luid=s2.WB_LUID, key=OTHER_DIRECT_KEY, connection=authority.OTHER)
     consumer = _provider_consumer(tmp_path, selected)
     if repeated:
         spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
         spec["data_sources"] *= 2
         s2._write(consumer / "migration-spec.json", spec)
+        provenance = json.loads((consumer / "source-provenance.json").read_bytes())
+        rows = provenance["inputs"][0]["origin"]["published_dependencies"]["rows"]
+        rows.append({**rows[0], "source_ordinal": 1})
+        s2._write(consumer / "source-provenance.json", provenance)
         _reseal(consumer)
     providers = (other, selected) if reverse else (selected, other)
     s2_results = pkg.pri.verify_phase1_role_identity([*providers, consumer])
@@ -1125,17 +1180,20 @@ def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
         handoff = role.data_access_handoff(provider)
         assert isinstance(handoff, pkg.pri.PackageDataAccessHandoff)
         assert handoff.migration_spec.root_identity == handoff.data_access.root_identity == str(provider)
-        connection, key = (
-            (authority.LIVE, "source-key:ab1baa4b3f77bb70")
-            if provider == selected
-            else (authority.OTHER, "source-key:e625ce798a6d19bb")
-        )
+        connection, key = (authority.LIVE, DIRECT_KEY) if provider == selected else (authority.OTHER, OTHER_DIRECT_KEY)
         projection = pkg.data_access.parse_data_access(handoff.data_access.content.decode("utf-8"))
         assert projection.state == "live_data_ok"
         assert projection.source_keys == handoff.facts.live_source_keys == (key,), (
             "direct-provider source-key authority must derive the literal key from held connection metadata"
         )
-        assert json.loads(handoff.migration_spec.content)["data_sources"] == [{"id": "ds-1", "connection": connection}]
+        assert json.loads(handoff.migration_spec.content)["data_sources"] == [
+            {
+                "id": "ds-1",
+                "connection": {**connection, "name": "orders-leg"},
+                "tables": [{"name": "Orders", "table": "[dbo].[Orders]", "connection": "orders-leg"}],
+                "published_datasource": {"id": "Shared", "site": "sales-site", "key": s2.PUBLISHED_KEY},
+            }
+        ]
         assert handoff.facts.direct_applicable and not handoff.facts.published_only
         assert not handoff.facts.has_review and handoff.facts.refusal_code is None
         pkg._binding_access(pkg._binding_hold(provider), role, provider)
@@ -1158,7 +1216,7 @@ def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
     assert result.to_json() == {
         "schema": "phase1-data-access/v1",
         "state": "provider_inherited",
-        "source_keys": ["source-key:ab1baa4b3f77bb70"],
+        "source_keys": [DIRECT_KEY],
         "provider_unit": expected_reference,
         "provider_state": "live_data_ok",
         "validation": "validated",
@@ -1303,13 +1361,20 @@ def test_mixed_published_and_direct_consumers_refuse_the_authoritys_inheritance_
 
 def test_contradictory_luid_and_second_dependency_cannot_be_collapsed_by_name(tmp_path: Path, root: Path) -> None:
     selected = _direct_provider(tmp_path / "selected")
-    other = _direct_provider(tmp_path / "other", luid=s2.WB_LUID, key=authority.OTHER_KEY, connection=authority.OTHER)
+    other = _direct_provider(tmp_path / "other", luid=s2.WB_LUID, key=OTHER_DIRECT_KEY, connection=authority.OTHER)
     consumer = _provider_consumer(tmp_path, selected)
     spec = json.loads((consumer / "migration-spec.json").read_text(encoding="utf-8"))
     spec["data_sources"].append(
-        {"connection": {"class": "sqlproxy", "mode": "live"}, "published_datasource": {"luid": s2.WB_LUID}}
+        {
+            "connection": {"class": "sqlproxy", "mode": "live"},
+            "published_datasource": {"luid": s2.WB_LUID, "key": s2.PUBLISHED_KEY},
+        }
     )
     s2._write(consumer / "migration-spec.json", spec)
+    provenance = json.loads((consumer / "source-provenance.json").read_bytes())
+    rows = provenance["inputs"][0]["origin"]["published_dependencies"]["rows"]
+    rows.append({**rows[0], "source_ordinal": 1, "datasource_luid": s2.WB_LUID})
+    s2._write(consumer / "source-provenance.json", provenance)
     _reseal(consumer)
     verdict = pkg.pri.verify_phase1_role_identity([selected, other, consumer])[-1]
     assert [dep.state for dep in verdict.dependencies] == ["resolved", "mismatch"]
@@ -1324,8 +1389,7 @@ def _shared_bundle(parent: Path) -> tuple[Path, Path]:
     assets = bundle.parent / "assets"
     consumer = next(assets.glob(f"*_{UNIT}.twb"))
     shutil.copyfile(Path(__file__).parent / "fixtures" / "published_datasource.twb", consumer)
-    (assets / f"{DS_LUID}_{DS_UNIT}.tds").unlink()
-    provider = assets / f"{DS_UNIT}.tds"
+    provider = assets / f"{DS_LUID}_{DS_UNIT}.tds"
     provider.write_text(
         "<datasource name='Shared'>"
         "<repository-location id='SalesMaster' site='Finance'/>"
@@ -1335,7 +1399,18 @@ def _shared_bundle(parent: Path) -> tuple[Path, Path]:
     )
     _write_input_manifest(bundle, [consumer, provider])
     provenance = json.loads((bundle / "source-provenance.json").read_text(encoding="utf-8"))
-    provenance["inputs"][0]["input"]["sha256"] = hashlib.sha256(consumer.read_bytes()).hexdigest()
+    source = provenance["inputs"][0]
+    source["input"]["sha256"] = hashlib.sha256(consumer.read_bytes()).hexdigest()
+    source["origin"]["published_dependencies"] = s2.published_authority(
+        source["input"]["sha256"], source["origin"]["workbook_luid"]
+    )
+    source["origin"]["published_dependencies"]["rows"][0]["published_key"] = "finance/salesmaster"
+    provenance["inputs"].append(
+        {
+            "input": {"file": provider.name, "sha256": hashlib.sha256(provider.read_bytes()).hexdigest()},
+            "origin": {"datasource_luid": DS_LUID, "match": "sha256"},
+        }
+    )
     s2._write(bundle / "source-provenance.json", provenance)
     shutil.rmtree(bundle / "pbip" / UNIT / f"{UNIT}.SemanticModel")
     s2._write(
@@ -1393,7 +1468,6 @@ def test_canonical_datasource_model_only_package_publishes_from_staged_input(
 ) -> None:
     bundle, oracle = _shared_bundle(tmp_path)
     asset = bundle.parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
-    (asset.parent / f"{DS_UNIT}.tds").rename(asset)
     row = {"name": DS_UNIT, "staged_input_path": str(asset), "sha256": hashlib.sha256(asset.read_bytes()).hexdigest()}
     rows = [row]
     if fault == "wrong-basename":
@@ -1440,7 +1514,7 @@ def test_canonical_shared_packages_resolve_raw_sources_and_ship_redacted_handove
     bundle, oracle = _shared_bundle(tmp_path)
     assets = bundle.parent / "assets"
     consumer = next(assets.glob(f"*_{UNIT}.twb"))
-    provider = assets / f"{DS_UNIT}.tds"
+    provider = assets / f"{DS_LUID}_{DS_UNIT}.tds"
     write_rows(
         bundle,
         [
@@ -1643,12 +1717,17 @@ def test_real_packaging_binds_only_the_exact_original_gate_root(
     bundle, oracle, _objects = _bundle(tmp_path, covered=None, datasource_only=True)
     asset = bundle.parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
     asset.write_text(
-        "<datasource name='Live'><connection class='sqlserver' server='source.example' dbname='db'/></datasource>",
+        "<datasource name='Live'><connection class='federated'><named-connections>"
+        "<named-connection name='orders-leg'><connection class='sqlserver' server='source.example' "
+        "dbname='db' schema='dbo'/></named-connection></named-connections>"
+        "<relation name='Orders' table='[dbo].[Orders]' connection='orders-leg' type='table'/>"
+        "</connection></datasource>",
         encoding="utf-8",
     )
     _write_input_manifest(bundle, list(asset.parent.glob("*")))
     report = json.loads((bundle / "report.json").read_text(encoding="utf-8"))
-    report["datasources"][0]["connection"] = dict(authority.LIVE)
+    report["datasources"][0]["connection"] = {**authority.LIVE, "name": "orders-leg"}
+    report["datasources"][0]["tables"] = [{"name": "Orders", "table": "[dbo].[Orders]", "connection": "orders-leg"}]
     s2._write(bundle / "report.json", report)
     authority._earn(bundle if selection == "default-engine" else root)
     observed = []

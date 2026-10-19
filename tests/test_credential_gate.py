@@ -171,6 +171,26 @@ def run_gate(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, str(GATE), *args], capture_output=True, text=True, check=False)
 
 
+def _arm_fixture(root: Path) -> subprocess.CompletedProcess:
+    """Give older single-source physical/hook fixtures real current source facts and identities."""
+    (root / cg.MIGRATION_SPEC).write_text(json.dumps(_da_spec(LIVE_A)), encoding="utf-8")
+    return run_gate("block", str(root), "--sources", KEY_A)
+
+
+def _earn_fixture(root: Path, sources: list[str] | None = None) -> subprocess.CompletedProcess:
+    """A returned row and paired clear, not the obsolete clear-only success fixture."""
+    keys = sources if sources is not None else cg._last_block_sources(root)
+    assert keys
+    cg.record_probe_attempt(root, "DATA_OK", "fixture row returned", keys)
+    return run_gate("clear", str(root), "--reason", "fixture DATA_OK", "--earned", "--sources", *keys)
+
+
+def _strip_fixture_barrier(root: Path) -> None:
+    """Explicit test-owned evasion/cleanup, never an earned production transition."""
+    with cg.gate_transaction(root):
+        cg._release_physical(root)
+
+
 def run_hook(payload: dict) -> dict:
     proc = subprocess.run(
         [sys.executable, str(HOOK)],
@@ -247,15 +267,14 @@ def _deny_rights_for_current_account(target: Path) -> tuple[int, str, list[froze
 
 
 def _assert_gate_fully_cleared(migration: Path) -> None:
-    """Asserted teardown: `clear` must exit 0 AND the kernel deny must actually be gone.
+    """Asserted test-owned teardown: the physical release must leave no kernel deny.
 
     #543's state-2 node called no cleanup at all and leaked a real deny ACE into the temp tree; the
-    module `migration` fixture does call `clear`, but discards its exit code, so a failed
-    `/remove:d` would leave a denied directory behind and still look like clean teardown. A failure
-    here fails/errors the test and carries the icacls output as evidence rather than swallowing it.
+    A canonical pending source cannot use manual `clear` as a release. Cleanup therefore uses the
+    locked physical helper on this test's own root, then checks raw ACEs and a real write. A failed
+    `/remove:d` must fail/error the test rather than leaving a denied directory behind.
     """
-    proc = run_gate("clear", str(migration), "--reason", "test-teardown")
-    assert proc.returncode == 0, f"teardown `clear` must succeed or the deny ACE leaks:\n{proc.stdout}{proc.stderr}"
+    _strip_fixture_barrier(migration)
     if platform.system() != "Windows":
         return
     fabric = migration / "fabric"
@@ -277,14 +296,36 @@ def migration(tmp_path: Path) -> Path:
     # unrelated agents in a real incident). Writing it here makes the fixture match reality.
     (tmp_path / "migration-spec.json").write_text("{}", encoding="utf-8")
     yield tmp_path
-    run_gate("clear", str(tmp_path), "--reason", "test-teardown")
+    _strip_fixture_barrier(tmp_path)
 
 
 def test_block_then_clear_round_trips(migration: Path) -> None:
-    assert run_gate("block", str(migration), "--sources", "x").returncode == 0
+    assert _arm_fixture(migration).returncode == 0
     assert (migration / ".credential-gate-BLOCKED.json").is_file()
-    assert run_gate("clear", str(migration), "--reason", "test").returncode == 0
+    assert _earn_fixture(migration).returncode == 0
     assert not (migration / ".credential-gate-BLOCKED.json").exists()
+
+
+@pytest.mark.parametrize(
+    "source_args",
+    [
+        (),
+        ("--sources",),
+        ("--sources", "legacy-display"),
+        ("--sources", "source-key:ffffffffffffffff"),
+    ],
+    ids=["omitted", "empty", "legacy", "foreign"],
+)
+def test_block_cli_preserves_identity_refusal_exit_2_without_effects(
+    tmp_path: Path, source_args: tuple[str, ...]
+) -> None:
+    """CLI usage succeeds, but the gate API refuses an unsupported source scope as exit 2."""
+    root = _da_root(tmp_path, "block-cli-refusal", LIVE_A)
+    result = run_gate("block", str(root), *source_args)
+    assert result.returncode == 2
+    assert not (root / cg.MARKER).exists()
+    assert not (root / cg.AUDIT).exists()
+    assert not (root / "_probe").exists()
 
 
 def test_a_bare_override_file_authorizes_nothing(migration: Path) -> None:
@@ -295,7 +336,7 @@ def test_a_bare_override_file_authorizes_nothing(migration: Path) -> None:
     must carry no authority on its own; only an audit-backed `authorize` counts.
     """
     (migration / ".credential-gate-AUTHORIZED").write_text("authorized by tool fallback")
-    run_gate("block", str(migration), "--sources", "x")
+    _arm_fixture(migration)
     assert (migration / ".credential-gate-BLOCKED.json").is_file(), "forged override must not prevent the block"
     assert run_gate("verify", str(migration)).returncode == 1, "forged override must be reported"
 
@@ -310,7 +351,7 @@ def test_authorize_is_audit_backed_and_lifts_the_gate(migration: Path, monkeypat
     sys.path.insert(0, str(REPO / "scripts"))
     import credential_gate as gate  # noqa: PLC0415
 
-    run_gate("block", str(migration), "--sources", "x")
+    _arm_fixture(migration)
     monkeypatch.setattr(gate, "_ancestry", lambda: ["python.exe", "pwsh.exe"])
     assert gate.authorize(migration, "tester") == 0
     assert gate.verify(migration) == 0
@@ -319,9 +360,9 @@ def test_authorize_is_audit_backed_and_lifts_the_gate(migration: Path, monkeypat
 
 
 def test_verify_flags_artifacts_built_while_blocked(migration: Path) -> None:
-    run_gate("block", str(migration), "--sources", "x")
+    _arm_fixture(migration)
     # Simulate a successful evasion (an agent that stripped the ACE and wrote anyway).
-    run_gate("clear", str(migration), "--reason", "simulate-evasion")
+    _strip_fixture_barrier(migration)
     (migration / ".credential-gate-BLOCKED.json").write_text('{"blocked": true, "sources": []}')
     (migration / "fabric" / "Model.tmdl").write_text("table X")
     assert run_gate("verify", str(migration)).returncode == 1
@@ -336,8 +377,8 @@ def test_verify_flags_materialized_source_data(migration: Path) -> None:
     strictly LARGER harm than a definition file - a `.tmdl` describes a model, a `.csv` IS the
     customer's data on a workstation, extracted from a source whose reachability was never proven.
     """
-    run_gate("block", str(migration), "--sources", "warehouse")
-    run_gate("clear", str(migration), "--reason", "simulate-evasion")
+    _arm_fixture(migration)
+    _strip_fixture_barrier(migration)
     (migration / ".credential-gate-BLOCKED.json").write_text('{"blocked": true, "sources": []}')
     data = migration / "data" / "Orders"
     data.mkdir(parents=True)
@@ -354,8 +395,8 @@ def test_verify_scans_outside_fabric(migration: Path) -> None:
     The deterministic tier writes to `pbip/`, `reports/`, `semantic_models/` and `data/`. A
     `fabric/`-only scan reported "no artifacts exist" beside a complete, unvalidated PBIP.
     """
-    run_gate("block", str(migration), "--sources", "warehouse")
-    run_gate("clear", str(migration), "--reason", "simulate-evasion")
+    _arm_fixture(migration)
+    _strip_fixture_barrier(migration)
     (migration / ".credential-gate-BLOCKED.json").write_text('{"blocked": true, "sources": []}')
     emitted = migration / "deterministic" / "pbip" / "Wb.SemanticModel" / "definition" / "tables"
     emitted.mkdir(parents=True)
@@ -379,7 +420,7 @@ def test_verify_allows_provenance_backed_engine_artifacts_that_predate_the_gate(
     artifact.write_text("table Orders", encoding="utf-8")
     _write_engine_receipt(migration, [artifact])
 
-    run_gate("block", str(migration), "--sources", "warehouse")
+    _arm_fixture(migration)
     result = run_gate("verify", str(migration))
 
     assert result.returncode == 0
@@ -398,7 +439,7 @@ def test_verify_allows_receipted_reports_engine_artifacts(migration: Path) -> No
     visual.write_text('{"visualType":"barChart"}', encoding="utf-8")
     _write_engine_receipt(migration, [pbir, visual])
 
-    run_gate("block", str(migration), "--sources", "warehouse")
+    _arm_fixture(migration)
     result = run_gate("verify", str(migration))
 
     assert result.returncode == 0
@@ -416,7 +457,7 @@ def test_verify_rejects_changed_reports_engine_artifacts(migration: Path) -> Non
     _write_engine_receipt(migration, [visual])
     visual.write_text('{"visualType":"lineChart"}', encoding="utf-8")
 
-    run_gate("block", str(migration), "--sources", "warehouse")
+    _arm_fixture(migration)
     result = run_gate("verify", str(migration))
 
     assert result.returncode == 1
@@ -433,7 +474,7 @@ def test_verify_still_flags_agent_artifacts_in_engine_roots_when_not_receipted(m
     engine_artifact.write_text("table Orders", encoding="utf-8")
     _write_engine_receipt(migration, [engine_artifact])
 
-    run_gate("block", str(migration), "--sources", "warehouse")
+    _arm_fixture(migration)
 
     agent_output = migration / "semantic_models" / "Agent.SemanticModel" / "definition" / "tables" / "AgentModel.tmdl"
     agent_output.parent.mkdir(parents=True)
@@ -456,7 +497,7 @@ def test_verify_rejects_a_mismatched_engine_receipt(migration: Path) -> None:
     _write_engine_receipt(migration, [artifact])
     artifact.write_text("table Orders\n// agent changed it", encoding="utf-8")
 
-    run_gate("block", str(migration), "--sources", "warehouse")
+    _arm_fixture(migration)
 
     result = run_gate("verify", str(migration))
     assert result.returncode == 1
@@ -475,7 +516,7 @@ def test_verify_rejects_a_foreign_run_receipt_with_matching_artifacts(migration:
 
     (migration / "report.json").write_text('{"workbooks": ["other-run"]}', encoding="utf-8")
 
-    run_gate("block", str(migration), "--sources", "warehouse")
+    _arm_fixture(migration)
     result = run_gate("verify", str(migration))
 
     assert result.returncode == 1
@@ -485,7 +526,7 @@ def test_verify_rejects_receipt_written_after_the_gate_arm(migration: Path) -> N
     """A helper-minted receipt after block is traceable drift, not engine output."""
     (migration / "report.json").write_text('{"workbooks": []}', encoding="utf-8")
     (migration / "input_manifest.json").write_text('{"inputs": []}', encoding="utf-8")
-    run_gate("block", str(migration), "--sources", "warehouse")
+    _arm_fixture(migration)
 
     emitted = migration / "semantic_models" / "Agent.SemanticModel" / "definition" / "tables"
     emitted.mkdir(parents=True)
@@ -505,7 +546,7 @@ def test_verify_ignores_the_probe_sandbox_and_the_source_workbook(migration: Pat
     make the gate impossible to satisfy. `source/` is the input we were handed, and `reference/`
     holds Tableau screenshots; neither is something we built.
     """
-    run_gate("block", str(migration), "--sources", "warehouse")
+    _arm_fixture(migration)
     for relative, name in (
         ("_probe", "Probe.tmdl"),
         ("source", "workbook.twbx"),
@@ -532,7 +573,7 @@ def test_verify_does_not_create_directories(tmp_path: Path) -> None:
 
 
 def test_hook_denies_a_guarded_write_under_a_blocked_migration(migration: Path) -> None:
-    run_gate("block", str(migration), "--sources", "shipment")
+    _arm_fixture(migration)
     target = migration / "fabric" / "Shipment.tmdl"
     out = run_hook({"toolName": "create", "toolArgs": json.dumps({"path": str(target)}), "cwd": str(migration)})
     assert out.get("permissionDecision") == "deny"
@@ -541,7 +582,7 @@ def test_hook_denies_a_guarded_write_under_a_blocked_migration(migration: Path) 
 
 def test_hook_allows_reads_of_guarded_files(migration: Path) -> None:
     """A gate that blinds the agent produces worse reports, not safer ones."""
-    run_gate("block", str(migration), "--sources", "shipment")
+    _arm_fixture(migration)
     target = migration / "fabric" / "Shipment.tmdl"
     out = run_hook({"toolName": "view", "toolArgs": json.dumps({"path": str(target)}), "cwd": str(migration)})
     assert out.get("permissionDecision") != "deny"
@@ -553,7 +594,7 @@ def test_hook_handles_both_measured_payload_shapes(migration: Path) -> None:
     An earlier version read only `tool_input` (snake_case) and matched nothing, so it allowed every
     write while appearing to work. That is worse than no guardrail, hence this test.
     """
-    run_gate("block", str(migration), "--sources", "shipment")
+    _arm_fixture(migration)
     target = migration / "fabric" / "Shipment.tmdl"
 
     pre = run_hook(
@@ -583,7 +624,7 @@ def test_authorize_is_refused_from_inside_an_agent_session(migration: Path) -> N
     """
     if platform.system() != "Windows":
         pytest.skip("lineage check is Windows-only")
-    run_gate("block", str(migration), "--sources", "x")
+    _arm_fixture(migration)
     proc = run_gate("authorize", str(migration), "--who", "someone")
     combined = proc.stdout + proc.stderr
     assert "REFUSED" in combined or proc.returncode == 2
@@ -606,7 +647,7 @@ def test_the_probe_can_build_while_the_deliverable_stays_blocked(migration: Path
     account, and the syscall itself - because none of the three implies the others.
     """
     try:
-        armed = run_gate("block", str(migration), "--sources", "shipment")
+        armed = _arm_fixture(migration)
         assert armed.returncode == 0, (
             f"the gate must ARM before enforcement can be asserted:\n{armed.stdout}{armed.stderr}"
         )
@@ -642,8 +683,8 @@ def test_the_probe_can_build_while_the_deliverable_stays_blocked(migration: Path
 
 def test_clearing_after_a_successful_probe_lets_the_build_proceed(migration: Path) -> None:
     """The other half of the positive path: DATA_OK -> clear -> build."""
-    run_gate("block", str(migration), "--sources", "shipment")
-    run_gate("clear", str(migration), "--reason", "probe-data-ok")
+    _arm_fixture(migration)
+    _earn_fixture(migration)
     (migration / "fabric" / "Model.tmdl").write_text("table x", encoding="utf-8")
     assert (migration / "fabric" / "Model.tmdl").exists()
 
@@ -667,7 +708,7 @@ def test_the_probe_sandbox_is_a_sibling_of_the_denied_folder(migration: Path) ->
     failing. Outside the denied tree, none of them exist. If someone moves it back under `fabric/`,
     this fails before the deadlock can reach a user.
     """
-    run_gate("block", str(migration), "--sources", "x")
+    _arm_fixture(migration)
     assert (migration / "_probe").is_dir(), "the sandbox must be a sibling of fabric/"
     assert not (migration / "fabric" / "_probe").exists(), "the sandbox must NOT be inside the denied tree"
 
@@ -680,8 +721,9 @@ def test_a_bare_clear_earns_nothing_and_verify_says_so(migration: Path) -> None:
     """The front-door bypass. Measured: `clear --reason "I decided it is fine"` lifted the ACL and
     the build proceeded with no probe run - the whole guarantee gone without touching the ACL.
     """
-    run_gate("block", str(migration), "--sources", "x")
+    _arm_fixture(migration)
     run_gate("clear", str(migration), "--reason", "I decided it is fine")
+    _strip_fixture_barrier(migration)
     (migration / "fabric" / "M.tmdl").write_text("table x", encoding="utf-8")
     assert run_gate("verify", str(migration)).returncode == 1, "an unearned clear must be reported"
 
@@ -692,8 +734,8 @@ def test_an_earned_clear_passes_verify(migration: Path) -> None:
     Without it, `verify` could satisfy that test by always returning 1, and both would look green
     while the gate was useless. Every "must be caught" needs a "must NOT be caught" beside it.
     """
-    run_gate("block", str(migration), "--sources", "x")
-    run_gate("clear", str(migration), "--reason", "probe-cleared: DATA_OK from t", "--earned")
+    _arm_fixture(migration)
+    _earn_fixture(migration)
     (migration / "fabric" / "M.tmdl").write_text("table x", encoding="utf-8")
     assert run_gate("verify", str(migration)).returncode == 0
 
@@ -712,8 +754,9 @@ def test_evidence_predating_the_most_recent_block_does_not_count(migration: Path
     """
     import json as _json
 
-    run_gate("block", str(migration), "--sources", "x")
+    _arm_fixture(migration)
     run_gate("clear", str(migration), "--reason", "sneaky")
+    _strip_fixture_barrier(migration)
     audit = migration / ".credential-gate-audit.log"
     forged = _json.dumps(
         {
@@ -860,7 +903,7 @@ def _classifier_output(tmp_path: Path) -> str:
         text=True,
         check=False,
     )
-    run_gate("clear", str(tmp_path), "--reason", "test-teardown")
+    _strip_fixture_barrier(tmp_path)
     return (proc.stdout + proc.stderr).lower()
 
 
@@ -1060,7 +1103,7 @@ def test_a_write_tool_is_judged_on_its_path_not_its_content(migration: Path) -> 
     Driven through the real hook rather than its internals, so the payload shapes are the ones the
     runtime actually sends.
     """
-    run_gate("block", str(migration), "--sources", "shipment")
+    _arm_fixture(migration)
 
     a_test_file = migration / "tests" / "test_credential_gate.py"
     body = "assert '.credential-gate-AUTHORIZED' and '.credential-gate-BLOCKED.json'"
@@ -1103,7 +1146,7 @@ def test_a_write_tool_is_judged_on_its_path_not_a_mention_of_a_guarded_suffix(mi
     Every assertion here has its negative twin: a write that genuinely targets a guarded suffix, and
     a shell command that genuinely writes one, must both still be denied.
     """
-    run_gate("block", str(migration), "--sources", "shipment")
+    _arm_fixture(migration)
 
     mentions_only = run_hook(
         {
@@ -1159,7 +1202,7 @@ def test_apply_patch_target_is_read_from_the_header_not_the_diff_body(migration:
     File:` header instead. Scanning the diff BODY as before would deny a patch that only ADDS a
     line mentioning a guarded suffix to an unrelated file - the same false positive, one tool over.
     """
-    run_gate("block", str(migration), "--sources", "shipment")
+    _arm_fixture(migration)
 
     unrelated_target = migration / "docs" / "notes.md"
     mentions_only = run_hook(
@@ -1194,7 +1237,7 @@ def test_the_hook_lets_the_agent_inspect_the_gate_it_is_under(migration: Path) -
     both denied, which blocked legitimate inspection AND `credential_gate.py verify`, whose whole
     job is to read that log.
     """
-    run_gate("block", str(migration), "--sources", "shipment")
+    _arm_fixture(migration)
     for command in (
         f"icacls {migration / 'fabric'}",
         f"Get-Content {migration / '.credential-gate-audit.log'}",
@@ -1237,7 +1280,7 @@ def test_the_hook_still_denies_a_subagent_clearing_its_own_armed_gate(migration:
     (incorrectly) that credential_gate.py enforces both itself - true only for `authorize`. That
     reopened the simplest possible bypass: no ctypes, no ACL API, just the ordinary command.
     """
-    run_gate("block", str(migration), "--sources", "shipment")
+    _arm_fixture(migration)
     cmd = f'python scripts/credential_gate.py clear {migration} --reason "self-clear attempt"'
     out = run_hook({"toolName": "powershell", "toolArgs": json.dumps({"command": cmd}), "cwd": str(migration)})
     assert out.get("permissionDecision") == "deny", "a subagent must not be able to clear its own armed gate"
@@ -1259,15 +1302,15 @@ def test_the_hook_does_not_block_teardown_of_an_unrelated_cleared_fixture(tmp_pa
     (armed / "migration-spec.json").write_text("{}", encoding="utf-8")
     (cleared / "fabric").mkdir(parents=True)
     (cleared / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(armed), "--sources", "shipment")
-    run_gate("block", str(cleared), "--sources", "shipment")
-    run_gate("clear", str(cleared), "--reason", "already earned")
+    _arm_fixture(armed)
+    _arm_fixture(cleared)
+    _earn_fixture(cleared)
 
     cmd = f"python scripts/credential_gate.py clear {cleared} --reason teardown"
     out = run_hook({"toolName": "powershell", "toolArgs": json.dumps({"command": cmd}), "cwd": str(tmp_path)})
     assert out.get("permissionDecision") != "deny", "teardown of an unrelated, already-cleared fixture must be allowed"
 
-    run_gate("clear", str(armed), "--reason", "test-teardown")
+    _strip_fixture_barrier(armed)
 
 
 def test_the_hook_denies_the_cd_plus_relative_clear_bypass(tmp_path: Path) -> None:
@@ -1286,12 +1329,12 @@ def test_the_hook_denies_the_cd_plus_relative_clear_bypass(tmp_path: Path) -> No
     (`UNEARNED CLEAR ... UNVALIDATED`) - detection held - but enforcement should not have needed
     rescuing here. This is the exact command, replayed against a real armed marker.
     """
-    run_gate("block", str(migration_fixture(tmp_path)), "--sources", "shipment")
+    _arm_fixture(migration_fixture(tmp_path))
     mig = tmp_path / "mig"
     cmd = f"cd {mig}; python ../../scripts/credential_gate.py clear . 2>&1"
     out = run_hook({"toolName": "powershell", "toolArgs": json.dumps({"command": cmd}), "cwd": str(tmp_path)})
     assert out.get("permissionDecision") == "deny", "the real observed bypass command must now be denied"
-    run_gate("clear", str(mig), "--reason", "test-teardown")
+    _strip_fixture_barrier(mig)
 
 
 def test_the_cd_fix_does_not_block_legitimate_teardown_via_the_same_pattern(tmp_path: Path) -> None:
@@ -1304,8 +1347,8 @@ def test_the_cd_fix_does_not_block_legitimate_teardown_via_the_same_pattern(tmp_
     mig = tmp_path / "mig2"
     (mig / "fabric").mkdir(parents=True)
     (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "x")
-    run_gate("clear", str(mig), "--reason", "already earned")
+    _arm_fixture(mig)
+    _earn_fixture(mig)
 
     cmd = f"cd {mig}; python ../../scripts/credential_gate.py clear . 2>&1"
     out = run_hook({"toolName": "powershell", "toolArgs": json.dumps({"command": cmd}), "cwd": str(tmp_path)})
@@ -1432,7 +1475,7 @@ def test_refresh_timeout_is_not_final_no_credential(monkeypatch: pytest.MonkeyPa
     def raise_timeout(*_args, **_kwargs):  # noqa: ANN002, ANN003
         raise subprocess.TimeoutExpired(cmd="refresh", timeout=1)
 
-    monkeypatch.setattr(probe_live_source.subprocess, "run", raise_timeout)
+    monkeypatch.setattr(probe_live_source, "_run_refresh", raise_timeout)
 
     assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=False) == (1, "ERROR")
     assert probe_live_source._refresh_and_classify(123, "Orders", 1, network_fault_observed=True) == (
@@ -1565,10 +1608,10 @@ def test_rearming_an_already_probe_cleared_gate_is_a_no_op(tmp_path: Path) -> No
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
     (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "shipment")
-    run_gate("clear", str(mig), "--reason", "probe ok", "--earned")
+    _arm_fixture(mig)
+    _earn_fixture(mig)
 
-    run_gate("block", str(mig), "--sources", "shipment")
+    _arm_fixture(mig)
 
     assert not (mig / ".credential-gate-BLOCKED.json").exists(), "gate must NOT re-arm for already-proven sources"
     assert _audit_actions(mig)[-1] == "block-skipped"
@@ -1585,31 +1628,31 @@ def test_rearming_after_a_BARE_clear_still_arms(tmp_path: Path) -> None:
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
     (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "shipment")
+    _arm_fixture(mig)
     run_gate("clear", str(mig), "--reason", "I decided it is fine")  # NOT --earned
 
-    run_gate("block", str(mig), "--sources", "shipment")
+    _arm_fixture(mig)
     try:
         assert (mig / ".credential-gate-BLOCKED.json").exists(), "a bare manual-clear must NOT prevent re-arming"
         assert _audit_actions(mig)[-1] in BLOCK_ACTIONS
     finally:
-        run_gate("clear", str(mig), "--reason", "test-teardown")
+        _strip_fixture_barrier(mig)
 
 
 def test_source_specific_clear_keeps_gate_for_still_pending_sources(tmp_path: Path) -> None:
     """Clearing one source from a multi-source marker must not open writes for the rest."""
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
-    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "orders", "customers")
+    (mig / "migration-spec.json").write_text(json.dumps(_da_spec(LIVE_A, LIVE_B)), encoding="utf-8")
+    run_gate("block", str(mig), "--sources", KEY_A, KEY_B)
 
-    run_gate("clear", str(mig), "--reason", "orders probe ok", "--earned", "--sources", "orders")
+    _earn_fixture(mig, [KEY_A])
 
     marker = json.loads((mig / ".credential-gate-BLOCKED.json").read_text(encoding="utf-8"))
-    assert marker["sources"] == ["customers"]
+    assert marker["sources"] == [KEY_B]
     assert run_gate("status", str(mig)).returncode == 1
 
-    run_gate("clear", str(mig), "--reason", "customers probe ok", "--earned", "--sources", "customers")
+    _earn_fixture(mig, [KEY_B])
     assert not (mig / ".credential-gate-BLOCKED.json").exists()
 
 
@@ -1617,13 +1660,13 @@ def test_a_sibling_block_does_not_discard_another_source_clearance(tmp_path: Pat
     """A bundle shared by sibling agents must remember each source's earned clearance independently."""
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
-    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "orders")
-    run_gate("clear", str(mig), "--reason", "probe ok", "--earned", "--sources", "orders")
+    (mig / "migration-spec.json").write_text(json.dumps(_da_spec(LIVE_A, LIVE_B)), encoding="utf-8")
+    run_gate("block", str(mig), "--sources", KEY_A)
+    _earn_fixture(mig, [KEY_A])
 
-    run_gate("block", str(mig), "--sources", "customers")
-    run_gate("clear", str(mig), "--reason", "probe ok", "--earned", "--sources", "customers")
-    run_gate("block", str(mig), "--sources", "orders")
+    run_gate("block", str(mig), "--sources", KEY_B)
+    _earn_fixture(mig, [KEY_B])
+    run_gate("block", str(mig), "--sources", KEY_A)
 
     assert not (mig / ".credential-gate-BLOCKED.json").exists(), "orders clearance must survive a sibling block"
     assert _audit_actions(mig)[-1] == "block-skipped"
@@ -1633,11 +1676,12 @@ def test_a_sibling_manual_clear_does_not_launder_an_unproven_source(tmp_path: Pa
     """Source-aware state must not turn one earned source into a pass for another source."""
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
-    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "orders")
-    run_gate("clear", str(mig), "--reason", "probe ok", "--earned", "--sources", "orders")
-    run_gate("block", str(mig), "--sources", "customers")
+    (mig / "migration-spec.json").write_text(json.dumps(_da_spec(LIVE_A, LIVE_B)), encoding="utf-8")
+    run_gate("block", str(mig), "--sources", KEY_A)
+    _earn_fixture(mig, [KEY_A])
+    run_gate("block", str(mig), "--sources", KEY_B)
     run_gate("clear", str(mig), "--reason", "manual teardown")
+    _strip_fixture_barrier(mig)
     (mig / "fabric" / "model.tmdl").write_text("table Customers")
 
     proc = run_gate("verify", str(mig))
@@ -1657,26 +1701,27 @@ def test_rearming_with_a_NEW_source_still_arms(tmp_path: Path) -> None:
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
     (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "shipment")
-    run_gate("clear", str(mig), "--reason", "probe ok", "--earned")
+    _arm_fixture(mig)
+    _earn_fixture(mig)
 
-    run_gate("block", str(mig), "--sources", "shipment", "orders")
+    (mig / "migration-spec.json").write_text(json.dumps(_da_spec(LIVE_A, LIVE_B)), encoding="utf-8")
+    run_gate("block", str(mig), "--sources", KEY_A, KEY_B)
     try:
         assert (mig / ".credential-gate-BLOCKED.json").exists(), "a newly-added live source must re-arm the gate"
         assert _audit_actions(mig)[-1] in BLOCK_ACTIONS
     finally:
-        run_gate("clear", str(mig), "--reason", "test-teardown")
+        _strip_fixture_barrier(mig)
 
 
 def test_the_rearm_skip_is_order_insensitive_on_sources(tmp_path: Path) -> None:
     """Source ORDER is a classifier implementation detail, not a change in what was proven."""
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
-    (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "shipment", "orders")
-    run_gate("clear", str(mig), "--reason", "probe ok", "--earned")
+    (mig / "migration-spec.json").write_text(json.dumps(_da_spec(LIVE_A, LIVE_B)), encoding="utf-8")
+    run_gate("block", str(mig), "--sources", KEY_A, KEY_B)
+    _earn_fixture(mig, [KEY_A, KEY_B])
 
-    run_gate("block", str(mig), "--sources", "orders", "shipment")
+    run_gate("block", str(mig), "--sources", KEY_B, KEY_A)
 
     assert not (mig / ".credential-gate-BLOCKED.json").exists(), "reordered but identical sources must not re-arm"
     assert _audit_actions(mig)[-1] == "block-skipped"
@@ -1720,8 +1765,9 @@ def test_a_genuinely_unearned_clear_is_STILL_reported(tmp_path: Path) -> None:
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
     (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "shipment")
+    _arm_fixture(mig)
     run_gate("clear", str(mig), "--reason", "I decided it is fine")  # NOT --earned
+    _strip_fixture_barrier(mig)
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
     proc = run_gate("verify", str(mig))
@@ -1740,8 +1786,8 @@ def test_an_earned_clear_still_verifies_clean_for_a_live_source(tmp_path: Path) 
     mig = tmp_path / "mig"
     (mig / "fabric").mkdir(parents=True)
     (mig / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "shipment")
-    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    _arm_fixture(mig)
+    _earn_fixture(mig)
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
     proc = run_gate("verify", str(mig))
@@ -1828,7 +1874,7 @@ def test_a_gate_applied_and_failed_at_its_own_bundle_root_is_still_state_2(tmp_p
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")  # built first, then gated over
 
     try:
-        armed = run_gate("block", str(mig), "--sources", "shipment")
+        armed = _arm_fixture(mig)
         assert armed.returncode == 0, f"the gate must ARM before state 2 can be asserted:\n{armed.stdout}{armed.stderr}"
         expected_action = "block" if platform.system() == "Windows" else "block-marker-only"
         actions = _audit_actions(mig)
@@ -2024,8 +2070,8 @@ def test_a_malformed_trailing_line_poisons_an_otherwise_genuine_history(tmp_path
     mig = tmp_path / "bundle"
     (mig / "fabric").mkdir(parents=True)
     (mig / "engine-output-receipt.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(mig), "--sources", "shipment")
-    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    _arm_fixture(mig)
+    _earn_fixture(mig)
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
     audit = mig / ".credential-gate-audit.log"
     audit.write_text(audit.read_text(encoding="utf-8") + "not json at all\n", encoding="utf-8")
@@ -2087,8 +2133,8 @@ def test_a_foreign_audit_log_copied_in_from_another_scope_CANNOT_be_verified_ok(
     scope_a = tmp_path / "scope-a"
     (scope_a / "fabric").mkdir(parents=True)
     (scope_a / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(scope_a), "--sources", "shipment")
-    run_gate("clear", str(scope_a), "--reason", "probe returned a row", "--earned")
+    _arm_fixture(scope_a)
+    _earn_fixture(scope_a)
 
     scope_b = tmp_path / "scope-b"
     (scope_b / "fabric").mkdir(parents=True)
@@ -2113,8 +2159,8 @@ def test_negative_control_verifying_at_the_original_scope_still_passes(tmp_path:
     scope_a = tmp_path / "scope-a"
     (scope_a / "fabric").mkdir(parents=True)
     (scope_a / "migration-spec.json").write_text("{}", encoding="utf-8")
-    run_gate("block", str(scope_a), "--sources", "shipment")
-    run_gate("clear", str(scope_a), "--reason", "probe returned a row", "--earned")
+    _arm_fixture(scope_a)
+    _earn_fixture(scope_a)
     (scope_a / "fabric" / "model.tmdl").write_text("table Shipment")
 
     proc = run_gate("verify", str(scope_a))
@@ -2146,7 +2192,7 @@ def test_a_swapped_live_source_key_makes_a_stale_clearance_unable_to_certify_it(
 
     key_e1 = pf._leg_key({}, 0, {"class": "sqlserver", "server": "e1.example", "database": "db"})
     run_gate("block", str(mig), "--sources", key_e1)
-    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    _earn_fixture(mig, [key_e1])
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
     # Re-point the SAME directory's spec at a different upstream, without ever re-gating it.
@@ -2175,13 +2221,112 @@ def test_negative_control_an_unswapped_source_still_verifies_clean(tmp_path: Pat
 
     key_e1 = pf._leg_key({}, 0, {"class": "sqlserver", "server": "e1.example", "database": "db"})
     run_gate("block", str(mig), "--sources", key_e1)
-    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    _earn_fixture(mig, [key_e1])
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
     proc = run_gate("verify", str(mig))
     out = proc.stdout + proc.stderr
 
     assert proc.returncode == 0, f"an unchanged, correctly-cleared source must still verify clean:\n{out}"
+
+
+@pytest.mark.parametrize("changed_table", ["[other].[trips]", "[nyctaxi].[different]", None])
+def test_717_changed_physical_target_cannot_reuse_earned_clear(tmp_path, changed_table):
+    mig = tmp_path / "schema-target"
+    (mig / "fabric").mkdir(parents=True)
+    conn = {
+        "class": "databricks",
+        "server": "adb.example",
+        "http_path": "/sql/1.0/warehouses/fixture",
+        "database": "samples",
+        "schema": "default",
+        "powerbi_target": "live_source",
+    }
+    source = {"connection": conn, "tables": [{"name": "Display Trips", "table": "[nyctaxi].[trips]"}]}
+    spec_path = mig / "migration-spec.json"
+    spec_path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    key = pf._leg_key(source, 0, conn)
+    assert run_gate("block", str(mig), "--sources", key).returncode == 0
+    assert _earn_fixture(mig, [key]).returncode == 0
+    (mig / "fabric" / "model.tmdl").write_text("table Fictitious", encoding="utf-8")
+    assert run_gate("verify", str(mig)).returncode == 0
+
+    source["tables"][0]["table"] = changed_table
+    spec_path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    changed_key = pf._leg_key(source, 0, conn)
+    assert changed_key != key, "schema, physical table and missing raw identity must each change the gate key"
+    assert run_gate("verify", str(mig)).returncode == 3, "current-spec verification must reject stale proof"
+    assert run_gate("block", str(mig), "--sources", changed_key).returncode == 0
+    assert json.loads((mig / cg.MARKER).read_text())["sources"] == [changed_key]
+
+
+def test_717_old_endpoint_only_key_cannot_clear_an_ordinary_target(tmp_path):
+    mig = tmp_path / "old-key"
+    (mig / "fabric").mkdir(parents=True)
+    conn = {"class": "sqlserver", "server": "sql.example", "database": "DB", "schema": "dbo"}
+    source = {"connection": conn, "tables": [{"name": "Alias", "table": "[dbo].[Orders]"}]}
+    (mig / "migration-spec.json").write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    old_identity = {"class": "sqlserver", "server": "sql.example", "database": "DB", "schema": "dbo"}
+    old_digest = hashlib.sha256(
+        json.dumps(old_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    old_key = f"source-key:{old_digest[:16]}"
+    new_key = pf._leg_key(source, 0, conn)
+    assert new_key != old_key
+    assert run_gate("block", str(mig), "--sources", old_key).returncode == 2
+    assert run_gate("block", str(mig), "--sources", new_key).returncode == 0
+    assert (
+        run_gate("clear", str(mig), "--reason", "old ordinary probe", "--earned", "--sources", old_key).returncode != 0
+    )
+    assert json.loads((mig / cg.MARKER).read_text(encoding="utf-8"))["sources"] == [new_key]
+    assert run_gate("status", str(mig)).returncode == 1
+    if platform.system() == "Windows":
+        with pytest.raises(PermissionError):
+            (mig / "fabric" / "model.tmdl").write_text("table Fictitious", encoding="utf-8")
+    else:
+        assert (mig / cg.MARKER).exists(), "non-Windows establishes only the serialized marker stop"
+    assert run_gate("verify", str(mig)).returncode == 0
+    assert _earn_fixture(mig, [new_key]).returncode == 0
+    assert run_gate("status", str(mig)).returncode == 0
+    (mig / "fabric" / "model.tmdl").write_text("table Fictitious", encoding="utf-8")
+    assert run_gate("verify", str(mig)).returncode == 0
+
+
+def test_717_reorder_and_alias_changes_reuse_proof_but_authorization_cannot_cover_future_keys(tmp_path, monkeypatch):
+    mig = tmp_path / "stable-target"
+    (mig / "fabric").mkdir(parents=True)
+    conn = {"class": "sqlserver", "server": "sql.example", "database": "DB", "schema": "default"}
+    source = {
+        "connection": conn,
+        "tables": [{"name": "Alias A", "table": "[dbo].[Orders]"}, {"name": "Alias B", "table": "[dbo].[Items]"}],
+    }
+    path = mig / "migration-spec.json"
+    path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    key = pf._leg_key(source, 0, conn)
+    assert run_gate("block", str(mig), "--sources", key).returncode == 0
+    assert _earn_fixture(mig, [key]).returncode == 0
+    source["tables"].reverse()
+    source["tables"][0]["name"] = "Renamed display"
+    path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    assert pf._leg_key(source, 0, conn) == key
+    assert run_gate("block", str(mig), "--sources", key).returncode == 0
+    assert not (mig / cg.MARKER).exists()
+    (mig / "fabric" / "model.tmdl").write_text("table Fictitious", encoding="utf-8")
+    assert run_gate("verify", str(mig)).returncode == 0
+
+    monkeypatch.setattr(cg, "_ancestry", lambda: ["python.exe", "pwsh.exe"])
+    assert cg.authorize(mig, "model-only test") == 0
+    source["tables"][0]["table"] = "[another].[Target]"
+    path.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
+    assert pf._leg_key(source, 0, conn) != key
+    assert not cg._override_is_authentic(mig), "an authorization cannot invent a future target's epoch"
+    assert run_gate("verify", str(mig)).returncode != 0
+    future_key = pf._leg_key(source, 0, conn)
+    assert run_gate("block", str(mig), "--sources", future_key).returncode == 0
+    assert (mig / cg.MARKER).exists()
+    assert cg.authorize(mig, "new exact snapshot") == 0
+    assert cg._override_is_authentic(mig)
+    assert run_gate("verify", str(mig)).returncode == 0
 
 
 # --- Requirement 1 (2nd bounded round, comment 5546182629): mixed-scope audit poisoning --------
@@ -2212,7 +2357,7 @@ def test_a_mixed_trail_with_one_unscoped_entry_CANNOT_certify_this_directory(tmp
 
     key = pf._leg_key({}, 0, {"class": "sqlserver", "server": "host1", "database": "db"})
     run_gate("block", str(mig), "--sources", key)
-    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    _earn_fixture(mig, [key])
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
     audit = mig / ".credential-gate-audit.log"
     unscoped = json.dumps({"ts": "2020-01-01T00:00:00+00:00", "action": "probe-cleared", "detail": "no scope here"})
@@ -2240,7 +2385,7 @@ def test_a_mixed_trail_with_one_foreign_scope_entry_CANNOT_certify_this_director
 
     key = pf._leg_key({}, 0, {"class": "sqlserver", "server": "host1", "database": "db"})
     run_gate("block", str(mig), "--sources", key)
-    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    _earn_fixture(mig, [key])
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
     audit = mig / ".credential-gate-audit.log"
     foreign = json.dumps(
@@ -2268,7 +2413,7 @@ def test_negative_control_a_fully_scoped_mixed_action_trail_still_verifies_ok(tm
 
     key = pf._leg_key({}, 0, {"class": "sqlserver", "server": "host1", "database": "db"})
     run_gate("block", str(mig), "--sources", key)
-    run_gate("clear", str(mig), "--reason", "probe returned a row", "--earned")
+    _earn_fixture(mig, [key])
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
     proc = run_gate("verify", str(mig))
@@ -2314,11 +2459,11 @@ def test_two_independently_earned_sources_both_verify_clean_together(tmp_path: P
     key_e2 = pf._leg_key({}, 1, {"class": "sqlserver", "server": "e2.example", "database": "db"})
 
     run_gate("block", str(mig), "--sources", key_e1)
-    run_gate("clear", str(mig), "--reason", "E1 probe returned a row", "--earned")
+    _earn_fixture(mig, [key_e1])
     # E2 is blocked and earned INDEPENDENTLY, later, and its own `block` names only E2 - so a
     # "most recent block" comparison would see only E2 here, not E1+E2.
     run_gate("block", str(mig), "--sources", key_e2)
-    run_gate("clear", str(mig), "--reason", "E2 probe returned a row", "--earned")
+    _earn_fixture(mig, [key_e2])
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
     proc = run_gate("verify", str(mig))
@@ -2351,9 +2496,9 @@ def test_swapping_either_of_two_earned_sources_for_an_unearned_one_fails(tmp_pat
     key_e2 = pf._leg_key({}, 1, {"class": "sqlserver", "server": "e2.example", "database": "db"})
 
     run_gate("block", str(mig), "--sources", key_e1)
-    run_gate("clear", str(mig), "--reason", "E1 probe returned a row", "--earned")
+    _earn_fixture(mig, [key_e1])
     run_gate("block", str(mig), "--sources", key_e2)
-    run_gate("clear", str(mig), "--reason", "E2 probe returned a row", "--earned")
+    _earn_fixture(mig, [key_e2])
     (mig / "fabric" / "model.tmdl").write_text("table Shipment")
 
     # Swap E2 for an unearned E3, without ever re-gating - E1 is untouched and still earned.
@@ -2378,6 +2523,15 @@ def _unit(root: Path, name: str, *, marker: bool = False, override: bool = False
     """Build one unit on disk in a given gate state. Artifacts only -- never prose."""
     d = root / name
     d.mkdir(parents=True)
+    if "probe-cleared" in audit or ("authorize" in audit and override):
+        assert _arm_fixture(d).returncode == 0
+        if "probe-cleared" in audit:
+            assert _earn_fixture(d).returncode == 0
+        if "authorize" in audit:
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(cg, "_ancestry", lambda: ["fixture-terminal.exe"])
+                assert cg.authorize(d, "Fixture Human") == 0
+        return d
     if marker:
         (d / ".credential-gate-BLOCKED.json").write_text("{}", encoding="utf-8")
     if override:
@@ -2771,19 +2925,49 @@ def test_an_unkeyed_probe_success_cannot_earn_a_clear(tmp_path: Path) -> None:
 def test_a_real_bare_earned_clear_through_the_gate_cli_stays_blocked(tmp_path: Path) -> None:
     """End to end through the PRODUCTION arm/clear path, not synthetic audit lines.
 
-    `clear_block(..., earned=True)` writes a `probe-cleared` naming the last block's sources even
-    though nothing was ever measured. That entry is real, well-formed, keyed and trusted - and it
-    still must not produce `live_data_ok`.
+    An earned clear must carry the caller's explicit canonical source list and current DATA_OK
+    evidence. It cannot synthesize either from the last block.
     """
     root = _da_root(tmp_path, "cli-clear", LIVE_A)
     cg.apply_block(root, [KEY_A])
     assert (root / cg.MARKER).exists(), "fixture must start armed"
-    assert cg.clear_block(root, "operator said it is fine", earned=True) == 0
-    assert "probe-cleared" in _direct_actions(root), "fixture must produce the real earned-clear record"
+    assert cg.clear_block(root, "operator said it is fine", earned=True) != 0
+    assert "probe-cleared" not in _direct_actions(root)
 
     result = _assess(root, _da_spec(LIVE_A))
 
-    assert (result.state, result.codes) == ("blocked", ("stale-clear",))
+    assert (result.state, result.codes) == ("blocked", ("marker-only",))
+
+
+@pytest.mark.parametrize(
+    ("source_args", "expected"),
+    [
+        ((), 1),
+        (("--sources",), 1),
+        (("--sources", KEY_A), 0),
+    ],
+    ids=["omitted-sources", "bare-sources", "explicit-current-source"],
+)
+def test_earned_clear_cli_requires_an_explicit_current_source_list(
+    tmp_path: Path, source_args: tuple[str, ...], expected: int
+) -> None:
+    """The real CLI preserves clear's 1/0 contract without last-block source synthesis."""
+    root = _da_root(tmp_path, "cli-earned-sources", LIVE_A)
+    assert cg.apply_block(root, [KEY_A]) == 0
+    cg.record_probe_attempt(root, "DATA_OK", "fixture returned a row", [KEY_A])
+    before = {name: (root / name).read_bytes() if (root / name).is_file() else None for name in (cg.MARKER, cg.AUDIT)}
+    try:
+        result = run_gate("clear", str(root), "--reason", "fixture CLI", "--earned", *source_args)
+        assert result.returncode == expected
+        if expected:
+            assert {
+                name: (root / name).read_bytes() if (root / name).is_file() else None for name in (cg.MARKER, cg.AUDIT)
+            } == before
+        else:
+            assert not (root / cg.MARKER).exists()
+            assert _direct_actions(root)[-1] == "probe-cleared"
+    finally:
+        _strip_fixture_barrier(root)
 
 
 def test_a_later_non_success_probe_invalidates_an_already_earned_key(tmp_path: Path) -> None:
@@ -3353,7 +3537,9 @@ def test_a_nonfinite_number_is_refused_as_such(tmp_path: Path) -> None:
         pytest.param(_projection(provider_state="blocked"), "unknown-value", id="provider-state-not-direct"),
         pytest.param(_projection(source_keys="nope"), "bad-type", id="source-keys-not-a-list"),
         pytest.param(_projection(source_keys=[1]), "bad-type", id="source-key-not-a-string"),
-        pytest.param(_projection(source_keys=[KEY_B, KEY_A]), "source-keys-unsorted", id="unsorted-keys"),
+        pytest.param(
+            _projection(source_keys=sorted([KEY_A, KEY_B], reverse=True)), "source-keys-unsorted", id="unsorted-keys"
+        ),
         pytest.param(_projection(source_keys=[KEY_A, KEY_A]), "source-keys-unsorted", id="duplicate-keys"),
         pytest.param(_projection(source_keys=["source-key:zzzz"]), "source-key-invalid", id="bad-key-syntax"),
         pytest.param(_projection(source_keys=["a.example"]), "source-key-invalid", id="display-name-as-key"),
@@ -3680,20 +3866,38 @@ def test_data_access_rejects_backdated_epoch_evidence(tmp_path: Path, backdated_
     )
 
 
-def test_data_access_latest_success_still_needs_its_own_clear(tmp_path: Path) -> None:
+def test_data_access_latest_success_still_needs_its_own_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The latest attempt must precede its earning clear, including after another success."""
+    monkeypatch.setattr(cg.platform, "system", lambda: "Linux")
     root = _da_root(tmp_path, "repeated-success", LIVE_A)
-    _trail(
-        root,
-        ("block", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-cleared", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-    )
+    cg.record_probe_attempt(root, "DATA_OK", "fixture first row", [KEY_A])
+    assert cg.clear_block(root, "fixture first clear", earned=True, sources=[KEY_A]) == 0
+    cg.record_probe_attempt(root, "DATA_OK", "fixture later row", [KEY_A])
 
     assert _assess(root, _da_spec(LIVE_A)).state == "blocked"
-    _trail(root, ("probe-cleared", [KEY_A]))
+    assert cg.clear_block(root, "fixture later clear", earned=True, sources=[KEY_A]) == 0
     assert _assess(root, _da_spec(LIVE_A)).state == "live_data_ok"
+
+
+@pytest.mark.parametrize("historical", ["display", "empty", "unpaired"])
+def test_698_historical_rows_are_readable_without_manufacturing_current_proof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, historical: str
+) -> None:
+    """Historical compatibility is a reader contract, never a second earned-clear policy."""
+    monkeypatch.setattr(cg.platform, "system", lambda: "Linux")
+    root = _da_root(tmp_path, "historical", LIVE_A)
+    if historical == "unpaired":
+        cg.record_probe_attempt(root, "DATA_OK", "fixture row returned", [KEY_A])
+        assert cg.clear_block(root, "fixture", earned=True, sources=[KEY_A]) == 0
+        _trail(root, ("probe-data_ok", [KEY_A]))
+    else:
+        names = ["legacy display"] if historical == "display" else []
+        _trail(root, ("block-marker-only", names), ("probe-data_ok", names), ("probe-cleared", names))
+    assert cg._audit_entries(root) is not None, "reader compatibility must remain intact"
+    assert cg._clear_was_earned(root, [KEY_A]) is None, "historical rows cannot manufacture a keyed pair"
+    assert cg.apply_block(root, [KEY_A]) == 0
+    assert json.loads((root / cg.MARKER).read_text(encoding="utf-8"))["sources"] == [KEY_A]
+    assert cg.status(root) != 0
 
 
 @pytest.mark.parametrize(

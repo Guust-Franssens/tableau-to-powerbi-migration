@@ -284,6 +284,9 @@ def _describe_named_connection(conn_el: etree._Element, mode: str) -> dict[str, 
         "database": _conn_attr(conn_el, "dbname"),
         "mode": mode,
     }
+    parent = conn_el.getparent()
+    if parent is not None and parent.get("name") is not None:
+        described["name"] = parent.get("name")
     _capture_connect_details(described, conn_el)
     described["powerbi_target"], described["powerbi_target_reason"] = powerbi_target(described["class"], mode)
     return described
@@ -442,6 +445,9 @@ def _parse_tables(ds_el: etree._Element, ids: IdRegistry) -> list[dict[str, Any]
                     "row_count": _unknown_row_count(),
                 }
             )
+            for attribute in ("table", "connection"):
+                if rel.get(attribute) is not None:
+                    tables[-1][attribute] = rel.get(attribute)
     return tables
 
 
@@ -2153,9 +2159,9 @@ def main() -> None:
     )
     # Arm the live-source credential gate here, at the earliest moment a live source is known and
     # before any builder runs. Measured: an agent built the model 95s BEFORE invoking the gate when
-    # arming was a later workflow step. Idempotent, no-op for extract-only workbooks, never fatal.
+    # arming was a later workflow step. Exit 1 is the ordinary live-source stop, not an arm failure.
     try:
-        subprocess.run(
+        result = subprocess.run(
             [
                 sys.executable,
                 str(Path(__file__).parent / "preflight_source_credentials.py"),
@@ -2166,8 +2172,12 @@ def main() -> None:
             check=False,
             timeout=120,
         )
+        if result.returncode not in (0, 1):
+            logger.error("Credential gate transaction failed; parsing is not cleared for build.")
+            sys.exit(3)
     except (OSError, subprocess.SubprocessError) as exc:
-        logger.warning("Could not arm the credential gate: %s", exc)
+        logger.error("Could not arm the credential gate: %s", exc)
+        sys.exit(3)
 
 
 if __name__ == "__main__":

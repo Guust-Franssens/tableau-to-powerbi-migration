@@ -74,7 +74,7 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         "powerbi-report-author not installed (npm bridge CLI; absent on Linux CI)",
         "validator could not fetch the PBIR schema - schema checks did NOT run",
         "no real cache.abf on this machine (they are gitignored); set PBIP_REFRESH_REAL_ABF",
-        "probe_desktop_credential.ps1 is a Windows-only UI Automation arbiter",
+        "Desktop UIA qualification is Windows-only",
         "real Win32 EnumWindows callback is Windows-only",
         "native protected file DACL is Windows-only",
         "native sharing violation control is Windows-only",
