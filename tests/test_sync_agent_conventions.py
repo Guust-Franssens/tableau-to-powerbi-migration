@@ -23,6 +23,7 @@ outcome, so the negative case is asserted beside every positive one.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -1184,6 +1185,98 @@ def test_dry_run_scope_stage_and_private_feedback_contract() -> None:
         "external root private by location, **not Git-ignored**",
     ):
         assert boundary in text, f"D stage/private feedback: {boundary}"
+
+
+def test_dry_run_dispatch_metadata_and_body_forbid_publication() -> None:
+    """Dispatch metadata is authority too; a private body cannot cancel a contradictory grant."""
+    source = DRY_RUN_OPERATOR_MD.read_text(encoding="utf-8")
+    frontmatter, separator, body = source.partition("\n---\n")
+    assert separator, "D metadata publication: missing frontmatter boundary"
+    descriptions = [
+        line.partition(":")[2].strip() for line in frontmatter.splitlines() if line.startswith("description:")
+    ]
+    assert len(descriptions) == 1, "D metadata publication: missing or ambiguous description"
+    description = descriptions[0]
+    refusal = "Never publishes issues/comments/uploads or repairs toolkit/model/report artifacts."
+    remaining = description.replace(refusal, "")
+    assert not re.search(r"\b(?:files?\s+issues?|publish(?:es)?|posts?|uploads?|repairs?|edits?)\b", remaining, re.I), (
+        "D metadata publication: affirmative publication/repair authority outside the explicit prohibition"
+    )
+    assert "Returns private evidence packets and findings only." in description, (
+        "D metadata publication: private-packet/report-only output"
+    )
+    assert refusal in description, "D metadata publication: explicit publication/repair prohibition"
+    body = " ".join(body.split())
+    assert "no toolkit/engine/model/TMDL/DAX/PBIR repairs or publication" in body, "D body publication: role override"
+    assert "Shared builder wording/stage outputs/tools grant no repair authority" in body, (
+        "D body publication: no grants"
+    )
+    assert "Stop at public-safe `issue-payload.json`; no autofix or publishing issues/comments/uploads" in body, (
+        "D body publication: private payload, never publication"
+    )
+
+
+@pytest.mark.parametrize(
+    ("scope", "before", "after", "diagnostic"),
+    [
+        (
+            "metadata",
+            "Never publishes issues/comments/uploads or repairs toolkit/model/report artifacts.",
+            "It publishes issues automatically and reports findings.",
+            "D metadata publication: affirmative",
+        ),
+        (
+            "metadata",
+            "Returns private evidence packets and findings only.",
+            "Returns private evidence packets and findings only. It publishes issues automatically.",
+            "D metadata publication: affirmative",
+        ),
+        (
+            "metadata",
+            "Returns private evidence packets and findings only.",
+            "Returns private evidence packets and findings only. It repairs toolkit/model/report artifacts.",
+            "D metadata publication: affirmative",
+        ),
+        (
+            "body",
+            "no autofix or publishing",
+            "publish",
+            "D body publication: private payload",
+        ),
+    ],
+    ids=["r1-description-grant", "grant-beside-metadata-prohibition", "metadata-repair-grant", "body-publication"],
+)
+def test_dry_run_publication_authority_reversals_fail_then_restore(
+    monkeypatch: pytest.MonkeyPatch, scope: str, before: str, after: str, diagnostic: str
+) -> None:
+    """Reverse metadata independently of the private body, and retain the body's direct defense."""
+    test_dry_run_dispatch_metadata_and_body_forbid_publication()
+    test_dry_run_scope_stage_and_private_feedback_contract()
+    read_source = Path.read_text
+    source = read_source(DRY_RUN_OPERATOR_MD, encoding="utf-8")
+    assert source.count(before) == 1, "reversal must change exactly one authority clause"
+    changed = source.replace(before, after, 1)
+    original_frontmatter, _, original_body = source.partition("\n---\n")
+    changed_frontmatter, _, changed_body = changed.partition("\n---\n")
+    if scope == "metadata":
+        assert changed_body == original_body, "description-only reversal must leave the body unchanged"
+    else:
+        assert changed_frontmatter == original_frontmatter, "body reversal must leave dispatch metadata unchanged"
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            Path,
+            "read_text",
+            lambda path, *args, **kwargs: (
+                changed if path == DRY_RUN_OPERATOR_MD else read_source(path, *args, **kwargs)
+            ),
+        )
+        with pytest.raises(AssertionError, match=diagnostic):
+            test_dry_run_dispatch_metadata_and_body_forbid_publication()
+        if scope == "body":
+            with pytest.raises(AssertionError, match="D stage/private feedback"):
+                test_dry_run_scope_stage_and_private_feedback_contract()
+    test_dry_run_dispatch_metadata_and_body_forbid_publication()
+    test_dry_run_scope_stage_and_private_feedback_contract()
 
 
 def test_persona_safety_and_attribution_handoffs() -> None:

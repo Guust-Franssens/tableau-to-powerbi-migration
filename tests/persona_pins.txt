@@ -46,7 +46,7 @@ e62210173d9db69bbea29b58fadb6a20d936ebb0ee3ad1188a8af9cb13f13e84  - **Customer m
 f1d6acb7da4d733442fd76495ad69852e529e1ecd2a428ab1fa393e0374484d8  <!-- END:shared-conventions -->
 
 [dry-run-operator.agent.md]
-129e6720ef6bcf4222d0d4c93027ceed7bc2fa7c0c150768c1e312358a629f1c  --- name: dry-run-operator description: Runs a full customer
+1df25ec1c1761d4a4420ea3daf50622910d257aefbdd3172cc8a28b9f8ba1fe1  --- name: dry-run-operator description: Executes the commiss
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 0ead80e44b062aebd0589b8d3a0df3596e84e05165058195036ac540315f7d90  # Dry-run operator
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
