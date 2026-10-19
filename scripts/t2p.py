@@ -702,6 +702,130 @@ def status(args: argparse.Namespace, result: dict) -> int:
     return code
 
 
+def _status_human(result: dict) -> None:
+    """Explain only the final safe projection, without acquiring or certifying evidence."""
+
+    def scalar(value: Any) -> str:
+        if value is None:
+            return "unavailable"
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=True)
+        return "".join(char if " " <= char <= "~" else json.dumps(char, ensure_ascii=True)[1:-1] for char in text)
+
+    def pairs(values: dict | None) -> str:
+        if values is None:
+            return "unavailable (not assessed)"
+        return "; ".join(f"{scalar(key)}={scalar(value)}" for key, value in values.items()) or "{}"
+
+    def observation_lines(observed: dict) -> list[str]:
+        rows = []
+        if observed.get("run_recorded_status") is not None:
+            rows.append(
+                "Recorded allocation status: "
+                + scalar(observed["run_recorded_status"])
+                + " (metadata only; not process liveness)"
+            )
+        if observed.get("inventory_scope") is not None:
+            rows.append("Inventory scope: " + scalar(observed["inventory_scope"]))
+        if observed.get("units") or observed.get("inventory_scope") == "established":
+            rows.append("Units (ephemeral zero-based ordinals; not durable IDs):")
+        for unit in observed.get("units") or []:
+            rows.append(
+                f"  [{scalar(unit.get('ordinal'))}] {scalar(unit.get('kind'))}/{scalar(unit.get('scope'))}; "
+                f"working-copy={scalar(unit.get('generated_working_copy'))}; handover={scalar(unit.get('handover'))}; "
+                f"packages={scalar(unit.get('package_count'))}; "
+                f"certification={scalar(unit.get('current_certification'))}"
+            )
+            for index, occurrence in enumerate(unit.get("occurrences", [])):
+                rows.append(
+                    f"    occurrence[{index}] kind={scalar(occurrence.get('kind'))} "
+                    f"status={scalar(occurrence.get('status'))}"
+                )
+        if observed.get("units") == [] and observed.get("inventory_scope") == "established":
+            rows.append("  none projected")
+        rows.append("Findings (run-level; not associated with unit ordinals):")
+        for index, finding in enumerate(observed.get("findings") or []):
+            rows.append(
+                f"  [{index}] code={scalar(finding.get('code'))} reason={scalar(finding.get('reason'))} "
+                f"unassessable={scalar(finding.get('unassessable'))} (run-level)"
+            )
+        if not observed.get("findings"):
+            rows.append("  none projected" if observed.get("findings") == [] else "  unavailable (not assessed)")
+        rows.append(
+            "Unscoped packages: "
+            + scalar(observed.get("unscoped_package_count"))
+            + (" (projected count; inventory unavailable)" if observed.get("inventory_scope") is None else "")
+        )
+        for title, key in (
+            ("Observed run folders", "canonical_subdirs"),
+            ("Observed child evidence", "child_evidence"),
+        ):
+            if observed.get(key) is not None:
+                rows.append(title + ": " + pairs(observed[key]))
+        for index, phase in enumerate(observed.get("recorded_phases") or []):
+            rows.append(
+                f"Last observed phase[{index}]: source={scalar(phase.get('source'))}; "
+                f"phase={scalar(phase.get('phase'))}; failed={scalar(phase.get('failed'))}; "
+                f"last_observed: {pairs(phase.get('last_observed'))} - historical only, not a current check."
+            )
+        return rows
+
+    observed = result.get("observations")
+    now = "diagnostic observations unavailable (not assessed)."
+    need = "inspect unavailable diagnostics; cause and required operator/lifecycle decision unknown."
+    if observed is not None:
+        now = (
+            f"inventory scope={scalar(observed.get('inventory_scope'))}; "
+            f"{len(observed.get('units', []))} observed units (not the commissioned denominator)."
+            if result.get("run_location") is not None
+            else "selected run identity was not established; no accepted run or child location is shown."
+        )
+        inspection = bool(observed.get("findings")) or any(
+            state is None or state in {"missing", "unestablished"} or str(state).startswith("unassessable")
+            for state in (
+                observed.get("inventory_scope"),
+                *(observed.get("canonical_subdirs") or {}).values(),
+                *(observed.get("child_evidence") or {}).values(),
+                *(
+                    unit.get(key)
+                    for unit in observed.get("units", [])
+                    for key in ("generated_working_copy", "handover")
+                ),
+            )
+        )
+        need = (
+            "inspect missing/unassessable/finding observations; cause and required operator/lifecycle decision unknown."
+            if inspection
+            else "this diagnostic establishes no required operator/lifecycle decision."
+        )
+    lines = [
+        f"STATUS {scalar(result.get('status'))} (exit {scalar(result.get('exit_code'))}) - observations only",
+        "Goal: inspect the explicitly selected run.",
+        "Now: " + now,
+        "Observed handoff: NOT CHECKED - openability, START_READY and COMPLETE were not evaluated.",
+        "Need: " + need,
+        f"Existing owner: {scalar(result.get('authority')) if result.get('authority') is not None else 'not reached'}; "
+        f"delegated diagnostic exit={scalar(result.get('delegated_exit_code'))}; "
+        f"facade exit={scalar(result.get('exit_code'))}.",
+    ]
+    if result.get("run_location") is not None:
+        lines.append(
+            "Run: "
+            + scalar(result["run_location"]["selected_run"])
+            + " (supplied local path accepted by the owner; local-only, not publication consent)"
+        )
+    if observed is not None:
+        lines.extend(observation_lines(observed))
+    lines.extend(
+        [
+            "Paths: NOT CHECKED; current longest/remaining budgets not recorded; "
+            "ceilings file=259, directory=247 UTF-16 code units.",
+            "Unavailable here: original intent/revision; named/openable artifact; full commissioned denominator; "
+            "recorded parent/root/repo/git/commit state; authoritative rerun; subst.",
+        ]
+    )
+    _print_safe("\n".join(lines))
+
+
 def _print_safe(text: str) -> None:
     """ASCII escapes keep human diagnostics printable even under cp1252."""
     print(text.encode("ascii", errors="backslashreplace").decode("ascii"), flush=True)
@@ -744,6 +868,8 @@ def main(argv: list[str] | None = None) -> int:
     result["exit_code"] = code
     if json_mode:
         print(json.dumps(result, ensure_ascii=True, sort_keys=True), flush=True)
+    elif command == "status":
+        _status_human(result)
     elif command == "doctor":
         _doctor_human(result, args)
     else:

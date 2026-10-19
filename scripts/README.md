@@ -1294,11 +1294,27 @@ allocation is reported before children. Over-ceiling diagnostics retain the old 
 owner's exact direct-script new-run command. The facade's rerun field remains unavailable because it
 has no complete recorded invocation; it never guesses an authoritative rerun.
 
-`status` calls `run_status.build_status` only. It does not launch git/processes, scan path ceilings,
-perform network requests, repair, allocate or establish liveness/readiness. It preserves diagnostic
-exit and ordered finding/unit multiplicity; customer labels are withheld. Stored outcomes are
-last-observed, not freshly certified. It omits `next_action`; missing/moved identity is
-`cannot_establish`, with no derived path. Underivable path/location fields are null with stable reasons.
+Ordinary `status` is an **anonymous interim human view** of the existing safe projection; `--json`
+remains **byte-for-byte `t2p/v1` compatible**, including syntax/error/interrupt envelopes. After the
+status/exit header, five consecutive lines explain Goal (this inspection), Now, Observed handoff,
+Need and Existing owner. Every projected unit/occurrence, run-level finding, unscoped-package count,
+folder/evidence state and historical phase remains visible in owner order, including duplicates.
+Zero-based unit ordinals are ephemeral, **not durable IDs**; findings have no positional unit join.
+`active` is allocation metadata, and phase results are **last observed**, never current checks.
+Need is only a fixed inspection rule: missing/unassessable/finding observations need inspection,
+with cause and operator/lifecycle decision unknown; otherwise this diagnostic establishes no required
+decision. Presence, package claims and historical success never make handoff green: **NOT CHECKED**.
+The sole local-path exception is an explicitly supplied run accepted by the owner; it is **not
+publication consent**. Rejected/null runs expose no path. Exact named/openable artifacts and other
+private locations are unavailable here; role states are observations, not artifact links.
+Full commissioned denominator, readiness, credentials, liveness, fidelity, START_READY and COMPLETE
+remain **unestablished**. Current path safety/longest paths/remaining budgets are not checked/recorded;
+259/247 are static file/directory UTF-16 ceilings, not measurements.
+One `run_status.build_status` call owns all reads and the exact diagnostic exit. There are no added
+reads, git/process/network calls, scans, cache/result writes, repairs, allocations, routing or gates;
+`next_action` remains omitted. Doctor/start/direct-owner behavior is unchanged.
+**Refs #734 / #469 / #663, not Fixes**: named/private-location enrichment is separate, unplanned work;
+this view does not close those issues or establish a legal next execution command.
 
 JSON stdout is one `t2p/v1` envelope, also for syntax/launch/interrupt failures. Common fields:
 `command`, `status`, `exit_code`, `authority`, `delegated_exit_code`, `stages`, `checks`, `evidence`,

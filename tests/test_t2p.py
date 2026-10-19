@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -58,6 +59,299 @@ def _preflight_bytes(*blockers, warnings=0):
     return json.dumps(
         {"critical_missing": len(blockers), "recommended_warnings": warnings, "blockers": list(blockers)}
     ).encode()
+
+
+def _status_observed():
+    return {
+        "run_location": {"state": "intact"},
+        "run_recorded_status": "active",
+        "inventory_scope": "established",
+        "canonical_subdirs": {
+            "assessment": "present",
+            "assets": "present",
+            "bundle": "present",
+            "oracle": "missing",
+            "packages": "present",
+            "deliverables": "missing",
+            "scratch": "present",
+        },
+        "child_evidence": {
+            "bundle/pbip": "present",
+            "bundle/handover": "present",
+            "bundle/source-provenance.json": "recorded",
+            "bundle/phase-timings.json": "recorded",
+        },
+        "findings": [
+            {
+                "code": "UNSCOPED_PACKAGE",
+                "reason": "preserve_and_inspect_association",
+                "unassessable": False,
+                "unit": "PRIVATE_FINDING_CANARY_84",
+                "source": "packages/PRIVATE_FINDING_CANARY_84",
+            },
+            {
+                "code": "UNSCOPED_HANDOVER",
+                "reason": "preserve_and_inspect_identity",
+                "unassessable": False,
+                "unit": "PRIVATE_HANDOVER_CANARY",
+                "source": "bundle/handover/PRIVATE_HANDOVER_CANARY",
+            },
+        ],
+        "units": [
+            {
+                "unit": "PRIVATE_UNIT_CANARY_73",
+                "kind": "workbook",
+                "scope": "scoped",
+                "generated_working_copy": "missing",
+                "handover": "present",
+                "occurrences": [{"kind": "workbook", "status": "observed", "source": "PRIVATE_OCCURRENCE_CANARY"}],
+                "package": {
+                    "unit": "PRIVATE_PACKAGE_CANARY_95",
+                    "relative_path": "packages/PRIVATE_PACKAGE_CANARY_95",
+                    "construction_status": "ASSEMBLED",
+                    "binding": {"status": "BOUND"},
+                    "stored_readiness": [{"status": "START_READY"}, {"status": "COMPLETE"}],
+                },
+                "current_certification": "NOT_CHECKED",
+            },
+            {
+                "unit": "PRIVATE_DATASOURCE_CANARY",
+                "kind": "datasource",
+                "scope": "working_copy_only",
+                "generated_working_copy": "present",
+                "handover": "not_applicable",
+                "occurrences": [
+                    {"kind": "datasource", "status": "observed"},
+                    {"kind": "datasource", "status": "observed"},
+                    {"kind": "datasource", "status": "present"},
+                ],
+                "package": None,
+                "current_certification": "NOT_CHECKED",
+            },
+        ],
+        "unscoped_packages": [{"unit": "PRIVATE_UNSCOPED_CANARY", "relative_path": "packages/PRIVATE_UNSCOPED_CANARY"}],
+        "recorded_phases": [
+            {
+                "source": "bundle/source-provenance.json",
+                "phase": "provenance",
+                "last_observed": {
+                    "status": "failed",
+                    "exit_code": 1,
+                    "elapsed_sec": 0.25,
+                    "started_at": "2026-10-19T08:00:00+00:00",
+                    "errors": [
+                        {"code": "collect-inputs-failed", "operation": "collect-inputs"},
+                        {"code": "unknown", "operation": "unknown"},
+                    ],
+                },
+                "failed": True,
+            },
+            {
+                "source": "bundle/phase-timings.json#phases[0]",
+                "phase": "path_ceiling",
+                "last_observed": {
+                    "status": "ok",
+                    "exit_code": 0,
+                    "elapsed_sec": 0.5,
+                    "started_at": "2026-10-19T08:00:01+00:00",
+                },
+                "failed": False,
+            },
+            {"source": "bundle/phase-timings.json#phases[1]", "last_observed": {}, "failed": False},
+        ],
+        "locations": [{"path": r"C:\PRIVATE_HOST_CANARY\PRIVATE_TOOLKIT_CANARY"}],
+        "next_action": {"command": "PRIVATE_COMMAND_CANARY", "detail": "PRIVATE_PROSE_CANARY"},
+        "path_report": {"projection_verdict": "PASS", "remaining_file_utf16": 999},
+    }
+
+
+# Complete stdout bytes captured from approved base 5af09020 with these synthetic owner records.
+STATUS_FROZEN_JSON = {
+    "status0": (
+        b'{"artifacts": [], "authority": "run_status.py", "checks": [], "command": "status", "dele'
+        b'gated_exit_code": 0, "evidence": [], "exit_code": 0, "limitations": ["last_observed_not_'
+        b'liveness", "customer_labels_withheld", "no_routing"], "observations": {"canonical_subdir'
+        b's": {"assessment": "present", "assets": "present", "bundle": "present", "deliverables": '
+        b'"missing", "oracle": "missing", "packages": "present", "scratch": "present"}, "child_evi'
+        b'dence": {"bundle/handover": "present", "bundle/pbip": "present", "bundle/phase-timings.j'
+        b'son": "recorded", "bundle/source-provenance.json": "recorded"}, "findings": [], "invento'
+        b'ry_scope": "established", "recorded_phases": [{"failed": true, "last_observed": {"elapse'
+        b'd_sec": 0.25, "errors": [{"code": "collect-inputs-failed", "operation": "collect-inputs"'
+        b'}, {"code": "unknown", "operation": "unknown"}], "exit_code": 1, "started_at": "2026-10-'
+        b'19T08:00:00+00:00", "status": "failed"}, "phase": "provenance", "source": "bundle/source'
+        b'-provenance.json"}, {"failed": false, "last_observed": {"elapsed_sec": 0.5, "exit_code":'
+        b' 0, "started_at": "2026-10-19T08:00:01+00:00", "status": "ok"}, "phase": "path_ceiling",'
+        b' "source": "bundle/phase-timings.json#phases[0]"}, {"failed": false, "last_observed": {}'
+        b', "phase": null, "source": "bundle/phase-timings.json#phases[1]"}], "run_recorded_status'
+        b'": "active", "units": [{"current_certification": "NOT_CHECKED", "generated_working_copy"'
+        b': "missing", "handover": "present", "kind": "workbook", "occurrences": [{"kind": "workbo'
+        b'ok", "status": "observed"}], "ordinal": 0, "package_count": 1, "scope": "scoped"}, {"cur'
+        b'rent_certification": "NOT_CHECKED", "generated_working_copy": "present", "handover": "no'
+        b't_applicable", "kind": "datasource", "occurrences": [{"kind": "datasource", "status": "o'
+        b'bserved"}, {"kind": "datasource", "status": "observed"}, {"kind": "datasource", "status"'
+        b': "present"}], "ordinal": 1, "package_count": 0, "scope": "working_copy_only"}], "unscop'
+        b'ed_package_count": 1}, "path_report": {"directory_ceiling_utf16": 247, "file_ceiling_utf'
+        b'16": 259, "initial_decision": "cannot_establish", "initial_reason": "unknown_until_harve'
+        b'st", "longest_directory_locator": {"reason": "not_recorded", "value": null}, "longest_di'
+        b'rectory_utf16": {"reason": "not_recorded", "value": null}, "longest_file_locator": {"rea'
+        b'son": "not_recorded", "value": null}, "longest_file_utf16": {"reason": "not_recorded", "'
+        b'value": null}, "owner": "run_estate.py", "projection_reason": "not_recorded", "projectio'
+        b'n_verdict": null, "remaining_directory_utf16": {"reason": "not_recorded", "value": null}'
+        b', "remaining_file_utf16": {"reason": "not_recorded", "value": null}, "rerun": {"argv": n'
+        b'ull, "authoritative": false, "reason": "arguments_not_recorded"}, "subst": {"reason": "n'
+        b'ot_derivable_read_only", "value": null}}, "proof_boundary": {"established": ["read_only_'
+        b'inventory"], "not_established": ["credential_validity", "source_reachability", "path_saf'
+        b'ety", "process_liveness", "START_READY", "fidelity", "COMPLETE", "deployability"]}, "run'
+        b'_location": {"commit_safety": null, "commit_safety_reason": "not_derivable_read_only", "'
+        b'git_visibility": null, "git_visibility_reason": "not_derivable_read_only", "physical_run'
+        b'": "C:\\\\synthetic\\\\_runs\\\\001-demo", "recorded_run": "C:\\\\synthetic\\\\_runs\\\\001-demo", "'
+        b'relationship": null, "relationship_reason": "not_derivable_read_only", "selected_run": "'
+        b'C:\\\\synthetic\\\\_runs\\\\001-demo"}, "run_location_reason": null, "runs_root": null, "schem'
+        b'a_version": "t2p/v1", "stages": [], "status": "ok"}\n'
+    ),
+    "findings0": (
+        b'{"artifacts": [], "authority": "run_status.py", "checks": [], "command": "status", "dele'
+        b'gated_exit_code": 0, "evidence": [], "exit_code": 0, "limitations": ["last_observed_not_'
+        b'liveness", "customer_labels_withheld", "no_routing"], "observations": {"canonical_subdir'
+        b's": {"assessment": "present", "assets": "present", "bundle": "present", "deliverables": '
+        b'"missing", "oracle": "missing", "packages": "present", "scratch": "present"}, "child_evi'
+        b'dence": {"bundle/handover": "present", "bundle/pbip": "present", "bundle/phase-timings.j'
+        b'son": "recorded", "bundle/source-provenance.json": "recorded"}, "findings": [{"code": "U'
+        b'NSCOPED_PACKAGE", "reason": "preserve_and_inspect_association", "unassessable": false}, '
+        b'{"code": "UNSCOPED_HANDOVER", "reason": "preserve_and_inspect_identity", "unassessable":'
+        b' false}], "inventory_scope": "established", "recorded_phases": [{"failed": true, "last_o'
+        b'bserved": {"elapsed_sec": 0.25, "errors": [{"code": "collect-inputs-failed", "operation"'
+        b': "collect-inputs"}, {"code": "unknown", "operation": "unknown"}], "exit_code": 1, "star'
+        b'ted_at": "2026-10-19T08:00:00+00:00", "status": "failed"}, "phase": "provenance", "sourc'
+        b'e": "bundle/source-provenance.json"}, {"failed": false, "last_observed": {"elapsed_sec":'
+        b' 0.5, "exit_code": 0, "started_at": "2026-10-19T08:00:01+00:00", "status": "ok"}, "phase'
+        b'": "path_ceiling", "source": "bundle/phase-timings.json#phases[0]"}, {"failed": false, "'
+        b'last_observed": {}, "phase": null, "source": "bundle/phase-timings.json#phases[1]"}], "r'
+        b'un_recorded_status": "active", "units": [{"current_certification": "NOT_CHECKED", "gener'
+        b'ated_working_copy": "missing", "handover": "present", "kind": "workbook", "occurrences":'
+        b' [{"kind": "workbook", "status": "observed"}], "ordinal": 0, "package_count": 1, "scope"'
+        b': "scoped"}, {"current_certification": "NOT_CHECKED", "generated_working_copy": "present'
+        b'", "handover": "not_applicable", "kind": "datasource", "occurrences": [{"kind": "datasou'
+        b'rce", "status": "observed"}, {"kind": "datasource", "status": "observed"}, {"kind": "dat'
+        b'asource", "status": "present"}], "ordinal": 1, "package_count": 0, "scope": "working_cop'
+        b'y_only"}], "unscoped_package_count": 1}, "path_report": {"directory_ceiling_utf16": 247,'
+        b' "file_ceiling_utf16": 259, "initial_decision": "cannot_establish", "initial_reason": "u'
+        b'nknown_until_harvest", "longest_directory_locator": {"reason": "not_recorded", "value": '
+        b'null}, "longest_directory_utf16": {"reason": "not_recorded", "value": null}, "longest_fi'
+        b'le_locator": {"reason": "not_recorded", "value": null}, "longest_file_utf16": {"reason":'
+        b' "not_recorded", "value": null}, "owner": "run_estate.py", "projection_reason": "not_rec'
+        b'orded", "projection_verdict": null, "remaining_directory_utf16": {"reason": "not_recorde'
+        b'd", "value": null}, "remaining_file_utf16": {"reason": "not_recorded", "value": null}, "'
+        b'rerun": {"argv": null, "authoritative": false, "reason": "arguments_not_recorded"}, "sub'
+        b'st": {"reason": "not_derivable_read_only", "value": null}}, "proof_boundary": {"establis'
+        b'hed": ["read_only_inventory"], "not_established": ["credential_validity", "source_reacha'
+        b'bility", "path_safety", "process_liveness", "START_READY", "fidelity", "COMPLETE", "depl'
+        b'oyability"]}, "run_location": {"commit_safety": null, "commit_safety_reason": "not_deriv'
+        b'able_read_only", "git_visibility": null, "git_visibility_reason": "not_derivable_read_on'
+        b'ly", "physical_run": "C:\\\\synthetic\\\\_runs\\\\001-demo", "recorded_run": "C:\\\\synthetic\\\\_'
+        b'runs\\\\001-demo", "relationship": null, "relationship_reason": "not_derivable_read_only",'
+        b' "selected_run": "C:\\\\synthetic\\\\_runs\\\\001-demo"}, "run_location_reason": null, "runs_r'
+        b'oot": null, "schema_version": "t2p/v1", "stages": [], "status": "findings"}\n'
+    ),
+    "native1": (
+        b'{"artifacts": [], "authority": "run_status.py", "checks": [], "command": "status", "dele'
+        b'gated_exit_code": 1, "evidence": [], "exit_code": 1, "limitations": ["last_observed_not_'
+        b'liveness", "customer_labels_withheld", "no_routing"], "observations": {"canonical_subdir'
+        b's": null, "child_evidence": null, "findings": [{"code": "UNASSESSABLE_EVIDENCE", "reason'
+        b'": "run_location_unestablished", "unassessable": true}], "inventory_scope": null, "recor'
+        b'ded_phases": [], "run_recorded_status": null, "units": [], "unscoped_package_count": 0},'
+        b' "path_report": {"directory_ceiling_utf16": 247, "file_ceiling_utf16": 259, "initial_dec'
+        b'ision": "cannot_establish", "initial_reason": "unknown_until_harvest", "longest_director'
+        b'y_locator": {"reason": "not_recorded", "value": null}, "longest_directory_utf16": {"reas'
+        b'on": "not_recorded", "value": null}, "longest_file_locator": {"reason": "not_recorded", '
+        b'"value": null}, "longest_file_utf16": {"reason": "not_recorded", "value": null}, "owner"'
+        b': "run_estate.py", "projection_reason": "not_recorded", "projection_verdict": null, "rem'
+        b'aining_directory_utf16": {"reason": "not_recorded", "value": null}, "remaining_file_utf1'
+        b'6": {"reason": "not_recorded", "value": null}, "rerun": {"argv": null, "authoritative": '
+        b'false, "reason": "arguments_not_recorded"}, "subst": {"reason": "not_derivable_read_only'
+        b'", "value": null}}, "proof_boundary": {"established": ["read_only_inventory"], "not_esta'
+        b'blished": ["credential_validity", "source_reachability", "path_safety", "process_livenes'
+        b's", "START_READY", "fidelity", "COMPLETE", "deployability"]}, "run_location": null, "run'
+        b'_location_reason": "identity_unestablished", "runs_root": null, "schema_version": "t2p/v'
+        b'1", "stages": [], "status": "cannot_establish"}\n'
+    ),
+    "native2": (
+        b'{"artifacts": [], "authority": "run_status.py", "checks": [], "command": "status", "dele'
+        b'gated_exit_code": 2, "evidence": [], "exit_code": 2, "limitations": ["last_observed_not_'
+        b'liveness", "customer_labels_withheld", "no_routing"], "observations": {"canonical_subdir'
+        b's": null, "child_evidence": null, "findings": [{"code": "UNASSESSABLE_EVIDENCE", "reason'
+        b'": "run_location_unestablished", "unassessable": true}], "inventory_scope": null, "recor'
+        b'ded_phases": [], "run_recorded_status": null, "units": [], "unscoped_package_count": 0},'
+        b' "path_report": {"directory_ceiling_utf16": 247, "file_ceiling_utf16": 259, "initial_dec'
+        b'ision": "cannot_establish", "initial_reason": "unknown_until_harvest", "longest_director'
+        b'y_locator": {"reason": "not_recorded", "value": null}, "longest_directory_utf16": {"reas'
+        b'on": "not_recorded", "value": null}, "longest_file_locator": {"reason": "not_recorded", '
+        b'"value": null}, "longest_file_utf16": {"reason": "not_recorded", "value": null}, "owner"'
+        b': "run_estate.py", "projection_reason": "not_recorded", "projection_verdict": null, "rem'
+        b'aining_directory_utf16": {"reason": "not_recorded", "value": null}, "remaining_file_utf1'
+        b'6": {"reason": "not_recorded", "value": null}, "rerun": {"argv": null, "authoritative": '
+        b'false, "reason": "arguments_not_recorded"}, "subst": {"reason": "not_derivable_read_only'
+        b'", "value": null}}, "proof_boundary": {"established": ["read_only_inventory"], "not_esta'
+        b'blished": ["credential_validity", "source_reachability", "path_safety", "process_livenes'
+        b's", "START_READY", "fidelity", "COMPLETE", "deployability"]}, "run_location": null, "run'
+        b'_location_reason": "identity_unestablished", "runs_root": null, "schema_version": "t2p/v'
+        b'1", "stages": [], "status": "cannot_establish"}\n'
+    ),
+    "syntax": (
+        b'{"artifacts": [], "authority": null, "checks": [], "command": "status", "delegated_exit_'
+        b'code": null, "evidence": [], "exit_code": 2, "limitations": ["invalid_arguments_use_help'
+        b'"], "path_report": {"directory_ceiling_utf16": 247, "file_ceiling_utf16": 259, "initial_'
+        b'decision": "cannot_establish", "initial_reason": "unknown_until_harvest", "longest_direc'
+        b'tory_locator": {"reason": "not_recorded", "value": null}, "longest_directory_utf16": {"r'
+        b'eason": "not_recorded", "value": null}, "longest_file_locator": {"reason": "not_recorded'
+        b'", "value": null}, "longest_file_utf16": {"reason": "not_recorded", "value": null}, "own'
+        b'er": "run_estate.py", "projection_reason": "not_recorded", "projection_verdict": null, "'
+        b'remaining_directory_utf16": {"reason": "not_recorded", "value": null}, "remaining_file_u'
+        b'tf16": {"reason": "not_recorded", "value": null}, "rerun": {"argv": null, "authoritative'
+        b'": false, "reason": "arguments_not_recorded"}, "subst": {"reason": "not_derivable_read_o'
+        b'nly", "value": null}}, "proof_boundary": {"established": [], "not_established": ["creden'
+        b'tial_validity", "source_reachability", "path_safety", "process_liveness", "START_READY",'
+        b' "fidelity", "COMPLETE", "deployability"]}, "run_location": null, "run_location_reason":'
+        b' "not_allocated_path_withheld", "runs_root": null, "schema_version": "t2p/v1", "stages":'
+        b' [], "status": "error"}\n'
+    ),
+    "exception": (
+        b'{"artifacts": [], "authority": "run_status.py", "checks": [], "command": "status", "dele'
+        b'gated_exit_code": null, "evidence": [], "exit_code": 1, "limitations": ["owner_result_un'
+        b'available"], "path_report": {"directory_ceiling_utf16": 247, "file_ceiling_utf16": 259, '
+        b'"initial_decision": "cannot_establish", "initial_reason": "unknown_until_harvest", "long'
+        b'est_directory_locator": {"reason": "not_recorded", "value": null}, "longest_directory_ut'
+        b'f16": {"reason": "not_recorded", "value": null}, "longest_file_locator": {"reason": "not'
+        b'_recorded", "value": null}, "longest_file_utf16": {"reason": "not_recorded", "value": nu'
+        b'll}, "owner": "run_estate.py", "projection_reason": "not_recorded", "projection_verdict"'
+        b': null, "remaining_directory_utf16": {"reason": "not_recorded", "value": null}, "remaini'
+        b'ng_file_utf16": {"reason": "not_recorded", "value": null}, "rerun": {"argv": null, "auth'
+        b'oritative": false, "reason": "arguments_not_recorded"}, "subst": {"reason": "not_derivab'
+        b'le_read_only", "value": null}}, "proof_boundary": {"established": [], "not_established":'
+        b' ["credential_validity", "source_reachability", "path_safety", "process_liveness", "STAR'
+        b'T_READY", "fidelity", "COMPLETE", "deployability"]}, "run_location": null, "run_location'
+        b'_reason": "not_allocated_path_withheld", "runs_root": null, "schema_version": "t2p/v1", '
+        b'"stages": [], "status": "error"}\n'
+    ),
+    "interrupt": (
+        b'{"artifacts": [], "authority": "run_status.py", "checks": [], "command": "status", "dele'
+        b'gated_exit_code": null, "evidence": [], "exit_code": 130, "limitations": [], "path_repor'
+        b't": {"directory_ceiling_utf16": 247, "file_ceiling_utf16": 259, "initial_decision": "can'
+        b'not_establish", "initial_reason": "unknown_until_harvest", "longest_directory_locator": '
+        b'{"reason": "not_recorded", "value": null}, "longest_directory_utf16": {"reason": "not_re'
+        b'corded", "value": null}, "longest_file_locator": {"reason": "not_recorded", "value": nul'
+        b'l}, "longest_file_utf16": {"reason": "not_recorded", "value": null}, "owner": "run_estat'
+        b'e.py", "projection_reason": "not_recorded", "projection_verdict": null, "remaining_direc'
+        b'tory_utf16": {"reason": "not_recorded", "value": null}, "remaining_file_utf16": {"reason'
+        b'": "not_recorded", "value": null}, "rerun": {"argv": null, "authoritative": false, "reas'
+        b'on": "arguments_not_recorded"}, "subst": {"reason": "not_derivable_read_only", "value": '
+        b'null}}, "proof_boundary": {"established": [], "not_established": ["credential_validity",'
+        b' "source_reachability", "path_safety", "process_liveness", "START_READY", "fidelity", "C'
+        b'OMPLETE", "deployability"]}, "run_location": null, "run_location_reason": "not_allocated'
+        b'_path_withheld", "runs_root": null, "schema_version": "t2p/v1", "stages": [], "status": '
+        b'"interrupted"}\n'
+    ),
+}
 
 
 PIN_BLOCKER = {
@@ -359,8 +653,9 @@ def test_native_descriptor_output_is_live_and_json_stdout_single(tmp_path):
     assert progress[-1].strip() == "RUN " + str(scripts)
 
 
+@pytest.mark.parametrize("json_mode", [False, True])
 @pytest.mark.parametrize("damage", [None, "missing", "malformed", "moved"])
-def test_status_readonly_and_owner_parity(monkeypatch, tmp_path, capsys, damage):
+def test_status_readonly_and_owner_parity(monkeypatch, tmp_path, capsys, damage, json_mode):
     import run_status
 
     run = work_dirs.allocate_run("synthetic", repo_root=tmp_path)
@@ -378,16 +673,24 @@ def test_status_readonly_and_owner_parity(monkeypatch, tmp_path, capsys, damage)
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("status must not launch subprocess/git"))
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("status must not launch subprocess"))
     for _ in range(2):
-        assert t2p.main(["status", "--run", str(path), "--json"]) == expected
-        result, _captured_output = _json(capsys)
-        assert result["delegated_exit_code"] == expected
-        assert len(result["observations"]["findings"]) == len(direct["findings"])
-        assert "next_action" not in json.dumps(result), "status must not route or suggest"
-        assert result["path_report"]["projection_verdict"] is None
+        assert t2p.main(["status", "--run", str(path), *(["--json"] if json_mode else [])]) == expected
+        if json_mode:
+            result, _captured_output = _json(capsys)
+            assert result["delegated_exit_code"] == expected
+            assert len(result["observations"]["findings"]) == len(direct["findings"])
+            assert "next_action" not in json.dumps(result), "status must not route or suggest"
+            assert result["path_report"]["projection_verdict"] is None
+            if damage:
+                assert result["status"] == "cannot_establish"
+                assert result["run_location"] is None
+        else:
+            _captured_output = capsys.readouterr()
+            assert _captured_output.out.startswith("STATUS ")
+            assert "next_action" not in _captured_output.out, "status must not route or suggest"
+            if damage:
+                assert "\nRun: " not in _captured_output.out
+        assert _captured_output.err == ""
         assert _snapshot(tmp_path) == before, "status byte/mtime/tree read-only assertion"
-        if damage:
-            assert result["status"] == "cannot_establish"
-            assert result["run_location"] is None
 
 
 def test_status_rejects_relative_without_scan(capsys):
@@ -537,8 +840,20 @@ def test_doctor_valid_default_and_optional_absence(monkeypatch, tmp_path, capsys
 def test_status_customer_labels_are_withheld(monkeypatch, tmp_path, capsys, json_mode):
     import run_status
 
-    labels = ["PRIVATE_UNIT_CANARY_73", "PRIVATE_FINDING_CANARY_84", "PRIVATE_PACKAGE_CANARY_95"]
-    unit, finding, package = labels
+    labels = [
+        "PRIVATE_UNIT_CANARY_73",
+        "PRIVATE_FINDING_CANARY_84",
+        "PRIVATE_PACKAGE_CANARY_95",
+        "PRIVATE_TOOLKIT_CANARY",
+        "PRIVATE_ENV_CANARY",
+        "PRIVATE_PROFILE_CANARY",
+        "PRIVATE_HOST_CANARY",
+        "PRIVATE_COMMAND_CANARY",
+        "PRIVATE_SERVER_CANARY",
+        "PRIVATE_SITE_CANARY",
+        "PRIVATE_PROJECT_CANARY",
+    ]
+    unit, finding, package = labels[:3]
     observed = {
         "run_location": {"state": "intact"},
         "findings": [
@@ -563,16 +878,301 @@ def test_status_customer_labels_are_withheld(monkeypatch, tmp_path, capsys, json
             }
         ],
         "unscoped_packages": [{"unit": package, "relative_path": f"packages/{package}"}],
+        "locations": [{"path": f"C:\\{label}\x1b[31m\nFORGED_LINE"} for label in labels[3:]],
+        "next_action": {"command": "PRIVATE_COMMAND_CANARY\x1b[31m\nFORGED_LINE"},
+        "environment": "PRIVATE_ENV_CANARY",
+        "profile": "PRIVATE_PROFILE_CANARY",
     }
     monkeypatch.setattr(run_status, "build_status", lambda _run: (observed, 0))
     assert t2p.main(["status", "--run", str(tmp_path), *(["--json"] if json_mode else [])]) == 0
     captured = capsys.readouterr()
     for label in labels:
         assert label not in captured.out + captured.err, f"status leaked customer label: {label}"
-    result = json.loads(captured.out)
-    jsonschema.validate(result, t2p.ENVELOPE_SCHEMA)
-    assert len(result["observations"]["units"]) == len(result["observations"]["findings"]) == 1
-    assert result["observations"]["unscoped_package_count"] == 1
+    assert "\x1b" not in captured.out + captured.err and "FORGED_LINE" not in captured.out + captured.err
+    assert captured.err == ""
+    if json_mode:
+        result = json.loads(captured.out)
+        jsonschema.validate(result, t2p.ENVELOPE_SCHEMA)
+        assert len(result["observations"]["units"]) == len(result["observations"]["findings"]) == 1
+        assert result["observations"]["unscoped_package_count"] == 1
+    else:
+        assert captured.out.startswith("STATUS findings (exit 0)")
+        assert str(tmp_path) in captured.out
+        assert "Unscoped packages: 1" in captured.out
+
+
+@pytest.mark.parametrize("json_mode", [False, True], ids=["human", "json"])
+@pytest.mark.parametrize("case", list(STATUS_FROZEN_JSON))
+def test_status_native_envelopes(monkeypatch, capsys, case, json_mode):
+    """Pin complete base JSON bytes and every human/native/error/authority distinction."""
+    observed, calls = _status_observed(), []
+    if case == "status0":
+        observed["findings"] = []
+    if case in {"native1", "native2"}:
+        observed = {
+            "findings": [
+                {"code": "UNASSESSABLE_EVIDENCE", "reason": "run_location_unestablished", "unassessable": True}
+            ]
+        }
+
+    def owner(run):
+        calls.append(run)
+        if case == "exception":
+            raise OSError("PRIVATE_EXCEPTION_CANARY\x1b[31m")
+        if case == "interrupt":
+            raise KeyboardInterrupt("PRIVATE_INTERRUPT_CANARY\x1b[31m")
+        return observed, {"native1": 1, "native2": 2}.get(case, 0)
+
+    monkeypatch.setattr("run_status.build_status", owner)
+    argv = ["status", "--run", r"C:\synthetic\_runs\001-demo", *(["--json"] if json_mode else [])]
+    if case == "syntax":
+        argv.append("--PRIVATE_ARGV_\x1b[31m")
+    expected = json.loads(STATUS_FROZEN_JSON[case])
+    assert t2p.main(argv) == expected["exit_code"], "status must preserve exact native and outer exits"
+    captured = capsys.readouterr()
+    assert len(calls) == (0 if case == "syntax" else 1), "status reaches exactly one owner; syntax reaches none"
+    assert captured.err == "", "status adds no stderr on any existing envelope path"
+    assert "PRIVATE_" not in captured.out + captured.err and "\x1b" not in captured.out + captured.err
+    if json_mode:
+        assert captured.out.encode("ascii") == STATUS_FROZEN_JSON[case], "complete frozen v1 bytes must not change"
+        jsonschema.validate(json.loads(captured.out), t2p.ENVELOPE_SCHEMA)
+    else:
+        assert captured.out.startswith(f"STATUS {expected['status']} (exit {expected['exit_code']})")
+        assert captured.out.splitlines()[1:6] == [
+            "Goal: inspect the explicitly selected run.",
+            next(line for line in captured.out.splitlines() if line.startswith("Now: ")),
+            "Observed handoff: NOT CHECKED - openability, START_READY and COMPLETE were not evaluated.",
+            next(line for line in captured.out.splitlines() if line.startswith("Need: ")),
+            f"Existing owner: {expected['authority'] or 'not reached'}; delegated diagnostic exit="
+            f"{expected['delegated_exit_code'] if expected['delegated_exit_code'] is not None else 'unavailable'}; "
+            f"facade exit={expected['exit_code']}.",
+        ], "human status must lead with five consecutive inspection headings"
+        assert ("\nRun: " in captured.out) == (expected["run_location"] is not None)
+        if "observations" not in expected:
+            assert "Now: diagnostic observations unavailable (not assessed)." in captured.out
+            assert "Unscoped packages:" not in captured.out and "\nUnits " not in captured.out
+        if case in {"native1", "native2"}:
+            assert "run_location_unestablished unassessable=true (run-level)" in captured.out
+            assert r"C:\synthetic" not in captured.out
+            assert "Unscoped packages: 0 (projected count; inventory unavailable)" in captured.out
+            assert not any(
+                label in captured.out
+                for label in (
+                    "Recorded allocation status:",
+                    "Inventory scope:",
+                    "\nUnits ",
+                    "Observed run folders:",
+                    "Observed child evidence:",
+                )
+            ), "absent owner structures must not become an assessed empty inventory or null-field forest"
+
+
+@pytest.mark.parametrize("order", ["original", "units", "findings", "phases"])
+def test_status_human_preserves_every_observation(monkeypatch, capsys, order):
+    """Ordered anonymous units, duplicate occurrences and run-level findings remain independent."""
+    observed = _status_observed()
+    if order == "units":
+        observed["units"].reverse()
+        for unit in observed["units"]:
+            unit["occurrences"].reverse()
+    if order == "findings":
+        observed["findings"].reverse()
+    if order == "phases":
+        observed["recorded_phases"].reverse()
+    monkeypatch.setattr("run_status.build_status", lambda _run: (observed, 0))
+    assert t2p.main(["status", "--run", r"C:\synthetic\_runs\001-demo"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.startswith("STATUS findings (exit 0) - observations only\n"), (
+        "human status must render inspection headings, not pretty JSON"
+    )
+    assert "Now: inventory scope=established; 2 observed units (not the commissioned denominator)." in captured.out
+    assert "ephemeral zero-based ordinals; not durable IDs" in captured.out
+    assert "Recorded allocation status: active (metadata only; not process liveness)" in captured.out
+    assert "Inventory scope: established" in captured.out
+    assert "Unscoped packages: 1" in captured.out
+    assert captured.err == ""
+    expected = []
+    for index, unit in enumerate(observed["units"]):
+        expected.append(
+            f"  [{index}] {unit['kind']}/{unit['scope']}; working-copy={unit['generated_working_copy']}; "
+            f"handover={unit['handover']}; packages={int(unit['package'] is not None)}; certification=NOT_CHECKED"
+        )
+        expected.extend(
+            f"    occurrence[{number}] kind={item['kind']} status={item['status']}"
+            for number, item in enumerate(unit["occurrences"])
+        )
+    assert captured.out.split("Units (ephemeral zero-based ordinals; not durable IDs):\n")[1].split("Findings")[0] == (
+        "\n".join(expected) + "\n"
+    ), "every ordered unit and occurrence, including duplicates, must survive"
+    assert captured.out.split("Findings (run-level; not associated with unit ordinals):\n")[1].split(
+        "Unscoped packages:"
+    )[0] == "".join(
+        f"  [{index}] code={row['code']} reason={row['reason']} unassessable=false (run-level)\n"
+        for index, row in enumerate(observed["findings"])
+    ), "findings stay ordered at run level, never positionally joined to units"
+    for title, key in (("Observed run folders", "canonical_subdirs"), ("Observed child evidence", "child_evidence")):
+        assert title + ": " + "; ".join(f"{key}={value}" for key, value in observed[key].items()) in captured.out
+    for index, row in enumerate(observed["recorded_phases"]):
+        assert (
+            f"Last observed phase[{index}]: source={row['source']}; phase={row.get('phase', 'unavailable')}; "
+            f"failed={str(row['failed']).lower()}; last_observed: "
+            + (
+                "; ".join(
+                    f"{key}={json.dumps(value) if not isinstance(value, str) else value}"
+                    for key, value in row["last_observed"].items()
+                )
+                or "{}"
+            )
+            + " - historical only, not a current check."
+        ) in captured.out, "every safe phase field and ordered nested error record is historical only"
+    assert [line for line in captured.out.splitlines() if line.startswith(("Paths:", "Unavailable here:"))] == [
+        "Paths: NOT CHECKED; current longest/remaining budgets not recorded; "
+        "ceilings file=259, directory=247 UTF-16 code units.",
+        "Unavailable here: original intent/revision; named/openable artifact; full commissioned denominator; "
+        "recorded parent/root/repo/git/commit state; authoritative rerun; subst.",
+    ], "unknown authorities stay condensed and never become current path measurements"
+
+
+@pytest.mark.parametrize(
+    "state", ["missing", "present", "unassessable:directory_unreadable", "finding", "other_missing"]
+)
+def test_status_inspection_never_certifies_handoff(monkeypatch, capsys, state):
+    """Presence reversals affect inspection only, never package/history-derived readiness."""
+    observed = _status_observed()
+    observed["findings"] = observed["findings"][:1] if state == "finding" else []
+    observed["canonical_subdirs"] = {key: "present" for key in observed["canonical_subdirs"]}
+    observed["units"][0]["generated_working_copy"] = (
+        state if state.startswith(("missing", "unassessable")) else "present"
+    )
+    if state == "other_missing":
+        observed["canonical_subdirs"]["oracle"] = "missing"
+    monkeypatch.setattr("run_status.build_status", lambda _run: (observed, 0))
+    assert t2p.main(["status", "--run", r"C:\synthetic\_runs\001-demo"]) == 0
+    captured = capsys.readouterr()
+    assert (
+        "Observed handoff: NOT CHECKED - openability, START_READY and COMPLETE were not evaluated." in captured.out
+        and captured.out.count("certification=NOT_CHECKED") == 2
+    ), "package presence and historical success must never promote current handoff"
+    assert (
+        "Need: this diagnostic establishes no required operator/lifecycle decision." in captured.out
+        if state == "present"
+        else "Need: inspect missing/unassessable/finding observations; cause and required "
+        "operator/lifecycle decision unknown." in captured.out
+    ), "Need is only the fixed inspection rule, not a lifecycle or credential classifier"
+    assert "Paths: NOT CHECKED; current longest/remaining budgets not recorded" in captured.out
+    assert "ASSEMBLED" not in captured.out and "BOUND" not in captured.out and "PASS" not in captured.out
+    assert "remaining_file_utf16" not in captured.out and "999" not in captured.out
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("packages", [0, 2])
+def test_status_zero_units_keeps_unscoped_packages(monkeypatch, capsys, packages):
+    """A package-only inventory is not silently turned into scoped units."""
+    observed = _status_observed()
+    observed["units"] = []
+    observed["unscoped_packages"] *= packages
+    monkeypatch.setattr("run_status.build_status", lambda _run: (observed, 0))
+    assert t2p.main(["status", "--run", r"C:\synthetic\_runs\001-demo"]) == 0
+    captured = capsys.readouterr()
+    assert "0 observed units (not the commissioned denominator)" in captured.out
+    assert f"Unscoped packages: {packages}\n" in captured.out
+    assert "  none projected\nFindings" in captured.out
+    assert "working-copy=" not in captured.out and "certification=" not in captured.out
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_status_scalar_controls_are_escaped(monkeypatch, capsys, json_mode):
+    """Safe-field observations remain visible without controlling the terminal."""
+    observed = _status_observed()
+    text = "OBSERVED\n\r\t\x00\x1b[31m\x7f\u0085\u202e\U0001f642"
+    observed["run_recorded_status"] = text
+    observed["canonical_subdirs"] = {text: text}
+    observed["child_evidence"] = {text: text}
+    observed["units"][0].update(
+        kind=text, scope=text, generated_working_copy=text, handover=text, current_certification=text
+    )
+    observed["units"][0]["occurrences"] = [{"kind": text, "status": text}]
+    observed["findings"][0].update(code=text, reason=text)
+    observed["recorded_phases"][0].update(source=text, phase=text)
+    observed["recorded_phases"][0]["last_observed"] = {"status": text, "errors": [{"code": text, "operation": text}]}
+    monkeypatch.setattr("run_status.build_status", lambda _run: (observed, 0))
+    assert t2p.main(["status", "--run", "C:\\synthetic\\" + text, *(["--json"] if json_mode else [])]) == 0
+    captured = capsys.readouterr()
+    assert json.dumps(text, ensure_ascii=True)[1:-1] in captured.out, (
+        "escape controls without dropping real observations"
+    )
+    assert captured.out.isascii() and not any(ord(char) < 32 and char != "\n" for char in captured.out + captured.err)
+    assert "\x7f" not in captured.out + captured.err
+    assert captured.err == ""
+    if json_mode:
+        assert json.loads(captured.out)["observations"]["units"][0]["kind"] == text
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_status_presentation_has_no_extra_io(monkeypatch, capsys, json_mode):
+    """Warm imports before trapping all presentation-side reads, probes and writes."""
+    observed, calls = _status_observed(), []
+
+    def owner(run):
+        calls.append(run)
+        return observed, 0
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("status presentation must not perform extra I/O or invoke another owner")
+
+    monkeypatch.setattr("run_status.build_status", owner)
+    monkeypatch.setattr("check_path_ceiling.scan", forbidden)
+    monkeypatch.setattr("run_status.render_human", forbidden)
+    monkeypatch.setattr("run_status._next_action", forbidden)
+    monkeypatch.setattr(work_dirs, "allocate_run", forbidden)
+    with monkeypatch.context() as boundary:
+        for name in (
+            "open",
+            "read_text",
+            "read_bytes",
+            "write_text",
+            "write_bytes",
+            "stat",
+            "lstat",
+            "resolve",
+            "absolute",
+            "exists",
+            "is_dir",
+            "is_file",
+            "iterdir",
+            "glob",
+            "rglob",
+            "mkdir",
+            "touch",
+            "unlink",
+            "rename",
+            "replace",
+            "__truediv__",
+        ):
+            boundary.setattr(Path, name, forbidden)
+        for name in (
+            "open",
+            "stat",
+            "lstat",
+            "scandir",
+            "listdir",
+            "mkdir",
+            "makedirs",
+            "unlink",
+            "remove",
+            "system",
+            "kill",
+        ):
+            boundary.setattr(os, name, forbidden)
+        for name in ("run", "Popen", "check_output", "check_call"):
+            boundary.setattr(subprocess, name, forbidden)
+        for name in ("socket", "create_connection", "getaddrinfo"):
+            boundary.setattr(socket, name, forbidden)
+        boundary.setattr("builtins.open", forbidden)
+        boundary.setattr(io, "open", forbidden)
+        assert t2p.main(["status", "--run", r"C:\synthetic\_runs\001-demo", *(["--json"] if json_mode else [])]) == 0
+    assert calls == [r"C:\synthetic\_runs\001-demo"], "status presentation reaches one owner and does not reread it"
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.parametrize(
@@ -731,6 +1331,38 @@ def test_status_customer_labels_are_withheld(monkeypatch, tmp_path, capsys, json
             '"ordinal": index, "unit": row["unit"],',
             "test_status_customer_labels_are_withheld",
             "status leaked customer label: PRIVATE_UNIT_CANARY_73",
+        ),
+        pytest.param(
+            "t2p.py",
+            "_status_human(result)",
+            "_print_safe(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2))",
+            "test_status_human_preserves_every_observation",
+            "human status must render inspection headings, not pretty JSON",
+            id="status-human-headings",
+        ),
+        pytest.param(
+            "t2p.py",
+            '"kind": row["kind"],\n                "scope": row["scope"],',
+            '"kind": row["unit"],\n                "scope": row["scope"],',
+            "test_status_customer_labels_are_withheld[False]",
+            "status leaked customer label: PRIVATE_UNIT_CANARY_73",
+            id="status-private-unit",
+        ),
+        pytest.param(
+            "t2p.py",
+            "Observed handoff: NOT CHECKED - openability, START_READY and COMPLETE were not evaluated.",
+            "Observed handoff: START_READY - package/history accepted.",
+            "test_status_inspection_never_certifies_handoff[present]",
+            "package presence and historical success must never promote current handoff",
+            id="status-false-green",
+        ),
+        pytest.param(
+            "t2p.py",
+            "code = status(args, result)",
+            "code = min(status(args, result), 1)",
+            "test_status_native_envelopes[native2-human]",
+            "status must preserve exact native and outer exits",
+            id="status-native-normalization",
         ),
         (
             "tableau_env.py",
