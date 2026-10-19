@@ -3866,19 +3866,16 @@ def test_data_access_rejects_backdated_epoch_evidence(tmp_path: Path, backdated_
     )
 
 
-def test_data_access_latest_success_still_needs_its_own_clear(tmp_path: Path) -> None:
+def test_data_access_latest_success_still_needs_its_own_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The latest attempt must precede its earning clear, including after another success."""
+    monkeypatch.setattr(cg.platform, "system", lambda: "Linux")
     root = _da_root(tmp_path, "repeated-success", LIVE_A)
-    _trail(
-        root,
-        ("block", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-cleared", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-    )
+    cg.record_probe_attempt(root, "DATA_OK", "fixture first row", [KEY_A])
+    assert cg.clear_block(root, "fixture first clear", earned=True, sources=[KEY_A]) == 0
+    cg.record_probe_attempt(root, "DATA_OK", "fixture later row", [KEY_A])
 
     assert _assess(root, _da_spec(LIVE_A)).state == "blocked"
-    _trail(root, ("probe-cleared", [KEY_A]))
+    assert cg.clear_block(root, "fixture later clear", earned=True, sources=[KEY_A]) == 0
     assert _assess(root, _da_spec(LIVE_A)).state == "live_data_ok"
 
 

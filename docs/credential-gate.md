@@ -105,6 +105,13 @@ invalidates earlier probe proof, and a later keyed `probe-data_ok` also requires
 `probe-cleared`. The ledger does not group all successes separately from all failures, so an older
 green row can never outvote a newer blocker. Backdated success, forced-scope history, legacy labels,
 foreign/torn audit, file-only override and audit-only authorization remain non-authoritative.
+The fold retains the full current root `R` even when a reader requests only `S ⊆ R`. A
+source-bearing transition row containing any canonical key outside `R` invalidates the **whole**
+current ledger's epochs as `source-key-set-changed`: neither its in-root members nor an earlier
+green history can supply proof or permission. Only later valid current keyed arms can establish
+new epochs; the foreign row never supplies one. Valid current siblings outside `S` remain legitimate
+row members. Historical rows remain readable, not new root obligations; generic engine
+receipts/violation diagnostics confer no transition authority.
 
 Human permission is exact-key and epoch-scoped. `authorize` grants permission only to keys that
 already have a current canonical arm when its row is appended. A later measurement is an
@@ -203,9 +210,13 @@ The transaction orders are:
    An ordinary pending observation unions established marker obligations with the exact selected
    keys, atomically persists the marker, denies/read-backs every Windows #724 anchor, appends/fsyncs
    the exact arm, then appends/fsyncs the attempt. The arm row never borrows sibling keys.
-   If every selected key instead has applicable exact human permission, the observation is appended
-   without manufacturing an arm or physical stop. `probe-data_ok` remains measured-but-unearned
-   until its paired clear.
+   Partition the selected keys by applicable exact human permission, including the override file
+   and each key's current arm epoch. Arm only the selected keys **without** that permission;
+   preserve authorized selected keys even when another selected key is pending. Append the exact
+   observation for the **original** selected scope, not its pending subset. If every selected key
+   is permitted, append without manufacturing an arm or physical stop. Missing-file, expired-epoch
+   or forced-scope authorization is not applicable. `probe-data_ok` remains measured-but-unearned
+   until its paired clear; permission never prevents a later failure from invalidating data proof.
 2. **Skip, clear or authorize:** a selected-scope skip is considered only after complete current-root
    pending state is known. Any omitted pending key must already be named by the marker and, on
    Windows, every resolved #724 anchor must be denied and readable; otherwise block returns `2` and

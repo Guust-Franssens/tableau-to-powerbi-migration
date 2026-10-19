@@ -773,7 +773,7 @@ def _earned_sources(
         current, refusal = _gate_root_live_keys(migration)
     if refusal or not current:
         return {}, frozenset()
-    codes, permission = _data_access_ledger(entries, tuple(sorted(current)))
+    codes, permission = _data_access_ledger(entries, tuple(sorted(current)), current=current)
     if not (migration / OVERRIDE).is_file():
         permission = frozenset()
     states = {key: "probe-cleared" if code is None else None for key, code in codes.items()}
@@ -1477,19 +1477,24 @@ def _transaction_pending(
     if entries is None:
         entries = _audit_entries(migration) or []
     established = _established_sources(migration)
-    recorded = [key for entry in entries for key in (_entry_sources(entry) or []) if SOURCE_KEY_RE.fullmatch(key)]
-    keys = list(dict.fromkeys([*established, *recorded, *(extra or [])]))
-    if include_current and (
-        current is not None or (migration / MIGRATION_SPEC).is_file() or (migration / "input_manifest.json").is_file()
-    ):
-        refusal = None
-        if current is None:
+    recorded = [
+        key
+        for entry in entries
+        if entry["action"] not in ("engine-receipt", "violation")
+        for key in (_entry_sources(entry) or [])
+        if SOURCE_KEY_RE.fullmatch(key)
+    ]
+    keys = list(dict.fromkeys([*established, *(extra or [])]))
+    if current is None:
+        current = frozenset()
+        if recorded or (migration / MIGRATION_SPEC).is_file() or (migration / "input_manifest.json").is_file():
             current, refusal = _gate_root_live_keys(migration)
-        if refusal:
-            raise GateTransactionError("transaction-spec-untrusted")
+            if refusal:
+                raise GateTransactionError("transaction-spec-untrusted")
+    if include_current:
         keys = list(dict.fromkeys([*keys, *sorted(current)]))
     canonical = tuple(key for key in keys if SOURCE_KEY_RE.fullmatch(key))
-    codes, permission = _data_access_ledger(entries, canonical)
+    codes, permission = _data_access_ledger(entries, canonical, current=current)
     permitted = permission if (migration / OVERRIDE).is_file() else frozenset()
     return [key for key in keys if key not in codes or (codes[key] is not None and key not in permitted)]
 
@@ -1511,9 +1516,10 @@ def record_probe_attempt(migration: Path, verdict: str, detail: str, sources: li
         if not forced and _scope_refusal(migration) is not None:
             raise GateTransactionError("transaction-scope-refused")
         # DATA_OK also remains blocked until its paired clear. Do not invalidate siblings' epochs.
-        _codes, permission = _data_access_ledger(entries, tuple(sorted(current)))
-        permitted = (migration / OVERRIDE).is_file() and set(sources) <= permission
-        if not permitted and _apply_pending_block(migration, sources):
+        _codes, permission = _data_access_ledger(entries, tuple(sorted(current)), current=current)
+        permitted = permission if (migration / OVERRIDE).is_file() else frozenset()
+        pending_sources = [source for source in sources if source not in permitted]
+        if pending_sources and _apply_pending_block(migration, pending_sources):
             raise GateTransactionError("transaction-arm-failed")
         _append_audit(migration, action, detail, sources)
 
@@ -1550,7 +1556,7 @@ def _earned_clear_ready(entries: list[dict], current: frozenset[str], sources: l
         "action": PROBE_CLEARED,
         "sources": sources,
     }
-    codes, _permission = _data_access_ledger([*entries, hypothetical], tuple(sorted(current)))
+    codes, _permission = _data_access_ledger([*entries, hypothetical], tuple(sorted(current)), current=current)
     return all(codes.get(source) is None for source in sources)
 
 
@@ -1687,7 +1693,7 @@ def _override_is_authentic(
         current, refusal = _gate_root_live_keys(migration)
     if refusal or not current:
         return False
-    codes, permission = _data_access_ledger(entries, tuple(sorted(current)))
+    codes, permission = _data_access_ledger(entries, tuple(sorted(current)), current=current)
     return bool(permission) and all(code is None or key in permission for key, code in codes.items())
 
 
@@ -1980,7 +1986,7 @@ def _source_set_mismatch_reason(migration: Path) -> str | None:
     current, refusal = _gate_root_live_keys(migration)
     if entries is None or refusal or not current:
         return None
-    codes, _permission = _data_access_ledger(entries, tuple(sorted(current)))
+    codes, _permission = _data_access_ledger(entries, tuple(sorted(current)), current=current)
     unarmed = {key for key, code in codes.items() if code == "source-key-set-changed"}
     if unarmed:
         return f"current source key(s) {sorted(unarmed)} lack a current keyed arm epoch"
@@ -2659,15 +2665,21 @@ def _key_block_code(state: dict) -> str | None:
 
 
 def _data_access_ledger(
-    entries: list[dict], live_keys: tuple[str, ...]
+    entries: list[dict], live_keys: tuple[str, ...], *, current: frozenset[str]
 ) -> tuple[dict[str, str | None], frozenset[str]]:
-    """Fold one trusted snapshot by file order, retaining each key's arm/measurement timestamps."""
+    """Validate whole rows against full current R before folding any selected-key projection."""
     tracked = {key: _new_key_state() for key in live_keys}
     forced = False
     for entry in entries:
         action = entry["action"]
         timestamp = datetime.fromisoformat(entry["ts"])
         sources = _entry_sources(entry) or None
+        if action not in ("engine-receipt", "violation") and any(
+            SOURCE_KEY_RE.fullmatch(source) and source not in current for source in sources or []
+        ):
+            # Dropping a foreign row or just its foreign members would resurrect earlier authority.
+            _apply_arm(tracked, None, timestamp)
+            continue
         # Legacy names/empty lists cannot identify a key; they must not turn failures into no-ops.
         if sources and not all(SOURCE_KEY_RE.fullmatch(source) for source in sources):
             sources = None
@@ -2806,29 +2818,19 @@ def _inherit_from_provider(provider: object, requested_scope: str) -> DataAccess
     )
 
 
-def _live_evidence_refusal(gate_root: Path, live_keys: tuple[str, ...], trail: list[dict] | None) -> str | None:
-    """Reject missing root-key coverage before interpreting the ordered ledger."""
-    if trail is None:
-        return None  # caller already turned this into an audit-* refusal
-    if not live_keys:
-        return None
-    root_keys, refusal = _gate_root_live_keys(gate_root)
-    if refusal:
-        return refusal
-    if set(live_keys) - root_keys:
-        return "source-key-set-changed"
-    return None
-
-
-def _direct_evidence(gate_root: Path, live_keys: tuple[str, ...], policy: str) -> tuple[list[dict] | None, str | None]:
-    """Read once. Live/fallback authority requires a trusted trail; local bytes alone do not."""
+def _direct_evidence(
+    gate_root: Path, live_keys: tuple[str, ...], policy: str
+) -> tuple[list[dict] | None, frozenset[str], str | None]:
+    """Retain full current R with the trusted trail; local bytes alone do not consume authority."""
     trail, trail_refusal = _read_audit_trail(gate_root)
     if not (bool(live_keys) or policy == "model_only_unvalidated" or (gate_root / OVERRIDE).exists()):
-        return [], None
+        return [], frozenset(), None
     if trail is None:
-        return None, trail_refusal or AUDIT_MISSING
-    refusal = _live_evidence_refusal(gate_root, live_keys, trail)
-    return (None, refusal) if refusal else (trail, None)
+        return None, frozenset(), trail_refusal or AUDIT_MISSING
+    current, refusal = _gate_root_live_keys(gate_root) if live_keys else (frozenset(), None)
+    if not refusal and not set(live_keys) <= current:
+        refusal = "source-key-set-changed"
+    return (None if refusal else trail), current, refusal
 
 
 def _package_findings(has_review: bool, local_complete: bool, auth_mismatch: bool) -> list[str]:
@@ -2870,27 +2872,26 @@ def _assess_direct(
     policy: tuple[str, str],
 ) -> DataAccessAssessment:
     """Conjoin the existing ledger policy with the physical state under the same descriptor."""
-    result, trail = _assess_direct_locked(gate_root, live_keys, has_review, package_data_sources, policy)
+    result, trail, current = _assess_direct_locked(gate_root, live_keys, has_review, package_data_sources, policy)
     if result.state == "local_import_ready":
         return result
     if result.state in DIRECT_ACCEPTED_STATES:
         physical = inspect_physical_barrier(gate_root)[0]
         if physical == "cannot_establish":
             return _cannot_establish("transaction-refused")
-        if physical != "clear" and not _completed_partial_clear(gate_root, live_keys, trail or []):
+        if physical != "clear" and not _completed_partial_clear(gate_root, live_keys, trail or [], current=current):
             return _assessment("blocked", codes=["marker-only"], source_keys=live_keys)
     return result
 
 
-def _completed_partial_clear(root: Path, selected: tuple[str, ...], entries: list[dict]) -> bool:
+def _completed_partial_clear(
+    root: Path, selected: tuple[str, ...], entries: list[dict], *, current: frozenset[str]
+) -> bool:
     """A completed scoped projection is not permission to release the root's sibling stop."""
     marked = set(_established_sources(root))
     if not marked or marked.intersection(selected):
         return False
-    keys, refusal = _gate_root_live_keys(root)
-    if refusal:
-        return False
-    states, permission = _data_access_ledger(entries, tuple(sorted(keys)))
+    states, permission = _data_access_ledger(entries, tuple(sorted(current)), current=current)
     permitted = permission if (root / OVERRIDE).is_file() else frozenset()
     pending = {key for key, code in states.items() if code is not None and key not in permitted}
     return marked == pending
@@ -2902,23 +2903,23 @@ def _assess_direct_locked(
     has_review: bool,
     package_data_sources: object,
     policy: tuple[str, str],
-) -> tuple[DataAccessAssessment, list[dict] | None]:
+) -> tuple[DataAccessAssessment, list[dict] | None, frozenset[str]]:
     """Assess direct authority against package facts and one same-root ledger snapshot."""
     fallback_authorization, requested_scope = policy
-    local_complete, local_refusal = _package_local_facts(package_data_sources)
-    if local_refusal:
-        return _cannot_establish(local_refusal), None
+    local_complete, refusal = _package_local_facts(package_data_sources)
+    if refusal:
+        return _cannot_establish(refusal), None, frozenset()
 
-    trail, evidence_refusal = _direct_evidence(gate_root, live_keys, fallback_authorization)
-    if evidence_refusal:
-        return _cannot_establish(evidence_refusal), None
+    trail, current, refusal = _direct_evidence(gate_root, live_keys, fallback_authorization)
+    if refusal:
+        return _cannot_establish(refusal), None, current
 
-    key_codes, permission = _data_access_ledger(trail or [], live_keys)
+    key_codes, permission = _data_access_ledger(trail or [], live_keys, current=current)
     authorized, auth_mismatch = _authorization_state(
         gate_root, key_codes, permission, fallback_authorization, requested_scope
     )
     if not has_review and local_complete and not any(key_codes.values()):
-        return _accepted_direct(live_keys, requested_scope), trail
+        return _accepted_direct(live_keys, requested_scope), trail, current
     if (
         authorized
         and live_keys
@@ -2926,17 +2927,23 @@ def _assess_direct_locked(
         and local_complete
         and not any(code in CANNOT_CODES for code in key_codes.values())
     ):
-        return _assessment(
-            "authorized_model_only",
-            codes=["human-authorize", "brief-model-only"],
-            source_keys=live_keys,
-            validation="unvalidated",
-            effective_scope="model_only",
-            max_phase2_claim="structural_only",
-        ), trail
-    return _blocked_assessment(
-        live_keys, key_codes, _package_findings(has_review, local_complete, auth_mismatch)
-    ), trail
+        return (
+            _assessment(
+                "authorized_model_only",
+                codes=["human-authorize", "brief-model-only"],
+                source_keys=live_keys,
+                validation="unvalidated",
+                effective_scope="model_only",
+                max_phase2_claim="structural_only",
+            ),
+            trail,
+            current,
+        )
+    return (
+        _blocked_assessment(live_keys, key_codes, _package_findings(has_review, local_complete, auth_mismatch)),
+        trail,
+        current,
+    )
 
 
 def assess_data_access(  # pylint: disable=too-many-arguments
