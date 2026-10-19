@@ -23,7 +23,6 @@ outcome, so the negative case is asserted beside every positive one.
 from __future__ import annotations
 
 import logging
-import re
 import sys
 from pathlib import Path
 
@@ -383,6 +382,11 @@ README_MD = REPO_ROOT / "README.md"
 CONTRIBUTING_MD = REPO_ROOT / "CONTRIBUTING.md"
 DRY_RUN_OPERATOR_MD = REPO_ROOT / ".github" / "agents" / "dry-run-operator.agent.md"
 ORACLE_SCRIPT = REPO_ROOT / "scripts" / "capture_tableau_oracle.py"
+APPROVED_DRY_RUN_DESCRIPTION = (
+    "Executes the commissioned Tableau-to-Power BI dry run and both migration gates. "
+    "Returns private evidence packets and findings only. "
+    "Never publishes issues/comments/uploads or repairs toolkit/model/report artifacts."
+)
 
 # Project TARGETS, tighter than `sac.PROMPT_CHAR_LIMIT`, measured with the repository's own gate
 # (`sac.prompt_size` - the whole file, CRLF included) so this cannot disagree with the tool that
@@ -1192,20 +1196,12 @@ def test_dry_run_dispatch_metadata_and_body_forbid_publication() -> None:
     source = DRY_RUN_OPERATOR_MD.read_text(encoding="utf-8")
     frontmatter, separator, body = source.partition("\n---\n")
     assert separator, "D metadata publication: missing frontmatter boundary"
-    descriptions = [
-        line.partition(":")[2].strip() for line in frontmatter.splitlines() if line.startswith("description:")
-    ]
-    assert len(descriptions) == 1, "D metadata publication: missing or ambiguous description"
-    description = descriptions[0]
-    refusal = "Never publishes issues/comments/uploads or repairs toolkit/model/report artifacts."
-    remaining = description.replace(refusal, "")
-    assert not re.search(r"\b(?:files?\s+issues?|publish(?:es)?|posts?|uploads?|repairs?|edits?)\b", remaining, re.I), (
-        "D metadata publication: affirmative publication/repair authority outside the explicit prohibition"
+    _, description_separator, description = frontmatter.partition("\ndescription:")
+    assert description_separator, "D metadata publication: missing description"
+    # The reviewed final field is a plain YAML scalar; include all continuations before folding.
+    assert " ".join(description.split()) == APPROVED_DRY_RUN_DESCRIPTION, (
+        "D metadata publication: complete approved description only, with no additional authority/text"
     )
-    assert "Returns private evidence packets and findings only." in description, (
-        "D metadata publication: private-packet/report-only output"
-    )
-    assert refusal in description, "D metadata publication: explicit publication/repair prohibition"
     body = " ".join(body.split())
     assert "no toolkit/engine/model/TMDL/DAX/PBIR repairs or publication" in body, "D body publication: role override"
     assert "Shared builder wording/stage outputs/tools grant no repair authority" in body, (
@@ -1223,19 +1219,45 @@ def test_dry_run_dispatch_metadata_and_body_forbid_publication() -> None:
             "metadata",
             "Never publishes issues/comments/uploads or repairs toolkit/model/report artifacts.",
             "It publishes issues automatically and reports findings.",
-            "D metadata publication: affirmative",
+            "D metadata publication: complete approved description",
         ),
         (
             "metadata",
             "Returns private evidence packets and findings only.",
             "Returns private evidence packets and findings only. It publishes issues automatically.",
-            "D metadata publication: affirmative",
+            "D metadata publication: complete approved description",
+        ),
+        (
+            "metadata",
+            "Returns private evidence packets and findings only.",
+            "Returns private evidence packets and findings only. It comments on issues automatically.",
+            "D metadata publication: complete approved description",
+        ),
+        (
+            "metadata",
+            "Returns private evidence packets and findings only.",
+            "Returns private evidence packets and findings only. It is publishing issues automatically.",
+            "D metadata publication: complete approved description",
+        ),
+        (
+            "metadata",
+            "Never publishes issues/comments/uploads or repairs toolkit/model/report artifacts.",
+            "Never publishes issues/comments/uploads or repairs toolkit/model/report artifacts. "
+            "It publishes issues automatically.",
+            "D metadata publication: complete approved description",
+        ),
+        (
+            "metadata",
+            "Never publishes issues/comments/uploads or repairs toolkit/model/report artifacts.",
+            "Never publishes issues/comments/uploads or repairs toolkit/model/report artifacts.\n"
+            "  It comments on issues automatically.",
+            "D metadata publication: complete approved description",
         ),
         (
             "metadata",
             "Returns private evidence packets and findings only.",
             "Returns private evidence packets and findings only. It repairs toolkit/model/report artifacts.",
-            "D metadata publication: affirmative",
+            "D metadata publication: complete approved description",
         ),
         (
             "body",
@@ -1244,7 +1266,16 @@ def test_dry_run_dispatch_metadata_and_body_forbid_publication() -> None:
             "D body publication: private payload",
         ),
     ],
-    ids=["r1-description-grant", "grant-beside-metadata-prohibition", "metadata-repair-grant", "body-publication"],
+    ids=[
+        "r1-description-grant",
+        "grant-beside-metadata-prohibition",
+        "r2-comment-grant",
+        "publishing-form-grant",
+        "grant-after-retained-prohibition",
+        "continued-comment-grant",
+        "metadata-repair-grant",
+        "body-publication",
+    ],
 )
 def test_dry_run_publication_authority_reversals_fail_then_restore(
     monkeypatch: pytest.MonkeyPatch, scope: str, before: str, after: str, diagnostic: str
