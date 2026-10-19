@@ -63,7 +63,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 68f9bfd7efc77ce6f58d0d659e9c842346a62fe8dbc758b5c3fc0cf92444f536  [Runbook ~2](../../docs/operator-runbook.md)/[script help](.
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 a0da892eef6262c6fbe69d46556b807d8068e114e00bf2eaa8e3ea4922d2fd98  1. **Preflight first:** session-start `scripts\preflight.ps1
-a54210e555ef4c461ce9ff024f8a25f2ed643aa2669886bac26beddd1bcf582f  2. **Allocate once** unless given the original root: `start_
+6954d4398f09d646885af48fcd7d227c869a733a25465e0194bee142fe668a78  2. **Allocate once** unless given the original root: `start_
 19f2c78b257719e76560120657427b4e6c134acd32dff78f51235910fdb34829  3. **Survey ~ assess ~ lineage ~ harvest ~ canonical engine*
 ea59683492f74e256d334b2617c24b529aadf2b5158a09b863ebd7f1f79b7b3f  4. **Authenticated oracle/reference capture** per [owner](..
 60278487c535e5af859c0dd7305313d41d79827898ca0c3b10e71b65d5dcfdf0  5. **Prepare/bind current packages ~ BOTH gates**: PRE `chec
@@ -280,7 +280,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 f9f4dd7c61f07c5be5f2cf51a880bf6e8185f176141108a4e3411eac48a94a1b  Only independently verified **current issued v2 `numeric_obl
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-e168b14fcda68298d77d3414a46c432259357fff31f6442b64288d604f2a1972  **BEFORE shipment**, live-source `scripts\credential_gate.py
+2b763ab51ffdb2a92301997c97a826231bc9dc766deb14524851fe6192d9465f  **BEFORE shipment**, run `python scripts\credential_gate.py
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 3ed70457e26cc85d255bc72c773979f5be710e046e64f94974f40415d0f594e5  Require builders' gates + independent V: all dashboards fait
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -290,4 +290,8 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 c80e4cf23044e95629c0ba766bf82a9b36f593b52c3c9518981e7ec0e9ace998  Supervise current-baseline progress/owner outputs/exits (`sc
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-b9de617c6297c1bf476fbbda43a3e3157094a773443db8f77b22765c887efc7d  Return counts/simplifications/findings/current limits/unveri
+6f2bb001443967e8efebd495f4a0b18fecb7e573bd04cbf6a7984badba67038e  Return counts/simplifications/findings/current limits/unveri
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+09976abbaac09a61b274e7124d14170e07e770ef623d677f25d4795b464298fd  ## Retrospective ~ MANDATORY
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+30bc592b1b4d7d1e6d0b79d87953400cf988981689bf770d609736f2b20850bf  Use `phase-timings.json`/owner engine-vs-authored accounts ~
