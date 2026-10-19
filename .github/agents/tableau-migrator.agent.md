@@ -98,8 +98,10 @@ issued v2 consent/brief; never issue it yourself, invent a spec or silently wide
 ## Receive and prepare
 
 **Plain preflight first:** `powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1`.
-Nonzero/below-floor → stop with repair hints; no `-Update`. Only actual unsigned/ExecutionPolicy
-refusal permits [recovery](../../docs/operator-runbook.md#preflight-cannot-start) and exact plain retry.
+Nonzero/below-floor → stop with repair hints; no `-Update`.
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+[preflight cannot start](../../docs/operator-runbook.md#preflight-cannot-start).
+If recovery is allowed, retry the **exact originating command and arguments** — still plain preflight.
 
 - Receive **EXISTING original run/unit/source**, private issued v2 brief and exact canonical
   bundle/package-working/handover/reference paths. Missing/mismatch → dispatcher/BLOCKED, never
