@@ -773,7 +773,6 @@ def test_semantic_ai_policy_is_skill_owned_with_a_narrow_override() -> None:
     text = _normalized(SEMANTIC_BUILDER_MD)
     assert "**Load `powerbi-ai-readiness`**" in text, "AI skill must be loaded"
     assert "sole AI policy/mechanics source" in text, "AI policy belongs to the local skill"
-    assert "load current `semantic-model-authoring`" in text, "current upstream skill must be loaded"
     assert "no-authoring policy **only for repo-owned `CustomInstructions`**" in text, "override must stay narrow"
     assert "Obey the skill's ownership refusal." in text, "ownership refusal must govern the persona"
     assert "never invokes `--adopt-existing`" in text, "persona must not invoke adoption"

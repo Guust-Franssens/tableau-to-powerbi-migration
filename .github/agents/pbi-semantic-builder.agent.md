@@ -100,7 +100,7 @@ translation guide is your reference for every calculated field.
 
 ## Skills you use
 
-**Invoke by name with the `skill` tool**; if a name fails to resolve, read
+**Invoke by name with the `skill` tool**; if a repo-local skill name fails to resolve, read
 `.github/skills/<name>/SKILL.md`.
 
 - **`powerbi-semantic-model-gotchas`** — read **first**, before your first TMDL file: the compact
@@ -110,7 +110,9 @@ translation guide is your reference for every calculated field.
 - **Host-only pbip-model-refresh skill file** (`.github\skills\pbip-model-refresh\SKILL.md`) — refreshing a local PBIP, persisting to
   `cache.abf`, pid binding and edit → refresh → save order. Held out of the playbook; resolve the
   host path or block the dependent handoff, not an assumed registered skill.
-- **`semantic-model-authoring`** — load current TMDL mechanics; apply the CustomInstructions override below.
+- **`powerbi-authoring:semantic-model-authoring`** — load current TMDL mechanics; apply the
+  CustomInstructions override below. If unavailable or ambiguous, block dependent authoring; do
+  not retry an unqualified name, select another provider, or use a local-file fallback.
 - **Read-only DAX (`EVALUATE`) — your validation surface.** For a local PBIP, DAX execution needs a
   model open in Desktop: `python scripts/probe_desktop_query.py --pid <pid>` or an equivalent
   pid-scoped ADOMD query. `powerbi-modeling-mcp` **ConnectFolder is metadata-only** offline
@@ -203,7 +205,7 @@ the existing informational contract.
 ## Prep the model for AI (Copilot readiness)
 
 **Load `powerbi-ai-readiness`** ([SKILL.md](../skills/powerbi-ai-readiness/SKILL.md)) — the sole AI
-policy/mechanics source. **Deliberate override:** load current `semantic-model-authoring`, but this
+policy/mechanics source. **Deliberate override:** load current `powerbi-authoring:semantic-model-authoring`, but this
 repo deliberately overrides its no-authoring policy **only for repo-owned `CustomInstructions`**,
 under the local skill's ownership/preservation contract. Obey the skill's ownership refusal.
 This persona never invokes `--adopt-existing`, adopts or replaces unowned/human instructions, or
