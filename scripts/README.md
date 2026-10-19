@@ -1262,13 +1262,27 @@ python -B scripts/t2p.py start --project <exact-name|LUID> [--env <path>] [--run
 python -B scripts/t2p.py status --run <absolute-local-run> [--json]
 ```
 
-`doctor` captures **plain** preflight privately and reports canonical configuration presence/source,
-alias/blank/conflict states and secret flags only. No value, length, digest, server/site/PAT name or
-host path is displayed. `READY_TO_ATTEMPT` means preflight=0 and consistent required presence, not
-authentication, reachability, path safety or readiness. Exit 1 is blocked configuration/preflight,
-3 is unknown input/launch/unexpected preflight result; syntax=2 and interrupt=130. The child receives
-`PYTHONDONTWRITEBYTECODE=1`. Read-only means no toolkit/run/config changes, not zero platform diagnostic
-traffic: plain preflight may inspect Azure/Fabric. No update, login, migration source probe or allocation.
+Ordinary `doctor` prints a short human verdict, every configuration/failed-critical blocker, safe
+source, manual action and non-blocking recommended-warning count. `--json` retains `t2p/v1` and every
+existing field; only optional `doctor_details` adds the two present server/PAT alias groups and safe
+preflight detail. Missing/noisy/unknown detail is explicitly unavailable, never guessed from raw prose;
+native 0/1 still owns the result. For unavailable causes, run plain preflight in a **private** terminal
+without `-Update`, then rerun doctor; do not change credentials on that evidence or publish its output.
+Conflicts are located independently of the winning source: process overrides do not erase a file
+conflict. Privately preserve the intended PAT under `TABLEAU_PAT_SECRET` **before** removing
+`TABLEAU_PAT_VALUE`; if the legacy value is intended, move it first. A dead Desktop pin needs a
+verified current-process refresh and retry in the **same invocation**, not merely `setx` or unpinning.
+Reruns retain an explicit `--env <same-selected-env>` placeholder; no selected/host path is exposed.
+No value, derivative, server/site/PAT-name label, raw child output or exception prose is displayed.
+The flushed checking line is on stderr; JSON stdout is one object, not human guidance.
+`READY_TO_ATTEMPT` means preflight=0 and consistent required presence, not authentication, reachability,
+path safety or readiness. Exit 1 is blocked; 3 is unknown input/launch/unexpected native result;
+syntax=2 and interrupt=130. One preflight child adds only internal `-DoctorDiagnostics` and receives
+`PYTHONDONTWRITEBYTECODE=1`. Doctor intentionally writes no toolkit/run/config/profile/registry/result/
+log/bytecode file and invokes no update, installer, login, source probe, allocation or repair.
+This is **not** offline or universal zero-write evidence: existing configured Azure/Fabric checks may
+make diagnostic traffic, and external tools/PowerShell hosts may affect caches. Actual-child tests
+cover only their monitored synthetic toolkit/profile and stub calls, not real host caches.
 
 `start` delegates **one** existing `start_migration.py` owner, including its output guard, allocator,
 site-wide assessment, post-harvest/pre-conversion path gate and reference-failure bundle continuation.

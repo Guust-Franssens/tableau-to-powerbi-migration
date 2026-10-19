@@ -813,3 +813,137 @@ def test_diagnostic_default_site_and_optional_absence(tmp_path, site):
     assert all(row["remedy"] == "none" for row in diagnostic["checks"] if not row["required"])
     assert diagnostic["status"] == "READY_TO_ATTEMPT"
     assert te.resolve_env(path, environ=values)["TABLEAU_SITE"] == (site or "")
+
+
+@pytest.mark.parametrize(
+    "canonical,legacy,other",
+    [
+        ("TABLEAU_SERVER_URL", "TABLEAU_SERVER", "TABLEAU_PAT_SECRET"),
+        ("TABLEAU_PAT_SECRET", "TABLEAU_PAT_VALUE", "TABLEAU_SERVER_URL"),
+    ],
+)
+@pytest.mark.parametrize(
+    "file_items,process_items,state,source,winning,origins",
+    [
+        ([], [], "missing", "absent", None, []),
+        ([(0, "a")], [], "set", "selected_env", 0, [("selected_env", [0], False)]),
+        ([(1, "a")], [], "deprecated-alias", "selected_env", 1, [("selected_env", [1], False)]),
+        ([(0, "a"), (1, "a")], [], "deprecated-alias", "selected_env", 0, [("selected_env", [0, 1], False)]),
+        ([(0, "a"), (1, "b")], [], "conflict", "selected_env", 0, [("selected_env", [0, 1], True)]),
+        ([], [(0, "a")], "set", "environment", 0, [("environment", [0], False)]),
+        ([], [(1, "a")], "deprecated-alias", "environment", 1, [("environment", [1], False)]),
+        ([], [(0, "a"), (1, "a")], "deprecated-alias", "environment", 0, [("environment", [0, 1], False)]),
+        ([], [(0, "a"), (1, "b")], "conflict", "environment", 0, [("environment", [0, 1], True)]),
+        (
+            [(0, "a"), (1, "b")],
+            [(0, "c")],
+            "conflict",
+            "environment",
+            0,
+            [("selected_env", [0, 1], True), ("environment", [0], False)],
+        ),
+        (
+            [(0, "a"), (1, "b")],
+            [(0, "c"), (1, "d")],
+            "conflict",
+            "environment",
+            0,
+            [("selected_env", [0, 1], True), ("environment", [0, 1], True)],
+        ),
+        (
+            [(0, "a")],
+            [(1, "b")],
+            "deprecated-alias",
+            "environment",
+            1,
+            [("selected_env", [0], False), ("environment", [1], False)],
+        ),
+        (
+            [(0, "a")],
+            [(0, " \t ")],
+            "blank",
+            "environment",
+            0,
+            [("selected_env", [0], False), ("environment", [0], False)],
+        ),
+        (
+            [(0, "a")],
+            [(1, " \t ")],
+            "blank",
+            "environment",
+            1,
+            [("selected_env", [0], False), ("environment", [1], False)],
+        ),
+    ],
+)
+def test_diagnostic_alias_groups_are_exact_and_preserve_policy(
+    tmp_path, canonical, legacy, other, file_items, process_items, state, source, winning, origins
+):
+    """Alias presence/provenance is additive; winning and conflicting sources are independent."""
+    keys = (canonical, legacy)
+    path = tmp_path / "selected.env"
+    values = {code: f"SYNTHETIC_PRIVATE_ALIAS_{code}_prefix_123456_suffix" for code in ("a", "b", "c", "d")}
+    values[" \t "] = " \t "
+    file_values = {keys[index]: values[value] for index, value in file_items}
+    process_values = {keys[index]: values[value] for index, value in process_items}
+    path.write_text("\n".join(f"{key}={value}" for key, value in file_values.items()), encoding="utf-8")
+    process_values.update({other: "SYNTHETIC_OTHER_GROUP_VALUE", "TABLEAU_PAT_NAME": "SYNTHETIC_PRIVATE_NAME"})
+    resolved, diagnostic = te.diagnose_env(path, explicit=True, environ=process_values)
+    row = next(row for row in diagnostic["checks"] if row["key"] == canonical)
+    assert row == {
+        "key": canonical,
+        "state": state,
+        "source": source,
+        "required": True,
+        "secret": canonical == "TABLEAU_PAT_SECRET",
+        "reason": state,
+        "remedy": "resolve_configuration"
+        if state in {"missing", "blank", "conflict"}
+        else "use_canonical_key"
+        if state == "deprecated-alias"
+        else "none",
+    }, "existing alias state/source/refusal must survive the overlay"
+    blocked = state in {"missing", "blank", "conflict"}
+    assert diagnostic["status"] == ("BLOCKED_CONFIG" if blocked else "READY_TO_ATTEMPT")
+    assert diagnostic["reason"] == ("configuration_inconsistent" if blocked else "presence_only")
+    if winning is not None:
+        effective = process_values if source == "environment" else file_values
+        assert resolved[canonical] == effective[keys[winning]].strip()
+    else:
+        assert canonical not in resolved
+    expected = []
+    if origins:
+        expected.append(
+            {
+                "key": canonical,
+                "winning_key": keys[winning],
+                "sources": [
+                    {"source": label, "keys": [keys[index] for index in indexes], "conflict": conflict}
+                    for label, indexes, conflict in origins
+                ],
+            }
+        )
+    expected.append(
+        {
+            "key": other,
+            "winning_key": other,
+            "sources": [{"source": "environment", "keys": [other], "conflict": False}],
+        }
+    )
+    expected.sort(key=lambda group: ("TABLEAU_SERVER_URL", "TABLEAU_PAT_SECRET").index(group["key"]))
+    assert diagnostic["configuration_aliases"] == expected, "exact two-group source/key order and winning spelling"
+    text = json.dumps(diagnostic)
+    for value in [*(value for code, value in values.items() if code != " \t "), "SYNTHETIC_PRIVATE_NAME"]:
+        assert value not in text
+        assert value[:22] not in text and value[-16:] not in text, "no value-derived prefixes or suffixes"
+
+
+def test_diagnostic_has_no_alias_census_for_non_alias_keys(tmp_path):
+    """No all-key metadata; Default site and optional absence remain existing checks only."""
+    path = tmp_path / "absent.env"
+    _, diagnostic = te.diagnose_env(path, environ={"TABLEAU_SITE": "", "TABLEAU_DBX_TOKEN": "synthetic-only"})
+    assert diagnostic["configuration_aliases"] == []
+    assert len(diagnostic["checks"]) == 9
+    assert all(
+        set(row) == {"key", "state", "source", "required", "secret", "reason", "remedy"} for row in diagnostic["checks"]
+    )
