@@ -118,6 +118,8 @@ Follow the brief's source-shape branch:
    folder/TWB(X)/TDS(X) branch, never backdoor Tableau Server. Trust front-door/`work_dirs.py` JSON paths,
    not guesses/legacy folders. Short root before survey/harvest; [path owner §6](../../docs/windows-path-limits.md):
    no junction/symlink/ceiling bypass, temporary same-user `subst` fallback only, never identity/portability.
+   The alias waives no gate and changes only the opened path, never the run's recorded path;
+   opening an alias proves neither path safety nor migration success.
 3. **Survey → assess → lineage → harvest → canonical engine** (`engine_source.py`), providers first.
    Site survey → `scope_bridge`: every stable kind/LUID/occurrence stays in denominator (duplicates/
    unresolved too); report `denominator_status` + occurrence `status`. No caption joins/drops;
