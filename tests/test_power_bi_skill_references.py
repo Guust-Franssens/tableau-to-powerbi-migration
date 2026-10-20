@@ -37,6 +37,18 @@ CORE_FAILED_CALL = "Advertised-but-failing invocation is not absence and cannot 
 CORE_CONTENT_STOP = "If content cannot be acquired, BLOCK the affected operation; never skip the core."
 CORE_READ_EVIDENCE = "A file read is content access, not skill invocation."
 CORE_AUTHORITY = "This core-only rule changes no actor/operation authority or other-owner access rule."
+CORE_ACCESS = " ".join(
+    (
+        CORE_ORDER,
+        CORE_INVOKE,
+        CORE_ABSENT_READ + r" `.github\skills\{core}\SKILL.md`.",
+        CORE_HOST,
+        CORE_FAILED_CALL,
+        CORE_CONTENT_STOP,
+        CORE_READ_EVIDENCE,
+        CORE_AUTHORITY,
+    )
+)
 HOST_PREFLIGHT = (
     r"Host startup/version preflight means `scripts\preflight.ps1` with the existing `AGENTS.md` timing and flags; "
     "never invoke a generic `preflight` skill as its substitute."
@@ -141,6 +153,14 @@ def test_local_core_access_is_content_first_and_fail_closed(role: tuple[str, str
     assert CORE_CONTENT_STOP in text, "unavailable core content blocks affected work"
     assert CORE_READ_EVIDENCE in text, "file read is not skill invocation evidence"
     assert CORE_AUTHORITY in text, "core-only authority boundary"
+    contract = CORE_ACCESS.format(core=core, artifact=artifact)
+    assert text.count(contract) == 1, "single contiguous core access contract"
+    # Core acquisition conditionals belong to this block, not appended overrides.
+    assert not re.search(
+        r"\b(?:if|when)\b[^.;!?]*\b(?:core|content|advertised|invocation)\b",
+        text.replace(contract, "", 1),
+        re.I,
+    ), "core-only access routing stays in the approved contract"
 
 
 @pytest.mark.parametrize("role", CORE_ROLES, ids=["report", "semantic"])
@@ -182,6 +202,24 @@ def test_local_core_access_is_content_first_and_fail_closed(role: tuple[str, str
         ),
         (CORE_READ_EVIDENCE, "A file read counts as successful skill invocation.", "file read is not skill invocation"),
         (CORE_AUTHORITY, "This file rule grants access to any skill or other owner.", "core-only authority boundary"),
+        (
+            CORE_AUTHORITY,
+            CORE_AUTHORITY + r" If core content is unavailable, read `.github\skills\powerbi-ai-readiness\SKILL.md`"
+            " and continue to the upstream procedure.",
+            "core-only access routing stays in the approved contract",
+        ),
+        (
+            CORE_AUTHORITY,
+            CORE_AUTHORITY + r" If the core is advertised, read `.github\skills\{core}\SKILL.md` directly"
+            " and continue to the upstream procedure.",
+            "core-only access routing stays in the approved contract",
+        ),
+        (
+            CORE_AUTHORITY,
+            CORE_AUTHORITY + r" If an advertised invocation fails, read `.github\skills\{core}\SKILL.md`"
+            " and continue to the upstream procedure.",
+            "core-only access routing stays in the approved contract",
+        ),
     ],
     ids=[
         "advertised-read-instead",
@@ -195,6 +233,9 @@ def test_local_core_access_is_content_first_and_fail_closed(role: tuple[str, str
         "missing-content-continue",
         "read-as-invocation",
         "broaden-other-owner",
+        "extra-unavailable-wrong-owner",
+        "extra-advertised-read",
+        "extra-failed-invocation-rescue",
     ],
 )
 def test_core_access_reversals_fail_the_named_assertion_then_restore(
@@ -297,6 +338,8 @@ def test_descriptive_topics_and_cli_preflight_vocabulary_remain_legal(
     source = original_read(target, encoding="utf-8")
     description = (
         "\nTopic label only: `semantic-model-authoring`; this sentence selects no provider.\n"
+        "Topic label only: `fabric-skills:semantic-model-authoring`; this sentence selects no provider.\n"
+        "Topic labels only: advertised core, invocation failure and core content; no routing instruction.\n"
         "The `preflight` module and `preview … --status` CLI preflight are descriptive vocabulary.\n"
     )
     with monkeypatch.context() as patch:
@@ -370,7 +413,7 @@ def test_semantic_authoring_provider_selection_is_exact_and_fail_closed() -> Non
     text = " ".join(_persona("pbi-semantic-builder").split())
     assert text.count(SEMANTIC_MANDATORY_SELECTION) == 1, "mandatory semantic selection"
     selections = re.findall(
-        r"\b(?:load|invoke|use|select|call)\s+(?:\*\*)?"
+        r"\b(?:load|invoke|use|select|call)\s+(?:the\s+)?(?:\*\*)?"
         r"`((?:[\w-]+:)?(?:semantic-model-authoring|powerbi-semantic-model-authoring))`",
         text,
         re.I,
@@ -426,16 +469,26 @@ def test_semantic_provider_reversals_fail_each_selection_then_restore(
     test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
 
 
-@pytest.mark.parametrize("verb", ["Invoke", "Use", "Select", "Call"])
+@pytest.mark.parametrize(
+    "selection",
+    [
+        "Invoke `semantic-model-authoring`",
+        "Use `semantic-model-authoring`",
+        "Select `semantic-model-authoring`",
+        "Call `semantic-model-authoring`",
+        "Load the `fabric-skills:semantic-model-authoring` skill",
+        "Invoke the `semantic-model-authoring` skill",
+    ],
+)
 def test_additional_semantic_imperatives_fail_provider_selection_then_restore(
-    monkeypatch: pytest.MonkeyPatch, verb: str
+    monkeypatch: pytest.MonkeyPatch, selection: str
 ) -> None:
     """Known imperative forms remain selections even with the canonical load intact."""
     original_read = Path.read_text
     target = ROOT / ".github" / "agents" / "pbi-semantic-builder.agent.md"
     source = original_read(target, encoding="utf-8")
     test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
-    changed = source + f"\n{verb} `semantic-model-authoring` for authoring.\n"
+    changed = source + f"\n{selection} for authoring.\n"
     with monkeypatch.context() as patch:
         patch.setattr(
             Path,
