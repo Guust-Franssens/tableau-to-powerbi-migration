@@ -137,9 +137,9 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 56fb731c42d3ea34bfef4c32e926dc82419d12f744a04d666e5830d2cdcf7a14  ## Procedure owners
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-1ceb7261ccaf90522f856dc626b2a7b5295ca8b5c6dc4dfcd4b6c931941274a3  - Invoke **`powerbi-report-gotchas` first**, before PBIR ([S
+4c6240fb982ae347293e5e009a950e6a3a57b2a3a201adfeda416e53ac0ed256  - Before loading an upstream procedure or authoring PBIR, ac
 d00e8eacc30c010fb36e7210228b74d77ef1166541ada703dfc3ef487a12dbf4  - Genuine greenfield ~ `planning`: persist/lock `_brief/repo
-466b8ff6018a938680c9b2f37d1f375f455f9d49dbfe4ef2a18daf222f79c9cc  - Use installed `powerbi-report-author` vocabulary, not reme
+e5acab4377ba7d1c740ef9e5040ce34c64bedea083f1b688e39787ae0db9b65e  - Use installed `powerbi-report-author` vocabulary, not reme
 9548052b9ce0b4d01c5e51ecba3ec6efd090a1bbd848145fb87cf3ef9eebea9f  - Read-only DAX: PID-scoped `scripts\probe_desktop_query.py`
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 bdd0ce3c39397697ce79b83f3678c5598bd73d6c1a3380b2cff186e77f0c5642  ## Warm-model and host barrier
@@ -192,7 +192,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 aadc463528a49520e75dad4e776acc6b578d0ed71c08c6cf7ad62e46864b2e90  Require the current issued v2 brief; exact run/unit/source,
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-b94ad829b052a5979259ee9fa35d7459afd4968b66452f30b68a49176b49b7e0  **Invoke `powerbi-semantic-model-gotchas` before TMDL**; rev
+01c2ab8e78a70d932d15b01647fedfda16887b290b17700c4e124c2d6018e44a  Before loading an upstream procedure or authoring TMDL, acqu
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3f56bb5919e24caaece1969fa85e2c1720f475deeffbcfc80ce627d7ab0b1e1  **Load `powerbi-authoring:semantic-model-authoring`** for ex
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)

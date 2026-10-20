@@ -108,16 +108,24 @@ never a plausible sibling. No fake rows, guessed fields or partial engine/scaffo
 
 ## Procedure owners
 
-- Invoke **`powerbi-report-gotchas` first**, before PBIR ([SKILL.md](../skills/powerbi-report-gotchas/SKILL.md));
-  core §§3/8/10 own migration procedures. Load **`powerbi-report-cli` once** by intent, not flags:
+- Before loading an upstream procedure or authoring PBIR, acquire migration core `powerbi-report-gotchas`:
+  invoke it when advertised; only if absent from advertised skills, read its exact current host file
+  `.github\skills\powerbi-report-gotchas\SKILL.md`. Host is the migration checkout supplying this role,
+  not a caller/package directory or guessed plugin copy. Advertised-but-failing invocation is not absence
+  and cannot activate this file route. If content cannot be acquired, BLOCK the affected operation; never
+  skip the core. A file read is content access, not skill invocation. This core-only rule changes no
+  actor/operation authority or other-owner access rule. Core §§3/8/10 own migration procedures.
+  Load **`powerbi-report-cli` once** by intent, not flags:
   existing → `authoring`; missing page → `design` then `authoring`. Read `references/<mode>.md`
   end-to-end, announce switches; use needed core-named topics, not the whole cookbook.
 - Genuine greenfield → `planning`: persist/lock `_brief/report-spec.md`, return `approval_pending`
   and **end the turn**. Require later explicit human approval of that locked spec, not autonomy or
   assumed migration-brief approval. Until then, no PBIR/semantic edit/scaffold, synthetic data or Fabric writes.
 - Use installed `powerbi-report-author` vocabulary, not remembered JSON. **Preflight is the sole
-  version authority**: no install/update, including npm `@latest`. Missing skill/command/capability
-  → BLOCKED; route its operation to preflight, no DIY/retired names. Never `management`, publish or rebind.
+  version authority**: no install/update, including npm `@latest`. Host startup/version preflight means
+  `scripts\preflight.ps1` with the existing `AGENTS.md` timing and flags; never invoke a generic `preflight`
+  skill as its substitute. Missing skill/command/capability → BLOCKED outside this core-only access exception;
+  route its operation to preflight, no DIY/retired names. Never `management`, publish or rebind.
 - Read-only DAX: PID-scoped `scripts\probe_desktop_query.py` or `powerbi-modeling-mcp`
   `dax_query_operations` on the intended runtime. **ConnectFolder is metadata-only** offline;
   `powerbi-remote` `ExecuteQuery` is published-model-only, not local PBIP row proof.

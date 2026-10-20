@@ -25,6 +25,35 @@ HISTORICAL = {
     )
 }
 PERSONAS = ("pbi-report-builder", "pbi-migration-validator")
+CORE_ROLES = (
+    ("pbi-report-builder", "powerbi-report-gotchas", "PBIR"),
+    ("pbi-semantic-builder", "powerbi-semantic-model-gotchas", "TMDL"),
+)
+CORE_ORDER = "Before loading an upstream procedure or authoring {artifact}, acquire migration core `{core}`:"
+CORE_INVOKE = "invoke it when advertised;"
+CORE_ABSENT_READ = "only if absent from advertised skills, read its exact current host file"
+CORE_HOST = "Host is the migration checkout supplying this role, not a caller/package directory or guessed plugin copy."
+CORE_FAILED_CALL = "Advertised-but-failing invocation is not absence and cannot activate this file route."
+CORE_CONTENT_STOP = "If content cannot be acquired, BLOCK the affected operation; never skip the core."
+CORE_READ_EVIDENCE = "A file read is content access, not skill invocation."
+CORE_AUTHORITY = "This core-only rule changes no actor/operation authority or other-owner access rule."
+CORE_ACCESS = " ".join(
+    (
+        CORE_ORDER,
+        CORE_INVOKE,
+        CORE_ABSENT_READ + r" `.github\skills\{core}\SKILL.md`.",
+        CORE_HOST,
+        CORE_FAILED_CALL,
+        CORE_CONTENT_STOP,
+        CORE_READ_EVIDENCE,
+        CORE_AUTHORITY,
+    )
+)
+HOST_PREFLIGHT = (
+    r"Host startup/version preflight means `scripts\preflight.ps1` with the existing `AGENTS.md` timing and flags; "
+    "never invoke a generic `preflight` skill as its substitute."
+)
+REPORT_CORE_EXCEPTION = "Missing skill/command/capability → BLOCKED outside this core-only access exception"
 SEMANTIC_AUTHORING_SKILL = "powerbi-authoring:semantic-model-authoring"
 SEMANTIC_MANDATORY_SELECTION = "**Load `powerbi-authoring:semantic-model-authoring`**"
 SEMANTIC_RESOLUTION_STOP = (
@@ -35,7 +64,7 @@ SEMANTIC_AI_SELECTION = (
     "Invoke `powerbi-ai-readiness` §0 as sole local AI owner; "
     "its narrow override below outranks generic upstream AI guidance."
 )
-SEMANTIC_LOCAL_FALLBACK = r"Repo-local skill files resolve at `.github\skills\<name>\SKILL.md`."
+SEMANTIC_LOCAL_CORE_READ = CORE_ABSENT_READ + r" `.github\skills\powerbi-semantic-model-gotchas\SKILL.md`."
 
 
 def _text(path: str) -> str:
@@ -101,6 +130,7 @@ def test_no_management_or_mid_migration_install(name: str) -> None:
         assert "Never `management`, publish or rebind" in text, "report publication stop"
         assert "no install/update, including npm `@latest`" in text, "no mid-migration installation"
         assert "Missing skill/command/capability → BLOCKED" in text, "missing capability blocks"
+        assert REPORT_CORE_EXCEPTION in text, "missing capability stop respects only the core access exception"
         assert "route its operation to preflight, no DIY/retired names" in text, "no DIY fallback"
         assert "Preflight is the sole version authority" in text
     else:
@@ -108,6 +138,225 @@ def test_no_management_or_mid_migration_install(name: str) -> None:
         assert "Unavailable owner/capability → BLOCKED affected operation to M/preflight" in text
         assert "never DIY/skipped-schema fallback sign-off" in text
     assert not re.search(r"\bnpm\s+(?:install|update|i|add)\b", text, re.I)
+
+
+@pytest.mark.parametrize("role", CORE_ROLES, ids=["report", "semantic"])
+def test_local_core_access_is_content_first_and_fail_closed(role: tuple[str, str, str]) -> None:
+    """Guard content routes, not a fabricated registry or a claim of runtime invocation."""
+    name, core, artifact = role
+    text = " ".join(_persona(name).replace("**", "").split())
+    assert CORE_ORDER.format(artifact=artifact, core=core) in text, "core content precedes upstream and artifact work"
+    assert CORE_INVOKE in text, "advertised core must be invoked"
+    assert f"{CORE_ABSENT_READ} `.github\\skills\\{core}\\SKILL.md`." in text, "absent core exact host read only"
+    assert CORE_HOST in text, "core host is the current migration checkout"
+    assert CORE_FAILED_CALL in text, "failed advertised invocation is not absence"
+    assert CORE_CONTENT_STOP in text, "unavailable core content blocks affected work"
+    assert CORE_READ_EVIDENCE in text, "file read is not skill invocation evidence"
+    assert CORE_AUTHORITY in text, "core-only authority boundary"
+    contract = CORE_ACCESS.format(core=core, artifact=artifact)
+    assert text.count(contract) == 1, "single contiguous core access contract"
+    # Core acquisition conditionals belong to this block, not appended overrides.
+    assert not re.search(
+        r"\b(?:if|when)\b[^.;!?]*\b(?:core|content|advertised|invocation)\b",
+        text.replace(contract, "", 1),
+        re.I,
+    ), "core-only access routing stays in the approved contract"
+
+
+@pytest.mark.parametrize("role", CORE_ROLES, ids=["report", "semantic"])
+@pytest.mark.parametrize(
+    "reversal",
+    [
+        (CORE_INVOKE, "read its file instead when advertised;", "advertised core must be invoked"),
+        (CORE_INVOKE, "skip it when advertised;", "advertised core must be invoked"),
+        (CORE_ABSENT_READ, "read this file regardless of advertisement", "absent core exact host read only"),
+        (
+            r"`.github\skills\{core}\SKILL.md`",
+            r"`.github\skills\{core}\README.md`",
+            "absent core exact host read only",
+        ),
+        (
+            r"`.github\skills\{core}\SKILL.md`",
+            r"`.github\skills\powerbi-ai-readiness\SKILL.md`",
+            "absent core exact host read only",
+        ),
+        (
+            CORE_HOST,
+            "Host is any caller/package directory or plugin copy.",
+            "core host is the current migration checkout",
+        ),
+        (
+            CORE_FAILED_CALL,
+            "An advertised invocation failure counts as absence and activates this file route.",
+            "failed advertised invocation is not absence",
+        ),
+        (
+            CORE_ORDER,
+            "After loading an upstream procedure or authoring {artifact}, acquire migration core `{core}`:",
+            "core content precedes upstream and artifact work",
+        ),
+        (
+            CORE_CONTENT_STOP,
+            "If content cannot be acquired, continue without the core.",
+            "unavailable core content blocks",
+        ),
+        (CORE_READ_EVIDENCE, "A file read counts as successful skill invocation.", "file read is not skill invocation"),
+        (CORE_AUTHORITY, "This file rule grants access to any skill or other owner.", "core-only authority boundary"),
+        (
+            CORE_AUTHORITY,
+            CORE_AUTHORITY + r" If core content is unavailable, read `.github\skills\powerbi-ai-readiness\SKILL.md`"
+            " and continue to the upstream procedure.",
+            "core-only access routing stays in the approved contract",
+        ),
+        (
+            CORE_AUTHORITY,
+            CORE_AUTHORITY + r" If the core is advertised, read `.github\skills\{core}\SKILL.md` directly"
+            " and continue to the upstream procedure.",
+            "core-only access routing stays in the approved contract",
+        ),
+        (
+            CORE_AUTHORITY,
+            CORE_AUTHORITY + r" If an advertised invocation fails, read `.github\skills\{core}\SKILL.md`"
+            " and continue to the upstream procedure.",
+            "core-only access routing stays in the approved contract",
+        ),
+    ],
+    ids=[
+        "advertised-read-instead",
+        "advertised-skip",
+        "absent-route-removed",
+        "absent-wrong-path",
+        "absent-wrong-owner",
+        "wrong-host",
+        "advertised-failure-fallback",
+        "wrong-order",
+        "missing-content-continue",
+        "read-as-invocation",
+        "broaden-other-owner",
+        "extra-unavailable-wrong-owner",
+        "extra-advertised-read",
+        "extra-failed-invocation-rescue",
+    ],
+)
+def test_core_access_reversals_fail_the_named_assertion_then_restore(
+    monkeypatch: pytest.MonkeyPatch, role: tuple[str, str, str], reversal: tuple[str, str, str]
+) -> None:
+    """Each direct reversal must fail its semantic assertion, never a pin or setup error."""
+    name, core, artifact = role
+    before, after, diagnostic = (part.format(core=core, artifact=artifact) for part in reversal)
+    original_read = Path.read_text
+    target = ROOT / ".github" / "agents" / f"{name}.agent.md"
+    source = " ".join(original_read(target, encoding="utf-8").split())
+    test_local_core_access_is_content_first_and_fail_closed(role)
+    assert source.count(before) == 1, "reversal must change one production instruction"
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            Path,
+            "read_text",
+            lambda current, *args, **kwargs: (
+                source.replace(before, after, 1) if current == target else original_read(current, *args, **kwargs)
+            ),
+        )
+        with pytest.raises(AssertionError, match=diagnostic):
+            test_local_core_access_is_content_first_and_fail_closed(role)
+    test_local_core_access_is_content_first_and_fail_closed(role)
+
+
+@pytest.mark.parametrize("role", CORE_ROLES, ids=["report", "semantic"])
+def test_host_preflight_is_the_existing_script_not_a_skill(role: tuple[str, str, str]) -> None:
+    """Identity only: existing startup flags/timing and authorized CLI status checks stay owned."""
+    text = " ".join(_persona(role[0]).replace("**", "").split())
+    assert HOST_PREFLIGHT in text, "host preflight script identity and existing timing/flags"
+    assert not re.search(r"\b(?:load|invoke|use|select|call)\s+(?:\*\*)?`preflight`", text, re.I), (
+        "no generic preflight skill substitution"
+    )
+
+
+@pytest.mark.parametrize("role", CORE_ROLES, ids=["report", "semantic"])
+@pytest.mark.parametrize("additional", [False, True], ids=["replace-identity", "extra-skill-selection"])
+def test_generic_preflight_selection_fails_its_named_assertion_then_restore(
+    monkeypatch: pytest.MonkeyPatch, role: tuple[str, str, str], additional: bool
+) -> None:
+    """Replacing or supplementing the host script with a generic skill cannot pass."""
+    original_read = Path.read_text
+    target = ROOT / ".github" / "agents" / f"{role[0]}.agent.md"
+    source = " ".join(original_read(target, encoding="utf-8").split())
+    test_host_preflight_is_the_existing_script_not_a_skill(role)
+    assert source.count(HOST_PREFLIGHT) == 1
+    selection = "Invoke `preflight` for host startup/version checks."
+    changed = source + " " + selection if additional else source.replace(HOST_PREFLIGHT, selection, 1)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            Path,
+            "read_text",
+            lambda current, *args, **kwargs: changed if current == target else original_read(current, *args, **kwargs),
+        )
+        with pytest.raises(
+            AssertionError,
+            match="no generic preflight skill substitution" if additional else "host preflight script identity",
+        ):
+            test_host_preflight_is_the_existing_script_not_a_skill(role)
+    test_host_preflight_is_the_existing_script_not_a_skill(role)
+
+
+def test_report_core_exception_cannot_negate_access_or_waive_upstream_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The exception permits only core content access; absent upstream capabilities still block."""
+    original_read = Path.read_text
+    target = ROOT / ".github" / "agents" / "pbi-report-builder.agent.md"
+    source = " ".join(original_read(target, encoding="utf-8").split())
+    test_no_management_or_mid_migration_install("pbi-report-builder")
+    assert source.count(REPORT_CORE_EXCEPTION) == 1
+    for replacement, diagnostic in (
+        (
+            "Missing skill/command/capability → BLOCKED including canonical core access",
+            "missing capability stop respects only the core access exception",
+        ),
+        ("Missing upstream skill/command/capability permits DIY.", "missing capability blocks"),
+    ):
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                Path,
+                "read_text",
+                lambda current, *args, replacement=replacement, **kwargs: (
+                    source.replace(REPORT_CORE_EXCEPTION, replacement, 1)
+                    if current == target
+                    else original_read(current, *args, **kwargs)
+                ),
+            )
+            with pytest.raises(AssertionError, match=diagnostic):
+                test_no_management_or_mid_migration_install("pbi-report-builder")
+        test_no_management_or_mid_migration_install("pbi-report-builder")
+
+
+@pytest.mark.parametrize("role", CORE_ROLES, ids=["report", "semantic"])
+def test_descriptive_topics_and_cli_preflight_vocabulary_remain_legal(
+    monkeypatch: pytest.MonkeyPatch, role: tuple[str, str, str]
+) -> None:
+    """Descriptive topic/module/CLI vocabulary is not an instruction to select a provider."""
+    original_read = Path.read_text
+    target = ROOT / ".github" / "agents" / f"{role[0]}.agent.md"
+    source = original_read(target, encoding="utf-8")
+    description = (
+        "\nTopic label only: `semantic-model-authoring`; this sentence selects no provider.\n"
+        "Topic label only: `fabric-skills:semantic-model-authoring`; this sentence selects no provider.\n"
+        "Topic labels only: advertised core, invocation failure and core content; no routing instruction.\n"
+        "The `preflight` module and `preview … --status` CLI preflight are descriptive vocabulary.\n"
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            Path,
+            "read_text",
+            lambda current, *args, **kwargs: (
+                source + description if current == target else original_read(current, *args, **kwargs)
+            ),
+        )
+        test_local_core_access_is_content_first_and_fail_closed(role)
+        test_host_preflight_is_the_existing_script_not_a_skill(role)
+        if role[0] == "pbi-semantic-builder":
+            test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
+    test_local_core_access_is_content_first_and_fail_closed(role)
+    test_host_preflight_is_the_existing_script_not_a_skill(role)
+    test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
 
 
 def test_current_references_and_query_surfaces() -> None:
@@ -163,12 +412,17 @@ def test_semantic_authoring_provider_selection_is_exact_and_fail_closed() -> Non
     """One canonical load can replace duplicate imperatives without losing the AI override."""
     text = " ".join(_persona("pbi-semantic-builder").split())
     assert text.count(SEMANTIC_MANDATORY_SELECTION) == 1, "mandatory semantic selection"
-    selections = re.findall(r"`((?:[\w-]+:)?(?:semantic-model-authoring|powerbi-semantic-model-authoring))`", text)
+    selections = re.findall(
+        r"\b(?:load|invoke|use|select|call)\s+(?:the\s+)?(?:\*\*)?"
+        r"`((?:[\w-]+:)?(?:semantic-model-authoring|powerbi-semantic-model-authoring))`",
+        text,
+        re.I,
+    )
     assert selections and all(name == SEMANTIC_AUTHORING_SKILL for name in selections), (
         "every semantic selection qualified"
     )
     assert SEMANTIC_AI_SELECTION in text, "AI policy override retained"
-    assert text.count(SEMANTIC_LOCAL_FALLBACK) == 1, "repo-local fallback boundary and resolution stop"
+    assert text.count(SEMANTIC_LOCAL_CORE_READ) == 1, "repo-local fallback boundary and resolution stop"
     assert SEMANTIC_RESOLUTION_STOP in text, "repo-local fallback boundary and resolution stop"
 
 
@@ -216,15 +470,47 @@ def test_semantic_provider_reversals_fail_each_selection_then_restore(
 
 
 @pytest.mark.parametrize(
+    "selection",
+    [
+        "Invoke `semantic-model-authoring`",
+        "Use `semantic-model-authoring`",
+        "Select `semantic-model-authoring`",
+        "Call `semantic-model-authoring`",
+        "Load the `fabric-skills:semantic-model-authoring` skill",
+        "Invoke the `semantic-model-authoring` skill",
+    ],
+)
+def test_additional_semantic_imperatives_fail_provider_selection_then_restore(
+    monkeypatch: pytest.MonkeyPatch, selection: str
+) -> None:
+    """Known imperative forms remain selections even with the canonical load intact."""
+    original_read = Path.read_text
+    target = ROOT / ".github" / "agents" / "pbi-semantic-builder.agent.md"
+    source = original_read(target, encoding="utf-8")
+    test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
+    changed = source + f"\n{selection} for authoring.\n"
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            Path,
+            "read_text",
+            lambda current, *args, **kwargs: changed if current == target else original_read(current, *args, **kwargs),
+        )
+        with pytest.raises(AssertionError, match="every semantic selection qualified"):
+            test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
+    test_semantic_authoring_provider_selection_is_exact_and_fail_closed()
+
+
+@pytest.mark.parametrize(
     ("before", "after"),
     [
         (
-            SEMANTIC_LOCAL_FALLBACK,
+            SEMANTIC_LOCAL_CORE_READ,
             r"If any skill fails, read `.github\skills\<name>\SKILL.md` as its fallback.",
         ),
         (SEMANTIC_RESOLUTION_STOP, "Unavailable/ambiguous selection permits another provider."),
+        (SEMANTIC_RESOLUTION_STOP, "Unavailable/ambiguous selection permits an upstream local-file fallback."),
     ],
-    ids=["unrestricted-fallback", "retry-after-ambiguity"],
+    ids=["unrestricted-fallback", "retry-after-ambiguity", "upstream-file-fallback"],
 )
 def test_semantic_fallback_reversals_fail_the_stop_then_restore(
     monkeypatch: pytest.MonkeyPatch, before: str, after: str
