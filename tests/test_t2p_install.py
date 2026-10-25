@@ -79,7 +79,7 @@ def note(owner, **fields):
 real_popen = subprocess.Popen
 
 def synthetic_child(command, *args, **options):
-    allowed = command[0] == "python" or Path(command[0]) == Path(sys.executable)
+    allowed = Path(command[0]) == Path(sys.executable) or Path(command[0]).name.lower() in {"python", "python.exe"}
     note("child_process" if allowed else "forbidden_process", argv=[str(value) for value in command])
     assert allowed, "synthetic controls must never launch updater/login/source/native commands"
     return real_popen(command, *args, **options)
@@ -89,6 +89,7 @@ subprocess.Popen = synthetic_child
 
 ENV_OWNER = r"""
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from fixture_witness import note, state
@@ -97,13 +98,15 @@ note("import:tableau_env")
 real_run = subprocess.run
 
 def preflight(command, **options):
+    # PowerShell uses PATH; bare CreateProcess can prefer Windows' application directory.
+    python = shutil.which("python", path=options["env"]["PATH"])
     note("preflight_transport", argv=command, child_cwd=str(options["cwd"]),
-         child_no_bytecode=options["env"].get("PYTHONDONTWRITEBYTECODE"))
+         child_no_bytecode=options["env"].get("PYTHONDONTWRITEBYTECODE"), child_python=python)
     if state().get("launch_failure"):
         raise OSError("PRIVATE_LAUNCH_CANARY")
     assert command == ["powershell", "-ExecutionPolicy", "Bypass", "-File",
                        str(Path(__file__).parent / "preflight.ps1"), "-DoctorDiagnostics"]
-    return real_run(["python", "-c", "import sys; sys.path.insert(0, 'scripts'); import child_witness"], **options)
+    return real_run([python, "-c", "import sys; sys.path.insert(0, 'scripts'); import child_witness"], **options)
 
 subprocess.run = preflight
 
@@ -381,7 +384,6 @@ def installed_toolkit(request) -> Iterator[SimpleNamespace]:
     """Actual ordinary installers and wrappers, with every write under owned repo scratch."""
     assert UV is not None, "uv is required for installation controls; missing setup is not a skip"
     root = REPO_ROOT / "_t2p_install_tests" / uuid.uuid4().hex[:8]
-    root.mkdir(parents=True)
     try:
         installer, toolkit_name = request.param
         lab = _lab(root, toolkit_name)
@@ -671,6 +673,7 @@ def test_installed_checkout_and_selected_python(installation: SimpleNamespace, m
         assert grandchild[0]["cwd"] == str(lab.toolkit)
         assert Path(config[0]["path"].split(os.pathsep)[0]) == lab.python.parent
         assert transport[0]["child_no_bytecode"] == "1"
+        assert Path(transport[0]["child_python"]) == lab.python, "PowerShell PATH must select the same interpreter"
         assert lab.env.get("PYTHONDONTWRITEBYTECODE") is None, "selected transport changes are child-process-only"
         assert not (caller / "_runs").exists(), "doctor must not allocate"
 
