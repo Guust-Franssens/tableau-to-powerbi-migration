@@ -109,6 +109,32 @@ uv venv
 uv sync                      # install parser + tooling deps from pyproject.toml
 ```
 
+Run contributor commands from this checkout. This default editable development environment is for
+direct `python -B scripts\t2p.py` calls, not the regular-installed operator contract in the
+[Quickstart](README.md#quickstart). `uv run` can automatically resync back to editable; `--no-sync`
+only suppresses syncing and does **not** select a previously chosen environment from another cwd.
+For operator commands use that environment's absolute `t2p` executable/Python, or activate it first.
+Use `uv sync --all-extras --no-editable` in the selected checkout for its operator `.venv`.
+Ordinary `python -m pip install <absolute-toolkit>` is also supported when the selected environment
+already has pip; uv environments need not. No pip bootstrapper or external-tool installer is added.
+
+Packaging copies only the existing `scripts\t2p.py` singleton as module `t2p`; backend scripts/assets
+remain live in the checkout recorded by standard local-directory installer metadata. Reinstall for
+facade/packaging changes, a moved checkout or an intentional rebind. Moving a nested environment can
+break its generated executable before Python starts; recreate/reinstall rather than expecting JSON.
+For uv facade updates, explicitly add `--reinstall-package tableau-to-pbi-migration` to that
+checkout's regular sync/install; ordinary cache reuse is not an editable source update.
+Editable console, index/wheel/VCS, standalone, user/target/pipx and copied environments are not
+supported operator forms. Early editable imports can write source bytecode; `-B` direct calls remain.
+
+`tests\test_t2p_install.py` uses real pip/uv installers, disposable public synthetic toolkits and the
+generated executable (including Windows `.exe`) from outside the selected checkout. It also covers
+module routing, metadata failures, transport and cache boundaries. Installers run only during tests,
+not collection; setup failures fail rather than skip. Run it with
+`uv run python -B -m pytest -q tests\test_t2p_install.py --basetemp _t2p_install_tests`.
+CI runs it in the ordinary full Linux suite and explicitly on Windows; synthetic controls establish
+neither live migration acceptance nor a global zero-write/offline promise.
+
 ## Python conventions (enforced)
 
 After editing any `.py`/`.ipynb`, run the ritual on the changed file(s) before opening a PR:

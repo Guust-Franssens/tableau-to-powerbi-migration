@@ -9,12 +9,18 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager, redirect_stdout
+from importlib import metadata
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
+import sysconfig
+import tomllib
 from typing import Any, Iterator
+from urllib.parse import urlsplit
+from urllib.request import url2pathname
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_VERSION = "t2p/v1"
@@ -124,10 +130,10 @@ class Parser(argparse.ArgumentParser):
         raise ArgumentError("invalid_arguments_use_help")
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentParser:
     """The entire supported command tree; no implicit input routing."""
     parser = Parser(
-        prog="python -B scripts/t2p.py",
+        prog=prog,
         allow_abbrev=False,
         description="Narrow pilot: diagnostic doctor, live project start, read-only status. Not readiness.",
     )
@@ -149,6 +155,138 @@ def build_parser() -> argparse.ArgumentParser:
         if command == "status":
             child.add_argument("--run", required=True, help="absolute local physical run; never latest")
     return parser
+
+
+def _project_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _toolkit_origin(origin: dict) -> tuple[Path | None, str, int]:
+    """Accept only an ordinary directory origin and finite, nonredirected toolkit paths."""
+    # pylint: disable=too-many-return-statements
+    if (
+        set(origin) != {"url", "dir_info"}
+        or not isinstance(origin.get("url"), str)
+        or not isinstance(origin.get("dir_info"), dict)
+        or set(origin["dir_info"]) - {"editable"}
+        or origin["dir_info"].get("editable", False) is not False
+    ):
+        return None, "install_form_unsupported", 1
+    url = urlsplit(origin["url"])
+    if url.scheme != "file" or url.netloc or url.query or url.fragment:
+        return None, "install_form_unsupported", 1
+    root = Path(url2pathname(url.path))
+    if not root.is_absolute() or root.drive.startswith("\\\\") or url.path.startswith("//"):
+        return None, "install_form_unsupported", 1
+    if not root.is_dir():
+        return None, "install_target_unavailable", 3
+    if root.resolve(strict=True) != root or ".." in root.parts:
+        return None, "install_target_redirected", 1
+    required = [
+        root / "pyproject.toml",
+        *(
+            root / "scripts" / name
+            for name in (
+                "t2p.py",
+                "start_migration.py",
+                "run_status.py",
+                "tableau_env.py",
+                "work_dirs.py",
+                "preflight.ps1",
+            )
+        ),
+    ]
+    for path in required:
+        if not path.is_file():
+            return None, "install_target_incomplete", 3
+        if path.resolve(strict=True) != path:
+            return None, "install_target_redirected", 1
+    project = tomllib.loads(required[0].read_text(encoding="utf-8")).get("project", {})
+    if not isinstance(project, dict) or project.get("name") != "tableau-to-pbi-migration":
+        return None, "install_target_identity_mismatch", 1
+    return root, "", 0
+
+
+def _installed_root() -> tuple[Path | None, str, int]:
+    """Use only this interpreter's installation sites, never cwd distribution discovery."""
+    # pylint: disable=too-many-return-statements
+    try:
+        sites = list(dict.fromkeys(Path(sysconfig.get_path(key)).resolve() for key in ("purelib", "platlib")))
+        distributions = list(metadata.distributions(path=[str(site) for site in sites]))
+        matches = [
+            dist for dist in distributions if _project_name(dist.metadata.get("Name", "")) == "tableau-to-pbi-migration"
+        ]
+        if len(matches) != 1:
+            reason = "install_distribution_ambiguous" if matches else "install_distribution_unavailable"
+            return None, reason, 3
+        providers = [
+            (dist, entry)
+            for dist in distributions
+            for entry in dist.entry_points
+            if entry.group == "console_scripts" and entry.name == "t2p"
+        ]
+        if len(providers) != 1:
+            reason = "install_provider_ambiguous" if providers else "install_provider_unavailable"
+            return None, reason, 3
+        dist = matches[0]
+        provider, entry = providers[0]
+        if provider is not dist or entry.value != "t2p:console_main":
+            return None, "install_provider_mismatch", 1
+        raw = dist.read_text("direct_url.json")
+        if raw is None:
+            return None, "install_origin_unavailable", 3
+        try:
+            origin = json.loads(raw)
+        except (ValueError, TypeError):
+            return None, "install_origin_invalid", 3
+        if not isinstance(origin, dict):
+            return None, "install_origin_invalid", 3
+        root, reason, code = _toolkit_origin(origin)
+        if root is None:
+            return None, reason, code
+        files = dist.files
+        if files is None or not any(str(file) == "t2p.py" for file in files):
+            return None, "install_facade_mismatch", 1
+        facade = Path(dist.locate_file("t2p.py")).resolve(strict=True)
+        if facade != Path(__file__).resolve(strict=True) or facade.parent not in sites:
+            return None, "install_facade_mismatch", 1
+        return root, "", 0
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, RecursionError):
+        return None, "install_metadata_unavailable", 3
+
+
+def _bind_installed(root: Path) -> None:
+    """Select live owners without chdir or persistent interpreter/profile changes."""
+    global ROOT  # pylint: disable=global-statement
+    ROOT = root
+    sys.dont_write_bytecode = True
+    os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+    os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")
+    sys.path.insert(0, str(root / "scripts"))
+
+
+def _install_binding(result: dict) -> bool:
+    root, reason, code = _installed_root()
+    if root is not None:
+        _bind_installed(root)
+        return True
+    result["exit_code"] = code
+    result["status"] = (
+        ("CANNOT_ESTABLISH" if result["command"] == "doctor" else "cannot_establish") if code == 3 else "error"
+    )
+    result["limitations"] = [reason]
+    return False
+
+
+def _install_human(result: dict) -> None:
+    _print_safe(
+        f"T2P INSTALL {result['limitations'][0]} (exit {result['exit_code']}). No owner was entered.\n"
+        "Regularly reinstall the SAME <selected-toolkit> into <selected-python>:\n"
+        "  uv pip install --reinstall-package tableau-to-pbi-migration"
+        " --python <selected-python> <selected-toolkit> (without --editable)\n"
+        "or <selected-python> -m pip install <selected-toolkit> (pip must already be available).\n"
+        "No checkout fallback, preflight, login or repair was attempted."
+    )
 
 
 def envelope(command: str | None) -> dict[str, Any]:
@@ -404,7 +542,7 @@ def _doctor_configuration_lines(result: dict) -> list[str]:
     return lines
 
 
-def _doctor_blocker_lines(blocker: dict) -> list[str]:
+def _doctor_blocker_lines(blocker: dict, *, installed: bool = False) -> list[str]:
     labels = {
         "copilot_home": "configured Copilot home directory was not found",
         "python_runtime": "Python is unavailable, unreadable or below 3.11",
@@ -460,6 +598,22 @@ def _doctor_blocker_lines(blocker: dict) -> list[str]:
         "scope_intended_tenant": "privately verify intended identity; scope preflight with -Subscription for"
         " a subscription in that tenant. Do not rewrite the shared Azure CLI profile just to pass.",
     }
+    if installed:
+        actions["sync_python_dependencies"] = (
+            "regularly reinstall the SAME <selected-toolkit> into <selected-python> per its README."
+            " For that checkout's .venv, run uv sync --all-extras --no-editable"
+            " --reinstall-package tableau-to-pbi-migration from <selected-toolkit>;"
+            " otherwise use uv pip install --reinstall-package tableau-to-pbi-migration"
+            " --python <selected-python> <selected-toolkit> without --editable."
+        )
+        actions = {
+            key: (
+                "In <selected-toolkit>, using <selected-python> for Python commands: " + action
+                if "scripts\\" in action or "docs/" in action
+                else action
+            )
+            for key, action in actions.items()
+        }
     lines = [f"Preflight blocker: {labels[blocker['id']]}; reason: {blocker['reason']}."]
     if blocker["source"] == "process_environment":
         lines.append("Effective source: inherited process environment. This is not a PAT diagnosis.")
@@ -467,7 +621,7 @@ def _doctor_blocker_lines(blocker: dict) -> list[str]:
     return lines
 
 
-def _doctor_human(result: dict, args: argparse.Namespace | None) -> None:
+def _doctor_human(result: dict, args: argparse.Namespace | None, *, installed: bool = False) -> None:
     """Doctor alone has a human view; start/status keep their existing renderers."""
     lines = [f"DOCTOR {result['status']} (exit {result['exit_code']})"]
     lines.extend(_doctor_configuration_lines(result))
@@ -478,7 +632,7 @@ def _doctor_human(result: dict, args: argparse.Namespace | None) -> None:
     if detail.get("availability") == "available":
         lines.append(f"Recommended warnings: {detail['recommended_warnings']} (non-blocking).")
         for blocker in detail["blockers"]:
-            lines.extend(_doctor_blocker_lines(blocker))
+            lines.extend(_doctor_blocker_lines(blocker, installed=installed))
         lines.append("Preflight: passed." if native == 0 else "Preflight: blocked.")
     else:
         lines.append("Recommended-warning count: unavailable.")
@@ -493,7 +647,9 @@ def _doctor_human(result: dict, args: argparse.Namespace | None) -> None:
         if result["exit_code"] in {2, 130} or native is None:
             lines.append(
                 {
-                    2: "Action: use python -B scripts\\t2p.py doctor --help for the supported syntax.",
+                    2: "Action: use "
+                    + ("<selected-t2p>" if installed else "python -B scripts\\t2p.py")
+                    + " doctor --help for the supported syntax.",
                     130: "Action: rerun the same doctor after the interruption.",
                 }.get(
                     result["exit_code"],
@@ -504,12 +660,20 @@ def _doctor_human(result: dict, args: argparse.Namespace | None) -> None:
             lines.append(
                 "Action: run plain preflight directly in a private terminal without -Update, then rerun doctor."
             )
-            lines.append("  powershell -ExecutionPolicy Bypass -File scripts\\preflight.ps1")
+            lines.append(
+                "  powershell -ExecutionPolicy Bypass -File "
+                + ("<selected-toolkit>\\" if installed else "")
+                + "scripts\\preflight.ps1"
+            )
         lines.append("Do not change Tableau credentials on this evidence.")
     if result["status"] == "READY_TO_ATTEMPT":
-        lines.append("Next, only when approved: python -B scripts\\t2p.py start --project <exact-name-or-LUID>")
+        lines.append(
+            "Next, only when approved: "
+            + ("<selected-t2p>" if installed else "python -B scripts\\t2p.py")
+            + " start --project <exact-name-or-LUID>"
+        )
         lines.append("Keep the same --env selection if supplied.")
-    rerun = "python -B scripts\\t2p.py doctor"
+    rerun = ("<selected-t2p>" if installed else "python -B scripts\\t2p.py") + " doctor"
     if args is not None and args.env is not None:
         rerun += " --env <same-selected-env>"
     lines.extend(
@@ -831,50 +995,65 @@ def _print_safe(text: str) -> None:
     print(text.encode("ascii", errors="backslashreplace").decode("ascii"), flush=True)
 
 
-# The three explicit branches deliberately do not use a command registry/router.
+def _delegate(args: argparse.Namespace, result: dict, *, json_mode: bool) -> int:
+    """Keep the same three owners and live descriptor transport, without a command registry."""
+    if args.command == "doctor":
+        code = doctor(args, result)
+    elif args.command == "start":
+        # The path marker is local progress, not part of the stdout JSON stream.
+        if json_mode:
+            with _native_to_stderr():
+                code = start(args, result)
+        else:
+            code = start(args, result)
+    else:
+        code = status(args, result)
+    return code
+
+
 # pylint: disable=too-many-branches
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
     """Render one versioned result without reflecting exception text or invalid argv."""
     argv = list(sys.argv[1:] if argv is None else argv)
     json_mode = "--json" in argv
     command = argv[0] if argv and argv[0] in {"doctor", "start", "status"} else None
     result = envelope(command)
     args = None
+    install_failure = False
     try:
-        args = build_parser().parse_args(argv)
+        parser = build_parser("t2p") if installed else build_parser()
+        args = parser.parse_args(argv)
         if args.command == "start" and not args.project.strip():
             raise ArgumentError("nonempty_project_required")
-        if args.command == "doctor":
-            code = doctor(args, result)
-        elif args.command == "start":
-            # The path marker is local progress, not part of the stdout JSON stream.
-            if json_mode:
-                with _native_to_stderr():
-                    code = start(args, result)
-            else:
-                code = start(args, result)
-        else:
-            code = status(args, result)
+        install_failure = installed and not _install_binding(result)
+        code = result["exit_code"] if install_failure else _delegate(args, result, json_mode=json_mode)
     except ArgumentError:
         code = 2
         result["limitations"] = ["invalid_arguments_use_help"]
     except KeyboardInterrupt:
         code = 130
         result["status"] = "interrupted"
-    except (OSError, ValueError, RuntimeError):
+    except (ImportError, OSError, ValueError, RuntimeError) as exc:
+        if isinstance(exc, ImportError) and not installed:
+            raise
         code = 3 if command == "doctor" else 1
         result["status"] = "CANNOT_ESTABLISH" if command == "doctor" else "error"
         result["limitations"].append("owner_result_unavailable")
     result["exit_code"] = code
     if json_mode:
         print(json.dumps(result, ensure_ascii=True, sort_keys=True), flush=True)
+    elif install_failure:
+        _install_human(result)
     elif command == "status":
         _status_human(result)
     elif command == "doctor":
-        _doctor_human(result, args)
+        if installed:
+            _doctor_human(result, args, installed=True)
+        else:
+            _doctor_human(result, args)
     else:
         _print_safe(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2))
-    if args is not None and args.command == "start":
+    if args is not None and args.command == "start" and (not installed or result["authority"] == "start_migration.py"):
         line = _run_line(result, args)
         if json_mode:
             print(line, file=sys.stderr, flush=True)
@@ -883,5 +1062,10 @@ def main(argv: list[str] | None = None) -> int:
     return code
 
 
+def console_main() -> int:
+    """Standard installed console entry; direct main() remains the expert compatibility path."""
+    return main(installed=True)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(console_main() if __spec__ is not None else main())
