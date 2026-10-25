@@ -282,9 +282,15 @@ def _install_human(result: dict) -> None:
     _print_safe(
         f"T2P INSTALL {result['limitations'][0]} (exit {result['exit_code']}). No owner was entered.\n"
         "Regularly reinstall the SAME <selected-toolkit> into <selected-python>:\n"
+        "  For that checkout's .venv, from <selected-toolkit>:"
+        " uv sync --all-extras --no-editable --reinstall-package tableau-to-pbi-migration\n"
+        "  Or <selected-python> -m pip install <selected-toolkit> (pip must already be available).\n"
         "  uv pip install --reinstall-package tableau-to-pbi-migration"
-        " --python <selected-python> <selected-toolkit> (without --editable)\n"
-        "or <selected-python> -m pip install <selected-toolkit> (pip must already be available).\n"
+        " --python <selected-python> <selected-toolkit> is only a plain/spaced-path compatibility form"
+        " (without --editable).\n"
+        "Raw native uv-pip combined Unicode/#/% compatibility is deferred;"
+        " canonical uv sync and pip retain both path-class qualification targets."
+        " Do not switch checkouts/environments to pass.\n"
         "No checkout fallback, preflight, login or repair was attempted."
     )
 
@@ -603,8 +609,12 @@ def _doctor_blocker_lines(blocker: dict, *, installed: bool = False) -> list[str
             "regularly reinstall the SAME <selected-toolkit> into <selected-python> per its README."
             " For that checkout's .venv, run uv sync --all-extras --no-editable"
             " --reinstall-package tableau-to-pbi-migration from <selected-toolkit>;"
-            " otherwise use uv pip install --reinstall-package tableau-to-pbi-migration"
-            " --python <selected-python> <selected-toolkit> without --editable."
+            " otherwise use <selected-python> -m pip install <selected-toolkit>"
+            " (pip must already be available), or uv pip install --reinstall-package tableau-to-pbi-migration"
+            " --python <selected-python> <selected-toolkit> only for plain/spaced paths, without --editable."
+            " Raw native uv-pip combined Unicode/#/% compatibility is deferred;"
+            " canonical uv sync and pip retain both path-class qualification targets."
+            " Do not switch checkouts/environments to pass."
         )
         actions = {
             key: (

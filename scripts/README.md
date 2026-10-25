@@ -1270,11 +1270,19 @@ t2p status --run <absolute-local-run> [--json]
 `uv sync --all-extras --no-editable` is the operator setup in the selected checkout. No-sync alone
 does not select an environment from another project, and default uv sync/run can restore editable
 mode. Ordinary pip requires pip already available in the selected environment; no bootstrapper.
+Required qualification covers canonical regular uv-sync and ordinary pip on plain/spaced **and**
+combined Unicode/#/% paths. Selected-environment uv-pip retains plain/spaced compatibility;
+**only its raw native combined-punctuation cell is explicitly deferred**, not all uv punctuation forms.
+Canonical combined-path uv-sync must pass the full installed-command matrix, not just doctor.
+Other unisolated path/representation cells remain unverified; no URI fallback, renamed/copied
+checkout or environment switch is a repair.
 The facade is a snapshot; backends at the bound location stay live. Reinstall for facade/packaging
 changes, a moved target or an intentional rebind. A moved nested environment may not launch Python
 at all and needs recreation/reinstallation, not an expected JSON verdict.
 For a facade update, use uv's explicit `--reinstall-package tableau-to-pbi-migration` with the same
-selected environment/checkout and regular mode; ordinary sync/cache reuse is not a live source link.
+selected environment/checkout and regular mode: canonical sync for that checkout's `.venv`, or
+the qualified plain/spaced uv-pip form. Ordinary pip needs pip already available in that same
+environment. Ordinary sync/cache reuse is not a live source link.
 
 Known unsupported forms refuse at the installation layer (exit 1); unavailable/ambiguous metadata
 or targets return 3, with fixed safe codes, null authority/delegated exit, empty stages/checks and
@@ -1318,6 +1326,12 @@ log/bytecode file and invokes no update, installer, login, source probe, allocat
 This is **not** offline or universal zero-write evidence: existing configured Azure/Fabric checks may
 make diagnostic traffic, and external tools/PowerShell hosts may affect caches. Actual-child tests
 cover only their monitored synthetic toolkit/profile and stub calls, not real host caches.
+Their original protected file-map equality and forbidden-command/native/output assertions remain
+strict. Each doctor/direct child gets a fresh empty sibling sidecar, selected only through its
+process-local `PSModuleAnalysisCachePath`. All sidecar entries, including empty directories, are
+checked; only the exact selected cache file may appear/change. Empty means **NOT_OBSERVED**, not
+cache relocation proof or a failure by itself. Same-basename protected writes still fail; no profile
+or installed-command directory/no-pyc snapshot exemption is introduced.
 
 `start` delegates **one** existing `start_migration.py` owner, including its output guard, allocator,
 site-wide assessment, post-harvest/pre-conversion path gate and reference-failure bundle continuation.

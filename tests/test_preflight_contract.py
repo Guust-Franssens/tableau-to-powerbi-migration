@@ -1541,6 +1541,16 @@ def test_doctor_merged_version_and_plugin_critical_reasons_are_projected() -> No
     ], "every merged CLI/plugin critical reason needs its exact safe owner code/remedy"
 
 
+def _preflight_host_cache_observation(sidecar: Path) -> str:
+    """Allow only the exact selected file; no cache means activity was not observed."""
+    selected = sidecar / "ModuleAnalysisCache"
+    entries = list(sidecar.rglob("*"))
+    assert all(path == selected and path.is_file() and not path.is_symlink() for path in entries), (
+        "actual-child unexpected sidecar entry must fail"
+    )
+    return "OBSERVED" if entries else "NOT_OBSERVED"
+
+
 def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) -> tuple:
     """Full script, synthetic profile/toolkit, command stubs only; not a real-host cache claim."""
     # Keep this one fixture's setup, invocation and monitored snapshot together.
@@ -1549,6 +1559,8 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
     scripts, profile, commands = root / "scripts", root / "PRIVATE_PROFILE_PATH_CANARY", root / "commands"
     for path in (scripts, profile, commands, root / "scratch", root / "azure"):
         path.mkdir(parents=True)
+    sidecar = tmp_path / ("doctor-host-cache" if diagnostics else "direct-host-cache")
+    sidecar.mkdir()
     shutil.copyfile(PREFLIGHT, scripts / "preflight.ps1")
     (root / ".env").write_text("", encoding="utf-8")
     log = root / "commands.jsonl"
@@ -1675,6 +1687,7 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
         "USERPROFILE": str(profile),
         "APPDATA": str(profile / "appdata"),
         "LOCALAPPDATA": str(profile / "localappdata"),
+        "PSModuleAnalysisCachePath": str(sidecar / "ModuleAnalysisCache"),
         "COPILOT_HOME": str(profile / "missing-copilot" if mode == "blocked" else copilot),
         "NUGET_PACKAGES": str(nuget),
         "AZURE_CONFIG_DIR": str(root / "azure"),
@@ -1723,7 +1736,81 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
     )
     assert all(call[1:] == ["--version"] for call in calls if call[0] in {"node", "powerbi-desktop"})
     assert all(call[1:] in (["--version"], ["doctor"]) for call in calls if call[0] == "powerbi-report-author")
+    _preflight_host_cache_observation(sidecar)
     return child, calls
+
+
+def test_windows_preflight_host_cache_boundary(tmp_path: Path, monkeypatch) -> None:
+    """Portable predicate calibration through the owning fixture, not host/cache causality."""
+    completed = []
+    allowed_calls = [
+        ["python", "--version"],
+        ["node", "--version"],
+        ["powerbi-report-author", "doctor"],
+        ["powerbi-desktop", "--version"],
+    ]
+
+    def controlled_child(command: list[str], **options) -> subprocess.CompletedProcess:
+        root = Path(options["cwd"])
+        selected = Path(options["env"]["PSModuleAnalysisCachePath"])
+        assert selected.name == "ModuleAnalysisCache"
+        assert selected.parent.parent == root.parent and not selected.is_relative_to(root), (
+            "host-cache transport assertion: the exact selected file must be in a sibling sidecar"
+        )
+        assert selected.parent.is_dir() and not any(selected.parent.iterdir()), (
+            "host-cache transport assertion: every child must start with a fresh empty writable sidecar"
+        )
+        child = subprocess.CompletedProcess(command, 0, "CONTROL_CHILD_OK\n", "")
+        completed.append(case)
+        calls = allowed_calls + ([["network", "synthetic-forbidden"]] if case == "forbidden-command" else [])
+        Path(options["env"]["STUB_LOG"]).write_text(
+            "".join(json.dumps(call) + "\n" for call in calls), encoding="utf-8"
+        )
+        protected = {
+            "protected-script": root / "scripts" / "ModuleAnalysisCache",
+            "protected-config": root / "config" / "ModuleAnalysisCache",
+            "protected-run": root / "run" / "ModuleAnalysisCache",
+            "protected-profile": Path(options["env"]["USERPROFILE"]) / "ModuleAnalysisCache",
+        }
+        if case in protected:
+            target = protected[case]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"known protected write after positive child setup")
+        elif case == "exact-cache":
+            selected.write_bytes(b"standalone synthetic cache calibration, never prepopulated for an actual child")
+        elif case == "extra-file":
+            (selected.parent / "unexpected").write_bytes(b"unexpected sidecar file")
+        elif case == "empty-directory":
+            (selected.parent / "unexpected-directory").mkdir()
+        return child
+
+    monkeypatch.setattr(subprocess, "run", controlled_child)
+    cases = [
+        ("empty", None),
+        ("exact-cache", None),
+        *[
+            ("protected-" + location, "actual-child monitored synthetic tree must remain byte/mtime/tree unchanged")
+            for location in ("script", "config", "run", "profile")
+        ],
+        ("extra-file", "actual-child unexpected sidecar entry must fail"),
+        ("empty-directory", "actual-child unexpected sidecar entry must fail"),
+        ("forbidden-command", "actual-child forbidden network/updater/installer/login command must not be invoked"),
+    ]
+    for case, assertion in cases:
+        parent = tmp_path / case
+        if assertion is not None:
+            with pytest.raises(AssertionError, match=assertion):
+                _synthetic_preflight_child(parent, "ready", diagnostics=True)
+        else:
+            child, calls = _synthetic_preflight_child(parent, "ready", diagnostics=True)
+            assert child.returncode == 0 and child.stdout == "CONTROL_CHILD_OK\n" and child.stderr == ""
+            assert calls == allowed_calls
+            sidecar = parent / "doctor-host-cache"
+            assert _preflight_host_cache_observation(sidecar) == ("NOT_OBSERVED" if case == "empty" else "OBSERVED")
+            if case == "exact-cache":
+                (sidecar / "ModuleAnalysisCache").write_bytes(b"updated exact calibration file")
+                assert _preflight_host_cache_observation(sidecar) == "OBSERVED"
+        assert completed[-1] == case, "each negative must reach the controlled child before its named assertion"
 
 
 @pytest.mark.skipif(

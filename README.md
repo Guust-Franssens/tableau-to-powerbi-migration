@@ -72,7 +72,7 @@ Default `uv sync`/`uv run` can reinstall editably; retain `--no-editable` for th
 Developer/direct-script use is documented in [CONTRIBUTING](CONTRIBUTING.md#environment-setup).
 
 For an already selected environment, regular `uv pip install --python <absolute-selected-python>
-<absolute-toolkit>` is another local-directory install. Ordinary pip is a compatibility path
+<absolute-toolkit>` is a plain/spaced-path local-directory compatibility form. Ordinary pip is a compatibility path
 **only when that environment already has pip** (uv environments need not):
 
 ```powershell
@@ -80,6 +80,19 @@ For an already selected environment, regular `uv pip install --python <absolute-
 # Existing optional extras can be selected, e.g. '<absolute-toolkit>[server]'.
 & '<absolute-selected-python>' -B -m t2p --help
 ```
+
+The phase-one **qualification matrix** is invocation-specific; plan approval alone proves no install:
+
+| Regular local-directory form | Required checkout-path qualification |
+|---|---|
+| `uv sync --all-extras --no-editable`, from the selected toolkit | Plain/spaced **and** combined Unicode/`#`/`%` |
+| Selected Python's `-m pip install <native-directory>`, with pip already available | Both path classes |
+| `uv pip install --python <selected-python> <native-directory>` | Plain/spaced; **only its raw native combined-punctuation cell is explicitly deferred** |
+
+Canonical uv-sync combined-path qualification remains required, not replaced by a doctor-only check.
+The deferral is not a claim that all uv Unicode/punctuation paths are unsupported. Unicode-only,
+percent-only and other unisolated representations remain unverified. Do not retry with converted URLs,
+copy/rename the checkout, or switch environments to pass; an unqualified install stays blocked.
 
 Normal Python resolution installs declared dependencies/requested extras, not Desktop, Copilot,
 plugins, MCP, Node or native drivers. Existing [preflight/setup guidance](docs/operator-runbook.md#11-tooling)
@@ -126,7 +139,9 @@ version-pinned. Caller cwd, another checkout and a source egg-info decoy do not 
 Missing/moved/ambiguous/redirected bindings stop without importing owners or falling back to cwd.
 Reinstall from the same intended checkout/environment after facade or packaging changes, a checkout
 move, or an intentional rebind. For uv, explicitly use `--reinstall-package tableau-to-pbi-migration`
-on the selected `uv pip install`, or on `uv sync --all-extras --no-editable` in that checkout:
+on the qualified plain/spaced `uv pip install`, or on `uv sync --all-extras --no-editable` in that checkout's
+selected `.venv`; use ordinary pip only where the same selected environment already has it.
+The invocation-specific matrix above also applies to reinstall guidance:
 ordinary sync/cache reuse is not a live update of the facade. Moving/deleting a nested `.venv` can break the generated command
 **before Python starts**: recreate/reinstall it; no in-process JSON refusal is promised then.
 

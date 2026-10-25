@@ -117,13 +117,19 @@ For operator commands use that environment's absolute `t2p` executable/Python, o
 Use `uv sync --all-extras --no-editable` in the selected checkout for its operator `.venv`.
 Ordinary `python -m pip install <absolute-toolkit>` is also supported when the selected environment
 already has pip; uv environments need not. No pip bootstrapper or external-tool installer is added.
+Required qualification retains pip and canonical regular `uv sync --all-extras --no-editable` on
+plain/spaced **and** combined Unicode/#/% checkouts. Selected-environment `uv pip install` retains
+plain/spaced compatibility; **only its raw native combined-punctuation cell is explicitly deferred**.
+That is not a blanket uv Unicode-path exclusion. Other unisolated path/representation cells remain
+unverified; no URL fallback, copied/renamed checkout, tool upgrade or environment switch is implied.
 
 Packaging copies only the existing `scripts\t2p.py` singleton as module `t2p`; backend scripts/assets
 remain live in the checkout recorded by standard local-directory installer metadata. Reinstall for
 facade/packaging changes, a moved checkout or an intentional rebind. Moving a nested environment can
 break its generated executable before Python starts; recreate/reinstall rather than expecting JSON.
 For uv facade updates, explicitly add `--reinstall-package tableau-to-pbi-migration` to that
-checkout's regular sync/install; ordinary cache reuse is not an editable source update.
+checkout's canonical regular sync, or its qualified plain/spaced uv-pip form, retaining the same
+selected environment. Ordinary cache reuse is not an editable source update.
 Editable console, index/wheel/VCS, standalone, user/target/pipx and copied environments are not
 supported operator forms. Early editable imports can write source bytecode; `-B` direct calls remain.
 
@@ -134,6 +140,19 @@ not collection; setup failures fail rather than skip. Run it with
 `uv run python -B -m pytest -q tests\test_t2p_install.py --basetemp _t2p_install_tests`.
 CI runs it in the ordinary full Linux suite and explicitly on Windows; synthetic controls establish
 neither live migration acceptance nor a global zero-write/offline promise.
+The existing full fixture matrix includes canonical uv-sync for both path classes, not only doctor.
+Its standard `UV_PROJECT_ENVIRONMENT` selects an owned separate environment so protected directory/
+no-pyc snapshots need no new exclusions; the two nested `.venv` sync cases remain separately required.
+Installer setup cwd never changes the actual command's caller cwd or relative arguments.
+
+The full synthetic Windows preflight tests keep fresh profiles, the same PowerShell host and the
+original protected-root file membership/bytes/file-mtime equality (except the existing command log).
+Only the child's explicit environment selects a new empty sibling sidecar and exact
+`PSModuleAnalysisCachePath` file. The whole sidecar is observed, including empty directories:
+only conditional creation/update of that exact file is allowed. Empty means **NOT_OBSERVED**, not
+relocation proof. Protected same-basename writes and unexpected sidecar files/directories still fail;
+forbidden-command/native/output controls and stronger installed-command directory snapshots remain.
+No cache producer, profile exemption, real user setting or causal/global-zero-write claim is added.
 
 ## Python conventions (enforced)
 

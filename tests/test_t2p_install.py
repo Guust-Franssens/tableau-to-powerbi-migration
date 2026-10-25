@@ -364,12 +364,30 @@ def _assert_regular_origin(origin: dict, toolkit: Path) -> None:
 
 
 def _install(lab: SimpleNamespace, source: Path, *, editable: bool = False) -> None:
-    command = (
-        [lab.python, "-B", "-m", "pip", "install", "--force-reinstall"]
-        if lab.installer == "pip"
-        else [UV, "pip", "install", "--python", lab.python, "--reinstall-package", PROJECT]
-    )
-    _checked([*command, *(["--editable"] if editable else []), source], cwd=lab.caller, env=lab.env)
+    if lab.installer == "uv-sync" and source.is_dir():
+        # A separate selected environment keeps the full protected snapshots unchanged.
+        _checked(
+            [
+                UV,
+                "sync",
+                "--all-extras",
+                *([] if editable else ["--no-editable"]),
+                "--python",
+                lab.python,
+                "--reinstall-package",
+                PROJECT,
+            ],
+            cwd=source,
+            env={**lab.env, "UV_PROJECT_ENVIRONMENT": str(lab.venv)},
+        )
+    else:
+        # Archive input is the unsupported-wheel control, never a sync fallback.
+        command = (
+            [lab.python, "-B", "-m", "pip", "install", "--force-reinstall"]
+            if lab.installer == "pip"
+            else [UV, "pip", "install", "--python", lab.python, "--reinstall-package", PROJECT]
+        )
+        _checked([*command, *(["--editable"] if editable else []), source], cwd=lab.caller, env=lab.env)
     lab.metadata = _metadata(lab)
     lab.site = Path(lab.metadata["site"])
     lab.dist_info = Path(lab.metadata["dist_info"])
@@ -378,8 +396,15 @@ def _install(lab: SimpleNamespace, source: Path, *, editable: bool = False) -> N
 @pytest.fixture(
     name="installation",
     scope="module",
-    params=[("pip", "toolkit A"), ("uv", "toolkit A"), ("pip", "toolkit café # %"), ("uv", "toolkit café # %")],
-    ids=["pip", "uv", "pip-encoded-unicode", "uv-encoded-unicode"],
+    # Only raw uv-pip's combined-punctuation cell is deferred; sync gets the full matrix.
+    params=[
+        ("pip", "toolkit A"),
+        ("uv", "toolkit A"),
+        ("pip", "toolkit café # %"),
+        ("uv-sync", "toolkit A"),
+        ("uv-sync", "toolkit café # %"),
+    ],
+    ids=["pip", "uv", "pip-encoded-unicode", "uv-sync", "uv-sync-encoded-unicode"],
 )
 def installed_toolkit(request) -> Iterator[SimpleNamespace]:
     """Actual ordinary installers and wrappers, with every write under owned repo scratch."""
@@ -573,6 +598,27 @@ def test_source_readme_fallback_environment_context() -> None:
     assert "**activate the same selected environment**" in fallback
     assert "`(Get-Command python).Source` points to its selected Python" in fallback
     assert "does **not** activate the parent shell; preflight uses `python` from PATH" in fallback
+
+
+def test_source_qualified_installation_guidance(capsys) -> None:
+    """Installed hints retain the invocation-specific Q1 matrix; direct advice is unchanged."""
+    module = _source_module()
+    installed = "\n".join(module._doctor_blocker_lines(IMPORT_BLOCKER, installed=True))  # pylint: disable=protected-access
+    direct = module._doctor_blocker_lines(IMPORT_BLOCKER)  # pylint: disable=protected-access
+    assert direct[-1] == "Action: activate the intended Python environment and run uv sync manually."
+    module._install_human({"limitations": ["install_origin_unavailable"], "exit_code": 3})  # pylint: disable=protected-access
+    failure = capsys.readouterr()
+    assert failure.err == ""
+    for text in (installed, failure.out):
+        assert "uv sync --all-extras --no-editable" in text
+        assert "<selected-python> -m pip install <selected-toolkit>" in text
+        assert "pip must already be available" in text
+        assert "plain/spaced" in text
+        assert "Raw native uv-pip combined Unicode/#/% compatibility is deferred" in text, (
+            "qualified guidance assertion: defer only the raw uv-pip combined-path cell"
+        )
+        assert "canonical uv sync and pip retain both path-class qualification targets" in text
+        assert "Do not switch checkouts/environments to pass." in text
 
 
 @pytest.mark.parametrize("argv", [[], ["doctor"], ["start"], ["status"]])
@@ -1333,8 +1379,11 @@ def test_installed_only_environment_safe_doctor_guidance(installation: SimpleNam
     )
     assert (
         "uv pip install --reinstall-package tableau-to-pbi-migration"
-        " --python <selected-python> <selected-toolkit> without --editable"
+        " --python <selected-python> <selected-toolkit> only for plain/spaced paths, without --editable"
     ) in text
+    assert "Raw native uv-pip combined Unicode/#/% compatibility is deferred" in text
+    assert "canonical uv sync and pip retain both path-class qualification targets" in text
+    assert "<selected-python> -m pip install <selected-toolkit> (pip must already be available)" in text
     assert "In <selected-toolkit>, using <selected-python> for Python commands:" in text
     assert "Rerun doctor: <selected-t2p> doctor --env <same-selected-env>" in text
     assert str(lab.toolkit) not in text and str(lab.venv) not in text, (
@@ -1662,7 +1711,9 @@ def test_real_uv_sync_regular_nested_environment(toolkit_name: str) -> None:
     root = REPO_ROOT / "_t2p_install_tests" / ("sync-" + uuid.uuid4().hex[:8])
     try:
         lab = _lab(root, toolkit_name)
-        _checked([UV, "sync", "--no-editable", "--python", sys.executable], cwd=lab.toolkit, env=lab.env)
+        _checked(
+            [UV, "sync", "--all-extras", "--no-editable", "--python", sys.executable], cwd=lab.toolkit, env=lab.env
+        )
         lab.venv = lab.toolkit / ".venv"
         scripts = lab.venv / ("Scripts" if os.name == "nt" else "bin")
         lab.python = scripts / ("python.exe" if os.name == "nt" else "python")
