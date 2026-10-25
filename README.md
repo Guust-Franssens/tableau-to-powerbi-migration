@@ -87,7 +87,10 @@ still owns those prerequisites. Doctor runs the plain diagnostic owner once, wit
 Tableau login. Resolve its manual hints before proceeding; `READY_TO_ATTEMPT` is presence/preflight
 only, not authentication, reachability, path safety, START_READY, fidelity or COMPLETE.
 Session-start preflight remains separate under [AGENTS.md](AGENTS.md). If doctor cannot establish
-the plain preflight cause, the existing manual fallback, from the selected toolkit checkout, is:
+the plain preflight cause, first **activate the same selected environment** in that private terminal
+and confirm `(Get-Command python).Source` points to its selected Python. Invoking the absolute
+`t2p.exe` above does **not** activate the parent shell; preflight uses `python` from PATH.
+Then, from the selected toolkit checkout, run the existing manual fallback:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1

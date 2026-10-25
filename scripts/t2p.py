@@ -657,6 +657,12 @@ def _doctor_human(result: dict, args: argparse.Namespace | None, *, installed: b
                 )
             )
         else:
+            if installed:
+                lines.append(
+                    "Before manual preflight, activate the SAME environment that supplies <selected-python>"
+                    " in this private terminal and verify PATH python is <selected-python>."
+                    " Invoking <selected-t2p> does not activate the parent shell."
+                )
             lines.append(
                 "Action: run plain preflight directly in a private terminal without -Update, then rerun doctor."
             )

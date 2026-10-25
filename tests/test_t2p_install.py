@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 from contextlib import contextmanager
 from importlib.util import module_from_spec, spec_from_file_location
 import json
@@ -498,6 +499,82 @@ def _source_module() -> ModuleType:
     return module
 
 
+def _assert_closed_help(stdout: bytes) -> None:
+    choices = re.findall(rb"\{([^{}\r\n]+)\}", stdout)
+    assert choices == [b"doctor,start,status"] * 2, (
+        "closed help verb assertion: usage and positional choices must be exactly doctor/start/status"
+    )
+
+
+def test_source_closed_help_oracle_distinguishes_prose_and_verbs() -> None:
+    """The finite command choices, not the word 'next' in prose, close the surface."""
+    literal = (
+        b"usage: t2p [-h] {doctor,start,status} ...\n"
+        b"positional arguments:\n  {doctor,start,status}\n"
+        b"    status  Read-only inventory; no next action or readiness.\n"
+    )
+    _assert_closed_help(literal)
+    _assert_closed_help(_source_module().build_parser("t2p").format_help().encode("ascii"))
+    _assert_closed_help(literal.replace(b"no next action", b"no continuation"))
+    for choices in (b"doctor,start,status,next", b"doctor,start,next", b"doctor,start"):
+        with pytest.raises(AssertionError, match="closed help verb assertion"):
+            _assert_closed_help(literal.replace(b"doctor,start,status", choices, 1))
+    with pytest.raises(AssertionError, match="closed help verb assertion"):
+        _assert_closed_help(b"doctor start status; no next action\n")
+
+
+@pytest.mark.parametrize("native", [0, 1, 7])
+@pytest.mark.parametrize("installed", [False, True])
+def test_source_unavailable_preflight_environment_guidance(native: int, installed: bool, monkeypatch, capsys) -> None:
+    """Pure fallback rendering retains the installed environment, never running a remedy."""
+    module = _source_module()
+    result = _expected_doctor(native, {"status": "READY_TO_ATTEMPT", "checks": [], "reason": "presence_only"})
+    result["doctor_details"] = {"preflight": {"availability": "unavailable"}}
+    before = _wire(result)
+    real_import = builtins.__import__
+
+    def forbidden(*_args, **_kwargs) -> None:
+        pytest.fail("fallback renderer must not import/call an owner or launch a child")
+
+    def guarded_import(name: str, *args, **kwargs) -> ModuleType:
+        if name.split(".", 1)[0] in {"tableau_env", "start_migration", "run_status", "work_dirs"}:
+            forbidden()
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    monkeypatch.setattr(module, "doctor", forbidden)
+    monkeypatch.setattr(module.subprocess, "run", forbidden)
+    module._doctor_human(  # pylint: disable=protected-access
+        result, SimpleNamespace(env=Path("relative.env")), installed=installed
+    )
+    captured = capsys.readouterr()
+    assert captured.err == "" and _wire(result) == before, "fallback rendering must not change records or channels"
+    if installed:
+        assert "activate the SAME environment that supplies <selected-python>" in captured.out, (
+            "installed fallback environment assertion: retain the selected Python"
+        )
+        assert "verify PATH python is <selected-python>" in captured.out
+        assert "Invoking <selected-t2p> does not activate the parent shell." in captured.out
+        assert "powershell -ExecutionPolicy Bypass -File <selected-toolkit>\\scripts\\preflight.ps1" in captured.out
+        assert "Rerun doctor: <selected-t2p> doctor --env <same-selected-env>" in captured.out
+    else:
+        assert "<selected-python>" not in captured.out and "<selected-toolkit>" not in captured.out, (
+            "direct fallback assertion: installed-only context must not leak into legacy output"
+        )
+        assert "Before manual preflight" not in captured.out
+        assert "powershell -ExecutionPolicy Bypass -File scripts\\preflight.ps1" in captured.out
+        assert "Rerun doctor: python -B scripts\\t2p.py doctor --env <same-selected-env>" in captured.out
+
+
+def test_source_readme_fallback_environment_context() -> None:
+    """The absolute-executable journey must not imply activation of its parent shell."""
+    text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    fallback = text.split("Session-start preflight remains separate", 1)[1].split("### Start one approved", 1)[0]
+    assert "**activate the same selected environment**" in fallback
+    assert "`(Get-Command python).Source` points to its selected Python" in fallback
+    assert "does **not** activate the parent shell; preflight uses `python` from PATH" in fallback
+
+
 @pytest.mark.parametrize("argv", [[], ["doctor"], ["start"], ["status"]])
 def test_source_root_independent_help(argv: list[str], monkeypatch, capsys) -> None:
     """Offline source parsing controls; no installation is simulated."""
@@ -511,7 +588,10 @@ def test_source_root_independent_help(argv: list[str], monkeypatch, capsys) -> N
     with pytest.raises(SystemExit) as raised:
         module.main([*argv, "--help"], installed=True)
     assert raised.value.code == 0
-    assert capsys.readouterr().out.startswith("usage: t2p ")
+    output = capsys.readouterr().out
+    assert output.startswith("usage: t2p ")
+    if not argv:
+        _assert_closed_help(output.encode("ascii"))
 
 
 @pytest.mark.parametrize("argv", SYNTAX)
@@ -611,7 +691,7 @@ def test_installed_help_and_syntax_before_binding(
             assert child.stdout.startswith(b"usage: t2p ")
             assert b"--json" in child.stdout or not argv
             if not argv:
-                assert b"{doctor,start,status}" in child.stdout and b"next" not in child.stdout
+                _assert_closed_help(child.stdout)
             flags = {b"--help", *([] if not argv else [b"--json"])}
             if argv and argv[0] in {"doctor", "start"}:
                 flags.add(b"--env")
@@ -932,6 +1012,64 @@ def _wire(result: dict) -> bytes:
     return (json.dumps(result, ensure_ascii=True, sort_keys=True) + os.linesep).encode("ascii")
 
 
+def _assert_json_start_markers(child: subprocess.CompletedProcess, first: str, last: str) -> None:
+    assert not any(line.startswith(b"RUN ") for line in child.stdout.splitlines()), (
+        "start marker channel assertion: JSON progress belongs on stderr"
+    )
+    lines = child.stderr.splitlines()
+    assert lines and lines[0] == first.encode("ascii", errors="backslashreplace"), (
+        "start initial marker assertion: ASCII-escaped first progress"
+    )
+    assert len(lines) >= 2 and lines[-1] == last.encode("utf-8"), "start final marker assertion: UTF-8 last progress"
+
+
+@pytest.mark.parametrize("early", [False, True])
+def test_source_unicode_start_marker_oracle_controls(early: bool) -> None:
+    """Independent literal bytes discriminate paths, encodings, presence and channels."""
+    first = "RUN NOT_ALLOCATED; runs_root=C:\\fixture\\café # %\\_runs"
+    first_bytes = rb"RUN NOT_ALLOCATED; runs_root=C:\fixture\caf\xe9 # %\_runs"
+    last = first if early else "RUN C:\\fixture\\café # %\\_runs\\001-fixture"
+    last_bytes = (
+        b"RUN NOT_ALLOCATED; runs_root=C:\\fixture\\caf\xc3\xa9 # %\\_runs"
+        if early
+        else b"RUN C:\\fixture\\caf\xc3\xa9 # %\\_runs\\001-fixture"
+    )
+    stdout = b'{"schema_version":"t2p/v1"}\n'
+    stderr = first_bytes + b"\n" + last_bytes + b"\n"
+    child = subprocess.CompletedProcess([], 1 if early else 0, stdout, stderr)
+    _assert_json_start_markers(child, first, last)
+    for bad_stderr, label in (
+        (stderr.replace(b"C:\\fixture", b"C:\\other", 1), "start initial marker assertion"),
+        (
+            first_bytes + b"\n" + last_bytes.replace(b"C:\\fixture", b"C:\\other") + b"\n",
+            "start final marker assertion",
+        ),
+        (first_bytes + b"\n", "start final marker assertion"),
+        (first_bytes + b"\n" + last.encode("ascii", errors="backslashreplace") + b"\n", "start final marker assertion"),
+    ):
+        with pytest.raises(AssertionError, match=label):
+            _assert_json_start_markers(
+                subprocess.CompletedProcess([], child.returncode, stdout, bad_stderr), first, last
+            )
+    with pytest.raises(AssertionError, match="start marker channel assertion"):
+        _assert_json_start_markers(subprocess.CompletedProcess([], child.returncode, stdout + stderr, b""), first, last)
+
+
+@pytest.mark.parametrize("early", [False, True])
+def test_source_unicode_start_markers(tmp_path: Path, early: bool) -> None:
+    """Real direct synthetic owners retain ASCII first/UTF-8 last stderr markers."""
+    lab = _lab(tmp_path / "markers", "toolkit café # %")
+    _write_state(lab, before_allocation=early, start_code=1 if early else 0)
+    child = _invoke(lab, "start", "--project", "fixture", "--json", direct=True)
+    first = "RUN NOT_ALLOCATED; runs_root=" + str(lab.toolkit / "_runs")
+    last = first if early else "RUN " + str(lab.toolkit / "_runs" / "001-fixture")
+    _assert_json_start_markers(child, first, last)
+    result = _json_result(child, 1 if early else 0)
+    assert result["authority"] == "start_migration.py"
+    assert len(_calls(lab, "start")) == 1, "the direct marker control must reach its synthetic owner"
+    assert (result["run_location"] is None) is early
+
+
 def _expected_doctor(native: int | None, configuration: dict) -> dict:
     expected = _expected_base("doctor")
     unknown = native not in {0, 1} or configuration["status"] == "CANNOT_ESTABLISH"
@@ -1056,6 +1194,11 @@ def test_installed_start_argv_native_and_json_parity(
     for direct, module in ((False, False), (False, True), (True, False)):
         lab.log.write_text("", encoding="utf-8")
         child = _invoke(lab, *args, direct=direct, module=module)
+        _assert_json_start_markers(
+            child,
+            "RUN NOT_ALLOCATED; runs_root=" + str(lab.caller / "relative-parent" / "_runs"),
+            "RUN " + run,
+        )
         assert _json_result(child, code) == expected, "native stage exits must remain distinct from the wrapper"
         assert child.stdout == _wire(expected), "fixed complete start v1 bytes"
         calls = _calls(lab, "start")
@@ -1070,8 +1213,6 @@ def test_installed_start_argv_native_and_json_parity(
         assert storage[0]["resolved_storage"] == str(lab.toolkit / "relative.policy"), (
             "do not silently rebase storage policy"
         )
-        assert child.stderr.splitlines()[0].startswith(b"RUN NOT_ALLOCATED; runs_root=")
-        assert child.stderr.splitlines()[-1] == ("RUN " + run).encode("ascii", errors="backslashreplace")
 
 
 def test_installed_start_default_roots_and_preallocation(installation: SimpleNamespace) -> None:
@@ -1080,17 +1221,17 @@ def test_installed_start_default_roots_and_preallocation(installation: SimpleNam
     for early in (False, True):
         _write_state(lab, before_allocation=early, start_code=1 if early else 0)
         child = _invoke(lab, "start", "--project", "fixture", "--json")
+        first = "RUN NOT_ALLOCATED; runs_root=" + str(lab.toolkit / "_runs")
+        _assert_json_start_markers(
+            child, first, first if early else "RUN " + str(lab.toolkit / "_runs" / "001-fixture")
+        )
         result = _json_result(child, 1 if early else 0)
         calls = _calls(lab, "start")
         assert len(calls) == 1 and calls[0]["argv"] == ["--project", "fixture"]
         assert calls[0]["env"] == str(lab.toolkit / ".env")
         assert calls[0]["default_runs"] == str(lab.toolkit / "_runs")
-        assert child.stderr.splitlines()[0] == ("RUN NOT_ALLOCATED; runs_root=" + str(lab.toolkit / "_runs")).encode(
-            "ascii", errors="backslashreplace"
-        )
         if early:
             assert result["run_location"] is result["runs_root"] is None
-            assert child.stderr.splitlines()[0] == child.stderr.splitlines()[-1], "delegated first/last markers survive"
 
 
 @pytest.mark.parametrize("case", ["intact", "findings", "missing", "moved", "relative"])
