@@ -10,6 +10,7 @@ inverted ``-ne``) both survived a 15-mutation sweep against source-string assert
 """
 
 import base64
+from collections.abc import Iterator
 import json
 import os
 import re
@@ -1542,9 +1543,12 @@ def test_doctor_merged_version_and_plugin_critical_reasons_are_projected() -> No
 
 
 def _preflight_host_cache_observation(sidecar: Path) -> str:
-    """Allow only the exact selected file; no cache means activity was not observed."""
+    """An assessable directory may be empty or contain only the exact selected file."""
     selected = sidecar / "ModuleAnalysisCache"
-    entries = list(sidecar.rglob("*"))
+    try:
+        entries = list(sidecar.iterdir())
+    except OSError as exc:
+        raise AssertionError("actual-child unexpected sidecar entry must fail") from exc
     assert all(path == selected and path.is_file() and not path.is_symlink() for path in entries), (
         "actual-child unexpected sidecar entry must fail"
     )
@@ -1743,6 +1747,7 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
 def test_windows_preflight_host_cache_boundary(tmp_path: Path, monkeypatch) -> None:
     """Portable predicate calibration through the owning fixture, not host/cache causality."""
     completed = []
+    original_iterdir = Path.iterdir
     allowed_calls = [
         ["python", "--version"],
         ["node", "--version"],
@@ -1782,6 +1787,18 @@ def test_windows_preflight_host_cache_boundary(tmp_path: Path, monkeypatch) -> N
             (selected.parent / "unexpected").write_bytes(b"unexpected sidecar file")
         elif case == "empty-directory":
             (selected.parent / "unexpected-directory").mkdir()
+        elif case in {"missing-root", "file-root"}:
+            selected.parent.rmdir()
+            if case == "file-root":
+                selected.parent.write_bytes(b"unexpected replacement of the observation directory")
+        elif case == "unassessable-root":
+
+            def unreadable(path: Path) -> Iterator[Path]:
+                if path == selected.parent:
+                    raise PermissionError("synthetic observation root cannot be enumerated")
+                return original_iterdir(path)
+
+            monkeypatch.setattr(Path, "iterdir", unreadable)
         return child
 
     monkeypatch.setattr(subprocess, "run", controlled_child)
@@ -1794,7 +1811,10 @@ def test_windows_preflight_host_cache_boundary(tmp_path: Path, monkeypatch) -> N
         ],
         ("extra-file", "actual-child unexpected sidecar entry must fail"),
         ("empty-directory", "actual-child unexpected sidecar entry must fail"),
+        ("missing-root", "actual-child unexpected sidecar entry must fail"),
+        ("file-root", "actual-child unexpected sidecar entry must fail"),
         ("forbidden-command", "actual-child forbidden network/updater/installer/login command must not be invoked"),
+        ("unassessable-root", "actual-child unexpected sidecar entry must fail"),
     ]
     for case, assertion in cases:
         parent = tmp_path / case

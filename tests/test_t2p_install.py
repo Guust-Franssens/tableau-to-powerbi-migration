@@ -304,7 +304,9 @@ def _write_state(lab: SimpleNamespace, **overrides) -> None:
     lab.log.write_text("", encoding="utf-8")
 
 
-def _lab(root: Path, toolkit_name: str = "toolkit A") -> SimpleNamespace:
+def _lab(root: Path, toolkit_name: str = "toolkit A", *, tmp_path_factory: pytest.TempPathFactory) -> SimpleNamespace:
+    # Pytest removes a pre-existing explicit basetemp on its first initialization.
+    tmp_path_factory.getbasetemp()
     root.mkdir(parents=True)
     _checked(["git", "check-ignore", "--no-index", "--quiet", root], cwd=REPO_ROOT, env=os.environ.copy())
     lab = SimpleNamespace(
@@ -325,13 +327,52 @@ def _lab(root: Path, toolkit_name: str = "toolkit A") -> SimpleNamespace:
 
 
 @pytest.fixture(name="source_control")
-def source_lab() -> Iterator[SimpleNamespace]:
+def source_lab(request, tmp_path_factory: pytest.TempPathFactory) -> Iterator[SimpleNamespace]:
     """Source-only controls need no installer and are not installed-command evidence."""
     root = REPO_ROOT / "_t2p_install_tests" / ("source-" + uuid.uuid4().hex[:8])
     try:
-        yield _lab(root)
+        yield _lab(root, getattr(request, "param", "toolkit A"), tmp_path_factory=tmp_path_factory)
     finally:
         shutil.rmtree(root)
+
+
+def test_source_fixture_basetemp_lifetime(source_control: SimpleNamespace) -> None:
+    """A real first factory initialization must not erase an already active fixture."""
+    parent = source_control.root / "lifetime"
+    parent.mkdir()
+    raw_base = parent / "uninitialized"
+    raw_sentinel = raw_base / "active" / "sentinel"
+    raw_sentinel.parent.mkdir(parents=True)
+    raw_sentinel.write_bytes(b"owned miniature deletion control")
+    raw_factory = pytest.TempPathFactory(
+        given_basetemp=raw_base,
+        retention_count=0,
+        retention_policy="none",
+        trace=lambda *_args: None,
+        _ispytest=True,
+    )
+    assert raw_factory.getbasetemp() == raw_base
+    assert not raw_sentinel.exists(), "lifetime calibration must exercise pytest's destructive first initialization"
+
+    base = parent / "protected"
+    factory = pytest.TempPathFactory(
+        given_basetemp=base,
+        retention_count=0,
+        retention_policy="none",
+        trace=lambda *_args: None,
+        _ispytest=True,
+    )
+    lab = _lab(base / "active", tmp_path_factory=factory)
+    sentinel = lab.toolkit / "active-sentinel"
+    sentinel.write_bytes(b"live owned fixture")
+    result = _json_result(_invoke(lab, "start", "--project", "fixture", "--json", direct=True), 0)
+    assert result["authority"] == "start_migration.py" and len(_calls(lab, "start")) == 1, (
+        "lifetime control must reach the positive synthetic fixture body"
+    )
+    assert factory.getbasetemp() == base
+    assert sentinel.is_file() and sentinel.read_bytes() == b"live owned fixture", (
+        "active fixture lifetime assertion: first basetemp initialization must not erase the live owned sentinel"
+    )
 
 
 def _metadata(lab: SimpleNamespace) -> dict:
@@ -406,13 +447,13 @@ def _install(lab: SimpleNamespace, source: Path, *, editable: bool = False) -> N
     ],
     ids=["pip", "uv", "pip-encoded-unicode", "uv-sync", "uv-sync-encoded-unicode"],
 )
-def installed_toolkit(request) -> Iterator[SimpleNamespace]:
+def installed_toolkit(request, tmp_path_factory: pytest.TempPathFactory) -> Iterator[SimpleNamespace]:
     """Actual ordinary installers and wrappers, with every write under owned repo scratch."""
     assert UV is not None, "uv is required for installation controls; missing setup is not a skip"
     root = REPO_ROOT / "_t2p_install_tests" / uuid.uuid4().hex[:8]
     try:
         installer, toolkit_name = request.param
-        lab = _lab(root, toolkit_name)
+        lab = _lab(root, toolkit_name, tmp_path_factory=tmp_path_factory)
         lab.installer = installer
         lab.venv = root / "environment"
         _checked([UV, "venv", "--seed", "--python", sys.executable, lab.venv], cwd=root, env=lab.env)
@@ -1102,9 +1143,10 @@ def test_source_unicode_start_marker_oracle_controls(early: bool) -> None:
 
 
 @pytest.mark.parametrize("early", [False, True])
-def test_source_unicode_start_markers(tmp_path: Path, early: bool) -> None:
+@pytest.mark.parametrize("source_control", ["toolkit café # %"], indirect=True, ids=["unicode"])
+def test_source_unicode_start_markers(source_control: SimpleNamespace, early: bool) -> None:
     """Real direct synthetic owners retain ASCII first/UTF-8 last stderr markers."""
-    lab = _lab(tmp_path / "markers", "toolkit café # %")
+    lab = source_control
     _write_state(lab, before_allocation=early, start_code=1 if early else 0)
     child = _invoke(lab, "start", "--project", "fixture", "--json", direct=True)
     first = "RUN NOT_ALLOCATED; runs_root=" + str(lab.toolkit / "_runs")
@@ -1705,12 +1747,12 @@ def test_regular_reinstall_selects_b_and_snapshot_backends_stay_live(installatio
 
 
 @pytest.mark.parametrize("toolkit_name", ["toolkit A", "toolkit café # %"], ids=["plain", "encoded-unicode"])
-def test_real_uv_sync_regular_nested_environment(toolkit_name: str) -> None:
+def test_real_uv_sync_regular_nested_environment(toolkit_name: str, tmp_path_factory: pytest.TempPathFactory) -> None:
     """Canonical regular uv sync also binds outside cwd, with .venv caches separated."""
     assert UV is not None, "uv is required; installer prerequisites cannot silently skip"
     root = REPO_ROOT / "_t2p_install_tests" / ("sync-" + uuid.uuid4().hex[:8])
     try:
-        lab = _lab(root, toolkit_name)
+        lab = _lab(root, toolkit_name, tmp_path_factory=tmp_path_factory)
         _checked(
             [UV, "sync", "--all-extras", "--no-editable", "--python", sys.executable], cwd=lab.toolkit, env=lab.env
         )
