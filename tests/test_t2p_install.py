@@ -735,18 +735,11 @@ def test_installed_damaged_binding_never_borrows_caller(
 
 
 def test_installed_unreadable_origin(installation: SimpleNamespace) -> None:
-    """A metadata read failure must remain unavailable, not owner dispatch."""
+    """An undecodable metadata read must remain unavailable, not owner dispatch."""
     lab = installation
-    path = lab.dist_info / "direct_url.json"
-    original = path.read_bytes()
-    path.unlink()
-    path.mkdir()
-    try:
+    with _changed_file(lab.dist_info / "direct_url.json", b"\xff unreadable UTF-8 metadata"):
         _write_state(lab)
         _undelegated(lab, _invoke(lab, "doctor", "--json"), "install_metadata_unavailable", 3)
-    finally:
-        path.rmdir()
-        path.write_bytes(original)
 
 
 @pytest.mark.parametrize(

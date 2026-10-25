@@ -86,9 +86,17 @@ plugins, MCP, Node or native drivers. Existing [preflight/setup guidance](docs/o
 still owns those prerequisites. Doctor runs the plain diagnostic owner once, without updates or
 Tableau login. Resolve its manual hints before proceeding; `READY_TO_ATTEMPT` is presence/preflight
 only, not authentication, reachability, path safety, START_READY, fidelity or COMPLETE.
-Session-start preflight remains separate under [AGENTS.md](AGENTS.md). **Only after an actual
-unsigned/ExecutionPolicy startup refusal**, follow [preflight cannot start](docs/operator-runbook.md#preflight-cannot-start)
-and retry the exact originating command/arguments if recovery is allowed; no policy pre-check.
+Session-start preflight remains separate under [AGENTS.md](AGENTS.md). If doctor cannot establish
+the plain preflight cause, the existing manual fallback, from the selected toolkit checkout, is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
+```
+
+**Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
+[preflight cannot start](docs/operator-runbook.md#preflight-cannot-start).
+If recovery is allowed, retry the **exact originating command and arguments** (plain preflight);
+no policy pre-check.
 
 ### Start one approved live project, then dispatch
 
