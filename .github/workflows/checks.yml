@@ -192,8 +192,8 @@ jobs:
         run: uv run pytest -q tests/test_preflight_signing_policy.py --basetemp _preflight_signing_tests
 
       - name: Tests (real installed t2p executable and synthetic preflight child)
-        # Keep pytest's disposable basetemp separate from live module-scoped installer roots.
-        run: uv run python -B -m pytest -q tests\test_t2p_install.py tests\test_preflight_contract.py::test_doctor_actual_windows_child tests\test_preflight_contract.py::test_windows_preflight_host_cache_boundary --basetemp _t2p_install_tests\pytest
+        # A checkout-root sibling has an existing parent and cannot erase live installer roots.
+        run: uv run python -B -m pytest -q tests\test_t2p_install.py tests\test_preflight_contract.py::test_doctor_actual_windows_child tests\test_preflight_contract.py::test_windows_preflight_host_cache_boundary --basetemp _t2p_install_pytest
 
       - name: Tests (credential-gate artifact ACLs, real Windows filesystem)
         run: uv run pytest -q tests\test_credential_gate_acl_layouts.py --basetemp _credential_gate_acl_tests

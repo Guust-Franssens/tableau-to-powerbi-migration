@@ -375,6 +375,38 @@ def test_source_fixture_basetemp_lifetime(source_control: SimpleNamespace) -> No
     )
 
 
+def test_source_fixture_fresh_workflow_basetemp(source_control: SimpleNamespace) -> None:
+    """The actual workflow initializes on a fresh checkout without touching live fixtures."""
+    workflow = (REPO_ROOT / ".github" / "workflows" / "checks.yml").read_text(encoding="utf-8")
+    command = next(line for line in workflow.splitlines() if "run: " in line and r"tests\test_t2p_install.py" in line)
+    checkout = source_control.root / "fresh"
+    checkout.mkdir()
+    installer_parent = checkout / "_t2p_install_tests"
+    assert not installer_parent.exists(), "fresh workflow layout must start without an installer parent"
+    base = checkout / command.split("--basetemp ", 1)[1].strip()
+    factory = pytest.TempPathFactory(
+        given_basetemp=base,
+        retention_count=0,
+        retention_policy="none",
+        trace=lambda *_args: None,
+        _ispytest=True,
+    )
+    lab = _lab(installer_parent / "active", tmp_path_factory=factory)
+    sentinel = lab.toolkit / "active-sentinel"
+    sentinel.write_bytes(b"live fresh-workflow fixture")
+    result = _json_result(_invoke(lab, "start", "--project", "fixture", "--json", direct=True), 0)
+    assert result["authority"] == "start_migration.py" and len(_calls(lab, "start")) == 1, (
+        "fresh workflow layout must reach the positive synthetic fixture body"
+    )
+    assert base.parent == checkout and base != installer_parent, (
+        "workflow basetemp layout assertion: pytest scratch must be a sibling of installer scratch"
+    )
+    assert factory.getbasetemp() == base
+    assert sentinel.is_file() and sentinel.read_bytes() == b"live fresh-workflow fixture", (
+        "active workflow fixture assertion: later basetemp access must preserve the live owned sentinel"
+    )
+
+
 def _metadata(lab: SimpleNamespace) -> dict:
     return json.loads(
         _checked(
