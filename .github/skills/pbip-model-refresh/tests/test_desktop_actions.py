@@ -249,13 +249,13 @@ def test_completion_awaits_real_bound_reader_progress_without_suppressing_refusa
     if final_state in {"UNKNOWN", "PROMPT"}:
         with pytest.raises(query_probe.ObservationUnavailable) as failure:
             refresh_pbip_model._wait_for_engine_completion(
-                context, baseline, baseline.partitions[0].refreshed_ticks + 1, 2.5
+                context, baseline, baseline.partitions[0].refreshed_ticks + 1, time.monotonic() + 2.5
             )
         assert str(failure.value) == ("DIALOG_UNREADABLE" if final_state == "UNKNOWN" else "DIALOG_NEEDS_HUMAN")
         assert not reads
     else:
         complete, _ = refresh_pbip_model._wait_for_engine_completion(
-            context, baseline, baseline.partitions[0].refreshed_ticks + 1, 2.5
+            context, baseline, baseline.partitions[0].refreshed_ticks + 1, time.monotonic() + 2.5
         )
         assert complete is (final_state == "READY")
         assert bool(reads) is complete
@@ -596,6 +596,99 @@ def test_no_save_and_failed_completion_never_invoke_ui_save(monkeypatch: pytest.
     )
     assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 3
     assert calls == ["Refresh"]
+
+
+@pytest.mark.parametrize("late_stage", ["observer", "binding", "identity", "snapshot", "save_binding", "save_identity"])
+def test_ui_deadline_rejects_late_preflight_and_save_rechecks(monkeypatch: pytest.MonkeyPatch, late_stage: str) -> None:
+    context, args, calls = _wire_ui_route(monkeypatch)
+    clock = [100.0]
+    monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
+    stages = {"binding": 0, "identity": 0}
+    original_snapshot = refresh_pbip_model.read_partition_snapshot
+
+    def run_stage(stage):
+        if stage in stages:
+            stages[stage] += 1
+        current = f"save_{stage}" if stages.get(stage, 0) == 2 else stage
+        if current == late_stage:
+            clock[0] = 111.0
+
+    def observe(*_args, **_kwargs):
+        run_stage("observer")
+        return SimpleNamespace(state="READY")
+
+    def bound_read(*_args, **_kwargs):
+        run_stage("binding")
+
+    def identity(*_args, **_kwargs):
+        run_stage("identity")
+        return True
+
+    def snapshot(*_args, **_kwargs):
+        run_stage("snapshot")
+        return original_snapshot(context.bound)
+
+    monkeypatch.setattr(refresh_pbip_model, "_ui_observer_state", observe)
+    monkeypatch.setattr(refresh_pbip_model, "bound_call", bound_read)
+    monkeypatch.setattr(refresh_pbip_model, "_identity_gate", identity)
+    monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", snapshot)
+
+    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) != 0
+    assert calls == (["Refresh", "canaries"] if late_stage.startswith("save_") else [])
+
+
+def test_ui_read_allowances_shrink_and_completion_uses_same_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    context, args, calls = _wire_ui_route(monkeypatch)
+    args.refresh_absolute_timeout_seconds = 40
+    clock = [100.0]
+    allowances = []
+    monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
+    original_snapshot = refresh_pbip_model.read_partition_snapshot
+
+    def bound_read(*_args, timeout_seconds):
+        allowances.append(timeout_seconds)
+        clock[0] += 7
+
+    def snapshot(*_args, timeout_seconds):
+        allowances.append(timeout_seconds)
+        clock[0] += 7
+        return original_snapshot(context.bound)
+
+    def completion(_context, _baseline, _started, deadline):
+        assert deadline == 140.0
+        clock[0] += 7
+        return True, CompletionResult(True, "all advanced")
+
+    def probe(*_args, timeout_seconds):
+        allowances.append(timeout_seconds)
+        clock[0] += 7
+        calls.append("canaries")
+        return [SimpleNamespace(table="Orders", returned_rows=1)]
+
+    monkeypatch.setattr(refresh_pbip_model, "bound_call", bound_read)
+    monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", snapshot)
+    monkeypatch.setattr(refresh_pbip_model, "_wait_for_engine_completion", completion)
+    monkeypatch.setattr(refresh_pbip_model, "probe_observations", probe)
+    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 0
+    assert allowances == [30.0, 30.0, 19.0, 12.0]
+    assert calls == ["Refresh", "canaries", "Save"]
+    clock[0] = 140.0
+    with pytest.raises(TimeoutError):
+        refresh_pbip_model._ui_read_budget(140.0)
+
+
+def test_ui_failed_metadata_read_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    context, args, calls = _wire_ui_route(monkeypatch)
+    reads = []
+
+    def snapshot(*_args, **_kwargs):
+        reads.append("snapshot")
+        raise query_probe.ObservationUnavailable("TIMEOUT")
+
+    monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", snapshot)
+    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) != 0
+    assert reads == ["snapshot"]
+    assert not calls
 
 
 def test_empty_data_or_failed_binding_never_authorizes_ui_save(monkeypatch: pytest.MonkeyPatch) -> None:

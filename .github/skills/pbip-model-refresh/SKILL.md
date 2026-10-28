@@ -79,6 +79,14 @@ Completion reads may encounter the existing bound reader's `REFRESH_IN_PROGRESS`
 refusal. Only that closed state is awaited within the original operation deadline; prompt,
 unknown/incomplete, identity and catalogue refusals are not retried as progress.
 
+The UI route holds one monotonic operation deadline from before preflight through completion and
+Save; no phase resets it. Each UI-only bound metadata/no-op/data read receives at most
+**30 seconds for the whole bound call, including observation and identity/catalogue rechecks**,
+not 30 seconds per internal step, clipped to the remaining operation time and recalculated
+before each read. Exhausted budgets and late results cannot authorize Refresh or Save.
+The native action remains capped at 20 seconds or the remaining time, with unchanged cleanup.
+Shared binding/observer budgets and the XMLA route are unchanged; failed reads are not retried.
+
 The initial supported surface is whole-model Import M source partitions. DirectQuery, Dual/mixed,
 unsupported source kinds, modes that cannot be resolved from model/partition metadata,
 changed or incomplete partition metadata, a non-READY initial observer, and

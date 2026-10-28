@@ -2015,14 +2015,22 @@ def _ui_observer_state(
     return state
 
 
+def _ui_read_budget(deadline: float, cap: float = 30.0) -> float:
+    """Clip one whole UI-route bound read to the held deadline, never restart its budget."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("UI refresh operation deadline exhausted")
+    return min(cap, remaining)
+
+
 def _wait_for_engine_completion(  # pylint: disable=too-many-statements
     context: UIRefreshContext,
     baseline: PartitionSnapshot,
     action_started_ticks: int,
-    timeout_seconds: float,
+    deadline: float,
 ) -> tuple[bool, CompletionResult | None]:
     """Poll exact typed partition evidence under the existing deadline and observer supervisor."""
-    deadline = time.monotonic() + timeout_seconds
+    timeout_seconds = _ui_read_budget(deadline, float("inf"))
     cancelled = threading.Event()
     outcome: dict[str, object] = {}
     initial_remaining = deadline - time.monotonic()
@@ -2031,6 +2039,7 @@ def _wait_for_engine_completion(  # pylint: disable=too-many-statements
         allow_progress=True,
         timeout_seconds=initial_remaining,
     )
+    _ui_read_budget(deadline)
 
     def poll() -> None:
         try:
@@ -2039,7 +2048,7 @@ def _wait_for_engine_completion(  # pylint: disable=too-many-statements
                 if remaining <= 0:
                     raise TimeoutError("engine completion deadline expired")
                 try:
-                    current = read_partition_snapshot(context.bound, timeout_seconds=min(8.0, remaining))
+                    current = read_partition_snapshot(context.bound, timeout_seconds=_ui_read_budget(deadline))
                 except ObservationUnavailable as exc:
                     # bound_call correctly refuses preflight reads during progress. Await that
                     # one closed state without changing its prompt/unknown or binding authority.
@@ -2117,6 +2126,7 @@ def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many
     initial_state: Observation,
 ) -> int:
     """Run explicit UI refresh with independent engine completion, held canaries and optional UI Save."""
+    deadline = time.monotonic() + args.refresh_absolute_timeout_seconds
     if cache is None:
         print("REFRESH: ERROR no model cache path resolved; refusing the UI route")
         return 2
@@ -2125,7 +2135,9 @@ def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many
         return 3
     try:
         root_hwnd = _ui_root(initial_state, pid, initial_state.process_started_at or "")
+        _ui_read_budget(deadline)
         bound = bind_desktop(pid, supplied_port=port)
+        _ui_read_budget(deadline)
         if bound.identity.process_start != initial_state.process_started_at:
             raise DesktopActionError("bound process identity differs from the initial observer")
         context = UIRefreshContext(
@@ -2143,9 +2155,9 @@ def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many
     lock_context = model_lock(lock_path, timeout=PERSIST_LOCK_TIMEOUT_SECONDS) if lock_path.parent.exists() else None
     try:
         if lock_context is None:
-            return _ui_refresh_locked(context, cache, args)
+            return _ui_refresh_locked(context, cache, args, deadline=deadline)
         with lock_context:
-            return _ui_refresh_locked(context, cache, args)
+            return _ui_refresh_locked(context, cache, args, deadline=deadline)
     except ModelLockTimeout as exc:
         print(f"REFRESH: NOT_PERSISTED (model lock unavailable: {exc})")
         return 1
@@ -2155,23 +2167,26 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
     context: UIRefreshContext,
     cache: Path,
     args: argparse.Namespace,
+    *,
+    deadline: float | None = None,
 ) -> int:
     """The UI route while holding the existing per-model cooperative lock when available."""
+    deadline = time.monotonic() + args.refresh_absolute_timeout_seconds if deadline is None else deadline
     before_stamp = cache.stat().st_mtime if cache.exists() else 0.0
-    timeout_seconds = args.refresh_absolute_timeout_seconds
     try:
-        _ui_observer_state(context)
-        bound_call(context.bound, lambda _connection: None)
+        _ui_observer_state(context, timeout_seconds=_ui_read_budget(deadline, 8.0))
+        bound_call(context.bound, lambda _connection: None, timeout_seconds=_ui_read_budget(deadline))
+        _ui_read_budget(deadline)
         if not _identity_gate(context.port, cache):
             return 2
-        baseline = read_partition_snapshot(context.bound)
+        baseline = read_partition_snapshot(context.bound, timeout_seconds=_ui_read_budget(deadline))
+        _ui_read_budget(deadline)
         if any(partition.state != 1 for partition in baseline.partitions):
             raise DesktopActionError("initial source partition state is not READY")
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         print(f"REFRESH: UI_PREFLIGHT_REFUSED ({type(exc).__name__}: {exc})")
         return 2
 
-    deadline = time.monotonic() + timeout_seconds
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         print("REFRESH: TIMEOUT - UI refresh deadline expired before action")
@@ -2207,7 +2222,7 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
             context,
             baseline,
             action.action_started_ticks,
-            max(0.0, remaining),
+            deadline,
         )
     except CredentialMissingError as exc:
         _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
@@ -2252,8 +2267,8 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         if remaining <= 0:
             print("REFRESH: TIMEOUT - data checks did not begin before the operation deadline")
             return 3
-        targets = canaries or [bound_call(context.bound, first_table, timeout_seconds=min(8.0, remaining))]
-        observations = probe_observations(context.bound, targets, timeout_seconds=min(8.0, remaining))
+        targets = canaries or [bound_call(context.bound, first_table, timeout_seconds=_ui_read_budget(deadline))]
+        observations = probe_observations(context.bound, targets, timeout_seconds=_ui_read_budget(deadline))
         if time.monotonic() >= deadline:
             print("REFRESH: TIMEOUT - data-check result arrived after the operation deadline")
             return 3
@@ -2294,7 +2309,8 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
             context,
             timeout_seconds=remaining,
         )
-        bound_call(context.bound, lambda _connection: None)
+        bound_call(context.bound, lambda _connection: None, timeout_seconds=_ui_read_budget(deadline))
+        _ui_read_budget(deadline)
         if not _identity_gate(context.port, cache):
             return 2
         remaining = deadline - time.monotonic()
@@ -2308,6 +2324,7 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
             root_hwnd=context.root_hwnd,
             timeout_seconds=min(ACTION_CHILD_TIMEOUT_SECONDS, remaining),
         )
+        _ui_read_budget(deadline)
     except CredentialMissingError as exc:
         _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
         return 1
