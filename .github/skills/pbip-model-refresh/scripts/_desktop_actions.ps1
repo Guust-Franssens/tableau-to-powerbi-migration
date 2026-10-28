@@ -258,7 +258,9 @@ try {
   $selected = Get-ActionControl (Test-Target)
   $selectedOwnership = Get-ControlOwnership $selected
   $target = Get-ActionControl (Test-Target)
-  if (-not [System.Windows.Automation.AutomationElement]::Compare($selected, $target)) {
+  $comparison = [System.Windows.Automation.Automation].GetMethod('Compare', [type[]]@(
+    [System.Windows.Automation.AutomationElement], [System.Windows.Automation.AutomationElement]))
+  if (-not $comparison.Invoke($null, [object[]]@($selected, $target))) {
     $reason = 'selected_control_changed'
     throw 'control'
   }

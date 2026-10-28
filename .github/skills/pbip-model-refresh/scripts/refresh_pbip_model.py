@@ -2124,9 +2124,11 @@ def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many
     cache: Path | None,
     args: argparse.Namespace,
     initial_state: Observation,
+    *,
+    deadline: float,
 ) -> int:
     """Run explicit UI refresh with independent engine completion, held canaries and optional UI Save."""
-    deadline = time.monotonic() + args.refresh_absolute_timeout_seconds
+    # pylint: disable=too-many-arguments
     if cache is None:
         print("REFRESH: ERROR no model cache path resolved; refusing the UI route")
         return 2
@@ -2517,6 +2519,7 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
     args = _build_arg_parser().parse_args(argv)
     if not _validate_ui_refresh_args(args):
         return 2
+    ui_deadline = time.monotonic() + args.refresh_absolute_timeout_seconds if args.ui_refresh else None
 
     pid = _resolve_pid(args.pid)
     if pid is None:
@@ -2562,7 +2565,12 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
         return 2
 
     if args.ui_refresh:
-        return _ui_refresh_and_save(pid, port, cache, args, credential_state)
+        try:
+            _ui_read_budget(ui_deadline)
+        except TimeoutError:
+            print("REFRESH: TIMEOUT - UI refresh deadline exhausted during CLI preflight; no action invoked")
+            return 3
+        return _ui_refresh_and_save(pid, port, cache, args, credential_state, deadline=ui_deadline)
 
     if not args.verify_only:
         outcome = _refresh_and_save(pid, port, cache, args, credential_state)

@@ -79,7 +79,8 @@ Completion reads may encounter the existing bound reader's `REFRESH_IN_PROGRESS`
 refusal. Only that closed state is awaited within the original operation deadline; prompt,
 unknown/incomplete, identity and catalogue refusals are not retried as progress.
 
-The UI route holds one monotonic operation deadline from before preflight through completion and
+The UI route holds one monotonic operation deadline set in the CLI before initial observation,
+port discovery and identity preflight, through completion and
 Save; no phase resets it. Each UI-only bound metadata/no-op/data read receives at most
 **30 seconds for the whole bound call, including observation and identity/catalogue rechecks**,
 not 30 seconds per internal step, clipped to the remaining operation time and recalculated

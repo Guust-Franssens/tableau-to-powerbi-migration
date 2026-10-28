@@ -268,7 +268,9 @@ def test_final_action_acquisition_rechecks_focus_and_identity_without_windows(ch
     body = source[source.rindex("  $target = Get-ActionControl (Test-Target)") : source.index("  $invoked = $true")]
     body = body.replace("[System.Windows.Automation.InvokePattern]::Pattern", "'Invoke'")
     body = body.replace("[DesktopActionNative]::GetForegroundWindow()", "$script:foreground")
-    body = body.replace("[System.Windows.Automation.AutomationElement]::Compare($selected, $target)", "$true")
+    comparison_start = body.index("  $comparison =")
+    comparison_end = body.index("    $reason = 'selected_control_changed'", comparison_start)
+    body = body[:comparison_start] + "  if (-not $true) {\n" + body[comparison_end:]
     script = r"""
 $ErrorActionPreference = 'Stop'
 $script:foreground = 789
@@ -309,6 +311,78 @@ Write-Output $script:count
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == ("1" if change == "none" else "0")
+
+
+def test_selected_control_comparison_uses_real_supported_uia_element_api() -> None:
+    source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("  $comparison =")
+    expression = source[start : source.index("    $reason = 'selected_control_changed'", start)]
+    script = r"""
+$ErrorActionPreference='Stop'
+Add-Type -AssemblyName UIAutomationClient
+$signature = [type[]]@([System.Windows.Automation.AutomationElement],[System.Windows.Automation.AutomationElement])
+$method = [System.Windows.Automation.Automation].GetMethod('Compare', $signature)
+if ($null -eq $method) { throw 'element comparison overload absent' }
+$selected = [System.Windows.Automation.AutomationElement]$null
+$target = [System.Windows.Automation.AutomationElement]$null
+try {
+EXPRESSION
+    throw 'unexpected null comparison result'
+  }
+} catch {
+  if ($_.Exception.GetBaseException() -isnot [ArgumentNullException]) { throw }
+  'real_element_api_executed'
+}
+""".replace("EXPRESSION", expression)
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "real_element_api_executed"
+
+
+@pytest.mark.parametrize("elapsed", [20.0, 3.0])
+def test_cli_preflight_consumes_original_ui_deadline_before_any_action(
+    monkeypatch: pytest.MonkeyPatch, elapsed: float
+) -> None:
+    context, _args, calls = _wire_ui_route(monkeypatch, no_save=True)
+    clock = [100.0]
+    monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(refresh_pbip_model, "_resolve_pid", lambda _pid: 123)
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda _pid: Path("missing-cache.abf"))
+    monkeypatch.setattr(refresh_pbip_model, "source_hint_from_model", lambda _path: None)
+    root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
+    ready = Observation(pid="123", process_started_at="456", target_window=root)
+
+    def observe(*_args, **_kwargs):
+        clock[0] += elapsed
+        return ready
+
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", observe)
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda _pid: 49157)
+    monkeypatch.setattr(refresh_pbip_model, "bind_desktop", lambda *_args, **_kwargs: context.bound)
+    received = []
+    locked = refresh_pbip_model._ui_refresh_locked
+
+    def run_locked(*args, deadline):
+        received.append(deadline)
+        return locked(*args, deadline=deadline)
+
+    monkeypatch.setattr(refresh_pbip_model, "_ui_refresh_locked", run_locked)
+    result = refresh_pbip_model.main(
+        ["--pid", "123", "--ui-refresh", "--no-save", "--refresh-absolute-timeout-seconds", "10"]
+    )
+    if elapsed == 20.0:
+        assert result != 0
+        assert not calls and not received
+    else:
+        assert result == 0
+        assert received == [110.0]
+        assert calls == ["Refresh", "canaries"]
 
 
 @pytest.mark.parametrize("case", ["child", "stale_hit", "wrong_root", "changed_start", "geometry"])
