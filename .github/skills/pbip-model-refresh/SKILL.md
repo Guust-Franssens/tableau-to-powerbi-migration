@@ -115,6 +115,12 @@ provider is reread freshly before accepting the scan; changed or unavailable ide
 whole scan, not a reduced set. The cache is discarded after that enumeration. The second full
 uniqueness scan and independent selected/final ownership checks remain fresh, within the unchanged
 20-second child cap and overall deadline.
+Focus uses bounded thread-input attachment between the current thread and distinct required
+foreground/target threads, with exact root and permitted-foreground checks before attachment and
+before BringWindowToTop/SetForegroundWindow. Only successful attachments are tracked and detached
+in finally on every path. There is no input injection, ShowWindow or minimized-window recovery.
+Handback additionally requires the captured prior HWND's PID/start identity to remain unchanged;
+a detected human foreground switch or identity change prevents restoration.
 
 Mode decoding uses the engine's `ModeType` for `Model.DefaultMode` and `Partition.Mode`:
 Import=0, DirectQuery=1, Default=2, Push=3, Dual=4, DirectLake=5. Only partition Default

@@ -33,6 +33,9 @@ public static class DesktopActionNative {
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint command);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint first, uint second, bool attach);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hwnd);
   [DllImport("user32.dll", SetLastError = true)] public static extern bool SetForegroundWindow(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
   public static bool BelongsTo(IntPtr hwnd, uint expected) {
@@ -116,6 +119,55 @@ function Get-ProcessStart {
   $process = Get-CimInstance Win32_Process -Filter "ProcessId=$DesktopPid"
   if ($null -eq $process) { return $null }
   return $process.CreationDate.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-WindowIdentity {
+  param([IntPtr]$Hwnd)
+  $windowPid = [uint32]0
+  if (-not [DesktopActionNative]::IsWindow($Hwnd) -or
+      [DesktopActionNative]::GetWindowThreadProcessId($Hwnd, [ref]$windowPid) -eq 0) { return $null }
+  $process = Get-CimInstance Win32_Process -Filter "ProcessId=$windowPid"
+  if ($null -eq $process) { return $null }
+  return "$windowPid/$($process.CreationDate.ToUniversalTime().Ticks)"
+}
+
+function Set-VerifiedForeground {
+  param([IntPtr]$Destination, [IntPtr]$PermittedForeground, [string]$DestinationIdentity)
+  $attached = [System.Collections.Generic.List[object]]::new()
+  try {
+    if (-not (Test-Target) -or
+        (Get-WindowIdentity $Destination) -cne $DestinationIdentity -or
+        [DesktopActionNative]::GetForegroundWindow() -ne $PermittedForeground) { return $false }
+    $currentThread = [DesktopActionNative]::GetCurrentThreadId()
+    $ignoredPid = [uint32]0
+    $foregroundThread = [DesktopActionNative]::GetWindowThreadProcessId($PermittedForeground, [ref]$ignoredPid)
+    $targetThread = [DesktopActionNative]::GetWindowThreadProcessId($Destination, [ref]$ignoredPid)
+    if ($currentThread -eq 0 -or $foregroundThread -eq 0 -or $targetThread -eq 0) { return $false }
+    $seen = [System.Collections.Generic.HashSet[uint32]]::new()
+    foreach ($thread in @($foregroundThread, $targetThread)) {
+      if ($thread -eq $currentThread -or -not $seen.Add($thread)) { continue }
+      if (-not (Test-Target) -or
+          (Get-WindowIdentity $Destination) -cne $DestinationIdentity -or
+          [DesktopActionNative]::GetForegroundWindow() -ne $PermittedForeground) { return $false }
+      if (-not [DesktopActionNative]::AttachThreadInput($currentThread, $thread, $true)) { return $false }
+      $attached.Add(@($currentThread, $thread))
+    }
+    if (-not (Test-Target) -or
+        (Get-WindowIdentity $Destination) -cne $DestinationIdentity -or
+        [DesktopActionNative]::GetForegroundWindow() -ne $PermittedForeground) { return $false }
+    [void][DesktopActionNative]::BringWindowToTop($Destination)
+    # BringWindowToTop may itself activate the destination. A third window is a human switch.
+    if (-not (Test-Target) -or
+        (Get-WindowIdentity $Destination) -cne $DestinationIdentity) { return $false }
+    $foreground = [DesktopActionNative]::GetForegroundWindow()
+    if ($foreground -ne $PermittedForeground -and $foreground -ne $Destination) { return $false }
+    [void][DesktopActionNative]::SetForegroundWindow($Destination)
+    return $true
+  } finally {
+    for ($index = $attached.Count - 1; $index -ge 0; $index--) {
+      [void][DesktopActionNative]::AttachThreadInput($attached[$index][0], $attached[$index][1], $false)
+    }
+  }
 }
 
 function Test-Target {
@@ -233,6 +285,7 @@ $actionTicks = $null
 $status = 'refused'
 $reason = 'target_unavailable'
 $priorForeground = [DesktopActionNative]::GetForegroundWindow()
+$priorIdentity = Get-WindowIdentity $priorForeground
 $targetHwnd = [IntPtr]::new([Int64]$RootHandle)
 $dpiContext = [IntPtr]::Zero
 
@@ -258,7 +311,11 @@ try {
       throw 'focus'
     }
     $attempts = $attempt
-    [void][DesktopActionNative]::SetForegroundWindow($targetHwnd)
+    $focusRequested = Set-VerifiedForeground $targetHwnd $foreground "$DesktopPid/$ExpectedProcessStart"
+    if (-not $focusRequested) {
+      $reason = 'focus_attachment_or_identity_failed'
+      throw 'focus'
+    }
     Start-Sleep -Milliseconds 150
     if (-not (Test-Target)) {
       $reason = $script:targetFailureReason
@@ -324,10 +381,13 @@ try {
       $handbackOk = $true
     } else {
       $restoreRequested = $true
-      if ([DesktopActionNative]::IsWindow($priorForeground)) {
-        [void][DesktopActionNative]::SetForegroundWindow($priorForeground)
+      if ($priorIdentity -and (Get-WindowIdentity $priorForeground) -ceq $priorIdentity -and
+          [DesktopActionNative]::GetForegroundWindow() -eq $targetHwnd) {
+        $restoreStarted = Set-VerifiedForeground $priorForeground $targetHwnd $priorIdentity
         Start-Sleep -Milliseconds 150
-        $restoreVerified = [DesktopActionNative]::GetForegroundWindow() -eq $priorForeground
+        $restoreVerified = $restoreStarted -and
+          [DesktopActionNative]::GetForegroundWindow() -eq $priorForeground -and
+          (Get-WindowIdentity $priorForeground) -ceq $priorIdentity
         $handbackOk = [bool]$restoreVerified
         if (-not $handbackOk -and $invoked) { $reason = 'handback_not_verified' }
       } else {

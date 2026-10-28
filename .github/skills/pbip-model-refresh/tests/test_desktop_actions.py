@@ -552,6 +552,12 @@ def test_selector_refusal_handback_preserves_human_foreground(human_switch: bool
     script = r"""
 $attempts=1; $invoked=$false; $targetHwnd=789; $priorForeground=456
 $restoreRequested=$false; $restoreVerified=$null; $handbackOk=$false
+$priorIdentity='456/10'
+function Get-WindowIdentity { param($h) return '456/10' }
+function Set-VerifiedForeground {
+  param($destination,$permitted,$identity)
+  $script:foreground=$destination; $script:restores++; return $true
+}
 $reason='ambiguous_named_control'; $script:restores=0; $script:foreground=FOREGROUND
 BODY
 "$script:restores|$restoreRequested|$restoreVerified|$reason"
@@ -567,6 +573,60 @@ BODY
     assert result.stdout.strip() == (
         "0|False||ambiguous_named_control" if human_switch else "1|True|True|ambiguous_named_control"
     )
+
+
+@pytest.mark.parametrize("case", ["success", "attach_failure", "human_switch", "bring_switch", "identity"])
+def test_thread_attachment_focus_body_detaches_and_preserves_human_switch(case: str) -> None:
+    source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("function Set-VerifiedForeground")
+    body = source[start : source.index("function Test-Target", start)]
+    body = body.replace("[DesktopActionNative]", "[FocusFake]")
+    script = r"""
+$ErrorActionPreference='Stop'
+Add-Type @'
+using System;
+public static class FocusFake {
+  public static string Case;
+  public static int Attach, Detach, Bring, Set;
+  public static IntPtr Foreground = (IntPtr)456;
+  public static uint GetCurrentThreadId() { return 1; }
+  public static bool IsWindow(IntPtr h) { return true; }
+  public static uint GetWindowThreadProcessId(IntPtr h, out uint pid) { pid=100; return h==(IntPtr)456 ? 2u : 3u; }
+  public static IntPtr GetForegroundWindow() { return Foreground; }
+  public static bool AttachThreadInput(uint a,uint b,bool attach) {
+    if (!attach) { Detach++; return true; }
+    Attach++;
+    if (Case=="attach_failure" && Attach==2) return false;
+    if (Case=="human_switch") Foreground=(IntPtr)999;
+    return true;
+  }
+  public static bool BringWindowToTop(IntPtr h) { Bring++; if(Case=="bring_switch") Foreground=(IntPtr)999; return true; }
+  public static bool SetForegroundWindow(IntPtr h) { Set++; Foreground=h; return true; }
+}
+'@
+[FocusFake]::Case='CASE'
+function Test-Target { return $true }
+function Get-WindowIdentity { param($h) if ('CASE' -eq 'identity') { return 'changed' }; return '100/10' }
+BODY
+$ok = Set-VerifiedForeground ([IntPtr]789) ([IntPtr]456) '100/10'
+"$ok|$([FocusFake]::Attach)|$([FocusFake]::Detach)|$([FocusFake]::Bring)|$([FocusFake]::Set)"
+""".replace("CASE", case).replace("BODY", body)
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    expected = {
+        "success": "True|2|2|1|1",
+        "attach_failure": "False|2|1|0|0",
+        "human_switch": "False|1|1|0|0",
+        "bring_switch": "False|2|2|1|0",
+        "identity": "False|0|0|0|0",
+    }
+    assert result.stdout.strip() == expected[case]
 
 
 @pytest.mark.parametrize(
