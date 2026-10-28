@@ -2015,7 +2015,7 @@ def _ui_observer_state(
     return state
 
 
-def _wait_for_engine_completion(
+def _wait_for_engine_completion(  # pylint: disable=too-many-statements
     context: UIRefreshContext,
     baseline: PartitionSnapshot,
     action_started_ticks: int,
@@ -2038,7 +2038,15 @@ def _wait_for_engine_completion(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("engine completion deadline expired")
-                current = read_partition_snapshot(context.bound, timeout_seconds=min(8.0, remaining))
+                try:
+                    current = read_partition_snapshot(context.bound, timeout_seconds=min(8.0, remaining))
+                except ObservationUnavailable as exc:
+                    # bound_call correctly refuses preflight reads during progress. Await that
+                    # one closed state without changing its prompt/unknown or binding authority.
+                    if exc.args != ("REFRESH_IN_PROGRESS",):
+                        raise
+                    cancelled.wait(min(1.0, max(0.0, deadline - time.monotonic())))
+                    continue
                 completed_at = time.monotonic()
                 if completed_at >= deadline:
                     raise TimeoutError("engine completion result arrived after deadline")

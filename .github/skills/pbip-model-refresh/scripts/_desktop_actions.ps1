@@ -196,6 +196,14 @@ try {
     throw 'control'
   }
 
+  if (-not (Test-Target)) {
+    $reason = $script:targetFailureReason
+    throw 'identity'
+  }
+  if ([DesktopActionNative]::GetForegroundWindow() -ne $targetHwnd) {
+    $reason = 'target_or_foreground_changed'
+    throw 'focus'
+  }
   $actionTicks = [DateTime]::UtcNow.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
   try { $invokePattern.Invoke() } catch {
     $reason = 'invoke_failed'

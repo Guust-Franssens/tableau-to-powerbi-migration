@@ -22,7 +22,9 @@ from types import SimpleNamespace
 import pytest
 
 import _desktop_actions as actions
+import probe_desktop_query as query_probe
 import refresh_pbip_model
+from _desktop_observer import DesktopWindow, DialogFinding, Observation
 from _desktop_actions import (
     ActionResult,
     CompletionResult,
@@ -74,7 +76,8 @@ class _Command:  # pylint: disable=invalid-name,too-few-public-methods
         if "TMSCHEMA_MODEL" in self.CommandText:
             return _Reader([(self.connection.default_mode,)])
         if "TMSCHEMA_TABLES" in self.CommandText:
-            return _Reader(self.connection.tables)
+            assert "[StorageMode]" not in self.CommandText, "StorageMode is not a TMSCHEMA_TABLES column"
+            return _Reader([row[:2] for row in self.connection.tables])
         if "TMSCHEMA_PARTITIONS" in self.CommandText:
             return _Reader(self.connection.partitions)
         raise AssertionError(f"unexpected metadata query: {self.CommandText}")
@@ -90,6 +93,7 @@ class _Connection:  # pylint: disable=invalid-name,too-few-public-methods
         self.tables = tables
         self.partitions = partitions
         self.default_mode = default_mode
+        self.Database = "00000000-0000-0000-0000-000000000001"
 
     def CreateCommand(self) -> _Command:
         return _Command(self)
@@ -153,7 +157,7 @@ def _action_payload(**changes: object) -> str:
 def test_snapshot_resolves_inherited_mode_from_table_metadata() -> None:
     connection = _Connection(
         tables=[(10, "Orders", None)],
-        partitions=[_partition(mode=None)],
+        partitions=[_partition(mode=2)],
         default_mode=0,
     )
     result = _snapshot_from_connection(connection, "catalog-1")
@@ -173,11 +177,139 @@ def test_snapshot_resolves_inherited_mode_from_table_metadata() -> None:
 
 
 @pytest.mark.parametrize(
+    "query",
+    [
+        'Sql.Database("server","database",[CreateNavigationProperties=false,Query="SELECT * FROM Orders"])',
+        'Sql.Database("server","database",[CommandTimeout=#duration(0,0,1,0),Query="SELECT 1"])',
+        'Sql.Database("server","database",[CreateNavigationProperties=false,Query /* option */ = "SELECT 1"])',
+        'let options = [CreateNavigationProperties=false, #"Query"="SELECT 1"] '
+        'in Sql.Database("server","database", options)',
+    ],
+)
+def test_custom_query_options_refuse_before_refresh(monkeypatch: pytest.MonkeyPatch, query: str) -> None:
+    context, args, calls = _wire_ui_route(monkeypatch)
+    connection = _Connection([(10, "Orders", 0)], [_partition(query=query)])
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "read_partition_snapshot",
+        lambda *_args, **_kwargs: _snapshot_from_connection(connection, "catalog-1"),
+    )
+
+    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 2
+    assert not calls
+
+
+@pytest.mark.parametrize("final_state", ["READY", "REFRESH_IN_PROGRESS", "UNKNOWN", "PROMPT"])
+def test_completion_awaits_real_bound_reader_progress_without_suppressing_refusals(
+    monkeypatch: pytest.MonkeyPatch, final_state: str
+) -> None:
+    identity = query_probe.DesktopIdentity(123, "456", 124, "457", 49157)
+    bound = query_probe.BoundDesktop(identity, "00000000-0000-0000-0000-000000000001")
+    root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
+    ready = Observation(pid="123", process_started_at="456", target_window=root)
+    progress = Observation(
+        pid="123",
+        process_started_at="456",
+        target_window=root,
+        dialog=DialogFinding("benign", "REFRESH_IN_PROGRESS", root),
+    )
+    reads = []
+    connection = _Connection([(10, "Orders", 0)], [_partition()])
+    monkeypatch.setattr(connection, "Open", lambda: reads.append("open"), raising=False)
+    monkeypatch.setattr(connection, "Close", lambda: None, raising=False)
+    monkeypatch.setattr(query_probe, "desktop_identity", lambda *_args: identity)
+    monkeypatch.setattr(query_probe, "catalogue_id", lambda *_args, **_kwargs: bound.catalogue)
+    monkeypatch.setattr(query_probe, "_load_adomd", lambda: lambda *_args: connection)
+    # Keep the real bound_call/_observation_call reader, preflight and error translation.
+    # Only the OS observation transport and ADOMD connection are synthetic.
+    observed = []
+
+    def observe(*_args, **_kwargs):
+        observed.append("poll")
+        if len(observed) == 1 or final_state == "REFRESH_IN_PROGRESS":
+            return progress
+        if final_state == "UNKNOWN":
+            return Observation(complete=False, unknown_reason="incomplete")
+        if final_state == "PROMPT":
+            return Observation(dialog=DialogFinding("needs-human", "DIALOG_NEEDS_HUMAN", root))
+        return ready
+
+    monkeypatch.setattr(query_probe, "_credential_state", observe)
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda *_args, **_kwargs: ready)
+    context = UIRefreshContext(123, 49157, bound, 789, None)
+    baseline = _snapshot_from_connection(connection, bound.catalogue)
+    connection.partitions = [_partition(refreshed=datetime(2026, 10, 28, 12, 1, tzinfo=timezone.utc))]
+    if final_state in {"UNKNOWN", "PROMPT"}:
+        with pytest.raises(query_probe.ObservationUnavailable) as failure:
+            refresh_pbip_model._wait_for_engine_completion(
+                context, baseline, baseline.partitions[0].refreshed_ticks + 1, 2.5
+            )
+        assert str(failure.value) == ("DIALOG_UNREADABLE" if final_state == "UNKNOWN" else "DIALOG_NEEDS_HUMAN")
+        assert not reads
+    else:
+        complete, _ = refresh_pbip_model._wait_for_engine_completion(
+            context, baseline, baseline.partitions[0].refreshed_ticks + 1, 2.5
+        )
+        assert complete is (final_state == "READY")
+        assert bool(reads) is complete
+    assert len(observed) >= (2 if final_state != "REFRESH_IN_PROGRESS" else 1)
+
+
+@pytest.mark.parametrize("change", ["foreground", "identity", "none"])
+def test_final_action_acquisition_rechecks_focus_and_identity_without_windows(change: str) -> None:
+    source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
+    body = source[source.rindex("  $target = Get-ActionControl (Test-Target)") : source.index("  $invoked = $true")]
+    body = body.replace("[System.Windows.Automation.InvokePattern]::Pattern", "'Invoke'")
+    body = body.replace("[DesktopActionNative]::GetForegroundWindow()", "$script:foreground")
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$script:foreground = 789
+$targetHwnd = 789
+$script:identity = $true
+$script:count = 0
+function Test-Target {
+  if (-not $script:identity) { $script:targetFailureReason = 'process_identity_changed'; return $false }
+  return $true
+}
+function Get-ActionControl {
+  param($root)
+  $control = [pscustomobject]@{}
+  $control | Add-Member ScriptMethod TryGetCurrentPattern {
+    param($pattern, $output)
+    if ('CHANGE' -eq 'foreground') { $script:foreground = 999 }
+    if ('CHANGE' -eq 'identity') { $script:identity = $false }
+    $invoke = [pscustomobject]@{}
+    $invoke | Add-Member ScriptMethod Invoke { $script:count++ }
+    $output.Value = $invoke
+    return $true
+  }
+  return $control
+}
+try {
+BODY
+} catch {}
+Write-Output $script:count
+""".replace("CHANGE", change).replace("BODY", body)
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ("1" if change == "none" else "0")
+
+
+@pytest.mark.parametrize(
     ("table_mode", "partition_mode", "kind", "refreshed", "query"),
     [
-        (1, None, 4, BASELINE, "Source"),
+        (0, 4, 4, BASELINE, "Source"),
         (0, 1, 4, BASELINE, "Source"),
-        (99, None, 4, BASELINE, "Source"),
+        (0, 99, 4, BASELINE, "Source"),
+        (0, None, 4, BASELINE, "Source"),
+        (0, 3, 4, BASELINE, "Source"),
+        (0, 5, 4, BASELINE, "Source"),
         (0, 0, 1, BASELINE, "Source"),
         (0, 0, 4, "2026-10-28T12:00:00Z", "Source"),
         (0, 0, 4, None, "Source"),
@@ -212,7 +344,7 @@ def test_snapshot_refuses_duplicate_source_identity_and_empty_source_set() -> No
 
 
 def test_snapshot_refuses_unresolved_or_directquery_model_default() -> None:
-    for mode in (None, 1, 99):
+    for mode in (None, 1, 2, 3, 4, 5, 99):
         connection = _Connection(
             tables=[(10, "Orders", None)],
             partitions=[_partition(mode=None)],

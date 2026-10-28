@@ -19,10 +19,9 @@ from probe_desktop_query import BoundDesktop, bound_call, is_auto_date_table_nam
 ACTION_SCRIPT = Path(__file__).resolve().with_name("_desktop_actions.ps1")
 ACTION_CHILD_TIMEOUT_SECONDS = 20.0
 ACTION_CHILD_CLEANUP_SECONDS = 5.0
-CUSTOM_QUERY_RE = re.compile(
-    r"\b(?:Value\.NativeQuery|(?:Sql|Odbc)\.Query)\s*\(|\bSql\.Database\s*\([^)]*?\[\s*Query\s*=",
-    re.IGNORECASE,
-)
+# Deliberately conservative: position, comments, parentheses and option-record
+# indirection must not hide a directly spelled query symbol. This is not M evaluation.
+CUSTOM_QUERY_RE = re.compile(r"\b(?:NativeQuery|Query)\b", re.IGNORECASE)
 
 
 class DesktopActionError(RuntimeError):
@@ -139,26 +138,22 @@ def _typed_utc_ticks(value: object) -> int:
     return result
 
 
-def _mode_name(value: object) -> str | None:
-    """Normalize documented engine enum values; unknown numbers never default to Import."""
-    if value is None:
-        return None
+def _mode_name(value: object) -> str:
+    """Decode TOM ModeType (Partition.Mode / Model.DefaultMode), not table storage enums."""
     raw = str(value).strip().casefold()
     return {
-        "": None,
-        "default": None,
-        "unspecified": None,
-        "null": None,
+        "default": "Default",
+        "2": "Default",
         "import": "Import",
         "0": "Import",
         "directquery": "DirectQuery",
         "direct_query": "DirectQuery",
         "1": "DirectQuery",
         "dual": "Dual",
-        "2": "Dual",
+        "4": "Dual",
         "directlake": "DirectLake",
         "direct_lake": "DirectLake",
-        "3": "DirectLake",
+        "5": "DirectLake",
     }.get(raw, "Unsupported")
 
 
@@ -199,25 +194,24 @@ def _read_model_mode(connection) -> str:
     return mode
 
 
-def _read_table_modes(connection) -> dict[int, tuple[str, str | None]]:
-    """Read the actual table storage modes used to resolve inherited partition mode."""
+def _read_table_modes(connection) -> dict[int, tuple[str, str]]:
+    """Bind table identities and the model default used by ModeType.Default partitions."""
     model_mode = _read_model_mode(connection)
     rows = _read_rows(
         connection,
-        "SELECT [ID], [Name], [StorageMode] FROM $SYSTEM.TMSCHEMA_TABLES",
-        3,
+        "SELECT [ID], [Name] FROM $SYSTEM.TMSCHEMA_TABLES",
+        2,
     )
     table_by_id = {}
-    for table_id_value, table_name_value, table_mode_value in rows:
+    for table_id_value, table_name_value in rows:
         table_id = _integer(table_id_value, "table identity")
         if table_id in table_by_id:
             raise DesktopActionError("duplicate table identity")
         if not isinstance(table_name_value, str) or not table_name_value:
             raise DesktopActionError("table name is unresolved")
-        table_mode = _mode_name(table_mode_value) or model_mode
-        if table_mode != "Import":
-            raise DesktopActionError("unsupported or mixed table storage mode")
-        table_by_id[table_id] = (table_name_value, table_mode)
+        # TMSCHEMA_TABLES has no StorageMode column. Never decode its hypothetical
+        # representation as ModeType; the actual partition modes below detect mixed models.
+        table_by_id[table_id] = (table_name_value, model_mode)
     return table_by_id
 
 
@@ -233,7 +227,7 @@ def _partition_rows(connection) -> list[tuple[object, ...]]:
 
 def _source_partition(
     row: tuple[object, ...],
-    table_by_id: dict[int, tuple[str, str | None]],
+    table_by_id: dict[int, tuple[str, str]],
     catalogue: str,
     seen: set[tuple[str, int, int]],
 ) -> SourcePartition | None:
@@ -247,7 +241,8 @@ def _source_partition(
         return None
 
     partition_type = _partition_type(row[3])
-    effective_mode = _mode_name(row[4]) or table_mode
+    partition_mode = _mode_name(row[4])
+    effective_mode = table_mode if partition_mode == "Default" else partition_mode
     if effective_mode is None or effective_mode == "Unsupported":
         raise DesktopActionError("partition effective mode is unresolved")
     if effective_mode != "Import":
@@ -278,7 +273,7 @@ def _source_partition(
 
 
 def _snapshot_from_connection(connection, catalogue: str) -> PartitionSnapshot:
-    """Read all partition and table storage metadata required to resolve the effective mode."""
+    """Read all partition/table identities and actual model/partition ModeType metadata."""
     table_by_id = _read_table_modes(connection)
     rows = _partition_rows(connection)
     partitions: list[SourcePartition] = []

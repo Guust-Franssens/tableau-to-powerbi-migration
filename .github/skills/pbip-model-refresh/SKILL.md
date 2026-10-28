@@ -66,9 +66,13 @@ processing. After completion it runs the existing canary checks on that same hel
 optional named UI **Save** is invoked only after completion, positive required row checks, a fresh
 READY observer state and the existing model-identity check; `--no-save` suppresses every Save.
 
+Completion reads may encounter the existing bound reader's `REFRESH_IN_PROGRESS` preflight
+refusal. Only that closed state is awaited within the original operation deadline; prompt,
+unknown/incomplete, identity and catalogue refusals are not retried as progress.
+
 The initial supported surface is whole-model Import M source partitions. DirectQuery, Dual/mixed,
-unsupported source kinds, modes that cannot be resolved from model/table metadata, custom-query
-auto mode, changed or incomplete partition metadata, a non-READY initial observer, and
+unsupported source kinds, modes that cannot be resolved from model/partition metadata, directly
+expressed custom-query forms, changed or incomplete partition metadata, a non-READY initial observer, and
 `--verify-only`, any `--tables` argument
 (including an empty one), `--calculate-only` or `--measures-only` refuse before Refresh. Supply
 `--canaries` to verify commissioned source tables. Positive rows alone do not prove processing;
@@ -76,6 +80,22 @@ no-action timestamp rereads, partial advancement, stale timestamps, prompt/unkno
 and deadline expiry cannot authorize success or Save. Deadline expiry is unknown, not a credential
 diagnosis. Focus acquisition is limited to three verified attempts with a 150 ms wait each; a failed
 focus/action is surfaced, and a human foreground switch is never overridden during handback.
+
+Mode decoding uses the engine's `ModeType` for `Model.DefaultMode` and `Partition.Mode`:
+Import=0, DirectQuery=1, Default=2, Push=3, Dual=4, DirectLake=5. Only partition Default
+inherits a positively established Import model default; missing metadata does not inherit.
+`TMSCHEMA_TABLES` supplies identity/name, not an assumed `StorageMode` column or encoding.
+See [ModeType](https://learn.microsoft.com/en-us/dotnet/api/microsoft.analysisservices.tabular.modetype)
+and [the table rowset](https://learn.microsoft.com/en-us/openspecs/sql_server_protocols/ms-ssas-t/c32ff15a-77b1-4d7b-bd33-84f5921d7e18).
+
+⚠️ **Bounded custom-query qualification:** the conservative lexical screen rejects the words
+`NativeQuery` and `Query` anywhere in the partition definition, including direct built-ins,
+quoted fields, non-first/nested/separately bound option records and intervening comments.
+Occurrences in comments or strings can also refuse an otherwise eligible model.
+This is not an M interpreter or proof about indirect/shared expressions, dynamically constructed
+field/function names, or externally supplied M. Those forms are **outside this candidate's
+qualification**; the general custom-query-auto exclusion contract remains unestablished for them.
+Do not treat passing this screen as proof that an arbitrary M model is eligible.
 
 This is not exclusive attribution against a human refreshing the same Desktop instance. Partition
 timestamps do not prove upstream freshness, source reachability beyond the commissioned canaries,
