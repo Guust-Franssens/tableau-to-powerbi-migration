@@ -182,6 +182,7 @@ def test_snapshot_resolves_inherited_mode_from_table_metadata() -> None:
         (0, 0, 4, "2026-10-28T12:00:00Z", "Source"),
         (0, 0, 4, None, "Source"),
         (0, 0, 4, BASELINE, "Value.NativeQuery(Source, Query)"),
+        (0, 0, 4, BASELINE, 'Sql.Database("server", "database", [Query="SELECT * FROM Orders"])'),
         (0, 0, 4, datetime(2026, 10, 28, 12, 0), "Source"),
     ],
 )
