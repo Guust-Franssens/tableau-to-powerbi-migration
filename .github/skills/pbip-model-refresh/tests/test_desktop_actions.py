@@ -179,6 +179,7 @@ def test_snapshot_resolves_inherited_mode_from_table_metadata() -> None:
 @pytest.mark.parametrize(
     "query",
     [
+        "Value.NativeQuery(Source, Query)",
         'Sql.Database("server","database",[CreateNavigationProperties=false,Query="SELECT * FROM Orders"])',
         'Sql.Database("server","database",[CommandTimeout=#duration(0,0,1,0),Query="SELECT 1"])',
         'Sql.Database("server","database",[CreateNavigationProperties=false,Query /* option */ = "SELECT 1"])',
@@ -186,8 +187,11 @@ def test_snapshot_resolves_inherited_mode_from_table_metadata() -> None:
         'in Sql.Database("server","database", options)',
     ],
 )
-def test_custom_query_options_refuse_before_refresh(monkeypatch: pytest.MonkeyPatch, query: str) -> None:
-    context, args, calls = _wire_ui_route(monkeypatch)
+@pytest.mark.parametrize("no_save", [False, True])
+def test_explicit_ui_refresh_executes_current_m_including_custom_sql(
+    monkeypatch: pytest.MonkeyPatch, query: str, no_save: bool
+) -> None:
+    context, args, calls = _wire_ui_route(monkeypatch, no_save=no_save)
     connection = _Connection([(10, "Orders", 0)], [_partition(query=query)])
     monkeypatch.setattr(
         refresh_pbip_model,
@@ -195,8 +199,11 @@ def test_custom_query_options_refuse_before_refresh(monkeypatch: pytest.MonkeyPa
         lambda *_args, **_kwargs: _snapshot_from_connection(connection, "catalog-1"),
     )
 
-    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 2
-    assert not calls
+    requested = refresh_pbip_model._build_arg_parser().parse_args(["--ui-refresh", *(["--no-save"] if no_save else [])])
+    assert requested.ui_refresh
+    args.no_save = requested.no_save
+    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 0
+    assert calls == ["Refresh", "canaries"] + ([] if no_save else ["Save"])
 
 
 @pytest.mark.parametrize("final_state", ["READY", "REFRESH_IN_PROGRESS", "UNKNOWN", "PROMPT"])
@@ -313,8 +320,6 @@ Write-Output $script:count
         (0, 0, 1, BASELINE, "Source"),
         (0, 0, 4, "2026-10-28T12:00:00Z", "Source"),
         (0, 0, 4, None, "Source"),
-        (0, 0, 4, BASELINE, "Value.NativeQuery(Source, Query)"),
-        (0, 0, 4, BASELINE, 'Sql.Database("server", "database", [Query="SELECT * FROM Orders"])'),
         (0, 0, 4, datetime(2026, 10, 28, 12, 0), "Source"),
     ],
 )
@@ -507,6 +512,16 @@ def test_default_and_verify_only_paths_do_not_enable_ui_refresh() -> None:
 
     assert parser.parse_args(["--pid", "123"]).ui_refresh is False
     assert parser.parse_args(["--pid", "123", "--verify-only"]).ui_refresh is False
+
+
+def test_ui_refresh_help_warns_about_operator_source_execution_and_no_clearance() -> None:
+    help_text = " ".join(refresh_pbip_model._build_arg_parser().format_help().split())
+
+    assert "operator-only opt-in commissions execution of ALL current M, including native/custom SQL" in help_text
+    assert "potential source-side costs" in help_text
+    assert "--no-save prevents Save, NOT source execution" in help_text
+    assert "No automatic credential-gate use or earned clearance" in help_text
+    assert "#780 (linked #692)" in help_text
 
 
 def test_action_result_handback_flag_is_not_inferred_from_invoke() -> None:

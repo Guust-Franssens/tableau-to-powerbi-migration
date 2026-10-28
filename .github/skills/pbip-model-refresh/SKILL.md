@@ -57,6 +57,15 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B
 
 ### Explicit foreground UI refresh
 
+⚠️ **Operator-only source-execution consent:** supplying `--ui-refresh` expressly commissions
+execution of **all current M**, including native/custom SQL and unknown/indirect query forms,
+with potential source-side costs or effects. There is no custom-query admission screen.
+**`--no-save` prevents Save, not source execution.** No additional consent flag is required.
+This route does **not** authorize automatic credential-gate use or earn credential clearance.
+Defaults and existing callers remain unchanged. Automatic custom/unknown-query integration in
+PR B depends on accepted follow-up [#780](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/780)
+(linked [#692](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/692)).
+
 `--ui-refresh` is an opt-in route; the existing XMLA default and migration gates do not change. It
 invokes one named Desktop **Refresh** control, then waits for engine metadata—not the Invoke return,
 quiet UI, or positive cached rows—to prove that the exact source-partition set stayed bound and every
@@ -71,8 +80,8 @@ refusal. Only that closed state is awaited within the original operation deadlin
 unknown/incomplete, identity and catalogue refusals are not retried as progress.
 
 The initial supported surface is whole-model Import M source partitions. DirectQuery, Dual/mixed,
-unsupported source kinds, modes that cannot be resolved from model/partition metadata, directly
-expressed custom-query forms, changed or incomplete partition metadata, a non-READY initial observer, and
+unsupported source kinds, modes that cannot be resolved from model/partition metadata,
+changed or incomplete partition metadata, a non-READY initial observer, and
 `--verify-only`, any `--tables` argument
 (including an empty one), `--calculate-only` or `--measures-only` refuse before Refresh. Supply
 `--canaries` to verify commissioned source tables. Positive rows alone do not prove processing;
@@ -87,15 +96,6 @@ inherits a positively established Import model default; missing metadata does no
 `TMSCHEMA_TABLES` supplies identity/name, not an assumed `StorageMode` column or encoding.
 See [ModeType](https://learn.microsoft.com/en-us/dotnet/api/microsoft.analysisservices.tabular.modetype)
 and [the table rowset](https://learn.microsoft.com/en-us/openspecs/sql_server_protocols/ms-ssas-t/c32ff15a-77b1-4d7b-bd33-84f5921d7e18).
-
-⚠️ **Bounded custom-query qualification:** the conservative lexical screen rejects the words
-`NativeQuery` and `Query` anywhere in the partition definition, including direct built-ins,
-quoted fields, non-first/nested/separately bound option records and intervening comments.
-Occurrences in comments or strings can also refuse an otherwise eligible model.
-This is not an M interpreter or proof about indirect/shared expressions, dynamically constructed
-field/function names, or externally supplied M. Those forms are **outside this candidate's
-qualification**; the general custom-query-auto exclusion contract remains unestablished for them.
-Do not treat passing this screen as proof that an arbitrary M model is eligible.
 
 This is not exclusive attribution against a human refreshing the same Desktop instance. Partition
 timestamps do not prove upstream freshness, source reachability beyond the commissioned canaries,

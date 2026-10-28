@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -19,9 +18,6 @@ from probe_desktop_query import BoundDesktop, bound_call, is_auto_date_table_nam
 ACTION_SCRIPT = Path(__file__).resolve().with_name("_desktop_actions.ps1")
 ACTION_CHILD_TIMEOUT_SECONDS = 20.0
 ACTION_CHILD_CLEANUP_SECONDS = 5.0
-# Deliberately conservative: position, comments, parentheses and option-record
-# indirection must not hide a directly spelled query symbol. This is not M evaluation.
-CUSTOM_QUERY_RE = re.compile(r"\b(?:NativeQuery|Query)\b", re.IGNORECASE)
 
 
 class DesktopActionError(RuntimeError):
@@ -253,9 +249,6 @@ def _source_partition(
         return None
     if partition_type != "M":
         raise DesktopActionError("unsupported partition source kind")
-    if not isinstance(row[6], str) or CUSTOM_QUERY_RE.search(row[6]):
-        raise DesktopActionError("custom-query source mode is unsupported")
-
     partition_id = _integer(row[0], "partition identity")
     identity = (catalogue, table_id, partition_id)
     if identity in seen:

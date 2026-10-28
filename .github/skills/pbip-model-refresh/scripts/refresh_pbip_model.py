@@ -2429,7 +2429,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--no-save",
         action="store_true",
         help=(
-            "Refresh in memory but persist NOTHING, leaving the project byte-identical. Use for "
+            "Prevent Save, NOT source execution: refresh still runs current M/native/custom SQL "
+            "and may incur source-side costs. Refresh in memory but persist NOTHING. Use for "
             "read-only work (validation, auditing) and for the validate-then-deploy path, because "
             "saving raises database.tmdl's declared compatibilityLevel to the level Desktop runs at"
         ),
@@ -2439,8 +2440,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--ui-refresh",
         action="store_true",
         help=(
-            "Explicitly invoke one named Power BI Desktop Refresh; supports only whole-model Import M "
-            "source partitions and requires typed engine completion evidence"
+            "WARNING: operator-only opt-in commissions execution of ALL current M, including native/custom SQL, "
+            "with potential source-side costs; --no-save prevents Save, NOT source execution. "
+            "Invoke one whole-model Import M Refresh and require typed engine completion evidence. "
+            "No automatic credential-gate use or earned clearance; defaults/callers unchanged. "
+            "Custom/unknown-query integration depends on accepted follow-up #780 (linked #692)"
         ),
     )
     parser.add_argument(
