@@ -268,12 +268,15 @@ def test_final_action_acquisition_rechecks_focus_and_identity_without_windows(ch
     body = source[source.rindex("  $target = Get-ActionControl (Test-Target)") : source.index("  $invoked = $true")]
     body = body.replace("[System.Windows.Automation.InvokePattern]::Pattern", "'Invoke'")
     body = body.replace("[DesktopActionNative]::GetForegroundWindow()", "$script:foreground")
+    body = body.replace("[System.Windows.Automation.AutomationElement]::Compare($selected, $target)", "$true")
     script = r"""
 $ErrorActionPreference = 'Stop'
 $script:foreground = 789
 $targetHwnd = 789
 $script:identity = $true
 $script:count = 0
+$selectedOwnership = 'owned'
+function Get-ControlOwnership { param($element) return 'owned' }
 function Test-Target {
   if (-not $script:identity) { $script:targetFailureReason = 'process_identity_changed'; return $false }
   return $true
@@ -306,6 +309,161 @@ Write-Output $script:count
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == ("1" if change == "none" else "0")
+
+
+@pytest.mark.parametrize("case", ["child", "stale_hit", "wrong_root", "changed_start", "geometry"])
+def test_native_renderer_ownership_without_window_operations(case: str) -> None:
+    source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
+    body = source[source.index("function Get-ControlOwnership") : source.index("function Get-ProcessStart")]
+    body = body.replace("[DesktopActionNative]", "[OwnershipFake]")
+    body = body.replace("[DesktopActionNative+Rect]::new()", "[pscustomobject]@{}")
+    body = body.replace("[DesktopActionNative+Point]::new()", "[pscustomobject]@{X=0;Y=0}")
+    script = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type @'
+using System;
+public static class OwnershipFake {
+  public static bool WrongRoot, Stale;
+  public static bool BelongsTo(IntPtr h, uint p) { return p == 200 && (h == (IntPtr)55 || h == (IntPtr)56); }
+  public static bool IsChild(IntPtr p, IntPtr h) {
+    return !WrongRoot && ((p == (IntPtr)789 && h == (IntPtr)55) || (p == (IntPtr)55 && h == (IntPtr)56));
+  }
+  public static bool GetWindowRect(IntPtr h, out object r) {
+    r = new { Left=0, Top=0, Right=100, Bottom=100 }; return true;
+  }
+  public static IntPtr WindowFromPoint(object p) { return Stale ? (IntPtr)99 : (IntPtr)56; }
+}
+'@
+$Action = 'Refresh'
+$targetHwnd = [IntPtr]789
+$script:chainReads = 0
+function Get-ProviderChain {
+  param($provider)
+  $script:chainReads++
+  if ('CASE' -eq 'changed_start' -and $script:chainReads -gt 1) { return 'changed' }
+  return '200/20;100/10'
+}
+[OwnershipFake]::WrongRoot = 'CASE' -eq 'wrong_root'
+[OwnershipFake]::Stale = 'CASE' -eq 'stale_hit'
+$bounds = [pscustomobject]@{IsEmpty=$false;Left=10;Top=10;Right=30;Bottom=30;Width=20;Height=20}
+if ('CASE' -eq 'geometry') { $bounds.Right = 101 }
+$element = [pscustomobject]@{Current=[pscustomobject]@{
+  Name='Refresh';IsEnabled=$true;IsOffscreen=$false;ProcessId=200;NativeWindowHandle=55;BoundingRectangle=$bounds
+}}
+BODY
+if (Get-ControlOwnership $element) { 'owned' } else { 'refused' }
+""".replace("CASE", case).replace("BODY", body)
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ("owned" if case == "child" else "refused")
+
+
+@pytest.mark.parametrize("case", ["valid", "wrong_start", "newer_parent", "cycle"])
+def test_provider_process_start_ancestry_is_required(case: str) -> None:
+    source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
+    body = source[source.index("function Get-ProviderChain") : source.index("function Get-ControlOwnership")]
+    script = r"""
+$ErrorActionPreference='Stop'
+$DesktopPid='100'; $ExpectedProcessStart='10'
+function Get-CimInstance {
+  param($Class, $Filter)
+  $id = [int]($Filter.Split('=')[1])
+  $start = if ($id -eq 100) { 10 } else { 20 }
+  $parent = 100
+  if ('CASE' -eq 'wrong_start' -and $id -eq 100) { $start=11 }
+  if ('CASE' -eq 'newer_parent' -and $id -eq 100) { $start=30 }
+  if ('CASE' -eq 'cycle') { $parent=200 }
+  return [pscustomobject]@{CreationDate=[datetime]::new($start,[DateTimeKind]::Utc);ParentProcessId=$parent}
+}
+BODY
+if (Get-ProviderChain 200) { 'verified' } else { 'refused' }
+""".replace("CASE", case).replace("BODY", body)
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ("verified" if case == "valid" else "refused")
+
+
+@pytest.mark.parametrize("count", [0, 1, 2])
+def test_selector_requires_one_owned_invoke_and_ignores_dropdowns(count: int) -> None:
+    source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
+    body = source[source.index("function Get-ActionControl") : source.index("$attempts = 0")]
+    body = body.replace("[System.Windows.Automation.AutomationElement]$RootElement", "$RootElement")
+    start = body.index("  $buttonType =")
+    end = body.index("  $named =", start)
+    body = body[:start] + "  $buttonElements = $RootElement\n  $splitElements = @()\n" + body[end:]
+    body = body.replace("[System.Windows.Automation.InvokePattern]::Pattern", "'Invoke'")
+    body = body.replace("[System.Windows.Automation.ExpandCollapsePattern]::Pattern", "'Expand'")
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$Action = 'Save'
+function Get-ControlOwnership { param($e) return $e.Owned }
+function New-Control($owned, $dropdown) {
+  $e = [pscustomobject]@{Owned=$owned;Dropdown=$dropdown;Current=[pscustomobject]@{
+    Name='Save';IsEnabled=$true;IsOffscreen=$false
+  }}
+  $e | Add-Member ScriptMethod TryGetCurrentPattern {
+    param($pattern, $out)
+    return ($pattern -eq 'Invoke' -or ($pattern -eq 'Expand' -and $this.Dropdown))
+  }
+  return $e
+}
+$controls = @((New-Control $true $true), (New-Control $false $false))
+for ($i=0; $i -lt COUNT; $i++) { $controls += New-Control $true $false }
+BODY
+try { $null = Get-ActionControl $controls; 'selected' } catch { $script:reason }
+""".replace("COUNT", str(count)).replace("BODY", body)
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == {0: "named_control_missing", 1: "selected", 2: "ambiguous_named_control"}[count]
+
+
+@pytest.mark.parametrize("human_switch", [False, True])
+def test_selector_refusal_handback_preserves_human_foreground(human_switch: bool) -> None:
+    source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("  $foregroundAfter =")
+    body = source[start : source.index("  if ($dpiContext", start)]
+    body = body.replace("[DesktopActionNative]::GetForegroundWindow()", "$script:foreground")
+    body = body.replace("[DesktopActionNative]::IsWindow($priorForeground)", "$true")
+    body = body.replace(
+        "[DesktopActionNative]::SetForegroundWindow($priorForeground)",
+        "(& { $script:foreground = $priorForeground; $script:restores++; $true })",
+    )
+    script = r"""
+$attempts=1; $invoked=$false; $targetHwnd=789; $priorForeground=456
+$restoreRequested=$false; $restoreVerified=$null; $handbackOk=$false
+$reason='ambiguous_named_control'; $script:restores=0; $script:foreground=FOREGROUND
+BODY
+"$script:restores|$restoreRequested|$restoreVerified|$reason"
+""".replace("FOREGROUND", "999" if human_switch else "789").replace("BODY", body)
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == (
+        "0|False||ambiguous_named_control" if human_switch else "1|True|True|ambiguous_named_control"
+    )
 
 
 @pytest.mark.parametrize(
@@ -870,7 +1028,7 @@ def test_synthetic_control_is_invoked_once_and_ambiguity_refused(control_type: s
         deadline = time.monotonic() + 3
         if duplicate:
             assert not result.invoked and result.reason == "ambiguous_named_control"
-            assert result.focus_attempts == 0
+            assert 1 <= result.focus_attempts <= 3
             ctypes.windll.user32.GetWindowTextW(root_hwnd, title, len(title))
             assert title.value == "Synthetic UIA", "ambiguous controls must not be activated"
         else:

@@ -98,6 +98,17 @@ and deadline expiry cannot authorize success or Save. Deadline expiry is unknown
 diagnosis. Focus acquisition is limited to three verified attempts with a 150 ms wait each; a failed
 focus/action is surfaced, and a human foreground switch is never overridden during handback.
 
+The action child focuses the held root before enumerating controls. Only enabled, visible,
+exactly named Invoke controls without an ExpandCollapse pattern qualify. A child provider must
+have a verified process/start ancestry chain to the held Desktop, and its nearest native renderer
+must belong to that provider and descend from the exact root. Under per-monitor DPI awareness,
+a native hit-test at the control's physical interior must land in that renderer's verified
+subtree. This is ownership corroboration only: there is no coordinate click or activation.
+Exactly one candidate must survive; zero, multiple, missing geometry or changed ownership refuse.
+The child reacquires and revalidates the selected control, ancestry, renderer/hit ownership and
+foreground before Invoke. Refusals after focus acquisition also attempt truthful best-effort
+handback only while Desktop still owns foreground. The same rules apply to Refresh and Save.
+
 Mode decoding uses the engine's `ModeType` for `Model.DefaultMode` and `Partition.Mode`:
 Import=0, DirectQuery=1, Default=2, Push=3, Dual=4, DirectLake=5. Only partition Default
 inherits a positively established Import model default; missing metadata does not inherit.
