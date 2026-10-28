@@ -1,6 +1,6 @@
 ---
 name: pbip-model-refresh
-description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop, and persist the result to .pbi/cache.abf (headlessly via AMO Server.ImageSave, UI-Automation fallback). Persisting is the DEFAULT - opt OUT with `--no-save` for read-only or validate-then-deploy work; saving aligns database.tmdl's declared compatibilityLevel so the cache stays loadable, and the cache write is staged and swapped atomically. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. For DAX-only edits, pass `--calculate-only` / `--measures-only` to recalculate formulas without re-reading source rows. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
+description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop, and persist the result to .pbi/cache.abf (headlessly via AMO Server.ImageSave, UI-Automation fallback). Persisting is the DEFAULT - opt OUT with `--no-save` for read-only or validate-then-deploy work; saving aligns database.tmdl's declared compatibilityLevel so the cache stays loadable, and the cache write is staged and swapped atomically. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. For DAX-only edits, pass `--calculate-only` / `--measures-only` to recalculate formulas without re-reading source rows. `--ui-refresh` is a separate explicit route for supported whole-model Import M models and requires typed engine completion evidence. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
 ---
 
 # Refresh a local PBIP model, and make the data survive a close
@@ -30,6 +30,9 @@ so `dotnet add` cannot silently no-op on a net10 default:
   exact-identity observation supervisor, closed diagnostics and private short-lived image leases.
 - [**`scripts/_desktop_uia.ps1`**](scripts/_desktop_uia.ps1) - private bounded Win32/UIA fact harvest;
   no policy, clicks, Refresh invocation or polling arbiter. It is not a user-facing command.
+- `scripts/_desktop_actions.py` and [`scripts/_desktop_actions.ps1`](scripts/_desktop_actions.ps1) -
+  private bounded child supervision and one named UIA action for the explicit `--ui-refresh` route;
+  neither decides engine completion or classifies prompts.
 - [**`tests/`**](tests) - the regression suite for both, runnable from this folder
   (`pytest tests`). It is what makes the portability claim below checkable rather than aspirational.
 
@@ -49,8 +52,35 @@ A migrated model hands over as *TMDL plus a promise*. Two things go wrong:
 ```
 python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"]
                                      [--calculate-only|--measures-only] [--no-save] [--verify-only]
-                                     [--ui-save]
+                                     [--ui-save] [--ui-refresh]
 ```
+
+### Explicit foreground UI refresh
+
+`--ui-refresh` is an opt-in route; the existing XMLA default and migration gates do not change. It
+invokes one named Desktop **Refresh** control, then waits for engine metadata—not the Invoke return,
+quiet UI, or positive cached rows—to prove that the exact source-partition set stayed bound and every
+Import M source partition became `READY` with a typed UTC `RefreshedTime` strictly newer than its
+baseline and at or after the action start. It never retries Refresh or falls back to AMO/XMLA
+processing. After completion it runs the existing canary checks on that same held binding. An
+optional named UI **Save** is invoked only after completion, positive required row checks, a fresh
+READY observer state and the existing model-identity check; `--no-save` suppresses every Save.
+
+The initial supported surface is whole-model Import M source partitions. DirectQuery, Dual/mixed,
+unsupported source kinds, modes that cannot be resolved from model/table metadata, custom-query
+auto mode, changed or incomplete partition metadata, a non-READY initial observer, and
+`--verify-only`, any `--tables` argument
+(including an empty one), `--calculate-only` or `--measures-only` refuse before Refresh. Supply
+`--canaries` to verify commissioned source tables. Positive rows alone do not prove processing;
+no-action timestamp rereads, partial advancement, stale timestamps, prompt/unknown observer evidence
+and deadline expiry cannot authorize success or Save. Deadline expiry is unknown, not a credential
+diagnosis. Focus acquisition is limited to three verified attempts with a 150 ms wait each; a failed
+focus/action is surfaced, and a human foreground switch is never overridden during handback.
+
+This is not exclusive attribution against a human refreshing the same Desktop instance. Partition
+timestamps do not prove upstream freshness, source reachability beyond the commissioned canaries,
+query equivalence, or cold-reopen durability. UI Save Invoke and the legacy cache timestamp display
+are not persistence proof.
 
 ### Read an already-detected dialog at the failing tool (#498)
 
@@ -546,7 +576,12 @@ on `WRONG_MODEL` instead of writing stale state.
 | Path | What it is | Status |
 |---|---|---|
 | **AMO `Server.ImageSave(databaseId, Stream)`** | Writes `cache.abf` directly from the engine. No UI, works headless; staged to a per-run private file and swapped in atomically, so a failed/partial write (or a concurrent second run) can't destroy an existing good cache. | **Default (opt out with `--no-save`)** |
-| **UI Automation (`InvokePattern` on the "Save" element)** | Drives Desktop's own Save through the Windows *accessibility* tree. | Fallback / `--ui-save` |
+| **UI Automation (`InvokePattern` on the named "Save" element)** | Drives Desktop's own Save through the Windows *accessibility* tree. | Legacy fallback / `--ui-save`; also the optional save after explicit `--ui-refresh` |
+
+⚠️ **UI Save can rewrite model definitions.** Desktop Save may update serialized definitions,
+inferred data types, and auto-date scaffolding in addition to writing `cache.abf`; it is not
+byte-neutral. The `--ui-refresh` route therefore saves only after its engine and canary checks, and
+its Invoke is never described as committed persistence or cold-reopen proof.
 
 ⚠️ **Read the `--no-save` warning above before using either.** Both write the same `cache.abf`. A
 present cache was once believed to make the PBIP unopenable; root-caused 2026-08-07, that was a

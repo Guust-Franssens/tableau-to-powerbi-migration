@@ -3,7 +3,7 @@ purpose: Refresh a local PBIP model in Power BI Desktop and PERSIST the result, 
          (and the next Desktop open) sees real data instead of an empty model.
 usage:   python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py
              [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"]
-             [--calculate-only] [--no-save]
+             [--calculate-only] [--no-save] [--ui-refresh]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/refresh_pbip_model.py` in this repo is a forwarding shim.)
 
@@ -107,6 +107,8 @@ from probe_desktop_query import (
     _load_adomd,
     _observation_errors,
     _validate_observation_request,
+    bind_desktop,
+    bound_call,
     column_names,
     desktop_identity,
     discover_port,
@@ -114,8 +116,18 @@ from probe_desktop_query import (
     is_auto_date_table_name,
     measure_names,
     nuget_packages_root,
+    probe_observations,
     recheck_bound,
     table_names,
+)
+from _desktop_actions import (
+    ACTION_CHILD_TIMEOUT_SECONDS,
+    CompletionResult,
+    DesktopActionError,
+    PartitionSnapshot,
+    check_completion,
+    invoke_desktop_action,
+    read_partition_snapshot,
 )
 
 # Cache-file integrity + atomic staged-write/rollback primitives live in _abf so this module
@@ -169,6 +181,7 @@ from _desktop_observer import (
     print_refresh_unknown_banner,
     raise_terminal_detection,
     print_operation_refusal,
+    main_frame,
     POLL_INTERVAL_SECONDS,
     source_hint_from_model,
 )
@@ -196,6 +209,17 @@ class PersistenceObservation:
     image: ImageObservation
     identity: DesktopIdentity
     method: Literal["AMO_ImageSave"] = "AMO_ImageSave"
+
+
+@dataclass(frozen=True, slots=True)
+class UIRefreshContext:
+    """The held Desktop/model identity shared by one explicit UI refresh operation."""
+
+    pid: int
+    port: int
+    bound: BoundDesktop
+    root_hwnd: int
+    source_hint: str | None
 
 
 SAVE_TIMEOUT_SECONDS = 120
@@ -1939,6 +1963,371 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
     return None
 
 
+def _ui_root(state: Observation, pid: int, expected_start: str) -> int:
+    """Require one complete READY observer snapshot and return its exact main-window handle."""
+    if not state.complete or state.state != "READY" or state.process_started_at != expected_start:
+        raise DesktopActionError("initial observer state is not complete READY for the held process")
+    frame = state.target_window or main_frame(state.windows)
+    if frame is None or not isinstance(frame.hwnd, int) or frame.hwnd <= 0:
+        raise DesktopActionError("observer did not establish one actionable root window")
+    if frame.pid is not None and frame.pid != str(pid):
+        raise DesktopActionError("observer root belongs to another process")
+    if frame.process_started_at is not None and frame.process_started_at != expected_start:
+        raise DesktopActionError("observer root process identity changed")
+    return frame.hwnd
+
+
+def _ui_observer_state(
+    context: UIRefreshContext,
+    *,
+    allow_progress: bool = False,
+    timeout_seconds: float = 8.0,
+) -> Observation:
+    """Reuse the existing observer and prompt authority while requiring the held root identity."""
+    state = _in_flight_credential_state(
+        context.pid,
+        expected_process_start=context.bound.identity.process_start,
+        timeout_s=max(0.01, min(8.0, timeout_seconds)),
+    )
+    raise_terminal_detection(context.pid, state, context.source_hint)
+    if not state.complete:
+        raise CredentialUnknownError(
+            context.pid,
+            state.unknown_reason or state.reason or "observer_incomplete",
+        )
+    if state.state not in {"READY", "REFRESH_IN_PROGRESS"}:
+        raise CredentialUnknownError(
+            context.pid,
+            state.unknown_reason or state.reason or "observer_not_ready",
+        )
+    frame = state.target_window or main_frame(state.windows)
+    if frame is None or frame.hwnd != context.root_hwnd:
+        raise DesktopUnreadyError(context.pid, "window_identity_changed")
+    if frame.process_started_at is not None and frame.process_started_at != context.bound.identity.process_start:
+        raise DesktopGoneError(context.pid, "process_identity_changed")
+    if state.state == "REFRESH_IN_PROGRESS" and allow_progress:
+        return state
+    if state.state != "READY":
+        raise CredentialUnknownError(
+            context.pid,
+            state.unknown_reason or state.reason or "observer_not_ready",
+        )
+    return state
+
+
+def _wait_for_engine_completion(
+    context: UIRefreshContext,
+    baseline: PartitionSnapshot,
+    action_started_ticks: int,
+    timeout_seconds: float,
+) -> tuple[bool, CompletionResult | None]:
+    """Poll exact typed partition evidence under the existing deadline and observer supervisor."""
+    deadline = time.monotonic() + timeout_seconds
+    cancelled = threading.Event()
+    outcome: dict[str, object] = {}
+    initial_remaining = deadline - time.monotonic()
+    initial_state = _ui_observer_state(
+        context,
+        allow_progress=True,
+        timeout_seconds=initial_remaining,
+    )
+
+    def poll() -> None:
+        try:
+            while not cancelled.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("engine completion deadline expired")
+                current = read_partition_snapshot(context.bound, timeout_seconds=min(8.0, remaining))
+                completed_at = time.monotonic()
+                if completed_at >= deadline:
+                    raise TimeoutError("engine completion result arrived after deadline")
+                result = check_completion(baseline, current, action_started_ticks)
+                if result.complete:
+                    outcome["result"] = result
+                    outcome["completed_at"] = completed_at
+                    return
+                time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            raise TimeoutError("engine completion wait was cancelled")
+        except BaseException as exc:  # pylint: disable=broad-exception-caught
+            outcome["error"] = exc
+            outcome["completed_at"] = time.monotonic()
+
+    def inspect_observer(target_pid: int) -> Observation:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("observer deadline expired")
+        state = _in_flight_credential_state(
+            target_pid,
+            expected_process_start=context.bound.identity.process_start,
+            timeout_s=min(8.0, remaining),
+        )
+        raise_terminal_detection(target_pid, state, context.source_hint)
+        if state.state not in {"READY", "REFRESH_IN_PROGRESS"} or not state.complete:
+            raise CredentialUnknownError(target_pid, state.unknown_reason or state.reason or "observer_not_ready")
+        frame = state.target_window or main_frame(state.windows)
+        if frame is None or frame.hwnd != context.root_hwnd:
+            raise DesktopUnreadyError(target_pid, "window_identity_changed")
+        return state
+
+    worker = threading.Thread(target=poll, name="ui-refresh-engine-completion", daemon=True)
+    worker.start()
+    try:
+        settled = _wait_refresh_worker(
+            worker,
+            desktop_pid=context.pid,
+            source_hint=context.source_hint,
+            initial_state=initial_state,
+            total_timeout=timeout_seconds,
+            progress_monitor=None,
+            observation_mode=True,
+            detector=inspect_observer,
+            deadline=deadline,
+            completed_at=lambda: outcome.get("completed_at"),
+        )
+    except BaseException:
+        cancelled.set()
+        worker.join(timeout=8.5)
+        raise
+    cancelled.set()
+    worker.join(timeout=8.5)
+    if worker.is_alive():
+        return False, None
+    if not settled or "result" not in outcome:
+        error = outcome.get("error")
+        if error is not None and not isinstance(error, TimeoutError):
+            raise error
+        return False, None
+    return True, outcome["result"]  # type: ignore[return-value]
+
+
+def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals
+    pid: int,
+    port: int,
+    cache: Path | None,
+    args: argparse.Namespace,
+    initial_state: Observation,
+) -> int:
+    """Run explicit UI refresh with independent engine completion, held canaries and optional UI Save."""
+    if cache is None:
+        print("REFRESH: ERROR no model cache path resolved; refusing the UI route")
+        return 2
+    if not initial_state.complete or initial_state.state != "READY":
+        print("REFRESH: UI_PREFLIGHT_REFUSED (the initial observer snapshot was not complete READY)")
+        return 3
+    try:
+        root_hwnd = _ui_root(initial_state, pid, initial_state.process_started_at or "")
+        bound = bind_desktop(pid, supplied_port=port)
+        if bound.identity.process_start != initial_state.process_started_at:
+            raise DesktopActionError("bound process identity differs from the initial observer")
+        context = UIRefreshContext(
+            pid=pid,
+            port=port,
+            bound=bound,
+            root_hwnd=root_hwnd,
+            source_hint=source_hint_from_model(cache.parent.parent),
+        )
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print(f"REFRESH: UI_PREFLIGHT_REFUSED ({type(exc).__name__}: {exc})")
+        return 2
+
+    lock_path = cache.with_name(cache.name + ".lock")
+    lock_context = model_lock(lock_path, timeout=PERSIST_LOCK_TIMEOUT_SECONDS) if lock_path.parent.exists() else None
+    try:
+        if lock_context is None:
+            return _ui_refresh_locked(context, cache, args)
+        with lock_context:
+            return _ui_refresh_locked(context, cache, args)
+    except ModelLockTimeout as exc:
+        print(f"REFRESH: NOT_PERSISTED (model lock unavailable: {exc})")
+        return 1
+
+
+def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-statements
+    context: UIRefreshContext,
+    cache: Path,
+    args: argparse.Namespace,
+) -> int:
+    """The UI route while holding the existing per-model cooperative lock when available."""
+    before_stamp = cache.stat().st_mtime if cache.exists() else 0.0
+    timeout_seconds = args.refresh_absolute_timeout_seconds
+    try:
+        _ui_observer_state(context)
+        bound_call(context.bound, lambda _connection: None)
+        if not _identity_gate(context.port, cache):
+            return 2
+        baseline = read_partition_snapshot(context.bound)
+        if any(partition.state != 1 for partition in baseline.partitions):
+            raise DesktopActionError("initial source partition state is not READY")
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print(f"REFRESH: UI_PREFLIGHT_REFUSED ({type(exc).__name__}: {exc})")
+        return 2
+
+    deadline = time.monotonic() + timeout_seconds
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        print("REFRESH: TIMEOUT - UI refresh deadline expired before action")
+        return 3
+    try:
+        action = invoke_desktop_action(
+            "Refresh",
+            pid=context.pid,
+            expected_process_start=context.bound.identity.process_start,
+            root_hwnd=context.root_hwnd,
+            timeout_seconds=min(ACTION_CHILD_TIMEOUT_SECONDS, remaining),
+        )
+    except DesktopActionError as exc:
+        print(f"REFRESH: UI_ACTION_FAILED ({exc})")
+        return 2
+    if not action.invoked or action.action_started_ticks is None:
+        print(f"REFRESH: UI_ACTION_REFUSED ({action.reason}; focus attempts={action.focus_attempts})")
+        return 2
+    print(
+        "  UI Refresh: one named Invoke returned; engine completion remains unestablished "
+        f"(focus attempts={action.focus_attempts})"
+    )
+    if action.restore_requested and not action.handback_verified:
+        print("  UI handback: requested but not verified; Save will be withheld")
+    elif action.handback_verified:
+        print("  UI handback: verified or not required")
+    else:
+        print("  UI handback: foreground changed; prior focus was not overridden")
+
+    remaining = deadline - time.monotonic()
+    try:
+        complete, completion = _wait_for_engine_completion(
+            context,
+            baseline,
+            action.action_started_ticks,
+            max(0.0, remaining),
+        )
+    except CredentialMissingError as exc:
+        _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
+        return 1
+    except DialogFoundError as exc:
+        _emit_dialog_finding(exc.pid, exc.finding)
+        return 3
+    except CredentialUnknownError as exc:
+        _emit_credential_unknown(exc.pid, exc.reason)
+        return 3
+    except (DesktopGoneError, DesktopUnreadyError) as exc:
+        if isinstance(exc, DesktopGoneError):
+            _emit_desktop_gone(exc.pid, exc.reason)
+        else:
+            _emit_desktop_unready(exc.pid, exc.reason)
+        return 2
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print(f"REFRESH: COMPLETION_UNKNOWN ({type(exc).__name__}: {exc})")
+        return 3
+    if not complete or completion is None:
+        print("REFRESH: TIMEOUT - engine completion not established before the bounded deadline")
+        return 3
+    print(f"  engine completion: {completion.reason}")
+
+    try:
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            state = _ui_observer_state(
+                context,
+                allow_progress=True,
+                timeout_seconds=remaining,
+            )
+            if state.state == "READY":
+                break
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+        else:
+            print("REFRESH: COMPLETION_UNKNOWN (Desktop observer did not return to READY before deadline)")
+            return 3
+        canaries = _canary_tables(args)
+        implicit = not canaries
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print("REFRESH: TIMEOUT - data checks did not begin before the operation deadline")
+            return 3
+        targets = canaries or [bound_call(context.bound, first_table, timeout_seconds=min(8.0, remaining))]
+        observations = probe_observations(context.bound, targets, timeout_seconds=min(8.0, remaining))
+        if time.monotonic() >= deadline:
+            print("REFRESH: TIMEOUT - data-check result arrived after the operation deadline")
+            return 3
+        results = [(item.table, item.returned_rows) for item in observations]
+    except CredentialMissingError as exc:
+        _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
+        return 1
+    except DialogFoundError as exc:
+        _emit_dialog_finding(exc.pid, exc.finding)
+        return 3
+    except CredentialUnknownError as exc:
+        _emit_credential_unknown(exc.pid, exc.reason)
+        return 3
+    except (DesktopGoneError, DesktopUnreadyError) as exc:
+        if isinstance(exc, DesktopGoneError):
+            _emit_desktop_gone(exc.pid, exc.reason)
+        else:
+            _emit_desktop_unready(exc.pid, exc.reason)
+        return 2
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print(f"REFRESH: DATA_CHECK_FAILED ({type(exc).__name__}: {exc})")
+        return 2
+
+    if any(rows <= 0 for _, rows in results):
+        return _emit_data_verdict(cache, before_stamp, args, results, implicit)
+    if args.no_save:
+        return _emit_data_verdict(cache, before_stamp, args, results, implicit)
+    if not action.handback_verified:
+        print("REFRESH: NOT_PERSISTED (Refresh handback was not verified; refusing UI Save)")
+        return 1
+
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print("REFRESH: TIMEOUT - UI Save was not invoked after the operation deadline")
+            return 3
+        _ui_observer_state(
+            context,
+            timeout_seconds=remaining,
+        )
+        bound_call(context.bound, lambda _connection: None)
+        if not _identity_gate(context.port, cache):
+            return 2
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print("REFRESH: TIMEOUT - UI Save was not invoked after the operation deadline")
+            return 3
+        save_action = invoke_desktop_action(
+            "Save",
+            pid=context.pid,
+            expected_process_start=context.bound.identity.process_start,
+            root_hwnd=context.root_hwnd,
+            timeout_seconds=min(ACTION_CHILD_TIMEOUT_SECONDS, remaining),
+        )
+    except CredentialMissingError as exc:
+        _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
+        return 1
+    except DialogFoundError as exc:
+        _emit_dialog_finding(exc.pid, exc.finding)
+        return 3
+    except CredentialUnknownError as exc:
+        _emit_credential_unknown(exc.pid, exc.reason)
+        return 3
+    except (DesktopGoneError, DesktopUnreadyError) as exc:
+        if isinstance(exc, DesktopGoneError):
+            _emit_desktop_gone(exc.pid, exc.reason)
+        else:
+            _emit_desktop_unready(exc.pid, exc.reason)
+        return 2
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print(f"REFRESH: NOT_PERSISTED (UI Save was not established: {type(exc).__name__})")
+        return 1
+    if not save_action.invoked:
+        print(f"REFRESH: NOT_PERSISTED (UI Save refused: {save_action.reason})")
+        return 1
+    if not save_action.handback_verified:
+        print("REFRESH: NOT_PERSISTED (UI Save handback was not verified; write outcome unconfirmed)")
+        return 1
+    print("  UI Save: one named Invoke returned; persistence remains unconfirmed")
+    return _emit_data_verdict(cache, before_stamp, args, results, implicit)
+
+
 def _resolve_pid(pid: int | None) -> int | None:
     """The Desktop pid to act on: the one given, or the ONLY running instance - never a guess.
 
@@ -2039,6 +2428,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--verify-only", action="store_true", help="Skip refresh/save; just report the state")
     parser.add_argument(
+        "--ui-refresh",
+        action="store_true",
+        help=(
+            "Explicitly invoke one named Power BI Desktop Refresh; supports only whole-model Import M "
+            "source partitions and requires typed engine completion evidence"
+        ),
+    )
+    parser.add_argument(
         "--ui-save",
         action="store_true",
         help="Force the legacy UI-Automation save instead of AMO ImageSave (fallback/diagnostic)",
@@ -2069,9 +2466,28 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _validate_ui_refresh_args(args: argparse.Namespace) -> bool:
+    """Reject incompatible UI-refresh combinations before process discovery or any action."""
+    if not args.ui_refresh:
+        return True
+    exclusions = []
+    if args.verify_only:
+        exclusions.append("--verify-only")
+    if args.tables is not None:
+        exclusions.append("--tables")
+    if args.refresh_type != REFRESH_TYPE_FULL:
+        exclusions.append("--calculate-only/--measures-only")
+    if exclusions:
+        print(f"REFRESH: ERROR --ui-refresh cannot be combined with {', '.join(exclusions)}")
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-return-statements,too-many-statements
     """CLI entry point: refresh, save, and prove data is really there."""
     args = _build_arg_parser().parse_args(argv)
+    if not _validate_ui_refresh_args(args):
+        return 2
 
     pid = _resolve_pid(args.pid)
     if pid is None:
@@ -2115,6 +2531,9 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
     # fully self-consistent false positive, so it has to be caught BEFORE any of the three.
     if not _identity_gate(port, cache):
         return 2
+
+    if args.ui_refresh:
+        return _ui_refresh_and_save(pid, port, cache, args, credential_state)
 
     if not args.verify_only:
         outcome = _refresh_and_save(pid, port, cache, args, credential_state)
