@@ -166,7 +166,7 @@ try {
       throw 'identity'
     }
     $foreground = [DesktopActionNative]::GetForegroundWindow()
-    if ($attempt -gt 1 -and $foreground -ne $priorForeground -and $foreground -ne $targetHwnd) {
+    if ($foreground -ne $priorForeground -and $foreground -ne $targetHwnd) {
       $reason = 'foreground_changed'
       throw 'focus'
     }
