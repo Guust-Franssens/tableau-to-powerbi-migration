@@ -385,7 +385,7 @@ def test_cli_preflight_consumes_original_ui_deadline_before_any_action(
         assert calls == ["Refresh", "canaries"]
 
 
-@pytest.mark.parametrize("case", ["child", "stale_hit", "wrong_root", "changed_start", "geometry"])
+@pytest.mark.parametrize("case", ["child", "cached", "stale_hit", "wrong_root", "changed_start", "geometry"])
 def test_native_renderer_ownership_without_window_operations(case: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     body = source[source.index("function Get-ControlOwnership") : source.index("function Get-ProcessStart")]
@@ -425,7 +425,16 @@ $element = [pscustomobject]@{Current=[pscustomobject]@{
   Name='Refresh';IsEnabled=$true;IsOffscreen=$false;ProcessId=200;NativeWindowHandle=55;BoundingRectangle=$bounds
 }}
 BODY
-if (Get-ControlOwnership $element) { 'owned' } else { 'refused' }
+if ('CASE' -eq 'cached') {
+  $cache = @{}
+  $first = Get-ControlOwnership $element $cache
+  $second = Get-ControlOwnership $element $cache
+  if (-not $first -or -not $second -or $script:chainReads -ne 1) { throw 'cache not scan-local' }
+  [OwnershipFake]::Stale = $true
+  if (Get-ControlOwnership $element $cache) { throw 'native ownership improperly cached' }
+  if ($script:chainReads -ne 1) { throw 'provider chain not cached' }
+  'owned'
+} elseif (Get-ControlOwnership $element) { 'owned' } else { 'refused' }
 """.replace("CASE", case).replace("BODY", body)
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -435,7 +444,7 @@ if (Get-ControlOwnership $element) { 'owned' } else { 'refused' }
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == ("owned" if case == "child" else "refused")
+    assert result.stdout.strip() == ("owned" if case in {"child", "cached"} else "refused")
 
 
 @pytest.mark.parametrize("case", ["valid", "wrong_start", "newer_parent", "cycle"])
@@ -470,7 +479,8 @@ if (Get-ProviderChain 200) { 'verified' } else { 'refused' }
 
 
 @pytest.mark.parametrize("count", [0, 1, 2])
-def test_selector_requires_one_owned_invoke_and_ignores_dropdowns(count: int) -> None:
+@pytest.mark.parametrize("identity", ["stable", "changed", "missing"])
+def test_selector_requires_one_owned_invoke_and_ignores_dropdowns(count: int, identity: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     body = source[source.index("function Get-ActionControl") : source.index("$attempts = 0")]
     body = body.replace("[System.Windows.Automation.AutomationElement]$RootElement", "$RootElement")
@@ -479,13 +489,24 @@ def test_selector_requires_one_owned_invoke_and_ignores_dropdowns(count: int) ->
     body = body[:start] + "  $buttonElements = $RootElement\n  $splitElements = @()\n" + body[end:]
     body = body.replace("[System.Windows.Automation.InvokePattern]::Pattern", "'Invoke'")
     body = body.replace("[System.Windows.Automation.ExpandCollapsePattern]::Pattern", "'Expand'")
-    script = r"""
+    script = (
+        r"""
 $ErrorActionPreference = 'Stop'
 $Action = 'Save'
-function Get-ControlOwnership { param($e) return $e.Owned }
+function Get-ControlOwnership {
+  param($e, $cache)
+  $cache[[uint32]200] = '200/20;100/10'
+  return $e.Owned
+}
+function Get-ProviderChain {
+  param($provider)
+  if ('IDENTITY' -eq 'changed') { return '200/21;100/10' }
+  if ('IDENTITY' -eq 'missing') { return $null }
+  return '200/20;100/10'
+}
 function New-Control($owned, $dropdown) {
   $e = [pscustomobject]@{Owned=$owned;Dropdown=$dropdown;Current=[pscustomobject]@{
-    Name='Save';IsEnabled=$true;IsOffscreen=$false
+    Name='Save';IsEnabled=$true;IsOffscreen=$false;ProcessId=200
   }}
   $e | Add-Member ScriptMethod TryGetCurrentPattern {
     param($pattern, $out)
@@ -496,8 +517,13 @@ function New-Control($owned, $dropdown) {
 $controls = @((New-Control $true $true), (New-Control $false $false))
 for ($i=0; $i -lt COUNT; $i++) { $controls += New-Control $true $false }
 BODY
-try { $null = Get-ActionControl $controls; 'selected' } catch { $script:reason }
-""".replace("COUNT", str(count)).replace("BODY", body)
+$invokes = 0
+try { $null = Get-ActionControl $controls; $invokes++; 'selected' } catch { $script:reason }
+if ('IDENTITY' -ne 'stable' -and COUNT -gt 0 -and $invokes -ne 0) { throw 'identity change admitted Invoke' }
+""".replace("COUNT", str(count))
+        .replace("IDENTITY", identity)
+        .replace("BODY", body)
+    )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
@@ -506,7 +532,10 @@ try { $null = Get-ActionControl $controls; 'selected' } catch { $script:reason }
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == {0: "named_control_missing", 1: "selected", 2: "ambiguous_named_control"}[count]
+    expected = {0: "named_control_missing", 1: "selected", 2: "ambiguous_named_control"}[count]
+    if count > 0 and identity != "stable":
+        expected = "provider_identity_changed"
+    assert result.stdout.strip() == expected
 
 
 @pytest.mark.parametrize("human_switch", [False, True])

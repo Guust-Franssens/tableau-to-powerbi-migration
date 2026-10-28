@@ -109,6 +109,12 @@ Exactly one candidate must survive; zero, multiple, missing geometry or changed 
 The child reacquires and revalidates the selected control, ancestry, renderer/hit ownership and
 foreground before Invoke. Refusals after focus acquisition also attempt truthful best-effort
 handback only while Desktop still owns foreground. The same rules apply to Refresh and Save.
+Each individual enumeration caches the verified ancestry/start chain once per distinct provider PID;
+renderer, root, geometry and native-hit checks remain live for every candidate. Every surviving
+provider is reread freshly before accepting the scan; changed or unavailable identity refuses the
+whole scan, not a reduced set. The cache is discarded after that enumeration. The second full
+uniqueness scan and independent selected/final ownership checks remain fresh, within the unchanged
+20-second child cap and overall deadline.
 
 Mode decoding uses the engine's `ModeType` for `Model.DefaultMode` and `Partition.Mode`:
 Import=0, DirectQuery=1, Default=2, Push=3, Dual=4, DirectLake=5. Only partition Default

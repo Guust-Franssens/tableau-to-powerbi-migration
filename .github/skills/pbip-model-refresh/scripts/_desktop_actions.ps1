@@ -65,11 +65,18 @@ function Get-ProviderChain {
 }
 
 function Get-ControlOwnership {
-  param($Element)
+  param($Element, [hashtable]$ScanChains = $null)
   if ([string]$Element.Current.Name -cne $Action -or
       -not $Element.Current.IsEnabled -or $Element.Current.IsOffscreen) { return $null }
   $providerPid = [uint32]$Element.Current.ProcessId
-  $chain = Get-ProviderChain $providerPid
+  if ($null -ne $ScanChains) {
+    if (-not $ScanChains.ContainsKey($providerPid)) {
+      $ScanChains[$providerPid] = Get-ProviderChain $providerPid
+    }
+    $chain = $ScanChains[$providerPid]
+  } else {
+    $chain = Get-ProviderChain $providerPid
+  }
   if (-not $chain) { return $null }
   $node = $Element
   $renderer = [IntPtr]::Zero
@@ -101,7 +108,7 @@ function Get-ControlOwnership {
   if (-not [DesktopActionNative]::BelongsTo($hit, $providerPid) -or
       ($hit -ne $renderer -and -not [DesktopActionNative]::IsChild($renderer, $hit))) { return $null }
   # Read the start chain again: geometry/native ownership cannot excuse PID reuse.
-  if ((Get-ProviderChain $providerPid) -cne $chain) { return $null }
+  if ($null -eq $ScanChains -and (Get-ProviderChain $providerPid) -cne $chain) { return $null }
   return "$chain|$($renderer.ToInt64())|$($hit.ToInt64())"
 }
 
@@ -186,6 +193,8 @@ function Get-ActionControl {
   $splitElements = $RootElement.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants, $splitButtonType)
   $named = [System.Collections.Generic.List[object]]::new()
+  $scanChains = @{}
+  $survivorProviders = [System.Collections.Generic.HashSet[uint32]]::new()
   foreach ($element in @($buttonElements) + @($splitElements)) {
     if ([string]$element.Current.Name -cne $Action -or
         -not $element.Current.IsEnabled -or $element.Current.IsOffscreen) { continue }
@@ -195,7 +204,18 @@ function Get-ActionControl {
         [System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) { continue }
     if ($element.TryGetCurrentPattern(
         [System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$expand)) { continue }
-    if (Get-ControlOwnership $element) { $named.Add($element) }
+    if (Get-ControlOwnership $element $scanChains) {
+      $named.Add($element)
+      [void]$survivorProviders.Add([uint32]$element.Current.ProcessId)
+    }
+  }
+  # A changed survivor invalidates the whole scan, never just a reduced candidate set.
+  foreach ($providerPid in $survivorProviders) {
+    $freshChain = Get-ProviderChain $providerPid
+    if (-not $freshChain -or $freshChain -cne $scanChains[$providerPid]) {
+      $script:reason = 'provider_identity_changed'
+      throw 'identity'
+    }
   }
   if ($named.Count -ne 1) {
     $script:reason = if ($named.Count -gt 1) { 'ambiguous_named_control' } else { 'named_control_missing' }
