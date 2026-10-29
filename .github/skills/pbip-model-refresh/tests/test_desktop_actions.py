@@ -11,6 +11,7 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import ctypes
@@ -37,6 +38,8 @@ from _desktop_actions import (
     invoke_desktop_action,
 )
 from refresh_pbip_model import UIRefreshContext
+
+WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
 
 
 BASELINE = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
@@ -263,6 +266,7 @@ def test_completion_awaits_real_bound_reader_progress_without_suppressing_refusa
 
 
 @pytest.mark.parametrize("change", ["foreground", "identity", "none"])
+@WINDOWS_ONLY
 def test_final_action_acquisition_rechecks_focus_and_identity_without_windows(change: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     body = source[source.rindex("  $target = Get-ActionControl (Test-Target)") : source.index("  $invoked = $true")]
@@ -313,6 +317,7 @@ Write-Output $script:count
     assert result.stdout.strip() == ("1" if change == "none" else "0")
 
 
+@WINDOWS_ONLY
 def test_selected_control_comparison_uses_real_supported_uia_element_api() -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     start = source.index("  $comparison =")
@@ -386,6 +391,7 @@ def test_cli_preflight_consumes_original_ui_deadline_before_any_action(
 
 
 @pytest.mark.parametrize("case", ["child", "cached", "stale_hit", "wrong_root", "changed_start", "geometry"])
+@WINDOWS_ONLY
 def test_native_renderer_ownership_without_window_operations(case: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     body = source[source.index("function Get-ControlOwnership") : source.index("function Get-ProcessStart")]
@@ -448,6 +454,7 @@ if ('CASE' -eq 'cached') {
 
 
 @pytest.mark.parametrize("case", ["valid", "wrong_start", "newer_parent", "cycle"])
+@WINDOWS_ONLY
 def test_provider_process_start_ancestry_is_required(case: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     body = source[source.index("function Get-ProviderChain") : source.index("function Get-ControlOwnership")]
@@ -480,6 +487,7 @@ if (Get-ProviderChain 200) { 'verified' } else { 'refused' }
 
 @pytest.mark.parametrize("count", [0, 1, 2])
 @pytest.mark.parametrize("identity", ["stable", "changed", "missing"])
+@WINDOWS_ONLY
 def test_selector_requires_one_owned_invoke_and_ignores_dropdowns(count: int, identity: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     body = source[source.index("function Get-ActionControl") : source.index("$attempts = 0")]
@@ -539,6 +547,7 @@ if ('IDENTITY' -ne 'stable' -and COUNT -gt 0 -and $invokes -ne 0) { throw 'ident
 
 
 @pytest.mark.parametrize("human_switch", [False, True])
+@WINDOWS_ONLY
 def test_selector_refusal_handback_preserves_human_foreground(human_switch: bool) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     start = source.index("  $foregroundAfter =")
@@ -576,6 +585,7 @@ BODY
 
 
 @pytest.mark.parametrize("case", ["success", "attach_failure", "human_switch", "bring_switch", "identity"])
+@WINDOWS_ONLY
 def test_thread_attachment_focus_body_detaches_and_preserves_human_switch(case: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     start = source.index("function Set-VerifiedForeground")
