@@ -502,14 +502,16 @@ def test_selector_requires_one_owned_invoke_and_ignores_dropdowns(count: int, id
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     body = source[source.index("function Get-ActionCandidates") : source.index("$attempts = 0")]
     body = body.replace("[System.Windows.Automation.AutomationElement]$RootElement", "$RootElement")
-    start = body.index("  $buttonType =")
-    end = body.index("  $named =", start)
-    body = body[:start] + "  $buttonElements = $RootElement\n  $splitElements = @()\n" + body[end:]
+    body = body.replace(
+        "$membershipComparison.Invoke($null, [object[]]@($element, $candidate.Element))",
+        "[object]::ReferenceEquals($element, $candidate.Element)",
+    )
     body = body.replace("[System.Windows.Automation.InvokePattern]::Pattern", "'Invoke'")
     body = body.replace("[System.Windows.Automation.ExpandCollapsePattern]::Pattern", "'Expand'")
     script = (
         r"""
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
 $Action = 'Save'
 function Get-ControlOwnership {
   param($e, $cache, [switch]$Prepare, $PreparedBinding=$null)
@@ -536,10 +538,12 @@ function New-Control($owned, $dropdown) {
 }
 $controls = @((New-Control $true $true), (New-Control $false $false))
 for ($i=0; $i -lt COUNT; $i++) { $controls += New-Control $true $false }
+$root = [pscustomobject]@{}
+$root | Add-Member ScriptMethod FindAll { param($scope,$condition) return $controls }
 BODY
 $invokes = 0
 try {
-  $candidates = Get-ActionCandidates $controls
+  $candidates = Get-ActionCandidates $root
   $null = Get-ActionControl $candidates
   $invokes++
   'selected'
@@ -576,14 +580,23 @@ if ('IDENTITY' -ne 'stable' -and COUNT -gt 0 -and $invokes -ne 0) { throw 'ident
         "dropdown",
         "stale",
         "second_pass_changed",
+        "added_at_focus",
+        "renamed_at_focus",
+        "added_after_selection",
+        "renamed_after_selection",
+        "replaced_at_focus",
     ],
 )
 @WINDOWS_ONLY
-def test_prepared_action_uses_no_foreground_enumeration_and_refuses_changed_candidates(case: str) -> None:
+def test_prepared_action_rediscovers_current_named_set_and_refuses_changed_candidates(case: str) -> None:
     """Execute the selection/action body with only fake controls, processes and native APIs."""
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     selection = source[source.index("function New-Result") : source.index("$attempts = 0")]
     selection = selection.replace("[System.Windows.Automation.AutomationElement]$RootElement", "$RootElement")
+    selection = selection.replace(
+        "$membershipComparison.Invoke($null, [object[]]@($element, $candidate.Element))",
+        "[object]::ReferenceEquals($element, $candidate.Element)",
+    )
     main = source[source.index("$attempts = 0") :]
     main = main.replace("[DesktopActionNative]", "[PreparedActionFake]")
     main = main.replace(
@@ -625,6 +638,11 @@ function Get-ControlOwnership {
   if ([PreparedActionFake]::Foreground -ne 789) { throw 'background hit test' }
   $hit=$e.Hit
   if ([object]::ReferenceEquals($e,$script:second) -and 'CASE' -eq 'second_pass_changed') { $e.Hit=$true }
+  if ([object]::ReferenceEquals($e,$script:first) -and -not $script:changedAfterSelection) {
+    if ('CASE' -eq 'added_after_selection') { $script:controls += New-Control $true }
+    if ('CASE' -eq 'renamed_after_selection') { $script:second.Current.Name='Refresh'; $script:second.Hit=$true }
+    $script:changedAfterSelection=$true
+  }
   if ($hit) { return "$binding|56" }
   return $null
 }
@@ -646,15 +664,29 @@ function New-Control($hit) {
 }
 $script:first=New-Control $true
 $script:second=New-Control $false
+$script:controls=@($script:first,$script:second)
+if ('CASE' -in @('renamed_at_focus','renamed_after_selection')) { $script:second.Current.Name='Other' }
 if ('CASE' -eq 'newly_enabled') { $script:second.Current.IsEnabled=$false }
 $script:root=[pscustomobject]@{}
 $script:root | Add-Member ScriptMethod FindAll {
   param($scope,$condition)
   $script:scans++
   $script:events += "scan:$([PreparedActionFake]::Foreground)"
-  if ([PreparedActionFake]::Foreground -eq 789) { throw 'foreground enumeration' }
+  if ($condition -is [System.Windows.Automation.AndCondition]) {
+    $terms=$condition.GetConditions()
+    if ($terms[0].Property -ne [System.Windows.Automation.AutomationElement]::NameProperty -or
+        $terms[0].Value -cne 'Refresh' -or
+        $terms[1] -isnot [System.Windows.Automation.OrCondition]) { throw 'query not narrow' }
+    $types=$terms[1].GetConditions()
+    if ($scope -ne [System.Windows.Automation.TreeScope]::Descendants -or $types.Count -ne 2 -or
+        $types[0].Property -ne [System.Windows.Automation.AutomationElement]::ControlTypeProperty -or
+        $types[1].Property -ne [System.Windows.Automation.AutomationElement]::ControlTypeProperty -or
+        $types[0].Value -ne [System.Windows.Automation.ControlType]::Button.Id -or
+        $types[1].Value -ne [System.Windows.Automation.ControlType]::SplitButton.Id) { throw 'wrong control types' }
+    return @($script:controls | Where-Object { $_.Current.Name -ceq 'Refresh' })
+  }
   if ($condition.Value -eq [System.Windows.Automation.ControlType]::Button.Id) {
-    return @($script:first,$script:second)
+    return $script:controls
   }
   return @()
 }
@@ -670,6 +702,9 @@ function Set-VerifiedForeground {
     if ('CASE' -eq 'renderer_changed') { $script:first.Renderer=57 }
     if ('CASE' -eq 'no_invoke') { $script:first.Invoke=$false }
     if ('CASE' -eq 'dropdown') { $script:first.Dropdown=$true }
+    if ('CASE' -eq 'added_at_focus') { $script:controls += New-Control $true }
+    if ('CASE' -eq 'renamed_at_focus') { $script:second.Current.Name='Refresh'; $script:second.Hit=$true }
+    if ('CASE' -eq 'replaced_at_focus') { $script:controls=@((New-Control $true),$script:second) }
   }
   [PreparedActionFake]::Foreground=$destination
   return $true
@@ -680,6 +715,9 @@ MAIN
 [pscustomobject]@{
   scans=$script:scans; invokes=$script:invokes; events=$script:events
   foreground=[PreparedActionFake]::Foreground.ToInt64()
+  eligible=@($script:controls | Where-Object {
+    $_.Current.Name -ceq 'Refresh' -and $_.Current.IsEnabled -and $_.Hit -and $_.Invoke -and -not $_.Dropdown
+  }).Count
 } | ConvertTo-Json -Compress
 """.replace("CASE", case)
         .replace("SELECTION", selection)
@@ -694,14 +732,18 @@ MAIN
     )
     assert result.returncode == 0, result.stderr
     action_result, facts = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-    assert facts["scans"] == 2
-    assert facts["events"][:3] == ["scan:456", "scan:456", "provider:456"], result.stdout
-    assert facts["events"][3] == "focus"
+    if case.startswith(("added_", "renamed_")):
+        assert facts["eligible"] == 2, result.stdout
+    elif case in {"valid", "replaced_at_focus"}:
+        assert facts["eligible"] == 1, result.stdout
     assert facts["foreground"] == 456
-    assert facts["invokes"] == (1 if case == "valid" else 0)
+    assert facts["invokes"] == (1 if case == "valid" else 0), result.stdout
     assert action_result["invoked"] is (case == "valid")
     assert action_result["handback_ok"] is True
+    assert facts["events"][:3] == ["scan:456", "provider:456", "focus"], result.stdout
+    assert facts["events"][3] == "scan:789", result.stdout
     if case == "valid":
+        assert facts["scans"] == 3
         assert facts["events"].count("provider:789") == 3
     elif case in {"ambiguous", "second_pass_changed"}:
         assert action_result["reason"] == "ambiguous_named_control"

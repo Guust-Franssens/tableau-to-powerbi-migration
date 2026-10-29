@@ -244,13 +244,15 @@ function Get-ActionCandidates {
   $splitButtonType = [System.Windows.Automation.PropertyCondition]::new(
     [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
     [System.Windows.Automation.ControlType]::SplitButton)
-  $buttonElements = $RootElement.FindAll(
-    [System.Windows.Automation.TreeScope]::Descendants, $buttonType)
-  $splitElements = $RootElement.FindAll(
-    [System.Windows.Automation.TreeScope]::Descendants, $splitButtonType)
+  $name = [System.Windows.Automation.PropertyCondition]::new(
+    [System.Windows.Automation.AutomationElement]::NameProperty, $Action)
+  $condition = [System.Windows.Automation.AndCondition]::new(
+    $name, [System.Windows.Automation.OrCondition]::new($buttonType, $splitButtonType))
+  $elements = $RootElement.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants, $condition)
   $named = [System.Collections.Generic.List[object]]::new()
   $scanChains = @{}
-  foreach ($element in @($buttonElements) + @($splitElements)) {
+  foreach ($element in $elements) {
     if ([string]$element.Current.Name -cne $Action) { continue }
     $pattern = $null
     $expand = $null
@@ -265,11 +267,33 @@ function Get-ActionCandidates {
       ProviderPid=[uint32]$element.Current.ProcessId
     })
   }
-  return [pscustomobject]@{ Controls=$named; Chains=$scanChains }
+  return [pscustomobject]@{
+    Controls=$named; Chains=$scanChains; RootElement=$RootElement; Condition=$condition
+  }
 }
 
 function Get-ActionControl {
   param($Candidates)
+  # Preparation cannot prove completeness after focus: controls can appear or be renamed.
+  # Rediscover only the exact Name/Button-or-SplitButton set, without repeating ownership walks.
+  $current = @($Candidates.RootElement.FindAll(
+    [System.Windows.Automation.TreeScope]::Descendants, $Candidates.Condition))
+  if ($current.Count -ne $Candidates.Controls.Count) {
+    $script:reason = 'selected_control_changed'
+    throw 'control'
+  }
+  $membershipComparison = [System.Windows.Automation.Automation].GetMethod('Compare', [type[]]@(
+    [System.Windows.Automation.AutomationElement], [System.Windows.Automation.AutomationElement]))
+  foreach ($element in $current) {
+    $matches = 0
+    foreach ($candidate in $Candidates.Controls) {
+      if ($membershipComparison.Invoke($null, [object[]]@($element, $candidate.Element))) { $matches++ }
+    }
+    if ($matches -ne 1) {
+      $script:reason = 'selected_control_changed'
+      throw 'control'
+    }
+  }
   $scanChains = @{}
   # Re-read each prepared provider once per pass, not once per control.
   foreach ($candidate in $Candidates.Controls) {
