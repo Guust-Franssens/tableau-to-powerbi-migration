@@ -34,6 +34,25 @@ public static class DesktopActionNative {
   [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint command);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll")] private static extern bool GetProcessTimes(
+    IntPtr process, out long creation, out long exit, out long kernel, out long user);
+  [DllImport("kernel32.dll")] private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+  public static string GetProcessStart(uint pid) {
+    // QUERY_LIMITED_INFORMATION | SYNCHRONIZE: no elevation or process-modification rights.
+    IntPtr handle = OpenProcess(0x101000, false, pid);
+    if (handle == IntPtr.Zero) return null;
+    try {
+      long creation, exit, kernel, user;
+      if (WaitForSingleObject(handle, 0) != 258 ||
+          !GetProcessTimes(handle, out creation, out exit, out kernel, out user) ||
+          WaitForSingleObject(handle, 0) != 258) return null;
+      long ticks = DateTime.FromFileTimeUtc(creation).Ticks;
+      // Win32_Process.CreationDate (DMTF) preserves microseconds, not the last 100 ns digit.
+      return (ticks - ticks % 10).ToString(System.Globalization.CultureInfo.InvariantCulture);
+    } finally { CloseHandle(handle); }
+  }
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint first, uint second, bool attach);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hwnd);
   [DllImport("user32.dll", SetLastError = true)] public static extern bool SetForegroundWindow(IntPtr hwnd);
@@ -45,26 +64,40 @@ public static class DesktopActionNative {
 }
 "@
 
+$script:processChains = @{}
+
 function Get-ProviderChain {
   param([uint32]$ProviderPid)
-  $chain = [System.Collections.Generic.List[string]]::new()
-  $seen = [System.Collections.Generic.HashSet[uint32]]::new()
-  $childStart = [Int64]::MaxValue
-  for ($depth = 0; $depth -lt 16; $depth++) {
-    if (-not $seen.Add($ProviderPid)) { return $null }
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProviderPid"
-    if ($null -eq $process) { return $null }
-    $start = $process.CreationDate.ToUniversalTime().Ticks
-    if ($start -gt $childStart) { return $null }
-    $chain.Add("$ProviderPid/$start")
-    if ($ProviderPid -eq [uint32]$DesktopPid) {
-      if ($start.ToString() -ne $ExpectedProcessStart) { return $null }
-      return $chain -join ';'
+  if (-not $script:processChains.ContainsKey($ProviderPid)) {
+    $chain = [System.Collections.Generic.List[object]]::new()
+    $seen = [System.Collections.Generic.HashSet[uint32]]::new()
+    $childStart = [Int64]::MaxValue
+    $processPid = $ProviderPid
+    for ($depth = 0; $depth -lt 16; $depth++) {
+      if (-not $seen.Add($processPid)) { return $null }
+      $process = Get-CimInstance Win32_Process -Filter "ProcessId=$processPid"
+      if ($null -eq $process -or $null -eq $process.CreationDate) { return $null }
+      $start = $process.CreationDate.ToUniversalTime().Ticks
+      if ($start -gt $childStart) { return $null }
+      $startText = $start.ToString([Globalization.CultureInfo]::InvariantCulture)
+      $chain.Add([pscustomobject]@{Pid=$processPid; Start=$startText})
+      if ($processPid -eq [uint32]$DesktopPid) {
+        if ($startText -cne $ExpectedProcessStart) { return $null }
+        break
+      }
+      $childStart = $start
+      $processPid = [uint32]$process.ParentProcessId
     }
-    $childStart = $start
-    $ProviderPid = [uint32]$process.ParentProcessId
+    if ($chain[$chain.Count - 1].Pid -ne [uint32]$DesktopPid) { return $null }
+    $script:processChains[$ProviderPid] = $chain
   }
-  return $null
+  # Parentage is immutable only within an incarnation. Recheck EVERY cached edge endpoint.
+  $identities = [System.Collections.Generic.List[string]]::new()
+  foreach ($process in $script:processChains[$ProviderPid]) {
+    if ([DesktopActionNative]::GetProcessStart($process.Pid) -cne $process.Start) { return $null }
+    $identities.Add("$($process.Pid)/$($process.Start)")
+  }
+  return $identities -join ';'
 }
 
 function Get-ControlOwnership {
@@ -120,9 +153,7 @@ function Get-ControlOwnership {
 }
 
 function Get-ProcessStart {
-  $process = Get-CimInstance Win32_Process -Filter "ProcessId=$DesktopPid"
-  if ($null -eq $process) { return $null }
-  return $process.CreationDate.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+  return [DesktopActionNative]::GetProcessStart([uint32]$DesktopPid)
 }
 
 function Get-WindowIdentity {
@@ -130,16 +161,16 @@ function Get-WindowIdentity {
   $windowPid = [uint32]0
   if (-not [DesktopActionNative]::IsWindow($Hwnd) -or
       [DesktopActionNative]::GetWindowThreadProcessId($Hwnd, [ref]$windowPid) -eq 0) { return $null }
-  $process = Get-CimInstance Win32_Process -Filter "ProcessId=$windowPid"
-  if ($null -eq $process) { return $null }
-  return "$windowPid/$($process.CreationDate.ToUniversalTime().Ticks)"
+  $start = [DesktopActionNative]::GetProcessStart($windowPid)
+  if (-not $start) { return $null }
+  return "$windowPid/$start"
 }
 
 function Set-VerifiedForeground {
-  param([IntPtr]$Destination, [IntPtr]$PermittedForeground, [string]$DestinationIdentity)
+  param([IntPtr]$Destination, [IntPtr]$PermittedForeground, [string]$DestinationIdentity, [switch]$Handback)
   $attached = [System.Collections.Generic.List[object]]::new()
   try {
-    if (-not (Test-Target) -or
+    if (-not (Test-Target -IdentityOnly:$Handback) -or
         (Get-WindowIdentity $Destination) -cne $DestinationIdentity -or
         [DesktopActionNative]::GetForegroundWindow() -ne $PermittedForeground) { return $false }
     $currentThread = [DesktopActionNative]::GetCurrentThreadId()
@@ -150,18 +181,18 @@ function Set-VerifiedForeground {
     $seen = [System.Collections.Generic.HashSet[uint32]]::new()
     foreach ($thread in @($foregroundThread, $targetThread)) {
       if ($thread -eq $currentThread -or -not $seen.Add($thread)) { continue }
-      if (-not (Test-Target) -or
+      if (-not (Test-Target -IdentityOnly:$Handback) -or
           (Get-WindowIdentity $Destination) -cne $DestinationIdentity -or
           [DesktopActionNative]::GetForegroundWindow() -ne $PermittedForeground) { return $false }
       if (-not [DesktopActionNative]::AttachThreadInput($currentThread, $thread, $true)) { return $false }
       $attached.Add(@($currentThread, $thread))
     }
-    if (-not (Test-Target) -or
+    if (-not (Test-Target -IdentityOnly:$Handback) -or
         (Get-WindowIdentity $Destination) -cne $DestinationIdentity -or
         [DesktopActionNative]::GetForegroundWindow() -ne $PermittedForeground) { return $false }
     [void][DesktopActionNative]::BringWindowToTop($Destination)
     # BringWindowToTop may itself activate the destination. A third window is a human switch.
-    if (-not (Test-Target) -or
+    if (-not (Test-Target -IdentityOnly:$Handback) -or
         (Get-WindowIdentity $Destination) -cne $DestinationIdentity) { return $false }
     $foreground = [DesktopActionNative]::GetForegroundWindow()
     if ($foreground -ne $PermittedForeground -and $foreground -ne $Destination) { return $false }
@@ -175,6 +206,7 @@ function Set-VerifiedForeground {
 }
 
 function Test-Target {
+  param([switch]$IdentityOnly)
   $start = Get-ProcessStart
   $root = [IntPtr]::new([Int64]$RootHandle)
   $expectedPid = [uint32]$DesktopPid
@@ -187,9 +219,15 @@ function Test-Target {
     return $false
   }
   if (-not [DesktopActionNative]::IsWindowVisible($root) -or
-      -not [DesktopActionNative]::IsWindowEnabled($root) -or
       [DesktopActionNative]::IsIconic($root) -or
       [DesktopActionNative]::GetWindow($root, 4) -ne [IntPtr]::Zero) {
+    $script:targetFailureReason = 'root_window_not_actionable'
+    return $false
+  }
+  # Returning focus does not invoke Desktop. A disabled root is not permission to act,
+  # but is still the held root; an activated modal/other HWND is never eligible for handback.
+  if ($IdentityOnly) { return $true }
+  if (-not [DesktopActionNative]::IsWindowEnabled($root)) {
     $script:targetFailureReason = 'root_window_not_actionable'
     return $false
   }
@@ -445,7 +483,7 @@ try {
       $restoreRequested = $true
       if ($priorIdentity -and (Get-WindowIdentity $priorForeground) -ceq $priorIdentity -and
           [DesktopActionNative]::GetForegroundWindow() -eq $targetHwnd) {
-        $restoreStarted = Set-VerifiedForeground $priorForeground $targetHwnd $priorIdentity
+        $restoreStarted = Set-VerifiedForeground $priorForeground $targetHwnd $priorIdentity -Handback
         Start-Sleep -Milliseconds 150
         $restoreVerified = $restoreStarted -and
           [DesktopActionNative]::GetForegroundWindow() -eq $priorForeground -and

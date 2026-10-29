@@ -463,7 +463,20 @@ if ('CASE' -eq 'prepared_occluded') {
     assert result.stdout.strip() == ("owned" if case in {"child", "cached", "prepared_occluded"} else "refused")
 
 
-@pytest.mark.parametrize("case", ["valid", "wrong_start", "newer_parent", "cycle"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "valid",
+        "wrong_start",
+        "newer_parent",
+        "cycle",
+        "native_mismatch",
+        "reused_provider",
+        "reused_parent",
+        "exited",
+        "denied",
+    ],
+)
 @WINDOWS_ONLY
 def test_provider_process_start_ancestry_is_required(case: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
@@ -471,8 +484,26 @@ def test_provider_process_start_ancestry_is_required(case: str) -> None:
     script = r"""
 $ErrorActionPreference='Stop'
 $DesktopPid='100'; $ExpectedProcessStart='10'
+$script:processChains=@{}; $script:cimReads=0; $script:changed=$false; $script:nativeReads=@()
+Add-Type @'
+using System;
+public static class ChainFake {
+  public static string Case;
+  public static bool Changed;
+  public static string GetProcessStart(uint p) {
+    if (Case=="native_mismatch") return "19";
+    if (Changed && (Case=="exited" || Case=="denied")) return null;
+    if (Changed && Case=="reused_provider" && p==200) return "21";
+    if (Changed && Case=="reused_parent" && p==100) return "11";
+    if (p==100) return Case=="wrong_start" ? "11" : Case=="newer_parent" ? "30" : "10";
+    return "20";
+  }
+}
+'@
+[ChainFake]::Case='CASE'
 function Get-CimInstance {
   param($Class, $Filter)
+  $script:cimReads++
   $id = [int]($Filter.Split('=')[1])
   $start = if ($id -eq 100) { 10 } else { 20 }
   $parent = 100
@@ -482,8 +513,14 @@ function Get-CimInstance {
   return [pscustomobject]@{CreationDate=[datetime]::new($start,[DateTimeKind]::Utc);ParentProcessId=$parent}
 }
 BODY
-if (Get-ProviderChain 200) { 'verified' } else { 'refused' }
-""".replace("CASE", case).replace("BODY", body)
+$first=Get-ProviderChain 200
+if ('CASE' -in @('valid','reused_provider','reused_parent','exited','denied') -and
+    $first -cne '200/20;100/10') { throw 'positive ancestry setup failed' }
+[ChainFake]::Changed=$true
+$second=Get-ProviderChain 200
+if ('CASE' -eq 'valid' -and $script:cimReads -ne 2) { throw "ancestry re-queried: $script:cimReads" }
+if ($second) { 'verified' } else { 'refused' }
+""".replace("CASE", case).replace("BODY", body.replace("[DesktopActionNative]", "[ChainFake]"))
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
@@ -493,6 +530,60 @@ if (Get-ProviderChain 200) { 'verified' } else { 'refused' }
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == ("verified" if case == "valid" else "refused")
+
+
+@pytest.mark.parametrize("case", ["valid", "denied", "exited_before", "exited_after", "wait_failed", "times_failed"])
+@WINDOWS_ONLY
+def test_native_process_time_preserves_cim_precision_and_closes_limited_handle(case: str) -> None:
+    source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("  public static string GetProcessStart(")
+    method = source[start : source.index('  [DllImport("user32.dll")]', start)]
+    script = r"""
+$ErrorActionPreference='Stop'
+Add-Type @'
+using System;
+public static class ProcessTimeFake {
+  public static string Case;
+  public static int Closed, Waits, Reads;
+  public static IntPtr OpenProcess(uint access,bool inherit,uint pid) {
+    if(access!=0x101000 || inherit || pid!=51552) throw new Exception("unexpected process rights/target");
+    return Case=="denied" ? IntPtr.Zero : (IntPtr)1;
+  }
+  public static uint WaitForSingleObject(IntPtr h,uint milliseconds) {
+    if(h!=(IntPtr)1 || milliseconds!=0) throw new Exception("blocking or wrong handle");
+    Waits++;
+    if(Case=="wait_failed") return 0xffffffff;
+    if(Case=="exited_before" || (Case=="exited_after" && Waits==2)) return 0;
+    return 258;
+  }
+  public static bool GetProcessTimes(IntPtr h,out long c,out long e,out long k,out long u) {
+    Reads++; c=new DateTime(639288946506233534,DateTimeKind.Utc).ToFileTimeUtc(); e=k=u=0;
+    return Case!="times_failed";
+  }
+  public static bool CloseHandle(IntPtr h) { Closed++; return true; }
+METHOD
+}
+'@
+[ProcessTimeFake]::Case='CASE'
+$actual=[ProcessTimeFake]::GetProcessStart(51552)
+[pscustomobject]@{value=$actual;closed=[ProcessTimeFake]::Closed;waits=[ProcessTimeFake]::Waits
+  reads=[ProcessTimeFake]::Reads} | ConvertTo-Json -Compress
+""".replace("CASE", case).replace("METHOD", method)
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    facts = json.loads(result.stdout)
+    # Independently measured retained PID: native 639288946506233534 -> CIM 639288946506233530.
+    assert facts["value"] == ("639288946506233530" if case == "valid" else None), result.stdout
+    assert facts["closed"] == (0 if case == "denied" else 1), result.stdout
+    assert facts["reads"] == (0 if case in {"denied", "exited_before", "wait_failed"} else 1), result.stdout
+    expected_waits = 0 if case == "denied" else 2 if case in {"valid", "exited_after"} else 1
+    assert facts["waits"] == expected_waits, result.stdout
 
 
 @pytest.mark.parametrize("count", [0, 1, 2])
@@ -565,6 +656,122 @@ if ('IDENTITY' -ne 'stable' -and COUNT -gt 0 -and $invokes -ne 0) { throw 'ident
     if identity != "stable":
         expected = "provider_identity_changed"
     assert result.stdout.strip() == expected
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["normal", "disabled_root", "initial_disabled", "owned_popup", "human_switch", "target_reused", "prior_reused"],
+)
+@WINDOWS_ONLY
+def test_native_identity_hot_path_and_disabled_root_handback_without_windows(case: str) -> None:
+    """Run the real focus/target/main bodies against fake native calls, never real windows."""
+    source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
+    functions = source[source.index("function Get-ProcessStart") : source.index("function Get-ActionCandidates")]
+    functions = functions.replace("[System.Windows.Automation.AutomationElement]::FromHandle($root)", "$script:root")
+    main = source[source.index("$attempts = 0") :]
+    main = main.replace(
+        "$comparison.Invoke($null, [object[]]@($selected, $target))", "[object]::ReferenceEquals($selected, $target)"
+    )
+    script = (
+        r"""
+$ErrorActionPreference='Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type @'
+using System;
+public static class HotPathFake {
+  public static string Case;
+  public static bool Invoked, Enabled=true;
+  public static IntPtr Foreground=(IntPtr)456;
+  public static int NativeReads, ForegroundReads, Attach, Detach;
+  public static string GetProcessStart(uint p) {
+    NativeReads++;
+    if (Invoked && ((Case=="target_reused" && p==100) || (Case=="prior_reused" && p==300))) return "11";
+    return "10";
+  }
+  public static bool IsWindow(IntPtr h) { return true; }
+  public static bool BelongsTo(IntPtr h,uint p) { return h==(IntPtr)789 && p==100; }
+  public static bool IsWindowVisible(IntPtr h) { return true; }
+  public static bool IsWindowEnabled(IntPtr h) { return Enabled; }
+  public static bool IsIconic(IntPtr h) { return false; }
+  public static IntPtr GetWindow(IntPtr h,uint command) { return IntPtr.Zero; }
+  public static IntPtr GetForegroundWindow() { ForegroundReads++; return Foreground; }
+  public static uint GetCurrentThreadId() { return 1; }
+  public static uint GetWindowThreadProcessId(IntPtr h,out uint p) {
+    p=h==(IntPtr)789 || h==(IntPtr)888 ? 100u : 300u; return h==(IntPtr)789 ? 2u : 3u;
+  }
+  public static bool AttachThreadInput(uint a,uint b,bool attach) {
+    if(attach) Attach++; else Detach++; return true;
+  }
+  public static bool BringWindowToTop(IntPtr h) { Foreground=h; return true; }
+  public static bool SetForegroundWindow(IntPtr h) { Foreground=h; return true; }
+  public static IntPtr SetThreadDpiAwarenessContext(IntPtr c) { return (IntPtr)1; }
+}
+'@
+[HotPathFake]::Case='CASE'
+if ('CASE' -eq 'initial_disabled') { [HotPathFake]::Enabled=$false }
+$Action='Refresh'; $DesktopPid='100'; $ExpectedProcessStart='10'; $RootHandle='789'
+$script:cimReads=0; $script:invokes=0; $script:postInvokeActionabilityReads=0
+function Get-CimInstance {
+  param($Class,$Filter)
+  $script:cimReads++
+  $id=[int]($Filter.Split('=')[1])
+  $ticks=10
+  if ([HotPathFake]::Invoked -and
+      (('CASE' -eq 'target_reused' -and $id -eq 100) -or
+       ('CASE' -eq 'prior_reused' -and $id -eq 300))) { $ticks=11 }
+  return [pscustomobject]@{CreationDate=[datetime]::new($ticks,[DateTimeKind]::Utc)}
+}
+$script:root=[pscustomobject]@{Current=[pscustomobject]@{ProcessId=100;NativeWindowHandle=789}}
+$script:control=[pscustomobject]@{}
+$script:control | Add-Member ScriptMethod TryGetCurrentPattern {
+  param($pattern,$output)
+  $invoke=[pscustomobject]@{}
+  $invoke | Add-Member ScriptMethod Invoke {
+    $script:invokes++; [HotPathFake]::Invoked=$true
+    if ('CASE' -eq 'disabled_root') { [HotPathFake]::Enabled=$false }
+    if ('CASE' -eq 'owned_popup') { [HotPathFake]::Foreground=[IntPtr]888 }
+    if ('CASE' -eq 'human_switch') { [HotPathFake]::Foreground=[IntPtr]999 }
+  }
+  $output.Value=$invoke; return $true
+}
+function Get-ActionCandidates { param($root) return @{} }
+function Get-ActionControl {
+  param($candidates) return [pscustomobject]@{Element=$script:control;Ownership='owned'}
+}
+function Get-ControlOwnership { param($target) return 'owned' }
+function Start-Sleep { param($Milliseconds) }
+FUNCTIONS
+MAIN
+[pscustomobject]@{invokes=$script:invokes;cim=$script:cimReads;native=[HotPathFake]::NativeReads
+  foreground=[HotPathFake]::Foreground.ToInt64();attach=[HotPathFake]::Attach;detach=[HotPathFake]::Detach
+} | ConvertTo-Json -Compress
+""".replace("CASE", case)
+        .replace("FUNCTIONS", functions)
+        .replace("MAIN", main)
+    )
+    script = script.replace("[DesktopActionNative]", "[HotPathFake]")
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    action_result, facts = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    assert facts["invokes"] == (0 if case == "initial_disabled" else 1), result.stdout
+    assert action_result["invoked"] is (case != "initial_disabled"), result.stdout
+    assert facts["attach"] == facts["detach"], result.stdout
+    assert facts["cim"] == 0, result.stdout
+    assert facts["native"] > 0, result.stdout
+    expected_foreground = {"owned_popup": 888, "human_switch": 999}.get(case, 789)
+    if case in {"normal", "disabled_root"}:
+        expected_foreground = 456
+    if case == "initial_disabled":
+        expected_foreground = 456
+        assert action_result["focus_attempts"] == 0
+    assert facts["foreground"] == expected_foreground, result.stdout
+    assert action_result["handback_ok"] is (case in {"normal", "disabled_root"}), result.stdout
 
 
 @pytest.mark.parametrize(
