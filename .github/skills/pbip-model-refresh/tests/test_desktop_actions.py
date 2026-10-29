@@ -269,7 +269,9 @@ def test_completion_awaits_real_bound_reader_progress_without_suppressing_refusa
 @WINDOWS_ONLY
 def test_final_action_acquisition_rechecks_focus_and_identity_without_windows(change: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
-    body = source[source.rindex("  $target = Get-ActionControl (Test-Target)") : source.index("  $invoked = $true")]
+    body = source[
+        source.rindex("  $targetControl = Get-ActionControl $candidates") : source.index("  $invoked = $true")
+    ]
     body = body.replace("[System.Windows.Automation.InvokePattern]::Pattern", "'Invoke'")
     body = body.replace("[DesktopActionNative]::GetForegroundWindow()", "$script:foreground")
     comparison_start = body.index("  $comparison =")
@@ -299,7 +301,7 @@ function Get-ActionControl {
     $output.Value = $invoke
     return $true
   }
-  return $control
+  return [pscustomobject]@{Element=$control;Ownership='owned'}
 }
 try {
 BODY
@@ -390,7 +392,9 @@ def test_cli_preflight_consumes_original_ui_deadline_before_any_action(
         assert calls == ["Refresh", "canaries"]
 
 
-@pytest.mark.parametrize("case", ["child", "cached", "stale_hit", "wrong_root", "changed_start", "geometry"])
+@pytest.mark.parametrize(
+    "case", ["child", "cached", "prepared_occluded", "stale_hit", "wrong_root", "changed_start", "geometry"]
+)
 @WINDOWS_ONLY
 def test_native_renderer_ownership_without_window_operations(case: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
@@ -424,14 +428,20 @@ function Get-ProviderChain {
   return '200/20;100/10'
 }
 [OwnershipFake]::WrongRoot = 'CASE' -eq 'wrong_root'
-[OwnershipFake]::Stale = 'CASE' -eq 'stale_hit'
+[OwnershipFake]::Stale = 'CASE' -in @('stale_hit', 'prepared_occluded')
 $bounds = [pscustomobject]@{IsEmpty=$false;Left=10;Top=10;Right=30;Bottom=30;Width=20;Height=20}
 if ('CASE' -eq 'geometry') { $bounds.Right = 101 }
 $element = [pscustomobject]@{Current=[pscustomobject]@{
   Name='Refresh';IsEnabled=$true;IsOffscreen=$false;ProcessId=200;NativeWindowHandle=55;BoundingRectangle=$bounds
 }}
 BODY
-if ('CASE' -eq 'cached') {
+if ('CASE' -eq 'prepared_occluded') {
+  if (-not (Get-ControlOwnership $element @{} -Prepare)) { throw 'occluded background preparation refused' }
+  $binding=$null
+  if (Get-ControlOwnership $element -PreparedBinding ([ref]$binding)) { throw 'occluded foreground resolution admitted' }
+  if ($binding -cne '200/20;100/10|55') { throw 'structural binding lost on a native hit refusal' }
+  'owned'
+} elseif ('CASE' -eq 'cached') {
   $cache = @{}
   $first = Get-ControlOwnership $element $cache
   $second = Get-ControlOwnership $element $cache
@@ -450,7 +460,7 @@ if ('CASE' -eq 'cached') {
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == ("owned" if case in {"child", "cached"} else "refused")
+    assert result.stdout.strip() == ("owned" if case in {"child", "cached", "prepared_occluded"} else "refused")
 
 
 @pytest.mark.parametrize("case", ["valid", "wrong_start", "newer_parent", "cycle"])
@@ -490,7 +500,7 @@ if (Get-ProviderChain 200) { 'verified' } else { 'refused' }
 @WINDOWS_ONLY
 def test_selector_requires_one_owned_invoke_and_ignores_dropdowns(count: int, identity: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
-    body = source[source.index("function Get-ActionControl") : source.index("$attempts = 0")]
+    body = source[source.index("function Get-ActionCandidates") : source.index("$attempts = 0")]
     body = body.replace("[System.Windows.Automation.AutomationElement]$RootElement", "$RootElement")
     start = body.index("  $buttonType =")
     end = body.index("  $named =", start)
@@ -502,9 +512,11 @@ def test_selector_requires_one_owned_invoke_and_ignores_dropdowns(count: int, id
 $ErrorActionPreference = 'Stop'
 $Action = 'Save'
 function Get-ControlOwnership {
-  param($e, $cache)
+  param($e, $cache, [switch]$Prepare, $PreparedBinding=$null)
+  if (-not $e.Owned) { return $null }
   $cache[[uint32]200] = '200/20;100/10'
-  return $e.Owned
+  if ($null -ne $PreparedBinding) { $PreparedBinding.Value='owned' }
+  return 'owned'
 }
 function Get-ProviderChain {
   param($provider)
@@ -526,7 +538,12 @@ $controls = @((New-Control $true $true), (New-Control $false $false))
 for ($i=0; $i -lt COUNT; $i++) { $controls += New-Control $true $false }
 BODY
 $invokes = 0
-try { $null = Get-ActionControl $controls; $invokes++; 'selected' } catch { $script:reason }
+try {
+  $candidates = Get-ActionCandidates $controls
+  $null = Get-ActionControl $candidates
+  $invokes++
+  'selected'
+} catch { $script:reason }
 if ('IDENTITY' -ne 'stable' -and COUNT -gt 0 -and $invokes -ne 0) { throw 'identity change admitted Invoke' }
 """.replace("COUNT", str(count))
         .replace("IDENTITY", identity)
@@ -541,9 +558,157 @@ if ('IDENTITY' -ne 'stable' -and COUNT -gt 0 -and $invokes -ne 0) { throw 'ident
     )
     assert result.returncode == 0, result.stderr
     expected = {0: "named_control_missing", 1: "selected", 2: "ambiguous_named_control"}[count]
-    if count > 0 and identity != "stable":
+    if identity != "stable":
         expected = "provider_identity_changed"
     assert result.stdout.strip() == expected
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "valid",
+        "ambiguous",
+        "disabled",
+        "newly_enabled",
+        "provider_changed",
+        "renderer_changed",
+        "no_invoke",
+        "dropdown",
+        "stale",
+        "second_pass_changed",
+    ],
+)
+@WINDOWS_ONLY
+def test_prepared_action_uses_no_foreground_enumeration_and_refuses_changed_candidates(case: str) -> None:
+    """Execute the selection/action body with only fake controls, processes and native APIs."""
+    source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
+    selection = source[source.index("function New-Result") : source.index("$attempts = 0")]
+    selection = selection.replace("[System.Windows.Automation.AutomationElement]$RootElement", "$RootElement")
+    main = source[source.index("$attempts = 0") :]
+    main = main.replace("[DesktopActionNative]", "[PreparedActionFake]")
+    main = main.replace(
+        "$comparison.Invoke($null, [object[]]@($selected, $target))",
+        "[object]::ReferenceEquals($selected, $target)",
+    )
+    script = (
+        r"""
+$ErrorActionPreference='Stop'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type @'
+using System;
+public static class PreparedActionFake {
+  public static IntPtr Foreground = (IntPtr)456;
+  public static IntPtr GetForegroundWindow() { return Foreground; }
+  public static IntPtr SetThreadDpiAwarenessContext(IntPtr c) { return (IntPtr)1; }
+}
+'@
+$Action='Refresh'; $DesktopPid='100'; $ExpectedProcessStart='10'; $RootHandle='789'
+$script:scans=0; $script:invokes=0; $script:providerReads=0; $script:events=@()
+function Get-ProviderChain {
+  param($provider)
+  $script:providerReads++
+  $script:events += "provider:$([PreparedActionFake]::Foreground)"
+  if ([PreparedActionFake]::Foreground -eq 789 -and 'CASE' -eq 'provider_changed') { return '200/21;100/10' }
+  return '200/20;100/10'
+}
+function Get-ControlOwnership {
+  param($e, $cache=$null, [switch]$Prepare, $PreparedBinding=$null)
+  if (-not $e.Current.IsEnabled) { return $null }
+  if ($null -eq $cache) { $chain=Get-ProviderChain 200 } else {
+    if (-not $cache.ContainsKey([uint32]200)) { $cache[[uint32]200]=Get-ProviderChain 200 }
+    $chain=$cache[[uint32]200]
+  }
+  if ([PreparedActionFake]::Foreground -eq 789 -and 'CASE' -eq 'stale') { throw 'stale element' }
+  $binding="$chain|$($e.Renderer)"
+  if ($null -ne $PreparedBinding) { $PreparedBinding.Value=$binding }
+  if ($Prepare) { return $binding }
+  if ([PreparedActionFake]::Foreground -ne 789) { throw 'background hit test' }
+  $hit=$e.Hit
+  if ([object]::ReferenceEquals($e,$script:second) -and 'CASE' -eq 'second_pass_changed') { $e.Hit=$true }
+  if ($hit) { return "$binding|56" }
+  return $null
+}
+function New-Control($hit) {
+  $e=[pscustomobject]@{Hit=$hit;Renderer=55;Invoke=$true;Dropdown=$false;Current=[pscustomobject]@{
+    Name='Refresh';IsEnabled=$true;IsOffscreen=$false;ProcessId=200
+  }}
+  $e | Add-Member ScriptMethod TryGetCurrentPattern {
+    param($pattern,$output)
+    if ($pattern -eq [System.Windows.Automation.InvokePattern]::Pattern) {
+      $invoke=[pscustomobject]@{}
+      $invoke | Add-Member ScriptMethod Invoke { $script:invokes++ }
+      $output.Value=$invoke
+      return $this.Invoke
+    }
+    return $this.Dropdown
+  }
+  return $e
+}
+$script:first=New-Control $true
+$script:second=New-Control $false
+if ('CASE' -eq 'newly_enabled') { $script:second.Current.IsEnabled=$false }
+$script:root=[pscustomobject]@{}
+$script:root | Add-Member ScriptMethod FindAll {
+  param($scope,$condition)
+  $script:scans++
+  $script:events += "scan:$([PreparedActionFake]::Foreground)"
+  if ([PreparedActionFake]::Foreground -eq 789) { throw 'foreground enumeration' }
+  if ($condition.Value -eq [System.Windows.Automation.ControlType]::Button.Id) {
+    return @($script:first,$script:second)
+  }
+  return @()
+}
+function Test-Target { return $script:root }
+function Get-WindowIdentity { param($h) return '100/10' }
+function Set-VerifiedForeground {
+  param($destination,$permitted,$identity)
+  if ($destination -eq 789) {
+    $script:events += 'focus'
+    if ('CASE' -eq 'ambiguous') { $script:second.Hit=$true }
+    if ('CASE' -eq 'disabled') { $script:first.Current.IsEnabled=$false }
+    if ('CASE' -eq 'newly_enabled') { $script:second.Current.IsEnabled=$true; $script:second.Hit=$true }
+    if ('CASE' -eq 'renderer_changed') { $script:first.Renderer=57 }
+    if ('CASE' -eq 'no_invoke') { $script:first.Invoke=$false }
+    if ('CASE' -eq 'dropdown') { $script:first.Dropdown=$true }
+  }
+  [PreparedActionFake]::Foreground=$destination
+  return $true
+}
+function Start-Sleep { param($Milliseconds) }
+SELECTION
+MAIN
+[pscustomobject]@{
+  scans=$script:scans; invokes=$script:invokes; events=$script:events
+  foreground=[PreparedActionFake]::Foreground.ToInt64()
+} | ConvertTo-Json -Compress
+""".replace("CASE", case)
+        .replace("SELECTION", selection)
+        .replace("MAIN", main)
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    action_result, facts = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    assert facts["scans"] == 2
+    assert facts["events"][:3] == ["scan:456", "scan:456", "provider:456"], result.stdout
+    assert facts["events"][3] == "focus"
+    assert facts["foreground"] == 456
+    assert facts["invokes"] == (1 if case == "valid" else 0)
+    assert action_result["invoked"] is (case == "valid")
+    assert action_result["handback_ok"] is True
+    if case == "valid":
+        assert facts["events"].count("provider:789") == 3
+    elif case in {"ambiguous", "second_pass_changed"}:
+        assert action_result["reason"] == "ambiguous_named_control"
+    elif case == "provider_changed":
+        assert action_result["reason"] == "provider_identity_changed"
+    elif case not in {"valid", "stale"}:
+        assert action_result["reason"] == "selected_control_changed"
 
 
 @pytest.mark.parametrize("human_switch", [False, True])

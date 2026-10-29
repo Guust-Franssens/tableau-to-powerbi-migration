@@ -68,7 +68,7 @@ function Get-ProviderChain {
 }
 
 function Get-ControlOwnership {
-  param($Element, [hashtable]$ScanChains = $null)
+  param($Element, [hashtable]$ScanChains = $null, [switch]$Prepare, $PreparedBinding = $null)
   if ([string]$Element.Current.Name -cne $Action -or
       -not $Element.Current.IsEnabled -or $Element.Current.IsOffscreen) { return $null }
   $providerPid = [uint32]$Element.Current.ProcessId
@@ -104,6 +104,10 @@ function Get-ControlOwnership {
   }
   if ($bounds.Left -lt $rect.Left -or $bounds.Top -lt $rect.Top -or
       $bounds.Right -gt $rect.Right -or $bounds.Bottom -gt $rect.Bottom) { return $null }
+  $binding = "$chain|$($renderer.ToInt64())"
+  if ($null -ne $PreparedBinding) { $PreparedBinding.Value = $binding }
+  # Native hit testing is meaningful only after the target is foreground.
+  if ($Prepare) { return $binding }
   $point = [DesktopActionNative+Point]::new()
   $point.X = [int][Math]::Floor($bounds.Left + $bounds.Width / 2)
   $point.Y = [int][Math]::Floor($bounds.Top + $bounds.Height / 2)
@@ -112,7 +116,7 @@ function Get-ControlOwnership {
       ($hit -ne $renderer -and -not [DesktopActionNative]::IsChild($renderer, $hit))) { return $null }
   # Read the start chain again: geometry/native ownership cannot excuse PID reuse.
   if ($null -eq $ScanChains -and (Get-ProviderChain $providerPid) -cne $chain) { return $null }
-  return "$chain|$($renderer.ToInt64())|$($hit.ToInt64())"
+  return "$binding|$($hit.ToInt64())"
 }
 
 function Get-ProcessStart {
@@ -232,7 +236,7 @@ function New-Result {
   }
 }
 
-function Get-ActionControl {
+function Get-ActionCandidates {
   param([System.Windows.Automation.AutomationElement]$RootElement)
   $buttonType = [System.Windows.Automation.PropertyCondition]::new(
     [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
@@ -246,27 +250,58 @@ function Get-ActionControl {
     [System.Windows.Automation.TreeScope]::Descendants, $splitButtonType)
   $named = [System.Collections.Generic.List[object]]::new()
   $scanChains = @{}
-  $survivorProviders = [System.Collections.Generic.HashSet[uint32]]::new()
   foreach ($element in @($buttonElements) + @($splitElements)) {
-    if ([string]$element.Current.Name -cne $Action -or
-        -not $element.Current.IsEnabled -or $element.Current.IsOffscreen) { continue }
+    if ([string]$element.Current.Name -cne $Action) { continue }
     $pattern = $null
     $expand = $null
-    if (-not $element.TryGetCurrentPattern(
-        [System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) { continue }
-    if ($element.TryGetCurrentPattern(
-        [System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$expand)) { continue }
-    if (Get-ControlOwnership $element $scanChains) {
-      $named.Add($element)
-      [void]$survivorProviders.Add([uint32]$element.Current.ProcessId)
-    }
+    $actionable = $element.TryGetCurrentPattern(
+      [System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern) -and -not $element.TryGetCurrentPattern(
+      [System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$expand)
+    $ownership = Get-ControlOwnership $element $scanChains -Prepare
+    $named.Add([pscustomobject]@{
+      Element=$element
+      Ownership=$ownership
+      Actionable=$actionable
+      ProviderPid=[uint32]$element.Current.ProcessId
+    })
   }
-  # A changed survivor invalidates the whole scan, never just a reduced candidate set.
-  foreach ($providerPid in $survivorProviders) {
+  return [pscustomobject]@{ Controls=$named; Chains=$scanChains }
+}
+
+function Get-ActionControl {
+  param($Candidates)
+  $scanChains = @{}
+  # Re-read each prepared provider once per pass, not once per control.
+  foreach ($candidate in $Candidates.Controls) {
+    if (-not $candidate.Ownership) { continue }
+    $providerPid = $candidate.ProviderPid
+    if ($scanChains.ContainsKey($providerPid)) { continue }
     $freshChain = Get-ProviderChain $providerPid
-    if (-not $freshChain -or $freshChain -cne $scanChains[$providerPid]) {
+    if (-not $freshChain -or $freshChain -cne $Candidates.Chains[$providerPid]) {
       $script:reason = 'provider_identity_changed'
       throw 'identity'
+    }
+    $scanChains[$providerPid] = $freshChain
+  }
+  $named = [System.Collections.Generic.List[object]]::new()
+  foreach ($candidate in $Candidates.Controls) {
+    $element = $candidate.Element
+    $pattern = $null
+    $expand = $null
+    $actionable = $element.TryGetCurrentPattern(
+      [System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern) -and -not $element.TryGetCurrentPattern(
+      [System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$expand)
+    $binding = $null
+    $ownership = Get-ControlOwnership $element $scanChains -Prepare:(-not $candidate.Actionable) `
+      -PreparedBinding ([ref]$binding)
+    # A stale prepared control invalidates the set; never silently drop it.
+    if ($binding -cne $candidate.Ownership -or $actionable -ne $candidate.Actionable) {
+      $script:reason = 'selected_control_changed'
+      throw 'control'
+    }
+    if (-not $candidate.Actionable -or -not $candidate.Ownership) { continue }
+    if ($ownership) {
+      $named.Add([pscustomobject]@{ Element=$element; Ownership=$ownership })
     }
   }
   if ($named.Count -ne 1) {
@@ -300,6 +335,7 @@ try {
     $reason = $script:targetFailureReason
     throw 'target'
   }
+  $candidates = Get-ActionCandidates $rootElement
   for ($attempt = 1; $attempt -le 3; $attempt++) {
     if (-not (Test-Target)) {
       $reason = $script:targetFailureReason
@@ -332,9 +368,11 @@ try {
     else { $reason = 'target_or_foreground_changed' }
     throw 'identity'
   }
-  $selected = Get-ActionControl (Test-Target)
-  $selectedOwnership = Get-ControlOwnership $selected
-  $target = Get-ActionControl (Test-Target)
+  $selectedControl = Get-ActionControl $candidates
+  $selected = $selectedControl.Element
+  $selectedOwnership = $selectedControl.Ownership
+  $targetControl = Get-ActionControl $candidates
+  $target = $targetControl.Element
   $comparison = [System.Windows.Automation.Automation].GetMethod('Compare', [type[]]@(
     [System.Windows.Automation.AutomationElement], [System.Windows.Automation.AutomationElement]))
   if (-not $comparison.Invoke($null, [object[]]@($selected, $target))) {
