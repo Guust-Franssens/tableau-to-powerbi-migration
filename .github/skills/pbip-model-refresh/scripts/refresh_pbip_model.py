@@ -2237,7 +2237,10 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         _emit_dialog_finding(exc.pid, exc.finding)
         return 3
     except CredentialUnknownError as exc:
-        _emit_credential_unknown(exc.pid, exc.reason)
+        print(
+            f"REFRESH: CREDENTIAL_UNKNOWN pid={exc.pid}; Completion observation unavailable; "
+            "credential state unestablished. Inspect Desktop before retrying."
+        )
         return 3
     except (DesktopGoneError, DesktopUnreadyError) as exc:
         if isinstance(exc, DesktopGoneError):

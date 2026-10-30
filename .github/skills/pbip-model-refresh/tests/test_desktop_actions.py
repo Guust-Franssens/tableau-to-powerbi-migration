@@ -364,8 +364,10 @@ def test_ui_completion_reports_held_finding_through_real_bound_reader(  # pylint
         token = tokens.get(finding_kind, "CREDENTIAL_UNKNOWN")
         assert f"REFRESH: {token} pid=123;" in output
         assert diagnostics == ([] if finding_kind == "no_finding" else [(123, window)])
-        if finding_kind != "no_finding":
-            assert "to the deadline" not in output
+        assert "to the deadline" not in output
+        if finding_kind == "no_finding":
+            assert "Completion observation unavailable" in output
+            assert "credential state unestablished" in output
         assert "engine completion:" not in output
 
 
