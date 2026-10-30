@@ -80,9 +80,11 @@ from __future__ import annotations
 # pylint: disable=too-many-lines
 
 import argparse
+import ctypes
 import hashlib
 import inspect
 import json
+import math
 import os
 import re
 import subprocess
@@ -181,6 +183,7 @@ from _desktop_observer import (
     print_refresh_unknown_banner,
     raise_terminal_detection,
     print_operation_refusal,
+    print_dialog_diagnostic,
     main_frame,
     POLL_INTERVAL_SECONDS,
     source_hint_from_model,
@@ -733,6 +736,181 @@ def _bridge_status() -> dict:
         return json.loads(result.stdout)
     except json.JSONDecodeError:
         return {}
+
+
+def _ui_desktop_alive(pid: int) -> bool:
+    """Check only the held PID without querying its engine or enumerating sibling windows."""
+    if os.name != "nt":
+        raise DesktopActionError("bridge readiness requires Windows")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel.WaitForSingleObject.restype = ctypes.c_uint32
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE, not mutation access
+    if not handle:
+        if ctypes.get_last_error() == 87:  # ERROR_INVALID_PARAMETER: PID does not exist
+            return False
+        raise DesktopActionError("Desktop process state unavailable")
+    try:
+        state = kernel.WaitForSingleObject(handle, 0)
+        if state not in (0, 258):
+            raise DesktopActionError("Desktop process state unavailable")
+        return state == 258  # WAIT_TIMEOUT: process is still running
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _ui_bridge_status(command: list[str], pid: int, deadline: float) -> dict:
+    """One bounded status RPC; startup consumes the caller's original readiness budget."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    arguments = [*command, "status", "--pid", str(pid), "--wait-seconds", str(remaining)]
+    if os.name == "nt" and command[0] == "npx.cmd":
+        arguments = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", subprocess.list2cmdline(arguments)]
+    child = subprocess.Popen(  # pylint: disable=consider-using-with
+        arguments,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    try:
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, 0)
+            output, _ = child.communicate(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill.exe", "/PID", str(child.pid), "/T", "/F"],
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        timeout=2.0,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                else:
+                    child.kill()
+                child.communicate(timeout=2.0)
+            except (OSError, subprocess.TimeoutExpired) as cleanup_exc:
+                print("  bridge : owned status-child cleanup unconfirmed; refresh remains withheld", flush=True)
+                raise DesktopActionError("bridge status cleanup unavailable") from cleanup_exc
+            raise TimeoutError from exc
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        if child.returncode != 0:
+            raise DesktopActionError("bridge status command failed")
+    finally:
+        # A failed tree kill can leave the pipe reader blocked; closing it would wait without a bound.
+        if child.stdout is not None and child.returncode is not None:
+            child.stdout.close()
+    try:
+        payload = json.loads(output)
+    except (ValueError, TypeError) as exc:
+        raise DesktopActionError("malformed bridge status") from exc
+    if not isinstance(payload, dict):
+        raise DesktopActionError("malformed bridge status")
+    return payload
+
+
+def _bridge_readiness_result(payload: dict, pid: int) -> tuple[dict | None, float]:
+    """Only positive application-state readiness or the narrowly recognized pending states."""
+    instances = payload.get("instances")
+    if not isinstance(instances, list):
+        raise DesktopActionError("malformed bridge instances")
+    if payload.get("error"):
+        raise DesktopActionError("bridge application error")
+    if payload.get("status") == "not_connected" and instances == []:
+        if (
+            payload.get("diagnostics")
+            or payload.get("error")
+            or payload.get("lastError") not in (None, f"No Power BI Desktop Bridge pipe found for pid {pid}.")
+        ):
+            raise DesktopActionError("bridge discovery refused")
+        return None, 0.5
+    if len(instances) != 1 or not isinstance(instances[0], dict):
+        raise DesktopActionError("ambiguous bridge instance")
+    instance = instances[0]
+    if type(instance.get("pid")) is not int or instance["pid"] != pid:  # pylint: disable=unidiomatic-typecheck
+        raise DesktopActionError("bridge PID mismatch")
+    if payload.get("status") == "ready" and instance.get("bridgeStatus") == "connected":
+        path = instance.get("currentFilePath")
+        if instance.get("error") or payload.get("error"):
+            raise DesktopActionError("bridge application error")
+        if not isinstance(path, str) or not path.strip() or "\x00" in path or not Path(path).is_absolute():
+            raise DesktopActionError("bridge file binding unavailable")
+        return instance, 0.0
+    error = instance.get("error")
+    if (
+        payload.get("status") == "error"
+        and instance.get("bridgeStatus") == "error"
+        and isinstance(error, dict)
+        and error.get("code") == "BRIDGE_ERROR"
+        and error.get("message") == "Another operation is already in progress"
+    ):
+        if error.get("retryable") is not True:
+            raise DesktopActionError("bridge busy retry not authorized")
+        delay = error.get("retryAfterMs")
+        if (
+            isinstance(delay, (int, float))
+            and not isinstance(delay, bool)
+            and 0 <= delay <= 2**53
+            and math.isfinite(delay)
+        ):
+            return None, min(1.0, max(0.05, delay / 1000))
+    raise DesktopActionError("bridge not ready or terminal error")
+
+
+def _wait_ui_bridge(pid: int, deadline: float) -> dict:
+    """A UI-only readiness loop; no refresh authority and no reset of the held deadline."""
+    command = ["npx.cmd" if os.name == "nt" else "npx", "--no-install", "@microsoft/powerbi-desktop-bridge-cli"]
+    print("  bridge : waiting for exact-PID application readiness (at most 60 seconds)", flush=True)
+    pending_reported = False
+    while time.monotonic() < deadline:
+        if not _ui_desktop_alive(pid):
+            raise DesktopActionError("Desktop process gone")
+        payload = _ui_bridge_status(command, pid, deadline)
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        instance, delay = _bridge_readiness_result(payload, pid)
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        if instance is not None:
+            print("  bridge : ready; existing observer and model checks still required", flush=True)
+            return instance
+        if not pending_reported:
+            print("  bridge : pending; refresh remains withheld", flush=True)
+            pending_reported = True
+        time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+    raise TimeoutError
+
+
+def _ui_bridge_preflight(pid: int, deadline: float) -> dict | None:
+    """Latch failure before one existing read-only diagnostic; it cannot clear readiness refusal."""
+    try:
+        return _wait_ui_bridge(pid, deadline)
+    except TimeoutError:
+        print("REFRESH: TIMEOUT - bridge readiness not established; no action invoked; cause unknown", flush=True)
+    except (DesktopActionError, OSError):
+        print("REFRESH: UI_PREFLIGHT_REFUSED (bridge readiness unavailable; no action invoked)", flush=True)
+    try:
+        state = _credential_state(pid)
+        if state.dialog is not None:
+            print_dialog_diagnostic(pid, state.dialog.window)
+        else:
+            print(f"  bridge diagnostic: {state.state}; inspect the held Desktop locally", flush=True)
+    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print("  bridge diagnostic: CANNOT_READ; inspect the held Desktop locally", flush=True)
+    return None
 
 
 def _instances() -> list[dict]:
@@ -1634,7 +1812,7 @@ def _cache_from_absent_binding(pbip: Path) -> Path | None:
     return None
 
 
-def cache_file(pid: int) -> Path | None:
+def cache_file(pid: int, *, instance: dict | None = None) -> Path | None:
     """Where `<Name>.SemanticModel/.pbi/cache.abf` belongs for the model this instance has open.
 
     Resolves the DESTINATION, not an existing file (on a first build there is no cache yet). There is
@@ -1644,7 +1822,9 @@ def cache_file(pid: int) -> Path | None:
     (round-3 mandate): resolved -> use it (even OUTSIDE this folder); unresolvable -> None (fail
     closed); absent -> and only then a name/count heuristic may run.
     """
-    inst = _instance(pid)
+    inst = _instance(pid) if instance is None else instance
+    if instance is not None and instance.get("pid") != pid:
+        return None
     if inst is None or not inst.get("currentFilePath"):
         return None
     pbip = Path(inst["currentFilePath"])
@@ -2508,6 +2688,9 @@ def _validate_ui_refresh_args(args: argparse.Namespace) -> bool:
     """Reject incompatible UI-refresh combinations before process discovery or any action."""
     if not args.ui_refresh:
         return True
+    if args.pid is None or args.pid <= 0 or args.pid >= 2**32:
+        print("REFRESH: ERROR --ui-refresh requires an explicit valid --pid")
+        return False
     exclusions = []
     if args.verify_only:
         exclusions.append("--verify-only")
@@ -2526,15 +2709,23 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
     args = _build_arg_parser().parse_args(argv)
     if not _validate_ui_refresh_args(args):
         return 2
-    ui_deadline = time.monotonic() + args.refresh_absolute_timeout_seconds if args.ui_refresh else None
+    entry = time.monotonic()
+    ui_deadline = entry + args.refresh_absolute_timeout_seconds if args.ui_refresh else None
 
-    pid = _resolve_pid(args.pid)
-    if pid is None:
-        return 2
+    if args.ui_refresh:
+        pid = args.pid
+        instance = _ui_bridge_preflight(pid, min(entry + 60.0, ui_deadline))
+        if instance is None:
+            return 3
+        cache = cache_file(pid, instance=instance)
+    else:
+        pid = _resolve_pid(args.pid)
+        if pid is None:
+            return 2
+        cache = cache_file(pid)
 
     # Resolve the destination before touching XMLA so a t=0 credential modal can be reported with the
     # source hint from the model files, and before any query is issued against a blocked Desktop.
-    cache = cache_file(pid)
     source_hint = source_hint_from_model(cache.parent.parent if cache else None)
     credential_state = _credential_state(pid)
     if credential_state.modal is not None:

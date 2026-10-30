@@ -45,6 +45,329 @@ WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA q
 BASELINE = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
 
 
+def _ready_bridge() -> dict:
+    return {
+        "status": "ready",
+        "instances": [{"pid": 123, "bridgeStatus": "connected", "currentFilePath": str(Path.cwd() / "model.pbip")}],
+    }
+
+
+def _busy_bridge(delay: object = 250) -> dict:
+    return {
+        "status": "error",
+        "instances": [
+            {
+                "pid": 123,
+                "bridgeStatus": "error",
+                "error": {
+                    "code": "BRIDGE_ERROR",
+                    "message": "Another operation is already in progress",
+                    "retryable": True,
+                    "retryAfterMs": delay,
+                },
+            }
+        ],
+    }
+
+
+@pytest.fixture(name="bridge_clock")
+def _bridge_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    clock = [100.0]
+    monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(refresh_pbip_model.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    monkeypatch.setattr(refresh_pbip_model, "_ui_desktop_alive", lambda _pid: True)
+    return clock
+
+
+@pytest.mark.parametrize("pending", [None, "not_connected", "busy"])
+def test_bridge_readiness_positive_controls_and_no_blind_sleep(
+    monkeypatch: pytest.MonkeyPatch, bridge_clock: list[float], pending: str | None
+) -> None:
+    payloads = [_ready_bridge()]
+    if pending:
+        payloads.insert(0, _busy_bridge() if pending == "busy" else {"status": "not_connected", "instances": []})
+    calls = []
+
+    def status(_command, pid, deadline):
+        calls.append((pid, deadline))
+        return payloads.pop(0)
+
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_status", status)
+    assert refresh_pbip_model._wait_ui_bridge(123, 160)["bridgeStatus"] == "connected"
+    assert calls == [(123, 160)] * (2 if pending else 1)
+    assert bridge_clock[0] == 100 + (0.25 if pending == "busy" else 0.5 if pending else 0)
+
+
+@pytest.mark.parametrize("delay", [-1, None, True, "250", float("nan"), float("inf"), 10**400])
+def test_bridge_readiness_refuses_invalid_busy_retry_metadata(delay: object) -> None:
+    with pytest.raises(DesktopActionError):
+        refresh_pbip_model._bridge_readiness_result(_busy_bridge(delay), 123)
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["top_error", "wrong_pid", "bool_pid", "wrong_field", "path", "relative", "duplicate", "instance_error"],
+)
+def test_bridge_readiness_requires_both_positive_fields_and_exact_pid_file(change: str) -> None:
+    payload = _ready_bridge()
+    instance = payload["instances"][0]
+    if change == "top_error":
+        payload["status"] = "error"
+    elif change == "wrong_pid":
+        instance["pid"] = 456
+    elif change == "bool_pid":
+        instance["pid"] = True
+    elif change == "wrong_field":
+        instance["bridgeStatus"] = "ready"
+    elif change in ("path", "relative"):
+        instance["currentFilePath"] = "" if change == "path" else "relative.pbip"
+    elif change == "duplicate":
+        payload["instances"].append(dict(instance))
+    else:
+        instance["error"] = {"code": "BRIDGE_ERROR"}
+    with pytest.raises(DesktopActionError):
+        refresh_pbip_model._bridge_readiness_result(payload, 123)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("retryable", False),
+        ("retryable", 1),
+        ("code", "CREDENTIAL_REQUIRED"),
+        ("message", "Sign in"),
+        ("message", "unknown error"),
+    ],
+)
+def test_bridge_readiness_never_retries_terminal_or_unrecognized_errors(field: str, value: object) -> None:
+    payload = _busy_bridge()
+    payload["instances"][0]["error"][field] = value
+    with pytest.raises(DesktopActionError):
+        refresh_pbip_model._bridge_readiness_result(payload, 123)
+
+
+@pytest.mark.parametrize("delay,expected", [(0, 0.05), (250, 0.25), (100000, 1.0)])
+def test_bridge_busy_retry_delay_is_clipped(delay: int, expected: float) -> None:
+    assert refresh_pbip_model._bridge_readiness_result(_busy_bridge(delay), 123) == (None, expected)
+
+
+@pytest.mark.parametrize("late_ready", [False, True])
+def test_bridge_readiness_deadline_never_resets_or_accepts_late_ready(
+    monkeypatch: pytest.MonkeyPatch, bridge_clock: list[float], late_ready: bool
+) -> None:
+    calls = []
+
+    def status(_command, pid, deadline):
+        calls.append((pid, deadline))
+        if late_ready:
+            bridge_clock[0] = deadline
+            return _ready_bridge()
+        return _busy_bridge(100000)
+
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_status", status)
+    with pytest.raises(TimeoutError):
+        refresh_pbip_model._wait_ui_bridge(123, 102.25)
+    assert bridge_clock[0] == 102.25
+    assert calls == [(123, 102.25)] * (1 if late_ready else 3)
+
+
+def test_bridge_readiness_process_gone_never_calls_status(
+    monkeypatch: pytest.MonkeyPatch, bridge_clock: list[float]
+) -> None:
+    monkeypatch.setattr(refresh_pbip_model, "_ui_desktop_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        refresh_pbip_model, "_ui_bridge_status", lambda *_args: pytest.fail("status after process gone")
+    )
+    with pytest.raises(DesktopActionError, match="gone"):
+        refresh_pbip_model._wait_ui_bridge(123, bridge_clock[0] + 60)
+
+
+@pytest.mark.parametrize("outcome", ["ready", "timeout", "terminal"])
+def test_ui_main_readiness_gate_precedes_cache_and_never_uses_legacy_bridge(
+    monkeypatch: pytest.MonkeyPatch, outcome: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    context, _args, calls = _wire_ui_route(monkeypatch, no_save=True)
+    instance = _ready_bridge()["instances"][0]
+    sequence = []
+    for name in ("_resolve_pid", "_instance", "_bridge_status", "_refresh_and_save", "save"):
+        monkeypatch.setattr(refresh_pbip_model, name, lambda *_args: pytest.fail("legacy UI path"))
+
+    def wait(pid, deadline):
+        assert pid == 123 and deadline > 0
+        sequence.append("readiness")
+        if outcome == "timeout":
+            raise TimeoutError
+        if outcome == "terminal":
+            raise DesktopActionError("private customer error must not print")
+        return instance
+
+    def cache(pid, **kwargs):
+        assert pid == 123 and kwargs == {"instance": instance}
+        assert sequence == ["readiness"]
+        sequence.append("cache")
+        return Path("missing-cache.abf")
+
+    monkeypatch.setattr(refresh_pbip_model, "_wait_ui_bridge", wait)
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", cache)
+    monkeypatch.setattr(refresh_pbip_model, "source_hint_from_model", lambda _path: None)
+    root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_credential_state",
+        lambda _pid: Observation(pid="123", process_started_at="456", target_window=root),
+    )
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda _pid: 49157)
+    monkeypatch.setattr(refresh_pbip_model, "bind_desktop", lambda *_args, **_kwargs: context.bound)
+    result = refresh_pbip_model.main(["--pid", "123", "--ui-refresh", "--no-save"])
+    assert result == (0 if outcome == "ready" else 3)
+    assert calls == (["Refresh", "canaries"] if outcome == "ready" else [])
+    assert sequence == (["readiness", "cache"] if outcome == "ready" else ["readiness"])
+    output = capsys.readouterr().out
+    assert "private customer" not in output
+    if outcome == "timeout":
+        assert output.index("REFRESH: TIMEOUT") < output.index("bridge diagnostic")
+
+
+def test_ui_refresh_requires_explicit_pid_before_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(refresh_pbip_model, "_resolve_pid", lambda *_args: pytest.fail("legacy discovery"))
+    monkeypatch.setattr(refresh_pbip_model, "_wait_ui_bridge", lambda *_args: pytest.fail("bridge discovery"))
+    assert refresh_pbip_model.main(["--ui-refresh"]) == 2
+
+
+@pytest.mark.parametrize("operation_seconds,expected", [(10, 110.0), (3600, 160.0)])
+def test_ui_main_caps_readiness_at_sixty_seconds_and_original_operation_deadline(
+    monkeypatch: pytest.MonkeyPatch, bridge_clock: list[float], operation_seconds: int, expected: float
+) -> None:
+    deadlines = []
+
+    def wait(_pid, deadline):
+        deadlines.append(deadline)
+        raise TimeoutError
+
+    monkeypatch.setattr(refresh_pbip_model, "_wait_ui_bridge", wait)
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: Observation())
+    assert (
+        refresh_pbip_model.main(
+            ["--pid", "123", "--ui-refresh", "--refresh-absolute-timeout-seconds", str(operation_seconds)]
+        )
+        == 3
+    )
+    assert deadlines == [expected] and bridge_clock[0] == 100
+
+
+def test_cache_file_consumes_snapshot_without_instance_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(refresh_pbip_model, "_instance", lambda *_args: pytest.fail("legacy bridge"))
+    model = Path.cwd() / "bound.SemanticModel"
+    monkeypatch.setattr(refresh_pbip_model, "_resolve_pbip_binding", lambda _path: ("resolved", model))
+    assert refresh_pbip_model.cache_file(123, instance=_ready_bridge()["instances"][0]) == model / ".pbi" / "cache.abf"
+
+
+def test_bridge_status_uses_installed_only_exact_pid_cli_with_original_budget(
+    monkeypatch: pytest.MonkeyPatch, bridge_clock: list[float]
+) -> None:
+    seen = []
+
+    def spawn(arguments, **kwargs):
+        seen.append((arguments, kwargs))
+        bridge_clock[0] += 2
+        return SimpleNamespace(
+            returncode=0,
+            stdout=None,
+            communicate=lambda timeout: (
+                (json.dumps(_ready_bridge()), None) if timeout == 8 else pytest.fail("budget reset")
+            ),
+        )
+
+    monkeypatch.setattr(refresh_pbip_model.subprocess, "Popen", spawn)
+    command = ["npx.cmd" if os.name == "nt" else "npx", "--no-install", "@microsoft/powerbi-desktop-bridge-cli"]
+    assert refresh_pbip_model._ui_bridge_status(command, 123, 110) == _ready_bridge()
+    arguments, kwargs = seen[0]
+    rendered = " ".join(arguments)
+    assert "--no-install" in rendered and "--pid 123" in rendered and "--wait-seconds 10.0" in rendered
+    assert "--yes" not in rendered and not kwargs.get("shell")
+
+
+@pytest.mark.parametrize("output,exit_code", [("not json", 0), ("[]", 0), ('{"status":"ready"}', 1)])
+def test_bridge_status_child_refuses_malformed_json_and_nonzero_exit(output: str, exit_code: int) -> None:
+    script = f"import sys; print({output!r}); sys.exit({exit_code})"
+    with pytest.raises(DesktopActionError):
+        refresh_pbip_model._ui_bridge_status([sys.executable, "-c", script], 123, time.monotonic() + 10)
+
+
+def test_bridge_status_child_timeout_reaps_real_direct_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    children = []
+    original = subprocess.Popen
+
+    def spawn(*args, **kwargs):
+        # Ownership transfers to the product timeout handler, not this intercepting spy.
+        child = original(*args, **kwargs)  # pylint: disable=consider-using-with
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(refresh_pbip_model.subprocess, "Popen", spawn)
+    with pytest.raises(TimeoutError):
+        refresh_pbip_model._ui_bridge_status(
+            [sys.executable, "-c", "import time; time.sleep(120)"], 123, time.monotonic() + 0.25
+        )
+    assert children and all(child.poll() is not None for child in children)
+
+
+def test_bridge_status_cleanup_failure_refuses_without_unbounded_pipe_close(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def blocked(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("owned-test-child", 1)
+
+    child = SimpleNamespace(
+        pid=123,
+        returncode=None,
+        communicate=blocked,
+        kill=lambda: None,
+        stdout=SimpleNamespace(close=lambda: pytest.fail("unbounded close of blocked reader")),
+    )
+    monkeypatch.setattr(refresh_pbip_model.subprocess, "Popen", lambda *_args, **_kwargs: child)
+    monkeypatch.setattr(refresh_pbip_model.subprocess, "run", blocked)
+    with pytest.raises(DesktopActionError, match="cleanup"):
+        refresh_pbip_model._ui_bridge_status(["controlled-child"], 123, time.monotonic() + 10)
+    assert "cleanup unconfirmed" in capsys.readouterr().out
+
+
+@WINDOWS_ONLY
+def test_bridge_status_timeout_kills_owned_launcher_and_descendant_without_gui(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    marker = tmp_path / "owned-worker.pid"
+    script = (
+        "import pathlib,subprocess,sys,time;"
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)']);"
+        f"pathlib.Path({str(marker)!r}).write_text(str(child.pid));"
+        "time.sleep(120)"
+    )
+    clock = [100.0]
+    original = subprocess.Popen
+    original_clock = time.monotonic
+    launchers = []
+
+    def spawn(arguments, **kwargs):
+        # Ownership transfers to the product timeout handler, not this intercepting spy.
+        child = original(arguments, **kwargs)  # pylint: disable=consider-using-with
+        if arguments[0] == sys.executable:
+            launchers.append(child)
+            limit = original_clock() + 10
+            while not marker.exists() and original_clock() < limit:
+                threading.Event().wait(0.01)
+            assert marker.exists(), "controlled descendant did not start"
+            clock[0] = 161.0  # process startup consumed the ENTIRE original allowance
+        return child
+
+    monkeypatch.setattr(refresh_pbip_model.subprocess, "Popen", spawn)
+    monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
+    with pytest.raises(TimeoutError):
+        refresh_pbip_model._ui_bridge_status([sys.executable, "-c", script], 123, 160)
+    assert len(launchers) == 1 and launchers[0].poll() is not None
+    assert not refresh_pbip_model._ui_desktop_alive(int(marker.read_text(encoding="utf-8")))
+
+
 @pytest.mark.parametrize("value", [True, 1.5, Decimal("1.5"), "1"])
 def test_engine_integer_fields_refuse_nonintegral_or_display_values(value: object) -> None:
     with pytest.raises(DesktopActionError):
@@ -466,7 +789,8 @@ def test_cli_preflight_consumes_original_ui_deadline_before_any_action(
     clock = [100.0]
     monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(refresh_pbip_model, "_resolve_pid", lambda _pid: 123)
-    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda _pid: Path("missing-cache.abf"))
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_preflight", lambda *_args: _ready_bridge()["instances"][0])
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda _pid, **_kwargs: Path("missing-cache.abf"))
     monkeypatch.setattr(refresh_pbip_model, "source_hint_from_model", lambda _path: None)
     root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
     ready = Observation(pid="123", process_started_at="456", target_window=root)

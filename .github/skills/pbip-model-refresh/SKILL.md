@@ -75,6 +75,30 @@ processing. After completion it runs the existing canary checks on that same hel
 optional named UI **Save** is invoked only after completion, positive required row checks, a fresh
 READY observer state and the existing model-identity check; `--no-save` suppresses every Save.
 
+**UI readiness requires explicit `--pid`.** Before cache/engine discovery this route waits for
+top-level bridge `status: "ready"` AND that exact PID's `bridgeStatus: "connected"` with a
+nonempty absolute current-file binding. One monotonic **60-second maximum** readiness budget,
+clipped to the existing operation deadline, includes installed-tool discovery, startup and RPC.
+It proceeds immediately when ready; it never sleeps a blind minute or proceeds after expiry.
+The installed CLI's `--wait-seconds` waits for connection discovery only. A small same-PID loop
+also awaits ordinary `not_connected` and the recognized `BRIDGE_ERROR` "Another operation is
+already in progress" response with Boolean `retryable: true` and finite nonnegative numeric
+`retryAfterMs` (delay clipped to 50–1000 ms, then remaining time). Unknown errors, malformed
+retry metadata and process disappearance refuse immediately; no terminal/credential error retry.
+
+The UI route uses `npx --no-install @microsoft/powerbi-desktop-bridge-cli status --pid ...`,
+never `--yes`, a custom package resolver or automatic tooling updates. Missing installations
+refuse. The child wait uses the remaining original budget; timeout terminates only the owned
+launcher PID and its descendants, never Desktop or a sibling process. Native startup/teardown
+may take additional OS time, but late responses cannot authorize any action.
+Readiness failure prints a non-success refusal/timeout immediately, then permits only one
+existing bounded read-only exact-PID observer diagnostic. This extra diagnostic allowance is
+not a new readiness budget; it cannot clear refusal, foreground Desktop or manipulate prompts.
+Known exact-window templates may provide predefined readable messages; arbitrary error text
+export, clipboard capture and foreground-only inspection are **not implemented**. Withheld or
+unreadable text requires local human inspection and is not a credential diagnosis. These UI-only
+rules do not change legacy XMLA callers or the historical 90-second CLI examples below.
+
 Completion reads may encounter the existing bound reader's `REFRESH_IN_PROGRESS` preflight
 refusal. Only that closed state is awaited within the original operation deadline; prompt,
 unknown/incomplete, identity and catalogue refusals are not retried as progress.
