@@ -596,23 +596,44 @@ def test_the_real_probe_sums_a_process_SUBTREE_not_just_the_pid_handed_to_popen(
         child.wait(timeout=30)
 
 
-def test_the_real_probe_returns_a_number_that_moves_for_a_working_child() -> None:
+def test_the_real_probe_returns_a_number_that_moves_for_a_working_child(tmp_path: Path) -> None:
     """A probe that always returns the same value is indistinguishable from a stall."""
+    source = tmp_path / "probe-input.bin"
+    source.write_bytes(b"x" * 65536)
+    deadline = time.perf_counter() + 5
     child = subprocess.Popen(  # pylint: disable=consider-using-with
         [
             sys.executable,
             "-c",
-            "import time\nfor _ in range(200):\n open(__file__ if False else 'nul','rb').read(1)\n time.sleep(0.01)\n",
+            "import os,sys,time\n"
+            "deadline = time.perf_counter() + 10\n"
+            "with open(sys.argv[1], 'rb') as source:\n"
+            " assert source.read() == b'x' * 65536\n"
+            " print(os.getpid(), flush=True)\n"
+            " while time.perf_counter() < deadline:\n"
+            "  source.seek(0)\n"
+            "  assert source.read() == b'x' * 65536\n"
+            "  time.sleep(0.01)\n",
+            str(source),
         ],
         stdout=subprocess.PIPE,
         text=True,
     )
     try:
+        ready = Future()
+        threading.Thread(target=lambda: ready.set_result(child.stdout.readline()), daemon=True).start()
+        real_pid = int(ready.result(timeout=max(0, deadline - time.perf_counter())).strip())
+        assert time.perf_counter() < deadline, "child readiness exceeded the observation deadline"
+        assert child.poll() is None and _alive(real_pid), "the actual I/O child exited before the baseline"
         first = harvest.transferred_bytes(child.pid)
+        assert child.poll() is None and _alive(real_pid), "the actual I/O child exited during the baseline"
         assert first is not None, "no progress signal at all on this platform"
-        deadline = time.perf_counter() + 5
         while time.perf_counter() < deadline:
-            if (harvest.transferred_bytes(child.pid) or 0) != first:
+            assert child.poll() is None and _alive(real_pid), "the actual I/O child exited before an observation"
+            current = harvest.transferred_bytes(child.pid)
+            assert child.poll() is None and _alive(real_pid), "the actual I/O child exited during an observation"
+            assert current is not None, "the progress signal became unavailable after the baseline"
+            if current - first >= 65536:
                 break
             time.sleep(0.1)
         else:
