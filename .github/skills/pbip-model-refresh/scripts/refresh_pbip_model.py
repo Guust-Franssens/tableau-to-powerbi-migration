@@ -762,7 +762,115 @@ def _ui_desktop_alive(pid: int) -> bool:
         kernel.CloseHandle(handle)
 
 
-def _ui_bridge_status(command: list[str], pid: int, deadline: float) -> dict:
+class _BridgeStatusJob:
+    """Contain only a suspended status launcher and its descendants, including after launcher exit."""
+
+    class Limits(ctypes.Structure):  # pylint: disable=too-few-public-methods
+        """JOBOBJECT_EXTENDED_LIMIT_INFORMATION, including native pointer-sized alignment."""
+
+        _fields_ = [
+            ("process_time", ctypes.c_int64),
+            ("job_time", ctypes.c_int64),
+            ("flags", ctypes.c_uint32),
+            ("min_working_set", ctypes.c_size_t),
+            ("max_working_set", ctypes.c_size_t),
+            ("active_limit", ctypes.c_uint32),
+            ("affinity", ctypes.c_size_t),
+            ("priority", ctypes.c_uint32),
+            ("scheduling", ctypes.c_uint32),
+            ("io_counters", ctypes.c_uint64 * 6),
+            ("memory_limits", ctypes.c_size_t * 4),
+        ]
+
+    class Threads(ctypes.Structure):  # pylint: disable=too-few-public-methods
+        """THREADENTRY32 for locating the still-suspended launcher's sole initial thread."""
+
+        _fields_ = [(name, ctypes.c_uint32) for name in ("size", "usage", "tid", "pid", "base", "delta", "flags")]
+
+    def __init__(self) -> None:
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle, dword, pointer = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p
+        for name, arguments, result in (
+            ("CreateJobObjectW", [pointer, ctypes.c_wchar_p], handle),
+            ("SetInformationJobObject", [handle, ctypes.c_int, pointer, dword], ctypes.c_int),
+            ("AssignProcessToJobObject", [handle, handle], ctypes.c_int),
+            ("TerminateJobObject", [handle, dword], ctypes.c_int),
+            ("QueryInformationJobObject", [handle, ctypes.c_int, pointer, dword, pointer], ctypes.c_int),
+            ("CreateToolhelp32Snapshot", [dword, dword], handle),
+            ("Thread32First", [handle, pointer], ctypes.c_int),
+            ("Thread32Next", [handle, pointer], ctypes.c_int),
+            ("OpenThread", [dword, ctypes.c_int, dword], handle),
+            ("ResumeThread", [handle], dword),
+            ("CloseHandle", [handle], ctypes.c_int),
+        ):
+            function = getattr(self.kernel, name)
+            function.argtypes, function.restype = arguments, result
+        self.handle = self.kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        limits = self.Limits()
+        limits.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; the handle is never inherited.
+        if not self.kernel.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            error = ctypes.get_last_error()
+            self.kernel.CloseHandle(self.handle)
+            self.handle = None
+            raise ctypes.WinError(error)
+
+    def start(self, child: subprocess.Popen) -> None:
+        """Assign before allowing any launcher instruction or descendant creation."""
+        if not self.kernel.AssignProcessToJobObject(self.handle, int(child._handle)):  # pylint: disable=protected-access
+            error = ctypes.get_last_error()
+            child.kill()  # Still suspended: there cannot yet be a descendant outside the job.
+            child.wait(timeout=2.0)
+            raise ctypes.WinError(error)
+        snapshot = self.kernel.CreateToolhelp32Snapshot(4, 0)  # TH32CS_SNAPTHREAD
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            entry = self.Threads(size=ctypes.sizeof(self.Threads))
+            found = self.kernel.Thread32First(snapshot, ctypes.byref(entry))
+            while found:
+                if entry.pid == child.pid:
+                    thread = self.kernel.OpenThread(2, False, entry.tid)  # THREAD_SUSPEND_RESUME
+                    if not thread:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    try:
+                        if self.kernel.ResumeThread(thread) != 1:
+                            raise OSError("status launcher's initial thread was not suspended exactly once")
+                        return
+                    finally:
+                        self.kernel.CloseHandle(thread)
+                found = self.kernel.Thread32Next(snapshot, ctypes.byref(entry))
+            raise OSError("status launcher's suspended initial thread unavailable")
+        finally:
+            self.kernel.CloseHandle(snapshot)
+
+    def close(self) -> None:
+        """Terminate the entire owned job and positively verify no active processes remain."""
+        if self.handle is None:
+            return
+        handle, self.handle = self.handle, None
+        try:
+            if not self.kernel.TerminateJobObject(handle, 1):
+                raise ctypes.WinError(ctypes.get_last_error())
+            deadline = time.monotonic() + 2.0
+            # JOBOBJECT_BASIC_ACCOUNTING_INFORMATION: four LARGE_INTEGERs then four DWORDs.
+            accounting = (ctypes.c_uint64 * 6)()
+            while True:
+                if not self.kernel.QueryInformationJobObject(handle, 1, accounting, ctypes.sizeof(accounting), None):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                active = ctypes.c_uint32.from_buffer(accounting, 40).value
+                if active == 0:
+                    return
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("owned status job did not empty")
+                time.sleep(0.01)
+        finally:
+            if not self.kernel.CloseHandle(handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _ui_bridge_status(command: list[str], pid: int, deadline: float) -> dict:  # pylint: disable=too-many-statements
     """One bounded status RPC; startup consumes the caller's original readiness budget."""
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -770,37 +878,37 @@ def _ui_bridge_status(command: list[str], pid: int, deadline: float) -> dict:
     arguments = [*command, "status", "--pid", str(pid), "--wait-seconds", str(remaining)]
     if os.name == "nt" and command[0] == "npx.cmd":
         arguments = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", subprocess.list2cmdline(arguments)]
-    child = subprocess.Popen(  # pylint: disable=consider-using-with
-        arguments,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
+    job = _BridgeStatusJob() if os.name == "nt" else None
+    child = None
+    pipe_settled = False
     try:
+        child = subprocess.Popen(  # pylint: disable=consider-using-with
+            arguments,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | (0x4 if job else 0),  # CREATE_SUSPENDED
+        )
+        if job is not None:
+            job.start(child)
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(command, 0)
             output, _ = child.communicate(timeout=remaining)
+            pipe_settled = True
         except subprocess.TimeoutExpired as exc:
             try:
-                if os.name == "nt":
-                    subprocess.run(
-                        ["taskkill.exe", "/PID", str(child.pid), "/T", "/F"],
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
-                        timeout=2.0,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
-                    )
+                if job is not None:
+                    owned_job, job = job, None
+                    owned_job.close()
                 else:
                     child.kill()
                 child.communicate(timeout=2.0)
+                pipe_settled = True
             except (OSError, subprocess.TimeoutExpired) as cleanup_exc:
                 print("  bridge : owned status-child cleanup unconfirmed; refresh remains withheld", flush=True)
                 raise DesktopActionError("bridge status cleanup unavailable") from cleanup_exc
@@ -810,9 +918,19 @@ def _ui_bridge_status(command: list[str], pid: int, deadline: float) -> dict:
         if child.returncode != 0:
             raise DesktopActionError("bridge status command failed")
     finally:
-        # A failed tree kill can leave the pipe reader blocked; closing it would wait without a bound.
-        if child.stdout is not None and child.returncode is not None:
-            child.stdout.close()
+        try:
+            if job is not None:
+                job.close()
+                if child is not None and not pipe_settled:
+                    child.communicate(timeout=2.0)
+                    pipe_settled = True
+        except (OSError, TimeoutError, subprocess.TimeoutExpired) as exc:
+            print("  bridge : owned status-child cleanup unconfirmed; refresh remains withheld", flush=True)
+            raise DesktopActionError("bridge status cleanup unavailable") from exc
+        finally:
+            # Launcher exit alone cannot establish that an inherited-pipe reader has settled.
+            if child is not None and child.stdout is not None and pipe_settled:
+                child.stdout.close()
     try:
         payload = json.loads(output)
     except (ValueError, TypeError) as exc:

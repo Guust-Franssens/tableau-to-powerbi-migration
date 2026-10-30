@@ -2,7 +2,7 @@
 
 # The test module intentionally exercises private orchestration seams; assertions belong in tests,
 # and the fake reader mirrors ADOMD.NET's PascalCase API rather than a Python naming convention.
-# pylint: disable=missing-function-docstring,protected-access
+# pylint: disable=missing-function-docstring,protected-access,too-many-lines
 
 from __future__ import annotations
 
@@ -279,6 +279,11 @@ def test_bridge_status_uses_installed_only_exact_pid_cli_with_original_budget(
         )
 
     monkeypatch.setattr(refresh_pbip_model.subprocess, "Popen", spawn)
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_BridgeStatusJob",
+        lambda: SimpleNamespace(start=lambda _child: None, close=lambda: None),
+    )
     command = ["npx.cmd" if os.name == "nt" else "npx", "--no-install", "@microsoft/powerbi-desktop-bridge-cli"]
     assert refresh_pbip_model._ui_bridge_status(command, 123, 110) == _ready_bridge()
     arguments, kwargs = seen[0]
@@ -312,6 +317,90 @@ def test_bridge_status_child_timeout_reaps_real_direct_worker(monkeypatch: pytes
     assert children and all(child.poll() is not None for child in children)
 
 
+@WINDOWS_ONLY
+@pytest.mark.parametrize("failure", ["AssignProcessToJobObject", "CreateToolhelp32Snapshot", "ResumeThread"])
+def test_bridge_status_containment_start_failure_reaps_suspended_child_before_execution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+) -> None:
+    job = refresh_pbip_model._BridgeStatusJob()
+    original = subprocess.Popen
+    children = []
+    marker = tmp_path / "must-not-execute"
+
+    def spawn(*args, **kwargs):
+        assert kwargs["creationflags"] & 0x4
+        child = original(*args, **kwargs)  # pylint: disable=consider-using-with
+        children.append(child)
+        return child
+
+    def fail(*_args):
+        ctypes.set_last_error(5)
+        return (
+            ctypes.c_void_p(-1).value
+            if failure == "CreateToolhelp32Snapshot"
+            else 0xFFFFFFFF
+            if failure == "ResumeThread"
+            else 0
+        )
+
+    monkeypatch.setattr(job.kernel, failure, fail)
+    monkeypatch.setattr(refresh_pbip_model, "_BridgeStatusJob", lambda: job)
+    monkeypatch.setattr(refresh_pbip_model.subprocess, "Popen", spawn)
+    script = f"import pathlib; pathlib.Path({str(marker)!r}).write_text('executed')"
+    try:
+        with pytest.raises(OSError):
+            refresh_pbip_model._ui_bridge_status([sys.executable, "-c", script], 123, time.monotonic() + 10)
+        assert len(children) == 1 and children[0].poll() is not None
+        assert children[0].stdout.closed
+        assert not marker.exists(), "uncontained launcher executed before assignment/resume"
+    finally:
+        job.close()
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=2)
+
+
+@WINDOWS_ONLY
+@pytest.mark.parametrize("failure", ["TerminateJobObject", "QueryInformationJobObject"])
+def test_bridge_status_never_accepts_ready_json_when_job_cleanup_is_unconfirmed(
+    monkeypatch: pytest.MonkeyPatch, failure: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    job = refresh_pbip_model._BridgeStatusJob()
+
+    def fail(*_args):
+        ctypes.set_last_error(5)
+        return 0
+
+    monkeypatch.setattr(job.kernel, failure, fail)
+    monkeypatch.setattr(refresh_pbip_model, "_BridgeStatusJob", lambda: job)
+    script = f"print({json.dumps(_ready_bridge())!r})"
+    with pytest.raises(DesktopActionError, match="cleanup"):
+        refresh_pbip_model._ui_bridge_status([sys.executable, "-c", script], 123, time.monotonic() + 10)
+    assert "cleanup unconfirmed" in capsys.readouterr().out
+
+
+@WINDOWS_ONLY
+def test_bridge_status_job_does_not_terminate_unassigned_sibling() -> None:
+    with subprocess.Popen(
+        [sys._base_executable, "-c", "import time; time.sleep(120)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    ) as sibling:
+        try:
+            script = f"print({json.dumps(_ready_bridge())!r})"
+            assert (
+                refresh_pbip_model._ui_bridge_status([sys.executable, "-c", script], 123, time.monotonic() + 10)
+                == _ready_bridge()
+            )
+            assert sibling.poll() is None, "unassigned process was terminated"
+        finally:
+            sibling.kill()
+            sibling.wait(timeout=2)
+
+
 def test_bridge_status_cleanup_failure_refuses_without_unbounded_pipe_close(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -326,46 +415,94 @@ def test_bridge_status_cleanup_failure_refuses_without_unbounded_pipe_close(
         stdout=SimpleNamespace(close=lambda: pytest.fail("unbounded close of blocked reader")),
     )
     monkeypatch.setattr(refresh_pbip_model.subprocess, "Popen", lambda *_args, **_kwargs: child)
-    monkeypatch.setattr(refresh_pbip_model.subprocess, "run", blocked)
+    job = SimpleNamespace(start=lambda _child: None, close=blocked)
+    monkeypatch.setattr(refresh_pbip_model, "_BridgeStatusJob", lambda: job)
     with pytest.raises(DesktopActionError, match="cleanup"):
         refresh_pbip_model._ui_bridge_status(["controlled-child"], 123, time.monotonic() + 10)
     assert "cleanup unconfirmed" in capsys.readouterr().out
 
 
 @WINDOWS_ONLY
+@pytest.mark.parametrize("launcher_exits", [False, True], ids=["living-launcher", "exited-launcher"])
 def test_bridge_status_timeout_kills_owned_launcher_and_descendant_without_gui(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, launcher_exits: bool
 ) -> None:
+    # Independent held handles establish both the setup state and actual termination.
+    # pylint: disable=too-many-statements
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel.WaitForSingleObject.restype = ctypes.c_uint32
+    kernel.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
     marker = tmp_path / "owned-worker.pid"
-    script = (
-        "import pathlib,subprocess,sys,time;"
-        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)']);"
-        f"pathlib.Path({str(marker)!r}).write_text(str(child.pid));"
-        "time.sleep(120)"
+    launcher_marker = tmp_path / "owned-launcher.pid"
+    worker_script = (
+        f"import os,pathlib,time; pathlib.Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(120)"
     )
-    clock = [100.0]
+    script = (
+        "import os,pathlib,subprocess,sys,time;"
+        f"pathlib.Path({str(launcher_marker)!r}).write_text(str(os.getpid()));"
+        f"subprocess.Popen([sys.executable,'-c',{worker_script!r}]);"
+        + ("sys.exit(0)" if launcher_exits else "time.sleep(120)")
+    )
     original = subprocess.Popen
-    original_clock = time.monotonic
     launchers = []
+    handles = []
 
     def spawn(arguments, **kwargs):
         # Ownership transfers to the product timeout handler, not this intercepting spy.
         child = original(arguments, **kwargs)  # pylint: disable=consider-using-with
-        if arguments[0] == sys.executable:
-            launchers.append(child)
-            limit = original_clock() + 10
-            while not marker.exists() and original_clock() < limit:
-                threading.Event().wait(0.01)
-            assert marker.exists(), "controlled descendant did not start"
-            clock[0] = 161.0  # process startup consumed the ENTIRE original allowance
+        if arguments[0] != sys.executable:
+            return child
+        launchers.append(child)
+        communicate = child.communicate
+
+        def synchronized(timeout=None):
+            if not handles:
+                limit = time.monotonic() + 10
+                while not marker.exists() and time.monotonic() < limit:
+                    threading.Event().wait(0.01)
+                assert marker.exists(), "controlled descendant did not start"
+                worker = kernel.OpenProcess(0x00100001, False, int(marker.read_text(encoding="utf-8")))
+                assert worker, "cannot hold controlled worker identity"
+                handles.append(worker)
+                assert kernel.WaitForSingleObject(worker, 0) == 258, "worker not alive at setup"
+                launcher = kernel.OpenProcess(0x00100000, False, int(launcher_marker.read_text(encoding="utf-8")))
+                if launcher:
+                    try:
+                        assert kernel.WaitForSingleObject(launcher, 2000 if launcher_exits else 0) == (
+                            0 if launcher_exits else 258
+                        ), "controlled launcher did not reach requested state"
+                    finally:
+                        kernel.CloseHandle(launcher)
+                else:
+                    assert launcher_exits and ctypes.get_last_error() == 87
+                timeout = 0.5  # The worker is alive and the requested launcher state is now established.
+            return communicate(timeout=timeout)
+
+        child.communicate = synchronized
         return child
 
     monkeypatch.setattr(refresh_pbip_model.subprocess, "Popen", spawn)
-    monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
-    with pytest.raises(TimeoutError):
-        refresh_pbip_model._ui_bridge_status([sys.executable, "-c", script], 123, 160)
-    assert len(launchers) == 1 and launchers[0].poll() is not None
-    assert not refresh_pbip_model._ui_desktop_alive(int(marker.read_text(encoding="utf-8")))
+    try:
+        with pytest.raises((TimeoutError, DesktopActionError)) as caught:
+            refresh_pbip_model._ui_bridge_status([sys.executable, "-c", script], 123, time.monotonic() + 15)
+        assert len(launchers) == 1 and launchers[0].poll() is not None
+        assert len(handles) == 1
+        assert kernel.WaitForSingleObject(handles[0], 2000) == 0, "owned worker survived timeout cleanup"
+        assert isinstance(caught.value, TimeoutError)
+    finally:
+        for handle in handles:
+            if kernel.WaitForSingleObject(handle, 0) == 258:
+                kernel.TerminateProcess(handle, 1)
+                assert kernel.WaitForSingleObject(handle, 2000) == 0
+            kernel.CloseHandle(handle)
+        for child in launchers:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=2)
 
 
 @pytest.mark.parametrize("value", [True, 1.5, Decimal("1.5"), "1"])
