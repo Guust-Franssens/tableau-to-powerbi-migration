@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import ctypes
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -25,7 +26,7 @@ import pytest
 import _desktop_actions as actions
 import probe_desktop_query as query_probe
 import refresh_pbip_model
-from _desktop_observer import DesktopWindow, DialogFinding, Observation
+from _desktop_observer import CredentialModal, DesktopWindow, DialogFinding, Observation
 from _desktop_actions import (
     ActionResult,
     CompletionResult,
@@ -48,7 +49,14 @@ BASELINE = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
 def _ready_bridge() -> dict:
     return {
         "status": "ready",
-        "instances": [{"pid": 123, "bridgeStatus": "connected", "currentFilePath": str(Path.cwd() / "model.pbip")}],
+        "instances": [
+            {
+                "pid": 123,
+                "bridgeStatus": "connected",
+                "currentFilePath": str(Path.cwd() / "model.pbip"),
+                "hasUnsavedChanges": False,
+            }
+        ],
     }
 
 
@@ -208,13 +216,22 @@ def test_ui_main_readiness_gate_precedes_cache_and_never_uses_legacy_bridge(
         return Path("missing-cache.abf")
 
     monkeypatch.setattr(refresh_pbip_model, "_wait_ui_bridge", wait)
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_ui_bridge_status",
+        lambda *_args, **kwargs: (
+            {"status": "ok", "pid": 123, "result": {"success": True}}
+            if kwargs.get("operation") == "reload"
+            else _ready_bridge()
+        ),
+    )
     monkeypatch.setattr(refresh_pbip_model, "cache_file", cache)
     monkeypatch.setattr(refresh_pbip_model, "source_hint_from_model", lambda _path: None)
     root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
     monkeypatch.setattr(
         refresh_pbip_model,
         "_credential_state",
-        lambda _pid: Observation(pid="123", process_started_at="456", target_window=root),
+        lambda _pid, **_kwargs: Observation(pid="123", process_started_at="456", target_window=root),
     )
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda _pid: 49157)
     monkeypatch.setattr(refresh_pbip_model, "bind_desktop", lambda *_args, **_kwargs: context.bound)
@@ -262,8 +279,319 @@ def test_cache_file_consumes_snapshot_without_instance_lookup(monkeypatch: pytes
     assert refresh_pbip_model.cache_file(123, instance=_ready_bridge()["instances"][0]) == model / ".pbi" / "cache.abf"
 
 
-def test_bridge_status_uses_installed_only_exact_pid_cli_with_original_budget(
+@pytest.fixture(name="clean_start_route")
+def _clean_start_route(  # pylint: disable=too-many-locals
     monkeypatch: pytest.MonkeyPatch, bridge_clock: list[float]
+):
+    context, _args, actions_seen = _wire_ui_route(monkeypatch)
+    root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
+    ready = Observation(pid="123", process_started_at="456", target_window=root)
+    controls = {
+        "initial": _ready_bridge()["instances"][0],
+        "pre_observer": ready,
+        "reload": {"status": "ok", "pid": 123, "result": {"success": True}},
+        "post_status": _ready_bridge(),
+        "post_observer": ready,
+        "late": None,
+        "deadline": 160.0,
+    }
+    events = []
+    observers = iter(("pre_observer", "post_observer"))
+
+    def phase(name):
+        events.append(name)
+        if controls["late"] == name:
+            bridge_clock[0] = controls["deadline"]
+
+    def wait(pid, deadline):
+        assert pid == 123 and deadline == controls["deadline"]
+        phase("initial")
+        return controls["initial"]
+
+    def observe(pid, **kwargs):
+        name = next(observers)
+        assert pid == 123 and 0 < kwargs["timeout_s"] <= 8
+        if name == "post_observer":
+            assert kwargs["expected_process_start"] == controls["pre_observer"].process_started_at
+        else:
+            assert "expected_process_start" not in kwargs
+        phase(name)
+        return controls[name]
+
+    def bridge(command, pid, deadline, *, operation="status"):
+        assert pid == 123 and deadline == controls["deadline"] and "--no-install" in command
+        phase("reload" if operation == "reload" else "post_status")
+        response = controls["reload" if operation == "reload" else "post_status"]
+        if isinstance(response, BaseException):
+            raise response  # pylint: disable=raising-bad-type
+        return response
+
+    def cache(pid, *, instance):
+        assert pid == 123 and instance is controls["post_status"]["instances"][0]
+        phase("cache")
+        return Path("missing-cache.abf")
+
+    def port(pid):
+        assert pid == 123
+        phase("port")
+        return 49157
+
+    def bind(pid, *, supplied_port):
+        assert pid == 123 and supplied_port == 49157
+        phase("bind")
+        return context.bound
+
+    def identity(*_args):
+        phase("identity")
+        return True
+
+    original_snapshot = refresh_pbip_model.read_partition_snapshot
+
+    def snapshot(*args, **kwargs):
+        phase("baseline")
+        return original_snapshot(*args, **kwargs)
+
+    for name in ("_resolve_pid", "_instance", "_bridge_status", "_refresh_and_save", "save"):
+        monkeypatch.setattr(refresh_pbip_model, name, lambda *_args: pytest.fail("legacy UI path"))
+    monkeypatch.setattr(refresh_pbip_model, "_wait_ui_bridge", wait)
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", observe)
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_status", bridge)
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", cache)
+    monkeypatch.setattr(refresh_pbip_model, "discover_port", port)
+    monkeypatch.setattr(refresh_pbip_model, "bind_desktop", bind)
+    monkeypatch.setattr(refresh_pbip_model, "_identity_gate", identity)
+    monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", snapshot)
+    monkeypatch.setattr(refresh_pbip_model, "source_hint_from_model", lambda _path: None)
+    return controls, events, actions_seen
+
+
+@pytest.mark.parametrize("no_save", [False, True])
+def test_clean_start_precedes_all_model_binding_baselines_and_existing_ui_actions(
+    clean_start_route, monkeypatch: pytest.MonkeyPatch, no_save: bool
+) -> None:
+    controls, events, actions_seen = clean_start_route
+    before = controls["pre_observer"]
+    after = replace(before, target_window=replace(before.target_window, hwnd=790))
+    controls["post_observer"] = after
+    downstream = refresh_pbip_model._ui_refresh_and_save
+
+    def run(*args, **kwargs):
+        assert args[4] is after, "stale pre-reload observer handed downstream"
+        assert events == [
+            "initial",
+            "pre_observer",
+            "reload",
+            "post_status",
+            "post_observer",
+            "cache",
+            "port",
+            "identity",
+        ]
+        return downstream(*args, **kwargs)
+
+    monkeypatch.setattr(refresh_pbip_model, "_ui_refresh_and_save", run)
+    assert refresh_pbip_model.main(["--pid", "123", "--ui-refresh", *(["--no-save"] if no_save else [])]) == 0
+    assert events[:10] == [
+        "initial",
+        "pre_observer",
+        "reload",
+        "post_status",
+        "post_observer",
+        "cache",
+        "port",
+        "identity",
+        "bind",
+        "identity",
+    ]
+    assert events.count("baseline") == 1
+    assert events.count("reload") == 1 and events.count("post_status") == 1
+    assert actions_seen == ["Refresh", "canaries", *([] if no_save else ["Save"])]
+
+
+@pytest.mark.parametrize("stage", ["initial", "post_status"])
+@pytest.mark.parametrize("dirty", [True, None, "missing", 0, 1, "", "false", [], {}])
+def test_clean_start_requires_strict_false_before_and_after_reload(
+    clean_start_route, stage: str, dirty: object
+) -> None:
+    controls, events, actions_seen = clean_start_route
+    instance = controls["initial"] if stage == "initial" else controls["post_status"]["instances"][0]
+    if dirty == "missing":
+        instance.pop("hasUnsavedChanges")
+    else:
+        instance["hasUnsavedChanges"] = dirty
+    assert refresh_pbip_model.main(["--pid", "123", "--ui-refresh"]) != 0, "clean-state gate accepted unsafe state"
+    assert events == (["initial"] if stage == "initial" else ["initial", "pre_observer", "reload", "post_status"]), (
+        "unsafe clean-state sequence"
+    )
+    assert actions_seen == [], "Refresh/Save must be withheld when clean state is not proven"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "error",
+        "status",
+        "pid",
+        "pid_bool",
+        "pid_float",
+        "pid_missing",
+        "result",
+        "failed",
+        "truthy_success",
+        "missing_success",
+        "result_error",
+        "result_errors",
+        "top_errors",
+        "malformed",
+        "timeout",
+    ],
+)
+def test_clean_start_refuses_failed_or_malformed_reload_without_post_status_or_actions(
+    clean_start_route, bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    controls, events, actions_seen = clean_start_route
+    payload = controls["reload"]
+    if bad == "error":
+        payload["error"] = {"message": "PRIVATE RAW ERROR"}
+    elif bad == "status":
+        payload["status"] = "error"
+    elif bad in {"pid", "pid_bool", "pid_float"}:
+        payload["pid"] = {"pid": 456, "pid_bool": True, "pid_float": 123.0}[bad]
+    elif bad == "pid_missing":
+        payload.pop("pid")
+    elif bad == "result":
+        payload["result"] = []
+    elif bad in {"failed", "truthy_success"}:
+        payload["result"]["success"] = 1 if bad == "truthy_success" else False
+    elif bad == "missing_success":
+        payload["result"].pop("success")
+    elif bad in {"result_error", "result_errors"}:
+        payload["result"]["error" if bad == "result_error" else "errors"] = "PRIVATE RAW ERROR"
+    elif bad == "top_errors":
+        payload["errors"] = ["PRIVATE RAW ERROR"]
+    else:
+        controls["reload"] = TimeoutError() if bad == "timeout" else DesktopActionError("PRIVATE RAW ERROR")
+    assert refresh_pbip_model.main(["--pid", "123", "--ui-refresh"]) != 0, "invalid reload was accepted"
+    assert events == ["initial", "pre_observer", "reload"], "invalid reload was accepted"
+    assert not actions_seen, "invalid reload must withhold Refresh/Save"
+    assert "PRIVATE" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "bad", ["pid", "pid_bool", "file", "relative", "status", "connected", "pending", "error", "duplicate"]
+)
+def test_clean_start_requires_one_post_status_same_exact_absolute_file_and_pid(clean_start_route, bad: str) -> None:
+    controls, events, actions_seen = clean_start_route
+    payload = controls["post_status"]
+    instance = payload["instances"][0]
+    if bad in {"pid", "pid_bool"}:
+        instance["pid"] = 456 if bad == "pid" else True
+    elif bad in {"file", "relative"}:
+        instance["currentFilePath"] = str(Path.cwd() / "other.pbip") if bad == "file" else "model.pbip"
+    elif bad == "status":
+        payload["status"] = "error"
+    elif bad == "connected":
+        instance["bridgeStatus"] = "not_connected"
+    elif bad == "pending":
+        controls["post_status"] = {"status": "not_connected", "instances": []}
+    elif bad == "error":
+        instance["error"] = {"message": "PRIVATE RAW ERROR"}
+    else:
+        payload["instances"].append(dict(instance))
+    assert refresh_pbip_model.main(["--pid", "123", "--ui-refresh"]) != 0, "post-status mismatch was accepted"
+    assert events == ["initial", "pre_observer", "reload", "post_status"], "post status was not enforced"
+    assert not actions_seen, "post status mismatch must withhold Refresh/Save"
+
+
+@pytest.mark.parametrize("path", ["model.pbip", "", "\x00", None])
+def test_clean_start_refuses_unestablished_initial_absolute_path(clean_start_route, path: object) -> None:
+    controls, events, actions_seen = clean_start_route
+    controls["initial"]["currentFilePath"] = path
+    assert refresh_pbip_model.main(["--pid", "123", "--ui-refresh"]) != 0
+    assert events == ["initial"] and not actions_seen
+
+
+@pytest.mark.parametrize("stage", ["pre_observer", "post_observer"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "credential",
+        "prompt",
+        "unknown",
+        "incomplete",
+        "progress",
+        "pid",
+        "start",
+        "missing_start",
+        "bad_start",
+        "root_start",
+    ],
+)
+def test_clean_start_observers_refuse_prompts_uncertainty_and_identity_changes(
+    clean_start_route, stage: str, bad: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    controls, events, actions_seen = clean_start_route
+    state = controls[stage]
+    if bad in {"credential", "prompt", "unknown", "progress"}:
+        window = DesktopWindow("PRIVATE UI TEXT", "", 100, 100, hwnd=790, owner_hwnd=789)
+        if bad == "credential":
+            state = replace(state, modal=CredentialModal("PRIVATE CREDENTIAL", window))
+        else:
+            kind, verdict = {
+                "prompt": ("needs-human", "DIALOG_NEEDS_HUMAN"),
+                "unknown": ("unrecognized", "DIALOG_UNRECOGNIZED"),
+                "progress": ("benign", "REFRESH_IN_PROGRESS"),
+            }[bad]
+            state = replace(state, dialog=DialogFinding(kind, verdict, window))
+    elif bad == "incomplete":
+        state = replace(state, complete=False)
+    elif bad == "pid":
+        state = replace(state, pid="456")
+    elif bad in {"start", "missing_start", "bad_start"}:
+        state = replace(state, process_started_at={"start": "457", "missing_start": None, "bad_start": "0"}[bad])
+        if stage == "pre_observer" and bad == "start":
+            state = replace(state, target_window=replace(state.target_window, process_started_at="457"))
+            # The post observation must match the pre-reload process, not merely its original PID.
+            controls["post_observer"] = replace(controls["post_observer"], process_started_at="456")
+    else:
+        state = replace(state, target_window=replace(state.target_window, process_started_at="457"))
+    controls[stage] = state
+    result = refresh_pbip_model.main(["--pid", "123", "--ui-refresh"])
+    assert result != 0, "unsafe observer was accepted"
+    expected = ["initial", "pre_observer"]
+    if stage == "post_observer" or (stage == "pre_observer" and bad == "start"):
+        expected += ["reload", "post_status", "post_observer"]
+    assert events == expected, "observer refusal did not stop the next phase"
+    assert not actions_seen, "observer refusal must withhold Refresh/Save"
+    output = capsys.readouterr().out
+    assert "PRIVATE" not in output
+    if bad == "prompt":
+        assert "DIALOG_NEEDS_HUMAN" in output
+    elif bad == "credential":
+        assert result == 1 and "CREDENTIAL_MISSING" in output
+
+
+@pytest.mark.parametrize("stage", ["initial", "pre_observer", "reload", "post_status", "post_observer"])
+@pytest.mark.parametrize("overall_seconds", [10, 3600])
+def test_clean_start_all_startup_phases_share_original_clipped_deadline(
+    clean_start_route, stage: str, overall_seconds: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    controls, events, actions_seen = clean_start_route
+    controls["late"] = stage
+    controls["deadline"] = 110.0 if overall_seconds == 10 else 160.0
+    result = refresh_pbip_model.main(
+        ["--pid", "123", "--ui-refresh", "--refresh-absolute-timeout-seconds", str(overall_seconds)]
+    )
+    phases = ["initial", "pre_observer", "reload", "post_status", "post_observer"]
+    assert result == 3
+    assert events == phases[: phases.index(stage) + 1], "late result authorized the next startup phase"
+    assert not actions_seen, "startup timeout must withhold Refresh/Save"
+    assert "REFRESH: TIMEOUT" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("operation", ["status", "reload"])
+def test_bridge_status_uses_installed_only_exact_pid_cli_with_original_budget(
+    monkeypatch: pytest.MonkeyPatch, bridge_clock: list[float], operation: str
 ) -> None:
     seen = []
 
@@ -285,18 +613,53 @@ def test_bridge_status_uses_installed_only_exact_pid_cli_with_original_budget(
         lambda: SimpleNamespace(start=lambda _child: None, close=lambda: None),
     )
     command = ["npx.cmd" if os.name == "nt" else "npx", "--no-install", "@microsoft/powerbi-desktop-bridge-cli"]
-    assert refresh_pbip_model._ui_bridge_status(command, 123, 110) == _ready_bridge()
+    assert refresh_pbip_model._ui_bridge_status(command, 123, 110, operation=operation) == _ready_bridge()
     arguments, kwargs = seen[0]
     rendered = " ".join(arguments)
-    assert "--no-install" in rendered and "--pid 123" in rendered and "--wait-seconds 10.0" in rendered
+    assert "--no-install" in rendered and f"{operation} --pid 123" in rendered
+    assert ("--wait-seconds 10.0" in rendered) is (operation == "status")
     assert "--yes" not in rendered and not kwargs.get("shell")
 
 
+@pytest.mark.parametrize("late_phase", ["launch", "output", pytest.param("cleanup", marks=WINDOWS_ONLY)])
+@pytest.mark.parametrize("operation", ["status", "reload"])
+def test_startup_transport_rejects_late_launch_output_and_cleanup(
+    monkeypatch: pytest.MonkeyPatch, bridge_clock: list[float], late_phase: str, operation: str
+) -> None:
+    def phase(name):
+        if late_phase == name:
+            bridge_clock[0] = 110
+
+    def communicate(**_kwargs):
+        phase("output")
+        return json.dumps(_ready_bridge()), None
+
+    child = SimpleNamespace(returncode=0, stdout=None, communicate=communicate, kill=lambda: None)
+
+    def spawn(*_args, **_kwargs):
+        phase("launch")
+        return child
+
+    monkeypatch.setattr(refresh_pbip_model.subprocess, "Popen", spawn)
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_BridgeStatusJob",
+        lambda: SimpleNamespace(start=lambda _child: None, close=lambda: phase("cleanup")),
+    )
+    with pytest.raises(TimeoutError):
+        refresh_pbip_model._ui_bridge_status(["controlled-child"], 123, 110, operation=operation)
+
+
+@pytest.mark.parametrize("operation", ["status", "reload"])
 @pytest.mark.parametrize("output,exit_code", [("not json", 0), ("[]", 0), ('{"status":"ready"}', 1)])
-def test_bridge_status_child_refuses_malformed_json_and_nonzero_exit(output: str, exit_code: int) -> None:
+def test_bridge_status_child_refuses_malformed_json_and_nonzero_exit(
+    output: str, exit_code: int, operation: str
+) -> None:
     script = f"import sys; print({output!r}); sys.exit({exit_code})"
     with pytest.raises(DesktopActionError):
-        refresh_pbip_model._ui_bridge_status([sys.executable, "-c", script], 123, time.monotonic() + 10)
+        refresh_pbip_model._ui_bridge_status(
+            [sys.executable, "-c", script], 123, time.monotonic() + 10, operation=operation
+        )
 
 
 def test_bridge_status_child_timeout_reaps_real_direct_worker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -424,11 +787,12 @@ def test_bridge_status_cleanup_failure_refuses_without_unbounded_pipe_close(
 
 @WINDOWS_ONLY
 @pytest.mark.parametrize("launcher_exits", [False, True], ids=["living-launcher", "exited-launcher"])
+@pytest.mark.parametrize("operation", ["status", "reload"])
 def test_bridge_status_timeout_kills_owned_launcher_and_descendant_without_gui(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, launcher_exits: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, launcher_exits: bool, operation: str
 ) -> None:
     # Independent held handles establish both the setup state and actual termination.
-    # pylint: disable=too-many-statements
+    # pylint: disable=too-many-statements,too-many-locals
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
     kernel.OpenProcess.restype = ctypes.c_void_p
@@ -438,8 +802,11 @@ def test_bridge_status_timeout_kills_owned_launcher_and_descendant_without_gui(
     kernel.CloseHandle.argtypes = [ctypes.c_void_p]
     marker = tmp_path / "owned-worker.pid"
     launcher_marker = tmp_path / "owned-launcher.pid"
+    # Existence is the setup signal: publish the complete PID atomically, never an empty open file.
     worker_script = (
-        f"import os,pathlib,time; pathlib.Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(120)"
+        f"import os,pathlib,time; marker=pathlib.Path({str(marker)!r});"
+        "staged=marker.with_suffix('.ready'); staged.write_text(str(os.getpid()));"
+        "staged.replace(marker); time.sleep(120)"
     )
     script = (
         "import os,pathlib,subprocess,sys,time;"
@@ -488,7 +855,9 @@ def test_bridge_status_timeout_kills_owned_launcher_and_descendant_without_gui(
     monkeypatch.setattr(refresh_pbip_model.subprocess, "Popen", spawn)
     try:
         with pytest.raises((TimeoutError, DesktopActionError)) as caught:
-            refresh_pbip_model._ui_bridge_status([sys.executable, "-c", script], 123, time.monotonic() + 15)
+            refresh_pbip_model._ui_bridge_status(
+                [sys.executable, "-c", script], 123, time.monotonic() + 15, operation=operation
+            )
         assert len(launchers) == 1 and launchers[0].poll() is not None
         assert len(handles) == 1
         assert kernel.WaitForSingleObject(handles[0], 2000) == 0, "owned worker survived timeout cleanup"
@@ -927,6 +1296,15 @@ def test_cli_preflight_consumes_original_ui_deadline_before_any_action(
     monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(refresh_pbip_model, "_resolve_pid", lambda _pid: 123)
     monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_preflight", lambda *_args: _ready_bridge()["instances"][0])
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_ui_bridge_status",
+        lambda *_args, **kwargs: (
+            {"status": "ok", "pid": 123, "result": {"success": True}}
+            if kwargs.get("operation") == "reload"
+            else _ready_bridge()
+        ),
+    )
     monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda _pid, **_kwargs: Path("missing-cache.abf"))
     monkeypatch.setattr(refresh_pbip_model, "source_hint_from_model", lambda _path: None)
     root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")

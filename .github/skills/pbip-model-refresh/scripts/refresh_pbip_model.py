@@ -870,12 +870,18 @@ class _BridgeStatusJob:
                 raise ctypes.WinError(ctypes.get_last_error())
 
 
-def _ui_bridge_status(command: list[str], pid: int, deadline: float) -> dict:  # pylint: disable=too-many-statements
-    """One bounded status RPC; startup consumes the caller's original readiness budget."""
+def _ui_bridge_status(  # pylint: disable=too-many-statements
+    command: list[str], pid: int, deadline: float, *, operation: str = "status"
+) -> dict:
+    """One contained status/reload RPC under the caller's original startup deadline."""
+    if operation not in {"status", "reload"}:
+        raise DesktopActionError("unsupported startup bridge operation")
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError
-    arguments = [*command, "status", "--pid", str(pid), "--wait-seconds", str(remaining)]
+    arguments = [*command, operation, "--pid", str(pid)]
+    if operation == "status":
+        arguments.extend(["--wait-seconds", str(remaining)])
     if os.name == "nt" and command[0] == "npx.cmd":
         arguments = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", subprocess.list2cmdline(arguments)]
     job = _BridgeStatusJob() if os.name == "nt" else None
@@ -931,6 +937,8 @@ def _ui_bridge_status(command: list[str], pid: int, deadline: float) -> dict:  #
             # Launcher exit alone cannot establish that an inherited-pipe reader has settled.
             if child is not None and child.stdout is not None and pipe_settled:
                 child.stdout.close()
+    if time.monotonic() >= deadline:
+        raise TimeoutError
     try:
         payload = json.loads(output)
     except (ValueError, TypeError) as exc:
@@ -2323,6 +2331,83 @@ def _ui_read_budget(deadline: float, cap: float = 30.0) -> float:
     return min(cap, remaining)
 
 
+def _ui_clean_start(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-statements
+    pid: int, instance: dict, deadline: float
+) -> tuple[dict, Observation] | int:
+    """Reload once only from proven clean READY state, then re-establish process/file/clean state."""
+    try:
+        _ui_read_budget(deadline)
+        # A missing/false-like value is not permission to discard changes. Use the already-held
+        # readiness instance, never another initial status that could hide an earlier dirty state.
+        if instance.get("hasUnsavedChanges") is not False:
+            raise DesktopActionError("initial clean state unestablished")
+        path = instance.get("currentFilePath")
+        if not isinstance(path, str) or not path.strip() or "\x00" in path or not Path(path).is_absolute():
+            raise DesktopActionError("initial absolute file binding unavailable")
+        before = _credential_state(pid, timeout_s=_ui_read_budget(deadline, 8.0))
+        _raise_if_blocked(pid, before)
+        _ui_read_budget(deadline)
+        start = before.process_started_at
+        # Observer/process binding uses lossless .NET UTC CreationDate.Ticks, not a timestamp
+        # conversion or a rounded display value.
+        if not isinstance(start, str) or not start.isascii() or not start.isdecimal() or int(start) <= 0:
+            raise DesktopActionError("process start identity unavailable")
+        if before.pid != str(pid):
+            raise DesktopActionError("observer PID mismatch")
+        _ui_root(before, pid, start)
+        command = ["npx.cmd" if os.name == "nt" else "npx", "--no-install", "@microsoft/powerbi-desktop-bridge-cli"]
+        response = _ui_bridge_status(command, pid, deadline, operation="reload")
+        _ui_read_budget(deadline)
+        result = response.get("result")
+        if (  # pylint: disable=too-many-boolean-expressions
+            response.get("status") != "ok"
+            or type(response.get("pid")) is not int  # pylint: disable=unidiomatic-typecheck
+            or response["pid"] != pid
+            or response.get("error")
+            or response.get("errors")
+            or not isinstance(result, dict)
+            or result.get("success") is not True
+            or result.get("error")
+            or result.get("errors")
+        ):
+            raise DesktopActionError("reload acknowledgement unavailable")
+        payload = _ui_bridge_status(command, pid, deadline)
+        _ui_read_budget(deadline)
+        after_instance, _delay = _bridge_readiness_result(payload, pid)
+        if (
+            after_instance is None
+            or after_instance.get("hasUnsavedChanges") is not False
+            or after_instance.get("currentFilePath") != path
+        ):
+            raise DesktopActionError("post-reload clean file binding unestablished")
+        after = _credential_state(pid, expected_process_start=start, timeout_s=_ui_read_budget(deadline, 8.0))
+        _raise_if_blocked(pid, after)
+        _ui_read_budget(deadline)
+        if after.pid != str(pid):
+            raise DesktopActionError("post-reload observer PID mismatch")
+        _ui_root(after, pid, start)
+        print("  bridge : clean-start reload checked; fresh engine/model checks still required", flush=True)
+        return after_instance, after
+    except CredentialMissingError as exc:
+        _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
+        return 1
+    except DialogFoundError as exc:
+        _emit_dialog_finding(exc.pid, exc.finding)
+        return 3
+    except (DesktopGoneError, DesktopUnreadyError) as exc:
+        if isinstance(exc, DesktopGoneError):
+            _emit_desktop_gone(exc.pid, exc.reason)
+        else:
+            _emit_desktop_unready(exc.pid, exc.reason)
+        return 2
+    except TimeoutError:
+        print("REFRESH: TIMEOUT - clean-start startup deadline exhausted; Refresh and Save withheld", flush=True)
+        return 3
+    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print("REFRESH: UI_PREFLIGHT_REFUSED (clean-start checks unavailable; Refresh and Save withheld)", flush=True)
+        return 3
+
+
 def _wait_for_engine_completion(  # pylint: disable=too-many-statements
     context: UIRefreshContext,
     baseline: PartitionSnapshot,
@@ -2829,12 +2914,18 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
         return 2
     entry = time.monotonic()
     ui_deadline = entry + args.refresh_absolute_timeout_seconds if args.ui_refresh else None
+    credential_state = None
 
     if args.ui_refresh:
         pid = args.pid
-        instance = _ui_bridge_preflight(pid, min(entry + 60.0, ui_deadline))
+        startup_deadline = min(entry + 60.0, ui_deadline)
+        instance = _ui_bridge_preflight(pid, startup_deadline)
         if instance is None:
             return 3
+        clean_start = _ui_clean_start(pid, instance, startup_deadline)
+        if isinstance(clean_start, int):
+            return clean_start
+        instance, credential_state = clean_start
         cache = cache_file(pid, instance=instance)
     else:
         pid = _resolve_pid(args.pid)
@@ -2845,7 +2936,8 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
     # Resolve the destination before touching XMLA so a t=0 credential modal can be reported with the
     # source hint from the model files, and before any query is issued against a blocked Desktop.
     source_hint = source_hint_from_model(cache.parent.parent if cache else None)
-    credential_state = _credential_state(pid)
+    if credential_state is None:
+        credential_state = _credential_state(pid)
     if credential_state.modal is not None:
         _emit_credential_missing(pid, credential_state.modal, source_hint)
         return 1
