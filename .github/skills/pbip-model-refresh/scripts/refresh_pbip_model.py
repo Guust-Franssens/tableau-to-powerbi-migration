@@ -1990,6 +1990,8 @@ def _ui_observer_state(
         timeout_s=max(0.01, min(8.0, timeout_seconds)),
     )
     raise_terminal_detection(context.pid, state, context.source_hint)
+    if state.dialog is not None and state.state in {"UNKNOWN_DIALOG", "UNREADABLE_DIALOG"}:
+        raise DialogFoundError(context.pid, state.dialog)
     if not state.complete:
         raise CredentialUnknownError(
             context.pid,
@@ -2080,6 +2082,8 @@ def _wait_for_engine_completion(  # pylint: disable=too-many-statements
             timeout_s=min(8.0, remaining),
         )
         raise_terminal_detection(target_pid, state, context.source_hint)
+        if state.dialog is not None and state.state in {"UNKNOWN_DIALOG", "UNREADABLE_DIALOG"}:
+            raise DialogFoundError(target_pid, state.dialog)
         if state.state not in {"READY", "REFRESH_IN_PROGRESS"} or not state.complete:
             raise CredentialUnknownError(target_pid, state.unknown_reason or state.reason or "observer_not_ready")
         frame = state.target_window or main_frame(state.windows)

@@ -78,6 +78,10 @@ READY observer state and the existing model-identity check; `--no-save` suppress
 Completion reads may encounter the existing bound reader's `REFRESH_IN_PROGRESS` preflight
 refusal. Only that closed state is awaited within the original operation deadline; prompt,
 unknown/incomplete, identity and catalogue refusals are not retried as progress.
+An unreadable or unrecognized finding in the UI-route completion observer is reported with
+its existing `DIALOG_UNREADABLE` or `DIALOG_UNRECOGNIZED` refusal and exact-window diagnostic,
+not replaced by a generic claim that uncertainty persisted to the deadline. This preserves
+the refusal; it does not establish completion or identify the dialog as progress or credentials.
 
 The UI route holds one monotonic operation deadline set in the CLI before initial observation,
 port discovery and identity preflight, through completion and
@@ -121,6 +125,9 @@ before BringWindowToTop/SetForegroundWindow. Only successful attachments are tra
 in finally on every path. There is no input injection, ShowWindow or minimized-window recovery.
 Handback additionally requires the captured prior HWND's PID/start identity to remain unchanged;
 a detected human foreground switch or identity change prevents restoration.
+Handback verification is a point-in-time observation after 150 ms, not a guarantee of stable
+foreground ownership: Desktop can activate a later window. There is no delayed restoration
+retry, since a later Desktop activation cannot establish that the human did not switch back.
 
 Mode decoding uses the engine's `ModeType` for `Model.DefaultMode` and `Partition.Mode`:
 Import=0, DirectQuery=1, Default=2, Push=3, Dual=4, DirectLake=5. Only partition Default

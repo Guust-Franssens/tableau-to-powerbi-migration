@@ -265,6 +265,110 @@ def test_completion_awaits_real_bound_reader_progress_without_suppressing_refusa
     assert len(observed) >= (2 if final_state != "REFRESH_IN_PROGRESS" else 1)
 
 
+@pytest.mark.parametrize("phase", ["initial", "poll"])
+@pytest.mark.parametrize("finding_kind", ["unreadable", "unrecognized", "needs-human", "no_finding", "progress"])
+def test_ui_completion_reports_held_finding_through_real_bound_reader(  # pylint: disable=too-many-locals,too-many-statements
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    phase: str,
+    finding_kind: str,
+) -> None:
+    """Keep the caller, completion wait and supervised bound reads; replace only external I/O."""
+    identity = query_probe.DesktopIdentity(123, "456", 124, "457", 49157)
+    bound = query_probe.BoundDesktop(identity, "00000000-0000-0000-0000-000000000001")
+    root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
+    ready = Observation(pid="123", process_started_at="456", target_window=root)
+    window = DesktopWindow("", "", 100, 100, hwnd=888, owner_hwnd=789, complete=False, reason="patterns_incomplete")
+    tokens = {
+        "unreadable": "DIALOG_UNREADABLE",
+        "unrecognized": "DIALOG_UNRECOGNIZED",
+        "needs-human": "DIALOG_NEEDS_HUMAN",
+    }
+    finding = DialogFinding(finding_kind, tokens.get(finding_kind, "REFRESH_IN_PROGRESS"), window)
+    blocked = Observation(
+        pid="123",
+        process_started_at="456",
+        target_window=root,
+        dialog=None if finding_kind == "no_finding" else finding,
+        complete=False,
+        unknown_reason="backend_failed" if finding_kind == "no_finding" else None,
+    )
+    progress = Observation(
+        pid="123",
+        process_started_at="456",
+        target_window=root,
+        dialog=DialogFinding("benign", "REFRESH_IN_PROGRESS", root),
+    )
+    calls = []
+    completion_polls = []
+    read_released = threading.Event()
+    diagnostics = []
+    connection = _Connection([(10, "Orders", 0)], [_partition()])
+
+    def open_connection() -> None:
+        if "Refresh" in calls and phase == "poll":
+            assert read_released.wait(2), "completion observer never released the controlled engine read"
+
+    def observe(*_args, **_kwargs):
+        if "Refresh" not in calls:
+            return ready
+        completion_polls.append("poll")
+        if phase == "poll" and len(completion_polls) == 1:
+            return ready
+        read_released.set()
+        if finding_kind == "progress":
+            return progress if len(completion_polls) == 1 else ready
+        return blocked
+
+    def invoke(action, **_kwargs):
+        calls.append(action)
+        # Every partition really advances on the mock engine, even in the refusal cases.
+        connection.partitions = [_partition(refreshed=datetime(2026, 10, 28, 12, 1, tzinfo=timezone.utc))]
+        return ActionResult(action, True, "invoke_returned", 1, baseline_ticks + 1, False, "not_requested")
+
+    baseline_ticks = actions._typed_utc_ticks(BASELINE)
+    monkeypatch.setattr(connection, "Open", open_connection, raising=False)
+    monkeypatch.setattr(connection, "Close", lambda: None, raising=False)
+    monkeypatch.setattr(query_probe, "desktop_identity", lambda *_args: identity)
+    monkeypatch.setattr(query_probe, "catalogue_id", lambda *_args, **_kwargs: bound.catalogue)
+    monkeypatch.setattr(query_probe, "_load_adomd", lambda: lambda *_args: connection)
+    monkeypatch.setattr(query_probe, "_credential_state", lambda *_args, **_kwargs: ready)
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", observe)
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(refresh_pbip_model, "_identity_gate", lambda *_args: True)
+    monkeypatch.setattr(refresh_pbip_model, "invoke_desktop_action", invoke)
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "probe_observations",
+        lambda *_args, **_kwargs: calls.append("canaries") or [SimpleNamespace(table="Orders", returned_rows=1)],
+    )
+    monkeypatch.setattr(refresh_pbip_model, "_emit_data_verdict", lambda *_args: 0)
+    monkeypatch.setattr(
+        sys.modules["_desktop_observer"],
+        "print_dialog_diagnostic",
+        lambda pid, target: diagnostics.append((pid, target)),
+    )
+    args = SimpleNamespace(refresh_absolute_timeout_seconds=4, no_save=False, canaries=["Orders"], tables=None)
+    result = refresh_pbip_model._ui_refresh_locked(
+        UIRefreshContext(123, 49157, bound, 789, None), Path("missing-cache.abf"), args
+    )
+    output = capsys.readouterr().out
+    if finding_kind == "progress":
+        assert result == 0, output
+        assert calls == ["Refresh", "canaries", "Save"], output
+        assert "engine completion: all source partitions READY" in output
+        assert not diagnostics
+    else:
+        assert result == 3, output
+        assert calls == ["Refresh"], output
+        token = tokens.get(finding_kind, "CREDENTIAL_UNKNOWN")
+        assert f"REFRESH: {token} pid=123;" in output
+        assert diagnostics == ([] if finding_kind == "no_finding" else [(123, window)])
+        if finding_kind != "no_finding":
+            assert "to the deadline" not in output
+        assert "engine completion:" not in output
+
+
 @pytest.mark.parametrize("change", ["foreground", "identity", "none"])
 @WINDOWS_ONLY
 def test_final_action_acquisition_rechecks_focus_and_identity_without_windows(change: str) -> None:
