@@ -7,6 +7,8 @@
 
 ## Session start, do this first (before any other work)
 
+**Linux contributor-only sessions:** follow the offline-work exception in `AGENTS.md`; Windows sessions must run the command below.
+
 ```
 powershell -ExecutionPolicy Bypass -File scripts/preflight.ps1 -Update -CheckUpstream
 ```
