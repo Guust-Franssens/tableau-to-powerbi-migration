@@ -1251,10 +1251,49 @@ rebuild the artifact after editing its source.
 | `trace_customer_text.py` | The artifact table in [`docs/customer-text-exposure.md`](../docs/customer-text-exposure.md) — **which artifacts carry the customer's field names, formulas and titles into an agent's context.** `inject` stamps uniquely-greppable, instruction-shaped sentinels into a `.twb`/`.tds`/`.twbx`; `trace` reports where they landed, in file NAMES as well as content, plus the sentinels that reached nothing (the negative result that bounds the claim). Answers a privacy question and a prompt-injection one with the same run, and neither answer survives an engine upgrade — the engine is not pinned, so re-run it rather than trusting the committed table. |
 | `provision_tableau_estate.py` | **The Tableau site as code** — the one direction the rest of the toolkit does not go. `capture` enumerates a site, downloads every asset and writes a re-appliable manifest; `apply` recreates projects (shallowest-first), groups, then **datasources before workbooks**, because a workbook published first silently rebinds to nothing; `seed` gives every empty leaf project something migratable, and `--refresh-seeded` republishes existing seeds after a template change. Projects are keyed by path **segments, never a joined string** — the trial site has a project literally named `R/D`, which made a `/`-joined identity ambiguous and mislabelled its seed. Asset filenames come from what TSC *returns*, never guessed: it appends its own suffix (`X.twbx.twbx`) and hands back `.twb` for an unpackaged workbook. `capture` **refuses an `--out` git does not ignore** (`--allow-unignored-out` overrides): `manifest.json` names every project, workbook and datasource on a live site, and this repo is public. `--refresh-seeded` **downloads a candidate before overwriting it** — `Seed - ` is a naming convention, not proof of authorship, so a genuine workbook of that name is refused rather than replaced by the stub, and `--dry-run` runs the same check so the plan reports the refusal the run would make. Permission RULES and group **membership** are deliberately not reproduced — LUIDs differ on a fresh site, and a half-correct permission model is worse than an absent one; ownership, tags, certification, workbook descriptions and extract data are not reproduced either, and `apply` prints that whole list. `content_permissions` and `show_tabs` **are** captured and re-applied on create. | after any hand-edit of the trial site, and before a trial lapses |
 | `make_seed_workbook.py` | Builds the ~1.8 KB self-contained `.twbx` that `provision_tableau_estate.py seed` publishes: one CSV, one worksheet, one dashboard. Exists because **an empty project is an inert fixture** — the trial site's 11-deep `ZZ Deep` chain and every deliberately hostile project name (`R/D`, `R+D`, `Trailing dot.`, `Ventes françaises`) held nothing, so the path handling they were built to stress was never exercised. Two non-obvious requirements, both measured against Tableau Cloud: a `<windows>` entry per sheet (or publish fails *"not associated with any window"*), and `<metadata-records>` for every column (without them the engine cannot type a model and the whole estate comes back `DOD_FAILED, bound=0/N`). Every attribute in the template is **single-quoted**, so names are escaped with quotes included — `saxutils.escape` alone covers only `&`/`<`/`>`, and a project named `L'Équipe` stopped the file being XML. Sheet names truncate the **raw** base then append the suffix: slicing an escaped string splits entities, and composing first made the worksheet and dashboard collide at 54 characters. The internal `.twb` entry name is sanitised, decoupled from the display name, so a `/` in the name cannot create a directory inside the archive. | called by `provision_tableau_estate.py seed` |
-## Narrow `t2p.py` pilot (Refs #749)
+## Narrow `t2p.py` pilot (Refs #749 / #773)
 
 This opt-in pilot does not replace direct scripts, dispatcher guidance or gates. The frozen
 [pilot plan](../docs/t2p-pilot-plan.md) supersedes the earlier consensus's path timing and exit names.
+The [Quickstart](../README.md#quickstart) installs only this existing facade as module `t2p`
+(`t2p:console_main`), using a **regular local-directory** pip/uv install. Its standard installer
+metadata binds the selected environment to one physical toolkit checkout; backend scripts/assets
+are not packaged or selected from caller cwd. Use that environment's absolute generated `t2p.exe`
+(Linux: `bin/t2p`), absolute Python `-B -m t2p`, or `t2p` after correct activation:
+
+```text
+t2p doctor [--env <path>] [--json]
+t2p start --project <exact-name|LUID> [--env <path>] [--runs-parent <path>] [--storage-decision <path>] [--session-id <UUID>] [--json]
+t2p status --run <absolute-local-run> [--json]
+```
+
+`uv sync --all-extras --no-editable` is the operator setup in the selected checkout. No-sync alone
+does not select an environment from another project, and default uv sync/run can restore editable
+mode. Ordinary pip requires pip already available in the selected environment; no bootstrapper.
+Required qualification covers canonical regular uv-sync and ordinary pip on plain/spaced **and**
+combined Unicode/#/% paths. Selected-environment uv-pip retains plain/spaced compatibility;
+**only its raw native combined-punctuation cell is explicitly deferred**, not all uv punctuation forms.
+Canonical combined-path uv-sync must pass the full installed-command matrix, not just doctor.
+Other unisolated path/representation cells remain unverified; no URI fallback, renamed/copied
+checkout or environment switch is a repair.
+The facade is a snapshot; backends at the bound location stay live. Reinstall for facade/packaging
+changes, a moved target or an intentional rebind. A moved nested environment may not launch Python
+at all and needs recreation/reinstallation, not an expected JSON verdict.
+For a facade update, use uv's explicit `--reinstall-package tableau-to-pbi-migration` with the same
+selected environment/checkout and regular mode: canonical sync for that checkout's `.venv`, or
+the qualified plain/spaced uv-pip form. Ordinary pip needs pip already available in that same
+environment. Ordinary sync/cache reuse is not a live source link.
+
+Known unsupported forms refuse at the installation layer (exit 1); unavailable/ambiguous metadata
+or targets return 3, with fixed safe codes, null authority/delegated exit, empty stages/checks and
+no established proof. Installed help/syntax (including blank project) need no binding/owner imports;
+undelegated installed paths emit no guessed RUN marker. Direct blank-project stderr is unchanged.
+Editable console, wheel/index/archive/VCS, standalone/user/target/pipx/copied environments and
+UNC/reparse/symlink roots are outside this contract. Regular invocation suppresses toolkit/child
+bytecode, not first-import site-packages or external host caches. Editable imports can cache source
+before the function starts; do not present those as supported read-only commands.
+
+The unchanged direct `-B` expert forms remain:
 
 ```text
 python -B scripts/t2p.py doctor [--env <path>] [--json]
@@ -1273,6 +1312,10 @@ conflict. Privately preserve the intended PAT under `TABLEAU_PAT_SECRET` **befor
 `TABLEAU_PAT_VALUE`; if the legacy value is intended, move it first. A dead Desktop pin needs a
 verified current-process refresh and retry in the **same invocation**, not merely `setx` or unpinning.
 Reruns retain an explicit `--env <same-selected-env>` placeholder; no selected/host path is exposed.
+Installed human remedies use `<selected-toolkit>`, `<selected-python>` and `<selected-t2p>` for the
+same checkout/environment, retaining regular mode (`--no-editable` for uv sync). Checkout-relative
+expert repair commands below must run **in that selected toolkit**, with its selected Python;
+they are not commands to paste into an arbitrary caller checkout. Direct strings and JSON stay unchanged.
 No value, derivative, server/site/PAT-name label, raw child output or exception prose is displayed.
 The flushed checking line is on stderr; JSON stdout is one object, not human guidance.
 `READY_TO_ATTEMPT` means preflight=0 and consistent required presence, not authentication, reachability,
@@ -1283,6 +1326,12 @@ log/bytecode file and invokes no update, installer, login, source probe, allocat
 This is **not** offline or universal zero-write evidence: existing configured Azure/Fabric checks may
 make diagnostic traffic, and external tools/PowerShell hosts may affect caches. Actual-child tests
 cover only their monitored synthetic toolkit/profile and stub calls, not real host caches.
+Their original protected file-map equality and forbidden-command/native/output assertions remain
+strict. Each doctor/direct child gets a fresh empty sibling sidecar, selected only through its
+process-local `PSModuleAnalysisCachePath`. All sidecar entries, including empty directories, are
+checked; only the exact selected cache file may appear/change. Empty means **NOT_OBSERVED**, not
+cache relocation proof or a failure by itself. Same-basename protected writes still fail; no profile
+or installed-command directory/no-pyc snapshot exemption is introduced.
 
 `start` delegates **one** existing `start_migration.py` owner, including its output guard, allocator,
 site-wide assessment, post-harvest/pre-conversion path gate and reference-failure bundle continuation.
@@ -1293,6 +1342,9 @@ START_READY, COMPLETE or deployment. Human first/last markers name the run (or N
 allocation is reported before children. Over-ceiling diagnostics retain the old run and the existing
 owner's exact direct-script new-run command. The facade's rerun field remains unavailable because it
 has no complete recorded invocation; it never guesses an authoritative rerun.
+Caller cwd is never changed: relative `--env`/`--runs-parent` keep caller-relative owner semantics.
+`--storage-decision` stays literal: the existing front door forwards it into a toolkit-cwd child,
+so that relative policy resolves there, not at caller cwd. Packaging does not silently repair/rebase it.
 
 Ordinary `status` is an **anonymous interim human view** of the existing safe projection; `--json`
 remains **byte-for-byte `t2p/v1` compatible**, including syntax/error/interrupt envelopes. After the
@@ -1337,5 +1389,5 @@ doctor uses `READY_TO_ATTEMPT|BLOCKED_CONFIG|CANNOT_ESTABLISH`.
 
 Only these three explicit verbs exist: no file/folder/datasource/site/server selectors, `next`,
 router, state DB, credential, build, package, validation, promotion, deployment or dispatch command.
-Offline tests validate mechanics, not blind-run benefit. Live blind run 2 remains an independent
-same-project/same-oracle acceptance step; no journey/documentation replacement is authorized yet.
+Synthetic tests validate mechanics, not blind-run benefit. Installation adds the bounded onboarding
+form only; live blind run 2 remains deferred as an independent same-project/same-oracle acceptance step.

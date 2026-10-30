@@ -109,6 +109,51 @@ uv venv
 uv sync                      # install parser + tooling deps from pyproject.toml
 ```
 
+Run contributor commands from this checkout. This default editable development environment is for
+direct `python -B scripts\t2p.py` calls, not the regular-installed operator contract in the
+[Quickstart](README.md#quickstart). `uv run` can automatically resync back to editable; `--no-sync`
+only suppresses syncing and does **not** select a previously chosen environment from another cwd.
+For operator commands use that environment's absolute `t2p` executable/Python, or activate it first.
+Use `uv sync --all-extras --no-editable` in the selected checkout for its operator `.venv`.
+Ordinary `python -m pip install <absolute-toolkit>` is also supported when the selected environment
+already has pip; uv environments need not. No pip bootstrapper or external-tool installer is added.
+Required qualification retains pip and canonical regular `uv sync --all-extras --no-editable` on
+plain/spaced **and** combined Unicode/#/% checkouts. Selected-environment `uv pip install` retains
+plain/spaced compatibility; **only its raw native combined-punctuation cell is explicitly deferred**.
+That is not a blanket uv Unicode-path exclusion. Other unisolated path/representation cells remain
+unverified; no URL fallback, copied/renamed checkout, tool upgrade or environment switch is implied.
+
+Packaging copies only the existing `scripts\t2p.py` singleton as module `t2p`; backend scripts/assets
+remain live in the checkout recorded by standard local-directory installer metadata. Reinstall for
+facade/packaging changes, a moved checkout or an intentional rebind. Moving a nested environment can
+break its generated executable before Python starts; recreate/reinstall rather than expecting JSON.
+For uv facade updates, explicitly add `--reinstall-package tableau-to-pbi-migration` to that
+checkout's canonical regular sync, or its qualified plain/spaced uv-pip form, retaining the same
+selected environment. Ordinary cache reuse is not an editable source update.
+Editable console, index/wheel/VCS, standalone, user/target/pipx and copied environments are not
+supported operator forms. Early editable imports can write source bytecode; `-B` direct calls remain.
+
+`tests\test_t2p_install.py` uses real pip/uv installers, disposable public synthetic toolkits and the
+generated executable (including Windows `.exe`) from outside the selected checkout. It also covers
+module routing, metadata failures, transport and cache boundaries. Installers run only during tests,
+not collection; setup failures fail rather than skip. Run it with
+`uv run python -B -m pytest -q tests\test_t2p_install.py --basetemp _t2p_install_tests`.
+CI runs it in the ordinary full Linux suite and explicitly on Windows; synthetic controls establish
+neither live migration acceptance nor a global zero-write/offline promise.
+The existing full fixture matrix includes canonical uv-sync for both path classes, not only doctor.
+Its standard `UV_PROJECT_ENVIRONMENT` selects an owned separate environment so protected directory/
+no-pyc snapshots need no new exclusions; the two nested `.venv` sync cases remain separately required.
+Installer setup cwd never changes the actual command's caller cwd or relative arguments.
+
+The full synthetic Windows preflight tests keep fresh profiles, the same PowerShell host and the
+original protected-root file membership/bytes/file-mtime equality (except the existing command log).
+Only the child's explicit environment selects a new empty sibling sidecar and exact
+`PSModuleAnalysisCachePath` file. The whole sidecar is observed, including empty directories:
+only conditional creation/update of that exact file is allowed. Empty means **NOT_OBSERVED**, not
+relocation proof. Protected same-basename writes and unexpected sidecar files/directories still fail;
+forbidden-command/native/output controls and stronger installed-command directory snapshots remain.
+No cache producer, profile exemption, real user setting or causal/global-zero-write claim is added.
+
 ## Python conventions (enforced)
 
 After editing any `.py`/`.ipynb`, run the ritual on the changed file(s) before opening a PR:
