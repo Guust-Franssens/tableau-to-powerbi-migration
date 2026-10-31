@@ -84,6 +84,7 @@ def _bridge_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(refresh_pbip_model.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
     monkeypatch.setattr(refresh_pbip_model, "_ui_desktop_alive", lambda _pid: True)
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_command", lambda: ["controlled-bridge"])
     return clock
 
 
@@ -319,7 +320,7 @@ def _clean_start_route(  # pylint: disable=too-many-locals
         return controls[name]
 
     def bridge(command, pid, deadline, *, operation="status"):
-        assert pid == 123 and deadline == controls["deadline"] and "--no-install" in command
+        assert pid == 123 and deadline == controls["deadline"] and command == ["controlled-bridge"]
         phase("reload" if operation == "reload" else "post_status")
         response = controls["reload" if operation == "reload" else "post_status"]
         if isinstance(response, BaseException):
@@ -612,13 +613,100 @@ def test_bridge_status_uses_installed_only_exact_pid_cli_with_original_budget(
         "_BridgeStatusJob",
         lambda: SimpleNamespace(start=lambda _child: None, close=lambda: None),
     )
-    command = ["npx.cmd" if os.name == "nt" else "npx", "--no-install", "@microsoft/powerbi-desktop-bridge-cli"]
+    command = [str(Path.cwd() / "powerbi-desktop.cmd")] if os.name == "nt" else ["powerbi-desktop"]
     assert refresh_pbip_model._ui_bridge_status(command, 123, 110, operation=operation) == _ready_bridge()
     arguments, kwargs = seen[0]
-    rendered = " ".join(arguments)
-    assert "--no-install" in rendered and f"{operation} --pid 123" in rendered
-    assert ("--wait-seconds 10.0" in rendered) is (operation == "status")
-    assert "--yes" not in rendered and not kwargs.get("shell")
+    if os.name == "nt":
+        assert '/d /v:off /s /c ""%PBIP_UI_BRIDGE_ARG_0%" ' in arguments
+        rendered = [kwargs["env"][f"PBIP_UI_BRIDGE_ARG_{index}"] for index in range(6 if operation == "status" else 4)]
+    else:
+        rendered = arguments
+    assert rendered == [*command, operation, "--pid", "123"] + (
+        ["--wait-seconds", "10.0"] if operation == "status" else []
+    )
+    assert not kwargs.get("shell")
+
+
+@pytest.fixture(name="installed_bridge", params=["bridge & (x) %PATH% !bang! ^ caret", "bridge&(%PATH%)!bang!^"])
+def _installed_bridge(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    if os.name != "nt":
+        pytest.skip("real installed Windows batch launcher control")
+    directory = tmp_path / request.param
+    directory.mkdir()
+    launcher = directory / "powerbi-desktop.cmd"
+    launcher.write_text(f'@"{sys.executable}" "%~dp0bridge.py" %*\n', encoding="utf-8")
+    script = directory / "bridge.py"
+    script.write_text(
+        "import json, os, pathlib, sys\n"
+        "with pathlib.Path(__file__).with_suffix('.calls').open('a', encoding='utf-8') as log:\n"
+        "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "print(os.environ['PBIP_TEST_BRIDGE_RESPONSE'] if sys.argv[1] == 'status' else "
+        '\'{"status":"ok","pid":123,"result":{"success":true}}\')\n'
+        "sys.exit(int(os.environ.get('PBIP_TEST_BRIDGE_EXIT', '0')))\n",
+        encoding="utf-8",
+    )
+    fallback = directory / "fallback"
+    (directory / "npx.cmd").write_text(f'@echo unexpected>"{fallback}"\n@exit /b 1\n', encoding="utf-8")
+    monkeypatch.setenv("PATH", str(directory))
+    monkeypatch.setenv("PBIP_TEST_BRIDGE_RESPONSE", json.dumps(_ready_bridge()))
+    monkeypatch.setenv("PBIP_TEST_BRIDGE_EXIT", "0")
+    monkeypatch.setattr(refresh_pbip_model, "_ui_desktop_alive", lambda _pid: True)
+    return launcher, script.with_suffix(".calls"), fallback
+
+
+def test_installed_launcher_drives_real_readiness_reload_and_post_status_without_npx(
+    installed_bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _launcher, calls_path, fallback = installed_bridge
+    deadline = time.monotonic() + 15
+    instance = refresh_pbip_model._ui_bridge_preflight(123, deadline)
+    assert instance is not None, "installed launcher failed exact-PID readiness"
+    root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
+    state = Observation(pid="123", process_started_at="456", target_window=root)
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid, **_kwargs: state)
+    assert refresh_pbip_model._ui_clean_start(123, instance, deadline) == (instance, state)
+    calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+    assert [call[:3] for call in calls] == [
+        ["status", "--pid", "123"],
+        ["reload", "--pid", "123"],
+        ["status", "--pid", "123"],
+    ]
+    assert calls[1] == ["reload", "--pid", "123"]
+    assert all(call[3] == "--wait-seconds" and 0 < float(call[4]) <= 15 for call in (calls[0], calls[2]))
+    assert not fallback.exists(), "installed launcher must not use npx"
+
+
+@pytest.mark.parametrize("refusal", ["exit", "semantic", "wrong_pid"])
+def test_installed_launcher_refusal_does_not_retry_or_fall_back(
+    installed_bridge, monkeypatch: pytest.MonkeyPatch, refusal: str
+) -> None:
+    _launcher, calls_path, fallback = installed_bridge
+    payload = _ready_bridge()
+    if refusal == "exit":
+        monkeypatch.setenv("PBIP_TEST_BRIDGE_EXIT", "1")
+    elif refusal == "semantic":
+        payload["error"] = {"code": "CREDENTIAL_REQUIRED"}
+    else:
+        payload["instances"][0]["pid"] = 456
+    monkeypatch.setenv("PBIP_TEST_BRIDGE_RESPONSE", json.dumps(payload))
+    with pytest.raises(DesktopActionError):
+        refresh_pbip_model._wait_ui_bridge(123, time.monotonic() + 15)
+    calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == 1 and calls[0][:3] == ["status", "--pid", "123"], "refusal retried"
+    assert not fallback.exists(), "refusal selected a different launcher"
+
+
+def test_absent_installed_launcher_refuses_without_spawning_npm(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(refresh_pbip_model, "_ui_desktop_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        refresh_pbip_model.subprocess, "Popen", lambda *_args, **_kwargs: pytest.fail("absent launcher spawned")
+    )
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", lambda _pid: Observation())
+    assert refresh_pbip_model._ui_bridge_preflight(123, time.monotonic() + 10) is None
+    assert "UI_PREFLIGHT_REFUSED" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("late_phase", ["launch", "output", pytest.param("cleanup", marks=WINDOWS_ONLY)])
@@ -2229,6 +2317,7 @@ def _wire_ui_route(monkeypatch: pytest.MonkeyPatch, *, no_save: bool = False, ro
     refresh_action = ActionResult("Refresh", True, "invoke_returned", 1, 200, False, "not_requested")
     save_action = ActionResult("Save", True, "invoke_returned", 1, 300, False, "not_requested")
 
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_command", lambda: ["controlled-bridge"])
     monkeypatch.setattr(
         refresh_pbip_model, "_ui_observer_state", lambda *_args, **_kwargs: SimpleNamespace(state="READY")
     )

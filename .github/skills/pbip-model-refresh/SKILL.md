@@ -10,8 +10,9 @@ ADOMD.NET/AMO (pythonnet), plus the Desktop Bridge CLI for process to file mappi
 
 Requirements, in full: Windows with Power BI Desktop, Python >= 3.11 with `pythonnet`, the ADOMD.NET
 and AMO client libraries under the NuGet global-packages cache (`$env:NUGET_PACKAGES` when set,
-otherwise `~/.nuget/packages`), and `npx` for `@microsoft/powerbi-desktop-bridge-cli`. No other
-dependency, and nothing repo-specific.
+otherwise `~/.nuget/packages`), and the installed `powerbi-desktop` CLI from
+`@microsoft/powerbi-desktop-bridge-cli` on PATH for `--ui-refresh` (legacy XMLA discovery still uses
+`npx`). No other dependency, and nothing repo-specific.
 
 The ADOMD.NET client is a *separate* nuget package from TOM/AMO, so a machine can have one and not the
 other. If `probe_desktop_query.py` prints `AdomdClient.dll not found in the nuget cache` (and
@@ -108,7 +109,7 @@ downstream. There is no reload between Refresh and optional Save.
 with Desktop, or actual-Desktop performance. Reload is not a substitute for reopening after model
 edits; the model synchronization and stale-Save warnings below still apply.
 
-The UI route uses `npx --no-install @microsoft/powerbi-desktop-bridge-cli status --pid ...`
+The UI route resolves the already-installed `powerbi-desktop` launcher on PATH for `status --pid ...`
 and the same contained transport for its one `reload --pid ...`,
 never `--yes`, a custom package resolver or automatic tooling updates. Missing installations
 refuse. The child wait uses the remaining original budget; timeout terminates only the owned

@@ -87,6 +87,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -870,7 +871,15 @@ class _BridgeStatusJob:
                 raise ctypes.WinError(ctypes.get_last_error())
 
 
-def _ui_bridge_status(  # pylint: disable=too-many-statements
+def _ui_bridge_command() -> list[str]:
+    """Resolve the already-installed CLI; never ask npm to acquire a package."""
+    launcher = shutil.which("powerbi-desktop")
+    if launcher is None:
+        raise DesktopActionError("installed Desktop bridge launcher unavailable")
+    return [str(Path(launcher).resolve())]
+
+
+def _ui_bridge_status(  # pylint: disable=too-many-statements,too-many-locals
     command: list[str], pid: int, deadline: float, *, operation: str = "status"
 ) -> dict:
     """One contained status/reload RPC under the caller's original startup deadline."""
@@ -882,8 +891,20 @@ def _ui_bridge_status(  # pylint: disable=too-many-statements
     arguments = [*command, operation, "--pid", str(pid)]
     if operation == "status":
         arguments.extend(["--wait-seconds", str(remaining)])
-    if os.name == "nt" and command[0] == "npx.cmd":
-        arguments = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", subprocess.list2cmdline(arguments)]
+    environment = None
+    if os.name == "nt" and Path(command[0]).suffix.lower() in {".cmd", ".bat"}:
+        if any(any(character in argument for character in '"\r\n\x00') for argument in arguments):
+            raise DesktopActionError("invalid batch launcher argument")
+        # Expand values once, inside quotes, with delayed expansion disabled. Passing the values
+        # through the environment preserves literal %, !, ^ and shell operators in installed paths.
+        environment = os.environ.copy()
+        names = [f"PBIP_UI_BRIDGE_ARG_{index}" for index in range(len(arguments))]
+        environment.update(zip(names, arguments))
+        batch = '"' + " ".join(f'"%{name}%"' for name in names) + '"'
+        # cmd.exe does not implement the backslash-quote escaping used for argv lists.
+        arguments = (
+            subprocess.list2cmdline([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/v:off", "/s", "/c"]) + " " + batch
+        )
     job = _BridgeStatusJob() if os.name == "nt" else None
     child = None
     pipe_settled = False
@@ -896,6 +917,7 @@ def _ui_bridge_status(  # pylint: disable=too-many-statements
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=environment,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | (0x4 if job else 0),  # CREATE_SUSPENDED
         )
         if job is not None:
@@ -998,7 +1020,7 @@ def _bridge_readiness_result(payload: dict, pid: int) -> tuple[dict | None, floa
 
 def _wait_ui_bridge(pid: int, deadline: float) -> dict:
     """A UI-only readiness loop; no refresh authority and no reset of the held deadline."""
-    command = ["npx.cmd" if os.name == "nt" else "npx", "--no-install", "@microsoft/powerbi-desktop-bridge-cli"]
+    command = _ui_bridge_command()
     print("  bridge : waiting for exact-PID application readiness (at most 60 seconds)", flush=True)
     pending_reported = False
     while time.monotonic() < deadline:
@@ -2355,7 +2377,7 @@ def _ui_clean_start(  # pylint: disable=too-many-return-statements,too-many-bran
         if before.pid != str(pid):
             raise DesktopActionError("observer PID mismatch")
         _ui_root(before, pid, start)
-        command = ["npx.cmd" if os.name == "nt" else "npx", "--no-install", "@microsoft/powerbi-desktop-bridge-cli"]
+        command = _ui_bridge_command()
         response = _ui_bridge_status(command, pid, deadline, operation="reload")
         _ui_read_budget(deadline)
         result = response.get("result")
