@@ -162,7 +162,7 @@ def _launches_the_live_desktop(func: ast.FunctionDef) -> bool:
                 return True
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "CreateWindowExW":
             return True
-        if isinstance(node, ast.Constant) and node.value == "-ReadyFile":
+        if isinstance(node, ast.Constant) and node.value in {"-ReadyFile", "-STA"}:
             return True
     return False
 

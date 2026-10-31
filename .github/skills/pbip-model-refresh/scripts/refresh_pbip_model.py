@@ -3,7 +3,7 @@ purpose: Refresh a local PBIP model in Power BI Desktop and PERSIST the result, 
          (and the next Desktop open) sees real data instead of an empty model.
 usage:   python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py
              [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"]
-             [--calculate-only] [--no-save]
+             [--calculate-only] [--no-save] [--ui-refresh]
          (ships inside the `pbip-model-refresh` skill; run it by its path from wherever the folder
           was copied. `scripts/refresh_pbip_model.py` in this repo is a forwarding shim.)
 
@@ -80,11 +80,14 @@ from __future__ import annotations
 # pylint: disable=too-many-lines
 
 import argparse
+import ctypes
 import hashlib
 import inspect
 import json
+import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -107,6 +110,8 @@ from probe_desktop_query import (
     _load_adomd,
     _observation_errors,
     _validate_observation_request,
+    bind_desktop,
+    bound_call,
     column_names,
     desktop_identity,
     discover_port,
@@ -114,8 +119,18 @@ from probe_desktop_query import (
     is_auto_date_table_name,
     measure_names,
     nuget_packages_root,
+    probe_observations,
     recheck_bound,
     table_names,
+)
+from _desktop_actions import (
+    ACTION_CHILD_TIMEOUT_SECONDS,
+    CompletionResult,
+    DesktopActionError,
+    PartitionSnapshot,
+    check_completion,
+    invoke_desktop_action,
+    read_partition_snapshot,
 )
 
 # Cache-file integrity + atomic staged-write/rollback primitives live in _abf so this module
@@ -169,6 +184,8 @@ from _desktop_observer import (
     print_refresh_unknown_banner,
     raise_terminal_detection,
     print_operation_refusal,
+    print_dialog_diagnostic,
+    main_frame,
     POLL_INTERVAL_SECONDS,
     source_hint_from_model,
 )
@@ -196,6 +213,17 @@ class PersistenceObservation:
     image: ImageObservation
     identity: DesktopIdentity
     method: Literal["AMO_ImageSave"] = "AMO_ImageSave"
+
+
+@dataclass(frozen=True, slots=True)
+class UIRefreshContext:
+    """The held Desktop/model identity shared by one explicit UI refresh operation."""
+
+    pid: int
+    port: int
+    bound: BoundDesktop
+    root_hwnd: int
+    source_hint: str | None
 
 
 SAVE_TIMEOUT_SECONDS = 120
@@ -709,6 +737,328 @@ def _bridge_status() -> dict:
         return json.loads(result.stdout)
     except json.JSONDecodeError:
         return {}
+
+
+def _ui_desktop_alive(pid: int) -> bool:
+    """Check only the held PID without querying its engine or enumerating sibling windows."""
+    if os.name != "nt":
+        raise DesktopActionError("bridge readiness requires Windows")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_uint32]
+    kernel.OpenProcess.restype = ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel.WaitForSingleObject.restype = ctypes.c_uint32
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE, not mutation access
+    if not handle:
+        if ctypes.get_last_error() == 87:  # ERROR_INVALID_PARAMETER: PID does not exist
+            return False
+        raise DesktopActionError("Desktop process state unavailable")
+    try:
+        state = kernel.WaitForSingleObject(handle, 0)
+        if state not in (0, 258):
+            raise DesktopActionError("Desktop process state unavailable")
+        return state == 258  # WAIT_TIMEOUT: process is still running
+    finally:
+        kernel.CloseHandle(handle)
+
+
+class _BridgeStatusJob:
+    """Contain only a suspended status launcher and its descendants, including after launcher exit."""
+
+    class Limits(ctypes.Structure):  # pylint: disable=too-few-public-methods
+        """JOBOBJECT_EXTENDED_LIMIT_INFORMATION, including native pointer-sized alignment."""
+
+        _fields_ = [
+            ("process_time", ctypes.c_int64),
+            ("job_time", ctypes.c_int64),
+            ("flags", ctypes.c_uint32),
+            ("min_working_set", ctypes.c_size_t),
+            ("max_working_set", ctypes.c_size_t),
+            ("active_limit", ctypes.c_uint32),
+            ("affinity", ctypes.c_size_t),
+            ("priority", ctypes.c_uint32),
+            ("scheduling", ctypes.c_uint32),
+            ("io_counters", ctypes.c_uint64 * 6),
+            ("memory_limits", ctypes.c_size_t * 4),
+        ]
+
+    class Threads(ctypes.Structure):  # pylint: disable=too-few-public-methods
+        """THREADENTRY32 for locating the still-suspended launcher's sole initial thread."""
+
+        _fields_ = [(name, ctypes.c_uint32) for name in ("size", "usage", "tid", "pid", "base", "delta", "flags")]
+
+    def __init__(self) -> None:
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle, dword, pointer = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p
+        for name, arguments, result in (
+            ("CreateJobObjectW", [pointer, ctypes.c_wchar_p], handle),
+            ("SetInformationJobObject", [handle, ctypes.c_int, pointer, dword], ctypes.c_int),
+            ("AssignProcessToJobObject", [handle, handle], ctypes.c_int),
+            ("TerminateJobObject", [handle, dword], ctypes.c_int),
+            ("QueryInformationJobObject", [handle, ctypes.c_int, pointer, dword, pointer], ctypes.c_int),
+            ("CreateToolhelp32Snapshot", [dword, dword], handle),
+            ("Thread32First", [handle, pointer], ctypes.c_int),
+            ("Thread32Next", [handle, pointer], ctypes.c_int),
+            ("OpenThread", [dword, ctypes.c_int, dword], handle),
+            ("ResumeThread", [handle], dword),
+            ("CloseHandle", [handle], ctypes.c_int),
+        ):
+            function = getattr(self.kernel, name)
+            function.argtypes, function.restype = arguments, result
+        self.handle = self.kernel.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        limits = self.Limits()
+        limits.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE; the handle is never inherited.
+        if not self.kernel.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            error = ctypes.get_last_error()
+            self.kernel.CloseHandle(self.handle)
+            self.handle = None
+            raise ctypes.WinError(error)
+
+    def start(self, child: subprocess.Popen) -> None:
+        """Assign before allowing any launcher instruction or descendant creation."""
+        if not self.kernel.AssignProcessToJobObject(self.handle, int(child._handle)):  # pylint: disable=protected-access
+            error = ctypes.get_last_error()
+            child.kill()  # Still suspended: there cannot yet be a descendant outside the job.
+            child.wait(timeout=2.0)
+            raise ctypes.WinError(error)
+        snapshot = self.kernel.CreateToolhelp32Snapshot(4, 0)  # TH32CS_SNAPTHREAD
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            entry = self.Threads(size=ctypes.sizeof(self.Threads))
+            found = self.kernel.Thread32First(snapshot, ctypes.byref(entry))
+            while found:
+                if entry.pid == child.pid:
+                    thread = self.kernel.OpenThread(2, False, entry.tid)  # THREAD_SUSPEND_RESUME
+                    if not thread:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    try:
+                        if self.kernel.ResumeThread(thread) != 1:
+                            raise OSError("status launcher's initial thread was not suspended exactly once")
+                        return
+                    finally:
+                        self.kernel.CloseHandle(thread)
+                found = self.kernel.Thread32Next(snapshot, ctypes.byref(entry))
+            raise OSError("status launcher's suspended initial thread unavailable")
+        finally:
+            self.kernel.CloseHandle(snapshot)
+
+    def close(self) -> None:
+        """Terminate the entire owned job and positively verify no active processes remain."""
+        if self.handle is None:
+            return
+        handle, self.handle = self.handle, None
+        try:
+            if not self.kernel.TerminateJobObject(handle, 1):
+                raise ctypes.WinError(ctypes.get_last_error())
+            deadline = time.monotonic() + 2.0
+            # JOBOBJECT_BASIC_ACCOUNTING_INFORMATION: four LARGE_INTEGERs then four DWORDs.
+            accounting = (ctypes.c_uint64 * 6)()
+            while True:
+                if not self.kernel.QueryInformationJobObject(handle, 1, accounting, ctypes.sizeof(accounting), None):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                active = ctypes.c_uint32.from_buffer(accounting, 40).value
+                if active == 0:
+                    return
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("owned status job did not empty")
+                time.sleep(0.01)
+        finally:
+            if not self.kernel.CloseHandle(handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _ui_bridge_command() -> list[str]:
+    """Resolve the already-installed CLI; never ask npm to acquire a package."""
+    launcher = shutil.which("powerbi-desktop")
+    if launcher is None:
+        raise DesktopActionError("installed Desktop bridge launcher unavailable")
+    return [str(Path(launcher).resolve())]
+
+
+def _ui_bridge_status(  # pylint: disable=too-many-statements,too-many-locals
+    command: list[str], pid: int, deadline: float, *, operation: str = "status"
+) -> dict:
+    """One contained status/reload RPC under the caller's original startup deadline."""
+    if operation not in {"status", "reload"}:
+        raise DesktopActionError("unsupported startup bridge operation")
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError
+    arguments = [*command, operation, "--pid", str(pid)]
+    if operation == "status":
+        arguments.extend(["--wait-seconds", str(remaining)])
+    environment = None
+    if os.name == "nt" and Path(command[0]).suffix.lower() in {".cmd", ".bat"}:
+        if any(any(character in argument for character in '"\r\n\x00') for argument in arguments):
+            raise DesktopActionError("invalid batch launcher argument")
+        # Expand values once, inside quotes, with delayed expansion disabled. Passing the values
+        # through the environment preserves literal %, !, ^ and shell operators in installed paths.
+        environment = os.environ.copy()
+        names = [f"PBIP_UI_BRIDGE_ARG_{index}" for index in range(len(arguments))]
+        environment.update(zip(names, arguments))
+        batch = '"' + " ".join(f'"%{name}%"' for name in names) + '"'
+        # cmd.exe does not implement the backslash-quote escaping used for argv lists.
+        arguments = (
+            subprocess.list2cmdline([os.environ.get("COMSPEC", "cmd.exe"), "/d", "/v:off", "/s", "/c"]) + " " + batch
+        )
+    job = _BridgeStatusJob() if os.name == "nt" else None
+    child = None
+    pipe_settled = False
+    try:
+        child = subprocess.Popen(  # pylint: disable=consider-using-with
+            arguments,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | (0x4 if job else 0),  # CREATE_SUSPENDED
+        )
+        if job is not None:
+            job.start(child)
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, 0)
+            output, _ = child.communicate(timeout=remaining)
+            pipe_settled = True
+        except subprocess.TimeoutExpired as exc:
+            try:
+                if job is not None:
+                    owned_job, job = job, None
+                    owned_job.close()
+                else:
+                    child.kill()
+                child.communicate(timeout=2.0)
+                pipe_settled = True
+            except (OSError, subprocess.TimeoutExpired) as cleanup_exc:
+                print("  bridge : owned status-child cleanup unconfirmed; refresh remains withheld", flush=True)
+                raise DesktopActionError("bridge status cleanup unavailable") from cleanup_exc
+            raise TimeoutError from exc
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        if child.returncode != 0:
+            raise DesktopActionError("bridge status command failed")
+    finally:
+        try:
+            if job is not None:
+                job.close()
+                if child is not None and not pipe_settled:
+                    child.communicate(timeout=2.0)
+                    pipe_settled = True
+        except (OSError, TimeoutError, subprocess.TimeoutExpired) as exc:
+            print("  bridge : owned status-child cleanup unconfirmed; refresh remains withheld", flush=True)
+            raise DesktopActionError("bridge status cleanup unavailable") from exc
+        finally:
+            # Launcher exit alone cannot establish that an inherited-pipe reader has settled.
+            if child is not None and child.stdout is not None and pipe_settled:
+                child.stdout.close()
+    if time.monotonic() >= deadline:
+        raise TimeoutError
+    try:
+        payload = json.loads(output)
+    except (ValueError, TypeError) as exc:
+        raise DesktopActionError("malformed bridge status") from exc
+    if not isinstance(payload, dict):
+        raise DesktopActionError("malformed bridge status")
+    return payload
+
+
+def _bridge_readiness_result(payload: dict, pid: int) -> tuple[dict | None, float]:
+    """Only positive application-state readiness or the narrowly recognized pending states."""
+    instances = payload.get("instances")
+    if not isinstance(instances, list):
+        raise DesktopActionError("malformed bridge instances")
+    if payload.get("error"):
+        raise DesktopActionError("bridge application error")
+    if payload.get("status") == "not_connected" and instances == []:
+        if (
+            payload.get("diagnostics")
+            or payload.get("error")
+            or payload.get("lastError") not in (None, f"No Power BI Desktop Bridge pipe found for pid {pid}.")
+        ):
+            raise DesktopActionError("bridge discovery refused")
+        return None, 0.5
+    if len(instances) != 1 or not isinstance(instances[0], dict):
+        raise DesktopActionError("ambiguous bridge instance")
+    instance = instances[0]
+    if type(instance.get("pid")) is not int or instance["pid"] != pid:  # pylint: disable=unidiomatic-typecheck
+        raise DesktopActionError("bridge PID mismatch")
+    if payload.get("status") == "ready" and instance.get("bridgeStatus") == "connected":
+        path = instance.get("currentFilePath")
+        if instance.get("error") or payload.get("error"):
+            raise DesktopActionError("bridge application error")
+        if not isinstance(path, str) or not path.strip() or "\x00" in path or not Path(path).is_absolute():
+            raise DesktopActionError("bridge file binding unavailable")
+        return instance, 0.0
+    error = instance.get("error")
+    if (
+        payload.get("status") == "error"
+        and instance.get("bridgeStatus") == "error"
+        and isinstance(error, dict)
+        and error.get("code") == "BRIDGE_ERROR"
+        and error.get("message") == "Another operation is already in progress"
+    ):
+        if error.get("retryable") is not True:
+            raise DesktopActionError("bridge busy retry not authorized")
+        delay = error.get("retryAfterMs")
+        if (
+            isinstance(delay, (int, float))
+            and not isinstance(delay, bool)
+            and 0 <= delay <= 2**53
+            and math.isfinite(delay)
+        ):
+            return None, min(1.0, max(0.05, delay / 1000))
+    raise DesktopActionError("bridge not ready or terminal error")
+
+
+def _wait_ui_bridge(pid: int, deadline: float) -> dict:
+    """A UI-only readiness loop; no refresh authority and no reset of the held deadline."""
+    command = _ui_bridge_command()
+    print("  bridge : waiting for exact-PID application readiness (at most 60 seconds)", flush=True)
+    pending_reported = False
+    while time.monotonic() < deadline:
+        if not _ui_desktop_alive(pid):
+            raise DesktopActionError("Desktop process gone")
+        payload = _ui_bridge_status(command, pid, deadline)
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        instance, delay = _bridge_readiness_result(payload, pid)
+        if time.monotonic() >= deadline:
+            raise TimeoutError
+        if instance is not None:
+            print("  bridge : ready; existing observer and model checks still required", flush=True)
+            return instance
+        if not pending_reported:
+            print("  bridge : pending; refresh remains withheld", flush=True)
+            pending_reported = True
+        time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+    raise TimeoutError
+
+
+def _ui_bridge_preflight(pid: int, deadline: float) -> dict | None:
+    """Latch failure before one existing read-only diagnostic; it cannot clear readiness refusal."""
+    try:
+        return _wait_ui_bridge(pid, deadline)
+    except TimeoutError:
+        print("REFRESH: TIMEOUT - bridge readiness not established; no action invoked; cause unknown", flush=True)
+    except (DesktopActionError, OSError):
+        print("REFRESH: UI_PREFLIGHT_REFUSED (bridge readiness unavailable; no action invoked)", flush=True)
+    try:
+        state = _credential_state(pid)
+        if state.dialog is not None:
+            print_dialog_diagnostic(pid, state.dialog.window)
+        else:
+            print(f"  bridge diagnostic: {state.state}; inspect the held Desktop locally", flush=True)
+    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print("  bridge diagnostic: CANNOT_READ; inspect the held Desktop locally", flush=True)
+    return None
 
 
 def _instances() -> list[dict]:
@@ -1610,7 +1960,7 @@ def _cache_from_absent_binding(pbip: Path) -> Path | None:
     return None
 
 
-def cache_file(pid: int) -> Path | None:
+def cache_file(pid: int, *, instance: dict | None = None) -> Path | None:
     """Where `<Name>.SemanticModel/.pbi/cache.abf` belongs for the model this instance has open.
 
     Resolves the DESTINATION, not an existing file (on a first build there is no cache yet). There is
@@ -1620,7 +1970,9 @@ def cache_file(pid: int) -> Path | None:
     (round-3 mandate): resolved -> use it (even OUTSIDE this folder); unresolvable -> None (fail
     closed); absent -> and only then a name/count heuristic may run.
     """
-    inst = _instance(pid)
+    inst = _instance(pid) if instance is None else instance
+    if instance is not None and instance.get("pid") != pid:
+        return None
     if inst is None or not inst.get("currentFilePath"):
         return None
     pbip = Path(inst["currentFilePath"])
@@ -1939,6 +2291,482 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
     return None
 
 
+def _ui_root(state: Observation, pid: int, expected_start: str) -> int:
+    """Require one complete READY observer snapshot and return its exact main-window handle."""
+    if not state.complete or state.state != "READY" or state.process_started_at != expected_start:
+        raise DesktopActionError("initial observer state is not complete READY for the held process")
+    frame = state.target_window or main_frame(state.windows)
+    if frame is None or not isinstance(frame.hwnd, int) or frame.hwnd <= 0:
+        raise DesktopActionError("observer did not establish one actionable root window")
+    if frame.pid is not None and frame.pid != str(pid):
+        raise DesktopActionError("observer root belongs to another process")
+    if frame.process_started_at is not None and frame.process_started_at != expected_start:
+        raise DesktopActionError("observer root process identity changed")
+    return frame.hwnd
+
+
+def _ui_observer_state(
+    context: UIRefreshContext,
+    *,
+    allow_progress: bool = False,
+    timeout_seconds: float = 8.0,
+) -> Observation:
+    """Reuse the existing observer and prompt authority while requiring the held root identity."""
+    state = _in_flight_credential_state(
+        context.pid,
+        expected_process_start=context.bound.identity.process_start,
+        timeout_s=max(0.01, min(8.0, timeout_seconds)),
+    )
+    raise_terminal_detection(context.pid, state, context.source_hint)
+    if state.dialog is not None and state.state in {"UNKNOWN_DIALOG", "UNREADABLE_DIALOG"}:
+        raise DialogFoundError(context.pid, state.dialog)
+    if not state.complete:
+        raise CredentialUnknownError(
+            context.pid,
+            state.unknown_reason or state.reason or "observer_incomplete",
+        )
+    if state.state not in {"READY", "REFRESH_IN_PROGRESS"}:
+        raise CredentialUnknownError(
+            context.pid,
+            state.unknown_reason or state.reason or "observer_not_ready",
+        )
+    frame = state.target_window or main_frame(state.windows)
+    if frame is None or frame.hwnd != context.root_hwnd:
+        raise DesktopUnreadyError(context.pid, "window_identity_changed")
+    if frame.process_started_at is not None and frame.process_started_at != context.bound.identity.process_start:
+        raise DesktopGoneError(context.pid, "process_identity_changed")
+    if state.state == "REFRESH_IN_PROGRESS" and allow_progress:
+        return state
+    if state.state != "READY":
+        raise CredentialUnknownError(
+            context.pid,
+            state.unknown_reason or state.reason or "observer_not_ready",
+        )
+    return state
+
+
+def _ui_read_budget(deadline: float, cap: float = 30.0) -> float:
+    """Clip one whole UI-route bound read to the held deadline, never restart its budget."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("UI refresh operation deadline exhausted")
+    return min(cap, remaining)
+
+
+def _ui_clean_start(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-statements
+    pid: int, instance: dict, deadline: float
+) -> tuple[dict, Observation] | int:
+    """Reload once only from proven clean READY state, then re-establish process/file/clean state."""
+    try:
+        _ui_read_budget(deadline)
+        # A missing/false-like value is not permission to discard changes. Use the already-held
+        # readiness instance, never another initial status that could hide an earlier dirty state.
+        if instance.get("hasUnsavedChanges") is not False:
+            raise DesktopActionError("initial clean state unestablished")
+        path = instance.get("currentFilePath")
+        if not isinstance(path, str) or not path.strip() or "\x00" in path or not Path(path).is_absolute():
+            raise DesktopActionError("initial absolute file binding unavailable")
+        before = _credential_state(pid, timeout_s=_ui_read_budget(deadline, 8.0))
+        _raise_if_blocked(pid, before)
+        _ui_read_budget(deadline)
+        start = before.process_started_at
+        # Observer/process binding uses lossless .NET UTC CreationDate.Ticks, not a timestamp
+        # conversion or a rounded display value.
+        if not isinstance(start, str) or not start.isascii() or not start.isdecimal() or int(start) <= 0:
+            raise DesktopActionError("process start identity unavailable")
+        if before.pid != str(pid):
+            raise DesktopActionError("observer PID mismatch")
+        _ui_root(before, pid, start)
+        command = _ui_bridge_command()
+        response = _ui_bridge_status(command, pid, deadline, operation="reload")
+        _ui_read_budget(deadline)
+        result = response.get("result")
+        if (  # pylint: disable=too-many-boolean-expressions
+            response.get("status") != "ok"
+            or type(response.get("pid")) is not int  # pylint: disable=unidiomatic-typecheck
+            or response["pid"] != pid
+            or response.get("error")
+            or response.get("errors")
+            or not isinstance(result, dict)
+            or result.get("success") is not True
+            or result.get("error")
+            or result.get("errors")
+        ):
+            raise DesktopActionError("reload acknowledgement unavailable")
+        payload = _ui_bridge_status(command, pid, deadline)
+        _ui_read_budget(deadline)
+        after_instance, _delay = _bridge_readiness_result(payload, pid)
+        if (
+            after_instance is None
+            or after_instance.get("hasUnsavedChanges") is not False
+            or after_instance.get("currentFilePath") != path
+        ):
+            raise DesktopActionError("post-reload clean file binding unestablished")
+        after = _credential_state(pid, expected_process_start=start, timeout_s=_ui_read_budget(deadline, 8.0))
+        _raise_if_blocked(pid, after)
+        _ui_read_budget(deadline)
+        if after.pid != str(pid):
+            raise DesktopActionError("post-reload observer PID mismatch")
+        _ui_root(after, pid, start)
+        print("  bridge : clean-start reload checked; fresh engine/model checks still required", flush=True)
+        return after_instance, after
+    except CredentialMissingError as exc:
+        _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
+        return 1
+    except DialogFoundError as exc:
+        _emit_dialog_finding(exc.pid, exc.finding)
+        return 3
+    except (DesktopGoneError, DesktopUnreadyError) as exc:
+        if isinstance(exc, DesktopGoneError):
+            _emit_desktop_gone(exc.pid, exc.reason)
+        else:
+            _emit_desktop_unready(exc.pid, exc.reason)
+        return 2
+    except TimeoutError:
+        print("REFRESH: TIMEOUT - clean-start startup deadline exhausted; Refresh and Save withheld", flush=True)
+        return 3
+    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print("REFRESH: UI_PREFLIGHT_REFUSED (clean-start checks unavailable; Refresh and Save withheld)", flush=True)
+        return 3
+
+
+def _wait_for_engine_completion(  # pylint: disable=too-many-statements
+    context: UIRefreshContext,
+    baseline: PartitionSnapshot,
+    action_started_ticks: int,
+    deadline: float,
+) -> tuple[bool, CompletionResult | None]:
+    """Poll exact typed partition evidence under the existing deadline and observer supervisor."""
+    timeout_seconds = _ui_read_budget(deadline, float("inf"))
+    cancelled = threading.Event()
+    outcome: dict[str, object] = {}
+    initial_remaining = deadline - time.monotonic()
+    initial_state = _ui_observer_state(
+        context,
+        allow_progress=True,
+        timeout_seconds=initial_remaining,
+    )
+    _ui_read_budget(deadline)
+
+    def poll() -> None:
+        try:
+            while not cancelled.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("engine completion deadline expired")
+                try:
+                    current = read_partition_snapshot(context.bound, timeout_seconds=_ui_read_budget(deadline))
+                except ObservationUnavailable as exc:
+                    # bound_call correctly refuses preflight reads during progress. Await that
+                    # one closed state without changing its prompt/unknown or binding authority.
+                    if exc.args != ("REFRESH_IN_PROGRESS",):
+                        raise
+                    cancelled.wait(min(1.0, max(0.0, deadline - time.monotonic())))
+                    continue
+                completed_at = time.monotonic()
+                if completed_at >= deadline:
+                    raise TimeoutError("engine completion result arrived after deadline")
+                result = check_completion(baseline, current, action_started_ticks)
+                if result.complete:
+                    outcome["result"] = result
+                    outcome["completed_at"] = completed_at
+                    return
+                time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+            raise TimeoutError("engine completion wait was cancelled")
+        except BaseException as exc:  # pylint: disable=broad-exception-caught
+            outcome["error"] = exc
+            outcome["completed_at"] = time.monotonic()
+
+    def inspect_observer(target_pid: int) -> Observation:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("observer deadline expired")
+        state = _in_flight_credential_state(
+            target_pid,
+            expected_process_start=context.bound.identity.process_start,
+            timeout_s=min(8.0, remaining),
+        )
+        raise_terminal_detection(target_pid, state, context.source_hint)
+        if state.dialog is not None and state.state in {"UNKNOWN_DIALOG", "UNREADABLE_DIALOG"}:
+            raise DialogFoundError(target_pid, state.dialog)
+        if state.state not in {"READY", "REFRESH_IN_PROGRESS"} or not state.complete:
+            raise CredentialUnknownError(target_pid, state.unknown_reason or state.reason or "observer_not_ready")
+        frame = state.target_window or main_frame(state.windows)
+        if frame is None or frame.hwnd != context.root_hwnd:
+            raise DesktopUnreadyError(target_pid, "window_identity_changed")
+        return state
+
+    worker = threading.Thread(target=poll, name="ui-refresh-engine-completion", daemon=True)
+    worker.start()
+    try:
+        settled = _wait_refresh_worker(
+            worker,
+            desktop_pid=context.pid,
+            source_hint=context.source_hint,
+            initial_state=initial_state,
+            total_timeout=timeout_seconds,
+            progress_monitor=None,
+            observation_mode=True,
+            detector=inspect_observer,
+            deadline=deadline,
+            completed_at=lambda: outcome.get("completed_at"),
+        )
+    except BaseException:
+        cancelled.set()
+        worker.join(timeout=8.5)
+        raise
+    cancelled.set()
+    worker.join(timeout=8.5)
+    if worker.is_alive():
+        return False, None
+    if not settled or "result" not in outcome:
+        error = outcome.get("error")
+        if error is not None and not isinstance(error, TimeoutError):
+            raise error
+        return False, None
+    return True, outcome["result"]  # type: ignore[return-value]
+
+
+def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals
+    pid: int,
+    port: int,
+    cache: Path | None,
+    args: argparse.Namespace,
+    initial_state: Observation,
+    *,
+    deadline: float,
+) -> int:
+    """Run explicit UI refresh with independent engine completion, held canaries and optional UI Save."""
+    # pylint: disable=too-many-arguments
+    if cache is None:
+        print("REFRESH: ERROR no model cache path resolved; refusing the UI route")
+        return 2
+    if not initial_state.complete or initial_state.state != "READY":
+        print("REFRESH: UI_PREFLIGHT_REFUSED (the initial observer snapshot was not complete READY)")
+        return 3
+    try:
+        root_hwnd = _ui_root(initial_state, pid, initial_state.process_started_at or "")
+        _ui_read_budget(deadline)
+        bound = bind_desktop(pid, supplied_port=port)
+        _ui_read_budget(deadline)
+        if bound.identity.process_start != initial_state.process_started_at:
+            raise DesktopActionError("bound process identity differs from the initial observer")
+        context = UIRefreshContext(
+            pid=pid,
+            port=port,
+            bound=bound,
+            root_hwnd=root_hwnd,
+            source_hint=source_hint_from_model(cache.parent.parent),
+        )
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print(f"REFRESH: UI_PREFLIGHT_REFUSED ({type(exc).__name__}: {exc})")
+        return 2
+
+    lock_path = cache.with_name(cache.name + ".lock")
+    lock_context = model_lock(lock_path, timeout=PERSIST_LOCK_TIMEOUT_SECONDS) if lock_path.parent.exists() else None
+    try:
+        if lock_context is None:
+            return _ui_refresh_locked(context, cache, args, deadline=deadline)
+        with lock_context:
+            return _ui_refresh_locked(context, cache, args, deadline=deadline)
+    except ModelLockTimeout as exc:
+        print(f"REFRESH: NOT_PERSISTED (model lock unavailable: {exc})")
+        return 1
+
+
+def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-statements
+    context: UIRefreshContext,
+    cache: Path,
+    args: argparse.Namespace,
+    *,
+    deadline: float | None = None,
+) -> int:
+    """The UI route while holding the existing per-model cooperative lock when available."""
+    deadline = time.monotonic() + args.refresh_absolute_timeout_seconds if deadline is None else deadline
+    before_stamp = cache.stat().st_mtime if cache.exists() else 0.0
+    try:
+        _ui_observer_state(context, timeout_seconds=_ui_read_budget(deadline, 8.0))
+        bound_call(context.bound, lambda _connection: None, timeout_seconds=_ui_read_budget(deadline))
+        _ui_read_budget(deadline)
+        if not _identity_gate(context.port, cache):
+            return 2
+        baseline = read_partition_snapshot(context.bound, timeout_seconds=_ui_read_budget(deadline))
+        _ui_read_budget(deadline)
+        if any(partition.state != 1 for partition in baseline.partitions):
+            raise DesktopActionError("initial source partition state is not READY")
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print(f"REFRESH: UI_PREFLIGHT_REFUSED ({type(exc).__name__}: {exc})")
+        return 2
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        print("REFRESH: TIMEOUT - UI refresh deadline expired before action")
+        return 3
+    try:
+        action = invoke_desktop_action(
+            "Refresh",
+            pid=context.pid,
+            expected_process_start=context.bound.identity.process_start,
+            root_hwnd=context.root_hwnd,
+            timeout_seconds=min(ACTION_CHILD_TIMEOUT_SECONDS, remaining),
+        )
+    except DesktopActionError as exc:
+        print(f"REFRESH: UI_ACTION_FAILED ({exc})")
+        return 2
+    if not action.invoked or action.action_started_ticks is None:
+        print(f"REFRESH: UI_ACTION_REFUSED ({action.reason}; focus attempts={action.focus_attempts})")
+        return 2
+    print(
+        "  UI Refresh: one named Invoke returned; engine completion remains unestablished "
+        f"(focus attempts={action.focus_attempts})"
+    )
+    if action.restore_requested and not action.handback_verified:
+        print("  UI handback: requested but not verified; Save will be withheld")
+    elif action.handback_verified:
+        print("  UI handback: verified or not required")
+    else:
+        print("  UI handback: foreground changed; prior focus was not overridden")
+
+    remaining = deadline - time.monotonic()
+    try:
+        complete, completion = _wait_for_engine_completion(
+            context,
+            baseline,
+            action.action_started_ticks,
+            deadline,
+        )
+    except CredentialMissingError as exc:
+        _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
+        return 1
+    except DialogFoundError as exc:
+        _emit_dialog_finding(exc.pid, exc.finding)
+        return 3
+    except CredentialUnknownError as exc:
+        print(
+            f"REFRESH: CREDENTIAL_UNKNOWN pid={exc.pid}; Completion observation unavailable; "
+            "credential state unestablished. Inspect Desktop before retrying."
+        )
+        return 3
+    except (DesktopGoneError, DesktopUnreadyError) as exc:
+        if isinstance(exc, DesktopGoneError):
+            _emit_desktop_gone(exc.pid, exc.reason)
+        else:
+            _emit_desktop_unready(exc.pid, exc.reason)
+        return 2
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print(f"REFRESH: COMPLETION_UNKNOWN ({type(exc).__name__}: {exc})")
+        return 3
+    if not complete or completion is None:
+        print("REFRESH: TIMEOUT - engine completion not established before the bounded deadline")
+        return 3
+    print(f"  engine completion: {completion.reason}")
+
+    try:
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            state = _ui_observer_state(
+                context,
+                allow_progress=True,
+                timeout_seconds=remaining,
+            )
+            if state.state == "READY":
+                break
+            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+        else:
+            print("REFRESH: COMPLETION_UNKNOWN (Desktop observer did not return to READY before deadline)")
+            return 3
+        canaries = _canary_tables(args)
+        implicit = not canaries
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print("REFRESH: TIMEOUT - data checks did not begin before the operation deadline")
+            return 3
+        targets = canaries or [bound_call(context.bound, first_table, timeout_seconds=_ui_read_budget(deadline))]
+        observations = probe_observations(context.bound, targets, timeout_seconds=_ui_read_budget(deadline))
+        if time.monotonic() >= deadline:
+            print("REFRESH: TIMEOUT - data-check result arrived after the operation deadline")
+            return 3
+        results = [(item.table, item.returned_rows) for item in observations]
+    except CredentialMissingError as exc:
+        _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
+        return 1
+    except DialogFoundError as exc:
+        _emit_dialog_finding(exc.pid, exc.finding)
+        return 3
+    except CredentialUnknownError as exc:
+        _emit_credential_unknown(exc.pid, exc.reason)
+        return 3
+    except (DesktopGoneError, DesktopUnreadyError) as exc:
+        if isinstance(exc, DesktopGoneError):
+            _emit_desktop_gone(exc.pid, exc.reason)
+        else:
+            _emit_desktop_unready(exc.pid, exc.reason)
+        return 2
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print(f"REFRESH: DATA_CHECK_FAILED ({type(exc).__name__}: {exc})")
+        return 2
+
+    if any(rows <= 0 for _, rows in results):
+        return _emit_data_verdict(cache, before_stamp, args, results, implicit)
+    if args.no_save:
+        return _emit_data_verdict(cache, before_stamp, args, results, implicit)
+    if not action.handback_verified:
+        print("REFRESH: NOT_PERSISTED (Refresh handback was not verified; refusing UI Save)")
+        return 1
+
+    try:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print("REFRESH: TIMEOUT - UI Save was not invoked after the operation deadline")
+            return 3
+        _ui_observer_state(
+            context,
+            timeout_seconds=remaining,
+        )
+        bound_call(context.bound, lambda _connection: None, timeout_seconds=_ui_read_budget(deadline))
+        _ui_read_budget(deadline)
+        if not _identity_gate(context.port, cache):
+            return 2
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print("REFRESH: TIMEOUT - UI Save was not invoked after the operation deadline")
+            return 3
+        save_action = invoke_desktop_action(
+            "Save",
+            pid=context.pid,
+            expected_process_start=context.bound.identity.process_start,
+            root_hwnd=context.root_hwnd,
+            timeout_seconds=min(ACTION_CHILD_TIMEOUT_SECONDS, remaining),
+        )
+        _ui_read_budget(deadline)
+    except CredentialMissingError as exc:
+        _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
+        return 1
+    except DialogFoundError as exc:
+        _emit_dialog_finding(exc.pid, exc.finding)
+        return 3
+    except CredentialUnknownError as exc:
+        _emit_credential_unknown(exc.pid, exc.reason)
+        return 3
+    except (DesktopGoneError, DesktopUnreadyError) as exc:
+        if isinstance(exc, DesktopGoneError):
+            _emit_desktop_gone(exc.pid, exc.reason)
+        else:
+            _emit_desktop_unready(exc.pid, exc.reason)
+        return 2
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print(f"REFRESH: NOT_PERSISTED (UI Save was not established: {type(exc).__name__})")
+        return 1
+    if not save_action.invoked:
+        print(f"REFRESH: NOT_PERSISTED (UI Save refused: {save_action.reason})")
+        return 1
+    if not save_action.handback_verified:
+        print("REFRESH: NOT_PERSISTED (UI Save handback was not verified; write outcome unconfirmed)")
+        return 1
+    print("  UI Save: one named Invoke returned; persistence remains unconfirmed")
+    return _emit_data_verdict(cache, before_stamp, args, results, implicit)
+
+
 def _resolve_pid(pid: int | None) -> int | None:
     """The Desktop pid to act on: the one given, or the ONLY running instance - never a guess.
 
@@ -2032,12 +2860,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--no-save",
         action="store_true",
         help=(
-            "Refresh in memory but persist NOTHING, leaving the project byte-identical. Use for "
+            "Prevent Save, NOT source execution: refresh still runs current M/native/custom SQL "
+            "and may incur source-side costs. Refresh in memory but persist NOTHING. Use for "
             "read-only work (validation, auditing) and for the validate-then-deploy path, because "
             "saving raises database.tmdl's declared compatibilityLevel to the level Desktop runs at"
         ),
     )
     parser.add_argument("--verify-only", action="store_true", help="Skip refresh/save; just report the state")
+    parser.add_argument(
+        "--ui-refresh",
+        action="store_true",
+        help=(
+            "WARNING: operator-only opt-in commissions execution of ALL current M, including native/custom SQL, "
+            "with potential source-side costs; --no-save prevents Save, NOT source execution. "
+            "Invoke one whole-model Import M Refresh and require typed engine completion evidence. "
+            "No automatic credential-gate use or earned clearance; defaults/callers unchanged. "
+            "Custom/unknown-query integration depends on accepted follow-up #780 (linked #692)"
+        ),
+    )
     parser.add_argument(
         "--ui-save",
         action="store_true",
@@ -2069,19 +2909,57 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _validate_ui_refresh_args(args: argparse.Namespace) -> bool:
+    """Reject incompatible UI-refresh combinations before process discovery or any action."""
+    if not args.ui_refresh:
+        return True
+    if args.pid is None or args.pid <= 0 or args.pid >= 2**32:
+        print("REFRESH: ERROR --ui-refresh requires an explicit valid --pid")
+        return False
+    exclusions = []
+    if args.verify_only:
+        exclusions.append("--verify-only")
+    if args.tables is not None:
+        exclusions.append("--tables")
+    if args.refresh_type != REFRESH_TYPE_FULL:
+        exclusions.append("--calculate-only/--measures-only")
+    if exclusions:
+        print(f"REFRESH: ERROR --ui-refresh cannot be combined with {', '.join(exclusions)}")
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-return-statements,too-many-statements
     """CLI entry point: refresh, save, and prove data is really there."""
     args = _build_arg_parser().parse_args(argv)
-
-    pid = _resolve_pid(args.pid)
-    if pid is None:
+    if not _validate_ui_refresh_args(args):
         return 2
+    entry = time.monotonic()
+    ui_deadline = entry + args.refresh_absolute_timeout_seconds if args.ui_refresh else None
+    credential_state = None
+
+    if args.ui_refresh:
+        pid = args.pid
+        startup_deadline = min(entry + 60.0, ui_deadline)
+        instance = _ui_bridge_preflight(pid, startup_deadline)
+        if instance is None:
+            return 3
+        clean_start = _ui_clean_start(pid, instance, startup_deadline)
+        if isinstance(clean_start, int):
+            return clean_start
+        instance, credential_state = clean_start
+        cache = cache_file(pid, instance=instance)
+    else:
+        pid = _resolve_pid(args.pid)
+        if pid is None:
+            return 2
+        cache = cache_file(pid)
 
     # Resolve the destination before touching XMLA so a t=0 credential modal can be reported with the
     # source hint from the model files, and before any query is issued against a blocked Desktop.
-    cache = cache_file(pid)
     source_hint = source_hint_from_model(cache.parent.parent if cache else None)
-    credential_state = _credential_state(pid)
+    if credential_state is None:
+        credential_state = _credential_state(pid)
     if credential_state.modal is not None:
         _emit_credential_missing(pid, credential_state.modal, source_hint)
         return 1
@@ -2115,6 +2993,14 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-retu
     # fully self-consistent false positive, so it has to be caught BEFORE any of the three.
     if not _identity_gate(port, cache):
         return 2
+
+    if args.ui_refresh:
+        try:
+            _ui_read_budget(ui_deadline)
+        except TimeoutError:
+            print("REFRESH: TIMEOUT - UI refresh deadline exhausted during CLI preflight; no action invoked")
+            return 3
+        return _ui_refresh_and_save(pid, port, cache, args, credential_state, deadline=ui_deadline)
 
     if not args.verify_only:
         outcome = _refresh_and_save(pid, port, cache, args, credential_state)

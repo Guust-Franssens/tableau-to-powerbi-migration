@@ -1,6 +1,6 @@
 ---
 name: pbip-model-refresh
-description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop, and persist the result to .pbi/cache.abf (headlessly via AMO Server.ImageSave, UI-Automation fallback). Persisting is the DEFAULT - opt OUT with `--no-save` for read-only or validate-then-deploy work; saving aligns database.tmdl's declared compatibilityLevel so the cache stays loadable, and the cache write is staged and swapped atomically. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. For DAX-only edits, pass `--calculate-only` / `--measures-only` to recalculate formulas without re-reading source rows. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
+description: Refresh a local PBIP/TMDL semantic model open in Power BI Desktop, and persist the result to .pbi/cache.abf (headlessly via AMO Server.ImageSave, UI-Automation fallback). Persisting is the DEFAULT - opt OUT with `--no-save` for read-only or validate-then-deploy work; saving aligns database.tmdl's declared compatibilityLevel so the cache stays loadable, and the cache write is staged and swapped atomically. Use after finishing TMDL edits, before handing a model to report authoring, or whenever Desktop reopens a migrated model empty. For DAX-only edits, pass `--calculate-only` / `--measures-only` to recalculate formulas without re-reading source rows. `--ui-refresh` is a separate explicit route for supported whole-model Import M models and requires typed engine completion evidence. Source-tool agnostic - the model is already Power BI, so this applies equally to Tableau, Qlik and Cognos migrations.
 ---
 
 # Refresh a local PBIP model, and make the data survive a close
@@ -10,8 +10,9 @@ ADOMD.NET/AMO (pythonnet), plus the Desktop Bridge CLI for process to file mappi
 
 Requirements, in full: Windows with Power BI Desktop, Python >= 3.11 with `pythonnet`, the ADOMD.NET
 and AMO client libraries under the NuGet global-packages cache (`$env:NUGET_PACKAGES` when set,
-otherwise `~/.nuget/packages`), and `npx` for `@microsoft/powerbi-desktop-bridge-cli`. No other
-dependency, and nothing repo-specific.
+otherwise `~/.nuget/packages`), and the installed `powerbi-desktop` CLI from
+`@microsoft/powerbi-desktop-bridge-cli` on PATH for `--ui-refresh` (legacy XMLA discovery still uses
+`npx`). No other dependency, and nothing repo-specific.
 
 The ADOMD.NET client is a *separate* nuget package from TOM/AMO, so a machine can have one and not the
 other. If `probe_desktop_query.py` prints `AdomdClient.dll not found in the nuget cache` (and
@@ -30,6 +31,9 @@ so `dotnet add` cannot silently no-op on a net10 default:
   exact-identity observation supervisor, closed diagnostics and private short-lived image leases.
 - [**`scripts/_desktop_uia.ps1`**](scripts/_desktop_uia.ps1) - private bounded Win32/UIA fact harvest;
   no policy, clicks, Refresh invocation or polling arbiter. It is not a user-facing command.
+- `scripts/_desktop_actions.py` and [`scripts/_desktop_actions.ps1`](scripts/_desktop_actions.ps1) -
+  private bounded child supervision and one named UIA action for the explicit `--ui-refresh` route;
+  neither decides engine completion or classifies prompts.
 - [**`tests/`**](tests) - the regression suite for both, runnable from this folder
   (`pytest tests`). It is what makes the portability claim below checkable rather than aspirational.
 
@@ -49,8 +53,141 @@ A migrated model hands over as *TMDL plus a promise*. Two things go wrong:
 ```
 python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"]
                                      [--calculate-only|--measures-only] [--no-save] [--verify-only]
-                                     [--ui-save]
+                                     [--ui-save] [--ui-refresh]
 ```
+
+### Explicit foreground UI refresh
+
+⚠️ **Operator-only source-execution consent:** supplying `--ui-refresh` expressly commissions
+execution of **all current M**, including native/custom SQL and unknown/indirect query forms,
+with potential source-side costs or effects. There is no custom-query admission screen.
+**`--no-save` prevents Save, not source execution.** No additional consent flag is required.
+This route does **not** authorize automatic credential-gate use or earn credential clearance.
+Defaults and existing callers remain unchanged. Automatic custom/unknown-query integration in
+PR B depends on accepted follow-up [#780](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/780)
+(linked [#692](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/692)).
+
+`--ui-refresh` is an opt-in route; the existing XMLA default and migration gates do not change. After
+the clean-start sequence below, it invokes one named Desktop **Refresh** control, then waits for engine
+metadata—not the Invoke return, quiet UI, or positive cached rows—to prove that the exact source-partition
+set stayed bound and every Import M source partition became `READY` with a typed UTC `RefreshedTime` strictly newer than its
+baseline and at or after the action start. It never retries Refresh or falls back to AMO/XMLA
+processing. After completion it runs the existing canary checks on that same held binding. An
+optional named UI **Save** is invoked only after completion, positive required row checks, a fresh
+READY observer state and the existing model-identity check; `--no-save` suppresses every Save.
+
+**UI readiness requires explicit `--pid`.** Before cache/engine discovery this route waits for
+top-level bridge `status: "ready"` AND that exact PID's `bridgeStatus: "connected"` with a
+nonempty absolute current-file binding. One monotonic **60-second maximum** startup budget,
+clipped to the existing operation deadline, includes initial readiness, both READY observations,
+reload, post-reload status and helper cleanup.
+It proceeds immediately when ready; it never sleeps a blind minute or proceeds after expiry.
+The installed CLI's `--wait-seconds` waits for connection discovery only. A small same-PID loop
+also awaits ordinary `not_connected` and the recognized `BRIDGE_ERROR` "Another operation is
+already in progress" response with Boolean `retryable: true` and finite nonnegative numeric
+`retryAfterMs` (delay clipped to 50–1000 ms, then remaining time). Unknown errors, malformed
+retry metadata and process disappearance refuse immediately; no terminal/credential error retry.
+
+**Clean-start reload is defensive sequencing, not repair proof.** The **already-fetched** ready
+instance must report `hasUnsavedChanges: false` as an actual Boolean before any reload. Dirty,
+missing or non-Boolean values refuse; the route never silently discards existing edits. One complete
+READY observer snapshot pins the held PID's exact `.NET CreationDate.ToUniversalTime().Ticks`
+string and the bridge's exact absolute `currentFilePath`. Prompts, unknown/incomplete evidence or
+unestablished process identity refuse before reload.
+
+It then issues **one** exact-PID bridge `reload`, requires `status: "ok"`, an exact integer PID,
+`result.success: true` and no reported errors, and performs **one** subsequent bounded status call
+(not another readiness retry loop). That status must be ready/connected for the same PID and exact
+absolute file path, again with strict Boolean `hasUnsavedChanges: false`. A fresh complete READY
+observation must match the pinned process-start ticks. Expired budgets and late output, including
+late cleanup, refuse before Refresh. Cache/port discovery, engine binding, model identity and all
+partition baselines are acquired **after** these checks; the pre-reload observer is not handed
+downstream. There is no reload between Refresh and optional Save.
+
+✅ The bundled synthetic controls exercise this ordering and fail-closed clean-state checks.
+⚠️ This does **not** establish external-warning repair, persistence, synchronization of disk TMDL
+with Desktop, or actual-Desktop performance. Reload is not a substitute for reopening after model
+edits; the model synchronization and stale-Save warnings below still apply.
+
+The UI route resolves the already-installed `powerbi-desktop` launcher on PATH for `status --pid ...`
+and the same contained transport for its one `reload --pid ...`,
+never `--yes`, a custom package resolver or automatic tooling updates. Missing installations
+refuse. The child wait uses the remaining original budget; timeout terminates only the owned
+launcher PID and its descendants, never Desktop or a sibling process. Native startup/teardown
+may take additional OS time, but late responses cannot authorize any action.
+Readiness failure prints a non-success refusal/timeout immediately, then permits only one
+existing bounded read-only exact-PID observer diagnostic. This extra diagnostic allowance is
+not a new readiness budget; it cannot clear refusal, foreground Desktop or manipulate prompts.
+Known exact-window templates may provide predefined readable messages; arbitrary error text
+export, clipboard capture and foreground-only inspection are **not implemented**. Withheld or
+unreadable text requires local human inspection and is not a credential diagnosis. These UI-only
+rules do not change legacy XMLA callers or the historical 90-second CLI examples below.
+
+Completion reads may encounter the existing bound reader's `REFRESH_IN_PROGRESS` preflight
+refusal. Only that closed state is awaited within the original operation deadline; prompt,
+unknown/incomplete, identity and catalogue refusals are not retried as progress.
+An unreadable or unrecognized finding in the UI-route completion observer is reported with
+its existing `DIALOG_UNREADABLE` or `DIALOG_UNRECOGNIZED` refusal and exact-window diagnostic,
+not replaced by a generic claim that uncertainty persisted to the deadline. This preserves
+the refusal; it does not establish completion or identify the dialog as progress or credentials.
+
+The UI route holds one monotonic operation deadline set in the CLI before initial observation,
+port discovery and identity preflight, through completion and
+Save; no phase resets it. Each UI-only bound metadata/no-op/data read receives at most
+**30 seconds for the whole bound call, including observation and identity/catalogue rechecks**,
+not 30 seconds per internal step, clipped to the remaining operation time and recalculated
+before each read. Exhausted budgets and late results cannot authorize Refresh or Save.
+The native action remains capped at 20 seconds or the remaining time, with unchanged cleanup.
+Shared binding/observer budgets and the XMLA route are unchanged; failed reads are not retried.
+
+The initial supported surface is whole-model Import M source partitions. DirectQuery, Dual/mixed,
+unsupported source kinds, modes that cannot be resolved from model/partition metadata,
+changed or incomplete partition metadata, a non-READY initial observer, and
+`--verify-only`, any `--tables` argument
+(including an empty one), `--calculate-only` or `--measures-only` refuse before Refresh. Supply
+`--canaries` to verify commissioned source tables. Positive rows alone do not prove processing;
+no-action timestamp rereads, partial advancement, stale timestamps, prompt/unknown observer evidence
+and deadline expiry cannot authorize success or Save. Deadline expiry is unknown, not a credential
+diagnosis. Focus acquisition is limited to three verified attempts with a 150 ms wait each; a failed
+focus/action is surfaced, and a human foreground switch is never overridden during handback.
+
+The action child focuses the held root before enumerating controls. Only enabled, visible,
+exactly named Invoke controls without an ExpandCollapse pattern qualify. A child provider must
+have a verified process/start ancestry chain to the held Desktop, and its nearest native renderer
+must belong to that provider and descend from the exact root. Under per-monitor DPI awareness,
+a native hit-test at the control's physical interior must land in that renderer's verified
+subtree. This is ownership corroboration only: there is no coordinate click or activation.
+Exactly one candidate must survive; zero, multiple, missing geometry or changed ownership refuse.
+The child reacquires and revalidates the selected control, ancestry, renderer/hit ownership and
+foreground before Invoke. Refusals after focus acquisition also attempt truthful best-effort
+handback only while Desktop still owns foreground. The same rules apply to Refresh and Save.
+Each individual enumeration caches the verified ancestry/start chain once per distinct provider PID;
+renderer, root, geometry and native-hit checks remain live for every candidate. Every surviving
+provider is reread freshly before accepting the scan; changed or unavailable identity refuses the
+whole scan, not a reduced set. The cache is discarded after that enumeration. The second full
+uniqueness scan and independent selected/final ownership checks remain fresh, within the unchanged
+20-second child cap and overall deadline.
+Focus uses bounded thread-input attachment between the current thread and distinct required
+foreground/target threads, with exact root and permitted-foreground checks before attachment and
+before BringWindowToTop/SetForegroundWindow. Only successful attachments are tracked and detached
+in finally on every path. There is no input injection, ShowWindow or minimized-window recovery.
+Handback additionally requires the captured prior HWND's PID/start identity to remain unchanged;
+a detected human foreground switch or identity change prevents restoration.
+Handback verification is a point-in-time observation after 150 ms, not a guarantee of stable
+foreground ownership: Desktop can activate a later window. There is no delayed restoration
+retry, since a later Desktop activation cannot establish that the human did not switch back.
+
+Mode decoding uses the engine's `ModeType` for `Model.DefaultMode` and `Partition.Mode`:
+Import=0, DirectQuery=1, Default=2, Push=3, Dual=4, DirectLake=5. Only partition Default
+inherits a positively established Import model default; missing metadata does not inherit.
+`TMSCHEMA_TABLES` supplies identity/name, not an assumed `StorageMode` column or encoding.
+See [ModeType](https://learn.microsoft.com/en-us/dotnet/api/microsoft.analysisservices.tabular.modetype)
+and [the table rowset](https://learn.microsoft.com/en-us/openspecs/sql_server_protocols/ms-ssas-t/c32ff15a-77b1-4d7b-bd33-84f5921d7e18).
+
+This is not exclusive attribution against a human refreshing the same Desktop instance. Partition
+timestamps do not prove upstream freshness, source reachability beyond the commissioned canaries,
+query equivalence, or cold-reopen durability. UI Save Invoke and the legacy cache timestamp display
+are not persistence proof.
 
 ### Read an already-detected dialog at the failing tool (#498)
 
@@ -546,7 +683,12 @@ on `WRONG_MODEL` instead of writing stale state.
 | Path | What it is | Status |
 |---|---|---|
 | **AMO `Server.ImageSave(databaseId, Stream)`** | Writes `cache.abf` directly from the engine. No UI, works headless; staged to a per-run private file and swapped in atomically, so a failed/partial write (or a concurrent second run) can't destroy an existing good cache. | **Default (opt out with `--no-save`)** |
-| **UI Automation (`InvokePattern` on the "Save" element)** | Drives Desktop's own Save through the Windows *accessibility* tree. | Fallback / `--ui-save` |
+| **UI Automation (`InvokePattern` on the named "Save" element)** | Drives Desktop's own Save through the Windows *accessibility* tree. | Legacy fallback / `--ui-save`; also the optional save after explicit `--ui-refresh` |
+
+⚠️ **UI Save can rewrite model definitions.** Desktop Save may update serialized definitions,
+inferred data types, and auto-date scaffolding in addition to writing `cache.abf`; it is not
+byte-neutral. The `--ui-refresh` route therefore saves only after its engine and canary checks, and
+its Invoke is never described as committed persistence or cold-reopen proof.
 
 ⚠️ **Read the `--no-save` warning above before using either.** Both write the same `cache.abf`. A
 present cache was once believed to make the PBIP unopenable; root-caused 2026-08-07, that was a
