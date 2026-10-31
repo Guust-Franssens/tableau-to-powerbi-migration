@@ -153,18 +153,24 @@ focus/action is surfaced, and a human foreground switch is never overridden duri
 
 The action child focuses the held root before enumerating controls. Only enabled, visible,
 exactly named Invoke controls without an ExpandCollapse pattern qualify. A child provider must
-have a verified process/start ancestry chain to the held Desktop, and its nearest native renderer
-must belong to that provider and descend from the exact root. Under per-monitor DPI awareness,
+have a verified process/start ancestry chain to the held Desktop, or be a verified live shared
+provider whose provider-owned native renderer is a descendant of the exact root. Both paths pin
+the provider incarnation and exact root identity; neither accepts a provider based on its name
+alone. The nearest native renderer must belong to that provider, and its HWND parent chain (only
+that provider and the exact target process) to the exact root is pinned and rechecked. Under
+per-monitor DPI awareness,
 a native hit-test at the control's physical interior must land in that renderer's verified
 subtree. This is ownership corroboration only: there is no coordinate click or activation.
 Exactly one candidate must survive; zero, multiple, missing geometry or changed ownership refuse.
-The child reacquires and revalidates the selected control, ancestry, renderer/hit ownership and
+The child reacquires and revalidates the selected control, provider identity/ancestry, renderer,
+geometry, native hit ownership and
 foreground before Invoke. Refusals after focus acquisition also attempt truthful best-effort
 handback only while Desktop still owns foreground. The same rules apply to Refresh and Save.
-Each individual enumeration caches the verified ancestry/start chain once per distinct provider PID;
-renderer, root, geometry and native-hit checks remain live for every candidate. Every surviving
-provider is reread freshly before accepting the scan; changed or unavailable identity refuses the
-whole scan, not a reduced set. The cache is discarded after that enumeration. The second full
+Each individual enumeration caches the verified ancestry/start chain (when present) once per
+distinct provider PID; provider incarnation, renderer, root, geometry and native-hit checks remain
+live for every candidate. Every surviving provider is reread freshly before accepting the scan;
+changed or unavailable identity refuses the whole scan, not a reduced set. The cache is discarded
+after that enumeration. The second full
 uniqueness scan and independent selected/final ownership checks remain fresh, within the unchanged
 20-second child cap and overall deadline.
 Focus uses bounded thread-input attachment between the current thread and distinct required

@@ -1426,12 +1426,32 @@ def test_cli_preflight_consumes_original_ui_deadline_before_any_action(
 
 
 @pytest.mark.parametrize(
-    "case", ["child", "cached", "prepared_occluded", "stale_hit", "wrong_root", "changed_start", "geometry"]
+    "case",
+    [
+        "child",
+        "shared",
+        "cached",
+        "prepared_occluded",
+        "stale_hit",
+        "wrong_root",
+        "changed_start",
+        "geometry",
+        "sibling_renderer",
+        "provider_reused",
+        "provider_pid_changed",
+        "root_reused",
+        "renderer_reparented",
+        "renderer_reparented_within_root",
+        "foreign_native_parent",
+        "hit_changed",
+        "geometry_changed",
+        "control_geometry_changed",
+    ],
 )
 @WINDOWS_ONLY
 def test_native_renderer_ownership_without_window_operations(case: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
-    body = source[source.index("function Get-ControlOwnership") : source.index("function Get-ProcessStart")]
+    body = source[source.index("function Get-ProviderIdentity") : source.index("function Get-ProcessStart")]
     body = body.replace("[DesktopActionNative]", "[OwnershipFake]")
     body = body.replace("[DesktopActionNative+Rect]::new()", "[pscustomobject]@{}")
     body = body.replace("[DesktopActionNative+Point]::new()", "[pscustomobject]@{X=0;Y=0}")
@@ -1440,26 +1460,78 @@ $ErrorActionPreference = 'Stop'
 Add-Type @'
 using System;
 public static class OwnershipFake {
-  public static bool WrongRoot, Stale;
+  public static string Case;
+  public static bool WrongRoot, Stale, Parented=true, Reparented;
+  public static int ProviderReads, RootReads, RectReads, HitReads;
+  public static string GetProcessStart(uint p) {
+    if (p==200) {
+      ProviderReads++;
+      return Case=="provider_reused" && ProviderReads>1 ? "21" : "20";
+    }
+    return p==100 ? "10" : null;
+  }
   public static bool BelongsTo(IntPtr h, uint p) { return p == 200 && (h == (IntPtr)55 || h == (IntPtr)56); }
   public static bool IsChild(IntPtr p, IntPtr h) {
-    return !WrongRoot && ((p == (IntPtr)789 && h == (IntPtr)55) || (p == (IntPtr)55 && h == (IntPtr)56));
+    if (p == (IntPtr)789 && h == (IntPtr)55) {
+      return Case != "wrong_root" && Case != "sibling_renderer" && Parented;
+    }
+    return p == (IntPtr)55 && h == (IntPtr)56;
+  }
+  public static bool IsWindow(IntPtr h) {
+    return h == (IntPtr)55 || h == (IntPtr)56 || h == (IntPtr)44 || h == (IntPtr)45 ||
+      h == (IntPtr)46 || h == (IntPtr)789;
+  }
+  public static IntPtr GetParent(IntPtr h) {
+    if (h == (IntPtr)56) return (IntPtr)55;
+    if (h == (IntPtr)55) {
+      return Case=="renderer_reparented_within_root" && Reparented ? (IntPtr)45 : (IntPtr)44;
+    }
+    if (h == (IntPtr)44 || h == (IntPtr)45 || h == (IntPtr)46) {
+      return Parented ? (IntPtr)789 : (IntPtr)999;
+    }
+    return IntPtr.Zero;
   }
   public static bool GetWindowRect(IntPtr h, out object r) {
-    r = new { Left=0, Top=0, Right=100, Bottom=100 }; return true;
+    RectReads++;
+    int right = Case=="geometry_changed" && RectReads>1 ? 101 : 100;
+    r = new { Left=0, Top=0, Right=right, Bottom=100 }; return true;
   }
-  public static IntPtr WindowFromPoint(object p) { return Stale ? (IntPtr)99 : (IntPtr)56; }
+  public static IntPtr WindowFromPoint(object p) {
+    HitReads++;
+    if (Case=="renderer_reparented" && HitReads==1) Parented=false;
+    if (Case=="renderer_reparented_within_root" && HitReads==1) Reparented=true;
+    if (Stale) return (IntPtr)99;
+    if (Case=="hit_changed" && HitReads>1) return (IntPtr)55;
+    return (IntPtr)56;
+  }
 }
 '@
-$Action = 'Refresh'
+$Action = 'Refresh'; $DesktopPid='100'; $ExpectedProcessStart='10'; $RootHandle='789'
 $targetHwnd = [IntPtr]789
 $script:chainReads = 0
+$script:targetReads = 0
+function Test-Target {
+  param([switch]$IdentityOnly)
+  $script:targetReads++
+  return 'CASE' -ne 'root_reused' -or $script:targetReads -eq 1
+}
 function Get-ProviderChain {
   param($provider)
   $script:chainReads++
+  if ('CASE' -in @('shared','sibling_renderer','provider_reused','root_reused',
+      'renderer_reparented','renderer_reparented_within_root','foreign_native_parent',
+      'hit_changed','geometry_changed')) { return $null }
   if ('CASE' -eq 'changed_start' -and $script:chainReads -gt 1) { return 'changed' }
   return '200/20;100/10'
 }
+function Get-WindowIdentity {
+  param($h)
+  if ($h -eq 789) { return '100/10' }
+  if ('CASE' -eq 'foreign_native_parent' -and $h -eq 44) { return '300/30' }
+  if ($h -in @(55,56,44,45,46)) { return '200/20' }
+  return $null
+}
+[OwnershipFake]::Case = 'CASE'
 [OwnershipFake]::WrongRoot = 'CASE' -eq 'wrong_root'
 [OwnershipFake]::Stale = 'CASE' -in @('stale_hit', 'prepared_occluded')
 $bounds = [pscustomobject]@{IsEmpty=$false;Left=10;Top=10;Right=30;Bottom=30;Width=20;Height=20}
@@ -1467,12 +1539,30 @@ if ('CASE' -eq 'geometry') { $bounds.Right = 101 }
 $element = [pscustomobject]@{Current=[pscustomobject]@{
   Name='Refresh';IsEnabled=$true;IsOffscreen=$false;ProcessId=200;NativeWindowHandle=55;BoundingRectangle=$bounds
 }}
+if ('CASE' -eq 'provider_pid_changed') {
+  $script:providerPidReads=0
+  $element.Current | Add-Member ScriptProperty ProcessId {
+    $script:providerPidReads++
+    if ($script:providerPidReads -eq 1) { return 200 }
+    return 300
+  } -Force
+}
+if ('CASE' -eq 'control_geometry_changed') {
+$script:boundsReads=0
+$element.Current | Add-Member ScriptProperty BoundingRectangle {
+  $script:boundsReads++
+  $right = if ($script:boundsReads -ge 2) { 31 } else { 30 }
+  return [pscustomobject]@{IsEmpty=$false;Left=10;Top=10;Right=$right;Bottom=30;Width=$right-10;Height=20}
+} -Force
+}
 BODY
 if ('CASE' -eq 'prepared_occluded') {
   if (-not (Get-ControlOwnership $element @{} -Prepare)) { throw 'occluded background preparation refused' }
   $binding=$null
   if (Get-ControlOwnership $element -PreparedBinding ([ref]$binding)) { throw 'occluded foreground resolution admitted' }
-  if ($binding -cne '200/20;100/10|55') { throw 'structural binding lost on a native hit refusal' }
+  if ($binding -cne '100/10|789|200/20|ancestry:200/20;100/10|55/200/20>44/200/20>789/100/10|10,10,30,30|0,0,100,100') {
+    throw 'structural binding lost on a native hit refusal'
+  }
   'owned'
 } elseif ('CASE' -eq 'cached') {
   $cache = @{}
@@ -1482,6 +1572,11 @@ if ('CASE' -eq 'prepared_occluded') {
   [OwnershipFake]::Stale = $true
   if (Get-ControlOwnership $element $cache) { throw 'native ownership improperly cached' }
   if ($script:chainReads -ne 1) { throw 'provider chain not cached' }
+  'owned'
+} elseif ('CASE' -eq 'shared') {
+  $binding = $null
+  if (-not (Get-ControlOwnership $element -PreparedBinding ([ref]$binding)) -or
+      $binding -notlike '*|shared:200/20|*') { throw 'shared provider was not attested narrowly' }
   'owned'
 } elseif (Get-ControlOwnership $element) { 'owned' } else { 'refused' }
 """.replace("CASE", case).replace("BODY", body)
@@ -1493,7 +1588,9 @@ if ('CASE' -eq 'prepared_occluded') {
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == ("owned" if case in {"child", "cached", "prepared_occluded"} else "refused")
+    assert result.stdout.strip() == (
+        "owned" if case in {"child", "shared", "cached", "prepared_occluded"} else "refused"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1638,11 +1735,18 @@ $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
 $Action = 'Save'
 function Get-ControlOwnership {
-  param($e, $cache, [switch]$Prepare, $PreparedBinding=$null)
+  param($e, $cache, $ScanProviders, [switch]$Prepare, $PreparedBinding=$null)
   if (-not $e.Owned) { return $null }
   $cache[[uint32]200] = '200/20;100/10'
+  $ScanProviders[[uint32]200] = '200/20'
   if ($null -ne $PreparedBinding) { $PreparedBinding.Value='owned' }
   return 'owned'
+}
+function Get-ProviderIdentity {
+  param($provider)
+  if ('IDENTITY' -eq 'changed') { return '200/21' }
+  if ('IDENTITY' -eq 'missing') { return $null }
+  return '200/20'
 }
 function Get-ProviderChain {
   param($provider)
@@ -1864,13 +1968,19 @@ function Get-ProviderChain {
   if ([PreparedActionFake]::Foreground -eq 789 -and 'CASE' -eq 'provider_changed') { return '200/21;100/10' }
   return '200/20;100/10'
 }
+function Get-ProviderIdentity {
+  param($provider)
+  if ([PreparedActionFake]::Foreground -eq 789 -and 'CASE' -eq 'provider_changed') { return '200/21' }
+  return '200/20'
+}
 function Get-ControlOwnership {
-  param($e, $cache=$null, [switch]$Prepare, $PreparedBinding=$null)
+  param($e, $cache=$null, $ScanProviders=$null, [switch]$Prepare, $PreparedBinding=$null)
   if (-not $e.Current.IsEnabled) { return $null }
   if ($null -eq $cache) { $chain=Get-ProviderChain 200 } else {
     if (-not $cache.ContainsKey([uint32]200)) { $cache[[uint32]200]=Get-ProviderChain 200 }
     $chain=$cache[[uint32]200]
   }
+  if ($null -ne $ScanProviders) { $ScanProviders[[uint32]200]='200/20' }
   if ([PreparedActionFake]::Foreground -eq 789 -and 'CASE' -eq 'stale') { throw 'stale element' }
   $binding="$chain|$($e.Renderer)"
   if ($null -ne $PreparedBinding) { $PreparedBinding.Value=$binding }

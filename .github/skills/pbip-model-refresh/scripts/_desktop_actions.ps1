@@ -100,11 +100,77 @@ function Get-ProviderChain {
   return $identities -join ';'
 }
 
+function Get-ProviderIdentity {
+  param([uint32]$ProviderPid)
+  $start = [DesktopActionNative]::GetProcessStart($ProviderPid)
+  if (-not $start) { return $null }
+  return "$ProviderPid/$start"
+}
+
+function Get-ControlRenderer {
+  param($Element)
+  $node = $Element
+  for ($depth = 0; $depth -lt 64 -and $null -ne $node; $depth++) {
+    if ($node.Current.NativeWindowHandle -ne 0) {
+      return [IntPtr]::new([Int64]$node.Current.NativeWindowHandle)
+    }
+    $node = [System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($node)
+  }
+  return [IntPtr]::Zero
+}
+
+function Test-ControlRenderer {
+  param($Element, [uint32]$ProviderPid, [IntPtr]$Renderer)
+  if ([uint32]$Element.Current.ProcessId -ne $ProviderPid -or
+      $Renderer -eq [IntPtr]::Zero -or
+      (Get-ControlRenderer $Element) -ne $Renderer -or
+      -not [DesktopActionNative]::BelongsTo($Renderer, $ProviderPid)) { return $false }
+  return $Renderer -eq $targetHwnd -or [DesktopActionNative]::IsChild($targetHwnd, $Renderer)
+}
+
+function Get-ControlNativeChain {
+  param([IntPtr]$Renderer, [string]$ProviderIdentity)
+  $chain = [System.Collections.Generic.List[string]]::new()
+  $seen = [System.Collections.Generic.HashSet[Int64]]::new()
+  $node = $Renderer
+  for ($depth = 0; $depth -lt 64 -and $node -ne [IntPtr]::Zero; $depth++) {
+    if (-not $seen.Add($node.ToInt64()) -or -not [DesktopActionNative]::IsWindow($node)) { return $null }
+    $identity = Get-WindowIdentity $node
+    if (-not $identity -or
+        ($node -eq $Renderer -and $identity -cne $ProviderIdentity) -or
+        ($node -ne $Renderer -and $identity -cne "$DesktopPid/$ExpectedProcessStart" -and
+          $identity -cne $ProviderIdentity)) { return $null }
+    $chain.Add("$($node.ToInt64())/$identity")
+    if ($node -eq $targetHwnd) {
+      if ($identity -cne "$DesktopPid/$ExpectedProcessStart") { return $null }
+      return $chain -join '>'
+    }
+    $node = [DesktopActionNative]::GetParent($node)
+  }
+  return $null
+}
+
 function Get-ControlOwnership {
-  param($Element, [hashtable]$ScanChains = $null, [switch]$Prepare, $PreparedBinding = $null)
+  param(
+    $Element,
+    [hashtable]$ScanChains = $null,
+    [hashtable]$ScanProviders = $null,
+    [switch]$Prepare,
+    $PreparedBinding = $null
+  )
   if ([string]$Element.Current.Name -cne $Action -or
       -not $Element.Current.IsEnabled -or $Element.Current.IsOffscreen) { return $null }
+  if (-not (Test-Target -IdentityOnly)) { return $null }
   $providerPid = [uint32]$Element.Current.ProcessId
+  $providerIdentity = Get-ProviderIdentity $providerPid
+  if (-not $providerIdentity) { return $null }
+  if ($null -ne $ScanProviders) {
+    if ($ScanProviders.ContainsKey($providerPid)) {
+      if ($ScanProviders[$providerPid] -cne $providerIdentity) { return $null }
+    } else {
+      $ScanProviders[$providerPid] = $providerIdentity
+    }
+  }
   if ($null -ne $ScanChains) {
     if (-not $ScanChains.ContainsKey($providerPid)) {
       $ScanChains[$providerPid] = Get-ProviderChain $providerPid
@@ -113,19 +179,18 @@ function Get-ControlOwnership {
   } else {
     $chain = Get-ProviderChain $providerPid
   }
-  if (-not $chain) { return $null }
-  $node = $Element
-  $renderer = [IntPtr]::Zero
-  for ($depth = 0; $depth -lt 64 -and $null -ne $node; $depth++) {
-    if ($node.Current.NativeWindowHandle -ne 0) {
-      $renderer = [IntPtr]::new([Int64]$node.Current.NativeWindowHandle)
-      break
-    }
-    $node = [System.Windows.Automation.TreeWalker]::RawViewWalker.GetParent($node)
-  }
-  if ($renderer -eq [IntPtr]::Zero -or
-      -not [DesktopActionNative]::BelongsTo($renderer, $providerPid) -or
-      ($renderer -ne $targetHwnd -and -not [DesktopActionNative]::IsChild($targetHwnd, $renderer))) {
+  $renderer = Get-ControlRenderer $Element
+  if (-not (Test-ControlRenderer $Element $providerPid $renderer)) { return $null }
+  $nativeChain = Get-ControlNativeChain $renderer $providerIdentity
+  if (-not $nativeChain) { return $null }
+  if ($chain) {
+    $providerRoute = "ancestry:$chain"
+  } elseif ($providerPid -ne [uint32]$DesktopPid -and
+      $renderer -ne $targetHwnd -and [DesktopActionNative]::IsChild($targetHwnd, $renderer)) {
+    # Some Desktop builds share a UIA provider across windows. Trust that provider only
+    # through its live incarnation and native renderer HWND beneath this exact root.
+    $providerRoute = "shared:$providerIdentity"
+  } else {
     return $null
   }
   $bounds = $Element.Current.BoundingRectangle
@@ -137,18 +202,46 @@ function Get-ControlOwnership {
   }
   if ($bounds.Left -lt $rect.Left -or $bounds.Top -lt $rect.Top -or
       $bounds.Right -gt $rect.Right -or $bounds.Bottom -gt $rect.Bottom) { return $null }
-  $binding = "$chain|$($renderer.ToInt64())"
+  $culture = [Globalization.CultureInfo]::InvariantCulture
+  $geometry = (@($bounds.Left, $bounds.Top, $bounds.Right, $bounds.Bottom) |
+    ForEach-Object { ([double]$_).ToString('R', $culture) }) -join ','
+  $rectIdentity = "$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)"
+  $binding = "$DesktopPid/$ExpectedProcessStart|$RootHandle|$providerIdentity|$providerRoute|$nativeChain|$geometry|$rectIdentity"
   if ($null -ne $PreparedBinding) { $PreparedBinding.Value = $binding }
   # Native hit testing is meaningful only after the target is foreground.
-  if ($Prepare) { return $binding }
+  if ($Prepare) {
+    if (-not (Test-Target -IdentityOnly) -or
+        (Get-ProviderIdentity $providerPid) -cne $providerIdentity -or
+        -not (Test-ControlRenderer $Element $providerPid $renderer) -or
+        (Get-ControlNativeChain $renderer $providerIdentity) -cne $nativeChain) { return $null }
+    return $binding
+  }
   $point = [DesktopActionNative+Point]::new()
   $point.X = [int][Math]::Floor($bounds.Left + $bounds.Width / 2)
   $point.Y = [int][Math]::Floor($bounds.Top + $bounds.Height / 2)
   $hit = [DesktopActionNative]::WindowFromPoint($point)
   if (-not [DesktopActionNative]::BelongsTo($hit, $providerPid) -or
       ($hit -ne $renderer -and -not [DesktopActionNative]::IsChild($renderer, $hit))) { return $null }
-  # Read the start chain again: geometry/native ownership cannot excuse PID reuse.
-  if ($null -eq $ScanChains -and (Get-ProviderChain $providerPid) -cne $chain) { return $null }
+  $latestBounds = $Element.Current.BoundingRectangle
+  $latestRect = [DesktopActionNative+Rect]::new()
+  $latestGeometry = (@($latestBounds.Left, $latestBounds.Top, $latestBounds.Right, $latestBounds.Bottom) |
+    ForEach-Object { ([double]$_).ToString('R', $culture) }) -join ','
+  if ($latestGeometry -cne $geometry -or
+      -not [DesktopActionNative]::GetWindowRect($renderer, [ref]$latestRect) -or
+      "$($latestRect.Left),$($latestRect.Top),$($latestRect.Right),$($latestRect.Bottom)" -cne $rectIdentity -or
+      -not (Test-Target -IdentityOnly) -or
+      (Get-ProviderIdentity $providerPid) -cne $providerIdentity -or
+      -not (Test-ControlRenderer $Element $providerPid $renderer) -or
+      (Get-ControlNativeChain $renderer $providerIdentity) -cne $nativeChain) { return $null }
+  $latestHit = [DesktopActionNative]::WindowFromPoint($point)
+  if ($latestHit -ne $hit -or
+      -not [DesktopActionNative]::BelongsTo($latestHit, $providerPid) -or
+      ($latestHit -ne $renderer -and -not [DesktopActionNative]::IsChild($renderer, $latestHit)) -or
+      -not (Test-Target -IdentityOnly) -or
+      (Get-ProviderIdentity $providerPid) -cne $providerIdentity -or
+      (Get-ControlNativeChain $renderer $providerIdentity) -cne $nativeChain) { return $null }
+  if ($null -eq $ScanChains -and $chain -and
+      (Get-ProviderChain $providerPid) -cne $chain) { return $null }
   return "$binding|$($hit.ToInt64())"
 }
 
@@ -290,6 +383,7 @@ function Get-ActionCandidates {
     [System.Windows.Automation.TreeScope]::Descendants, $condition)
   $named = [System.Collections.Generic.List[object]]::new()
   $scanChains = @{}
+  $scanProviders = @{}
   foreach ($element in $elements) {
     if ([string]$element.Current.Name -cne $Action) { continue }
     $pattern = $null
@@ -297,7 +391,7 @@ function Get-ActionCandidates {
     $actionable = $element.TryGetCurrentPattern(
       [System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern) -and -not $element.TryGetCurrentPattern(
       [System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$expand)
-    $ownership = Get-ControlOwnership $element $scanChains -Prepare
+    $ownership = Get-ControlOwnership $element $scanChains -ScanProviders $scanProviders -Prepare
     $named.Add([pscustomobject]@{
       Element=$element
       Ownership=$ownership
@@ -306,7 +400,7 @@ function Get-ActionCandidates {
     })
   }
   return [pscustomobject]@{
-    Controls=$named; Chains=$scanChains; RootElement=$RootElement; Condition=$condition
+    Controls=$named; Chains=$scanChains; Providers=$scanProviders; RootElement=$RootElement; Condition=$condition
   }
 }
 
@@ -333,17 +427,21 @@ function Get-ActionControl {
     }
   }
   $scanChains = @{}
+  $scanProviders = @{}
   # Re-read each prepared provider once per pass, not once per control.
   foreach ($candidate in $Candidates.Controls) {
     if (-not $candidate.Ownership) { continue }
     $providerPid = $candidate.ProviderPid
     if ($scanChains.ContainsKey($providerPid)) { continue }
+    $freshIdentity = Get-ProviderIdentity $providerPid
     $freshChain = Get-ProviderChain $providerPid
-    if (-not $freshChain -or $freshChain -cne $Candidates.Chains[$providerPid]) {
+    if (-not $freshIdentity -or $freshIdentity -cne $Candidates.Providers[$providerPid] -or
+        $freshChain -cne $Candidates.Chains[$providerPid]) {
       $script:reason = 'provider_identity_changed'
       throw 'identity'
     }
     $scanChains[$providerPid] = $freshChain
+    $scanProviders[$providerPid] = $freshIdentity
   }
   $named = [System.Collections.Generic.List[object]]::new()
   foreach ($candidate in $Candidates.Controls) {
@@ -354,7 +452,8 @@ function Get-ActionControl {
       [System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern) -and -not $element.TryGetCurrentPattern(
       [System.Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$expand)
     $binding = $null
-    $ownership = Get-ControlOwnership $element $scanChains -Prepare:(-not $candidate.Actionable) `
+    $ownership = Get-ControlOwnership $element $scanChains -ScanProviders $scanProviders `
+      -Prepare:(-not $candidate.Actionable) `
       -PreparedBinding ([ref]$binding)
     # A stale prepared control invalidates the set; never silently drop it.
     if ($binding -cne $candidate.Ownership -or $actionable -ne $candidate.Actionable) {
