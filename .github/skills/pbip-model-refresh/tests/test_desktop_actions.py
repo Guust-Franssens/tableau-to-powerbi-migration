@@ -1271,7 +1271,7 @@ def test_ui_completion_reports_held_finding_through_real_bound_reader(  # pylint
         if capture_failure:
             raise OSError("controlled capture failed")
 
-    monkeypatch.setattr(refresh_pbip_model.ModalVisualEvidence, "hold_refusal", hold_refusal)
+    monkeypatch.setattr("refresh_pbip_model.ModalVisualEvidence.hold_refusal", hold_refusal)
     monkeypatch.setattr(
         refresh_pbip_model,
         "probe_observations",
