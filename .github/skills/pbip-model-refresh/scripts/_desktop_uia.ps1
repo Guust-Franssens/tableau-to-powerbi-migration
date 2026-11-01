@@ -87,55 +87,92 @@ function Get-HandleString {
   if ($Handle -eq [IntPtr]::Zero) { return $null }
   return '0x' + $Handle.ToInt64().ToString('x')
 }
-function Get-ElementIdentity {
-  param($Element, $Root, [IntPtr]$Handle)
-  $facts = [Collections.Generic.List[string]]::new()
-  $native = [IntPtr]::Zero
-  $elementPid = $null
-  $node = $Element
-  $reachedRoot = $false
-  for ($depth = 0; $depth -lt 64 -and $null -ne $node; $depth++) {
-    $runtime = $node.GetRuntimeId()
-    if ($null -eq $runtime -or $runtime.Length -eq 0) { throw 'missing runtime identity' }
-    # Current.ProcessId defaults to zero. Never confuse that with the NotSupported sentinel.
-    # https://learn.microsoft.com/dotnet/api/system.windows.automation.automationelement.processidproperty
-    $provider = $node.GetCurrentPropertyValue([Windows.Automation.AutomationElement]::ProcessIdProperty, $true)
-    $unsupported = [object]::ReferenceEquals($provider, [Windows.Automation.AutomationElement]::NotSupported)
-    if ($unsupported -or ($provider -isnot [int]) -or $provider -lt 0) { throw 'invalid provider identity' }
-    if ($depth -eq 0) { $elementPid = $provider }
-    $nodeHandle = [IntPtr]::new([long]$node.Current.NativeWindowHandle)
-    $start = if (-not $unsupported -and $provider -gt 0) { [DesktopHarvest]::ProcessStart($provider) } else { '-' }
-    $facts.Add(($runtime -join ',') + ":$unsupported`:$(if ($unsupported) { '-' } else { $provider })`:$start`:$nodeHandle")
-    if ($native -eq [IntPtr]::Zero -and $nodeHandle -ne [IntPtr]::Zero) {
-      # A missing/zero PID on a virtual node inherits only a supported, live native anchor.
-      $anchorPid = [uint32]0
-      if ($unsupported -or $provider -le 0 -or
-          [DesktopHarvest]::GetWindowThreadProcessId($nodeHandle, [ref]$anchorPid) -eq 0 -or
-          $anchorPid -ne $provider -or ($elementPid -gt 0 -and $elementPid -ne $anchorPid)) {
-        throw 'unattested native provider'
+function Get-IdentitySnapshot {
+  param($Root, [IntPtr]$Handle)
+  # Cache only identity metadata, never Name/Value/Text. Each pass has fresh native/process bindings.
+  # Raw Subtree keeps ALL descendants, including the frame; window/classification selection stays in Python.
+  # https://learn.microsoft.com/dotnet/framework/ui-automation/caching-in-ui-automation-clients
+  $request = [Windows.Automation.CacheRequest]::new()
+  $request.TreeScope = [Windows.Automation.TreeScope]::Subtree
+  $request.TreeFilter = [Windows.Automation.Condition]::TrueCondition
+  foreach ($property in @(
+      [Windows.Automation.AutomationElement]::RuntimeIdProperty,
+      [Windows.Automation.AutomationElement]::ProcessIdProperty,
+      [Windows.Automation.AutomationElement]::NativeWindowHandleProperty)) { $request.Add($property) }
+  $cached = $Root.GetUpdatedCache($request)
+  $entries = @{}
+  $nodes = [Collections.Generic.List[object]]::new()
+  $starts = @{}
+  $nativeFacts = @{}
+  $pending = [Collections.Generic.Stack[object]]::new()
+  $pending.Push(@{node=$cached; parent=$null; anchor=[IntPtr]::Zero; anchor_pid=0; depth=0})
+  while ($pending.Count) {
+    $visit = $pending.Pop()
+    $node = $visit.node
+    if ($visit.depth -ge 64 -or $entries.Count -gt $script:remaining) { throw 'identity bound' }
+    $runtime = $node.GetCachedPropertyValue([Windows.Automation.AutomationElement]::RuntimeIdProperty, $true)
+    if ($runtime -isnot [int[]] -or $runtime.Length -eq 0) { throw 'missing runtime identity' }
+    $key = $runtime -join ','
+    if ($entries.ContainsKey($key)) { throw 'duplicate runtime identity' }
+    $provider = $node.GetCachedPropertyValue([Windows.Automation.AutomationElement]::ProcessIdProperty, $true)
+    # A zero integer is distinct from unsupported: the latter still refuses BEFORE any private read.
+    if ($provider -isnot [int] -or $provider -lt 0) { throw 'invalid provider identity' }
+    if ($provider -gt 0 -and -not $starts.ContainsKey($provider)) {
+      $starts[$provider] = [DesktopHarvest]::ProcessStart($provider)
+    }
+    $nodeHandle = [IntPtr]::new([long]$node.GetCachedPropertyValue(
+      [Windows.Automation.AutomationElement]::NativeWindowHandleProperty))
+    $anchor = $visit.anchor
+    $anchorPid = $visit.anchor_pid
+    if ($nodeHandle -ne [IntPtr]::Zero) {
+      if (-not $nativeFacts.ContainsKey($nodeHandle)) {
+        $facts = [Collections.Generic.List[string]]::new()
+        $native = $nodeHandle
+        $anchorPid = 0
+        $reached = $false
+        for ($depth = 0; $depth -lt 64 -and $native -ne [IntPtr]::Zero; $depth++) {
+          $nativePid = [uint32]0
+          $thread = [DesktopHarvest]::GetWindowThreadProcessId($native, [ref]$nativePid)
+          if ($thread -eq 0 -or $nativePid -eq 0) { throw 'missing native identity' }
+          if ($depth -eq 0) { $anchorPid = $nativePid }
+          if (-not $starts.ContainsKey([int]$nativePid)) {
+            $starts[[int]$nativePid] = [DesktopHarvest]::ProcessStart($nativePid)
+          }
+          $facts.Add("$native`:$thread`:$nativePid`:$($starts[[int]$nativePid])")
+          if ($native -eq $Handle) {
+            if ($nativePid -ne [uint32]$DesktopPid) { throw 'native root identity' }
+            $reached = $true
+            break
+          }
+          $native = [DesktopHarvest]::ChildParent($native)
+        }
+        if (-not $reached) { throw 'missing native containment' }
+        $nativeFacts[$nodeHandle] = @{pid=$anchorPid; identity=($facts -join '|')}
       }
-      $native = $nodeHandle
+      $anchorPid = $nativeFacts[$nodeHandle].pid
+      if ($provider -le 0 -or $provider -ne $anchorPid) { throw 'unattested native provider' }
+      $anchor = $nodeHandle
     }
-    if ([Windows.Automation.Automation]::Compare($node, $Root)) {
-      if ($unsupported -or $provider -ne [uint32]$DesktopPid -or $nodeHandle -ne $Handle) { throw 'root identity' }
-      $reachedRoot = $true
-      break
+    if ($anchor -eq [IntPtr]::Zero -or ($provider -gt 0 -and $provider -ne $anchorPid)) {
+      throw 'unattested native provider'
     }
-    $node = [Windows.Automation.TreeWalker]::RawViewWalker.GetParent($node)
+    if ($null -eq $visit.parent -and ($provider -ne [uint32]$DesktopPid -or $nodeHandle -ne $Handle)) {
+      throw 'root identity'
+    }
+    $start = if ($provider -gt 0) { $starts[$provider] } else { '-' }
+    $entries[$key] = "$($visit.parent)`:$provider`:$start`:$nodeHandle`:$anchor`:$($nativeFacts[$anchor].identity)"
+    if ($null -ne $visit.parent) { $nodes.Add(@{element=$node; key=$key; provider=$provider}) }
+    foreach ($child in $node.CachedChildren) {
+      $parent = $child.CachedParent
+      if ($null -ne $parent) {
+        $parentRuntime = $parent.GetCachedPropertyValue(
+          [Windows.Automation.AutomationElement]::RuntimeIdProperty, $true)
+        if ($parentRuntime -isnot [int[]] -or ($parentRuntime -join ',') -cne $key) { throw 'raw parent changed' }
+      }
+      $pending.Push(@{node=$child; parent=$key; anchor=$anchor; anchor_pid=$anchorPid; depth=($visit.depth+1)})
+    }
   }
-  if (-not $reachedRoot -or $native -eq [IntPtr]::Zero) { throw 'missing root ancestry' }
-  for ($depth = 0; $depth -lt 64 -and $native -ne [IntPtr]::Zero; $depth++) {
-    $nativePid = [uint32]0
-    $thread = [DesktopHarvest]::GetWindowThreadProcessId($native, [ref]$nativePid)
-    if ($thread -eq 0 -or $nativePid -eq 0) { throw 'missing native identity' }
-    $facts.Add("$native`:$thread`:$nativePid`:$([DesktopHarvest]::ProcessStart($nativePid))")
-    if ($native -eq $Handle) {
-      if ($nativePid -ne [uint32]$DesktopPid) { throw 'native root identity' }
-      return $facts -join '|'
-    }
-    $native = [DesktopHarvest]::ChildParent($native)
-  }
-  throw 'missing native containment'
+  return @{entries=$entries; nodes=$nodes}
 }
 function Get-AutomationHarvest {
   param([IntPtr]$Handle)
@@ -148,15 +185,14 @@ function Get-AutomationHarvest {
         $root.Current.NativeWindowHandle -ne $Handle.ToInt64() -or $root.Current.IsPassword) {
       throw 'target'
     }
-    $rootIdentity = Get-ElementIdentity $root $root $Handle
-    $descendants = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants,
-      [System.Windows.Automation.Condition]::TrueCondition)
-    foreach ($element in $descendants) {
+    $snapshot = Get-IdentitySnapshot $root $Handle
+    $limit = $script:remaining
+    foreach ($entry in $snapshot.nodes) {
       if ($script:remaining -le 0) { $truncated = $true; break }
       $script:remaining--
       try {
+        $element = $entry.element
         $current = $element.Current
-        $identity = Get-ElementIdentity $element $root $Handle
         $role = [string]$current.ControlType.ProgrammaticName
         # Editable/password content is neither read nor considered complete evidence.
         if ($current.IsPassword -or $role -in @('ControlType.Edit', 'ControlType.ComboBox')) {
@@ -179,14 +215,26 @@ function Get-AutomationHarvest {
           $incomplete = $true
           continue
         }
-        if ((Get-ElementIdentity $element $root $Handle) -cne $identity -or
-            (Get-ElementIdentity $root $root $Handle) -cne $rootIdentity) { throw 'identity changed' }
         if ($name) { $items.Add([ordered]@{Text=$name; Role=$role; Source='Name'}) }
         if ($document) { $items.Add([ordered]@{Text=[string]$document; Role=$role; Source='TextPattern'}) }
       } catch { $incomplete = $true }
     }
-    if ((Get-ElementIdentity $root $root $Handle) -cne $rootIdentity) { throw 'root changed' }
-  } catch { $incomplete = $true }
+    $remaining = $script:remaining
+    try {
+      $script:remaining = $limit
+      $after = Get-IdentitySnapshot $root $Handle
+      if ($snapshot.entries.Count -ne $after.entries.Count) { throw 'tree changed' }
+      foreach ($key in $snapshot.entries.Keys) {
+        if (-not $after.entries.ContainsKey($key) -or $snapshot.entries[$key] -cne $after.entries[$key]) {
+          throw 'identity changed'
+        }
+      }
+    } finally { $script:remaining = $remaining }
+  } catch {
+    if ($_.Exception.Message -eq 'identity bound') { $truncated = $true }
+    $incomplete = $true
+    $items.Clear()
+  }
   return [ordered]@{items=@($items.ToArray()); truncated=$truncated; patterns_incomplete=$incomplete}
 }
 

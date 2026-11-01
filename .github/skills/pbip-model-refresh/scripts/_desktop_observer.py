@@ -4,9 +4,9 @@ internal: true
 internal-reason: Portable import authority and private image child; existing query/refresh entry points remain public.
 
 Python alone classifies native facts. _desktop_uia.ps1 only harvests, in one bounded child.
-UIA descendants require raw-tree and native-child containment in the exact Win32 root, with
-before/after runtime and live-process stamps. A zero ProcessId is neither blanket ownership nor
-necessarily an unsupported property. These bounded snapshots are not an atomic UI transaction.
+UIA descendants require two complete raw-tree identity snapshots and native-child containment in
+the exact Win32 root. Native/process bindings are deduplicated within each pass, never between
+passes. Unsupported identity refuses before private reads. These are not an atomic UI transaction.
 READY is observation completeness, never source reachability, row evidence or a gate clear.
 """
 # pylint: disable=too-many-branches
