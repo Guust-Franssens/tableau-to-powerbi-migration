@@ -4033,6 +4033,7 @@ namespace System.Windows.Automation {
     public static AutomationElement Root = new AutomationElement();
     public Info Current = new Info();
     public bool UnsupportedPid;
+    public AutomationElement Source;
     public int[] Runtime = new[]{1};
     public AutomationElement Parent;
     public int CachedPid, CachedHandle;
@@ -4042,7 +4043,8 @@ namespace System.Windows.Automation {
     public TextPattern Text;
     public static AutomationElement FromHandle(IntPtr ignored) { return Root; }
     public object GetCurrentPropertyValue(object property, bool ignoreDefault) {
-      return UnsupportedPid ? NotSupported : (object)Current.ProcessId;
+      if (!ignoreDefault) throw new Exception("LIVE_PID_MUST_IGNORE_DEFAULT");
+      return (Source ?? this).UnsupportedPid ? NotSupported : (object)Current.ProcessId;
     }
     public int[] GetRuntimeId() { return Runtime; }
     public object GetCachedPropertyValue(object property, bool ignoreDefault) {
@@ -4060,6 +4062,7 @@ namespace System.Windows.Automation {
     }
     private static AutomationElement Copy(AutomationElement source, AutomationElement parent) {
       var copy = new AutomationElement();
+      copy.Source=source;
       copy.Current=source.Current;
       copy.Text=source.Text;
       copy.Parent=parent;
@@ -4238,6 +4241,17 @@ switch ($Case) {
     $child.Current.ProcessId = 0
     [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::SupportChanged() }
   }
+  next_support_changed {
+    $second = [System.Windows.Automation.AutomationElement]::new()
+    $second.Current.NativeWindowHandle = 0
+    $second.Runtime = @(3)
+    $second.Parent = $root
+    $child.Text = [System.Windows.Automation.TextPattern]::new()
+    $second.Text = [System.Windows.Automation.TextPattern]::new()
+    # The stack visits the last child first; its Name invalidates the other live provider.
+    $root.Children = @($child, $second)
+    [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::SupportChanged() }
+  }
   tree_added { [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::AddChild() } }
   tree_removed { [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::RemoveChildren() } }
   password { $child.Current.IsPassword = $true; $child.Current.Text = 'PRIVATE_EDIT_VALUE' }
@@ -4339,6 +4353,7 @@ $result = Get-AutomationHarvest -Handle ([IntPtr]222)
         "root_process_reuse",
         "raw_reparent",
         "zero_support_changed",
+        "next_support_changed",
         "linear32",
         "linear128",
         "linear1091",
@@ -4412,6 +4427,9 @@ def test_native_harvest_provider_guards_precede_every_private_read(tmp_path: Pat
     elif case in {"oversized", "truncated"}:
         assert payload["truncated"] is True
         assert record["names"] == 0
+    elif case == "next_support_changed":
+        assert payload["patterns_incomplete"] is True and payload["items"] == []
+        assert (record["names"], record["documents"]) == (1, 1), "no private reads from the next unsupported provider"
     else:
         assert payload["patterns_incomplete"] is True
         assert payload["items"] == []

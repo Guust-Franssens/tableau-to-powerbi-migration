@@ -201,6 +201,11 @@ function Get-AutomationHarvest {
         }
         $document = ''
         if ($role -ne 'ControlType.Button') {
+          $provider = $element.GetCurrentPropertyValue(
+            [Windows.Automation.AutomationElement]::ProcessIdProperty, $true)
+          if ($provider -isnot [int] -or $provider -lt 0 -or $provider -ne $entry.provider) {
+            throw 'invalid live provider identity'
+          }
           $pattern = $null
           if ($element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$pattern)) {
             $readOnly = $pattern.DocumentRange.GetAttributeValue([System.Windows.Automation.TextPattern]::IsReadOnlyAttribute)
@@ -208,6 +213,12 @@ function Get-AutomationHarvest {
             $document = $pattern.DocumentRange.GetText(8001)
             if ($document.Length -gt 8000) { $truncated = $true; continue }
           }
+        }
+        # Cached attestation cannot authorize a private read after live PID support changes.
+        $provider = $element.GetCurrentPropertyValue(
+          [Windows.Automation.AutomationElement]::ProcessIdProperty, $true)
+        if ($provider -isnot [int] -or $provider -lt 0 -or $provider -ne $entry.provider) {
+          throw 'invalid live provider identity'
         }
         $name = [string]$current.Name
         if ($name.Length -gt 8000) { $truncated = $true; continue }
