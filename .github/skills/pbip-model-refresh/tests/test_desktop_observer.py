@@ -4455,7 +4455,7 @@ def test_native_harvest_provider_guards_precede_every_private_read(tmp_path: Pat
 
 
 _PIDZERO_NATIVE_PROVIDER = r"""
-param([string]$Ready, [int]$LeafCount = 3)
+param([string]$ReadyFile, [int]$LeafCount = 3)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationProvider,UIAutomationTypes,WindowsBase,System.Windows.Forms
 Add-Type -ReferencedAssemblies UIAutomationProvider,UIAutomationTypes,WindowsBase,System.Windows.Forms,System.Drawing @'
@@ -4524,7 +4524,7 @@ public class ProbeNode : IRawElementProviderFragmentRoot {
 [ProbeNode]::LeafCount=$LeafCount
 $form = [ProbeForm]::new()
 [void]$form.Handle
-[IO.File]::WriteAllText($Ready, (@{pid=[string]$PID; hwnd=[string]$form.Handle.ToInt64()} | ConvertTo-Json -Compress))
+[IO.File]::WriteAllText($ReadyFile, (@{pid=[string]$PID; hwnd=[string]$form.Handle.ToInt64()} | ConvertTo-Json -Compress))
 $timer = [Windows.Forms.Timer]::new()
 $timer.Interval = 60000
 $timer.Add_Tick({$form.Close()})
@@ -4559,7 +4559,7 @@ ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
 
 
 @pytest.mark.gui
-@pytest.mark.skipif(sys.platform != "win32", reason="native UIA provider semantics require Windows")
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
 @pytest.mark.parametrize("leaf_count", [3, 1091])
 def test_native_pid_zero_is_not_synonymous_with_unsupported_and_can_have_exact_root(
     tmp_path: Path, leaf_count: int
@@ -4578,7 +4578,7 @@ def test_native_pid_zero_is_not_synonymous_with_unsupported_and_can_have_exact_r
             "-NonInteractive",
             "-File",
             str(provider),
-            "-Ready",
+            "-ReadyFile",
             str(ready),
             "-LeafCount",
             str(leaf_count),
