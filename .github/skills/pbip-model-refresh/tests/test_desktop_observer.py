@@ -3319,6 +3319,7 @@ def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_applicatio
         cred_hwnd = probe.top(probe.WS_POPUP, 500, 10, 900, 700)
         probe.label(cred_hwnd, "Enter your credentials", 10)
         tip_hwnd = probe.top(probe.WS_POPUP, 520, 40, 120, 24, owner=cred_hwnd)
+        probe.label(tip_hwnd, "TOOLTIP_ONLY", 0)
         time.sleep(0.2)
 
         harvested, _visited = _pump_native_harvest(os.getpid())
@@ -3330,6 +3331,8 @@ def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_applicatio
         assert by_hwnd[cred_hwnd].owner_hwnd == 0, "the credential host is unowned - that is the whole shape"
         assert by_hwnd[tip_hwnd].owner_hwnd == cred_hwnd, "the tooltip is owned BY the credential host"
         assert by_hwnd[tip_hwnd].owner_enabled is True, "an enabled owner exonerates the tooltip itself"
+        assert "TOOLTIP_ONLY" in by_hwnd[tip_hwnd].texts, "the separate tooltip root must still be harvested"
+        assert "TOOLTIP_ONLY" not in by_hwnd[cred_hwnd].texts, "owned top-level content belongs to its own root"
         frame = by_hwnd[frame_hwnd]
         assert sorted(_desktop_observer.normalize_texts((frame.title, *frame.texts))) == ["Evaluating...", "Refresh"], (
             "the frame reads as pure progress status"
@@ -4093,10 +4096,22 @@ namespace System.Windows.Automation {
   }
 }
 public class DesktopHarvest {
+  public class Window { public IntPtr Hwnd, Owner; }
+  public static System.Collections.Generic.List<Window> RootWindows =
+    new System.Collections.Generic.List<Window>();
+  public static System.Collections.Generic.List<Window> Windows(uint pid) { return RootWindows; }
   public static System.Collections.Generic.Dictionary<long,uint> Pids =
     new System.Collections.Generic.Dictionary<long,uint>{{222,111},{223,111},{224,112},{225,113}};
   public static System.Collections.Generic.Dictionary<long,long> Parents =
     new System.Collections.Generic.Dictionary<long,long>{{222,0},{223,0},{224,222},{225,224}};
+  public static System.Collections.Generic.Dictionary<long,long> Owners =
+    new System.Collections.Generic.Dictionary<long,long>();
+  public static IntPtr GetWindow(IntPtr handle, uint command) {
+    long owner;
+    return Owners.TryGetValue(handle.ToInt64(), out owner) ? new IntPtr(owner) : IntPtr.Zero;
+  }
+  public static void SeparateReparent() { Owners[224]=223; }
+  public static void SeparateDisappear() { Pids.Remove(224); }
   public static System.Collections.Generic.Dictionary<uint,string> Starts =
     new System.Collections.Generic.Dictionary<uint,string>{{111,"1001"},{112,"1002"},{113,"1003"}};
   public static uint GetWindowThreadProcessId(IntPtr handle, out uint pid) {
@@ -4252,6 +4267,20 @@ switch ($Case) {
     $root.Children = @($child, $second)
     [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::SupportChanged() }
   }
+  separate_root { $separateCase = $true }
+  separate_unenumerated { $separateCase = $true }
+  separate_reparent {
+    $separateCase = $true
+    [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::SeparateReparent() }
+  }
+  separate_disappear {
+    $separateCase = $true
+    [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::SeparateDisappear() }
+  }
+  separate_reuse {
+    $separateCase = $true
+    [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::RootProcessReuse() }
+  }
   tree_added { [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::AddChild() } }
   tree_removed { [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::RemoveChildren() } }
   password { $child.Current.IsPassword = $true; $child.Current.Text = 'PRIVATE_EDIT_VALUE' }
@@ -4296,8 +4325,61 @@ if ($count) {
   if ($Case -eq 'late_unsupported') { $children[-1].UnsupportedPid = $true }
   $root.Children = $children
 }
-$result = Get-AutomationHarvest -Handle ([IntPtr]222)
+$windowRoots = @{}
+if ($separateCase) {
+  $separate = [System.Windows.Automation.AutomationElement]::new()
+  $separate.Current.NativeWindowHandle = 224; $separate.Runtime = @(3); $separate.Parent = $root
+  [DesktopHarvest]::Pids[224] = 111; [DesktopHarvest]::Parents[224] = 0; [DesktopHarvest]::Owners[224] = 222
+  $leaf = [System.Windows.Automation.AutomationElement]::new()
+  $leaf.Current.NativeWindowHandle = 0; $leaf.Runtime = @(4); $leaf.Parent = $separate
+  $leaf.Current.Text = 'SEPARATE_CONTENT'
+  $separate.Children = @($leaf)
+  $root.Children = @($separate, $child)
+  if ($Case -ne 'separate_unenumerated') { $windowRoots[[IntPtr]224] = [IntPtr]222 }
+}
+foreach ($handle in $windowRoots.Keys) {
+  $native = [DesktopHarvest+Window]::new()
+  $native.Hwnd = $handle; $native.Owner = $windowRoots[$handle]
+  [DesktopHarvest]::RootWindows.Add($native)
+}
+$result = Get-AutomationHarvest -Handle ([IntPtr]222) -WindowRoots $windowRoots
+$separateResult = $null
+if ($Case -eq 'separate_root') {
+  [System.Windows.Automation.AutomationElement]::Root = $separate
+  $separateResult = Get-AutomationHarvest -Handle ([IntPtr]224) -WindowRoots $windowRoots
+}
+$rootSetRefused = $null
+if ($Case.StartsWith('rootset_')) {
+  $windowRoots = @{([IntPtr]222)=[IntPtr]::Zero; ([IntPtr]224)=[IntPtr]222}
+  foreach ($handle in @(222,224)) {
+    $native = [DesktopHarvest+Window]::new()
+    $native.Hwnd = [IntPtr]$handle; $native.Owner = $windowRoots[$native.Hwnd]
+    [DesktopHarvest]::RootWindows.Add($native)
+  }
+  switch ($Case) {
+    rootset_disappear { [DesktopHarvest]::RootWindows.RemoveAt(1) }
+    rootset_reparent { [DesktopHarvest]::RootWindows[1].Owner = [IntPtr]223 }
+    rootset_duplicate { [DesktopHarvest]::RootWindows[1].Hwnd = [IntPtr]222 }
+    rootset_added { [DesktopHarvest]::RootWindows.Add([DesktopHarvest+Window]::new()) }
+  }
+  $assignment = $ast.Find({param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+      $node.Left.Extent.Text -eq '$finalWindows'
+  }, $true)
+  $statements = @($assignment.Parent.Statements)
+  $offset = [array]::IndexOf($statements, $assignment)
+  if ($offset -lt 0 -or $statements.Count -ne $offset + 4) { throw 'root set guard extraction failed' }
+  try {
+    foreach ($statement in $statements[$offset..($offset+3)]) { Invoke-Expression $statement.Extent.Text }
+    $rootSetRefused = $false
+  } catch {
+    if ($_.Exception.Message -ne 'native root set changed') { throw }
+    $rootSetRefused = $true
+  }
+}
 @{ payload=$result; names=[System.Windows.Automation.AutomationElement]::Names
+   rootset_refused=$rootSetRefused
+   separate_payload=$separateResult
    documents=[System.Windows.Automation.AutomationElement]::Documents
     snapshots=[System.Windows.Automation.AutomationElement]::Snapshots
     cached_reads=[System.Windows.Automation.AutomationElement]::CachedReads
@@ -4354,6 +4436,16 @@ $result = Get-AutomationHarvest -Handle ([IntPtr]222)
         "raw_reparent",
         "zero_support_changed",
         "next_support_changed",
+        "separate_root",
+        "separate_unenumerated",
+        "separate_reparent",
+        "separate_disappear",
+        "separate_reuse",
+        "rootset_stable",
+        "rootset_disappear",
+        "rootset_reparent",
+        "rootset_duplicate",
+        "rootset_added",
         "linear32",
         "linear128",
         "linear1091",
@@ -4430,6 +4522,23 @@ def test_native_harvest_provider_guards_precede_every_private_read(tmp_path: Pat
     elif case == "next_support_changed":
         assert payload["patterns_incomplete"] is True and payload["items"] == []
         assert (record["names"], record["documents"]) == (1, 1), "no private reads from the next unsupported provider"
+    elif case == "separate_root":
+        for root_payload, expected in ((payload, ["STATIC_NAME"]), (record["separate_payload"], ["SEPARATE_CONTENT"])):
+            assert (
+                root_payload["patterns_incomplete"] is False
+                and root_payload["truncated"] is False
+                and [item["Text"] for item in root_payload["items"]] == expected
+            )
+        assert record["names"] == 2 and record["documents"] == 0, "each subtree must be read only in its own root"
+    elif case.startswith("rootset_"):
+        assert record["rootset_refused"] is (case != "rootset_stable")
+    elif case.startswith("separate_"):
+        assert (
+            payload["patterns_incomplete"] is True
+            and payload["items"] == []
+            and record["names"] == (0 if case == "separate_unenumerated" else 1)
+            and record["documents"] == 0
+        ), "unattested separate roots must not authorize private reads"
     else:
         assert payload["patterns_incomplete"] is True
         assert payload["items"] == []

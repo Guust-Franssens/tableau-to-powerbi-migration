@@ -88,7 +88,17 @@ function Get-HandleString {
   return '0x' + $Handle.ToInt64().ToString('x')
 }
 function Get-IdentitySnapshot {
-  param($Root, [IntPtr]$Handle)
+  param($Root, [IntPtr]$Handle, [hashtable]$WindowRoots = @{})
+  if ($WindowRoots.Count) {
+    $currentRoots = [DesktopHarvest]::Windows([uint32]$DesktopPid)
+    if ($currentRoots.Count -ne $WindowRoots.Count) { throw 'native root set changed' }
+    $seen = @{}
+    foreach ($window in $currentRoots) {
+      if ($seen.ContainsKey($window.Hwnd) -or -not $WindowRoots.ContainsKey($window.Hwnd) -or
+          $WindowRoots[$window.Hwnd] -ne $window.Owner) { throw 'native root set changed' }
+      $seen[$window.Hwnd] = $true
+    }
+  }
   # Cache only identity metadata, never Name/Value/Text. Each pass has fresh native/process bindings.
   # Raw Subtree keeps ALL descendants, including the frame; window/classification selection stays in Python.
   # https://learn.microsoft.com/dotnet/framework/ui-automation/caching-in-ui-automation-clients
@@ -122,6 +132,19 @@ function Get-IdentitySnapshot {
     }
     $nodeHandle = [IntPtr]::new([long]$node.GetCachedPropertyValue(
       [Windows.Automation.AutomationElement]::NativeWindowHandleProperty))
+    # UIA raw children can include owned TOP-LEVEL windows. Their separately enumerated root owns
+    # their harvest; ownership never authorizes reading them through this root's WS_CHILD boundary.
+    if ($nodeHandle -ne $Handle -and $WindowRoots.ContainsKey($nodeHandle)) {
+      $owner = $WindowRoots[$nodeHandle]
+      $nativePid = [uint32]0
+      $thread = [DesktopHarvest]::GetWindowThreadProcessId($nodeHandle, [ref]$nativePid)
+      if ($null -eq $visit.parent -or $owner -ne $Handle -or $thread -eq 0 -or
+          $nativePid -ne [uint32]$DesktopPid -or $provider -ne [int]$nativePid -or
+          [DesktopHarvest]::ChildParent($nodeHandle) -ne [IntPtr]::Zero -or
+          [DesktopHarvest]::GetWindow($nodeHandle, 4) -ne $owner) { throw 'changed separate root' }
+      $entries[$key] = "$($visit.parent)`:$provider`:$($starts[$provider])`:$nodeHandle`:separate`:$owner`:$thread"
+      continue
+    }
     $anchor = $visit.anchor
     $anchorPid = $visit.anchor_pid
     if ($nodeHandle -ne [IntPtr]::Zero) {
@@ -175,7 +198,7 @@ function Get-IdentitySnapshot {
   return @{entries=$entries; nodes=$nodes}
 }
 function Get-AutomationHarvest {
-  param([IntPtr]$Handle)
+  param([IntPtr]$Handle, [hashtable]$WindowRoots = @{})
   $items = [Collections.Generic.List[object]]::new()
   $truncated = $false
   $incomplete = $false
@@ -185,7 +208,7 @@ function Get-AutomationHarvest {
         $root.Current.NativeWindowHandle -ne $Handle.ToInt64() -or $root.Current.IsPassword) {
       throw 'target'
     }
-    $snapshot = Get-IdentitySnapshot $root $Handle
+    $snapshot = Get-IdentitySnapshot $root $Handle $WindowRoots
     $limit = $script:remaining
     foreach ($entry in $snapshot.nodes) {
       if ($script:remaining -le 0) { $truncated = $true; break }
@@ -233,7 +256,7 @@ function Get-AutomationHarvest {
     $remaining = $script:remaining
     try {
       $script:remaining = $limit
-      $after = Get-IdentitySnapshot $root $Handle
+      $after = Get-IdentitySnapshot $root $Handle $WindowRoots
       if ($snapshot.entries.Count -ne $after.entries.Count) { throw 'tree changed' }
       foreach ($key in $snapshot.entries.Keys) {
         if (-not $after.entries.ContainsKey($key) -or $snapshot.entries[$key] -cne $after.entries[$key]) {
@@ -254,10 +277,16 @@ try {
   $script:remaining = $HarvestMaxElements
   $windows = @()
   if ($null -ne $before) {
-    foreach ($window in [DesktopHarvest]::Windows([uint32]$DesktopPid)) {
+    $nativeWindows = [DesktopHarvest]::Windows([uint32]$DesktopPid)
+    $windowRoots = @{}
+    foreach ($window in $nativeWindows) {
+      if ($windowRoots.ContainsKey($window.Hwnd)) { throw 'duplicate native root' }
+      $windowRoots[$window.Hwnd] = $window.Owner
+    }
+    foreach ($window in $nativeWindows) {
       $targetBefore = [DesktopHarvest]::Target($window.Hwnd, [uint32]$DesktopPid)
       $ownerBefore = [DesktopHarvest]::GetWindow($window.Hwnd, 4)
-      $harvest = Get-AutomationHarvest $window.Hwnd
+      $harvest = Get-AutomationHarvest $window.Hwnd $windowRoots
       if ([DesktopHarvest]::Enabled($window.Hwnd) -ne $window.Enabled) { throw 'target state changed' }
       $ownerEnabled = $window.OwnerEnabled
       if ($window.Owner -ne [IntPtr]::Zero -and [DesktopHarvest]::Enabled($window.Owner) -ne $ownerEnabled) {
@@ -274,6 +303,15 @@ try {
         title=$window.Title; texts=@(); items=$harvest.items
         truncated=$harvest.truncated; patterns_incomplete=$harvest.patterns_incomplete
       }
+    }
+    # No omitted subtree is accepted unless its root remains independently enumerated and harvested.
+    $finalWindows = [DesktopHarvest]::Windows([uint32]$DesktopPid)
+    if ($finalWindows.Count -ne $windowRoots.Count) { throw 'native root set changed' }
+    $seenRoots = @{}
+    foreach ($window in $finalWindows) {
+      if ($seenRoots.ContainsKey($window.Hwnd) -or -not $windowRoots.ContainsKey($window.Hwnd) -or
+          $windowRoots[$window.Hwnd] -ne $window.Owner) { throw 'native root set changed' }
+      $seenRoots[$window.Hwnd] = $true
     }
   }
   $after = Get-ProcessStart
