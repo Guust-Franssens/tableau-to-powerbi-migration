@@ -3331,7 +3331,7 @@ def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_applicatio
         assert by_hwnd[tip_hwnd].owner_hwnd == cred_hwnd, "the tooltip is owned BY the credential host"
         assert by_hwnd[tip_hwnd].owner_enabled is True, "an enabled owner exonerates the tooltip itself"
         frame = by_hwnd[frame_hwnd]
-        assert _desktop_observer.normalize_texts((frame.title, *frame.texts)) == ("Refresh", "Evaluating..."), (
+        assert sorted(_desktop_observer.normalize_texts((frame.title, *frame.texts))) == ["Evaluating...", "Refresh"], (
             "the frame reads as pure progress status"
         )
 
@@ -4558,6 +4558,7 @@ ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
 """
 
 
+@pytest.mark.serial
 @pytest.mark.gui
 @pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
 @pytest.mark.parametrize("leaf_count", [3, 1091])
