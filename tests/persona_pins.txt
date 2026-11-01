@@ -224,6 +224,14 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 8891af7d6482d511e8e9c7136196cf792f6f36a958c1e33f57f7e84ff8ee7297  **Host-only pbip-model-refresh skill file:** `.github\skills
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+1d84ee7625d434d6bb67ed3fe428124b3d93e72bc1789344d305e4b2659afd14  ### Unreadable-dialog visual handoff
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+f8a08c1b1b9eb744fd13a12c347556d77a60a88dd43b37b91aad16c2de40f4e5  **Automatically review available pixels before asking the op
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+e4245a6ed1c359e862c3e5bb6498f2ff3e12319c3787ae2ff3a2715a3eda2cad  Require the exact record/identity/hash/TTL checks and a fres
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
+6500fc83786f7a397afb2c20f202f7417446d1f96ab47ab7af9d74cab880ab65  A positively identified sign-in or approval form gets a spec
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 5af66ae1a0d6127654bb2d737a55435dd6a29d21e08216cbab686d4c3b3acb15  ## AI seal and data-bearing handoff
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 4974749e07ea15bd508113a264628ecb509118fb17aa60db9680e665aadbbc04  Enrich validated objects with descriptions/enumerated domain
