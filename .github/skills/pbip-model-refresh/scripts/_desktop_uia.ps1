@@ -101,8 +101,8 @@ function Get-ElementIdentity {
     # https://learn.microsoft.com/dotnet/api/system.windows.automation.automationelement.processidproperty
     $provider = $node.GetCurrentPropertyValue([Windows.Automation.AutomationElement]::ProcessIdProperty, $true)
     $unsupported = [object]::ReferenceEquals($provider, [Windows.Automation.AutomationElement]::NotSupported)
-    if (-not $unsupported -and (($provider -isnot [int]) -or $provider -lt 0)) { throw 'invalid provider identity' }
-    if ($depth -eq 0) { $elementPid = if ($unsupported) { 0 } else { $provider } }
+    if ($unsupported -or ($provider -isnot [int]) -or $provider -lt 0) { throw 'invalid provider identity' }
+    if ($depth -eq 0) { $elementPid = $provider }
     $nodeHandle = [IntPtr]::new([long]$node.Current.NativeWindowHandle)
     $start = if (-not $unsupported -and $provider -gt 0) { [DesktopHarvest]::ProcessStart($provider) } else { '-' }
     $facts.Add(($runtime -join ',') + ":$unsupported`:$(if ($unsupported) { '-' } else { $provider })`:$start`:$nodeHandle")

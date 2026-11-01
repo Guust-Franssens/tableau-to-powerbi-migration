@@ -4295,7 +4295,6 @@ def test_native_harvest_provider_guards_precede_every_private_read(tmp_path: Pat
         "foreign_shared",
         "zero_anchored",
         "zero_progress",
-        "zero_unsupported_anchored",
         "zero_readonly_credential",
     }:
         assert payload["patterns_incomplete"] is False and payload["truncated"] is False
