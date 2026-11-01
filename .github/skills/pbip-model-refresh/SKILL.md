@@ -341,7 +341,7 @@ with ModalVisualEvidence(Path(sys.argv[6]), deadline=time.monotonic() + 8.0) as 
     evidence.enqueue(int(pid), state)
     time.sleep(60)  # Hold the lease for live review; context exit always closes it.
 '@
-& $python -u -B -c $code $skillDir $heldPid $heldStartTicks $heldDialogHwnd $heldOwnerHwnd $evidenceDir
+$code | & $python -u -B - $skillDir $heldPid $heldStartTicks $heldDialogHwnd $heldOwnerHwnd $evidenceDir
 ```
 
 This invocation has an **8-second observation**, a separate **8-second acquisition** maximum,
