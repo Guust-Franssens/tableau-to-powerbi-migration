@@ -182,6 +182,13 @@ a detected human foreground switch or identity change prevents restoration.
 Handback verification is a point-in-time observation after 150 ms, not a guarantee of stable
 foreground ownership: Desktop can activate a later window. There is no delayed restoration
 retry, since a later Desktop activation cannot establish that the human did not switch back.
+Failure to restore the previous application's focus is reported as a **UX failure**, not a
+Save veto or evidence that a write failed. Save still acquires and verifies its own foreground,
+exact target and named Invoke control after fresh observer/model checks. After Invoke, a fresh
+observer and held binding read, exact-PID connected bridge with `hasUnsavedChanges: false`,
+unchanged resolved cache destination and the existing cache timestamp check govern persistence,
+within the original deadline. Unknown/unreadable dialogs remain blockers; a ribbon alone is not
+permission to dismiss, Apply or reload anything. Cold-reopen durability remains unverified.
 
 Mode decoding uses the engine's `ModeType` for `Model.DefaultMode` and `Partition.Mode`:
 Import=0, DirectQuery=1, Default=2, Push=3, Dual=4, DirectLake=5. Only partition Default

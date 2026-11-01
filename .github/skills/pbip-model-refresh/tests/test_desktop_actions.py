@@ -320,8 +320,13 @@ def _clean_start_route(  # pylint: disable=too-many-locals
         return controls[name]
 
     def bridge(command, pid, deadline, *, operation="status"):
-        assert pid == 123 and deadline == controls["deadline"] and command == ["controlled-bridge"]
-        phase("reload" if operation == "reload" else "post_status")
+        assert pid == 123 and command == ["controlled-bridge"]
+        if actions_seen and actions_seen[-1] == "Save":
+            assert deadline > bridge_clock[0]
+            phase("post_save_status")
+        else:
+            assert deadline == controls["deadline"]
+            phase("reload" if operation == "reload" else "post_status")
         response = controls["reload" if operation == "reload" else "post_status"]
         if isinstance(response, BaseException):
             raise response  # pylint: disable=raising-bad-type
@@ -329,7 +334,7 @@ def _clean_start_route(  # pylint: disable=too-many-locals
 
     def cache(pid, *, instance):
         assert pid == 123 and instance is controls["post_status"]["instances"][0]
-        phase("cache")
+        phase("post_save_cache" if actions_seen and actions_seen[-1] == "Save" else "cache")
         return Path("missing-cache.abf")
 
     def port(pid):
@@ -1260,6 +1265,9 @@ def test_ui_completion_reports_held_finding_through_real_bound_reader(  # pylint
         lambda *_args, **_kwargs: calls.append("canaries") or [SimpleNamespace(table="Orders", returned_rows=1)],
     )
     monkeypatch.setattr(refresh_pbip_model, "_emit_data_verdict", lambda *_args: 0)
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_command", lambda: ["controlled-bridge"])
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_status", lambda *_args: _ready_bridge())
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda *_args, **_kwargs: Path("missing-cache.abf"))
     monkeypatch.setattr(
         sys.modules["_desktop_observer"],
         "print_dialog_diagnostic",
@@ -2429,6 +2437,22 @@ def _wire_ui_route(monkeypatch: pytest.MonkeyPatch, *, no_save: bool = False, ro
 
     monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_command", lambda: ["controlled-bridge"])
     monkeypatch.setattr(
+        refresh_pbip_model,
+        "_ui_bridge_status",
+        lambda *_args, **_kwargs: {
+            "status": "ready",
+            "instances": [
+                {
+                    "pid": 123,
+                    "bridgeStatus": "connected",
+                    "currentFilePath": str(Path("controlled.pbip").resolve()),
+                    "hasUnsavedChanges": False,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda *_args, **_kwargs: Path("missing-cache.abf"))
+    monkeypatch.setattr(
         refresh_pbip_model, "_ui_observer_state", lambda *_args, **_kwargs: SimpleNamespace(state="READY")
     )
     monkeypatch.setattr(refresh_pbip_model, "bound_call", lambda *_args, **_kwargs: None)
@@ -2528,7 +2552,7 @@ def test_ui_deadline_rejects_late_preflight_and_save_rechecks(monkeypatch: pytes
 
 def test_ui_read_allowances_shrink_and_completion_uses_same_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     context, args, calls = _wire_ui_route(monkeypatch)
-    args.refresh_absolute_timeout_seconds = 40
+    args.refresh_absolute_timeout_seconds = 50
     clock = [100.0]
     allowances = []
     monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
@@ -2544,7 +2568,7 @@ def test_ui_read_allowances_shrink_and_completion_uses_same_deadline(monkeypatch
         return original_snapshot(context.bound)
 
     def completion(_context, _baseline, _started, deadline):
-        assert deadline == 140.0
+        assert deadline == 150.0
         clock[0] += 7
         return True, CompletionResult(True, "all advanced")
 
@@ -2559,11 +2583,11 @@ def test_ui_read_allowances_shrink_and_completion_uses_same_deadline(monkeypatch
     monkeypatch.setattr(refresh_pbip_model, "_wait_for_engine_completion", completion)
     monkeypatch.setattr(refresh_pbip_model, "probe_observations", probe)
     assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 0
-    assert allowances == [30.0, 30.0, 19.0, 12.0]
+    assert allowances == [30.0, 30.0, 29.0, 22.0, 15.0]
     assert calls == ["Refresh", "canaries", "Save"]
-    clock[0] = 140.0
+    clock[0] = 150.0
     with pytest.raises(TimeoutError):
-        refresh_pbip_model._ui_read_budget(140.0)
+        refresh_pbip_model._ui_read_budget(150.0)
 
 
 def test_ui_failed_metadata_read_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2610,52 +2634,131 @@ def test_unknown_observer_after_invoke_prevents_canary_and_save(
     assert calls == ["Refresh"]
 
 
-def test_identity_recheck_refuses_save_and_save_handback_failure_is_not_persisted(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_identity_recheck_refuses_save(monkeypatch: pytest.MonkeyPatch) -> None:
     context, args, calls = _wire_ui_route(monkeypatch)
     gates = iter((True, False))
     monkeypatch.setattr(refresh_pbip_model, "_identity_gate", lambda *_args, **_kwargs: next(gates))
     assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 2
     assert calls == ["Refresh", "canaries"]
 
+
+@pytest.mark.parametrize("failed_phase", ["Refresh", "Save"])
+@pytest.mark.parametrize("restore_requested", [False, True])
+def test_failed_handback_does_not_veto_safe_save_or_verified_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    failed_phase: str,
+    restore_requested: bool,
+) -> None:
+    emit_verdict = refresh_pbip_model._emit_data_verdict
     context, args, calls = _wire_ui_route(monkeypatch)
-    failed_save = ActionResult("Save", True, "foreground_changed_after_invoke", 1, 300, False, "failed")
+    cache = tmp_path / "cache.abf"
+    cache.write_bytes(b"old synthetic cache")
+    os.utime(cache, (100, 100))
+    safety_checks: list[str] = []
+
+    def invoke(action: str, **kwargs) -> ActionResult:
+        assert kwargs["pid"] == 123
+        assert kwargs["expected_process_start"] == "456"
+        assert kwargs["root_hwnd"] == 789
+        assert 0 < kwargs["timeout_seconds"] <= 20
+        calls.append(action)
+        if action == "Save":
+            assert safety_checks == ["observer", "binding", "model", "observer", "observer", "binding", "model"]
+            cache.write_bytes(b"synthetic cache updated by named Save")
+            os.utime(cache, (200, 200))
+        return ActionResult(
+            action,
+            True,
+            "invoke_returned",
+            1,
+            200,
+            restore_requested,
+            "failed" if action == failed_phase else "verified",
+        )
+
+    def observe(*_args, **_kwargs):
+        safety_checks.append("observer")
+        return SimpleNamespace(state="READY")
+
+    def bind(*_args, **_kwargs):
+        safety_checks.append("binding")
+
+    monkeypatch.setattr(refresh_pbip_model, "_ui_observer_state", observe)
+    monkeypatch.setattr(refresh_pbip_model, "bound_call", bind)
     monkeypatch.setattr(
-        refresh_pbip_model,
-        "invoke_desktop_action",
-        lambda action, **_kwargs: (
-            calls.append(action)
-            or (
-                ActionResult("Refresh", True, "ok", 1, 200, False, "not_requested")
-                if action == "Refresh"
-                else failed_save
-            )
-        ),
+        refresh_pbip_model, "_identity_gate", lambda *_args, **_kwargs: safety_checks.append("model") or True
     )
-    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 1
+    monkeypatch.setattr(refresh_pbip_model, "invoke_desktop_action", invoke)
+    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda *_args, **_kwargs: cache)
+    monkeypatch.setattr(refresh_pbip_model, "_emit_data_verdict", emit_verdict)
+
+    assert refresh_pbip_model._ui_refresh_locked(context, cache, args) == 0
     assert calls == ["Refresh", "canaries", "Save"]
-    assert "NOT_PERSISTED" in capsys.readouterr().out
+    assert safety_checks == [
+        "observer",
+        "binding",
+        "model",
+        "observer",
+        "observer",
+        "binding",
+        "model",
+        "observer",
+        "binding",
+    ]
+    output = capsys.readouterr().out
+    assert "REFRESH: DATA_OK + PERSISTED" in output
+    assert "NOT_PERSISTED" not in output
+    assert "UX failure" in output
 
 
-def test_failed_refresh_handback_never_authorizes_save(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("failure", ["action", "dirty", "unknown_clean", "binding", "observer", "cache", "deadline"])
+def test_failed_save_handback_does_not_clear_real_save_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], failure: str
+) -> None:
+    emit_verdict = refresh_pbip_model._emit_data_verdict
     context, args, calls = _wire_ui_route(monkeypatch)
-    failed_refresh = ActionResult("Refresh", True, "foreground_changed_after_invoke", 1, 200, False, "failed")
-    monkeypatch.setattr(
-        refresh_pbip_model,
-        "invoke_desktop_action",
-        lambda action, **_kwargs: (
-            calls.append(action)
-            or (
-                failed_refresh
-                if action == "Refresh"
-                else ActionResult("Save", True, "ok", 1, 300, False, "not_requested")
-            )
-        ),
-    )
+    cache = tmp_path / "cache.abf"
+    cache.write_bytes(b"old synthetic cache")
+    os.utime(cache, (100, 100))
+    bridge_status = refresh_pbip_model._ui_bridge_status
+    clock = [100.0]
+    monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
 
-    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 1
-    assert calls == ["Refresh", "canaries"]
+    def invoke(action: str, **_kwargs) -> ActionResult:
+        calls.append(action)
+        if action == "Save" and failure != "cache":
+            cache.write_bytes(b"synthetic updated cache")
+            os.utime(cache, (200, 200))
+        return ActionResult(action, failure != "action" or action == "Refresh", "controlled", 1, 200, True, "failed")
+
+    def status(*_args, **_kwargs):
+        payload = bridge_status(["controlled-bridge"], 123, 110.0)
+        if failure in {"dirty", "unknown_clean"}:
+            payload["instances"][0]["hasUnsavedChanges"] = True if failure == "dirty" else None
+        if failure == "deadline":
+            clock[0] = 111.0
+        return payload
+
+    def observe(*_args, **_kwargs):
+        if calls and calls[-1] == "Save" and failure == "observer":
+            raise refresh_pbip_model.CredentialUnknownError(123, "observer_incomplete")
+        return SimpleNamespace(state="READY")
+
+    monkeypatch.setattr(refresh_pbip_model, "invoke_desktop_action", invoke)
+    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_status", status)
+    monkeypatch.setattr(refresh_pbip_model, "_ui_observer_state", observe)
+    monkeypatch.setattr(
+        refresh_pbip_model, "cache_file", lambda *_args, **_kwargs: None if failure == "binding" else cache
+    )
+    monkeypatch.setattr(refresh_pbip_model, "_emit_data_verdict", emit_verdict)
+
+    assert refresh_pbip_model._ui_refresh_locked(context, cache, args) == (3 if failure == "observer" else 1)
+    assert calls == ["Refresh", "canaries", "Save"]
+    output = capsys.readouterr().out
+    assert ("REFRESH: CREDENTIAL_UNKNOWN" if failure == "observer" else "REFRESH: NOT_PERSISTED") in output
+    assert "REFRESH: DATA_OK" not in output
 
 
 @pytest.mark.gui

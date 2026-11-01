@@ -2621,11 +2621,11 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         f"(focus attempts={action.focus_attempts})"
     )
     if action.restore_requested and not action.handback_verified:
-        print("  UI handback: requested but not verified; Save will be withheld")
+        print("  UI handback: UX failure; requested prior focus restoration was not verified")
     elif action.handback_verified:
         print("  UI handback: verified or not required")
     else:
-        print("  UI handback: foreground changed; prior focus was not overridden")
+        print("  UI handback: UX failure; foreground changed; prior focus was not overridden")
 
     remaining = deadline - time.monotonic()
     try:
@@ -2710,10 +2710,6 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         return _emit_data_verdict(cache, before_stamp, args, results, implicit)
     if args.no_save:
         return _emit_data_verdict(cache, before_stamp, args, results, implicit)
-    if not action.handback_verified:
-        print("REFRESH: NOT_PERSISTED (Refresh handback was not verified; refusing UI Save)")
-        return 1
-
     try:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -2761,9 +2757,38 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         print(f"REFRESH: NOT_PERSISTED (UI Save refused: {save_action.reason})")
         return 1
     if not save_action.handback_verified:
-        print("REFRESH: NOT_PERSISTED (UI Save handback was not verified; write outcome unconfirmed)")
-        return 1
+        print("  UI Save handback: UX failure; prior focus restoration was not verified")
     print("  UI Save: one named Invoke returned; persistence remains unconfirmed")
+    try:
+        _ui_observer_state(context, timeout_seconds=_ui_read_budget(deadline, 8.0))
+        bound_call(context.bound, lambda _connection: None, timeout_seconds=_ui_read_budget(deadline))
+        payload = _ui_bridge_status(_ui_bridge_command(), context.pid, deadline)
+        _ui_read_budget(deadline)
+        instance, _delay = _bridge_readiness_result(payload, context.pid)
+        if instance is None or instance.get("hasUnsavedChanges") is not False:
+            raise DesktopActionError("post-Save bridge clean state unestablished")
+        resolved_cache = cache_file(context.pid, instance=instance)
+        if resolved_cache is None or resolved_cache.resolve() != cache.resolve():
+            raise DesktopActionError("post-Save file binding changed")
+        _ui_read_budget(deadline)
+    except CredentialMissingError as exc:
+        _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
+        return 1
+    except DialogFoundError as exc:
+        _emit_dialog_finding(exc.pid, exc.finding)
+        return 3
+    except CredentialUnknownError as exc:
+        _emit_credential_unknown(exc.pid, exc.reason)
+        return 3
+    except (DesktopGoneError, DesktopUnreadyError) as exc:
+        if isinstance(exc, DesktopGoneError):
+            _emit_desktop_gone(exc.pid, exc.reason)
+        else:
+            _emit_desktop_unready(exc.pid, exc.reason)
+        return 2
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        print(f"REFRESH: NOT_PERSISTED (post-Save verification unavailable: {type(exc).__name__})")
+        return 1
     return _emit_data_verdict(cache, before_stamp, args, results, implicit)
 
 
