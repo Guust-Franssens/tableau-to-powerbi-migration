@@ -232,8 +232,8 @@ discovery, and modals appearing after a DAX precheck remain unverified/outside t
 
 ### Inspect an unreadable in-flight dialog without stealing focus (#146)
 
-**Phase-1 seam: acquisition plus a metadata record, not pixel classification.** An in-flight
-`DIALOG_UNREADABLE` owned finding is offered to a background worker for one bounded exact-HWND
+**Acquisition plus a metadata record, not pixel classification.** An in-flight
+`DIALOG_UNREADABLE` or `DIALOG_UNRECOGNIZED` owned finding is offered to a background worker for one bounded exact-HWND
 **`PrintWindow(PW_RENDERFULLCONTENT)`** attempt. PID, visibility, direct owner, owner PID and disabled
 owner are checked before rendering, after rendering and after writing. Failure, blank/unpainted
 pixels, changed identity or incomplete metadata cannot become a semantic verdict. The existing
@@ -260,7 +260,8 @@ matching the child's own dimensions or the old top-left pixels does not. This cl
 geometric crop, not renderer staleness, text legibility or semantic classification.
 ⚠️ **Post-fix actual-Desktop requalification is still required after #687 releases Desktop.**
 The retained actual-Desktop evidence above proves the old defect, not qualification of this fix.
-Observer eligibility remains `DIALOG_UNREADABLE` only; no OCR or new prompt classification is added.
+Observer eligibility includes unreadable and unrecognized findings with the same exact owned,
+disabled-owner checks; no OCR or new prompt classification is added.
 
 **The wait only queues an immutable exact-target snapshot.** Its single pending slot never waits
 for storage validation, Git, file/process creation or acquisition. A busy slot can drop an
@@ -314,7 +315,16 @@ numbers. Do not feed re-serialized metadata into an authentication-text scanner.
 The **agent**, not the CLI, reviews pixels. When UIA cannot identify an eligible unreadable dialog,
 consume a live `LOCAL_IMAGE` immediately and perform the checks/review/deletion below **before**
 asking the operator to look. Do not wait for CLI exit: XMLA teardown closes its image leases.
-The foreground UI completion route can refuse before queueing an image. If no live acquired record
+The foreground UI completion route now cancels its engine worker before handing either unreadable or
+unrecognized refusal snapshot to `ModalVisualEvidence.hold_refusal`. This separate non-verdict
+diagnostic permits at most eight seconds for acquisition and up to the existing 60-second lease,
+streaming `LOCAL_IMAGE` while the command remains attached. No eligible enqueue, acquisition failure,
+external deletion or lease expiry ends the hold; it is not an unconditional extra minute.
+The original operation stays refused: no completion result, Save, retry or deadline reset is admitted.
+After the image is reviewed, delete it immediately; this releases the hold. Engine-worker cancellation
+does not invoke Desktop Cancel or establish that Desktop's own refresh has stopped.
+
+If no live acquired record
 exists, retain that original refusal and run the following **one separate read-only diagnostic**
 using the already-held PID, process-start ticks, selected dialog HWND and direct owner HWND.
 Missing original identities block this fallback; do not select another window or guess a start token.
@@ -333,27 +343,26 @@ from _desktop_observer import observe, ModalVisualEvidence
 pid, started, hwnd, owner = sys.argv[2:6]
 state = observe(pid, hwnd=int(hwnd), expected_process_start=started, timeout_s=8.0)
 window = state.dialog.window if state.dialog else None
-if (state.state != "UNREADABLE_DIALOG" or state.process_started_at != started
+if (state.state not in {"UNREADABLE_DIALOG", "UNKNOWN_DIALOG"} or state.process_started_at != started
         or window is None or window.hwnd != int(hwnd)
         or window.owner_hwnd != int(owner) or window.owner_enabled is not False):
     raise SystemExit("DIAGNOSTIC_NOT_ELIGIBLE; original refusal retained")
 with ModalVisualEvidence(Path(sys.argv[6]), deadline=time.monotonic() + 8.0) as evidence:
-    evidence.enqueue(int(pid), state)
-    time.sleep(60)  # Hold the lease for live review; context exit always closes it.
+    evidence.hold_refusal(int(pid), state)
 '@
 $code | & $python -u -B - $skillDir $heldPid $heldStartTicks $heldDialogHwnd $heldOwnerHwnd $evidenceDir
 ```
 
 This invocation has an **8-second observation**, a separate **8-second acquisition** maximum,
-and at most **60 seconds of lease holding** after enqueue. It does not restart or extend the refused
+and at most **60 seconds of lease holding** after acquisition. It does not restart or extend the refused
 operation's deadline. After consuming/deleting the image, stop only this attached runner's owned
 session/process so its leases close; otherwise its bounded context exit does so. Do not stop Desktop.
 Capture failure/timeout, no notice, stale/blank/nonviewable pixels or identity mismatch retains unknown
 and ends this attempt—no repeat capture loop.
 
-Eligibility is unchanged: `ModalVisualEvidence.enqueue` accepts only `DIALOG_UNREADABLE` with an
-exact owned HWND and disabled direct owner. `UNKNOWN_DIALOG`/`DIALOG_UNRECOGNIZED`, an unowned host,
-enabled owner, or ambiguous/missing selected identity **cannot be admitted by rewriting a finding**.
+`ModalVisualEvidence.enqueue` accepts unreadable or unrecognized findings only with an
+exact owned HWND and disabled direct owner. An unowned host, enabled owner, or ambiguous/missing
+selected identity **cannot be admitted by rewriting a finding**.
 Report this acquisition limitation and stop; do not force capture or claim the cause is credentials.
 
 **Exact local reviewer workflow (mandatory for each acquired image):**

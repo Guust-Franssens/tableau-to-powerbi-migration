@@ -1189,11 +1189,13 @@ def test_completion_awaits_real_bound_reader_progress_without_suppressing_refusa
 
 @pytest.mark.parametrize("phase", ["initial", "poll"])
 @pytest.mark.parametrize("finding_kind", ["unreadable", "unrecognized", "needs-human", "no_finding", "progress"])
+@pytest.mark.parametrize("capture_failure", [False, True])
 def test_ui_completion_reports_held_finding_through_real_bound_reader(  # pylint: disable=too-many-locals,too-many-statements
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     phase: str,
     finding_kind: str,
+    capture_failure: bool,
 ) -> None:
     """Keep the caller, completion wait and supervised bound reads; replace only external I/O."""
     identity = query_probe.DesktopIdentity(123, "456", 124, "457", 49157)
@@ -1225,6 +1227,7 @@ def test_ui_completion_reports_held_finding_through_real_bound_reader(  # pylint
     completion_polls = []
     read_released = threading.Event()
     diagnostics = []
+    image_handoffs = []
     connection = _Connection([(10, "Orders", 0)], [_partition()])
 
     def open_connection() -> None:
@@ -1259,6 +1262,16 @@ def test_ui_completion_reports_held_finding_through_real_bound_reader(  # pylint
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.01)
     monkeypatch.setattr(refresh_pbip_model, "_identity_gate", lambda *_args: True)
     monkeypatch.setattr(refresh_pbip_model, "invoke_desktop_action", invoke)
+
+    def hold_refusal(_self: object, pid: int, state: Observation) -> None:
+        """Exercise a diagnostic failure without replacing the original refusal."""
+        image_handoffs.append((pid, state))
+        if phase == "poll":
+            assert read_released.is_set(), "capture preceded completion-reader release"
+        if capture_failure:
+            raise OSError("controlled capture failed")
+
+    monkeypatch.setattr(refresh_pbip_model.ModalVisualEvidence, "hold_refusal", hold_refusal)
     monkeypatch.setattr(
         refresh_pbip_model,
         "probe_observations",
@@ -1278,6 +1291,7 @@ def test_ui_completion_reports_held_finding_through_real_bound_reader(  # pylint
         UIRefreshContext(123, 49157, bound, 789, None), Path("missing-cache.abf"), args
     )
     output = capsys.readouterr().out
+    assert image_handoffs == ([(123, blocked)] if finding_kind in {"unreadable", "unrecognized"} else [])
     if finding_kind == "progress":
         assert result == 0, output
         assert calls == ["Refresh", "canaries", "Save"], output
@@ -2567,8 +2581,9 @@ def test_ui_read_allowances_shrink_and_completion_uses_same_deadline(monkeypatch
         clock[0] += 7
         return original_snapshot(context.bound)
 
-    def completion(_context, _baseline, _started, deadline):
+    def completion(_context, _baseline, _started, deadline, *, evidence_dir=None):
         assert deadline == 150.0
+        assert evidence_dir is None
         clock[0] += 7
         return True, CompletionResult(True, "all advanced")
 

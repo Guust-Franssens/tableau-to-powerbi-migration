@@ -2310,6 +2310,7 @@ def _ui_observer_state(
     *,
     allow_progress: bool = False,
     timeout_seconds: float = 8.0,
+    refusal_evidence: Callable[[Observation], None] | None = None,
 ) -> Observation:
     """Reuse the existing observer and prompt authority while requiring the held root identity."""
     state = _in_flight_credential_state(
@@ -2319,7 +2320,11 @@ def _ui_observer_state(
     )
     raise_terminal_detection(context.pid, state, context.source_hint)
     if state.dialog is not None and state.state in {"UNKNOWN_DIALOG", "UNREADABLE_DIALOG"}:
-        raise DialogFoundError(context.pid, state.dialog)
+        try:
+            if refusal_evidence is not None:
+                refusal_evidence(state)
+        finally:
+            raise DialogFoundError(context.pid, state.dialog)
     if not state.complete:
         raise CredentialUnknownError(
             context.pid,
@@ -2435,16 +2440,29 @@ def _wait_for_engine_completion(  # pylint: disable=too-many-statements
     baseline: PartitionSnapshot,
     action_started_ticks: int,
     deadline: float,
+    evidence_dir: Path | None = None,
 ) -> tuple[bool, CompletionResult | None]:
     """Poll exact typed partition evidence under the existing deadline and observer supervisor."""
     timeout_seconds = _ui_read_budget(deadline, float("inf"))
     cancelled = threading.Event()
     outcome: dict[str, object] = {}
+    worker = None
+
+    def refusal_evidence(state: Observation) -> None:
+        cancelled.set()
+        if worker is not None:
+            worker.join(timeout=8.5)
+        # This is a new diagnostic allowance, never a reset of the cancelled operation deadline.
+        emit_observation(state)
+        with ModalVisualEvidence(evidence_dir) as evidence:
+            evidence.hold_refusal(context.pid, state)
+
     initial_remaining = deadline - time.monotonic()
     initial_state = _ui_observer_state(
         context,
         allow_progress=True,
         timeout_seconds=initial_remaining,
+        refusal_evidence=refusal_evidence,
     )
     _ui_read_budget(deadline)
 
@@ -2488,7 +2506,10 @@ def _wait_for_engine_completion(  # pylint: disable=too-many-statements
         )
         raise_terminal_detection(target_pid, state, context.source_hint)
         if state.dialog is not None and state.state in {"UNKNOWN_DIALOG", "UNREADABLE_DIALOG"}:
-            raise DialogFoundError(target_pid, state.dialog)
+            try:
+                refusal_evidence(state)
+            finally:
+                raise DialogFoundError(target_pid, state.dialog)
         if state.state not in {"READY", "REFRESH_IN_PROGRESS"} or not state.complete:
             raise CredentialUnknownError(target_pid, state.unknown_reason or state.reason or "observer_not_ready")
         frame = state.target_window or main_frame(state.windows)
@@ -2634,6 +2655,7 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
             baseline,
             action.action_started_ticks,
             deadline,
+            evidence_dir=getattr(args, "evidence_dir", None),
         )
     except CredentialMissingError as exc:
         _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)

@@ -853,6 +853,66 @@ def test_visual_enqueue_is_bounded_immutable_and_has_no_acquisition_side_effects
         evidence.close()
 
 
+@pytest.mark.parametrize("kind", ["unreadable", "mixed-content", "unrecognized", "credential", "needs-human", "benign"])
+@pytest.mark.parametrize("owner_enabled", [False, True, None])
+def test_visual_unknown_capture_keeps_exact_disabled_owner_admission(monkeypatch, kind, owner_enabled) -> None:
+    """New unknown diagnostics retain exact-window ownership; no capture changes the finding."""
+    monkeypatch.setattr(_desktop_observer.threading.Thread, "start", lambda _self: None)
+    window = _desktop_observer.replace(owned_dialog(), owner_enabled=owner_enabled)
+    finding = DialogFinding(kind, _desktop_observer.DIALOG_KIND_VERDICTS[kind], window)
+    state = Observation(dialog=finding)
+    with _desktop_observer.ModalVisualEvidence() as evidence:
+        eligible = owner_enabled is False and kind in {"unreadable", "mixed-content", "unrecognized"}
+        assert evidence.enqueue(111, state) is eligible
+        assert evidence._pending.qsize() == int(eligible)
+        assert state.dialog is finding and state.modal is None
+
+
+@pytest.mark.parametrize("captured", [False, True])
+def test_terminal_image_hold_stops_on_failure_or_exact_external_deletion(monkeypatch, captured) -> None:
+    """Only an acquired live lease is held; completed/failed diagnostics do not blindly wait 60s."""
+    monkeypatch.setattr(_desktop_observer.threading.Thread, "start", lambda _self: None)
+    events = []
+    with _desktop_observer.ModalVisualEvidence() as evidence:
+        monkeypatch.setattr(evidence, "enqueue", lambda pid, state: events.append(("enqueue", pid)) or True)
+        monkeypatch.setattr(
+            evidence,
+            "_capture_finished",
+            SimpleNamespace(wait=lambda seconds: events.append(("capture", seconds)) or True),
+        )
+        existence = iter([True, False] if captured else [])
+        evidence._requests = (
+            [SimpleNamespace(record={"capture_success": True}, path=SimpleNamespace(exists=lambda: next(existence)))]
+            if captured
+            else []
+        )
+        monkeypatch.setattr(_desktop_observer.time, "sleep", lambda seconds: events.append(("sleep", seconds)))
+        try:
+            evidence.hold_refusal(111, Observation())
+            assert events == [("enqueue", 111), ("capture", 8.0)] + ([("sleep", 0.05)] if captured else [])
+        finally:
+            evidence._requests = []
+
+
+@pytest.mark.parametrize("fault", ["unowned", "missing_hwnd", "capture_timeout"])
+def test_terminal_image_hold_never_waits_for_ineligible_or_timed_out_capture(monkeypatch, fault) -> None:
+    """No owner/identity amnesty and no lease wait when the eight-second acquisition fails."""
+    monkeypatch.setattr(_desktop_observer.threading.Thread, "start", lambda _self: None)
+    window = owned_dialog()
+    if fault == "unowned":
+        window = _desktop_observer.replace(window, owner_hwnd=0)
+    if fault == "missing_hwnd":
+        window = _desktop_observer.replace(window, hwnd=0)
+    waits = []
+    with _desktop_observer.ModalVisualEvidence() as evidence:
+        monkeypatch.setattr(
+            evidence, "_capture_finished", SimpleNamespace(wait=lambda seconds: waits.append(seconds) or False)
+        )
+        monkeypatch.setattr(_desktop_observer.time, "sleep", lambda _seconds: pytest.fail("no eligible acquired lease"))
+        evidence.hold_refusal(111, Observation(dialog=DialogFinding("unrecognized", "DIALOG_UNRECOGNIZED", window)))
+        assert waits == ([8.0] if fault == "capture_timeout" else [])
+
+
 def test_visual_directory_must_be_ignored_inside_a_checkout(tmp_path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
