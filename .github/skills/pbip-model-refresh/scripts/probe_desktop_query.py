@@ -318,6 +318,7 @@ def _observation_call(
     """Bound reads, including credential inspection. Timed-out native work is not cancellable.
 
     Workers are daemon-only; results stay invocation-private until both workers terminate.
+    Read completion closes monitor admission, settles admitted checks, then freshly checks once more.
     This helper is for reads, NOT a lifecycle wrapper around refresh or persistence.
     """
     # Both private workers, their result queue and helper settlement belong to this invocation.
@@ -326,6 +327,8 @@ def _observation_call(
         raise ObservationUnavailable("TIMEOUT")
     outcome = queue.Queue()
     stopped = threading.Event()
+    monitor_closed = threading.Event()
+    admission_lock = threading.Lock()
     now = time.monotonic()
     if _binding_deadline is not None and now >= _binding_deadline:
         raise ObservationUnavailable("TIMEOUT")
@@ -352,9 +355,12 @@ def _observation_call(
 
     def poll() -> None:
         try:
-            while not stopped.is_set():
+            while True:
+                with admission_lock:
+                    if stopped.is_set() or monitor_closed.is_set():
+                        return
                 check(in_flight=True)
-                if stopped.wait(PREFLIGHT_CREDENTIAL_POLL_SECONDS):
+                if monitor_closed.wait(PREFLIGHT_CREDENTIAL_POLL_SECONDS):
                     break
         except BaseException as error:  # pylint: disable=broad-exception-caught
             stopped.set()
@@ -371,6 +377,12 @@ def _observation_call(
             if stopped.is_set():
                 return
             result = operation()
+            with admission_lock:
+                monitor_closed.set()
+            # An admitted check retains authority, even when the read finished first.
+            monitor.join(max(0, deadline - time.monotonic()))
+            if monitor.is_alive() or time.monotonic() >= deadline:
+                raise ObservationUnavailable("TIMEOUT")
             if not stopped.is_set():
                 check(in_flight=True)
                 outcome.put((True, result))
@@ -399,6 +411,8 @@ def _observation_call(
         raise ObservationUnavailable("TIMEOUT") from None
     finally:
         stopped.set()
+        with admission_lock:
+            monitor_closed.set()
         supervisor.close()
     return value
 
