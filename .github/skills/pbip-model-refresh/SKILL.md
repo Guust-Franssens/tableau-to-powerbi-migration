@@ -68,7 +68,7 @@ PR B depends on accepted follow-up [#780](https://github.com/Guust-Franssens/tab
 (linked [#692](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/692)).
 
 `--ui-refresh` is an opt-in route; the existing XMLA default and migration gates do not change. After
-the clean-start sequence below, it invokes one named Desktop **Refresh** control, then waits for engine
+the startup readiness checks below, it invokes one named Desktop **Refresh** control, then waits for engine
 metadata—not the Invoke return, quiet UI, or positive cached rows—to prove that the exact source-partition
 set stayed bound and every Import M source partition became `READY` with a typed UTC `RefreshedTime` strictly newer than its
 baseline and at or after the action start. It never retries Refresh or falls back to AMO/XMLA
@@ -79,8 +79,8 @@ READY observer state and the existing model-identity check; `--no-save` suppress
 **UI readiness requires explicit `--pid`.** Before cache/engine discovery this route waits for
 top-level bridge `status: "ready"` AND that exact PID's `bridgeStatus: "connected"` with a
 nonempty absolute current-file binding. One monotonic **60-second maximum** startup budget,
-clipped to the existing operation deadline, includes initial readiness, both READY observations,
-reload, post-reload status and helper cleanup.
+clipped to the existing operation deadline, includes initial readiness, one complete READY observer
+snapshot and helper cleanup.
 It proceeds immediately when ready; it never sleeps a blind minute or proceeds after expiry.
 The installed CLI's `--wait-seconds` waits for connection discovery only. A small same-PID loop
 also awaits ordinary `not_connected` and the recognized `BRIDGE_ERROR` "Another operation is
@@ -88,31 +88,25 @@ already in progress" response with Boolean `retryable: true` and finite nonnegat
 `retryAfterMs` (delay clipped to 50–1000 ms, then remaining time). Unknown errors, malformed
 retry metadata and process disappearance refuse immediately; no terminal/credential error retry.
 
-**Clean-start reload is defensive sequencing, not repair proof.** The **already-fetched** ready
-instance must report `hasUnsavedChanges: false` as an actual Boolean before any reload. Dirty,
-missing or non-Boolean values refuse; the route never silently discards existing edits. One complete
-READY observer snapshot pins the held PID's exact `.NET CreationDate.ToUniversalTime().Ticks`
-string and the bridge's exact absolute `currentFilePath`. Prompts, unknown/incomplete evidence or
-unestablished process identity refuse before reload.
-
-It then issues **one** exact-PID bridge `reload`, requires `status: "ok"`, an exact integer PID,
-`result.success: true` and no reported errors, and performs **one** subsequent bounded status call
-(not another readiness retry loop). That status must be ready/connected for the same PID and exact
-absolute file path, again with strict Boolean `hasUnsavedChanges: false`. A fresh complete READY
-observation must match the pinned process-start ticks. Expired budgets and late output, including
-late cleanup, refuse before Refresh. Cache/port discovery, engine binding, model identity and all
-partition baselines are acquired **after** these checks; the pre-reload observer is not handed
-downstream. There is no reload between Refresh and optional Save.
+**The startup gate does not reload Desktop.** The already-fetched ready instance must report
+`hasUnsavedChanges: false` as an actual Boolean; dirty, missing or non-Boolean values refuse, and the
+route never silently discards existing edits. One complete READY observer snapshot pins the held
+PID's exact `.NET CreationDate.ToUniversalTime().Ticks` string and the bridge's exact absolute
+`currentFilePath`. Prompts, unknown/incomplete evidence or unestablished process identity refuse
+before Refresh. The already-open PBIP proceeds directly to the normal binding and refresh checks.
+Expired budgets and late output, including late cleanup, refuse before Refresh. Cache/port discovery,
+engine binding, model identity and partition baselines follow startup readiness; typed completion
+and canary checks still precede optional guarded Save. No automatic startup reload or post-reload
+status/observer is performed.
 
 ✅ The bundled synthetic controls exercise this ordering and fail-closed clean-state checks.
 ⚠️ This does **not** establish external-warning repair, persistence, synchronization of disk TMDL
 with Desktop, or actual-Desktop performance. Reload is not a substitute for reopening after model
 edits; the model synchronization and stale-Save warnings below still apply.
 
-The UI route resolves the already-installed `powerbi-desktop` launcher on PATH for `status --pid ...`
-and the same contained transport for its one `reload --pid ...`,
-never `--yes`, a custom package resolver or automatic tooling updates. Missing installations
-refuse. The child wait uses the remaining original budget; timeout terminates only the owned
+The UI route resolves the already-installed `powerbi-desktop` launcher on PATH for `status --pid ...`,
+never `--yes`, a custom package resolver or automatic tooling updates. Missing installations refuse.
+The child wait uses the remaining original budget; timeout terminates only the owned
 launcher PID and its descendants, never Desktop or a sibling process. Native startup/teardown
 may take additional OS time, but late responses cannot authorize any action.
 Readiness failure prints a non-success refusal/timeout immediately, then permits only one
