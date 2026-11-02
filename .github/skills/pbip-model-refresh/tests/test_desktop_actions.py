@@ -1106,6 +1106,132 @@ def test_completion_worker_retries_only_desktop_popup_read_refusals(
         assert reads == ["read"]
 
 
+def _held_ui_context() -> UIRefreshContext:
+    return UIRefreshContext(123, 49157, SimpleNamespace(identity=SimpleNamespace(process_start="456")), 789, None)
+
+
+def _settle_observation(left: str) -> Observation:
+    root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
+    window = DesktopWindow("", "", 100, 100, hwnd=888, owner_hwnd=789, complete=False, reason="patterns_incomplete")
+    if left == "progress":
+        return Observation(
+            pid="123",
+            process_started_at="456",
+            target_window=root,
+            dialog=DialogFinding("benign", "REFRESH_IN_PROGRESS", root),
+        )
+    if left == "dialog":
+        return Observation(
+            pid="123",
+            process_started_at="456",
+            target_window=root,
+            dialog=DialogFinding("unreadable", "DIALOG_UNREADABLE", window),
+        )
+    if left == "unready":
+        return Observation(pid="123", process_started_at="456", desktop_unready="no_main_window")
+    if left == "incomplete":
+        return Observation(pid="123", process_started_at="456", complete=False, unknown_reason="backend_failed")
+    if left == "other_root":
+        return Observation(pid="123", process_started_at="456", target_window=replace(root, hwnd=999))
+    return Observation(pid="123", process_started_at="456", target_window=root)
+
+
+@pytest.mark.parametrize("left", ["progress", "dialog"])
+def test_completion_wait_judges_leftover_popup_inside_the_original_deadline(
+    monkeypatch: pytest.MonkeyPatch, left: str
+) -> None:
+    """Desktop's popup never ends the engine wait early, never extends it, and is judged at its end."""
+    leftover = _settle_observation(left)
+    observer_budgets: list[float] = []
+    read_budgets: list[float] = []
+    holds: list[Observation] = []
+
+    def observe(*_args, timeout_s, **_kwargs) -> Observation:
+        observer_budgets.append(timeout_s)
+        return leftover
+
+    def read(*_args, timeout_seconds) -> PartitionSnapshot:
+        read_budgets.append(timeout_seconds)
+        raise query_probe.ObservationUnavailable(leftover.state if left == "progress" else "DIALOG_UNREADABLE")
+
+    monkeypatch.setattr(refresh_pbip_model, "_in_flight_credential_state", observe)
+    monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", read)
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(refresh_pbip_model, "_hold_ui_refusal_evidence", lambda _pid, state, _dir: holds.append(state))
+    budget = 0.3
+    deadline = time.monotonic() + budget
+    try:
+        outcome: object = refresh_pbip_model._wait_for_engine_completion(
+            _held_ui_context(), _snapshot(ticks=100), 200, deadline
+        )
+    except refresh_pbip_model.DialogFoundError as exc:
+        outcome = exc
+    ended = time.monotonic()
+
+    if left == "progress":
+        # Only Desktop's own progress popup remained: an honest TIMEOUT, not a dialog finding.
+        assert outcome == (False, None)
+        assert not holds
+    else:
+        # An unknown dialog still up at the deadline is judged and reported, never folded into TIMEOUT.
+        assert isinstance(outcome, refresh_pbip_model.DialogFoundError), outcome
+        assert outcome.finding.verdict == "DIALOG_UNREADABLE"
+        assert holds == [leftover]
+    assert len(observer_budgets) >= 2 and read_budgets
+    assert max(observer_budgets + read_budgets) <= budget
+    assert ended < deadline + 1.0
+
+
+@pytest.mark.parametrize(
+    "left,deadline_seconds,expected",
+    [
+        ("ready", 1000.0, "READY"),
+        ("progress", 0.5, None),
+        ("progress", 1000.0, None),
+        ("dialog", 1000.0, "DialogFoundError:DIALOG_UNREADABLE"),
+        ("unready", 1000.0, "DesktopUnreadyError:no_main_window"),
+        ("incomplete", 1000.0, "CredentialUnknownError:backend_failed"),
+        ("other_root", 1000.0, "DesktopUnreadyError:window_identity_changed"),
+    ],
+)
+def test_ui_settle_wait_is_capped_by_the_held_deadline_and_judges_what_remains(
+    monkeypatch: pytest.MonkeyPatch, left: str, deadline_seconds: float, expected: str | None
+) -> None:
+    clock = [1000.0]
+    budgets: list[float] = []
+    holds: list[Observation] = []
+    leftover = _settle_observation(left)
+
+    def observe(*_args, timeout_s, **_kwargs) -> Observation:
+        budgets.append(timeout_s)
+        return leftover
+
+    monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(refresh_pbip_model.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    monkeypatch.setattr(refresh_pbip_model, "_in_flight_credential_state", observe)
+    monkeypatch.setattr(refresh_pbip_model, "_hold_ui_refusal_evidence", lambda _pid, state, _dir: holds.append(state))
+    deadline = clock[0] + deadline_seconds
+    limit = min(deadline, clock[0] + refresh_pbip_model.UI_SETTLE_SECONDS)
+    try:
+        settled = refresh_pbip_model._ui_wait_ready(_held_ui_context(), deadline)
+        outcome = None if settled is None else settled.state
+    except (
+        refresh_pbip_model.DialogFoundError,
+        refresh_pbip_model.DesktopUnreadyError,
+        refresh_pbip_model.CredentialUnknownError,
+    ) as exc:
+        detail = exc.finding.verdict if isinstance(exc, refresh_pbip_model.DialogFoundError) else exc.reason
+        outcome = f"{type(exc).__name__}:{detail}"
+
+    assert outcome == expected
+    assert holds == ([leftover] if left == "dialog" else [])
+    # The settle never reaches past the original deadline, nor past its own window.
+    assert clock[0] <= limit
+    assert max(budgets) <= limit - 1000.0
+    if expected is None:
+        assert clock[0] == limit
+
+
 @pytest.mark.parametrize("phase", ["initial", "poll"])
 @pytest.mark.parametrize(
     "finding_kind", ["unreadable", "unrecognized", "needs-human", "no_finding", "progress", "transient"]
@@ -2594,22 +2720,23 @@ def test_identity_recheck_refuses_save(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("left", ["busy", "dialog"])
-def test_post_save_settle_refuses_when_desktop_never_returns_to_ready(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], left: str
+@pytest.mark.parametrize("phase", ["Refresh", "Save"])
+def test_settle_refuses_when_desktop_never_returns_to_ready(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], phase: str, left: str
 ) -> None:
     context, args, calls = _wire_ui_route(monkeypatch)
     monkeypatch.setattr(refresh_pbip_model, "UI_SETTLE_SECONDS", 0.3)
     root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
     window = DesktopWindow("", "", 100, 100, hwnd=888, owner_hwnd=789, complete=False, reason="patterns_incomplete")
     kind, token = ("benign", "REFRESH_IN_PROGRESS") if left == "busy" else ("unreadable", "DIALOG_UNREADABLE")
-    after_save = Observation(
+    after_action = Observation(
         pid="123", process_started_at="456", target_window=root, dialog=DialogFinding(kind, token, window)
     )
     holds: list[Observation] = []
     monkeypatch.setattr(
         refresh_pbip_model,
         "_ui_observer_state",
-        lambda *_args, **_kwargs: after_save if calls[-1:] == ["Save"] else SimpleNamespace(state="READY"),
+        lambda *_args, **_kwargs: after_action if calls[-1:] == [phase] else SimpleNamespace(state="READY"),
     )
     monkeypatch.setattr(refresh_pbip_model, "_hold_ui_refusal_evidence", lambda _pid, state, _dir: holds.append(state))
     monkeypatch.setattr(sys.modules["_desktop_observer"], "print_dialog_diagnostic", lambda *_args: None)
@@ -2617,16 +2744,22 @@ def test_post_save_settle_refuses_when_desktop_never_returns_to_ready(
     result = refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args)
 
     output = capsys.readouterr().out
-    assert calls == ["Refresh", "canaries", "Save"]
+    assert calls == (["Refresh"] if phase == "Refresh" else ["Refresh", "canaries", "Save"])
     assert "DATA_OK" not in output
-    if left == "busy":
+    if left == "busy" and phase == "Refresh":
+        assert result == 3, output
+        assert (
+            "REFRESH: COMPLETION_UNKNOWN (Desktop observer did not return to READY within the settle window)" in output
+        )
+        assert not holds
+    elif left == "busy":
         assert result == 1, output
         assert "REFRESH: NOT_PERSISTED (Desktop did not return to READY within the settle window after Save)" in output
         assert not holds
     else:
         assert result == 3, output
         assert "DIALOG_UNREADABLE" in output
-        assert holds == [after_save]
+        assert holds == [after_action]
 
 
 @pytest.mark.parametrize("failed_phase", ["Refresh", "Save"])

@@ -144,7 +144,8 @@ Save; no phase resets it. Each UI-only bound metadata/no-op/data read receives a
 not 30 seconds per internal step, clipped to the remaining operation time and recalculated
 before each read. Exhausted budgets and late results cannot authorize Refresh or Save.
 The native action remains capped at 20 seconds or the remaining time, with unchanged cleanup.
-Shared binding/observer budgets and the XMLA route are unchanged; failed reads are not retried.
+Shared binding/observer budgets and the XMLA route are unchanged; apart from the completion-read
+retry of Desktop's own popup refusals described above, failed reads are not retried.
 
 The initial supported surface is whole-model Import M source partitions. DirectQuery, Dual/mixed,
 unsupported source kinds, modes that cannot be resolved from model/partition metadata,
@@ -190,8 +191,9 @@ foreground ownership: Desktop can activate a later window. There is no delayed r
 retry, since a later Desktop activation cannot establish that the human did not switch back.
 Failure to restore the previous application's focus is reported as a **UX failure**, not a
 Save veto or evidence that a write failed. Save still acquires and verifies its own foreground,
-exact target and named Invoke control after fresh observer/model checks. After Invoke, a fresh
-observer and held binding read, exact-PID connected bridge with `hasUnsavedChanges: false`,
+exact target and named Invoke control after fresh observer/model checks. After Invoke, the
+post-Save settle wait (up to 60 seconds, clipped to the deadline) for a complete READY observer
+root, then a held binding read, exact-PID connected bridge with `hasUnsavedChanges: false`,
 unchanged resolved cache destination and the existing cache timestamp check govern persistence,
 within the original deadline. Unknown/unreadable dialogs remain blockers; a ribbon alone is not
 permission to dismiss, Apply or reload anything. Cold-reopen durability remains unverified.
