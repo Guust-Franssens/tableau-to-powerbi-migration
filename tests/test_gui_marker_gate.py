@@ -64,7 +64,7 @@ RUN_GUI_ENV = "T2P_RUN_GUI"
 # mention: `tests/test_parallel_test_loop.py` contains the literal "-ReadyFile" inside its own AST
 # scanner, and matching bare constants flagged three of its meta-tests as window-spawners.
 WINDOW_SPAWN_CALLS = {"CreateWindowExW"}
-WINDOW_SPAWN_ARGV = {"-ReadyFile"}
+WINDOW_SPAWN_ARGV = {"-ReadyFile", "-STA"}
 PROCESS_LAUNCHERS = {"Popen", "run", "call", "check_call", "check_output"}
 
 
@@ -114,7 +114,12 @@ def _collect(argv: list[str], *, cwd: Path | None = None, env: dict[str, str] | 
 
 def _node_ids(output: str) -> set[str]:
     """Every node id in a `--collect-only -q` transcript."""
-    return {line.strip() for line in output.splitlines() if "::" in line and not line.startswith(("E ", "ERROR"))}
+    # Parametrization suffixes are dropped: the AST scans below can only name the test function.
+    return {
+        line.strip().split("[", 1)[0]
+        for line in output.splitlines()
+        if "::" in line and not line.startswith(("E ", "ERROR"))
+    }
 
 
 def _collected_node_ids(argv: list[str], **kwargs) -> set[str]:

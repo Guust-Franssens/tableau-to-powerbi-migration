@@ -290,8 +290,10 @@ def test_a_bundled_skill_passes_its_own_tests_after_being_copied_out_of_this_rep
     )
     if skill_dir.name == "pbip-model-refresh":
         for name in (
+            "_desktop_actions.py",
             "_desktop_observer.py",
             "_desktop_uia.ps1",
+            "_desktop_actions.ps1",
             "credential_modal_signature.regex",
             "blocking_prompt_signature.regex",
             "benign_dialog_signature.regex",

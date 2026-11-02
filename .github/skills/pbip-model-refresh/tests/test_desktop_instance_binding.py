@@ -1696,8 +1696,17 @@ def test_canaries_verify_the_whole_model_without_narrowing_the_refresh(monkeypat
 def test_the_bundled_backend_has_no_classifier_or_refresh_arbiter() -> None:
     """Only Python may interpret facts; native harvesting has no successful operation verdict."""
     body = CREDENTIAL_PROBE_PS1.read_text(encoding="utf-8")
-    for forbidden in ("signature.regex", "CREDENTIAL_PRESENT", "Get-DialogClassification", "InvokePattern", "while ("):
+    for forbidden in (
+        "signature.regex",
+        "CREDENTIAL_PRESENT",
+        "Get-DialogClassification",
+        "InvokePattern",
+        "Start-Sleep",
+    ):
         assert forbidden not in body, f"parallel policy/arbiter returned: {forbidden}"
+    # A bounded stack traversal is acquisition, not operation polling.
+    loops = re.findall(r"\bwhile\s*\(([^)]*)\)", body)
+    assert loops == ["$pending.Count"], f"unexpected native polling loop: {loops}"
     assert "desktop.harvest.v1" in body and "EnumWindows" in body
 
 

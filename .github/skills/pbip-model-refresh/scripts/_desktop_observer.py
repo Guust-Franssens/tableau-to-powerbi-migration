@@ -4,6 +4,9 @@ internal: true
 internal-reason: Portable import authority and private image child; existing query/refresh entry points remain public.
 
 Python alone classifies native facts. _desktop_uia.ps1 only harvests, in one bounded child.
+UIA descendants require two complete raw-tree identity snapshots and native-child containment in
+the exact Win32 root. Native/process bindings are deduplicated within each pass, never between
+passes. Unsupported identity refuses before private reads. These are not an atomic UI transaction.
 READY is observation completeness, never source reachability, row evidence or a gate clear.
 """
 # pylint: disable=too-many-branches
@@ -1354,6 +1357,7 @@ _WINDOW_KEYS = {
     "items",
     "truncated",
     "patterns_incomplete",
+    "content_skipped",
 }
 _REASONS = frozenset(
     {
@@ -1425,11 +1429,16 @@ def _window_fact(payload: dict) -> DesktopWindow:
                 "enabled",
                 "truncated",
                 "patterns_incomplete",
+                "content_skipped",
             )
         )
         or payload["visible"] is not True
     ):
         raise ValueError("flags")
+    if payload["content_skipped"] and (
+        owner or any(payload[key] for key in ("items", "texts", "truncated", "patterns_incomplete"))
+    ):
+        raise ValueError("skipped content")
     if payload["owner_enabled"] is not None and type(payload["owner_enabled"]) is not bool:  # pylint: disable=unidiomatic-typecheck
         raise ValueError("owner")
     if not owner and payload["owner_enabled"] is not None:
@@ -1511,6 +1520,11 @@ def _harvest_payload(
     result = tuple(replace(_window_fact(window), pid=pid, process_started_at=before) for window in windows)
     if len({window.hwnd for window in result}) != len(result):
         raise ValueError("duplicate window")
+    # The collector may skip only the unambiguous frame, whose content no policy reads; it stays
+    # complete because its texts never reach classification, findings or diagnostics.
+    skipped = [fact for fact, window in zip(result, windows) if window["content_skipped"]]
+    if skipped and (len(skipped) != 1 or main_frame(result) is not skipped[0]):
+        raise ValueError("skipped content")
     return before, result
 
 
@@ -2211,6 +2225,8 @@ class _ImageRequest:
 class ModalVisualEvidence:
     """Invocation-private, one-shot asynchronous evidence. Never mutates a detection or its deadline."""
 
+    # One additional event bounds terminal diagnostic handoff without joining the acquisition thread.
+    # pylint: disable=too-many-instance-attributes
     def __init__(self, directory: Path | None = None, *, deadline: float = float("inf")) -> None:
         self._attempted: set[tuple[int, int]] = set()
         self._requests: list[_ImageRequest] = []
@@ -2218,6 +2234,7 @@ class ModalVisualEvidence:
         self._closed = False
         self._deadline = deadline
         self._pending: queue.Queue[tuple[int, Observation, float] | None] = queue.Queue(maxsize=1)
+        self._capture_finished = threading.Event()
         configured = directory if directory is not None else os.environ.get(IMAGE_DIRECTORY_ENV)
         self._directory = Path(configured) if configured else None
         atexit.register(self.close)
@@ -2249,19 +2266,42 @@ class ModalVisualEvidence:
         request.record["cleanup_state"] = reason
         return True
 
-    def enqueue(self, pid: int, state: Observation) -> None:
+    def enqueue(self, pid: int, state: Observation) -> bool:
         """Nonblocking handoff of an immutable detection; no filesystem, subprocess or thread startup."""
-        if state.modal is not None or state.dialog is None or state.dialog.verdict != VERDICT_DIALOG_UNREADABLE:
-            return
+        if (
+            state.modal is not None
+            or state.dialog is None
+            or state.dialog.verdict
+            not in {
+                VERDICT_DIALOG_UNREADABLE,
+                VERDICT_DIALOG_UNRECOGNIZED,
+            }
+        ):
+            return False
         window = state.dialog.window
         if self._closed or not window.hwnd or not window.owner_hwnd or window.owner_enabled is not False:
-            return
+            return False
         deadline = min(self._deadline, time.monotonic() + IMAGE_CAPTURE_SECONDS)
         try:
             self._pending.put_nowait((pid, state, deadline))
+            return True
         except queue.Full:
             # One pending exact snapshot is enough; later detector polls can offer a newer HWND.
-            pass
+            return False
+
+    def hold_refusal(self, pid: int, state: Observation) -> None:
+        """Separate diagnostic budget after operation cancellation; pixels never clear its refusal."""
+        if not self.enqueue(pid, state):
+            return
+        if not self._capture_finished.wait(IMAGE_CAPTURE_SECONDS):
+            return
+        lease_deadline = time.monotonic() + IMAGE_LIFETIME_SECONDS
+        while not self._closed and time.monotonic() < lease_deadline:
+            with self._lock:
+                acquired = tuple(request for request in self._requests if request.record["capture_success"])
+            if not acquired or not any(request.path.exists() for request in acquired):
+                return
+            time.sleep(0.05)
 
     def _consume(self) -> None:
         while not self._closed:
@@ -2359,6 +2399,7 @@ class ModalVisualEvidence:
         with self._lock:
             if not self._closed:
                 _image_notice(record, status)
+                self._capture_finished.set()
 
     def _capture_result(self, request: _ImageRequest, deadline: float) -> str | None:
         # Exact bools are intentional: integer 1 must not certify an ownership check.
@@ -2414,12 +2455,14 @@ class ModalVisualEvidence:
                         capture_success=True,
                     )
                     _image_notice(request.record, code)
+                    self._capture_finished.set()
                     return
             except (OSError, RuntimeError):
                 code = "CAPTURE_FAILED"
             if self._remove(request, "removed") and request.expiry is not None:
                 request.expiry.cancel()
             _image_notice(request.record, code if code != "ACQUIRED" else "WRITE_FAILED")
+            self._capture_finished.set()
 
     @staticmethod
     def _accept_image(request: _ImageRequest, payload: dict) -> bool:
