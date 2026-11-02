@@ -553,7 +553,8 @@ def test_installed_launcher_refresh_preflight_never_reloads_without_npx(
     installed_bridge, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _launcher, calls_path, fallback = installed_bridge
-    deadline = time.monotonic() + 15
+    started = time.monotonic()
+    deadline = started + 15
     instance = refresh_pbip_model._ui_bridge_preflight(123, deadline)
     assert instance is not None, "installed launcher failed exact-PID readiness"
     root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
@@ -563,7 +564,7 @@ def test_installed_launcher_refresh_preflight_never_reloads_without_npx(
     calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()]
     assert len(calls) == 1 and calls[0][:3] == ["status", "--pid", "123"]
     assert all(call[0] != "reload" for call in calls)
-    assert calls[0][3] == "--wait-seconds" and 0 < float(calls[0][4]) <= 15
+    assert calls[0][3] == "--wait-seconds" and 0 < float(calls[0][4]) <= deadline - started
     assert not fallback.exists(), "installed launcher must not use npx"
 
 
