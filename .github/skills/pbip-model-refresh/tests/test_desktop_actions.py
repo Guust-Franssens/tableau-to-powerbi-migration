@@ -1158,8 +1158,11 @@ def test_completion_wait_judges_leftover_popup_inside_the_original_deadline(
     monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", read)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.01)
     monkeypatch.setattr(refresh_pbip_model, "_hold_ui_refusal_evidence", lambda _pid, state, _dir: holds.append(state))
-    budget = 0.3
-    deadline = time.monotonic() + budget
+    started = time.monotonic()
+    deadline = started + 0.3
+    # Production budgets are `deadline - now` with now >= started, so this represented span is
+    # their exact ceiling; the literal 0.3 is not representable at large monotonic values.
+    budget = deadline - started
     try:
         outcome: object = refresh_pbip_model._wait_for_engine_completion(
             _held_ui_context(), _snapshot(ticks=100), 200, deadline
