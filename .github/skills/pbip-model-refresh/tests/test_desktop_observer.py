@@ -4451,7 +4451,7 @@ if ($Case.StartsWith('rootset_')) {
 """
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Controlled PowerShell providers require Windows")
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
 @pytest.mark.parametrize(
     "fault",
     ["alternating", "editable", "unsupported", "range_exception", "attribute_exception", "text_exception", "linear"],

@@ -773,7 +773,6 @@ def test_monitor_handoff_keeps_fresh_final_check_without_postfinal_admission(mon
     assert results == ([("DIALOG_UNRECOGNIZED",)] if final_failure else ["private facts"])
 
 
-@pytest.mark.timing
 def test_hung_admitted_monitor_withholds_final_and_result_and_settles_owned_helpers(monkeypatch):
     """An admitted hung monitor cannot earn final-check/result publication or a new deadline."""
     entered, release = threading.Event(), threading.Event()
