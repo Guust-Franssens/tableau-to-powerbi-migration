@@ -231,9 +231,10 @@ function Get-AutomationHarvest {
           }
           $pattern = $null
           if ($element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$pattern)) {
-            $readOnly = $pattern.DocumentRange.GetAttributeValue([System.Windows.Automation.TextPattern]::IsReadOnlyAttribute)
+            $range = $pattern.DocumentRange
+            $readOnly = $range.GetAttributeValue([System.Windows.Automation.TextPattern]::IsReadOnlyAttribute)
             if (($readOnly -isnot [bool]) -or -not $readOnly) { $incomplete = $true; continue }
-            $document = $pattern.DocumentRange.GetText(8001)
+            $document = $range.GetText(8001)
             if ($document.Length -gt 8000) { $truncated = $true; continue }
           }
         }

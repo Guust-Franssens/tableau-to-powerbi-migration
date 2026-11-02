@@ -4451,6 +4451,104 @@ if ($Case.StartsWith('rootset_')) {
 """
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Controlled PowerShell providers require Windows")
+@pytest.mark.parametrize(
+    "fault",
+    ["alternating", "editable", "unsupported", "range_exception", "attribute_exception", "text_exception", "linear"],
+)
+def test_document_text_uses_only_the_attested_range(tmp_path: Path, fault: str) -> None:
+    """Range identity and actual private-read counts must survive provider changes and exceptions."""
+    harness = (
+        _HARVEST_PROVIDER_CONTROL.replace(
+            "public object ReadOnly = true;",
+            """public object ReadOnly = true;
+    public bool ThrowAttribute, ThrowText;
+    public static int FirstReads, SecondReads;
+    public bool Second;""",
+        )
+        .replace(
+            "return ReadOnly;",
+            'if (ThrowAttribute) throw new Exception("ATTRIBUTE"); return ReadOnly;',
+        )
+        .replace(
+            "AutomationElement.Documents++;",
+            """if (ThrowText) throw new Exception("TEXT");
+      if (Second) SecondReads++; else FirstReads++;
+      AutomationElement.Documents++;""",
+        )
+        .replace(
+            "public Range DocumentRange = new Range();",
+            """public static int RangeGets;
+    public static bool Alternating, ThrowRange;
+    private Range first = new Range(), second = new Range { Second=true, ReadOnly=false, Text="PRIVATE_EDIT_VALUE" };
+    public Range DocumentRange { get {
+      RangeGets++;
+      if (ThrowRange) throw new Exception("RANGE");
+      return Alternating && RangeGets > 1 ? second : first;
+    } }""",
+        )
+        .replace(
+            "if (!ignoreDefault) throw",
+            "LivePids++; if (!ignoreDefault) throw",
+        )
+        .replace(
+            "public static int Names, Documents;",
+            "public static int Names, Documents, LivePids;",
+        )
+    )
+    setup = {
+        "alternating": "[System.Windows.Automation.TextPattern]::Alternating=$true",
+        "editable": "$child.Text.DocumentRange.ReadOnly=$false",
+        "unsupported": "$child.Text.DocumentRange.ReadOnly=[System.Windows.Automation.AutomationElement]::NotSupported",
+        "range_exception": "[System.Windows.Automation.TextPattern]::ThrowRange=$true",
+        "attribute_exception": "$child.Text.DocumentRange.ThrowAttribute=$true",
+        "text_exception": "$child.Text.DocumentRange.ThrowText=$true",
+        "linear": ("foreach ($leaf in $root.Children) { $leaf.Text=[System.Windows.Automation.TextPattern]::new() }"),
+    }[fault]
+    harness = harness.replace(
+        "$result = Get-AutomationHarvest -Handle",
+        setup + "\n[System.Windows.Automation.TextPattern]::RangeGets=0\n$result = Get-AutomationHarvest -Handle",
+    ).replace(
+        "rootset_refused=$rootSetRefused",
+        """range_gets=[System.Windows.Automation.TextPattern]::RangeGets
+   first_reads=[System.Windows.Automation.Range]::FirstReads
+   second_reads=[System.Windows.Automation.Range]::SecondReads
+   live_pids=[System.Windows.Automation.AutomationElement]::LivePids
+   rootset_refused=$rootSetRefused""",
+    )
+    script = tmp_path / "range_control.ps1"
+    script.write_text(harness, encoding="utf-8")
+    result = subprocess.run(
+        [
+            _powershell(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(script),
+            "-Backend",
+            str(Path(_desktop_observer.__file__).with_name("_desktop_uia.ps1")),
+            "-Case",
+            "linear1091" if fault == "linear" else "readonly_document",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert result.returncode == 0, "provider setup and real harvest must execute before assertions"
+    record = json.loads(result.stdout)
+    count = 1091 if fault == "linear" else 1
+    assert record["range_gets"] == count, "each document must use precisely one range instance"
+    assert record["second_reads"] == 0, "text must never come from the unattested second range"
+    assert "PRIVATE_EDIT_VALUE" not in json.dumps(record)
+    readable = fault in {"alternating", "linear"}
+    assert record["first_reads"] == record["documents"] == record["names"] == (count if readable else 0)
+    assert record["payload"]["patterns_incomplete"] is not readable
+    if readable:
+        assert record["live_pids"] == count * 2
+        assert record["snapshots"] == 2 and record["process_reads"] == record["native_reads"] == 2
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
 @pytest.mark.parametrize(
     "case",
