@@ -3758,6 +3758,7 @@ def harvest_fixture(*, text: str = "Evaluating...", complete: bool = True) -> di
                 ],
                 "truncated": False,
                 "patterns_incomplete": not complete if owner else False,
+                "content_skipped": False,
             }
             for hwnd, owner, title, content in (
                 ("0xfedcba9876543201", None, "Synthetic report", "Report"),
@@ -3867,6 +3868,78 @@ def test_changed_or_lossy_identity_never_clean(monkeypatch, fault: str) -> None:
     state = fixture_observation(monkeypatch, payload)
     assert state.state == "UNREADABLE_DIALOG" and not state.complete
     assert _desktop_observer.legacy_token(state) == "DIALOG_UNREADABLE"
+
+
+def _skip_content(window: dict) -> dict:
+    window.update(content_skipped=True, items=[], texts=[])
+    return window
+
+
+def _unowned_window(hwnd: str, *, width: int = 300) -> dict:
+    return dict(harvest_fixture()["windows"][0], hwnd=hwnd, width=width, title="Other")
+
+
+@pytest.mark.parametrize("with_dialog,expected", [(True, "REFRESH_IN_PROGRESS"), (False, "READY")])
+def test_the_collector_may_skip_only_the_unambiguous_frames_content(
+    monkeypatch, with_dialog: bool, expected: str
+) -> None:
+    """The frame's text never reaches policy, so its skipped harvest keeps the snapshot complete."""
+    payload = harvest_fixture()
+    _skip_content(payload["windows"][0])
+    if not with_dialog:
+        del payload["windows"][1]
+    state = fixture_observation(monkeypatch, payload)
+    assert (state.state, state.complete) == (expected, True)
+    frame = next(window for window in state.windows if window.hwnd == 0xFEDCBA9876543201)
+    assert frame.complete and frame.items == () and frame.texts == ()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "owned_window",
+        "ambiguous_frame",
+        "zero_area_root",
+        "two_skipped",
+        "items",
+        "texts",
+        "truncated",
+        "patterns_incomplete",
+        "missing",
+        "non_bool",
+    ],
+)
+def test_skipped_content_outside_the_unambiguous_frame_is_refused(monkeypatch, fault: str) -> None:
+    """A skip can never hide a dialog's content, an ambiguous root or partially read frame text."""
+    payload = harvest_fixture()
+    frame, owned = payload["windows"]
+    if fault == "owned_window":
+        _skip_content(owned)
+    elif fault == "ambiguous_frame":
+        _skip_content(frame)
+        payload["windows"].append(_unowned_window("0xfedcba9876543221"))
+    elif fault == "zero_area_root":
+        payload["windows"].append(_skip_content(_unowned_window("0xfedcba9876543221", width=0)))
+    elif fault == "two_skipped":
+        _skip_content(frame)
+        payload["windows"].append(_skip_content(_unowned_window("0xfedcba9876543221", width=0)))
+    elif fault == "missing":
+        del frame["content_skipped"]
+    elif fault == "non_bool":
+        _skip_content(frame)["content_skipped"] = 1
+    else:
+        _skip_content(frame)[fault] = owned["items"] if fault == "items" else (["Report"] if fault == "texts" else True)
+    state = fixture_observation(monkeypatch, payload)
+    assert (state.state, state.reason, state.complete) == ("UNREADABLE_DIALOG", "invalid_payload", False)
+
+
+def test_a_minimized_skipped_frame_still_cannot_certify_clean(monkeypatch) -> None:
+    """Minimization is a native fact, so skipping the frame's text cannot hide hidden owned dialogs."""
+    payload = harvest_fixture()
+    del payload["windows"][1]
+    _skip_content(payload["windows"][0])["minimized"] = True
+    state = fixture_observation(monkeypatch, payload)
+    assert (state.reason, state.complete) == ("minimized", False)
 
 
 @pytest.mark.parametrize(

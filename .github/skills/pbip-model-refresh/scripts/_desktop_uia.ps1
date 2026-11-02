@@ -272,6 +272,34 @@ function Get-AutomationHarvest {
   }
   return [ordered]@{items=@($items.ToArray()); truncated=$truncated; patterns_incomplete=$incomplete}
 }
+function Get-FrameHandle {
+  # Mirrors Python main_frame, which re-verifies the choice; any ambiguity harvests every root.
+  param($Windows, [hashtable]$WindowRoots)
+  $roots = @{}
+  foreach ($window in $Windows) {
+    if ($window.Owner -ne [IntPtr]::Zero) {
+      $current = $window.Hwnd
+      $seen = @{}
+      $seen[$current] = $true
+      $root = $null
+      for ($step = 0; $step -le $WindowRoots.Count; $step++) {
+        $owner = $WindowRoots[$current]
+        if ($owner -eq [IntPtr]::Zero) { $root = $current; break }
+        if (-not $WindowRoots.ContainsKey($owner) -or $seen.ContainsKey($owner)) { return [IntPtr]::Zero }
+        $seen[$owner] = $true
+        $current = $owner
+      }
+      if ($null -eq $root) { return [IntPtr]::Zero }
+    } elseif ($window.Width -le 0 -or $window.Height -le 0) {
+      continue
+    } else {
+      $root = $window.Hwnd
+    }
+    $roots[$root] = $true
+  }
+  if ($roots.Count -ne 1) { return [IntPtr]::Zero }
+  return @($roots.Keys)[0]
+}
 
 try {
   $before = Get-ProcessStart
@@ -284,10 +312,17 @@ try {
       if ($windowRoots.ContainsKey($window.Hwnd)) { throw 'duplicate native root' }
       $windowRoots[$window.Hwnd] = $window.Owner
     }
+    $frame = Get-FrameHandle $nativeWindows $windowRoots
     foreach ($window in $nativeWindows) {
       $targetBefore = [DesktopHarvest]::Target($window.Hwnd, [uint32]$DesktopPid)
       $ownerBefore = [DesktopHarvest]::GetWindow($window.Hwnd, 4)
-      $harvest = Get-AutomationHarvest $window.Hwnd $windowRoots
+      # Policy never reads the frame's own content, so its (largest) UIA tree is not harvested.
+      $skipped = $frame -ne [IntPtr]::Zero -and $window.Hwnd -eq $frame
+      if ($skipped) {
+        $harvest = [ordered]@{items=@(); truncated=$false; patterns_incomplete=$false}
+      } else {
+        $harvest = Get-AutomationHarvest $window.Hwnd $windowRoots
+      }
       if ([DesktopHarvest]::Enabled($window.Hwnd) -ne $window.Enabled) { throw 'target state changed' }
       $ownerEnabled = $window.OwnerEnabled
       if ($window.Owner -ne [IntPtr]::Zero -and [DesktopHarvest]::Enabled($window.Owner) -ne $ownerEnabled) {
@@ -303,6 +338,7 @@ try {
         owner_enabled=$ownerEnabled; width=$window.Width; height=$window.Height
         title=$window.Title; texts=@(); items=$harvest.items
         truncated=$harvest.truncated; patterns_incomplete=$harvest.patterns_incomplete
+        content_skipped=$skipped
       }
     }
     # No omitted subtree is accepted unless its root remains independently enumerated and harvested.

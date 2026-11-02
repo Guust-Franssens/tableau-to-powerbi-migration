@@ -510,6 +510,9 @@ immutable `desktop.observation.v1` snapshot; `watch` owns one invocation deadlin
 settlement. PID/start/HWND/owner identities are lossless strings in JSON. `_desktop_uia.ps1` supplies
 bounded Win32 enumeration and role-bearing UIA facts only. Python owns all root/candidate selection,
 signatures, complete-template matching and precedence. No caller classifies UI text.
+The collector skips the UIA content of the unambiguous main frame (marked `content_skipped`), because
+no policy reads frame text; Python refuses the snapshot unless `main_frame` re-derives that same window.
+Owned dialogs and every other root are still harvested in full.
 
 | Observation | Existing operation adapter | Meaning |
 |---|---|---|

@@ -1357,6 +1357,7 @@ _WINDOW_KEYS = {
     "items",
     "truncated",
     "patterns_incomplete",
+    "content_skipped",
 }
 _REASONS = frozenset(
     {
@@ -1428,11 +1429,16 @@ def _window_fact(payload: dict) -> DesktopWindow:
                 "enabled",
                 "truncated",
                 "patterns_incomplete",
+                "content_skipped",
             )
         )
         or payload["visible"] is not True
     ):
         raise ValueError("flags")
+    if payload["content_skipped"] and (
+        owner or any(payload[key] for key in ("items", "texts", "truncated", "patterns_incomplete"))
+    ):
+        raise ValueError("skipped content")
     if payload["owner_enabled"] is not None and type(payload["owner_enabled"]) is not bool:  # pylint: disable=unidiomatic-typecheck
         raise ValueError("owner")
     if not owner and payload["owner_enabled"] is not None:
@@ -1514,6 +1520,11 @@ def _harvest_payload(
     result = tuple(replace(_window_fact(window), pid=pid, process_started_at=before) for window in windows)
     if len({window.hwnd for window in result}) != len(result):
         raise ValueError("duplicate window")
+    # The collector may skip only the unambiguous frame, whose content no policy reads; it stays
+    # complete because its texts never reach classification, findings or diagnostics.
+    skipped = [fact for fact, window in zip(result, windows) if window["content_skipped"]]
+    if skipped and (len(skipped) != 1 or main_frame(result) is not skipped[0]):
+        raise ValueError("skipped content")
     return before, result
 
 
