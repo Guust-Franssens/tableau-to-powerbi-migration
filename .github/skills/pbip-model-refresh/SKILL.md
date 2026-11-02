@@ -118,13 +118,24 @@ unreadable text is not a credential diagnosis; use the agent visual-review flow 
 asking a human to inspect a successfully acquired image. These UI-only
 rules do not change legacy XMLA callers or the historical 90-second CLI examples below.
 
-Completion reads may encounter the existing bound reader's `REFRESH_IN_PROGRESS` preflight
-refusal. Only that closed state is awaited within the original operation deadline; prompt,
-unknown/incomplete, identity and catalogue refusals are not retried as progress.
-An unreadable or unrecognized finding in the UI-route completion observer is reported with
-its existing `DIALOG_UNREADABLE` or `DIALOG_UNRECOGNIZED` refusal and exact-window diagnostic,
-not replaced by a generic claim that uncertainty persisted to the deadline. This preserves
-the refusal; it does not establish completion or identify the dialog as progress or credentials.
+**During and just after the refresh, only real blocks stop the wait.** Desktop shows its own
+WebView2 Refresh progress popup, which the observer cannot always read or recognize (measured:
+`DIALOG_UNRECOGNIZED kind=mixed-content` after one real Refresh). So, inside the original deadline:
+
+- Terminal observer states (credential, needs-human, Desktop session error, process gone) refuse at once.
+- Completion reads retry only the bound reader's `REFRESH_IN_PROGRESS`, `DIALOG_UNREADABLE` and
+  `DIALOG_UNRECOGNIZED` refusals. Credential, needs-human, unready, timeout, identity and catalogue
+  refusals are not retried.
+- Unknown, unreadable or incomplete observations are not judged mid-wait. Whatever is left is
+  judged once the wait ends: a remaining non-progress dialog refuses with its existing
+  `DIALOG_UNREADABLE`/`DIALOG_UNRECOGNIZED` token, exact-window diagnostic and private image offer.
+- After completion and again after Save, the route waits up to **60 seconds** (clipped to the
+  deadline) for a complete READY root. Still-busy Desktop with no dialog to blame reports
+  `COMPLETION_UNKNOWN` (exit 3) after completion, or `NOT_PERSISTED` (exit 1) after Save.
+
+The pre-Save observer check stays strict. A persistent unknown dialog therefore costs up to the
+deadline (or 60 seconds after completion/Save) before refusing. This preserves every refusal; it
+does not identify the popup as progress or credentials.
 
 The UI route holds one monotonic operation deadline set in the CLI before initial observation,
 port discovery and identity preflight, through completion and

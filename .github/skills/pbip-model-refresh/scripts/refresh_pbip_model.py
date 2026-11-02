@@ -258,6 +258,12 @@ REFRESH_ABSOLUTE_TIMEOUT_SECONDS = 3600.0
 REFRESH_WALL_CLOCK_GRACE_SECONDS = 30
 REFRESH_CREDENTIAL_POLL_SECONDS = POLL_INTERVAL_SECONDS
 REFRESH_HEARTBEAT_SECONDS = 30.0
+# After a UI Refresh completes or a UI Save returns, Desktop's own popup can linger briefly. The UI
+# route waits at most this long (inside the operation deadline) for READY before judging what is left.
+UI_SETTLE_SECONDS = 60.0
+# Bound-reader refusals that Desktop's own refresh popup produces. The completion reader retries on
+# these; the outer observer still stops at once on credential, needs-human, session or process loss.
+UI_TRANSIENT_READ_TOKENS = frozenset({"REFRESH_IN_PROGRESS", "DIALOG_UNREADABLE", "DIALOG_UNRECOGNIZED"})
 
 # A TMDL table declaration sits at column 0 of `definition/tables/<Name>.tmdl`; the name is quoted
 # only when it needs to be (spaces, punctuation), so both forms have to be accepted.
@@ -335,6 +341,15 @@ def _emit_credential_unknown(pid: int, reason: str) -> None:
     """Retain the existing deadline-uncertainty token without inventing its cause."""
     # pylint: disable=unused-argument
     print_operation_refusal("REFRESH", pid, "CREDENTIAL_UNKNOWN")
+
+
+def _emit_ui_observation_unknown(pid: int, phase: str) -> None:
+    """Same token for the UI route, without claiming the uncertainty lasted to the deadline."""
+    print(
+        f"REFRESH: CREDENTIAL_UNKNOWN pid={pid}; {phase} observation unavailable; "
+        "credential state unestablished. Inspect Desktop before retrying.",
+        flush=True,
+    )
 
 
 def _emit_desktop_gone(pid: int, reason: str) -> None:
@@ -2305,22 +2320,24 @@ def _ui_observer_state(
     context: UIRefreshContext,
     *,
     allow_progress: bool = False,
+    lenient: bool = False,
     timeout_seconds: float = 8.0,
-    refusal_evidence: Callable[[Observation], None] | None = None,
 ) -> Observation:
-    """Reuse the existing observer and prompt authority while requiring the held root identity."""
+    """Reuse the existing observer and prompt authority while requiring the held root identity.
+
+    ``lenient`` keeps every terminal stop but returns any other non-READY snapshot unjudged, so a
+    caller can wait for Desktop's own popup to clear. The caller must judge what remains at its limit.
+    """
     state = _in_flight_credential_state(
         context.pid,
         expected_process_start=context.bound.identity.process_start,
         timeout_s=max(0.01, min(8.0, timeout_seconds)),
     )
     raise_terminal_detection(context.pid, state, context.source_hint)
+    if lenient and (not state.complete or state.state not in {"READY", "REFRESH_IN_PROGRESS"}):
+        return state
     if state.dialog is not None and state.state in {"UNKNOWN_DIALOG", "UNREADABLE_DIALOG"}:
-        try:
-            if refusal_evidence is not None:
-                refusal_evidence(state)
-        finally:
-            raise DialogFoundError(context.pid, state.dialog)
+        raise DialogFoundError(context.pid, state.dialog)
     if not state.complete:
         raise CredentialUnknownError(
             context.pid,
@@ -2352,6 +2369,47 @@ def _ui_read_budget(deadline: float, cap: float = 30.0) -> float:
     if remaining <= 0:
         raise TimeoutError("UI refresh operation deadline exhausted")
     return min(cap, remaining)
+
+
+def _hold_ui_refusal_evidence(pid: int, state: Observation, evidence_dir: Path | None) -> None:
+    """Offer one private exact-window image of a held dialog; a diagnostic, never a verdict."""
+    emit_observation(state)
+    with ModalVisualEvidence(evidence_dir) as evidence:
+        evidence.hold_refusal(pid, state)
+
+
+def _refuse_unsettled_ui(context: UIRefreshContext, state: Observation | None, evidence_dir: Path | None) -> None:
+    """Judge the last lenient snapshot once its wait has ended; benign progress or READY passes."""
+    if state is None:
+        return
+    if state.dialog is not None and state.state != "REFRESH_IN_PROGRESS":
+        try:
+            _hold_ui_refusal_evidence(context.pid, state, evidence_dir)
+        finally:
+            raise DialogFoundError(context.pid, state.dialog)
+    if state.desktop_unready is not None:
+        raise DesktopUnreadyError(context.pid, state.desktop_unready)
+    if not state.complete or state.unknown_reason is not None:
+        raise CredentialUnknownError(context.pid, state.unknown_reason or state.reason or "observer_incomplete")
+
+
+def _ui_wait_ready(
+    context: UIRefreshContext, deadline: float, *, evidence_dir: Path | None = None
+) -> Observation | None:
+    """Wait, inside the held deadline and at most UI_SETTLE_SECONDS, for a complete READY root.
+
+    Terminal states still stop at once. Anything else left at the limit is judged by
+    ``_refuse_unsettled_ui``; ``None`` means Desktop was still busy without a dialog to blame.
+    """
+    limit = min(deadline, time.monotonic() + UI_SETTLE_SECONDS)
+    last: Observation | None = None
+    while (remaining := limit - time.monotonic()) > 0:
+        last = _ui_observer_state(context, allow_progress=True, lenient=True, timeout_seconds=remaining)
+        if last.state == "READY":
+            return last
+        time.sleep(max(0.0, min(1.0, limit - time.monotonic())))
+    _refuse_unsettled_ui(context, last, evidence_dir)
+    return None
 
 
 def _ui_refresh_preflight(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-statements
@@ -2398,36 +2456,42 @@ def _ui_refresh_preflight(  # pylint: disable=too-many-return-statements,too-man
         return 3
 
 
-def _wait_for_engine_completion(  # pylint: disable=too-many-statements
+def _read_completion_snapshot(context: UIRefreshContext, deadline: float) -> PartitionSnapshot | None:
+    """One bound partition read; ``None`` when Desktop's own popup made the reader refuse.
+
+    bound_call correctly refuses reads while Desktop's popup is up. Retry on that closed set
+    only; every other refusal keeps its prompt or binding authority.
+    """
+    try:
+        return read_partition_snapshot(context.bound, timeout_seconds=_ui_read_budget(deadline))
+    except ObservationUnavailable as exc:
+        if len(exc.args) != 1 or exc.args[0] not in UI_TRANSIENT_READ_TOKENS:
+            raise
+        return None
+
+
+def _wait_for_engine_completion(
     context: UIRefreshContext,
     baseline: PartitionSnapshot,
     action_started_ticks: int,
     deadline: float,
     evidence_dir: Path | None = None,
 ) -> tuple[bool, CompletionResult | None]:
-    """Poll exact typed partition evidence under the existing deadline and observer supervisor."""
-    timeout_seconds = _ui_read_budget(deadline, float("inf"))
+    """Poll exact typed partition evidence while the outer observer stops only on real blocks.
+
+    Desktop's own Refresh popup is often unreadable to the observer. While the engine works, only
+    terminal states (credential, needs-human, session error, process loss) stop the wait; whatever
+    is still showing when the wait ends is judged then, never ignored.
+    """
+    _ui_read_budget(deadline, float("inf"))
     cancelled = threading.Event()
     outcome: dict[str, object] = {}
-    worker = None
 
-    def refusal_evidence(state: Observation) -> None:
-        cancelled.set()
-        if worker is not None:
-            worker.join(timeout=8.5)
-        # This is a new diagnostic allowance, never a reset of the cancelled operation deadline.
-        emit_observation(state)
-        with ModalVisualEvidence(evidence_dir) as evidence:
-            evidence.hold_refusal(context.pid, state)
-
-    initial_remaining = deadline - time.monotonic()
-    initial_state = _ui_observer_state(
-        context,
-        allow_progress=True,
-        timeout_seconds=initial_remaining,
-        refusal_evidence=refusal_evidence,
-    )
-    _ui_read_budget(deadline)
+    def watch_ui() -> Observation:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("observer deadline expired")
+        return _ui_observer_state(context, allow_progress=True, lenient=True, timeout_seconds=remaining)
 
     def poll() -> None:
         try:
@@ -2435,13 +2499,8 @@ def _wait_for_engine_completion(  # pylint: disable=too-many-statements
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError("engine completion deadline expired")
-                try:
-                    current = read_partition_snapshot(context.bound, timeout_seconds=_ui_read_budget(deadline))
-                except ObservationUnavailable as exc:
-                    # bound_call correctly refuses preflight reads during progress. Await that
-                    # one closed state without changing its prompt/unknown or binding authority.
-                    if exc.args != ("REFRESH_IN_PROGRESS",):
-                        raise
+                current = _read_completion_snapshot(context, deadline)
+                if current is None:
                     cancelled.wait(min(1.0, max(0.0, deadline - time.monotonic())))
                     continue
                 completed_at = time.monotonic()
@@ -2458,57 +2517,31 @@ def _wait_for_engine_completion(  # pylint: disable=too-many-statements
             outcome["error"] = exc
             outcome["completed_at"] = time.monotonic()
 
-    def inspect_observer(target_pid: int) -> Observation:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("observer deadline expired")
-        state = _in_flight_credential_state(
-            target_pid,
-            expected_process_start=context.bound.identity.process_start,
-            timeout_s=min(8.0, remaining),
-        )
-        raise_terminal_detection(target_pid, state, context.source_hint)
-        if state.dialog is not None and state.state in {"UNKNOWN_DIALOG", "UNREADABLE_DIALOG"}:
-            try:
-                refusal_evidence(state)
-            finally:
-                raise DialogFoundError(target_pid, state.dialog)
-        if state.state not in {"READY", "REFRESH_IN_PROGRESS"} or not state.complete:
-            raise CredentialUnknownError(target_pid, state.unknown_reason or state.reason or "observer_not_ready")
-        frame = state.target_window or main_frame(state.windows)
-        if frame is None or frame.hwnd != context.root_hwnd:
-            raise DesktopUnreadyError(target_pid, "window_identity_changed")
-        return state
-
+    last = watch_ui()
+    _ui_read_budget(deadline)
     worker = threading.Thread(target=poll, name="ui-refresh-engine-completion", daemon=True)
     worker.start()
     try:
-        settled = _wait_refresh_worker(
-            worker,
-            desktop_pid=context.pid,
-            source_hint=context.source_hint,
-            initial_state=initial_state,
-            total_timeout=timeout_seconds,
-            progress_monitor=None,
-            observation_mode=True,
-            detector=inspect_observer,
-            deadline=deadline,
-            completed_at=lambda: outcome.get("completed_at"),
-        )
-    except BaseException:
+        while worker.is_alive() and (remaining := deadline - time.monotonic()) > 0:
+            worker.join(timeout=min(REFRESH_CREDENTIAL_POLL_SECONDS, remaining))
+            if worker.is_alive():
+                try:
+                    last = watch_ui()
+                except TimeoutError:
+                    break
+    finally:
         cancelled.set()
         worker.join(timeout=8.5)
-        raise
-    cancelled.set()
-    worker.join(timeout=8.5)
-    if worker.is_alive():
-        return False, None
-    if not settled or "result" not in outcome:
+    if not worker.is_alive():
+        result = outcome.get("result")
+        completed_at = outcome.get("completed_at")
+        if result is not None and isinstance(completed_at, float) and completed_at < deadline:
+            return True, result  # type: ignore[return-value]
         error = outcome.get("error")
         if error is not None and not isinstance(error, TimeoutError):
-            raise error
-        return False, None
-    return True, outcome["result"]  # type: ignore[return-value]
+            raise error  # type: ignore[misc]
+    _refuse_unsettled_ui(context, last, evidence_dir)
+    return False, None
 
 
 def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-branches,too-many-locals
@@ -2612,13 +2645,14 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         print("  UI handback: UX failure; foreground changed; prior focus was not overridden")
 
     remaining = deadline - time.monotonic()
+    evidence_dir = getattr(args, "evidence_dir", None)
     try:
         complete, completion = _wait_for_engine_completion(
             context,
             baseline,
             action.action_started_ticks,
             deadline,
-            evidence_dir=getattr(args, "evidence_dir", None),
+            evidence_dir=evidence_dir,
         )
     except CredentialMissingError as exc:
         _emit_credential_missing(exc.pid, exc.modal, exc.source_hint)
@@ -2627,10 +2661,7 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         _emit_dialog_finding(exc.pid, exc.finding)
         return 3
     except CredentialUnknownError as exc:
-        print(
-            f"REFRESH: CREDENTIAL_UNKNOWN pid={exc.pid}; Completion observation unavailable; "
-            "credential state unestablished. Inspect Desktop before retrying."
-        )
+        _emit_ui_observation_unknown(exc.pid, "Completion")
         return 3
     except (DesktopGoneError, DesktopUnreadyError) as exc:
         if isinstance(exc, DesktopGoneError):
@@ -2647,18 +2678,8 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
     print(f"  engine completion: {completion.reason}")
 
     try:
-        while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-            state = _ui_observer_state(
-                context,
-                allow_progress=True,
-                timeout_seconds=remaining,
-            )
-            if state.state == "READY":
-                break
-            time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
-        else:
-            print("REFRESH: COMPLETION_UNKNOWN (Desktop observer did not return to READY before deadline)")
+        if _ui_wait_ready(context, deadline, evidence_dir=evidence_dir) is None:
+            print("REFRESH: COMPLETION_UNKNOWN (Desktop observer did not return to READY within the settle window)")
             return 3
         canaries = _canary_tables(args)
         implicit = not canaries
@@ -2679,7 +2700,7 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         _emit_dialog_finding(exc.pid, exc.finding)
         return 3
     except CredentialUnknownError as exc:
-        _emit_credential_unknown(exc.pid, exc.reason)
+        _emit_ui_observation_unknown(exc.pid, "Completion")
         return 3
     except (DesktopGoneError, DesktopUnreadyError) as exc:
         if isinstance(exc, DesktopGoneError):
@@ -2745,7 +2766,9 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         print("  UI Save handback: UX failure; prior focus restoration was not verified")
     print("  UI Save: one named Invoke returned; persistence remains unconfirmed")
     try:
-        _ui_observer_state(context, timeout_seconds=_ui_read_budget(deadline, 8.0))
+        if _ui_wait_ready(context, deadline, evidence_dir=evidence_dir) is None:
+            print("REFRESH: NOT_PERSISTED (Desktop did not return to READY within the settle window after Save)")
+            return 1
         bound_call(context.bound, lambda _connection: None, timeout_seconds=_ui_read_budget(deadline))
         payload = _ui_bridge_status(_ui_bridge_command(), context.pid, deadline)
         _ui_read_budget(deadline)
@@ -2763,7 +2786,7 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         _emit_dialog_finding(exc.pid, exc.finding)
         return 3
     except CredentialUnknownError as exc:
-        _emit_credential_unknown(exc.pid, exc.reason)
+        _emit_ui_observation_unknown(exc.pid, "Post-Save")
         return 3
     except (DesktopGoneError, DesktopUnreadyError) as exc:
         if isinstance(exc, DesktopGoneError):
