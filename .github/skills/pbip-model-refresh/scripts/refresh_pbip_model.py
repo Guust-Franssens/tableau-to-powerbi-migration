@@ -128,6 +128,7 @@ from _desktop_actions import (
     CompletionResult,
     DesktopActionError,
     PartitionSnapshot,
+    check_automatic_source_scope,
     check_completion,
     invoke_desktop_action,
     read_partition_snapshot,
@@ -2612,6 +2613,12 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         _ui_read_budget(deadline)
         if any(partition.state != 1 for partition in baseline.partitions):
             raise DesktopActionError("initial source partition state is not READY")
+        scope = getattr(args, "automatic_source_scope", None)
+        if scope is not None:
+            check_automatic_source_scope(
+                context.bound, scope, _canary_tables(args), timeout_seconds=_ui_read_budget(deadline)
+            )
+            _ui_read_budget(deadline)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         print(f"REFRESH: UI_PREFLIGHT_REFUSED ({type(exc).__name__}: {exc})")
         return 2
@@ -2913,6 +2920,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--automatic-source-scope",
+        nargs="?",
+        const="",
+        metavar="EXPECTED_SOURCES_JSON",
+        help=(
+            "Automatic-caller form of --ui-refresh (#780): before any Refresh, refuse unless every partition "
+            "is an exact engine connector read (no custom SQL, files or code) whose identity equals this file. "
+            "Requires --ui-refresh and --canaries"
+        ),
+    )
+    parser.add_argument(
         "--ui-save",
         action="store_true",
         help="Force the legacy UI-Automation save instead of AMO ImageSave (fallback/diagnostic)",
@@ -2945,6 +2963,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 
 def _validate_ui_refresh_args(args: argparse.Namespace) -> bool:
     """Reject incompatible UI-refresh combinations before process discovery or any action."""
+    if args.automatic_source_scope is not None and not (
+        args.ui_refresh and args.automatic_source_scope and args.canaries
+    ):
+        print("REFRESH: ERROR --automatic-source-scope requires a file value, --ui-refresh and --canaries")
+        return False
     if not args.ui_refresh:
         return True
     if args.pid is None or args.pid <= 0 or args.pid >= 2**32:

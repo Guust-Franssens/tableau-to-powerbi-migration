@@ -53,7 +53,7 @@ A migrated model hands over as *TMDL plus a promise*. Two things go wrong:
 ```
 python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B"] [--tables "A" "B"]
                                      [--calculate-only|--measures-only] [--no-save] [--verify-only]
-                                     [--ui-save] [--ui-refresh]
+                                     [--ui-save] [--ui-refresh [--automatic-source-scope <expected-sources.json>]]
 ```
 
 ### Explicit foreground UI refresh
@@ -219,6 +219,39 @@ This is not exclusive attribution against a human refreshing the same Desktop in
 timestamps do not prove upstream freshness, source reachability beyond the commissioned canaries,
 query equivalence, or cold-reopen durability. UI Save Invoke and the legacy cache timestamp display
 are not persistence proof.
+
+### Automatic callers: `--automatic-source-scope` (#780)
+
+Automatic callers never use plain `--ui-refresh`. They add
+`--automatic-source-scope <expected-sources.json>` (requires `--ui-refresh` and `--canaries`).
+After the READY baseline and before any Refresh, canary read or Save, the script reads the live
+model (partition M, `TMSCHEMA_EXPRESSIONS`, `TMSCHEMA_REFRESH_POLICIES`) and refuses unless:
+
+- every shared expression is a text literal, optionally with a literal `meta` record;
+- every partition is `calculated`, or `m` in the exact engine template
+  `let S = <Root>(<arg>, <arg>), N1 = S{[F="..."]}[Data], ... in Nk` (1 to 3 hops, `F` one of
+  `Schema`, `Item`, `Name`, `Kind`), roots `Sql.Database`, `PostgreSQL.Database`, `MySQL.Database`,
+  `AmazonRedshift.Database`, `Snowflake.Databases`, `Databricks.Catalogs`, or
+  `Oracle.Database(<arg>, [HierarchicalNavigation=false])`; each `<arg>` is a text literal or a
+  shared literal parameter; no refresh policy exists; every canary is such a connector table;
+- the resolved identities equal the file exactly: same tables, no extras, byte-equal values.
+
+Custom SQL, files, comments, numbers, other functions and any metadata read error all refuse. The
+refusal is `REFRESH: UI_PREFLIGHT_REFUSED (DesktopActionError: automatic source scope: <name>: <clause>)`,
+exit 2, no action; it names tables and fields, never values. Treat it as a human stop.
+
+```json
+{"version": 1, "sources": [
+  {"table": "Orders", "connector": "Sql.Database", "server": "srv", "database": "Sales",
+   "navigation": [{"Schema": "dbo", "Item": "Orders"}]},
+  {"table": "Flights", "connector": "Snowflake.Databases", "server": "acct", "warehouse": "WH",
+   "navigation": [{"Name": "DB", "Kind": "Database"}, {"Name": "PUB", "Kind": "Schema"},
+                  {"Name": "FLIGHTS", "Kind": "Table"}]}]}
+```
+
+The second argument key is `database` (Sql, PostgreSQL, MySQL, AmazonRedshift), `warehouse`
+(Snowflake), `http_path` (Databricks) or absent (Oracle). Derive the file from a trusted snapshot of
+the engine emission with `_source_scope.resolve_partition_identity`, never from the live model.
 
 ### Read an already-detected dialog at the failing tool (#498)
 

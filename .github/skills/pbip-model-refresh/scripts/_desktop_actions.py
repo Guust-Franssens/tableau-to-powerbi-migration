@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from _source_scope import SourceScopeError, check_source_scope, load_expected_sources
 from probe_desktop_query import BoundDesktop, bound_call, is_auto_date_table_name
 
 ACTION_SCRIPT = Path(__file__).resolve().with_name("_desktop_actions.ps1")
@@ -287,6 +288,40 @@ def read_partition_snapshot(bound: BoundDesktop, *, timeout_seconds: float = 8.0
         return _snapshot_from_connection(connection, bound.catalogue)
 
     return bound_call(bound, read, timeout_seconds=timeout_seconds)
+
+
+def _scope_reads(connection) -> tuple[list[tuple[str, str, object]], dict[str, object]]:
+    """Read partition M, shared expressions and refresh policies; any unexpected shape refuses."""
+    table_by_id = _read_table_modes(connection)
+    partitions = []
+    for row in _partition_rows(connection):
+        table = table_by_id.get(_integer(row[1], "table identity"))
+        if table is None:
+            raise DesktopActionError("partition table identity is unresolved")
+        partitions.append((table[0], _partition_type(row[3]), row[6]))
+    expressions: dict[str, object] = {}
+    for name, text in _read_rows(connection, "SELECT [Name], [Expression] FROM $SYSTEM.TMSCHEMA_EXPRESSIONS", 2):
+        if not isinstance(name, str) or not name or name in expressions:
+            raise DesktopActionError("shared expression name is unresolved")
+        expressions[name] = text
+    if _read_rows(connection, "SELECT [TableID] FROM $SYSTEM.TMSCHEMA_REFRESH_POLICIES", 1):
+        raise DesktopActionError("a refresh policy is present")
+    return partitions, expressions
+
+
+def check_automatic_source_scope(
+    bound: BoundDesktop, expected_path: str, canaries: list[str], *, timeout_seconds: float
+) -> None:
+    """Refuse (#780) unless every live partition is an exact connector read of the caller's expected set."""
+    try:
+        expected = load_expected_sources(expected_path)
+        partitions, expressions = bound_call(bound, _scope_reads, timeout_seconds=timeout_seconds)
+        check_source_scope(partitions, expressions, expected, canaries)
+    except (SourceScopeError, DesktopActionError) as exc:
+        raise DesktopActionError(f"automatic source scope: {exc}") from None
+    except Exception:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        # A driver error may echo connection details, so only the failure class is reported.
+        raise DesktopActionError("automatic source scope: metadata read failed") from None
 
 
 def check_completion(
