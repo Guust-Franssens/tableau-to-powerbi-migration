@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1604,6 +1605,35 @@ def _preflight_host_cache_observation(sidecar: Path) -> str:
     return "OBSERVED" if entries else "NOT_OBSERVED"
 
 
+def _actual_child_timeout_report(exc: subprocess.TimeoutExpired, trace: Path, spawned_ms: int) -> str:
+    """Issue #791: say where a timed-out actual child spent its budget (the budget itself is unchanged)."""
+    raised_ms = time.time_ns() // 1_000_000
+    try:
+        rows = trace.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        rows = []
+    events = []
+    for row in rows:
+        stamp, _, event = row.partition(" ")
+        events.append(f"  +{(int(stamp) - spawned_ms) / 1000:7.2f}s {event}" if stamp.isdigit() else f"  ? {row}")
+
+    def partial(value: str | bytes | None) -> str:
+        text = value.decode("utf-8", "replace") if isinstance(value, bytes) else value or ""
+        return repr(text[-4000:])
+
+    return "\n".join(
+        [
+            f"actual preflight child exceeded its {exc.timeout}s budget; "
+            f"TimeoutExpired raised +{(raised_ms - spawned_ms) / 1000:.2f}s after spawn",
+            "child trace (seconds after spawn: launcher start, every stub launch, every mocked "
+            "Test-Path/Get-AppxPackage/Get-OdbcDriver call with its calling script:line, launcher return):",
+            *(events or ["  <empty: the launcher never reached its first statement>"]),
+            f"partial stdout: {partial(exc.stdout)}",
+            f"partial stderr: {partial(exc.stderr)}",
+        ]
+    )
+
+
 def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) -> tuple:
     """Full script, synthetic profile/toolkit, command stubs only; not a real-host cache claim."""
     # Keep this one fixture's setup, invocation and monitored snapshot together.
@@ -1614,6 +1644,8 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
         path.mkdir(parents=True)
     sidecar = tmp_path / ("doctor-host-cache" if diagnostics else "direct-host-cache")
     sidecar.mkdir()
+    # Outside the monitored root and the sidecar, so neither tree assertion sees it.
+    trace = tmp_path / f"{root.name}-trace.log"
     shutil.copyfile(PREFLIGHT, scripts / "preflight.ps1")
     (root / ".env").write_text("", encoding="utf-8")
     log = root / "commands.jsonl"
@@ -1660,8 +1692,10 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
         leaf.parent.mkdir(parents=True)
         leaf.write_text("different" if mode == "blocked" and parent == profile / "skills" else "same", encoding="utf-8")
     (commands / "stub.py").write_text(
-        "import json,os,sys\nfrom pathlib import Path\n"
+        "import json,os,sys,time\nfrom pathlib import Path\n"
         "tool,*args=sys.argv[1:]\nmode=os.environ['PREFLIGHT_CASE']\n"
+        "with Path(os.environ['CHILD_TRACE']).open('a',encoding='utf-8') as trace: "
+        "trace.write(f'{time.time_ns()//1000000} stub {json.dumps([tool,*args])}\\n')\n"
         "with Path(os.environ['STUB_LOG']).open('a',encoding='utf-8') as log: "
         "log.write(json.dumps([tool,*args])+'\\n')\n"
         "if tool=='python':\n"
@@ -1714,22 +1748,30 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
         (commands / f"{tool}.cmd").write_text(f'@"{sys.executable}" -B "%~dp0stub.py" {tool} %*\n', encoding="utf-8")
     launcher = root / "launch.ps1"
     launcher.write_text(
+        "function Add-ChildTrace([string]$What, $Site) { if ($Site) { $What += ' ' + "
+        "[IO.Path]::GetFileName($Site.ScriptName) + ':' + $Site.ScriptLineNumber }\n"
+        ' [IO.File]::AppendAllText($env:CHILD_TRACE,"$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) $What`n") }\n'
+        "Add-ChildTrace 'launcher start'\n"
         "$ErrorActionPreference='Stop'\n"
         "Set-Variable -Name HOME -Value $env:USERPROFILE -Force\n"
-        "function Get-AppxPackage { if ($env:PREFLIGHT_CASE -ne 'blocked') { "
+        "function Get-AppxPackage { Add-ChildTrace Get-AppxPackage $MyInvocation\n"
+        " if ($env:PREFLIGHT_CASE -ne 'blocked') { "
         "[pscustomobject]@{InstallLocation=(Join-Path $env:FIXTURE_ROOT 'desktop');Version='2.157.627.0'} } }\n"
-        "function Get-OdbcDriver { }\n"
+        "function Get-OdbcDriver { Add-ChildTrace Get-OdbcDriver $MyInvocation }\n"
         'function Invoke-WebRequest { [IO.File]::AppendAllText($env:STUB_LOG,\'["network","Invoke-WebRequest"]\'+"`n");'
         " [pscustomobject]@{Content='{}'} }\n"
         "function Invoke-RestMethod { [IO.File]::AppendAllText($env:STUB_LOG,"
         '\'["network","Invoke-RestMethod"]\'+"`n") }\n'
         "function Test-Path { param($Path,$LiteralPath,$PathType)\n"
+        " Add-ChildTrace Test-Path $MyInvocation\n"
         " $target=if ($LiteralPath) { $LiteralPath } else { $Path }\n"
         " if ($target -eq 'C:\\Program Files\\Microsoft Power BI Desktop\\bin\\PBIDesktop.exe') { return $false }\n"
         " if (-not ([IO.Path]::GetFullPath($target)).StartsWith($env:FIXTURE_ROOT+'\\',"
         "[StringComparison]::OrdinalIgnoreCase)) { throw 'non-synthetic path' }\n"
         " Microsoft.PowerShell.Management\\Test-Path @PSBoundParameters\n}\n"
-        "& (Join-Path $env:FIXTURE_ROOT 'scripts\\preflight.ps1') @args\nexit $LASTEXITCODE\n",
+        "& (Join-Path $env:FIXTURE_ROOT 'scripts\\preflight.ps1') @args\n"
+        'Add-ChildTrace "launcher return $LASTEXITCODE"\n'
+        "exit $LASTEXITCODE\n",
         encoding="utf-8",
     )
     environment = {
@@ -1752,31 +1794,36 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
         "FIXTURE_ROOT": str(root),
         "PREFLIGHT_CASE": mode,
         "STUB_LOG": str(log),
+        "CHILD_TRACE": str(trace),
     }
     before = {
         str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
         for path in root.rglob("*")
         if path.is_file() and path != log
     }
-    child = subprocess.run(
-        [
-            shutil.which("powershell") or _PS,
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(launcher),
-            *(["-DoctorDiagnostics"] if diagnostics else []),
-        ],
-        env=environment,
-        cwd=root,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        timeout=60,
-        check=False,
-    )
+    spawned_ms = time.time_ns() // 1_000_000
+    try:
+        child = subprocess.run(
+            [
+                shutil.which("powershell") or _PS,
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(launcher),
+                *(["-DoctorDiagnostics"] if diagnostics else []),
+            ],
+            env=environment,
+            cwd=root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AssertionError(_actual_child_timeout_report(exc, trace, spawned_ms)) from exc
     after = {
         str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
         for path in root.rglob("*")
