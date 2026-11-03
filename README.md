@@ -51,46 +51,112 @@ git sparse-checkout add examples/eea-urban-adaptation
 
 For the full repo (all examples + showcase), use a normal `git clone …`.
 
-Set up the Python environment and run preflight directly, without a signing-policy pre-check:
+### Install and check the selected toolkit
+
+The local folder being installed is **this toolkit checkout**, not a folder of Tableau inputs or
+migration outputs. From that checkout, install the regular (noneditable) facade into its environment:
 
 ```powershell
 uv venv
-.venv\Scripts\Activate.ps1
-uv sync --all-extras   # --all-extras pulls tableauhyperapi/playwright/pillow used by the scripts below
+uv sync --all-extras --no-editable
 
+$toolkit = (Get-Location).Path
+$t2p = Join-Path $toolkit '.venv\Scripts\t2p.exe'
+& $t2p doctor
+```
+
+Use this selected environment's **absolute executable**, its absolute Python with `-B -m t2p`, or
+activate that environment and use `t2p`. On Linux the generated command is `.venv/bin/t2p`.
+An unqualified `uv run --no-sync t2p` from another project is **not** environment selection.
+Default `uv sync`/`uv run` can reinstall editably; retain `--no-editable` for this operator setup.
+Developer/direct-script use is documented in [CONTRIBUTING](CONTRIBUTING.md#environment-setup).
+
+For an already selected environment, regular `uv pip install --python <absolute-selected-python>
+<absolute-toolkit>` is a plain/spaced-path local-directory compatibility form. Ordinary pip is a compatibility path
+**only when that environment already has pip** (uv environments need not):
+
+```powershell
+& '<absolute-selected-python>' -m pip install '<absolute-toolkit>'
+# Existing optional extras can be selected, e.g. '<absolute-toolkit>[server]'.
+& '<absolute-selected-python>' -B -m t2p --help
+```
+
+The phase-one **qualification matrix** is invocation-specific; plan approval alone proves no install:
+
+| Regular local-directory form | Required checkout-path qualification |
+|---|---|
+| `uv sync --all-extras --no-editable`, from the selected toolkit | Plain/spaced **and** combined Unicode/`#`/`%` |
+| Selected Python's `-m pip install <native-directory>`, with pip already available | Both path classes |
+| `uv pip install --python <selected-python> <native-directory>` | Plain/spaced; **only its raw native combined-punctuation cell is explicitly deferred** |
+
+Canonical uv-sync combined-path qualification remains required, not replaced by a doctor-only check.
+The deferral is not a claim that all uv Unicode/punctuation paths are unsupported. Unicode-only,
+percent-only and other unisolated representations remain unverified. Do not retry with converted URLs,
+copy/rename the checkout, or switch environments to pass; an unqualified install stays blocked.
+
+Normal Python resolution installs declared dependencies/requested extras, not Desktop, Copilot,
+plugins, MCP, Node or native drivers. Existing [preflight/setup guidance](docs/operator-runbook.md#11-tooling)
+still owns those prerequisites. Doctor runs the plain diagnostic owner once, without updates or
+Tableau login. Resolve its manual hints before proceeding; `READY_TO_ATTEMPT` is presence/preflight
+only, not authentication, reachability, path safety, START_READY, fidelity or COMPLETE.
+Session-start preflight remains separate under [AGENTS.md](AGENTS.md). If doctor cannot establish
+the plain preflight cause, first **activate the same selected environment** in that private terminal
+and confirm `(Get-Command python).Source` points to its selected Python. Invoking the absolute
+`t2p.exe` above does **not** activate the parent shell; preflight uses `python` from PATH.
+Then, from the selected toolkit checkout, run the existing manual fallback:
+
+```powershell
 powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1
 ```
 
 **Only after an actual unsigned/ExecutionPolicy startup refusal**, follow
 [preflight cannot start](docs/operator-runbook.md#preflight-cannot-start).
-If recovery is allowed, retry the **exact originating command and arguments**; this quickstart uses
-plain preflight. If activation was the refused command, diagnose that exact script instead.
+If recovery is allowed, retry the **exact originating command and arguments** (plain preflight);
+no policy pre-check.
 
-Continue only after preflight exits 0:
+### Start one approved live project, then dispatch
+
+Only for the approved exact live Tableau project and real session attribution:
 
 ```powershell
-# Parse a workbook into the intermediate spec
-python scripts\parse_tableau.py migrations\workbooks\<name>\source\<workbook>.twbx `
-    -o migrations\workbooks\<name>\migration-spec.json
-
-# If the workbook uses .hyper extracts (no live DB), pull the real row data too:
-python scripts\extract_hyper_data.py migrations\workbooks\<name>\source\<workbook>.twbx `
-    migrations\workbooks\<name>\migration-spec.json `
-    -o migrations\workbooks\<name>\data
+& $t2p start --project '<exact-name-or-LUID>' --session-id '<real-session-UUID>'
+# Use the absolute run printed by start; never discover or guess "latest".
+& $t2p status --run '<absolute-run>'
 ```
 
-Then, in [GitHub Copilot CLI](https://github.com/github/copilot-cli), run the orchestrator agent:
+`start` is the existing front door: initial path scope is unknown until harvest, assessment stays
+site-wide, and exit 0 is **capture-only**. It neither dispatches agents nor finishes a migration.
+Continue through [AGENTS.md](AGENTS.md): one intake, issued private v2 brief per unit, then
+task-tool `tableau-migrator` dispatch with existing bundle/working paths and final package-cohort
+START_READY/0 barrier. Independent Tableau comparison/sign-off is still required. `status` is
+read-only anonymous inventory, not a next-command, readiness or completion authority.
 
-```
-/agent tableau-migrator
-```
+### Binding and update limits
 
-and point it at `migrations\workbooks\<name>\migration-spec.json`.
+The installed module is a **facade snapshot**; standard local-directory installer metadata binds it
+to one physical toolkit checkout. Backend scripts/assets at that location remain **live**, not
+version-pinned. Caller cwd, another checkout and a source egg-info decoy do not select a target.
+Missing/moved/ambiguous/redirected bindings stop without importing owners or falling back to cwd.
+Reinstall from the same intended checkout/environment after facade or packaging changes, a checkout
+move, or an intentional rebind. For uv, explicitly use `--reinstall-package tableau-to-pbi-migration`
+on the qualified plain/spaced `uv pip install`, or on `uv sync --all-extras --no-editable` in that checkout's
+selected `.venv`; use ordinary pip only where the same selected environment already has it.
+The invocation-specific matrix above also applies to reinstall guidance:
+ordinary sync/cache reuse is not a live update of the facade. Moving/deleting a nested `.venv` can break the generated command
+**before Python starts**: recreate/reinstall it; no in-process JSON refusal is promised then.
 
-> **Migrating a whole Tableau *site*, not one workbook?** That is a different, mostly deterministic
-> pipeline — survey → assess → harvest → convert → deploy — and it has its own step-by-step
-> procedure with measured timings, exit codes, decision points and a failure playbook:
-> **[`docs/operator-runbook.md`](docs/operator-runbook.md)**. Read it before the day you need it.
+Editable console invocation, standalone/index/wheel/archive/VCS distribution, user/target/pipx,
+copied environments, UNC and symlink/reparse-root aliases are outside this installed contract.
+The existing `python -B <toolkit>\scripts\t2p.py` expert path stays available. Regular invocation
+suppresses toolkit/backend/grandchild bytecode; the installed module's first import and other
+host/environment caches are not toolkit writes. Editable first imports can already cache source
+before the adapter runs. This is not an offline or global zero-write promise.
+
+**Other scopes:** local `.twb/.twbx`, folders and `.tds/.tdsx` use the
+[single-workbook/manual guide](docs/start-with-one-workbook.md) and [operator runbook](docs/operator-runbook.md),
+not new `t2p` selectors. Site/estate expert operations also stay in the runbook. Phase one has only
+doctor/start/status; [#749 live acceptance](docs/t2p-pilot-plan.md) remains deferred, with no new
+E2E, usability, cost or fidelity result claimed.
 
 ## What you get
 
@@ -120,7 +186,7 @@ workbook (16 worksheets, 7 data sources, 152 fields).
 **After cloning**, before you can refresh a model with live data, you must:
 
 1. Download the workbook yourself from its Tableau Public link (source `.twbx` and extracted data are
-   gitignored, not redistributed here) and re-run the two scripts above, **or** just open the report to
+   gitignored, not redistributed here) and follow the manual guide's parse/extract steps, **or** just open the report to
    inspect the already-built semantic model/report structure without live data.
 2. Point the `DataFolder` Power Query parameter (Transform data → Manage Parameters) at your local
    `examples/<name>/data/` path. It ships with a placeholder because M parameters cannot be relative
@@ -408,9 +474,9 @@ install or confirm the runner pieces below:
 - **Copilot plugins/MCP servers** below, including the separate deterministic conversion engine plugin
   (`tableau-fabric-skills@tableau-collection`).
 
-The Quickstart below stops at a **local PBIP** (`migrations\workbooks\<name>\fabric\...`). For a
-customer/estate run, treat publish-to-Fabric as an operator step documented in the runbook, not as a
-finished one-command agent handoff yet.
+The Quickstart above installs only the three-command navigation facade and then routes through the
+existing dispatcher. It does not complete a PBIP or deploy to Fabric. Local/manual migrations and
+explicit publish-to-Fabric operations remain in the guides/runbook, not a one-command handoff.
 
 <details>
 <summary><strong>⚡ Copilot plugins, conversion engine &amp; MCP (self-configuring)</strong></summary>

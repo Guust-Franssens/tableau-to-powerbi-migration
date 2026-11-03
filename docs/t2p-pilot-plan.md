@@ -11,7 +11,7 @@ python -B scripts/t2p.py status --run <absolute-run> [--json]
 ```
 Start requires one nonempty project selector; disable argparse abbreviation; reject other selectors/verbs.
 No local file/folder/datasource/site/server routes, `next`, credential, package, build, validation,
-promotion, deployment or dispatch commands; no installed entrypoint, framework, registry, DB or router.
+promotion, deployment or dispatch; [#773](../README.md#quickstart) adds only regular-local installation, not a framework/registry/DB/router.
 ✅ Assessment stays site-wide; owner comments extend/supersede `docs/cli-consensus/consensus.md:45-71,81,130-138`.
 
 ## 1. Path invariant and decision timing

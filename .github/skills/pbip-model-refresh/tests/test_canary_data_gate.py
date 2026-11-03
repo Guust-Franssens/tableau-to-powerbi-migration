@@ -668,8 +668,9 @@ def test_read_result_waits_for_worker_termination_not_queue_publication(monkeypa
     assert published == [] and all(not worker.is_alive() for worker in workers)
 
 
-def test_inspection_failure_after_queued_read_still_refuses(monkeypatch):
-    inspecting, release, queued = threading.Event(), threading.Event(), threading.Event()
+@pytest.mark.parametrize("failure", ["CREDENTIAL_MISSING", "DIALOG_UNREADABLE", "PID_REUSED"])
+def test_inspection_failure_after_queued_read_still_refuses(monkeypatch, failure):
+    inspecting, release, queued, returned = (threading.Event() for _ in range(4))
     published, failures = [], []
 
     class ObservedQueue(queue.Queue):
@@ -682,11 +683,12 @@ def test_inspection_failure_after_queued_read_still_refuses(monkeypatch):
         if threading.current_thread().name == "observation-inspection":
             inspecting.set()
             assert release.wait(5)
-            return probe_desktop_query.Observation(modal=object())
+            raise getattr(probe_desktop_query, "ObservationUnavailable")(failure)
         return probe_desktop_query.Observation()
 
     def read():
         assert inspecting.wait(3), "inspection must be in flight before the read completes"
+        returned.set()
         return "private facts"
 
     def call():
@@ -700,10 +702,152 @@ def test_inspection_failure_after_queued_read_still_refuses(monkeypatch):
     caller = threading.Thread(target=call)
     caller.start()
     try:
-        assert queued.wait(3), "must queue a read result while the inspection is unfinished"
-        assert caller.is_alive() and published == []
+        assert returned.wait(3), "read must return while the admitted inspection is unfinished"
+        assert caller.is_alive() and not published and not queued.is_set()
     finally:
         release.set()
         caller.join(5)
-    assert not caller.is_alive() and published == []
-    assert len(failures) == 1 and failures[0].args == ("CREDENTIAL_MISSING",)
+    assert not caller.is_alive() and not published
+    assert len(failures) == 1 and failures[0].args == (failure,)
+
+
+@pytest.mark.parametrize("monitor_wins", [False, True])
+@pytest.mark.parametrize("final_failure", [False, True])
+def test_monitor_handoff_keeps_fresh_final_check_without_postfinal_admission(monkeypatch, monitor_wins, final_failure):
+    """Control both admission orders, including an admitted check blocked when the read returns."""
+    entered, release, returned, handed_off = (threading.Event() for _ in range(4))
+    events, results = [], []
+    real_thread = threading.Thread
+
+    class ControlledThread(real_thread):
+        """Delay only the monitor body when the operation must close admission first."""
+
+        def run(self):
+            if self.name == "observation-inspection" and not monitor_wins:
+                assert returned.wait(3)
+                assert release.wait(3)
+            super().run()
+
+        def join(self, timeout=None):
+            if self.name == "observation-inspection":
+                handed_off.set()
+            return super().join(timeout)
+
+    def inspect_state(_pid, *, in_flight=False, **_kwargs):
+        if threading.current_thread().name == "observation-inspection":
+            events.append("monitor")
+            entered.set()
+            assert release.wait(3)
+        else:
+            events.append("final" if in_flight else "initial")
+            if in_flight and final_failure:
+                raise getattr(probe_desktop_query, "ObservationUnavailable")("DIALOG_UNRECOGNIZED")
+        return getattr(probe_desktop_query, "Observation")()
+
+    def read():
+        if monitor_wins:
+            assert entered.wait(3)
+        events.append("read")
+        returned.set()
+        return "private facts"
+
+    def call():
+        try:
+            results.append(getattr(probe_desktop_query, "_observation_call")(111, read, 4))
+        except getattr(probe_desktop_query, "ObservationUnavailable") as error:
+            results.append(error.args)
+
+    monkeypatch.setattr("probe_desktop_query.threading.Thread", ControlledThread)
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", inspect_state)
+    caller = real_thread(target=call)
+    caller.start()
+    try:
+        assert returned.wait(3)
+        assert handed_off.wait(3), "read must close admission before waiting for its monitor"
+        assert not results and "final" not in events
+    finally:
+        release.set()
+        caller.join(5)
+    assert not caller.is_alive()
+    assert events == (["initial", "monitor", "read", "final"] if monitor_wins else ["initial", "read", "final"])
+    assert results == ([("DIALOG_UNRECOGNIZED",)] if final_failure else ["private facts"])
+
+
+def test_hung_admitted_monitor_withholds_final_and_result_and_settles_owned_helpers(monkeypatch):
+    """An admitted hung monitor cannot earn final-check/result publication or a new deadline."""
+    entered, release = threading.Event(), threading.Event()
+    events, workers = [], []
+    supervisor = getattr(probe_desktop_query, "watch")(
+        111, deadline=time.monotonic() + 1, operation_id="00000000-0000-0000-0000-000000000001"
+    )
+    helper_events = []
+    getattr(supervisor, "_children").append(
+        SimpleNamespace(
+            poll=lambda: None,
+            kill=lambda: helper_events.append("kill"),
+            wait=lambda: helper_events.append("wait"),
+        )
+    )
+
+    def inspect_state(_pid, *, in_flight=False, **_kwargs):
+        if threading.current_thread().name == "observation-inspection":
+            workers.append(threading.current_thread())
+            entered.set()
+            assert release.wait(3)
+        elif in_flight:
+            events.append("final")
+        return getattr(probe_desktop_query, "Observation")()
+
+    def read():
+        assert entered.wait(1)
+        events.append("read")
+        return "private facts"
+
+    monkeypatch.setattr(probe_desktop_query, "watch", lambda *_args, **_kwargs: supervisor)
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", inspect_state)
+    try:
+        with pytest.raises(getattr(probe_desktop_query, "ObservationUnavailable"), match="^TIMEOUT$"):
+            getattr(probe_desktop_query, "_observation_call")(111, read, 0.1)
+        assert events == ["read"] and supervisor.closed and helper_events == ["kill", "wait"]
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(3)
+    assert all(not worker.is_alive() for worker in workers)
+
+
+def test_handoff_result_is_private_until_owned_helper_teardown_finishes(monkeypatch):
+    """Successful final checks still cannot publish ahead of owned native-helper settlement."""
+    entered, release = threading.Event(), threading.Event()
+    events, results = [], []
+    supervisor = getattr(probe_desktop_query, "watch")(
+        111, deadline=time.monotonic() + 4, operation_id="00000000-0000-0000-0000-000000000001"
+    )
+
+    def wait():
+        events.append("wait")
+        entered.set()
+        assert release.wait(3)
+
+    getattr(supervisor, "_children").append(
+        SimpleNamespace(poll=lambda: None, kill=lambda: events.append("kill"), wait=wait)
+    )
+    monkeypatch.setattr(probe_desktop_query, "watch", lambda *_args, **_kwargs: supervisor)
+    monkeypatch.setattr(
+        probe_desktop_query,
+        "_credential_state",
+        lambda *_args, **_kwargs: getattr(probe_desktop_query, "Observation")(),
+    )
+    caller = threading.Thread(
+        target=lambda: results.append(
+            getattr(probe_desktop_query, "_observation_call")(111, lambda: "private facts", 4)
+        )
+    )
+    caller.start()
+    try:
+        assert entered.wait(3), "must settle the native helper before publishing"
+        assert caller.is_alive() and not results and events == ["kill", "wait"]
+    finally:
+        release.set()
+        caller.join(5)
+    assert not caller.is_alive() and results == ["private facts"]

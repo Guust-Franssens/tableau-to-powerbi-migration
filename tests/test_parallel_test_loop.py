@@ -162,7 +162,7 @@ def _launches_the_live_desktop(func: ast.FunctionDef) -> bool:
                 return True
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "CreateWindowExW":
             return True
-        if isinstance(node, ast.Constant) and node.value == "-ReadyFile":
+        if isinstance(node, ast.Constant) and node.value in {"-ReadyFile", "-STA"}:
             return True
     return False
 
@@ -486,7 +486,9 @@ def test_xdist_deselects_contended_tests_without_being_asked() -> None:
     Before the root conftest deselected them, this collected all seven live WPF/UI-Automation tests,
     which is the configuration measured to fail 3 times in 8 concurrent-pair runs.
     """
-    contended = {node for node in _contended_nodes() if node.startswith(BUNDLE_TESTS + "::")}
+    collection = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "--run-gui", "-m", "serial or timing", BUNDLE_TESTS])
+    assert collection.returncode == 0, collection.stdout + collection.stderr
+    contended = {line for line in collection.stdout.splitlines() if line.startswith(BUNDLE_TESTS + "::")}
     # #741 retains six native/UIA GUI controls and six timing controls in this renamed suite.
     assert len(contended) >= 12, f"expected the bundle's contended tests to be found, got {sorted(contended)}"
     # `--run-gui` for the same reason as in `test_the_markers_actually_deselect_those_tests`: the
@@ -544,7 +546,10 @@ def test_the_opt_out_flag_puts_the_contended_tests_back() -> None:
     # `--include-contended` is about `serial`/`timing`, not about hijacking someone's desktop. The
     # per-node loop below is the real check; keep the count assertion so this stays falsifiable
     # rather than merely relaxed - a NEW unexplained deselection must still fail here.
-    gui_nodes = {node for node in _gui_nodes() if node.startswith(BUNDLE_TESTS + "::")}
+    collection = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "--run-gui", "-m", "gui", BUNDLE_TESTS])
+    assert collection.returncode == 0, collection.stdout + collection.stderr
+    gui_nodes = {line for line in collection.stdout.splitlines() if line.startswith(BUNDLE_TESTS + "::")}
+    assert gui_nodes, "the GUI collection must not be empty"
     deselected = re.search(r"\((\d+) deselected\)", output)
     remaining = int(deselected.group(1)) if deselected else 0
     assert remaining == len(gui_nodes), (
@@ -552,7 +557,8 @@ def test_the_opt_out_flag_puts_the_contended_tests_back() -> None:
         f"@pytest.mark.gui; an unexplained deselection means the opt-out no longer restores "
         f"everything it claims to:\n{output[-1500:]}"
     )
-    for node in sorted(node for node in _contended_nodes() - gui_nodes if node.startswith(BUNDLE_TESTS + "::")):
+    gui_functions = {node.split("[", 1)[0] for node in gui_nodes}
+    for node in sorted(node for node in _contended_nodes() - gui_functions if node.startswith(BUNDLE_TESTS + "::")):
         assert node in output, f"{node} missing even with --include-contended"
 
 

@@ -75,6 +75,7 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         "validator could not fetch the PBIR schema - schema checks did NOT run",
         "no real cache.abf on this machine (they are gitignored); set PBIP_REFRESH_REAL_ABF",
         "Desktop UIA qualification is Windows-only",
+        "real installed Windows batch launcher control",
         "real Win32 EnumWindows callback is Windows-only",
         "native protected file DACL is Windows-only",
         "native sharing violation control is Windows-only",

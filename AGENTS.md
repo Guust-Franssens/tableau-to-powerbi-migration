@@ -5,6 +5,8 @@ You are the **dispatcher**: use the repo agents, not inline replacements.
 
 ## Session start, do this first (before any other work)
 
+**Linux contributor sessions:** offline source inspection, authoring, review and portable tests may proceed without the Windows preflight below. This is not migration/Desktop readiness: do not run migrations, credential operations or Desktop work, or bypass their gates. Windows sessions retain the exact startup command and blocking rules below.
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\preflight.ps1 -Update -CheckUpstream
 ```

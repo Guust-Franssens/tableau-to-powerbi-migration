@@ -853,6 +853,66 @@ def test_visual_enqueue_is_bounded_immutable_and_has_no_acquisition_side_effects
         evidence.close()
 
 
+@pytest.mark.parametrize("kind", ["unreadable", "mixed-content", "unrecognized", "credential", "needs-human", "benign"])
+@pytest.mark.parametrize("owner_enabled", [False, True, None])
+def test_visual_unknown_capture_keeps_exact_disabled_owner_admission(monkeypatch, kind, owner_enabled) -> None:
+    """New unknown diagnostics retain exact-window ownership; no capture changes the finding."""
+    monkeypatch.setattr(_desktop_observer.threading.Thread, "start", lambda _self: None)
+    window = _desktop_observer.replace(owned_dialog(), owner_enabled=owner_enabled)
+    finding = DialogFinding(kind, _desktop_observer.DIALOG_KIND_VERDICTS[kind], window)
+    state = Observation(dialog=finding)
+    with _desktop_observer.ModalVisualEvidence() as evidence:
+        eligible = owner_enabled is False and kind in {"unreadable", "mixed-content", "unrecognized"}
+        assert evidence.enqueue(111, state) is eligible
+        assert evidence._pending.qsize() == int(eligible)
+        assert state.dialog is finding and state.modal is None
+
+
+@pytest.mark.parametrize("captured", [False, True])
+def test_terminal_image_hold_stops_on_failure_or_exact_external_deletion(monkeypatch, captured) -> None:
+    """Only an acquired live lease is held; completed/failed diagnostics do not blindly wait 60s."""
+    monkeypatch.setattr(_desktop_observer.threading.Thread, "start", lambda _self: None)
+    events = []
+    with _desktop_observer.ModalVisualEvidence() as evidence:
+        monkeypatch.setattr(evidence, "enqueue", lambda pid, state: events.append(("enqueue", pid)) or True)
+        monkeypatch.setattr(
+            evidence,
+            "_capture_finished",
+            SimpleNamespace(wait=lambda seconds: events.append(("capture", seconds)) or True),
+        )
+        existence = iter([True, False] if captured else [])
+        evidence._requests = (
+            [SimpleNamespace(record={"capture_success": True}, path=SimpleNamespace(exists=lambda: next(existence)))]
+            if captured
+            else []
+        )
+        monkeypatch.setattr(_desktop_observer.time, "sleep", lambda seconds: events.append(("sleep", seconds)))
+        try:
+            evidence.hold_refusal(111, Observation())
+            assert events == [("enqueue", 111), ("capture", 8.0)] + ([("sleep", 0.05)] if captured else [])
+        finally:
+            evidence._requests = []
+
+
+@pytest.mark.parametrize("fault", ["unowned", "missing_hwnd", "capture_timeout"])
+def test_terminal_image_hold_never_waits_for_ineligible_or_timed_out_capture(monkeypatch, fault) -> None:
+    """No owner/identity amnesty and no lease wait when the eight-second acquisition fails."""
+    monkeypatch.setattr(_desktop_observer.threading.Thread, "start", lambda _self: None)
+    window = owned_dialog()
+    if fault == "unowned":
+        window = _desktop_observer.replace(window, owner_hwnd=0)
+    if fault == "missing_hwnd":
+        window = _desktop_observer.replace(window, hwnd=0)
+    waits = []
+    with _desktop_observer.ModalVisualEvidence() as evidence:
+        monkeypatch.setattr(
+            evidence, "_capture_finished", SimpleNamespace(wait=lambda seconds: waits.append(seconds) or False)
+        )
+        monkeypatch.setattr(_desktop_observer.time, "sleep", lambda _seconds: pytest.fail("no eligible acquired lease"))
+        evidence.hold_refusal(111, Observation(dialog=DialogFinding("unrecognized", "DIALOG_UNRECOGNIZED", window)))
+        assert waits == ([8.0] if fault == "capture_timeout" else [])
+
+
 def test_visual_directory_must_be_ignored_inside_a_checkout(tmp_path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -3319,6 +3379,7 @@ def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_applicatio
         cred_hwnd = probe.top(probe.WS_POPUP, 500, 10, 900, 700)
         probe.label(cred_hwnd, "Enter your credentials", 10)
         tip_hwnd = probe.top(probe.WS_POPUP, 520, 40, 120, 24, owner=cred_hwnd)
+        probe.label(tip_hwnd, "TOOLTIP_ONLY", 0)
         time.sleep(0.2)
 
         harvested, _visited = _pump_native_harvest(os.getpid())
@@ -3330,8 +3391,10 @@ def test_a_native_unowned_credential_host_owning_a_tooltip_is_not_the_applicatio
         assert by_hwnd[cred_hwnd].owner_hwnd == 0, "the credential host is unowned - that is the whole shape"
         assert by_hwnd[tip_hwnd].owner_hwnd == cred_hwnd, "the tooltip is owned BY the credential host"
         assert by_hwnd[tip_hwnd].owner_enabled is True, "an enabled owner exonerates the tooltip itself"
+        assert "TOOLTIP_ONLY" in by_hwnd[tip_hwnd].texts, "the separate tooltip root must still be harvested"
+        assert "TOOLTIP_ONLY" not in by_hwnd[cred_hwnd].texts, "owned top-level content belongs to its own root"
         frame = by_hwnd[frame_hwnd]
-        assert _desktop_observer.normalize_texts((frame.title, *frame.texts)) == ("Refresh", "Evaluating..."), (
+        assert sorted(_desktop_observer.normalize_texts((frame.title, *frame.texts))) == ["Evaluating...", "Refresh"], (
             "the frame reads as pure progress status"
         )
 
@@ -3695,6 +3758,7 @@ def harvest_fixture(*, text: str = "Evaluating...", complete: bool = True) -> di
                 ],
                 "truncated": False,
                 "patterns_incomplete": not complete if owner else False,
+                "content_skipped": False,
             }
             for hwnd, owner, title, content in (
                 ("0xfedcba9876543201", None, "Synthetic report", "Report"),
@@ -3804,6 +3868,78 @@ def test_changed_or_lossy_identity_never_clean(monkeypatch, fault: str) -> None:
     state = fixture_observation(monkeypatch, payload)
     assert state.state == "UNREADABLE_DIALOG" and not state.complete
     assert _desktop_observer.legacy_token(state) == "DIALOG_UNREADABLE"
+
+
+def _skip_content(window: dict) -> dict:
+    window.update(content_skipped=True, items=[], texts=[])
+    return window
+
+
+def _unowned_window(hwnd: str, *, width: int = 300) -> dict:
+    return dict(harvest_fixture()["windows"][0], hwnd=hwnd, width=width, title="Other")
+
+
+@pytest.mark.parametrize("with_dialog,expected", [(True, "REFRESH_IN_PROGRESS"), (False, "READY")])
+def test_the_collector_may_skip_only_the_unambiguous_frames_content(
+    monkeypatch, with_dialog: bool, expected: str
+) -> None:
+    """The frame's text never reaches policy, so its skipped harvest keeps the snapshot complete."""
+    payload = harvest_fixture()
+    _skip_content(payload["windows"][0])
+    if not with_dialog:
+        del payload["windows"][1]
+    state = fixture_observation(monkeypatch, payload)
+    assert (state.state, state.complete) == (expected, True)
+    frame = next(window for window in state.windows if window.hwnd == 0xFEDCBA9876543201)
+    assert frame.complete and frame.items == () and frame.texts == ()
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "owned_window",
+        "ambiguous_frame",
+        "zero_area_root",
+        "two_skipped",
+        "items",
+        "texts",
+        "truncated",
+        "patterns_incomplete",
+        "missing",
+        "non_bool",
+    ],
+)
+def test_skipped_content_outside_the_unambiguous_frame_is_refused(monkeypatch, fault: str) -> None:
+    """A skip can never hide a dialog's content, an ambiguous root or partially read frame text."""
+    payload = harvest_fixture()
+    frame, owned = payload["windows"]
+    if fault == "owned_window":
+        _skip_content(owned)
+    elif fault == "ambiguous_frame":
+        _skip_content(frame)
+        payload["windows"].append(_unowned_window("0xfedcba9876543221"))
+    elif fault == "zero_area_root":
+        payload["windows"].append(_skip_content(_unowned_window("0xfedcba9876543221", width=0)))
+    elif fault == "two_skipped":
+        _skip_content(frame)
+        payload["windows"].append(_skip_content(_unowned_window("0xfedcba9876543221", width=0)))
+    elif fault == "missing":
+        del frame["content_skipped"]
+    elif fault == "non_bool":
+        _skip_content(frame)["content_skipped"] = 1
+    else:
+        _skip_content(frame)[fault] = owned["items"] if fault == "items" else (["Report"] if fault == "texts" else True)
+    state = fixture_observation(monkeypatch, payload)
+    assert (state.state, state.reason, state.complete) == ("UNREADABLE_DIALOG", "invalid_payload", False)
+
+
+def test_a_minimized_skipped_frame_still_cannot_certify_clean(monkeypatch) -> None:
+    """Minimization is a native fact, so skipping the frame's text cannot hide hidden owned dialogs."""
+    payload = harvest_fixture()
+    del payload["windows"][1]
+    _skip_content(payload["windows"][0])["minimized"] = True
+    state = fixture_observation(monkeypatch, payload)
+    assert (state.reason, state.complete) == ("minimized", False)
 
 
 @pytest.mark.parametrize(
@@ -3992,7 +4128,12 @@ $ErrorActionPreference = 'Stop'
 Add-Type @'
 using System;
 namespace System.Windows.Automation {
-  public enum TreeScope { Descendants }
+  public enum TreeScope { Descendants, Subtree }
+  public class CacheRequest {
+    public TreeScope TreeScope;
+    public Condition TreeFilter;
+    public void Add(object property) {}
+  }
   public class Condition { public static Condition TrueCondition = new Condition(); }
   public class Control { public string ProgrammaticName = "ControlType.Text"; }
   public class Info {
@@ -4000,7 +4141,11 @@ namespace System.Windows.Automation {
     public Control ControlType = new Control();
     public bool IsPassword;
     public string Text = "STATIC_NAME";
-    public string Name { get { AutomationElement.Names++; return Text; } }
+    public string Name { get {
+      AutomationElement.Names++;
+      if (AutomationElement.AfterName != null) AutomationElement.AfterName();
+      return Text;
+    } }
   }
   public class Range {
     public string Text = "READONLY_DOCUMENT";
@@ -4017,33 +4162,260 @@ namespace System.Windows.Automation {
   }
   public class AutomationElement {
     public static int Names, Documents;
+    public static int Snapshots, CachedReads, ParentReads;
+    public static Action AfterName;
+    public static object ProcessIdProperty = new object(), NotSupported = new object();
+    public static object RuntimeIdProperty = new object(), NativeWindowHandleProperty = new object();
     public static AutomationElement Root = new AutomationElement();
     public Info Current = new Info();
+    public bool UnsupportedPid;
+    public AutomationElement Source;
+    public int[] Runtime = new[]{1};
+    public AutomationElement Parent;
+    public int CachedPid, CachedHandle;
+    public bool CachedUnsupported;
+    public int[] CachedRuntime;
     public AutomationElement[] Children = new AutomationElement[0];
     public TextPattern Text;
     public static AutomationElement FromHandle(IntPtr ignored) { return Root; }
+    public object GetCurrentPropertyValue(object property, bool ignoreDefault) {
+      if (!ignoreDefault) throw new Exception("LIVE_PID_MUST_IGNORE_DEFAULT");
+      return (Source ?? this).UnsupportedPid ? NotSupported : (object)Current.ProcessId;
+    }
+    public int[] GetRuntimeId() { return Runtime; }
+    public object GetCachedPropertyValue(object property, bool ignoreDefault) {
+      CachedReads++;
+      if (property==RuntimeIdProperty) return CachedRuntime;
+      if (property==NativeWindowHandleProperty) return CachedHandle;
+      return CachedUnsupported ? NotSupported : (object)CachedPid;
+    }
+    public object GetCachedPropertyValue(object property) { return GetCachedPropertyValue(property,false); }
+    public AutomationElement[] CachedChildren { get { return Children; } }
+    public AutomationElement CachedParent { get { return Parent; } }
+    public AutomationElement GetUpdatedCache(CacheRequest request) {
+      Snapshots++;
+      return Copy(this,null);
+    }
+    private static AutomationElement Copy(AutomationElement source, AutomationElement parent) {
+      var copy = new AutomationElement();
+      copy.Source=source;
+      copy.Current=source.Current;
+      copy.Text=source.Text;
+      copy.Parent=parent;
+      if(parent!=null && source.Parent==null) {
+        var missing=new AutomationElement(); missing.CachedRuntime=new int[0]; copy.Parent=missing;
+      }
+      if(parent!=null && source.Parent!=null && !Object.ReferenceEquals(source.Parent.Current,parent.Current)) {
+        var foreign=new AutomationElement(); foreign.CachedRuntime=source.Parent.Runtime;
+        copy.Parent=foreign;
+      }
+      copy.CachedPid=source.Current.ProcessId; copy.CachedHandle=source.Current.NativeWindowHandle;
+      copy.CachedUnsupported=source.UnsupportedPid;
+      copy.CachedRuntime=source.Runtime==null ? null : (int[])source.Runtime.Clone();
+      var children=new System.Collections.Generic.List<AutomationElement>();
+      foreach(var child in source.Children) children.Add(Copy(child,copy));
+      copy.Children=children.ToArray();
+      return copy;
+    }
     public AutomationElement[] FindAll(TreeScope scope, Condition condition) { return Children; }
     public bool TryGetCurrentPattern(object pattern, out object value) { value = Text; return Text != null; }
+  }
+  public class Automation {
+    public static bool Compare(AutomationElement a, AutomationElement b) { return Object.ReferenceEquals(a,b); }
+  }
+  public class TreeWalker {
+    public static TreeWalker RawViewWalker = new TreeWalker();
+    public AutomationElement GetParent(AutomationElement element) { AutomationElement.ParentReads++; return element.Parent; }
+  }
+}
+public class DesktopHarvest {
+  public class Window { public IntPtr Hwnd, Owner; }
+  public static System.Collections.Generic.List<Window> RootWindows =
+    new System.Collections.Generic.List<Window>();
+  public static System.Collections.Generic.List<Window> Windows(uint pid) { return RootWindows; }
+  public static System.Collections.Generic.Dictionary<long,uint> Pids =
+    new System.Collections.Generic.Dictionary<long,uint>{{222,111},{223,111},{224,112},{225,113}};
+  public static System.Collections.Generic.Dictionary<long,long> Parents =
+    new System.Collections.Generic.Dictionary<long,long>{{222,0},{223,0},{224,222},{225,224}};
+  public static System.Collections.Generic.Dictionary<long,long> Owners =
+    new System.Collections.Generic.Dictionary<long,long>();
+  public static IntPtr GetWindow(IntPtr handle, uint command) {
+    long owner;
+    return Owners.TryGetValue(handle.ToInt64(), out owner) ? new IntPtr(owner) : IntPtr.Zero;
+  }
+  public static void SeparateReparent() { Owners[224]=223; }
+  public static void SeparateDisappear() { Pids.Remove(224); }
+  public static System.Collections.Generic.Dictionary<uint,string> Starts =
+    new System.Collections.Generic.Dictionary<uint,string>{{111,"1001"},{112,"1002"},{113,"1003"}};
+  public static uint GetWindowThreadProcessId(IntPtr handle, out uint pid) {
+    NativeReads++;
+    if (!Pids.TryGetValue(handle.ToInt64(), out pid)) return 0;
+    return 7;
+  }
+  public static IntPtr ChildParent(IntPtr handle) {
+    long parent;
+    return Parents.TryGetValue(handle.ToInt64(), out parent) ? new IntPtr(parent) : IntPtr.Zero;
+  }
+  public static string ProcessStart(uint pid) {
+    ProcessReads++;
+    if (pid == 0 || !Starts.ContainsKey(pid)) throw new Exception("NO_PROCESS");
+    return Starts[pid];
+  }
+  public static int ProcessReads;
+  public static int NativeReads;
+  public static void NativeReparent() { Parents[224]=223; }
+  public static void ProviderReuse() { Starts[112]="2002"; }
+  public static void RootReuse() { AutomationRoot().Runtime=new[]{99}; }
+  public static void RootProcessReuse() { Starts[111]="2001"; }
+  public static void RawReparent() {
+    var sibling = new System.Windows.Automation.AutomationElement();
+    sibling.Current.NativeWindowHandle=223; sibling.Runtime=new[]{9};
+    AutomationRoot().Children[0].Parent=sibling;
+  }
+  public static void SupportChanged() { AutomationRoot().Children[0].UnsupportedPid=true; }
+  public static void AddChild() {
+    var root=AutomationRoot();
+    var extra=new System.Windows.Automation.AutomationElement();
+    extra.Current.NativeWindowHandle=0; extra.Parent=root; extra.Runtime=new[]{99};
+    root.Children=new[]{root.Children[0],extra};
+  }
+  public static void RemoveChildren() { AutomationRoot().Children=new System.Windows.Automation.AutomationElement[0]; }
+  private static System.Windows.Automation.AutomationElement AutomationRoot() {
+    return System.Windows.Automation.AutomationElement.Root;
   }
 }
 '@
 $tokens = $null; $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($Backend, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'backend did not parse' }
-$function = $ast.Find({param($node)
-  $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-AutomationHarvest'
+$functions = $ast.FindAll({param($node)
+  $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -in @('Get-IdentitySnapshot', 'Get-AutomationHarvest')
 }, $true)
-if ($null -eq $function) { throw 'harvest function missing' }
-Invoke-Expression $function.Extent.Text
+if ($functions.Count -ne 2) { throw 'harvest functions missing' }
+foreach ($function in $functions) { Invoke-Expression $function.Extent.Text }
 $DesktopPid = '111'
 $script:remaining = 4000
 $root = [System.Windows.Automation.AutomationElement]::Root
 $child = [System.Windows.Automation.AutomationElement]::new()
+$child.Current.NativeWindowHandle = 0
+$child.Runtime = @(2)
+$child.Parent = $root
 $root.Children = @($child)
 switch ($Case) {
+  linear32 { $count = 32 }
+  linear128 { $count = 128 }
+  linear1091 { $count = 1091 }
+  late_unsupported { $count = 128 }
+  late_process_change {
+    $count = 128
+    [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::RootProcessReuse() }
+  }
   root_pid { $root.Current.ProcessId = 112 }
   reused { $root.Current.NativeWindowHandle = 223 }
   child_pid { $child.Current.ProcessId = 112 }
+  foreign_child { $child.Current.ProcessId = 112; $child.Current.NativeWindowHandle = 224 }
+  foreign_grandchild { $child.Current.ProcessId = 113; $child.Current.NativeWindowHandle = 225 }
+  foreign_progress {
+    $child.Current.ProcessId = 112; $child.Current.NativeWindowHandle = 224
+    $child.Current.Text = 'Evaluating...'
+  }
+  foreign_shared {
+    $child.Current.ProcessId = 112; $child.Current.NativeWindowHandle = 224
+    [DesktopHarvest]::Pids[225] = 112; [DesktopHarvest]::Parents[225] = 223
+  }
+  foreign_unowned {
+    $child.Current.ProcessId = 112; $child.Current.NativeWindowHandle = 224
+    [DesktopHarvest]::Parents[224] = 0
+  }
+  foreign_sibling {
+    $child.Current.ProcessId = 112; $child.Current.NativeWindowHandle = 225
+    [DesktopHarvest]::Pids[225] = 112; [DesktopHarvest]::Parents[225] = 223
+  }
+  foreign_raw_sibling {
+    $child.Current.ProcessId = 112; $child.Current.NativeWindowHandle = 224
+    $child.Parent = [System.Windows.Automation.AutomationElement]::new()
+    $child.Parent.Current.NativeWindowHandle = 223
+    $child.Parent.Runtime = @(9)
+  }
+  missing_provider {
+    $child.Current.ProcessId = 112; $child.Current.NativeWindowHandle = 224
+    [void][DesktopHarvest]::Starts.Remove([uint32]112)
+  }
+  native_pid_mismatch { $child.Current.ProcessId = 113; $child.Current.NativeWindowHandle = 224 }
+  zero_anchored { $child.Current.ProcessId = 0 }
+  zero_progress { $child.Current.ProcessId = 0; $child.Current.Text = 'Evaluating...' }
+  zero_unsupported_anchored { $child.Current.ProcessId = 0; $child.UnsupportedPid = $true }
+  zero_unowned { $child.Current.ProcessId = 0; $child.Parent = $null }
+  zero_unsupported_unowned { $child.Current.ProcessId = 0; $child.UnsupportedPid = $true; $child.Parent = $null }
+  zero_empty_identity { $child.Current.ProcessId = 0; $child.Runtime = @() }
+  zero_native_unattested { $child.Current.ProcessId = 0; $child.Current.NativeWindowHandle = 224 }
+  zero_password { $child.Current.ProcessId = 0; $child.Current.IsPassword = $true; $child.Current.Text = 'PRIVATE_EDIT_VALUE' }
+  zero_password_readonly {
+    $child.Current.ProcessId = 0; $child.Current.IsPassword = $true
+    $child.Current.ControlType.ProgrammaticName = 'ControlType.Document'
+    $child.Current.Text = 'PRIVATE_EDIT_VALUE'
+    $child.Text = [System.Windows.Automation.TextPattern]::new()
+  }
+  zero_editable {
+    $child.Current.ProcessId = 0; $child.Current.ControlType.ProgrammaticName = 'ControlType.Edit'
+    $child.Current.Text = 'PRIVATE_EDIT_VALUE'
+  }
+  zero_empty { $child.Current.ProcessId = 0; $child.Current.Text = '' }
+  zero_nonreadonly_document {
+    $child.Current.ProcessId = 0; $child.Current.ControlType.ProgrammaticName = 'ControlType.Document'
+    $child.Current.Text = 'PRIVATE_EDIT_VALUE'
+    $child.Text = [System.Windows.Automation.TextPattern]::new()
+    $child.Text.DocumentRange.ReadOnly = $false
+  }
+  zero_readonly_credential {
+    $child.Current.ProcessId = 0; $child.Current.ControlType.ProgrammaticName = 'ControlType.Document'
+    $child.Current.Text = 'Enter your credentials'
+    $child.Text = [System.Windows.Automation.TextPattern]::new()
+    $child.Text.DocumentRange.Text = 'Enter your credentials'
+  }
+  native_reparent {
+    $child.Current.ProcessId = 112; $child.Current.NativeWindowHandle = 224
+    [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::NativeReparent() }
+  }
+  provider_reuse {
+    $child.Current.ProcessId = 112; $child.Current.NativeWindowHandle = 224
+    [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::ProviderReuse() }
+  }
+  root_reuse { [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::RootReuse() } }
+  root_process_reuse { [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::RootProcessReuse() } }
+  raw_reparent { [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::RawReparent() } }
+  zero_support_changed {
+    $child.Current.ProcessId = 0
+    [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::SupportChanged() }
+  }
+  next_support_changed {
+    $second = [System.Windows.Automation.AutomationElement]::new()
+    $second.Current.NativeWindowHandle = 0
+    $second.Runtime = @(3)
+    $second.Parent = $root
+    $child.Text = [System.Windows.Automation.TextPattern]::new()
+    $second.Text = [System.Windows.Automation.TextPattern]::new()
+    # The stack visits the last child first; its Name invalidates the other live provider.
+    $root.Children = @($child, $second)
+    [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::SupportChanged() }
+  }
+  separate_root { $separateCase = $true }
+  separate_unenumerated { $separateCase = $true }
+  separate_reparent {
+    $separateCase = $true
+    [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::SeparateReparent() }
+  }
+  separate_disappear {
+    $separateCase = $true
+    [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::SeparateDisappear() }
+  }
+  separate_reuse {
+    $separateCase = $true
+    [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::RootProcessReuse() }
+  }
+  tree_added { [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::AddChild() } }
+  tree_removed { [System.Windows.Automation.AutomationElement]::AfterName = [Action]{ [DesktopHarvest]::RemoveChildren() } }
   password { $child.Current.IsPassword = $true; $child.Current.Text = 'PRIVATE_EDIT_VALUE' }
   editable { $child.Current.ControlType.ProgrammaticName = 'ControlType.Edit'; $child.Current.Text = 'PRIVATE_EDIT_VALUE' }
   combo { $child.Current.ControlType.ProgrammaticName = 'ControlType.ComboBox'; $child.Current.Text = 'PRIVATE_EDIT_VALUE' }
@@ -4069,14 +4441,185 @@ switch ($Case) {
   truncated {
     $script:remaining = 1
     $second = [System.Windows.Automation.AutomationElement]::new()
+    $second.Current.NativeWindowHandle = 0
+    $second.Runtime = @(3)
+    $second.Parent = $root
     $second.Current.Text = 'PRIVATE_EDIT_VALUE'
     $root.Children = @($child, $second)
   }
 }
-$result = Get-AutomationHarvest -Handle ([IntPtr]222)
+if ($count) {
+  $children = @()
+  for ($i=0; $i -lt $count; $i++) {
+    $leaf = [System.Windows.Automation.AutomationElement]::new()
+    $leaf.Current.NativeWindowHandle = 0; $leaf.Runtime = @(100+$i); $leaf.Parent=$root
+    $children += $leaf
+  }
+  if ($Case -eq 'late_unsupported') { $children[-1].UnsupportedPid = $true }
+  $root.Children = $children
+}
+$windowRoots = @{}
+if ($separateCase) {
+  $separate = [System.Windows.Automation.AutomationElement]::new()
+  $separate.Current.NativeWindowHandle = 224; $separate.Runtime = @(3); $separate.Parent = $root
+  [DesktopHarvest]::Pids[224] = 111; [DesktopHarvest]::Parents[224] = 0; [DesktopHarvest]::Owners[224] = 222
+  $leaf = [System.Windows.Automation.AutomationElement]::new()
+  $leaf.Current.NativeWindowHandle = 0; $leaf.Runtime = @(4); $leaf.Parent = $separate
+  $leaf.Current.Text = 'SEPARATE_CONTENT'
+  $separate.Children = @($leaf)
+  $root.Children = @($separate, $child)
+  if ($Case -ne 'separate_unenumerated') { $windowRoots[[IntPtr]224] = [IntPtr]222 }
+}
+foreach ($handle in $windowRoots.Keys) {
+  $native = [DesktopHarvest+Window]::new()
+  $native.Hwnd = $handle; $native.Owner = $windowRoots[$handle]
+  [DesktopHarvest]::RootWindows.Add($native)
+}
+$result = Get-AutomationHarvest -Handle ([IntPtr]222) -WindowRoots $windowRoots
+$separateResult = $null
+if ($Case -eq 'separate_root') {
+  [System.Windows.Automation.AutomationElement]::Root = $separate
+  $separateResult = Get-AutomationHarvest -Handle ([IntPtr]224) -WindowRoots $windowRoots
+}
+$rootSetRefused = $null
+if ($Case.StartsWith('rootset_')) {
+  $windowRoots = @{([IntPtr]222)=[IntPtr]::Zero; ([IntPtr]224)=[IntPtr]222}
+  foreach ($handle in @(222,224)) {
+    $native = [DesktopHarvest+Window]::new()
+    $native.Hwnd = [IntPtr]$handle; $native.Owner = $windowRoots[$native.Hwnd]
+    [DesktopHarvest]::RootWindows.Add($native)
+  }
+  switch ($Case) {
+    rootset_disappear { [DesktopHarvest]::RootWindows.RemoveAt(1) }
+    rootset_reparent { [DesktopHarvest]::RootWindows[1].Owner = [IntPtr]223 }
+    rootset_duplicate { [DesktopHarvest]::RootWindows[1].Hwnd = [IntPtr]222 }
+    rootset_added { [DesktopHarvest]::RootWindows.Add([DesktopHarvest+Window]::new()) }
+  }
+  $assignment = $ast.Find({param($node)
+    $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+      $node.Left.Extent.Text -eq '$finalWindows'
+  }, $true)
+  $statements = @($assignment.Parent.Statements)
+  $offset = [array]::IndexOf($statements, $assignment)
+  if ($offset -lt 0 -or $statements.Count -ne $offset + 4) { throw 'root set guard extraction failed' }
+  try {
+    foreach ($statement in $statements[$offset..($offset+3)]) { Invoke-Expression $statement.Extent.Text }
+    $rootSetRefused = $false
+  } catch {
+    if ($_.Exception.Message -ne 'native root set changed') { throw }
+    $rootSetRefused = $true
+  }
+}
 @{ payload=$result; names=[System.Windows.Automation.AutomationElement]::Names
-   documents=[System.Windows.Automation.AutomationElement]::Documents } | ConvertTo-Json -Depth 8 -Compress
+   rootset_refused=$rootSetRefused
+   separate_payload=$separateResult
+   documents=[System.Windows.Automation.AutomationElement]::Documents
+    snapshots=[System.Windows.Automation.AutomationElement]::Snapshots
+    cached_reads=[System.Windows.Automation.AutomationElement]::CachedReads
+    parent_reads=[System.Windows.Automation.AutomationElement]::ParentReads
+    process_reads=[DesktopHarvest]::ProcessReads
+    native_reads=[DesktopHarvest]::NativeReads
+   other_native_pid=[DesktopHarvest]::Pids[225]; other_native_parent=[DesktopHarvest]::Parents[225]
+} | ConvertTo-Json -Depth 8 -Compress
 """
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
+@pytest.mark.parametrize(
+    "fault",
+    ["alternating", "editable", "unsupported", "range_exception", "attribute_exception", "text_exception", "linear"],
+)
+def test_document_text_uses_only_the_attested_range(tmp_path: Path, fault: str) -> None:
+    """Range identity and actual private-read counts must survive provider changes and exceptions."""
+    harness = (
+        _HARVEST_PROVIDER_CONTROL.replace(
+            "public object ReadOnly = true;",
+            """public object ReadOnly = true;
+    public bool ThrowAttribute, ThrowText;
+    public static int FirstReads, SecondReads;
+    public bool Second;""",
+        )
+        .replace(
+            "return ReadOnly;",
+            'if (ThrowAttribute) throw new Exception("ATTRIBUTE"); return ReadOnly;',
+        )
+        .replace(
+            "AutomationElement.Documents++;",
+            """if (ThrowText) throw new Exception("TEXT");
+      if (Second) SecondReads++; else FirstReads++;
+      AutomationElement.Documents++;""",
+        )
+        .replace(
+            "public Range DocumentRange = new Range();",
+            """public static int RangeGets;
+    public static bool Alternating, ThrowRange;
+    private Range first = new Range(), second = new Range { Second=true, ReadOnly=false, Text="PRIVATE_EDIT_VALUE" };
+    public Range DocumentRange { get {
+      RangeGets++;
+      if (ThrowRange) throw new Exception("RANGE");
+      return Alternating && RangeGets > 1 ? second : first;
+    } }""",
+        )
+        .replace(
+            "if (!ignoreDefault) throw",
+            "LivePids++; if (!ignoreDefault) throw",
+        )
+        .replace(
+            "public static int Names, Documents;",
+            "public static int Names, Documents, LivePids;",
+        )
+    )
+    setup = {
+        "alternating": "[System.Windows.Automation.TextPattern]::Alternating=$true",
+        "editable": "$child.Text.DocumentRange.ReadOnly=$false",
+        "unsupported": "$child.Text.DocumentRange.ReadOnly=[System.Windows.Automation.AutomationElement]::NotSupported",
+        "range_exception": "[System.Windows.Automation.TextPattern]::ThrowRange=$true",
+        "attribute_exception": "$child.Text.DocumentRange.ThrowAttribute=$true",
+        "text_exception": "$child.Text.DocumentRange.ThrowText=$true",
+        "linear": ("foreach ($leaf in $root.Children) { $leaf.Text=[System.Windows.Automation.TextPattern]::new() }"),
+    }[fault]
+    harness = harness.replace(
+        "$result = Get-AutomationHarvest -Handle",
+        setup + "\n[System.Windows.Automation.TextPattern]::RangeGets=0\n$result = Get-AutomationHarvest -Handle",
+    ).replace(
+        "rootset_refused=$rootSetRefused",
+        """range_gets=[System.Windows.Automation.TextPattern]::RangeGets
+   first_reads=[System.Windows.Automation.Range]::FirstReads
+   second_reads=[System.Windows.Automation.Range]::SecondReads
+   live_pids=[System.Windows.Automation.AutomationElement]::LivePids
+   rootset_refused=$rootSetRefused""",
+    )
+    script = tmp_path / "range_control.ps1"
+    script.write_text(harness, encoding="utf-8")
+    result = subprocess.run(
+        [
+            _powershell(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(script),
+            "-Backend",
+            str(Path(_desktop_observer.__file__).with_name("_desktop_uia.ps1")),
+            "-Case",
+            "linear1091" if fault == "linear" else "readonly_document",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=20,
+    )
+    assert result.returncode == 0, "provider setup and real harvest must execute before assertions"
+    record = json.loads(result.stdout)
+    count = 1091 if fault == "linear" else 1
+    assert record["range_gets"] == count, "each document must use precisely one range instance"
+    assert record["second_reads"] == 0, "text must never come from the unattested second range"
+    assert "PRIVATE_EDIT_VALUE" not in json.dumps(record)
+    readable = fault in {"alternating", "linear"}
+    assert record["first_reads"] == record["documents"] == record["names"] == (count if readable else 0)
+    assert record["payload"]["patterns_incomplete"] is not readable
+    if readable:
+        assert record["live_pids"] == count * 2
+        assert record["snapshots"] == 2 and record["process_reads"] == record["native_reads"] == 2
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
@@ -4095,6 +4638,52 @@ $result = Get-AutomationHarvest -Handle ([IntPtr]222)
         "unknown_readonly",
         "oversized",
         "truncated",
+        "foreign_child",
+        "foreign_grandchild",
+        "foreign_progress",
+        "foreign_shared",
+        "foreign_unowned",
+        "foreign_sibling",
+        "foreign_raw_sibling",
+        "missing_provider",
+        "native_pid_mismatch",
+        "zero_anchored",
+        "zero_progress",
+        "zero_unsupported_anchored",
+        "zero_unowned",
+        "zero_unsupported_unowned",
+        "zero_empty_identity",
+        "zero_native_unattested",
+        "zero_password",
+        "zero_password_readonly",
+        "zero_editable",
+        "zero_empty",
+        "zero_nonreadonly_document",
+        "zero_readonly_credential",
+        "native_reparent",
+        "provider_reuse",
+        "root_reuse",
+        "root_process_reuse",
+        "raw_reparent",
+        "zero_support_changed",
+        "next_support_changed",
+        "separate_root",
+        "separate_unenumerated",
+        "separate_reparent",
+        "separate_disappear",
+        "separate_reuse",
+        "rootset_stable",
+        "rootset_disappear",
+        "rootset_reparent",
+        "rootset_duplicate",
+        "rootset_added",
+        "linear32",
+        "linear128",
+        "linear1091",
+        "late_unsupported",
+        "late_process_change",
+        "tree_added",
+        "tree_removed",
     ],
 )
 def test_native_harvest_provider_guards_precede_every_private_read(tmp_path: Path, case: str) -> None:
@@ -4122,12 +4711,263 @@ def test_native_harvest_provider_guards_precede_every_private_read(tmp_path: Pat
     record = json.loads(result.stdout)
     payload = record["payload"]
     assert "PRIVATE_EDIT_VALUE" not in json.dumps(record), "editable/password/capped provider text was read"
-    if case in {"complete", "readonly_document"}:
+    if case.startswith("linear"):
+        count = int(case.removeprefix("linear"))
         assert payload["patterns_incomplete"] is False and payload["truncated"] is False
-        assert record["names"] == 1 and record["documents"] == (1 if case == "readonly_document" else 0)
+        assert record["names"] == len(payload["items"]) == count, "all descendants must remain in scope"
+        assert record["snapshots"] == 2 and record["parent_reads"] == 0
+        assert record["process_reads"] == record["native_reads"] == 2, "bindings must be fresh once PER pass"
+        assert 6 * (count + 1) <= record["cached_reads"] <= 8 * (count + 1)
+    elif case in {
+        "complete",
+        "readonly_document",
+        "foreign_child",
+        "foreign_grandchild",
+        "foreign_progress",
+        "foreign_shared",
+        "zero_anchored",
+        "zero_progress",
+        "zero_readonly_credential",
+    }:
+        assert payload["patterns_incomplete"] is False and payload["truncated"] is False
+        assert record["names"] == 1
+        assert record["documents"] == (1 if case in {"readonly_document", "zero_readonly_credential"} else 0)
+        if case == "foreign_shared":
+            assert record["other_native_pid"] == 112 and record["other_native_parent"] == 223
+        if case in {"foreign_progress", "zero_progress"}:
+            facts = harvest_fixture()["windows"][1]
+            facts.update(payload)
+            window = _desktop_observer._window_fact(facts)
+            frame = _desktop_observer._window_fact(harvest_fixture()["windows"][0])
+            assert window.complete
+            assert inspect_desktop_observer(111, lambda _pid: [frame, window]).state == "REFRESH_IN_PROGRESS"
+        if case == "zero_readonly_credential":
+            window = owned_dialog(())
+            window = _desktop_observer.replace(
+                window, items=tuple((v["Text"], v["Role"], v["Source"]) for v in payload["items"])
+            )
+            assert inspect_desktop_observer(111, lambda _pid: [main_window(), window]).state == "CREDENTIAL_REQUIRED"
     elif case in {"oversized", "truncated"}:
         assert payload["truncated"] is True
-        assert record["names"] == (1 if case == "truncated" else 0)
+        assert record["names"] == 0
+    elif case == "next_support_changed":
+        assert payload["patterns_incomplete"] is True and payload["items"] == []
+        assert (record["names"], record["documents"]) == (1, 1), "no private reads from the next unsupported provider"
+    elif case == "separate_root":
+        for root_payload, expected in ((payload, ["STATIC_NAME"]), (record["separate_payload"], ["SEPARATE_CONTENT"])):
+            assert (
+                root_payload["patterns_incomplete"] is False
+                and root_payload["truncated"] is False
+                and [item["Text"] for item in root_payload["items"]] == expected
+            )
+        assert record["names"] == 2 and record["documents"] == 0, "each subtree must be read only in its own root"
+    elif case.startswith("rootset_"):
+        assert record["rootset_refused"] is (case != "rootset_stable")
+    elif case.startswith("separate_"):
+        assert (
+            payload["patterns_incomplete"] is True
+            and payload["items"] == []
+            and record["names"] == (0 if case == "separate_unenumerated" else 1)
+            and record["documents"] == 0
+        ), "unattested separate roots must not authorize private reads"
     else:
         assert payload["patterns_incomplete"] is True
-        assert record["names"] == record["documents"] == 0, "a private descendant was read before refusal"
+        assert payload["items"] == []
+        assert record["documents"] == 0
+        assert record["names"] == (
+            128
+            if case == "late_process_change"
+            else 1
+            if case
+            in {
+                "native_reparent",
+                "provider_reuse",
+                "root_reuse",
+                "root_process_reuse",
+                "raw_reparent",
+                "zero_support_changed",
+                "zero_empty",
+                "tree_added",
+                "tree_removed",
+            }
+            else 0
+        )
+
+
+_PIDZERO_NATIVE_PROVIDER = r"""
+param([string]$ReadyFile, [int]$LeafCount = 3)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationProvider,UIAutomationTypes,WindowsBase,System.Windows.Forms
+Add-Type -ReferencedAssemblies UIAutomationProvider,UIAutomationTypes,WindowsBase,System.Windows.Forms,System.Drawing @'
+using System;
+using System.Diagnostics;
+using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Automation.Provider;
+using System.Windows.Forms;
+public class ProbeForm : Form {
+  public ProbeNode Root;
+  public ProbeForm() { Text="TEST_779"; Width=400; Height=200; ShowInTaskbar=false; }
+  protected override bool ShowWithoutActivation { get { return true; } }
+  protected override void WndProc(ref Message m) {
+    if (m.Msg==0x003d && m.LParam.ToInt64()==AutomationInteropProvider.RootObjectId) {
+      if (Root==null) Root=new ProbeNode(this,0);
+      m.Result=AutomationInteropProvider.ReturnRawElementProvider(Handle,m.WParam,m.LParam,Root); return;
+    }
+    base.WndProc(ref m);
+  }
+}
+public class ProbeNode : IRawElementProviderFragmentRoot {
+  public static int LeafCount=3;
+  public ProbeForm Form; public int Kind;
+  public ProbeNode[] Leaves;
+  public ProbeNode(ProbeForm form,int kind) {
+    Form=form; Kind=kind;
+    if (kind==0) {
+      Leaves=new ProbeNode[LeafCount];
+      for(int i=0;i<LeafCount;i++) Leaves[i]=new ProbeNode(form,i+1);
+    }
+  }
+  public ProviderOptions ProviderOptions { get { return ProviderOptions.ServerSideProvider; } }
+  public IRawElementProviderSimple HostRawElementProvider { get {
+    return Kind==0 ? AutomationInteropProvider.HostProviderFromHandle(Form.Handle) : null;
+  }}
+  public object GetPatternProvider(int patternId) { return null; }
+  public object GetPropertyValue(int propertyId) {
+    if(propertyId==AutomationElementIdentifiers.ProcessIdProperty.Id && Kind==3)
+      return AutomationElementIdentifiers.NotSupported;
+    if(propertyId==AutomationElementIdentifiers.ProcessIdProperty.Id)
+      return Kind==1 ? null : (object)(Kind==2 ? 0 : Process.GetCurrentProcess().Id);
+    if(propertyId==AutomationElementIdentifiers.ControlTypeProperty.Id)
+      return Kind==0 ? ControlType.Window.Id : ControlType.Text.Id;
+    if(propertyId==AutomationElementIdentifiers.IsPasswordProperty.Id) return false;
+    if(propertyId==AutomationElementIdentifiers.NameProperty.Id) return "TEST_STATIC_"+Kind;
+    return null;
+  }
+  public IRawElementProviderFragment Navigate(NavigateDirection direction) {
+    if(Kind==0 && direction==NavigateDirection.FirstChild) return Leaves[0];
+    if(Kind==0 && direction==NavigateDirection.LastChild) return Leaves[LeafCount-1];
+    if(Kind!=0 && direction==NavigateDirection.Parent) return Form.Root;
+    if(Kind>0 && Kind<LeafCount && direction==NavigateDirection.NextSibling) return Form.Root.Leaves[Kind];
+    if(Kind>1 && direction==NavigateDirection.PreviousSibling) return Form.Root.Leaves[Kind-2];
+    return null;
+  }
+  public int[] GetRuntimeId() { return Kind==0 ? null : new[]{AutomationInteropProvider.AppendRuntimeId,Kind}; }
+  public Rect BoundingRectangle { get { return new Rect(10,10,100,30); } }
+  public IRawElementProviderSimple[] GetEmbeddedFragmentRoots() { return null; }
+  public void SetFocus() { throw new InvalidOperationException("READ_ONLY"); }
+  public IRawElementProviderFragmentRoot FragmentRoot { get { return Form.Root; } }
+  public IRawElementProviderFragment ElementProviderFromPoint(double x,double y) { return this; }
+  public IRawElementProviderFragment GetFocus() { return null; }
+}
+'@
+[ProbeNode]::LeafCount=$LeafCount
+$form = [ProbeForm]::new()
+[void]$form.Handle
+[IO.File]::WriteAllText($ReadyFile, (@{pid=[string]$PID; hwnd=[string]$form.Handle.ToInt64()} | ConvertTo-Json -Compress))
+$timer = [Windows.Forms.Timer]::new()
+$timer.Interval = 60000
+$timer.Add_Tick({$form.Close()})
+$timer.Start()
+[Windows.Forms.Application]::Run($form)
+$timer.Dispose()
+$form.Dispose()
+"""
+
+_PIDZERO_NATIVE_CLIENT = r"""
+param([long]$Handle)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
+$root = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]::new($Handle))
+$rows = @()
+foreach ($node in $root.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)) {
+  $noDefault = $node.GetCurrentPropertyValue([Windows.Automation.AutomationElement]::ProcessIdProperty,$true)
+  $parent = [Windows.Automation.TreeWalker]::RawViewWalker.GetParent($node)
+  $rows += @{
+    pid=$node.Current.ProcessId
+    unsupported=[object]::ReferenceEquals($noDefault,[Windows.Automation.AutomationElement]::NotSupported)
+    explicit=if ([object]::ReferenceEquals($noDefault,[Windows.Automation.AutomationElement]::NotSupported)) {$null} else {$noDefault}
+    native=$node.Current.NativeWindowHandle
+    parent_pid=$parent.Current.ProcessId
+    parent_native=$parent.Current.NativeWindowHandle
+    parent_exact_root=[Windows.Automation.Automation]::Compare($parent,$root)
+    runtime_present=$null -ne $node.GetRuntimeId()
+  }
+}
+ConvertTo-Json -InputObject @($rows) -Depth 4 -Compress
+"""
+
+
+@pytest.mark.serial
+@pytest.mark.gui
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
+@pytest.mark.parametrize("leaf_count", [3, 1091])
+def test_native_pid_zero_is_not_synonymous_with_unsupported_and_can_have_exact_root(
+    tmp_path: Path, leaf_count: int
+) -> None:
+    """Independent WM_GETOBJECT provider: no Desktop, focus, credentials, Refresh or arbitrary UI text."""
+    provider, client, ready = (tmp_path / name for name in ("native_provider.ps1", "native_client.ps1", "ready.json"))
+    provider.write_text(_PIDZERO_NATIVE_PROVIDER, encoding="utf-8")
+    client.write_text(_PIDZERO_NATIVE_CLIENT, encoding="utf-8")
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetForegroundWindow.argtypes = []
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    with subprocess.Popen(
+        [
+            _powershell(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            str(provider),
+            "-ReadyFile",
+            str(ready),
+            "-LeafCount",
+            str(leaf_count),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as child:
+        try:
+            deadline = time.monotonic() + 12
+            while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert ready.exists(), "native provider never became ready"
+            identity = json.loads(ready.read_text(encoding="utf-8"))
+            assert identity["pid"] == str(child.pid), "fixture identity is not its owned process"
+            assert user32.GetForegroundWindow() != int(identity["hwnd"]), "fixture must not take focus"
+            metadata = subprocess.run(
+                [_powershell(), "-NoProfile", "-NonInteractive", "-File", str(client), "-Handle", identity["hwnd"]],
+                capture_output=True,
+                text=True,
+                timeout=12,
+                check=False,
+            )
+            assert metadata.returncode == 0, "independent UIA semantics probe did not execute"
+            rows = json.loads(metadata.stdout)
+            assert len(rows) == leaf_count
+            # The native host fills omitted/NotSupported provider PIDs; explicit zero remains zero.
+            assert rows[0]["pid"] == rows[2]["pid"] == child.pid
+            assert rows[1]["pid"] == rows[1]["explicit"] == 0 and rows[1]["unsupported"] is False
+            assert all(row["parent_exact_root"] and row["runtime_present"] for row in rows)
+            assert all(row["parent_pid"] == child.pid and row["parent_native"] == int(identity["hwnd"]) for row in rows)
+            harvest_started = time.monotonic()
+            _, windows = _desktop_observer._harvest(str(child.pid), 8.0, None)
+            harvest_elapsed = time.monotonic() - harvest_started
+            target = next(window for window in windows if window.hwnd == int(identity["hwnd"]))
+            assert target.complete, "a rooted, read-only explicit-zero virtual node was refused"
+            assert {item[0] for item in target.items} == {f"TEST_STATIC_{i}" for i in range(1, leaf_count + 1)}
+            print(
+                json.dumps(
+                    {
+                        "native_leaf_count": leaf_count,
+                        "harvest_seconds": harvest_elapsed,
+                        "complete": target.complete,
+                        "item_count": len(target.items),
+                    }
+                )
+            )
+            assert user32.GetForegroundWindow() != int(identity["hwnd"]), "read-only acquisition must not take focus"
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)

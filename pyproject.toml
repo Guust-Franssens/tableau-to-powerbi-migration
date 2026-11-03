@@ -8,6 +8,9 @@ dependencies = [
     "jsonschema>=4.22",
 ]
 
+[project.scripts]
+t2p = "t2p:console_main"
+
 [project.optional-dependencies]
 extract = [
     "tableauhyperapi>=0.0.19315",
@@ -42,12 +45,12 @@ dev = [
     "pillow>=10.3",
 ]
 
-# This is a SCRIPT toolkit, not an importable library: everything runs as `python scripts/<x>.py`.
-# Without this, setuptools' flat-layout auto-discovery tries to package the top-level content folders
-# (examples/, migrations/) and fails with "Multiple top-level packages discovered in a
-# flat-layout", which breaks `uv sync` and therefore pytest for everyone.
+# Install only the navigation facade; backend scripts/assets stay in the local toolkit checkout.
+# Explicit modules avoid flat-layout discovery of examples/, migrations/ and the other scripts.
 [tool.setuptools]
-py-modules = []
+py-modules = ["t2p"]
+package-dir = {"" = "scripts"}
+include-package-data = false
 
 [tool.pytest.ini_options]
 # Default to reporting failed, skipped, and error details so evidence is visible (issues #435, #436).
