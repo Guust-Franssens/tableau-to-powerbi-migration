@@ -193,7 +193,8 @@ uniqueness scan and independent selected/final ownership checks remain fresh, wi
 Focus uses bounded thread-input attachment between the current thread and distinct required
 foreground/target threads, with exact root and permitted-foreground checks before attachment and
 before BringWindowToTop/SetForegroundWindow. Only successful attachments are tracked and detached
-in finally on every path. There is no input injection, ShowWindow or minimized-window recovery.
+in finally on every path. There is no input injection, ShowWindow or minimized-window recovery; the
+CLI never resizes a window.
 Handback additionally requires the captured prior HWND's PID/start identity to remain unchanged;
 a detected human foreground switch or identity change prevents restoration.
 Handback verification is a point-in-time observation after 150 ms, not a guarantee of stable
@@ -207,6 +208,13 @@ root, then a held binding read, exact-PID connected bridge with `hasUnsavedChang
 unchanged resolved cache destination and the existing cache timestamp check govern persistence,
 within the original deadline. Unknown/unreadable dialogs remain blockers; a ribbon alone is not
 permission to dismiss, Apply or reload anything. Cold-reopen durability remains unverified.
+
+The route prints the observed root size (`  frame  : observed <W>x<H>`). A small frame collapses the
+Home ribbon, so `UI_ACTION_REFUSED (named_control_missing; ...)` adds
+`  hint   : a small frame collapses the Home ribbon; maximize the Desktop window`. `_desktop_frame.py`
+can fit a launcher's own instance to its nearest monitor's work area (identity-gated, no activation, no
+z-order change); no launcher calls it yet, so an agent-launched small frame still refuses
+`named_control_missing` with the hint (#805).
 
 Mode decoding uses the engine's `ModeType` for `Model.DefaultMode` and `Partition.Mode`:
 Import=0, DirectQuery=1, Default=2, Push=3, Dual=4, DirectLake=5. Only partition Default

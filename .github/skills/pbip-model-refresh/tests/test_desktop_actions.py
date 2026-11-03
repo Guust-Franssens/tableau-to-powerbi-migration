@@ -3546,3 +3546,34 @@ def test_scope_negative_controls_refuse_before_any_action(
     context, args, calls = _scope_route(monkeypatch, tmp_path, queries=queries, expressions=expressions, **options)
 
     assert f"automatic source scope: {clause})" in _refusal(context, args, calls, capsys)
+
+
+@pytest.mark.parametrize("reason", ["named_control_missing", "ambiguous_named_control"])
+def test_ui_refusal_prints_the_observed_frame_and_hints_only_a_missing_control(
+    ui_refresh_route, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], reason: str
+) -> None:
+    """#805: a small frame collapses the ribbon; the CLI names the size and never resizes."""
+    controls, _events, actions_seen, _bridge_operations = ui_refresh_route
+    root = DesktopWindow("", "", 636, 400, hwnd=789, pid="123", process_started_at="456")
+    controls["observer"] = Observation(pid="123", process_started_at="456", target_window=root)
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "invoke_desktop_action",
+        lambda action, **_kwargs: (
+            actions_seen.append(action) or ActionResult(action, False, reason, 1, None, False, "not_requested")
+        ),
+    )
+
+    assert refresh_pbip_model.main(["--pid", "123", "--ui-refresh", "--no-save"]) == 2
+
+    out = capsys.readouterr().out
+    hint = "  hint   : a small frame collapses the Home ribbon; maximize the Desktop window\n"
+    refusal = f"REFRESH: UI_ACTION_REFUSED ({reason}; focus attempts=1)\n"
+    assert out.count("  frame  : observed 636x400\n") == 1
+    assert out.index("  frame  : observed") < out.index(refusal)
+    assert actions_seen == ["Refresh"]
+    if reason == "named_control_missing":
+        assert out.count(hint) == 1 and out.index(refusal) < out.index(hint)
+        assert "resize" not in hint and "--" not in hint
+    else:
+        assert "hint" not in out
