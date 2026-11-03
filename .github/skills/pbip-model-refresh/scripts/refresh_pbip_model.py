@@ -2565,6 +2565,8 @@ def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many
         return 3
     try:
         root_hwnd = _ui_root(initial_state, pid, initial_state.process_started_at or "")
+        frame = initial_state.target_window or main_frame(initial_state.windows)
+        print(f"  frame  : observed {frame.width}x{frame.height}")
         _ui_read_budget(deadline)
         bound = bind_desktop(pid, supplied_port=port)
         _ui_read_budget(deadline)
@@ -2641,6 +2643,8 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         return 2
     if not action.invoked or action.action_started_ticks is None:
         print(f"REFRESH: UI_ACTION_REFUSED ({action.reason}; focus attempts={action.focus_attempts})")
+        if action.reason == "named_control_missing":
+            print("  hint   : a small frame collapses the Home ribbon; maximize the Desktop window")
         return 2
     print(
         "  UI Refresh: one named Invoke returned; engine completion remains unestablished "
