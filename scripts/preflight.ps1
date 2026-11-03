@@ -160,15 +160,33 @@ else {
         -DoctorId 'python_runtime' -DoctorReason 'runtime_unavailable_or_old' -DoctorRemedy 'install_python'
 }
 
+function Add-NodeRuntimeCheck([string]$Raw) {
+    # Compare the numeric core: [version] rejects a prerelease suffix, so a Node 27 alpha used to fail this
+    # critical floor. Semver orders X.Y.Z-pre before X.Y.Z, so a prerelease AT the floor still fails.
+    # A prerelease above the floor passes it and gets a non-blocking warning.
+    $text = if ($null -eq $Raw) { '' } else { $Raw.Trim() }
+    $detail = if ($text) { $text -replace '^v', '' } else { 'no version reported' }
+    $ok = $false
+    $prerelease = $false
+    if ($text -cmatch '\Av?([0-9]+\.[0-9]+\.[0-9]+)(-[0-9A-Za-z.-]+)?\z') {
+        $prerelease = [bool]$Matches[2]
+        try {
+            $core = [version]$Matches[1]
+            $ok = ($core -gt [version]'20.0.0') -or ($core -eq [version]'20.0.0' -and -not $prerelease)
+        }
+        catch { $ok = $false }
+    }
+    Add-Check 'Node.js >= 20' 'critical' $ok $detail 'Install Node.js 20+; npx and the Power BI bridge CLIs depend on it.' `
+        -DoctorId 'node_runtime' -DoctorReason 'runtime_unavailable_or_old' -DoctorRemedy 'install_node'
+    if ($ok -and $prerelease) {
+        Add-Check 'Node.js release build' 'recommended' $false "$detail is a prerelease build" `
+            'Install the current Node.js LTS release; prerelease builds are not exercised by this toolkit.'
+    }
+}
+
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) {
-    $nodeRaw = (& node --version 2>&1 | Select-Object -First 1) -replace '^v', ''
-    $nodeOk = $false
-    try { $nodeOk = [version]$nodeRaw -ge [version]'20.0.0' } catch { $nodeOk = $false }
-    Add-Check 'Node.js >= 20' 'critical' $nodeOk `
-        $(if ($nodeRaw) { $nodeRaw } else { 'no version reported' }) `
-        'Install Node.js 20+; npx and the Power BI bridge CLIs depend on it.' `
-        -DoctorId 'node_runtime' -DoctorReason 'runtime_unavailable_or_old' -DoctorRemedy 'install_node'
+    Add-NodeRuntimeCheck ([string](& node --version 2>&1 | Select-Object -First 1))
 }
 else {
     Add-Check 'Node.js >= 20' 'critical' $false 'node not on PATH' 'Install Node.js 20+; npx and the Power BI bridge CLIs depend on it.' `
