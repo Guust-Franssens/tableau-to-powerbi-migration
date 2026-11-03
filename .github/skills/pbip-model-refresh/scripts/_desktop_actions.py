@@ -324,6 +324,25 @@ def check_automatic_source_scope(
         raise DesktopActionError("automatic source scope: metadata read failed") from None
 
 
+def check_baseline(snapshot: PartitionSnapshot) -> None:
+    """Admit a pre-action snapshot only when every source partition is READY (1) or never processed (3).
+
+    A never-processed M partition (TOM ObjectState NoData) reports State 3 with a typed 1699-12-31
+    RefreshedTime; localization re-points SourceFolder and returns every M partition to it, so no
+    cache may be assumed. Every other state, error and in-progress included, refuses.
+    """
+    if not snapshot.partitions:
+        raise DesktopActionError("initial source partition set is empty")
+    refused = {
+        partition.state if type(partition.state) is int else "non-integer"  # pylint: disable=unidiomatic-typecheck
+        for partition in snapshot.partitions
+        if type(partition.state) is not int or partition.state not in (1, 3)  # pylint: disable=unidiomatic-typecheck
+    }
+    if refused:
+        states = ", ".join(sorted(map(str, refused)))
+        raise DesktopActionError(f"initial source partition state is not READY or never-processed (state {states})")
+
+
 def check_completion(
     baseline: PartitionSnapshot,
     current: PartitionSnapshot,
