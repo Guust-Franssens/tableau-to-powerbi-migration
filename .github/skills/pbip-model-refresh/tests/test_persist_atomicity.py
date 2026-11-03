@@ -1461,7 +1461,12 @@ def test_ui_route_refuses_before_any_desktop_action_when_the_model_lock_is_not_w
         refresh_pbip_model, "read_partition_snapshot", lambda *_args, **_kwargs: SimpleNamespace(partitions=())
     )
     monkeypatch.setattr(refresh_pbip_model, "invoke_desktop_action", invoke)
-    initial = SimpleNamespace(complete=True, state="READY", process_started_at="456")
+    initial = SimpleNamespace(
+        complete=True,
+        state="READY",
+        process_started_at="456",
+        target_window=SimpleNamespace(width=1280, height=800),
+    )
     args = refresh_pbip_model._build_arg_parser().parse_args([])
 
     result = refresh_pbip_model._ui_refresh_and_save(123, 49157, cache, args, initial, deadline=time.monotonic() + 60)
