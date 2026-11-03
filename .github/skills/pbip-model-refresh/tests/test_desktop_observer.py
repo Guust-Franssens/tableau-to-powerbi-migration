@@ -4971,3 +4971,263 @@ def test_native_pid_zero_is_not_synonymous_with_unsupported_and_can_have_exact_r
             if child.poll() is None:
                 child.kill()
             child.communicate(timeout=5)
+
+
+_CREATION_START_FAKE = r"""
+$ErrorActionPreference='Stop'
+Add-Type @'
+using System;
+public static class CreationStartFake {
+  public static string Case;
+  public static uint Requested;
+  public static int Opened, Closed, Waits, Reads, Ids, LastError;
+  private static class Marshal { public static int GetLastWin32Error() { return LastError; } }
+  private static IntPtr OpenProcess(uint access, bool inherit, uint pid) {
+    if (access != 0x101000 || inherit || pid != Requested) throw new Exception("unexpected process rights/target");
+    Opened++;
+    if (Case == "gone") { LastError = 87; return IntPtr.Zero; }
+    if (Case == "denied") { LastError = 5; return IntPtr.Zero; }
+    if (Case == "open_failed") { LastError = 1450; return IntPtr.Zero; }
+    LastError = 0;
+    return (IntPtr)1;
+  }
+  private static uint GetProcessId(IntPtr h) {
+    if (h != (IntPtr)1) throw new Exception("wrong handle");
+    Ids++;
+    if (Case == "id_failed") { LastError = 6; return 0; }
+    return 51552;
+  }
+  private static uint WaitForSingleObject(IntPtr h, uint milliseconds) {
+    if (h != (IntPtr)1 || milliseconds != 0) throw new Exception("blocking or wrong handle");
+    Waits++;
+    if (Case == "wait_failed") { LastError = 6; return 0xffffffff; }
+    if (Case == "exited_before" || (Case == "exited_after" && Waits == 2)) return 0;
+    return 258;
+  }
+  private static bool GetProcessTimes(IntPtr h, out long c, out long e, out long k, out long u) {
+    if (h != (IntPtr)1) throw new Exception("wrong handle");
+    Reads++; c = new DateTime(639288946506233534, DateTimeKind.Utc).ToFileTimeUtc(); e = k = u = 0;
+    if (Case == "times_failed") { LastError = 5; return false; }
+    return true;
+  }
+  private static bool CloseHandle(IntPtr h) {
+    if (h != (IntPtr)1) throw new Exception("wrong handle");
+    Closed++; return true;
+  }
+METHOD
+}
+'@
+[CreationStartFake]::Case = 'CASE'
+[CreationStartFake]::Requested = REQUESTED
+$value = $null; $thrown = $null
+try { $value = [CreationStartFake]::CreationStart(REQUESTED) } catch { $thrown = $_.Exception.InnerException.GetType().Name }
+[pscustomobject]@{value=$value; thrown=$thrown; opened=[CreationStartFake]::Opened; ids=[CreationStartFake]::Ids
+  closed=[CreationStartFake]::Closed; waits=[CreationStartFake]::Waits; reads=[CreationStartFake]::Reads} |
+  ConvertTo-Json -Compress
+"""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA collector is Windows-only")
+@pytest.mark.parametrize(
+    ("case", "value", "thrown", "ids", "waits", "reads"),
+    [
+        # Independently measured retained PID: native 639288946506233534 -> CIM 639288946506233530.
+        ("valid", "639288946506233530", None, 1, 2, 1),
+        ("gone", None, None, 0, 0, 0),
+        ("denied", None, "Win32Exception", 0, 0, 0),
+        ("open_failed", None, "Win32Exception", 0, 0, 0),
+        ("aliased", None, None, 1, 0, 0),
+        ("id_failed", None, "Win32Exception", 1, 0, 0),
+        ("exited_before", None, None, 1, 1, 0),
+        ("exited_after", None, None, 1, 2, 1),
+        ("wait_failed", None, "Win32Exception", 1, 1, 0),
+        ("times_failed", None, "Win32Exception", 1, 1, 1),
+    ],
+)
+def test_collector_process_start_maps_native_failures_like_cim(
+    case: str, value: str | None, thrown: str | None, ids: int, waits: int, reads: int
+) -> None:
+    """Only a PID that does not exist (or has exited) reads as gone; an unreadable live PID must fail closed.
+
+    The collector's null/null payload is positive evidence that Desktop is gone, so access denied, an
+    unexpected open error, WAIT_FAILED or a failed time read must throw (collector exit 4 -> backend_failed).
+    """
+    source = Path(_desktop_observer.__file__).with_name("_desktop_uia.ps1").read_text(encoding="utf-8")
+    start = source.index("  public static string CreationStart(")
+    method = source[start : source.index("  public static List<Window> Windows(", start)]
+    # OpenProcess ignores a PID's low two bits: asking for 51553 opens process 51552.
+    requested = "51553" if case == "aliased" else "51552"
+    script = _CREATION_START_FAKE.replace("CASE", case).replace("REQUESTED", requested).replace("METHOD", method)
+    result = subprocess.run(
+        [_powershell(), "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    facts = json.loads(result.stdout)
+    assert (facts["value"], facts["thrown"]) == (value, thrown), result.stdout
+    assert facts["opened"] == 1, result.stdout
+    assert (facts["ids"], facts["waits"], facts["reads"]) == (ids, waits, reads), result.stdout
+    opened = case not in {"gone", "denied", "open_failed"}
+    assert facts["closed"] == (1 if opened else 0), "every opened handle is closed exactly once"
+
+
+def _collector_payload(pid: int) -> dict:
+    """Run the real collector child exactly as the observer does and return its raw payload."""
+    result = subprocess.run(
+        [
+            _powershell(),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(Path(_desktop_observer.__file__).with_name("_desktop_uia.ps1")),
+            "-DesktopPid",
+            str(pid),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    assert result.returncode == 0, f"collector failed for test-visible pid {pid}"
+    return json.loads(result.stdout)
+
+
+def _independent_cim_starts(pids: list[int]) -> dict[str, str | None]:
+    """The same separate CIM read probe_desktop_query uses for the bound Desktop identity."""
+    script = (
+        "$ErrorActionPreference='Stop'; $out=[ordered]@{}; foreach ($id in @("
+        + ",".join(str(pid) for pid in pids)
+        + ')) { $p = Get-CimInstance Win32_Process -Filter "ProcessId=$id"; $out[[string]$id] = $null; '
+        "if ($null -ne $p) { $out[[string]$id] = [string]$p.CreationDate.ToUniversalTime().Ticks } }; "
+        "$out | ConvertTo-Json -Compress"
+    )
+    result = subprocess.run(
+        [_powershell(), "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA collector is Windows-only")
+def test_collector_start_is_byte_identical_to_an_independent_cim_read() -> None:
+    """The observer's start token must equal the probe's CIM token byte for byte, or every bound compare fails.
+
+    Three independent start times make a dropped microsecond truncation escape with probability <= 1e-3.
+    """
+    owned = [
+        subprocess.Popen(
+            ["PING.EXE", "-n", "60", "127.0.0.1"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        for _ in range(2)
+    ]
+    try:
+        pids = [owned[0].pid, owned[1].pid, os.getpid()]
+        cim = _independent_cim_starts(pids)
+        for pid in pids:
+            expected = cim[str(pid)]
+            assert expected is not None and expected.endswith("0"), cim
+            payload = _collector_payload(pid)
+            assert payload["process_started_at_before"] == payload["process_started_at_after"] == expected, pid
+        child = owned[0]
+        expected = cim[str(child.pid)]
+        state = _desktop_observer.observe(child.pid, expected_process_start=expected)
+        assert state.process_started_at == expected and state.process_gone is None, state
+        assert child.poll() is None, "the read-only collector must leave the test-owned child running"
+        child.kill()
+        child.wait(timeout=10)
+        gone = _collector_payload(child.pid)
+        assert (gone["process_started_at_before"], gone["process_started_at_after"], gone["windows"]) == (
+            None,
+            None,
+            [],
+        )
+        assert _desktop_observer.observe(child.pid).reason == "process_gone"
+    finally:
+        for process in owned:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
+
+
+_PROCESS_START_SHAPE = r"""
+param([string]$Backend)
+$ErrorActionPreference='Stop'
+$tokens = $null; $errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($Backend, [ref]$tokens, [ref]$errors)
+if ($errors.Count) { throw 'backend did not parse' }
+$functions = @($ast.FindAll({param($node)
+  $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-ProcessStart'
+}, $true))
+$function = $functions[0]
+$body = $function.Body
+$statements = @()
+if ($null -ne $body.EndBlock) { $statements = @($body.EndBlock.Statements | ForEach-Object { $_.Extent.Text }) }
+$guards = @($function.FindAll({param($node)
+  $node -is [System.Management.Automation.Language.TryStatementAst] -or
+  $node -is [System.Management.Automation.Language.TrapStatementAst]
+}, $true)).Count
+$commands = @($ast.FindAll({param($node) $node -is [System.Management.Automation.Language.CommandAst]}, $true) |
+  ForEach-Object { $_.GetCommandName() } | Where-Object { $_ })
+Add-Type @'
+public static class DesktopHarvest {
+  public static uint Seen;
+  public static string CreationStart(uint pid) {
+    Seen = pid;
+    throw new System.ComponentModel.Win32Exception(5);
+  }
+}
+'@
+Invoke-Expression $function.Extent.Text
+$DesktopPid = '51552'
+$propagated = $null; $returned = $false
+try { $null = Get-ProcessStart; $returned = $true } catch {
+  $failure = $_.Exception
+  if ($failure.InnerException) { $failure = $failure.InnerException }
+  $propagated = $failure.GetType().Name
+}
+$otherBlocks = @(@($body.ParamBlock, $body.BeginBlock, $body.ProcessBlock, $body.DynamicParamBlock) |
+  Where-Object { $null -ne $_ }).Count
+[pscustomobject]@{functions=$functions.Count; statements=$statements; guards=$guards; other_blocks=$otherBlocks
+  commands=$commands; propagated=$propagated; returned=$returned; seen=[DesktopHarvest]::Seen} |
+  ConvertTo-Json -Compress -Depth 4
+"""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA collector is Windows-only")
+def test_collector_process_start_cannot_turn_an_unreadable_process_into_gone(tmp_path: Path) -> None:
+    """A PowerShell wrapper or CIM fallback would hide the native refusal and fabricate a gone verdict."""
+    backend = Path(_desktop_observer.__file__).with_name("_desktop_uia.ps1")
+    source = backend.read_text(encoding="utf-8").lower()
+    assert "get-ciminstance" not in source and "get-wmiobject" not in source
+    script = tmp_path / "process_start_shape.ps1"
+    script.write_text(_PROCESS_START_SHAPE, encoding="utf-8")
+    result = subprocess.run(
+        [_powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+        + ["-Backend", str(backend)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    facts = json.loads(result.stdout)
+    assert facts["functions"] == 1 and facts["other_blocks"] == 0 and facts["guards"] == 0, facts
+    statements = facts["statements"] if isinstance(facts["statements"], list) else [facts["statements"]]
+    assert statements == ["return [DesktopHarvest]::CreationStart([uint32]$DesktopPid)"], facts
+    commands = facts["commands"] if isinstance(facts["commands"], list) else [facts["commands"]]
+    assert not {"get-ciminstance", "get-wmiobject", "invoke-cimmethod"} & {c.lower() for c in commands}, commands
+    assert facts["seen"] == 51552 and facts["returned"] is False, facts
+    assert facts["propagated"] == "Win32Exception", "a native refusal must reach the collector's exit-4 catch"
