@@ -288,10 +288,13 @@ binding; normalization must not erase an unproved reparse component.
 
 The persistent companion is
 `<root-parent>\.credential-gate-tx-v1-<sha256>.lock`, **outside the authority/package root**. It is a
-regular one-byte, single-link file. Writers wait at most 10 seconds, readers 2 seconds, hooks
-0.5 seconds per authority. Windows locks its byte with `msvcrt`; POSIX uses `flock`. Process death
-releases the descriptor; the companion stays. **Never unlink it on release, to recover a busy lock,
-or because a recorded PID seems old.** There is no PID file, daemon, database or recovery ledger.
+regular single-link file. Before the lock it may be empty (newly created, or left empty by a crash);
+the lock holder writes its one byte under the lock, and from then until exit it must stay exactly one
+byte, so any resize, relink or replacement while held is refused. Writers wait at most 10 seconds,
+readers 2 seconds, hooks 0.5 seconds per authority. Windows locks its byte with `msvcrt`; POSIX uses
+`flock`. Process death releases the descriptor; the companion stays. **Never unlink it on release, to
+recover a busy lock, or because a recorded PID seems old.** There is no PID file, daemon, database or
+recovery ledger.
 An unsafe companion, timeout, identity change or untrusted/torn audit returns a non-success verdict.
 Public wrappers join a held transaction instead of reacquiring its descriptor.
 

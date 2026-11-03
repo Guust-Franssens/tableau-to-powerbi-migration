@@ -206,6 +206,7 @@ class GateTransaction:
         self.authority = authority
         self.timeout = timeout
         self.descriptor = -1
+        self.initialized = False
 
     def check(self) -> None:
         """Detect replacement even on POSIX, where unlinking a locked inode is possible."""
@@ -217,23 +218,21 @@ class GateTransaction:
             raise GateTransactionError("transaction-parent-changed")
         info = _safe_entry(authority.companion)
         opened = os.fstat(self.descriptor)
-        if _identity(info) != _identity(opened) or info.st_size != 1 or opened.st_size != 1:
+        sizes = (1,) if self.initialized else (0, 1)
+        if _identity(info) != _identity(opened) or info.st_size not in sizes or opened.st_size not in sizes:
             raise GateTransactionError("transaction-companion-changed")
 
     def __enter__(self) -> GateTransaction:
         path = self.authority.companion
         try:
-            created = False
             try:
                 descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
-                created = True
             except FileExistsError:
                 _safe_entry(path)
                 descriptor = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
             self.descriptor = descriptor
-            if created:
-                os.write(descriptor, b"\0")
-                os.fsync(descriptor)
+            # A peer may open the companion before its creator writes the byte (#801): initialize it
+            # only under the lock, so no transaction can observe it half-made. Identity is still checked first.
             self.check()
             deadline = time.monotonic() + self.timeout
             while True:
@@ -244,6 +243,11 @@ class GateTransaction:
                     if time.monotonic() >= deadline:
                         raise GateTransactionError("transaction-busy") from None
                     time.sleep(0.025)
+            if os.fstat(descriptor).st_size == 0:
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                os.write(descriptor, b"\0")
+                os.fsync(descriptor)
+            self.initialized = True
             self.check()
             return self
         except BaseException:
