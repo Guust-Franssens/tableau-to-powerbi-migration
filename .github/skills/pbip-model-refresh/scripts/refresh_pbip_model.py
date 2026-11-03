@@ -2603,7 +2603,8 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
     before_stamp = cache.stat().st_mtime if cache.exists() else 0.0
     try:
         _ui_observer_state(context, timeout_seconds=_ui_read_budget(deadline, 8.0))
-        bound_call(context.bound, lambda _connection: None, timeout_seconds=_ui_read_budget(deadline))
+        # No bound no-op read here: the baseline read below repeats its identity, catalogue and
+        # observer checks after the model gate, so a separate one only added observations (#793).
         _ui_read_budget(deadline)
         if not _identity_gate(context.port, cache):
             return 2
