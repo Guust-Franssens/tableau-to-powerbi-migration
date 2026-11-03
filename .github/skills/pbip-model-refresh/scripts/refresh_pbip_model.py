@@ -157,6 +157,7 @@ from _abf import (  # noqa: F401  # pylint: disable=unused-import
 # Per-model interprocess lock for the persist transaction, in its own module for the same reason;
 # re-exported so callers and tests reach it via refresh_pbip_model.
 from _lock import (  # noqa: F401  # pylint: disable=unused-import
+    LockUnavailable,
     ModelLockTimeout,
     model_lock,
 )
@@ -2287,6 +2288,10 @@ def _refresh_and_save(  # pylint: disable=too-many-return-statements,too-many-br
                     "data is in memory only). Wait for the other run to finish and retry."
                 )
                 return 1
+            except LockUnavailable as exc:
+                # No lock means no safe write: the UI Save fallback would persist outside it (#114).
+                print(f"REFRESH: NOT_PERSISTED (model lock not writable: {exc}; data is in memory only)")
+                return 1
             except ObservationUnavailable:
                 print("REFRESH: NOT_PERSISTED (observation unavailable; do NOT fall back to UI Save)")
                 return 1
@@ -2593,6 +2598,10 @@ def _ui_refresh_and_save(  # pylint: disable=too-many-return-statements,too-many
     except ModelLockTimeout as exc:
         print(f"REFRESH: NOT_PERSISTED (model lock unavailable: {exc})")
         return 1
+    except LockUnavailable as exc:
+        # Raised only while entering the lock, so no Desktop action has been invoked.
+        print(f"REFRESH: UI_PREFLIGHT_REFUSED (model lock not writable: {exc})")
+        return 2
 
 
 def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-statements
