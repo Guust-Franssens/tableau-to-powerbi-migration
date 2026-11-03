@@ -137,7 +137,7 @@ Which is which ✅ verified by reading every `Add-Check`/`Add-Cli` tier in `pref
 | critical check | blocks §2 steps 1–6? | blocks the agent / Desktop phase? |
 |---|---|---|
 | `Python >= 3.11`, `python: lxml`, `python: jsonschema` | **yes** | yes |
-| `engine: plugin installed`, `engine: single source` | **yes** — step 5 resolves the plugin (§1.2) | yes |
+| `engine: plugin installed` (`engine: single source` only when `engine_source.py` cannot report) | **yes** — step 5 resolves the plugin (§1.2) | yes |
 | `cli: powerbi-report-author` + its version floor | no | yes — it is the PBIR validator |
 | `plugin: powerbi-authoring@…`, `skill bundles installed`, `skill bundles match published plugin` | no | yes |
 | `cli: npx`, `cli: powerbi-desktop`, `Power BI Desktop`, **`PBI_DESKTOP_PATH`** | no | yes |
@@ -176,7 +176,7 @@ with upstream; it neither upgrades nor fails the run. The plugin uses the GitHub
 `.github/plugin/marketplace.json` catalog. Missing, ambiguous, malformed or prerelease upstream
 metadata prints advisory `unknown`, not an assumed current version.
 
-The **single** `plugin: powerbi-authoring@fabric-collection` verdict jointly checks exact registry
+For **Copilot CLI**, the single `plugin: powerbi-authoring@fabric-collection` verdict jointly checks exact registry
 identity, `enabled=true`, cache directory, effective `.github/plugin/plugin.json` name/version,
 registry/manifest agreement, and the `skills\powerbi-report-cli\SKILL.md` **file**. Cannot establish
 any of these, prerelease metadata or a version below the floor means a critical MISS. The capability
@@ -184,6 +184,30 @@ file remains mandatory above the floor. This blocks the agent phase, not §2 ste
 An on-PATH CLI with blank, noisy, malformed or prerelease version output also fails closed.
 Versions between floor and known-good are allowed-but-unmeasured WARNs; above known-good is a
 re-verification WARN with **no update/downgrade advice**.
+
+### Installed plugin host selection (#727)
+
+`discover_installed_plugin` in `scripts/engine_source.py` is the one resolver for the engine,
+`powerbi-authoring` and the skill bundles; preflight, `skill_plugin_source.py` and `t2p doctor` consume
+its evidence. It reads the Copilot CLI (`COPILOT_HOME`) and stable Windows VS Code
+(`%APPDATA%\Code\User\agent-plugins\installed.json`, schema version 1, pinned to
+[1.144.0, commit `2c33b50`](https://github.com/microsoft/vscode/blob/2c33b50b16c472efe58357d1d2a8a5414bc23fbf/src/vs/workbench/contrib/chat/common/plugins/fileBackedInstalledPluginsStore.ts)).
+An entry's `relativePath` wins over its `file:` `pluginUri`; a root outside that cache is ignored.
+
+- **`T2P_PLUGIN_HOST` unset:** the one host holding a copy is used; a missing or unreadable registry counts as
+  no copy, so a broken host never blocks the other. Distinct copies in **both** hosts refuse as `multiple`
+  (equal versions do not prove equal bytes), with a hint naming `T2P_PLUGIN_HOST=cli|vscode`; one physical
+  tree registered by both hosts is one copy.
+- **`$env:T2P_PLUGIN_HOST = 'vscode'` (or `'cli'`):** that host only, no fallback; a missing or broken engine or
+  authoring copy there is a critical MISS (missing bundles stay recommended). Other values refuse.
+  `Remove-Item Env:T2P_PLUGIN_HOST` restores automatic selection.
+- Two distinct copies in one host refuse as `multiple`. The engine and authoring plugins are identified by
+  their registered `name` (a VS Code entry without one is ignored), the skill bundles by content. VS Code copies
+  report **installed (enablement not verified)**: the registry holds no enablement state. Authoring still needs
+  the manifest floor and `skills\powerbi-report-cli\SKILL.md`; without Python it is **not verified (Python
+  unavailable)** and fails closed.
+
+Inspect the selection with `python scripts\engine_source.py --json` and `python scripts\skill_plugin_source.py --json`.
 
 An installed skill plugin can shadow correct repo-local skills. Preflight blocks on `STALE in plugin`.
 `copilot plugin update` file-locks while a session is running; the lock blocks renaming, not content
@@ -392,8 +416,8 @@ deprecated Bing `shapeMap`/`filledMap` visuals and dropped a density-map workshe
   another directory exits **5** with `ESTATE: ENGINE_SOURCE - … is not the canonical engine plugin
   … Pass --allow-noncanonical-engine to override deliberately; the bundle receipt will record the
   run as non-canonical.`
-- **`preflight.ps1` blocks on a second tree** — `engine: plugin installed` and `engine: single
-  source`, both **critical** (§1.1).
+- **`preflight.ps1` reports a second tree** — `engine: plugin installed` is **critical**; since #727
+  `engine: single source` names another tree as a recommended diagnostic, because it never runs (§1.1).
 - **The bundle answers *"what built me?"* by itself.** `migration_bundle.write_engine_receipt` writes
   an `engine` key into `engine-output-receipt.json` from `engine_source.engine_provenance` — the
   resolved root, its `VERSION`, whether it was canonical, and where it came from:

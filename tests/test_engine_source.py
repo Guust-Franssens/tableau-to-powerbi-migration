@@ -33,6 +33,19 @@ def _make_engine_tree(root: Path, version: str = "2.126.0") -> Path:
     return root
 
 
+def test_jsonc_removes_comment_only_lines_without_touching_strings(tmp_path: Path) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(
+        '// before\n{"url": "https://example.invalid//path",\n// between\n"value": 1}\n',
+        encoding="utf-8",
+    )
+
+    assert engine_source._read_json(config, leading_comments=True) == {  # pylint: disable=protected-access
+        "url": "https://example.invalid//path",
+        "value": 1,
+    }
+
+
 @pytest.mark.parametrize("configured", [None, "", "relocated", "missing"])
 def test_process_start_copilot_home(tmp_path: Path, configured: str | None) -> None:
     """Resolve after setting the subprocess environment, never the parent import's hook."""
@@ -43,8 +56,9 @@ def test_process_start_copilot_home(tmp_path: Path, configured: str | None) -> N
     _make_engine_tree(relocated / suffix)
     selected = tmp_path / configured if configured else user / ".copilot"
     env = os.environ.copy()
-    env.update(HOME=str(user), USERPROFILE=str(user))
+    env.update(HOME=str(user), USERPROFILE=str(user), APPDATA=str(user / "appdata"))  # #727: VS Code is a host
     env.pop(engine_source.SIMULATE_ENGINE_ABSENT_ENV, None)
+    env.pop(engine_source.PLUGIN_HOST_ENV, None)
     if configured is None:
         env.pop("COPILOT_HOME", None)
     else:
@@ -121,7 +135,7 @@ def test_the_plugin_resolves_when_it_is_installed(tmp_path: Path, monkeypatch) -
 
 
 # ---------------------------------------------------------------------------
-# A second tree is the defect, so it has to be VISIBLE
+# A second tree stays VISIBLE as a diagnostic (#727), never selected
 # ---------------------------------------------------------------------------
 
 
@@ -132,7 +146,10 @@ def test_an_alternative_tree_is_reported(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(engine_source, "ALTERNATIVE_ENGINE_ROOTS", (sibling,))
 
     assert engine_source.alternative_engine_roots() == [sibling]
-    assert engine_source.status()["ok"] is False
+    verdict = engine_source.status()
+    assert verdict["alternatives"] == [str(sibling)]
+    assert verdict["root"] == str(plugin), "the alternative is reported, never selected"
+    assert verdict["ok"] is True, "#727: nonselected sibling checkouts are advisory, not deletions"
 
 
 def test_a_clean_machine_reports_ok(tmp_path: Path, monkeypatch) -> None:
