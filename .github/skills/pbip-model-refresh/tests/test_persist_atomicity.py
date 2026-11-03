@@ -1395,6 +1395,41 @@ def test_refresh_refuses_ui_save_when_the_model_lock_is_not_writable(tmp_path, m
     assert calls == ["image"]
 
 
+def test_refresh_refuses_ui_save_when_the_cache_folder_cannot_be_created(tmp_path, monkeypatch, capsys) -> None:
+    """`.pbi` absent and its creation denied (a model-folder ACL deny) is the same refusal as an unwritable lock.
+
+    The folder is created before the lock is taken, so a raw `PermissionError` there used to reach the
+    generic ImageSave handler and fall back to the unlocked UI Save.
+    """
+    cache = _model(tmp_path, compat=1604)
+    database_tmdl = cache.parent.parent / "definition" / "database.tmdl"
+    before = database_tmdl.read_bytes()
+    args = refresh_pbip_model._build_arg_parser().parse_args([])
+    calls: list[str] = []
+    real_mkdir = Path.mkdir
+
+    def denied_mkdir(self, *a, **k):
+        if self == cache.parent:
+            raise _denied(self)
+        return real_mkdir(self, *a, **k)
+
+    def persisting_image_save(_port: int, _cache: Path, model_dir: Path | None = None):
+        calls.append("image")
+        return refresh_pbip_model._persist_image(_cache, model_dir, 1606, lambda _p: calls.append("write"), 3.0)
+
+    monkeypatch.setattr(Path, "mkdir", denied_mkdir)
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda *_args: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "image_save", persisting_image_save)
+    monkeypatch.setattr(refresh_pbip_model, "save", lambda _pid: calls.append("ui-save") or (True, "unlocked"))
+
+    assert refresh_pbip_model._refresh_and_save(456, 789, cache, args) == 1
+    out = capsys.readouterr().out
+    assert "REFRESH: NOT_PERSISTED (model lock not writable: PermissionError [Errno 13]; data is in memory only)" in out
+    assert str(tmp_path) not in out
+    assert calls == ["image"], "no ImageSave write and no unlocked UI Save without the model lock"
+    assert database_tmdl.read_bytes() == before and not cache.parent.exists()
+
+
 def test_ui_route_refuses_before_any_desktop_action_when_the_model_lock_is_not_writable(
     tmp_path, monkeypatch, capsys
 ) -> None:

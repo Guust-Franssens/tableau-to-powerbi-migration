@@ -1626,7 +1626,10 @@ def _persist_image(  # pylint: disable=too-many-arguments
     """
     _validate_observation_request(return_observation, on_observation)
     with _observation_errors(return_observation, preserve=(CompatRollbackError, ModelLockTimeout)):
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:  # no folder means no lock file: refuse like one (#799)
+            raise LockUnavailable(f"{type(error).__name__} [Errno {error.errno}]") from None
         lock_path = cache_path.with_name(cache_path.name + ".lock")
         with model_lock(lock_path, timeout=lock_timeout):
             observation = _persist_image_locked(
