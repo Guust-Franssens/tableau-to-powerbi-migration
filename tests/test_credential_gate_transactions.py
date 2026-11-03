@@ -1040,6 +1040,68 @@ def test_reader_busy_never_reports_clear(tmp_path: Path, monkeypatch: pytest.Mon
     assert gate.status(root) == 0
 
 
+def test_peer_arriving_before_the_creator_locks_never_sees_a_half_made_companion(
+    unit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#801: a peer that opens the companion right after its exclusive creation must still transact."""
+    root, keys = unit
+    companion = gate.coordination_root(root).companion
+    real_open, seen, peer = os.open, [], {}
+
+    def run_peer() -> None:
+        try:
+            with gate.gate_transaction(root):
+                peer["size"] = companion.stat().st_size
+        except OSError as exc:
+            peer["error"] = exc
+
+    def creating(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        # Deterministic interleaving: the peer runs to completion between creation and anything after it.
+        if flags & os.O_EXCL and Path(path) == companion and not seen:
+            seen.append(os.fstat(descriptor).st_size)
+            thread = threading.Thread(target=run_peer)
+            thread.start()
+            thread.join(timeout=30)
+            assert not thread.is_alive(), "peer must not wait on a creator that holds no lock"
+        return descriptor
+
+    monkeypatch.setattr(gate.os, "open", creating)
+    assert gate.apply_block(root, [keys[0]]) == 0, "the creator must still transact after the peer"
+    assert seen == [0], "the seam must open the companion while it is still empty"
+    assert "error" not in peer, f"peer observed a partially initialized companion: {peer.get('error')!r}"
+    assert peer == {"size": 1}, "the lock holder must initialize the companion before its strict check"
+    assert companion.stat().st_size == 1
+
+
+def test_crash_left_empty_companion_is_initialized_by_its_holder(tmp_path: Path) -> None:
+    """A creator that died before locking leaves an empty companion; the next holder completes it, same inode."""
+    root = tmp_path / "unit"
+    root.mkdir()
+    companion = gate.coordination_root(root).companion
+    companion.write_bytes(b"")
+    before = gate._identity(companion.stat())
+    assert gate.status(root) == 0
+    assert companion.read_bytes() == b"\0" and gate._identity(companion.stat()) == before
+
+
+@pytest.mark.parametrize("tamper", ["grown", "truncated"])
+def test_companion_resized_while_held_is_refused(tmp_path: Path, tamper: str) -> None:
+    """Only the pre-lock look may see an empty companion; once held, size is exactly one byte again."""
+    root = tmp_path / "unit"
+    root.mkdir()
+    companion = gate.coordination_root(root).companion
+    with pytest.raises(gate.GateTransactionError, match="transaction-companion-changed"):
+        with gate.gate_transaction(root):
+            with companion.open("r+b") as stream:
+                if tamper == "grown":
+                    stream.seek(1)
+                    stream.write(b"\0")
+                else:
+                    stream.truncate(0)
+            gate._check_transaction(root)
+
+
 @pytest.mark.parametrize("kind", ["directory", "extra-byte", "symlink", "hardlink"])
 def test_unsafe_companion_is_refused(tmp_path: Path, kind: str) -> None:
     root = tmp_path / "unit"
