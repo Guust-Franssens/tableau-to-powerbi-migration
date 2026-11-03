@@ -622,7 +622,9 @@ def test_preflight_alternative_engine_copy_is_a_diagnostic(profile: dict[str, st
     """#727: "Keep nonselected sibling checkouts visible as advisory diagnostics rather than requiring deletion."""
     _install(profile, "cli", "engine")
     _install(profile, "cli", "authoring")
-    sibling = _content(Path(profile["USERPROFILE"]) / "tableau-fabric-skills", "engine")
+    # engine_source.py lists siblings under Path.home(): USERPROFILE on Windows, HOME elsewhere.
+    home = profile["USERPROFILE"] if os.name == "nt" else profile["HOME"]
+    sibling = _content(Path(home) / "tableau-fabric-skills", "engine")
     result = _preflight(profile)
     row = result["rows"]["engine: single source"]
     assert (row["Tier"], row["Ok"]) == ("recommended", False)
