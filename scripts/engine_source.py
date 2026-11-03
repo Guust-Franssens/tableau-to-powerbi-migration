@@ -132,10 +132,12 @@ class NonCanonicalEngineError(RuntimeError):
 
 
 def _hint(kind: PluginKind, host: str | None = None) -> str:
+    if host == "vscode":
+        return VSCODE_INSTALL_HINT
     if kind == "engine":
-        return INSTALL_HINT if host != "vscode" else VSCODE_INSTALL_HINT
+        return INSTALL_HINT
     if kind == "authoring":
-        return AUTHORING_INSTALL_HINT if host != "vscode" else VSCODE_INSTALL_HINT
+        return AUTHORING_INSTALL_HINT
     return (
         "Install it once between sessions: copilot plugin marketplace add "
         "Guust-Franssens/powerbi-playbook && "
@@ -180,7 +182,12 @@ def _environment_home(environment: dict[str, str]) -> Path:
     configured = environment.get("COPILOT_HOME")
     if configured:
         return Path(configured)
-    home = environment.get("HOME") or environment.get("USERPROFILE")
+    if os.name == "nt":
+        home = environment.get("USERPROFILE")
+        if not home and environment.get("HOMEPATH"):
+            home = environment.get("HOMEDRIVE", "") + environment["HOMEPATH"]
+    else:
+        home = environment.get("HOME") or environment.get("USERPROFILE")
     return Path(home) / ".copilot" if home else Path(".copilot")
 
 
@@ -240,16 +247,15 @@ def _read_manifest(root: Path) -> tuple[dict[str, object] | None, str | None]:
     if not manifests:
         return None, f"no recognized plugin manifest under {root}"
 
-    first_path, selected = manifests[0]
-    for path, other in manifests[1:]:
-        for field in ("name", "version"):
-            left, right = selected.get(field), other.get(field)
-            if left is not None and right is not None and left != right:
-                return None, f"conflicting {field} in {first_path} and {path}"
-        for field in ("skills", "components", "extensions"):
-            if field in selected and field in other and selected[field] != other[field]:
-                return None, f"conflicting {field} in {first_path} and {path}"
-    return selected, None
+    observed: dict[str, tuple[Path, object]] = {}
+    for path, manifest in manifests:
+        for field in ("name", "version", "skills", "components", "extensions"):
+            if field not in manifest or (field in ("name", "version") and manifest[field] is None):
+                continue
+            if field in observed and observed[field][1] != manifest[field]:
+                return None, f"conflicting {field} in {observed[field][0]} and {path}"
+            observed[field] = (path, manifest[field])
+    return manifests[0][1], None
 
 
 def _read_cli_authoring_manifest(root: Path) -> tuple[dict[str, object] | None, str | None]:
@@ -662,9 +668,10 @@ def engine_root() -> Path:
     else:
         evidence = None
     detail = f" ({evidence.detail})" if evidence else ""
+    hint = evidence.install_hint if evidence else INSTALL_HINT
     raise EngineNotFoundError(
         f"the deterministic conversion engine is not installed at {PLUGIN_ENGINE_ROOT}{detail}. "
-        f"{INSTALL_HINT}. This does NOT fall back to another copy: a second tree is what issue #107 "
+        f"{hint}. This does NOT fall back to another copy: a second tree is what issue #107 "
         "is about, and a silent fallback is how two engine versions built one pipeline."
     )
 
@@ -825,7 +832,7 @@ def main(argv: list[str] | None = None) -> int:
     for path in verdict["alternatives"]:
         print(f"  ALTERNATIVE COPY : {path}  <- delete it; the plugin is the single source (#107)")
     if not verdict["present"]:
-        print(f"  -> {INSTALL_HINT}")
+        print(f"  -> {verdict['install_hint']}")
     return 0 if verdict["ok"] else 1
 
 

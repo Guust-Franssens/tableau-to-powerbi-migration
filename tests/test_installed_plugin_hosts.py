@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -113,6 +114,62 @@ def _install(environment: dict[str, str], host: str, kind: str) -> Path:
     )
     registry.write_text(json.dumps({"version": 1, "installed": entries}), encoding="utf-8")
     return root
+
+
+@pytest.mark.parametrize("platform,home_key", [("nt", "USERPROFILE"), ("posix", "HOME")])
+def test_cli_default_home_matches_platform(
+    profile: dict[str, str], monkeypatch: pytest.MonkeyPatch, platform: str, home_key: str
+) -> None:
+    """Windows ignores a distinct Git Bash HOME when selecting the native profile."""
+    environment = {key: value for key, value in profile.items() if key != "COPILOT_HOME"}
+    expected_home = Path(environment[home_key]) / ".copilot"
+    root = _install({**environment, "COPILOT_HOME": str(expected_home)}, "cli", "engine")
+    monkeypatch.setattr(engine, "os", SimpleNamespace(name=platform))
+    evidence = engine.discover_installed_plugin("engine", env=environment)
+    assert evidence.ok, evidence.detail
+    assert evidence.plugin_root == root
+    assert engine.discover_installed_plugin("engine", env=profile).status == "missing"
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_selected_vscode_remedy_never_installs_into_cli(
+    profile: dict[str, str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], kind: str
+) -> None:
+    """A refused explicit VS Code selection must offer a repair in the same host."""
+    _install(profile, "cli", kind)
+    environment = {**profile, "T2P_PLUGIN_HOST": "vscode"}
+    evidence = engine.discover_installed_plugin(kind, env=environment)
+    assert not evidence.ok
+    assert "VS Code" in evidence.install_hint
+    assert "copilot plugin" not in evidence.install_hint
+    if kind == "bundles":
+        assert bundles.discover_skill_plugin(env=environment).install_hint == evidence.install_hint
+    if kind == "engine":
+        monkeypatch.setenv("T2P_PLUGIN_HOST", "vscode")
+        with pytest.raises(engine.EngineNotFoundError, match="VS Code"):
+            engine.engine_root()
+        assert engine.main([]) == 1
+        assert evidence.install_hint in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("field", ["version", "skills", "components", "extensions"])
+def test_lower_manifests_conflict_when_preferred_omits_field(profile: dict[str, str], field: str) -> None:
+    """The preferred manifest cannot hide a conflict between two lower-priority copies."""
+    root = _install(profile, "vscode", "engine")
+    preferred = root / ".plugin" / "plugin.json"
+    preferred.parent.mkdir()
+    preferred.write_text(json.dumps({"name": NAMES["engine"]}), encoding="utf-8")
+    lower = root / ".claude-plugin" / "plugin.json"
+    lower.parent.mkdir()
+    lower.write_text(json.dumps({"name": NAMES["engine"], field: "one"}), encoding="utf-8")
+    last = root / ".github" / "plugin" / "plugin.json"
+    last.write_text(json.dumps({"name": NAMES["engine"], field: "one"}), encoding="utf-8")
+    environment = {**profile, "T2P_PLUGIN_HOST": "vscode"}
+    assert engine.discover_installed_plugin("engine", env=environment).ok
+    last.write_text(json.dumps({"name": NAMES["engine"], field: "two"}), encoding="utf-8")
+    evidence = engine.discover_installed_plugin("engine", env=environment)
+    assert evidence.status == "invalid"
+    assert f"conflicting {field}" in evidence.detail
 
 
 @pytest.mark.parametrize("host", ["cli", "vscode"])
