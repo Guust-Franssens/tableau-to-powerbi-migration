@@ -2642,20 +2642,11 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
         print(f"REFRESH: UI_ACTION_FAILED ({exc})")
         return 2
     if not action.invoked or action.action_started_ticks is None:
-        print(f"REFRESH: UI_ACTION_REFUSED ({action.reason}; focus attempts={action.focus_attempts})")
+        print(f"REFRESH: UI_ACTION_REFUSED ({action.reason})")
         if action.reason == "named_control_missing":
             print("  hint   : a small frame collapses the Home ribbon; maximize the Desktop window")
         return 2
-    print(
-        "  UI Refresh: one named Invoke returned; engine completion remains unestablished "
-        f"(focus attempts={action.focus_attempts})"
-    )
-    if action.restore_requested and not action.handback_verified:
-        print("  UI handback: UX failure; requested prior focus restoration was not verified")
-    elif action.handback_verified:
-        print("  UI handback: verified or not required")
-    else:
-        print("  UI handback: UX failure; foreground changed; prior focus was not overridden")
+    print("  UI Refresh: one named Invoke returned; engine completion remains unestablished")
 
     remaining = deadline - time.monotonic()
     evidence_dir = getattr(args, "evidence_dir", None)
@@ -2775,8 +2766,6 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
     if not save_action.invoked:
         print(f"REFRESH: NOT_PERSISTED (UI Save refused: {save_action.reason})")
         return 1
-    if not save_action.handback_verified:
-        print("  UI Save handback: UX failure; prior focus restoration was not verified")
     print("  UI Save: one named Invoke returned; persistence remains unconfirmed")
     try:
         if _ui_wait_ready(context, deadline, evidence_dir=evidence_dir) is None:

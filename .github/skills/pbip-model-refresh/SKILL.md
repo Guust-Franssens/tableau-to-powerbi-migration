@@ -56,7 +56,7 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B
                                      [--ui-save] [--ui-refresh [--automatic-source-scope <expected-sources.json>]]
 ```
 
-### Explicit foreground UI refresh
+### Explicit UI refresh (focus-free)
 
 ⚠️ **Operator-only source-execution consent:** supplying `--ui-refresh` expressly commissions
 execution of **all current M**, including native/custom SQL and unknown/indirect query forms,
@@ -165,10 +165,11 @@ changed or incomplete partition metadata, a non-READY initial observer, and
 `--canaries` to verify commissioned source tables. Positive rows alone do not prove processing;
 no-action timestamp rereads, partial advancement, stale timestamps, prompt/unknown observer evidence
 and deadline expiry cannot authorize success or Save. Deadline expiry is unknown, not a credential
-diagnosis. Focus acquisition is limited to three verified attempts with a 150 ms wait each; a failed
-focus/action is surfaced, and a human foreground switch is never overridden during handback.
+diagnosis. The helper never takes focus: Refresh and Save are UIA Invokes with no foreground
+change, so a human's foreground window is never touched.
 
-The action child focuses the held root before enumerating controls. Only enabled, visible,
+The action child reads the held root without taking focus before enumerating controls. Only
+enabled, visible,
 exactly named Invoke controls without an ExpandCollapse pattern qualify. A child provider must
 have a verified process/start ancestry chain to the held Desktop, or be a verified live shared
 provider whose provider-owned native renderer is a descendant of the exact root. Both paths pin
@@ -176,13 +177,20 @@ the provider incarnation and exact root identity; neither accepts a provider bas
 alone. The nearest native renderer must belong to that provider, and its HWND parent chain (only
 that provider and the exact target process) to the exact root is pinned and rechecked. Under
 per-monitor DPI awareness,
-a native hit-test at the control's physical interior must land in that renderer's verified
-subtree. This is ownership corroboration only: there is no coordinate click or activation.
+an in-root descent from the held root (`ScreenToClient`, then `ChildWindowFromPointEx` skipping
+invisible and disabled children, at most 32 levels) at the control's physical interior must land in
+that renderer's verified subtree, whatever window is in front on screen. This is ownership
+corroboration only: there is no coordinate click or activation.
 Exactly one candidate must survive; zero, multiple, missing geometry or changed ownership refuse.
 The child reacquires and revalidates the selected control, provider identity/ancestry, renderer,
-geometry, native hit ownership and
-foreground before Invoke. Refusals after focus acquisition also attempt truthful best-effort
-handback only while Desktop still owns foreground. The same rules apply to Refresh and Save.
+geometry, descent ownership and the full root identity before Invoke. One top-level window
+snapshot then refuses `occluded_by_desktop_window` when a visible Desktop or provider window above
+the root covers the control centre, and `occlusion_walk_incomplete` when the root is missing from
+the snapshot. Foreign windows in front are ignored: UIA Invoke needs neither focus nor visibility.
+A cloaked root proceeds with its identity verified.
+An open in-page ribbon menu is not detected, the same as before this change.
+Do not type while `--ui-refresh` runs: Desktop raises itself during Refresh, and Save persists edits.
+The same rules apply to Refresh and Save.
 Each individual enumeration caches the verified ancestry/start chain (when present) once per
 distinct provider PID; provider incarnation, renderer, root, geometry and native-hit checks remain
 live for every candidate. Every surviving provider is reread freshly before accepting the scan;
@@ -190,19 +198,10 @@ changed or unavailable identity refuses the whole scan, not a reduced set. The c
 after that enumeration. The second full
 uniqueness scan and independent selected/final ownership checks remain fresh, within the unchanged
 20-second child cap and overall deadline.
-Focus uses bounded thread-input attachment between the current thread and distinct required
-foreground/target threads, with exact root and permitted-foreground checks before attachment and
-before BringWindowToTop/SetForegroundWindow. Only successful attachments are tracked and detached
-in finally on every path. There is no input injection, ShowWindow or minimized-window recovery; the
-CLI never resizes a window.
-Handback additionally requires the captured prior HWND's PID/start identity to remain unchanged;
-a detected human foreground switch or identity change prevents restoration.
-Handback verification is a point-in-time observation after 150 ms, not a guarantee of stable
-foreground ownership: Desktop can activate a later window. There is no delayed restoration
-retry, since a later Desktop activation cannot establish that the human did not switch back.
-Failure to restore the previous application's focus is reported as a **UX failure**, not a
-Save veto or evidence that a write failed. Save still acquires and verifies its own foreground,
-exact target and named Invoke control after fresh observer/model checks. After Invoke, the
+There is no focus acquisition, thread-input attachment, foreground change or handback; UIA Invoke
+needs none. There is no input injection, ShowWindow or minimized-window recovery: a minimized
+Desktop refuses, and the CLI never resizes a window. Save reverifies its exact target and named
+Invoke control after fresh observer/model checks. After Invoke, the
 post-Save settle wait (up to 60 seconds, clipped to the deadline) for a complete READY observer
 root, then a held binding read, exact-PID connected bridge with `hasUnsavedChanges: false`,
 unchanged resolved cache destination and the existing cache timestamp check govern persistence,
