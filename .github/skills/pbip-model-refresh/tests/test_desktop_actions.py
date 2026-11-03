@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 import _desktop_actions as actions
+import _source_scope as scope
 import probe_desktop_query as query_probe
 import refresh_pbip_model
 from _desktop_observer import CredentialModal, DesktopWindow, DialogFinding, Observation
@@ -897,6 +898,12 @@ class _Command:  # pylint: disable=invalid-name,too-few-public-methods
             return _Reader([row[:2] for row in self.connection.tables])
         if "TMSCHEMA_PARTITIONS" in self.CommandText:
             return _Reader(self.connection.partitions)
+        if "TMSCHEMA_EXPRESSIONS" in self.CommandText and isinstance(self.connection.expressions, Exception):
+            raise self.connection.expressions
+        if "TMSCHEMA_EXPRESSIONS" in self.CommandText:
+            return _Reader(list(self.connection.expressions.items()))
+        if "TMSCHEMA_REFRESH_POLICIES" in self.CommandText:
+            return _Reader(self.connection.policies)
         raise AssertionError(f"unexpected metadata query: {self.CommandText}")
 
 
@@ -910,6 +917,8 @@ class _Connection:  # pylint: disable=invalid-name,too-few-public-methods
         self.tables = tables
         self.partitions = partitions
         self.default_mode = default_mode
+        self.expressions: dict[str, str] | Exception = {}
+        self.policies: list[tuple[object, ...]] = []
         self.Database = "00000000-0000-0000-0000-000000000001"
 
     def CreateCommand(self) -> _Command:
@@ -2510,7 +2519,7 @@ def test_ui_refresh_help_warns_about_operator_source_execution_and_no_clearance(
     assert "potential source-side costs" in help_text
     assert "--no-save prevents Save, NOT source execution" in help_text
     assert "No automatic credential-gate use or earned clearance" in help_text
-    assert "#780 (linked #692)" in help_text
+    assert "Automatic callers must add --automatic-source-scope (#780, linked #692)" in help_text
 
 
 def test_action_result_handback_flag_is_not_inferred_from_invoke() -> None:
@@ -3023,3 +3032,326 @@ def test_synthetic_control_is_invoked_once_and_ambiguity_refused(control_type: s
         if child.stdout is not None:
             child.stdout.close()
         reader.join(timeout=1)
+
+
+# --- #780 automatic source scope -----------------------------------------------------------------
+
+_PARAM = '"{}" meta [IsParameterQuery=true, Type="Text", IsParameterQueryRequired=true]'
+_SQL_M = (
+    'let\n    Source = Sql.Database(#"Server", #"Database"),\n'
+    '    dbo_Orders = Source{[Schema="dbo",Item="Orders"]}[Data]\nin\n    dbo_Orders'
+)
+_SNOW_M = (
+    'let Source = Snowflake.Databases(#"SfServer", #"SfWarehouse"), Db = Source{[Name="DB",Kind="Database"]}[Data], '
+    'Sch = Db{[Name="PUB",Kind="Schema"]}[Data], T = Sch{[Name="FLIGHTS",Kind="Table"]}[Data] in T'
+)
+_DBX_M = (
+    'let Source = Databricks.Catalogs("host.example", "/sql/1.0/warehouses/x"), '
+    'C = Source{[Name="cat",Kind="Database"]}[Data], S = C{[Name="sch",Kind="Schema"]}[Data], '
+    'T = S{[Name="trips",Kind="Table"]}[Data] in T'
+)
+_VALUES = ("srv.example", "Sales", "acct.example", "COMPUTE_WH", "host.example", "/sql/1.0/warehouses/x")
+
+
+def _expressions() -> dict[str, str]:
+    names = ("Server", "Database", "SfServer", "SfWarehouse")
+    return {name: _PARAM.format(value) for name, value in zip(names, _VALUES)}
+
+
+def _sources() -> list[dict[str, object]]:
+    return [
+        {"table": "Orders", "connector": "Sql.Database", "server": "srv.example", "database": "Sales",
+         "navigation": [{"Schema": "dbo", "Item": "Orders"}]},
+        {"table": "Flights", "connector": "Snowflake.Databases", "server": "acct.example", "warehouse": "COMPUTE_WH",
+         "navigation": [{"Name": "DB", "Kind": "Database"}, {"Name": "PUB", "Kind": "Schema"},
+                        {"Name": "FLIGHTS", "Kind": "Table"}]},
+        {"table": "Trips", "connector": "Databricks.Catalogs", "server": "host.example",
+         "http_path": "/sql/1.0/warehouses/x",
+         "navigation": [{"Name": "cat", "Kind": "Database"}, {"Name": "sch", "Kind": "Schema"},
+                        {"Name": "trips", "Kind": "Table"}]},
+    ]  # fmt: skip
+
+
+def _scope_route(  # pylint: disable=too-many-arguments
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    queries: dict[str, object] | None = None,
+    sources: object = None,
+    expressions: dict[str, str] | Exception | None = None,
+    policies: list[tuple[object, ...]] | None = None,
+    canaries: tuple[str, ...] = ("Orders",),
+    raw: str | None = None,
+):
+    """Wire the UI route over a fake live model; a None query is a calculated partition."""
+    context, args, calls = _wire_ui_route(monkeypatch)
+    queries = {"Orders": _SQL_M, "Flights": _SNOW_M, "Trips": _DBX_M, "Calc": None} if queries is None else queries
+    tables = [(10 + index, name, 0) for index, name in enumerate(queries)]
+    partitions = [
+        _partition(59 + index, table_id=10 + index, kind=2 if query is None else query[0], query=query[1])
+        if isinstance(query, tuple)
+        else _partition(59 + index, table_id=10 + index, kind=2 if query is None else 4, query=query)
+        for index, query in enumerate(queries.values())
+    ]
+    connection = _Connection(tables, partitions)
+    connection.expressions = _expressions() if expressions is None else expressions
+    connection.policies = policies or []
+    monkeypatch.setattr(actions, "bound_call", lambda _bound, read, **_kwargs: read(connection))
+    path = tmp_path / "expected-sources.json"
+    document = {"version": 1, "sources": _sources() if sources is None else sources}
+    path.write_text(json.dumps(document) if raw is None else raw, encoding="utf-8")
+    args.automatic_source_scope = str(path)
+    args.canaries = list(canaries)
+    return context, args, calls
+
+
+def _refusal(context, args, calls, capsys: pytest.CaptureFixture[str]) -> str:
+    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 2
+    assert calls == [], "no Refresh, canary read or Save may run after a scope refusal"
+    out = capsys.readouterr().out
+    assert "REFRESH: UI_PREFLIGHT_REFUSED (DesktopActionError: automatic source scope: " in out
+    assert not [value for value in _VALUES if value in out], "refusal text must not carry source values"
+    return out
+
+
+@pytest.mark.parametrize(
+    "m_text,identity",
+    [
+        (_SQL_M, {"connector": "Sql.Database", "server": 'srv"x', "database": "Sales",
+                  "navigation": [{"Schema": "dbo", "Item": "Orders"}]}),
+        (_SNOW_M, {"connector": "Snowflake.Databases", "server": "acct.example", "warehouse": "COMPUTE_WH",
+                   "navigation": _sources()[1]["navigation"]}),
+        ('let Source = Oracle.Database(#"Server", [HierarchicalNavigation=false]), '
+         'S = Source{[Schema="HR"]}[Data], T = S{[Name="EMP"]}[Data] in T',
+         {"connector": "Oracle.Database", "server": 'srv"x', "navigation": [{"Schema": "HR"}, {"Name": "EMP"}]}),
+        ('let Source = PostgreSQL.Database("h", "d""b"), T = Source{[Schema="p",Item="t"]}[Data] in T',
+         {"connector": "PostgreSQL.Database", "server": "h", "database": 'd"b',
+          "navigation": [{"Schema": "p", "Item": "t"}]}),
+    ],
+)  # fmt: skip
+def test_scope_resolves_exact_engine_connector_identities(m_text: str, identity: dict[str, object]) -> None:
+    expressions = _expressions() | {"Server": _PARAM.format('srv""x')}
+
+    assert scope.resolve_partition_identity(m_text, expressions) == identity
+
+
+@pytest.mark.parametrize(
+    "m_text",
+    [
+        'let Source = Sql.Database("s", "d", [Query="SELECT 1"]), T = Source{[Item="t"]}[Data] in T',
+        'let Source = Sql.Database("s", "d"), Q = Value.NativeQuery(Source, "SELECT 1"), T = Q{[Item="t"]}[Data] in T',
+        'let Source = Odbc.Query("dsn=x", "SELECT 1"), T = Source{[Item="t"]}[Data] in T',
+        'let Source = #"Value.NativeQuery"(Sql.Database("s", "d"), "SELECT 1") in Source',
+        'let Source = Record.Field(#shared, "Sql.Database")("s", "d"), T = Source{[Item="t"]}[Data] in T',
+        'let Source = Expression.Evaluate("Sql.Database(""s"", ""d"")"), T = Source{[Item="t"]}[Data] in T',
+        'let Source = Sql.Database("s", "d"), Unused = Value.NativeQuery(Source, "EXEC p"), '
+        'T = Source{[Item="t"]}[Data] in T',
+        'let Source = try Sql.Database("s", "d") otherwise null, T = Source{[Item="t"]}[Data] in T',
+        'let Source = Table.Buffer(#table({"a"}, {{"b"}})) in Source',
+        'let Source = #table({"a"}, {{"b"}}) in Source',
+        'let Source = if false then Odbc.Query("x", "y") else Sql.Database("s", "d"), '
+        'T = Source{[Item="t"]}[Data] in T',
+        'let Source = Csv.Document(File.Contents("\\\\share\\x.csv")), T = Source{[Item="t"]}[Data] in T',
+        'let Source = Sql.Database("s", "d"), T = Source{[Item="t"]}[Data], U = Table.FirstN(T, 1) in U',
+        'let Source = Sql.Database("s", "d"), T = Source{[Item="t"]}[Data], U = T{[Item="u"]}[Data] in U'.replace(
+            "in U", ', V = U{[Item="v"]}[Data], W = V{[Item="w"]}[Data] in W'
+        ),
+        'let Source = Sql.Database("s", "d") /* c */, T = Source{[Item="t"]}[Data] in T',
+        'let Source = Sql.Database("s", "d"), // c\n T = Source{[Item="t"]}[Data] in T',
+        'let Source = Sql.Database("s", 1), T = Source{[Item="t"]}[Data] in T',
+        'let Source = Sql.Database("s", "d), T = Source{[Item="t"]}[Data] in T',
+        'let Source = Web.Database("s", "d"), T = Source{[Item="t"]}[Data] in T',
+        'let Source = Sql.Database("s" & "x", "d"), T = Source{[Item="t"]}[Data] in T',
+        'let Source = Sql.Database(Missing, "d"), T = Source{[Item="t"]}[Data] in T',
+        'let Source = Sql.Database(T, "d"), T = Source{[Item="t"]}[Data] in T',
+        'let Source = Sql.Database(Code, "d"), T = Source{[Item="t"]}[Data] in T',
+        'let Source = Sql.Database("s", "d"), T = Source{[Item="t"]}[Data] in Source',
+        'let Source = Sql.Database("s", "d"), T = Source{[Query="t"]}[Data] in T',
+        'let Source = Sql.Database("s", "d") in Source',
+        'let Source = Sql.Database("s", "d"), T = Source{[Schema="dbo",Item="Orders"]}[Data] in T{[Item="Secret"]}[Data]',
+        'let Source = Oracle.Database("s", [HierarchicalNavigation=true]), T = Source{[Name="t"]}[Data] in T',
+        'let Source = Sql.Database("s", "d"), T = Source{[Item="t"]}[Data], T = T{[Item="u"]}[Data] in T',
+    ],
+)
+def test_scope_refuses_everything_outside_the_connector_template(m_text: str) -> None:
+    expressions = _expressions() | {"Code": 'Sql.Database("s", "d")', "T": '"a binding shadows this"'}
+
+    with pytest.raises(scope.SourceScopeError):
+        scope.resolve_partition_identity(m_text, expressions)
+
+
+@pytest.mark.parametrize(
+    "m_text", ['"a" & "b"', '"a" . x', "#shared", '"a" ! b', "@x", "a.b;", '"srv#(lf)x"', '#"a#(tab)b"']
+)
+def test_scope_tokenizer_refuses_operators_and_unknown_punctuation(m_text: str) -> None:
+    with pytest.raises(scope.SourceScopeError, match="unsupported M token"):
+        scope.tokenize(m_text)
+
+
+@pytest.mark.parametrize(
+    "expression",
+    ['"a" "b"', '"a" meta [X="y"] meta [Z="w"]', '"a" meta [X=Code]', '"a" meta [X="y", X="z"]', "Code"],
+)
+def test_scope_parameter_is_exactly_one_literal_with_an_optional_literal_meta(expression: str) -> None:
+    assert scope.parameter_value(_PARAM.format('a""b')) == 'a"b'
+    with pytest.raises(scope.SourceScopeError):
+        scope.parameter_value(expression)
+
+
+def test_scope_refuses_a_table_with_two_m_partitions() -> None:
+    with pytest.raises(scope.SourceScopeError, match="Orders: partition is not one M partition"):
+        scope.check_source_scope([("Orders", "M", _SQL_M)] * 2, _expressions(), {}, [])
+
+
+def test_scope_admits_matching_models_and_reaches_one_refresh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    context, args, calls = _scope_route(monkeypatch, tmp_path, canaries=("Orders", "Flights"))
+
+    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 0
+    assert calls == ["Refresh", "canaries", "Save"]
+
+
+def _set(entry: int, field: str, value: object):
+    def change(sources: list[dict[str, object]]) -> None:
+        sources[entry][field] = value
+
+    return change
+
+
+def _rename(entry: int, old: str, new: str):
+    def change(sources: list[dict[str, object]]) -> None:
+        sources[entry][new] = sources[entry].pop(old)
+
+    return change
+
+
+@pytest.mark.parametrize(
+    "change,clause",
+    [
+        (lambda sources: sources.append(dict(sources[0], table="Extra")), "Extra: missing"),
+        (lambda sources: sources.pop(1), "Flights: unexpected"),
+        (_set(1, "server", "other.example"), "Flights: server"),
+        (_set(0, "server", "SRV.EXAMPLE"), "Orders: server"),
+        (_set(0, "database", "Other"), "Orders: database"),
+        (_set(1, "warehouse", "OTHER_WH"), "Flights: warehouse"),
+        (_set(2, "http_path", "/sql/other"), "Trips: http_path"),
+        (_set(1, "navigation", [{"Name": "DB2", "Kind": "Database"}] + _sources()[1]["navigation"][1:]),
+         "Flights: navigation"),
+        (_set(0, "navigation", [{"Schema": "dbo", "Item": "Other"}]), "Orders: navigation"),
+        (_set(2, "navigation", _sources()[2]["navigation"][:2] + [{"Name": "x", "Kind": "Table"}]),
+         "Trips: navigation"),
+        (_set(0, "connector", "PostgreSQL.Database"), "Orders: connector"),
+        (_rename(1, "warehouse", "database"), "Flights: warehouse"),
+        (_rename(2, "http_path", "warehouse"), "Trips: http_path"),
+        (lambda sources: sources[0].update(warehouse="Sales"), "Orders: warehouse"),
+    ],
+)  # fmt: skip
+def test_scope_refuses_any_expected_source_mismatch_naming_only_the_field(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], change, clause: str
+) -> None:
+    sources = _sources()
+    change(sources)
+    context, args, calls = _scope_route(monkeypatch, tmp_path, sources=sources)
+
+    assert f"automatic source scope: expected sources: {clause})" in _refusal(context, args, calls, capsys)
+
+
+def test_scope_compares_resolved_parameter_values_not_partition_text(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    expressions = _expressions() | {"SfWarehouse": _PARAM.format("OTHER_WH")}
+    context, args, calls = _scope_route(monkeypatch, tmp_path, expressions=expressions)
+
+    assert "expected sources: Flights: warehouse)" in _refusal(context, args, calls, capsys)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "{not json",
+        json.dumps({"version": 1, "sources": []}),
+        json.dumps({"version": 2, "sources": _sources()}),
+        json.dumps({"version": 1, "sources": _sources(), "note": "x"}),
+        json.dumps({"version": 1, "sources": [dict(_sources()[0], extra="x")]}),
+        json.dumps({"version": 1, "sources": [_sources()[0], _sources()[0]]}),
+        json.dumps({"version": 1, "sources": [dict(_sources()[0], server=1)]}),
+        json.dumps({"version": True, "sources": _sources()}),
+        json.dumps({"version": 1.0, "sources": _sources()}),
+        json.dumps({"version": 1, "sources": _sources()})[:-3] + ', "table": "Trips"}]}',
+        None,
+    ],
+)
+def test_scope_refuses_unreadable_or_malformed_expected_sources(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], raw: str | None
+) -> None:
+    context, args, calls = _scope_route(monkeypatch, tmp_path, raw=raw or "")
+    if raw is None:
+        args.automatic_source_scope = str(tmp_path / "absent.json")
+
+    assert "automatic source scope: expected sources: input)" in _refusal(context, args, calls, capsys)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--automatic-source-scope", "x.json", "--canaries", "Orders"],
+        ["--ui-refresh", "--automatic-source-scope", "x.json"],
+        ["--ui-refresh", "--automatic-source-scope", "--canaries", "Orders"],
+        ["--ui-refresh", "--automatic-source-scope", "", "--canaries", "Orders"],
+    ],
+)
+def test_scope_flag_requires_value_ui_refresh_and_canaries_before_discovery(
+    arguments: list[str], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(refresh_pbip_model, "_resolve_pid", lambda _pid: pytest.fail("instance discovery ran"))
+
+    assert refresh_pbip_model.main(["--pid", "123", *arguments]) == 2
+    assert "--automatic-source-scope requires" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "case,clause",
+    [
+        ("custom_sql", "Orders: not the connector template"),
+        ("native_expression", "Native: expression is not a literal parameter"),
+        ("code_expression", "Code: expression is not a literal parameter"),
+        ("dynamic_reference", "Orders: unsupported M token"),
+        ("unknown_connector", "Orders: connector is not admitted"),
+        ("file_partition", "Orders: connector is not admitted"),
+        ("calculated_canary", "Calc: canary is not a connector table"),
+        ("policy_range", "Orders: partition is not one M partition"),
+        ("refresh_policy", "a refresh policy is present"),
+        ("dmv_error", "metadata read failed"),
+        ("unexpected_expression_shape", "shared expression name is unresolved"),
+    ],
+)
+def test_scope_negative_controls_refuse_before_any_action(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], case: str, clause: str
+) -> None:
+    queries: dict[str, object] = {"Orders": _SQL_M, "Flights": _SNOW_M, "Trips": _DBX_M, "Calc": None}
+    expressions: dict[str, str] | Exception = _expressions()
+    options: dict[str, object] = {}
+    if case == "custom_sql":
+        queries["Orders"] = _SQL_M.replace("dbo_Orders = Source", 'dbo_Orders = Value.NativeQuery(Source, "x")')
+    elif case == "native_expression":
+        expressions["Native"] = 'Value.NativeQuery(Sql.Database("s", "d"), "SELECT 1")'
+    elif case == "code_expression":
+        expressions["Code"] = "let Source = #shared in Source"
+    elif case == "dynamic_reference":
+        queries["Orders"] = _SQL_M.replace("Sql.Database", 'Record.Field(#shared, "Sql.Database")')
+    elif case == "unknown_connector":
+        queries["Orders"] = _SQL_M.replace("Sql.Database", "Web.Database")
+    elif case == "file_partition":
+        queries["Orders"] = 'let Source = Csv.Document(File.Contents("\\\\share\\x.csv")) in Source'
+    elif case == "calculated_canary":
+        options["canaries"] = ("Orders", "Calc")
+    elif case == "policy_range":
+        queries["Orders"] = (6, _SQL_M)
+    elif case == "refresh_policy":
+        options["policies"] = [(10,)]
+    elif case == "dmv_error":
+        expressions = RuntimeError("cannot reach srv.example")
+    else:
+        expressions = {"": _PARAM.format("x")}
+    context, args, calls = _scope_route(monkeypatch, tmp_path, queries=queries, expressions=expressions, **options)
+
+    assert f"automatic source scope: {clause})" in _refusal(context, args, calls, capsys)
