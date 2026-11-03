@@ -2911,6 +2911,101 @@ def test_failed_save_handback_does_not_clear_real_save_failures(
     assert "REFRESH: DATA_OK" not in output
 
 
+# Startup budget for the synthetic WPF child to print READY (#807). Twenty local hidden starts reached the
+# pre-render READY work in 1.6-3.0 s (median 1.9 s); the hosted windows-bundle runner missed the old 10 s
+# budget on the session's first GUI case, so keep about 10x the local worst case.
+SYNTHETIC_WINDOW_STARTUP_BUDGET_S = 30.0
+
+
+def _await_ready_line(child: subprocess.Popen[str], *, started: float, budget_s: float) -> str:
+    """Return the child's READY| line, or fail with elapsed time, last phase, poll() and stderr."""
+    ready: queue.Queue[str | None] = queue.Queue()
+    received: list[tuple[float, str]] = []
+
+    def read_stdout() -> None:
+        for line in child.stdout:
+            text = line.strip()
+            received.append((time.monotonic() - started, text))
+            if text.startswith("READY|"):
+                ready.put(text)
+                return
+        ready.put(None)
+
+    threading.Thread(target=read_stdout, daemon=True).start()
+    try:
+        line = ready.get(timeout=max(0.0, started + budget_s - time.monotonic()))
+    except queue.Empty:
+        line = ""
+    if not line:
+        elapsed = time.monotonic() - started
+        if line is None:
+            # stdout closed before READY: give the exiting child a bounded moment to report its code.
+            try:
+                child.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        state = child.poll()
+        if state is None:
+            child.terminate()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        errors: list[str] = []
+        if child.stderr is not None:
+            # Read only after termination, and never wait unboundedly on a pipe a survivor may hold open.
+            stderr_reader = threading.Thread(target=lambda: errors.append(child.stderr.read()), daemon=True)
+            stderr_reader.start()
+            stderr_reader.join(timeout=5)
+            if stderr_reader.is_alive():
+                errors.append("<stderr read timed out>")
+        phases = [(at, text.removeprefix("PHASE|")) for at, text in list(received) if text.startswith("PHASE|")]
+        last_phase = f"{phases[-1][1]} at {phases[-1][0]:.2f} s" if phases else "none"
+        pytest.fail(
+            f"synthetic window did not publish its identity: elapsed {elapsed:.2f} s of {budget_s:.2f} s budget; "
+            f"last phase: {last_phase}; poll(): {'None (still running)' if state is None else state}; "
+            f"stdout: {[f'{at:.2f}s {text}' for at, text in list(received)]}; stderr: {''.join(errors).strip()!r}"
+        )
+    print(f"synthetic window READY after {time.monotonic() - started:.2f} s of {budget_s:.2f} s budget")
+    return line
+
+
+@pytest.mark.parametrize("exits", [False, True])
+def test_synthetic_window_startup_failure_is_self_explaining(exits: bool) -> None:
+    script = (
+        "import sys, time\n"
+        "print('PHASE|assemblies', flush=True)\n"
+        "print('PHASE|compiled', flush=True)\n"
+        "sys.stderr.write('startup detail\\n'); sys.stderr.flush()\n"
+        f"sys.exit(7) if {exits} else time.sleep(60)\n"
+    )
+    started = time.monotonic()
+    child = subprocess.Popen(  # pylint: disable=consider-using-with
+        [sys.executable, "-c", script],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        with pytest.raises(pytest.fail.Exception) as failure:
+            _await_ready_line(child, started=started, budget_s=1.5)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        child.stdout.close()
+        child.stderr.close()
+    message = str(failure.value)
+    elapsed = float(message.split("elapsed ", 1)[1].split(" s", 1)[0])
+    assert (elapsed < 1.5) if exits else (1.5 <= elapsed < 3.0), message
+    assert "of 1.50 s budget" in message
+    assert "last phase: compiled at " in message
+    assert ("poll(): 7;" if exits else "poll(): None (still running);") in message
+    assert "'startup detail'" in message
+    assert "s PHASE|assemblies" in message
+
+
 @pytest.mark.gui
 @pytest.mark.serial
 @pytest.mark.parametrize(
@@ -2921,8 +3016,11 @@ def test_synthetic_control_is_invoked_once_and_ambiguity_refused(control_type: s
     powershell = shutil.which("powershell.exe")
     assert os.name == "nt" and powershell, "the native action qualification requires Windows PowerShell"
     script = (
+        "function Write-Phase([string]$name) { [Console]::Out.WriteLine('PHASE|' + $name); [Console]::Out.Flush() }; "
+        "Write-Phase 'started'; "
         "Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, "
         "UIAutomationProvider, System.Xaml; "
+        "Write-Phase 'assemblies'; "
         "$references = @([System.Windows.Window].Assembly.Location, "
         "[System.Windows.UIElement].Assembly.Location, "
         "[System.Windows.Threading.DispatcherObject].Assembly.Location, "
@@ -2943,6 +3041,7 @@ def test_synthetic_control_is_invoked_once_and_ambiguity_refused(control_type: s
         "}\n"
         "'@\n"
         "Add-Type -TypeDefinition $peerCode -ReferencedAssemblies $references; "
+        "Write-Phase 'compiled'; "
         "$form = [System.Windows.Window]::new(); $form.Title = 'Synthetic UIA'; "
         "$form.Width = 360; $form.Height = 180; "
         f"$button = if ('{control_type}' -eq 'SplitButton') "
@@ -2959,12 +3058,14 @@ def test_synthetic_control_is_invoked_once_and_ambiguity_refused(control_type: s
         "$second.Add_Click({ $form.Title = 'Synthetic invoked' }); $null = $panel.Children.Add($second) "
         "}; $form.Content = $panel; "
         "$form.Add_ContentRendered({ "
+        "Write-Phase 'rendered'; "
         "$process = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID); "
         "$handle = [System.Windows.Interop.WindowInteropHelper]::new($form).Handle; "
         "[Console]::Out.WriteLine(('READY|{0}|{1}' -f $handle.ToInt64(), "
         "$process.CreationDate.ToUniversalTime().Ticks)); [Console]::Out.Flush() "
-        "}); $null = $form.ShowDialog()"
+        "}); Write-Phase 'showing'; $null = $form.ShowDialog()"
     )
+    started = time.monotonic()
     child = subprocess.Popen(  # pylint: disable=consider-using-with
         [powershell, "-NoProfile", "-STA", "-Command", script],
         stdin=subprocess.DEVNULL,
@@ -2975,29 +3076,8 @@ def test_synthetic_control_is_invoked_once_and_ambiguity_refused(control_type: s
         errors="replace",
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
-    lines: queue.Queue[str] = queue.Queue()
-
-    def wait_for_ready() -> None:
-        for line in child.stdout:
-            if line.startswith("READY|"):
-                lines.put(line)
-                return
-
-    reader = threading.Thread(target=wait_for_ready, daemon=True)
-    reader.start()
     try:
-        try:
-            ready_line = lines.get(timeout=10).strip()
-        except queue.Empty:
-            child.terminate()
-            child.wait(timeout=5)
-            detail = child.stderr.read() if child.stderr is not None else ""
-            pytest.fail(f"synthetic window did not publish its identity: {detail}")
-        if not ready_line:
-            child.terminate()
-            child.wait(timeout=5)
-            detail = child.stderr.read() if child.stderr is not None else ""
-            pytest.fail(f"synthetic window did not publish its identity: {detail}")
+        ready_line = _await_ready_line(child, started=started, budget_s=SYNTHETIC_WINDOW_STARTUP_BUDGET_S)
         ready = ready_line.split("|")
         assert len(ready) == 3 and ready[0] == "READY", "synthetic window did not publish its identity"
         root_hwnd, process_start = int(ready[1]), ready[2]
@@ -3031,7 +3111,6 @@ def test_synthetic_control_is_invoked_once_and_ambiguity_refused(control_type: s
             child.wait(timeout=5)
         if child.stdout is not None:
             child.stdout.close()
-        reader.join(timeout=1)
 
 
 # --- #780 automatic source scope -----------------------------------------------------------------
