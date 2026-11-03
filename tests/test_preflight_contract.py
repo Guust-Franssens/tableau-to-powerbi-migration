@@ -654,6 +654,55 @@ def test_cli_version_output_parsing() -> None:
 
 
 @pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
+def test_node_runtime_check_accepts_prerelease_above_floor_with_warning() -> None:
+    """A prerelease Node above the floor passes the critical check and adds one non-blocking warning."""
+    critical, warning = ("Node.js >= 20", "critical"), ("Node.js release build", "recommended")
+    rows = [
+        ("v20.0.0", [(*critical, True)]),
+        ("v26.13.0", [(*critical, True)]),
+        (" v22.1.0 ", [(*critical, True)]),
+        ("v19.9.9", [(*critical, False)]),
+        ("v27.0.0-alpha.0.0.0", [(*critical, True), (*warning, False)]),
+        ("v27.0.0-nightly20260101abcdef", [(*critical, True), (*warning, False)]),
+        ("v20.0.1-rc.1", [(*critical, True), (*warning, False)]),
+        ("v20.0.0-rc.1", [(*critical, False)]),
+        ("v19.0.0-rc.1", [(*critical, False)]),
+        *[
+            (raw, [(*critical, False)])
+            for raw in (
+                "",
+                None,
+                "garbage",
+                "node v22.1.0",
+                "v20",
+                "v20.0",
+                "v20.0.0.0",
+                "v27.0.0+build",
+                "v99999999999.0.0",
+            )
+        ],
+    ]
+    actual = _ps_json(
+        "Add-Check,Add-NodeRuntimeCheck",
+        "$out = @(for ($i = 0; $i -lt $inputData.Count; $i++) {\n"
+        " $results = New-Object System.Collections.Generic.List[object]\n"
+        " Add-NodeRuntimeCheck $inputData[$i][0]\n"
+        " foreach ($c in $results) { [pscustomobject]@{ Case = $i; Name = $c.Name; Tier = $c.Tier; Ok = $c.Ok\n"
+        "  Detail = $c.Detail; Hint = $c.Hint; Blocker = $(if ($c.DoctorBlocker) { $c.DoctorBlocker.id }) } } })\n"
+        "Emit (ConvertTo-Json -InputObject $out -Compress)\n",
+        [[raw] for raw, _ in rows],
+    )
+    for index, (raw, expected) in enumerate(rows):
+        checks = [c for c in actual if c["Case"] == index]
+        assert [(c["Name"], c["Tier"], c["Ok"]) for c in checks] == expected, raw
+        assert checks[0]["Blocker"] == (None if checks[0]["Ok"] else "node_runtime"), raw
+        assert checks[0]["Detail"] == ((raw or "").strip().removeprefix("v") or "no version reported"), raw
+        if len(checks) == 2:
+            assert checks[1]["Blocker"] is None and "prerelease" in checks[1]["Detail"], raw
+            assert "LTS" in checks[1]["Hint"], raw
+
+
+@pytest.mark.skipif(_PS is None, reason="no PowerShell on PATH")
 def test_plugin_verdict_fails_closed() -> None:
     """Registry, effective manifest and capability must jointly satisfy policy."""
     rows = [
