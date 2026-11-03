@@ -6,6 +6,8 @@ different versions, and a bundle could not say which one built it. So every test
 FAILURE mode - that the resolver refuses rather than substitutes - because a resolver that falls back
 passes any test written about its happy path.
 """
+# pylint: disable=missing-function-docstring,subprocess-run-check
+# pylint: disable=unused-argument,use-implicit-booleaness-not-comparison
 
 from __future__ import annotations
 
@@ -31,6 +33,33 @@ def _make_engine_tree(root: Path, version: str = "2.126.0") -> Path:
     (skill / "VERSION").write_text(version + "\n", encoding="utf-8")
     (skill / "scripts" / "migrate_estate.py").write_text("# engine\n", encoding="utf-8")
     return root
+
+
+def test_jsonc_removes_comment_only_lines_without_touching_strings(tmp_path: Path) -> None:
+    config = tmp_path / "config.json"
+    config.write_text(
+        '// before\n{"url": "https://example.invalid//path",\n// between\n"value": 1}\n',
+        encoding="utf-8",
+    )
+
+    assert engine_source._read_json(config, leading_comments=True) == {  # pylint: disable=protected-access
+        "url": "https://example.invalid//path",
+        "value": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    ("schema", "expected"),
+    [
+        ("https://agent-plugins.org/schemas/v1/plugin.schema.json", True),
+        ("https://agent-plugins.org/schemas/plugin.schema.json", True),
+        ("http://agent-plugins.org/schemas/v1/plugin.schema.json", False),
+        ("https://agent-plugins.org/schemas/v1/marketplace.schema.json", False),
+        ("https://example.invalid/agent-plugins.org/schemas/v1/plugin.schema.json", False),
+    ],
+)
+def test_agent_plugin_schema_recognition_is_exact(schema: str, expected: bool) -> None:
+    assert engine_source._is_agent_plugin_schema(schema) is expected  # pylint: disable=protected-access
 
 
 @pytest.mark.parametrize("configured", [None, "", "relocated", "missing"])

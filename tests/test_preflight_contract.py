@@ -1671,7 +1671,10 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
         " elif Path(args[0]).name=='engine_source.py':\n"
         "  print(json.dumps({'present':mode!='blocked','alternatives':['PRIVATE_ENGINE_PATH_CANARY'] "
         "if mode=='blocked' else [],'version':'9.9.9','root':'PRIVATE_ENGINE_PATH_CANARY',"
-        "'install_hint':'PRIVATE_HELPER_HINT_CANARY'}))\n"
+        "'install_hint':'PRIVATE_HELPER_HINT_CANARY','authoring_plugin':{"
+        "'host':'cli','status':'found','ok':True,"
+        "'entries':json.loads((Path(os.environ['USERPROFILE'])/'copilot'/'config.json').read_text())"
+        "['installedPlugins']}}))\n"
         " elif Path(args[0]).name=='check_engine_receipts.py': print('PRIVATE_RECEIPT_OUTPUT_CANARY')\n"
         " elif Path(args[0]).name=='skill_plugin_source.py':\n"
         "  print(json.dumps({'status':'multiple' if mode=='multiple' else 'found',"
@@ -1911,7 +1914,16 @@ def test_windows_preflight_host_cache_boundary(tmp_path: Path, monkeypatch) -> N
         ),
         (
             "missing",
-            {"python_runtime", "node_runtime", "report_author", "desktop_bridge", "engine_source", "npx", "dotnet"},
+            {
+                "python_runtime",
+                "node_runtime",
+                "report_author",
+                "desktop_bridge",
+                "engine_source",
+                "authoring_plugin",
+                "npx",
+                "dotnet",
+            },
         ),
         ("multiple", {"reusable_skill_plugins"}),
     ],

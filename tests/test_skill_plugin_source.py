@@ -1,5 +1,5 @@
 """Tests for content-based discovery of the installed reusable Power BI skill plugin."""
-# pylint: disable=wrong-import-position
+# pylint: disable=missing-function-docstring,wrong-import-position
 
 from __future__ import annotations
 

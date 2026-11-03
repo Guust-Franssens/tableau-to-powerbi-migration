@@ -13,6 +13,7 @@ from pathlib import Path
 
 from build_plugin import MARKETPLACE_NAME, PLUGIN_NAME, PUBLISH_REPO, SHIPPED_SKILLS
 from copilot_home import copilot_home
+from engine_source import PLUGIN_HOST_ENV, discover_installed_plugin
 
 PLUGIN_ROOT_ENV = "POWERBI_SKILLS_PLUGIN_ROOT"
 DEFAULT_IDENTITY = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
@@ -33,6 +34,7 @@ class SkillPluginDiscovery:  # pylint: disable=too-many-instance-attributes
     identity: str
     install_hint: str
     detail: str
+    host: str | None
     override: bool = False
 
     @property
@@ -51,6 +53,7 @@ class SkillPluginDiscovery:  # pylint: disable=too-many-instance-attributes
             "identity": self.identity,
             "install_hint": self.install_hint,
             "detail": self.detail,
+            "host": self.host,
             "override": self.override,
             "shipped_skills": list(SHIPPED_SKILLS),
         }
@@ -92,6 +95,17 @@ def discover_skill_plugin(
     different name, and hard-coding that identity is exactly how stale bundles went unnoticed.
     """
     environment = os.environ if env is None else env
+    if PLUGIN_HOST_ENV in environment and environment.get(PLUGIN_HOST_ENV) not in ("cli", "vscode"):
+        return SkillPluginDiscovery(
+            status="invalid",
+            plugin_root=None,
+            skills_dir=None,
+            candidates=(),
+            identity=DEFAULT_IDENTITY,
+            install_hint=f"Set {PLUGIN_HOST_ENV} to cli or vscode, or unset it for automatic selection.",
+            detail=f"invalid {PLUGIN_HOST_ENV}: {environment.get(PLUGIN_HOST_ENV)!r}",
+            host=None,
+        )
     override_value = plugin_root_override or (
         Path(environment[PLUGIN_ROOT_ENV]) if environment.get(PLUGIN_ROOT_ENV) else None
     )
@@ -107,6 +121,19 @@ def discover_skill_plugin(
                 identity=_identity_from_root(plugin_root),
                 install_hint=f"{PLUGIN_ROOT_ENV} points at {plugin_root}, but {skills_dir} does not exist.",
                 detail=f"override has no skills directory: {skills_dir}",
+                host=None,
+                override=True,
+            )
+        if not _carries_shipped_skill(skills_dir):
+            return SkillPluginDiscovery(
+                status="invalid",
+                plugin_root=plugin_root,
+                skills_dir=skills_dir,
+                candidates=(plugin_root,),
+                identity=_identity_from_root(plugin_root),
+                install_hint=f"{PLUGIN_ROOT_ENV} must point at a plugin carrying a shipped skill.",
+                detail=f"override carries no shipped skill bundle: {plugin_root}",
+                host=None,
                 override=True,
             )
         return SkillPluginDiscovery(
@@ -117,46 +144,24 @@ def discover_skill_plugin(
             identity=_identity_from_root(plugin_root),
             install_hint=DEFAULT_INSTALL_HINT,
             detail=f"override: {plugin_root}",
+            host=None,
             override=True,
         )
 
-    root = installed_plugins_root or (copilot_home() / "installed-plugins")
-    root = root.expanduser().resolve()
-    candidates: list[Path] = []
-    if root.is_dir():
-        for skills_dir in sorted(root.glob("*/*/skills")):
-            if skills_dir.is_dir() and _carries_shipped_skill(skills_dir):
-                candidates.append(skills_dir.parent)
-
-    if len(candidates) == 1:
-        plugin_root = candidates[0]
-        return SkillPluginDiscovery(
-            status="found",
-            plugin_root=plugin_root,
-            skills_dir=_skills_dir(plugin_root),
-            candidates=tuple(candidates),
-            identity=_identity_from_root(plugin_root),
-            install_hint=DEFAULT_INSTALL_HINT,
-            detail=f"found {plugin_root}",
-        )
-    if len(candidates) > 1:
-        return SkillPluginDiscovery(
-            status="multiple",
-            plugin_root=None,
-            skills_dir=None,
-            candidates=tuple(candidates),
-            identity=DEFAULT_IDENTITY,
-            install_hint="Remove or disable duplicate installed skill plugins so only one copy can shadow the repo.",
-            detail="MULTIPLE skill plugin installs: " + "; ".join(str(path) for path in candidates),
-        )
+    resolver_env = dict(environment)
+    if env is None and installed_plugins_root is None:
+        resolver_env["COPILOT_HOME"] = str(copilot_home())
+    evidence = discover_installed_plugin("bundles", installed_plugins_root, resolver_env)
+    plugin_root = evidence.plugin_root
     return SkillPluginDiscovery(
-        status="missing",
-        plugin_root=None,
-        skills_dir=None,
-        candidates=(),
-        identity=DEFAULT_IDENTITY,
-        install_hint=DEFAULT_INSTALL_HINT,
-        detail=f"no installed plugin under {root} carries any shipped skill bundle",
+        status=evidence.status,
+        plugin_root=plugin_root,
+        skills_dir=_skills_dir(plugin_root) if plugin_root else None,
+        candidates=evidence.candidates,
+        identity=evidence.identity,
+        install_hint=evidence.install_hint,
+        detail=evidence.detail,
+        host=evidence.host,
     )
 
 

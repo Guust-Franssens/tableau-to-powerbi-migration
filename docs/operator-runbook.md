@@ -176,7 +176,7 @@ with upstream; it neither upgrades nor fails the run. The plugin uses the GitHub
 `.github/plugin/marketplace.json` catalog. Missing, ambiguous, malformed or prerelease upstream
 metadata prints advisory `unknown`, not an assumed current version.
 
-The **single** `plugin: powerbi-authoring@fabric-collection` verdict jointly checks exact registry
+For **Copilot CLI**, the single `plugin: powerbi-authoring@fabric-collection` verdict jointly checks exact registry
 identity, `enabled=true`, cache directory, effective `.github/plugin/plugin.json` name/version,
 registry/manifest agreement, and the `skills\powerbi-report-cli\SKILL.md` **file**. Cannot establish
 any of these, prerelease metadata or a version below the floor means a critical MISS. The capability
@@ -184,6 +184,64 @@ file remains mandatory above the floor. This blocks the agent phase, not §2 ste
 An on-PATH CLI with blank, noisy, malformed or prerelease version output also fails closed.
 Versions between floor and known-good are allowed-but-unmeasured WARNs; above known-good is a
 re-verification WARN with **no update/downgrade advice**.
+
+### Installed plugin host selection (#727)
+
+`scripts/engine_source.py` is the shared installation-selection authority for the engine, Power BI
+authoring and reusable bundles. Preflight consumes its selected evidence; `skill_plugin_source.py`
+retains bundle-content and explicit-root policy. Installed `t2p doctor` calls the same plain preflight.
+
+Supported discovery is the existing Copilot CLI `COPILOT_HOME` layout and **stable Windows VS Code**
+at `%APPDATA%\Code\User\agent-plugins\installed.json`. The VS Code contract is pinned to
+[1.144.0, commit `2c33b50`](https://github.com/microsoft/vscode/blob/2c33b50b16c472efe58357d1d2a8a5414bc23fbf/src/vs/workbench/contrib/chat/common/plugins/fileBackedInstalledPluginsStore.ts).
+Its schema is `{version: 1, installed: [{pluginUri, relativePath?, enablementUri?, marketplace, name?}]}`.
+A contained `relativePath` takes precedence over `pluginUri`, preserving literal spaces, `#` and `%20`
+as in the [official relocation fixture](https://github.com/microsoft/vscode/blob/2c33b50b16c472efe58357d1d2a8a5414bc23fbf/src/vs/workbench/contrib/chat/test/common/plugins/fileBackedInstalledPluginsStore.test.ts#L282-L311).
+The registered cached root is authoritative. There is no newest-directory search, source-checkout
+fallback or legacy-storage migration.
+
+Select the intended host in the current PowerShell session:
+
+```powershell
+$env:T2P_PLUGIN_HOST = 'vscode' # or 'cli'
+python scripts\engine_source.py --json
+python scripts\skill_plugin_source.py --json
+```
+
+Without a selector, each identity requires one unambiguous physical root. Identical resolved roots
+deduplicate; distinct roots refuse even at equal versions. Invalid selectors and missing, malformed
+or incomplete explicitly selected installations refuse without trying another host. Repair the
+intended host between sessions, correct the selector, or select one host when both are installed.
+`Remove-Item Env:T2P_PLUGIN_HOST` restores automatic selection. Existing deliberate engine and
+bundle-root overrides remain explicit overrides, never automatic fallback.
+
+VS Code installations report **installed (enablement not verified)**. The registry has no enabled,
+version, sha, cachedRevision or nonce member. Editor enablement depends separately on
+`state.vscdb` workspace/global state, settings, policy and collision groups; this check does not
+establish it. Authoring still requires the existing manifest version floor and both report/model CLI
+skill files. VS Code manifest order is AgentPlugin-format root `plugin.json`, `.plugin/plugin.json`,
+`.claude-plugin/plugin.json`, root `plugin.json`, then `.github/plugin/plugin.json`. Conflicting
+manifests refuse; CLI manifest precedence and registry/manifest agreement policy remain unchanged.
+
+If Python is unavailable, authoring cannot be verified and fails closed. Doctor retains the existing
+authoring-plugin repair remedy; its separate `python_runtime` blocker provides Python-first guidance.
+
+**Could not verify:** synthetic Linux/PowerShell tests do not establish real Windows VS Code enablement
+or migration/Desktop readiness. Hosted `windows-bundle` CI must qualify Windows children at the exact
+PR head. Portable/custom `--user-data-dir`, Insiders and other editor distributions are outside scope.
+Credentials and refresh are separate work.
+
+Windows follow-up, from the toolkit root, without updates or credentials:
+
+```powershell
+git rev-parse HEAD # record exact head and windows-bundle CI URL
+uv run pytest tests\test_engine_source.py tests\test_skill_plugin_source.py tests\test_installed_plugin_hosts.py tests\test_preflight_contract.py -q
+$LASTEXITCODE # require 0
+uv run pytest tests\test_t2p_install.py -k doctor -q
+$LASTEXITCODE
+# Separately, an operator may inspect the JSON discovery commands above on their own setup.
+# A synthetic pass does not prove editor enablement, credentials or Desktop readiness.
+```
 
 An installed skill plugin can shadow correct repo-local skills. Preflight blocks on `STALE in plugin`.
 `copilot plugin update` file-locks while a session is running; the lock blocks renaming, not content

@@ -309,7 +309,11 @@ if ($py) {
 if ($engineStatus) {
     $alternatives = @($engineStatus.alternatives)
     Add-Check 'engine: plugin installed' 'critical' ([bool]$engineStatus.present) `
-        $(if ($engineStatus.present) { "VERSION $($engineStatus.version) at $($engineStatus.root)" } else { "not installed at $($engineStatus.root)" }) `
+        $(if ($engineStatus.present) {
+            "VERSION $($engineStatus.version) at $($engineStatus.root)" + $(if ($engineStatus.host -eq 'vscode') { ' - installed (enablement not verified)' } else { '' })
+        } elseif ($engineStatus.installation_status -in @('invalid', 'multiple') -or $engineStatus.host -eq 'vscode' -or $env:T2P_PLUGIN_HOST) {
+            $engineStatus.detail
+        } else { "not installed at $($engineStatus.root)" }) `
         $engineStatus.install_hint `
         -DoctorId 'engine_plugin' -DoctorReason 'plugin_missing' -DoctorRemedy 'install_engine_plugin'
     Add-Check 'engine: single source' 'critical' ($alternatives.Count -eq 0) `
@@ -338,9 +342,9 @@ if ($engineStatus -and $engineStatus.present -and $py) {
 # --- Skill plugins ---
 # This repo's reusable Power BI bundles are different: their marketplace/plugin name has changed once,
 # and a hard-coded name let the installed copy drift silently. Discover that plugin by content instead:
-# scan the Copilot home's installed-plugins/*/*/skills for build_plugin.py's bundle names. Exactly
-# one discovered install is acceptable; more than one is a critical shadowing hazard.
-$cfg = Read-CopilotJson 'config.json'
+# engine_source.py selects installation evidence for every host; the bundle helper retains content policy.
+# Exactly one physical install is acceptable; multiple installs remain a shadowing hazard.
+$cfg = [pscustomobject]@{ installedPlugins = @($engineStatus.authoring_plugin.entries) }
 $pluginPolicy = @{ name = 'powerbi-authoring'; market = 'fabric-collection'
     floor = '0.3.19'; knownGood = '0.3.19'; skill = 'powerbi-report-cli'
     upstreamUrl = 'https://raw.githubusercontent.com/microsoft/skills-for-fabric/main/.github/plugin/marketplace.json'
@@ -375,6 +379,27 @@ function Get-PluginVerdict($Entries, [bool]$CacheExists, $Manifest, [bool]$Skill
     return $v
 }
 
+function Get-VscodePluginVerdict($Evidence, $Policy) {
+    # VS Code installation records cannot establish enablement. Never manufacture a CLI entry.
+    $hint = $Evidence.install_hint
+    $v = [pscustomobject]@{ Kind = 'missing'; Tier = 'critical'; Ok = $false
+        Detail = $Evidence.detail; Hint = $hint }
+    if (-not $Evidence.ok) { return $v }
+    if (-not $Evidence.manifest -or $Evidence.manifest.name -cne $Policy.name) {
+        $v.Kind = 'manifest-unreadable'; return $v
+    }
+    $v = Get-VersionFloorVerdict $Evidence.manifest.version $Policy.floor $Policy.knownGood $hint
+    if ($v.Tier -eq 'critical') { return $v }
+    foreach ($skill in @($Policy.skill, 'powerbi-model-cli')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Evidence.plugin_root "skills\$skill\SKILL.md") -PathType Leaf)) {
+            return [pscustomobject]@{ Kind = 'skill-missing'; Tier = 'critical'; Ok = $false
+                Detail = "required skills/$skill/SKILL.md leaf missing"; Hint = $hint }
+        }
+    }
+    $v.Detail += ' - installed (enablement not verified)'
+    return $v
+}
+
 $pluginEntries = @($cfg.installedPlugins | Where-Object {
     $_.name -ceq $pluginPolicy.name -and $_.marketplace -ceq $pluginPolicy.market
 })
@@ -389,6 +414,14 @@ if ($cacheExists) {
     $skillPresent = Test-Path -LiteralPath (Join-Path $plugin.cache_path "skills\$($pluginPolicy.skill)\SKILL.md") -PathType Leaf
 }
 $pv = Get-PluginVerdict $pluginEntries ([bool]$cacheExists) $manifest $skillPresent $pluginPolicy
+if ($engineStatus.authoring_plugin.host -eq 'vscode') {
+    $pv = Get-VscodePluginVerdict $engineStatus.authoring_plugin $pluginPolicy
+}
+elseif ($engineStatus.authoring_plugin -and -not $engineStatus.authoring_plugin.ok -and
+    ($engineStatus.authoring_plugin.status -eq 'multiple' -or -not $engineStatus.authoring_plugin.host -or $pv.Tier -ne 'critical')) {
+    $pv = [pscustomobject]@{ Kind = 'missing'; Tier = 'critical'; Ok = $false
+        Detail = $engineStatus.authoring_plugin.detail; Hint = $engineStatus.authoring_plugin.install_hint }
+}
 Add-Check 'plugin: powerbi-authoring@fabric-collection' $pv.Tier $pv.Ok $pv.Detail $pv.Hint `
     -DoctorId 'authoring_plugin' -DoctorReason $pv.Kind -DoctorRemedy 'repair_authoring_plugin_between_sessions'
 
@@ -408,7 +441,7 @@ elseif ($skillPlugin.status -eq 'multiple') {
         'Two installed copies of the same skill create an ambiguous shadowing order. Remove the duplicate before trusting skill output.' `
         -DoctorId 'reusable_skill_plugins' -DoctorReason 'multiple_installs' -DoctorRemedy 'inspect_duplicate_skill_plugins'
 }
-elseif ($skillPlugin.status -eq 'missing') {
+elseif ($skillPlugin.status -eq 'missing' -and -not $env:T2P_PLUGIN_HOST) {
     # Deliberately recommended, not critical: with NO installed copy, this repo's local .github/skills
     # bundles remain available in this checkout. That is a capability/distribution gap for other repos,
     # not the measured false-green bug. STALE remains critical below because it silently executes code
@@ -417,9 +450,13 @@ elseif ($skillPlugin.status -eq 'missing') {
         'not installed/enabled' `
         $skillPlugin.install_hint
 }
+elseif ($skillPlugin.status -in @('missing', 'invalid')) {
+    Add-Check 'skill bundles installed' 'critical' $false $skillPlugin.detail $skillPlugin.install_hint `
+        -DoctorId 'skill_bundles' -DoctorReason 'bundle_missing' -DoctorRemedy 'sync_installed_skills'
+}
 else {
     Add-Check "plugin: $($skillPlugin.identity)" 'recommended' $true `
-        $skillPlugin.plugin_root `
+        $(if ($skillPlugin.host -eq 'vscode') { "$($skillPlugin.plugin_root) - installed (enablement not verified)" } else { $skillPlugin.plugin_root }) `
         'Discovered by scanning installed-plugins for this repo''s shipped skill bundles.'
 
     $missing = @()
