@@ -1669,12 +1669,15 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
         " elif args[0]=='-c': sys.exit(1 if mode=='blocked' and args[1] in "
         "('import lxml','import jsonschema') else 0)\n"
         " elif Path(args[0]).name=='engine_source.py':\n"
+        # Mirror engine_source._environment_home: the CLI registry is read from COPILOT_HOME, never a
+        # profile default, so a missing configured home yields the resolver's host-less 'missing' verdict.
+        "  cfg=Path(os.environ['COPILOT_HOME'])/'config.json'\n"
         "  print(json.dumps({'present':mode!='blocked','alternatives':['PRIVATE_ENGINE_PATH_CANARY'] "
         "if mode=='blocked' else [],'version':'9.9.9','root':'PRIVATE_ENGINE_PATH_CANARY',"
         "'install_hint':'PRIVATE_HELPER_HINT_CANARY','authoring_plugin':{"
-        "'host':'cli','status':'found','ok':True,"
-        "'entries':json.loads((Path(os.environ['USERPROFILE'])/'copilot'/'config.json').read_text())"
-        "['installedPlugins']}}))\n"
+        "'host':'cli' if cfg.is_file() else None,'status':'found' if cfg.is_file() else 'missing',"
+        "'ok':cfg.is_file(),'detail':'PRIVATE_PLUGIN_DETAIL_CANARY','install_hint':'PRIVATE_HELPER_HINT_CANARY',"
+        "'entries':json.loads(cfg.read_text())['installedPlugins'] if cfg.is_file() else []}}))\n"
         " elif Path(args[0]).name=='check_engine_receipts.py': print('PRIVATE_RECEIPT_OUTPUT_CANARY')\n"
         " elif Path(args[0]).name=='skill_plugin_source.py':\n"
         "  print(json.dumps({'status':'multiple' if mode=='multiple' else 'found',"
