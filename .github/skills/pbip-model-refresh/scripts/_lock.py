@@ -52,6 +52,19 @@ class ModelLockTimeout(RuntimeError):
     """
 
 
+class LockUnavailable(RuntimeError):
+    """The lock file could not be created or written at all (e.g. ``.pbi`` not writable, ACL deny).
+
+    A sibling of :class:`ModelLockTimeout`, not a subclass: nobody holds the lock, so callers must not
+    report a concurrent persist - but the duty is the same: refuse, never write unlocked. The message
+    names only the error class and errno, never the host path.
+    """
+
+
+def _lock_error_reason(error: OSError) -> str:
+    return f"{type(error).__name__} [Errno {error.errno}]"
+
+
 def _process_alive(pid: int) -> bool:
     """Is a process with ``pid`` running on THIS host? Conservative: on any uncertainty, assume alive.
 
@@ -126,7 +139,7 @@ class _ModelLock:
         return False
 
     def acquire(self) -> _ModelLock:
-        """Take the lock, reclaiming it from a dead holder, or raise `ModelLockTimeout`."""
+        """Take the lock, reclaiming it from a dead holder, or raise `ModelLockTimeout`/`LockUnavailable`."""
         deadline = time.monotonic() + self._timeout
         while True:
             try:
@@ -142,10 +155,25 @@ class _ModelLock:
                     ) from None
                 time.sleep(self._poll)
                 continue
+            except PermissionError as error:
+                # Windows reports EACCES for a still-present but DELETE-PENDING lock (a peer's legacy
+                # delete while another handle is open); that clears on its own, so wait it out within
+                # the deadline. An absent lock file means the directory itself refuses creation.
+                if not self._path.exists() or time.monotonic() >= deadline:
+                    raise LockUnavailable(_lock_error_reason(error)) from None
+                time.sleep(self._poll)
+                continue
+            except OSError as error:
+                raise LockUnavailable(_lock_error_reason(error)) from None
             try:
-                os.write(fd, self._payload())
-            finally:
-                os.close(fd)
+                try:
+                    os.write(fd, self._payload())
+                finally:
+                    os.close(fd)
+            except OSError as error:
+                with contextlib.suppress(OSError):
+                    os.unlink(self._path)
+                raise LockUnavailable(_lock_error_reason(error)) from None
             self._held = True
             return self
 

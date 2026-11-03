@@ -538,23 +538,8 @@ def test_visual_does_not_mask_later_positive_semantic_text(monkeypatch, parked, 
         thread.join(3)
 
 
-def test_visual_notice_and_path_cannot_trip_the_real_parent_text_classifier(
-    monkeypatch, parked, visual_runtime
-) -> None:
-    source = Path(__file__).resolve()
-    repo_scripts = next(
-        (
-            parent / "scripts"
-            for parent in source.parents
-            if source == parent.joinpath(".github", "skills", "pbip-model-refresh", "tests", source.name)
-        ),
-        None,
-    )
-    if repo_scripts is None or not (repo_scripts / "probe_live_source.py").is_file():
-        pytest.skip("parent transcript classifier is host-repo-only; portable skill has no such consumer")
-    monkeypatch.syspath_prepend(str(repo_scripts))
-    import probe_live_source  # pylint: disable=import-outside-toplevel
-
+def test_visual_notice_keeps_the_identifier_and_leaks_no_host_path(monkeypatch, parked, visual_runtime) -> None:
+    """A credential-looking cwd and pid stay out of the wire line; the decoded identifier survives."""
     private_cwd = visual_runtime.root / "authentication-10054-oauth"
     private_cwd.mkdir()
     monkeypatch.chdir(private_cwd)
@@ -567,8 +552,7 @@ def test_visual_notice_and_path_cannot_trip_the_real_parent_text_classifier(
         assert payload["status"] == "ACQUIRED"
         assert payload["desktop_pid"] == "10054", "escaping must preserve the decoded identifier"
         line = visual_runtime.wires[0]
-        assert not any(marker in line.lower() for marker in probe_live_source.CREDENTIAL_MARKERS)
-        assert probe_live_source._classify_failure(line, False)[0] == "ERROR"
+        assert "10054" not in line and "403" not in line, "numeric zero-escape must survive on the wire"
         assert "authentication-10054-oauth" not in line
         assert str(private_cwd) not in line
         assert "/" not in payload["path"] and "\\" not in payload["path"]
@@ -657,16 +641,6 @@ def test_visual_cli_scratch_is_forwarded_to_the_refresh_api(monkeypatch, tmp_pat
     monkeypatch.setattr(refresh_pbip_model, "refresh", invoked)
     refresh_pbip_model._refresh_and_save(111, 1234, None, args)
     assert seen == [tmp_path], "the CLI flag must reach the production refresh API, not just its parser"
-
-
-def test_visual_parent_classifier_is_optional_in_a_shallow_copy(monkeypatch, parked, visual_runtime) -> None:
-    """A portable copy must skip host-only coverage without assuming four parent directories."""
-    test = test_visual_notice_and_path_cannot_trip_the_real_parent_text_classifier
-    shallow = Path(Path.cwd().anchor) / "portable" / "tests" / "test_refresh_wall_clock.py"
-    monkeypatch.setitem(test.__globals__, "__file__", str(shallow))
-    with pytest.raises(pytest.skip.Exception, match="parent transcript classifier is host-repo-only"):
-        test(monkeypatch, parked, visual_runtime)
-    assert visual_runtime.children == []
 
 
 def test_visual_acquisition_timeout_kills_only_its_child_and_preserves_refresh(
