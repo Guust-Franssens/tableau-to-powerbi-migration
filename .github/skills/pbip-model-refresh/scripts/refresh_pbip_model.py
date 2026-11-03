@@ -2916,7 +2916,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "with potential source-side costs; --no-save prevents Save, NOT source execution. "
             "Invoke one whole-model Import M Refresh and require typed engine completion evidence. "
             "No automatic credential-gate use or earned clearance; defaults/callers unchanged. "
-            "Custom/unknown-query integration depends on accepted follow-up #780 (linked #692)"
+            "Automatic callers must add --automatic-source-scope (#780, linked #692)"
         ),
     )
     parser.add_argument(

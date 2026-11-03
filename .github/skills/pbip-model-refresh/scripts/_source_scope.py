@@ -43,6 +43,8 @@ def tokenize(m_text: str) -> list[tuple[str, str]]:
         if match is None:
             raise SourceScopeError("unsupported M token")
         position, kind, raw = match.end(), match.lastgroup, match.group()
+        if kind in {"text", "qname"} and "#(" in raw:
+            raise SourceScopeError("unsupported M token")
         if kind in {"text", "qname"}:
             tokens.append(("text" if kind == "text" else "id", raw[raw.index('"') + 1 : -1].replace('""', '"')))
         elif kind == "name":

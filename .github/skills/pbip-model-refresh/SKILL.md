@@ -63,9 +63,9 @@ execution of **all current M**, including native/custom SQL and unknown/indirect
 with potential source-side costs or effects. There is no custom-query admission screen.
 **`--no-save` prevents Save, not source execution.** No additional consent flag is required.
 This route does **not** authorize automatic credential-gate use or earn credential clearance.
-Defaults and existing callers remain unchanged. Automatic custom/unknown-query integration in
-PR B depends on accepted follow-up [#780](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/780)
-(linked [#692](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/692)).
+Defaults and existing callers remain unchanged. Automatic callers must add
+`--automatic-source-scope` ([#780](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/780),
+linked [#692](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/692)); see below.
 
 `--ui-refresh` is an opt-in route; the existing XMLA default and migration gates do not change. After
 the startup readiness checks below, it invokes one named Desktop **Refresh** control, then waits for engine
@@ -236,8 +236,8 @@ model (partition M, `TMSCHEMA_EXPRESSIONS`, `TMSCHEMA_REFRESH_POLICIES`) and ref
   shared literal parameter; no refresh policy exists; every canary is such a connector table;
 - the resolved identities equal the file exactly: same tables, no extras, byte-equal values.
 
-Custom SQL, files, comments, numbers, other functions and any metadata read error all refuse. The
-refusal is `REFRESH: UI_PREFLIGHT_REFUSED (DesktopActionError: automatic source scope: <name>: <clause>)`,
+Custom SQL, files, comments, numbers, `#(...)` text escapes, other functions and any metadata read
+error all refuse. The refusal is `REFRESH: UI_PREFLIGHT_REFUSED (DesktopActionError: automatic source scope: <name>: <clause>)`,
 exit 2, no action; it names tables and fields, never values. Treat it as a human stop.
 
 ```json

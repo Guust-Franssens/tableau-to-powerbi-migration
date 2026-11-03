@@ -2519,7 +2519,7 @@ def test_ui_refresh_help_warns_about_operator_source_execution_and_no_clearance(
     assert "potential source-side costs" in help_text
     assert "--no-save prevents Save, NOT source execution" in help_text
     assert "No automatic credential-gate use or earned clearance" in help_text
-    assert "#780 (linked #692)" in help_text
+    assert "Automatic callers must add --automatic-source-scope (#780, linked #692)" in help_text
 
 
 def test_action_result_handback_flag_is_not_inferred_from_invoke() -> None:
@@ -3168,6 +3168,9 @@ def test_scope_resolves_exact_engine_connector_identities(m_text: str, identity:
         'let Source = Sql.Database("s", "d"), T = Source{[Item="t"]}[Data] in Source',
         'let Source = Sql.Database("s", "d"), T = Source{[Query="t"]}[Data] in T',
         'let Source = Sql.Database("s", "d") in Source',
+        'let Source = Sql.Database("s", "d"), T = Source{[Schema="dbo",Item="Orders"]}[Data] in T{[Item="Secret"]}[Data]',
+        'let Source = Oracle.Database("s", [HierarchicalNavigation=true]), T = Source{[Name="t"]}[Data] in T',
+        'let Source = Sql.Database("s", "d"), T = Source{[Item="t"]}[Data], T = T{[Item="u"]}[Data] in T',
     ],
 )
 def test_scope_refuses_everything_outside_the_connector_template(m_text: str) -> None:
@@ -3177,7 +3180,9 @@ def test_scope_refuses_everything_outside_the_connector_template(m_text: str) ->
         scope.resolve_partition_identity(m_text, expressions)
 
 
-@pytest.mark.parametrize("m_text", ['"a" & "b"', '"a" . x', "#shared", '"a" ! b', "@x", "a.b;"])
+@pytest.mark.parametrize(
+    "m_text", ['"a" & "b"', '"a" . x', "#shared", '"a" ! b', "@x", "a.b;", '"srv#(lf)x"', '#"a#(tab)b"']
+)
 def test_scope_tokenizer_refuses_operators_and_unknown_punctuation(m_text: str) -> None:
     with pytest.raises(scope.SourceScopeError, match="unsupported M token"):
         scope.tokenize(m_text)
@@ -3269,7 +3274,9 @@ def test_scope_compares_resolved_parameter_values_not_partition_text(
         json.dumps({"version": 1, "sources": [dict(_sources()[0], extra="x")]}),
         json.dumps({"version": 1, "sources": [_sources()[0], _sources()[0]]}),
         json.dumps({"version": 1, "sources": [dict(_sources()[0], server=1)]}),
-        '{"version": 1, "version": 1, "sources": []}',
+        json.dumps({"version": True, "sources": _sources()}),
+        json.dumps({"version": 1.0, "sources": _sources()}),
+        json.dumps({"version": 1, "sources": _sources()})[:-3] + ', "table": "Trips"}]}',
         None,
     ],
 )
