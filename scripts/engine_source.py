@@ -36,9 +36,10 @@ The engine, `powerbi-authoring` and this repo's skill bundles install through th
 (`COPILOT_HOME`) or VS Code agent plugins (`%APPDATA%/Code/User/agent-plugins/installed.json`).
 `discover_installed_plugin` is the one resolver for all three. `T2P_PLUGIN_HOST=cli|vscode` selects a
 host with no fallback; an explicit installed-plugins root is an override that skips host selection.
-Unset, the CLI is used unless it holds no usable copy (so CLI-only and dual-host
-machines behave as before #727), VS Code only then, and whatever VS Code holds beside a CLI copy is
-returned as `host_advisory`. VS Code records cannot prove enablement.
+Unset, the one host holding a copy is used; distinct copies in both hosts refuse with a hint naming the
+selector, because equal versions do not prove equal bytes. A missing or unreadable registry is no copy.
+The engine and authoring plugins are identified by registered name, the skill bundles by content.
+VS Code records cannot prove enablement.
 """
 
 from __future__ import annotations
@@ -46,7 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
@@ -117,7 +118,6 @@ class InstalledPluginDiscovery:
     detail: str
     candidates: tuple[Path, ...] = ()
     entries: tuple[dict[str, object], ...] = ()
-    host_advisory: str = ""
 
     @property
     def ok(self) -> bool:
@@ -142,7 +142,7 @@ class InstalledPluginDiscovery:
     def install_hint(self) -> str:
         """A repair in the host that was examined; never a CLI install for a VS Code refusal."""
         if self.host is None:
-            return f"Set {PLUGIN_HOST_ENV} to cli or vscode, or unset it for automatic selection."
+            return f"Set {PLUGIN_HOST_ENV}=cli or {PLUGIN_HOST_ENV}=vscode to choose which host's installed copy runs."
         if self.status == "multiple":
             return "Remove or disable duplicate installed plugins so only one copy can shadow the repo."
         return VSCODE_INSTALL_HINT if self.host == "vscode" else _PLUGINS[self.kind][2]
@@ -159,7 +159,6 @@ class InstalledPluginDiscovery:
             "identity": self.identity,
             "install_hint": self.install_hint,
             "entries": list(self.entries),
-            "host_advisory": self.host_advisory,
         }
 
 
@@ -262,7 +261,10 @@ def _vscode(kind: PluginKind, environment: dict[str, str]) -> InstalledPluginDis
         return InstalledPluginDiscovery(kind, "invalid", "vscode", f"registry is unreadable: {registry} ({exc})")
     if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("installed"), list):
         return InstalledPluginDiscovery(kind, "invalid", "vscode", f"registry schema is not version 1: {registry}")
-    located = [_vscode_root(entry, cache) for entry in value["installed"]]
+    # Files alone are not identity: like the CLI registry, an entry names the engine or authoring plugin.
+    name = _PLUGINS[kind][0]
+    entries = [e for e in value["installed"] if kind == "bundles" or (isinstance(e, dict) and e.get("name") == name)]
+    located = [_vscode_root(entry, cache) for entry in entries]
     return _select(
         kind,
         "vscode",
@@ -287,13 +289,15 @@ def discover_installed_plugin(
     if selector:
         return _vscode(kind, environment) if selector == "vscode" else _cli(kind, None, environment)
     cli, vscode = _cli(kind, None, environment), _vscode(kind, environment)
-    if "missing" in (cli.status, vscode.status):
-        return vscode if cli.status == "missing" and vscode.status != "missing" else cli
-    advisory = (
-        f"{kind}: using cli ({cli.status}); vscode is {vscode.status}: {vscode.detail}. "
-        f"Set {PLUGIN_HOST_ENV}=cli or {PLUGIN_HOST_ENV}=vscode to choose explicitly."
-    )
-    return replace(cli, host_advisory=advisory)
+    if not (cli.candidates and vscode.candidates):
+        # At most one host holds a copy; the other's missing or unreadable registry is no second copy.
+        return vscode if vscode.candidates or (cli.status == "missing" and vscode.status == "invalid") else cli
+    # #727: one physical tree seen by both hosts is one install; distinct trees refuse, even at equal versions.
+    roots = tuple(dict.fromkeys(path.resolve() for path in (*cli.candidates, *vscode.candidates)))
+    if len(roots) == 1:
+        return cli
+    detail = "installed for both the Copilot CLI and VS Code: " + "; ".join(map(str, roots))
+    return InstalledPluginDiscovery(kind, "multiple", None, detail, roots)
 
 
 def version_tuple(version: str | None) -> tuple[int, ...]:
@@ -333,7 +337,7 @@ def engine_root() -> Path:
     if evidence.plugin_root:
         return evidence.plugin_root
     raise EngineNotFoundError(
-        f"the deterministic conversion engine is not installed at {PLUGIN_ENGINE_ROOT} ({evidence.detail}). "
+        f"the deterministic conversion engine did not resolve: {evidence.detail}. "
         f"{evidence.install_hint}. This does NOT fall back to another copy: a second tree is what issue #107 "
         "is about, and a silent fallback is how two engine versions built one pipeline."
     )
@@ -444,7 +448,6 @@ def status() -> dict[str, object]:
         "install_hint": evidence.install_hint,
         "host": evidence.host,
         "detail": evidence.detail,
-        "host_advisory": evidence.host_advisory,
         "authoring_plugin": discover_installed_plugin("authoring").to_jsonable(),
         # Alternative trees are diagnostics (#727): the installed plugin is the only engine that can run.
         "ok": evidence.ok,
@@ -464,12 +467,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"ENGINE: {'OK' if verdict['ok'] else 'PROBLEM'}")
     print(f"  canonical plugin : {verdict['root']}")
-    print(f"  version          : {verdict['version'] or '(not installed)'}")
+    print(f"  version          : {verdict['version'] or '(not resolved)'}")
     for path in verdict["alternatives"]:
         print(f"  ALTERNATIVE COPY : {path}  (diagnostic only; the installed plugin is the engine, #107)")
-    if verdict["host_advisory"]:
-        print(f"  HOST ADVISORY    : {verdict['host_advisory']}")
     if not verdict["present"]:
+        print(f"  problem          : {verdict['detail']}")
         print(f"  -> {verdict['install_hint']}")
     return 0 if verdict["ok"] else 1
 

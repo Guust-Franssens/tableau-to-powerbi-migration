@@ -194,14 +194,18 @@ its evidence. It reads the Copilot CLI (`COPILOT_HOME`) and stable Windows VS Co
 [1.144.0, commit `2c33b50`](https://github.com/microsoft/vscode/blob/2c33b50b16c472efe58357d1d2a8a5414bc23fbf/src/vs/workbench/contrib/chat/common/plugins/fileBackedInstalledPluginsStore.ts)).
 An entry's `relativePath` wins over its `file:` `pluginUri`; a root outside that cache is ignored.
 
-- **`T2P_PLUGIN_HOST` unset:** the CLI copy is used whenever the CLI has one, as before #727; VS Code
-  only when it has none. Copies in both hosts pass with one recommended `plugin host: automatic selection` warning.
+- **`T2P_PLUGIN_HOST` unset:** the one host holding a copy is used; a missing or unreadable registry counts as
+  no copy, so a broken host never blocks the other. Distinct copies in **both** hosts refuse as `multiple`
+  (equal versions do not prove equal bytes), with a hint naming `T2P_PLUGIN_HOST=cli|vscode`; one physical
+  tree registered by both hosts is one copy.
 - **`$env:T2P_PLUGIN_HOST = 'vscode'` (or `'cli'`):** that host only, no fallback; a missing or broken engine or
   authoring copy there is a critical MISS (missing bundles stay recommended). Other values refuse.
   `Remove-Item Env:T2P_PLUGIN_HOST` restores automatic selection.
-- Two distinct copies in one host refuse as `multiple`. VS Code copies report **installed (enablement not
-  verified)**: the registry holds no enablement state. Authoring still needs the manifest floor and
-  `skills\powerbi-report-cli\SKILL.md`; without Python it is **not verified (Python unavailable)** and fails closed.
+- Two distinct copies in one host refuse as `multiple`. The engine and authoring plugins are identified by
+  their registered `name` (a VS Code entry without one is ignored), the skill bundles by content. VS Code copies
+  report **installed (enablement not verified)**: the registry holds no enablement state. Authoring still needs
+  the manifest floor and `skills\powerbi-report-cli\SKILL.md`; without Python it is **not verified (Python
+  unavailable)** and fails closed.
 
 Inspect the selection with `python scripts\engine_source.py --json` and `python scripts\skill_plugin_source.py --json`.
 

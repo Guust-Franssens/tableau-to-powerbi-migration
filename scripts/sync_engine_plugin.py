@@ -29,7 +29,8 @@ sessions - it also refreshes the manifest and the marketplace bookkeeping. This 
 escape hatch, and the way to pin the engine to a KNOWN-GOOD checkout rather than whatever upstream
 happens to be today.
 
-Getting a source checkout without leaving a second engine tree behind (preflight blocks on one):
+Getting a source checkout without leaving a second engine tree behind (preflight reports one as a
+non-blocking diagnostic):
 
     git clone --depth 1 https://github.com/Yarbrdab000/tableau-fabric-skills <scratch>
     python scripts/sync_engine_plugin.py --source <scratch>

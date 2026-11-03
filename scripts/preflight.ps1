@@ -379,8 +379,8 @@ function Get-PluginVerdict($Entries, [bool]$CacheExists, $Manifest, [bool]$Skill
 }
 
 function Get-VscodePluginVerdict($Evidence, $Policy) {
-    # A refused T2P_PLUGIN_HOST (no host) or VS Code evidence. VS Code records cannot establish
-    # enablement, and engine_source.py already required the report-cli skill leaf.
+    # No host (T2P_PLUGIN_HOST refused, or copies in both hosts) or VS Code evidence. VS Code records
+    # cannot establish enablement, and engine_source.py already required the report-cli skill leaf.
     $v = [pscustomobject]@{ Kind = 'missing'; Tier = 'critical'; Ok = $false
         Detail = $Evidence.detail; Hint = $Evidence.install_hint }
     if (-not $Evidence.ok) { return $v }
@@ -428,9 +428,10 @@ if (-not $skillPlugin) {
         'Run python scripts\skill_plugin_source.py --json. Without this plugin, repo-local skills may still work here, but subagents in other repos cannot invoke the bundles by name.'
 }
 elseif ($skillPlugin.status -eq 'multiple') {
+    # Two copies (in one host, or one per host) create an ambiguous shadowing order; the resolver's hint
+    # names the fix (remove one, or choose a host with T2P_PLUGIN_HOST).
     Add-Check 'plugin: reusable Power BI skill bundles' 'critical' $false `
-        $skillPlugin.detail `
-        'Two installed copies of the same skill create an ambiguous shadowing order. Remove the duplicate before trusting skill output.' `
+        $skillPlugin.detail $skillPlugin.install_hint `
         -DoctorId 'reusable_skill_plugins' -DoctorReason 'multiple_installs' -DoctorRemedy 'inspect_duplicate_skill_plugins'
 }
 elseif ($skillPlugin.status -ne 'found') {
@@ -469,14 +470,6 @@ else {
         $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { 'in sync' }) `
         'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of the marketplace repo>, commit+push. Do not trust a measurement taken against a stale bundle.' `
         -DoctorId 'published_skill_bundles' -DoctorReason 'content_stale' -DoctorRemedy 'sync_and_publish_skills'
-}
-
-# --- Plugin host (#727): with T2P_PLUGIN_HOST unset, the Copilot CLI installation is used whenever it
-# holds a usable copy. Report what VS Code holds beside it so the operator can choose; the run is unaffected.
-$hostAdvisories = @(@($engineStatus.host_advisory, $authoring.host_advisory, $skillPlugin.host_advisory) | Where-Object { $_ })
-if ($hostAdvisories.Count) {
-    Add-Check 'plugin host: automatic selection' 'recommended' $false ($hostAdvisories -join ' | ') `
-        "Set `$env:T2P_PLUGIN_HOST='cli' or 'vscode' to choose explicitly; unset, the Copilot CLI installation is used."
 }
 
 # Recommended means "warn, do not halt." A check is critical if any persona's Definition of Done

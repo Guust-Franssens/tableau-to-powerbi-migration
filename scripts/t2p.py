@@ -409,7 +409,7 @@ def _doctor_preflight(stdout: bytes, stderr: bytes, native: int | None) -> dict:
         "report_author_version": ({"unreadable", "prerelease", "below-floor"}, "inspect_cli_release"),
         "desktop_bridge_version": ({"unreadable", "prerelease", "below-floor"}, "inspect_cli_release"),
         "engine_plugin": ({"plugin_missing"}, "install_engine_plugin"),
-        "engine_source": ({"alternative_copy", "verdict_unavailable"}, "inspect_engine_source"),
+        "engine_source": ({"verdict_unavailable"}, "inspect_engine_source"),
         "authoring_plugin": (
             {
                 "missing",
@@ -582,8 +582,8 @@ def _doctor_blocker_lines(blocker: dict, *, installed: bool = False) -> list[str
         " at session start only, using docs/operator-runbook.md.",
         "install_engine_plugin": "install the canonical tableau-fabric-skills plugin between sessions"
         " per setup guidance.",
-        "inspect_engine_source": "run python -B scripts\\engine_source.py --json privately; inspect alternative copies"
-        " and uncommitted/unpushed work before any manual removal, or restore a usable resolver/Python invocation.",
+        "inspect_engine_source": "run python -B scripts\\engine_source.py --json privately"
+        " and restore a usable resolver/Python invocation.",
         "repair_authoring_plugin_between_sessions": "close Copilot sessions; manually inspect/repair only"
         " powerbi-authoring@fabric-collection per docs/operator-runbook.md, then verify enabled/version/content.",
         "inspect_duplicate_skill_plugins": "privately inspect duplicate skill-plugin installations;"

@@ -32,7 +32,6 @@ class SkillPluginDiscovery:  # pylint: disable=too-many-instance-attributes
     detail: str
     host: str | None
     override: bool = False
-    host_advisory: str = ""
 
     @property
     def ok(self) -> bool:
@@ -52,7 +51,6 @@ class SkillPluginDiscovery:  # pylint: disable=too-many-instance-attributes
             "detail": self.detail,
             "host": self.host,
             "override": self.override,
-            "host_advisory": self.host_advisory,
             "shipped_skills": list(SHIPPED_SKILLS),
         }
 
@@ -133,7 +131,6 @@ def discover_skill_plugin(
         install_hint=evidence.install_hint,
         detail=evidence.detail,
         host=evidence.host,
-        host_advisory=evidence.host_advisory,
     )
 
 
@@ -154,8 +151,6 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(verdict.to_jsonable(), indent=2))
     elif verdict.ok:
         print(f"FOUND: {verdict.plugin_root} ({verdict.identity})")
-        if verdict.host_advisory:
-            print(f"HOST ADVISORY: {verdict.host_advisory}")
     else:
         print(f"{verdict.status.upper()}: {verdict.detail}")
         print(verdict.install_hint)
