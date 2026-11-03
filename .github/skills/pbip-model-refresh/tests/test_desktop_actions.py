@@ -2381,6 +2381,118 @@ def test_completion_requires_every_source_partition_to_advance() -> None:
     assert result.reason == "source partition timestamp did not advance"
 
 
+# Measured (S12): a never-processed M partition reports State 3 and a typed 1699-12-31 RefreshedTime.
+_NEVER_PROCESSED = datetime(1699, 12, 31, tzinfo=timezone.utc)
+_NEVER_PROCESSED_TICKS = 536151744000000000
+
+
+def _mixed(*states: int, ticks: int = _NEVER_PROCESSED_TICKS) -> PartitionSnapshot:
+    return PartitionSnapshot(
+        tuple(
+            partition
+            for index, state in enumerate(states)
+            for partition in _snapshot(partition_id=59 + index, ticks=ticks, state=state).partitions
+        )
+    )
+
+
+def test_baseline_admits_ready_never_processed_and_a_mix_of_both() -> None:
+    assert actions._typed_utc_ticks(_NEVER_PROCESSED) == _NEVER_PROCESSED_TICKS
+    for snapshot in (_mixed(1), _mixed(3), _mixed(3, 3), _mixed(1, 3), _mixed(3, 1, 3)):
+        assert actions.check_baseline(snapshot) is None
+
+
+@pytest.mark.parametrize("state", [0, 2, 4, 5, 6, 7, 8, 9, -1, 99])
+def test_baseline_refuses_every_other_state_naming_only_the_value(state: int) -> None:
+    for snapshot in (_mixed(state), _mixed(1, state), _mixed(3, state, 1)):
+        with pytest.raises(DesktopActionError) as refusal:
+            actions.check_baseline(snapshot)
+        assert str(refusal.value) == f"initial source partition state is not READY or never-processed (state {state})"
+
+
+@pytest.mark.parametrize("state", [True, "3", 3.0, None])
+def test_baseline_refuses_untyped_states(state: object) -> None:
+    with pytest.raises(DesktopActionError, match=r"\(state non-integer\)"):
+        actions.check_baseline(_mixed(3, state))  # type: ignore[arg-type]
+
+
+def test_baseline_refuses_an_empty_source_set() -> None:
+    with pytest.raises(DesktopActionError, match="empty"):
+        actions.check_baseline(PartitionSnapshot(()))
+
+
+def test_completion_from_a_never_processed_baseline_still_demands_ready_and_fresh_times() -> None:
+    before = _mixed(3, 1)
+    start = _NEVER_PROCESSED_TICKS + 1_000
+
+    assert check_completion(before, _mixed(1, 1, ticks=start), start).complete
+    assert check_completion(_mixed(3), _mixed(1, ticks=start + 1), start).complete
+    for after, action_start, reason in (
+        (_mixed(3, 1, ticks=start), start, "source partition is not READY"),
+        (_mixed(1, 3, ticks=start), start, "source partition is not READY"),
+        (_mixed(1, 1), start, "source partition timestamp did not advance"),
+        (_mixed(1, 1, ticks=start - 1), start, "source partition timestamp predates the action"),
+    ):
+        result = check_completion(before, after, action_start)
+        assert (result.complete, result.reason) == (False, reason)
+
+
+@pytest.mark.parametrize("states", [(3, 3, 3, 3), (3, 6, 3, 4)])
+def test_never_processed_out_of_scope_model_refuses_on_scope_before_any_action(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], states: tuple[int, ...]
+) -> None:
+    """Ordering pin: the source-scope check runs before the baseline-state check."""
+    queries: dict[str, object] = {"Orders": _SQL_M, "Flights": _SNOW_M, "Trips": _DBX_M, "Calc": None}
+    queries["Orders"] = _SQL_M.replace("Sql.Database", "Web.Database")
+    context, args, calls = _scope_route(monkeypatch, tmp_path, queries=queries)
+    monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", lambda *_args, **_kwargs: _mixed(*states))
+
+    out = _refusal(context, args, calls, capsys)
+
+    assert "automatic source scope: Orders: connector is not admitted)" in out
+    assert "never-processed" not in out
+
+
+def test_in_scope_never_processed_model_reaches_one_refresh(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    context, args, calls = _scope_route(monkeypatch, tmp_path)
+    monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", lambda *_args, **_kwargs: _mixed(3, 3, 3))
+
+    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 0
+    assert calls == ["Refresh", "canaries", "Save"]
+
+
+def test_operator_refresh_admits_an_all_never_processed_model_after_a_source_folder_repoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context, args, calls = _wire_ui_route(monkeypatch)
+    context = replace(context, bound=SimpleNamespace(identity=context.bound.identity, catalogue="catalog-1"))
+    m_text = 'let Source = Csv.Document(File.Contents(#"SourceFolder" & "\\orders.csv")) in Source'
+    connection = _Connection(
+        [(10, "Orders", 0), (11, "Lines", 0)],
+        [
+            _partition(59, table_id=10, state=3, refreshed=_NEVER_PROCESSED, query=m_text),
+            _partition(60, table_id=11, state=3, refreshed=_NEVER_PROCESSED, query=m_text),
+        ],
+    )
+    monkeypatch.setattr(actions, "bound_call", lambda _bound, read, **_kwargs: read(connection))
+    monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", actions.read_partition_snapshot)
+
+    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 0
+    assert calls == ["Refresh", "canaries", "Save"]
+
+
+@pytest.mark.parametrize("state", [4, 6, 8])
+def test_operator_refresh_refuses_a_non_ready_baseline_before_any_action(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], state: int
+) -> None:
+    context, args, calls = _wire_ui_route(monkeypatch)
+    monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", lambda *_args, **_kwargs: _mixed(3, state))
+
+    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 2
+    assert calls == []
+    assert f"not READY or never-processed (state {state}))" in capsys.readouterr().out
+
+
 def test_action_protocol_requires_exact_target_and_truthful_handback() -> None:
     result = _read_action_output(
         _action_payload(),

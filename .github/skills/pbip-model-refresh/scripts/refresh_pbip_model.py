@@ -129,6 +129,7 @@ from _desktop_actions import (
     DesktopActionError,
     PartitionSnapshot,
     check_automatic_source_scope,
+    check_baseline,
     check_completion,
     invoke_desktop_action,
     read_partition_snapshot,
@@ -2611,14 +2612,14 @@ def _ui_refresh_locked(  # pylint: disable=too-many-return-statements,too-many-s
             return 2
         baseline = read_partition_snapshot(context.bound, timeout_seconds=_ui_read_budget(deadline))
         _ui_read_budget(deadline)
-        if any(partition.state != 1 for partition in baseline.partitions):
-            raise DesktopActionError("initial source partition state is not READY")
         scope = getattr(args, "automatic_source_scope", None)
         if scope is not None:
             check_automatic_source_scope(
                 context.bound, scope, _canary_tables(args), timeout_seconds=_ui_read_budget(deadline)
             )
             _ui_read_budget(deadline)
+        # After the scope check: admitting never-processed State 3 must never let an out-of-scope model reach Refresh.
+        check_baseline(baseline)
     except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
         print(f"REFRESH: UI_PREFLIGHT_REFUSED ({type(exc).__name__}: {exc})")
         return 2
