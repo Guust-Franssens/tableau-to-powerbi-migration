@@ -1391,6 +1391,7 @@ def test_refresh_refuses_ui_save_when_the_model_lock_is_not_writable(tmp_path, m
     out = capsys.readouterr().out
     assert "REFRESH: NOT_PERSISTED (model lock not writable: PermissionError [Errno 13]; data is in memory only)" in out
     assert "concurrent persist" not in out
+    assert str(tmp_path) not in out
     assert calls == ["image"]
 
 

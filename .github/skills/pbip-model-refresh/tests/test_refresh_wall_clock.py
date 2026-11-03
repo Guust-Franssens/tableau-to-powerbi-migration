@@ -552,6 +552,7 @@ def test_visual_notice_keeps_the_identifier_and_leaks_no_host_path(monkeypatch, 
         assert payload["status"] == "ACQUIRED"
         assert payload["desktop_pid"] == "10054", "escaping must preserve the decoded identifier"
         line = visual_runtime.wires[0]
+        assert "10054" not in line and "403" not in line, "numeric zero-escape must survive on the wire"
         assert "authentication-10054-oauth" not in line
         assert str(private_cwd) not in line
         assert "/" not in payload["path"] and "\\" not in payload["path"]
