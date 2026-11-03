@@ -377,15 +377,29 @@ def test_ui_refresh_preflight_precedes_binding_baseline_and_refresh(
         assert events == ["initial", "observer", "cache", "port", "identity"]
         return downstream(*args, **kwargs)
 
+    invoke = refresh_pbip_model.invoke_desktop_action
     monkeypatch.setattr(refresh_pbip_model, "_ui_refresh_and_save", run)
+    monkeypatch.setattr(refresh_pbip_model, "bound_call", lambda *_args, **_kwargs: events.append("bound"))
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "_ui_observer_state",
+        lambda *_args, **_kwargs: events.append("held_observer") or SimpleNamespace(state="READY"),
+    )
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "invoke_desktop_action",
+        lambda action, **kwargs: events.append(action) or invoke(action, **kwargs),
+    )
     assert refresh_pbip_model.main(["--pid", "123", "--ui-refresh", *(["--no-save"] if no_save else [])]) == 0
-    assert events[:8] == [
+    # The baseline read is the only bound recheck between the model gate and Refresh (#793).
+    assert events[: events.index("Refresh")] == [
         "initial",
         "observer",
         "cache",
         "port",
         "identity",
         "bind",
+        "held_observer",
         "identity",
         "baseline",
     ]
@@ -2590,18 +2604,21 @@ def test_no_save_and_failed_completion_never_invoke_ui_save(monkeypatch: pytest.
     assert calls == ["Refresh"]
 
 
-@pytest.mark.parametrize("late_stage", ["observer", "binding", "identity", "snapshot", "save_binding", "save_identity"])
+@pytest.mark.parametrize("late_stage", ["observer", "identity", "snapshot", "save_binding", "save_identity"])
 def test_ui_deadline_rejects_late_preflight_and_save_rechecks(monkeypatch: pytest.MonkeyPatch, late_stage: str) -> None:
     context, args, calls = _wire_ui_route(monkeypatch)
     clock = [100.0]
     monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
     stages = {"binding": 0, "identity": 0}
+    # The pre-Save recheck is the first bound no-op read and the second model-identity gate:
+    # no bound no-op read precedes Refresh (#793).
+    save_ordinal = {"binding": 1, "identity": 2}
     original_snapshot = refresh_pbip_model.read_partition_snapshot
 
     def run_stage(stage):
         if stage in stages:
             stages[stage] += 1
-        current = f"save_{stage}" if stages.get(stage, 0) == 2 else stage
+        current = f"save_{stage}" if stage in stages and stages[stage] == save_ordinal[stage] else stage
         if current == late_stage:
             clock[0] = 111.0
 
@@ -2627,6 +2644,8 @@ def test_ui_deadline_rejects_late_preflight_and_save_rechecks(monkeypatch: pytes
 
     assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) != 0
     assert calls == (["Refresh", "canaries"] if late_stage.startswith("save_") else [])
+    if late_stage == "observer":
+        assert stages["identity"] == 0, "the model gate ran after the held observer exhausted the deadline"
 
 
 def test_ui_read_allowances_shrink_and_completion_uses_same_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2663,7 +2682,7 @@ def test_ui_read_allowances_shrink_and_completion_uses_same_deadline(monkeypatch
     monkeypatch.setattr(refresh_pbip_model, "_wait_for_engine_completion", completion)
     monkeypatch.setattr(refresh_pbip_model, "probe_observations", probe)
     assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 0
-    assert allowances == [30.0, 30.0, 29.0, 22.0, 15.0]
+    assert allowances == [30.0, 30.0, 29.0, 22.0]
     assert calls == ["Refresh", "canaries", "Save"]
     clock[0] = 150.0
     with pytest.raises(TimeoutError):
@@ -2788,7 +2807,7 @@ def test_failed_handback_does_not_veto_safe_save_or_verified_cache(
         assert 0 < kwargs["timeout_seconds"] <= 20
         calls.append(action)
         if action == "Save":
-            assert safety_checks == ["observer", "binding", "model", "observer", "observer", "binding", "model"]
+            assert safety_checks == ["observer", "model", "observer", "observer", "binding", "model"]
             cache.write_bytes(b"synthetic cache updated by named Save")
             os.utime(cache, (200, 200))
         return ActionResult(
@@ -2821,7 +2840,6 @@ def test_failed_handback_does_not_veto_safe_save_or_verified_cache(
     assert calls == ["Refresh", "canaries", "Save"]
     assert safety_checks == [
         "observer",
-        "binding",
         "model",
         "observer",
         "observer",

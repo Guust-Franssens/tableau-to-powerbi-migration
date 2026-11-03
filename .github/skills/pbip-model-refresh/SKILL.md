@@ -147,6 +147,16 @@ The native action remains capped at 20 seconds or the remaining time, with uncha
 Shared binding/observer budgets and the XMLA route are unchanged; apart from the completion-read
 retry of Desktop's own popup refusals described above, failed reads are not retried.
 
+**An observer timeout is not a dialog diagnosis.** Before Refresh, the partition-baseline read is
+the only bound read after the model-identity gate; it rechecks PID, process start, port, catalogue
+and the observer. One observer snapshot that exceeds its 8-second bound is incomplete, which a bound
+read reports as `DIALOG_UNREADABLE`. Before Refresh that refuses with `UI_PREFLIGHT_REFUSED`, invokes
+nothing and is not retried; if the held Desktop shows no dialog, a rerun repeats every check from the
+start. After Refresh, the same timeout in a canary or pre-Save read stops with Refresh invoked and Save
+withheld (for example `DATA_CHECK_FAILED`, exit 2). ⚠️ Inferred, not tested: Desktop may then report
+unsaved changes, so a rerun refuses at the startup clean-state check until a human saves or discards
+them.
+
 The initial supported surface is whole-model Import M source partitions. DirectQuery, Dual/mixed,
 unsupported source kinds, modes that cannot be resolved from model/partition metadata,
 changed or incomplete partition metadata, a non-READY initial observer, and
