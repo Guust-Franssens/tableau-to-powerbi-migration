@@ -1978,17 +1978,19 @@ using System.Collections.Generic;
 public static class HotPathFake {
   public struct Rect { public int Left; public int Top; public int Right; public int Bottom; }
   public static string Case;
-  public static bool Invoked, Enabled=true, Iconic;
+  public static bool Invoked, Enabled=true, Iconic, Walked;
   public static IntPtr[] Snapshot = new IntPtr[] { WINDOWS };
   public static List<string> Events = new List<string>();
   public static int NativeReads;
   public static string GetProcessStart(uint p) {
     NativeReads++;
     if (Invoked && Case=="target_reused" && p==100) return "11";
+    if (Walked && Case=="walk_process_reused" && p==100) return "11";
     return "10";
   }
   // 789 is the root and 901/903/904 other Desktop windows; 905 is the provider's; the rest are foreign.
   static uint Owner(long h) {
+    if (h==789 && Walked && Case=="walk_root_reused") return 300;
     if (h==789 || h==901 || h==903 || h==904) return 100;
     return h==905 ? 200u : 300u;
   }
@@ -2004,7 +2006,12 @@ public static class HotPathFake {
     r.Right = r.Bottom = h==(IntPtr)904 ? 200 : 50;
     return true;
   }
-  public static IntPtr[] TopLevelSnapshot() { Events.Add("walk"); return Snapshot; }
+  // The walk is unbounded, so a case may change the target while it runs.
+  public static IntPtr[] TopLevelSnapshot() {
+    Events.Add("walk"); Walked=true;
+    if (Case=="walk_disabled") Enabled=false;
+    return Snapshot;
+  }
   public static IntPtr SetThreadDpiAwarenessContext(IntPtr c) { return (IntPtr)1; }
 }
 '@
@@ -2036,7 +2043,9 @@ function Get-ActionControl {
 }
 function Get-ControlOwnership {
   param($target)
+  [HotPathFake]::Events.Add('ownership')
   if ('CASE' -eq 'disabled_before_invoke') { [HotPathFake]::Enabled=$false }
+  if ('CASE' -eq 'walk_ownership' -and [HotPathFake]::Walked) { return 'moved' }
   return 'owned'
 }
 FUNCTIONS
@@ -2067,7 +2076,18 @@ MAIN
 
 @pytest.mark.parametrize(
     "case",
-    ["normal", "disabled_root", "initial_disabled", "target_reused", "iconic", "disabled_before_invoke"],
+    [
+        "normal",
+        "disabled_root",
+        "initial_disabled",
+        "target_reused",
+        "iconic",
+        "disabled_before_invoke",
+        "walk_disabled",
+        "walk_process_reused",
+        "walk_root_reused",
+        "walk_ownership",
+    ],
 )
 @WINDOWS_ONLY
 def test_native_identity_hot_path_without_windows(case: str) -> None:
@@ -2076,13 +2096,22 @@ def test_native_identity_hot_path_without_windows(case: str) -> None:
         "initial_disabled": "root_window_not_actionable",
         "iconic": "root_window_not_actionable",
         "disabled_before_invoke": "root_window_not_actionable",
+        # The occlusion walk is unbounded: identity and ownership are re-proved after it.
+        "walk_disabled": "root_window_not_actionable",
+        "walk_process_reused": "process_identity_changed",
+        "walk_root_reused": "root_process_identity_changed",
+        "walk_ownership": "control_ownership_changed",
     }
     assert action_result["schema"] == "pbip.desktop-action.v2", action_result
     assert facts["invokes"] == (0 if case in refused else 1), facts
     assert action_result["invoked"] is (case not in refused), action_result
     assert action_result["reason"] == refused.get(case, "invoke_returned"), action_result
     if case not in refused:
-        assert facts["events"][-3:] == ["target", "walk", "invoke"], facts
+        assert facts["events"][-5:] == ["target", "walk", "ownership", "target", "invoke"], facts
+    elif case.startswith("walk_"):
+        assert facts["events"].count("walk") == 1, facts
+    elif case == "disabled_before_invoke":
+        assert "walk" not in facts["events"], "a target refused before the walk must not walk"
 
 
 @pytest.mark.parametrize(
@@ -2107,7 +2136,7 @@ def test_occlusion_walk_runs_once_after_target_and_before_invoke(
     assert action_result["invoked"] is (reason is None), action_result
     assert action_result["reason"] == (reason or "invoke_returned"), action_result
     assert facts["events"].count("walk") == 1, facts
-    expected_tail = ["target", "walk"] if reason else ["target", "walk", "invoke"]
+    expected_tail = ["target", "walk"] if reason else ["target", "walk", "ownership", "target", "invoke"]
     assert facts["events"][-len(expected_tail) :] == expected_tail, facts
 
 
@@ -2287,7 +2316,8 @@ MAIN
     assert facts["events"][3] == "scan:act", result.stdout
     if case == "valid":
         assert facts["scans"] == 3
-        assert facts["events"].count("provider:act") == 3
+        # Two reacquisition passes, then the final ownership check before and after the occlusion walk.
+        assert facts["events"].count("provider:act") == 4
     elif case in {"ambiguous", "second_pass_changed"}:
         assert action_result["reason"] == "ambiguous_named_control"
     elif case == "provider_changed":

@@ -516,6 +516,16 @@ try {
     throw 'identity'
   }
   if (-not (Test-Occlusion $target)) { throw 'occlusion' }
+  # The walk is unbounded, so re-prove ownership and the full target after it, right before Invoke.
+  $ownership = Get-ControlOwnership $target
+  if (-not $ownership -or $ownership -cne $selectedOwnership) {
+    $reason = 'control_ownership_changed'
+    throw 'control'
+  }
+  if (-not (Test-Target)) {
+    $reason = $script:targetFailureReason
+    throw 'identity'
+  }
   $actionTicks = [DateTime]::UtcNow.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
   try { $invokePattern.Invoke() } catch {
     $reason = 'invoke_failed'

@@ -165,8 +165,8 @@ changed or incomplete partition metadata, a non-READY initial observer, and
 `--canaries` to verify commissioned source tables. Positive rows alone do not prove processing;
 no-action timestamp rereads, partial advancement, stale timestamps, prompt/unknown observer evidence
 and deadline expiry cannot authorize success or Save. Deadline expiry is unknown, not a credential
-diagnosis. The helper never takes focus: Refresh and Save are UIA Invokes with no foreground
-change, so a human's foreground window is never touched.
+diagnosis. The helper never requests foreground or focus: Refresh and Save are UIA Invokes.
+That is a guarantee about the helper only; Desktop may raise its own window during Refresh.
 
 The action child reads the held root without taking focus before enumerating controls. Only
 enabled, visible,
@@ -187,6 +187,9 @@ geometry, descent ownership and the full root identity before Invoke. One top-le
 snapshot then refuses `occluded_by_desktop_window` when a visible Desktop or provider window above
 the root covers the control centre, and `occlusion_walk_incomplete` when the root is missing from
 the snapshot. Foreign windows in front are ignored: UIA Invoke needs neither focus nor visibility.
+The snapshot walk is unbounded, so control ownership and the full root identity (including that the
+root is still enabled) are checked again after it, immediately before Invoke; a change refuses
+with nothing invoked. A Desktop popup created after the walk is not detected.
 A cloaked root proceeds with its identity verified.
 An open in-page ribbon menu is not detected, the same as before this change.
 Do not type while `--ui-refresh` runs: Desktop raises itself during Refresh, and Save persists edits.
@@ -198,8 +201,8 @@ changed or unavailable identity refuses the whole scan, not a reduced set. The c
 after that enumeration. The second full
 uniqueness scan and independent selected/final ownership checks remain fresh, within the unchanged
 20-second child cap and overall deadline.
-There is no focus acquisition, thread-input attachment, foreground change or handback; UIA Invoke
-needs none. There is no input injection, ShowWindow or minimized-window recovery: a minimized
+The helper performs no focus acquisition, thread-input attachment, foreground request or handback;
+UIA Invoke needs none. There is no input injection, ShowWindow or minimized-window recovery: a minimized
 Desktop refuses, and the CLI never resizes a window. Save reverifies its exact target and named
 Invoke control after fresh observer/model checks. After Invoke, the
 post-Save settle wait (up to 60 seconds, clipped to the deadline) for a complete READY observer
