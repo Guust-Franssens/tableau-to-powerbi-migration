@@ -137,7 +137,7 @@ Which is which ✅ verified by reading every `Add-Check`/`Add-Cli` tier in `pref
 | critical check | blocks §2 steps 1–6? | blocks the agent / Desktop phase? |
 |---|---|---|
 | `Python >= 3.11`, `python: lxml`, `python: jsonschema` | **yes** | yes |
-| `engine: plugin installed`, `engine: single source` | **yes** — step 5 resolves the plugin (§1.2) | yes |
+| `engine: plugin installed` (`engine: single source` only when `engine_source.py` cannot report) | **yes** — step 5 resolves the plugin (§1.2) | yes |
 | `cli: powerbi-report-author` + its version floor | no | yes — it is the PBIR validator |
 | `plugin: powerbi-authoring@…`, `skill bundles installed`, `skill bundles match published plugin` | no | yes |
 | `cli: npx`, `cli: powerbi-desktop`, `Power BI Desktop`, **`PBI_DESKTOP_PATH`** | no | yes |
@@ -187,61 +187,23 @@ re-verification WARN with **no update/downgrade advice**.
 
 ### Installed plugin host selection (#727)
 
-`scripts/engine_source.py` is the shared installation-selection authority for the engine, Power BI
-authoring and reusable bundles. Preflight consumes its selected evidence; `skill_plugin_source.py`
-retains bundle-content and explicit-root policy. Installed `t2p doctor` calls the same plain preflight.
+`discover_installed_plugin` in `scripts/engine_source.py` is the one resolver for the engine,
+`powerbi-authoring` and the skill bundles; preflight, `skill_plugin_source.py` and `t2p doctor` consume
+its evidence. It reads the Copilot CLI (`COPILOT_HOME`) and stable Windows VS Code
+(`%APPDATA%\Code\User\agent-plugins\installed.json`, schema version 1, pinned to
+[1.144.0, commit `2c33b50`](https://github.com/microsoft/vscode/blob/2c33b50b16c472efe58357d1d2a8a5414bc23fbf/src/vs/workbench/contrib/chat/common/plugins/fileBackedInstalledPluginsStore.ts)).
+An entry's `relativePath` wins over its `file:` `pluginUri`; a root outside that cache is ignored.
 
-Supported discovery is the existing Copilot CLI `COPILOT_HOME` layout and **stable Windows VS Code**
-at `%APPDATA%\Code\User\agent-plugins\installed.json`. The VS Code contract is pinned to
-[1.144.0, commit `2c33b50`](https://github.com/microsoft/vscode/blob/2c33b50b16c472efe58357d1d2a8a5414bc23fbf/src/vs/workbench/contrib/chat/common/plugins/fileBackedInstalledPluginsStore.ts).
-Its schema is `{version: 1, installed: [{pluginUri, relativePath?, enablementUri?, marketplace, name?}]}`.
-A contained `relativePath` takes precedence over `pluginUri`, preserving literal spaces, `#` and `%20`
-as in the [official relocation fixture](https://github.com/microsoft/vscode/blob/2c33b50b16c472efe58357d1d2a8a5414bc23fbf/src/vs/workbench/contrib/chat/test/common/plugins/fileBackedInstalledPluginsStore.test.ts#L282-L311).
-The registered cached root is authoritative. There is no newest-directory search, source-checkout
-fallback or legacy-storage migration.
+- **`T2P_PLUGIN_HOST` unset:** the CLI copy is used whenever the CLI has one, as before #727; VS Code
+  only when it has none. Copies in both hosts pass with one recommended `plugin host: automatic selection` warning.
+- **`$env:T2P_PLUGIN_HOST = 'vscode'` (or `'cli'`):** that host only, no fallback; a missing or broken engine or
+  authoring copy there is a critical MISS (missing bundles stay recommended). Other values refuse.
+  `Remove-Item Env:T2P_PLUGIN_HOST` restores automatic selection.
+- Two distinct copies in one host refuse as `multiple`. VS Code copies report **installed (enablement not
+  verified)**: the registry holds no enablement state. Authoring still needs the manifest floor and
+  `skills\powerbi-report-cli\SKILL.md`; without Python it is **not verified (Python unavailable)** and fails closed.
 
-Select the intended host in the current PowerShell session:
-
-```powershell
-$env:T2P_PLUGIN_HOST = 'vscode' # or 'cli'
-python scripts\engine_source.py --json
-python scripts\skill_plugin_source.py --json
-```
-
-Without a selector, each identity requires one unambiguous physical root. Identical resolved roots
-deduplicate; distinct roots refuse even at equal versions. Invalid selectors and missing, malformed
-or incomplete explicitly selected installations refuse without trying another host. Repair the
-intended host between sessions, correct the selector, or select one host when both are installed.
-`Remove-Item Env:T2P_PLUGIN_HOST` restores automatic selection. Existing deliberate engine and
-bundle-root overrides remain explicit overrides, never automatic fallback.
-
-VS Code installations report **installed (enablement not verified)**. The registry has no enabled,
-version, sha, cachedRevision or nonce member. Editor enablement depends separately on
-`state.vscdb` workspace/global state, settings, policy and collision groups; this check does not
-establish it. Authoring still requires the existing manifest version floor and both report/model CLI
-skill files. VS Code manifest order is AgentPlugin-format root `plugin.json`, `.plugin/plugin.json`,
-`.claude-plugin/plugin.json`, root `plugin.json`, then `.github/plugin/plugin.json`. Conflicting
-manifests refuse; CLI manifest precedence and registry/manifest agreement policy remain unchanged.
-
-If Python is unavailable, authoring cannot be verified and fails closed. Doctor retains the existing
-authoring-plugin repair remedy; its separate `python_runtime` blocker provides Python-first guidance.
-
-**Could not verify:** synthetic Linux/PowerShell tests do not establish real Windows VS Code enablement
-or migration/Desktop readiness. Hosted `windows-bundle` CI must qualify Windows children at the exact
-PR head. Portable/custom `--user-data-dir`, Insiders and other editor distributions are outside scope.
-Credentials and refresh are separate work.
-
-Windows follow-up, from the toolkit root, without updates or credentials:
-
-```powershell
-git rev-parse HEAD # record exact head and windows-bundle CI URL
-uv run pytest tests\test_engine_source.py tests\test_skill_plugin_source.py tests\test_installed_plugin_hosts.py tests\test_preflight_contract.py -q
-$LASTEXITCODE # require 0
-uv run pytest tests\test_t2p_install.py -k doctor -q
-$LASTEXITCODE
-# Separately, an operator may inspect the JSON discovery commands above on their own setup.
-# A synthetic pass does not prove editor enablement, credentials or Desktop readiness.
-```
+Inspect the selection with `python scripts\engine_source.py --json` and `python scripts\skill_plugin_source.py --json`.
 
 An installed skill plugin can shadow correct repo-local skills. Preflight blocks on `STALE in plugin`.
 `copilot plugin update` file-locks while a session is running; the lock blocks renaming, not content
@@ -450,8 +412,8 @@ deprecated Bing `shapeMap`/`filledMap` visuals and dropped a density-map workshe
   another directory exits **5** with `ESTATE: ENGINE_SOURCE - … is not the canonical engine plugin
   … Pass --allow-noncanonical-engine to override deliberately; the bundle receipt will record the
   run as non-canonical.`
-- **`preflight.ps1` blocks on a second tree** — `engine: plugin installed` and `engine: single
-  source`, both **critical** (§1.1).
+- **`preflight.ps1` reports a second tree** — `engine: plugin installed` is **critical**; since #727
+  `engine: single source` names another tree as a recommended diagnostic, because it never runs (§1.1).
 - **The bundle answers *"what built me?"* by itself.** `migration_bundle.write_engine_receipt` writes
   an `engine` key into `engine-output-receipt.json` from `engine_source.engine_provenance` — the
   resolved root, its `VERSION`, whether it was canonical, and where it came from:

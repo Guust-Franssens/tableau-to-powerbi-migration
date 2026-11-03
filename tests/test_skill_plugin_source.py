@@ -1,5 +1,5 @@
 """Tests for content-based discovery of the installed reusable Power BI skill plugin."""
-# pylint: disable=missing-function-docstring,wrong-import-position
+# pylint: disable=wrong-import-position
 
 from __future__ import annotations
 
@@ -35,6 +35,8 @@ def test_copilot_home_discovery(tmp_path, monkeypatch, configured):
     relocated = tmp_path / "relocated"
     relocated_plugin = _make_plugin(relocated / "installed-plugins", "collection", "plugin")
     monkeypatch.setattr(Path, "home", lambda: user)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))  # #727: VS Code's registry is a host too
+    monkeypatch.delenv("T2P_PLUGIN_HOST", raising=False)
     monkeypatch.delenv(PLUGIN_ROOT_ENV, raising=False)
     if configured is None:
         monkeypatch.delenv("COPILOT_HOME", raising=False)

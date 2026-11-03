@@ -11,16 +11,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from build_plugin import MARKETPLACE_NAME, PLUGIN_NAME, PUBLISH_REPO, SHIPPED_SKILLS
+from build_plugin import SHIPPED_SKILLS
 from copilot_home import copilot_home
-from engine_source import PLUGIN_HOST_ENV, discover_installed_plugin
+from engine_source import BUNDLE_INSTALL_HINT as DEFAULT_INSTALL_HINT
+from engine_source import discover_installed_plugin
 
 PLUGIN_ROOT_ENV = "POWERBI_SKILLS_PLUGIN_ROOT"
-DEFAULT_IDENTITY = f"{PLUGIN_NAME}@{MARKETPLACE_NAME}"
-DEFAULT_INSTALL_HINT = (
-    f"Install it once between sessions: copilot plugin marketplace add "
-    f"{PUBLISH_REPO.rsplit('github.com/', 1)[-1]} && copilot plugin install {DEFAULT_IDENTITY}"
-)
 
 
 @dataclass(frozen=True)
@@ -36,6 +32,7 @@ class SkillPluginDiscovery:  # pylint: disable=too-many-instance-attributes
     detail: str
     host: str | None
     override: bool = False
+    host_advisory: str = ""
 
     @property
     def ok(self) -> bool:
@@ -55,6 +52,7 @@ class SkillPluginDiscovery:  # pylint: disable=too-many-instance-attributes
             "detail": self.detail,
             "host": self.host,
             "override": self.override,
+            "host_advisory": self.host_advisory,
             "shipped_skills": list(SHIPPED_SKILLS),
         }
 
@@ -80,10 +78,6 @@ def _skills_dir(plugin_root: Path) -> Path:
     return plugin_root / "skills"
 
 
-def _carries_shipped_skill(skills_dir: Path) -> bool:
-    return any((skills_dir / skill / "SKILL.md").is_file() for skill in SHIPPED_SKILLS)
-
-
 def discover_skill_plugin(
     installed_plugins_root: Path | None = None,
     plugin_root_override: Path | None = None,
@@ -95,17 +89,6 @@ def discover_skill_plugin(
     different name, and hard-coding that identity is exactly how stale bundles went unnoticed.
     """
     environment = os.environ if env is None else env
-    if PLUGIN_HOST_ENV in environment and environment.get(PLUGIN_HOST_ENV) not in ("cli", "vscode"):
-        return SkillPluginDiscovery(
-            status="invalid",
-            plugin_root=None,
-            skills_dir=None,
-            candidates=(),
-            identity=DEFAULT_IDENTITY,
-            install_hint=f"Set {PLUGIN_HOST_ENV} to cli or vscode, or unset it for automatic selection.",
-            detail=f"invalid {PLUGIN_HOST_ENV}: {environment.get(PLUGIN_HOST_ENV)!r}",
-            host=None,
-        )
     override_value = plugin_root_override or (
         Path(environment[PLUGIN_ROOT_ENV]) if environment.get(PLUGIN_ROOT_ENV) else None
     )
@@ -121,18 +104,6 @@ def discover_skill_plugin(
                 identity=_identity_from_root(plugin_root),
                 install_hint=f"{PLUGIN_ROOT_ENV} points at {plugin_root}, but {skills_dir} does not exist.",
                 detail=f"override has no skills directory: {skills_dir}",
-                host=None,
-                override=True,
-            )
-        if not _carries_shipped_skill(skills_dir):
-            return SkillPluginDiscovery(
-                status="invalid",
-                plugin_root=plugin_root,
-                skills_dir=skills_dir,
-                candidates=(plugin_root,),
-                identity=_identity_from_root(plugin_root),
-                install_hint=f"{PLUGIN_ROOT_ENV} must point at a plugin carrying a shipped skill.",
-                detail=f"override carries no shipped skill bundle: {plugin_root}",
                 host=None,
                 override=True,
             )
@@ -162,6 +133,7 @@ def discover_skill_plugin(
         install_hint=evidence.install_hint,
         detail=evidence.detail,
         host=evidence.host,
+        host_advisory=evidence.host_advisory,
     )
 
 
@@ -182,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(verdict.to_jsonable(), indent=2))
     elif verdict.ok:
         print(f"FOUND: {verdict.plugin_root} ({verdict.identity})")
+        if verdict.host_advisory:
+            print(f"HOST ADVISORY: {verdict.host_advisory}")
     else:
         print(f"{verdict.status.upper()}: {verdict.detail}")
         print(verdict.install_hint)

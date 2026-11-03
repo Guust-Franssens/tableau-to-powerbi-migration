@@ -99,7 +99,6 @@ def test_known_blocking_preflight_checks_are_critical() -> None:
         "skill bundles installed",
         "skill bundles match published plugin",
         "engine: plugin installed",
-        "engine: single source",
         "Power BI Desktop",
     ):
         _assert_add_check_tier(source, check_name, "critical")
@@ -263,10 +262,14 @@ def test_an_unverifiable_engine_check_fails_rather_than_being_skipped() -> None:
     source = _preflight_source()
     block = source[source.index("$engineStatus = $null") : source.index("# --- Skill plugins ---")]
     assert "else {" in block, "no else-branch: an unobtainable engine verdict would be skipped silently"
-    _assert_add_check_tier(block, "engine: single source", "critical")
     assert block.count("Add-Check 'engine: single source'") == 2, (
         "both the verdict path and the fallback path must emit the single-source check"
     )
+    verdict, fallback = block.split("\nelse {", 1)
+    _assert_add_check_tier(fallback, "engine: single source", "critical")
+    # #727: "Keep nonselected sibling checkouts visible as advisory diagnostics rather than requiring
+    # deletion." engine_source.py never runs them, so only the could-not-verify path may block.
+    _assert_add_check_tier(verdict, "engine: single source", "recommended")
 
 
 def test_the_upstream_engine_check_stays_opt_in_and_advisory() -> None:
@@ -1669,13 +1672,12 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
         " elif args[0]=='-c': sys.exit(1 if mode=='blocked' and args[1] in "
         "('import lxml','import jsonschema') else 0)\n"
         " elif Path(args[0]).name=='engine_source.py':\n"
-        # Mirror engine_source._environment_home: the CLI registry is read from COPILOT_HOME, never a
-        # profile default, so a missing configured home yields the resolver's host-less 'missing' verdict.
+        # Mirror engine_source._cli: the CLI registry is read from COPILOT_HOME, never a profile default.
         "  cfg=Path(os.environ['COPILOT_HOME'])/'config.json'\n"
         "  print(json.dumps({'present':mode!='blocked','alternatives':['PRIVATE_ENGINE_PATH_CANARY'] "
         "if mode=='blocked' else [],'version':'9.9.9','root':'PRIVATE_ENGINE_PATH_CANARY',"
         "'install_hint':'PRIVATE_HELPER_HINT_CANARY','authoring_plugin':{"
-        "'host':'cli' if cfg.is_file() else None,'status':'found' if cfg.is_file() else 'missing',"
+        "'host':'cli','status':'found' if cfg.is_file() else 'missing',"
         "'ok':cfg.is_file(),'detail':'PRIVATE_PLUGIN_DETAIL_CANARY','install_hint':'PRIVATE_HELPER_HINT_CANARY',"
         "'entries':json.loads(cfg.read_text())['installedPlugins'] if cfg.is_file() else []}}))\n"
         " elif Path(args[0]).name=='check_engine_receipts.py': print('PRIVATE_RECEIPT_OUTPUT_CANARY')\n"
@@ -1906,7 +1908,6 @@ def test_windows_preflight_host_cache_boundary(tmp_path: Path, monkeypatch) -> N
                 "report_author_version",
                 "desktop_bridge_version",
                 "engine_plugin",
-                "engine_source",
                 "authoring_plugin",
                 "skill_bundles",
                 "published_skill_bundles",
@@ -1940,7 +1941,7 @@ def test_doctor_actual_windows_child(tmp_path: Path, mode: str, ids: set) -> Non
     assert {row["id"] for row in detail["blockers"]} == ids, "all actual failed-critical blockers must be retained"
     assert detail["critical_missing"] == len(detail["blockers"]) == len(ids), "owner count must equal all blockers"
     assert all(set(row) == {"id", "source", "reason", "remedy"} for row in detail["blockers"])
-    assert detail["recommended_warnings"] == {"blocked": 2, "missing": 1}.get(mode, 0)
+    assert detail["recommended_warnings"] == {"blocked": 3, "missing": 1}.get(mode, 0)
     assert child.returncode == (1 if ids else 0), "doctor and direct native exits use the same shared aggregate"
     if mode == "blocked":
         assert next(row for row in detail["blockers"] if row["id"] == "desktop_pin") == {
@@ -1957,7 +1958,7 @@ def test_doctor_actual_windows_child(tmp_path: Path, mode: str, ids: set) -> Non
     assert direct.returncode == child.returncode
     assert direct.stdout.count("[MISS]") == detail["critical_missing"]
     assert direct.stdout.startswith("Copilot home: ") and "== CRITICAL ==" in direct.stdout
-    assert ("2 recommended warning(s)" in direct.stdout) == (mode == "blocked")
+    assert ("3 recommended warning(s)" in direct.stdout) == (mode == "blocked")
     assert ("1 recommended warning(s)" in direct.stdout) == (mode == "missing")
     assert [call[0] for call in direct_calls] == [call[0] for call in calls], "plain checks run once in both modes"
 

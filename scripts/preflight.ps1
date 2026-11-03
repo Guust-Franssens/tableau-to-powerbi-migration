@@ -296,8 +296,9 @@ if (Get-Command 'powerbi-report-author' -ErrorAction SilentlyContinue) {
 # worksheet entirely; 2.126.0 emits azureMap with a heat layer. Nothing in the run output said which
 # one had run.
 #
-# The decision: the INSTALLED PLUGIN is the single canonical engine. So a second tree is not a
-# convenience to warn about, it is THE defect - hence critical, not recommended.
+# The decision: the INSTALLED PLUGIN is the single canonical engine, and engine_source.py never falls
+# back to another tree. A missing or unverifiable plugin is critical. A second tree can no longer run,
+# so since #727 it is a recommended diagnostic, not a mandatory deletion.
 #
 # The candidate list lives in scripts/engine_source.py, not here, deliberately: duplicating it in
 # PowerShell would recreate the two-definitions-of-one-thing problem this check exists to catch.
@@ -310,16 +311,13 @@ if ($engineStatus) {
     $alternatives = @($engineStatus.alternatives)
     Add-Check 'engine: plugin installed' 'critical' ([bool]$engineStatus.present) `
         $(if ($engineStatus.present) {
-            "VERSION $($engineStatus.version) at $($engineStatus.root)" + $(if ($engineStatus.host -eq 'vscode') { ' - installed (enablement not verified)' } else { '' })
-        } elseif ($engineStatus.installation_status -in @('invalid', 'multiple') -or $engineStatus.host -eq 'vscode' -or $env:T2P_PLUGIN_HOST) {
-            $engineStatus.detail
-        } else { "not installed at $($engineStatus.root)" }) `
+            "VERSION $($engineStatus.version) at $($engineStatus.root)" + $(if ($engineStatus.host -eq 'vscode') { ' - installed (enablement not verified)' })
+        } else { $engineStatus.detail }) `
         $engineStatus.install_hint `
         -DoctorId 'engine_plugin' -DoctorReason 'plugin_missing' -DoctorRemedy 'install_engine_plugin'
-    Add-Check 'engine: single source' 'critical' ($alternatives.Count -eq 0) `
+    Add-Check 'engine: single source' 'recommended' ($alternatives.Count -eq 0) `
         $(if ($alternatives.Count) { "ALTERNATIVE COPY: $($alternatives -join '; ')" } else { 'plugin only' }) `
-        'A second engine tree means two versions can build one pipeline with no record of which ran (#107). DELETE the alternative copy after confirming it has no uncommitted/unpushed work: git -C <path> status --porcelain; git -C <path> log --branches --not --remotes.' `
-        -DoctorId 'engine_source' -DoctorReason 'alternative_copy' -DoctorRemedy 'inspect_engine_source'
+        'Diagnostic only (#727): every script runs the installed plugin, never this copy (#107). Removing it is optional; first confirm it has no uncommitted/unpushed work: git -C <path> status --porcelain; git -C <path> log --branches --not --remotes.'
 }
 else {
     Add-Check 'engine: single source' 'critical' $false `
@@ -342,9 +340,10 @@ if ($engineStatus -and $engineStatus.present -and $py) {
 # --- Skill plugins ---
 # This repo's reusable Power BI bundles are different: their marketplace/plugin name has changed once,
 # and a hard-coded name let the installed copy drift silently. Discover that plugin by content instead:
-# engine_source.py selects installation evidence for every host; the bundle helper retains content policy.
-# Exactly one physical install is acceptable; multiple installs remain a shadowing hazard.
-$cfg = [pscustomobject]@{ installedPlugins = @($engineStatus.authoring_plugin.entries) }
+# engine_source.py selects installation evidence for every host; preflight keeps the CLI verdict below.
+# Exactly one discovered bundle install is acceptable; more than one is a critical shadowing hazard.
+$authoring = $engineStatus.authoring_plugin
+$cfg = [pscustomobject]@{ installedPlugins = @($authoring.entries) }
 $pluginPolicy = @{ name = 'powerbi-authoring'; market = 'fabric-collection'
     floor = '0.3.19'; knownGood = '0.3.19'; skill = 'powerbi-report-cli'
     upstreamUrl = 'https://raw.githubusercontent.com/microsoft/skills-for-fabric/main/.github/plugin/marketplace.json'
@@ -380,23 +379,18 @@ function Get-PluginVerdict($Entries, [bool]$CacheExists, $Manifest, [bool]$Skill
 }
 
 function Get-VscodePluginVerdict($Evidence, $Policy) {
-    # VS Code installation records cannot establish enablement. Never manufacture a CLI entry.
-    $hint = $Evidence.install_hint
+    # A refused T2P_PLUGIN_HOST (no host) or VS Code evidence. VS Code records cannot establish
+    # enablement, and engine_source.py already required the report-cli skill leaf.
     $v = [pscustomobject]@{ Kind = 'missing'; Tier = 'critical'; Ok = $false
-        Detail = $Evidence.detail; Hint = $hint }
+        Detail = $Evidence.detail; Hint = $Evidence.install_hint }
     if (-not $Evidence.ok) { return $v }
-    if (-not $Evidence.manifest -or $Evidence.manifest.name -cne $Policy.name) {
-        $v.Kind = 'manifest-unreadable'; return $v
+    try { $manifest = Get-Content -LiteralPath (Join-Path $Evidence.plugin_root '.github\plugin\plugin.json') -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+    catch { $manifest = $null }
+    if (-not $manifest -or $manifest.name -cne $Policy.name) {
+        $v.Kind = 'manifest-unreadable'; $v.Detail = 'effective .github/plugin/plugin.json unreadable or wrong name'; return $v
     }
-    $v = Get-VersionFloorVerdict $Evidence.manifest.version $Policy.floor $Policy.knownGood $hint
-    if ($v.Tier -eq 'critical') { return $v }
-    foreach ($skill in @($Policy.skill, 'powerbi-model-cli')) {
-        if (-not (Test-Path -LiteralPath (Join-Path $Evidence.plugin_root "skills\$skill\SKILL.md") -PathType Leaf)) {
-            return [pscustomobject]@{ Kind = 'skill-missing'; Tier = 'critical'; Ok = $false
-                Detail = "required skills/$skill/SKILL.md leaf missing"; Hint = $hint }
-        }
-    }
-    $v.Detail += ' - installed (enablement not verified)'
+    $v = Get-VersionFloorVerdict $manifest.version $Policy.floor $Policy.knownGood $Evidence.install_hint
+    if ($v.Tier -ne 'critical') { $v.Detail += ' - installed (enablement not verified)' }
     return $v
 }
 
@@ -414,13 +408,11 @@ if ($cacheExists) {
     $skillPresent = Test-Path -LiteralPath (Join-Path $plugin.cache_path "skills\$($pluginPolicy.skill)\SKILL.md") -PathType Leaf
 }
 $pv = Get-PluginVerdict $pluginEntries ([bool]$cacheExists) $manifest $skillPresent $pluginPolicy
-if ($engineStatus.authoring_plugin.host -eq 'vscode') {
-    $pv = Get-VscodePluginVerdict $engineStatus.authoring_plugin $pluginPolicy
+if (-not $authoring) {
+    $pv.Detail = $(if ($py) { 'not verified (engine_source.py did not report)' } else { 'not verified (Python unavailable)' })
 }
-elseif ($engineStatus.authoring_plugin -and -not $engineStatus.authoring_plugin.ok -and
-    ($engineStatus.authoring_plugin.status -eq 'multiple' -or -not $engineStatus.authoring_plugin.host -or $pv.Tier -ne 'critical')) {
-    $pv = [pscustomobject]@{ Kind = 'missing'; Tier = 'critical'; Ok = $false
-        Detail = $engineStatus.authoring_plugin.detail; Hint = $engineStatus.authoring_plugin.install_hint }
+elseif ($authoring.host -ne 'cli') {
+    $pv = Get-VscodePluginVerdict $authoring $pluginPolicy
 }
 Add-Check 'plugin: powerbi-authoring@fabric-collection' $pv.Tier $pv.Ok $pv.Detail $pv.Hint `
     -DoctorId 'authoring_plugin' -DoctorReason $pv.Kind -DoctorRemedy 'repair_authoring_plugin_between_sessions'
@@ -441,18 +433,14 @@ elseif ($skillPlugin.status -eq 'multiple') {
         'Two installed copies of the same skill create an ambiguous shadowing order. Remove the duplicate before trusting skill output.' `
         -DoctorId 'reusable_skill_plugins' -DoctorReason 'multiple_installs' -DoctorRemedy 'inspect_duplicate_skill_plugins'
 }
-elseif ($skillPlugin.status -eq 'missing' -and -not $env:T2P_PLUGIN_HOST) {
+elseif ($skillPlugin.status -ne 'found') {
     # Deliberately recommended, not critical: with NO installed copy, this repo's local .github/skills
     # bundles remain available in this checkout. That is a capability/distribution gap for other repos,
     # not the measured false-green bug. STALE remains critical below because it silently executes code
-    # from a different tree than the repo being inspected.
+    # from a different tree than the repo being inspected. T2P_PLUGIN_HOST does not change this severity.
     Add-Check "plugin: $($skillPlugin.identity)" 'recommended' $false `
-        'not installed/enabled' `
+        $(if ($skillPlugin.status -eq 'missing') { 'not installed/enabled' } else { $skillPlugin.detail }) `
         $skillPlugin.install_hint
-}
-elseif ($skillPlugin.status -in @('missing', 'invalid')) {
-    Add-Check 'skill bundles installed' 'critical' $false $skillPlugin.detail $skillPlugin.install_hint `
-        -DoctorId 'skill_bundles' -DoctorReason 'bundle_missing' -DoctorRemedy 'sync_installed_skills'
 }
 else {
     Add-Check "plugin: $($skillPlugin.identity)" 'recommended' $true `
@@ -481,6 +469,14 @@ else {
         $(if ($drift.Count) { "STALE in plugin: $($drift -join ', ')" } else { 'in sync' }) `
         'The plugin copy SHADOWS .github/skills, so agents run the OLDER code, not what this repo shows. FIX IT NOW, mid-session: python scripts/sync_installed_skills.py (the lock behind "os error 5" only blocks renaming the plugin dir - files inside stay writable). Then publish so other machines get it: python scripts/build_plugin.py --out <clone of the marketplace repo>, commit+push. Do not trust a measurement taken against a stale bundle.' `
         -DoctorId 'published_skill_bundles' -DoctorReason 'content_stale' -DoctorRemedy 'sync_and_publish_skills'
+}
+
+# --- Plugin host (#727): with T2P_PLUGIN_HOST unset, the Copilot CLI installation is used whenever it
+# holds a usable copy. Report what VS Code holds beside it so the operator can choose; the run is unaffected.
+$hostAdvisories = @(@($engineStatus.host_advisory, $authoring.host_advisory, $skillPlugin.host_advisory) | Where-Object { $_ })
+if ($hostAdvisories.Count) {
+    Add-Check 'plugin host: automatic selection' 'recommended' $false ($hostAdvisories -join ' | ') `
+        "Set `$env:T2P_PLUGIN_HOST='cli' or 'vscode' to choose explicitly; unset, the Copilot CLI installation is used."
 }
 
 # Recommended means "warn, do not halt." A check is critical if any persona's Definition of Done
