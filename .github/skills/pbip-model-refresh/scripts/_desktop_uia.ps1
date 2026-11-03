@@ -57,6 +57,41 @@ public static class DesktopHarvest {
       return process.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
   }
+  [DllImport("kernel32.dll", SetLastError=true)] private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll", SetLastError=true)] private static extern uint GetProcessId(IntPtr process);
+  [DllImport("kernel32.dll", SetLastError=true)] private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll", SetLastError=true)] private static extern bool GetProcessTimes(
+    IntPtr process, out long creation, out long exit, out long kernel, out long user);
+  [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);
+  // Same string as Win32_Process.CreationDate.ToUniversalTime().Ticks. null means only "no such process";
+  // a process that exists but cannot be read throws, because the caller treats null/null as Desktop gone.
+  public static string CreationStart(uint pid) {
+    // QUERY_LIMITED_INFORMATION | SYNCHRONIZE: no elevation or process-modification rights.
+    IntPtr handle = OpenProcess(0x101000, false, pid);
+    if (handle == IntPtr.Zero) {
+      int error = Marshal.GetLastWin32Error();
+      if (error == 87) return null;
+      throw new System.ComponentModel.Win32Exception(error);
+    }
+    try {
+      // OpenProcess ignores a PID's low two bits, so pid+1..+3 open pid; CIM has no such alias.
+      uint actual = GetProcessId(handle);
+      if (actual == 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+      if (actual != pid) return null;
+      long creation, exit, kernel, user;
+      uint wait = WaitForSingleObject(handle, 0);
+      if (wait == 0) return null;
+      if (wait != 258) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+      if (!GetProcessTimes(handle, out creation, out exit, out kernel, out user))
+        throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+      wait = WaitForSingleObject(handle, 0);
+      if (wait == 0) return null;
+      if (wait != 258) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+      long ticks = DateTime.FromFileTimeUtc(creation).Ticks;
+      // Win32_Process.CreationDate (DMTF) preserves microseconds, not the last 100 ns digit.
+      return (ticks - ticks % 10).ToString(System.Globalization.CultureInfo.InvariantCulture);
+    } finally { CloseHandle(handle); }
+  }
   public static List<Window> Windows(uint expected) {
     var result = new List<Window>();
     bool ok = EnumWindows(delegate(IntPtr hwnd, IntPtr ignored) {
@@ -78,9 +113,7 @@ public static class DesktopHarvest {
 "@
 
 function Get-ProcessStart {
-  $process = Get-CimInstance Win32_Process -Filter "ProcessId=$DesktopPid"
-  if ($null -eq $process) { return $null }
-  return $process.CreationDate.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+  return [DesktopHarvest]::CreationStart([uint32]$DesktopPid)
 }
 function Get-HandleString {
   param([IntPtr]$Handle)
