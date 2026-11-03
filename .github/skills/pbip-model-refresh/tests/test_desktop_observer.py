@@ -5027,7 +5027,7 @@ try { $value = [CreationStartFake]::CreationStart(REQUESTED) } catch { $thrown =
 """
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA collector is Windows-only")
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
 @pytest.mark.parametrize(
     ("case", "value", "thrown", "ids", "waits", "reads"),
     [
@@ -5118,7 +5118,7 @@ def _independent_cim_starts(pids: list[int]) -> dict[str, str | None]:
     return json.loads(result.stdout)
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA collector is Windows-only")
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
 def test_collector_start_is_byte_identical_to_an_independent_cim_read() -> None:
     """The observer's start token must equal the probe's CIM token byte for byte, or every bound compare fails.
 
@@ -5206,7 +5206,7 @@ $otherBlocks = @(@($body.ParamBlock, $body.BeginBlock, $body.ProcessBlock, $body
 """
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA collector is Windows-only")
+@pytest.mark.skipif(sys.platform != "win32", reason="Desktop UIA qualification is Windows-only")
 def test_collector_process_start_cannot_turn_an_unreadable_process_into_gone(tmp_path: Path) -> None:
     """A PowerShell wrapper or CIM fallback would hide the native refusal and fabricate a gone verdict."""
     backend = Path(_desktop_observer.__file__).with_name("_desktop_uia.ps1")
