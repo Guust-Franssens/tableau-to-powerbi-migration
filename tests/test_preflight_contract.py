@@ -1609,7 +1609,7 @@ def _actual_child_timeout_report(exc: subprocess.TimeoutExpired, trace: Path, sp
     """Issue #791: say where a timed-out actual child spent its budget (the budget itself is unchanged)."""
     raised_ms = time.time_ns() // 1_000_000
     try:
-        rows = trace.read_text(encoding="utf-8").splitlines()
+        rows = trace.read_text(encoding="utf-8", errors="replace").splitlines()
     except FileNotFoundError:
         rows = []
     events = []
@@ -1632,6 +1632,19 @@ def _actual_child_timeout_report(exc: subprocess.TimeoutExpired, trace: Path, sp
             f"partial stderr: {partial(exc.stderr)}",
         ]
     )
+
+
+def _timeout_after_partial_trace(command: list[str], env: dict, root: Path) -> None:
+    """Calibrate the #791 report: a launcher-style row, a row from the real generated stub, then bytes
+    cut mid-write by a kill; never a real 60 s child."""
+    trace = Path(env["CHILD_TRACE"])
+    trace.write_text(f"{time.time_ns() // 1_000_000} launcher start\n", encoding="utf-8")
+    # check_call goes through Popen, which the boundary test's subprocess.run patch leaves real.
+    stub = [sys.executable, "-B", str(root / "commands" / "stub.py"), "python", "--version"]
+    subprocess.check_call(stub, env=env, stdout=subprocess.DEVNULL)
+    with trace.open("ab") as handle:
+        handle.write(b"\xff\xfe")
+    raise subprocess.TimeoutExpired(command, 60, output="partial-out", stderr="partial-err")
 
 
 def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) -> tuple:
@@ -1895,6 +1908,8 @@ def test_windows_preflight_host_cache_boundary(tmp_path: Path, monkeypatch) -> N
                 return original_iterdir(path)
 
             monkeypatch.setattr(Path, "iterdir", unreadable)
+        elif case == "timeout":
+            _timeout_after_partial_trace(command, options["env"], root)
         return child
 
     monkeypatch.setattr(subprocess, "run", controlled_child)
@@ -1910,6 +1925,11 @@ def test_windows_preflight_host_cache_boundary(tmp_path: Path, monkeypatch) -> N
         ("missing-root", "actual-child unexpected sidecar entry must fail"),
         ("file-root", "actual-child unexpected sidecar entry must fail"),
         ("forbidden-command", "actual-child forbidden network/updater/installer/login command must not be invoked"),
+        (
+            "timeout",
+            '(?s)exceeded its 60s budget.*s launcher start\n.*s stub \\["python", "--version"\\]\n'
+            "  \\? \ufffd.*partial stdout: 'partial-out'\npartial stderr: 'partial-err'",
+        ),
         ("unassessable-root", "actual-child unexpected sidecar entry must fail"),
     ]
     for case, assertion in cases:
