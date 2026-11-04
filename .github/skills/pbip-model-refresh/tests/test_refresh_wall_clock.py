@@ -797,6 +797,7 @@ def test_process_startup_uses_the_acquisition_budget_without_stopping_refresh(
     entered, resume, observed = threading.Event(), threading.Event(), threading.Event()
     popen = _desktop_observer.subprocess.Popen
     observe = _desktop_observer.ModalVisualEvidence.observe
+    hold_refusal = _desktop_observer.ModalVisualEvidence.hold_refusal
     monkeypatch.setattr(_desktop_observer, "IMAGE_CAPTURE_SECONDS", 0.1)
 
     def delayed_process(*args, **kwargs):
@@ -810,8 +811,15 @@ def test_process_startup_uses_the_acquisition_budget_without_stopping_refresh(
         finally:
             observed.set()
 
+    def refuse_after_watchdog(self, *args, **kwargs):
+        # O23's structural refusal can close evidence at the same deadline as its watchdog.
+        # Keep that competing teardown behind this test's independent acquisition-budget check.
+        assert resume.wait(5), "the test must release terminal teardown"
+        return hold_refusal(self, *args, **kwargs)
+
     monkeypatch.setattr(_desktop_observer.subprocess, "Popen", delayed_process)
     monkeypatch.setattr(_desktop_observer.ModalVisualEvidence, "observe", observe_until_clean)
+    monkeypatch.setattr(_desktop_observer.ModalVisualEvidence, "hold_refusal", refuse_after_watchdog)
     thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
     try:
         assert entered.wait(2)
