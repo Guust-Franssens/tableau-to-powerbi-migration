@@ -1795,6 +1795,35 @@ recipe, the physical-fail/alias-open control and everything it does **not** prov
 [`docs/windows-path-limits.md`](windows-path-limits.md) (§6 *`subst` — a measured Desktop-open
 fallback, never a repair*).
 
+### 4.14 An old run folder refuses writes after the credential gate was retired
+
+Trees armed by the retired credential gate keep its Windows deny ACE: the current user is denied
+`(OI)(CI)(WD,AD,WA)` on each `fabric`, `pbip`, `*.SemanticModel` or `*.Report` folder, and every
+child inherits it. Reads still work. Edits, refresh writes and Desktop saves fail with
+`Access is denied`. Remove the deny only on trees you still mean to edit or refresh:
+
+```powershell
+python scripts\disarm_credential_gate.py <root>           # dry run: lists ARMED folders, exit 3 if any
+python scripts\disarm_credential_gate.py <root> --apply   # removes them, exit 0 when nothing is left
+```
+
+It is idempotent, touches only your own explicit gate-shaped deny, and leaves other ACEs and the old
+marker files alone. Exit 1 names a folder it could not read or clear, or one it skipped because you
+also hold another explicit deny there (`/remove:d` would strip that one too).
+
+**Manual fallback** (same effect, no script): for each `fabric`, `pbip`, `*.SemanticModel` and
+`*.Report` folder, run
+
+```powershell
+icacls "<dir>" /remove:d %USERNAME%    # in PowerShell write $env:USERNAME
+icacls "<dir>"                          # the line <DOMAIN>\<you>:(OI)(CI)(DENY)(WD,AD,WA) must be gone
+```
+
+Deleting an armed tree does not need a disarm (measured 2026-11-04 on a synthetic tree:
+`rmdir /s /q`, Python `shutil.rmtree` and `Remove-Item -Recurse` all succeeded). `Remove-Item
+-Recurse -Force` failed with `Access is denied`, because `-Force` rewrites file attributes and the
+deny covers `WA`; drop `-Force` or disarm first.
+
 ---
 
 ## 5. Verification checklist
