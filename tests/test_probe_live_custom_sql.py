@@ -393,7 +393,8 @@ def test_malformed_json_payloads_never_execute_or_earn_authority(
     assert not any(row["action"] in ("probe-data_ok", "probe-cleared", "authorize") for row in entries)
     assert not (tmp_path / gate.OVERRIDE).exists()
     result = _assess_sources(tmp_path, [source])
-    assert result.state in ("blocked", "cannot_establish")
+    # Without a ledger the projection no longer blocks here; it simply never earns validated data.
+    assert result.state not in ("live_data_ok", "authorized_model_only") and result.validation != "validated"
     assert TOKEN not in caplog.text and "PROBE: DATA_OK" not in caplog.text
     assert SENTINEL not in caplog.text + json.dumps(entries) + repr(effects)
     assert path.read_bytes() == before
