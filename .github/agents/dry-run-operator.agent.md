@@ -146,8 +146,8 @@ First credential/modal/native approval prompt → **human STOP**, even autopilot
 No auto-fill/approve/secret acquisition/network-retry loop; shared transient/self-timer bounds apply.
 Secrets only ignored env files/exported environment, never argv/output.
 
-Probe only commissioned current [live-source](../skills/live-source-reachability/SKILL.md) routes,
-shipped first; shell/SQL identity or permission/build-only isn't Power BI DATA_OK/clearance.
+Check only commissioned current [live-source](../skills/live-source-reachability/SKILL.md) routes,
+shipped first; shell/SQL identity or permission/model-only isn't Power BI DATA_OK.
 Only issued brief/current owners set numeric waiver/fidelity bar.
 
 Host [refresh](../skills/pbip-model-refresh/SKILL.md), `check_migration_progress.py` handoff and
