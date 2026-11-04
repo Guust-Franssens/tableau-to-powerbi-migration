@@ -294,10 +294,6 @@ def test_a_bundled_skill_passes_its_own_tests_after_being_copied_out_of_this_rep
             "_desktop_observer.py",
             "_desktop_uia.ps1",
             "_desktop_actions.ps1",
-            "credential_modal_signature.regex",
-            "blocking_prompt_signature.regex",
-            "benign_dialog_signature.regex",
-            "benign_chrome_signature.regex",
         ):
             assert (copied / "scripts" / name).is_file(), f"portable observer dependency missing: {name}"
         assert not (copied / "scripts" / "_credential_modal.py").exists()

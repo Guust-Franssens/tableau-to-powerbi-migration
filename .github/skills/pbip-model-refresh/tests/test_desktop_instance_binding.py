@@ -1704,9 +1704,9 @@ def test_the_bundled_backend_has_no_classifier_or_refresh_arbiter() -> None:
         "Start-Sleep",
     ):
         assert forbidden not in body, f"parallel policy/arbiter returned: {forbidden}"
-    # A bounded stack traversal is acquisition, not operation polling.
     loops = re.findall(r"\bwhile\s*\(([^)]*)\)", body)
-    assert loops == ["$pending.Count"], f"unexpected native polling loop: {loops}"
+    assert not loops, f"unexpected native polling loop: {loops}"
+    assert "Get-IdentitySnapshot" not in body and "Get-AutomationHarvest" not in body
     assert "desktop.harvest.v1" in body and "EnumWindows" in body
 
 
@@ -1778,25 +1778,24 @@ def test_timeout_recovery_command_quotes_a_path_with_spaces(monkeypatch, tmp_pat
     assert f'python "{spaced}" --pid 111' in out, "the portable query recovery path must stay quoted"
 
 
-def test_backend_exact_target_prepost_and_readonly_values_are_retained() -> None:
-    """The native backend keeps identity/role facts without becoming a second policy authority."""
+def test_backend_exact_target_rechecks_and_structural_facts_are_retained() -> None:
+    """Keep native identity guards and structural facts, without retaining UIA text harvesting."""
     body = CREDENTIAL_PROBE_PS1.read_text(encoding="utf-8")
     for required in (
         "EnumWindows",
         "GetWindowThreadProcessId",
-        "owner_before",
-        "owner_after",
-        "target_before",
-        "target_after",
+        "if (!Target(hwnd, expected) || GetWindow(hwnd, 4) != owner",
+        "IsWindowEnabled(hwnd) != window.Enabled",
         "process_started_at_before",
         "process_started_at_after",
-        "IsPassword",
-        "ControlType.Edit",
-        "TextPattern",
-        "patterns_incomplete",
+        "owner_same_pid=$window.OwnerSamePid",
+        "ie_hosted=$window.IEHosted",
+        "EnumChildWindows",
+        "Internet Explorer_Server",
     ):
         assert required in body, f"native safeguard missing: {required}"
-    assert "ValuePattern" not in body
+    for retired in ("ValuePattern", "TextPattern", "IsPassword", "ControlType.Edit", "Get-AutomationHarvest"):
+        assert retired not in body
 
 
 def test_ui_save_fallback_when_cache_does_not_update_reports_not_persisted_without_contradiction(

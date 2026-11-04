@@ -347,29 +347,15 @@ def test_a_dialog_finding_keeps_the_gate_shut_without_claiming_a_credential_wall
         assert not probe_live_source._has_credential_stop_verdict(stdout)
 
 
-def test_every_dialog_guidance_string_is_marker_free() -> None:
-    """#376 x #153: the guidance printed under a dialog verdict must not fabricate a credential stop.
-
-    The kinds are DISCOVERED from the detector's own table rather than listed here, so a kind added
-    later is covered without anyone editing this test - the same "catches a newly-added X" discipline
-    as ``_detector_unknown_reasons``. This matters because ``_classify_failure`` scans a failing
-    child's WHOLE transcript as free text: one stray "credential"/"sign in"/"authentication" in the
-    reassuring half of the message would relabel "we could not probe" as the hard stop it exists to
-    avoid, exactly as the #153 banner did.
-    """
+def test_local_image_unavailable_notice_is_marker_free() -> None:
+    """The replacement diagnostic cannot manufacture a source verdict from its own prose."""
     probe_live_source = _import_probe_live_source()
     _, _, credential_modal = _import_skill_modules()
 
-    guidance = credential_modal.DIALOG_KIND_GUIDANCE
-    assert len(guidance) >= 5, f"expected the detector's full guidance table; got {sorted(guidance)}"
-
-    offenders = {
-        kind: [marker for marker in probe_live_source.CREDENTIAL_MARKERS if marker in text.lower()]
-        for kind, text in guidance.items()
-        if any(marker in text.lower() for marker in probe_live_source.CREDENTIAL_MARKERS)
-    }
-
-    assert not offenders, f"guidance prose carries free-text credential markers: {offenders}"
+    output = io.StringIO()
+    credential_modal.print_dialog_diagnostic(403, _dialog_window(credential_modal, ()), stream=output)
+    assert output.getvalue().startswith("LOCAL_IMAGE: unavailable")
+    assert not any(marker in output.getvalue().lower() for marker in probe_live_source.CREDENTIAL_MARKERS)
 
 
 def test_a_dialog_verdict_is_recognised_structurally_and_is_not_a_credential_stop() -> None:
@@ -431,13 +417,13 @@ def _dialog_window(credential_modal, texts: tuple[str, ...]):
 # (mixed-content -> DIALOG_UNRECOGNIZED, caption-only -> DIALOG_UNREADABLE). Keyed by label so a
 # failure names the case; the token is read back from the emitted line, never assumed.
 DIALOG_TOKEN_WINDOWS = {
-    "DIALOG_NEEDS_HUMAN/authentication-notice": ("Authentication required",),
-    "DIALOG_NEEDS_HUMAN/native-query": ("Permission is required to run this native database query",),
-    "DIALOG_UNREADABLE/no-text": (),
-    "DIALOG_UNREADABLE/caption-only": ("Refresh",),
-    "DIALOG_UNRECOGNIZED/read-nothing-matched": ("Save changes?", "Discard"),
-    "DIALOG_UNRECOGNIZED/mixed-content": ("Evaluating...", "Delete these 4 tables?"),
-    "REFRESH_IN_PROGRESS/progress-content": ("Refresh", "Evaluating..."),
+    "DIALOG_NEEDS_HUMAN/authentication-notice": "DIALOG_NEEDS_HUMAN",
+    "DIALOG_NEEDS_HUMAN/native-query": "DIALOG_NEEDS_HUMAN",
+    "DIALOG_UNREADABLE/no-text": "DIALOG_UNREADABLE",
+    "DIALOG_UNREADABLE/caption-only": "DIALOG_UNREADABLE",
+    "DIALOG_UNRECOGNIZED/read-nothing-matched": "DIALOG_UNRECOGNIZED",
+    "DIALOG_UNRECOGNIZED/mixed-content": "DIALOG_UNRECOGNIZED",
+    "REFRESH_IN_PROGRESS/progress-content": "REFRESH_IN_PROGRESS",
 }
 
 # What the CHILD's own guidance line may and may not say, per token (issue #146). The classification,
@@ -449,43 +435,6 @@ DIALOG_TOKEN_WINDOWS = {
 #   DIALOG_UNREADABLE / DIALOG_UNRECOGNIZED  matched nothing, or read nothing. They settle the
 #                       credential question in NEITHER direction and send a human to the screen.
 #   REFRESH_IN_PROGRESS positively read progress content: wait or cancel, never stack.
-CHILD_GUIDANCE_CONTRACT = {
-    "DIALOG_NEEDS_HUMAN": {
-        "required": ("known human-blocking prompt", "does not establish which action"),
-        "forbidden": (
-            "approve it",
-            "approve whatever",
-            "no account details are implied",
-            "not a data-source sign-on prompt",
-            "not a sign-in",
-            "not a credential",
-        ),
-    },
-    "DIALOG_UNREADABLE": {
-        "required": ("look at the desktop screen",),
-        "forbidden": (
-            "approve",
-            "not a sign-in",
-            "not a credential",
-            "supply account details",
-            "no account details",
-        ),
-    },
-    "DIALOG_UNRECOGNIZED": {
-        "required": ("look at the desktop screen",),
-        "forbidden": (
-            "approve",
-            "not a sign-in",
-            "not a credential",
-            "supply account details",
-            "no account details",
-        ),
-    },
-    "REFRESH_IN_PROGRESS": {
-        "required": ("a refresh is already running on this pid", "do not stack"),
-        "forbidden": ("approve", "not a sign-in", "not a credential"),
-    },
-}
 
 # What the PARENT (`_verdict_lines.classify_child_verdict`) may and may not say for the same token.
 # The verdict stays ERROR in every row - only the operator sentence differs.
@@ -512,13 +461,11 @@ PARENT_DETAIL_CONTRACT = {
 }
 
 
-def emitted_dialog_verdict(refresh_pbip_model, credential_modal, texts: tuple[str, ...]) -> tuple[str, str]:
-    """Drive the REAL detector + REAL child emitter for ``texts``; return ``(token, transcript)``.
-
-    Harvested, never hand-written (the #152/#153 discipline): a reworded guidance string or a changed
-    fold order is caught here rather than in production.
-    """
-    finding = credential_modal.classify_dialog(_dialog_window(credential_modal, texts))
+def emitted_dialog_verdict(refresh_pbip_model, credential_modal, token: str | tuple) -> tuple[str, str]:
+    """Exercise retained legacy finding-to-wire adapters, not the retired text classifier."""
+    token = token or "DIALOG_UNREADABLE"
+    kind = next(kind for kind, value in credential_modal.DIALOG_KIND_VERDICTS.items() if value == token)
+    finding = credential_modal.DialogFinding(kind, token, _dialog_window(credential_modal, ()))
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
         refresh_pbip_model._emit_dialog_finding(111, finding)
@@ -538,13 +485,8 @@ def assert_message_matches_its_token(contract: dict, token: str, message: str, *
         )
 
 
-def test_each_dialog_token_says_only_what_its_evidence_supports() -> None:
-    """Issue #146, the runtime half: child guidance AND parent detail, token by token.
-
-    Both halves are driven through the real detector, the real emitter and the real classifier, so
-    this fails on a reworded string rather than on a restated copy of one. Nothing about the
-    classification is asserted here beyond the token itself - that is pinned by its own tests.
-    """
+def test_each_legacy_dialog_token_keeps_its_wire_and_parent_contract() -> None:
+    """Retiring producer states must not break consumers of existing transcripts."""
     probe_live_source = _import_probe_live_source()
     refresh_pbip_model, _, credential_modal = _import_skill_modules()
 
@@ -554,15 +496,15 @@ def test_each_dialog_token_says_only_what_its_evidence_supports() -> None:
         assert label.startswith(token), f"{label}: emitted {token}, so the fixture no longer covers what it names"
         seen.add(token)
 
-        guidance = transcript.splitlines()[-1]
-        assert_message_matches_its_token(CHILD_GUIDANCE_CONTRACT, token, guidance, label=label)
+        assert transcript.startswith(f"REFRESH: {token} ")
+        assert "approve it" not in transcript.lower()
 
         verdict, detail = probe_live_source._classify_failure(transcript, network_fault_observed=False)
         assert verdict == "ERROR", f"{label}: classification changed - {verdict}"
         assert token in detail, f"{label}: the parent dropped the child's token from its own message: {detail!r}"
         assert_message_matches_its_token(PARENT_DETAIL_CONTRACT, token, detail, label=label)
 
-    assert seen == set(CHILD_GUIDANCE_CONTRACT), f"a dialog token lost its fixture: {sorted(seen)}"
+    assert seen == set(PARENT_DETAIL_CONTRACT), f"a dialog token lost its fixture: {sorted(seen)}"
 
 
 def test_unreadable_dialog_verdict_does_not_assert_not_a_sign_in_prompt() -> None:
@@ -619,32 +561,6 @@ def test_the_progress_token_gets_its_own_parent_guidance_not_the_generic_branch(
     assert_message_matches_its_token(PARENT_DETAIL_CONTRACT, token, detail, label="REFRESH_IN_PROGRESS")
 
 
-def test_mutation_swapping_the_dialog_guidance_table_breaks_the_named_assertion() -> None:
-    """Mutation: give each token its sibling's guidance. The token-specific assertion must fail.
-
-    Monkeypatch-free by construction - the mutation is applied to the detector's own table and driven
-    through the real emitter, in the same shape as the caption-accounting Python mutation in the skill
-    suite. Without it, a contract of only-forbidden phrases would pass on any wrong-but-clean string.
-    """
-    refresh_pbip_model, _, credential_modal = _import_skill_modules()
-
-    original = dict(credential_modal.DIALOG_KIND_GUIDANCE)
-    swapped = dict(original)
-    swapped[credential_modal.DIALOG_KIND_NEEDS_HUMAN] = original[credential_modal.DIALOG_KIND_BENIGN]
-    swapped[credential_modal.DIALOG_KIND_BENIGN] = original[credential_modal.DIALOG_KIND_NEEDS_HUMAN]
-    credential_modal.DIALOG_KIND_GUIDANCE.update(swapped)
-    try:
-        token, transcript = emitted_dialog_verdict(
-            refresh_pbip_model, credential_modal, DIALOG_TOKEN_WINDOWS["DIALOG_NEEDS_HUMAN/native-query"]
-        )
-        guidance = transcript.splitlines()[-1]
-        with pytest.raises(AssertionError, match="known human-blocking prompt"):
-            assert_message_matches_its_token(CHILD_GUIDANCE_CONTRACT, token, guidance, label="mutated")
-    finally:
-        credential_modal.DIALOG_KIND_GUIDANCE.clear()
-        credential_modal.DIALOG_KIND_GUIDANCE.update(original)
-
-
 def test_mutation_collapsing_progress_into_the_generic_branch_breaks_the_named_assertion() -> None:
     """Mutation: route REFRESH_IN_PROGRESS back through the generic could-not-classify text.
 
@@ -673,13 +589,6 @@ def test_mutation_restoring_the_retired_approval_prose_breaks_the_named_assertio
     """
     probe_live_source = _import_probe_live_source()
     refresh_pbip_model, _, credential_modal = _import_skill_modules()
-
-    retired_child = (
-        "this is a KNOWN human-blocking prompt (e.g. the native database query approval), not a "
-        "data-source sign-on prompt - approve it at the Desktop screen; no account details are implied"
-    )
-    with pytest.raises(AssertionError, match="does not establish which action"):
-        assert_message_matches_its_token(CHILD_GUIDANCE_CONTRACT, "DIALOG_NEEDS_HUMAN", retired_child, label="mutated")
 
     token, transcript = emitted_dialog_verdict(
         refresh_pbip_model, credential_modal, DIALOG_TOKEN_WINDOWS["DIALOG_NEEDS_HUMAN/authentication-notice"]

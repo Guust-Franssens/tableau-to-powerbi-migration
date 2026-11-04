@@ -458,6 +458,24 @@ def test_observation_refusals_are_one_attempt_and_do_not_query(monkeypatch, fiel
     assert calls == [111]
 
 
+def test_o23_completion_reader_never_runs_a_query_behind_a_structural_popup(monkeypatch):
+    """A stateless reader cannot adopt the UI watcher's popup or read through it."""
+    from _desktop_observer import DesktopWindow, inspect_desktop_observer  # pylint: disable=import-outside-toplevel
+
+    frame = DesktopWindow("", "", 1280, 800, hwnd=1111, enabled=False)
+    popup = DesktopWindow("Refresh", "", 500, 300, ("Evaluating...",), hwnd=2222, owner_hwnd=1111, owner_enabled=False)
+    calls = []
+
+    def observe(pid, **_kwargs):
+        calls.append(pid)
+        return inspect_desktop_observer(pid, lambda _: [frame, popup])
+
+    monkeypatch.setattr(probe_desktop_query, "_credential_state", observe)
+    with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^DIALOG_NEEDS_HUMAN$"):
+        probe_desktop_query._observation_call(111, lambda: pytest.fail("reader ran behind popup"), 1)
+    assert calls == [111]
+
+
 def test_late_credential_refusal_interrupts_the_bounded_read(monkeypatch):
     release = threading.Event()
     calls = []

@@ -340,7 +340,6 @@ def desktop_executor_fixture(monkeypatch: pytest.MonkeyPatch) -> tuple:
         "desktop_identity",
         lambda pid, port=None: pdq.DesktopIdentity(pid, "638963424000000001", 112, "638963424000000002", port or 55001),
     )
-    monkeypatch.setattr(modal, "diagnose_dialog", lambda *_a: ("OBSERVED", "package_session", "template_match"))
     return events, state, blocked, connection, modal
 
 
@@ -355,7 +354,7 @@ def test_desktop_refusal_precedes_open_and_keeps_startup_silent(desktop_executor
     assert set(result) == {"error"}, "a detected modal must return an error, never fabricated rows or zero"
     assert "DIALOG_UNRECOGNIZED" in result["error"]
     assert events == ["check"], "Open must not run behind a detected modal"
-    assert output.out == "" and "PackageSession" in output.err
+    assert output.out == "" and output.err == "LOCAL_IMAGE: unavailable (not_captured)\n"
     assert "PRIVATE_TEST_VALUE" not in output.err + json.dumps(result)
 
 
@@ -391,7 +390,7 @@ def test_desktop_persistent_requests_are_each_checked(desktop_executor: tuple, c
     assert replies[0] == replies[2] == {"rows": [{"v": 7}]}
     assert set(replies[1]) == {"error"}, "each persistent request must refuse a newly detected modal"
     assert events.count("open") == 1 and events.count("read") == 2
-    assert capsys.readouterr().err.count("DIALOG_DIAGNOSTIC ") == 1
+    assert capsys.readouterr().err == "LOCAL_IMAGE: unavailable (not_captured)\n"
     execute.close()
     assert events[-1] == "close"
 
@@ -419,7 +418,7 @@ def test_desktop_one_shot_keeps_error_json_and_exit_zero(desktop_executor: tuple
     output = capsys.readouterr()
     assert code == 0, "oracle one-shot errors retain the existing exit-zero JSON contract"
     assert set(json.loads(output.out)) == {"error"}
-    assert "DIALOG_DIAGNOSTIC " not in output.out and "DIALOG_DIAGNOSTIC " in output.err
+    assert "LOCAL_IMAGE:" not in output.out and output.err == "LOCAL_IMAGE: unavailable (not_captured)\n"
 
 
 def test_desktop_port_only_and_offline_never_infer_a_pid(desktop_executor: tuple, monkeypatch, capsys) -> None:
