@@ -74,6 +74,11 @@ def test_empty_user_never_matches() -> None:
     assert not dg.is_current_user("someone", "")
 
 
+def test_is_gate_ace_rejects_the_inherited_copy() -> None:
+    assert dg.is_gate_ace(dg.Ace(ME, frozenset({"OI", "CI", "DENY"}), frozenset({"WD", "AD", "WA"})))
+    assert not dg.is_gate_ace(dg.Ace(ME, frozenset({"I", "OI", "CI", "DENY"}), frozenset({"WD", "AD", "WA"})))
+
+
 def test_other_principals_explicit_aces_are_tolerated() -> None:
     target = "C:\\runs\\fabric"
     text = listing(target, "BUILTIN\\Users:(OI)(CI)(RX)", f"DOMAIN\\other:{GATE}", f"DOMAIN\\{ME}:{GATE}")
@@ -110,7 +115,7 @@ class FakeIcacls:
         self.calls.append(list(args))
         target = args[0]
         if args[1:] == ["/remove:d", ME]:
-            if self.remove_code == 0 and self.remove_works:
+            if self.remove_works:
                 self.armed.discard(target)
             return self.remove_code, "processed file"
         assert len(args) == 1, f"unexpected icacls call {args}"
@@ -183,6 +188,7 @@ def test_apply_removes_only_armed_anchors_and_is_idempotent(tree: dict[str, Path
 
 
 def test_apply_exits_one_when_icacls_remove_fails(tree: dict[str, Path], tmp_path: Path) -> None:
+    """A nonzero icacls exit is a failure even if a re-read no longer shows the ACE."""
     runner = FakeIcacls({tree["fabric"]})
     runner.remove_code = 5
     assert _run(tmp_path, runner, apply=True) == dg.EXIT_FAILED
