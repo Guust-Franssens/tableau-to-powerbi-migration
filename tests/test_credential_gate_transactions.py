@@ -1639,12 +1639,14 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
             message = "exact engine mirrors"
         else:
             _mutant(
-                gate,
+                pda,
                 "_package_spec_facts",
                 "if len(set(keys)) != len(keys):",
                 "if False:",
                 monkeypatch,
             )
+            # The gate binds the moved helper by name; route its gate-side caller to the same mutant.
+            monkeypatch.setattr(gate, "_package_spec_facts", pda._package_spec_facts)
             check = partial(test_engine_distinct_records_colliding_to_one_key_refuse, control)
             message = "distinct projected records"
     elif mutation == "marker-assignment":
