@@ -6019,6 +6019,42 @@ def test_r2_canonical_data_reconciliation_preserves_negative_state_and_ceiling(
         assert assessed["max_phase2_claim"] == "none"
 
 
+@pytest.mark.parametrize("state", ["live_unproven", "live_data_ok"])
+@pytest.mark.parametrize("evidence", ["pass", "zero", "no-canaries", "refresh"])
+def test_r2_live_source_data_is_proven_only_by_this_runs_data_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, state: str, evidence: str
+) -> None:
+    """`live_unproven` earns current-source-data only through the same run's data-evidence PASS."""
+    package = _r2_package(tmp_path)
+    _r2_expand_report(package)
+    if state == "live_unproven":
+        projection = json.loads((package / "data-access.json").read_bytes())
+        projection.update(state=state, validation="unvalidated", codes=["live-unproven"])
+        _r2_put(package, "data-access.json", projection)
+        _r2_declare(package, "data-access.json")
+    requests = {"refresh": True, "persist": True, "canaries": () if evidence == "no-canaries" else ("Sales",)}
+    token, _, _ = _r2_seal(
+        package,
+        monkeypatch,
+        requests=requests,
+        rows=0 if evidence == "zero" else 1,
+        unavailable="refresh" if evidence == "refresh" else None,
+    )
+    report = cu.run_all(package, receipt_sha256=token)
+    current = _r2_check(report, "current-source-data")
+    assert current["assessment"]["state"] == state
+    if state == "live_data_ok":
+        assert (current["status"], current["code"]) == ("PASS", "current_data_validated"), "legacy meaning unchanged"
+    elif evidence == "pass":
+        assert (current["status"], current["code"]) == ("PASS", "current_data_proved_by_evidence")
+        assert _r2_check(report, "data-evidence")["status"] == "PASS"
+    else:
+        assert (current["status"], current["code"]) == ("NOT_CHECKED", "data_access_not_validated")
+    assert (report["status"] == "COMPLETE") is (evidence == "pass"), cu.render(report)
+    if evidence == "pass":
+        assert report["exit_code"] == 0 and _r2_check(report, "finalized")["status"] == "PASS"
+
+
 @pytest.mark.parametrize("variant", ["missing", "refused", "copied", "reconstructed", "grafted", "tuple", "revision"])
 def test_r2_w_must_be_the_original_issued_object_for_this_exact_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, r2_gate_runtime: list, variant: str

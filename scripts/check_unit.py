@@ -3243,7 +3243,8 @@ def _import_model_class(target: Path, model_path: str) -> dict[str, Any]:
     }
 
 
-def _current_source_data(snapshot: _PinnedSnapshot, target: Path) -> dict[str, Any]:
+def _current_source_data(snapshot: _PinnedSnapshot, target: Path, data_evidence_status: str) -> dict[str, Any]:
+    """A live source is only proven by this same run's `data-evidence` PASS, never by the projection alone."""
     code = roles.validate_current_source_data_handoff(
         target, snapshot.handoff, expected_package_working_revision=snapshot.working_revision
     )
@@ -3256,19 +3257,31 @@ def _current_source_data(snapshot: _PinnedSnapshot, target: Path) -> dict[str, A
         fallback_authorization=snapshot.policy.fallback_authorization,
         provider=None,
     )
-    eligible = (
-        assessment.state in ("local_import_ready", "live_data_ok")
-        and assessment.validation == "validated"
-        and assessment.effective_scope == "model_and_report"
+    direct = (
+        assessment.effective_scope == "model_and_report"
         and assessment.max_phase2_claim == "data_validated"
         and assessment.provider_unit is None
     )
+    validated = (
+        direct and assessment.state in ("local_import_ready", "live_data_ok") and assessment.validation == "validated"
+    )
+    proved = (
+        direct
+        and assessment.state == "live_unproven"
+        and assessment.validation == "unvalidated"
+        and data_evidence_status == STATUS_PASS
+    )
+    code = "data_access_not_validated"
+    if validated:
+        code = "current_data_validated"
+    elif proved:
+        code = "current_data_proved_by_evidence"
     return {
         **_completion_row(
             "current-source-data",
             "SOURCE_DATA",
-            "current_data_validated" if eligible else "data_access_not_validated",
-            STATUS_PASS if eligible else STATUS_NOT_CHECKED,
+            code,
+            STATUS_PASS if validated or proved else STATUS_NOT_CHECKED,
         ),
         "assessment": assessment.to_json(),
     }
@@ -3315,7 +3328,7 @@ def _completion_inputs(  # pylint: disable=too-many-return-statements
         ]
     snapshot = _PinnedSnapshot(token, chain, artifact["package_revision"], target_tuple, handoff, policy)
     checks = [_completion_row("iteration-history", "HISTORY", "current_final_v3", STATUS_PASS)]
-    check = _current_source_data(snapshot, target)
+    check = _current_source_data(snapshot, target, _data_observations(chain[-1].payload["generated"])["status"])
     checks.append(check)
     if check["status"] != STATUS_PASS:
         return None, [

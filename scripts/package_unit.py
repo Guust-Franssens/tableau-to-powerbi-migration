@@ -2083,7 +2083,7 @@ expected set is every dashboard PLUS every worksheet not placed on one.
 | `data/` | the rows the model imports, shipped with it (#461), reached through a `{package_root}` folder parameter in `expressions.tmdl` - see the binding command above. Absent when nothing was shipped - either the model imports nothing, or a source it names was unavailable when this was packaged, in which case that literal now reads `{unavailable}` rather than a path on the builder's machine and `package-manifest.json`'s `data_sources` says which, one line per source, repeated in `handover.md` as a `PACKAGE_NOTE`. |
 | `migration-spec.json` | the parsed source; the expected page set both gates grade against |
 | `migration-brief.md` | **what this migration is FOR**, copied from the dispatcher: scope, fidelity bar, autonomy, refresh strategy, and what was pre-authorized if we hit a wall. A copy, so it travels with the package; the dispatcher's own file stays authoritative and its path is deliberately not recorded here. Absent only when the packager was given none - `package-manifest.json`'s notes then say so. |
-| `data-access.json` | The strict nine-field authority projection, declared as `artifacts.data_access` and hashed in `contents.files`. Blocked/cannot-establish never mean ready; authorized model-only remains **UNVALIDATED**, with a structural-only ceiling. |
+| `data-access.json` | The strict nine-field authority projection, declared as `artifacts.data_access` and hashed in `contents.files`. Blocked/cannot-establish never mean ready; authorized model-only remains **UNVALIDATED**, with a structural-only ceiling. A live source ships as `live_unproven`: dispatchable but **UNVALIDATED** until `check_unit.py`'s `data-evidence` row proves real rows at sign-off. |
 | `migration-spec.schema.json` | the CONTRACT `validate_spec.py` enforces. Read it before appending a `limitations_encountered` entry: exactly `item`/`issue`/`severity`/`stage`, `additionalProperties: false`, so one invented field rejects every entry. |
 | `reference/` | explicitly supplied original Tableau screenshots plus their existing `manifest.json`; only manifest-declared image bytes are copied. The manifest's source/image hashes, provider, kind and capability ceiling are preserved rather than restamped. |
 | `oracle/` | this unit's Tableau reference, split `dashboard/` vs `worksheet/` vs `unknown/` (**singular** - the directory is the object kind, not a plural). `oracle/*/data/*.csv` is the NUMERIC oracle - exact labels and figures, no OCR and no judgement. |
@@ -5405,8 +5405,6 @@ def _assess_package_data_access(  # pylint: disable=too-many-arguments,too-many-
             requested_scope=policy.requested_scope,
             provider=provider,
         )
-        if "transaction-refused" in assessment.codes:
-            raise data_access.GateTransactionError("transaction-refused")
         return _checked_data_access(
             data_access.reconcile_package_data_access(
                 assessment,
@@ -5831,12 +5829,6 @@ def _binding_hold(root: Path) -> _BindingPackage:
     return _BindingPackage(snapshot, members, directories)
 
 
-def _binding_barrier(root: Path) -> None:
-    state, code = data_access.inspect_physical_barrier(root)
-    if state != "clear":
-        raise _BindingRefusal(code, 1 if state == "blocked" else 3)
-
-
 def _binding_metadata(state: str) -> dict[str, str]:
     return {
         "state": state,
@@ -6051,7 +6043,6 @@ def _binding_cohort(
             raise _BindingRefusal("binding_cohort_changed")
     for index, package in enumerate(inputs.packages if original else inputs.packages[:-1]):
         location = roots[index]
-        _binding_barrier(location)
         if not _binding_matches(location, package.members, package.directories, package.snapshot.directory_id):
             raise _BindingRefusal("binding_cohort_changed")
     return roles
@@ -6068,7 +6059,6 @@ def _binding_inputs(roots: tuple[Path, ...]) -> _BindingInputs:  # pylint: disab
         _binding_access(package, role, root)
         if role.kind != KIND_DATASOURCE:
             raise _BindingRefusal("binding_provider_not_direct")
-        _binding_barrier(root)
         if _binding_observation(package, root)["codes"]:
             raise _BindingRefusal("binding_provider_not_bound", 1)
     roles = pri.verify_phase1_role_identity(roots)
@@ -6192,7 +6182,6 @@ def _binding_final(
             raise _BindingRefusal("binding_sanitize_incomplete")
     elif observation["codes"]:
         raise _BindingRefusal("binding_final_inspection_failed", 1)
-    _binding_barrier(root)
     roles = _binding_cohort(inputs, root, original=False)
     current = inputs._replace(packages=(*inputs.packages[:-1], fresh), roles=roles)
     _binding_access(fresh, roles[-1], root, provider=_binding_data_provider(current))
@@ -6284,7 +6273,6 @@ def _binding_publish(
         identity = _binding_stage(inputs, expected, staged)
 
         def retired_check(retired: Path) -> None:
-            _binding_barrier(retired)
             package = inputs.packages[-1]
             if not _binding_matches(retired, package.members, package.directories, package.snapshot.directory_id):
                 raise _BindingRefusal("binding_original_changed")

@@ -10,7 +10,6 @@ import json
 import os
 import shutil
 import subprocess
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,10 +19,8 @@ import pytest
 
 import test_data_access_contract as authority
 import test_package_role_identity as s2
-from test_data_access_contract import _desktop_fixture, _root_fixture, _rows  # noqa: F401  # existing pytest fixtures
+from test_data_access_contract import _root_fixture  # noqa: F401  # existing pytest fixture
 from test_package_unit_gates import DS_LUID, DS_UNIT, UNIT, _brief, _bundle, _write_input_manifest, _write_receipt, pkg
-from credential_gate import _clear_was_earned
-from probe_live_source import _probe_leg
 
 
 def selected_input(root: Path) -> tuple[Path, Path, dict[str, Any]]:
@@ -825,93 +822,41 @@ def test_real_localized_bytes_and_exact_in_memory_facts_drive_projection(
     assert pkg.pri.verify_s1(package).integrity.is_clean
 
 
-@pytest.mark.usefixtures("desktop")
-@pytest.mark.parametrize(
-    ("fault", "state", "codes"),
-    [
-        ("none", "live_data_ok", ("probe-cleared", "probe-data-ok")),
-        ("missing", "cannot_establish", ("audit-missing",)),
-        ("unkeyed", "blocked", ("stale-clear",)),
-        ("manual", "blocked", ("manual-clear",)),
-        ("rearm", "blocked", ("marker-only",)),
-    ],
-)
-def test_producer_uses_current_keyed_authority_without_writes(
-    tmp_path: Path, root: Path, fault: str, state: str, codes: tuple[str, ...]
+UNPROVEN = ("live_unproven", ("live-unproven",))
+
+
+@pytest.mark.parametrize("evidence", ["none", "malformed-gate-files"])
+def test_producer_admits_a_live_source_unproven_without_reading_or_writing_gate_evidence(
+    tmp_path: Path, root: Path, evidence: str
 ) -> None:
-    if fault in {"manual", "rearm"}:
-        assert authority.gate.apply_block(root, [authority.KEY]) == 0
-        assert (root / authority.gate.MARKER).is_file()
-        assert json.loads((root / authority.gate.MARKER).read_text(encoding="utf-8"))["sources"] == [authority.KEY]
-    else:
-        authority._earn(root)
-    rows = authority._rows(root)
-    if fault == "missing":
-        (root / authority.gate.AUDIT).unlink()
-    elif fault == "unkeyed":
-        for row in rows:
-            if row["action"].startswith("probe-"):
-                row.pop("sources", None)
-        authority._write_rows(root, rows)
-    elif fault == "manual":
-        assert authority.gate.clear_block(root, "manual diagnostic", earned=False) != 0
-        assert (root / authority.gate.MARKER).exists()
-        assert authority.gate.status(root) != 0
-        assert _clear_was_earned(root, [authority.KEY]) is None
-        assert [row["action"] for row in _rows(root)] == ["block-marker-only", "manual-clear"]
+    """The package projection is a pure function of sealed package facts; the gate root is inert."""
+    if evidence == "malformed-gate-files":
+        for name in (authority.gate.MARKER, authority.gate.OVERRIDE, authority.gate.AUDIT):
+            (root / name).write_text("{not json", encoding="utf-8")
     candidate = _assessment_candidate(tmp_path, authority._spec(authority.LIVE))
     before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
     actual = _assess_candidate(candidate, root)
-    assert (actual.state, actual.codes) == (state, codes)
-    assert actual.source_keys == (() if state == "cannot_establish" else (authority.KEY,))
+    assert (actual.state, actual.codes, actual.source_keys) == (*UNPROVEN, (authority.KEY,))
+    assert (actual.validation, actual.max_phase2_claim) == ("unvalidated", "data_validated")
     assert {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()} == before
 
 
-@pytest.mark.usefixtures("desktop")
 @pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("fault", ["none", "unearned-key", "incomplete-flat"])
-def test_mixed_direct_sources_need_every_key_and_all_local_bytes(
+@pytest.mark.parametrize("fault", ["none", "incomplete-flat"])
+def test_mixed_direct_sources_carry_every_key_and_need_all_local_bytes(
     tmp_path: Path, root: Path, reverse: bool, fault: str
 ) -> None:
-    keys = [authority.KEY, authority.OTHER_KEY]
     connections = [authority.FLAT, authority.LIVE, authority.OTHER]
     if reverse:
-        keys.reverse()
         connections.reverse()
-    assert authority.gate.apply_block(root, keys) == 0
-    connections_by_key = {authority.KEY: authority.LIVE, authority.OTHER_KEY: authority.OTHER}
-    for key in keys:
-        if fault == "unearned-key" and key == authority.OTHER_KEY:
-            continue
-        assert _probe_leg(root, key, connections_by_key[key], ([{"name": "Orders"}], "ID"), (1, False)) == (
-            0,
-            "DATA_OK",
-        )
-        assert authority.gate.clear_block(root, "fixture-earned", earned=True, sources=[key]) == 0
-    if fault == "unearned-key":
-        assert json.loads((root / authority.gate.MARKER).read_text(encoding="utf-8"))["sources"] == [
-            authority.OTHER_KEY
-        ]
-    else:
-        assert not (root / authority.gate.MARKER).exists()
-    assert [(row["action"], row["sources"]) for row in _rows(root)] == [
-        ("block-marker-only", keys),
-        *[
-            (action, [key])
-            for key in keys
-            if not (fault == "unearned-key" and key == authority.OTHER_KEY)
-            for action in ("block-marker-only", "probe-data_ok", "probe-cleared")
-        ],
-    ]
     candidate = _assessment_candidate(tmp_path, authority._spec(*connections))
     local = copy.deepcopy(authority.LOCAL)
     if fault == "incomplete-flat":
         local["omissions"] = [{"file": "not-shipped.csv", "reason": "missing"}]
     result = _assess_candidate(candidate, root, local=local)
-    assert result.source_keys == tuple(sorted(keys))
+    assert result.source_keys == tuple(sorted([authority.KEY, authority.OTHER_KEY]))
     assert (result.state, result.codes) == {
-        "none": ("live_data_ok", ("probe-cleared", "probe-data-ok")),
-        "unearned-key": ("blocked", ("marker-only",)),
+        "none": UNPROVEN,
         "incomplete-flat": ("blocked", ("local-import-incomplete",)),
     }[fault]
 
@@ -919,20 +864,16 @@ def test_mixed_direct_sources_need_every_key_and_all_local_bytes(
 @pytest.mark.parametrize(
     ("fault", "expected"),
     [
-        ("none", ("authorized_model_only", ("brief-model-only", "human-authorize"))),
-        ("bare-override", ("cannot_establish", ("audit-missing",))),
-        ("stop", ("blocked", ("authorization-mismatch", "marker-only"))),
-        ("workbook", ("blocked", ("authorization-mismatch", "marker-only"))),
-        ("review", ("blocked", ("marker-only", "unknown-target"))),
-        ("local-missing", ("blocked", ("local-import-incomplete", "marker-only"))),
+        ("none", ("authorized_model_only", ("brief-model-only",))),
+        ("stop", UNPROVEN),
+        ("workbook", UNPROVEN),
+        ("review", ("blocked", ("unknown-target",))),
+        ("local-missing", ("blocked", ("local-import-incomplete",))),
     ],
 )
-def test_authorization_never_downgrades_scope_or_overrides_missing_prerequisites(
+def test_brief_model_only_never_downgrades_scope_or_overrides_missing_prerequisites(
     tmp_path: Path, root: Path, fault: str, expected: tuple
 ) -> None:
-    authority._authorize(root)
-    if fault == "bare-override":
-        (root / authority.gate.AUDIT).unlink()
     connections = [authority.LIVE]
     if fault == "review":
         connections.append(authority.REVIEW)
@@ -947,64 +888,27 @@ def test_authorization_never_downgrades_scope_or_overrides_missing_prerequisites
         local["neutralized"] = ["missing.csv"]
     result = _assess_candidate(candidate, root, local=local)
     assert (result.state, result.codes) == expected
+    assert result.validation != "validated"
     if fault == "none":
-        assert (result.effective_scope, result.validation, result.max_phase2_claim) == (
-            "model_only",
-            "unvalidated",
-            "structural_only",
-        )
+        assert (result.effective_scope, result.max_phase2_claim) == ("model_only", "structural_only")
+    elif expected == UNPROVEN:
+        scope = "model_and_report" if fault == "workbook" else "model_only"
+        assert (result.effective_scope, result.max_phase2_claim) == (scope, "data_validated")
     else:
         assert result.effective_scope is None and result.max_phase2_claim == "none"
 
 
-@pytest.mark.usefixtures("desktop")
-@pytest.mark.parametrize(
-    ("fault", "code"),
-    [
-        ("mixed-malformed", "audit-malformed"),
-        ("duplicate-key", "audit-malformed"),
-        ("missing-field", "audit-malformed"),
-        ("foreign", "audit-foreign-scope"),
-        ("future", "audit-malformed"),
-    ],
-)
-def test_producer_preserves_the_authoritys_exact_audit_refusal(
-    tmp_path: Path, root: Path, fault: str, code: str
-) -> None:
-    authority._earn(root)
+@pytest.mark.parametrize("change", ["none", "new-package-key", "changed-root-key", "spec-tamper"])
+def test_source_keys_come_from_the_sealed_candidate_not_the_gate_root(tmp_path: Path, root: Path, change: str) -> None:
     candidate = _assessment_candidate(tmp_path, authority._spec(authority.LIVE))
-    assert _assess_candidate(candidate, root).state == "live_data_ok"
-    rows = authority._rows(root)
-    if fault == "mixed-malformed":
-        rows.append({"action": "probe-data_ok", "scope": str(root.resolve())})
-    elif fault == "missing-field":
-        rows[-1].pop("user")
-    elif fault == "foreign":
-        rows[-1]["scope"] = str(root.parent / "foreign")
-    elif fault == "future":
-        rows[-1]["ts"] = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
-    authority._write_rows(root, rows)
-    if fault == "duplicate-key":
-        with (root / authority.gate.AUDIT).open("a", encoding="utf-8") as handle:
-            handle.write('{"action":"probe-data_ok","action":"probe-cleared"}\n')
-    result = _assess_candidate(candidate, root)
-    assert (result.state, result.codes, result.source_keys) == ("cannot_establish", (code,), ())
-
-
-@pytest.mark.usefixtures("desktop")
-@pytest.mark.parametrize("change", ["root-superset", "new-package-key", "changed-root-key", "spec-tamper"])
-def test_gate_key_coverage_allows_supersets_but_not_foreign_or_unsealed_sources(
-    tmp_path: Path, root: Path, change: str
-) -> None:
-    authority._earn(root)
-    candidate = _assessment_candidate(tmp_path, authority._spec(authority.LIVE))
-    assert _assess_candidate(candidate, root).source_keys == (authority.KEY,), "root already has an extra key"
+    expected_key = authority.KEY
     if change == "new-package-key":
         foreign = {**authority.LIVE, "server": "uncovered.example"}
         spec = json.loads((candidate / "migration-spec.json").read_text(encoding="utf-8"))
         spec["data_sources"] = authority._spec(foreign)["data_sources"]
         s2._write(candidate / "migration-spec.json", spec)
         _reseal(candidate)
+        expected_key = authority._ordinary_key("uncovered.example")
     elif change == "changed-root-key":
         s2._write(root / "migration-spec.json", authority._spec(authority.OTHER))
     elif change == "spec-tamper":
@@ -1012,12 +916,10 @@ def test_gate_key_coverage_allows_supersets_but_not_foreign_or_unsealed_sources(
             handle.write(" ")
         assert pkg.pri.verify_s1(candidate).integrity.codes() == ("package_file_digest_mismatch",)
     result = _assess_candidate(candidate, root)
-    assert (result.state, result.codes) == {
-        "root-superset": ("live_data_ok", ("probe-cleared", "probe-data-ok")),
-        "new-package-key": ("cannot_establish", ("source-key-set-changed",)),
-        "changed-root-key": ("cannot_establish", ("source-key-set-changed",)),
-        "spec-tamper": ("cannot_establish", ("projection-invalid",)),
-    }[change]
+    if change == "spec-tamper":
+        assert (result.state, result.codes) == ("cannot_establish", ("projection-invalid",))
+    else:
+        assert (result.state, result.codes, result.source_keys) == (*UNPROVEN, (expected_key,))
 
 
 LOCAL_PROJECTION = {
@@ -1709,7 +1611,6 @@ def test_selected_failed_provider_never_reuses_even_an_explicit_stale_output(
     )
 
 
-@pytest.mark.usefixtures("desktop")
 @pytest.mark.parametrize("selection", ["default-engine", "explicit-directory", "explicit-spec", "sibling-only"])
 def test_real_packaging_binds_only_the_exact_original_gate_root(
     tmp_path: Path, root: Path, monkeypatch: pytest.MonkeyPatch, selection: str
@@ -1729,7 +1630,6 @@ def test_real_packaging_binds_only_the_exact_original_gate_root(
     report["datasources"][0]["connection"] = {**authority.LIVE, "name": "orders-leg"}
     report["datasources"][0]["tables"] = [{"name": "Orders", "table": "[dbo].[Orders]", "connection": "orders-leg"}]
     s2._write(bundle / "report.json", report)
-    authority._earn(bundle if selection == "default-engine" else root)
     observed = []
     assess = pkg.data_access.assess_data_access
 
@@ -1754,11 +1654,7 @@ def test_real_packaging_binds_only_the_exact_original_gate_root(
     package = tmp_path / "out" / DS_UNIT
     result = json.loads((package / "package-manifest.json").read_text(encoding="utf-8"))
     actual = pkg.data_access.read_data_access(package / "data-access.json")
-    assert (actual.state, actual.codes) == (
-        ("cannot_establish", ("audit-missing",))
-        if selection == "sibling-only"
-        else ("live_data_ok", ("probe-cleared", "probe-data-ok"))
-    )
+    assert (actual.state, actual.codes, actual.validation) == ("live_unproven", ("live-unproven",), "unvalidated")
     assert observed == [bundle if selection in ("default-engine", "sibling-only") else root]
     assert not any(path.name.startswith(".credential-gate") for path in package.rglob("*"))
     assert not any(key in result for key in ("gate_root", "provider_packages"))

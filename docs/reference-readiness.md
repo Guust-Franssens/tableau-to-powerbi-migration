@@ -704,6 +704,25 @@ even after the read-only final consumer returns `START_READY`.
 See [credential gate](credential-gate.md#package-data-access-projection) for gate-root, provider and
 scope limits. S1 stays byte authority, not a semantic interpreter of `artifacts.data_access`.
 
+#### Data-access states
+
+The projection schema stays `phase1-data-access/v1`. The producer no longer reads the gate's audit
+trail or probe ledger, so no new package earns `live_data_ok` or a human-authorize code.
+
+| state | validation / ceiling | codes | meaning |
+|---|---|---|---|
+| `local_import_ready` | `validated` / `data_validated` | `all-flat-file`, `package-self-contained` | all sources are local and shipped |
+| `live_unproven` | `unvalidated` / `data_validated` | `live-unproven` | live direct source, local bytes complete; START_READY, but no data proof yet |
+| `authorized_model_only` | `unvalidated` / `structural_only` | `brief-model-only` (legacy: plus `human-authorize`) | brief `fallback_authorization = "model_only_unvalidated"` with `model_only` scope |
+| `provider_inherited` | the provider's | `provider-exact` | consumer of one exact provider, including a `live_unproven` provider |
+| `live_data_ok` | `validated` / `data_validated` | `probe-data-ok`, `probe-cleared` | **legacy only**: stored documents still parse and reconcile |
+| `blocked` / `cannot_establish` | `not_established` / `none` | refusal code | not dispatchable |
+
+⚠️ `live_unproven` is never validated by itself. `check_unit.py` grants `current-source-data` PASS
+(`current_data_proved_by_evidence`) only when the same completion run's `data-evidence` row is PASS:
+full refresh, persist and named canaries with rows > 0. Without it the row is `NOT_CHECKED` and the
+run cannot be COMPLETE.
+
 ## Package-local source return (issue #558)
 
 ✅ After no-follow classification, S1 exact bytes and S2 cohort role/identity acceptance,

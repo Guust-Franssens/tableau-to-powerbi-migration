@@ -164,7 +164,8 @@ Per-unit layout (authoritative list: `package_unit.py`'s module docstring):
     migration-spec.json          parse_tableau.py; check_unit.py's expected page set (#443)
     migration-brief.md           the dispatcher's brief, COPIED in (--brief). Bytes only: the
                                  external path is never recorded (#562 S2)
-    data-access.json             strict, declared S1-covered projection; blocked/cannot states ship too
+    data-access.json             strict, declared S1-covered projection; blocked/cannot states ship too;
+                                 a live source ships as live_unproven (proof owed at COMPLETE)
     report.json                  the engine's own classification, SCOPED to this unit
     source-provenance.json       SCOPED; the only trusted route to a workbook/datasource LUID
     engine-output-receipt.json   what built this, so version drift stays checkable
@@ -232,7 +233,9 @@ within each phase; the requested denominator and every outcome bucket are unchan
 only successfully published datasource packages from this invocation or repeatable explicit
 `--provider-package <exact-root>` inputs. There is no output/sibling scan, stale failed-provider
 reuse, recursive inheritance or post-publication cohort rewrite. Separate provider/consumer commands
-each need their own brief; this does not introduce bulk brief support.
+each need their own brief; this does not introduce bulk brief support. A live direct source needs no
+probe or ledger evidence to publish: it projects `live_unproven` (`unvalidated`, ceiling
+`data_validated`), and its real-data proof is the COMPLETE run's `data-evidence` row.
 
 `--gate-root <original-bundle-or-spec-dir-or-spec-file>` binds the existing audit authority exactly.
 Without it, the default is `load_bundle(bundle).migration_dir`, **not** the run parent or package.
@@ -369,7 +372,11 @@ H is supplied by the caller, exactly lowercase ASCII 64 hex with no prefix — n
 history, environment or a promotion record. The initial COMPLETE class is one owned/import
 workbook model/report/PBIP, literal final-v3 all-pages sign-off, current strict v2 brief, exact
 namespace, canonical data access, positive A1 canaries/cache readback, AI and validation-grade
-whole-page/every-visual passes. Unsupported/shared/report-free classes remain non-success.
+whole-page/every-visual passes. **Live data proof is the `data-evidence` row:** a live source packaged
+as `live_unproven` (no probe or ledger proof) earns `current-source-data` PASS only when the same
+completion run's `data-evidence` row is PASS (full refresh, persist, named canaries with rows > 0);
+otherwise it stays `NOT_CHECKED` and the run is never COMPLETE. Stored legacy `live_data_ok` keeps
+its meaning. Unsupported/shared/report-free classes remain non-success.
 Numeric `none` waives **only** comparison; raw missing counts survive. Required/unknown numeric
 authority remains `CANNOT_ESTABLISH(NUMERIC)`, never warning-only COMPLETE. The exact
 [disclosures, precedence and limits](../scripts/README.md#phase-2-complete--one-caller-pinned-current-snapshot-check)

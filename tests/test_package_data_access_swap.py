@@ -505,78 +505,21 @@ def test_binding_final_authorities_reject_at_the_final_root_not_after_cleanup(
     assert len(list(root.parent.rglob(pkg.MANIFEST_NAME))) == 1
 
 
-@pytest.mark.parametrize("barrier", ["marker", "malformed", "acl", "query-failure"])
-@pytest.mark.parametrize("address", ["original", "retired"])
-def test_binding_checks_the_retired_original_physical_barrier(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, barrier: str, address: str
+def test_binding_no_longer_reads_the_retired_credential_gate_barrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from test_credential_gate import _physical_marker  # pylint: disable=import-outside-toplevel
-
+    """The physical gate stop is retired: binding publishes without consulting marker or ACL state."""
     root = _binding_package(tmp_path)
-    retired = pkg.retired_dir(root)
-    stage = pkg._binding_stage
-    observed = []
-    retained = {}
 
-    def write_marker():
-        if barrier in ("marker", "malformed"):
-            (root / pkg.data_access.MARKER).write_text(
-                json.dumps(_physical_marker() if barrier == "marker" else {}), encoding="utf-8"
-            )
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("binding consulted the retired credential-gate physical barrier")
 
-    if address == "original":
-        write_marker()
-        manifest = json.loads((root / "package-manifest.json").read_bytes())
-        manifest["contents"]["files"] = pkg.package_contents(root)
-        (root / "package-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-        retained.update(_files(root))
-
-    def after_stage(*args, **kwargs):
-        assert address == "retired", "the original physical stop must refuse before staging"
-        identity = stage(*args, **kwargs)
-        write_marker()
-        retained.update(_files(root))
-        return identity
-
-    def query(args):
-        if args == [str((root if address == "original" else retired) / "fabric")]:
-            observed.append(True)
-            return (5, "private-acl-canary") if barrier == "query-failure" else (0, "fixture:(DENY)(WD)")
-        return 0, "fixture:(F)"
-
-    inspect = pkg.data_access.inspect_physical_barrier
-
-    def observe(location):
-        result = inspect(location)
-        if location == (root if address == "original" else retired) and barrier in ("marker", "malformed"):
-            observed.append(True)
-        return result
-
-    monkeypatch.setattr(pkg, "_binding_stage", after_stage)
-    monkeypatch.setattr(pkg.data_access.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(pkg.data_access, "_icacls", query)
-    monkeypatch.setattr(pkg.data_access, "inspect_physical_barrier", observe)
+    monkeypatch.setattr(pkg.data_access, "inspect_physical_barrier", forbidden)
+    monkeypatch.setattr(pkg.data_access, "_icacls", forbidden)
     result = _binding_cli(root)
-    expected = {
-        "marker": (1, "physical_marker_blocked"),
-        "malformed": (3, "physical_marker_invalid"),
-        "acl": (1, "physical_acl_blocked"),
-        "query-failure": (3, "physical_acl_query_failed"),
-    }
-    assert observed == [True]
-    if address == "retired" and barrier in ("marker", "malformed"):
-        assert (result["outcome"], result["exit_code"], result["codes"]) == (
-            "cannot-establish",
-            3,
-            ["binding_discovery_unassessable"],
-        )
-        assert _files(root) == {key: raw for key, raw in retained.items() if key != pkg.MANIFEST_NAME}
-        assert (root / pkg.data_access.MARKER).read_bytes() == retained[pkg.data_access.MARKER]
-    else:
-        assert result["outcome"] == ("rolled-back" if address == "retired" else "unchanged")
-        assert (result["exit_code"], result["codes"]) == (expected[barrier][0], [expected[barrier][1]])
-        assert _files(root) == retained
-    assert result["inspection"] == {} and not retired.exists()
+    assert result["exit_code"] == 0 and result["outcome"] == "published"
+    assert result["inspection"]["state"] == "BOUND" and result["inspection"]["validation"] == "UNVALIDATED"
+    assert not pkg.retired_dir(root).exists()
 
 
 @pytest.mark.parametrize("seam", ["stage", "post-retire", "post-publish", "post-swap", "rollback"])
