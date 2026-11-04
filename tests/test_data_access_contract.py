@@ -101,7 +101,7 @@ def _assess(
 def _root_fixture(tmp_path: Path) -> Path:
     unit = tmp_path / "unit"
     unit.mkdir()
-    (unit / gate.MIGRATION_SPEC).write_text(json.dumps(_spec(LIVE, OTHER)), encoding="utf-8")
+    (unit / pda.MIGRATION_SPEC).write_text(json.dumps(_spec(LIVE, OTHER)), encoding="utf-8")
     return unit
 
 
