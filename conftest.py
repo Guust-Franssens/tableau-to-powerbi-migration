@@ -115,6 +115,9 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         # once, so the second-spelling control (tests/test_package_filesystem.py) has nothing to
         # assert there. Windows is that host, so this skip is expected on the primary platform.
         "this filesystem is case-insensitive: two manifest-name spellings are one file",
+        # tests/test_disarm_credential_gate.py: real junction and real ACL controls (Windows only).
+        "junctions are a Windows reparse point",
+        "the gate only ever set ACLs on Windows",
     }
 )
 
