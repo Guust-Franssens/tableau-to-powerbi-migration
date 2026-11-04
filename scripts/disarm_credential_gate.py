@@ -12,6 +12,8 @@ carry an explicit (non-inherited) deny of exactly that shape for the current use
 Other principals' ACEs and explicit allows are left alone. A folder where the current user ALSO has
 some other explicit deny is reported and skipped, because `/remove:d` would strip that deny as well.
 Marker and ledger files are ignored on purpose: after the gate is deleted they are inert evidence.
+icacls prints in the OEM code page; a user name that code page cannot hold, or a listing that does not
+decode, fails closed (exit 1) instead of being read as clean.
 
 Exit codes: 0 nothing left to remove (or not Windows); 1 a listing or removal failed, or a folder was
 skipped; 3 dry run found armed folders (re-run with --apply).
@@ -20,15 +22,15 @@ skipped; 3 dry run found armed folders (re-run with --apply).
 from __future__ import annotations
 
 import argparse
+import codecs
 import os
 import re
+import stat
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import NamedTuple
-
-from bundle_corpus import is_reparse_entry
+from typing import NamedTuple, TextIO
 
 GATE_FLAGS = frozenset({"OI", "CI", "DENY"})
 GATE_RIGHTS = frozenset({"WD", "AD", "WA"})
@@ -47,6 +49,29 @@ class Ace(NamedTuple):
     principal: str
     flags: frozenset[str]
     rights: frozenset[str]
+
+
+def oem_encoding() -> str:
+    """icacls writes the OEM code page whatever the console code page is (measured: `ü` arrives as cp437 0x81).
+
+    Python only has the `oem` codec on Windows; cp437 stands in elsewhere so the seam tests run anywhere.
+    """
+    try:
+        return codecs.lookup("oem").name
+    except LookupError:
+        return "cp437"
+
+
+def decode_icacls_output(raw: bytes) -> str:
+    """Decode icacls bytes; an undecodable byte becomes U+FFFD, which `classify` refuses to trust."""
+    return raw.decode(oem_encoding(), errors="replace")
+
+
+def is_reparse_entry(info: os.stat_result) -> bool:
+    """A no-follow `lstat` result for a link, junction or other reparse point (junctions are not S_ISLNK)."""
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    return bool(getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 
 
 def parse_acl_listing(listing: str, target: str) -> list[Ace]:
@@ -84,7 +109,9 @@ def is_gate_ace(ace: Ace) -> bool:
 
 
 def classify(listing: str, target: str, user: str) -> str:
-    """Return `armed`, `conflict` (gate deny plus another explicit deny of ours) or `clean`."""
+    """Return `armed`, `conflict` (gate deny plus another explicit deny of ours), `undecodable` or `clean`."""
+    if "\ufffd" in listing:
+        return "undecodable"
     ours = [
         ace
         for ace in parse_acl_listing(listing, target)
@@ -128,15 +155,25 @@ def iter_anchor_dirs(root: Path, errors: list[str]) -> Iterator[Path]:
 def run_icacls(args: list[str]) -> tuple[int, str]:
     """The only process boundary: `icacls <args>`, never raising."""
     try:
-        proc = subprocess.run(["icacls", *args], capture_output=True, text=True, timeout=60, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
+        proc = subprocess.run(["icacls", *args], capture_output=True, timeout=60, check=False)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return 1, str(exc)
-    return proc.returncode, (proc.stdout + proc.stderr).strip()
+    return proc.returncode, decode_icacls_output(proc.stdout + proc.stderr).strip()
 
 
 def is_windows() -> bool:
     """Seam for tests; the gate only ever set ACLs on Windows."""
     return os.name == "nt"
+
+
+def print_safe(line: str, stream: TextIO | None = None) -> None:
+    """Print one line; a path a redirected cp1252 stdout cannot encode is escaped, not a crash mid-run."""
+    target = stream if stream is not None else sys.stdout
+    try:
+        print(line, file=target)
+    except UnicodeEncodeError:
+        encoding = getattr(target, "encoding", None) or "ascii"
+        print(line.encode(encoding, "backslashreplace").decode(encoding), file=target)
 
 
 def _state(directory: Path, user: str, runner: Runner) -> str | None:
@@ -147,6 +184,13 @@ def _state(directory: Path, user: str, runner: Runner) -> str | None:
 def _root_refusal(root: Path, user: str) -> str | None:
     if not user:
         return "%USERNAME% is not set, so the current user cannot be identified."
+    try:
+        user.encode(oem_encoding())
+    except UnicodeEncodeError:
+        return (
+            f"user name {user!r} cannot be written in the OEM code page icacls prints, so its ACEs cannot be "
+            "recognised; use the manual icacls fallback instead."
+        )
     try:
         info = os.lstat(root)
     except OSError as exc:
@@ -162,6 +206,8 @@ def _scan(root: Path, user: str, runner: Runner, errors: list[str]) -> list[Path
         state = _state(directory, user, runner)
         if state is None:
             errors.append(f"cannot read the ACL of {directory}")
+        elif state == "undecodable":
+            errors.append(f"cannot decode the icacls listing of {directory}; inspect it with icacls by hand")
         elif state == "conflict":
             errors.append(
                 f"skipped {directory}: you also hold another explicit deny there, which /remove:d would "
@@ -178,7 +224,7 @@ def disarm(
     apply: bool,
     runner: Runner = run_icacls,
     user: str | None = None,
-    out: Callable[[str], None] = print,
+    out: Callable[[str], None] = print_safe,
 ) -> int:
     """Testable core: list (dry run) or remove the current user's gate denies under `root`."""
     if not is_windows():

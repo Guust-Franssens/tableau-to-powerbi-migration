@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+import io
+import locale
 import os
 import subprocess
 import sys
@@ -12,6 +15,19 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import disarm_credential_gate as dg  # noqa: E402
+
+
+def test_imports_only_the_standard_library() -> None:
+    """The tool must outlive the retired gate and the corpus scripts: stdlib + icacls only."""
+    tree = ast.parse(Path(dg.__file__).read_text(encoding="utf-8"))
+    modules = {
+        alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
+    }
+    modules |= {
+        node.module.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
+    }
+    assert modules - {"__future__"} <= sys.stdlib_module_names
+
 
 ME = "someuser"
 GATE = "(OI)(CI)(DENY)(WD,AD,WA)"
@@ -231,6 +247,51 @@ def test_unknown_user_or_missing_root_exits_one(tree: dict[str, Path], tmp_path:
     assert runner.calls == []
 
 
+def test_user_name_outside_the_oem_code_page_is_refused(tree: dict[str, Path], tmp_path: Path) -> None:
+    """icacls would best-fit `\u0141ukasz` to `Lukasz`, so the ACE could never match: refuse, never report clean."""
+    runner = FakeIcacls({tree["fabric"]})
+    out: list[str] = []
+    assert dg.disarm(tmp_path, apply=False, runner=runner, user="\u0141ukasz", out=out.append) == dg.EXIT_FAILED
+    assert runner.calls == []
+    assert "OEM code page" in out[0]
+
+
+def test_undecodable_listing_fails_closed_and_names_the_folder(tree: dict[str, Path], tmp_path: Path) -> None:
+    target = str(tree["pbip"])
+    runner = FakeIcacls(set(), **{target: listing(target, f"DOMAIN\\{ME}\ufffd:{GATE}")})
+    out: list[str] = []
+    assert _run(tmp_path, runner, apply=True, out=out) == dg.EXIT_FAILED
+    assert runner.removals == []
+    assert any(target in line and "decode" in line for line in out)
+
+
+@pytest.mark.parametrize(("folder", "user"), [("M\u00fcller", ME), ("caf\u00e9", "Jos\u00e9")])
+def test_run_icacls_decodes_the_oem_code_page(monkeypatch: pytest.MonkeyPatch, folder: str, user: str) -> None:
+    """Feed the bytes icacls really writes (OEM, e.g. cp437 0x81 for u-umlaut) through the process seam."""
+    target = f"C:\\runs\\{folder}\\fabric"
+    raw = listing(target, f"DOMAIN\\{user}:{GATE}").encode(dg.oem_encoding())
+
+    def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        encoding = kwargs.get("encoding") or (locale.getpreferredencoding(False) if kwargs.get("text") else None)
+        if encoding:
+            text = raw.decode(str(encoding), str(kwargs.get("errors") or "strict"))
+            return subprocess.CompletedProcess(cmd, 0, text, "")
+        return subprocess.CompletedProcess(cmd, 0, raw, b"")
+
+    monkeypatch.setattr(dg.subprocess, "run", fake_run)
+    code, text = dg.run_icacls([target])
+    assert code == 0
+    assert dg.classify(text, target, user) == "armed"
+
+
+def test_print_safe_escapes_what_a_cp1252_stdout_cannot_encode() -> None:
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252")
+    dg.print_safe("ARMED   C:\\runs\\\u0141\u00f3d\u017a\\fabric", stream)
+    stream.flush()
+    assert raw.getvalue().decode("cp1252").strip() == "ARMED   C:\\runs\\\\u0141\u00f3d\\u017a\\fabric"
+
+
 def test_root_that_is_itself_an_anchor_is_included(tree: dict[str, Path]) -> None:
     runner = FakeIcacls({tree["fabric"]})
     assert _run(tree["fabric"], runner, apply=True) == dg.EXIT_CLEAN
@@ -252,6 +313,10 @@ def test_walk_never_enters_a_junction(tmp_path: Path) -> None:
         runner = FakeIcacls({link / "fabric", outside})
         assert _run(root, runner, apply=True) == dg.EXIT_CLEAN
         assert runner.calls == []
+        out: list[str] = []
+        assert _run(link, runner, apply=True, out=out) == dg.EXIT_FAILED
+        assert runner.calls == []
+        assert "reparse point" in out[0]
     finally:
         os.rmdir(link)
 
@@ -260,9 +325,11 @@ def test_walk_never_enters_a_junction(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the gate only ever set ACLs on Windows")
-def test_real_gate_deny_is_removed_and_writes_work_again(tmp_path: Path) -> None:
+@pytest.mark.parametrize("parent", ["run", "M\u00fcller run", "\u0141\u00f3d\u017a"])
+def test_real_gate_deny_is_removed_and_writes_work_again(tmp_path: Path, parent: str) -> None:
+    """`M\u00fcller` is undecodable as cp1252; `\u0141\u00f3d\u017a` is best-fitted by icacls to `L\u00f3dz`."""
     user = os.environ["USERNAME"]
-    anchor = tmp_path / "run" / "fabric"
+    anchor = tmp_path / parent / "fabric"
     anchor.mkdir(parents=True)
     probe = anchor / "written.txt"
     applied = subprocess.run(["icacls", str(anchor), "/deny", f"{user}:{DENY_ARG}"], check=False)

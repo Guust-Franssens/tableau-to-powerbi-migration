@@ -1809,10 +1809,12 @@ python scripts\disarm_credential_gate.py <root> --apply   # removes them, exit 0
 
 It is idempotent, touches only your own explicit gate-shaped deny, and leaves other ACEs and the old
 marker files alone. Exit 1 names a folder it could not read or clear, or one it skipped because you
-also hold another explicit deny there (`/remove:d` would strip that one too).
+also hold another explicit deny there (`/remove:d` would strip that one too). It also exits 1, before
+scanning, if your user name has a letter the OEM code page icacls prints cannot hold; use the fallback.
 
-**Manual fallback** (same effect, no script): for each `fabric`, `pbip`, `*.SemanticModel` and
-`*.Report` folder, run
+**Manual fallback** (no script): for each `fabric`, `pbip`, `*.SemanticModel` and `*.Report` folder,
+run the two lines below. Unlike the script, `/remove:d` also strips any other explicit deny you hold on
+that folder, so check `icacls "<dir>"` first and re-add such a deny afterwards.
 
 ```powershell
 icacls "<dir>" /remove:d %USERNAME%    # in PowerShell write $env:USERNAME
