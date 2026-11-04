@@ -4164,6 +4164,37 @@ def test_start_ready_provider_refusals_use_existing_s2_and_canonical_owners(
     assert code in report["package_readiness"][0]["codes"]
 
 
+def test_start_ready_admits_a_live_source_without_probe_proof_and_keeps_it_unvalidated(tmp_path: Path) -> None:
+    """A live package is dispatchable with no gate evidence; its data proof is owed at completion."""
+    root = _packaged_unit(tmp_path)
+    connection = {"class": "sqlserver", "server": "source.example", "database": "db", "schema": "dbo"}
+    spec = json.loads((root / "migration-spec.json").read_bytes())
+    spec["data_sources"] = [
+        {
+            "connection": {**connection, "name": "leg", "powerbi_target": "live_source"},
+            "tables": [{"name": "Sales", "table": "[dbo].[Sales]", "connection": "leg"}],
+        }
+    ]
+    (root / "migration-spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    key = hashlib.sha256(
+        json.dumps({**connection, "ordinary_tables": ["Sales"]}, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:16]
+    unproven = {
+        **LOCAL_PROJECTION,
+        "state": "live_unproven",
+        "source_keys": [f"source-key:{key}"],
+        "validation": "unvalidated",
+        "codes": ["live-unproven"],
+    }
+    (root / "data-access.json").write_text(json.dumps(unproven), encoding="utf-8")
+    _reseal_start_fixture(root)
+    assert not list(root.rglob("*credential*")) and not list(root.rglob("*ledger*"))
+    report = crr.scan(root)
+    assert report["status"] == crr.STATUS_START_READY, report["package_readiness"]
+    row = report["package_data_access"][0]
+    assert row["stored"] == row["assessment"] == unproven
+
+
 def test_start_ready_competing_binding_candidate_refuses_without_cleanup(tmp_path: Path) -> None:
     root = _packaged_unit(tmp_path)
     competing = crr.binding.staging_dir(root.parent, root.name)
