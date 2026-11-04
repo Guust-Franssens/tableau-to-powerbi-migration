@@ -505,9 +505,7 @@ def test_binding_final_authorities_reject_at_the_final_root_not_after_cleanup(
     assert len(list(root.parent.rglob(pkg.MANIFEST_NAME))) == 1
 
 
-def test_binding_no_longer_reads_the_retired_credential_gate_barrier(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_binding_no_longer_reads_the_retired_credential_gate_barrier(tmp_path: Path) -> None:
     """The physical gate stop is retired: binding publishes without consulting marker or ACL state."""
     root = _binding_package(tmp_path)
 
