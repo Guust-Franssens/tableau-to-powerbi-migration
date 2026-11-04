@@ -1,132 +1,86 @@
 ---
 name: live-source-reachability
-description: Prove a Tableau migration's live database sources are reachable through the Power BI artifact that will ship, and route credential-gate verdicts. Use before building any workbook/datasource that has live sources, when probe_bundle/probe_live_source returns DATA_OK, CONNECTION_OK_QUERY_UNVALIDATED, OPERATOR_REQUIRED, NO_CREDENTIAL, ACCESS_DENIED, UNREACHABLE, ERROR, or SKIPPED, or when a credential-gate audit/verify decision is needed.
+description: Prove a Tableau migration's live database sources are reachable through the Power BI artifact that will ship. Use before builders start on any workbook/datasource with live sources, when a Desktop refresh stops on a sign-in or other dialog, or when sign-off needs real-data evidence for a live source.
 ---
 
-# Live-source reachability and credential-gate routing
+# Live-source reachability
 
-Use this before any builder starts on a workbook/datasource with live database sources. The invariant
-is simple: prove the **Power BI artifact you will ship** can reach the source; a Python, SQL client or
-Tableau-only proof does not exercise Power BI Desktop's credential store.
+Use this before any builder starts on a workbook/datasource with live database sources. Prove that
+the **Power BI artifact you will ship** can reach its source. A Python, SQL client or Tableau-only
+check does not use Power BI Desktop's credential store, so it proves nothing here.
 
-The full lifecycle and audit semantics live in
-[`../../../docs/credential-gate.md`](../../../docs/credential-gate.md). This skill is the compact
-execution route a migrator should invoke instead of carrying the mechanics inline.
+Run it **before dispatching builders**. Nothing stops a builder from writing a model before the
+source is reached, so the order is the safeguard.
 
 ## Run order
 
-1. **Classify and arm without opening sockets.**
+1. **Classify the sources (read-only, no network).**
 
    ```powershell
    python scripts\preflight_source_credentials.py --spec <spec>
-   python scripts\preflight_source_credentials.py --bundle <engine-bundle>
    ```
 
-   Use the form that matches the active contract. Any live database source requires the proof below.
+   Any live database source needs steps 2 to 5. No live source: record that and stop here.
 
-2. **Check the emitted artifact first.**
+2. **Check the emitted artifact before opening Desktop.**
 
    ```powershell
-   python scripts\probe_bundle.py <bundle> --check-only --spec <spec>
+   python scripts\check_bundle_sources.py <bundle> --spec <spec>
    ```
 
-   Non-zero here outranks a later live probe: the model you plan to ship cannot refresh as emitted.
-   Route `M_PARAM_UNDEFINED`, `SOURCE_COLLAPSED`, missing parameter, or missing endpoint evidence to
-   the owner before probing live. On a parser-path migration with no bundle yet, continue to step 3.
+   Non-zero means the model cannot refresh as emitted. Route `M_PARAM_UNDEFINED` (an undefined M
+   parameter) and `SOURCE_COLLAPSED` (declared endpoints missing from the model) to the model owner
+   first. Refreshing a broken model proves nothing.
 
-3. **Probe through Power BI Desktop.**
+3. **Open the shipped working copy in Desktop.** That is `<bundle>/pbip/`, or `<package>/fabric/`
+   when you were handed a package. Never the pristine `<bundle>/reports/` baseline.
+
+4. **Refresh it with named canaries** through the `pbip-model-refresh` skill:
 
    ```powershell
-   python scripts\probe_live_source.py --spec <spec>
-   python scripts\probe_live_source.py --bundle <engine-bundle>
+   python .github\skills\pbip-model-refresh\scripts\refresh_pbip_model.py --pid <pid> --ui-refresh --canaries <table> [<table> ...] [--automatic-source-scope <expected-sources.json>]
    ```
 
-   The probe builds a one-table PBIP sandbox, refreshes in Desktop, requires a row back for ordinary
-   tables, records any earned `probe-cleared` audit entry, and refuses to fabricate missing
-   table/column evidence.
+   - Pick canaries that read from the live source. Each must return rows.
+   - Plain `--ui-refresh` is operator-only consent to run all current M, including custom SQL. A
+     human runs it. Nothing in this repo writes `expected-sources.json` yet, so for now every live
+     refresh is a human step.
+   - An automatic caller must add `--automatic-source-scope`. It refuses custom SQL and any M it
+     cannot match to the expected sources, with `UI_PREFLIGHT_REFUSED` and exit 2.
 
-   ✅ **Custom SQL is never executed by this default probe (#690).** It reuses only an ordinary
-   table's same-scope Power BI `DATA_OK` from this invocation; otherwise it returns
-   `OPERATOR_REQUIRED` **without generating custom M/PBIP, checking the network, opening Desktop or
-   refreshing**. There is no connector navigation or native/generated SQL fallback, including for
-   unsupported custom-only connectors.
+5. **A dialog is a human stop.** Any sign-in, permission or other Desktop dialog, and any
+   `UI_PREFLIGHT_REFUSED`, ends the attempt. The refresh refuses to act while a dialog is open.
+   - Ask the human **once**, naming the source and what Desktop showed. Never type, paste or store
+     credentials, and never click through a prompt.
+   - Autopilot does not override this. End the turn and wait.
+   - After the human answers in Desktop, rerun step 4 once. A repeat of the same refusal is final.
 
-   Ordinary admission is **shape/presence-only**: `source_relation` is `"table"` or a legacy absent/
-   null default, and `custom_sql` is absent/null. Non-null query facts with a missing/wrong tag, or
-   an unrecognized relation tag, stop the whole resolved leg before ordinary work, even if a
-   same-named physical table could return rows. Empty/false/list/object payloads are not null
-   defaults. They earn no connection reuse, query proof or clear; do not repair/normalize metadata
-   or inspect SQL contents to choose behavior. Correctly tagged custom relations keep the normal
-   reuse-or-stop contract.
+## Record the outcome
 
-   The probe-specific loader keeps each custom or malformed-source occurrence by reference after
-   JSON parsing and this null/presence check. It never inspects, copies, serializes or hashes query
-   contents; correctly tagged custom payloads need not be accessed at all. It skips `custom_sql`
-   during engine source discovery and does not traverse published-binding signals. Only supported
-   ordinary sources use the existing deduplication rule; mixed/custom/malformed sources are not
-   fingerprinted. Valid ordinary absent/null defaults retain their existing row-proof behavior.
-
-   This is a **probe-loader** boundary, not a prohibition on the supported gate's canonical root
-   identity work. Under the owner-approved `allow_canonical_sql_identity_comparison=true` definition,
-   that resolver may compare/serialize persisted JSON-native full-source facts ephemerally in memory,
-   including query identity, solely to establish current `R`, exact mirrors and distinct-query/key
-   collisions. Exact mirrors are one fact; distinct queries sharing a projected key refuse.
-   It may not interpret, normalize, rewrite, log, audit, emit, transmit or execute SQL, and identity
-   comparison alone grants no proof or permission. No zero-local-memory/cost claim is made.
-   String/null are supported payloads; boolean/list/object shapes are fail-closed robustness
-   negatives. A Python spy injected into probe input is not a persisted canonical-root fact.
-
-   The conservative key retains **all** declared connection fields: SQL Server server/port-or-instance/
-   database; Databricks host/HTTP path/catalog; Snowflake account/warehouse/role/database; and every
-   credential/authentication/session hint. Only existing class/URL-host normalization is used.
-   Differences prevent reuse, not trigger another operation. Shell/ODBC success and prior-run
-   observations never participate. A separate `port` or `instance` declaration is **ineligible for
-   reuse** because ordinary M does not exercise those fields; empty, malformed or conflicting values
-   also refuse reuse, including after a same-leg ordinary `DATA_OK`. Existing server-string M and
-   ordinary one-row probing remain unchanged; no endpoint syntax is added.
-
-   The SQL stays untouched in the spec: no normalization, comment stripping, native SQL fallback,
-   `SELECT 1`, TOP/LIMIT/WHERE wrapper, or automatic exact execution. #692 owns the separate explicit,
-   cost-disclosed exact-query mode; it is not implemented here.
-
-## Verdict routing
-
-| Verdict | Meaning | Action |
+| Outcome | Meaning | Next |
 |---|---|---|
-| `DATA_OK` | Power BI returned a real row; the probe earns the clear itself. | Continue. |
-| `CONNECTION_OK_QUERY_UNVALIDATED` | Only existing same-invocation, exact-scope ordinary `DATA_OK` is reused. The custom SQL was **not executed**; no custom-query/object permission, schema, rows, semantics, cost or refreshability claim. | **Exit 1; without existing exact-key human build-only permission, gate armed.** Keyed `probe-error` envelope with detail starting `CONNECTION_OK_QUERY_UNVALIDATED:`; no custom `proved_names`, `probe-cleared` or gate lift. Genuine current human permission remains unvalidated and still needs brief-backed model-only scope; this probe never grants it. |
-| `OPERATOR_REQUIRED` | Custom SQL has no same-invocation, same-scope ordinary proof. No custom connection operation was attempted and no connection claim was earned. `probe_bundle.py` retains its separate operator handoff. | **Exit 1; hard stop; without existing exact-key human build-only permission, gate armed.** This custom no-operation path uses keyed `probe-error` with detail starting `OPERATOR_REQUIRED:`; other operator producers are unchanged. No PBIP/Desktop/network/native-query fallback or new permission. Do not accept SQL-client proof. |
-| `NO_CREDENTIAL` | Power BI lacks or rejects a credential. | Hard stop after one attempt; ask for Desktop sign-in or human build-only authorization. |
-| `ACCESS_DENIED` | The classifier matched access-denial-shaped text (`403`/forbidden/permission denied/not authorized) ahead of the credential markers. It does **not** establish that authentication succeeded, that the failure is permission-only, or that a fresh sign-in cannot help — `403 Unauthorized: authentication failed` and `403 Forbidden: access token revoked` both land here. | Hard stop; the gate stays armed. **Unchanged retry is not useful** — read the redacted detail and change what the source named: the credential/token when it speaks of authentication or an expired or revoked token, the permission or object grant when it names a principal or object. Do not route it as a timeout or a transient error. |
-| `UNREACHABLE` | Address/network/spec failure, not a credential wall. | Report the bad address/path; do not send the user to sign in. |
-| `ERROR` | Local tooling/artifact evidence failure. | Stop; fix/reroute the artifact evidence before retrying. |
-| `SKIPPED` | No live source exists. | Record the skip and continue. |
+| Exit 0, `DATA_OK + PERSISTED` | Power BI reached the source through the shipped model and every canary returned rows. | Continue; keep the output for sign-off. |
+| A dialog finding or `UI_PREFLIGHT_REFUSED` | Needs a human. | Ask once (step 5). |
+| `NO_DATA` (a canary returned zero rows) | The refresh ran but a canary is empty. | Check the canary choice and source filters. Not proof. |
+| `DATA_CHECK_FAILED`, `ERROR`, `TIMEOUT`, `COMPLETION_UNKNOWN`, `NOT_PERSISTED`, `WRONG_MODEL` | No proof either way. | Fix the cause, then rerun once. |
 
-## Rules that prevent false greens
+- Write the outcome into the unit's handover and `limitations_encountered`. An unproven live source
+  is a disclosed limitation, never a silent pass.
+- **COMPLETE needs real-data proof.** `check_unit.py` reports COMPLETE for a live source only with a
+  PASS `data-evidence` row: full refresh, persisted, and named canaries that returned rows. The
+  validator must also sign off.
+- **Model-only work** is allowed only when the brief says `fallback_authorization: model_only_unvalidated`.
+  The result stays unvalidated and cannot serve a report as validated data.
 
-- A credential/sign-in/permission refusal is final after **one** attempt. Retrying does not create a
-  credential.
-- On connection-only completion say exactly: **Power BI reached this same connection scope through an ordinary table in this probe. Your custom SQL was not executed and remains unvalidated. Without existing exact-key human build-only permission, the gate stays armed; this result grants no permission.**
-- Without same-scope ordinary proof say exactly: **Your custom SQL was not executed. No safe automated connection-only operation is currently available without catalog enumeration or a native-query approval prompt. No connection claim was earned. Without existing exact-key human build-only permission, the gate stays armed; this result grants no permission.**
-- Each approved message is one exact customer-facing log record, with no appended paragraphs.
-- Both custom observations go through supported `credential_gate.record_probe_attempt`: it owns
-  canonical scope, physical arming and permission. Arm/record failure is nonzero
-  `ERROR` / `CANNOT_ESTABLISH`, never a successful blocked claim. #698 preserves genuine exact-key
-  human build-only permission as **unvalidated**; automated measurements neither revoke it nor
-  upgrade it to `DATA_OK`. Do not duplicate this policy or append raw audit rows in the caller.
-- ⚠️ #694 is a nonblocking enhancement for future connector strategies. Any future generated-query
-  default needs explicit dialect support and #146/#687's qualified native-approval routing. No
-  popup/timeout is success; existing ordinary dialog/error and zero-row behavior stays unchanged.
-  No health-query template, popup watcher, exact-query mode or new model-only authority is added.
-- `probe_bundle.py` checks the artifact you ship; `probe_live_source.py` checks a reconstructed
-  one-table probe model. If they disagree, believe the shipped-artifact check.
-- Never clear the gate by hand. `credential_gate.py clear` earns nothing; only a probe-earned
-  `probe-cleared` line or a human `authorize` produces an auditable state.
-- Finish by verifying the same bundle/dir whose audit log was armed:
+## Old run trees
 
-  ```powershell
-  python scripts\credential_gate.py verify <bundle-or-migration-dir>
-  ```
+Run trees created before the gate was retired may still deny writes to `fabric`, `pbip`,
+`*.SemanticModel` or `*.Report` folders. If a write fails with **Access denied**, run:
 
-  `verify` rejects unvalidated artifacts behind the armed gate; with no artifacts it can report
-  compliance while the gate remains blocked. That is not earned clearance or authority to build.
+```powershell
+python scripts\disarm_credential_gate.py <run-or-migration-root>          # list
+python scripts\disarm_credential_gate.py <run-or-migration-root> --apply  # remove
+```
+
+Fallback for one folder: `icacls "<dir>" /remove:d %USERNAME%`. Any `.credential-gate-BLOCKED.json`
+or audit log left in an old tree is inert and can be ignored.
