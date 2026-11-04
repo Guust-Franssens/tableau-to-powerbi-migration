@@ -31,6 +31,8 @@ from test_package_role_identity import (
 )
 
 import credential_gate as gate
+
+import package_data_access as pda
 import package_filesystem as pfs
 
 # pylint: disable=protected-access,missing-function-docstring
@@ -417,7 +419,7 @@ def test_s2_spec_is_parsed_once_and_only_the_authority_walks(tmp_path: Path, mon
         assert inspect.currentframe().f_back.f_globals["__name__"] == "package_filesystem", "consumer rewalked S1"
         return original_walk(root)
 
-    def facts(spec: object) -> gate.PackageSpecFacts:
+    def facts(spec: object) -> pda.PackageSpecFacts:
         inputs.append(copy.deepcopy(spec))
         return derive(spec)
 
@@ -451,17 +453,17 @@ def test_projection_discrimination_needs_only_new_handoffs(
     for name in (
         "_read_audit_trail",
         "_audit_entries",
-        "assess_data_access",
-        "read_data_access",
         "_classify_legs",
         "load_bundle",
     ):
         monkeypatch.setattr(gate, name, forbidden)
+    for name in ("assess_data_access", "read_data_access", "_classify_legs"):
+        monkeypatch.setattr(pda, name, forbidden)
     monkeypatch.setattr(pri, "package_spec_facts", forbidden)
     monkeypatch.setattr(pfs, "parse_manifest_text", forbidden)
     monkeypatch.setattr(pfs, "declared_files", forbidden)
     handoff = require_handoff(result.data_access_handoff(package))
-    parsed = gate.parse_data_access(handoff.data_access.content.decode("utf-8"))
+    parsed = pda.parse_data_access(handoff.data_access.content.decode("utf-8"))
     assert parsed.state == projection["state"], "the existing projection parser must still accept every control"
     assert handoff.facts.live_source_keys == (LIVE_KEY,)
     assert (parsed.source_keys == handoff.facts.live_source_keys) is (projection == LIVE_PROJECTION)
@@ -567,7 +569,7 @@ def test_pure_spec_facts_reuse_canonical_leg_derivation(
 ) -> None:
     spec = {"data_sources": source_rows(*connections)}
     original = copy.deepcopy(spec)
-    facts = gate.package_spec_facts(spec)
+    facts = pda.package_spec_facts(spec)
     assert (facts.live_source_keys, facts.has_review, facts.refusal_code) == (keys, review, refusal)
     assert facts.all_flat is (connections == [FLAT])
     assert not facts.published_only
@@ -578,14 +580,14 @@ def test_pure_spec_facts_reuse_canonical_leg_derivation(
 
 @pytest.mark.parametrize("rows", [None, {}, False, "rows", [None], [False], [{"connection": []}], [{"fields": False}]])
 def test_malformed_source_sets_preserve_authority_refusal(rows: object) -> None:
-    facts = gate.package_spec_facts({"data_sources": rows})
+    facts = pda.package_spec_facts({"data_sources": rows})
     assert facts.refusal_code == "spec-unreadable"
     assert facts.live_source_keys == () and not facts.all_flat and not facts.published_only
 
 
 def test_mixed_published_rows_are_not_published_only() -> None:
-    published = gate.package_spec_facts({"data_sources": [copy.deepcopy(PUBLISHED)]})
-    mixed = gate.package_spec_facts({"data_sources": [copy.deepcopy(PUBLISHED), *source_rows(LIVE)]})
+    published = pda.package_spec_facts({"data_sources": [copy.deepcopy(PUBLISHED)]})
+    mixed = pda.package_spec_facts({"data_sources": [copy.deepcopy(PUBLISHED), *source_rows(LIVE)]})
     assert published.published_only and not published.direct_applicable
     assert published.live_source_keys == () and published.refusal_code is None
     assert not mixed.published_only, "a mixed-row handoff would let the future consumer borrow provider-only proof"
@@ -614,7 +616,7 @@ def test_mixed_published_rows_are_not_published_only() -> None:
     ],
 )
 def test_malformed_or_nested_published_rows_never_gain_clean_applicability(extra: dict) -> None:
-    facts = gate.package_spec_facts({"data_sources": [{**PUBLISHED, **extra}]})
+    facts = pda.package_spec_facts({"data_sources": [{**PUBLISHED, **extra}]})
     assert not facts.published_only and not facts.direct_applicable and not facts.all_flat
 
 
@@ -637,8 +639,8 @@ def test_projection_stays_held_and_existing_parser_owns_strictness(tmp_path: Pat
     result = pri.verify_phase1_role_identity([package])[0]
     held = require_handoff(result.data_access_handoff(package))
     assert result.is_start_ready and held.data_access.content == raw, "no semantic consumer belongs in this PR"
-    with pytest.raises(gate.DataAccessProjectionError) as caught:
-        gate.parse_data_access(held.data_access.content.decode("utf-8"))
+    with pytest.raises(pda.DataAccessProjectionError) as caught:
+        pda.parse_data_access(held.data_access.content.decode("utf-8"))
     assert caught.value.reason == reason
 
 
@@ -853,7 +855,7 @@ def test_r1_small_metadata_never_rehashes_unrelated_eight_mib_asset(
 def test_explicit_unresolved_sqlproxy_classification_cannot_claim_published_only(target: object) -> None:
     row = copy.deepcopy(PUBLISHED)
     row["connection"].update(server="published.example", powerbi_target=target)
-    facts = gate.package_spec_facts({"data_sources": [row]})
+    facts = pda.package_spec_facts({"data_sources": [row]})
     assert not facts.published_only, "published shape cannot repair canonical uncertainty"
     assert not facts.direct_applicable
     if target in ("unknown", "unsupported"):
@@ -1017,7 +1019,7 @@ def test_published_provider_applicability_uses_final_cohort_topology(
                 [PUBLISHED],
             )
         )
-    canonical = gate.package_spec_facts({"data_sources": rows})
+    canonical = pda.package_spec_facts({"data_sources": rows})
     assert tuple(canonical) == (keys, False, True, False, None), "self-publication must not erase the direct source"
     results = pri.verify_phase1_role_identity(roots)
     assert all(result.is_start_ready for result in results)
@@ -1039,7 +1041,7 @@ def test_mixed_case_sqlproxy_retains_canonical_direct_applicability(
     rows = source_rows({**PUBLISHED["connection"], "class": "SQLPROXY"})
     if publication_metadata:
         rows[0]["published_datasource"] = {"luid": DS_LUID, "key": PUBLISHED_KEY}
-    canonical = gate.package_spec_facts({"data_sources": rows})
+    canonical = pda.package_spec_facts({"data_sources": rows})
     assert tuple(canonical) == ((), False, True, False, None)
     assert canonical.all_flat
     provider = with_data_access(datasource_package(tmp_path / "Provider", unit="Shared"), rows)
@@ -1092,7 +1094,7 @@ def test_consumer_applicability_preserves_strict_proxy_and_mixed_canonical_facts
         ),
         rows,
     )
-    canonical = gate.package_spec_facts({"data_sources": rows})
+    canonical = pda.package_spec_facts({"data_sources": rows})
     assert tuple(canonical) == (keys, review, False, additional is None, None)
     results = pri.verify_phase1_role_identity([provider, consumer])
     assert all(result.is_start_ready for result in results)
@@ -1104,7 +1106,7 @@ def test_consumer_applicability_preserves_strict_proxy_and_mixed_canonical_facts
 
 def test_datasource_proxy_cannot_borrow_consumer_applicability(tmp_path: Path) -> None:
     package = with_data_access(datasource_package(tmp_path / "Source"), [PUBLISHED])
-    assert tuple(gate.package_spec_facts({"data_sources": [PUBLISHED]})) == ((), False, False, True, None)
+    assert tuple(pda.package_spec_facts({"data_sources": [PUBLISHED]})) == ((), False, False, True, None)
     result = pri.verify_phase1_role_identity([package])[0]
     assert result.is_start_ready and result.topology == "standalone_datasource"
     facts = require_handoff(result.data_access_handoff(package)).facts
@@ -1154,7 +1156,7 @@ def test_strict_published_references_have_no_second_direct_database_leg(target: 
         del row["connection"]["powerbi_target"]
     spec = {"data_sources": [copy.deepcopy(row) for _ in range(2 if repeated else 1)]}
     original = copy.deepcopy(spec)
-    assert gate.package_spec_facts(spec) == gate.PackageSpecFacts((), False, False, True, None)
+    assert pda.package_spec_facts(spec) == pda.PackageSpecFacts((), False, False, True, None)
     assert spec == original, "a reference route must not rewrite the parser's target annotation"
 
 
@@ -1178,8 +1180,8 @@ def test_published_plus_direct_keeps_every_canonical_key_in_both_orders(reverse:
         rows.reverse()
     original = copy.deepcopy(rows)
     proxy_key = ordinary_key("published.example")
-    facts = gate.package_spec_facts({"data_sources": rows})
-    assert facts == gate.PackageSpecFacts(tuple(sorted((LIVE_KEY, proxy_key))), False, False, False, None)
+    facts = pda.package_spec_facts({"data_sources": rows})
+    assert facts == pda.PackageSpecFacts(tuple(sorted((LIVE_KEY, proxy_key))), False, False, False, None)
     assert rows == original
 
 
@@ -1189,37 +1191,37 @@ def test_published_plus_direct_keeps_every_canonical_key_in_both_orders(reverse:
 )
 def test_published_identity_must_be_structurally_valid(published: object) -> None:
     row = {**PUBLISHED, "published_datasource": published}
-    facts = gate.package_spec_facts({"data_sources": [row]})
+    facts = pda.package_spec_facts({"data_sources": [row]})
     assert not facts.published_only and not facts.all_flat
 
 
 @pytest.mark.parametrize(
     "payload,facts,fallback",
     [
-        (LOCAL_PROJECTION, gate.PackageSpecFacts((), False, True, False, None), "stop"),
+        (LOCAL_PROJECTION, pda.PackageSpecFacts((), False, True, False, None), "stop"),
         (
             {**LOCAL_PROJECTION, "effective_scope": "model_and_report"},
-            gate.PackageSpecFacts((), False, True, False, None),
+            pda.PackageSpecFacts((), False, True, False, None),
             "stop",
         ),
-        (LIVE_PROJECTION, gate.PackageSpecFacts((LIVE_KEY,), False, True, False, None), "stop"),
+        (LIVE_PROJECTION, pda.PackageSpecFacts((LIVE_KEY,), False, True, False, None), "stop"),
         (
             {**LIVE_PROJECTION, "effective_scope": "model_and_report"},
-            gate.PackageSpecFacts((LIVE_KEY,), False, True, False, None),
+            pda.PackageSpecFacts((LIVE_KEY,), False, True, False, None),
             "stop",
         ),
         (
             MODEL_ONLY_PROJECTION,
-            gate.PackageSpecFacts((LIVE_KEY,), False, True, False, None),
+            pda.PackageSpecFacts((LIVE_KEY,), False, True, False, None),
             "model_only_unvalidated",
         ),
     ],
 )
 def test_reconcile_direct_acceptance_retains_the_original_assessment(
-    payload: dict, facts: gate.PackageSpecFacts, fallback: str
+    payload: dict, facts: pda.PackageSpecFacts, fallback: str
 ) -> None:
-    assessment = gate.parse_data_access(json.dumps(payload))
-    result = gate.reconcile_package_data_access(
+    assessment = pda.parse_data_access(json.dumps(payload))
+    result = pda.reconcile_package_data_access(
         assessment, facts, requested_scope=payload["effective_scope"], fallback_authorization=fallback
     )
     assert result is assessment
@@ -1236,7 +1238,7 @@ def test_reconcile_direct_acceptance_retains_the_original_assessment(
 def test_reconcile_preserves_preexisting_refusals_before_other_inputs(
     state: str, codes: list[str], keys: list[str]
 ) -> None:
-    assessment = gate.parse_data_access(
+    assessment = pda.parse_data_access(
         json.dumps(
             {
                 **LOCAL_PROJECTION,
@@ -1249,9 +1251,9 @@ def test_reconcile_preserves_preexisting_refusals_before_other_inputs(
             }
         )
     )
-    result = gate.reconcile_package_data_access(
+    result = pda.reconcile_package_data_access(
         assessment,
-        gate.PackageSpecFacts((), True, False, False, "spec-unreadable"),
+        pda.PackageSpecFacts((), True, False, False, "spec-unreadable"),
         requested_scope=None,
         fallback_authorization=None,
     )
@@ -1277,7 +1279,7 @@ def test_reconcile_preserves_preexisting_refusals_before_other_inputs(
     ],
 )
 def test_reconcile_direct_consistency_refusals_use_existing_codes(fault: str, state: str, code: str) -> None:
-    facts = gate.PackageSpecFacts((LIVE_KEY,), False, True, False, None)
+    facts = pda.PackageSpecFacts((LIVE_KEY,), False, True, False, None)
     payload, scope, fallback, provider = dict(LIVE_PROJECTION), "model_only", "stop", None
     if fault in ("spec", "identity"):
         facts = facts._replace(refusal_code="spec-unreadable" if fault == "spec" else "source-key-invalid")
@@ -1298,10 +1300,10 @@ def test_reconcile_direct_consistency_refusals_use_existing_codes(fault: str, st
     elif fault == "model-only-stop":
         payload = dict(MODEL_ONLY_PROJECTION)
     else:
-        provider = (PROVIDER_REF, gate.parse_data_access(json.dumps(LIVE_PROJECTION)))
-    assessment = gate.parse_data_access(json.dumps(payload))
-    assert assessment.state in gate.DIRECT_ACCEPTED_STATES, "this is a consistency test, not parser rejection"
-    result = gate.reconcile_package_data_access(
+        provider = (PROVIDER_REF, pda.parse_data_access(json.dumps(LIVE_PROJECTION)))
+    assessment = pda.parse_data_access(json.dumps(payload))
+    assert assessment.state in pda.DIRECT_ACCEPTED_STATES, "this is a consistency test, not parser rejection"
+    result = pda.reconcile_package_data_access(
         assessment, facts, requested_scope=scope, fallback_authorization=fallback, provider=provider
     )
     assert (result.state, result.codes, result.validation, result.max_phase2_claim) == (
@@ -1310,27 +1312,27 @@ def test_reconcile_direct_consistency_refusals_use_existing_codes(fault: str, st
         "not_established",
         "none",
     )
-    assert gate.parse_data_access(result.dumps()) == result
+    assert pda.parse_data_access(result.dumps()) == result
 
 
 @pytest.mark.parametrize("local", [False, True])
 def test_reconcile_inherits_only_the_exact_canonically_checked_direct_provider(local: bool) -> None:
     payload = LOCAL_PROJECTION if local else LIVE_PROJECTION
     keys = () if local else (LIVE_KEY,)
-    supplied = gate.parse_data_access(json.dumps(payload))
-    checked = gate.reconcile_package_data_access(
+    supplied = pda.parse_data_access(json.dumps(payload))
+    checked = pda.reconcile_package_data_access(
         supplied,
-        gate.PackageSpecFacts(keys, False, True, False, None),
+        pda.PackageSpecFacts(keys, False, True, False, None),
         requested_scope="model_only",
         fallback_authorization="stop",
     )
     assert checked is supplied
-    assessment = gate.parse_data_access(
+    assessment = pda.parse_data_access(
         json.dumps({**INHERITED_PROJECTION, "provider_state": payload["state"], "source_keys": list(keys)})
     )
-    result = gate.reconcile_package_data_access(
+    result = pda.reconcile_package_data_access(
         assessment,
-        gate.PackageSpecFacts((), False, False, True, None),
+        pda.PackageSpecFacts((), False, False, True, None),
         requested_scope="report_only_shared_model",
         fallback_authorization="stop",
         provider=(PROVIDER_REF, checked),
@@ -1361,7 +1363,7 @@ def test_reconcile_inherits_only_the_exact_canonically_checked_direct_provider(l
 def test_reconcile_provider_consistency_refusals_never_strengthen_the_ceiling(
     fault: str, state: str, code: str
 ) -> None:
-    facts = gate.PackageSpecFacts((), False, False, True, None)
+    facts = pda.PackageSpecFacts((), False, False, True, None)
     payload, supplied = dict(INHERITED_PROJECTION), dict(LIVE_PROJECTION)
     reference, fallback = PROVIDER_REF, "stop"
     if fault == "token":
@@ -1393,14 +1395,14 @@ def test_reconcile_provider_consistency_refusals_never_strengthen_the_ceiling(
         payload["effective_scope"] = "model_only"
     elif fault == "fallback-absent":
         fallback = None
-    provider = (reference, gate.parse_data_access(json.dumps(supplied)))
+    provider = (reference, pda.parse_data_access(json.dumps(supplied)))
     if fault == "missing":
         provider = None
     elif fault == "multiple":
         provider = [provider, provider]
-    assessment = gate.parse_data_access(json.dumps(payload))
+    assessment = pda.parse_data_access(json.dumps(payload))
     assert assessment.state == "provider_inherited", "every wire control must pass the existing parser"
-    result = gate.reconcile_package_data_access(
+    result = pda.reconcile_package_data_access(
         assessment,
         facts,
         requested_scope=payload["effective_scope"],
@@ -1410,16 +1412,16 @@ def test_reconcile_provider_consistency_refusals_never_strengthen_the_ceiling(
     assert (result.state, result.codes) == (state, (code,))
     assert (result.validation, result.max_phase2_claim) == ("not_established", "none")
     assert assessment.to_json() == payload
-    assert gate.parse_data_access(result.dumps()) == result
+    assert pda.parse_data_access(result.dumps()) == result
 
 
 def test_reconcile_has_no_filesystem_audit_classification_or_brief_parser_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    assessment = gate.parse_data_access(json.dumps(INHERITED_PROJECTION))
-    supplied = gate.parse_data_access(json.dumps(LIVE_PROJECTION))
-    facts = gate.PackageSpecFacts((), False, False, True, None)
-    assert tuple(inspect.signature(gate.reconcile_package_data_access).parameters) == (
+    assessment = pda.parse_data_access(json.dumps(INHERITED_PROJECTION))
+    supplied = pda.parse_data_access(json.dumps(LIVE_PROJECTION))
+    facts = pda.PackageSpecFacts((), False, False, True, None)
+    assert tuple(inspect.signature(pda.reconcile_package_data_access).parameters) == (
         "assessment",
         "facts",
         "requested_scope",
@@ -1434,22 +1436,21 @@ def test_reconcile_has_no_filesystem_audit_classification_or_brief_parser_author
         "_read_audit_trail",
         "_audit_entries",
         "_classify_legs",
-        "package_spec_facts",
         "load_bundle",
-        "assess_data_access",
-        "read_data_access",
         "authorize",
         "clear_block",
         "_audit",
         "verify",
     ):
         monkeypatch.setattr(gate, name, forbidden)
+    for name in ("package_spec_facts", "assess_data_access", "read_data_access", "_classify_legs"):
+        monkeypatch.setattr(pda, name, forbidden)
     monkeypatch.setattr(pri, "parse_brief_policy", forbidden)
     with monkeypatch.context() as io_patch:
         io_patch.setattr("builtins.open", forbidden)
         for name in ("open", "read_bytes", "read_text", "write_bytes", "write_text", "stat", "lstat"):
             io_patch.setattr(Path, name, forbidden)
-        result = gate.reconcile_package_data_access(
+        result = pda.reconcile_package_data_access(
             assessment,
             facts,
             requested_scope="report_only_shared_model",
@@ -1461,11 +1462,11 @@ def test_reconcile_has_no_filesystem_audit_classification_or_brief_parser_author
 
 @pytest.mark.parametrize("field,value", [("validation", "unvalidated"), ("max_phase2_claim", "structural_only")])
 def test_reconcile_does_not_repair_an_illegal_assessment(field: str, value: str) -> None:
-    parsed = gate.parse_data_access(json.dumps(LIVE_PROJECTION))
+    parsed = pda.parse_data_access(json.dumps(LIVE_PROJECTION))
     invalid = parsed._replace(**{field: value})
-    result = gate.reconcile_package_data_access(
+    result = pda.reconcile_package_data_access(
         invalid,
-        gate.PackageSpecFacts((LIVE_KEY,), False, True, False, None),
+        pda.PackageSpecFacts((LIVE_KEY,), False, True, False, None),
         requested_scope="model_only",
         fallback_authorization="stop",
     )
@@ -1475,10 +1476,10 @@ def test_reconcile_does_not_repair_an_illegal_assessment(field: str, value: str)
 
 @pytest.mark.parametrize("scope", ["model_only", "model_and_report"])
 def test_inherited_projection_cannot_be_its_own_direct_provider(scope: str) -> None:
-    facts = gate.package_spec_facts({"data_sources": source_rows(LIVE)})
+    facts = pda.package_spec_facts({"data_sources": source_rows(LIVE)})
     assert facts.live_source_keys == (LIVE_KEY,) and facts.direct_applicable
-    assessment = gate.parse_data_access(json.dumps({**INHERITED_PROJECTION, "effective_scope": scope}))
-    result = gate.reconcile_package_data_access(assessment, facts, requested_scope=scope, fallback_authorization="stop")
+    assessment = pda.parse_data_access(json.dumps({**INHERITED_PROJECTION, "effective_scope": scope}))
+    result = pda.reconcile_package_data_access(assessment, facts, requested_scope=scope, fallback_authorization="stop")
     assert (result.state, result.codes) == ("cannot_establish", ("provider-ambiguous",))
 
 
@@ -1486,14 +1487,14 @@ def test_legacy_published_reference_cannot_hide_an_additional_direct_leg() -> No
     proxy = copy.deepcopy(PUBLISHED)
     del proxy["connection"]["powerbi_target"]
     spec = {"data_sources": [proxy]}
-    assessment = gate.parse_data_access(json.dumps(INHERITED_PROJECTION))
-    provider = (PROVIDER_REF, gate.parse_data_access(json.dumps(LIVE_PROJECTION)))
+    assessment = pda.parse_data_access(json.dumps(INHERITED_PROJECTION))
+    provider = (PROVIDER_REF, pda.parse_data_access(json.dumps(LIVE_PROJECTION)))
     policy = {"requested_scope": "report_only_shared_model", "fallback_authorization": "stop", "provider": provider}
-    assert gate.reconcile_package_data_access(assessment, gate.package_spec_facts(spec), **policy) is assessment
+    assert pda.reconcile_package_data_access(assessment, pda.package_spec_facts(spec), **policy) is assessment
     spec["data_sources"].extend(source_rows(LIVE))
     before = copy.deepcopy(spec)
-    facts = gate.package_spec_facts(spec)
+    facts = pda.package_spec_facts(spec)
     assert not facts.published_only and facts.refusal_code == "source-key-invalid"
-    result = gate.reconcile_package_data_access(assessment, facts, **policy)
+    result = pda.reconcile_package_data_access(assessment, facts, **policy)
     assert (result.state, result.codes) == ("cannot_establish", ("projection-invalid",))
     assert facts.refusal_code == "source-key-invalid" and spec == before

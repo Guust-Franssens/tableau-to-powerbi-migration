@@ -287,6 +287,35 @@ def engine_artifact_records(bundle_dir: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _receipt_matches_bundle(migration: Path, receipt: dict) -> bool:
+    """Does the receipt describe this bundle's current run markers?"""
+    if receipt.get("version") != 1:
+        return False
+    try:
+        report_hash = sha256_file(migration / "report.json")
+        manifest_hash = sha256_file(migration / "input_manifest.json")
+    except OSError:
+        return False
+    return receipt.get("report_sha256") == report_hash and receipt.get("input_manifest_sha256") == manifest_hash
+
+
+def _receipt_artifacts(records: object) -> dict[str, dict[str, str | int]] | None:
+    """Validate receipt artifact records and index them by relative path."""
+    if not isinstance(records, list):
+        return None
+    by_path: dict[str, dict[str, str | int]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            return None
+        rel = record.get("path")
+        size = record.get("size")
+        digest = record.get("sha256")
+        if not isinstance(rel, str) or not isinstance(size, int) or not isinstance(digest, str):
+            return None
+        by_path[rel] = {"size": size, "sha256": digest}
+    return by_path
+
+
 def write_engine_receipt(bundle_dir: Path, engine: Path | None = None) -> Path:
     """Write the exact engine-output receipt consumed by `credential_gate.py verify`.
 

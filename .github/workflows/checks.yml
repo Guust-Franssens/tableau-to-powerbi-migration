@@ -199,7 +199,7 @@ jobs:
         run: uv run pytest -q tests\test_credential_gate_acl_layouts.py --basetemp _credential_gate_acl_tests
 
       - name: Tests (credential-gate descriptor transactions and package generations)
-        run: uv run pytest -q tests\test_credential_gate_transactions.py tests\test_package_data_access_swap.py tests\test_reprobe_blocked.py --basetemp _credential_gate_tx_tests
+        run: uv run pytest -q tests\test_credential_gate_transactions.py tests\test_package_transactions.py tests\test_package_data_access_swap.py tests\test_reprobe_blocked.py --basetemp _credential_gate_tx_tests
 
       # The root `conftest.py` deselects `gui` (window-spawning) tests in every tier, so an
       # operator's desktop is never hijacked (issue #447). That protection is worthless if NOBODY

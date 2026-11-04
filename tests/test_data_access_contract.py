@@ -20,6 +20,8 @@ from pathlib import Path
 import pytest
 
 import credential_gate as gate
+
+import package_data_access as pda
 from test_package_role_identity import DS_LUID, PUBLISHED_KEY, datasource_package, workbook_package
 from credential_gate import _DuplicateJsonKey, _reject_duplicate_keys
 from package_filesystem import is_canonical_key
@@ -85,8 +87,8 @@ def _spec(*connections: dict) -> dict:
 
 def _assess(
     root: Path, *, spec: dict | None = None, local: dict | None = None, authorized: bool = False
-) -> gate.DataAccessAssessment:
-    return gate.assess_data_access(
+) -> pda.DataAccessAssessment:
+    return pda.assess_data_access(
         root,
         package_spec=_spec(LIVE) if spec is None else spec,
         package_data_sources=copy.deepcopy(LOCAL) if local is None else local,
@@ -326,7 +328,7 @@ LEGACY_AUTHORIZED = _legacy(
 @pytest.mark.parametrize("fallback", ["stop", "model_only_unvalidated"])
 def test_live_source_is_admitted_unproven_never_validated(root: Path, scope: str, fallback: str) -> None:
     """Live keys yield a dispatchable but unvalidated state unless the brief degrades to model-only."""
-    result = gate.assess_data_access(
+    result = pda.assess_data_access(
         root,
         package_spec=_spec(LIVE),
         package_data_sources=copy.deepcopy(LOCAL),
@@ -339,11 +341,11 @@ def test_live_source_is_admitted_unproven_never_validated(root: Path, scope: str
         expected = ("live_unproven", ("live-unproven",), "unvalidated", "data_validated")
     assert (result.state, result.codes, result.validation, result.max_phase2_claim) == expected
     assert (result.source_keys, result.effective_scope, result.provider_unit) == ((KEY,), scope, None)
-    assert result.state in gate.DIRECT_ACCEPTED_STATES
-    assert gate.parse_data_access(result.dumps()) == result
-    facts = gate.package_spec_facts(_spec(LIVE))
+    assert result.state in pda.DIRECT_ACCEPTED_STATES
+    assert pda.parse_data_access(result.dumps()) == result
+    facts = pda.package_spec_facts(_spec(LIVE))
     assert (
-        gate.reconcile_package_data_access(result, facts, requested_scope=scope, fallback_authorization=fallback)
+        pda.reconcile_package_data_access(result, facts, requested_scope=scope, fallback_authorization=fallback)
         is result
     )
 
@@ -409,11 +411,11 @@ def test_invalid_package_identities_cannot_establish(root: Path, fault: str) -> 
 
 def test_reconcile_refuses_a_live_projection_whose_keys_moved() -> None:
     """A stored live_unproven projection binds to the package's current key set."""
-    stored = gate.parse_data_access(
+    stored = pda.parse_data_access(
         _legacy("live_unproven", ["live-unproven"], validation="unvalidated", source_keys=[KEY])
     )
-    facts = gate.package_spec_facts(_spec(OTHER))
-    result = gate.reconcile_package_data_access(
+    facts = pda.package_spec_facts(_spec(OTHER))
+    result = pda.reconcile_package_data_access(
         stored, facts, requested_scope="model_and_report", fallback_authorization="stop"
     )
     assert (result.state, result.codes) == ("cannot_establish", ("source-key-set-changed",))
@@ -422,27 +424,27 @@ def test_reconcile_refuses_a_live_projection_whose_keys_moved() -> None:
 @pytest.mark.parametrize("document", [LEGACY_LIVE, LEGACY_AUTHORIZED], ids=["live_data_ok", "human-authorize"])
 def test_legacy_stored_documents_still_parse_and_reconcile(document: str) -> None:
     """Old runs' data-access.json keeps its exact meaning; nothing is rewritten or downgraded."""
-    stored = gate.parse_data_access(document)
+    stored = pda.parse_data_access(document)
     assert json.loads(stored.dumps()) == json.loads(document)
-    assert stored.state in gate.DIRECT_ACCEPTED_STATES
+    assert stored.state in pda.DIRECT_ACCEPTED_STATES
     scope, fallback = (
         ("model_only", "model_only_unvalidated")
         if stored.state == "authorized_model_only"
         else ("model_and_report", "stop")
     )
-    result = gate.reconcile_package_data_access(
-        stored, gate.package_spec_facts(_spec(LIVE)), requested_scope=scope, fallback_authorization=fallback
+    result = pda.reconcile_package_data_access(
+        stored, pda.package_spec_facts(_spec(LIVE)), requested_scope=scope, fallback_authorization=fallback
     )
     assert result is stored
 
 
 def test_legacy_provider_inherited_live_data_ok_still_parses() -> None:
     """A consumer inherited from a legacy validated provider stays readable."""
-    stored = gate.parse_data_access(
+    stored = pda.parse_data_access(
         _legacy(
             "provider_inherited",
             ["provider-exact"],
-            provider_unit=gate.provider_reference("Shared"),
+            provider_unit=pda.provider_reference("Shared"),
             provider_state="live_data_ok",
             effective_scope="report_only_shared_model",
         )
@@ -491,9 +493,9 @@ def test_legacy_provider_inherited_live_data_ok_still_parses() -> None:
 def test_unproven_states_cannot_be_serialized_as_validated(state: str, codes: list[str], fields: dict) -> None:
     """No stored document may pair live_unproven with validation, or a legacy state with the new code."""
     if state == "provider_inherited":
-        fields = {"provider_unit": gate.provider_reference("Shared"), **fields}
-    with pytest.raises(gate.DataAccessProjectionError) as error:
-        gate.parse_data_access(_legacy(state, codes, **fields))
+        fields = {"provider_unit": pda.provider_reference("Shared"), **fields}
+    with pytest.raises(pda.DataAccessProjectionError) as error:
+        pda.parse_data_access(_legacy(state, codes, **fields))
     assert error.value.reason == "illegal-combination"
 
 
@@ -502,8 +504,8 @@ def test_inheriting_an_unproven_provider_stays_unvalidated(root: Path, scope: st
     """A consumer of a live_unproven provider inherits its unvalidated state, never a stronger one."""
     provider = _assess(root)
     assert provider.state == "live_unproven"
-    reference = gate.provider_reference("Shared")
-    result = gate.assess_data_access(
+    reference = pda.provider_reference("Shared")
+    result = pda.assess_data_access(
         root,
         package_spec={},
         package_data_sources={},
@@ -518,7 +520,7 @@ def test_inheriting_an_unproven_provider_stays_unvalidated(root: Path, scope: st
         "data_validated",
     )
     assert result.source_keys == provider.source_keys
-    assert gate.parse_data_access(result.dumps()) == result
+    assert pda.parse_data_access(result.dumps()) == result
 
 
 @pytest.mark.parametrize("inherited", [False, True], ids=["direct", "inherited"])
@@ -527,25 +529,25 @@ def test_projection_requires_current_keys_for_model_only(root: Path, inherited: 
     authority = _assess(root, authorized=True)
     assert authority.state == "authorized_model_only"
     if inherited:
-        authority = gate.assess_data_access(
+        authority = pda.assess_data_access(
             root,
             package_spec={},
             package_data_sources={},
             fallback_authorization="stop",
             requested_scope="model_only",
-            provider=(gate.provider_reference("Exact_S2_unit"), authority),
+            provider=(pda.provider_reference("Exact_S2_unit"), authority),
         )
-    assert gate.parse_data_access(authority.dumps()) == authority
+    assert pda.parse_data_access(authority.dumps()) == authority
     empty = authority._replace(source_keys=())
-    with pytest.raises(gate.DataAccessProjectionError, match="illegal-combination"):
-        gate.parse_data_access(empty.dumps())
-    result = gate.assess_data_access(
+    with pytest.raises(pda.DataAccessProjectionError, match="illegal-combination"):
+        pda.parse_data_access(empty.dumps())
+    result = pda.assess_data_access(
         root,
         package_spec={},
         package_data_sources={},
         fallback_authorization="stop",
         requested_scope="model_only",
-        provider=(gate.provider_reference("Exact_S2_unit"), empty),
+        provider=(pda.provider_reference("Exact_S2_unit"), empty),
     )
     assert (result.state, result.codes) == ("cannot_establish", ("provider-foreign",))
 
@@ -636,7 +638,7 @@ def test_spec_fact_shapes_precede_classifier_fallback(root: Path, path: tuple, v
 def test_provider_identity_has_one_closed_syntax(root: Path, unit: str) -> None:
     """Even a valid raw S2 name must never enter the assessment or projection directly."""
     provider = _assess(root, spec=_spec(FLAT))
-    result = gate.assess_data_access(
+    result = pda.assess_data_access(
         root,
         package_spec={},
         package_data_sources={},
@@ -654,8 +656,8 @@ def test_provider_identity_has_one_closed_syntax(root: Path, unit: str) -> None:
         "provider_state": provider.state,
         "effective_scope": "report_only_shared_model",
     }
-    with pytest.raises(gate.DataAccessProjectionError) as error:
-        gate.parse_data_access(json.dumps(payload))
+    with pytest.raises(pda.DataAccessProjectionError) as error:
+        pda.parse_data_access(json.dumps(payload))
     assert error.value.reason == "provider-unit-invalid"
     assert unit not in str(error.value)
 
@@ -672,13 +674,13 @@ def test_valid_provider_reference_is_preserved_exactly_without_search(
     def forbidden(*_args, **_kwargs) -> None:
         pytest.fail("provider path searched direct evidence instead of using S2's supplied identity")
 
-    monkeypatch.setattr(gate, "_classify_legs", forbidden)
+    monkeypatch.setattr(pda, "_classify_legs", forbidden)
     monkeypatch.setattr(gate, "load_bundle", forbidden)
     monkeypatch.setattr(Path, "resolve", forbidden)
     monkeypatch.setattr(Path, "open", forbidden)
     monkeypatch.setattr(Path, "iterdir", forbidden)
-    reference = gate.provider_reference(unit)
-    result = gate.assess_data_access(
+    reference = pda.provider_reference(unit)
+    result = pda.assess_data_access(
         root,
         package_spec={},
         package_data_sources={},
@@ -688,7 +690,7 @@ def test_valid_provider_reference_is_preserved_exactly_without_search(
     )
     assert (result.state, result.provider_unit) == ("provider_inherited", reference)
     assert unit not in result.dumps()
-    assert gate.parse_data_access(result.dumps()) == result
+    assert pda.parse_data_access(result.dumps()) == result
 
 
 @pytest.mark.parametrize("unit", ["Shared Sales", "Sales.Report"])
@@ -704,10 +706,10 @@ def test_s2_selected_provider_unit_converts_to_the_same_opaque_reference(tmp_pat
     assert (provider_result.verdict, consumer_result.verdict) == ("START_READY", "START_READY")
     selected = consumer_result.dependencies[0]
     assert (selected.state, selected.provider_unit) == ("resolved", unit)
-    reference = gate.provider_reference(selected.provider_unit)
-    assert reference == gate.provider_reference(provider_result.unit)
+    reference = pda.provider_reference(selected.provider_unit)
+    assert reference == pda.provider_reference(provider_result.unit)
     provider = _assess(provider_root, spec=_spec(FLAT))
-    result = gate.assess_data_access(
+    result = pda.assess_data_access(
         consumer,
         package_spec={},
         package_data_sources={},
@@ -717,7 +719,7 @@ def test_s2_selected_provider_unit_converts_to_the_same_opaque_reference(tmp_pat
     )
     assert (result.state, result.provider_unit) == ("provider_inherited", reference)
     assert unit not in result.dumps()
-    assert gate.parse_data_access(result.dumps()) == result
+    assert pda.parse_data_access(result.dumps()) == result
 
 
 def test_provider_reference_is_versioned_stable_and_preserves_exact_s2_identity() -> None:
@@ -738,7 +740,7 @@ def test_provider_reference_is_versioned_stable_and_preserves_exact_s2_identity(
         "\U0001f600",
         "\ud83d\ude00",
     )
-    references = [gate.provider_reference(unit) for unit in units]
+    references = [pda.provider_reference(unit) for unit in units]
     assert len(set(references)) == len(units), "distinct exact S2 units must not collapse"
     for unit, reference in zip(units, references, strict=True):
         assert is_canonical_key(unit) and "/" not in unit
@@ -746,7 +748,7 @@ def test_provider_reference_is_versioned_stable_and_preserves_exact_s2_identity(
             b"phase1-data-access/provider-unit/v1\0" + unit.encode("utf-8", "surrogatepass")
         ).hexdigest()
         assert reference == "provider-ref:v1:sha256:" + expected
-        assert reference == gate.provider_reference(unit)
+        assert reference == pda.provider_reference(unit)
         assert re.fullmatch(r"provider-ref:v1:sha256:[0-9a-f]{64}", reference)
 
 
@@ -784,8 +786,8 @@ def test_provider_reference_is_versioned_stable_and_preserves_exact_s2_identity(
 )
 def test_provider_reference_refuses_invalid_units_without_serializing_them(unit: object) -> None:
     """The conversion applies S2's component predicate, with a closed input-type refusal."""
-    with pytest.raises(gate.DataAccessProjectionError) as raised:
-        gate.provider_reference(unit)
+    with pytest.raises(pda.DataAccessProjectionError) as raised:
+        pda.provider_reference(unit)
     assert raised.value.reason == "provider-unit-invalid"
     assert raised.value.args == ("data-access projection rejected: provider-unit-invalid",)
     assert raised.value.__context__ is None
@@ -813,12 +815,12 @@ def test_provider_reference_parser_accepts_only_the_closed_token(root: Path, ref
 
 def test_provider_reference_does_not_rehash_an_existing_reference() -> None:
     """A selected unit and its serialized reference are different input contracts."""
-    with pytest.raises(gate.DataAccessProjectionError, match="provider-unit-invalid"):
-        gate.provider_reference(gate.provider_reference("Shared Sales"))
+    with pytest.raises(pda.DataAccessProjectionError, match="provider-unit-invalid"):
+        pda.provider_reference(pda.provider_reference("Shared Sales"))
 
 
 def _safe_error(call: Callable, reason: str, secret: str) -> None:
-    with pytest.raises(gate.DataAccessProjectionError) as raised:
+    with pytest.raises(pda.DataAccessProjectionError) as raised:
         call()
     error = raised.value
     assert error.reason == reason
@@ -838,7 +840,7 @@ def test_projection_read_errors_retain_no_unsafe_cause(tmp_path: Path, kind: str
         path.mkdir()
     elif kind == "invalid-utf8":
         path.write_bytes(b"\xff")
-    _safe_error(lambda: gate.read_data_access(path), "unreadable", str(path))
+    _safe_error(lambda: pda.read_data_access(path), "unreadable", str(path))
 
 
 @pytest.mark.parametrize("kind", ["duplicate", "malformed", "nonfinite"])
@@ -852,7 +854,7 @@ def test_projection_parse_errors_retain_no_raw_payload(tmp_path: Path, kind: str
         text, reason = "{" + key + ":NaN}", "nonfinite"
     else:
         text, reason = "{" + key + ":", "malformed-json"
-    _safe_error(lambda: gate.parse_data_access(text), reason, secret)
+    _safe_error(lambda: pda.parse_data_access(text), reason, secret)
 
 
 def test_duplicate_detection_never_stores_the_key(tmp_path: Path) -> None:

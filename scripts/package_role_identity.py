@@ -31,7 +31,7 @@ from bundle_corpus import (  # noqa: E402  # pylint: disable=wrong-import-positi
     TargetClassification,
     classify_target,
 )
-from credential_gate import (  # noqa: E402  # pylint: disable=wrong-import-position
+from package_data_access import (  # noqa: E402  # pylint: disable=wrong-import-position
     DataAccessAssessment,
     DataAccessProjectionError,
     PackageSpecFacts,

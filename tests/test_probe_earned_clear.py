@@ -31,6 +31,8 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 
 import credential_gate as cg  # noqa: E402
+
+import package_data_access as pda  # noqa: E402
 import preflight_source_credentials as pf  # noqa: E402
 import probe_live_source as pls  # noqa: E402
 from parse_tableau import parse_workbook  # noqa: E402
@@ -1075,7 +1077,7 @@ def test_the_dns_precheck_records_its_verdict_against_the_leg_it_refused(tmp_pat
 
 
 def _assess(root: Path):
-    return cg.assess_data_access(
+    return pda.assess_data_access(
         root,
         package_spec=PROBE_SPEC,
         package_data_sources=PROBE_LOCAL,
@@ -1287,7 +1289,7 @@ def test_same_table_on_two_named_schemas_requires_both_keys_to_earn(
     assert [entry["action"] for entry in attempts] == ["probe-data_ok", "probe-data_ok"]
     assert [entry["sources"] for entry in attempts] == [[key] for key in keys]
     assert not (root / cg.MARKER).exists()
-    earned = cg.assess_data_access(
+    earned = pda.assess_data_access(
         root,
         package_spec=spec,
         package_data_sources=PROBE_LOCAL,

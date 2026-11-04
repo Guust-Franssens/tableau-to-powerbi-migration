@@ -584,7 +584,7 @@ def test_acl_mutations_fail_their_named_physical_assertion(
     mutation: str,
 ) -> None:
     """Each mutation reaches a syscall-backed oracle after canonical source setup succeeds."""
-    mutant = __import__("test_credential_gate_transactions")._mutant
+    mutant = __import__("test_package_transactions")._mutant
 
     if mutation == "all-any":
         mutant(gate, "_all_targets_denied", "and all(", "and any(", monkeypatch)

@@ -37,7 +37,7 @@ from typing import Any, Generic, TypeVar
 
 import check_desktop_orphans as check_desktop_orphans_module
 import check_empty_model as empty_model
-import credential_gate
+import package_data_access
 import current_artifact_revision as revision
 import iteration_receipt
 import object_identity as oid
@@ -3250,7 +3250,7 @@ def _current_source_data(snapshot: _PinnedSnapshot, target: Path, data_evidence_
     )
     if code is not None:
         return _completion_row("current-source-data", "SOURCE_DATA", code)
-    assessment = credential_gate.reconcile_package_data_access(
+    assessment = package_data_access.reconcile_package_data_access(
         snapshot.handoff.stored_data_access,
         snapshot.handoff.facts,
         requested_scope=snapshot.policy.requested_scope,

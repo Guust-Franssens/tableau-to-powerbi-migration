@@ -1106,11 +1106,8 @@ def test_inheritance_uses_exact_ordinal_not_duplicate_provider_unit_names(
         references.append(unit)
         return make_reference(unit)
 
-    def no_provider_reassessment(*_args, **_kwargs):
-        pytest.fail("inheritance re-read an original audit instead of the exact packaged provider")
-
     monkeypatch.setattr(pkg.data_access, "provider_reference", exact_reference)
-    monkeypatch.setattr(pkg.data_access, "_read_audit_trail", no_provider_reassessment)
+    assert not hasattr(pkg.data_access, "_read_audit_trail"), "inheritance must not be able to re-read an audit"
     result = _assess_candidate(consumer, root, providers=providers)
     expected_reference = (
         "provider-ref:v1:sha256:" + hashlib.sha256(b"phase1-data-access/provider-unit/v1\0Shared").hexdigest()

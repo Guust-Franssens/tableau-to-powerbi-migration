@@ -631,8 +631,7 @@ def test_start_ready_public_owned_package_is_read_only_and_keeps_ceilings(
 
     for name in ("_assemble_unit", "_binding_plan", "_binding_publish", "_seal_package", "_write_data_access_final"):
         monkeypatch.setattr(pkg, name, forbidden)
-    for name in ("assess_data_access", "apply_block", "clear_block", "authorize", "_audit"):
-        monkeypatch.setattr(pkg.data_access, name, forbidden)
+    monkeypatch.setattr(pkg.data_access, "assess_data_access", forbidden)
     capsys.readouterr()
     assert crr.main([str(root)]) == 0
     output = capsys.readouterr().out

@@ -97,7 +97,7 @@ def test_transaction_setup_mutations_fail_existing_policy_assertions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], policy: str
 ) -> None:
     """Regress only setup ordering/mapping; existing independent policy assertions must catch it."""
-    from test_credential_gate_transactions import _mutant  # pylint: disable=import-outside-toplevel
+    from test_package_transactions import _mutant  # pylint: disable=import-outside-toplevel
 
     controls = {
         "report": partial(test_a_truncated_engine_report_is_refused_rather_than_packaged_unclassified, tmp_path),

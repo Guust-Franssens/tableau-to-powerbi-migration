@@ -6091,9 +6091,9 @@ def test_r2_w_must_be_the_original_issued_object_for_this_exact_target(
 
     monkeypatch.setattr(cu.roles, "read_current_source_data_handoff", issue)
     reconcile = []
-    real_reconcile = cu.credential_gate.reconcile_package_data_access
+    real_reconcile = cu.package_data_access.reconcile_package_data_access
     monkeypatch.setattr(
-        cu.credential_gate,
+        cu.package_data_access,
         "reconcile_package_data_access",
         lambda *args, **kwargs: (reconcile.append(True), real_reconcile(*args, **kwargs))[1],
     )
