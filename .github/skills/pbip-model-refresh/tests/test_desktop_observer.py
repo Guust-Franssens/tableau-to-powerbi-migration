@@ -5231,3 +5231,83 @@ def test_collector_process_start_cannot_turn_an_unreadable_process_into_gone(tmp
     assert not {"get-ciminstance", "get-wmiobject", "invoke-cimmethod"} & {c.lower() for c in commands}, commands
     assert facts["seen"] == 51552 and facts["returned"] is False, facts
     assert facts["propagated"] == "Win32Exception", "a native refusal must reach the collector's exit-4 catch"
+
+
+@pytest.mark.parametrize(
+    "state,token",
+    [
+        ("READY", None),
+        ("CREDENTIAL_REQUIRED", "CREDENTIAL_MISSING"),
+        ("NATIVE_QUERY_APPROVAL", "DIALOG_NEEDS_HUMAN"),
+        ("HUMAN_ACTION_REQUIRED", "DIALOG_NEEDS_HUMAN"),
+        ("DESKTOP_SESSION_ERROR", "DESKTOP_UNREADY"),
+        ("UNKNOWN_DIALOG", "DIALOG_UNRECOGNIZED"),
+        ("UNREADABLE_DIALOG", "DIALOG_UNREADABLE"),
+        ("NO_WINDOW", "DESKTOP_UNREADY"),
+        ("REFRESH_IN_PROGRESS", "REFRESH_IN_PROGRESS"),
+        ("PROCESS_GONE", "DESKTOP_GONE"),
+    ],
+)
+def test_o23_existing_wire_states_keep_their_legacy_tokens(state: str, token: str | None) -> None:
+    """Old receipts remain readable even when the new observer stops emitting a state."""
+    snapshot = Observation(pid="111", process_started_at="456")
+    payload = json.loads(snapshot.to_json())
+    payload["state"] = state
+    assert _desktop_observer.observation_token(json.dumps(payload)) == token
+
+
+@pytest.mark.parametrize(
+    "kind,token",
+    [
+        ("credential", "CREDENTIAL_MISSING"),
+        ("needs-human", "DIALOG_NEEDS_HUMAN"),
+        ("mixed-content", "DIALOG_UNRECOGNIZED"),
+        ("benign", "REFRESH_IN_PROGRESS"),
+        ("benign-title-only", "DIALOG_UNREADABLE"),
+        ("unreadable", "DIALOG_UNREADABLE"),
+        ("unrecognized", "DIALOG_UNRECOGNIZED"),
+    ],
+)
+def test_o23_existing_finding_fixtures_keep_their_legacy_tokens(kind: str, token: str) -> None:
+    """Pin adapters, not the retiring classification of arbitrary dialog prose."""
+    state = Observation(dialog=DialogFinding(kind, token, owned_dialog()))
+    assert _desktop_observer.legacy_token(state) == token
+
+
+@pytest.mark.parametrize("alive,expected", [(True, "NO_WINDOW"), (False, "PROCESS_GONE")])
+def test_o23_zero_windows_never_proves_readiness(alive: bool, expected: str) -> None:
+    """Absence of windows is readiness failure, not evidence about the data source."""
+    state = inspect_desktop_observer(111, lambda _: [], process_is_alive=lambda _: alive)
+    assert state.state == expected
+    assert not state.complete
+
+
+def test_o23_minimized_frame_never_proves_readiness() -> None:
+    """A minimized frame can conceal owned windows."""
+    state = inspect_desktop_observer(111, lambda _: [main_window(minimized=True)])
+    assert state.state != "READY"
+    assert not state.complete
+
+
+@pytest.mark.parametrize("width,height", [(650, 115), (120, 25)])
+def test_o23_owner_enabled_toast_and_tooltip_remain_nonblocking(width: int, height: int) -> None:
+    """Positive owner-enabled evidence, not geometry, exempts a window."""
+    window = owned_dialog(width=width, height=height, owner_enabled=True)
+    state = inspect_desktop_observer(111, lambda _: [main_window(), window])
+    assert _desktop_observer.is_proven_non_blocking(window)
+    assert state.state == "READY"
+
+
+def test_o23_two_rendering_unowned_roots_never_identify_a_frame() -> None:
+    """An unowned sign-in host must not displace the application frame."""
+    windows = [main_window(), DesktopWindow("", "Internet Explorer_Hidden", 900, 700, hwnd=333)]
+    assert _desktop_observer.main_frame(windows) is None
+    assert inspect_desktop_observer(111, lambda _: windows).state != "READY"
+
+
+def test_o23_unresolvable_owner_never_identifies_a_frame() -> None:
+    """A missing owner cannot be silently promoted to the application frame."""
+    window = DesktopWindow("", "Cls", 400, 300, hwnd=222, owner_hwnd=333)
+    windows = [main_window(), window]
+    assert _desktop_observer.main_frame(windows) is None
+    assert inspect_desktop_observer(111, lambda _: windows).state != "READY"
