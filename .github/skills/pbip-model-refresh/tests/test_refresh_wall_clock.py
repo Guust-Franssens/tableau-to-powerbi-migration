@@ -3,8 +3,8 @@
 Regression for a measured 956s hang (2026-08-05): a direct `refresh_pbip_model.py --pid` call
 against a never-authenticated Azure SQL server parked on a Desktop sign-in modal. XMLA's
 `CommandTimeout = 300` never fired, because the mashup engine waits synchronously on a dialog in
-another process that the server cannot preempt. `probe_live_source.py` survived only because it
-wraps the script in `subprocess.run(..., timeout=...)`; every direct caller had no bound at all.
+another process that the server cannot preempt. The retired `probe_live_source.py` survived only because it
+wrapped the script in `subprocess.run(..., timeout=...)`; every direct caller had no bound at all.
 
 The old docstring said "the caller must run its own clock". A rule an agent has to remember is not
 a bound - it failed on this repo's own agent. These tests pin the bound into the function.

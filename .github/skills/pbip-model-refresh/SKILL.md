@@ -62,7 +62,6 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B
 execution of **all current M**, including native/custom SQL and unknown/indirect query forms,
 with potential source-side costs or effects. There is no custom-query admission screen.
 **`--no-save` prevents Save, not source execution.** No additional consent flag is required.
-This route does **not** authorize automatic credential-gate use or earn credential clearance.
 Defaults and existing callers remain unchanged. Automatic callers must add
 `--automatic-source-scope` ([#780](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/780),
 linked [#692](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/692)); see below.
@@ -287,8 +286,7 @@ suppression, deadlines, success behavior and gate state are unchanged.
 
 ⚠️ This is diagnostic-only, not a second classifier. An incomplete read never establishes clean
 absence. Real-Desktop latency, localization, MSHTML-only dialogs, dialogs absent from existing
-discovery, and modals appearing after a DAX precheck remain unverified/outside this slice. The buffered
-`probe_live_source.py` wrapper and its catalog-readiness behavior are a separate follow-up.
+discovery, and modals appearing after a DAX precheck remain unverified/outside this slice.
 
 ### Inspect an unreadable in-flight dialog without stealing focus (#146)
 
@@ -463,15 +461,6 @@ Report this acquisition limitation and stop; do not force capture or claim the c
    non-semantic diagnostics. A cleanup refusal must not replace the original refresh result;
    close a holding viewer and remove the same private file locally. Never publish pixels to explain
    a cleanup failure. Durable logs may retain the safe record and external review provenance only.
-
-**Buffered-wrapper limit:** `probe_live_source.py` currently buffers the
-refresh's output. Its Phase-1 consumer must forward/stream `LOCAL_IMAGE` lines, supply the run-owned
-`PBIP_EVIDENCE_DIR`, perform the schema/PID/hash/lifetime checks above, and route a separate positive
-visual review. Its runtime streaming is outside this change's closed surface; the agent's
-separate terminal diagnostic above covers eligible held identities without changing that wrapper. The
-image seam itself adds no UIA enrichment, OCR or external-verdict ingestion. The separate #498
-exact-HWND text diagnostic above runs only at terminal reporting; detector verdicts and active-wait
-behavior remain unchanged.
 
 ✅ **Precedent:** the two independent September 15, 2026 controls on #146 acquired readable
 Snowflake forms with their owners minimized and without foreground/restore. This implementation
