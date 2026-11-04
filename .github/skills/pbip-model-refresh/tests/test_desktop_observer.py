@@ -3481,6 +3481,22 @@ def test_o23_ineligible_first_candidate_never_adopts(change: dict) -> None:
     assert popup.hwnd == 0
 
 
+def test_o23_first_candidate_must_be_owned_directly_by_frame() -> None:
+    """A non-blocking intermediate owner cannot confer frame-owned adoption eligibility."""
+    popup = _desktop_observer.PopupTracker(expect_popup=True)
+    frame = replace(main_window(), pid="111")
+    intermediate = replace(
+        owned_dialog(hwnd=333, owner_enabled=True), pid=frame.pid, owner_same_pid=True, enabled=False
+    )
+    candidate = replace(owned_dialog(), pid=frame.pid, owner_hwnd=intermediate.hwnd, owner_same_pid=True)
+    windows = [frame, intermediate, candidate]
+    assert _desktop_observer.main_frame(windows) is frame
+    assert _desktop_observer.dialog_candidates(windows, frame=frame) == [candidate]
+    state = _structural_poll(windows, popup)
+    assert state.state == "HUMAN_ACTION_REQUIRED"
+    assert popup.hwnd == 0
+
+
 def test_o23_two_candidates_at_first_sight_never_adopt() -> None:
     """The 5-second poll cannot infer which of two windows appeared first."""
     popup = _desktop_observer.PopupTracker(expect_popup=True)
