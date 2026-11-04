@@ -228,7 +228,7 @@ def test_every_live_ui_test_declares_itself_serial() -> None:
     would move the boundary rather than remove it: all of them share the mechanism.
     """
     live = _live_desktop_tests_with_marks()
-    assert len(live) >= 6, f"expected the retained native/UIA GUI regressions to be found, got {sorted(live)}"
+    assert len(live) >= 5, f"expected the retained native/UIA GUI regressions to be found, got {sorted(live)}"
     unmarked = sorted(node for node, marked in live.items() if not marked)
     assert not unmarked, (
         "these tests drive a real WPF window through UI Automation but do not carry "
@@ -489,8 +489,8 @@ def test_xdist_deselects_contended_tests_without_being_asked() -> None:
     collection = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "--run-gui", "-m", "serial or timing", BUNDLE_TESTS])
     assert collection.returncode == 0, collection.stdout + collection.stderr
     contended = {line for line in collection.stdout.splitlines() if line.startswith(BUNDLE_TESTS + "::")}
-    # #741 retains six native/UIA GUI controls and six timing controls in this renamed suite.
-    assert len(contended) >= 12, f"expected the bundle's contended tests to be found, got {sorted(contended)}"
+    # O23 (#799) retains four native/UIA GUI controls and six timing controls in this renamed suite.
+    assert len(contended) >= 10, f"expected the bundle's contended tests to be found, got {sorted(contended)}"
     # `--run-gui` for the same reason as in `test_the_markers_actually_deselect_those_tests`: the
     # `gui` exclusion is orthogonal and always on, and three gui tests carry no contended marker, so
     # leaving it engaged would fold two mechanisms into one count. This test is about the xdist one.
