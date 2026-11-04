@@ -1084,19 +1084,19 @@ def _assess(root: Path):
     )
 
 
-def test_a_real_keyed_probe_run_is_what_the_pure_assessor_can_earn_from(tmp_path: Path, monkeypatch) -> None:
-    """End to end through production code, with the mutation control that makes it load-bearing.
+def test_a_real_keyed_probe_run_no_longer_moves_the_package_projection(tmp_path: Path, monkeypatch) -> None:
+    """The probe ledger still records keyed proof, but the package projection no longer reads it.
 
-    Arm the gate, probe (only the Desktop primitives stubbed), lift it, then ask the pure assessor.
-    Then STRIP the key the producer correction adds - leaving a perfectly well-formed, trusted,
-    same-scope `probe-data_ok` and a keyed `probe-cleared`, exactly the pre-#562 shape - and the
-    verdict must collapse to `blocked/stale-clear`. Without that second half this test would pass
-    just as happily against a producer that never keyed anything.
+    Arm the gate, probe (only the Desktop primitives stubbed) and lift it: the projection is
+    `live_unproven` both with the keyed ledger and after stripping the key, because live-data proof
+    now comes from check_unit's `data-evidence` row at sign-off, never from this ledger.
     """
     root = _keyed_root(tmp_path, "earned")
     cg.apply_block(root, [PROBE_KEY])
     assert (root / cg.MARKER).exists(), "fixture must start armed"
     _stub_desktop(monkeypatch)
+    unproven = ("live_unproven", (PROBE_KEY,), "unvalidated")
+    assert (_assess(root).state, _assess(root).source_keys, _assess(root).validation) == unproven
 
     rc, verdict = pls._probe_leg(root, PROBE_KEY, dict(PROBE_CONN), (PROBE_TABLES, "OrderID"), (60, False))
     assert (rc, verdict) == (0, "DATA_OK")
@@ -1104,7 +1104,7 @@ def test_a_real_keyed_probe_run_is_what_the_pure_assessor_can_earn_from(tmp_path
     assert not (root / cg.MARKER).exists(), "a fully proved leg must fully lift the gate"
 
     earned = _assess(root)
-    assert (earned.state, earned.source_keys) == ("live_data_ok", (PROBE_KEY,))
+    assert (earned.state, earned.source_keys, earned.validation) == unproven
 
     rewritten = []
     for entry in _audit_entries(root):
@@ -1113,11 +1113,7 @@ def test_a_real_keyed_probe_run_is_what_the_pure_assessor_can_earn_from(tmp_path
             entry["detail"] = "Orders -> DATA_OK"
         rewritten.append(json.dumps(entry))
     (root / cg.AUDIT).write_text("\n".join(rewritten) + "\n", encoding="utf-8")
-
-    regressed = _assess(root)
-    assert (regressed.state, regressed.codes) == ("blocked", ("stale-clear",)), (
-        "an unkeyed success must not be earnable - if this still passes, the key is decorative"
-    )
+    assert _assess(root) == earned
 
 
 @pytest.mark.parametrize(
@@ -1298,7 +1294,7 @@ def test_same_table_on_two_named_schemas_requires_both_keys_to_earn(
         fallback_authorization="stop",
         requested_scope="model_and_report",
     )
-    assert earned.state == "live_data_ok" and set(earned.source_keys) == set(keys)
+    assert earned.state == "live_unproven" and set(earned.source_keys) == set(keys)
 
 
 @pytest.mark.parametrize("reverse_relations", [False, True], ids=["sales-first", "restricted-first"])

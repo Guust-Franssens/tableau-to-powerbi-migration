@@ -742,21 +742,13 @@ def test_start_ready_move_sanitize_and_rebind_are_separate_public_steps(tmp_path
     assert _readiness(moved)[1]["status"] == "START_READY"
 
 
-@pytest.mark.parametrize("authorized", [False, True], ids=["keyed-live-proof", "explicit-model-only"])
-def test_start_ready_original_proof_and_explicit_authorization_keep_their_own_ceiling(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, authorized: bool
-) -> None:
-    """Real proof/authorization and package producers; only external Desktop/network/ACL primitives are stubbed."""
-    import test_data_access_contract as authority
+@pytest.mark.parametrize("authorized", [False, True], ids=["live-unproven", "brief-model-only"])
+def test_start_ready_live_source_without_probe_proof_keeps_its_own_ceiling(tmp_path: Path, authorized: bool) -> None:
+    """A live source dispatches with no probe ledger; it is never stored or reported as validated."""
+    import test_data_access_contract as authority  # pylint: disable=import-outside-toplevel
 
-    proof = tmp_path / "proof"
-    proof.mkdir()
-    original = authority._root_fixture.__wrapped__(proof, monkeypatch)
-    authority._desktop_fixture.__wrapped__(monkeypatch)
-    if authorized:
-        authority._authorize(original)
-    else:
-        authority._earn(original)
+    original = authority._root_fixture.__wrapped__(tmp_path)
+    assert sorted(path.name for path in original.iterdir()) == ["migration-spec.json"], "no gate evidence exists"
     bundle, oracle, _ = _bundle(tmp_path / "source", covered=None, datasource_only=True)
     asset = bundle.parent / "assets" / f"{DS_LUID}_{DS_UNIT}.tds"
     asset.write_text(
@@ -787,14 +779,14 @@ def test_start_ready_original_proof_and_explicit_authorization_keep_their_own_ce
     package = out / DS_UNIT
     stored = json.loads((package / "data-access.json").read_bytes())
     assert stored["source_keys"] == [authority.KEY]
-    assert stored["state"] == ("authorized_model_only" if authorized else "live_data_ok")
+    assert stored["state"] == ("authorized_model_only" if authorized else "live_unproven")
     assert _binding_cli(package)["exit_code"] == 0
     before = {str(path.relative_to(original)): path.read_bytes() for path in original.rglob("*") if path.is_file()}
     code, report = _readiness(package)
     assert (code, report["status"]) == (0, "START_READY")
     assert report["package_data_access"][0]["stored"] == report["package_data_access"][0]["assessment"] == stored
     assert (stored["validation"], stored["max_phase2_claim"]) == (
-        ("unvalidated", "structural_only") if authorized else ("validated", "data_validated")
+        ("unvalidated", "structural_only") if authorized else ("unvalidated", "data_validated")
     )
     assert before == {
         str(path.relative_to(original)): path.read_bytes() for path in original.rglob("*") if path.is_file()

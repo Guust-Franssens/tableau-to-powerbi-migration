@@ -492,7 +492,7 @@ def test_malformed_relation_cannot_probe_or_clear_a_same_named_physical_table(
     assert json.loads((tmp_path / gate.MARKER).read_text(encoding="utf-8"))["sources"] == [key]
     with gate.gate_transaction(tmp_path):
         assert gate._transaction_pending(tmp_path) == [key]
-    assert gate.status(tmp_path) == 1 and _assess_sources(tmp_path, [source]).state == "blocked"
+    assert gate.status(tmp_path) == 1 and _assess_sources(tmp_path, [source]).validation != "validated"
     assert not (tmp_path / gate.OVERRIDE).exists() and not list((tmp_path / "_probe").rglob("*.pbip"))
     assert "PROBE: DATA_OK" not in caplog.text and TOKEN not in caplog.text
     assert SENTINEL not in caplog.text + json.dumps(entries) + repr(effects)
@@ -560,7 +560,8 @@ def test_ordinary_relation_defaults_still_earn_real_row_proof(
         "probe-cleared",
     ]
     assert not (tmp_path / gate.MARKER).exists() and gate.status(tmp_path) == 0
-    assert _assess_sources(tmp_path, [source]).state == "live_data_ok"
+    # The package projection no longer reads the probe ledger; real-row proof is owed at sign-off.
+    assert _assess_sources(tmp_path, [source]).state == "live_unproven"
 
 
 @pytest.mark.parametrize("same_query", [True, False], ids=["exact-mirror", "distinct-query-collision"])
