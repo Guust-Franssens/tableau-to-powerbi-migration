@@ -3612,29 +3612,18 @@ def test_start_ready_fresh_binding_must_match_earlier_bytes_and_native_roots(
     assert hits == ([] if change == "foreign-inspection" else [True])
 
 
-@pytest.mark.parametrize(
-    "state,code,expected",
-    [
-        ("blocked", "physical_marker_blocked", "FINDINGS"),
-        ("cannot_establish", "physical_acl_unassessable", "CANNOT_ESTABLISH"),
-    ],
-)
-def test_start_ready_physical_stop_is_owned_by_fresh_binding(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, code: str, expected: str
+def test_start_ready_fresh_binding_no_longer_reads_the_retired_physical_barrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = _packaged_unit(tmp_path)
-    reached = []
 
     def barrier(_root):
-        reached.append(True)
-        return state, code
+        pytest.fail("fresh binding consulted the retired credential-gate physical barrier")
 
     monkeypatch.setattr(crr.data_access, "inspect_physical_barrier", barrier)
     report = crr.scan(root)
-    assert reached
-    assert report["status"] == expected
-    assert report["package_readiness"][0]["failed_stage"] == "binding"
-    assert report["package_binding"][0]["codes"] == [code]
+    assert report["status"] == "START_READY"
+    assert report["package_readiness"][0]["failed_stage"] is None
     assert report["pages_ready"] == report["pages_expected"] == 1
 
 
