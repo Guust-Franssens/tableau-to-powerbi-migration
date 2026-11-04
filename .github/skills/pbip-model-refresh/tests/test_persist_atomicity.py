@@ -1483,6 +1483,30 @@ def _frontmatter(text: str) -> str:
     return text.split("---", 2)[1]
 
 
+def test_o23_structural_stop_withholds_canaries_and_save(monkeypatch, capsys) -> None:
+    """A prompt after Invoke must not reach either data verification or persistence."""
+    # pylint: disable=import-outside-toplevel
+    from _desktop_observer import DesktopWindow, Observation, classify_dialog
+    from test_desktop_actions import _wire_ui_route
+
+    observer = refresh_pbip_model._ui_observer_state
+    wait = refresh_pbip_model._wait_for_engine_completion
+    context, args, calls = _wire_ui_route(monkeypatch)
+    frame = DesktopWindow("", "", 1280, 800, hwnd=789)
+    prompt = DesktopWindow("", "", 500, 300, hwnd=888, owner_hwnd=789, owner_enabled=False, ie_hosted=True)
+    ready = Observation(pid="123", process_started_at="456", target_window=frame)
+    stopped = Observation(pid="123", process_started_at="456", target_window=frame, dialog=classify_dialog(prompt))
+    monkeypatch.setattr(refresh_pbip_model, "_ui_observer_state", observer)
+    monkeypatch.setattr(refresh_pbip_model, "_wait_for_engine_completion", wait)
+    monkeypatch.setattr(
+        refresh_pbip_model, "_in_flight_credential_state", lambda *_a, **_k: stopped if calls else ready
+    )
+    monkeypatch.setattr(refresh_pbip_model.ModalVisualEvidence, "hold_refusal", lambda *_a, **_k: None)
+    assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 3
+    assert calls == ["Refresh"]
+    assert "REFRESH: DIALOG_NEEDS_HUMAN" in capsys.readouterr().out
+
+
 def test_documented_persist_default_matches_the_argparse_default() -> None:
     """The doc and the code cannot drift: the frontmatter's persistence default must equal argparse's.
 

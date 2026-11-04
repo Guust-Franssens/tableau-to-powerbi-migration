@@ -46,7 +46,6 @@ def dialog_capture_fixture(monkeypatch: pytest.MonkeyPatch) -> list[int]:
         return modal.Observation(dialog=finding)
 
     monkeypatch.setattr(capture, "observe", inspect_pid)
-    monkeypatch.setattr(modal, "diagnose_dialog", lambda *_a: ("OBSERVED", "package_session", "template_match"))
     return calls
 
 
@@ -66,9 +65,9 @@ def test_capture_dialog_report_is_once_after_standalone_failure(
     output = capsys.readouterr()
     assert code == capture.EXIT_CAPTURE_FAILED
     assert dialog_capture == [111]
-    assert output.err.count("DIALOG_DIAGNOSTIC ") == 1
-    assert "PackageSession" in output.err and "PRIVATE_TEST_VALUE" not in output.err
-    assert "DIALOG_DIAGNOSTIC " not in output.out
+    assert output.err == "LOCAL_IMAGE: unavailable (not_captured)\n"
+    assert "PRIVATE_TEST_VALUE" not in output.err
+    assert "LOCAL_IMAGE:" not in output.out
 
 
 @pytest.mark.parametrize("phase", ["reload", "capture", "bind", "observation", "missing-observation"])
@@ -106,10 +105,10 @@ def test_capture_dialog_report_preserves_package_refusals_and_receipts(
             pending["generated"]["data_evidence"][key]["status"] == expected
             for key in ("refresh", "canaries", "persistence")
         )
-        assert "DIALOG_DIAGNOSTIC" not in json.dumps(pending)
-        assert "PackageSession" not in _path(package).read_text(encoding="utf-8")
+        assert "LOCAL_IMAGE:" not in json.dumps(pending)
+        assert "LOCAL_IMAGE:" not in _path(package).read_text(encoding="utf-8")
     assert dialog_capture == [PID], "one terminal report must not repeat UIA reads for each failed measurement"
-    assert capsys.readouterr().err.count("DIALOG_DIAGNOSTIC ") == 1
+    assert capsys.readouterr().err == "LOCAL_IMAGE: unavailable (not_captured)\n"
 
 
 def test_capture_dialog_diagnostic_never_inspects_success_or_an_unheld_pid(

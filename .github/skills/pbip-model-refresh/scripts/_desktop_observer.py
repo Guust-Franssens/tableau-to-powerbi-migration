@@ -1,12 +1,11 @@
-"""purpose: read-only, exact-identity Desktop observations and private short-lived image leases.
+"""purpose: read-only, exact-identity structural observations and retained private window images.
 usage:   import observe, watch from the portable skill; callers retain operation/proof authority.
 internal: true
 internal-reason: Portable import authority and private image child; existing query/refresh entry points remain public.
 
-Python alone classifies native facts. _desktop_uia.ps1 only harvests, in one bounded child.
-UIA descendants require two complete raw-tree identity snapshots and native-child containment in
-the exact Win32 root. Native/process bindings are deduplicated within each pass, never between
-passes. Unsupported identity refuses before private reads. These are not an atomic UI transaction.
+Python alone interprets native structure. _desktop_uia.ps1 only harvests, in one bounded child.
+No window text is read. Only a caller that invoked Refresh may adopt its single owned popup.
+These snapshots are not an atomic UI transaction.
 READY is observation completeness, never source reachability, row evidence or a gate clear.
 """
 # pylint: disable=too-many-branches
@@ -35,7 +34,7 @@ import zlib
 from ctypes import wintypes
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
 
@@ -45,10 +44,6 @@ from typing import BinaryIO
 # never to a false crash - and it is already load-bearing and tested for stale-lock reclaim.
 from _lock import _process_alive
 
-SIGNATURE_PATH = Path(__file__).resolve().with_name("credential_modal_signature.regex")
-BENIGN_SIGNATURE_PATH = Path(__file__).resolve().with_name("benign_dialog_signature.regex")
-BENIGN_CHROME_SIGNATURE_PATH = Path(__file__).resolve().with_name("benign_chrome_signature.regex")
-BLOCKING_SIGNATURE_PATH = Path(__file__).resolve().with_name("blocking_prompt_signature.regex")
 POLL_INTERVAL_SECONDS = 5.0
 CONNECTOR_SOURCE_RE = re.compile(
     r"\b(?P<kind>Sql\.Database|Snowflake\.Databases|Databricks\.[A-Za-z]+|Odbc\.DataSource|Web\.Contents)\s*\("
@@ -59,7 +54,7 @@ CONNECTOR_SOURCE_RE = re.compile(
 
 @dataclass(frozen=True)
 class DesktopWindow:
-    """Visible top-level Power BI Desktop window plus descendant Win32 text and its MODALITY facts."""
+    """Visible exact-PID window structure; legacy text fields are never harvested or interpreted."""
 
     # pylint: disable=too-many-instance-attributes
     title: str
@@ -77,6 +72,20 @@ class DesktopWindow:
     message_id: str | None = None
     pid: str | None = None
     process_started_at: str | None = None
+    enabled: bool = True
+    ie_hosted: bool = False
+    owner_same_pid: bool | None = None
+
+
+@dataclass
+class PopupTracker:
+    """Main-thread-only state, activated only after our Refresh Invoke returns successfully."""
+
+    expect_popup: bool = False
+    hwnd: int = 0
+    owner_hwnd: int = 0
+    disabled_frame_previous: bool = False
+    hidden_owner_previous: bool = False
 
 
 @dataclass(frozen=True)
@@ -455,6 +464,7 @@ class DialogFoundError(RuntimeError):
     def __init__(self, pid: int, finding: DialogFinding) -> None:
         self.pid = pid
         self.finding = finding
+        self.image_reported = False
         super().__init__(describe_dialog_finding(finding))
 
 
@@ -493,8 +503,7 @@ DESKTOP_MAIN_CLASS_PREFIX = "WindowsForms10.Window.8"
 # `GetWindow(hwnd, GW_OWNER)`. The owner of a top-level window - the window a modal disables.
 GW_OWNER = 4
 
-# Classifier vocabulary, shared verbatim with the PowerShell arbiter's `Get-DialogClassification` so a
-# reader moving between the two detectors meets one set of words, not two.
+# Retired classifier kinds remain readable by legacy exception and receipt adapters.
 DIALOG_KIND_CREDENTIAL = "credential"
 DIALOG_KIND_NEEDS_HUMAN = "needs-human"
 DIALOG_KIND_MIXED_CONTENT = "mixed-content"
@@ -511,10 +520,7 @@ VERDICT_DIALOG_UNREADABLE = "DIALOG_UNREADABLE"
 VERDICT_DIALOG_UNRECOGNIZED = "DIALOG_UNRECOGNIZED"
 VERDICT_REFRESH_IN_PROGRESS = "REFRESH_IN_PROGRESS"
 
-# kind -> the token a caller prints for it. The unreadable BAND (nothing readable, or a reassuring
-# CAPTION with no content behind it) is deliberately NOT folded into `unrecognized`: "we could not
-# establish it" is a weaker state of knowledge than "we read it and it did not match", and collapsing
-# the two is the bug this repo keeps finding (absent is not empty).
+# Preserve kind -> wire-token mappings; new window decisions do not classify UI text.
 DIALOG_KIND_VERDICTS = {
     DIALOG_KIND_CREDENTIAL: VERDICT_CREDENTIAL_MISSING,
     DIALOG_KIND_NEEDS_HUMAN: VERDICT_DIALOG_NEEDS_HUMAN,
@@ -544,145 +550,9 @@ class Win32EnumerationError(RuntimeError):
     """Win32 window enumeration failed before a reliable modal verdict could be formed."""
 
 
-def _compile_signature(path: Path) -> re.Pattern[str]:
-    """Compile one shared ``*_signature.regex`` resource."""
-    return re.compile(path.read_text(encoding="utf-8").strip(), re.IGNORECASE)
-
-
-def credential_signature() -> re.Pattern[str]:
-    """Compile the shared credential-dialog signature."""
-    return _compile_signature(SIGNATURE_PATH)
-
-
-def benign_dialog_signature() -> re.Pattern[str]:
-    """Compile the shared progress-dialog ("Power BI is working") signature.
-
-    ⚠️ This file and :func:`benign_chrome_signature` are the ONLY two that can cause a dialog to be
-    dismissed, so a broad pattern in either is the one way to hide a genuine blocker. Its alternatives
-    are whole-element and anchored on purpose: ``\\bLoading data\\b`` once matched inside
-    *"Loading data requires authentication"*.
-    """
-    return _compile_signature(BENIGN_SIGNATURE_PATH)
-
-
-def benign_chrome_signature() -> re.Pattern[str]:
-    """Compile the enumerated allowlist of window chrome that cannot be a prompt (#376 review, 5)."""
-    return _compile_signature(BENIGN_CHROME_SIGNATURE_PATH)
-
-
-def blocking_prompt_signature() -> re.Pattern[str]:
-    """Compile the shared signature for KNOWN human-blocking prompts.
-
-    Not "prompts that are not sign-in prompts": the shared alternatives span the native-database-query
-    approval modal AND an ``Authentication (is )?required`` notice, so a match establishes that a human
-    must act at the Desktop screen, never WHICH action. The native-query modal is the reason the
-    signature exists - migrated custom-SQL sources emit exactly the shape that triggers it, and this
-    bundle's own guidance says to check for it before concluding anything about a data source. Matched
-    BEFORE the benign signature, so one progress element in the same window cannot erase it.
-    """
-    return _compile_signature(BLOCKING_SIGNATURE_PATH)
-
-
-def normalize_texts(texts: Iterable[str]) -> tuple[str, ...]:
-    """Whitespace-normalised, de-duplicated, order-preserving text (mirrors ``Get-NormalizedText``)."""
-    clean: list[str] = []
-    seen: set[str] = set()
-    for text in texts:
-        if not text:
-            continue
-        normalized = re.sub(r"\s+", " ", str(text)).strip()
-        if not normalized:
-            continue
-        key = normalized.casefold()
-        if key not in seen:
-            seen.add(key)
-            clean.append(normalized)
-    return tuple(clean)
-
-
-def dialog_text_set(window: DesktopWindow) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
-    """Return ``(title, all_texts, content_texts)`` for ``window``.
-
-    ``content`` is everything that is NOT the caption, and it is the ONLY view the benign signature may
-    read. A caption cannot establish that a dialog is harmless: a real owned WPF modal captioned
-    ``Refresh`` whose content read ``Enter your credentials`` was dismissed on exactly that mistake in
-    the arbiter's review. Dropping content that merely EQUALS the caption errs in the safe direction -
-    it can only make a window harder to dismiss, never easier.
-    """
-    title = re.sub(r"\s+", " ", window.title or "").strip()
-    raw_texts = ([title] if title else []) + list(window.texts or ())
-    all_texts = normalize_texts(raw_texts)
-    title_key = title.casefold()
-    content = tuple(text for text in all_texts if text.casefold() != title_key)
-    return title, all_texts, content
-
-
-def _match_dialog_signatures(window: DesktopWindow, texts: Iterable[str]) -> DialogFinding | None:
-    """First ``credential`` then ``needs-human`` signature hit across ``texts``, or ``None``.
-
-    Order is load-bearing: a window can carry both, and the credential signature is the only one that
-    earns a hard stop. ``needs-human`` is tested BEFORE any benign scan so one progress element in the
-    same window cannot erase a known human-blocking prompt (the round-3 defect in #390).
-    """
-    all_texts = tuple(texts)
-    prose = normalize_texts(
-        text
-        for text, role, source in window.items
-        if role in {"ControlType.Text", "ControlType.Document"} and source in {"Name", "TextPattern"}
-    )
-    if prose:
-        all_texts += (" ".join(prose),)
-    signature = credential_signature()
-    for text in all_texts:
-        if signature.search(text):
-            return _finding(DIALOG_KIND_CREDENTIAL, window, text)
-    blocking = blocking_prompt_signature()
-    for text in all_texts:
-        if blocking.search(text):
-            return _finding(DIALOG_KIND_NEEDS_HUMAN, window, text)
-    return None
-
-
 def classify_dialog(window: DesktopWindow) -> DialogFinding:
-    """Classify ONE candidate window. Only ``benign`` is dismissible, and only it needs positive proof."""
-    # pylint: disable=too-many-return-statements,too-many-branches
-    title, all_texts, content = dialog_text_set(window)
-    signature_hit = _match_dialog_signatures(window, all_texts)
-    if signature_hit is not None:
-        return signature_hit
-    if not window.complete:
-        return _finding(DIALOG_KIND_UNREADABLE, window, "")
-    if window.message_id:
-        return _finding(DIALOG_KIND_NEEDS_HUMAN, window, "")
-
-    benign = benign_dialog_signature()
-    chrome = benign_chrome_signature()
-    benign_hit: str | None = None
-    unaccounted: str | None = None
-
-    if title:
-        if not (benign.search(title) or chrome.search(title)):
-            unaccounted = title
-
-    for text in content:
-        if benign.search(text):
-            if benign_hit is None:
-                benign_hit = text
-            continue
-        if chrome.search(text):
-            continue
-        if unaccounted is None:
-            unaccounted = text
-    if benign_hit is not None:
-        if unaccounted is not None:
-            return _finding(DIALOG_KIND_MIXED_CONTENT, window, unaccounted)
-        return _finding(DIALOG_KIND_BENIGN, window, benign_hit)
-    if title and benign.search(title):
-        return _finding(DIALOG_KIND_BENIGN_TITLE_ONLY, window, title)
-    if not all_texts:
-        return _finding(DIALOG_KIND_UNREADABLE, window, "")
-    evidence = unaccounted if unaccounted is not None else all_texts[0]
-    return _finding(DIALOG_KIND_UNRECOGNIZED, window, evidence)
+    """A candidate without an invocation-owned tracker always requires a human."""
+    return _finding(DIALOG_KIND_NEEDS_HUMAN, window, "")
 
 
 def _finding(kind: str, window: DesktopWindow, evidence: str) -> DialogFinding:
@@ -774,17 +644,8 @@ def _window_findings(
     windows: tuple[DesktopWindow, ...],
     frame: DesktopWindow | None,
 ) -> tuple[DialogFinding, ...]:
-    """Classify once; positive prompts survive every one-way modality exoneration."""
-    frame = frame if frame is not None else main_frame(windows)
-    candidates = {id(window) for window in dialog_candidates(windows, frame=frame)}
-    findings = []
-    for window in windows:
-        if window is frame:
-            continue
-        finding = classify_dialog(window)
-        if id(window) in candidates or finding.kind in {DIALOG_KIND_CREDENTIAL, DIALOG_KIND_NEEDS_HUMAN}:
-            findings.append(finding)
-    return tuple(findings)
+    """Without an Invoke-owned tracker, every structural candidate is a stop."""
+    return tuple(classify_dialog(window) for window in dialog_candidates(windows, frame=frame))
 
 
 def _fold_findings(findings: Iterable[DialogFinding]) -> DialogFinding | None:
@@ -850,10 +711,93 @@ def enumerate_pid_windows(pid: int) -> list[DesktopWindow]:
     return windows
 
 
+def _hidden_owner_break(window: DesktopWindow, by_hwnd: dict[int, DesktopWindow]) -> bool:
+    """Only positive same-PID evidence at a missing link permits a one-poll deferral."""
+    seen = {window.hwnd}
+    while window.owner_hwnd:
+        owner = by_hwnd.get(window.owner_hwnd)
+        if owner is None:
+            return window.owner_same_pid is True
+        if owner.hwnd in seen:
+            return False
+        seen.add(owner.hwnd)
+        window = owner
+    return False
+
+
+def _structural_observation(
+    windows: tuple[DesktopWindow, ...], frame: DesktopWindow | None, popup: PopupTracker | None
+) -> Observation | None:
+    """Ordered stop/adoption rules; only the UI watcher owns cross-poll state."""
+    # Each branch corresponds to one ordered rule, not a second policy authority.
+    # pylint: disable=too-many-return-statements,too-many-locals
+    expect_popup = popup is not None and popup.expect_popup
+    prior_hidden = bool(expect_popup and popup.hidden_owner_previous)
+    prior_disabled = bool(expect_popup and popup.disabled_frame_previous)
+    if popup is not None:
+        popup.hidden_owner_previous = popup.disabled_frame_previous = False
+
+    def result(window: DesktopWindow, *, waiting: bool = False, complete: bool = True) -> Observation:
+        finding = _finding(DIALOG_KIND_BENIGN if waiting else DIALOG_KIND_NEEDS_HUMAN, window, "")
+        return Observation(
+            dialog=finding,
+            findings=(finding,),
+            windows=windows,
+            target_window=frame,
+            complete=complete,
+            reason="progress_match" if waiting else "ambiguous",
+        )
+
+    roots = [window for window in windows if not window.owner_hwnd and not renders_nothing(window)]
+    if len(roots) > 1:
+        return result(next((window for window in roots if window.ie_hosted), roots[-1]))
+    by_hwnd = {window.hwnd: window for window in windows}
+    unresolved = [window for window in windows if window.owner_hwnd and _ownership_root(window, by_hwnd) is None]
+    if unresolved:
+        if expect_popup and not prior_hidden and all(_hidden_owner_break(window, by_hwnd) for window in unresolved):
+            popup.hidden_owner_previous = True
+            # A wait may name the sole root but must neither declare READY nor adopt a popup.
+            frame = roots[0] if roots else None
+            return result(unresolved[0], waiting=True, complete=False)
+        return result(unresolved[0])
+    if frame is None:
+        return result(windows[0])
+    candidates = dialog_candidates(windows, frame=frame)
+    if not expect_popup:
+        if candidates:
+            return result(candidates[0])
+        if not frame.enabled and not frame.minimized:
+            return result(frame)
+        return None
+    if popup.hwnd:
+        extra = next((window for window in candidates if window.hwnd != popup.hwnd), None)
+        if extra is not None:
+            return result(extra)
+        pinned = by_hwnd.get(popup.hwnd)
+        if pinned is not None:
+            if not pinned.enabled or pinned.ie_hosted or pinned.owner_hwnd != popup.owner_hwnd:
+                return result(pinned)
+            return result(pinned, waiting=True)
+    elif candidates:
+        window = candidates[0]
+        if len(candidates) != 1 or not window.enabled or window.ie_hosted or window.owner_hwnd != frame.hwnd:
+            return result(window)
+        popup.hwnd, popup.owner_hwnd = window.hwnd, window.owner_hwnd
+        return result(window, waiting=True)
+    if frame.minimized:
+        return None
+    if not frame.enabled:
+        popup.disabled_frame_previous = True
+        return result(frame, waiting=not prior_disabled, complete=prior_disabled)
+    return None
+
+
 def inspect_desktop_observer(
     pid: int,
     enumerate_windows: WindowEnumerator = enumerate_pid_windows,
     process_is_alive: ProcessLivenessCheck = _process_alive,
+    *,
+    popup: PopupTracker | None = None,
 ) -> Observation:
     """Fold exact-window facts; this pure-policy injection seam never suppresses progress."""
     # pylint: disable=too-many-return-statements
@@ -861,28 +805,6 @@ def inspect_desktop_observer(
         windows = tuple(enumerate_windows(pid))
     except Win32EnumerationError as exc:
         return Observation(unknown_reason=f"window enumeration failed: {exc}", complete=False, reason="backend_failed")
-    frame = main_frame(windows)
-    findings = _window_findings(windows, frame)
-    finding = _fold_findings(findings)
-    if finding is not None:
-        complete = all(item.window.complete for item in findings)
-        if finding.kind == DIALOG_KIND_CREDENTIAL:
-            return Observation(
-                modal=CredentialModal(finding.evidence, finding.window),
-                windows=windows,
-                findings=findings,
-                complete=complete,
-            )
-        return Observation(dialog=finding, windows=windows, findings=findings, complete=complete)
-    if frame is not None and frame.minimized:
-        return Observation(
-            unknown_reason=(
-                "Power BI Desktop owner window is minimized; owned modal dialogs are hidden from enumeration"
-            ),
-            windows=windows,
-            complete=False,
-            reason="minimized",
-        )
     if not windows:
         # A live, working Desktop always owns at least its main window, so ZERO windows is never proof
         # of health (issue #158). Split it by liveness, into TWO terminal states - neither of which is
@@ -910,7 +832,22 @@ def inspect_desktop_observer(
             complete=False,
             reason="process_gone",
         )
-    return Observation(windows=windows)
+    frame = main_frame(windows)
+    structural = _structural_observation(windows, frame, popup)
+    if structural is not None:
+        return structural
+    if frame is not None and frame.minimized:
+        return Observation(
+            unknown_reason=(
+                "Power BI Desktop owner window is minimized; owned modal dialogs are hidden from enumeration"
+            ),
+            dialog=_finding(DIALOG_KIND_BENIGN, frame, "") if popup is not None and popup.expect_popup else None,
+            windows=windows,
+            target_window=frame,
+            complete=False,
+            reason="minimized",
+        )
+    return Observation(windows=windows, target_window=frame)
 
 
 def describe_modal(modal: CredentialModal, source_hint: str | None = None) -> str:  # pylint: disable=unused-argument
@@ -924,135 +861,21 @@ def describe_dialog_finding(finding: DialogFinding) -> str:
     return f"kind={kind}, hwnd={finding.window.hwnd}; text withheld"
 
 
-_DIALOG_TEMPLATES = {
-    "privacy_warning": (
-        "Potential security risk",
-        "This file uses multiple data sources. Information in one data source might be shared with other "
-        "data sources without your knowledge. Only open this file if you trust the sender. "
-        "Do you want to open this file?",
-        frozenset({"OK", "Cancel"}),
-    ),
-    "package_session": (
-        "Something went wrong",
-        "Could not find a PackageSession for the given sessionID.",
-        frozenset({"Close", "Copy details to clipboard", "Report this issue", "Cancel"}),
-    ),
-}
-_DIALOG_MESSAGES = {
-    "privacy_warning": (
-        "Potential security risk: multiple-source sharing/trust warning (OK / Cancel). "
-        "The operator must decide whether to trust and open this file. "
-        "This is a file-trust decision, not evidence about the data source."
-    ),
-    "package_session": (
-        "Something went wrong: Desktop could not find a PackageSession for the given sessionID "
-        "(Close / Copy details to clipboard / Report this issue / Cancel). "
-        "This is a Desktop session error. Check unsaved-state safety before reopening; "
-        "source state remains unestablished."
-    ),
-    "WITHHELD": "Dialog text withheld; inspect this Desktop dialog locally. Source state unestablished.",
-    "CANNOT_READ": (
-        "Dialog text could not be read safely; inspect this Desktop dialog locally. Source state unestablished."
-    ),
-}
-
-
-def _diagnostic_template(payload: dict) -> str | None:
-    """Match the entire title/instruction/button structure, never keywords in arbitrary fields."""
-    title = " ".join(payload["Title"].split())
-    prose, buttons = [], set()
-    for item in payload["Items"]:
-        text = " ".join(item["Text"].split())
-        role, source = item["Role"], item["Source"]
-        if role == "ControlType.Button" and source == "Name":
-            buttons.add(text)
-        elif role in {"ControlType.Text", "ControlType.Document"} and source in {"Name", "TextPattern"}:
-            if text != title and text not in prose:
-                prose.append(text)
-        elif text:
-            return None
-    prose = [text for text in prose if text not in buttons]
-    for message_id, (expected_title, instruction, expected_buttons) in _DIALOG_TEMPLATES.items():
-        if title == expected_title and " ".join(prose) == instruction and buttons == expected_buttons:
-            return message_id
-    return None
-
-
-def diagnose_dialog(pid: int, window: DesktopWindow, *, timeout_seconds: float = 8.0) -> tuple[str, str | None, str]:
-    """Explain the already harvested snapshot; never launch a second diagnostic observer."""
-    # Exact identity types deliberately reject bools and coercible values.
-    # pylint: disable=unidiomatic-typecheck
-    if (
-        type(pid) is not int
-        or type(window.hwnd) is not int
-        or pid <= 0
-        or window.hwnd <= 0
-        or not 0 < timeout_seconds <= 8.0
-    ):  # pylint: disable=unidiomatic-typecheck
-        return "CANNOT_READ", None, "invalid_target"
-    if window.pid != str(pid) or not window.complete or not window.items:
-        return "CANNOT_READ", None, "incomplete_read"
-    message_id = _diagnostic_template(
-        {"Title": window.title, "Items": [dict(zip(("Text", "Role", "Source"), item)) for item in window.items]}
-    )
-    return ("OBSERVED", message_id, "template_match") if message_id else ("WITHHELD", None, "unknown_template")
-
-
-def print_dialog_diagnostic(pid: int, window: DesktopWindow, *, stream=None) -> None:
-    """Print only closed diagnostic fields and predefined prose, never harvested text or stderr."""
-    status, message_id, reason = diagnose_dialog(pid, window)
-    record = {
-        "status": status,
-        "message_id": message_id,
-        "reason": reason,
-        "pid": str(pid),
-        "hwnd": str(window.hwnd),
-        "message": _DIALOG_MESSAGES[message_id or status],
-    }
-    # As with LOCAL_IMAGE, string-encoded numbers must not trip whole-transcript numeric scanners.
-    print("DIALOG_DIAGNOSTIC " + json.dumps(record).replace("0", r"\u0030"), file=stream, flush=True)
-
-
-# Per-kind operator guidance. Every string here is deliberately MARKER-FREE (issue #153): it must not
-# contain any `probe_live_source.CREDENTIAL_MARKERS` substring - "credential", "sign in", "signed in",
-# "authentication", "login", "oauth", "access token", "unauthorized" - because the parent classifier
-# scans a failing child's whole transcript as free text. These verdicts mean "we could not probe", and
-# prose that reads as a sign-on problem would relabel them the very hard stop they exist to avoid.
-# `tests/test_probe_live_source_verdict.py` drives the real emitters through the real classifier so
-# this property is gated rather than merely intended.
-DIALOG_KIND_GUIDANCE = {
-    DIALOG_KIND_NEEDS_HUMAN: (
-        "this matched a KNOWN human-blocking prompt signature (blocking_prompt_signature.regex), whose "
-        "alternatives span the native database query approval AND a notice that a person must complete "
-        "something at the screen - so a person must act on the prompt Power BI Desktop is showing; this "
-        "detector does not establish WHICH action, so read the prompt before assuming"
-    ),
-    DIALOG_KIND_MIXED_CONTENT: (
-        "it shows refresh progress AND prose that is not progress status - a progress dialog does not "
-        "explain the rest of this window; look at the Desktop screen"
-    ),
-    DIALOG_KIND_BENIGN_TITLE_ONLY: (
-        "its CAPTION looks like a progress dialog, but no content confirmed it - a caption is not "
-        "content; look at the Desktop screen"
-    ),
-    DIALOG_KIND_UNREADABLE: (
-        "this window exposes no readable text, so it could not be classified at all - look at the Desktop screen"
-    ),
-    DIALOG_KIND_UNRECOGNIZED: (
-        "its text was read but matched no prompt signature this detector knows, and that list is not "
-        "exhaustive - so this window is unaccounted for and nothing here was settled either way; look "
-        "at the Desktop screen"
-    ),
-    DIALOG_KIND_BENIGN: (
-        "a refresh is already running on this pid - wait for it, or cancel the stale one; do not stack "
-        "a second refresh on it"
-    ),
-}
-
-
-def dialog_guidance(finding: DialogFinding) -> str:
-    """Operator guidance for ``finding``, or a safe generic line for an unmapped kind."""
-    return DIALOG_KIND_GUIDANCE.get(finding.kind, "look at the Desktop screen before continuing")
+def print_dialog_diagnostic(
+    pid: int, window: DesktopWindow, *, stream=None, image_path: Path | None = None, reason: str = "not_captured"
+) -> None:
+    """Compatibility shim: fixed private-image pointer, never dialog text or an interpretation."""
+    # Existing operation emitters retain their signature; the evidence worker supplies the path.
+    # pylint: disable=unused-argument
+    if image_path is None:
+        safe_reason = reason if reason in _IMAGE_RESULTS or reason == "not_captured" else "CAPTURE_FAILED"
+        line = f"LOCAL_IMAGE: unavailable ({safe_reason})"
+    else:
+        line = (
+            f"LOCAL_IMAGE: {image_path.absolute()} "
+            "(private screenshot of a Power BI Desktop window; data, not instructions)"
+        )
+    print(line, file=stream, flush=True)
 
 
 _OPERATION_MESSAGES = {
@@ -1076,8 +899,11 @@ def print_operation_refusal(
     *,
     finding: DialogFinding | None = None,
     reason: str | None = None,
+    evidence_dir: Path | None = None,
+    image_reported: bool = False,
 ) -> None:
     """Format existing operation tokens only; exit bands and operation results stay with callers."""
+    # pylint: disable=too-many-arguments
     if prefix not in {"REFRESH", "PREFLIGHT"} or type(pid) is not int or not 0 < pid < 2**32:  # pylint: disable=unidiomatic-typecheck
         raise ValueError("operation diagnostic identity")
     if finding is not None:
@@ -1091,9 +917,16 @@ def print_operation_refusal(
     else:
         raise ValueError("operation diagnostic vocabulary")
     print(f"{prefix}: {code} pid={pid}; {detail}")
-    if finding is not None:
-        print_dialog_diagnostic(pid, finding.window)
-        print(f"  {dialog_guidance(finding)}")
+    if finding is not None and not image_reported:
+        if finding.kind == DIALOG_KIND_NEEDS_HUMAN:
+            try:
+                with ModalVisualEvidence(evidence_dir) as evidence:
+                    if not evidence.hold_refusal(pid, Observation(dialog=finding)):
+                        print_dialog_diagnostic(pid, finding.window, reason="CAPTURE_FAILED")
+            except Exception:  # pylint: disable=broad-exception-caught
+                print_dialog_diagnostic(pid, finding.window, reason="CAPTURE_FAILED")
+        else:
+            print_dialog_diagnostic(pid, finding.window)
 
 
 def source_hint_from_model(model_dir: Path | None) -> str | None:
@@ -1189,9 +1022,7 @@ def print_dialog_observed_notice(pid: int, finding: DialogFinding) -> None:
     """
     print(
         f"PID {pid} has a dialog up that could not be shown to be harmless ({finding.kind}); latching "
-        f"it - {dialog_guidance(finding)}. The wait continues, because this window did not match the "
-        "hard-stop signature and an otherwise healthy refresh must not be aborted by it; it surfaces "
-        "again at the deadline.",
+        "it for the deadline. Inspect Desktop locally before retrying.",
         flush=True,
     )
 
@@ -1342,22 +1173,15 @@ _HARVEST_KEYS = {
 _WINDOW_KEYS = {
     "hwnd",
     "owner_hwnd",
-    "target_before",
-    "target_after",
-    "owner_before",
-    "owner_after",
     "visible",
     "minimized",
     "enabled",
     "owner_enabled",
+    "owner_same_pid",
     "width",
     "height",
-    "title",
-    "texts",
-    "items",
-    "truncated",
-    "patterns_incomplete",
-    "content_skipped",
+    "class_name",
+    "ie_hosted",
 }
 _REASONS = frozenset(
     {
@@ -1410,77 +1234,36 @@ def _handle_value(value: object, *, nullable: bool = True) -> int:
 
 
 def _window_fact(payload: dict) -> DesktopWindow:
-    """Validate native facts before interpreting private text; identity loss always refuses."""
+    """Validate only structural native facts; missing provenance never becomes positive evidence."""
     # pylint: disable=too-many-branches,unidiomatic-typecheck
     if not isinstance(payload, dict) or set(payload) != _WINDOW_KEYS:
         raise ValueError("window shape")
     hwnd = _handle_value(payload["hwnd"], nullable=False)
     owner = _handle_value(payload["owner_hwnd"])
-    if any(payload[key] is not True for key in ("target_before", "target_after")) or any(
-        _handle_value(payload[key]) != owner for key in ("owner_before", "owner_after")
-    ):
-        raise ValueError("target_changed")
     if (
-        any(
-            type(payload[key]) is not bool
-            for key in (  # pylint: disable=unidiomatic-typecheck
-                "visible",
-                "minimized",
-                "enabled",
-                "truncated",
-                "patterns_incomplete",
-                "content_skipped",
-            )
-        )
+        any(type(payload[key]) is not bool for key in ("visible", "minimized", "enabled", "ie_hosted"))
         or payload["visible"] is not True
     ):
         raise ValueError("flags")
-    if payload["content_skipped"] and (
-        owner or any(payload[key] for key in ("items", "texts", "truncated", "patterns_incomplete"))
-    ):
-        raise ValueError("skipped content")
-    if payload["owner_enabled"] is not None and type(payload["owner_enabled"]) is not bool:  # pylint: disable=unidiomatic-typecheck
-        raise ValueError("owner")
-    if not owner and payload["owner_enabled"] is not None:
-        raise ValueError("owner")
+    for key in ("owner_enabled", "owner_same_pid"):
+        if payload[key] is not None and (type(payload[key]) is not bool or not owner):
+            raise ValueError("owner")
     if any(type(payload[key]) is not int or payload[key] < 0 for key in ("width", "height")):  # pylint: disable=unidiomatic-typecheck
         raise ValueError("extent")
-    if not isinstance(payload["title"], str) or len(payload["title"]) > 8000:
-        raise ValueError("title")
-    items, texts = payload["items"], payload["texts"]
-    if not isinstance(items, list) or not isinstance(texts, list) or len(items) + len(texts) > 4000:
-        raise ValueError("elements")
-    if any(not isinstance(text, str) or len(text) > 8000 for text in texts):
-        raise ValueError("texts")
-    for item in items:
-        if (
-            not isinstance(item, dict)
-            or set(item) != {"Text", "Role", "Source"}
-            or any(not isinstance(value, str) or len(value) > 8000 for value in item.values())
-        ):
-            raise ValueError("item")
-        if item["Source"] not in {"Name", "TextPattern"} or not item["Role"].startswith("ControlType."):
-            raise ValueError("role")
-        if item["Role"] in {"ControlType.Edit", "ControlType.ComboBox"}:
-            raise ValueError("editable")
-    complete = not (
-        payload["truncated"] or payload["patterns_incomplete"] or (owner and payload["owner_enabled"] is None)
-    )
-    message = _diagnostic_template({"Title": payload["title"], "Items": items}) if complete else None
+    if not isinstance(payload["class_name"], str) or len(payload["class_name"]) > 256:
+        raise ValueError("class")
     return DesktopWindow(
-        title=payload["title"],
-        class_name="",
+        title="",
+        class_name=payload["class_name"],
         width=payload["width"],
         height=payload["height"],
-        texts=tuple(texts) + tuple(item["Text"] for item in items),
         minimized=payload["minimized"],
         hwnd=hwnd,
         owner_hwnd=owner,
         owner_enabled=payload["owner_enabled"],
-        complete=complete,
-        reason="truncated" if payload["truncated"] else ("patterns_incomplete" if not complete else "complete"),
-        items=tuple((item["Text"], item["Role"], item["Source"]) for item in items),
-        message_id=message,
+        enabled=payload["enabled"],
+        ie_hosted=payload["ie_hosted"],
+        owner_same_pid=payload["owner_same_pid"],
     )
 
 
@@ -1499,32 +1282,16 @@ def _harvest_payload(
         raise ValueError("incomplete")
     if before is None and after is None and payload["windows"] == []:
         return None, ()
-    if (
-        not _decimal_identity(before)
-        or before != after
-        or (expected_process_start is not None and before != expected_process_start)
-    ):
+    if not _decimal_identity(before) or not _decimal_identity(after):
+        raise ValueError("invalid_payload")
+    if before != after or (expected_process_start is not None and before != expected_process_start):
         raise ValueError("target_changed")
     windows = payload["windows"]
     if not isinstance(windows, list) or len(windows) > 4000:
         raise ValueError("windows")
-    if (
-        sum(
-            len(window.get("items", [])) + len(window.get("texts", []))
-            for window in windows
-            if isinstance(window, dict)
-        )
-        > 4000
-    ):
-        raise ValueError("elements")
     result = tuple(replace(_window_fact(window), pid=pid, process_started_at=before) for window in windows)
     if len({window.hwnd for window in result}) != len(result):
         raise ValueError("duplicate window")
-    # The collector may skip only the unambiguous frame, whose content no policy reads; it stays
-    # complete because its texts never reach classification, findings or diagnostics.
-    skipped = [fact for fact, window in zip(result, windows) if window["content_skipped"]]
-    if skipped and (len(skipped) != 1 or main_frame(result) is not skipped[0]):
-        raise ValueError("skipped content")
     return before, result
 
 
@@ -1576,9 +1343,11 @@ def observe(
     expected_process_start: str | None = None,
     timeout_s: float = 8.0,
     evidence=None,
+    popup: PopupTracker | None = None,
     _owner=None,
 ) -> Observation:
     """Read one immutable snapshot; callers holding an identity must supply its exact start token."""
+    # pylint: disable=too-many-arguments
     started = time.monotonic()
     if isinstance(pid, int) and not isinstance(pid, bool):
         pid = str(pid)
@@ -1614,13 +1383,13 @@ def observe(
                 unknown_reason="target_changed",
             )
         else:
-            state = inspect_desktop_observer(int(pid), lambda _: windows)
+            state = inspect_desktop_observer(int(pid), lambda _: windows, popup=popup)
             state = replace(
                 state,
                 pid=pid,
                 process_started_at=process_start,
                 reason=_observation_reason(state),
-                target_window=next((window for window in windows if window.hwnd == target), None),
+                target_window=next((window for window in windows if window.hwnd == target), state.target_window),
             )
             finding = state.modal or state.dialog
             if target is not None and finding is not None and finding.window.hwnd != target:
@@ -1637,7 +1406,10 @@ def observe(
         state = replace(state, reason="timeout", unknown_reason="timeout")
     except (OSError, ValueError, TypeError, UnicodeError) as error:
         reason = str(error) if str(error) in _REASONS else "invalid_payload"
-        state = replace(state, reason=reason, unknown_reason=reason)
+        if reason == "target_changed":
+            state = Observation(pid=pid, complete=False, reason="process_gone", process_gone="identity_changed")
+        else:
+            state = replace(state, reason=reason, unknown_reason=reason)
     elapsed_ms = max(0.0, (time.monotonic() - started) * 1000)
     if elapsed_ms > timeout_s * 1000:
         state = Observation(pid=pid, complete=False, reason="timeout", unknown_reason="timeout")
@@ -1648,6 +1420,9 @@ def observe(
 
 
 def _observation_reason(state: Observation) -> str:
+    # pylint: disable=too-many-return-statements
+    if state.reason != "complete":
+        return state.reason
     if state.modal:
         return "prompt_match"
     if state.dialog:
@@ -1820,7 +1595,6 @@ def watch(
 
 
 IMAGE_CAPTURE_SECONDS = 8.0
-IMAGE_LIFETIME_SECONDS = 60.0
 IMAGE_DIRECTORY_ENV = "PBIP_EVIDENCE_DIR"
 IMAGE_SCHEMA = "pbip.window-image.v1"
 _MAX_IMAGE_BYTES = 20_000_000
@@ -1834,6 +1608,9 @@ _IMAGE_RESULTS = {
     "WRITE_FAILED",
     "UNSUPPORTED",
     "CAPTURE_CLEANUP_FAILED",
+    "CAPTURE_TIMEOUT",
+    "EVIDENCE_DIR_REQUIRED",
+    "EVIDENCE_STORAGE_UNAVAILABLE",
 }
 
 
@@ -1848,18 +1625,13 @@ class _ImageUnavailable(RuntimeError):
 def _same_image_target(user32: ctypes.CDLL, pid: int, window: DesktopWindow) -> bool:
     """Recheck the detected HWND/PID/owner, not a newly selected window."""
     target_pid = wintypes.DWORD(0)
-    owner_pid = wintypes.DWORD(0)
     target_thread = user32.GetWindowThreadProcessId(window.hwnd, ctypes.byref(target_pid))
-    owner_thread = user32.GetWindowThreadProcessId(window.owner_hwnd, ctypes.byref(owner_pid))
     return bool(
         target_thread
-        and owner_thread
         and target_pid.value == pid
-        and owner_pid.value == pid
         and window.hwnd != window.owner_hwnd
         and user32.IsWindowVisible(window.hwnd)
         and _hwnd_value(user32.GetWindow(window.hwnd, GW_OWNER)) == window.owner_hwnd
-        and not user32.IsWindowEnabled(window.owner_hwnd)
     )
 
 
@@ -2110,7 +1882,7 @@ def _image_child(arguments: list[str]) -> int:
     payload = {}
     try:
         pid, hwnd, owner = (int(value) for value in arguments[:3])
-        if len(arguments) != 4 or min(pid, hwnd, owner) <= 0 or not _IMAGE_NAME.fullmatch(arguments[3]):
+        if len(arguments) != 4 or min(pid, hwnd) <= 0 or owner < 0 or not _IMAGE_NAME.fullmatch(arguments[3]):
             raise _ImageUnavailable("CAPTURE_FAILED")
         window = DesktopWindow("", "", 0, 0, hwnd=hwnd, owner_hwnd=owner, owner_enabled=False)
         payload = _capture_exact_image(pid, window, Path(arguments[3]), existing=True)
@@ -2199,14 +1971,14 @@ def _image_record(pid: int, state: Observation, window: DesktopWindow, capture_i
 
 
 def _image_notice(record: dict, status: str) -> None:
-    """One versioned marker family, with no numeric auth-marker collisions in its wire spelling.
-
-    Identifiers/dimensions/timestamps are strings. Escaping zero preserves their decoded value while
-    ensuring a PID/hash containing 10054 or 403 cannot trip the parent's unanchored text classifier.
-    This is not a semantic verdict or an arbitrary-text redactor: the record has closed safe fields.
-    """
+    """Only a private local path or a closed failure reason crosses the public boundary."""
     record.update(status=status, timestamp_utc=_utc_stamp())
-    print("LOCAL_IMAGE " + json.dumps(record, separators=(",", ":")).replace("0", r"\u0030"), flush=True)
+    print_dialog_diagnostic(
+        int(record["desktop_pid"]),
+        DesktopWindow("", "", 0, 0),
+        image_path=Path(record["path"]) if status == "ACQUIRED" else None,
+        reason=status,
+    )
 
 
 @dataclass
@@ -2219,7 +1991,6 @@ class _ImageRequest:
     child: subprocess.Popen[bytes] | None = None
     ready: threading.Event = field(default_factory=threading.Event)
     cancelled: bool = False
-    expiry: threading.Timer | None = None
 
 
 class ModalVisualEvidence:
@@ -2268,18 +2039,13 @@ class ModalVisualEvidence:
 
     def enqueue(self, pid: int, state: Observation) -> bool:
         """Nonblocking handoff of an immutable detection; no filesystem, subprocess or thread startup."""
-        if (
-            state.modal is not None
-            or state.dialog is None
-            or state.dialog.verdict
-            not in {
-                VERDICT_DIALOG_UNREADABLE,
-                VERDICT_DIALOG_UNRECOGNIZED,
-            }
+        if state.dialog is None or not (
+            state.state == "HUMAN_ACTION_REQUIRED"
+            or (state.state == "REFRESH_IN_PROGRESS" and state.reason == "timeout")
         ):
             return False
         window = state.dialog.window
-        if self._closed or not window.hwnd or not window.owner_hwnd or window.owner_enabled is not False:
+        if self._closed or not window.hwnd:
             return False
         deadline = min(self._deadline, time.monotonic() + IMAGE_CAPTURE_SECONDS)
         try:
@@ -2289,19 +2055,18 @@ class ModalVisualEvidence:
             # One pending exact snapshot is enough; later detector polls can offer a newer HWND.
             return False
 
-    def hold_refusal(self, pid: int, state: Observation) -> None:
+    def hold_refusal(self, pid: int, state: Observation) -> bool:
         """Separate diagnostic budget after operation cancellation; pixels never clear its refusal."""
-        if not self.enqueue(pid, state):
-            return
+        if self._closed or state.dialog is None or not state.dialog.window.hwnd:
+            return False
+        if state.state != "HUMAN_ACTION_REQUIRED" and not (
+            state.state == "REFRESH_IN_PROGRESS" and state.reason == "timeout"
+        ):
+            return False
+        self.enqueue(pid, state)
         if not self._capture_finished.wait(IMAGE_CAPTURE_SECONDS):
-            return
-        lease_deadline = time.monotonic() + IMAGE_LIFETIME_SECONDS
-        while not self._closed and time.monotonic() < lease_deadline:
-            with self._lock:
-                acquired = tuple(request for request in self._requests if request.record["capture_success"])
-            if not acquired or not any(request.path.exists() for request in acquired):
-                return
-            time.sleep(0.05)
+            print_dialog_diagnostic(pid, state.dialog.window, reason="CAPTURE_TIMEOUT")
+        return True
 
     def _consume(self) -> None:
         while not self._closed:
@@ -2374,8 +2139,8 @@ class ModalVisualEvidence:
             if self._closed or time.monotonic() >= deadline:
                 self._notice(record, "CAPTURE_TIMEOUT")
                 return None
-            lease = _open_private_image(path, delete_on_close=True)
-            record.update(image_basename=path.name, path=path.name, cleanup_state="pending")
+            lease = _open_private_image(path)
+            record.update(image_basename=path.name, path=str(path), cleanup_state="pending")
             request = _ImageRequest(path, lease, record)
             with self._lock:
                 if not self._closed:
@@ -2443,24 +2208,18 @@ class ModalVisualEvidence:
             if self._closed:
                 return
             try:
-                # Even a failed write can leave a partial file whose first deletion is refused.
-                request.expiry = threading.Timer(IMAGE_LIFETIME_SECONDS, self._expire, args=(request,))
-                request.expiry.daemon = True
-                request.expiry.start()
                 if code == "ACQUIRED" and request.path.is_file():
-                    acquired = datetime.now(timezone.utc)
                     request.record.update(
-                        captured_at_utc=_utc_stamp(acquired),
-                        expires_at_utc=_utc_stamp(acquired + timedelta(seconds=IMAGE_LIFETIME_SECONDS)),
+                        captured_at_utc=_utc_stamp(),
                         capture_success=True,
+                        cleanup_state="retained",
                     )
                     _image_notice(request.record, code)
                     self._capture_finished.set()
                     return
             except (OSError, RuntimeError):
                 code = "CAPTURE_FAILED"
-            if self._remove(request, "removed") and request.expiry is not None:
-                request.expiry.cancel()
+            self._remove(request, "removed")
             _image_notice(request.record, code if code != "ACQUIRED" else "WRITE_FAILED")
             self._capture_finished.set()
 
@@ -2490,11 +2249,6 @@ class ModalVisualEvidence:
         request.record.update(dimensions={key: str(value) for key, value in dimensions.items()}, sha256=digest)
         return True
 
-    def _expire(self, request: _ImageRequest) -> None:
-        with self._lock:
-            if self._remove(request, "expired"):
-                _image_notice(request.record, "CLEANED")
-
     @classmethod
     def _stop(cls, request: _ImageRequest) -> None:
         request.cancelled = True
@@ -2517,12 +2271,10 @@ class ModalVisualEvidence:
             pass
         for request in requests:
             self._stop(request)
-            previous = request.record["cleanup_state"]
-            removed = self._remove(request, "removed_on_exit")
-            if removed and request.expiry is not None:
-                request.expiry.cancel()
-            if removed and previous in ("pending", "cleanup_failed") and request.record["capture_success"]:
-                _image_notice(request.record, "CLEANED")
+            if request.record["capture_success"]:
+                request.lease.close()
+            else:
+                self._remove(request, "removed_on_exit")
         atexit.unregister(self.close)
 
 

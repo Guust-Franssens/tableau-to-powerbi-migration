@@ -852,7 +852,7 @@ def _emit_credential_missing(pid: int, modal: CredentialModal) -> None:
 
 
 def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
-    """Keep the CLI seam; formatting and same-snapshot diagnostics have one authority."""
+    """Keep legacy verdict grammar; structural stops offer only a private LOCAL_IMAGE pointer."""
     print_operation_refusal("PREFLIGHT", pid, finding.verdict, finding=finding)
 
 

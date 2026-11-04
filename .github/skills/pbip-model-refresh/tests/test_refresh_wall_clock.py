@@ -17,7 +17,6 @@ import hashlib
 import subprocess
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -174,7 +173,7 @@ def test_default_refresh_type_is_full() -> None:
 def test_terminal_diagnostic_runs_once_after_either_refresh_wait_branch(
     monkeypatch, parked, capsys, progress_enabled: bool
 ) -> None:
-    """Only the terminal reporting boundary enriches a latched finding, never an active wait."""
+    """A structural stop publishes one image pointer in either wait branch."""
     # The tests deliberately reach bundled internals; pylint may instead resolve the root CLI shim.
     # pylint: disable=protected-access,no-member
     terminal = []
@@ -193,10 +192,9 @@ def test_terminal_diagnostic_runs_once_after_either_refresh_wait_branch(
         finally:
             terminal.append(True)
 
-    def diagnose(pid: int, target):
-        assert terminal, "diagnostic harvesting must not run inside active wait callbacks"
+    def diagnose(pid: int, target, **_kwargs):
         calls.append((pid, target.hwnd))
-        return "OBSERVED", "privacy_warning", "template_match"
+        print("LOCAL_IMAGE: unavailable (EVIDENCE_DIR_REQUIRED)")
 
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", state)
     monkeypatch.setattr(refresh_pbip_model, "_join_refresh_worker", join)
@@ -204,15 +202,16 @@ def test_terminal_diagnostic_runs_once_after_either_refresh_wait_branch(
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_TIMEOUT_SECONDS", 1)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_WALL_CLOCK_GRACE_SECONDS", 0.05)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.02)
-    monkeypatch.setattr(_desktop_observer, "diagnose_dialog", diagnose)
+    monkeypatch.setattr(_desktop_observer, "print_dialog_diagnostic", diagnose)
     argv = ["--pid", "111", "--no-save", "--refresh-absolute-timeout-seconds", "1"]
     if not progress_enabled:
         argv.append("--no-progress")
     args = refresh_pbip_model._build_arg_parser().parse_args(argv)
     assert refresh_pbip_model._refresh_and_save(111, 1234, None, args) == 3
     out = capsys.readouterr().out
-    assert "REFRESH: DIALOG_UNREADABLE" in out and out.count("DIALOG_DIAGNOSTIC ") == 1
-    assert calls == [(111, DIALOG_HWND)]
+    assert "REFRESH: DIALOG_NEEDS_HUMAN" in out and out.count("LOCAL_IMAGE:") == 1
+    assert len(calls) == 1 and calls[0][0] == 111
+    assert terminal
     assert not parked[0].closed, "the worker should remain parked until fixture cleanup"
 
 
@@ -225,7 +224,7 @@ def test_timeout_diagnostic_does_not_invent_a_dialog_or_source_state(monkeypatch
 
     monkeypatch.setattr(refresh_pbip_model, "refresh", timeout)
     monkeypatch.setattr(
-        _desktop_observer, "diagnose_dialog", lambda *_a: pytest.fail("a timeout has no detected HWND to enrich")
+        _desktop_observer, "print_dialog_diagnostic", lambda *_a, **_k: pytest.fail("a timeout has no target")
     )
     args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "111", "--no-save"])
     assert refresh_pbip_model._refresh_and_save(111, 1234, None, args) == 3
@@ -256,6 +255,7 @@ def _visual_refresh(
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", state)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.005)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_WALL_CLOCK_GRACE_SECONDS", 0)
+    monkeypatch.setattr(_desktop_observer, "IMAGE_CAPTURE_SECONDS", min(_desktop_observer.IMAGE_CAPTURE_SECONDS, 0.5))
     monkeypatch.setattr(refresh_pbip_model, "_start_refresh_progress_trace", lambda *_a, **_k: _FakeProgressMonitor())
 
     def run():
@@ -278,10 +278,10 @@ def _visual_refresh(
 
 
 @pytest.mark.parametrize("progress", [False, True])
-def test_visual_notice_is_once_flushed_readable_in_flight_and_deleted_on_success(
+def test_visual_notice_is_once_flushed_readable_and_retained_after_structural_stop(
     monkeypatch, parked, visual_runtime, progress
 ) -> None:
-    """The positive oracle is an independent PNG decoder and a still-parked real production wait."""
+    """The exact PNG remains independently readable after the refused operation exits."""
     image_decoder = pytest.importorskip("PIL.Image", reason="independent PNG decoder is a repo dev extra")
     thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, progress=progress)
     try:
@@ -295,16 +295,13 @@ def test_visual_notice_is_once_flushed_readable_in_flight_and_deleted_on_success
         assert payload["ownership_checks"] == {"before": True, "after_render": True, "after_write": True}
         assert payload["dimensions"] == {"width": "2", "height": "2"}
         assert payload["capture_success"] is True
-        assert payload["cleanup_state"] == "pending"
+        assert payload["cleanup_state"] == "retained"
         assert payload["classification_provenance"] is None
-        start = datetime.fromisoformat(payload["captured_at_utc"])
-        end = datetime.fromisoformat(payload["expires_at_utc"])
-        assert (end - start).total_seconds() == 60
+        assert payload["captured_at_utc"] and payload["expires_at_utc"] is None
         assert kwargs["flush"] is True
         path = visual_runtime.root / payload["path"]
-        assert payload["image_basename"] == payload["path"]
+        assert payload["image_basename"] == path.name and path.is_absolute()
         assert payload["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
-        assert thread.is_alive(), "the image must be inspectable BEFORE the refresh command returns"
         with image_decoder.open(path) as image:
             assert image.size == (2, 2)
             assert [image.getpixel((x, y)) for y in range(2) for x in range(2)] == (
@@ -318,26 +315,25 @@ def test_visual_notice_is_once_flushed_readable_in_flight_and_deleted_on_success
         released.set()
         thread.join(3)
     assert not thread.is_alive()
-    assert outcome.get("result", (False,))[0] is True, f"image evidence changed the refresh verdict: {outcome}"
-    assert not list(visual_runtime.root.glob("_ui-image-*.png")), "normal exit must remove every image"
-    cleanup = visual_runtime.records[-1][0]
-    assert cleanup["status"] == "CLEANED"
-    assert cleanup["capture_id"] == payload["capture_id"]
-    assert cleanup["sha256"] == payload["sha256"]
-    assert cleanup["cleanup_state"] == "removed_on_exit"
+    _assert_structural_stop(outcome)
+    assert path.is_file(), "the next-run wrapper, not this invocation, owns deletion"
+    assert len(visual_runtime.records) == 1
+
+
+def _assert_structural_stop(outcome: dict) -> None:
+    """No-Invoke callers refuse; optional image work cannot reverse that result."""
+    assert isinstance(outcome.get("error"), _desktop_observer.DialogFoundError), outcome
+    assert outcome["error"].finding.verdict == "DIALOG_NEEDS_HUMAN"
 
 
 @pytest.mark.parametrize(
     "change,phase,status,capture_count,write_count",
     [
         (("pid", 222), "before", "TARGET_CHANGED", 0, 0),
-        (("owner_pid", 222), "before", "TARGET_CHANGED", 0, 0),
         (("owner", MAIN_HWND + 7), "before", "TARGET_CHANGED", 0, 0),
         (("visible", False), "before", "TARGET_CHANGED", 0, 0),
         (("thread", 0), "before", "TARGET_CHANGED", 0, 0),
-        (("owner_enabled", True), "before", "TARGET_CHANGED", 0, 0),
         (("pid", 222), "after_render", "TARGET_CHANGED", 1, 0),
-        (("owner_pid", 222), "after_render", "TARGET_CHANGED", 1, 0),
         (("owner", MAIN_HWND + 7), "after_render", "TARGET_CHANGED", 1, 0),
         (("visible", False), "after_render", "TARGET_CHANGED", 1, 0),
         (("thread", 0), "after_render", "TARGET_CHANGED", 1, 0),
@@ -372,11 +368,10 @@ def test_visual_failure_never_changes_the_worker_result(
         assert len(visual_runtime.api.writes) == write_count, "post-check must reject BEFORE writing pixels"
         assert all(call[0] == DIALOG_HWND for call in visual_runtime.api.captures), "never capture an alternate HWND"
         assert not list(visual_runtime.root.glob("_ui-image-*.png")), "failed acquisition left a private image"
-        assert thread.is_alive(), "an image failure must not abort a healthy in-flight refresh"
     finally:
         released.set()
         thread.join(3)
-    assert outcome.get("result", (False,))[0] is True, f"non-semantic evidence failure changed the result: {outcome}"
+    _assert_structural_stop(outcome)
 
 
 def test_visual_write_failure_is_detail_free_and_does_not_change_the_worker(
@@ -395,7 +390,7 @@ def test_visual_write_failure_is_detail_free_and_does_not_change_the_worker(
     finally:
         released.set()
         thread.join(3)
-    assert outcome.get("result", (False,))[0] is True
+    _assert_structural_stop(outcome)
     output = capsys.readouterr()
     assert "PRIVATE_DIALOG_TEXT" not in output.out + output.err
     assert "authentication" not in output.out + output.err
@@ -413,84 +408,15 @@ def test_visual_unsupported_platform_is_loud_nonsemantic_once(monkeypatch, parke
     finally:
         released.set()
         thread.join(3)
-    assert outcome.get("result", (False,))[0] is True
-
-
-def test_visual_expiry_deletes_without_waiting_for_refresh_exit(monkeypatch, parked, visual_runtime) -> None:
-    monkeypatch.setattr(_desktop_observer, "IMAGE_LIFETIME_SECONDS", 0.08)
-    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
-    try:
-        assert visual_runtime.noticed.wait(2)
-        path = visual_runtime.root / visual_runtime.records[0][0]["path"]
-        assert path.is_file()
-        deadline = time.monotonic() + 2
-        while path.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert not path.exists(), "expiry must delete the image while refresh remains running"
-        assert thread.is_alive(), "image expiry cannot end a healthy refresh"
-        assert len(visual_runtime.children) == 1, "expiry must not rearm the same HWND"
-    finally:
-        released.set()
-        thread.join(3)
-    assert outcome.get("result", (False,))[0] is True
-
-
-def test_visual_inspector_can_delete_early(monkeypatch, parked, visual_runtime) -> None:
-    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
-    try:
-        assert visual_runtime.noticed.wait(2)
-        path = visual_runtime.root / visual_runtime.records[0][0]["path"]
-        visual_runtime.noticed.clear()
-        path.unlink()
-        assert visual_runtime.noticed.wait(2), "the observer must acknowledge external deletion while refresh is alive"
-        assert thread.is_alive()
-        assert not path.exists()
-        assert len(visual_runtime.children) == 1
-    finally:
-        released.set()
-        thread.join(3)
-    assert outcome.get("result", (False,))[0] is True
-    assert [record[0]["status"] for record in visual_runtime.records] == ["ACQUIRED", "CLEANED"]
-    assert visual_runtime.records[-1][0]["cleanup_state"] == "removed_externally"
-
-
-def test_visual_cleanup_failure_is_loud_preserves_result_and_expiry_retries(
-    monkeypatch, parked, visual_runtime, capsys
-) -> None:
-    monkeypatch.setattr(_desktop_observer, "IMAGE_LIFETIME_SECONDS", 0.15)
-    unlink = Path.unlink
-    attempts = []
-
-    def locked_once(path, **kwargs):
-        attempts.append(path)
-        if len(attempts) == 1:
-            raise PermissionError("PRIVATE_OS_DETAIL authentication")
-        return unlink(path, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", locked_once)
-    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked)
-    try:
-        assert visual_runtime.noticed.wait(2)
-    finally:
-        released.set()
-        thread.join(3)
-    assert outcome.get("result", (False,))[0] is True, "cleanup must never replace the original result"
-    assert "CLEANUP_FAILED" in [record[0]["status"] for record in visual_runtime.records]
-    deadline = time.monotonic() + 2
-    while list(visual_runtime.root.glob("_ui-image-*.png")) and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert not list(visual_runtime.root.glob("_ui-image-*.png")), "expiry must retry failed exit cleanup"
-    assert len(attempts) >= 2
-    output = capsys.readouterr()
-    assert "PRIVATE_OS_DETAIL" not in output.out + output.err
+    _assert_structural_stop(outcome)
 
 
 @pytest.mark.parametrize("progress", [False, True])
-def test_visual_capture_keeps_unreadable_deadline_and_never_becomes_a_verdict(
+def test_visual_capture_does_not_delay_structural_stop_until_the_refresh_deadline(
     monkeypatch, parked, visual_runtime, progress
 ) -> None:
     started = time.monotonic()
-    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, progress=progress, timeout=0.25)
+    thread, released, outcome, _window = _visual_refresh(monkeypatch, parked, progress=progress, timeout=10)
     try:
         assert visual_runtime.noticed.wait(2)
         thread.join(2)
@@ -498,41 +424,10 @@ def test_visual_capture_keeps_unreadable_deadline_and_never_becomes_a_verdict(
         assert isinstance(outcome.get("error"), _desktop_observer.DialogFoundError), (
             f"acquisition is NOT a semantic verdict: {outcome}"
         )
-        assert outcome["error"].finding.verdict == "DIALOG_UNREADABLE"
-        assert time.monotonic() - started >= 0.25, "capture may not shorten the original wait"
+        assert outcome["error"].finding.verdict == "DIALOG_NEEDS_HUMAN"
+        assert time.monotonic() - started < 3, "a structural stop must not wait for the refresh deadline"
         assert len(visual_runtime.children) == 1
-        assert not list(visual_runtime.root.glob("_ui-image-*.png")), "error exit must remove the image"
-    finally:
-        released.set()
-        thread.join(3)
-
-
-def test_visual_new_hwnd_is_independently_captured_once(monkeypatch, parked, visual_runtime) -> None:
-    thread, released, outcome, window = _visual_refresh(monkeypatch, parked)
-    try:
-        assert visual_runtime.noticed.wait(2)
-        visual_runtime.noticed.clear()
-        window["value"] = owned_dialog(hwnd=DIALOG_HWND + 9)
-        assert visual_runtime.noticed.wait(2), "a new HWND needs its own guarded acquisition"
-        time.sleep(0.03)
-        assert [call[0] for call in visual_runtime.api.captures] == [DIALOG_HWND, DIALOG_HWND + 9]
-        assert len(visual_runtime.children) == 2
-    finally:
-        released.set()
-        thread.join(3)
-    assert outcome.get("result", (False,))[0] is True
-    assert not list(visual_runtime.root.glob("_ui-image-*.png"))
-
-
-def test_visual_does_not_mask_later_positive_semantic_text(monkeypatch, parked, visual_runtime) -> None:
-    thread, released, outcome, window = _visual_refresh(monkeypatch, parked)
-    try:
-        assert visual_runtime.noticed.wait(2)
-        window["value"] = owned_dialog(("Please specify how to connect",))
-        thread.join(2)
-        assert not thread.is_alive()
-        assert isinstance(outcome.get("error"), _desktop_observer.CredentialMissingError)
-        assert not list(visual_runtime.root.glob("_ui-image-*.png"))
+        assert len(list(visual_runtime.root.glob("_ui-image-*.png"))) == 1
     finally:
         released.set()
         thread.join(3)
@@ -552,14 +447,14 @@ def test_visual_notice_keeps_the_identifier_and_leaks_no_host_path(monkeypatch, 
         assert payload["status"] == "ACQUIRED"
         assert payload["desktop_pid"] == "10054", "escaping must preserve the decoded identifier"
         line = visual_runtime.wires[0]
-        assert "10054" not in line and "403" not in line, "numeric zero-escape must survive on the wire"
+        assert line.startswith(f"LOCAL_IMAGE: {payload['path']} "), "the locator must be usable after exit"
         assert "authentication-10054-oauth" not in line
         assert str(private_cwd) not in line
-        assert "/" not in payload["path"] and "\\" not in payload["path"]
+        assert Path(payload["path"]).is_absolute()
     finally:
         released.set()
         thread.join(3)
-    assert outcome.get("result", (False,))[0] is True
+    _assert_structural_stop(outcome)
     assert not list(private_cwd.glob("_ui-image-*.png"))
 
 
@@ -578,7 +473,7 @@ def test_visual_requires_explicit_scratch_and_never_falls_back_to_cwd(monkeypatc
     finally:
         released.set()
         thread.join(3)
-    assert outcome.get("result", (False,))[0] is True
+    _assert_structural_stop(outcome)
     assert not list(visual_runtime.root.glob("_ui-image-*.png"))
 
 
@@ -591,13 +486,13 @@ def test_visual_explicit_api_scratch_overrides_environment(monkeypatch, parked, 
         record = visual_runtime.records[0][0]
         assert record["status"] == "ACQUIRED"
         assert (explicit / record["path"]).is_file()
-        assert not (visual_runtime.root / record["path"]).exists()
-        assert str(explicit) not in visual_runtime.wires[0], "only a relative locator belongs in the record"
+        assert Path(record["path"]).parent == explicit
+        assert str(explicit) in visual_runtime.wires[0], "the retained locator must be absolute"
     finally:
         released.set()
         thread.join(3)
-    assert outcome.get("result", (False,))[0] is True
-    assert not list(explicit.glob("_ui-image-*.png"))
+    _assert_structural_stop(outcome)
+    assert len(list(explicit.glob("_ui-image-*.png"))) == 1
 
 
 @pytest.mark.parametrize("bad_field", ["hash", "dimensions", "boolean_check", "missing_check"])
@@ -627,7 +522,7 @@ def test_visual_rejects_incomplete_or_unbound_child_metadata(monkeypatch, parked
     finally:
         released.set()
         thread.join(3)
-    assert outcome.get("result", (False,))[0] is True
+    _assert_structural_stop(outcome)
 
 
 def test_visual_cli_scratch_is_forwarded_to_the_refresh_api(monkeypatch, tmp_path) -> None:
@@ -659,23 +554,23 @@ def test_visual_acquisition_timeout_kills_only_its_child_and_preserves_refresh(
     try:
         assert visual_runtime.noticed.wait(2), "the acquisition needs its own bounded failure notice"
         assert visual_runtime.records[0][0]["status"] == "CAPTURE_TIMEOUT"
-        assert thread.is_alive(), "acquisition timeout must not terminate the refresh"
         assert len(visual_runtime.children) == 1
         assert visual_runtime.children[0].killed
         assert not list(visual_runtime.root.glob("_ui-image-*.png"))
     finally:
         released.set()
         thread.join(3)
-    assert outcome.get("result", (False,))[0] is True
+    _assert_structural_stop(outcome)
 
 
-def test_visual_capture_in_flight_is_cancelled_when_worker_finishes(monkeypatch, parked, visual_runtime) -> None:
+def test_terminal_capture_is_cancelled_when_its_diagnostic_budget_ends(monkeypatch, parked, visual_runtime) -> None:
     entered = threading.Event()
     child_type = _desktop_observer.subprocess.Popen
 
     def wait_for_exit(child, timeout):
         entered.set()
-        assert child.finished.wait(timeout), "wait teardown must stop its still-running acquisition child"
+        if not child.finished.wait(timeout):
+            raise subprocess.TimeoutExpired(child.argv, timeout)
         return b"CAPTURE_FAILED", None
 
     monkeypatch.setattr(child_type, "communicate", wait_for_exit)
@@ -685,13 +580,15 @@ def test_visual_capture_in_flight_is_cancelled_when_worker_finishes(monkeypatch,
     finally:
         released.set()
         thread.join(3)
-    assert outcome.get("result", (False,))[0] is True
+    _assert_structural_stop(outcome)
     assert visual_runtime.children[0].killed
-    assert visual_runtime.records == [], "a cancelled acquisition must not publish after refresh exit"
+    assert all(record[0]["status"] != "ACQUIRED" for record in visual_runtime.records)
     assert not list(visual_runtime.root.glob("_ui-image-*.png"))
 
 
-def test_visual_cleanup_preserves_an_exception_from_the_refresh_worker(monkeypatch, parked, visual_runtime) -> None:
+def test_structural_stop_precedes_a_later_exception_from_the_refresh_worker(
+    monkeypatch, parked, visual_runtime
+) -> None:
     failure = ValueError("synthetic worker failure")
 
     def fail_after_release(command):
@@ -705,8 +602,8 @@ def test_visual_cleanup_preserves_an_exception_from_the_refresh_worker(monkeypat
     finally:
         released.set()
         thread.join(3)
-    assert outcome.get("error") is failure, "image teardown cannot replace the worker's original exception"
-    assert not list(visual_runtime.root.glob("_ui-image-*.png"))
+    _assert_structural_stop(outcome)
+    assert len(list(visual_runtime.root.glob("_ui-image-*.png"))) == 1
 
 
 @pytest.mark.parametrize("mode", ["legacy", "progress", "observation"])
@@ -722,7 +619,9 @@ def test_wait_completion_must_be_observed_before_the_original_deadline(
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.1)
     state = _desktop_observer.Observation()
     if unreadable:
-        state = _desktop_observer.inspect_desktop_observer(111, lambda _pid: [owned_dialog(), main_window()])
+        state = _desktop_observer.Observation(
+            dialog=_desktop_observer.DialogFinding("unreadable", "DIALOG_UNREADABLE", owned_dialog())
+        )
 
     class Worker:
         def is_alive(self):
@@ -839,11 +738,7 @@ def test_delayed_observer_never_blocks_refresh_wait_or_teardown(monkeypatch, par
         assert not thread.is_alive(), "the refresh wait/teardown blocked behind evidence observation"
         assert not observed.is_set(), "control requires the evidence observer still to be delayed"
         assert seen[0][0] == 111 and seen[0][1].dialog.window.hwnd == DIALOG_HWND
-        if finishes:
-            assert outcome.get("result", (False,))[0] is True, "optional evidence must not reject a timely refresh"
-        else:
-            assert isinstance(outcome.get("error"), _desktop_observer.DialogFoundError), outcome
-            assert outcome["error"].finding.verdict == "DIALOG_UNREADABLE"
+        _assert_structural_stop(outcome)
     finally:
         released.set()
         resume.set()
@@ -883,7 +778,7 @@ def test_delayed_evidence_startup_cannot_hold_the_deadline_or_publish_after_exit
         thread.join(2)
         assert not thread.is_alive(), "evidence startup held the refresh deadline"
         assert isinstance(outcome.get("error"), _desktop_observer.DialogFoundError), outcome
-        assert outcome["error"].finding.verdict == "DIALOG_UNREADABLE"
+        assert outcome["error"].finding.verdict == "DIALOG_NEEDS_HUMAN"
         assert not observed.is_set(), "control requires startup still to be delayed at refresh exit"
     finally:
         released.set()
@@ -922,7 +817,6 @@ def test_process_startup_uses_the_acquisition_budget_without_stopping_refresh(
         assert entered.wait(2)
         assert visual_runtime.noticed.wait(2), "startup must be inside the acquisition watchdog, not before it"
         assert visual_runtime.records[0][0]["status"] == "CAPTURE_TIMEOUT"
-        assert thread.is_alive(), "an acquisition timeout must not end a healthy refresh"
         assert not observed.is_set() and not list(visual_runtime.root.glob("_ui-image-*.png"))
         resume.set()
         assert observed.wait(2)
@@ -933,7 +827,7 @@ def test_process_startup_uses_the_acquisition_budget_without_stopping_refresh(
         released.set()
         thread.join(3)
         assert observed.wait(2)
-    assert outcome.get("result", (False,))[0] is True
+    _assert_structural_stop(outcome)
     assert not list(visual_runtime.root.glob("_ui-image-*.png"))
 
 
