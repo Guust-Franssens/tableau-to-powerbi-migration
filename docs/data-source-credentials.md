@@ -12,14 +12,17 @@ missing, and what to do. It is grounded in a first-hand Databricks test (2026-07
 
 1. After parsing, **classify the data sources**:
    `python scripts/preflight_source_credentials.py --spec migrations/workbooks/<slug>/migration-spec.json`.
-2. If every source is extract/flat -> no credential gate, proceed normally.
+2. If every source is extract/flat -> no credential is needed, proceed normally.
 3. If any source is a **live database**, the migration cannot refresh/validate against data until a
    credential is configured. **You (the agent) cannot supply it.** Prompt the user, then verify:
-   - **Local (Desktop, the iterative loop):** ask the user to open the `.pbip` in Power BI Desktop once
-     and authenticate the source (Sign in / paste PAT) so Desktop caches it on the machine. Then prove
-     data actually flows with `python .github/skills/pbip-model-refresh/scripts/probe_desktop_query.py
-     --pid <pid>` (queries one row from the loaded model via the Desktop local AS) ->
-     `PREFLIGHT: DATA_OK` before building the report. That probe ships inside the
+   - **Local (Desktop, the iterative loop):** follow the
+     [`live-source-reachability`](../.github/skills/live-source-reachability/SKILL.md) skill before builders
+     start. It opens the shipped working copy in Desktop and refreshes it with named canaries
+     (`refresh_pbip_model.py --pid <pid> --ui-refresh --canaries <tables>`). Any sign-in or other dialog
+     stops the run; the user signs in (Sign in / paste PAT) so Desktop caches it on the machine, then the
+     refresh runs again. For a quick read-only check of an already loaded model, use
+     `python .github/skills/pbip-model-refresh/scripts/probe_desktop_query.py --pid <pid>` (one row via the
+     Desktop local AS) -> `PREFLIGHT: DATA_OK`. Both ship inside the
      [`pbip-model-refresh`](../.github/skills/pbip-model-refresh/SKILL.md) skill; `scripts/probe_desktop_query.py`
      is a forwarding shim kept for existing callers.
    - **Cloud (service):** after publish, probe a refresh
@@ -78,7 +81,7 @@ files — **but it is keyed by the full data-source path (host *and* `httpPath`/
 alone.** Verified 2026-07 first-hand: re-pointing the same model from one Databricks warehouse to a
 freshly-created warehouse on the *same host* re-triggered the sign-in modal, because the new
 `…/warehouses/<id>` path had no cached credential. So a prior sign-in only counts as "present" when the
-host **and** warehouse/`httpPath` match; changing the warehouse opens a new local credential gate even
+host **and** warehouse/`httpPath` match; changing the warehouse opens a new local credential prompt even
 on an already-authenticated host.
 
 **The one-row data probe is the AUTHORITATIVE local gate; the modal probe is a secondary signal.**
@@ -99,7 +102,7 @@ fixed `VERDICT: UNKNOWN`, exit 3; **no observation or Refresh is performed**.
 | Verdict | Exit | What it establishes, and what to do |
 |---|---|---|
 | `CREDENTIAL_MISSING` | 1 | Positive, authentication-specific evidence: a window's text matched the connector credential signature (this includes a modal that was **already open** at t=0). The credential-specific hard stop — a human signs in once at the Desktop screen. |
-| `READY` (observer) | not an operation exit | Complete observation found no unexplained candidate. A bounded observation only; never operation success, `DATA_OK`, or physical gate clearance. |
+| `READY` (observer) | not an operation exit | Complete observation found no unexplained candidate. A bounded observation only; never operation success or `DATA_OK`. |
 | `REFRESH_IN_PROGRESS` | 3 | A dialog whose whole content positively reads as refresh progress was already up: another refresh owns this instance. Wait for it, or cancel the stale one — **do not stack** a second refresh. |
 | `DIALOG_NEEDS_HUMAN` | 3 | A **known** human-blocking prompt matched — the native-database-query approval modal, an approval request, or an `Authentication required` notice. A human must act at the Desktop screen; the token does **not** establish which action, because that one signature spans an approval *and* an authentication notice. Read the prompt before assuming. |
 | `DIALOG_UNRECOGNIZED` | 3 | The window's text was read but matched no known signature, and the signature list is not exhaustive. Inspect Desktop: the credential state is **undetermined in both directions**. |
@@ -146,10 +149,6 @@ exit 3. Two consequences worth knowing:
   filed as #406, and **#406 is now closed** — the arbiter has no length amnesty either. Short unknown
   text (`Password:`) vetoes suppression on both paths, and the enumerated chrome allowlist is the only
   exemption.
-- `probe_live_source` recognises the dialog tokens **structurally** and maps them to **`ERROR`** —
-  "the probe itself could not run". The gate stays armed; nothing asserts a sign-in wall that was never
-  observed. Without that structural step the transcript fell through to an unanchored keyword scan, and
-  `DIALOG_NEEDS_HUMAN` quoting `Authentication required` came back out as `NO_CREDENTIAL`.
 
 Two gotchas learned building it: (a) use a **generous timeout (>=60s)** because a serverless warehouse
 (Databricks) can **cold-start** before the modal appears, so a short wait yields a false PRESENT; and
@@ -188,7 +187,7 @@ after the user resolves the visible prompt and the row probe is run; observer `R
 ⚠️ **`DATA_OK` is earned by a clean run, and an active dialog vetoes it.** The success line is not a
 substring you may harvest from a transcript: an authoritative non-success verdict anywhere in the child's
 output — any `DIALOG_*` token, `REFRESH_IN_PROGRESS`, or a non-zero exit — outranks a stale or late
-`DATA_OK`-looking line, and the gate stays armed. Settle the dialog, then re-probe for a clean
+`DATA_OK`-looking line, and the source is not proven. Settle the dialog, then re-probe for a clean
 `DATA_OK`.
 
 **Pass `--pid` whenever more than one Desktop instance is open** (a parallel batch): the probe binds
@@ -270,11 +269,11 @@ The parser records `data_sources[].connection.{class,mode,server}` in `migration
 
 ## Notes / gotchas
 
-- The 1-row probe is deliberately **M navigation, not `Value.NativeQuery`/`Databricks.Query`**, so it
+- Prefer **M navigation over `Value.NativeQuery`/`Databricks.Query`** for a reachability check, so it
   exercises the same connector + credential path the real model will use (and `Databricks.Query` isn't
   supported with DirectQuery anyway).
 - Since Feb 2026 new Power BI Databricks connections default to the **ADBC** driver; add
-  `Implementation="2.0"` in the options record to force it. Either driver hits the same credential gate.
+  `Implementation="2.0"` in the options record to force it. Either driver hits the same credential prompt.
 - A PAT is a **secret**: never commit it, never put it in TMDL. Store it only in the service-side
   connection (Option B) or the user's Desktop cache (local). This repo's throwaway test kept the PAT in
   a temp file that was deleted once the connection held it.

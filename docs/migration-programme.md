@@ -64,13 +64,13 @@ So the parser stays, and it is not duplicated effort. Two consequences follow, t
   lookups (`connection_to_m._http_path_of`) are correct *by construction*. We resolve it per
   attribute in `parse_tableau._conn_attr`, reading `<document-format-change-manifest>` to pick the
   live variant. **Neither is redundant**: his feeds M generation, ours feeds the live-vs-flat-file
-  classification that arms the credential gate, and the two run at different times on different
+  credential-readiness classification, and the two run at different times on different
   inputs. ⚠️ **An earlier revision of this section claimed "his does it better, prefer his for M
   generation". That was wrong**, and it was wrong for an instructive reason: it was read off his
   *comments* describing the FCP shapes rather than off the resolution code. A docstring is a claim,
   not evidence — the same rule we apply to subagents applies to reading a peer's repo.
 - **`migration-spec.json` is load-bearing** — 38 tracked files reference it, including the
-  credential gate's arming point and all four personas. Any future move here is a **contract**
+  credential-readiness classifier and all four personas. Any future move here is a **contract**
   change, not a file deletion.
 
 ---

@@ -10,14 +10,14 @@ Map of maps for agent-facing knowledge. Start here, then open the matching index
 1. `python scripts/check_reference_readiness.py <package> [...]` — **after deterministic emission and applicable binding, before agentic dispatch**. The final Phase-1 package-only verdict is **`START_READY / 0`** only when boundary, current S1/S2, issued v2 brief, source, canonical data access, reference policy and fresh binding inspection all pass. Bind separately with `set_data_folder.py --package <absolute-package>`; supply a shared provider and consumer in **ONE final check**, never a consumer alone. Established findings exit 1; `CANNOT_ESTABLISH` exits 3; neither permits dispatch. Ordinary `<bundle>` targets retain reference-only `READY`/engine-earned `NOT_APPLICABLE`, never package START_READY. Reference grades and `limitations_encountered` remain unchanged; BOUND stays UNVALIDATED. See [final START_READY](reference-readiness.md#final-package-start_ready-562-622) and the authoritative [conversion, dispatch, and fidelity boundaries](reference-readiness.md#conversion-dispatch-and-fidelity-boundaries).
 2. `python scripts/check_unit.py <unit-or-bundle> --scope <model|report|integration|all>` — diagnostics. **Sole COMPLETE authority:** `python scripts/check_unit.py <package> --scope all --receipt-sha256 <H>`, with exact caller-supplied lowercase 64-hex H, no prefix or token discovery. Tokenless all-scope stays non-success; layers never COMPLETE. Current v2 numeric `none` waives comparison only; required/unknown remains `CANNOT_ESTABLISH(NUMERIC)`. [Evidence, exact disclosures and current-snapshot limits](../scripts/README.md#phase-2-complete--one-caller-pinned-current-snapshot-check); direct gates isolate findings.
 3. `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason.
-4. `python scripts/credential_gate.py list <estate-root>` — which units are gated, across a whole estate (`--json` for an agent). Exit 1 = still blocked, so it is the resume signal after a human signs in. A credential caches machine-wide, so re-probe the blocked units to earn a `probe-cleared`; never mass-`authorize`, which stamps a build UNVALIDATED permanently. Detail: [`docs/credential-gate.md`](credential-gate.md).
+4. Live database sources: run the `live-source-reachability` skill **before builders start**. It refreshes the shipped working copy in Desktop with named canaries; any sign-in or other dialog is a human stop. A live unit reaches COMPLETE only with `check_unit`'s PASS `data-evidence` row.
 5. Load the right skill before acting: `live-source-reachability` for live-source proof and
-   credential-gate routing, `powerbi-semantic-model-gotchas` for TMDL/DAX,
+   credential stops, `powerbi-semantic-model-gotchas` for TMDL/DAX,
    `powerbi-report-gotchas` for PBIR/visuals, `pbip-model-refresh` for cache/refresh, and
    `powerbi-ai-readiness` for Copilot/Q&A metadata.
 6. `python scripts/promote_unit.py --package <package> --slug <slug> --receipt-sha256 <H>` — **the last hop** from the checked package, forwarding identical caller H to the public all-scope checker and preserving its result/disclosures. A stored token is observation, never future authority. `--force` conflicts with H before effects; force alone prints/records exactly **PROMOTED unchecked; Phase-2 COMPLETE was not established.** Content, resolved containment, external-data, host-path, model-reference and transaction guards remain non-forceable. Shared/report-free shipment mechanics do not become COMPLETE-supported classes. Exits: 0 promoted / 1 gate refusal / 2 CANNOT_ASSESS / 3 content refusal / 4 promotion failure / 5 external-data refusal / 6 host-path refusal / 64 usage. [Phase-3 mechanics](migration-phases.md#phase-3--ship); promotion is not deployment, durable persistence or receiving-machine proof.
 
-After a machine-wide Power BI sign-in, resume every still-blocked unit at once with `python scripts/reprobe_blocked.py` (dry-run by default; `--apply` to run). It re-probes each BLOCKED credential-gate unit and lets the gate earn its own `probe-cleared` where the probe now passes — it **never authorizes**, so it is the agent-safe counterpart to the human-only `credential_gate.py authorize`.
+After a machine-wide Power BI sign-in, rerun the skill's refresh for each live unit that stopped on a dialog. Run trees made before the credential gate was retired may still deny writes; `python scripts/disarm_credential_gate.py <root> --apply` removes that.
 
 Toolkit-maintenance scripts live in `scripts/README.md`, outside the per-unit route.
 
@@ -30,7 +30,7 @@ orchestration-specific.
 | Learning about | Put it here |
 |---|---|
 | Every agent | `AGENTS.md` conventions block, then run `scripts/sync_agent_conventions.py` |
-| Live-source reachability / credential gates | `.github/skills/live-source-reachability/SKILL.md` or `docs/credential-gate.md` |
+| Live-source reachability / credential stops | `.github/skills/live-source-reachability/SKILL.md` or `docs/data-source-credentials.md` |
 | PBIR / visual / Desktop craft | `.github/skills/powerbi-report-gotchas/SKILL.md` |
 | TMDL / DAX / modeling craft | `.github/skills/powerbi-semantic-model-gotchas/SKILL.md` |
 | Refresh / cache or AI readiness | `.github/skills/pbip-model-refresh/SKILL.md` / `.github/skills/powerbi-ai-readiness/SKILL.md` |
@@ -76,12 +76,10 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Find migration guidance | [`docs/capabilities-and-limitations.md`](../docs/capabilities-and-limitations.md) | Automation capability boundaries. |
 | Review the unified CLI consensus | [`docs/cli-consensus/consensus.md`](cli-consensus/consensus.md) | Four independent designs plus one red-team report, synthesized into a narrow `t2p start`/`status` pilot, authority boundaries, path contract, deferrals and blind-run acceptance (Refs #734). |
 | Review the CLI pilot plan | [`docs/t2p-pilot-plan.md`](t2p-pilot-plan.md) | Docs-only doctor/start/status plan; presence/source-only doctor, initially unknown_until_harvest, existing post-harvest/pre-conversion gate, no #751 dependency (Refs #749). |
-| Find migration guidance | [`docs/credential-gate-testing.md`](../docs/credential-gate-testing.md) | Credential-gate tests and audit behavior. |
-| Find migration guidance | [`docs/credential-gate.md`](../docs/credential-gate.md) | Live-source/Desktop credential wall. |
 | Find migration guidance | [`docs/customer-text-exposure.md`](../docs/customer-text-exposure.md) | Customer text/privacy exposure. |
 | Find migration guidance | [`docs/data-source-credentials.md`](../docs/data-source-credentials.md) | Tableau/database/warehouse credentials. |
 | Find migration guidance | [`docs/deterministic-tier-integration.md`](../docs/deterministic-tier-integration.md) | Engine and handoff integration. |
-| Review Desktop observer consolidation | [`docs/desktop-observer-simplification.md`](desktop-observer-simplification.md) | Architecture census, observer alternatives and unverified deletion hypotheses; preserves real-row proof and the physical credential gate (Refs #741). |
+| Review Desktop observer consolidation | [`docs/desktop-observer-simplification.md`](desktop-observer-simplification.md) | Architecture census, observer alternatives and unverified deletion hypotheses; preserves real-row proof (Refs #741). |
 | Review gotcha deduplication | [`docs/gotcha-dedup-plan.md`](gotcha-dedup-plan.md) | Bounded upstream/local claim dispositions, safety preservation, release/role-canary gates and ownership sequencing; plan only (Refs #732). |
 | Find migration guidance | [`docs/dry-run-findings-2026-08-11.md`](../docs/dry-run-findings-2026-08-11.md) | Durable F00x dry-run findings. |
 | Find migration guidance | [`docs/engine-gap-harvest.md`](../docs/engine-gap-harvest.md) | Attribute and classify the `reports/` vs `pbip/` delta into engine-gap evidence — provenance delegated to the `--tamper` gate's own adjudicator. |

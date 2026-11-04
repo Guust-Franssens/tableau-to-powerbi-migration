@@ -515,16 +515,14 @@ clone is self-configuring:
 - **Measured 2026-07-31:** a custom subagent can invoke these **by name** — repo-local ones included —
   unless its persona declares a `tools:` allow-list that omits `skill`. See
   [`docs/agent-architecture.md`](docs/agent-architecture.md) §6.
-- **A live source must be PROVEN reachable before a model is built — enforced, not requested.** When a
-  workbook connects to a live database (Databricks, Snowflake, SQL Server…), the pipeline applies a
-  **kernel-level write-deny** to that migration's output folder until a real one-row query, run
-  *through Power BI Desktop*, returns data. So a semantic model for a source nothing ever contacted
-  physically cannot be written. It exists because asking did not work: measured across four blind
-  migrations, every agent announced the stop correctly and three then built anyway. The gate is about
-  **reachability, not credentials** — only the probe can tell a missing sign-in (a human must act)
-  from a wrong hostname (nobody needs to sign in). See
-  [`docs/credential-gate.md`](docs/credential-gate.md) — including an honest threat model, since this
-  stops the *accidental* case outright but only *detects* deliberate circumvention.
+- **A live source must be proven reachable through Power BI, not assumed.** When a workbook connects
+  to a live database (Databricks, Snowflake, SQL Server...), the
+  [`live-source-reachability`](.github/skills/live-source-reachability/SKILL.md) skill runs before
+  builders start: it refreshes the shipped model in Desktop with named canary tables. Any sign-in or
+  other dialog stops the run until a human answers it. A live unit reaches COMPLETE only when
+  `check_unit.py` records a full, persisted refresh whose canaries returned rows. This is detection,
+  not prevention: nothing physically stops a model being written before the source is reached, so the
+  skill's order and the COMPLETE check are the control.
 
 In Copilot CLI, install the plugins once with `/plugin` (including
 `tableau-fabric-skills@tableau-collection`, plus the `microsoft/skills-for-fabric` and
@@ -559,8 +557,10 @@ than it is.
 > wraps the XMLA refresh rather than the open. To a supervising agent it looks like a hang with no
 > error, which is the single failure mode this toolkit's conventions exist to prevent.
 >
-> Setting it once is safe here: the reachability probe builds a throwaway **one-row** copy of the
-> model, so there is no real data-privacy boundary to protect. `scripts/preflight.ps1` cannot read
+> It is a trade-off, not free: ignoring privacy levels lets Power Query combine sources without
+> isolating them. On a migration build machine that is usually acceptable. If a workbook joins sources
+> that must never see each other's data, leave the setting on and have a human answer the dialog.
+> `scripts/preflight.ps1` cannot read
 > this setting — Desktop ships as an MSIX package and stores it outside the registry — so it stays a
 > documented manual step rather than an automated check.
 
