@@ -2,7 +2,7 @@
 .SYNOPSIS
   Perform one bounded, named UIA Refresh or Save action against an exact Desktop window.
 .DESCRIPTION
-  This child owns only foreground/action facts. It does not inspect engine completion, classify prompts,
+  This child owns only action facts. It does not inspect engine completion, classify prompts,
   or retry an action. Python supervises and reaps this process.
 #>
 [CmdletBinding()]
@@ -25,15 +25,22 @@ public static class DesktopActionNative {
   [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
   [DllImport("user32.dll")] public static extern bool IsChild(IntPtr parent, IntPtr child);
   [DllImport("user32.dll")] public static extern IntPtr GetParent(IntPtr hwnd);
-  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
+  [DllImport("user32.dll")] public static extern IntPtr ChildWindowFromPointEx(IntPtr parent, Point point, uint flags);
+  [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr hwnd, ref Point point);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
   [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint command);
-  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr parameter);
+  [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+  public static IntPtr[] TopLevelSnapshot() {
+    // Every top-level window, top-down, with no early stop: a FALSE return is a failure, never a stop.
+    var windows = new System.Collections.Generic.List<IntPtr>();
+    return EnumWindows((hwnd, parameter) => { windows.Add(hwnd); return true; }, IntPtr.Zero)
+      ? windows.ToArray() : new IntPtr[0];
+  }
   [DllImport("kernel32.dll")] private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
   [DllImport("kernel32.dll")] private static extern bool GetProcessTimes(
     IntPtr process, out long creation, out long exit, out long kernel, out long user);
@@ -53,9 +60,6 @@ public static class DesktopActionNative {
       return (ticks - ticks % 10).ToString(System.Globalization.CultureInfo.InvariantCulture);
     } finally { CloseHandle(handle); }
   }
-  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint first, uint second, bool attach);
-  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hwnd);
-  [DllImport("user32.dll", SetLastError = true)] public static extern bool SetForegroundWindow(IntPtr hwnd);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
   public static bool BelongsTo(IntPtr hwnd, uint expected) {
     uint actual;
@@ -150,6 +154,24 @@ function Get-ControlNativeChain {
   return $null
 }
 
+function Find-DescentHit {
+  param($Point)
+  # Descend Desktop's own child z-order from the held root; the foreground window is irrelevant.
+  # 0x3 skips invisible and disabled children, never WS_EX_TRANSPARENT ones: the live renderer has it.
+  $node = $targetHwnd
+  for ($depth = 0; $depth -lt 32; $depth++) {
+    $client = [DesktopActionNative+Point]::new()
+    $client.X = $Point.X
+    $client.Y = $Point.Y
+    if (-not [DesktopActionNative]::ScreenToClient($node, [ref]$client)) { return [IntPtr]::Zero }
+    $child = [DesktopActionNative]::ChildWindowFromPointEx($node, $client, 3)
+    if ($child -eq [IntPtr]::Zero) { return [IntPtr]::Zero }
+    if ($child -eq $node) { return $node }
+    $node = $child
+  }
+  return [IntPtr]::Zero
+}
+
 function Get-ControlOwnership {
   param(
     $Element,
@@ -208,7 +230,7 @@ function Get-ControlOwnership {
   $rectIdentity = "$($rect.Left),$($rect.Top),$($rect.Right),$($rect.Bottom)"
   $binding = "$DesktopPid/$ExpectedProcessStart|$RootHandle|$providerIdentity|$providerRoute|$nativeChain|$geometry|$rectIdentity"
   if ($null -ne $PreparedBinding) { $PreparedBinding.Value = $binding }
-  # Native hit testing is meaningful only after the target is foreground.
+  # Native hit testing runs only in the act phase.
   if ($Prepare) {
     if (-not (Test-Target -IdentityOnly) -or
         (Get-ProviderIdentity $providerPid) -cne $providerIdentity -or
@@ -219,7 +241,7 @@ function Get-ControlOwnership {
   $point = [DesktopActionNative+Point]::new()
   $point.X = [int][Math]::Floor($bounds.Left + $bounds.Width / 2)
   $point.Y = [int][Math]::Floor($bounds.Top + $bounds.Height / 2)
-  $hit = [DesktopActionNative]::WindowFromPoint($point)
+  $hit = Find-DescentHit $point
   if (-not [DesktopActionNative]::BelongsTo($hit, $providerPid) -or
       ($hit -ne $renderer -and -not [DesktopActionNative]::IsChild($renderer, $hit))) { return $null }
   $latestBounds = $Element.Current.BoundingRectangle
@@ -233,7 +255,7 @@ function Get-ControlOwnership {
       (Get-ProviderIdentity $providerPid) -cne $providerIdentity -or
       -not (Test-ControlRenderer $Element $providerPid $renderer) -or
       (Get-ControlNativeChain $renderer $providerIdentity) -cne $nativeChain) { return $null }
-  $latestHit = [DesktopActionNative]::WindowFromPoint($point)
+  $latestHit = Find-DescentHit $point
   if ($latestHit -ne $hit -or
       -not [DesktopActionNative]::BelongsTo($latestHit, $providerPid) -or
       ($latestHit -ne $renderer -and -not [DesktopActionNative]::IsChild($renderer, $latestHit)) -or
@@ -259,45 +281,6 @@ function Get-WindowIdentity {
   return "$windowPid/$start"
 }
 
-function Set-VerifiedForeground {
-  param([IntPtr]$Destination, [IntPtr]$PermittedForeground, [string]$DestinationIdentity, [switch]$Handback)
-  $attached = [System.Collections.Generic.List[object]]::new()
-  try {
-    if (-not (Test-Target -IdentityOnly:$Handback) -or
-        (Get-WindowIdentity $Destination) -cne $DestinationIdentity -or
-        [DesktopActionNative]::GetForegroundWindow() -ne $PermittedForeground) { return $false }
-    $currentThread = [DesktopActionNative]::GetCurrentThreadId()
-    $ignoredPid = [uint32]0
-    $foregroundThread = [DesktopActionNative]::GetWindowThreadProcessId($PermittedForeground, [ref]$ignoredPid)
-    $targetThread = [DesktopActionNative]::GetWindowThreadProcessId($Destination, [ref]$ignoredPid)
-    if ($currentThread -eq 0 -or $foregroundThread -eq 0 -or $targetThread -eq 0) { return $false }
-    $seen = [System.Collections.Generic.HashSet[uint32]]::new()
-    foreach ($thread in @($foregroundThread, $targetThread)) {
-      if ($thread -eq $currentThread -or -not $seen.Add($thread)) { continue }
-      if (-not (Test-Target -IdentityOnly:$Handback) -or
-          (Get-WindowIdentity $Destination) -cne $DestinationIdentity -or
-          [DesktopActionNative]::GetForegroundWindow() -ne $PermittedForeground) { return $false }
-      if (-not [DesktopActionNative]::AttachThreadInput($currentThread, $thread, $true)) { return $false }
-      $attached.Add(@($currentThread, $thread))
-    }
-    if (-not (Test-Target -IdentityOnly:$Handback) -or
-        (Get-WindowIdentity $Destination) -cne $DestinationIdentity -or
-        [DesktopActionNative]::GetForegroundWindow() -ne $PermittedForeground) { return $false }
-    [void][DesktopActionNative]::BringWindowToTop($Destination)
-    # BringWindowToTop may itself activate the destination. A third window is a human switch.
-    if (-not (Test-Target -IdentityOnly:$Handback) -or
-        (Get-WindowIdentity $Destination) -cne $DestinationIdentity) { return $false }
-    $foreground = [DesktopActionNative]::GetForegroundWindow()
-    if ($foreground -ne $PermittedForeground -and $foreground -ne $Destination) { return $false }
-    [void][DesktopActionNative]::SetForegroundWindow($Destination)
-    return $true
-  } finally {
-    for ($index = $attached.Count - 1; $index -ge 0; $index--) {
-      [void][DesktopActionNative]::AttachThreadInput($attached[$index][0], $attached[$index][1], $false)
-    }
-  }
-}
-
 function Test-Target {
   param([switch]$IdentityOnly)
   $start = Get-ProcessStart
@@ -317,8 +300,6 @@ function Test-Target {
     $script:targetFailureReason = 'root_window_not_actionable'
     return $false
   }
-  # Returning focus does not invoke Desktop. A disabled root is not permission to act,
-  # but is still the held root; an activated modal/other HWND is never eligible for handback.
   if ($IdentityOnly) { return $true }
   if (-not [DesktopActionNative]::IsWindowEnabled($root)) {
     $script:targetFailureReason = 'root_window_not_actionable'
@@ -344,14 +325,10 @@ function New-Result {
     [string]$Status,
     [bool]$Invoked,
     [string]$Reason,
-    [int]$Attempts,
-    [object]$ActionTicks,
-    [bool]$RestoreRequested,
-    [Nullable[bool]]$RestoreVerified,
-    [bool]$HandbackOk
+    [object]$ActionTicks
   )
   return [ordered]@{
-    schema='pbip.desktop-action.v1'
+    schema='pbip.desktop-action.v2'
     status=$Status
     action=$Action
     desktop_pid=$DesktopPid
@@ -359,12 +336,32 @@ function New-Result {
     root_hwnd=$RootHandle
     invoked=$Invoked
     reason=$Reason
-    focus_attempts=$Attempts
     action_started_ticks=$ActionTicks
-    restore_requested=$RestoreRequested
-    restore_verified=$RestoreVerified
-    handback_ok=$HandbackOk
   }
+}
+
+function Test-Occlusion {
+  param($Element)
+  # One top-down snapshot: a visible Desktop or provider window above the root over the control
+  # centre refuses. Foreign windows are ignored; UIA Invoke needs neither focus nor visibility.
+  $bounds = $Element.Current.BoundingRectangle
+  $x = [int][Math]::Floor($bounds.Left + $bounds.Width / 2)
+  $y = [int][Math]::Floor($bounds.Top + $bounds.Height / 2)
+  $providerPid = [uint32]$Element.Current.ProcessId
+  foreach ($window in [DesktopActionNative]::TopLevelSnapshot()) {
+    if ($window -eq $targetHwnd) { return $true }
+    $rect = [DesktopActionNative+Rect]::new()
+    if ([DesktopActionNative]::IsWindowVisible($window) -and
+        ([DesktopActionNative]::BelongsTo($window, [uint32]$DesktopPid) -or
+         [DesktopActionNative]::BelongsTo($window, $providerPid)) -and
+        [DesktopActionNative]::GetWindowRect($window, [ref]$rect) -and
+        $x -ge $rect.Left -and $x -lt $rect.Right -and $y -ge $rect.Top -and $y -lt $rect.Bottom) {
+      $script:reason = 'occluded_by_desktop_window'
+      return $false
+    }
+  }
+  $script:reason = 'occlusion_walk_incomplete'
+  return $false
 }
 
 function Get-ActionCandidates {
@@ -406,7 +403,7 @@ function Get-ActionCandidates {
 
 function Get-ActionControl {
   param($Candidates)
-  # Preparation cannot prove completeness after focus: controls can appear or be renamed.
+  # Preparation cannot prove completeness at act time: controls can appear or be renamed.
   # Rediscover only the exact Name/Button-or-SplitButton set, without repeating ownership walks.
   $current = @($Candidates.RootElement.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants, $Candidates.Condition))
@@ -472,16 +469,10 @@ function Get-ActionControl {
   return $named[0]
 }
 
-$attempts = 0
 $invoked = $false
-$restoreRequested = $false
-$restoreVerified = $null
-$handbackOk = $false
 $actionTicks = $null
 $status = 'refused'
 $reason = 'target_unavailable'
-$priorForeground = [DesktopActionNative]::GetForegroundWindow()
-$priorIdentity = Get-WindowIdentity $priorForeground
 $targetHwnd = [IntPtr]::new([Int64]$RootHandle)
 $dpiContext = [IntPtr]::Zero
 
@@ -497,38 +488,6 @@ try {
     throw 'target'
   }
   $candidates = Get-ActionCandidates $rootElement
-  for ($attempt = 1; $attempt -le 3; $attempt++) {
-    if (-not (Test-Target)) {
-      $reason = $script:targetFailureReason
-      throw 'identity'
-    }
-    $foreground = [DesktopActionNative]::GetForegroundWindow()
-    if ($foreground -ne $priorForeground -and $foreground -ne $targetHwnd) {
-      $reason = 'foreground_changed'
-      throw 'focus'
-    }
-    $attempts = $attempt
-    $focusRequested = Set-VerifiedForeground $targetHwnd $foreground "$DesktopPid/$ExpectedProcessStart"
-    if (-not $focusRequested) {
-      $reason = 'focus_attachment_or_identity_failed'
-      throw 'focus'
-    }
-    Start-Sleep -Milliseconds 150
-    if (-not (Test-Target)) {
-      $reason = $script:targetFailureReason
-      throw 'identity'
-    }
-    if ([DesktopActionNative]::GetForegroundWindow() -eq $targetHwnd) { break }
-  }
-  if ([DesktopActionNative]::GetForegroundWindow() -ne $targetHwnd) {
-    $reason = 'focus_not_verified'
-    throw 'focus'
-  }
-  if (-not (Test-Target) -or [DesktopActionNative]::GetForegroundWindow() -ne $targetHwnd) {
-    if (-not (Test-Target)) { $reason = $script:targetFailureReason }
-    else { $reason = 'target_or_foreground_changed' }
-    throw 'identity'
-  }
   $selectedControl = Get-ActionControl $candidates
   $selected = $selectedControl.Element
   $selectedOwnership = $selectedControl.Ownership
@@ -556,9 +515,16 @@ try {
     $reason = $script:targetFailureReason
     throw 'identity'
   }
-  if ([DesktopActionNative]::GetForegroundWindow() -ne $targetHwnd) {
-    $reason = 'target_or_foreground_changed'
-    throw 'focus'
+  if (-not (Test-Occlusion $target)) { throw 'occlusion' }
+  # The walk is unbounded, so re-prove ownership and the full target after it, right before Invoke.
+  $ownership = Get-ControlOwnership $target
+  if (-not $ownership -or $ownership -cne $selectedOwnership) {
+    $reason = 'control_ownership_changed'
+    throw 'control'
+  }
+  if (-not (Test-Target)) {
+    $reason = $script:targetFailureReason
+    throw 'identity'
   }
   $actionTicks = [DateTime]::UtcNow.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
   try { $invokePattern.Invoke() } catch {
@@ -572,38 +538,10 @@ try {
 } catch {
   if ($reason -eq 'target_unavailable') { $reason = 'uia_or_control_unavailable' }
 } finally {
-  # Refusals after acquiring focus need the same respectful handback as an Invoke.
-  $foregroundAfter = [DesktopActionNative]::GetForegroundWindow()
-  if ($attempts -gt 0) {
-  if ($foregroundAfter -eq $targetHwnd) {
-    if ($priorForeground -eq [IntPtr]::Zero -or $priorForeground -eq $targetHwnd) {
-      $handbackOk = $true
-    } else {
-      $restoreRequested = $true
-      if ($priorIdentity -and (Get-WindowIdentity $priorForeground) -ceq $priorIdentity -and
-          [DesktopActionNative]::GetForegroundWindow() -eq $targetHwnd) {
-        $restoreStarted = Set-VerifiedForeground $priorForeground $targetHwnd $priorIdentity -Handback
-        Start-Sleep -Milliseconds 150
-        $restoreVerified = $restoreStarted -and
-          [DesktopActionNative]::GetForegroundWindow() -eq $priorForeground -and
-          (Get-WindowIdentity $priorForeground) -ceq $priorIdentity
-        $handbackOk = [bool]$restoreVerified
-        if (-not $handbackOk -and $invoked) { $reason = 'handback_not_verified' }
-      } else {
-        $restoreVerified = $false
-        if ($invoked) { $reason = 'prior_foreground_unavailable' }
-      }
-    }
-  } else {
-    if ($invoked) { $reason = 'foreground_changed_after_invoke' }
-    $handbackOk = $false
-  }
-  }
   if ($dpiContext -ne [IntPtr]::Zero) {
     [void][DesktopActionNative]::SetThreadDpiAwarenessContext($dpiContext)
   }
 }
 
-$result = New-Result $status $invoked $reason $attempts $actionTicks `
-  $restoreRequested $restoreVerified $handbackOk
+$result = New-Result $status $invoked $reason $actionTicks
 Write-Output (ConvertTo-Json -InputObject $result -Compress)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -962,7 +963,7 @@ def _snapshot(
 
 def _action_payload(**changes: object) -> str:
     payload: dict[str, object] = {
-        "schema": "pbip.desktop-action.v1",
+        "schema": "pbip.desktop-action.v2",
         "status": "invoked",
         "action": "Refresh",
         "desktop_pid": "123",
@@ -970,11 +971,7 @@ def _action_payload(**changes: object) -> str:
         "root_hwnd": "789",
         "invoked": True,
         "reason": "invoke_returned",
-        "focus_attempts": 2,
         "action_started_ticks": "638972496000000000",
-        "restore_requested": True,
-        "restore_verified": True,
-        "handback_ok": True,
     }
     payload.update(changes)
     return json.dumps(payload)
@@ -1337,7 +1334,7 @@ def test_ui_completion_reports_held_finding_through_real_bound_reader(  # pylint
         calls.append(action)
         # Every partition really advances on the mock engine, even in the refusal cases.
         connection.partitions = [_partition(refreshed=datetime(2026, 10, 28, 12, 1, tzinfo=timezone.utc))]
-        return ActionResult(action, True, "invoke_returned", 1, baseline_ticks + 1, False, "not_requested")
+        return ActionResult(action, True, "invoke_returned", baseline_ticks + 1)
 
     baseline_ticks = actions._typed_utc_ticks(BASELINE)
     monkeypatch.setattr(connection, "Open", open_connection, raising=False)
@@ -1402,26 +1399,25 @@ def test_ui_completion_reports_held_finding_through_real_bound_reader(  # pylint
         assert ("engine completion:" in output) is (finding_kind != "needs-human")
 
 
-@pytest.mark.parametrize("change", ["foreground", "identity", "none"])
+@pytest.mark.parametrize("change", ["identity", "ownership", "none"])
 @WINDOWS_ONLY
-def test_final_action_acquisition_rechecks_focus_and_identity_without_windows(change: str) -> None:
+def test_final_action_acquisition_rechecks_identity_without_windows(change: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     body = source[
         source.rindex("  $targetControl = Get-ActionControl $candidates") : source.index("  $invoked = $true")
     ]
     body = body.replace("[System.Windows.Automation.InvokePattern]::Pattern", "'Invoke'")
-    body = body.replace("[DesktopActionNative]::GetForegroundWindow()", "$script:foreground")
     comparison_start = body.index("  $comparison =")
     comparison_end = body.index("    $reason = 'selected_control_changed'", comparison_start)
     body = body[:comparison_start] + "  if (-not $true) {\n" + body[comparison_end:]
     script = r"""
 $ErrorActionPreference = 'Stop'
-$script:foreground = 789
 $targetHwnd = 789
 $script:identity = $true
 $script:count = 0
 $selectedOwnership = 'owned'
-function Get-ControlOwnership { param($element) return 'owned' }
+function Get-ControlOwnership { param($element) if ('CHANGE' -eq 'ownership') { return 'moved' } return 'owned' }
+function Test-Occlusion { param($element) return $true }
 function Test-Target {
   if (-not $script:identity) { $script:targetFailureReason = 'process_identity_changed'; return $false }
   return $true
@@ -1431,7 +1427,6 @@ function Get-ActionControl {
   $control = [pscustomobject]@{}
   $control | Add-Member ScriptMethod TryGetCurrentPattern {
     param($pattern, $output)
-    if ('CHANGE' -eq 'foreground') { $script:foreground = 999 }
     if ('CHANGE' -eq 'identity') { $script:identity = $false }
     $invoke = [pscustomobject]@{}
     $invoke | Add-Member ScriptMethod Invoke { $script:count++ }
@@ -1556,6 +1551,11 @@ def test_cli_preflight_consumes_original_ui_deadline_before_any_action(
         "hit_changed",
         "geometry_changed",
         "control_geometry_changed",
+        "deep",
+        "screen_to_client_false",
+        "hidden_stale_above",
+        "visible_stale_below",
+        "disabled_stale",
     ],
 )
 @WINDOWS_ONLY
@@ -1564,12 +1564,13 @@ def test_native_renderer_ownership_without_window_operations(case: str) -> None:
     body = source[source.index("function Get-ProviderIdentity") : source.index("function Get-ProcessStart")]
     body = body.replace("[DesktopActionNative]", "[OwnershipFake]")
     body = body.replace("[DesktopActionNative+Rect]::new()", "[pscustomobject]@{}")
-    body = body.replace("[DesktopActionNative+Point]::new()", "[pscustomobject]@{X=0;Y=0}")
+    body = body.replace("[DesktopActionNative+Point]", "[OwnershipFake+Point]")
     script = r"""
 $ErrorActionPreference = 'Stop'
 Add-Type @'
 using System;
 public static class OwnershipFake {
+  public struct Point { public int X; public int Y; }
   public static string Case;
   public static bool WrongRoot, Stale, Parented=true, Reparented;
   public static int ProviderReads, RootReads, RectReads, HitReads;
@@ -1580,19 +1581,22 @@ public static class OwnershipFake {
     }
     return p==100 ? "10" : null;
   }
-  public static bool BelongsTo(IntPtr h, uint p) { return p == 200 && (h == (IntPtr)55 || h == (IntPtr)56); }
+  // 55 is the live renderer, 57 a stale duplicate, 56/59/1000+ live children, 58 a foreign window.
+  static bool Owned(long h) { return h == 55 || h == 56 || h == 57 || h == 59 || h >= 1000; }
+  public static bool BelongsTo(IntPtr h, uint p) { return p == 200 && Owned((long)h); }
   public static bool IsChild(IntPtr p, IntPtr h) {
     if (p == (IntPtr)789 && h == (IntPtr)55) {
       return Case != "wrong_root" && Case != "sibling_renderer" && Parented;
     }
-    return p == (IntPtr)55 && h == (IntPtr)56;
+    if (p == (IntPtr)789 && h == (IntPtr)57) return true;
+    return p == (IntPtr)55 && (h == (IntPtr)56 || h == (IntPtr)59 || (long)h >= 1000);
   }
   public static bool IsWindow(IntPtr h) {
-    return h == (IntPtr)55 || h == (IntPtr)56 || h == (IntPtr)44 || h == (IntPtr)45 ||
-      h == (IntPtr)46 || h == (IntPtr)789;
+    return Owned((long)h) || h == (IntPtr)44 || h == (IntPtr)45 || h == (IntPtr)46 || h == (IntPtr)789;
   }
   public static IntPtr GetParent(IntPtr h) {
     if (h == (IntPtr)56) return (IntPtr)55;
+    if (h == (IntPtr)57) return (IntPtr)44;
     if (h == (IntPtr)55) {
       return Case=="renderer_reparented_within_root" && Reparented ? (IntPtr)45 : (IntPtr)44;
     }
@@ -1606,13 +1610,51 @@ public static class OwnershipFake {
     int right = Case=="geometry_changed" && RectReads>1 ? 101 : 100;
     r = new { Left=0, Top=0, Right=right, Bottom=100 }; return true;
   }
-  public static IntPtr WindowFromPoint(object p) {
-    HitReads++;
-    if (Case=="renderer_reparented" && HitReads==1) Parented=false;
-    if (Case=="renderer_reparented_within_root" && HitReads==1) Reparented=true;
-    if (Stale) return (IntPtr)99;
-    if (Case=="hit_changed" && HitReads>1) return (IntPtr)55;
-    return (IntPtr)56;
+  // Screen rect and a NON-ZERO client origin per window: an unconverted point lands elsewhere.
+  static int[] Geometry(long h) {
+    if (h == 789) return new int[] { -100, -100, 300, 300, -90, -60 };
+    if (h == 44 || h == 45) return new int[] { 0, 0, 100, 100, 6, 9 };
+    if (h == 55 || h == 57) return new int[] { 0, 0, 100, 100, 12, 7 };
+    if (h == 58) return new int[] { 0, 0, 200, 200, 1, 1 };
+    return new int[] { 15, 15, 25, 25, 16, 17 };
+  }
+  static bool Inside(int[] g, int x, int y) { return x >= g[0] && x < g[2] && y >= g[1] && y < g[3]; }
+  // Child z-order, top first.
+  static long[] Children(long h) {
+    if (h == 789) return Stale ? new long[] { 58, 44 } : new long[] { 44 };
+    if (h == 44) {
+      if (Case == "hidden_stale_above" || Case == "disabled_stale") return new long[] { 57, 55 };
+      if (Case == "visible_stale_below") return new long[] { 55, 57 };
+      return new long[] { 55 };
+    }
+    if (h == 55) return Case == "hit_changed" && HitReads > 1 ? new long[] { 59, 56 } : new long[] { 56 };
+    if (h == 56) return Case == "deep" ? new long[] { 1000 } : new long[0];
+    if (h >= 1000 && h < 1035) return new long[] { h + 1 };
+    return new long[0];
+  }
+  public static bool ScreenToClient(IntPtr h, ref Point p) {
+    int[] g = Geometry((long)h);
+    p.X -= g[4];
+    p.Y -= g[5];
+    return Case != "screen_to_client_false";
+  }
+  public static IntPtr ChildWindowFromPointEx(IntPtr parent, Point p, uint flags) {
+    if (parent == (IntPtr)789) {
+      HitReads++;
+      if (Case=="renderer_reparented" && HitReads==1) Parented=false;
+      if (Case=="renderer_reparented_within_root" && HitReads==1) Reparented=true;
+    }
+    int[] g = Geometry((long)parent);
+    int x = p.X + g[4], y = p.Y + g[5];
+    if (!Inside(g, x, y)) return IntPtr.Zero;
+    foreach (long child in Children((long)parent)) {
+      if ((flags & 1) != 0 && Case == "hidden_stale_above" && child == 57) continue;
+      if ((flags & 2) != 0 && Case == "disabled_stale" && child == 57) continue;
+      // The live renderer is WS_EX_TRANSPARENT, as measured on real Desktop.
+      if ((flags & 4) != 0 && child == 55) continue;
+      if (Inside(Geometry(child), x, y)) return (IntPtr)child;
+    }
+    return parent;
   }
 }
 '@
@@ -1638,7 +1680,7 @@ function Get-WindowIdentity {
   param($h)
   if ($h -eq 789) { return '100/10' }
   if ('CASE' -eq 'foreign_native_parent' -and $h -eq 44) { return '300/30' }
-  if ($h -in @(55,56,44,45,46)) { return '200/20' }
+  if ($h -in @(55,56,57,59,44,45,46) -or $h -ge 1000) { return '200/20' }
   return $null
 }
 [OwnershipFake]::Case = 'CASE'
@@ -1688,6 +1730,13 @@ if ('CASE' -eq 'prepared_occluded') {
   if (-not (Get-ControlOwnership $element -PreparedBinding ([ref]$binding)) -or
       $binding -notlike '*|shared:200/20|*') { throw 'shared provider was not attested narrowly' }
   'owned'
+} elseif ('CASE' -in @('hidden_stale_above','visible_stale_below','disabled_stale')) {
+  $stale = [pscustomobject]@{Current=[pscustomobject]@{
+    Name='Refresh';IsEnabled=$true;IsOffscreen=$false;ProcessId=200;NativeWindowHandle=57;BoundingRectangle=$bounds
+  }}
+  $live = if (Get-ControlOwnership $element) { 'owned' } else { 'refused' }
+  $old = if (Get-ControlOwnership $stale) { 'owned' } else { 'refused' }
+  "$live/$old"
 } elseif (Get-ControlOwnership $element) { 'owned' } else { 'refused' }
 """.replace("CASE", case).replace("BODY", body)
     result = subprocess.run(
@@ -1698,9 +1747,13 @@ if ('CASE' -eq 'prepared_occluded') {
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == (
-        "owned" if case in {"child", "shared", "cached", "prepared_occluded"} else "refused"
-    )
+    if case in {"hidden_stale_above", "visible_stale_below", "disabled_stale"}:
+        expected = "owned/refused"
+    elif case in {"child", "shared", "cached", "prepared_occluded"}:
+        expected = "owned"
+    else:
+        expected = "refused"
+    assert result.stdout.strip() == expected
 
 
 @pytest.mark.parametrize(
@@ -1831,7 +1884,7 @@ $actual=[ProcessTimeFake]::GetProcessStart(51552)
 @WINDOWS_ONLY
 def test_selector_requires_one_owned_invoke_and_ignores_dropdowns(count: int, identity: str) -> None:
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
-    body = source[source.index("function Get-ActionCandidates") : source.index("$attempts = 0")]
+    body = source[source.index("function Get-ActionCandidates") : source.index("$invoked = $false")]
     body = body.replace("[System.Windows.Automation.AutomationElement]$RootElement", "$RootElement")
     body = body.replace(
         "$membershipComparison.Invoke($null, [object[]]@($element, $candidate.Element))",
@@ -1905,79 +1958,82 @@ if ('IDENTITY' -ne 'stable' -and COUNT -gt 0 -and $invokes -ne 0) { throw 'ident
     assert result.stdout.strip() == expected
 
 
-@pytest.mark.parametrize(
-    "case",
-    ["normal", "disabled_root", "initial_disabled", "owned_popup", "human_switch", "target_reused", "prior_reused"],
-)
-@WINDOWS_ONLY
-def test_native_identity_hot_path_and_disabled_root_handback_without_windows(case: str) -> None:
-    """Run the real focus/target/main bodies against fake native calls, never real windows."""
+def _run_hot_path(case: str, snapshot: list[int] | None = None) -> tuple[dict, dict]:
+    """Run the real target/occlusion/main bodies against fake native calls, never real windows."""
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
     functions = source[source.index("function Get-ProcessStart") : source.index("function Get-ActionCandidates")]
     functions = functions.replace("[System.Windows.Automation.AutomationElement]::FromHandle($root)", "$script:root")
-    main = source[source.index("$attempts = 0") :]
+    main = source[source.index("$invoked = $false") :]
     main = main.replace(
         "$comparison.Invoke($null, [object[]]@($selected, $target))", "[object]::ReferenceEquals($selected, $target)"
     )
+    windows = ",".join(f"(IntPtr){hwnd}" for hwnd in (snapshot or [789]))
     script = (
         r"""
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type @'
 using System;
+using System.Collections.Generic;
 public static class HotPathFake {
+  public struct Rect { public int Left; public int Top; public int Right; public int Bottom; }
   public static string Case;
-  public static bool Invoked, Enabled=true;
-  public static IntPtr Foreground=(IntPtr)456;
-  public static int NativeReads, ForegroundReads, Attach, Detach;
+  public static bool Invoked, Enabled=true, Iconic, Walked;
+  public static IntPtr[] Snapshot = new IntPtr[] { WINDOWS };
+  public static List<string> Events = new List<string>();
+  public static int NativeReads;
   public static string GetProcessStart(uint p) {
     NativeReads++;
-    if (Invoked && ((Case=="target_reused" && p==100) || (Case=="prior_reused" && p==300))) return "11";
+    if (Invoked && Case=="target_reused" && p==100) return "11";
+    if (Walked && Case=="walk_process_reused" && p==100) return "11";
     return "10";
   }
+  // 789 is the root and 901/903/904 other Desktop windows; 905 is the provider's; the rest are foreign.
+  static uint Owner(long h) {
+    if (h==789 && Walked && Case=="walk_root_reused") return 300;
+    if (h==789 || h==901 || h==903 || h==904) return 100;
+    return h==905 ? 200u : 300u;
+  }
   public static bool IsWindow(IntPtr h) { return true; }
-  public static bool BelongsTo(IntPtr h,uint p) { return h==(IntPtr)789 && p==100; }
-  public static bool IsWindowVisible(IntPtr h) { return true; }
-  public static bool IsWindowEnabled(IntPtr h) { return Enabled; }
-  public static bool IsIconic(IntPtr h) { return false; }
+  public static bool BelongsTo(IntPtr h,uint p) { return Owner((long)h)==p; }
+  public static bool IsWindowVisible(IntPtr h) { return h!=(IntPtr)903; }
+  public static bool IsWindowEnabled(IntPtr h) { Events.Add("target"); return Enabled; }
+  public static bool IsIconic(IntPtr h) { return Iconic; }
   public static IntPtr GetWindow(IntPtr h,uint command) { return IntPtr.Zero; }
-  public static IntPtr GetForegroundWindow() { ForegroundReads++; return Foreground; }
-  public static uint GetCurrentThreadId() { return 1; }
-  public static uint GetWindowThreadProcessId(IntPtr h,out uint p) {
-    p=h==(IntPtr)789 || h==(IntPtr)888 ? 100u : 300u; return h==(IntPtr)789 ? 2u : 3u;
+  public static bool GetWindowRect(IntPtr h, out Rect r) {
+    r = new Rect();
+    r.Left = r.Top = h==(IntPtr)904 ? 100 : 0;
+    r.Right = r.Bottom = h==(IntPtr)904 ? 200 : 50;
+    return true;
   }
-  public static bool AttachThreadInput(uint a,uint b,bool attach) {
-    if(attach) Attach++; else Detach++; return true;
+  // The walk is unbounded, so a case may change the target while it runs.
+  public static IntPtr[] TopLevelSnapshot() {
+    Events.Add("walk"); Walked=true;
+    if (Case=="walk_disabled") Enabled=false;
+    return Snapshot;
   }
-  public static bool BringWindowToTop(IntPtr h) { Foreground=h; return true; }
-  public static bool SetForegroundWindow(IntPtr h) { Foreground=h; return true; }
   public static IntPtr SetThreadDpiAwarenessContext(IntPtr c) { return (IntPtr)1; }
 }
 '@
 [HotPathFake]::Case='CASE'
 if ('CASE' -eq 'initial_disabled') { [HotPathFake]::Enabled=$false }
+if ('CASE' -eq 'iconic') { [HotPathFake]::Iconic=$true }
 $Action='Refresh'; $DesktopPid='100'; $ExpectedProcessStart='10'; $RootHandle='789'
-$script:cimReads=0; $script:invokes=0; $script:postInvokeActionabilityReads=0
+$script:cimReads=0; $script:invokes=0
 function Get-CimInstance {
   param($Class,$Filter)
   $script:cimReads++
-  $id=[int]($Filter.Split('=')[1])
-  $ticks=10
-  if ([HotPathFake]::Invoked -and
-      (('CASE' -eq 'target_reused' -and $id -eq 100) -or
-       ('CASE' -eq 'prior_reused' -and $id -eq 300))) { $ticks=11 }
-  return [pscustomobject]@{CreationDate=[datetime]::new($ticks,[DateTimeKind]::Utc)}
+  return [pscustomobject]@{CreationDate=[datetime]::new(10,[DateTimeKind]::Utc)}
 }
 $script:root=[pscustomobject]@{Current=[pscustomobject]@{ProcessId=100;NativeWindowHandle=789}}
-$script:control=[pscustomobject]@{}
+$bounds=[pscustomobject]@{Left=10;Top=10;Width=20;Height=20}
+$script:control=[pscustomobject]@{Current=[pscustomobject]@{ProcessId=200;BoundingRectangle=$bounds}}
 $script:control | Add-Member ScriptMethod TryGetCurrentPattern {
   param($pattern,$output)
   $invoke=[pscustomobject]@{}
   $invoke | Add-Member ScriptMethod Invoke {
-    $script:invokes++; [HotPathFake]::Invoked=$true
+    $script:invokes++; [HotPathFake]::Invoked=$true; [HotPathFake]::Events.Add('invoke')
     if ('CASE' -eq 'disabled_root') { [HotPathFake]::Enabled=$false }
-    if ('CASE' -eq 'owned_popup') { [HotPathFake]::Foreground=[IntPtr]888 }
-    if ('CASE' -eq 'human_switch') { [HotPathFake]::Foreground=[IntPtr]999 }
   }
   $output.Value=$invoke; return $true
 }
@@ -1985,17 +2041,24 @@ function Get-ActionCandidates { param($root) return @{} }
 function Get-ActionControl {
   param($candidates) return [pscustomobject]@{Element=$script:control;Ownership='owned'}
 }
-function Get-ControlOwnership { param($target) return 'owned' }
-function Start-Sleep { param($Milliseconds) }
+function Get-ControlOwnership {
+  param($target)
+  [HotPathFake]::Events.Add('ownership')
+  if ('CASE' -eq 'disabled_before_invoke') { [HotPathFake]::Enabled=$false }
+  if ('CASE' -eq 'walk_ownership' -and [HotPathFake]::Walked) { return 'moved' }
+  return 'owned'
+}
 FUNCTIONS
 MAIN
 [pscustomobject]@{invokes=$script:invokes;cim=$script:cimReads;native=[HotPathFake]::NativeReads
-  foreground=[HotPathFake]::Foreground.ToInt64();attach=[HotPathFake]::Attach;detach=[HotPathFake]::Detach
+  events=@([HotPathFake]::Events)
 } | ConvertTo-Json -Compress
 """.replace("CASE", case)
+        .replace("WINDOWS", windows)
         .replace("FUNCTIONS", functions)
         .replace("MAIN", main)
     )
+    script = script.replace("[DesktopActionNative+Rect]", "[HotPathFake+Rect]")
     script = script.replace("[DesktopActionNative]", "[HotPathFake]")
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -2006,19 +2069,75 @@ MAIN
     )
     assert result.returncode == 0, result.stderr
     action_result, facts = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-    assert facts["invokes"] == (0 if case == "initial_disabled" else 1), result.stdout
-    assert action_result["invoked"] is (case != "initial_disabled"), result.stdout
-    assert facts["attach"] == facts["detach"], result.stdout
     assert facts["cim"] == 0, result.stdout
     assert facts["native"] > 0, result.stdout
-    expected_foreground = {"owned_popup": 888, "human_switch": 999}.get(case, 789)
-    if case in {"normal", "disabled_root"}:
-        expected_foreground = 456
-    if case == "initial_disabled":
-        expected_foreground = 456
-        assert action_result["focus_attempts"] == 0
-    assert facts["foreground"] == expected_foreground, result.stdout
-    assert action_result["handback_ok"] is (case in {"normal", "disabled_root"}), result.stdout
+    return action_result, facts
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "normal",
+        "disabled_root",
+        "initial_disabled",
+        "target_reused",
+        "iconic",
+        "disabled_before_invoke",
+        "walk_disabled",
+        "walk_process_reused",
+        "walk_root_reused",
+        "walk_ownership",
+    ],
+)
+@WINDOWS_ONLY
+def test_native_identity_hot_path_without_windows(case: str) -> None:
+    action_result, facts = _run_hot_path(case)
+    refused = {
+        "initial_disabled": "root_window_not_actionable",
+        "iconic": "root_window_not_actionable",
+        "disabled_before_invoke": "root_window_not_actionable",
+        # The occlusion walk is unbounded: identity and ownership are re-proved after it.
+        "walk_disabled": "root_window_not_actionable",
+        "walk_process_reused": "process_identity_changed",
+        "walk_root_reused": "root_process_identity_changed",
+        "walk_ownership": "control_ownership_changed",
+    }
+    assert action_result["schema"] == "pbip.desktop-action.v2", action_result
+    assert facts["invokes"] == (0 if case in refused else 1), facts
+    assert action_result["invoked"] is (case not in refused), action_result
+    assert action_result["reason"] == refused.get(case, "invoke_returned"), action_result
+    if case not in refused:
+        assert facts["events"][-5:] == ["target", "walk", "ownership", "target", "invoke"], facts
+    elif case.startswith("walk_"):
+        assert facts["events"].count("walk") == 1, facts
+    elif case == "disabled_before_invoke":
+        assert "walk" not in facts["events"], "a target refused before the walk must not walk"
+
+
+@pytest.mark.parametrize(
+    ("case", "snapshot", "reason"),
+    [
+        ("occluded", [901, 789], "occluded_by_desktop_window"),
+        ("provider_occluded", [905, 789], "occluded_by_desktop_window"),
+        ("not_over_centre", [904, 789], None),
+        ("foreign", [902, 789], None),
+        ("hidden", [903, 789], None),
+        ("after_root", [789, 901], None),
+        ("root_missing", [902], "occlusion_walk_incomplete"),
+        ("long_snapshot", [*range(2000, 2600), 901, 789], "occluded_by_desktop_window"),
+    ],
+)
+@WINDOWS_ONLY
+def test_occlusion_walk_runs_once_after_target_and_before_invoke(
+    case: str, snapshot: list[int], reason: str | None
+) -> None:
+    action_result, facts = _run_hot_path(case, snapshot)
+    assert facts["invokes"] == (0 if reason else 1), facts
+    assert action_result["invoked"] is (reason is None), action_result
+    assert action_result["reason"] == (reason or "invoke_returned"), action_result
+    assert facts["events"].count("walk") == 1, facts
+    expected_tail = ["target", "walk"] if reason else ["target", "walk", "ownership", "target", "invoke"]
+    assert facts["events"][-len(expected_tail) :] == expected_tail, facts
 
 
 @pytest.mark.parametrize(
@@ -2034,24 +2153,25 @@ MAIN
         "dropdown",
         "stale",
         "second_pass_changed",
-        "added_at_focus",
-        "renamed_at_focus",
+        "added_at_act",
+        "renamed_at_act",
         "added_after_selection",
         "renamed_after_selection",
-        "replaced_at_focus",
+        "replaced_at_act",
     ],
 )
 @WINDOWS_ONLY
 def test_prepared_action_rediscovers_current_named_set_and_refuses_changed_candidates(case: str) -> None:
     """Execute the selection/action body with only fake controls, processes and native APIs."""
     source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
-    selection = source[source.index("function New-Result") : source.index("$attempts = 0")]
+    selection = source[source.index("function New-Result") : source.index("$invoked = $false")]
     selection = selection.replace("[System.Windows.Automation.AutomationElement]$RootElement", "$RootElement")
     selection = selection.replace(
         "$membershipComparison.Invoke($null, [object[]]@($element, $candidate.Element))",
         "[object]::ReferenceEquals($element, $candidate.Element)",
     )
-    main = source[source.index("$attempts = 0") :]
+    selection = selection.replace("[DesktopActionNative]", "[PreparedActionFake]")
+    main = source[source.index("$invoked = $false") :]
     main = main.replace("[DesktopActionNative]", "[PreparedActionFake]")
     main = main.replace(
         "$comparison.Invoke($null, [object[]]@($selected, $target))",
@@ -2064,8 +2184,8 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type @'
 using System;
 public static class PreparedActionFake {
-  public static IntPtr Foreground = (IntPtr)456;
-  public static IntPtr GetForegroundWindow() { return Foreground; }
+  public static string Phase = "prepare";
+  public static IntPtr[] TopLevelSnapshot() { return new IntPtr[] { (IntPtr)789 }; }
   public static IntPtr SetThreadDpiAwarenessContext(IntPtr c) { return (IntPtr)1; }
 }
 '@
@@ -2074,13 +2194,13 @@ $script:scans=0; $script:invokes=0; $script:providerReads=0; $script:events=@()
 function Get-ProviderChain {
   param($provider)
   $script:providerReads++
-  $script:events += "provider:$([PreparedActionFake]::Foreground)"
-  if ([PreparedActionFake]::Foreground -eq 789 -and 'CASE' -eq 'provider_changed') { return '200/21;100/10' }
+  $script:events += "provider:$([PreparedActionFake]::Phase)"
+  if ([PreparedActionFake]::Phase -eq 'act' -and 'CASE' -eq 'provider_changed') { return '200/21;100/10' }
   return '200/20;100/10'
 }
 function Get-ProviderIdentity {
   param($provider)
-  if ([PreparedActionFake]::Foreground -eq 789 -and 'CASE' -eq 'provider_changed') { return '200/21' }
+  if ([PreparedActionFake]::Phase -eq 'act' -and 'CASE' -eq 'provider_changed') { return '200/21' }
   return '200/20'
 }
 function Get-ControlOwnership {
@@ -2091,11 +2211,11 @@ function Get-ControlOwnership {
     $chain=$cache[[uint32]200]
   }
   if ($null -ne $ScanProviders) { $ScanProviders[[uint32]200]='200/20' }
-  if ([PreparedActionFake]::Foreground -eq 789 -and 'CASE' -eq 'stale') { throw 'stale element' }
+  if ([PreparedActionFake]::Phase -eq 'act' -and 'CASE' -eq 'stale') { throw 'stale element' }
   $binding="$chain|$($e.Renderer)"
   if ($null -ne $PreparedBinding) { $PreparedBinding.Value=$binding }
   if ($Prepare) { return $binding }
-  if ([PreparedActionFake]::Foreground -ne 789) { throw 'background hit test' }
+  if ([PreparedActionFake]::Phase -ne 'act') { throw 'prepare-phase hit test' }
   $hit=$e.Hit
   if ([object]::ReferenceEquals($e,$script:second) -and 'CASE' -eq 'second_pass_changed') { $e.Hit=$true }
   if ([object]::ReferenceEquals($e,$script:first) -and -not $script:changedAfterSelection) {
@@ -2125,13 +2245,27 @@ function New-Control($hit) {
 $script:first=New-Control $true
 $script:second=New-Control $false
 $script:controls=@($script:first,$script:second)
-if ('CASE' -in @('renamed_at_focus','renamed_after_selection')) { $script:second.Current.Name='Other' }
+if ('CASE' -in @('renamed_at_act','renamed_after_selection')) { $script:second.Current.Name='Other' }
 if ('CASE' -eq 'newly_enabled') { $script:second.Current.IsEnabled=$false }
 $script:root=[pscustomobject]@{}
 $script:root | Add-Member ScriptMethod FindAll {
   param($scope,$condition)
   $script:scans++
-  $script:events += "scan:$([PreparedActionFake]::Foreground)"
+  if ($script:scans -eq 2) {
+    # The act phase starts with the first rediscovery; the world may change in between.
+    $script:events += 'act'
+    if ('CASE' -eq 'ambiguous') { $script:second.Hit=$true }
+    if ('CASE' -eq 'disabled') { $script:first.Current.IsEnabled=$false }
+    if ('CASE' -eq 'newly_enabled') { $script:second.Current.IsEnabled=$true; $script:second.Hit=$true }
+    if ('CASE' -eq 'renderer_changed') { $script:first.Renderer=57 }
+    if ('CASE' -eq 'no_invoke') { $script:first.Invoke=$false }
+    if ('CASE' -eq 'dropdown') { $script:first.Dropdown=$true }
+    if ('CASE' -eq 'added_at_act') { $script:controls += New-Control $true }
+    if ('CASE' -eq 'renamed_at_act') { $script:second.Current.Name='Refresh'; $script:second.Hit=$true }
+    if ('CASE' -eq 'replaced_at_act') { $script:controls=@((New-Control $true),$script:second) }
+    [PreparedActionFake]::Phase='act'
+  }
+  $script:events += "scan:$([PreparedActionFake]::Phase)"
   if ($condition -is [System.Windows.Automation.AndCondition]) {
     $terms=$condition.GetConditions()
     if ($terms[0].Property -ne [System.Windows.Automation.AutomationElement]::NameProperty -or
@@ -2151,30 +2285,10 @@ $script:root | Add-Member ScriptMethod FindAll {
   return @()
 }
 function Test-Target { return $script:root }
-function Get-WindowIdentity { param($h) return '100/10' }
-function Set-VerifiedForeground {
-  param($destination,$permitted,$identity)
-  if ($destination -eq 789) {
-    $script:events += 'focus'
-    if ('CASE' -eq 'ambiguous') { $script:second.Hit=$true }
-    if ('CASE' -eq 'disabled') { $script:first.Current.IsEnabled=$false }
-    if ('CASE' -eq 'newly_enabled') { $script:second.Current.IsEnabled=$true; $script:second.Hit=$true }
-    if ('CASE' -eq 'renderer_changed') { $script:first.Renderer=57 }
-    if ('CASE' -eq 'no_invoke') { $script:first.Invoke=$false }
-    if ('CASE' -eq 'dropdown') { $script:first.Dropdown=$true }
-    if ('CASE' -eq 'added_at_focus') { $script:controls += New-Control $true }
-    if ('CASE' -eq 'renamed_at_focus') { $script:second.Current.Name='Refresh'; $script:second.Hit=$true }
-    if ('CASE' -eq 'replaced_at_focus') { $script:controls=@((New-Control $true),$script:second) }
-  }
-  [PreparedActionFake]::Foreground=$destination
-  return $true
-}
-function Start-Sleep { param($Milliseconds) }
 SELECTION
 MAIN
 [pscustomobject]@{
   scans=$script:scans; invokes=$script:invokes; events=$script:events
-  foreground=[PreparedActionFake]::Foreground.ToInt64()
   eligible=@($script:controls | Where-Object {
     $_.Current.Name -ceq 'Refresh' -and $_.Current.IsEnabled -and $_.Hit -and $_.Invoke -and -not $_.Dropdown
   }).Count
@@ -2194,116 +2308,22 @@ MAIN
     action_result, facts = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
     if case.startswith(("added_", "renamed_")):
         assert facts["eligible"] == 2, result.stdout
-    elif case in {"valid", "replaced_at_focus"}:
+    elif case in {"valid", "replaced_at_act"}:
         assert facts["eligible"] == 1, result.stdout
-    assert facts["foreground"] == 456
     assert facts["invokes"] == (1 if case == "valid" else 0), result.stdout
     assert action_result["invoked"] is (case == "valid")
-    assert action_result["handback_ok"] is True
-    assert facts["events"][:3] == ["scan:456", "provider:456", "focus"], result.stdout
-    assert facts["events"][3] == "scan:789", result.stdout
+    assert facts["events"][:3] == ["scan:prepare", "provider:prepare", "act"], result.stdout
+    assert facts["events"][3] == "scan:act", result.stdout
     if case == "valid":
         assert facts["scans"] == 3
-        assert facts["events"].count("provider:789") == 3
+        # Two reacquisition passes, then the final ownership check before and after the occlusion walk.
+        assert facts["events"].count("provider:act") == 4
     elif case in {"ambiguous", "second_pass_changed"}:
         assert action_result["reason"] == "ambiguous_named_control"
     elif case == "provider_changed":
         assert action_result["reason"] == "provider_identity_changed"
     elif case not in {"valid", "stale"}:
         assert action_result["reason"] == "selected_control_changed"
-
-
-@pytest.mark.parametrize("human_switch", [False, True])
-@WINDOWS_ONLY
-def test_selector_refusal_handback_preserves_human_foreground(human_switch: bool) -> None:
-    source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
-    start = source.index("  $foregroundAfter =")
-    body = source[start : source.index("  if ($dpiContext", start)]
-    body = body.replace("[DesktopActionNative]::GetForegroundWindow()", "$script:foreground")
-    body = body.replace("[DesktopActionNative]::IsWindow($priorForeground)", "$true")
-    body = body.replace(
-        "[DesktopActionNative]::SetForegroundWindow($priorForeground)",
-        "(& { $script:foreground = $priorForeground; $script:restores++; $true })",
-    )
-    script = r"""
-$attempts=1; $invoked=$false; $targetHwnd=789; $priorForeground=456
-$restoreRequested=$false; $restoreVerified=$null; $handbackOk=$false
-$priorIdentity='456/10'
-function Get-WindowIdentity { param($h) return '456/10' }
-function Set-VerifiedForeground {
-  param($destination,$permitted,$identity)
-  $script:foreground=$destination; $script:restores++; return $true
-}
-$reason='ambiguous_named_control'; $script:restores=0; $script:foreground=FOREGROUND
-BODY
-"$script:restores|$restoreRequested|$restoreVerified|$reason"
-""".replace("FOREGROUND", "999" if human_switch else "789").replace("BODY", body)
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == (
-        "0|False||ambiguous_named_control" if human_switch else "1|True|True|ambiguous_named_control"
-    )
-
-
-@pytest.mark.parametrize("case", ["success", "attach_failure", "human_switch", "bring_switch", "identity"])
-@WINDOWS_ONLY
-def test_thread_attachment_focus_body_detaches_and_preserves_human_switch(case: str) -> None:
-    source = actions.ACTION_SCRIPT.read_text(encoding="utf-8")
-    start = source.index("function Set-VerifiedForeground")
-    body = source[start : source.index("function Test-Target", start)]
-    body = body.replace("[DesktopActionNative]", "[FocusFake]")
-    script = r"""
-$ErrorActionPreference='Stop'
-Add-Type @'
-using System;
-public static class FocusFake {
-  public static string Case;
-  public static int Attach, Detach, Bring, Set;
-  public static IntPtr Foreground = (IntPtr)456;
-  public static uint GetCurrentThreadId() { return 1; }
-  public static bool IsWindow(IntPtr h) { return true; }
-  public static uint GetWindowThreadProcessId(IntPtr h, out uint pid) { pid=100; return h==(IntPtr)456 ? 2u : 3u; }
-  public static IntPtr GetForegroundWindow() { return Foreground; }
-  public static bool AttachThreadInput(uint a,uint b,bool attach) {
-    if (!attach) { Detach++; return true; }
-    Attach++;
-    if (Case=="attach_failure" && Attach==2) return false;
-    if (Case=="human_switch") Foreground=(IntPtr)999;
-    return true;
-  }
-  public static bool BringWindowToTop(IntPtr h) { Bring++; if(Case=="bring_switch") Foreground=(IntPtr)999; return true; }
-  public static bool SetForegroundWindow(IntPtr h) { Set++; Foreground=h; return true; }
-}
-'@
-[FocusFake]::Case='CASE'
-function Test-Target { return $true }
-function Get-WindowIdentity { param($h) if ('CASE' -eq 'identity') { return 'changed' }; return '100/10' }
-BODY
-$ok = Set-VerifiedForeground ([IntPtr]789) ([IntPtr]456) '100/10'
-"$ok|$([FocusFake]::Attach)|$([FocusFake]::Detach)|$([FocusFake]::Bring)|$([FocusFake]::Set)"
-""".replace("CASE", case).replace("BODY", body)
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
-    )
-    assert result.returncode == 0, result.stderr
-    expected = {
-        "success": "True|2|2|1|1",
-        "attach_failure": "False|2|1|0|0",
-        "human_switch": "False|1|1|0|0",
-        "bring_switch": "False|2|2|1|0",
-        "identity": "False|0|0|0|0",
-    }
-    assert result.stdout.strip() == expected[case]
 
 
 @pytest.mark.parametrize(
@@ -2493,7 +2513,7 @@ def test_operator_refresh_refuses_a_non_ready_baseline_before_any_action(
     assert f"not READY or never-processed (state {state}))" in capsys.readouterr().out
 
 
-def test_action_protocol_requires_exact_target_and_truthful_handback() -> None:
+def test_action_protocol_requires_exact_target() -> None:
     result = _read_action_output(
         _action_payload(),
         "Refresh",
@@ -2501,16 +2521,8 @@ def test_action_protocol_requires_exact_target_and_truthful_handback() -> None:
         expected_process_start="456",
         root_hwnd=789,
     )
-    failed_handback = _read_action_output(
-        _action_payload(restore_verified=False, handback_ok=False, reason="handback_not_verified"),
-        "Refresh",
-        pid=123,
-        expected_process_start="456",
-        root_hwnd=789,
-    )
 
-    assert result.invoked and result.focus_attempts == 2 and result.handback_verified
-    assert failed_handback.invoked and not failed_handback.handback_verified
+    assert result.invoked and result.reason == "invoke_returned"
     with pytest.raises(DesktopActionError, match="did not match"):
         _read_action_output(
             _action_payload(root_hwnd="999"),
@@ -2519,6 +2531,33 @@ def test_action_protocol_requires_exact_target_and_truthful_handback() -> None:
             expected_process_start="456",
             root_hwnd=789,
         )
+
+
+def test_action_protocol_refuses_v1_schema() -> None:
+    with pytest.raises(DesktopActionError, match="unsupported protocol"):
+        _read_action_output(
+            _action_payload(schema="pbip.desktop-action.v1"),
+            "Refresh",
+            pid=123,
+            expected_process_start="456",
+            root_hwnd=789,
+        )
+
+
+@pytest.mark.parametrize(
+    "focus_api",
+    [
+        "SetForegroundWindow",
+        "AttachThreadInput",
+        "BringWindowToTop",
+        "GetForegroundWindow",
+        "WindowFromPoint",
+        "GetCurrentThreadId",
+    ],
+)
+def test_action_helper_source_names_no_focus_or_screen_hit_test_api(focus_api: str) -> None:
+    # Word boundaries: ChildWindowFromPointEx is the in-root descent primitive and is allowed.
+    assert not re.search(rf"\b{focus_api}\b", actions.ACTION_SCRIPT.read_text(encoding="utf-8"))
 
 
 def test_action_protocol_refuses_invoke_without_typed_start_or_named_status() -> None:
@@ -2634,20 +2673,13 @@ def test_ui_refresh_help_warns_about_operator_source_execution_and_no_clearance(
     assert "Automatic callers must add --automatic-source-scope (#780, linked #692)" in help_text
 
 
-def test_action_result_handback_flag_is_not_inferred_from_invoke() -> None:
-    action = ActionResult("Save", True, "foreground_changed_after_invoke", 1, 10, False, "failed")
-
-    assert action.invoked
-    assert not action.handback_verified
-
-
 def _wire_ui_route(monkeypatch: pytest.MonkeyPatch, *, no_save: bool = False, rows: int = 1):
     baseline = _snapshot(ticks=100)
     identity = SimpleNamespace(pid=123, port=49157, process_start="456")
     context = UIRefreshContext(123, 49157, SimpleNamespace(identity=identity), 789, None)
     calls: list[str] = []
-    refresh_action = ActionResult("Refresh", True, "invoke_returned", 1, 200, False, "not_requested")
-    save_action = ActionResult("Save", True, "invoke_returned", 1, 300, False, "not_requested")
+    refresh_action = ActionResult("Refresh", True, "invoke_returned", 200)
+    save_action = ActionResult("Save", True, "invoke_returned", 300)
 
     monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_command", lambda: ["controlled-bridge"])
     monkeypatch.setattr(
@@ -2905,14 +2937,10 @@ def test_settle_refuses_when_desktop_never_returns_to_ready(
         assert holds == [after_action]
 
 
-@pytest.mark.parametrize("failed_phase", ["Refresh", "Save"])
-@pytest.mark.parametrize("restore_requested", [False, True])
-def test_failed_handback_does_not_veto_safe_save_or_verified_cache(
+def test_safe_save_runs_after_ordered_safety_checks_and_persists_verified_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    failed_phase: str,
-    restore_requested: bool,
 ) -> None:
     emit_verdict = refresh_pbip_model._emit_data_verdict
     context, args, calls = _wire_ui_route(monkeypatch)
@@ -2931,15 +2959,7 @@ def test_failed_handback_does_not_veto_safe_save_or_verified_cache(
             assert safety_checks == ["observer", "model", "observer", "observer", "binding", "model"]
             cache.write_bytes(b"synthetic cache updated by named Save")
             os.utime(cache, (200, 200))
-        return ActionResult(
-            action,
-            True,
-            "invoke_returned",
-            1,
-            200,
-            restore_requested,
-            "failed" if action == failed_phase else "verified",
-        )
+        return ActionResult(action, True, "invoke_returned", 200)
 
     def observe(*_args, **_kwargs):
         safety_checks.append("observer")
@@ -2972,11 +2992,10 @@ def test_failed_handback_does_not_veto_safe_save_or_verified_cache(
     output = capsys.readouterr().out
     assert "REFRESH: DATA_OK + PERSISTED" in output
     assert "NOT_PERSISTED" not in output
-    assert "UX failure" in output
 
 
 @pytest.mark.parametrize("failure", ["action", "dirty", "unknown_clean", "binding", "observer", "cache", "deadline"])
-def test_failed_save_handback_does_not_clear_real_save_failures(
+def test_real_save_failures_are_not_cleared(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], failure: str
 ) -> None:
     emit_verdict = refresh_pbip_model._emit_data_verdict
@@ -2993,7 +3012,7 @@ def test_failed_save_handback_does_not_clear_real_save_failures(
         if action == "Save" and failure != "cache":
             cache.write_bytes(b"synthetic updated cache")
             os.utime(cache, (200, 200))
-        return ActionResult(action, failure != "action" or action == "Refresh", "controlled", 1, 200, True, "failed")
+        return ActionResult(action, failure != "action" or action == "Refresh", "controlled", 200)
 
     def status(*_args, **_kwargs):
         payload = bridge_status(["controlled-bridge"], 123, 110.0)
@@ -3194,23 +3213,22 @@ def test_synthetic_control_is_invoked_once_and_ambiguity_refused(control_type: s
         assert len(ready) == 3 and ready[0] == "READY", "synthetic window did not publish its identity"
         root_hwnd, process_start = int(ready[1]), ready[2]
         time.sleep(0.25)
+        foreground = ctypes.windll.user32.GetForegroundWindow()
         result = invoke_desktop_action(
             "Refresh",
             pid=child.pid,
             expected_process_start=process_start,
             root_hwnd=root_hwnd,
         )
+        assert ctypes.windll.user32.GetForegroundWindow() == foreground, "the helper changed the foreground"
         title = ctypes.create_unicode_buffer(256)
         deadline = time.monotonic() + 3
         if duplicate:
             assert not result.invoked and result.reason == "ambiguous_named_control"
-            assert 1 <= result.focus_attempts <= 3
             ctypes.windll.user32.GetWindowTextW(root_hwnd, title, len(title))
             assert title.value == "Synthetic UIA", "ambiguous controls must not be activated"
         else:
             assert result.invoked and result.action_started_ticks is not None
-            assert 1 <= result.focus_attempts <= 3
-            assert isinstance(result.handback_verified, bool)
             while time.monotonic() < deadline:
                 ctypes.windll.user32.GetWindowTextW(root_hwnd, title, len(title))
                 if title.value == "Synthetic invoked":
@@ -3559,16 +3577,14 @@ def test_ui_refusal_prints_the_observed_frame_and_hints_only_a_missing_control(
     monkeypatch.setattr(
         refresh_pbip_model,
         "invoke_desktop_action",
-        lambda action, **_kwargs: (
-            actions_seen.append(action) or ActionResult(action, False, reason, 1, None, False, "not_requested")
-        ),
+        lambda action, **_kwargs: actions_seen.append(action) or ActionResult(action, False, reason, None),
     )
 
     assert refresh_pbip_model.main(["--pid", "123", "--ui-refresh", "--no-save"]) == 2
 
     out = capsys.readouterr().out
     hint = "  hint   : a small frame collapses the Home ribbon; maximize the Desktop window\n"
-    refusal = f"REFRESH: UI_ACTION_REFUSED ({reason}; focus attempts=1)\n"
+    refusal = f"REFRESH: UI_ACTION_REFUSED ({reason})\n"
     assert out.count("  frame  : observed 636x400\n") == 1
     assert out.index("  frame  : observed") < out.index(refusal)
     assert actions_seen == ["Refresh"]

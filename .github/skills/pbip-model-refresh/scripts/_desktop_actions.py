@@ -70,15 +70,7 @@ class ActionResult:
     action: Literal["Refresh", "Save"]
     invoked: bool
     reason: str
-    focus_attempts: int
     action_started_ticks: int | None
-    restore_requested: bool
-    handback_state: Literal["verified", "not_requested", "failed"]
-
-    @property
-    def handback_verified(self) -> bool:
-        """True only when no restore was needed or requested handback was verified."""
-        return self.handback_state in {"verified", "not_requested"}
 
 
 def _integer(value: object, field: str) -> int:
@@ -372,20 +364,10 @@ def check_completion(
 
 
 def _action_result(payload: dict[str, object], action: Literal["Refresh", "Save"]) -> ActionResult:
-    """Validate the typed action outcome and honest foreground handback fields."""
+    """Validate the typed action outcome."""
     invoked = payload.get("invoked")
-    requested = payload.get("restore_requested")
-    verified = payload.get("restore_verified")
-    handback_ok = payload.get("handback_ok")
-    attempts = payload.get("focus_attempts")
-    if not isinstance(invoked, bool) or not isinstance(requested, bool) or not isinstance(handback_ok, bool):
+    if not isinstance(invoked, bool):
         raise DesktopActionError("UIA child protocol is incomplete")
-    if verified is not None and not isinstance(verified, bool):
-        raise DesktopActionError("UIA child handback result is invalid")
-    if requested != (verified is not None):
-        raise DesktopActionError("UIA child handback protocol is inconsistent")
-    if not isinstance(attempts, int) or isinstance(attempts, bool) or not 0 <= attempts <= 3:
-        raise DesktopActionError("UIA child focus result is invalid")
     ticks_value = payload.get("action_started_ticks")
     if ticks_value is not None and (
         not isinstance(ticks_value, str) or not ticks_value.isascii() or not ticks_value.isdecimal()
@@ -399,10 +381,7 @@ def _action_result(payload: dict[str, object], action: Literal["Refresh", "Save"
     reason = payload.get("reason")
     if not isinstance(reason, str) or not reason:
         raise DesktopActionError("UIA child reason is missing")
-    handback_state = (
-        "verified" if requested and verified and handback_ok else "not_requested" if handback_ok else "failed"
-    )
-    return ActionResult(action, invoked, reason, attempts, ticks, requested, handback_state)
+    return ActionResult(action, invoked, reason, ticks)
 
 
 def _read_action_output(
@@ -418,7 +397,7 @@ def _read_action_output(
         payload = json.loads(output)
     except json.JSONDecodeError as exc:
         raise DesktopActionError("UIA child returned invalid protocol data") from exc
-    if not isinstance(payload, dict) or payload.get("schema") != "pbip.desktop-action.v1":
+    if not isinstance(payload, dict) or payload.get("schema") != "pbip.desktop-action.v2":
         raise DesktopActionError("UIA child returned an unsupported protocol")
     if (
         payload.get("action") != action
