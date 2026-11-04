@@ -2199,12 +2199,14 @@ DATA_ACCESS_SCHEMA = "phase1-data-access/v1"
 DATA_ACCESS_STATES = (
     "local_import_ready",
     "live_data_ok",
+    "live_unproven",
     "authorized_model_only",
     "provider_inherited",
     "blocked",
     "cannot_establish",
 )
-DIRECT_ACCEPTED_STATES = ("local_import_ready", "live_data_ok", "authorized_model_only")
+# `live_data_ok` and the human-authorize pairing are legacy: still parsed, no longer produced.
+DIRECT_ACCEPTED_STATES = ("local_import_ready", "live_data_ok", "live_unproven", "authorized_model_only")
 VALIDATION_STATES = ("validated", "unvalidated", "not_established")
 EFFECTIVE_SCOPES = ("model_and_report", "model_only", "report_only_shared_model")
 DIRECT_SCOPES = ("model_and_report", "model_only")
@@ -2220,6 +2222,7 @@ ACCEPTED_CODES = frozenset(
         "human-authorize",
         "brief-model-only",
         "provider-exact",
+        "live-unproven",
     }
 )
 BLOCKING_CODES = frozenset(
@@ -2708,36 +2711,6 @@ def _data_access_ledger(
     )
 
 
-def _authorization_state(
-    gate_root: Path,
-    key_codes: dict[str, str | None],
-    permission: frozenset[str],
-    fallback_authorization: str,
-    requested_scope: str,
-) -> tuple[bool, bool]:
-    """(complete authorization, mismatched inputs), using the same already-read audit snapshot."""
-    authorized = (
-        bool(permission)
-        and (gate_root / OVERRIDE).is_file()
-        and all(code is None or key in permission for key, code in key_codes.items())
-    )
-    wants = fallback_authorization == "model_only_unvalidated"
-    if authorized and wants and requested_scope == "model_only":
-        return True, False
-    return False, authorized or wants
-
-
-def _blocked_assessment(
-    live_keys: tuple[str, ...], key_codes: dict[str, str | None], extra: list[str]
-) -> DataAccessAssessment:
-    """An untrusted identity is cannot-establish, not a finding about that source's data."""
-    codes = [code for code in key_codes.values() if code] + extra
-    fatal = [code for code in codes if code in CANNOT_CODES]
-    if fatal:
-        return _cannot_establish(*fatal)
-    return _assessment("blocked", codes=codes or ["marker-only"], source_keys=live_keys)
-
-
 def provider_reference(unit: str) -> str:
     """Versioned SHA-256 reference of an exact S2 component; no search, normalization or lost code points."""
     _require(isinstance(unit, str) and "/" not in unit and is_canonical_key(unit), "provider-unit-invalid")
@@ -2822,131 +2795,50 @@ def _inherit_from_provider(provider: object, requested_scope: str) -> DataAccess
     )
 
 
-def _direct_evidence(
-    gate_root: Path, live_keys: tuple[str, ...], policy: str
-) -> tuple[list[dict] | None, frozenset[str], str | None]:
-    """Retain full current R with the trusted trail; local bytes alone do not consume authority."""
-    trail, trail_refusal = _read_audit_trail(gate_root)
-    if not (bool(live_keys) or policy == "model_only_unvalidated" or (gate_root / OVERRIDE).exists()):
-        return [], frozenset(), None
-    if trail is None:
-        return None, frozenset(), trail_refusal or AUDIT_MISSING
-    current, refusal = _gate_root_live_keys(gate_root) if live_keys else (frozenset(), None)
-    if not refusal and not set(live_keys) <= current:
-        refusal = "source-key-set-changed"
-    return (None if refusal else trail), current, refusal
-
-
-def _package_findings(has_review: bool, local_complete: bool, auth_mismatch: bool) -> list[str]:
-    """Package-level blocking codes that are true regardless of any single source key."""
-    findings = ["unknown-target"] if has_review else []
-    if not local_complete:
-        findings.append("local-import-incomplete")
-    if auth_mismatch:
-        findings.append("authorization-mismatch")
-    return findings
-
-
-def _accepted_direct(live_keys: tuple[str, ...], requested_scope: str) -> DataAccessAssessment:
-    """The accepted direct state once every check has passed: live if there are keys, else local."""
-    if live_keys:
-        return _assessment(
-            "live_data_ok",
-            codes=["probe-data-ok", "probe-cleared"],
-            source_keys=live_keys,
-            validation="validated",
-            effective_scope=requested_scope,
-            max_phase2_claim="data_validated",
-        )
-    return _assessment(
-        "local_import_ready",
-        codes=["all-flat-file", "package-self-contained"],
-        validation="validated",
-        effective_scope=requested_scope,
-        max_phase2_claim="data_validated",
-    )
-
-
-@_coordinated(reader=True, refusal=lambda: _cannot_establish("transaction-refused"))
 def _assess_direct(
-    gate_root: Path,
     live_keys: tuple[str, ...],
     has_review: bool,
     package_data_sources: object,
     policy: tuple[str, str],
 ) -> DataAccessAssessment:
-    """Conjoin the existing ledger policy with the physical state under the same descriptor."""
-    result, trail, current = _assess_direct_locked(gate_root, live_keys, has_review, package_data_sources, policy)
-    if result.state == "local_import_ready":
-        return result
-    if result.state in DIRECT_ACCEPTED_STATES:
-        physical = inspect_physical_barrier(gate_root)[0]
-        if physical == "cannot_establish":
-            return _cannot_establish("transaction-refused")
-        if physical != "clear" and not _completed_partial_clear(gate_root, live_keys, trail or [], current=current):
-            return _assessment("blocked", codes=["marker-only"], source_keys=live_keys)
-    return result
+    """Assess direct access from package facts and the brief alone; no audit, ledger or marker is read.
 
-
-def _completed_partial_clear(
-    root: Path, selected: tuple[str, ...], entries: list[dict], *, current: frozenset[str]
-) -> bool:
-    """A completed scoped projection is not permission to release the root's sibling stop."""
-    marked = set(_established_sources(root))
-    if not marked or marked.intersection(selected):
-        return False
-    states, permission = _data_access_ledger(entries, tuple(sorted(current)), current=current)
-    permitted = permission if (root / OVERRIDE).is_file() else frozenset()
-    pending = {key for key, code in states.items() if code is not None and key not in permitted}
-    return marked == pending
-
-
-def _assess_direct_locked(
-    gate_root: Path,
-    live_keys: tuple[str, ...],
-    has_review: bool,
-    package_data_sources: object,
-    policy: tuple[str, str],
-) -> tuple[DataAccessAssessment, list[dict] | None, frozenset[str]]:
-    """Assess direct authority against package facts and one same-root ledger snapshot."""
+    A live source is admitted as `live_unproven`: dispatchable, but never `validated`. Real-data proof
+    is owed at sign-off by check_unit's `data-evidence` row, not earned here.
+    """
     fallback_authorization, requested_scope = policy
     local_complete, refusal = _package_local_facts(package_data_sources)
     if refusal:
-        return _cannot_establish(refusal), None, frozenset()
-
-    trail, current, refusal = _direct_evidence(gate_root, live_keys, fallback_authorization)
-    if refusal:
-        return _cannot_establish(refusal), None, current
-
-    key_codes, permission = _data_access_ledger(trail or [], live_keys, current=current)
-    authorized, auth_mismatch = _authorization_state(
-        gate_root, key_codes, permission, fallback_authorization, requested_scope
-    )
-    if not has_review and local_complete and not any(key_codes.values()):
-        return _accepted_direct(live_keys, requested_scope), trail, current
-    if (
-        authorized
-        and live_keys
-        and not has_review
-        and local_complete
-        and not any(code in CANNOT_CODES for code in key_codes.values())
-    ):
-        return (
-            _assessment(
-                "authorized_model_only",
-                codes=["human-authorize", "brief-model-only"],
-                source_keys=live_keys,
-                validation="unvalidated",
-                effective_scope="model_only",
-                max_phase2_claim="structural_only",
-            ),
-            trail,
-            current,
+        return _cannot_establish(refusal)
+    findings = ["unknown-target"] if has_review else []
+    if not local_complete:
+        findings.append("local-import-incomplete")
+    if findings:
+        return _assessment("blocked", codes=findings, source_keys=live_keys)
+    if not live_keys:
+        return _assessment(
+            "local_import_ready",
+            codes=["all-flat-file", "package-self-contained"],
+            validation="validated",
+            effective_scope=requested_scope,
+            max_phase2_claim="data_validated",
         )
-    return (
-        _blocked_assessment(live_keys, key_codes, _package_findings(has_review, local_complete, auth_mismatch)),
-        trail,
-        current,
+    if fallback_authorization == "model_only_unvalidated" and requested_scope == "model_only":
+        return _assessment(
+            "authorized_model_only",
+            codes=["brief-model-only"],
+            source_keys=live_keys,
+            validation="unvalidated",
+            effective_scope="model_only",
+            max_phase2_claim="structural_only",
+        )
+    return _assessment(
+        "live_unproven",
+        codes=["live-unproven"],
+        source_keys=live_keys,
+        validation="unvalidated",
+        effective_scope=requested_scope,
+        max_phase2_claim="data_validated",
     )
 
 
@@ -2959,11 +2851,13 @@ def assess_data_access(  # pylint: disable=too-many-arguments
     requested_scope: str,
     provider: tuple[str, DataAccessAssessment] | list | None = None,
 ) -> DataAccessAssessment:
-    """Read-only authority over this root's audit/spec and supplied package facts or S2 provider.
+    """Read-only authority over supplied package facts, the brief policy or one S2 provider.
 
     Invalid policy/scope raises ValueError; malformed evidence returns a typed refusal.
-    No probe, mutation or ancestor search. Provider pairs carry provider_reference(), not raw names.
+    No probe, mutation, audit/ledger read or ancestor search. `gate_root` is retained for caller
+    compatibility only. Provider pairs carry provider_reference(), not raw names.
     """
+    del gate_root
     if fallback_authorization not in FALLBACK_POLICIES:
         raise ValueError(f"fallback_authorization must be one of {FALLBACK_POLICIES}")
     if requested_scope not in EFFECTIVE_SCOPES:
@@ -2974,9 +2868,7 @@ def assess_data_access(  # pylint: disable=too-many-arguments
     live_keys, has_review, spec_refusal = _package_spec_facts(package_spec)
     if spec_refusal:
         return _cannot_establish(spec_refusal)
-    return _assess_direct(
-        gate_root, live_keys, has_review, package_data_sources, (fallback_authorization, requested_scope)
-    )
+    return _assess_direct(live_keys, has_review, package_data_sources, (fallback_authorization, requested_scope))
 
 
 def reconcile_package_data_access(  # pylint: disable=too-many-return-statements,too-many-branches
@@ -3114,6 +3006,8 @@ def _check_state_combination(payload: dict) -> None:  # pylint: disable=too-many
                 keys and validation == "unvalidated" and ceiling == "structural_only" and scope == "model_only",
                 "illegal-combination",
             )
+        elif provider_state == "live_unproven":
+            _require(keys and validation == "unvalidated" and ceiling == "data_validated", "illegal-combination")
         else:
             _require(validation == "validated" and ceiling == "data_validated", "illegal-combination")
             _require(bool(keys) == (provider_state == "live_data_ok"), "illegal-combination")
@@ -3125,13 +3019,21 @@ def _check_state_combination(payload: dict) -> None:  # pylint: disable=too-many
         _require(
             validation == "validated" and ceiling == "data_validated" and scope in DIRECT_SCOPES, "illegal-combination"
         )
+    elif state == "live_unproven":
+        _require(keys and codes == {"live-unproven"}, "illegal-combination")
+        _require(
+            validation == "unvalidated" and ceiling == "data_validated" and scope in DIRECT_SCOPES,
+            "illegal-combination",
+        )
     elif state == "local_import_ready":
         _require(not keys and codes == {"all-flat-file", "package-self-contained"}, "illegal-combination")
         _require(
             validation == "validated" and ceiling == "data_validated" and scope in DIRECT_SCOPES, "illegal-combination"
         )
     elif state == "authorized_model_only":
-        _require(keys and codes == {"human-authorize", "brief-model-only"}, "illegal-combination")
+        _require(
+            keys and codes in ({"brief-model-only"}, {"human-authorize", "brief-model-only"}), "illegal-combination"
+        )
         _require(
             validation == "unvalidated" and ceiling == "structural_only" and scope == "model_only",
             "illegal-combination",
