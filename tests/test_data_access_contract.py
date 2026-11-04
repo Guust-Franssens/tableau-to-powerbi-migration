@@ -23,7 +23,7 @@ import credential_gate as gate
 
 import package_data_access as pda
 from test_package_role_identity import DS_LUID, PUBLISHED_KEY, datasource_package, workbook_package
-from credential_gate import _DuplicateJsonKey, _reject_duplicate_keys
+from package_data_access import _DuplicateJsonKey, _reject_duplicate_keys
 from package_filesystem import is_canonical_key
 from package_role_identity import verify_phase1_role_identity
 

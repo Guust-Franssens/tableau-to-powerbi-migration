@@ -3381,9 +3381,10 @@ def test_the_module_still_loads_the_way_the_hook_loads_it(tmp_path: Path) -> Non
 
     spec.loader.exec_module(module)
 
-    assert module.assess_data_access is not None
+    assert module.gate_transaction is not None and module.status is not None
     assert (
-        module.DataAccessAssessment(
+        sys.modules["package_data_access"]
+        .DataAccessAssessment(
             state="blocked",
             source_keys=(),
             provider_unit=None,
@@ -3392,7 +3393,8 @@ def test_the_module_still_loads_the_way_the_hook_loads_it(tmp_path: Path) -> Non
             effective_scope=None,
             max_phase2_claim="none",
             codes=("marker-only",),
-        ).state
+        )
+        .state
         == "blocked"
     )
     assert not (tmp_path / "unused").exists(), "importing the module must not touch the filesystem"
