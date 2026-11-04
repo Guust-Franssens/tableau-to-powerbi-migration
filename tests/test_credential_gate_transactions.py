@@ -318,23 +318,11 @@ def test_foreign_historical_scope_refuses_the_whole_current_ledger(
     )
     assert gate._clear_was_earned(root, keys[:1]) is None
     assert not gate._override_is_authentic(root)
-    spec = json.loads((root / gate.MIGRATION_SPEC).read_text(encoding="utf-8"))
-    selected = {"data_sources": spec["data_sources"][:1]}
-    assessment = gate.assess_data_access(
-        root,
-        package_spec=selected,
-        package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
-        fallback_authorization="model_only_unvalidated" if action == "arm" else "stop",
-        requested_scope="model_only",
-    )
-    assert (assessment.state, assessment.codes) == ("cannot_establish", ("source-key-set-changed",)), (
-        "selected projection must retain the full-root foreign-row refusal"
-    )
     assert gate.status(root) != 0, "foreign rows must not establish root clearance"
 
 
 @pytest.mark.parametrize("permission", [False, True], ids=["proof", "human-permission"])
-def test_current_sibling_rows_survive_selected_projection_with_one_root_snapshot(
+def test_selected_projection_reads_no_gate_root_snapshot(
     unit, monkeypatch: pytest.MonkeyPatch, permission: bool
 ) -> None:
     root, keys = unit
@@ -365,10 +353,10 @@ def test_current_sibling_rows_survive_selected_projection_with_one_root_snapshot
         fallback_authorization="model_only_unvalidated" if permission else "stop",
         requested_scope="model_only",
     )
-    assert assessment.state == ("authorized_model_only" if permission else "live_data_ok"), (
-        "current sibling scope must remain authoritative when projecting a selected subset"
+    assert assessment.state == ("authorized_model_only" if permission else "live_unproven"), (
+        "S2: a selected live subset projects from the package and brief, never from gate proof"
     )
-    assert calls == [True], "selected projection must fold one immutable full current root"
+    assert calls == [], "the projection must not read the gate root at all"
     assert assessment.source_keys == (keys[0],)
     monkeypatch.setattr(gate, "_gate_root_live_keys", resolve)
     assert gate.status(root) == (0 if permission else 1), "generic diagnostics must not invent source obligations"
@@ -763,20 +751,12 @@ def test_write_ahead_crash_retains_stop_and_reader_rejects_credit(unit, monkeypa
         0
     ] == dict.fromkeys(keys)
     assert gate.status(root) != 0
-    assessment = gate.assess_data_access(
-        root,
-        package_spec=json.loads((root / gate.MIGRATION_SPEC).read_text()),
-        package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
-        fallback_authorization="stop",
-        requested_scope="model_only",
-    )
-    assert assessment.state == "blocked", "a durable evidence row alone is not physical release"
     assert gate.clear_block(root, "retry", earned=True, sources=keys) == 0
     assert gate.status(root) == 0
 
 
 @pytest.mark.parametrize("interrupted", [False, True])
-def test_scoped_projection_distinguishes_completed_partial_clear_from_interruption(
+def test_scoped_projection_ignores_completed_and_interrupted_partial_clears(
     unit, monkeypatch: pytest.MonkeyPatch, interrupted: bool
 ) -> None:
     root, keys = unit
@@ -797,7 +777,9 @@ def test_scoped_projection_distinguishes_completed_partial_clear_from_interrupti
         fallback_authorization="stop",
         requested_scope="model_and_report",
     )
-    assert assessment.state == ("blocked" if interrupted else "live_data_ok")
+    assert (assessment.state, assessment.validation) == ("live_unproven", "unvalidated"), (
+        "S2: neither a completed nor an interrupted partial clear moves the projection"
+    )
     assert gate.status(root) != 0, "a scoped data projection must never release the sibling's root barrier"
 
 
@@ -859,7 +841,7 @@ def test_scoped_data_proof_does_not_claim_root_clearance(unit, repaired: bool) -
         fallback_authorization="stop",
         requested_scope="model_and_report",
     )
-    assert result.state == "live_data_ok", "a sibling cannot invalidate the selected key's genuine proof"
+    assert result.state == "live_unproven", "S2: gate proof neither earns nor invalidates the projection"
     assert gate.status(root) == (0 if repaired else 3), "the root-wide authority must still refuse the missing stop"
     assert (root / gate.MARKER).exists() is False
 
@@ -1000,14 +982,6 @@ def test_windows_death_after_marker_removal_retains_kernel_stop_and_can_retry(tm
         with pytest.raises(PermissionError):
             artifact.write_text("not permitted", encoding="utf-8")
         assert gate.status(root) != 0
-        assessment = gate.assess_data_access(
-            root,
-            package_spec=spec,
-            package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
-            fallback_authorization="stop",
-            requested_scope="model_and_report",
-        )
-        assert assessment.state == "blocked"
         with gate.gate_transaction(root, timeout=1):
             assert gate.coordination_root(root).companion.stat().st_size == 1
         assert gate.clear_block(root, "retry fixture", earned=True, sources=[key]) == 0
@@ -1635,7 +1609,6 @@ def _omitted_mutex_schedule(unit: tuple[Path, list[str]], monkeypatch: pytest.Mo
         "historical-count-membership",
         "historical-intersection",
         "historical-drop-resurrects",
-        "selected-root-domain",
         "failures-only-pending",
         "omitted-root-veto",
         "global-future-authorization",
@@ -1892,18 +1865,6 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
             test_foreign_historical_scope_refuses_the_whole_current_ledger, unit, "substitution", "probe-data_ok", True
         )
         message = "foreign audit membership must refuse"
-    elif mutation == "selected-root-domain":
-        _mutant(
-            gate,
-            "_assess_direct_locked",
-            "_data_access_ledger(trail or [], live_keys, current=current)",
-            "_data_access_ledger(trail or [], live_keys, current=frozenset(live_keys))",
-            monkeypatch,
-        )
-        check = partial(
-            test_current_sibling_rows_survive_selected_projection_with_one_root_snapshot, unit, monkeypatch, False
-        )
-        message = "current sibling scope must remain authoritative"
     elif mutation == "failures-only-pending":
         _mutant(
             gate,

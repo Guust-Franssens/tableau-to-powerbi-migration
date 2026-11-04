@@ -2828,100 +2828,6 @@ def test_an_all_flat_package_with_complete_bytes_is_local_import_ready(tmp_path:
     assert result.effective_scope == "model_and_report"
 
 
-def test_one_live_key_earned_by_a_keyed_probe_then_clear_is_live_data_ok(tmp_path: Path) -> None:
-    """The only shape that earns `live_data_ok`: keyed measurement, then keyed clear, same epoch."""
-    root = _da_root(tmp_path, "one-live", LIVE_A)
-    _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
-
-    result = _assess(root, _da_spec(LIVE_A))
-
-    assert (result.state, result.codes) == ("live_data_ok", ("probe-cleared", "probe-data-ok"))
-    assert result.source_keys == (KEY_A,)
-    assert (result.validation, result.max_phase2_claim) == ("validated", "data_validated")
-
-
-def test_two_live_keys_earned_in_separate_epochs_are_both_retained(tmp_path: Path) -> None:
-    """Re-arming B must not erase A: independent endpoints are independent reachability facts."""
-    root = _da_root(tmp_path, "two-live", LIVE_A, LIVE_B)
-    _trail(
-        root,
-        ("block", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-cleared", [KEY_A]),
-        ("block", [KEY_B]),
-        ("probe-data_ok", [KEY_B]),
-        ("probe-cleared", [KEY_B]),
-    )
-
-    result = _assess(root, _da_spec(LIVE_A, LIVE_B))
-
-    assert result.state == "live_data_ok"
-    assert result.source_keys == tuple(sorted((KEY_A, KEY_B)))
-
-
-def test_the_latest_arm_invalidates_only_its_own_keys_proof(tmp_path: Path) -> None:
-    """Per-key epochs, proved in both directions from ONE trail.
-
-    The same audit log must say `blocked/marker-only` for the re-armed key and `live_data_ok` for
-    the untouched one. A global "cleared" bit cannot produce both answers, so this is the test that
-    distinguishes a per-key ledger from one.
-    """
-    root = _da_root(tmp_path, "rearm", LIVE_A, LIVE_B)
-    _trail(
-        root,
-        ("block", [KEY_A, KEY_B]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-cleared", [KEY_A]),
-        ("probe-data_ok", [KEY_B]),
-        ("probe-cleared", [KEY_B]),
-        ("block", [KEY_B]),
-    )
-
-    both = _assess(root, _da_spec(LIVE_A, LIVE_B))
-    only_a = _assess(root, _da_spec(LIVE_A))
-
-    assert (both.state, both.codes) == ("blocked", ("marker-only",))
-    assert (only_a.state, only_a.source_keys) == ("live_data_ok", (KEY_A,))
-
-
-def test_a_mixed_flat_and_live_package_needs_every_live_key_and_complete_bytes(tmp_path: Path) -> None:
-    """A live leg does not excuse the flat half, and the flat half does not excuse the live one."""
-    root = _da_root(tmp_path, "mixed", FLAT, LIVE_A, LIVE_B)
-    _trail(
-        root,
-        ("block", [KEY_A, KEY_B]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-data_ok", [KEY_B]),
-        ("probe-cleared", [KEY_A, KEY_B]),
-    )
-    spec = _da_spec(FLAT, LIVE_A, LIVE_B)
-
-    earned = _assess(root, spec)
-    leaky = _assess(root, spec, {**COMPLETE_LOCAL, "retained_network": ["\\\\share\\rows.csv"]})
-
-    assert (earned.state, earned.source_keys) == ("live_data_ok", tuple(sorted((KEY_A, KEY_B))))
-    assert (leaky.state, leaky.codes) == ("blocked", ("local-import-incomplete",))
-
-
-def test_an_unkeyed_probe_success_cannot_earn_a_clear(tmp_path: Path) -> None:
-    """The producer gap #562 closes, pinned from the READER side.
-
-    Before `_record_attempt` stamped source keys, a two-key bundle could hold a `probe-data_ok` and
-    a `probe-cleared` with nothing tying either to an endpoint. The positive control is the same
-    trail with the key present, so this cannot pass by refusing everything.
-    """
-    root = _da_root(tmp_path, "unkeyed", LIVE_A)
-    _trail(root, ("block", [KEY_A]), ("probe-data_ok", None), ("probe-cleared", [KEY_A]))
-    unkeyed = _assess(root, _da_spec(LIVE_A))
-
-    keyed_root = _da_root(tmp_path, "keyed", LIVE_A)
-    _trail(keyed_root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
-    keyed = _assess(keyed_root, _da_spec(LIVE_A))
-
-    assert (unkeyed.state, unkeyed.codes) == ("blocked", ("stale-clear",))
-    assert keyed.state == "live_data_ok"
-
-
 def test_a_real_bare_earned_clear_through_the_gate_cli_stays_blocked(tmp_path: Path) -> None:
     """End to end through the PRODUCTION arm/clear path, not synthetic audit lines.
 
@@ -2936,7 +2842,7 @@ def test_a_real_bare_earned_clear_through_the_gate_cli_stays_blocked(tmp_path: P
 
     result = _assess(root, _da_spec(LIVE_A))
 
-    assert (result.state, result.codes) == ("blocked", ("marker-only",))
+    assert (result.state, result.codes) == ("live_unproven", ("live-unproven",)), "the gate CLI never moves it"
 
 
 @pytest.mark.parametrize(
@@ -2970,91 +2876,6 @@ def test_earned_clear_cli_requires_an_explicit_current_source_list(
         _strip_fixture_barrier(root)
 
 
-def test_a_later_non_success_probe_invalidates_an_already_earned_key(tmp_path: Path) -> None:
-    """Proof is not permanent: the LATEST measurement decides, including when it goes backwards."""
-    root = _da_root(tmp_path, "regressed", LIVE_A)
-    _trail(
-        root,
-        ("block", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-cleared", [KEY_A]),
-        ("probe-no_credential", [KEY_A]),
-    )
-
-    result = _assess(root, _da_spec(LIVE_A))
-
-    assert (result.state, result.codes) == ("blocked", ("probe-no-credential",))
-
-
-@pytest.mark.parametrize(
-    ("entries", "expected_code"),
-    [
-        pytest.param((("block", [KEY_A]),), "marker-only", id="marker-only"),
-        pytest.param((("block", [KEY_A]), ("manual-clear", None)), "manual-clear", id="manual-clear"),
-        pytest.param(
-            (("block", [KEY_A]), ("probe-credential_present", [KEY_A])),
-            "credential-present-only",
-            id="credential-present",
-        ),
-        pytest.param((("block", [KEY_A]), ("probe-skipped", [KEY_A])), "live-probe-skipped", id="skipped"),
-        pytest.param(
-            (("block", [KEY_A]), ("probe-operator_required", [KEY_A])),
-            "probe-operator-required",
-            id="operator-required",
-        ),
-        pytest.param((("block", [KEY_A]), ("probe-no_credential", [KEY_A])), "probe-no-credential", id="no-credential"),
-        pytest.param((("block", [KEY_A]), ("probe-access_denied", [KEY_A])), "probe-access-denied", id="access-denied"),
-        pytest.param((("block", [KEY_A]), ("probe-unreachable", [KEY_A])), "probe-unreachable", id="unreachable"),
-        pytest.param((("block", [KEY_A]), ("probe-bad_table", [KEY_A])), "probe-bad-table", id="bad-table"),
-        pytest.param((("block", [KEY_A]), ("probe-error", [KEY_A])), "probe-error", id="error"),
-    ],
-)
-def test_each_unearned_shape_names_its_own_blocking_code(tmp_path: Path, entries: tuple, expected_code: str) -> None:
-    """Every refusal must be distinguishable. A single fail-closed code would pass all of these."""
-    root = _da_root(tmp_path, f"blocked-{expected_code}", LIVE_A)
-    _trail(root, *entries)
-
-    result = _assess(root, _da_spec(LIVE_A))
-
-    assert (result.state, result.codes) == ("blocked", (expected_code,))
-
-
-@pytest.mark.parametrize(
-    ("poison", "expected_code"),
-    [
-        pytest.param("missing", "audit-missing", id="missing"),
-        pytest.param("empty", "audit-malformed", id="empty"),
-        pytest.param("malformed", "audit-malformed", id="malformed-line"),
-        pytest.param("foreign", "audit-foreign-scope", id="foreign-scope"),
-        pytest.param("unscoped", "audit-foreign-scope", id="unscoped"),
-    ],
-)
-def test_an_untrusted_audit_cannot_establish_live_access(tmp_path: Path, poison: str, expected_code: str) -> None:
-    """An untrusted trail is `cannot_establish`, never `blocked` - and never a silent pass.
-
-    Each poison is mixed into an OTHERWISE COMPLETE, genuinely earned history, so the refusal comes
-    from the poison rather than from missing evidence.
-    """
-    root = _da_root(tmp_path, f"poison-{poison}", LIVE_A)
-    if poison != "missing":
-        _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
-    audit = root / cg.AUDIT
-    if poison == "empty":
-        audit.write_text("", encoding="utf-8")
-    elif poison == "malformed":
-        audit.write_text(audit.read_text(encoding="utf-8") + "{ this is not json\n", encoding="utf-8")
-    elif poison == "foreign":
-        foreign = json.dumps({"ts": "x", "action": "block", "detail": "d", "scope": str(tmp_path / "elsewhere")})
-        audit.write_text(audit.read_text(encoding="utf-8") + foreign + "\n", encoding="utf-8")
-    elif poison == "unscoped":
-        audit.write_text(audit.read_text(encoding="utf-8") + json.dumps({"action": "block"}) + "\n", encoding="utf-8")
-
-    result = _assess(root, _da_spec(LIVE_A))
-
-    assert (result.state, result.codes) == ("cannot_establish", (expected_code,))
-    assert result.source_keys == (), "an untrusted authority must not still publish its keys"
-
-
 def test_an_untrusted_audit_does_not_block_a_package_with_no_live_leg(tmp_path: Path) -> None:
     """Negative control for the poison suite: the audit is only load-bearing when something needs it."""
     root = _da_root(tmp_path, "poison-irrelevant", FLAT)
@@ -3063,108 +2884,9 @@ def test_an_untrusted_audit_does_not_block_a_package_with_no_live_leg(tmp_path: 
     assert _assess(root, _da_spec(FLAT)).state == "local_import_ready"
 
 
-def test_a_force_scoped_arm_is_never_portable_one_unit_authority(tmp_path: Path) -> None:
-    """`--force-scope` gates a whole subtree, so its evidence cannot certify one package."""
-    root = _da_root(tmp_path, "forced", LIVE_A)
-    _trail(
-        root,
-        ("block-forced-scope", None),
-        ("block", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-cleared", [KEY_A]),
-    )
-
-    result = _assess(root, _da_spec(LIVE_A))
-
-    assert (result.state, result.codes) == ("cannot_establish", ("forced-scope",))
-
-
-def _authorized_root(tmp_path: Path, name: str, *, override: bool = True, authorize_first: bool = False) -> Path:
-    root = _da_root(tmp_path, name, LIVE_A)
-    if authorize_first:
-        _trail(root, ("authorize", None), ("block", [KEY_A]))
-    else:
-        _trail(root, ("block", [KEY_A]), ("authorize", None), ("probe-cleared", [KEY_A]))
-    if override:
-        (root / cg.OVERRIDE).write_text("authorized by a human\n", encoding="utf-8")
-    return root
-
-
-def test_an_authentic_authorization_at_model_only_scope_is_the_limited_accepted_state(tmp_path: Path) -> None:
-    """Authorized is ACCEPTED but never validated, and its ceiling drops to structural-only."""
-    root = _authorized_root(tmp_path, "authorized")
-
-    result = _assess(root, _da_spec(LIVE_A), policy="model_only_unvalidated", scope="model_only")
-
-    assert (result.state, result.codes) == ("authorized_model_only", ("brief-model-only", "human-authorize"))
-    assert (result.validation, result.max_phase2_claim) == ("unvalidated", "structural_only")
-    assert (result.effective_scope, result.source_keys) == ("model_only", (KEY_A,))
-
-
-@pytest.mark.parametrize(
-    ("kwargs", "root_kwargs", "why"),
-    [
-        pytest.param({"policy": "stop", "scope": "model_only"}, {}, "brief says stop", id="brief-says-stop"),
-        pytest.param(
-            {"policy": "model_only_unvalidated", "scope": "model_and_report"},
-            {},
-            "requested scope is not model-only",
-            id="scope-not-model-only",
-        ),
-        pytest.param(
-            {"policy": "model_only_unvalidated", "scope": "model_only"},
-            {"override": False},
-            "no override file, so nothing authentic to honour",
-            id="no-override-file",
-        ),
-        pytest.param(
-            {"policy": "model_only_unvalidated", "scope": "model_only"},
-            {"authorize_first": True},
-            "the authorization predates the current arm",
-            id="authorize-before-arm",
-        ),
-    ],
-)
-def test_a_partial_authorization_is_a_named_mismatch_not_a_quiet_pass(
-    tmp_path: Path, kwargs: dict, root_kwargs: dict, why: str
-) -> None:
-    """All three legs must agree. Any partial combination blocks and SAYS it was a mismatch."""
-    root = _authorized_root(tmp_path, f"mismatch-{len(why)}-{kwargs['scope']}-{kwargs['policy']}", **root_kwargs)
-
-    result = _assess(root, _da_spec(LIVE_A), **kwargs)
-
-    assert result.state == "blocked", why
-    assert "authorization-mismatch" in result.codes, why
-
-
-def test_a_brief_that_asks_for_the_fallback_without_any_authorization_is_a_mismatch(tmp_path: Path) -> None:
-    """The other direction: policy wants the fallback, but no human ever signed anything."""
-    root = _da_root(tmp_path, "wants-fallback", LIVE_A)
-    _trail(root, ("block", [KEY_A]))
-
-    result = _assess(root, _da_spec(LIVE_A), policy="model_only_unvalidated", scope="model_only")
-
-    assert result.state == "blocked"
-    assert set(result.codes) == {"marker-only", "authorization-mismatch"}
-
-
-def test_a_forged_override_with_no_authorize_entry_authorizes_nothing(tmp_path: Path) -> None:
-    """The file alone has never authorized anything, and this authority does not change that."""
-    root = _da_root(tmp_path, "forged-override", LIVE_A)
-    _trail(root, ("block", [KEY_A]))
-    (root / cg.OVERRIDE).write_text("I wrote this myself\n", encoding="utf-8")
-
-    result = _assess(root, _da_spec(LIVE_A), policy="model_only_unvalidated", scope="model_only")
-
-    assert result.state == "blocked"
-    assert "authorization-mismatch" in result.codes
-
-
 @pytest.mark.parametrize(
     ("root_legs", "package_legs", "expected"),
     [
-        pytest.param((LIVE_A,), (LIVE_A, LIVE_B), "source-key-set-changed", id="key-added"),
-        pytest.param((LIVE_A,), (LIVE_B,), "source-key-set-changed", id="key-swapped"),
         pytest.param((LIVE_A, LIVE_A), (LIVE_A, LIVE_A), "source-key-invalid", id="key-duplicated"),
     ],
 )
@@ -3180,22 +2902,6 @@ def test_a_package_key_the_gate_root_never_covered_cannot_be_established(
     assert (result.state, result.codes) == ("cannot_establish", (expected,))
 
 
-def test_a_package_carrying_fewer_keys_than_the_gate_root_still_earns_its_own(tmp_path: Path) -> None:
-    """Negative control for the key-set rules: an estate root legitimately gates more than one unit."""
-    root = _da_root(tmp_path, "root-superset", LIVE_A, LIVE_B)
-    _trail(
-        root,
-        ("block", [KEY_A, KEY_B]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-data_ok", [KEY_B]),
-        ("probe-cleared", [KEY_A, KEY_B]),
-    )
-
-    result = _assess(root, _da_spec(LIVE_A))
-
-    assert (result.state, result.source_keys) == ("live_data_ok", (KEY_A,)), "only this package's own key ships"
-
-
 def test_an_unknown_or_review_leg_blocks_and_is_never_dropped_from_the_denominator(tmp_path: Path) -> None:
     """A leg nobody can classify is not a flat file, and an earned sibling does not cover it."""
     root = _da_root(tmp_path, "review", LIVE_A, REVIEW)
@@ -3205,7 +2911,7 @@ def test_an_unknown_or_review_leg_blocks_and_is_never_dropped_from_the_denominat
     without_review = _assess(root, _da_spec(LIVE_A))
 
     assert (with_review.state, with_review.codes) == ("blocked", ("unknown-target",))
-    assert without_review.state == "live_data_ok", "control: the review leg is what blocked, nothing else"
+    assert without_review.state == "live_unproven", "control: the review leg is what blocked, nothing else"
 
 
 def test_an_unclassifiable_leg_with_no_stable_identity_is_an_authority_failure(tmp_path: Path) -> None:
@@ -3486,7 +3192,7 @@ def test_every_producible_assessment_survives_its_own_strict_parser(tmp_path: Pa
 def test_a_cannot_establish_projection_round_trips_too(tmp_path: Path) -> None:
     """The refusal states ship as artifacts as well; they must survive the same parser."""
     root = _da_root(tmp_path, "refusal-round-trip", LIVE_A)
-    refusal = _assess(root, _da_spec(LIVE_A))
+    refusal = _assess(root, _da_spec(REVIEW_UNSTABLE))
 
     assert refusal.state == "cannot_establish"
     assert cg.parse_data_access(refusal.dumps()) == refusal
@@ -3689,93 +3395,6 @@ def test_the_module_still_loads_the_way_the_hook_loads_it(tmp_path: Path) -> Non
     assert not (tmp_path / "unused").exists(), "importing the module must not touch the filesystem"
 
 
-def test_an_unkeyed_clear_earns_nothing_even_after_a_keyed_measurement(tmp_path: Path) -> None:
-    """The OTHER half of the keyed-evidence invariant, and a fail-open measured on this branch.
-
-    A `probe-cleared` carrying no source list used to earn `live_data_ok` for every key that held a
-    keyed success, because "does this clear name my key?" was SKIPPED rather than FAILED when there
-    was no name to test. It is reachable from production, not only from a forged log:
-    `clear_block(..., earned=True)` passes `_last_block_sources`, which is None whenever the arm's
-    source list cannot be parsed, and `_audit` then omits the field.
-
-    Three shapes, all unattributable, plus the keyed positive control.
-    """
-    keyed = _da_root(tmp_path, "clear-keyed", LIVE_A)
-    _trail(keyed, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
-
-    absent = _da_root(tmp_path, "clear-absent", LIVE_A)
-    _trail(absent, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", None))
-
-    empty = _da_root(tmp_path, "clear-empty", LIVE_A)
-    _trail(empty, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", []))
-
-    other = _da_root(tmp_path, "clear-other-key", LIVE_A, LIVE_B)
-    _trail(other, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_B]))
-
-    assert _assess(keyed, _da_spec(LIVE_A)).state == "live_data_ok", "control: the keyed clear must still earn"
-    for root, why in ((absent, "no sources field"), (empty, "empty sources list")):
-        result = _assess(root, _da_spec(LIVE_A))
-        assert (result.state, result.codes) == ("blocked", ("stale-clear",)), why
-
-    # A clear naming a DIFFERENT key does not touch this one at all, so the honest code is
-    # `marker-only` - armed, measured, and nothing ever lifted it - rather than `stale-clear`,
-    # which would claim a clear was applied here and found wanting.
-    sibling = _assess(other, _da_spec(LIVE_A))
-    assert (sibling.state, sibling.codes) == ("blocked", ("marker-only",))
-
-
-def test_an_unattributable_clear_does_not_un_earn_an_already_proved_key(tmp_path: Path) -> None:
-    """Fail-closed must not overshoot: proof is removed by a new arm or a measured failure only.
-
-    Without this the previous test would also be satisfied by a rule that treats any unreadable
-    record as invalidating, which would blank out correctly earned units on a log with one legacy
-    line in it.
-    """
-    root = _da_root(tmp_path, "unattributable-after-earned", LIVE_A)
-    _trail(
-        root,
-        ("block", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-cleared", [KEY_A]),
-        ("probe-cleared", None),
-    )
-
-    assert _assess(root, _da_spec(LIVE_A)).state == "live_data_ok"
-
-
-def test_an_unattributable_failure_record_still_invalidates_every_key(tmp_path: Path) -> None:
-    """The failure direction of the same normalisation: `[]` must not be read as "affects nobody"."""
-    root = _da_root(tmp_path, "unattributable-failure", LIVE_A)
-    _trail(
-        root,
-        ("block", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-cleared", [KEY_A]),
-        ("probe-no_credential", []),
-    )
-
-    result = _assess(root, _da_spec(LIVE_A))
-
-    assert (result.state, result.codes) == ("blocked", ("probe-no-credential",))
-
-
-def test_a_skipped_probe_is_corroborating_history_when_nothing_live_remains(tmp_path: Path) -> None:
-    """SKIPPED blocks a CURRENTLY live key, and only that.
-
-    A package whose spec now declares no live source at all is an import-only package; a historic
-    `probe-skipped` in its root's log describes a source it no longer has and must not block it.
-    The paired live spec is the control proving the entry is still read.
-    """
-    root = _da_root(tmp_path, "skipped-history", LIVE_A)
-    _trail(root, ("block", [KEY_A]), ("probe-skipped", [KEY_A]))
-
-    flat_now = _assess(root, _da_spec(FLAT))
-    still_live = _assess(root, _da_spec(LIVE_A))
-
-    assert flat_now.state == "local_import_ready"
-    assert (still_live.state, still_live.codes) == ("blocked", ("live-probe-skipped",))
-
-
 def test_every_state_the_assessor_actually_produces_survives_the_strict_parser(tmp_path: Path) -> None:
     """Producer/parser agreement on ASSESSOR OUTPUT, not on hand-built constants.
 
@@ -3785,27 +3404,85 @@ def test_every_state_the_assessor_actually_produces_survives_the_strict_parser(t
     producer and the parser drifting apart.
     """
     live = _da_root(tmp_path, "rt-live", LIVE_A)
-    _trail(live, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
-    blocked = _da_root(tmp_path, "rt-blocked", LIVE_A)
-    _trail(blocked, ("block", [KEY_A]))
-    authorized = _authorized_root(tmp_path, "rt-authorized")
     flat = _da_root(tmp_path, "rt-flat", FLAT)
     consumer = _da_root(tmp_path, "rt-consumer", FLAT)
 
     produced = [
         _assess(live, _da_spec(LIVE_A)),
-        _assess(blocked, _da_spec(LIVE_A)),
-        _assess(authorized, _da_spec(LIVE_A), policy="model_only_unvalidated", scope="model_only"),
+        _assess(live, _da_spec(LIVE_A, REVIEW)),
+        _assess(live, _da_spec(LIVE_A), policy="model_only_unvalidated", scope="model_only"),
         _assess(flat, _da_spec(FLAT)),
-        _assess(flat, _da_spec(LIVE_A)),
+        _assess(flat, _da_spec(REVIEW_UNSTABLE)),
         _assess(consumer, _da_spec(FLAT), scope="report_only_shared_model", provider=(UP_REF, PROVIDER_LIVE)),
     ]
 
-    assert {result.state for result in produced} == set(cg.DATA_ACCESS_STATES), (
-        "this corpus must cover every producible state, or the round trip is partial"
+    assert {result.state for result in produced} == set(cg.DATA_ACCESS_STATES) - {"live_data_ok"}, (
+        "this corpus must cover every producible state; legacy live_data_ok is parse-only now"
     )
     for result in produced:
         assert cg.parse_data_access(result.dumps()) == result, result.state
+
+
+GATE_TRAILS = {
+    "no-audit": (),
+    "earned": (("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A])),
+    "armed": (("block", [KEY_A]),),
+    "regressed": (
+        ("block", [KEY_A]),
+        ("probe-data_ok", [KEY_A]),
+        ("probe-cleared", [KEY_A]),
+        ("probe-no_credential", [KEY_A]),
+    ),
+    "unkeyed-clear": (("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", None)),
+    "forced-scope": (
+        ("block-forced-scope", None),
+        ("block", [KEY_A]),
+        ("probe-data_ok", [KEY_A]),
+        ("probe-cleared", [KEY_A]),
+    ),
+    "authorized": (("block", [KEY_A]), ("authorize", None), ("probe-cleared", [KEY_A])),
+}
+
+
+@pytest.mark.parametrize("trail", sorted(GATE_TRAILS))
+@pytest.mark.parametrize("damage", [None, "malformed-audit", "override-file"])
+@pytest.mark.parametrize(
+    ("policy", "scope"),
+    [
+        ("stop", "model_and_report"),
+        ("stop", "model_only"),
+        ("model_only_unvalidated", "model_only"),
+        ("model_only_unvalidated", "model_and_report"),
+    ],
+)
+def test_the_gate_trail_never_moves_the_package_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trail: str, damage: str | None, policy: str, scope: str
+) -> None:
+    """S2: earned, armed, regressed, forced, authorized or poisoned gate evidence is never read.
+
+    A live package projects from its own facts and brief alone. It is never `validated` here;
+    check_unit's same-run `data-evidence` PASS is the only live data proof.
+    """
+    root = _da_root(tmp_path, "trail", LIVE_A)
+    _trail(root, *GATE_TRAILS[trail])
+    if damage == "malformed-audit":
+        with (root / cg.AUDIT).open("a", encoding="utf-8") as handle:
+            handle.write("{ not json\n")
+    elif damage == "override-file":
+        (root / cg.OVERRIDE).write_text("authorized by a human\n", encoding="utf-8")
+    reads = []
+    read = cg._read_audit_trail
+    monkeypatch.setattr(cg, "_read_audit_trail", lambda target: reads.append(target) or read(target))
+
+    result = _assess(root, _da_spec(LIVE_A), policy=policy, scope=scope)
+
+    if policy == "model_only_unvalidated" and scope == "model_only":
+        expected = ("authorized_model_only", ("brief-model-only",), "unvalidated", "structural_only")
+    else:
+        expected = ("live_unproven", ("live-unproven",), "unvalidated", "data_validated")
+    assert (result.state, result.codes, result.validation, result.max_phase2_claim) == expected
+    assert (result.source_keys, result.effective_scope) == ((KEY_A,), scope)
+    assert reads == [], "the projection must not read the gate audit trail"
 
 
 def test_no_projection_field_can_carry_a_host_path_or_display_name(tmp_path: Path) -> None:
@@ -3818,65 +3495,6 @@ def test_no_projection_field_can_carry_a_host_path_or_display_name(tmp_path: Pat
     for secret in ("a.example", "sqlserver", "excel-direct", str(root), "ds0", "ds1"):
         assert secret not in payload, f"{secret!r} reached the projection"
     assert set(json.loads(payload)) == set(cg.DATA_ACCESS_FIELDS)
-
-
-@pytest.mark.parametrize("authorized", [False, True], ids=["live-pair", "human-fallback"])
-def test_data_access_requires_an_arm_for_each_current_key(tmp_path: Path, authorized: bool) -> None:
-    """Neither a measurement pair nor authorization may invent a missing per-key epoch."""
-    root = _da_root(tmp_path, "unarmed-key", LIVE_A, LIVE_B)
-    _trail(root, ("block", [KEY_B]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
-    if authorized:
-        _trail(root, ("authorize", None))
-        (root / cg.OVERRIDE).write_text("human authorization\n", encoding="utf-8")
-
-    result = _assess(
-        root, _da_spec(LIVE_A), policy="model_only_unvalidated" if authorized else "stop", scope="model_only"
-    )
-
-    assert (result.state, result.codes) == ("cannot_establish", ("source-key-set-changed",))
-
-
-@pytest.mark.parametrize("backdated_action", ["probe-data_ok", "probe-cleared", "authorize"])
-def test_data_access_rejects_backdated_epoch_evidence(tmp_path: Path, backdated_action: str) -> None:
-    """File order cannot launder a successful event timestamped before the current arm."""
-    root = _da_root(tmp_path, "backdated-epoch", LIVE_A)
-    events = [("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A])]
-    if backdated_action == "authorize":
-        events = [("block", [KEY_A]), ("authorize", None)]
-        (root / cg.OVERRIDE).write_text("human authorization\n", encoding="utf-8")
-    _trail(root, *events)
-    audit = root / cg.AUDIT
-    entries = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines()]
-    for entry in entries:
-        entry["ts"] = "2026-09-11T08:00:00+00:00"
-        if entry["action"] == backdated_action:
-            entry["ts"] = "2020-01-01T00:00:00+00:00"
-    audit.write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
-
-    kwargs = {"policy": "model_only_unvalidated", "scope": "model_only"} if backdated_action == "authorize" else {}
-    result = _assess(root, _da_spec(LIVE_A), **kwargs)
-
-    assert result.state == "blocked"
-    assert ("authorization-mismatch" if backdated_action == "authorize" else "stale-clear") in result.codes
-    for entry in entries:
-        entry["ts"] = "2026-09-11T08:00:00+00:00"
-    audit.write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
-    assert _assess(root, _da_spec(LIVE_A), **kwargs).state == (
-        "authorized_model_only" if backdated_action == "authorize" else "live_data_ok"
-    )
-
-
-def test_data_access_latest_success_still_needs_its_own_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The latest attempt must precede its earning clear, including after another success."""
-    monkeypatch.setattr(cg.platform, "system", lambda: "Linux")
-    root = _da_root(tmp_path, "repeated-success", LIVE_A)
-    cg.record_probe_attempt(root, "DATA_OK", "fixture first row", [KEY_A])
-    assert cg.clear_block(root, "fixture first clear", earned=True, sources=[KEY_A]) == 0
-    cg.record_probe_attempt(root, "DATA_OK", "fixture later row", [KEY_A])
-
-    assert _assess(root, _da_spec(LIVE_A)).state == "blocked"
-    assert cg.clear_block(root, "fixture later clear", earned=True, sources=[KEY_A]) == 0
-    assert _assess(root, _da_spec(LIVE_A)).state == "live_data_ok"
 
 
 @pytest.mark.parametrize("historical", ["display", "empty", "unpaired"])
@@ -3901,22 +3519,6 @@ def test_698_historical_rows_are_readable_without_manufacturing_current_proof(
 
 
 @pytest.mark.parametrize(
-    "sources",
-    [None, [], ["legacy display"], [""], [KEY_A, "legacy display"]],
-    ids=["missing", "empty", "legacy-name", "blank-name", "mixed-identity"],
-)
-def test_data_access_unattributable_failures_cannot_leave_sibling_keys_green(tmp_path: Path, sources: object) -> None:
-    """Unknown attribution is not an empty target set; both previously earned keys must refuse."""
-    root = _da_root(tmp_path, "unknown-failure", LIVE_A, LIVE_B)
-    _trail(root, ("block", [KEY_A, KEY_B]), ("probe-data_ok", [KEY_A, KEY_B]), ("probe-cleared", [KEY_A, KEY_B]))
-    assert _assess(root, _da_spec(LIVE_A, LIVE_B)).state == "live_data_ok"
-    _trail(root, ("probe-error", sources))
-
-    for connection in (LIVE_A, LIVE_B):
-        assert _assess(root, _da_spec(connection)).state in {"blocked", "cannot_establish"}
-
-
-@pytest.mark.parametrize(
     "field,value",
     [
         ("sources", True),
@@ -3937,7 +3539,7 @@ def test_data_access_malformed_audit_fields_poison_the_whole_trail(tmp_path: Pat
     """Typed audit fields cannot be stringified or ignored to preserve a previous green."""
     root = _da_root(tmp_path, "bad-audit-field", LIVE_A)
     _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
-    assert _assess(root, _da_spec(LIVE_A)).state == "live_data_ok"
+    assert cg._audit_entries(root) is not None, "control: the trail is readable before the poison"
     entry = {
         "ts": "2026-09-11T08:00:00+00:00",
         "action": "probe-error",
@@ -3950,66 +3552,7 @@ def test_data_access_malformed_audit_fields_poison_the_whole_trail(tmp_path: Pat
     with (root / cg.AUDIT).open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry) + "\n")
 
-    result = _assess(root, _da_spec(LIVE_A))
-
-    assert (result.state, result.codes) == ("cannot_establish", ("audit-malformed",))
     assert cg._audit_entries(root) is None
-
-
-@pytest.mark.parametrize("poison", ["duplicate-action", "duplicate-scope", "invalid-utf8"])
-def test_data_access_strict_audit_rejects_lossy_decoding(tmp_path: Path, poison: str) -> None:
-    """The sole audit reader must reject duplicate JSON keys and undecodable bytes."""
-    root = _da_root(tmp_path, "lossy-audit", LIVE_A)
-    _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
-    entry = json.dumps(
-        {
-            "scope": str(root.resolve()),
-            "ts": "2026-09-11T08:00:00+00:00",
-            "action": "probe-error",
-            "detail": "source probe -> ERROR",
-            "user": "test",
-            "sources": [KEY_A],
-        }
-    )
-    if poison == "duplicate-action":
-        tail = (entry[:-1] + ', "action": "block-skipped"}\n').encode("utf-8")
-    elif poison == "duplicate-scope":
-        tail = (entry[:-1] + ', "scope": ' + json.dumps(str(root.resolve())) + "}\n").encode("utf-8")
-    else:
-        tail = b"\xff\n"
-    with (root / cg.AUDIT).open("ab") as handle:
-        handle.write(tail)
-
-    result = _assess(root, _da_spec(LIVE_A))
-
-    assert (result.state, result.codes) == ("cannot_establish", ("audit-malformed",))
-
-
-def test_data_access_authorization_reads_the_audit_only_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Authorization uses the same immutable ledger snapshot, not another mutable audit read."""
-    root = _authorized_root(tmp_path, "single-read")
-    read = cg._read_audit_trail
-    calls = []
-
-    def counted_read(target: Path) -> tuple:
-        calls.append(target)
-        return read(target)
-
-    monkeypatch.setattr(cg, "_read_audit_trail", counted_read)
-    result = _assess(root, _da_spec(LIVE_A), policy="model_only_unvalidated", scope="model_only")
-
-    assert result.state == "authorized_model_only"
-    assert calls == [root]
-
-
-def test_data_access_root_keys_are_not_silently_collapsed(tmp_path: Path) -> None:
-    """The package subset must not hide ambiguous keys in the canonical root facts."""
-    root = _da_root(tmp_path, "duplicate-root", LIVE_A, LIVE_A)
-    _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
-
-    result = _assess(root, _da_spec(LIVE_A))
-
-    assert (result.state, result.codes) == ("cannot_establish", ("source-key-invalid",))
 
 
 @pytest.mark.parametrize(
