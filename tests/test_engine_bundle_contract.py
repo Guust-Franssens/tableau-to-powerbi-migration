@@ -9,9 +9,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 PREFLIGHT = REPO / "scripts" / "preflight_source_credentials.py"
-PROBE = REPO / "scripts" / "probe_live_source.py"
 REGISTRY = REPO / "scripts" / "published_datasource_registry.py"
-GATE = REPO / "scripts" / "credential_gate.py"
 
 
 def _write_engine_bundle(
@@ -77,26 +75,22 @@ def _live_embedded_source() -> dict:
     }
 
 
-def test_preflight_accepts_engine_bundle_and_arms_the_real_bundle_dir(tmp_path: Path) -> None:
-    """#55: the classifier must not require a hand-made migration-spec.json scratch tree."""
+def test_preflight_accepts_engine_bundle_and_classifies_it_read_only(tmp_path: Path) -> None:
+    """#55: the classifier must not require a hand-made migration-spec.json scratch tree.
+
+    It reads the real bundle dir and reports the live source (exit 1), and writes nothing into it.
+    """
     bundle = _write_engine_bundle(tmp_path / "engine", [_live_embedded_source()])
-    try:
-        proc = subprocess.run(
-            [sys.executable, str(PREFLIGHT), "--bundle", str(bundle)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert proc.returncode == 1
-        assert (bundle / ".credential-gate-BLOCKED.json").is_file()
-        assert not (bundle / "migration-spec.json").exists()
-    finally:
-        subprocess.run(
-            [sys.executable, str(GATE), "clear", str(bundle), "--reason", "test-teardown"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+    before = {path: path.read_bytes() for path in bundle.rglob("*") if path.is_file()}
+    proc = subprocess.run(
+        [sys.executable, str(PREFLIGHT), "--bundle", str(bundle)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "PROOF REQUIRED - 1 live source(s)" in proc.stdout + proc.stderr
+    assert {path: path.read_bytes() for path in bundle.rglob("*") if path.is_file()} == before
 
 
 def test_preflight_refuses_an_engine_bundle_without_source_contract(tmp_path: Path) -> None:
@@ -110,19 +104,6 @@ def test_preflight_refuses_an_engine_bundle_without_source_contract(tmp_path: Pa
     )
     assert proc.returncode == 2
     assert "No explicit data_sources" in (proc.stdout + proc.stderr)
-
-
-def test_probe_accepts_engine_bundle_but_refuses_missing_probe_targets(tmp_path: Path) -> None:
-    """The probe has a native bundle entry point, but it still refuses to invent tables/columns."""
-    bundle = _write_engine_bundle(tmp_path / "engine", [_live_embedded_source()])
-    proc = subprocess.run(
-        [sys.executable, str(PROBE), "--bundle", str(bundle), "--timeout-sec", "1"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert proc.returncode == 1
-    assert "source has no table/column to probe" in (proc.stdout + proc.stderr)
 
 
 def test_registry_accepts_engine_binding_signal_by_name(tmp_path: Path) -> None:

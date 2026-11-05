@@ -2,9 +2,11 @@
 purpose: preflight the DATA-SOURCE CREDENTIAL gate for a Tableau -> Power BI migration.
 
          Two checks, matching how a real migration should gate on credentials:
-           1. classify (offline): read a migration-spec.json and decide, per data source, whether
-              Power BI will need a bound CONNECTION + CREDENTIAL (live DB source) or not (extract /
-              flat file, which the toolkit materialises to CSV under a DataFolder).
+           1. classify (offline, read-only): read a migration-spec.json and decide, per data source,
+              whether Power BI will need a bound CONNECTION + CREDENTIAL (live DB source) or not
+              (extract / flat file, which the toolkit materialises to CSV under a DataFolder). It
+              writes nothing; a live source is proven by refreshing the shipped working copy through
+              the pbip-model-refresh skill (`--ui-refresh --canaries`).
            2. gate (service): given a published semantic model, read its datasources and trigger a
               bounded refresh. If it fails with `ModelRefreshFailed_CredentialsNotSpecified`, the
               credential has NOT been configured yet -> STOP and prompt the user before proceeding.
@@ -85,60 +87,6 @@ def classify_source(connection: dict) -> tuple[str, str]:
         cached = " (packaged as an extract, but the upstream is what must be connected)" if mode == "extract" else ""
         return "needs-credential", f"LIVE source ('{klass}' @ {server}){cached}; {reason}"
     return "review", reason
-
-
-GATE_MARKER = ".credential-gate-BLOCKED.json"
-GATE_OVERRIDE = ".credential-gate-AUTHORIZED"
-
-
-def _write_gate_marker(migration: Path, sources: list[str]) -> Path | None:
-    """Apply the FILESYSTEM gate for this migration, and return the marker path.
-
-    Delegates to scripts/credential_gate.py, which denies write access to the migration's output
-    folder at the OS level. That indirection is the whole point: prose could not make the stop
-    stick, and neither could a tool-call hook that matches command text - an agent beat the latter
-    by writing through `python -c` with the extension split into `'R3' + '.' + 'tmdl'`, so no
-    literal ever appeared to match. A kernel-enforced ACL does not care how the write is attempted.
-
-    Skipped when the user has explicitly authorized a build-only run: that is a legitimate choice
-    once a human has seen the gate, and removing it would make the toolkit unusable for a customer
-    who genuinely wants a structural-only pass.
-    """
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(Path(__file__).parent / "credential_gate.py"),
-            "block",
-            str(migration),
-            "--sources",
-            *sources,
-        ],
-        check=False,
-        timeout=120,
-    )
-    if result.returncode:
-        raise OSError("credential gate transaction refused")
-    marker = migration / GATE_MARKER
-    return marker if marker.exists() else None
-
-
-def _clear_gate_marker(migration: Path) -> None:
-    """Release the gate: no live source needs a credential."""
-    if (migration / GATE_MARKER).exists():
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(Path(__file__).parent / "credential_gate.py"),
-                "clear",
-                str(migration),
-                "--reason",
-                "no-live-sources",
-            ],
-            check=False,
-            timeout=120,
-        )
-        if result.returncode:
-            raise OSError("credential gate transaction refused")
 
 
 def _norm_case_insensitive(value: object) -> str:
@@ -282,12 +230,12 @@ def _key_from_resolved_scope(leg: dict, tables: list[dict], error: str | None) -
 
 
 def _leg_key(src: dict, index: int, leg: dict) -> str:
-    """Stable marker identity for one datasource connection leg.
+    """Stable source identity for one datasource connection leg.
 
-    Positional keys (`source[0]`) are not identities: reordering the source list between arm and
-    clear can let proof from one endpoint occupy two keys. Hash the connection endpoint and resolved
-    ordinary navigation scope instead. If that cannot distinguish two legs, duplicate-key checks
-    in `credential_gate.py block` fail closed rather than letting them collapse.
+    Positional keys (`source[0]`) are not identities: reordering the source list can let proof from
+    one endpoint occupy two keys. Hash the connection endpoint and resolved ordinary navigation scope
+    instead. If that cannot distinguish two legs, the package data-access projection refuses the
+    duplicate key (`source-key-invalid`) rather than letting them collapse.
     """
     _ = index
     connection, tables, error = resolve_probe_scope(src, leg)
@@ -383,51 +331,27 @@ def cmd_classify(bundle_path: Path) -> int:
 
     needs = 0
     review = 0
-    blocked_names: list[str] = []
     log.info("Data-source credential preflight for %s (%s)", bundle.label, bundle.kind)
     for i, src in enumerate(sources):
-        for key, display, verdict, reason in _classify_legs(src, i):
+        for _key, display, verdict, reason in _classify_legs(src, i):
             marker = {"no-creds": "  OK ", "needs-credential": " !!! ", "review": "  ?  "}[verdict]
             log.info("%s %-28s %s", marker, display[:28], reason)
             needs += verdict == "needs-credential"
             review += verdict == "review"
-            if verdict == "needs-credential":
-                blocked_names.append(key)
 
     log.info("-" * 60)
     if needs:
         # Order is load-bearing: the STOP directive goes FIRST. Measured 2026-08-01, an agent hit
-        # this gate, paused correctly, marked its own todo blocked - then overrode itself with
+        # this check, paused correctly, marked its own todo blocked - then overrode itself with
         # "applying the non-interactive fallback ... rather than leaving the requested artifacts
         # unbuilt", and shipped a model for a warehouse it never contacted. Leading with remediation
-        # invites exactly that reading ("the human fixes it later, I continue now"). Persona prose
-        # already said "Unconditional" and lost, so the imperative lives here, in tool output, which
-        # agents follow far more literally than their own instructions.
-        try:
-            written = _write_gate_marker(bundle.migration_dir, blocked_names)
-        except (OSError, subprocess.SubprocessError):
-            log.error("Credential gate CANNOT_ESTABLISH: arming transaction failed.")
-            return 3
+        # invites exactly that reading ("the human fixes it later, I continue now"). The imperative
+        # lives here, in tool output, which agents follow far more literally than their own
+        # instructions. This classification is read-only: it writes nothing to the migration.
         _print_stop_directive(needs)
         _print_remediation()
-        if written:
-            log.warning(
-                "\nENFORCED AT THE FILESYSTEM: %s exists and the migration's output folder is now\n"
-                "  DENIED write access at the OS level. This is not advice you can reason around and\n"
-                "  not a pattern you can route around - the kernel refuses the write however it is\n"
-                "  attempted (verified against python ctypes and split-string paths).\n"
-                "  Clear it with a successful probe:  python scripts/credential_gate.py clear <dir>\n"
-                "  Or the USER may authorize an unvalidated build by creating %s.",
-                written,
-                GATE_OVERRIDE,
-            )
     else:
-        try:
-            _clear_gate_marker(bundle.migration_dir)
-        except (OSError, subprocess.SubprocessError):
-            log.error("Credential gate CANNOT_ESTABLISH: clearing transaction failed.")
-            return 3
-        log.info("No live sources: all extract/flat (CSV + DataFolder). No credential gate for this workbook.")
+        log.info("No live sources: all extract/flat (CSV + DataFolder).")
     if review:
         log.warning("%d source(s) need manual review (unrecognised class).", review)
     return 1 if needs else 0
@@ -509,7 +433,7 @@ def _print_stop_directive(needs: int) -> None:
 
     This is printed FIRST, before any remediation detail, and restated at the end. Both placements
     are deliberate: a shell tool's output is often truncated in the middle (the failed run showed
-    the whole gate collapsed to "17 lines"), so an imperative that appears only at the bottom can be
+    the whole check collapsed to "17 lines"), so an imperative that appears only at the bottom can be
     cut before the agent ever reads it. Leading with it also sets the frame - remediation steps read
     as "the user will handle this later" when they come first.
 
@@ -517,43 +441,49 @@ def _print_stop_directive(needs: int) -> None:
     (measured 2026-08-02): this script is a *static classifier* - it opens no socket and cannot know
     whether a credential exists - yet it fired an unconditional "STOP - A HUMAN MUST ACT / TERMINATE
     THE RUN NOW" for every live source. Agents obeyed it literally: 10 of 15 models never reached
-    `probe_live_source.py` at all, and `claude-opus-5` refused a FULLY CREDENTIALED, reachable
+    the live measurement at all, and `claude-opus-5` refused a FULLY CREDENTIALED, reachable
     warehouse on the happy path - a migration that would have succeeded in seconds.
 
-    That is the prose analogue of the v1 filesystem deadlock: the step that decides was never
-    allowed to run. The terminal "a human must act" wording now lives in the PROBE, the only
-    component that actually knows. Here we say: do not build, and go measure.
+    The step that decides must be allowed to run. The terminal "a human must act" verdict belongs to
+    the measurement - the pbip-model-refresh UI refresh of the shipped working copy, which stops on
+    any Desktop dialog - not to this classifier. Here we say: do not build on it yet, and go measure.
     """
     log.warning(
         "\n"
         "################################################################\n"
-        "#  PROOF REQUIRED - %d live source(s) UNPROVEN. Do NOT build.\n"
+        "#  PROOF REQUIRED - %d live source(s) UNPROVEN. Do NOT build on them yet.\n"
         "################################################################\n"
         "  DIRECTIVE TO THE AGENT READING THIS - NOT ADVISORY, NOT A WARNING:\n"
-        "    1. You may NOT build the semantic model or the report YET. TMDL for an\n"
-        "       unreachable source is byte-identical to TMDL that works, so building now\n"
-        "       hands over something indistinguishable from a correct model that nobody\n"
-        "       can tell is broken.\n"
+        "    1. You may NOT build the semantic model or the report on these sources YET.\n"
+        "       TMDL for an unreachable source is byte-identical to TMDL that works, so\n"
+        "       building now hands over something indistinguishable from a correct model\n"
+        "       that nobody can tell is broken.\n"
         "    2. This check opened NO connection. It is a classifier, not a test. It does\n"
         "       NOT know whether a credential exists, so it is NOT telling you to stop.\n"
-        "    3. Your NEXT action is the measurement. Run it now:\n"
-        "         python scripts/probe_live_source.py --spec <this spec>\n"
-        "         OR: python scripts/probe_live_source.py --bundle <engine-output-dir>\n"
-        "       It builds a one-table model, opens Power BI Desktop, and reads one real\n"
-        "       row. It lifts the gate itself on DATA_OK.\n"
+        "    3. Your NEXT action is the measurement, on the artifact that will ship:\n"
+        "         python scripts/check_bundle_sources.py <bundle> [--spec <this spec>]\n"
+        "       then open the shipped working copy (<bundle>/pbip/, or <package>/fabric/)\n"
+        "       in Power BI Desktop and refresh it with named canaries, one per live source:\n"
+        "       Follow pbip-model-refresh SKILL.md, 'Automatic callers': derive <expected-sources.json>\n"
+        "       from a trusted snapshot of the engine emission, never from the live model.\n"
+        "       Plain --ui-refresh without this scope is operator-only.\n"
+        "         python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py\n"
+        "           --pid <pid> --ui-refresh --canaries <table> [<table> ...] "
+        "--automatic-source-scope <expected-sources.json>\n"
         "\n"
         "  DO NOT stop and ask the user yet. A verdict of 'only a human can fix this' is the\n"
-        "  PROBE's to give, not this script's - and only the probe can tell a missing credential\n"
-        "  (a human IS needed) from a wrong hostname (nobody needs to sign in). Reporting\n"
-        "  'credential required' without probing sends the user hunting for a sign-in they\n"
-        "  may not need, and refuses migrations that would have worked.\n"
+        "  REFRESH's to give, not this script's - and only a real refresh can tell a missing\n"
+        "  credential (a human IS needed) from a wrong hostname (nobody needs to sign in).\n"
+        "  Reporting 'credential required' without measuring sends the user hunting for a\n"
+        "  sign-in they may not need, and refuses migrations that would have worked.\n"
         "\n"
         "  Then let the RESULT decide:\n"
-        "    DATA_OK        -> gate lifts automatically; build for real.\n"
-        "    NO_CREDENTIAL  -> STOP and ask a human. No retry can conjure a credential.\n"
-        "    UNREACHABLE    -> STOP; report the address/network fault. Do not build.\n"
+        "    DATA_OK + PERSISTED          -> the source is reached; keep the output for sign-off.\n"
+        "    a dialog / UI_PREFLIGHT_REFUSED -> STOP and ask a human once. Never type a credential.\n"
+        "    anything else                -> no proof either way; fix the cause, rerun once.\n"
+        "  COMPLETE still needs check_unit's PASS data-evidence row for every live source.\n"
         "\n"
-        "  'Defer validation' is a choice only the USER can make, AFTER a probe result.\n"
+        "  'Defer validation' is a choice only the USER can make, AFTER a refresh result.\n"
         "  It NEVER means 'skip the test and build anyway'.\n"
         "################################################################",
         needs,
@@ -562,7 +492,7 @@ def _print_stop_directive(needs: int) -> None:
 
 def _print_remediation() -> None:
     log.warning(
-        "\nIF the probe comes back NO_CREDENTIAL, this is how a human fixes it:\n"
+        "\nIF the refresh stops on a credential dialog, this is how a human fixes it:\n"
         "  Option A (UI): Power BI service > the semantic model > Settings > Data source credentials\n"
         "                 > Edit credentials > enter the token/login. Power BI stores it server-side.\n"
         "                 Locally: sign in interactively once in Power BI Desktop.\n"
@@ -575,11 +505,15 @@ def _print_remediation() -> None:
         "  the user's to complete (or the user must supply the secret for Option B).\n"
         "\n"
         "============================================================\n"
-        "REMINDER (see the full directive above): do NOT build yet, and do NOT\n"
-        "  report a credential problem yet either - none has been observed. This\n"
-        "  check never opened a connection. Run the probe; it decides:\n"
-        "      python scripts/probe_live_source.py --spec <this spec>\n"
-        "      OR: python scripts/probe_live_source.py --bundle <engine-output-dir>\n"
+        "REMINDER (see the full directive above): do NOT build on these sources yet, and\n"
+        "  do NOT report a credential problem yet either - none has been observed. This\n"
+        "  check never opened a connection. Measure on the shipped working copy; it decides:\n"
+        "  Follow pbip-model-refresh SKILL.md, 'Automatic callers': derive <expected-sources.json>\n"
+        "  from a trusted snapshot of the engine emission, never from the live model.\n"
+        "  Plain --ui-refresh without this scope is operator-only.\n"
+        "      python .github/skills/pbip-model-refresh/scripts/refresh_pbip_model.py\n"
+        "        --pid <pid> --ui-refresh --canaries <table> [<table> ...] "
+        "--automatic-source-scope <expected-sources.json>\n"
         "============================================================"
     )
 

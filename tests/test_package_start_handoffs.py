@@ -30,7 +30,6 @@ from test_package_role_identity import (
     workbook_package,
 )
 
-import credential_gate as gate
 
 import package_data_access as pda
 import package_filesystem as pfs
@@ -450,13 +449,6 @@ def test_projection_discrimination_needs_only_new_handoffs(
     def forbidden(*_args: object, **_kwargs: object) -> None:
         pytest.fail("a held handoff read audit, reprobed, reclassified or reparsed the manifest")
 
-    for name in (
-        "_read_audit_trail",
-        "_audit_entries",
-        "_classify_legs",
-        "load_bundle",
-    ):
-        monkeypatch.setattr(gate, name, forbidden)
     for name in ("assess_data_access", "read_data_access", "_classify_legs"):
         monkeypatch.setattr(pda, name, forbidden)
     monkeypatch.setattr(pri, "package_spec_facts", forbidden)
@@ -1432,17 +1424,6 @@ def test_reconcile_has_no_filesystem_audit_classification_or_brief_parser_author
     def forbidden(*_args: object, **_kwargs: object) -> None:
         pytest.fail("the consistency conjunction acquired another authority or performed I/O")
 
-    for name in (
-        "_read_audit_trail",
-        "_audit_entries",
-        "_classify_legs",
-        "load_bundle",
-        "authorize",
-        "clear_block",
-        "_audit",
-        "verify",
-    ):
-        monkeypatch.setattr(gate, name, forbidden)
     for name in ("package_spec_facts", "assess_data_access", "read_data_access", "_classify_legs"):
         monkeypatch.setattr(pda, name, forbidden)
     monkeypatch.setattr(pri, "parse_brief_policy", forbidden)

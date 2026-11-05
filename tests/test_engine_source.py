@@ -254,8 +254,8 @@ def test_the_receipt_records_the_engine_path_and_version(tmp_path: Path, monkeyp
     assert receipt["engine"]["canonical"] is True
 
 
-def test_the_receipt_still_verifies_against_the_credential_gate(tmp_path: Path, monkeypatch) -> None:
-    """Adding a key must not break the gate that consumes this file."""
+def test_the_receipt_still_matches_its_bundle(tmp_path: Path, monkeypatch) -> None:
+    """Adding a key must not break the receipt matcher that verifies a bundle against this file."""
     from migration_bundle import _receipt_matches_bundle  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
     plugin = _make_engine_tree(tmp_path / "plugin")

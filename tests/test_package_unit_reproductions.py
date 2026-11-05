@@ -831,7 +831,7 @@ def test_producer_admits_a_live_source_unproven_without_reading_or_writing_gate_
 ) -> None:
     """The package projection is a pure function of sealed package facts; the gate root is inert."""
     if evidence == "malformed-gate-files":
-        for name in (authority.gate.MARKER, authority.gate.OVERRIDE, authority.gate.AUDIT):
+        for name in authority.LEGACY_GATE_FILES:
             (root / name).write_text("{not json", encoding="utf-8")
     candidate = _assessment_candidate(tmp_path, authority._spec(authority.LIVE))
     before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
