@@ -660,9 +660,8 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
         )
 
     # A clean run is what earns DATA_OK: an active dialog, any authoritative non-success token, or a
-    # non-zero exit outranks a stale or late DATA_OK-looking line. `_verdict_lines._is_earned_success`
-    # is the oracle - it requires exit 0, no `NON_SUCCESS_VERDICT_CHECKS` hit (which include
-    # `_has_dialog_verdict`), and only then a scoped success line.
+    # non-zero exit outranks a stale or late DATA_OK-looking line. The refresh's own terminal
+    # outcome and named canaries matter, not text collected from a different or failed attempt.
     clean_run = _block_from(CREDENTIAL_DOC, CLEAN_RUN_LEAD, ends=CLEAN_RUN_ENDS)
     assert clean_run, (
         f"the clean-run DATA_OK paragraph was not found in {CREDENTIAL_DOC.name} - this contract now proves nothing"
@@ -696,11 +695,26 @@ def test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop() -
         ("**A dialog is a human stop.**", "live-source skill lost human stop"),
         ("Never type, paste or store", "live-source skill lost no-secrets rule"),
         ("PASS `data-evidence` row", "live-source skill lost data evidence"),
+        ("same-run PASS `data-evidence` row", "live-source skill lost same-run evidence"),
+        ("trusted engine-emission snapshot, never the live model", "live-source skill lost trusted source identity"),
+        (
+            "Structural refusals do **not** prove missing credentials",
+            "live-source skill lost structural stop distinction",
+        ),
+        ("Never drop the flag or switch refresh routes", "live-source skill lost fail-closed qualification"),
+        (
+            "[<table> ...] --automatic-source-scope <expected-sources.json>",
+            "live-source skill lost mandatory automatic source scope",
+        ),
         ("`fallback_authorization: model_only_unvalidated`", "live-source skill lost model-only source"),
     ]:
         assert needle in text, diagnostic
     for retired in ("probe_live_source", "probe_bundle", r"scripts\credential_gate.py", "authorize", "earned clear"):
         assert retired not in text, f"live-source skill names retired gate machinery {retired!r}"
+    static_row = _table_row(SCRIPTS_README, "check_bundle_sources.py")
+    assert "Offline, credential-free source checks" in static_row, "script index lost static source check"
+    assert "M_PARAM_UNDEFINED" in static_row and "SOURCE_COLLAPSED" in static_row
+    assert not _table_row(SCRIPTS_README, "probe_live_source.py"), "script index routes to retired live probe"
 
 
 @pytest.mark.parametrize(
@@ -719,6 +733,48 @@ def test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop() -
             "PASS structural row",
             test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
             "live-source skill lost data evidence",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "same-run PASS `data-evidence` row",
+            "prior-run PASS `data-evidence` row",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost same-run evidence",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "trusted engine-emission snapshot, never the live model",
+            "live model copied into a matching snapshot",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost trusted source identity",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "Structural refusals do **not** prove missing credentials",
+            "Structural refusals prove missing credentials",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost structural stop distinction",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "Never drop the flag or switch refresh routes",
+            "Drop the flag or switch refresh routes",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost fail-closed qualification",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "[<table> ...] --automatic-source-scope <expected-sources.json>",
+            "[<table> ...] [--automatic-source-scope <expected-sources.json>]",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost mandatory automatic source scope",
+        ),
+        (
+            SCRIPTS_README,
+            "| `check_bundle_sources.py` |",
+            "| `probe_live_source.py` |",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "script index lost static source check",
         ),
         (
             REPORT_GOTCHAS,

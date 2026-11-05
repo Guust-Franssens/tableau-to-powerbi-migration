@@ -1685,8 +1685,8 @@ def test_refresh_and_save_wires_a_dialog_finding_to_exit_3(monkeypatch, capsys) 
 
     Exit 1 is reserved for a matched credential signature. This module cannot establish that a dialog
     BLOCKS anything, so nothing it observes about one may enter that band - and the retired
-    ``probe_live_source`` mapped the exit-1 credential family to "you may NOT build; a person must sign in". The finding is a
-    real classification and the verdict line is the real emitter's, so this pins raise -> emit -> exit
+    ``probe_live_source`` mapped the exit-1 credential family to "you may NOT build; a person must sign in".
+    The finding is a real classification and the verdict line is the real emitter's, so this pins raise -> emit -> exit
     code with no hand-written text.
     """
 

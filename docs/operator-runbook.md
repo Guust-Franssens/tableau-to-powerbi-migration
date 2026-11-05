@@ -465,7 +465,7 @@ The [model-baseline procedure](#engine-model-baseline-availability) owns diff co
 Engine defects route upstream to `Yarbrdab000/tableau-fabric-skills`; our tier's mitigation is a
 separate cross-linked local issue. Use qualified issue links, not ambiguous bare numbers;
 see [upstream routing](upstream-issue-gate.md). Customer migrations stop and ask before toolkit
-patching; approval waives no credential gate, plugin read-only rule or validator/dry-run role.
+patching; approval waives no human credential/dialog stop, plugin read-only rule or validator/dry-run role.
 Artifact repairs and replay stay within each builder's existing layer.
 
 ### 1.3 Credentials — test them the day before
@@ -636,7 +636,8 @@ Autonomy describes behaviour at a decision point:
 | `autopilot` | decide, log it | decide, flag in the summary | **ask — always** |
 
 No level clears the credential stop — a modal sign-in dialog needs a human. Wall policy may
-pre-authorize the fallback (model-only under `credential_gate.py authorize`, artifacts unvalidated),
+specify the fallback in the brief (`fallback_authorization: model_only_unvalidated` with model-only
+scope, artifacts unvalidated),
 never pretend a source was reachable or infer authorization.
 
 > ⚠️ **Check the brief is actually ignored before you write anything into it:**
@@ -1122,7 +1123,6 @@ What a bundle contains ✅ verified against the reference bundle by listing it, 
 | `engine-output-receipt.json` | hashes of the engine's output **and `engine` — what built this bundle** (§1.2). Read back by the pre-engine rewrite barrier (exit 9) to tell engine output from downstream work | — |
 | `input_manifest.json` → `engine_output_tree` | the barrier's authoritative baseline: **every** file in every folder a re-run deletes, with no format allowlist (so PBIR JSON and `textscan` extracts under `<project>.Data` are covered, which the receipt's suffix list does not reach). Absent ⇒ the next destructive run is indeterminate and blocks | — |
 | `bundle-rewrite-acknowledgement.json` | present only when someone knowingly re-ran the engine over downstream work, a different engine version, or a bundle that could not be assessed — records when, which flag, every file destroyed, and every coverage gap | — |
-| `.credential-gate-audit.log` | append-only audit trail; `credential_gate.py verify` reads it. **This is the non-narrative record** — trust it over any summary, including your own | — |
 | `input_manifest.json`, `source-provenance.json` | what went in, and where upstream it came from | — |
 | `deploy-journal.jsonl` | written by step 6, not step 5: intent-then-outcome per item (§6.1) | — |
 | `deploy-estate-id.txt` | **minted at first deploy — keep it with the bundle** (§3.3) | — |
@@ -1451,13 +1451,15 @@ hand-roll it ✅ verified from the module docstring:
 
 ## 3. Decision points — stop and ask
 
-**Gate B — after parse + probe, before building.** Present these as **ONE block, not four serial stops**: serial
+**Gate B — after parse + source checks, before building.** Present these as **ONE block, not four serial stops**: serial
 stops are the same questions with strictly more waiting, and each is another chance to catch the
 customer out of the room. Where the brief (§1.5) already answered one, **apply it and say so** — do
 not re-ask.
 
 1. Published datasources → fetch the `.tds` and migrate it first, or proceed knowingly incomplete.
-2. Live sources that failed the probe → credential, or the authorized build-only path.
+2. Unproven live sources → follow [live-source-reachability](../.github/skills/live-source-reachability/SKILL.md);
+   distinguish structural findings from human credential/dialog stops, or use the brief's model-only
+   unvalidated fallback.
 3. Extract-only sources → materialize real rows, or model-only.
 4. The high-severity `limitations_encountered` digest → proceed, or narrow scope.
 
@@ -2157,5 +2159,5 @@ empty model — so a bundle can trip a gate the exit code never mentions. Read t
 **Related reading:** [`/AGENTS.md`](../AGENTS.md) (dispatcher flow, Gate B, shared conventions) ·
 [`docs/capabilities-and-limitations.md`](capabilities-and-limitations.md) ·
 [`docs/data-source-credentials.md`](data-source-credentials.md) ·
-[`docs/credential-gate.md`](credential-gate.md) ·
+[`live-source-reachability`](../.github/skills/live-source-reachability/SKILL.md) ·
 [`docs/migration-programme.md`](migration-programme.md)

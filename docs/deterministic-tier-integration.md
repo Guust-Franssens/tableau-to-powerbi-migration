@@ -1,5 +1,8 @@
 # Integrating the deterministic tier (`Yarbrdab000/tableau-fabric-skills`)
 
+**Historical integration plan and measurements.** Credential-gate/probe references below predate
+retirement; they are not current instructions. Use [the navigation index](INDEX.md) for operation.
+
 **Status:** **v4** — the agent-architecture redesign. Supersedes v3's shape.
 **Branch:** `feat/deterministic-tier-integration`
 **Evidence root:** `~/.copilot/session-state/5d5a3c63-…/files/integration-analysis/`

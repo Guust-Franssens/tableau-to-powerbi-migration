@@ -317,7 +317,7 @@ def _receipt_artifacts(records: object) -> dict[str, dict[str, str | int]] | Non
 
 
 def write_engine_receipt(bundle_dir: Path, engine: Path | None = None) -> Path:
-    """Write the exact engine-output receipt consumed by `credential_gate.py verify`.
+    """Write the exact engine-output receipt used by bundle and package evidence checks.
 
     Also the bundle's answer to *"what built me?"*: `engine` records the resolved engine root, its
     `VERSION` and whether it was the canonical plugin. Before issue #107 that was a manual note in a

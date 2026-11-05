@@ -27,9 +27,9 @@ Hence the rule this module implements: **attribute from the artifact you inspect
 you copy forward.** Every finding names the `.SemanticModel` folder, the table, the partition and the
 literal path that was read out of the TMDL on disk. No engine warning is trusted, parsed or echoed.
 
-Why here and not in `probe_bundle.py` / `check_datamodel.py`
+Why here and not in live-source refresh / `check_datamodel.py`
 ------------------------------------------------------------
-* `probe_bundle.py` answers "can a LIVE source be reached", and needs Power BI Desktop, a refresh and
+* The live-source-reachability skill answers "can a LIVE source be reached", and needs Desktop, a refresh and
   usually a credential. It cannot run on a laptop with no tenant, which is exactly when this class of
   defect ships.
 * `check_datamodel.py` answers "is the M/TMDL well-formed". The M here is perfectly well-formed. That
@@ -78,7 +78,7 @@ fail, so the posture is auditable rather than assumed.
 
 What it will NOT tell you
 -------------------------
-* Whether a reachable database actually returns rows - that needs `probe_bundle.py` and a credential.
+* Whether a reachable database returns rows - that needs the live-source-reachability skill's canaries.
 * Whether the rows that DO land are correct. Row presence is not fidelity.
 * Anything about a bundle produced on another machine: a Windows-authored bundle inspected from Linux
   is all `foreign_path`. Run this on the host that produced the bundle (as `run_estate.py` does).

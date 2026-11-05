@@ -706,9 +706,8 @@ def scope_receipt(receipt: Any, unit: str) -> dict[str, Any] | None:
     `engine.plugin_root`. It is now projected through `RECEIPT_ALLOW` like every other manifest -
     engine provenance is a VERSION, not a location on the machine that happened to build it.
 
-    It still deliberately does NOT become a credential-gate exemption, and now fails closed one step
-    earlier: `migration_bundle._receipt_matches_bundle` raises OSError on the package's absent
-    `input_manifest.json` before it ever reads the hashes this no longer carries.
+    This scoped receipt is not a full-bundle identity: `migration_bundle._receipt_matches_bundle`
+    raises OSError on the package's absent `input_manifest.json` before reading its bundle hashes.
     """
     if not isinstance(receipt, dict):
         return None

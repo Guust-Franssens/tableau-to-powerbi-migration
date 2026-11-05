@@ -1,7 +1,7 @@
-# Data-source credentials: the migration preflight gate
+# Data-source credentials and shipped-model proof
 
-Every migration in this repo so far uses **extract-based** Tableau sources (`.hyper`), which the toolkit
-materialises to **CSV under a `DataFolder` parameter**. Flat files need **no credentials**: the model
+The original July 2026 measurements used **extract-based** Tableau sources (`.hyper`), which the toolkit
+materialised to **CSV under a `DataFolder` parameter**. Flat files need **no credentials**: the model
 refreshes from disk. The moment a workbook instead uses a **live database** (Databricks, SQL Server,
 Snowflake, Synapse, ...), that stops being true: Power BI needs a **credential** to connect, and the
 credential is **never in the committed model files**. It lives outside them, and a human normally
@@ -12,23 +12,29 @@ missing, and what to do. It is grounded in a first-hand Databricks test (2026-07
 
 1. After parsing, **classify the data sources**:
    `python scripts/preflight_source_credentials.py --spec migrations/workbooks/<slug>/migration-spec.json`.
-2. If every source is extract/flat -> no credential is needed, proceed normally.
+2. If every source classifies as `no-creds` -> no source credential is needed, proceed normally.
+   An extract can still have a live upstream target; extraction alone is not that classification.
 3. If any source is a **live database**, the migration cannot refresh/validate against data until a
-   credential is configured. **You (the agent) cannot supply it.** Prompt the user, then verify:
+   credential is configured. **You (the agent) cannot supply it.** Do not assume it is missing:
+   use the existing procedure, and stop for a human on an actual credential/dialog refusal.
    - **Local (Desktop, the iterative loop):** follow the
      [`live-source-reachability`](../.github/skills/live-source-reachability/SKILL.md) skill before builders
-     start. It opens the shipped working copy in Desktop and refreshes it with named canaries
-     (`refresh_pbip_model.py --pid <pid> --ui-refresh --canaries <tables>`). Any sign-in or other dialog
-     stops the run; the user signs in (Sign in / paste PAT) so Desktop caches it on the machine, then the
-     refresh runs again. For a quick read-only check of an already loaded model, use
-     `python .github/skills/pbip-model-refresh/scripts/probe_desktop_query.py --pid <pid>` (one row via the
-     Desktop local AS) -> `PREFLIGHT: DATA_OK`. Both ship inside the
+     start. It delegates to `pbip-model-refresh`'s existing automatic-source procedure: shipped working
+     artifact, trusted engine-emission identities, `--automatic-source-scope` and named live canaries.
+     Any sign-in or other dialog stops the run; a human resolves it before a new qualified attempt.
+     A structural refusal is not proof of missing credentials. For a quick read-only check of an
+     already loaded model, use
+     `python .github/skills/pbip-model-refresh/scripts/probe_desktop_query.py --pid <pid> --canaries <live-tables>`
+     (rows via Desktop local AS). Named positive canaries can establish `PREFLIGHT: DATA_OK`, not a
+     fresh persisted refresh or fidelity. Without named canaries it is only table-level evidence.
+     Both scripts ship inside the
      [`pbip-model-refresh`](../.github/skills/pbip-model-refresh/SKILL.md) skill; `scripts/probe_desktop_query.py`
      is a forwarding shim kept for existing callers.
    - **Cloud (service):** after publish, probe a refresh
      (`python scripts/preflight_source_credentials.py --model "<Workspace>" "<Model>"`); if it reports
      `ModelRefreshFailed_CredentialsNotSpecified`, have the user bind a credential (UI or a Fabric
-     connection). Do not proceed to data validation until the gate is green.
+     connection). This service refresh check is not the retired local credential gate and does not
+     replace Desktop shipped-artifact evidence or independent fidelity sign-off.
 
 ## Why the agent cannot just supply the credential
 
@@ -47,7 +53,11 @@ agent-writable API**:
   connection**, set via the UI (*Semantic model > Settings > Data source credentials*) or the
   Connections API. Publishing via `fab import` binds **no** credential, so a refresh fails immediately.
 
-## The two gates, proven first-hand (Databricks, `samples.nyctaxi.trips`, 1-row M probe)
+## Historical credential measurements (July 2026, Databricks one-row M probe)
+
+The measurements below explain past failures, not the current refresh route. Use the skill above
+for operation and its current structural-stop semantics; old modal-verdict names are historical.
+Only named-canary evidence on the shipped artifact can support a current data claim.
 
 The probe model uses a **pure-M** navigation (NOT a native SQL query), returning one row:
 

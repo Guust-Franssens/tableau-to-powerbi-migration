@@ -114,7 +114,8 @@ them**, and the deselection is visible in tier 1's own summary (`... 14 deselect
 gated from the suite's AST. A larger budget earns the marker on measured evidence instead - the 10 s
 process-rendezvous barrier in `test_check_migration_progress.py` did, after failing under 44 workers.
 Two budgets are deliberately **left in** the parallel tier, having never been observed to fail:
-`tests/test_credential_gate.py`'s 5.0 s hook budget and `test_refresh_wall_clock.py`'s 15 s bound.
+the now-retired `tests/test_credential_gate.py`'s 5.0 s hook budget and `test_refresh_wall_clock.py`'s
+15 s bound. Those timings are historical, not instructions to run the deleted gate suite.
 
 Three things make the marker hold up, and each is gated by `tests/test_parallel_test_loop.py`:
 

@@ -36,7 +36,7 @@ from typing import Any
 import current_artifact_revision as rev
 import iteration_receipt as receipt
 
-# As in probe_live_source, import the canonical bundled APIs, not the CLI forwarding shims.
+# Import the canonical bundled APIs, not the CLI forwarding shims.
 # Neither import loads CLR or starts native work; there is no alternate implementation.
 SKILL_SCRIPTS = Path(__file__).resolve().parents[1] / ".github" / "skills" / "pbip-model-refresh" / "scripts"
 sys.path.insert(0, str(SKILL_SCRIPTS))

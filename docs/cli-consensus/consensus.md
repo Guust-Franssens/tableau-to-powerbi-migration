@@ -1,5 +1,8 @@
 # Issue #734 — CLI design synthesis
 
+**Historical design record, before credential-gate retirement.** Owner names and proposed routes
+below describe that review, not current commands. Use [the navigation index](../INDEX.md) for operation.
+
 ## Executive verdict
 
 **Narrow pilot, not a lifecycle-wide CLI.** Four design reports converge on a thin facade; the red-team report finds no measured proof that a broad CLI improves migration outcomes and identifies real compatibility costs. Pilot the already-landed live-site/project front door for the same Tableau Cloud project and oracle as blind run 1 (`20 - Supply Chain`), with read-only `status`; do not include `next` in v1. This pilot is conditional on safe pre-network path projection and explicit first-failure/native-exit behavior; the current front door does not fully establish the latter. Compare like-for-like before expansion. Do not call a local-file trial “blind run 2” against the live project baseline or retire script guidance yet.

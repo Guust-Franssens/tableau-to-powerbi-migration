@@ -443,10 +443,10 @@ ROOT_CONTRACTS: dict[str, tuple[Path, tuple[str, ...]]] = {
     "gate-b-one-block": (
         OPERATOR_RUNBOOK_MD,
         (
-            "**Gate B — after parse + probe, before building.**",
+            "**Gate B — after parse + source checks, before building.**",
             "**ONE block, not four serial stops**",
             "1. Published datasources",
-            "2. Live sources that failed the probe",
+            "2. Unproven live sources",
             "3. Extract-only sources",
             "4. The high-severity `limitations_encountered` digest",
         ),
@@ -1156,9 +1156,8 @@ def test_migrator_entry_dispatch_and_shipment_contract() -> None:
         "AND `check_migration_progress.py --handoff` exit 0",
         "**2–3-round cap never auto-accepts**",
         "**BEFORE shipment**",
-        "**ORIGINAL armed bundle/spec root**",
-        "No ship/probe/package/run-parent/ sibling replacement",
-        "copy/fallback/permission cannot clear the stop or create DATA_OK",
+        "every live source needs `check_unit.py`'s PASS `data-evidence` row",
+        "Copy/fallback/permission cannot create it",
         "Deploy only by separate explicit agreement",
     ):
         assert boundary in text, f"M entry/dispatch/ship: {boundary}"
@@ -1315,8 +1314,9 @@ def test_persona_safety_and_attribution_handoffs() -> None:
     operator = _normalized(DRY_RUN_OPERATOR_MD)
     for boundary in (
         "**ONCE, then human stop over autonomy**",
-        "ACCESS_DENIED proves no authentication/permission-only cause",
-        "No secret acquisition/CLI secrets, self-authorize or hand-clear",
+        "Invoke host `live-source-reachability` **before dispatching builders**",
+        "No secret acquisition/CLI secrets or self-authorization",
+        "Model-only needs the brief's `fallback_authorization: model_only_unvalidated`",
         "permission/fallback stays UNVALIDATED, not DATA_OK",
         "Customer-run toolkit/engine gate defect: **STOP, route, ask**, never silently patch",
         "Shared transient caps/self-timer exceptions apply, never credential retries",

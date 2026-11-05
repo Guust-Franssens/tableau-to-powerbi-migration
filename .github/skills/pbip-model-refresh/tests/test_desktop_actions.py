@@ -2687,7 +2687,7 @@ def test_default_and_verify_only_paths_do_not_enable_ui_refresh() -> None:
     assert parser.parse_args(["--pid", "123", "--verify-only"]).ui_refresh is False
 
 
-def test_ui_refresh_help_warns_about_operator_source_execution() -> None:
+def test_ui_refresh_help_warns_about_operator_source_execution_and_no_clearance() -> None:
     help_text = " ".join(refresh_pbip_model._build_arg_parser().format_help().split())
 
     assert "operator-only opt-in commissions execution of ALL current M, including native/custom SQL" in help_text

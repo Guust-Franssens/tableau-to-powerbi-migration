@@ -125,9 +125,11 @@ via `scripts\check_reference_readiness.py` **before ANY validator triage or buil
 internal readiness, BOUND, reference READY, emission/capture/structural green proves neither entry nor fidelity.
 
 Invoke host `live-source-reachability` **before dispatching builders**: **every live source through the
-shipped Power BI artifact** (static source check, then Desktop refresh with named canaries); no
+shipped Power BI artifact** (static source check, then the existing `pbip-model-refresh`
+automatic-source procedure with named canaries); no
 shell/SQL/Tableau-only or CSV substitute. Credential/permission refusal or any Desktop dialog:
 **ONCE, then human stop over autonomy**. No secret acquisition/CLI secrets or self-authorization.
+Structural refusals do not prove missing credentials; never bypass source qualification or wrong-model checks.
 Model-only needs the brief's `fallback_authorization: model_only_unvalidated`; human
 permission/fallback stays UNVALIDATED, not DATA_OK. No-live skips must be earned.
 

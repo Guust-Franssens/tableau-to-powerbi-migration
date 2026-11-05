@@ -92,10 +92,27 @@ far more reliable than asking an LLM to re-derive this structure from raw XML on
   schemas are never backfilled from relations, and equal table aliases on different legs remain
   separate evidence.
 
-  These optional fields do not change JSON-schema validity. They were added for the live-source
-  probe, which has since been retired with the credential gate; that probe's resolution rules and
-  key hashing no longer apply. A live source is now proven by a canary refresh of the shipped model
-  (see the [`live-source-reachability`](../.github/skills/live-source-reachability/SKILL.md) skill).
+  These optional fields do not change JSON-schema validity. Although reconstructed live-source
+  probes are retired, **`preflight_source_credentials.resolve_probe_scope` and source-key hashing
+  still apply**: `package_data_access.package_spec_facts` uses `_classify_legs` / `_leg_key` to
+  derive the direct-source identities carried by `data-access.json`.
+
+  Ordinary relations bind by exact `tables[].connection` to a unique named leg; a missing reference
+  is allowed only for a single-leg datasource. Physical identifiers, not Tableau aliases, supply
+  candidate table names. An unqualified table needs that leg's explicit schema. Two-/three-part
+  identifiers supply the effective schema, require a recorded database, and refuse ambiguous or
+  conflicting database evidence. All ordinary candidates for a leg must resolve to one schema.
+  Unsupported connectors, unsafe identifiers or ambiguous bindings remain unresolved, not guessed.
+  Custom-SQL candidates retain their datasource-wide identity policy; this does not authorize
+  executing custom SQL through automatic refresh.
+
+  `_key_from_resolved_scope` hashes the connector/endpoint identity, including effective schema
+  and sorted unique `ordinary_tables` when resolved (`null` on resolution failure). Class/server
+  are case-folded; database/schema and connector-specific warehouse/role or HTTP path retain exact
+  trimmed values; port participates when present. Sorted-key compact JSON is SHA-256 hashed into
+  `source-key:<first-16-hex>`. Duplicate keys refuse rather than collapsing legs. These keys are
+  **identity, not connectivity proof**. Real-data proof now comes from named-canary refresh of the
+  shipped model (see [`live-source-reachability`](../.github/skills/live-source-reachability/SKILL.md)).
 - **`dashboards[].zones.type == "layout-floating"`.** Tableau dashboards built entirely from
   "Floating" (freeform, absolute-position) containers serialize `<zones>` as N flat sibling `<zone>`
   elements with no wrapping root container at all — unlike a "Tiled" dashboard's single nested root

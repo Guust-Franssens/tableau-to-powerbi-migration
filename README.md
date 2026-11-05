@@ -518,7 +518,8 @@ clone is self-configuring:
 - **A live source must be proven reachable through Power BI, not assumed.** When a workbook connects
   to a live database (Databricks, Snowflake, SQL Server...), the
   [`live-source-reachability`](.github/skills/live-source-reachability/SKILL.md) skill runs before
-  builders start: it refreshes the shipped model in Desktop with named canary tables. Any sign-in or
+  builders start: it delegates to `pbip-model-refresh`'s existing automatic-source procedure on the
+  shipped model in Desktop with named canary tables. Any sign-in or
   other dialog stops the run until a human answers it. A live unit reaches COMPLETE only when
   `check_unit.py` records a full, persisted refresh whose canaries returned rows. This is detection,
   not prevention: nothing physically stops a model being written before the source is reached, so the
@@ -543,13 +544,14 @@ here rather than at the top of Quickstart: they matter only once you are about t
 Desktop, and front-loading them before clone/env setup makes the first-run path look more dangerous
 than it is.
 
-> ### ⚠️ One-time Power BI Desktop setting: turn OFF Privacy Levels
+> ### ⚠️ Choose Power BI Desktop privacy isolation deliberately
 >
-> **Options → Global → Privacy → "Always ignore Privacy Level settings"**
+> **Options → Global → Privacy** includes **"Always ignore Privacy Level settings"**.
+> This is a human choice, not a setting an agent should disable automatically.
 >
-> Without it, opening any model that spans **more than one data source** raises a modal —
+> Keeping isolation on can make opening a model spanning **more than one data source** raise a modal —
 > *"Potential security risk: This file uses multiple data sources…"* — **before the model loads**.
-> Federated datasources are normal in real Tableau workbooks, so most migrations hit this.
+> Federated datasources are common in Tableau workbooks; account for this human stop.
 >
 > It matters more for agents than for people. The dialog blocks at **load time**, so it stalls
 > before any refresh call and no automation can dismiss it: measured 2026-08-05, a run sat past
@@ -558,8 +560,9 @@ than it is.
 > error, which is the single failure mode this toolkit's conventions exist to prevent.
 >
 > It is a trade-off, not free: ignoring privacy levels lets Power Query combine sources without
-> isolating them. On a migration build machine that is usually acceptable. If a workbook joins sources
-> that must never see each other's data, leave the setting on and have a human answer the dialog.
+> isolating them. Refresh executes the **real working artifact**, not an isolated throwaway probe:
+> there is no probe-based protection against cross-source disclosure. Leave privacy isolation on
+> whenever the sources require it, and have a human resolve the dialog without weakening that policy.
 > `scripts/preflight.ps1` cannot read
 > this setting — Desktop ships as an MSIX package and stores it outside the registry — so it stays a
 > documented manual step rather than an automated check.

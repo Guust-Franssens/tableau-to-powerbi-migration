@@ -420,7 +420,7 @@ DISPATCH_READINESS_NOT_EVALUATED = "NOT_EVALUATED"
 NOT_START_READY_NOTICE = (
     "NOT START_READY: dispatch readiness is unavailable and was not evaluated; #622 and the final "
     "#562 consumer own that decision. Package construction and reference READY do not authorize "
-    "Phase-2 dispatch or clear the credential gate."
+    "Phase-2 dispatch or prove source access."
 )
 DATA_ACCESS_PENDING = NOT_START_READY_NOTICE
 
@@ -3543,9 +3543,9 @@ def _write_spec(asset: Path | None, dest: Path) -> tuple[str | None, str | None]
     """`(relative spec path, failure note)` - `check_unit.py` cannot grade a unit without one (#443)."""
     if asset is None:
         return None, "no migration-spec.json: the source asset could not be resolved"
-    # The parser CLI arms a new credential gate beside its output. Packaging must only project the
-    # ORIGINAL gate's authority, never create or ship a staged audit. Keep its pure parser/schema
-    # validation in the existing bounded subprocess, without invoking that lifecycle entry point.
+    # Packaging needs only the pure parser/schema validator, not the CLI's source-classification
+    # output. Keep that parsing in the existing bounded subprocess; source access is assessed
+    # separately from the packaged facts and brief.
     parse_only = (
         "import json, sys\n"
         "from pathlib import Path\n"
