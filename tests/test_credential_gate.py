@@ -1353,6 +1353,8 @@ def test_the_cd_fix_does_not_block_legitimate_teardown_via_the_same_pattern(tmp_
     _arm_fixture(mig)
     _earn_fixture(mig)
 
+    # An unscoped audit file in a shared ancestor is not a gate for this already-cleared unit.
+    (tmp_path / cg.AUDIT).write_text("{}\n", encoding="utf-8")
     cmd = f"cd {mig}; python ../../scripts/credential_gate.py clear . 2>&1"
     out = run_hook({"toolName": "powershell", "toolArgs": json.dumps({"command": cmd}), "cwd": str(tmp_path)})
     assert out.get("permissionDecision") != "deny", "teardown of an already-cleared dir must stay allowed"
