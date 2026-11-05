@@ -43,6 +43,7 @@ dev = [
     # `showcase` extra; it is repeated here so a `uv sync --group dev` venv has it too.
     "pypdf>=5.0",
     "pillow>=10.3",
+    "pyyaml>=6.0",
 ]
 
 # Install only the navigation facade; backend scripts/assets stay in the local toolkit checkout.

@@ -1,6 +1,6 @@
 ---
 name: powerbi-semantic-model-gotchas
-description: Tableau-migration semantic core for a host repository: source calculations, request roles, visual grain and model/report handoff. Use for translated-model work, not generic TMDL/DAX or greenfield authoring. Host tooling is not bundled; general procedures belong to installed semantic-model-authoring.
+description: "Tableau-migration semantic core for a host repository: source calculations, request roles, visual grain and model/report handoff. Use for translated-model work, not generic TMDL/DAX or greenfield authoring. Host tooling is not bundled; general procedures belong to installed semantic-model-authoring."
 ---
 
 # Tableau migration semantic core
