@@ -15,11 +15,24 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import build_plugin  # noqa: E402  (needs the sys.path insert above)
+
+
+# PyYAML's SafeLoader already inherits the parser/composer/constructor mixins.
+class _DescriptorLoader(yaml.SafeLoader):  # pylint: disable=too-many-ancestors
+    """Keep descriptor authority unique, including keys introduced by YAML merges."""
+
+    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict:
+        self.flatten_mapping(node)
+        mapping = super().construct_mapping(node, deep=deep)
+        if len(mapping) != len(node.value):
+            raise yaml.constructor.ConstructorError(None, None, "duplicate mapping key", node.start_mark)
+        return mapping
 
 
 @pytest.fixture(name="built")
@@ -159,7 +172,7 @@ def test_the_advertised_skills_are_the_shipped_skills(built: Path) -> None:
 
     ⚠️ **Its reach is identifiers, not plain English.** The v0.3.0 README opened with "persisting a
     refreshed local PBIP", which names the withheld capability in ordinary words carrying no
-    camelCase or dotted token - measured, this check returns `[]` for that sentence. Detecting that
+    mixed-case or dotted token - measured, this check returns `[]` for that sentence. Detecting that
     class reliably needs a human reading the summary paragraph, so treat this as a floor, not a
     guarantee: it catches the copy-paste of technical terms, which is the common failure, and it
     will not catch a fluent English claim.
@@ -173,20 +186,215 @@ def test_the_advertised_skills_are_the_shipped_skills(built: Path) -> None:
 
     def identifiers(text: str) -> set[str]:
         """Technical tokens a marketing sentence would only carry if it meant that specific feature."""
-        return set(re.findall(r"\b[A-Za-z]+\.[a-z]{2,}\b|\b[a-z]+[A-Z][A-Za-z]+\b", text))
+        return set(re.findall(r"\b[A-Za-z]+\.[a-z]{2,}\b|\b[A-Za-z]*[a-z][A-Z][A-Za-z]+\b", text))
 
     def frontmatter(skill: str) -> str:
-        return (build_plugin.SKILLS_DIR / skill / "SKILL.md").read_text(encoding="utf-8")[:1500]
+        """Parse only delimited metadata; unavailable authority must fail before comparing claims."""
+        text = (build_plugin.SKILLS_DIR / skill / "SKILL.md").read_text(encoding="utf-8")
+        match = re.match(r"---\n(.*?)^---(?:\n|\Z)", text, re.DOTALL | re.MULTILINE)
+        assert match, f"{skill} has missing or unclosed frontmatter"
+        try:
+            metadata = yaml.load(match.group(1), Loader=_DescriptorLoader)
+        except yaml.YAMLError as exc:
+            raise AssertionError(f"{skill} frontmatter has invalid YAML: {exc}") from exc
+        assert isinstance(metadata, dict), f"{skill} frontmatter must be a mapping"
+        assert metadata.get("name") == skill, f"{skill} frontmatter has a missing or mismatched name"
+        value = metadata.get("description")
+        assert isinstance(value, str) and value.strip(), f"{skill} frontmatter needs a nonempty string description"
+        return value
 
-    shipped_terms = {term for name in build_plugin.SHIPPED_SKILLS for term in identifiers(frontmatter(name))}
-    withheld = {p.name for p in build_plugin.SKILLS_DIR.iterdir() if p.is_dir()} - set(build_plugin.SHIPPED_SKILLS)
+    descriptions = {p.name: frontmatter(p.name) for p in build_plugin.SKILLS_DIR.iterdir() if p.is_dir()}
+    shipped_terms = {term for name in build_plugin.SHIPPED_SKILLS for term in identifiers(descriptions[name])}
+    withheld = descriptions.keys() - set(build_plugin.SHIPPED_SKILLS)
 
     for name in withheld:
-        assert name not in readme, f"{name} is NOT shipped but the README still advertises it"
-        exclusive = identifiers(frontmatter(name)) - shipped_terms
+        exclusive = identifiers(descriptions[name]) - shipped_terms
         for surface, text in (("plugin description", description), ("README", readme)):
+            assert name not in text, f"{name} is NOT shipped but the {surface} still advertises it"
             leaked = sorted(term for term in exclusive if term in text)
             assert not leaked, f"{name} is NOT shipped, but the {surface} still sells it via {leaked}"
+
+
+def _replace_skill_read(monkeypatch: pytest.MonkeyPatch, skill: Path, text: str) -> None:
+    original_read = Path.read_text
+
+    def read_text(path: Path, *args, **kwargs) -> str:
+        return text if path == skill else original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+
+def test_publication_ignores_skill_body_links(built: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Body cross-references are not exclusive capability descriptors, at any character offset."""
+    skill = build_plugin.SKILLS_DIR / "live-source-reachability" / "SKILL.md"
+    text = skill.read_text(encoding="utf-8")
+    front = text[: text.index("---\n", 4) + 4]
+    link = "[Refresh procedure](../pbip-model-refresh/SKILL.md)\n"
+
+    for body in ("", link, "Ordinary guide text.\n" * 100 + link):
+        test_the_advertised_skills_are_the_shipped_skills(built)
+        with monkeypatch.context() as patch:
+            _replace_skill_read(patch, skill, front + "\n" + body)
+            test_the_advertised_skills_are_the_shipped_skills(built)
+        test_the_advertised_skills_are_the_shipped_skills(built)
+
+
+@pytest.mark.parametrize(
+    ("metadata", "message"),
+    [
+        ("[]", "must be a mapping"),
+        ("description: A guide.", "missing or mismatched name"),
+        ("name: wrong-skill\ndescription: A guide.", "missing or mismatched name"),
+        ("name: pbip-model-refresh", "nonempty string description"),
+        ("name: pbip-model-refresh\ndescription:", "nonempty string description"),
+        ('name: pbip-model-refresh\ndescription: ""', "nonempty string description"),
+        ("name: pbip-model-refresh\ndescription: '   '", "nonempty string description"),
+        ("name: pbip-model-refresh\ndescription: # no value", "nonempty string description"),
+        ("name: pbip-model-refresh\ndescription: |", "nonempty string description"),
+        ("name: pbip-model-refresh\ndescription: null", "nonempty string description"),
+        ("name: pbip-model-refresh\ndescription: []", "nonempty string description"),
+        ('name: pbip-model-refresh\ndescription: "unterminated', "invalid YAML"),
+        ("name: pbip-model-refresh\ndescription: 'unterminated", "invalid YAML"),
+        ("name: pbip-model-refresh\ndescription: A: null", "invalid YAML"),
+        (
+            "name: pbip-model-refresh\nname: pbip-model-refresh\ndescription: A guide.",
+            "duplicate mapping key",
+        ),
+        (
+            "name: wrong-skill\nname: pbip-model-refresh\ndescription: A guide.",
+            "duplicate mapping key",
+        ),
+        (
+            "name: pbip-model-refresh\ndescription: A guide.\ndescription: A guide.",
+            "duplicate mapping key",
+        ),
+        (
+            "name: pbip-model-refresh\ndescription: ImageSave\ndescription: A guide.",
+            "duplicate mapping key",
+        ),
+        (
+            "name: pbip-model-refresh\ndescription: A guide.\ndescription: ImageSave",
+            "duplicate mapping key",
+        ),
+        (
+            "defaults: &defaults {name: pbip-model-refresh, description: ImageSave}\n"
+            "<<: *defaults\ndescription: A guide.",
+            "duplicate mapping key",
+        ),
+        (
+            "name: pbip-model-refresh\ndescription: &value ImageSave\ndescription: *value",
+            "duplicate mapping key",
+        ),
+        ("!!python/object:builtins.object {}", "invalid YAML"),
+    ],
+)
+@pytest.mark.parametrize("surface", ["README", "plugin description"])
+def test_publication_rejects_unusable_descriptor_before_claims(
+    built: Path, monkeypatch: pytest.MonkeyPatch, metadata: str, message: str, surface: str
+) -> None:
+    """Invalid authority must refuse explicitly, not disappear into an empty capability set."""
+    skill = build_plugin.SKILLS_DIR / "pbip-model-refresh" / "SKILL.md"
+    path = built / ("README.md" if surface == "README" else ".claude-plugin/marketplace.json")
+    text = path.read_text(encoding="utf-8")
+    claim = "\nThis plugin persists cache.abf through ImageSave."
+    if surface == "README":
+        advertised = text + claim
+    else:
+        manifest = json.loads(text)
+        manifest["plugins"][0]["description"] += claim
+        advertised = json.dumps(manifest)
+
+    test_the_advertised_skills_are_the_shipped_skills(built)
+    with monkeypatch.context() as patch:
+        _replace_skill_read(patch, path, advertised)
+        with pytest.raises(AssertionError, match=f"pbip-model-refresh is NOT shipped, but the {surface} still sells"):
+            test_the_advertised_skills_are_the_shipped_skills(built)
+    test_the_advertised_skills_are_the_shipped_skills(built)
+    with monkeypatch.context() as patch:
+        _replace_skill_read(patch, path, advertised)
+        _replace_skill_read(patch, skill, f"---\n{metadata}\n---\n")
+        with pytest.raises(AssertionError, match=f"pbip-model-refresh frontmatter.*{message}"):
+            test_the_advertised_skills_are_the_shipped_skills(built)
+    test_the_advertised_skills_are_the_shipped_skills(built)
+
+
+@pytest.mark.parametrize("descriptor", ["No metadata\n", "---\nname: pbip-model-refresh\n"])
+@pytest.mark.parametrize("surface", ["README", "plugin description"])
+def test_publication_requires_delimited_descriptor(
+    built: Path, monkeypatch: pytest.MonkeyPatch, descriptor: str, surface: str
+) -> None:
+    """Missing delimiters cannot make an affirmative withheld claim pass."""
+    skill = build_plugin.SKILLS_DIR / "pbip-model-refresh" / "SKILL.md"
+    path = built / ("README.md" if surface == "README" else ".claude-plugin/marketplace.json")
+    text = path.read_text(encoding="utf-8")
+    if surface == "README":
+        advertised = text + "\nThis plugin includes ImageSave."
+    else:
+        manifest = json.loads(text)
+        manifest["plugins"][0]["description"] += "\nThis plugin includes ImageSave."
+        advertised = json.dumps(manifest)
+    test_the_advertised_skills_are_the_shipped_skills(built)
+    test_publication_rejects_withheld_claims(built, surface, "ImageSave")
+    with monkeypatch.context() as patch:
+        _replace_skill_read(patch, path, advertised)
+        _replace_skill_read(patch, skill, descriptor)
+        with pytest.raises(AssertionError, match="pbip-model-refresh has missing or unclosed frontmatter"):
+            test_the_advertised_skills_are_the_shipped_skills(built)
+    test_the_advertised_skills_are_the_shipped_skills(built)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Persist cache.abf through ImageSave.",
+        "'Persist cache.abf through ImageSave.'",
+        r'"Persist cache.abf through \u0049mageSave."',
+        "|\n  Persist cache.abf\n  through ImageSave.",
+        ">\n  Persist cache.abf\n  through ImageSave.",
+    ],
+)
+def test_publication_preserves_supported_description_values(
+    built: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """Plain, quoted and block descriptions retain parsed terms, independent of metadata order."""
+    skill = build_plugin.SKILLS_DIR / "pbip-model-refresh" / "SKILL.md"
+    test_the_advertised_skills_are_the_shipped_skills(built)
+    with monkeypatch.context() as patch:
+        _replace_skill_read(patch, skill, f"---\ndescription: {value}\nname: pbip-model-refresh\n---\n")
+        test_the_advertised_skills_are_the_shipped_skills(built)
+        for surface in ("README", "plugin description"):
+            for claim in ("ImageSave", "cache.abf"):
+                test_publication_rejects_withheld_claims(built, surface, claim)
+    test_the_advertised_skills_are_the_shipped_skills(built)
+
+
+@pytest.mark.parametrize("surface", ["README", "plugin description"])
+@pytest.mark.parametrize("claim", ["ImageSave", "cache.abf", "pbip-model-refresh"])
+def test_publication_rejects_withheld_claims(built: Path, surface: str, claim: str) -> None:
+    """Mutate actual output, require the intended publication failure, then restore healthy bytes."""
+    test_the_advertised_skills_are_the_shipped_skills(built)
+    path = built / ("README.md" if surface == "README" else ".claude-plugin/marketplace.json")
+    original = path.read_bytes()
+    text = original.decode("utf-8")
+    advertisement = f"\nThis plugin includes {claim} for local model persistence.\n"
+    if surface == "README":
+        mutated = text + advertisement
+    else:
+        manifest = json.loads(text)
+        manifest["plugins"][0]["description"] += advertisement
+        mutated = json.dumps(manifest)
+    message = (
+        f"pbip-model-refresh is NOT shipped but the {surface} still advertises it"
+        if claim == "pbip-model-refresh"
+        else f"pbip-model-refresh is NOT shipped, but the {surface} still sells it via ['{claim}']"
+    )
+    try:
+        path.write_text(mutated, encoding="utf-8")
+        with pytest.raises(AssertionError, match=re.escape(message)):
+            test_the_advertised_skills_are_the_shipped_skills(built)
+    finally:
+        path.write_bytes(original)
+    test_the_advertised_skills_are_the_shipped_skills(built)
 
 
 def test_rebuilding_preserves_a_git_clone(tmp_path: Path) -> None:

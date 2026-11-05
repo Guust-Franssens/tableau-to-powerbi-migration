@@ -1,6 +1,6 @@
 ---
 name: powerbi-report-gotchas
-description: Tableau-migration report core for a host repository: source grain/defaults, shipped-model binding and layer handoff. Use for migrated-report repair/fidelity, not generic PBIR or greenfield work. Host tooling is not bundled; general procedures belong to installed powerbi-report-cli.
+description: "Tableau-migration report core for a host repository: source grain/defaults, shipped-model binding and layer handoff. Use for migrated-report repair/fidelity, not generic PBIR or greenfield work. Host tooling is not bundled; general procedures belong to installed powerbi-report-cli."
 ---
 
 # Tableau migration report core
