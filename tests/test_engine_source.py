@@ -256,7 +256,7 @@ def test_the_receipt_records_the_engine_path_and_version(tmp_path: Path, monkeyp
 
 def test_the_receipt_still_verifies_against_the_credential_gate(tmp_path: Path, monkeypatch) -> None:
     """Adding a key must not break the gate that consumes this file."""
-    from credential_gate import _receipt_matches_bundle  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+    from migration_bundle import _receipt_matches_bundle  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
     plugin = _make_engine_tree(tmp_path / "plugin")
     monkeypatch.setattr(engine_source, "PLUGIN_ENGINE_ROOT", plugin)

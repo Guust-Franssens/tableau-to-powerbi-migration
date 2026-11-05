@@ -1777,7 +1777,7 @@ def test_current_working_canonical_states_and_ceilings_are_preserved(tmp_path: P
 
 
 def test_current_working_wrong_live_keys_are_retained_for_later_canonical_reconciliation(tmp_path: Path) -> None:
-    import credential_gate as gate
+    import package_data_access as pda
 
     projection = {
         **_W_LOCAL,
@@ -1789,7 +1789,7 @@ def test_current_working_wrong_live_keys_are_retained_for_later_canonical_reconc
     handoff = _w_read(package, _w_revision(raw))
     assert handoff.facts.live_source_keys == (_W_LIVE_KEY,)
     assert handoff.stored_data_access.source_keys == (_W_OTHER_KEY,)
-    reconciled = gate.reconcile_package_data_access(
+    reconciled = pda.reconcile_package_data_access(
         handoff.stored_data_access,
         handoff.facts,
         requested_scope="model_and_report",
@@ -2746,6 +2746,7 @@ def test_current_working_reader_invokes_no_baseline_gate_receipt_probe_policy_or
     import check_reference_readiness as readiness
     import credential_gate as gate
     import iteration_receipt as receipts
+    import package_data_access as pda
 
     package, raw = _w_package(tmp_path / "Unit")
     _w_put(package, f"{_W_REPORT}/definition/pages/pages.json", b'{"pageOrder":["working"]}')
@@ -2782,7 +2783,8 @@ def test_current_working_reader_invokes_no_baseline_gate_receipt_probe_policy_or
         (pri.pfs, ("verify_package", "read_verified_member", "HeldVerifiedMember")),
         (readiness, ("scan", "_entry_integrity")),
         (receipts, ("read_chain", "read_history", "write_receipt", "finalize")),
-        (gate, ("verify", "authorize", "_audit", "reconcile_package_data_access")),
+        (gate, ("verify", "authorize", "_audit")),
+        (pda, ("reconcile_package_data_access",)),
         (subprocess, ("run", "Popen")),
         (Path, ("write_bytes", "write_text", "mkdir")),
     ):

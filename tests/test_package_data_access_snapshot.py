@@ -530,8 +530,7 @@ def test_binding_existing_data_access_is_required_and_never_upgraded(
     def forbidden(*_args, **_kwargs):
         pytest.fail("binder attempted assessment, proof creation or reassembly")
 
-    for name in ("assess_data_access", "authorize", "clear_block", "_audit", "verify"):
-        monkeypatch.setattr(pkg.data_access, name, forbidden)
+    monkeypatch.setattr(pkg.data_access, "assess_data_access", forbidden)
     monkeypatch.setattr(pkg, "_assemble_unit", forbidden)
     result = _binding_cli(root)
     if state == "authorized_model_only":

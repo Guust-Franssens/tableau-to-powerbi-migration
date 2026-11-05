@@ -21,6 +21,8 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
 import credential_gate as gate  # noqa: E402
+
+import package_data_access as pda  # noqa: E402
 import preflight_source_credentials as preflight  # noqa: E402
 import probe_live_source  # noqa: E402
 from parse_tableau import parse_workbook  # noqa: E402
@@ -105,8 +107,8 @@ def _audit(root: Path) -> list[dict]:
     return [json.loads(line) for line in (root / gate.AUDIT).read_text(encoding="utf-8").splitlines()]
 
 
-def _assess_sources(root: Path, sources: list[dict], *, authorized: bool = False) -> gate.DataAccessAssessment:
-    return gate.assess_data_access(
+def _assess_sources(root: Path, sources: list[dict], *, authorized: bool = False) -> pda.DataAccessAssessment:
+    return pda.assess_data_access(
         root,
         package_spec={"data_sources": sources},
         package_data_sources={

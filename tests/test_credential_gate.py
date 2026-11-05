@@ -27,6 +27,8 @@ HOOK = REPO / "scripts" / "hooks" / "credential_gate.py"
 sys.path.insert(0, str(REPO / "scripts"))
 
 import credential_gate as cg  # noqa: E402  # pylint: disable=wrong-import-position
+
+import package_data_access as pda  # noqa: E402  # pylint: disable=wrong-import-position
 import preflight_source_credentials as pf  # noqa: E402  # pylint: disable=wrong-import-position
 
 
@@ -98,8 +100,9 @@ def test_physical_barrier_is_read_only_and_keeps_query_failure(
     monkeypatch.setattr(cg.platform, "system", lambda: "Windows")
     monkeypatch.setattr(cg, "_icacls", query)
     monkeypatch.setattr(cg, "denied_dirs", read_dirs)
-    for name in ("_audit", "_has_deny_ace", "authorize", "clear_block", "verify", "assess_data_access"):
+    for name in ("_audit", "_has_deny_ace", "authorize", "clear_block", "verify"):
         monkeypatch.setattr(cg, name, forbidden)
+    monkeypatch.setattr(pda, "assess_data_access", forbidden)
     result = cg.inspect_physical_barrier(root)
     assert result == expected
     assert query_calls == ([True] if marker is None else [])
@@ -1350,6 +1353,8 @@ def test_the_cd_fix_does_not_block_legitimate_teardown_via_the_same_pattern(tmp_
     _arm_fixture(mig)
     _earn_fixture(mig)
 
+    # An unscoped audit file in a shared ancestor is not a gate for this already-cleared unit.
+    (tmp_path / cg.AUDIT).write_text("{}\n", encoding="utf-8")
     cmd = f"cd {mig}; python ../../scripts/credential_gate.py clear . 2>&1"
     out = run_hook({"toolName": "powershell", "toolArgs": json.dumps({"command": cmd}), "cwd": str(tmp_path)})
     assert out.get("permissionDecision") != "deny", "teardown of an already-cleared dir must stay allowed"
@@ -2763,7 +2768,7 @@ def _trail(root: Path, *entries: tuple) -> None:
 
 
 def _assess(root: Path, spec: dict, local: dict | None = None, **kwargs) -> object:
-    return cg.assess_data_access(
+    return pda.assess_data_access(
         root,
         package_spec=spec,
         package_data_sources=COMPLETE_LOCAL if local is None else local,
@@ -2988,13 +2993,13 @@ def _direct_actions(root: Path) -> list[str]:
     return [json.loads(line)["action"] for line in (root / cg.AUDIT).read_text(encoding="utf-8").splitlines()]
 
 
-UPSTREAM_REF = cg.provider_reference("Upstream")
-OTHER_REF = cg.provider_reference("Other")
-SUPERSTORE_REF = cg.provider_reference("Superstore")
-UP_REF = cg.provider_reference("Up")
-S2_UNIT_REF = cg.provider_reference("Exact_S2_unit")
+UPSTREAM_REF = pda.provider_reference("Upstream")
+OTHER_REF = pda.provider_reference("Other")
+SUPERSTORE_REF = pda.provider_reference("Superstore")
+UP_REF = pda.provider_reference("Up")
+S2_UNIT_REF = pda.provider_reference("Exact_S2_unit")
 
-PROVIDER_LIVE = cg.DataAccessAssessment(
+PROVIDER_LIVE = pda.DataAccessAssessment(
     state="live_data_ok",
     source_keys=(KEY_A,),
     provider_unit=None,
@@ -3004,7 +3009,7 @@ PROVIDER_LIVE = cg.DataAccessAssessment(
     max_phase2_claim="data_validated",
     codes=("probe-cleared", "probe-data-ok"),
 )
-PROVIDER_LOCAL = cg.DataAccessAssessment(
+PROVIDER_LOCAL = pda.DataAccessAssessment(
     state="local_import_ready",
     source_keys=(),
     provider_unit=None,
@@ -3014,7 +3019,7 @@ PROVIDER_LOCAL = cg.DataAccessAssessment(
     max_phase2_claim="data_validated",
     codes=("all-flat-file", "package-self-contained"),
 )
-PROVIDER_AUTHORIZED = cg.DataAccessAssessment(
+PROVIDER_AUTHORIZED = pda.DataAccessAssessment(
     state="authorized_model_only",
     source_keys=(KEY_A,),
     provider_unit=None,
@@ -3024,7 +3029,7 @@ PROVIDER_AUTHORIZED = cg.DataAccessAssessment(
     max_phase2_claim="structural_only",
     codes=("brief-model-only", "human-authorize"),
 )
-PROVIDER_BLOCKED = cg.DataAccessAssessment(
+PROVIDER_BLOCKED = pda.DataAccessAssessment(
     state="blocked",
     source_keys=(),
     provider_unit=None,
@@ -3034,7 +3039,7 @@ PROVIDER_BLOCKED = cg.DataAccessAssessment(
     max_phase2_claim="none",
     codes=("marker-only",),
 )
-PROVIDER_RECURSIVE = cg.DataAccessAssessment(
+PROVIDER_RECURSIVE = pda.DataAccessAssessment(
     state="provider_inherited",
     source_keys=(KEY_A,),
     provider_unit=UPSTREAM_REF,
@@ -3078,7 +3083,7 @@ def test_a_model_only_provider_cannot_authorize_a_report_only_consumer(tmp_path:
     refusal is about the topology intersection rather than about the provider being unusable.
     """
     root = _da_root(tmp_path, "model-only-provider", FLAT)
-    provider = (cg.provider_reference("SharedModel"), PROVIDER_AUTHORIZED)
+    provider = (pda.provider_reference("SharedModel"), PROVIDER_AUTHORIZED)
 
     report_consumer = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=provider)
     model_consumer = _assess(root, _da_spec(FLAT), scope="model_only", provider=provider)
@@ -3119,7 +3124,7 @@ def test_an_unusable_provider_is_named_rather_than_searched_for(
     """
     root = _da_root(tmp_path, f"provider-{expected}-{type(provider).__name__}-{len(str(provider))}", FLAT)
 
-    result = cg.assess_data_access(
+    result = pda.assess_data_access(
         root,
         package_spec=_da_spec(FLAT),
         package_data_sources=COMPLETE_LOCAL,
@@ -3149,7 +3154,7 @@ def test_a_single_candidate_list_inherits_exactly_like_a_bare_pair(tmp_path: Pat
 def test_the_typed_inputs_are_a_closed_vocabulary(tmp_path: Path, policy: str, scope: str) -> None:
     """Accepted members must work; anything else is a CALLER bug and raises rather than degrading."""
     root = _da_root(tmp_path, f"vocab-{policy}-{scope}", FLAT)
-    _assess(root, _da_spec(FLAT), policy=policy, scope=scope, provider=(cg.provider_reference("U"), PROVIDER_LOCAL))
+    _assess(root, _da_spec(FLAT), policy=policy, scope=scope, provider=(pda.provider_reference("U"), PROVIDER_LOCAL))
 
     with pytest.raises(ValueError):
         _assess(root, _da_spec(FLAT), policy="whatever")
@@ -3181,12 +3186,12 @@ def test_every_producible_assessment_survives_its_own_strict_parser(tmp_path: Pa
     """Producer and parser must agree by construction, and the bytes must be stable."""
     text = assessment.dumps()
 
-    assert cg.parse_data_access(text) == assessment
+    assert pda.parse_data_access(text) == assessment
     assert assessment.dumps() == text, "serialization must be deterministic, or S1 hashes churn"
 
     path = tmp_path / "data-access.json"
     path.write_text(text, encoding="utf-8")
-    assert cg.read_data_access(path) == assessment
+    assert pda.read_data_access(path) == assessment
 
 
 def test_a_cannot_establish_projection_round_trips_too(tmp_path: Path) -> None:
@@ -3195,7 +3200,7 @@ def test_a_cannot_establish_projection_round_trips_too(tmp_path: Path) -> None:
     refusal = _assess(root, _da_spec(REVIEW_UNSTABLE))
 
     assert refusal.state == "cannot_establish"
-    assert cg.parse_data_access(refusal.dumps()) == refusal
+    assert pda.parse_data_access(refusal.dumps()) == refusal
 
 
 @pytest.mark.parametrize(
@@ -3211,8 +3216,8 @@ def test_a_cannot_establish_projection_round_trips_too(tmp_path: Path) -> None:
 )
 def test_the_projection_parser_refuses_malformed_text_by_name(text: str, reason: str) -> None:
     """Textual refusals, each identified. `.code` is always the shipped `projection-invalid`."""
-    with pytest.raises(cg.DataAccessProjectionError) as excinfo:
-        cg.parse_data_access(text)
+    with pytest.raises(pda.DataAccessProjectionError) as excinfo:
+        pda.parse_data_access(text)
 
     assert excinfo.value.reason == reason
     assert excinfo.value.code == "projection-invalid"
@@ -3222,8 +3227,8 @@ def test_a_nonfinite_number_is_refused_as_such(tmp_path: Path) -> None:
     """`NaN`/`Infinity` are not JSON; Python's decoder accepts them unless told not to."""
     payload = json.dumps(_projection())[:-1] + ', "extra": Infinity}'
 
-    with pytest.raises(cg.DataAccessProjectionError) as excinfo:
-        cg.parse_data_access(payload)
+    with pytest.raises(pda.DataAccessProjectionError) as excinfo:
+        pda.parse_data_access(payload)
 
     assert excinfo.value.reason == "nonfinite"
 
@@ -3255,8 +3260,8 @@ def test_a_nonfinite_number_is_refused_as_such(tmp_path: Path) -> None:
 )
 def test_the_projection_parser_refuses_bad_fields_by_name(payload: dict, reason: str) -> None:
     """Field-level strictness. Each case must name ITS refusal, not a single catch-all."""
-    with pytest.raises(cg.DataAccessProjectionError) as excinfo:
-        cg.parse_data_access(json.dumps(payload))
+    with pytest.raises(pda.DataAccessProjectionError) as excinfo:
+        pda.parse_data_access(json.dumps(payload))
 
     assert excinfo.value.reason == reason
 
@@ -3341,16 +3346,16 @@ def test_the_projection_parser_refuses_bad_fields_by_name(payload: dict, reason:
 )
 def test_the_projection_parser_refuses_impossible_state_combinations(payload: dict) -> None:
     """Types alone cannot catch a semantically impossible projection; these are the tampered shapes."""
-    with pytest.raises(cg.DataAccessProjectionError) as excinfo:
-        cg.parse_data_access(json.dumps(payload))
+    with pytest.raises(pda.DataAccessProjectionError) as excinfo:
+        pda.parse_data_access(json.dumps(payload))
 
     assert excinfo.value.reason == "illegal-combination"
 
 
 def test_reading_an_absent_projection_is_a_refusal_not_an_empty_state(tmp_path: Path) -> None:
     """`read_data_access` must never degrade a missing artifact into a permissive default."""
-    with pytest.raises(cg.DataAccessProjectionError) as excinfo:
-        cg.read_data_access(tmp_path / "nope" / "data-access.json")
+    with pytest.raises(pda.DataAccessProjectionError) as excinfo:
+        pda.read_data_access(tmp_path / "nope" / "data-access.json")
 
     assert excinfo.value.reason == "unreadable"
     assert excinfo.value.code == "projection-invalid"
@@ -3378,9 +3383,10 @@ def test_the_module_still_loads_the_way_the_hook_loads_it(tmp_path: Path) -> Non
 
     spec.loader.exec_module(module)
 
-    assert module.assess_data_access is not None
+    assert module.gate_transaction is not None and module.status is not None
     assert (
-        module.DataAccessAssessment(
+        sys.modules["package_data_access"]
+        .DataAccessAssessment(
             state="blocked",
             source_keys=(),
             provider_unit=None,
@@ -3389,7 +3395,8 @@ def test_the_module_still_loads_the_way_the_hook_loads_it(tmp_path: Path) -> Non
             effective_scope=None,
             max_phase2_claim="none",
             codes=("marker-only",),
-        ).state
+        )
+        .state
         == "blocked"
     )
     assert not (tmp_path / "unused").exists(), "importing the module must not touch the filesystem"
@@ -3416,11 +3423,11 @@ def test_every_state_the_assessor_actually_produces_survives_the_strict_parser(t
         _assess(consumer, _da_spec(FLAT), scope="report_only_shared_model", provider=(UP_REF, PROVIDER_LIVE)),
     ]
 
-    assert {result.state for result in produced} == set(cg.DATA_ACCESS_STATES) - {"live_data_ok"}, (
+    assert {result.state for result in produced} == set(pda.DATA_ACCESS_STATES) - {"live_data_ok"}, (
         "this corpus must cover every producible state; legacy live_data_ok is parse-only now"
     )
     for result in produced:
-        assert cg.parse_data_access(result.dumps()) == result, result.state
+        assert pda.parse_data_access(result.dumps()) == result, result.state
 
 
 GATE_TRAILS = {
@@ -3494,7 +3501,7 @@ def test_no_projection_field_can_carry_a_host_path_or_display_name(tmp_path: Pat
 
     for secret in ("a.example", "sqlserver", "excel-direct", str(root), "ds0", "ds1"):
         assert secret not in payload, f"{secret!r} reached the projection"
-    assert set(json.loads(payload)) == set(cg.DATA_ACCESS_FIELDS)
+    assert set(json.loads(payload)) == set(pda.DATA_ACCESS_FIELDS)
 
 
 @pytest.mark.parametrize("historical", ["display", "empty", "unpaired"])
@@ -3589,7 +3596,7 @@ def test_data_access_provider_candidate_shapes_are_not_coerced(tmp_path: Path, p
         PROVIDER_LIVE._replace(codes=("probe-cleared",)),
         PROVIDER_LIVE._replace(codes=["probe-cleared", "probe-data-ok"]),
         PROVIDER_LOCAL._replace(source_keys=""),
-        PROVIDER_LIVE._replace(provider_unit=cg.provider_reference("hidden-recursion")),
+        PROVIDER_LIVE._replace(provider_unit=pda.provider_reference("hidden-recursion")),
     ],
 )
 def test_data_access_provider_assessment_must_already_be_strict(tmp_path: Path, provider: object) -> None:
@@ -3611,6 +3618,7 @@ def test_data_access_provider_resolution_stays_with_the_caller(tmp_path: Path, m
 
     for name in ("_read_audit_trail", "load_bundle", "_classify_legs", "_override_is_authentic", "verify", "_audit"):
         monkeypatch.setattr(cg, name, forbidden)
+    monkeypatch.setattr(pda, "_classify_legs", forbidden)
     inherited = _assess(root, published_spec, scope="report_only_shared_model", provider=(S2_UNIT_REF, PROVIDER_LIVE))
     missing = _assess(root, published_spec, scope="report_only_shared_model", provider=[])
 
@@ -3635,19 +3643,19 @@ def test_data_access_inherited_authorization_cannot_expand_to_reports(tmp_path: 
         "max_phase2_claim": "structural_only",
         "effective_scope": scope,
     }
-    with pytest.raises(cg.DataAccessProjectionError, match="illegal-combination"):
-        cg.parse_data_access(json.dumps(payload))
+    with pytest.raises(pda.DataAccessProjectionError, match="illegal-combination"):
+        pda.parse_data_access(json.dumps(payload))
 
 
 def test_data_access_source_key_syntax_requires_the_whole_string() -> None:
     """A final newline is outside the stable key, despite the special meaning of regex `$`."""
-    with pytest.raises(cg.DataAccessProjectionError, match="source-key-invalid"):
-        cg.parse_data_access(json.dumps(_projection(source_keys=[KEY_A + "\n"])))
+    with pytest.raises(pda.DataAccessProjectionError, match="source-key-invalid"):
+        pda.parse_data_access(json.dumps(_projection(source_keys=[KEY_A + "\n"])))
 
 
 def test_data_access_unreadable_projection_still_has_a_typed_refusal(tmp_path: Path) -> None:
     """Invalid UTF-8 is a read failure, not an uncaught decoder exception."""
     path = tmp_path / "projection.json"
     path.write_bytes(b"\xff")
-    with pytest.raises(cg.DataAccessProjectionError, match="unreadable"):
-        cg.read_data_access(path)
+    with pytest.raises(pda.DataAccessProjectionError, match="unreadable"):
+        pda.read_data_access(path)

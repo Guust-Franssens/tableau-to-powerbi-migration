@@ -665,7 +665,7 @@ def test_the_generated_manifest_is_written_before_the_engine_receipt(tmp_path: P
     helper-level test would document the constraint without guarding it.
     """
     sys.path.insert(0, str(Path(run_estate.__file__).resolve().parent))
-    from credential_gate import _receipt_matches_bundle  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
+    from migration_bundle import _receipt_matches_bundle  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
     out = tmp_path / "bundle"
 
@@ -1339,7 +1339,7 @@ def test_scope_bridge_duplicate_scope_identity_retains_multiplicity(tmp_path: Pa
 def test_scope_bridge_unresolved_exact_nested_identity_survives_receipt(
     tmp_path: Path, monkeypatch, empty_engine: bool
 ) -> None:
-    from credential_gate import _receipt_matches_bundle  # pylint: disable=import-outside-toplevel
+    from migration_bundle import _receipt_matches_bundle  # pylint: disable=import-outside-toplevel
 
     case = _scope_unresolved_case(tmp_path)
     case.survey["unresolved_dependencies"].reverse()
@@ -1792,7 +1792,7 @@ def test_scope_bridge_bad_snapshots_fail_closed_without_discovery(
 def test_scope_bridge_main_freezes_both_snapshots_before_engine_and_receipt_seals_final_manifest(
     tmp_path: Path, monkeypatch, caplog
 ) -> None:
-    from credential_gate import _receipt_matches_bundle  # pylint: disable=import-outside-toplevel
+    from migration_bundle import _receipt_matches_bundle  # pylint: disable=import-outside-toplevel
 
     case = _scope_case(tmp_path)
     _persist_scope_inputs(case)

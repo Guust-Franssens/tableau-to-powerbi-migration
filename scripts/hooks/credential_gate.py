@@ -379,7 +379,8 @@ def _blocking_marker(target: Path) -> Path | None:
             if marker is not None:
                 return marker
             for root in roots:
-                if not (root / MARKER).exists() and core.status(root) != 0:
+                scoped = any((root / name).is_file() for name in core.SCOPE_MARKERS)
+                if scoped and not (root / MARKER).exists() and core.status(root) != 0:
                     return root / MARKER
             return None
     except (OSError, ValueError):

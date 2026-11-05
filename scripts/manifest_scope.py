@@ -707,7 +707,7 @@ def scope_receipt(receipt: Any, unit: str) -> dict[str, Any] | None:
     engine provenance is a VERSION, not a location on the machine that happened to build it.
 
     It still deliberately does NOT become a credential-gate exemption, and now fails closed one step
-    earlier: `credential_gate._receipt_matches_bundle` raises OSError on the package's absent
+    earlier: `migration_bundle._receipt_matches_bundle` raises OSError on the package's absent
     `input_manifest.json` before it ever reads the hashes this no longer carries.
     """
     if not isinstance(receipt, dict):

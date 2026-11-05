@@ -77,7 +77,7 @@ from typing import Any
 from xml.etree import ElementTree
 import bundle_corpus as corpus
 from bundle_corpus import TargetClassification, classify_target, evidence_dirs, shipping_reports
-import credential_gate as data_access
+import package_data_access as data_access
 import object_identity as oid
 import package_filesystem as pfs
 import package_role_identity as pri

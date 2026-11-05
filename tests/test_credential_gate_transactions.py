@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
-import inspect
 from functools import partial
 import json
 import os
@@ -24,8 +23,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import credential_gate as gate  # noqa: E402  # pylint: disable=wrong-import-position
+import package_data_access as pda  # noqa: E402  # pylint: disable=wrong-import-position
 import preflight_source_credentials as preflight  # noqa: E402  # pylint: disable=wrong-import-position
 import probe_live_source as probe  # noqa: E402  # pylint: disable=wrong-import-position
+from test_package_transactions import _child, _mutant  # noqa: E402  # pylint: disable=wrong-import-position
 
 SCRIPTS = Path(gate.__file__).parent
 
@@ -260,7 +261,7 @@ def test_scoped_human_permission_preserves_new_siblings_without_authorizing_them
     path.write_text(complete, encoding="utf-8")
     assert gate.apply_block(root, keys) == 0
     assert _marker(root) == keys[1:]
-    assessment = gate.assess_data_access(
+    assessment = pda.assess_data_access(
         root,
         package_spec=selected,
         package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
@@ -346,7 +347,7 @@ def test_selected_projection_reads_no_gate_root_snapshot(
         return (frozenset(keys) if len(calls) == 1 else frozenset({"source-key:ffffffffffffffff"})), None
 
     monkeypatch.setattr(gate, "_gate_root_live_keys", alternating)
-    assessment = gate.assess_data_access(
+    assessment = pda.assess_data_access(
         root,
         package_spec={"data_sources": spec["data_sources"][:1]},
         package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
@@ -591,16 +592,6 @@ def test_each_source_bearing_transition_uses_one_immutable_current_domain(
     assert calls == [True], "one transition must not mix two independently resolved current domains"
 
 
-def _child(root: Path, code: str) -> subprocess.Popen:
-    return subprocess.Popen(
-        [sys.executable, "-u", "-c", f"import sys; sys.path.insert(0, {str(SCRIPTS)!r}); " + code, str(root)],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-
 def test_concurrent_first_arms_preserve_union_and_exact_rows(unit) -> None:
     root, keys = unit
     with ThreadPoolExecutor(max_workers=3) as pool:
@@ -770,7 +761,7 @@ def test_scoped_projection_ignores_completed_and_interrupted_partial_clears(
     assert (result != 0) is interrupted
     spec = json.loads((root / gate.MIGRATION_SPEC).read_text(encoding="utf-8"))
     spec["data_sources"] = spec["data_sources"][:1]
-    assessment = gate.assess_data_access(
+    assessment = pda.assess_data_access(
         root,
         package_spec=spec,
         package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
@@ -792,7 +783,7 @@ def test_local_byte_projection_without_a_gate_does_not_invent_an_origin_acl_requ
         raise AssertionError("local-byte proof is not an origin-root writability claim")
 
     monkeypatch.setattr(gate, "inspect_physical_barrier", no_physical_claim)
-    result = gate.assess_data_access(
+    result = pda.assess_data_access(
         root,
         package_spec={"data_sources": [{"connection": {"class": "csv", "powerbi_target": "flat_file"}}]},
         package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
@@ -834,7 +825,7 @@ def test_scoped_data_proof_does_not_claim_root_clearance(unit, repaired: bool) -
         (root / gate.MARKER).unlink()  # Deliberately corrupt only this marker-only test fixture.
     spec = json.loads((root / gate.MIGRATION_SPEC).read_text(encoding="utf-8"))
     spec["data_sources"] = spec["data_sources"][:1]
-    result = gate.assess_data_access(
+    result = pda.assess_data_access(
         root,
         package_spec=spec,
         package_data_sources={"self_contained": True, "omissions": [], "neutralized": [], "retained_network": []},
@@ -911,35 +902,6 @@ def test_unprovable_source_identity_refuses_without_a_success_row(unit) -> None:
     assert not (root / gate.MARKER).exists() and not (root / gate.AUDIT).exists()
 
 
-def test_native_descriptor_contention_death_and_persistent_external_file(tmp_path: Path) -> None:
-    root = tmp_path / "package"
-    root.mkdir()
-    child = _child(
-        root,
-        "from pathlib import Path; import credential_gate as g; "
-        "tx=g.gate_transaction(Path(sys.argv[1])); tx.__enter__(); print('HELD', flush=True); "
-        "sys.stdin.read()",
-    )
-    # A pipe owned by this test, not a PID-age/stale-lock recovery scheme.
-    try:
-        assert child.stdout.readline().strip() == "HELD"
-        authority = gate.coordination_root(root)
-        assert authority.companion.parent == root.parent
-        assert authority.companion.stat().st_size == 1
-        with pytest.raises(gate.GateTransactionError, match="busy"):
-            with gate.gate_transaction(root, timeout=0.1):
-                pytest.fail("contending descriptor was admitted")
-        root.rename(tmp_path / "renamed")
-        child.kill()
-        child.wait(timeout=10)
-        with gate.gate_transaction(root, timeout=1):
-            assert authority.companion.exists(), "death releases the descriptor, never deletes the companion"
-    finally:
-        if child.poll() is None:
-            child.kill()
-        child.communicate(timeout=10)
-
-
 @pytest.mark.skipif(
     os.name != "nt", reason="write-deny enforcement is an icacls ACL; the marker-only path cannot block a write"
 )
@@ -1003,7 +965,7 @@ def test_reader_busy_never_reports_clear(tmp_path: Path, monkeypatch: pytest.Mon
             entered.set()
             assert release.wait(5)
 
-    monkeypatch.setattr(gate, "TX_READER_TIMEOUT", 0.1)
+    monkeypatch.setattr(pda, "TX_READER_TIMEOUT", 0.1)
     with ThreadPoolExecutor(max_workers=1) as pool:
         held = pool.submit(holder)
         assert entered.wait(5)
@@ -1059,23 +1021,6 @@ def test_crash_left_empty_companion_is_initialized_by_its_holder(tmp_path: Path)
     assert companion.read_bytes() == b"\0" and gate._identity(companion.stat()) == before
 
 
-@pytest.mark.parametrize("tamper", ["grown", "truncated"])
-def test_companion_resized_while_held_is_refused(tmp_path: Path, tamper: str) -> None:
-    """Only the pre-lock look may see an empty companion; once held, size is exactly one byte again."""
-    root = tmp_path / "unit"
-    root.mkdir()
-    companion = gate.coordination_root(root).companion
-    with pytest.raises(gate.GateTransactionError, match="transaction-companion-changed"):
-        with gate.gate_transaction(root):
-            with companion.open("r+b") as stream:
-                if tamper == "grown":
-                    stream.seek(1)
-                    stream.write(b"\0")
-                else:
-                    stream.truncate(0)
-            gate._check_transaction(root)
-
-
 @pytest.mark.parametrize("kind", ["directory", "extra-byte", "symlink", "hardlink"])
 def test_unsafe_companion_is_refused(tmp_path: Path, kind: str) -> None:
     root = tmp_path / "unit"
@@ -1098,46 +1043,16 @@ def test_unsafe_companion_is_refused(tmp_path: Path, kind: str) -> None:
     assert gate.status(root) != 0
 
 
-def test_replacement_cannot_be_credited_as_serialized(tmp_path: Path) -> None:
-    root = tmp_path / "unit"
-    root.mkdir()
-    authority = gate.coordination_root(root)
-    if os.name == "nt":
-        with gate.gate_transaction(root):
-            with pytest.raises(PermissionError):
-                authority.companion.unlink()
-        return
-    with pytest.raises(gate.GateTransactionError, match="changed"):
-        with gate.gate_transaction(root):
-            authority.companion.unlink()
-            authority.companion.write_bytes(b"\0")
-    assert authority.companion.exists()
-
-
-def test_canonical_case_and_relative_aliases_share_one_token(tmp_path: Path) -> None:
-    root = tmp_path / "Unit"
-    root.mkdir()
-    authority = gate.coordination_root(root)
-    assert authority == gate.coordination_root(root.parent / "." / root.name)
-    if os.name == "nt":
-        assert authority.canonical == gate.coordination_root(Path(str(root).swapcase())).canonical
-        assert authority.companion.name == gate.coordination_root(Path(str(root).swapcase())).companion.name
-        with pytest.raises(gate.GateTransactionError):
-            gate.coordination_root(root.with_name("UNIT~1"))
-        with pytest.raises(gate.GateTransactionError, match="alias-unproved"):
-            gate.coordination_root(Path(r"\\uncontacted.example.invalid\share\Unit"))
-
-
 def test_unavailable_native_object_identity_is_not_a_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = tmp_path / "Unit"
     root.mkdir()
     assert gate.status(root) == 0
-    safe, fstat = gate._safe_entry, os.fstat
+    safe, fstat = pda._safe_entry, os.fstat
 
     def unknown(info):
         return SimpleNamespace(st_dev=info.st_dev, st_ino=0, st_size=info.st_size)
 
-    monkeypatch.setattr(gate, "_safe_entry", lambda path, **kwargs: unknown(safe(path, **kwargs)))
+    monkeypatch.setattr(pda, "_safe_entry", lambda path, **kwargs: unknown(safe(path, **kwargs)))
     monkeypatch.setattr(gate.os, "fstat", lambda descriptor: unknown(fstat(descriptor)))
     assert gate.status(root) == 3, "two unavailable object IDs are not proof of identity"
 
@@ -1170,66 +1085,6 @@ def test_unproved_or_case_sensitive_parent_is_not_a_clear(
     assert gate.status(root) == 3, "unproved case semantics must refuse, not normalize by assumption"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="`subst` is Windows-only")
-def test_windows_subst_alias_uses_the_opened_parent_identity(tmp_path: Path) -> None:
-    import ctypes  # pylint: disable=import-outside-toplevel
-
-    root = tmp_path / "Unit"
-    root.mkdir()
-    drives = ctypes.windll.kernel32.GetLogicalDrives()
-    letter = next(chr(code) for code in range(ord("Z"), ord("D"), -1) if not drives & (1 << (code - ord("A"))))
-    drive = f"{letter}:"
-    created = subprocess.run(["subst", drive, str(tmp_path)], capture_output=True, timeout=10, check=False)
-    assert created.returncode == 0, "test-owned subst mapping must be created, not silently skipped"
-    try:
-        alias = Path(f"{drive}\\Unit")
-        assert gate.coordination_root(alias).canonical == gate.coordination_root(root).canonical
-        assert gate.coordination_root(alias).companion.name == gate.coordination_root(root).companion.name
-
-        def contend():
-            with gate.gate_transaction(alias, timeout=0.1):
-                return "admitted"
-
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            with gate.gate_transaction(root):
-                with pytest.raises(gate.GateTransactionError, match="busy"):
-                    pool.submit(contend).result(timeout=5)
-        with gate.gate_transaction(alias):
-            assert gate.coordination_root(root).companion.exists()
-    finally:
-        removed = subprocess.run(["subst", drive, "/D"], capture_output=True, timeout=10, check=False)
-        assert removed.returncode == 0, "remove only this test's own subst mapping"
-
-
-@pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")
-def test_windows_junction_is_refused_not_given_an_independent_token(tmp_path: Path) -> None:
-    parent = tmp_path / "parent"
-    (parent / "Unit").mkdir(parents=True)
-    alias = tmp_path / "junction"
-    result = subprocess.run(
-        ["cmd.exe", "/c", "mklink", "/J", str(alias), str(parent)],
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
-    assert result.returncode == 0, "junction fixture creation must succeed to exercise the refusal"
-    try:
-        with pytest.raises(gate.GateTransactionError):
-            gate.coordination_root(alias / "Unit")
-    finally:
-        alias.rmdir()
-
-
-def test_parent_replacement_and_reparse_are_not_silent_aliases(tmp_path: Path) -> None:
-    parent = tmp_path / "parent"
-    root = parent / "unit"
-    root.mkdir(parents=True)
-    with pytest.raises(OSError):
-        with gate.gate_transaction(root):
-            parent.rename(tmp_path / "old")
-            root.mkdir(parents=True)
-
-
 def test_dotdot_cannot_erase_an_unproved_parent_component(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     parent = tmp_path / "parent"
     (parent / "ordinary").mkdir(parents=True)
@@ -1237,7 +1092,7 @@ def test_dotdot_cannot_erase_an_unproved_parent_component(tmp_path: Path, monkey
     root.mkdir()
     path = parent / "ordinary" / ".." / "Unit"
     assert gate.coordination_root(path).canonical == gate.coordination_root(root).canonical
-    safe = gate._safe_entry
+    safe = pda._safe_entry
 
     def unproved(location, **kwargs):
         if location == parent / "ordinary":
@@ -1245,7 +1100,7 @@ def test_dotdot_cannot_erase_an_unproved_parent_component(tmp_path: Path, monkey
         return safe(location, **kwargs)
 
     with gate.gate_transactions([root]):
-        monkeypatch.setattr(gate, "_safe_entry", unproved)
+        monkeypatch.setattr(pda, "_safe_entry", unproved)
         with pytest.raises(gate.GateTransactionError, match="reparse component"):
             gate.coordination_root(path)
         assert gate.status(path) == 3, "an alias binding must not bypass validation of the original parent chain"
@@ -1254,13 +1109,13 @@ def test_dotdot_cannot_erase_an_unproved_parent_component(tmp_path: Path, monkey
 def test_public_wrappers_join_without_reacquiring(unit, monkeypatch: pytest.MonkeyPatch) -> None:
     root, keys = unit
     count = []
-    acquire = gate._descriptor_lock
+    acquire = pda._descriptor_lock
 
     def counted(descriptor, lock):
         count.append(lock)
         return acquire(descriptor, lock)
 
-    monkeypatch.setattr(gate, "_descriptor_lock", counted)
+    monkeypatch.setattr(pda, "_descriptor_lock", counted)
     with gate.gate_transaction(root):
         assert gate.apply_block(root, keys) == 0
         assert gate.status(root) != 0
@@ -1502,7 +1357,7 @@ def test_audit_descriptor_is_held_through_append(unit, monkeypatch: pytest.Monke
     assert gate.apply_block(root, keys) == 0
     audit_identity = gate._identity((root / gate.AUDIT).stat())
     sync = os.fsync
-    monkeypatch.setattr(gate, "TX_READER_TIMEOUT", 0.1)
+    monkeypatch.setattr(pda, "TX_READER_TIMEOUT", 0.1)
 
     def observed(descriptor):
         if gate._identity(os.fstat(descriptor)) == audit_identity:
@@ -1518,7 +1373,7 @@ def test_changed_companion_identity_cannot_establish_clear(tmp_path: Path, monke
     root = tmp_path / "identity-control"
     root.mkdir()
     companion = gate.coordination_root(root).companion
-    entry = gate._safe_entry
+    entry = pda._safe_entry
     with gate.gate_transaction(root):
         with monkeypatch.context() as patch:
 
@@ -1528,30 +1383,8 @@ def test_changed_companion_identity_cannot_establish_clear(tmp_path: Path, monke
                     return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino + 1, st_size=info.st_size)
                 return info
 
-            patch.setattr(gate, "_safe_entry", changed)
+            patch.setattr(pda, "_safe_entry", changed)
             assert gate.status(root) == 3, "replaced companion must not be credited as serialized"
-
-
-def test_release_never_unlinks_companion(tmp_path: Path) -> None:
-    root = tmp_path / "persistent-control"
-    root.mkdir()
-    companion = gate.coordination_root(root).companion
-    with gate.gate_transaction(root):
-        pass
-    assert companion.is_file(), "release must never unlink the persistent companion"
-
-
-def _mutant(module, name: str, old: str, new: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """In-memory single-function mutations: never edit/rebaseline product files or score arbitrary errors."""
-    source = inspect.getsource(getattr(module, name))
-    assert source.count(old) == 1, "mutation must match exactly its intended production boundary"
-    original = getattr(module, name)
-    try:
-        exec(compile(source.replace(old, new), "<controlled-transaction-mutation>", "exec"), vars(module))  # pylint: disable=exec-used
-        mutant = getattr(module, name)
-    finally:
-        setattr(module, name, original)
-    monkeypatch.setattr(module, name, mutant)
 
 
 def _omitted_mutex_schedule(unit: tuple[Path, list[str]], monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1573,7 +1406,7 @@ def _omitted_mutex_schedule(unit: tuple[Path, list[str]], monkeypatch: pytest.Mo
         with audit_mutex:
             return append(*args, **kwargs)
 
-    monkeypatch.setattr(gate, "_descriptor_lock", lambda *_args: None)
+    monkeypatch.setattr(pda, "_descriptor_lock", lambda *_args: None)
     monkeypatch.setattr(gate, "_durable_write", same_snapshot)
     monkeypatch.setattr(gate, "_append_audit", complete_row)
     test_concurrent_first_arms_preserve_union_and_exact_rows(unit)
@@ -1624,11 +1457,8 @@ def _omitted_mutex_schedule(unit: tuple[Path, list[str]], monkeypatch: pytest.Mo
         "unlock-before-append",
         "swallowed-audit-fsync",
         "any-anchor",
-        "in-root-lock",
         "parser-suppression",
         "preflight-suppression",
-        "transient-package-token",
-        "unlink-on-release",
         "replacement-credited",
     ],
 )
@@ -1809,12 +1639,14 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
             message = "exact engine mirrors"
         else:
             _mutant(
-                gate,
+                pda,
                 "_package_spec_facts",
                 "if len(set(keys)) != len(keys):",
                 "if False:",
                 monkeypatch,
             )
+            # The gate binds the moved helper by name; route its gate-side caller to the same mutant.
+            monkeypatch.setattr(gate, "_package_spec_facts", pda._package_spec_facts)
             check = partial(test_engine_distinct_records_colliding_to_one_key_refuse, control)
             message = "distinct projected records"
     elif mutation == "marker-assignment":
@@ -1993,7 +1825,11 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
             gate,
             "_append_audit",
             "    _check_transaction(migration)\n    path = migration / AUDIT",
-            "    _descriptor_lock(_TRANSACTIONS.get()[-1].descriptor, False)\n    path = migration / AUDIT",
+            (
+                "    pda = __import__('package_data_access')\n"
+                "    pda._descriptor_lock(pda._TRANSACTIONS.get()[-1].descriptor, False)\n"
+                "    path = migration / AUDIT"
+            ),
             monkeypatch,
         )
         check = partial(test_audit_descriptor_is_held_through_append, unit, monkeypatch)
@@ -2012,15 +1848,6 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
         _mutant(gate, "_all_targets_denied", "and all(", "and any(", monkeypatch)
         check = partial(test_every_anchor_is_required_not_any, control, monkeypatch)
         message = "all anchors"
-    elif mutation == "in-root-lock":
-        _mutant(gate, "coordination_root", 'root.parent / f"{TX_PREFIX}', 'root / f"{TX_PREFIX}', monkeypatch)
-
-        def check():
-            root = tmp_path / "external-control"
-            root.mkdir()
-            assert gate.coordination_root(root).companion.parent == root.parent, "lock must be external"
-
-        message = "lock must be external"
     elif mutation == "parser-suppression":
         import parse_tableau  # pylint: disable=import-outside-toplevel
 
@@ -2031,26 +1858,8 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
         _mutant(preflight, "_write_gate_marker", "if result.returncode:", "if False:", monkeypatch)
         check = partial(test_preflight_propagates_failed_transaction, unit, monkeypatch)
         message = "preflight must propagate"
-    elif mutation == "transient-package-token":
-        from test_package_data_access_swap import (  # pylint: disable=import-outside-toplevel
-            test_first_package_generation_receives_final_token,
-        )
-
-        _mutant(gate, "_authority", "in _COORDINATION.get():", "in ():", monkeypatch)
-        check = partial(test_first_package_generation_receives_final_token, control)
-        message = "package generation must retain final token"
-    elif mutation == "unlink-on-release":
-        release = gate.GateTransaction.__exit__
-
-        def unlink(transaction, *args):
-            release(transaction, *args)
-            transaction.authority.companion.unlink()
-
-        monkeypatch.setattr(gate.GateTransaction, "__exit__", unlink)
-        check = partial(test_release_never_unlinks_companion, control)
-        message = "release must never unlink"
     else:
-        check_identity = gate.GateTransaction.check
+        check_identity = pda.GateTransaction.check
 
         def unchecked(transaction):
             try:
@@ -2058,7 +1867,7 @@ def test_required_mutations_fail_their_intended_assertion(  # pylint: disable=to
             except gate.GateTransactionError:
                 pass
 
-        monkeypatch.setattr(gate.GateTransaction, "check", unchecked)
+        monkeypatch.setattr(pda.GateTransaction, "check", unchecked)
         check = partial(test_changed_companion_identity_cannot_establish_clear, control, monkeypatch)
         message = "replaced companion must not be credited"
     with pytest.raises((AssertionError, pytest.fail.Exception), match=message):

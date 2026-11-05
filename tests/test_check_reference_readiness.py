@@ -3612,15 +3612,10 @@ def test_start_ready_fresh_binding_must_match_earlier_bytes_and_native_roots(
     assert hits == ([] if change == "foreign-inspection" else [True])
 
 
-def test_start_ready_fresh_binding_no_longer_reads_the_retired_physical_barrier(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_start_ready_fresh_binding_no_longer_reads_the_retired_physical_barrier(tmp_path: Path) -> None:
     root = _packaged_unit(tmp_path)
 
-    def barrier(_root):
-        pytest.fail("fresh binding consulted the retired credential-gate physical barrier")
-
-    monkeypatch.setattr(crr.data_access, "inspect_physical_barrier", barrier)
+    assert not hasattr(crr.data_access, "inspect_physical_barrier"), "the barrier must stay out of data access"
     report = crr.scan(root)
     assert report["status"] == "START_READY"
     assert report["package_readiness"][0]["failed_stage"] is None
