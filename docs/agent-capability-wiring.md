@@ -47,6 +47,7 @@ must appear below unless the script docstring marks it `internal: true` with an 
 | `scripts/check_agent_capabilities.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/check_ai_readiness.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/check_blank_placeholders.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
+| `scripts/check_bundle_sources.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/check_connection_fidelity.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/check_datamodel.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/check_desktop_orphans.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |

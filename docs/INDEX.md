@@ -187,6 +187,7 @@ Base: `scripts/`
 check_agent_capabilities.py
 check_ai_readiness.py
 check_blank_placeholders.py
+check_bundle_sources.py
 check_connection_fidelity.py
 check_datamodel.py
 check_desktop_orphans.py
