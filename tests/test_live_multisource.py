@@ -46,9 +46,9 @@ def spec_fixture(tmp_path_factory: pytest.TempPathFactory) -> dict:
 def test_every_federated_leg_is_reported(spec: dict) -> None:
     """The parser must report EVERY named connection, not just the first.
 
-    Under-reporting live sources is the one direction the credential gate must never fail in: a
-    federated datasource that collapses to its first connection arms the gate for one system and
-    reports the others nowhere.
+    Under-reporting live sources is the one direction the source classification must never fail in:
+    a federated datasource that collapses to its first connection classifies one system and reports
+    the others nowhere.
     """
     sources = spec["data_sources"]
     assert sources, "no data sources parsed"
@@ -79,7 +79,7 @@ def test_connector_specific_details_survive_per_leg(spec: dict) -> None:
         assert legs["snowflake"].get("warehouse"), f"snowflake leg lost its warehouse: {legs['snowflake']}"
 
 
-def test_the_credential_gate_arms_for_every_live_leg(spec: dict, tmp_path: Path) -> None:
+def test_the_preflight_classifies_every_live_leg(spec: dict, tmp_path: Path) -> None:
     """The preflight must classify each leg, not just the datasource as a whole."""
     spec_path = tmp_path / "migration-spec.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")

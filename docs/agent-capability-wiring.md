@@ -23,8 +23,6 @@ it is present and scripts are missing, the gate names them.
 | `--scope` | Layer owners need scoped `check_unit` gates without mistaking a scoped pass for full sign-off. | all personas | `docs/INDEX.md` | first status and final gate; direct `check_*.py` gates only isolate one finding. |
 | `read_handover` | Builders need the compact residual-work queue instead of re-reading large engine handover JSON by hand. | model and report builders | `docs/INDEX.md` | `python scripts/read_handover.py <bundle> --workbook <name>` — residual work queue and engine-block reason. |
 | `desktop-orphans` | Run-owned Power BI Desktop processes must be cleaned up without killing sibling work. | all personas | `AGENTS.md` | leaks are enforced by `check_unit.py`'s `desktop-orphans` gate. |
-| `reprobe_blocked.py` | After a machine-wide sign-in an agent has no cheap way to resume: it cannot `authorize` (agent-hostile by design), and re-probing dozens of gated units by hand is the friction that invites a bypass. This is the agent-SAFE resume path — probe-only, never authorizes, so it converts unearned→earned by measurement without any human-only step. | `tableau-migrator` | `docs/INDEX.md` | After a machine-wide sign-in, resume with `python scripts/reprobe_blocked.py` (dry-run; `--apply` to run) — re-probes every BLOCKED unit and earns each gate's own clear; it never authorizes. |
-| `credential_gate.py list` | Every other gate subcommand takes exactly one migration, so "which units are still gated?" had no answer across an estate. Measured 2026-08-26 on a ~44-unit estate: a human hand-typed `authorize` per unit and so took the lossy exit for all of them, permanently marking builds UNVALIDATED that a re-probe *might* have earned (whether it would depends on post-sign-in reachability, which was never measured). An agent had no resume signal at all after a human signed in. | all personas | `docs/INDEX.md` | `python scripts/credential_gate.py list <estate-root>` names every gated unit (`--json`); exit 1 means work remains. After a sign-in re-probe the blocked units to earn `probe-cleared` — a credential caches machine-wide, so one sign-in can clear several. Never mass-`authorize`. |
 
 ## Script capability inventory
 
@@ -69,7 +67,6 @@ must appear below unless the script docstring marks it `internal: true` with an 
 | `scripts/classify_harvest_hardness.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/connection_target.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/connections_manifest.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/credential_gate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/current_artifact_revision.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/dax_oracle_server.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/declare_generated_edit.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
@@ -89,7 +86,6 @@ must appear below unless the script docstring marks it `internal: true` with an 
 | `scripts/harvest_gap_trees.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/harvest_estate_assets.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/harvest_tableau_public.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/hooks/credential_gate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/host_paths.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/iteration_receipt.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/make_carousel.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
@@ -108,9 +104,7 @@ must appear below unless the script docstring marks it `internal: true` with an 
 | `scripts/path_flavour.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/preflight_source_credentials.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/prompt_injection.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/probe_bundle.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/probe_desktop_query.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/probe_live_source.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/promote_unit.py` | `agent-facing` | Named in `scripts/README.md` and routed from `docs/INDEX.md` as the last step for a migration unit. |
 | `scripts/provision_tableau_estate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/published_datasource_registry.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
@@ -118,7 +112,6 @@ must appear below unless the script docstring marks it `internal: true` with an 
 | `scripts/reference_evidence.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/refresh_pbip_model.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/render_excalidraw.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/reprobe_blocked.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/resolve_datasource_target.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/run_engine_survey.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/run_estate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |

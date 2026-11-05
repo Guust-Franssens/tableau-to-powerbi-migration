@@ -25,6 +25,7 @@ from __future__ import annotations
 import sys
 import json
 import copy
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -36,8 +37,7 @@ if str(SCRIPTS) not in sys.path:
 # ruff: noqa: E402  (the sys.path insert above must precede these imports)
 # pylint: disable=wrong-import-position,import-error
 from connection_target import FLAT_FILE, LIVE_SOURCE, powerbi_target
-import credential_gate as gate
-from preflight_source_credentials import GATE_MARKER, classify_source, cmd_classify
+from preflight_source_credentials import classify_source, cmd_classify
 import preflight_source_credentials as pf
 
 # (class, mode, expected verdict). The cases that used to be wrong are marked.
@@ -115,8 +115,12 @@ def test_an_unknown_class_is_never_silently_cleared() -> None:
     assert verdict != "no-creds"
 
 
-def test_unkeyable_live_source_arms_gate_instead_of_clearing(tmp_path: Path, caplog) -> None:
-    """A known-live source whose key cannot be derived must stay blocking."""
+def _files(root: Path) -> set[str]:
+    return {path.relative_to(root).as_posix() for path in root.rglob("*")}
+
+
+def test_unkeyable_live_source_still_blocks_instead_of_clearing(tmp_path: Path, caplog) -> None:
+    """A known-live source whose key cannot be derived must stay blocking, and nothing is written."""
     spec = tmp_path / "migration-spec.json"
     spec.write_text(
         json.dumps(
@@ -133,10 +137,11 @@ def test_unkeyable_live_source_arms_gate_instead_of_clearing(tmp_path: Path, cap
     )
     caplog.set_level("INFO", logger="preflight_source_credentials")
 
-    assert cmd_classify(spec) == 3
-    assert not (tmp_path / GATE_MARKER).exists()
+    assert cmd_classify(spec) == 1
+    assert _files(tmp_path) == {"migration-spec.json"}
     messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert "CANNOT_ESTABLISH" in messages
+    assert "cannot derive a stable" in messages
+    assert "PROOF REQUIRED - 1 live source(s)" in messages
     assert "No live sources" not in messages
 
 
@@ -325,15 +330,14 @@ def test_missing_class_does_not_launder_live_source_to_extract_only(tmp_path: Pa
     )
     caplog.set_level("INFO", logger="preflight_source_credentials")
 
-    assert cmd_classify(spec) == 3
-    assert not (tmp_path / GATE_MARKER).exists()
+    assert cmd_classify(spec) == 1
+    assert _files(tmp_path) == {"migration-spec.json"}
     messages = "\n".join(record.getMessage() for record in caplog.records)
-    assert "CANNOT_ESTABLISH" in messages
+    assert "connection leg has no class" in messages
     assert "No live sources" not in messages
 
 
-def test_canonical_live_source_arms_the_real_gate(tmp_path: Path) -> None:
-    """The positive producer writes exactly the classifier key, not a display or count alias."""
+def _live_spec(tmp_path: Path) -> tuple[Path, dict]:
     source = {
         "name": "Orders",
         "connection": {
@@ -347,47 +351,148 @@ def test_canonical_live_source_arms_the_real_gate(tmp_path: Path) -> None:
     }
     spec = tmp_path / "migration-spec.json"
     spec.write_text(json.dumps({"data_sources": [source]}), encoding="utf-8")
-    key = pf._leg_key(source, 0, source["connection"])
-
-    try:
-        assert cmd_classify(spec) == 1
-        marker = json.loads((tmp_path / GATE_MARKER).read_text(encoding="utf-8"))
-        assert marker["sources"] == [key]
-    finally:
-        with gate.gate_transaction(tmp_path):
-            gate._release_physical(tmp_path)
+    return spec, source
 
 
-def test_failed_no_live_clear_is_preflight_and_parser_cannot_establish(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """No-live success cannot outrun a failed teardown transition."""
+def test_canonical_live_source_classification_is_read_only(tmp_path: Path) -> None:
+    """A live source exits 1 and writes nothing; the leg identity is the classifier key, not a display."""
+    spec, source = _live_spec(tmp_path)
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*")}
+
+    assert cmd_classify(spec) == 1
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*")} == before
+    assert [leg[0] for leg in pf._classify_legs(source, 0)] == [pf._leg_key(source, 0, source["connection"])]
+
+
+def _classifier_output(tmp_path: Path) -> str:
+    spec, _source = _live_spec(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPTS / "preflight_source_credentials.py"), "--spec", str(spec)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    return (proc.stdout + proc.stderr).lower()
+
+
+def test_the_classifier_sends_the_agent_to_the_refresh_instead_of_terminating(tmp_path: Path) -> None:
+    """The classifier opens no socket, so it must hand off to the measurement, not issue a terminal stop.
+
+    Measured 2026-08-02: an unconditional "STOP - A HUMAN MUST ACT / TERMINATE THE RUN NOW" made 10 of
+    15 models skip the live measurement, and claude-opus-5 refused a fully credentialed, reachable
+    warehouse. The measurement is now the pbip-model-refresh UI refresh of the shipped working copy.
+    """
+    out = _classifier_output(tmp_path)
+
+    assert "refresh_pbip_model.py" in out and "--ui-refresh --canaries" in out
+    assert "check_bundle_sources.py" in out
+    forbidden = ["terminate the run", "a human must act", "you cannot fix this yourself", "probe_live_source"]
+    present = [phrase for phrase in forbidden if phrase in out]
+    assert not present, f"a socket-less classifier must not issue a terminal stop; found {present}"
+
+
+def test_the_classifier_still_forbids_building(tmp_path: Path) -> None:
+    """Paired control: softening the directive must not soften the actual prohibition."""
+    out = _classifier_output(tmp_path)
+    assert "may not build" in out
+    assert "proof required" in out
+
+
+def test_a_failed_classification_never_fails_the_parse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The parser's post-parse classification is a read-only print; its failure no longer exits 3."""
     import parse_tableau  # pylint: disable=import-outside-toplevel
 
-    spec = tmp_path / "migration-spec.json"
-    spec.write_text(
-        json.dumps(
-            {
-                "data_sources": [
-                    {
-                        "name": "Local",
-                        "connection": {"class": "excel-direct", "mode": "extract", "powerbi_target": FLAT_FILE},
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    caplog.set_level("INFO", logger="preflight_source_credentials")
-    monkeypatch.setattr(pf, "_clear_gate_marker", lambda _root: (_ for _ in ()).throw(OSError("fixture clear")))
-    assert cmd_classify(spec) == 3
-    assert "No live sources" not in "\n".join(record.getMessage() for record in caplog.records)
-
     source = Path(__file__).parent / "fixtures" / "federated_multi_connection.twb"
-    monkeypatch.setattr(
-        parse_tableau.subprocess, "run", lambda *_args, **_kwargs: __import__("subprocess").CompletedProcess([], 3)
-    )
+    calls = []
+
+    def _failed_classification(*args, **_kwargs):
+        calls.append(args[0])
+        return subprocess.CompletedProcess(args[0], 3)
+
+    monkeypatch.setattr(parse_tableau.subprocess, "run", _failed_classification)
     monkeypatch.setattr(sys, "argv", ["parse_tableau.py", str(source), "-o", str(tmp_path / "parsed.json")])
-    with pytest.raises(SystemExit) as failure:
-        parse_tableau.main()
-    assert failure.value.code == 3
+    parse_tableau.main()
+    assert (tmp_path / "parsed.json").is_file()
+    assert len(calls) == 1 and calls[0][1].endswith("preflight_source_credentials.py")
+
+
+def test_source_keys_survive_datasource_reordering() -> None:
+    """Source keys are endpoint identities, not array positions."""
+    first = [
+        {
+            "name": "A",
+            "connection": {
+                "class": "sqlserver",
+                "server": "a.example",
+                "database": "db",
+                "powerbi_target": "live_source",
+            },
+        },
+        {
+            "name": "B",
+            "connection": {
+                "class": "sqlserver",
+                "server": "b.example",
+                "database": "db",
+                "powerbi_target": "live_source",
+            },
+        },
+    ]
+    swapped = [first[1], first[0]]
+
+    first_keys = {
+        source["name"]: pf._leg_key(source, index, source["connection"]) for index, source in enumerate(first)
+    }
+    swapped_keys = {
+        source["name"]: pf._leg_key(source, index, source["connection"]) for index, source in enumerate(swapped)
+    }
+
+    assert first_keys == swapped_keys
+
+
+def test_snowflake_role_changes_the_source_key() -> None:
+    """A Snowflake role is part of the source identity."""
+    base = {
+        "class": "snowflake",
+        "server": "acct.snowflakecomputing.com",
+        "database": "DB",
+        "schema": "PUBLIC",
+        "warehouse": "WH",
+    }
+    analyst = {**base, "role": "ANALYST"}
+    restricted = {**base, "role": "RESTRICTED"}
+
+    tables = [{"name": "Orders", "table": "[Orders]"}]
+    assert pf._leg_key({"connection": analyst, "tables": tables}, 0, analyst) != pf._leg_key(
+        {"connection": restricted, "tables": tables}, 0, restricted
+    )
+
+
+def test_schema_changes_the_source_key_for_live_connectors() -> None:
+    """The schema is part of the source identity for every keyed live connector."""
+    cases = [
+        {"class": "sqlserver", "server": "sql.example", "database": "DB"},
+        {
+            "class": "databricks",
+            "server": "adb.example",
+            "database": "DB",
+            "http_path": "/sql/1.0/warehouses/x",
+        },
+        {"class": "snowflake", "server": "acct.snowflakecomputing.com", "database": "DB", "warehouse": "WH"},
+    ]
+    for base in cases:
+        dbo = {**base, "schema": "dbo"}
+        restricted = {**base, "schema": "restricted"}
+        tables = [{"name": "Orders", "table": "[Orders]"}]
+        assert pf._leg_key({"connection": dbo, "tables": tables}, 0, dbo) != pf._leg_key(
+            {"connection": restricted, "tables": tables}, 0, restricted
+        )
+
+
+def test_missing_endpoint_identity_refuses_a_source_key() -> None:
+    """No fallback index/name key when endpoint identity is unavailable."""
+    with pytest.raises(ValueError):
+        pf._leg_key({}, 0, {})
+    with pytest.raises(ValueError):
+        pf._leg_key({"name": "OnlyName"}, 0, {"class": "sqlserver"})

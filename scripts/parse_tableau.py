@@ -174,7 +174,7 @@ def _conn_attr(conn_el: etree._Element, attr: str) -> str | None:
     re-checked 2026-08-07, it no longer does — `connection_to_m` now calls `_resolve_fcp_attributes`
     before any connection reader, so its bare-name lookups are correct by construction. Both sides
     are right, and neither is redundant: his feeds M generation, this feeds the live-vs-flat-file
-    classification that arms the credential gate.
+    credential classification.
     """
     direct = conn_el.get(attr)
     if direct:
@@ -230,9 +230,9 @@ def _parse_connection(ds_el: etree._Element, hyper_files: dict[str, str]) -> dic
     predate this; the full list is added as `connections` so nothing downstream has to guess.
 
     ⚠️ This is a SAFETY fix, not a completeness one. Measured 2026-08-04 on a tri-source workbook:
-    the parser reported one connection, so `preflight_source_credentials` armed the credential gate
-    for 1 of 3 live systems and reported the other two nowhere. Under-reporting live sources is the
-    one direction the gate must never fail in.
+    the parser reported one connection, so `preflight_source_credentials` flagged 1 of 3 live
+    systems and reported the other two nowhere. Under-reporting live sources is the one direction
+    the credential classification must never fail in.
     """
     outer_conn = ds_el.find("connection")
     connection: dict[str, Any] = {"class": "unknown", "mode": "live", "server": None, "database": None, "note": None}
@@ -2157,9 +2157,10 @@ def main() -> None:
         len(spec["dashboards"]),
         len(spec["limitations_encountered"]),
     )
-    # Arm the live-source credential gate here, at the earliest moment a live source is known and
-    # before any builder runs. Measured: an agent built the model 95s BEFORE invoking the gate when
-    # arming was a later workflow step. Exit 1 is the ordinary live-source stop, not an arm failure.
+    # Print the read-only live-source credential classification here, at the earliest moment a live
+    # source is known and before any builder runs. Measured: an agent built the model 95s BEFORE
+    # checking credentials when that was a later workflow step. Exit 1 is the ordinary live-source
+    # directive; the classification writes nothing, so its failure never fails the parse.
     try:
         result = subprocess.run(
             [
@@ -2168,16 +2169,13 @@ def main() -> None:
                 "--spec",
                 str(args.output),
             ],
-            capture_output=True,
             check=False,
             timeout=120,
         )
         if result.returncode not in (0, 1):
-            logger.error("Credential gate transaction failed; parsing is not cleared for build.")
-            sys.exit(3)
+            logger.warning("Credential classification exited %d; rerun it on %s.", result.returncode, args.output)
     except (OSError, subprocess.SubprocessError) as exc:
-        logger.error("Could not arm the credential gate: %s", exc)
-        sys.exit(3)
+        logger.warning("Could not run the credential classification: %s", exc)
 
 
 if __name__ == "__main__":

@@ -2668,10 +2668,6 @@ def write_receipt_phase(out_dir: Path, phases: list[dict], engine: Path | None =
     started = time.monotonic()
     receipt = write_engine_receipt(out_dir, engine)
     phases.append({"phase": "engine_receipt", "elapsed_sec": round(time.monotonic() - started, 1)})
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from credential_gate import _audit  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
-
-    _audit(out_dir, "engine-receipt", f"sha256={sha256_file(receipt)}")
     log.info("ENGINE RECEIPT: %s", receipt)
 
 
@@ -2680,7 +2676,7 @@ def record_engine_output(out_dir: Path, report: dict | None, phases: list[dict],
 
     The order is load-bearing and lives HERE rather than in ``main`` so it cannot be separated by an
     unrelated edit: both manifest writes UPSERT into ``input_manifest.json`` and the receipt HASHES
-    that same file, so receipt-first leaves ``input_manifest_sha256`` stale and the credential gate
+    that same file, so receipt-first leaves ``input_manifest_sha256`` stale and the receipt check
     then rejects the bundle the engine just produced - while the run still reports success.
     """
     log.info(

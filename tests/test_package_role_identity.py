@@ -2744,7 +2744,6 @@ def test_current_working_reader_invokes_no_baseline_gate_receipt_probe_policy_or
     import subprocess
 
     import check_reference_readiness as readiness
-    import credential_gate as gate
     import iteration_receipt as receipts
     import package_data_access as pda
 
@@ -2783,7 +2782,6 @@ def test_current_working_reader_invokes_no_baseline_gate_receipt_probe_policy_or
         (pri.pfs, ("verify_package", "read_verified_member", "HeldVerifiedMember")),
         (readiness, ("scan", "_entry_integrity")),
         (receipts, ("read_chain", "read_history", "write_receipt", "finalize")),
-        (gate, ("verify", "authorize", "_audit")),
         (pda, ("reconcile_package_data_access",)),
         (subprocess, ("run", "Popen")),
         (Path, ("write_bytes", "write_text", "mkdir")),
