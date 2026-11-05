@@ -176,7 +176,12 @@ def test_the_advertised_skills_are_the_shipped_skills(built: Path) -> None:
         return set(re.findall(r"\b[A-Za-z]+\.[a-z]{2,}\b|\b[A-Za-z]*[a-z][A-Z][A-Za-z]+\b", text))
 
     def frontmatter(skill: str) -> str:
-        """Only the delimited descriptor is authority; guide-body links are not capabilities."""
+        """Read the repository's two-field descriptor, not arbitrary YAML or guide-body links.
+
+        Accept a single-line prose description, plain or simply quoted (no escapes). Blocks,
+        comments, extra fields and other YAML constructs require explicit review, never an empty
+        token set. This intentionally narrow contract matches every current canonical descriptor.
+        """
         text = (build_plugin.SKILLS_DIR / skill / "SKILL.md").read_text(encoding="utf-8")
         match = re.match(r"---\n(.*?)^---(?:\n|\Z)", text, re.DOTALL | re.MULTILINE)
         assert match, f"{skill} has missing or unclosed frontmatter"
@@ -184,11 +189,26 @@ def test_the_advertised_skills_are_the_shipped_skills(built: Path) -> None:
         assert re.search(rf"^name:[ \t]*{re.escape(skill)}[ \t]*$", front, re.MULTILINE), (
             f"{skill} frontmatter has a missing or mismatched name"
         )
-        description_field = re.search(r"^description:[ \t]*(\S[^\n]*)$", front, re.MULTILINE)
-        assert description_field and description_field.group(1).strip(" \t'\""), (
-            f"{skill} frontmatter has a missing or empty description"
-        )
-        return front
+        description_field = re.fullmatch(rf"name: {re.escape(skill)}\ndescription:[ \t]*([^\n]*)\n", front)
+        assert description_field, f"{skill} frontmatter has a missing or empty description or unsupported structure"
+        value = description_field.group(1).strip()
+        if value.startswith(("'", '"')):
+            quoted = re.fullmatch(r"""(?:'([^'\\]*)'|"([^"\\]*)")""", value)
+            assert quoted, f"{skill} frontmatter has a malformed or unsupported quoted description"
+            value = next(group for group in quoted.groups() if group is not None).strip()
+        else:
+            assert not re.search(r"(^|[ \t])#", value), f"{skill} frontmatter has an unsupported description comment"
+        assert value, f"{skill} frontmatter has a missing or empty description"
+        assert re.match(r"[A-Za-z]", value) and value.lower() not in {
+            "null",
+            "true",
+            "false",
+            "yes",
+            "no",
+            "on",
+            "off",
+        }, f"{skill} frontmatter has an unsupported description scalar; expected single-line prose"
+        return value
 
     shipped_terms = {term for name in build_plugin.SHIPPED_SKILLS for term in identifiers(frontmatter(name))}
     withheld = {p.name for p in build_plugin.SKILLS_DIR.iterdir() if p.is_dir()} - set(build_plugin.SHIPPED_SKILLS)
@@ -247,6 +267,67 @@ def test_publication_rejects_missing_descriptor(
         _replace_skill_read(patch, skill, descriptor)
         with pytest.raises(AssertionError, match=f"live-source-reachability.*{message}"):
             test_the_advertised_skills_are_the_shipped_skills(built)
+    test_the_advertised_skills_are_the_shipped_skills(built)
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "# no value",
+        "|",
+        '"unterminated',
+        "'unterminated",
+        "'   '",
+        "null",
+        "[]",
+        "|\n  Persist cache.abf through ImageSave.",
+        "A guide.\ndescription: # duplicate",
+    ],
+)
+@pytest.mark.parametrize("surface", ["README", "plugin description"])
+def test_publication_rejects_unusable_descriptor_before_claims(
+    built: Path, monkeypatch: pytest.MonkeyPatch, description: str, surface: str
+) -> None:
+    """Malformed/unsupported metadata must refuse even when a withheld claim would otherwise leak."""
+    skill = build_plugin.SKILLS_DIR / "pbip-model-refresh" / "SKILL.md"
+    path = built / ("README.md" if surface == "README" else ".claude-plugin/marketplace.json")
+    text = path.read_text(encoding="utf-8")
+    claim = "\nThis plugin persists cache.abf through ImageSave."
+    if surface == "README":
+        advertised = text + claim
+    else:
+        manifest = json.loads(text)
+        manifest["plugins"][0]["description"] += claim
+        advertised = json.dumps(manifest)
+
+    test_the_advertised_skills_are_the_shipped_skills(built)
+    with monkeypatch.context() as patch:
+        _replace_skill_read(patch, path, advertised)
+        with pytest.raises(AssertionError, match=f"pbip-model-refresh is NOT shipped, but the {surface} still sells"):
+            test_the_advertised_skills_are_the_shipped_skills(built)
+    test_the_advertised_skills_are_the_shipped_skills(built)
+    with monkeypatch.context() as patch:
+        _replace_skill_read(patch, path, advertised)
+        _replace_skill_read(patch, skill, f"---\nname: pbip-model-refresh\ndescription: {description}\n---\n")
+        with pytest.raises(AssertionError, match="pbip-model-refresh frontmatter has"):
+            test_the_advertised_skills_are_the_shipped_skills(built)
+    test_the_advertised_skills_are_the_shipped_skills(built)
+
+
+@pytest.mark.parametrize("quote", ["", "'", '"'])
+def test_publication_preserves_supported_description_values(
+    built: Path, monkeypatch: pytest.MonkeyPatch, quote: str
+) -> None:
+    """Plain and simple quoted prose retain the capability terms, not their scalar syntax."""
+    skill = build_plugin.SKILLS_DIR / "pbip-model-refresh" / "SKILL.md"
+    value = f"{quote}Persist cache.abf through ImageSave.{quote}"
+    test_the_advertised_skills_are_the_shipped_skills(built)
+    with monkeypatch.context() as patch:
+        _replace_skill_read(patch, skill, f"---\nname: pbip-model-refresh\ndescription: {value}\n---\n")
+        test_the_advertised_skills_are_the_shipped_skills(built)
+        for surface in ("README", "plugin description"):
+            for claim in ("ImageSave", "cache.abf"):
+                test_publication_rejects_withheld_claims(built, surface, claim)
     test_the_advertised_skills_are_the_shipped_skills(built)
 
 
