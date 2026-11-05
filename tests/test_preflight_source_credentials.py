@@ -25,6 +25,7 @@ from __future__ import annotations
 import sys
 import json
 import copy
+import importlib
 import subprocess
 from pathlib import Path
 
@@ -496,3 +497,60 @@ def test_missing_endpoint_identity_refuses_a_source_key() -> None:
         pf._leg_key({}, 0, {})
     with pytest.raises(ValueError):
         pf._leg_key({"name": "OnlyName"}, 0, {"class": "sqlserver"})
+
+
+@pytest.fixture(
+    name="refresh_guidance",
+    params=[("_print_stop_directive", (1,)), ("_print_remediation", ())],
+    ids=["directive", "reminder"],
+)
+def _refresh_guidance(request: pytest.FixtureRequest, caplog: pytest.LogCaptureFixture) -> str:
+    """Capture each independently readable next-action message."""
+    printer, arguments = request.param
+    getattr(pf, printer)(*arguments)
+    return caplog.text
+
+
+def test_refresh_guidance_requires_independent_source_identity(refresh_guidance: str) -> None:
+    """Neither message may tell an automatic caller to trust the live model as its oracle."""
+    assert "pbip-model-refresh" in refresh_guidance
+    assert "Automatic callers" in refresh_guidance
+    assert "trusted snapshot of the engine emission" in refresh_guidance
+    assert "never from the live model" in refresh_guidance
+    assert "operator-only" in refresh_guidance
+
+
+@pytest.mark.parametrize("mismatch", [False, True], ids=["matching", "mismatched"])
+def test_refresh_guidance_enforces_automatic_source_scope(  # pylint: disable=too-many-locals
+    refresh_guidance: str,
+    mismatch: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Parse the printed command and exercise real admission over the existing fake live model."""
+    # pylint: disable=protected-access
+    bundle = SCRIPTS.parent / ".github" / "skills" / "pbip-model-refresh"
+    monkeypatch.syspath_prepend(str(bundle / "scripts"))
+    monkeypatch.syspath_prepend(str(bundle / "tests"))
+    controls = importlib.import_module("test_desktop_actions")
+    refresh = controls.refresh_pbip_model
+    assert Path(refresh.__file__).resolve().is_relative_to(bundle)
+
+    sources = controls._sources()
+    if mismatch:
+        sources[0]["database"] = "DifferentExpectedDatabase"
+    context, scoped_args, calls = controls._scope_route(monkeypatch, tmp_path, sources=sources)
+    command = next(line.strip() for line in refresh_guidance.splitlines() if line.strip().startswith("--pid "))
+    replacements = {"<pid>": "123", "<expected-sources.json>": scoped_args.automatic_source_scope}
+    arguments = [replacements.get(token, token) for token in command.replace("<table> [<table> ...]", "Orders").split()]
+    parsed = refresh._build_arg_parser().parse_args(arguments)
+
+    result = refresh._ui_refresh_locked(context, Path("missing-cache.abf"), parsed)
+
+    assert result == (2 if mismatch else 0)
+    assert calls == ([] if mismatch else ["Refresh", "canaries", "Save"])
+    if mismatch:
+        assert "automatic source scope: expected sources: Orders: database" in capsys.readouterr().out
+    assert parsed.automatic_source_scope == scoped_args.automatic_source_scope
+    assert parsed.ui_refresh and parsed.pid == 123 and parsed.canaries == ["Orders"]
