@@ -62,7 +62,6 @@ python scripts/refresh_pbip_model.py [--pid <pbidesktop-pid>] [--canaries "A" "B
 execution of **all current M**, including native/custom SQL and unknown/indirect query forms,
 with potential source-side costs or effects. There is no custom-query admission screen.
 **`--no-save` prevents Save, not source execution.** No additional consent flag is required.
-This route does **not** authorize automatic credential-gate use or earn credential clearance.
 Defaults and existing callers remain unchanged. Automatic callers must add
 `--automatic-source-scope` ([#780](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/780),
 linked [#692](https://github.com/Guust-Franssens/tableau-to-powerbi-migration/issues/692)); see below.
@@ -232,7 +231,7 @@ are not persistence proof.
 
 ### Automatic callers: `--automatic-source-scope` (#780)
 
-Automatic callers never use plain `--ui-refresh`. They add
+Agent-directed source refreshes delegate to this procedure; automatic callers never use plain `--ui-refresh`. They add
 `--automatic-source-scope <expected-sources.json>` (requires `--ui-refresh` and `--canaries`).
 After the READY baseline and before any Refresh, canary read or Save, the script reads the live
 model (partition M, `TMSCHEMA_EXPRESSIONS`, `TMSCHEMA_REFRESH_POLICIES`) and refuses unless:
@@ -248,7 +247,9 @@ model (partition M, `TMSCHEMA_EXPRESSIONS`, `TMSCHEMA_REFRESH_POLICIES`) and ref
 
 Custom SQL, files, comments, numbers, `#(...)` text escapes, other functions and any metadata read
 error all refuse. The refusal is `REFRESH: UI_PREFLIGHT_REFUSED (DesktopActionError: automatic source scope: <name>: <clause>)`,
-exit 2, no action; it names tables and fields, never values. Treat it as a human stop.
+exit 2, no action; it names tables and fields, never values. Stop and route the reported cause:
+this structural refusal is not proof of missing credentials. Never remove the flag or switch
+refresh routes to evade qualification; any actual Desktop dialog needs a human.
 
 ```json
 {"version": 1, "sources": [
@@ -262,6 +263,8 @@ exit 2, no action; it names tables and fields, never values. Treat it as a human
 The second argument key is `database` (Sql, PostgreSQL, MySQL, AmazonRedshift), `warehouse`
 (Snowflake), `http_path` (Databricks) or absent (Oracle). Derive the file from a trusted snapshot of
 the engine emission with `_source_scope.resolve_partition_identity`, never from the live model.
+This bundle supplies no expected-sources producer. If trusted emission evidence is unavailable,
+stop rather than fabricate identities that match the model being checked.
 
 ### Read an already-detected dialog at the failing tool (#498)
 
@@ -283,12 +286,11 @@ messages: `privacy_warning` (the operator's file-trust decision) and `package_se
 session error; check unsaved-state safety before reopening). Everything else is `WITHHELD` or
 `CANNOT_READ`, never arbitrary UI text. `DIALOG_DIAGNOSTIC` is a separate JSON line, not a verdict;
 decode its escaped numeric strings before reading PID/HWND metadata. The detector's token, exit,
-suppression, deadlines, success behavior and gate state are unchanged.
+suppression, deadlines and success behavior are unchanged.
 
 ⚠️ This is diagnostic-only, not a second classifier. An incomplete read never establishes clean
 absence. Real-Desktop latency, localization, MSHTML-only dialogs, dialogs absent from existing
-discovery, and modals appearing after a DAX precheck remain unverified/outside this slice. The buffered
-`probe_live_source.py` wrapper and its catalog-readiness behavior are a separate follow-up.
+discovery, and modals appearing after a DAX precheck remain unverified/outside this slice.
 
 ### Inspect an unreadable in-flight dialog without stealing focus (#146)
 
@@ -447,11 +449,11 @@ Report this acquisition limitation and stop; do not force capture or claim the c
    existing credential stop; a **positively identified native-query approval prompt** to
    operator-required. Record only category, reviewer/method, review time, `capture_id` and image
    hash as classification provenance—not field values, source names or dialog text. Do not enter
-   credentials, approve a prompt, forge the refresh's exit code, or clear a gate from metadata alone.
+   credentials, approve a prompt, forge the refresh's exit code, or establish source access from metadata alone.
    Name the specific **blocker category** and the physical operator action required, not “please
    inspect Desktop” when the agent already identified it. Visual progress or a quiet dialog never
    clears the original unreadable latch, authorizes Save/Refresh/retry, proves engine completion,
-   or changes credential/data/gate outcomes. Absent positive review, retain unknown and stop.
+   or changes credential/data outcomes. Absent positive review, retain unknown and stop.
 4. **In finally, delete the exact file immediately after handling and close the viewer**, including
    failed verification/view/classification paths. For example, remove
    `Join-Path $env:PBIP_EVIDENCE_DIR $record.image_basename` with `Remove-Item -LiteralPath`.
@@ -463,15 +465,6 @@ Report this acquisition limitation and stop; do not force capture or claim the c
    non-semantic diagnostics. A cleanup refusal must not replace the original refresh result;
    close a holding viewer and remove the same private file locally. Never publish pixels to explain
    a cleanup failure. Durable logs may retain the safe record and external review provenance only.
-
-**Buffered-wrapper limit:** `probe_live_source.py` currently buffers the
-refresh's output. Its Phase-1 consumer must forward/stream `LOCAL_IMAGE` lines, supply the run-owned
-`PBIP_EVIDENCE_DIR`, perform the schema/PID/hash/lifetime checks above, and route a separate positive
-visual review. Its runtime streaming is outside this change's closed surface; the agent's
-separate terminal diagnostic above covers eligible held identities without changing that wrapper. The
-image seam itself adds no UIA enrichment, OCR or external-verdict ingestion. The separate #498
-exact-HWND text diagnostic above runs only at terminal reporting; detector verdicts and active-wait
-behavior remain unchanged.
 
 ✅ **Precedent:** the two independent September 15, 2026 controls on #146 acquired readable
 Snowflake forms with their owners minimized and without foreground/restore. This implementation

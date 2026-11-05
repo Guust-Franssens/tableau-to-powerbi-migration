@@ -52,11 +52,13 @@ The private `migration-brief.md` follows the [v2 schema](scripts/README.md#curre
 not inferred consent. Record intake choices, exact source/working paths, dependencies, limitations and each
 reference's provider/capabilities/grade/ceiling. Pass it in every delegation; never fabricate a spec.
 [Runbook §1.5/§3](docs/operator-runbook.md) owns refresh, attribution and Gate B: present unresolved
-post-parse/probe choices together. A fallback neither clears credentials nor earns validation.
+post-parse/source-check choices together. A fallback neither supplies credentials nor earns validation.
 
 ## Runtime boundaries and expert fallback
 
-**Credential stops override autonomy:** stop for a human; never self-authorize or bypass a gate.
+**Credential/dialog stops override autonomy:** stop for a human; never acquire, enter or fabricate
+credentials, automate approval, or bypass a tool's structural refusal. This is instruction-level
+and tool behavior, not a filesystem credential gate.
 Credentials belong in ignored `.env`/environment, not CLI secrets. Never commit or publicly expose customer
 sources, rows, captures, identifiable briefs or diagnostics; verify in-repo output paths are ignored.
 [SECURITY.md](SECURITY.md) owns privacy; route defects privately before sanitized public reporting.

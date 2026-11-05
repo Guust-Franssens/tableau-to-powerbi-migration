@@ -85,47 +85,34 @@ far more reliable than asking an LLM to re-derive this structure from raw XML on
   no live DB) — real rows must be pulled from the embedded `.hyper` file via `tableauhyperapi` (see
   `scripts/extract_hyper_data.py`). Real-world workbooks may have `mode: live` connections instead;
   the schema supports both without changing shape.
-- **Ordinary live-source probe evidence.** The parser preserves each leaf relation's raw `table`
+- **Raw physical relation evidence.** The parser preserves each leaf relation's raw `table`
   and `connection` attributes in `tables[].table` and `tables[].connection`, when present.
   `connection.connections[].name` preserves the containing named-connection's exact name.
   `tables[].name` remains the Tableau alias; it is not a physical navigation target. Connection
   schemas are never backfilled from relations, and equal table aliases on different legs remain
   separate evidence.
 
-  The probe resolves ordinary relations against **all** actual legs, including flat-file legs.
-  A present reference must match exactly one leg name; duplicate names, dangling references and
-  malformed references refuse resolution. A missing reference is accepted only with one actual
-  leg. No sibling table or schema is borrowed. Raw physical identifiers must be conservative
-  full-string one-, two- or three-part names, bare or bracketed; bracketed dots, internal spaces
-  and apostrophes are literal.   Unsupported or mixed bare/bracketed quoting, malformed brackets, unsafe M-string contents,
-  empty components and more than three components refuse resolution.
+  These optional fields do not change JSON-schema validity. Although reconstructed live-source
+  probes are retired, **`preflight_source_credentials.resolve_probe_scope` and source-key hashing
+  still apply**: `package_data_access.package_spec_facts` uses `_classify_legs` / `_leg_key` to
+  derive the direct-source identities carried by `data-access.json`.
 
-  A qualified relation supplies its own schema in preference to the leg's configured schema.
-  An unqualified relation requires that leg's valid explicit schema, including a literally
-  recorded `default`; there is no implicit default. Two-part names require a recorded database
-  and refuse a first component equal to that database, case-insensitively, as ambiguous.
-  Three-part names require their database component to agree exactly with the recorded database;
-  they never retarget the endpoint. Legacy `dbname` is usable only without conflicting `database`.
-  Every ordinary candidate on a live leg must resolve to the same effective schema. Missing
-  physical evidence, no candidates and multi-schema legs produce `PROBE: ERROR` before query
-  construction, DNS, model creation or Desktop launch.
+  Ordinary relations bind by exact `tables[].connection` to a unique named leg; a missing reference
+  is allowed only for a single-leg datasource. Physical identifiers, not Tableau aliases, supply
+  candidate table names. An unqualified table needs that leg's explicit schema. Two-/three-part
+  identifiers supply the effective schema, require a recorded database, and refuse ambiguous or
+  conflicting database evidence. All ordinary candidates for a leg must resolve to one schema.
+  Unsupported connectors, unsafe identifiers or ambiguous bindings remain unresolved, not guessed.
+  Custom-SQL candidates retain their datasource-wide identity policy; this does not authorize
+  executing custom SQL through automatic refresh.
 
-  The resolved schema and sorted unique decoded physical table names participate in the
-  credential-gate key. Changing either invalidates earlier ordinary-target evidence; aliases
-  and relation ordering do not. Unresolved ordinary scopes, including metadata-only summaries,
-  carry `ordinary_tables: null` in the hashed identity, not an endpoint-only success identity.
-  Custom-only scopes omit that identity field and retain existing custom-SQL execution, ordering
-  and endpoint identity: raw custom-SQL connection references add evidence, not a new binding
-  policy. Metadata-only summaries can classify and arm the gate, but cannot be probed.
-
-  These optional raw fields do not change JSON-schema validity: previously schema-valid specs
-  remain schema-valid. Legacy alias-only or implicit-schema ordinary specs may nevertheless
-  refuse runtime probing; reparse or correct their physical metadata rather than guessing.
-  **Legacy upgrade:** specs and bundles parsed before this change lack raw identifiers, so their
-  ordinary live sources fail closed (`cannot_establish` / `NOT_CHECKED`). Re-parse with the current
-  parser, re-probe, and regenerate packages. Never hand-edit credential-gate keys.
-  The two committed live connection-fidelity fixtures lack these raw fields and therefore refuse
-  runtime probing; they need no regeneration for their connection-fidelity purpose.
+  `_key_from_resolved_scope` hashes the connector/endpoint identity, including effective schema
+  and sorted unique `ordinary_tables` when resolved (`null` on resolution failure). Class/server
+  are case-folded; database/schema and connector-specific warehouse/role or HTTP path retain exact
+  trimmed values; port participates when present. Sorted-key compact JSON is SHA-256 hashed into
+  `source-key:<first-16-hex>`. Duplicate keys refuse rather than collapsing legs. These keys are
+  **identity, not connectivity proof**. Real-data proof now comes from named-canary refresh of the
+  shipped model (see [`live-source-reachability`](../.github/skills/live-source-reachability/SKILL.md)).
 - **`dashboards[].zones.type == "layout-floating"`.** Tableau dashboards built entirely from
   "Floating" (freeform, absolute-position) containers serialize `<zones>` as N flat sibling `<zone>`
   elements with no wrapping root container at all — unlike a "Tiled" dashboard's single nested root

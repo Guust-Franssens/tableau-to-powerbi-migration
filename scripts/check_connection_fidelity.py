@@ -113,7 +113,7 @@ must not carry a unit past an unresolved one.
 What this gate does NOT tell you
 --------------------------------
 * Whether a live source that DID stay connected points at the right server - that is fidelity, and
-  needs a credentialed probe (`probe_live_source.py`).
+  needs shipped-artifact source checks and real-data evidence (the live-source-reachability skill).
 * A PARTIAL downgrade inside a source that still has one live partition, or an exotic connection
   class this module cannot map to an M connector: both are reported as NOT_CHECKED for that source,
   never as PASS. Anything this module cannot prove is a downgrade is not called one.

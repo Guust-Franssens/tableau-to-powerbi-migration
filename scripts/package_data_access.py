@@ -34,8 +34,8 @@ from package_filesystem import is_canonical_key
 
 # Imported as a plain NAME, not reached through the module (`preflight_source_credentials._classify_legs`
 # is `protected-access` to pylint, W0212). This is the SAME canonical classifier
-# (`connection_target.powerbi_target`) that arms the gate in the first place; issue #354's review
-# explicitly required reusing it here rather than a second, independently-maintained opinion.
+# (`connection_target.powerbi_target`) used for source readiness; issue #354's review explicitly
+# required reusing it here rather than a second, independently-maintained opinion.
 from preflight_source_credentials import _classify_legs
 
 # The historical logger name: transaction refusals keep routing exactly as before the move.

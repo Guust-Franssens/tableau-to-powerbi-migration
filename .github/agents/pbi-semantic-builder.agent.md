@@ -142,8 +142,8 @@ sole local AI owner; its narrow override below outranks generic upstream AI guid
 - `openability_selfcheck.ok` is a non-exhaustive engine/own-parse claim, not Desktop/source proof.
   Absent checks/`not_evaluated` are not passes; cross-check source intent.
 - Before live-source edits invoke/resolve host `live-source-reachability`
-  (`.github\skills\live-source-reachability\SKILL.md`): shipped-artifact check first, then its probe
-  and credential routing. Verify `connection_to_m`'s fixed connector/storage and **every declared
+  (`.github\skills\live-source-reachability\SKILL.md`): shipped-artifact check first, then its automatic-source Desktop
+  refresh and human credential stop. Verify `connection_to_m`'s fixed connector/storage and **every declared
   endpoint**. `SOURCE_COLLAPSED` refuses even a successful refresh; `endpoints_distinct` cannot
   detect its own mis-parse. Route defects, never rewrite connections/storage, collapse independent
   sources, guess fields or fabricate rows. Missing owner blocks this operation.

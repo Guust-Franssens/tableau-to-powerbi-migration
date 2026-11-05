@@ -1684,9 +1684,9 @@ def test_refresh_and_save_wires_a_dialog_finding_to_exit_3(monkeypatch, capsys) 
     """#376 wiring: a DialogFoundError must surface at exit 3, never in the exit-1 hard-stop band.
 
     Exit 1 is reserved for a matched credential signature. This module cannot establish that a dialog
-    BLOCKS anything, so nothing it observes about one may enter that band - and ``probe_live_source``
-    maps the exit-1 credential family to "you may NOT build; a person must sign in". The finding is a
-    real classification and the verdict line is the real emitter's, so this pins raise -> emit -> exit
+    BLOCKS anything, so nothing it observes about one may enter that band - and the retired
+    ``probe_live_source`` mapped the exit-1 credential family to "you may NOT build; a person must sign in".
+    The finding is a real classification and the verdict line is the real emitter's, so this pins raise -> emit -> exit
     code with no hand-written text.
     """
 
@@ -1932,7 +1932,7 @@ def test_probe_query_stops_at_exit_3_for_a_dialog_it_could_not_read(monkeypatch,
     """#376: an unreadable dialog stops the GATE OF RECORD at exit 3, never in the exit-1 hard-stop band.
 
     Master emitted ``PREFLIGHT: BLOCKED_BY_DIALOG`` at exit 1 from a SIZE-ONLY test, which
-    ``probe_live_source`` maps to ``NO_CREDENTIAL`` ("you may NOT build; a person must sign in"). Exit 3
+    ``probe_live_source`` mapped to ``NO_CREDENTIAL`` ("you may NOT build; a person must sign in"). Exit 3
     means "could not probe" and makes no claim about the source at all.
     """
     monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda _pid, **_kw: dialog_state())
@@ -2048,7 +2048,7 @@ def test_probe_query_worker_cannot_print_after_credential_verdict(monkeypatch, c
 # The Python fast path had the same defect the PowerShell arbiter shed in #367, on a more dangerous
 # route: `inspect_desktop_observer` returned the FIRST visible non-main window >= 100x100 as a
 # `blocking_dialog`, and both callers mapped that to `BLOCKED_BY_DIALOG` at exit 1 - which
-# `probe_live_source` classifies `NO_CREDENTIAL`. It feeds `probe_desktop_query.py`, the gate of
+# `probe_live_source` classified `NO_CREDENTIAL`. It feeds `probe_desktop_query.py`, the gate of
 # record, so a Power BI Refresh progress dialog could halt a migration and send an operator to a
 # sign-in screen that was never on show.
 #

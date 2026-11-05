@@ -2693,7 +2693,7 @@ def test_ui_refresh_help_warns_about_operator_source_execution_and_no_clearance(
     assert "operator-only opt-in commissions execution of ALL current M, including native/custom SQL" in help_text
     assert "potential source-side costs" in help_text
     assert "--no-save prevents Save, NOT source execution" in help_text
-    assert "No automatic credential-gate use or earned clearance" in help_text
+    assert "credential-gate" not in help_text
     assert "Automatic callers must add --automatic-source-scope (#780, linked #692)" in help_text
 
 

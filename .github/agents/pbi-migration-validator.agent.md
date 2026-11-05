@@ -127,7 +127,8 @@ endpoints/`definition.pbir` binding. ConnectFolder = metadata-only; offline Exec
 `powerbi-remote` GetSemanticModelSchema/ExecuteQuery = published-only, not local proof.
 Host `.github\skills\pbip-model-refresh\SKILL.md` (“Order matters”/“Bind to the right instance”/
 persistence output), `scripts\check_migration_progress.py --handoff`; live evidence:
-`.github\skills\live-source-reachability\SKILL.md`. **#730 UNMEASURED:** preserve host capture/reload/
+`.github\skills\live-source-reachability\SKILL.md`; live COMPLETE needs check_unit's PASS `data-evidence`.
+**#730 UNMEASURED:** preserve host capture/reload/
 PID/identity/current-definition/export/cache/persist overrides over conflicting upstream host/
 `--pid`/reload guidance; log deviations. No stale Save over newer bytes. Inspect OWNER final-definition
 load/reopen → refresh → save/persist, rows for every commissioned import/live table, cache freshness/

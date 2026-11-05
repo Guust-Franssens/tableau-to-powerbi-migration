@@ -60,12 +60,7 @@ BUNDLED_PATH_CLAIM_RE = re.compile(r"\bbundled(?:\s+in\s+this skill's)?\s+[`']([
 PBIP_REFRESH_SKILL = SKILLS_DIR / "pbip-model-refresh" / "SKILL.md"
 LIVE_SOURCE_SKILL = SKILLS_DIR / "live-source-reachability" / "SKILL.md"
 CREDENTIAL_DOC = REPO_ROOT / "docs" / "data-source-credentials.md"
-GATE_DOC = REPO_ROOT / "docs" / "credential-gate.md"
-GATE_TESTING_DOC = REPO_ROOT / "docs" / "credential-gate-testing.md"
 SCRIPTS_README = REPO_ROOT / "scripts" / "README.md"
-# `credential-gate-testing.md` routes by ERROR SIGNATURE, so its ACCESS_DENIED row is keyed on the
-# connector text rather than on the token - hence a row prefix here instead of `_table_row`.
-ACCESS_DENIED_SIGNATURE_ROW = "| error names `403`"
 DESKTOP_VERDICT_TOKENS = (
     "CREDENTIAL_MISSING",
     "CREDENTIAL_PRESENT",
@@ -95,26 +90,6 @@ RETIRED_CREDENTIAL_CLAIMS = (
     "approval, not a sign-in",
     "not a sign-in prompt",
     "no sign-in implied",
-)
-# ACCESS_DENIED over-claims. `_classify_failure` tests BARE markers (`403`, `forbidden`, ...) before
-# any credential marker, so `403 Unauthorized: authentication failed` and
-# `403 Forbidden: access token revoked` both classify as ACCESS_DENIED - measured against the shipped
-# classifier. The verdict therefore cannot assert that authentication succeeded, that the failure is
-# permission-only, or that a fresh credential can never help.
-RETIRED_ACCESS_DENIED_CLAIMS = (
-    "final until permissions change",
-    "authenticated, but",
-    "and **authenticated**",
-    "permission owner",
-    "never a second sign-in",
-    "sign in again",
-    "signing in again is not enough",
-)
-# Both messages are `403`s that a NEW credential would fix, and both land on ACCESS_DENIED. Naming
-# them in the docs is what stops the verdict being read as "authentication already succeeded".
-ACCESS_DENIED_CONTROL_MESSAGES = (
-    "403 Unauthorized: authentication failed",
-    "403 Forbidden: access token revoked",
 )
 
 
@@ -154,18 +129,6 @@ def _table_row(path: Path, key: str) -> str:
     """The single markdown table row whose first cell names `key`."""
     rows = [line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith(f"| `{key}`")]
     return "\n".join(rows)
-
-
-def _signature_row(path: Path, prefix: str) -> str:
-    """The one markdown row starting with `prefix`, or `''` when it is not unique.
-
-    `credential-gate-testing.md` routes by ERROR SIGNATURE rather than by token, so its ACCESS_DENIED
-    row has no backticked first cell for `_table_row` to key on. Returning `''` for a non-unique match
-    keeps the caller's "this contract now proves nothing" assertion in charge, rather than silently
-    asserting against whichever row happened to be first.
-    """
-    rows = [line for line in path.read_text(encoding="utf-8").splitlines() if line.startswith(prefix)]
-    return rows[0] if len(rows) == 1 else ""
 
 
 def test_the_skills_directory_is_not_empty() -> None:
@@ -696,54 +659,9 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
             "DIALOG_UNREADABLE and DIALOG_UNRECOGNIZED must each say it"
         )
 
-    # ACCESS_DENIED says what the CLASSIFIER saw, not what the source decided. Collapsing it into a
-    # timeout or a transient error is one failure; promoting it to "authentication succeeded, so only
-    # a permission change can help" is the other, and the shipped classifier contradicts that one.
-    # All four operator-facing surfaces that route it are listed; a fifth would be an unpinned consumer.
-    access_denied_rows = {
-        SCRIPTS_README.name: _table_row(SCRIPTS_README, "probe_live_source.py"),
-        LIVE_SOURCE_SKILL.name: _table_row(LIVE_SOURCE_SKILL, "ACCESS_DENIED"),
-        GATE_DOC.name: _table_row(GATE_DOC, "ACCESS_DENIED"),
-        GATE_TESTING_DOC.name: _signature_row(GATE_TESTING_DOC, ACCESS_DENIED_SIGNATURE_ROW),
-    }
-    for name, row in access_denied_rows.items():
-        assert row, f"no ACCESS_DENIED row found in {name} - this contract now proves nothing"
-        assert "ACCESS_DENIED" in row, f"{name} no longer names ACCESS_DENIED in its row"
-        assert "permission" in row.lower(), f"{name} no longer ties ACCESS_DENIED to permissions"
-        for claim in RETIRED_ACCESS_DENIED_CLAIMS:
-            assert claim not in row, (
-                f"{name} still carries the retired ACCESS_DENIED claim {claim!r}: the classifier "
-                "matches bare 403/forbidden markers, so the verdict cannot assert that "
-                "authentication succeeded or that a fresh credential is pointless"
-            )
-        assert "does **not** establish that authentication succeeded" in row.lower(), (
-            f"{name} no longer states that ACCESS_DENIED does not establish that authentication succeeded"
-        )
-        for message in ACCESS_DENIED_CONTROL_MESSAGES:
-            assert message in row, (
-                f"{name} no longer cites the control message {message!r}, which the shipped "
-                "classifier returns ACCESS_DENIED for despite being fixable with a new credential"
-            )
-
-    # The retry rule survives the correction, in its honest form: blind repetition is useless, but the
-    # operator is NOT forbidden from re-authenticating - they must read the detail and change the input
-    # the source named.
-    for name in (SCRIPTS_README.name, LIVE_SOURCE_SKILL.name, GATE_DOC.name):
-        row = access_denied_rows[name]
-        assert "unchanged retry is not useful" in row.lower(), (
-            f"{name} no longer states that unchanged retry is not useful for ACCESS_DENIED"
-        )
-        assert "read the redacted detail" in row.lower(), (
-            f"{name} no longer tells the operator to read the redacted detail before acting"
-        )
-    assert "never, unchanged" in access_denied_rows[GATE_TESTING_DOC.name], (
-        f"{GATE_TESTING_DOC.name} no longer states that retrying ACCESS_DENIED unchanged is wrong"
-    )
-
     # A clean run is what earns DATA_OK: an active dialog, any authoritative non-success token, or a
-    # non-zero exit outranks a stale or late DATA_OK-looking line. `_verdict_lines._is_earned_success`
-    # is the oracle - it requires exit 0, no `NON_SUCCESS_VERDICT_CHECKS` hit (which include
-    # `_has_dialog_verdict`), and only then a scoped success line.
+    # non-zero exit outranks a stale or late DATA_OK-looking line. The refresh's own terminal
+    # outcome and named canaries matter, not text collected from a different or failed attempt.
     clean_run = _block_from(CREDENTIAL_DOC, CLEAN_RUN_LEAD, ends=CLEAN_RUN_ENDS)
     assert clean_run, (
         f"the clean-run DATA_OK paragraph was not found in {CREDENTIAL_DOC.name} - this contract now proves nothing"
@@ -762,9 +680,102 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
         )
 
 
+def test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop() -> None:
+    """The live-source route after the credential gate was retired: instruction and tool behaviour only.
+
+    With no file-system block left, these sentences are the whole control: check the emitted model,
+    refresh the shipped copy with canaries, stop for a human on any dialog, do it before builders,
+    and count only check_unit's data-evidence row as proof.
+    """
+    text = LIVE_SOURCE_SKILL.read_text(encoding="utf-8")
+    for needle, diagnostic in [
+        (r"python scripts\check_bundle_sources.py <bundle> --spec <spec>", "live-source skill lost static check"),
+        ("--ui-refresh --canaries", "live-source skill lost canary refresh"),
+        ("**before dispatching builders**", "live-source skill lost builder order"),
+        ("**A dialog is a human stop.**", "live-source skill lost human stop"),
+        ("Never type, paste or store", "live-source skill lost no-secrets rule"),
+        ("PASS `data-evidence` row", "live-source skill lost data evidence"),
+        ("same-run PASS `data-evidence` row", "live-source skill lost same-run evidence"),
+        ("trusted engine-emission snapshot, never the live model", "live-source skill lost trusted source identity"),
+        (
+            "Structural refusals do **not** prove missing credentials",
+            "live-source skill lost structural stop distinction",
+        ),
+        ("Never drop the flag or switch refresh routes", "live-source skill lost fail-closed qualification"),
+        (
+            "[<table> ...] --automatic-source-scope <expected-sources.json>",
+            "live-source skill lost mandatory automatic source scope",
+        ),
+        ("`fallback_authorization: model_only_unvalidated`", "live-source skill lost model-only source"),
+    ]:
+        assert needle in text, diagnostic
+    for retired in ("probe_live_source", "probe_bundle", r"scripts\credential_gate.py", "authorize", "earned clear"):
+        assert retired not in text, f"live-source skill names retired gate machinery {retired!r}"
+    static_row = _table_row(SCRIPTS_README, "check_bundle_sources.py")
+    assert "Offline, credential-free source checks" in static_row, "script index lost static source check"
+    assert "M_PARAM_UNDEFINED" in static_row and "SOURCE_COLLAPSED" in static_row
+    assert not _table_row(SCRIPTS_README, "probe_live_source.py"), "script index routes to retired live probe"
+
+
 @pytest.mark.parametrize(
     "case",
     [
+        (
+            LIVE_SOURCE_SKILL,
+            "**A dialog is a human stop.**",
+            "**A dialog can be dismissed.**",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost human stop",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "PASS `data-evidence` row",
+            "PASS structural row",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost data evidence",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "same-run PASS `data-evidence` row",
+            "prior-run PASS `data-evidence` row",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost same-run evidence",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "trusted engine-emission snapshot, never the live model",
+            "live model copied into a matching snapshot",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost trusted source identity",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "Structural refusals do **not** prove missing credentials",
+            "Structural refusals prove missing credentials",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost structural stop distinction",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "Never drop the flag or switch refresh routes",
+            "Drop the flag or switch refresh routes",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost fail-closed qualification",
+        ),
+        (
+            LIVE_SOURCE_SKILL,
+            "[<table> ...] --automatic-source-scope <expected-sources.json>",
+            "[<table> ...] [--automatic-source-scope <expected-sources.json>]",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "live-source skill lost mandatory automatic source scope",
+        ),
+        (
+            SCRIPTS_README,
+            "| `check_bundle_sources.py` |",
+            "| `probe_live_source.py` |",
+            test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop,
+            "script index lost static source check",
+        ),
         (
             REPORT_GOTCHAS,
             "never pristine `reports`",
@@ -968,13 +979,6 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
             test_semantic_core_keeps_runtime_identity_and_policy_owners,
             "semantic runtime lost AI owner",
         ),
-        (
-            LIVE_SOURCE_SKILL,
-            "Unchanged retry is not useful",
-            "Unchanged retry is useful",
-            test_credential_guidance_states_only_what_the_desktop_arbiter_establishes,
-            "no longer states that unchanged retry is not useful for ACCESS_DENIED",
-        ),
     ],
     ids=lambda case: case[-1],
 )
@@ -1055,3 +1059,4 @@ def test_compact_contract_noop_control(monkeypatch: pytest.MonkeyPatch) -> None:
     test_compact_cores_keep_owner_availability_and_evidence_direction()
     test_semantic_core_keeps_runtime_identity_and_policy_owners()
     test_credential_guidance_states_only_what_the_desktop_arbiter_establishes()
+    test_live_source_skill_routes_through_the_shipped_model_and_a_human_stop()

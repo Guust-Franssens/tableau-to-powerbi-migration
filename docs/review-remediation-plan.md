@@ -1,5 +1,8 @@
 # Review remediation plan
 
+**Historical August 2026 plan, not current operating instructions.** Its credential-gate/probe
+tasks predate retirement. Current source-proof and recovery routes live in [the navigation index](INDEX.md).
+
 **Status:** Phases A · B · B′ ✅ COMPLETE · Phase 0 (connectivity) ✅ PROVEN LIVE · E1 ✅ DONE ·
 next: **D1 spike** → C → D → E · **Branch:** `feat/deterministic-tier-integration` ·
 **Created:** 2026-08-04 · **Last updated:** 2026-08-05

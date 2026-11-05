@@ -275,7 +275,7 @@ def _leg_identity(leg: dict) -> dict:
 
 
 def _leg_display(src: dict, index: int, leg: dict, leg_index: int, leg_count: int) -> str:
-    """Human-readable datasource/leg label for logs and marker diagnostics."""
+    """Human-readable datasource/leg label for source classification diagnostics."""
     conn = src.get("connection", {}) or {}
     base_name = str(src.get("name") or conn.get("hyper_file") or f"source[{index}]")
     return base_name if leg_count == 1 else f"{base_name}[{leg_index}] {leg.get('class', '?')}"
@@ -290,8 +290,8 @@ def _classify_legs(src: dict, index: int) -> list[tuple[str, str, str, str]]:
     other two nowhere. Under-reporting live sources is the one direction this must never fail in.
 
     The key is deliberately not the display name. Display names can duplicate, contain punctuation,
-    or change; the marker identity must stay unique and stable so a proof for one leg cannot clear a
-    sibling endpoint.
+    or change; the package projection's source identity must stay unique and stable so one leg
+    cannot stand in for a sibling endpoint.
     """
     conn = src.get("connection", {}) or {}
     legs = conn.get("connections") or [conn]
@@ -383,7 +383,7 @@ def _fab_api(endpoint: str, method: str = "get", body: str | None = None) -> dic
 
 
 def cmd_gate(workspace: str, model: str) -> int:
-    """Check a published model's datasources and refresh state; interpret the credential gate."""
+    """Check a published Fabric model's datasources and service refresh state."""
     ws_id = _fab(["get", f"{workspace}.Workspace", "-q", "id"]).strip()
     ds_id = _fab(["get", f"{workspace}.Workspace/{model}.SemanticModel", "-q", "id"]).strip()
     log.info("workspace=%s  model=%s", ws_id, ds_id)
@@ -528,7 +528,7 @@ def main(argv: list[str] | None = None) -> int:
         "--model",
         nargs=2,
         metavar=("WORKSPACE", "SEMANTIC_MODEL"),
-        help="Workspace + semantic-model display names to probe the credential gate (needs fab auth)",
+        help="Workspace + semantic-model display names to check service datasource/refresh state (needs fab auth)",
     )
     args = parser.parse_args(argv)
 

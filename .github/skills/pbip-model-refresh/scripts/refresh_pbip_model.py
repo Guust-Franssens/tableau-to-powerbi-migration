@@ -530,7 +530,7 @@ def refresh(
 
     So it cuts short a source that is merely *slow*, and never one that is waiting on a human.
     **Hence the outer wall clock below.** This used to say "the caller must run its own clock", and
-    that was a real defect dressed up as documentation: `probe_live_source.py` did wrap it
+    that was a real defect dressed up as documentation: the retired `probe_live_source.py` did wrap it
     (`subprocess.run(..., timeout=...)`), but every *direct* caller inherited nothing. Measured
     2026-08-05, a direct `--pid` call against a never-authenticated Azure SQL server sat blocked on a
     modal for **956 s** while `REFRESH_TIMEOUT_SECONDS = 300` never fired — and the caller who forgot
@@ -2969,7 +2969,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "WARNING: operator-only opt-in commissions execution of ALL current M, including native/custom SQL, "
             "with potential source-side costs; --no-save prevents Save, NOT source execution. "
             "Invoke one whole-model Import M Refresh and require typed engine completion evidence. "
-            "No automatic credential-gate use or earned clearance; defaults/callers unchanged. "
+            "Defaults/callers unchanged. "
             "Automatic callers must add --automatic-source-scope (#780, linked #692)"
         ),
     )

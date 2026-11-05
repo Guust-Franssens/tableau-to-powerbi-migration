@@ -96,7 +96,7 @@ original package boundary -> current S1 bytes -> S2 roles/cohort/brief/provider
 ```
 
 It consumes the existing no-follow classifier, S1/S2 issued handoffs,
-`credential_gate.reconcile_package_data_access`, reference policy, and
+`package_data_access.reconcile_package_data_access`, reference policy, and
 `package_unit.bind_package(..., inspect=True, sanitize=False)`. It does not reparse a spec, select
 a provider by name, rebind, sanitize, reseal, earn credentials, or write package bytes.
 S2's internal `START_READY`, construction `ASSEMBLED`, and binding `BOUND` are necessary inputs,
@@ -683,7 +683,7 @@ target orders and the exact structured S2 finding.
 
 Every newly published package declares `artifacts.data_access = "data-access.json"` and hashes
 its final UTF-8/LF bytes in `contents.files`. Assembly writes a strict non-accepted provisional file,
-seals and snapshots the candidate, runs real S1/S2, calls only `credential_gate.assess_data_access`,
+seals and snapshots the candidate, runs real S1/S2, calls only `package_data_access.assess_data_access`,
 and validates the nine-field projection with `parse_data_access` and the zero-drop shipment allowlist.
 The snapshot holds the exact namespace/digests and assessment facts; every `data_sources.shipped`
 role must exist. Resealing extends that held map, never baselines arbitrary new bytes. Only the exact
@@ -694,15 +694,49 @@ declared digest. Changed provider bytes/root or final provider ordinal/policy dr
 than silently selecting a new baseline.
 
 ⚠️ Production is **not** the final START_READY check. Construction success, internal S2
-`START_READY`, and reference `READY` alone do not authorize Phase-2 dispatch or clear a credential
-gate. Handover, README and packaging output expose the actual closed data state.
+`START_READY`, and reference `READY` alone do not authorize Phase-2 dispatch or prove source access.
+Handover, README and packaging output expose the actual closed data state.
 `construction_status = "ASSEMBLED"` means only
 that a diagnostic package directory was constructed; `has_engine_working_copy` and `self_contained`
 remain separate limitations. Stored `dispatch_readiness.status = "NOT_EVALUATED"` remains unchanged
 even after the read-only final consumer returns `START_READY`.
 
-See [credential gate](credential-gate.md#package-data-access-projection) for gate-root, provider and
+See [package data-access projection](#package-data-access-projection) for fields, provider and
 scope limits. S1 stays byte authority, not a semantic interpreter of `artifacts.data_access`.
+
+#### Package data-access projection
+
+The strict nine fields are `schema`, `state`, `source_keys`, `provider_unit`, `provider_state`,
+`validation`, `effective_scope`, `max_phase2_claim`, `codes`. They carry closed values and opaque
+references, never endpoints, source/provider names, credentials, host paths or audit text. This
+privacy boundary concerns the projection, not the existing source/spec/model content.
+`source_keys` contains sorted canonical `source-key:<16-hex>` identities. `provider_unit` is an
+opaque `provider-ref:v1:sha256:<64-hex>` token from `provider_reference(exact_unit)`, not a path or name.
+
+The producer's read-only `assess_data_access` uses the packaged spec, brief policy and the held
+localizer's `result["data_sources"]`. Its `gate_root` argument and the packaging `--gate-root` option
+remain for caller compatibility only: they confer no credential, ledger or filesystem authority.
+Staged spec generation still uses the pure parser/schema validator in a bounded subprocess.
+Incomplete local bytes, unclassifiable source facts or absent policy never default to success.
+
+A published-only consumer inherits only the published assessment of **one exact S2-selected,
+S1/S2-clean direct provider**, supplied through `--provider-package` or published earlier in the
+same invocation. Provider keys, validation and ceiling are preserved. No re-assessment from the
+consumer's root, recursion or published-plus-direct aggregation is allowed. Every consumer row
+must remain a complete scalar `sqlproxy` reference with valid published dependency; malformed,
+mixed or nested direct connections cannot disappear from the denominator.
+`authorized_model_only` comes from the brief's `fallback_authorization = "model_only_unvalidated"`
+and `model_only` scope, remains unvalidated/structural-only, and cannot serve a report consumer.
+An owned workbook is never silently downgraded.
+
+`package_unit.py` production/binding, `check_reference_readiness.py` and `check_unit.py` use
+`package_data_access`; `package_role_identity.py` carries its issued source/projection facts.
+`parse_data_access` retains strict parsing of stored legacy states/codes.
+`reconcile_package_data_access` checks only the issued/parsed assessment, canonical source facts,
+brief scope/fallback and exact selected provider. Read-only readers never acquire gate/ledger
+authority, reclassify a source to earn proof, or write a projection. START_READY additionally checks
+current package/reference/binding evidence; it does not refresh the model or strengthen the stored
+state. `BOUND` remains `UNVALIDATED`.
 
 #### Data-access states
 

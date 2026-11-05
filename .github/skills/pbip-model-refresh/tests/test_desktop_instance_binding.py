@@ -833,7 +833,7 @@ def test_tmdl_tables_reads_through_a_byte_order_mark(tmp_path: Path) -> None:
 
 
 def test_a_bom_prefixed_model_still_refuses_a_siblings_data(monkeypatch, tmp_path: Path) -> None:
-    """The consequence that matters: BOM handling is what keeps the gate armed."""
+    """The consequence that matters: BOM handling is what keeps the same-model check refusing."""
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"], bom=True)
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Turbine"})
     ok, _ = same_model(52001, cache)

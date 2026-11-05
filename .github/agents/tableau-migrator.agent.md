@@ -124,12 +124,13 @@ via `scripts\check_reference_readiness.py` **before ANY validator triage or buil
 [Entry authority](../../docs/reference-readiness.md#final-package-start_ready-562-622) owns coverage;
 internal readiness, BOUND, reference READY, emission/capture/structural green proves neither entry nor fidelity.
 
-Invoke host `live-source-reachability`: **every live source through the shipped Power BI artifact**,
-outranking reconstructed probes; no shell/SQL/Tableau-only, CSV or probe-root substitute.
-[Credential owner](../../docs/credential-gate.md#canonical-source-identity-at-every-transition) owns
-current-root/canonical-key/sibling/coverage limits. Credential/permission refusal or operator prompt:
-**ONCE, then human stop over autonomy**. ACCESS_DENIED proves no authentication/permission-only cause.
-No secret acquisition/CLI secrets, self-authorize or hand-clear; human
+Invoke host `live-source-reachability` **before dispatching builders**: **every live source through the
+shipped Power BI artifact** (static source check, then the existing `pbip-model-refresh`
+automatic-source procedure with named canaries); no
+shell/SQL/Tableau-only or CSV substitute. Credential/permission refusal or any Desktop dialog:
+**ONCE, then human stop over autonomy**. No secret acquisition/CLI secrets or self-authorization.
+Structural refusals do not prove missing credentials; never bypass source qualification or wrong-model checks.
+Model-only needs the brief's `fallback_authorization: model_only_unvalidated`; human
 permission/fallback stays UNVALIDATED, not DATA_OK. No-live skips must be earned.
 
 ## Task dispatch through barriers
@@ -182,10 +183,8 @@ Required/unknown without actual **Power BI + Tableau results/filter/grain/contex
 typed nonzero **CANNOT_ESTABLISH(NUMERIC): Phase-2 COMPLETE was not established.**
 Retain raw missing counts/lists; no default-none, CSV/label override or ceiling upgrade.
 
-**BEFORE shipment**, run `python scripts\credential_gate.py verify <bundle>` at the **ORIGINAL armed
-bundle/spec root** retains current-root/source/sibling coverage. No ship/probe/package/run-parent/
-sibling replacement. Paste verdict: refusal/legacy NONE/unassessable ≠ clean; copy/fallback/permission
-cannot clear the stop or create DATA_OK.
+**BEFORE shipment**, every live source needs `check_unit.py`'s PASS `data-evidence` row: full refresh,
+persisted, named canaries with rows. Copy/fallback/permission cannot create it.
 
 Require builders' gates + independent V: all dashboards faithful, no open high, other limits evidenced.
 **Only `python scripts\check_unit.py <package> --scope all --receipt-sha256 <H>` establishes COMPLETE**,

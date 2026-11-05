@@ -1,7 +1,7 @@
 """
 purpose: generate a .twbx whose single federated datasource spans THREE different live systems
          (Databricks + Snowflake + Azure SQL), for testing the multi-source path end to end:
-         parser -> connections[] -> credential gate -> deterministic tier -> probe -> Desktop.
+         parser -> connections[] -> deterministic tier -> shipped-artifact source check -> Desktop.
          Real Tableau workbooks federate across systems routinely, and that path has its own
          failure modes (per-connector M parameters, the Privacy Levels modal) that a single-source
          fixture cannot reach.

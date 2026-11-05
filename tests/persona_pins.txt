@@ -74,7 +74,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 626cb27a695f9abe8eac9503073b54428990482b30d406d1e727b6fac32bc004  First credential/modal/native approval prompt ~ **human STOP
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-88e2f21fd61836f6855c06520560972d73bdf824eb1e4d10e85a49afc4c546f1  Probe only commissioned current [live-source](../skills/live
+5818b20d1c65b088965fe8e406ec4e9e6ba8f238f1552a2371b55c6be40bccc3  Check only commissioned current [live-source](../skills/live
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 6648bfa8c6c187cb41a1bb0770d2a019b792e0c68b89c1b758255eee6eb3f5fd  Host [refresh](../skills/pbip-model-refresh/SKILL.md), `chec
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -103,7 +103,7 @@ b9c17c5644f5676e7fa461f454e655b428643c74e7a41d99c81be86c7a61021a  Require curren
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 64ef8b89c4f9f3b842d698c59d4974fa02ebf771cb3a2cdd7d1c128d0613d994  ## Reachable read-only owners
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-2d358bb221b74dd71edfa0b8be5d6e4141989c0bb771da611e509681f94a611f  Invoke `powerbi-report-gotchas` ~~3/8/10; `powerbi-report-cl
+d387d0c17bd69ebd734e2b85e8776172fd93259ecc4b8e80d14afd6d5ef59f4d  Invoke `powerbi-report-gotchas` ~~3/8/10; `powerbi-report-cl
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 bd4a85861c7662cba45984bcc3599c9c0691150542a7db241cc1d2cfbfa24299  ## Independent phases
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -212,7 +212,7 @@ f348b11afc412c04d56c365d74e17a4a7d2fd07ad65ea3fa06e9ff76603a8448  ## Model-only 
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 b8e8db2040a735a523f679707eb6cc331864b209ea2868f33c0aa9000d26b6a1  - Read `python scripts\read_handover.py <bundle> --workbook
 527ebf928e014f82f041b9e2013739c32da0aa58aa27ae0f2722d1a3ebfcdd1d  - `openability_selfcheck.ok` is a non-exhaustive engine/own-
-dcf4eff8027c8ae5286bca0d83e66cb18bcdbeb77f745bcaf5ed38f8d8b3316a  - Before live-source edits invoke/resolve host `live-source-
+b28d0d9812fa6f35e1eebd3273c0b3cf54d8ee2babcbec958ebd5e96a8c68a03  - Before live-source edits invoke/resolve host `live-source-
 c45de130b39a40050b8651375e84328641872657a8a4dfa3af620a522d753722  - Preserve actual LOD/table-calc axis, partition, order, fil
 24344eab615aec16e999f783384fd76d56b27c9a627b9218c6ae1fa45d96c447  - Send `{name: dax}` through the orchestrator's `--approved-
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -264,7 +264,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 caac71d5df4536e772347977c18466b29b0f147f90c1aa2a60b941b7822772ba  Existing preparation/binding owners must earn **CURRENT pack
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-4a9f5cf4edb45fcf56fb2e46e5eb6c7cddbf67598aa657c9317ec36b82deda0f  Invoke host `live-source-reachability`: **every live source
+7ebab5baeec8de614c01b5ee6a63d6e115afe58cb2d62b17cab9defc2fb73f02  Invoke host `live-source-reachability` **before dispatching
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 c93535c74f737db2a12d63f5b2ff17ccdb16d64469ef66a0c2fab0c5784ace8f  ## Task dispatch through barriers
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
@@ -288,7 +288,7 @@ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 f9f4dd7c61f07c5be5f2cf51a880bf6e8185f176141108a4e3411eac48a94a1b  Only independently verified **current issued v2 `numeric_obl
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
-2b763ab51ffdb2a92301997c97a826231bc9dc766deb14524851fe6192d9465f  **BEFORE shipment**, run `python scripts\credential_gate.py
+02ebb0ceb0ac76e416c49b3d11d9b947c5bbb0a1f854c936add0ad1822fe6c25  **BEFORE shipment**, every live source needs `check_unit.py`
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)
 3ed70457e26cc85d255bc72c773979f5be710e046e64f94974f40415d0f594e5  Require builders' gates + independent V: all dashboards fait
 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  (1 blank line)

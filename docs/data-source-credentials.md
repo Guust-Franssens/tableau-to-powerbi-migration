@@ -1,7 +1,7 @@
-# Data-source credentials: the migration preflight gate
+# Data-source credentials and shipped-model proof
 
-Every migration in this repo so far uses **extract-based** Tableau sources (`.hyper`), which the toolkit
-materialises to **CSV under a `DataFolder` parameter**. Flat files need **no credentials**: the model
+The original July 2026 measurements used **extract-based** Tableau sources (`.hyper`), which the toolkit
+materialised to **CSV under a `DataFolder` parameter**. Flat files need **no credentials**: the model
 refreshes from disk. The moment a workbook instead uses a **live database** (Databricks, SQL Server,
 Snowflake, Synapse, ...), that stops being true: Power BI needs a **credential** to connect, and the
 credential is **never in the committed model files**. It lives outside them, and a human normally
@@ -12,20 +12,29 @@ missing, and what to do. It is grounded in a first-hand Databricks test (2026-07
 
 1. After parsing, **classify the data sources**:
    `python scripts/preflight_source_credentials.py --spec migrations/workbooks/<slug>/migration-spec.json`.
-2. If every source is extract/flat -> no credential gate, proceed normally.
+2. If every source classifies as `no-creds` -> no source credential is needed, proceed normally.
+   An extract can still have a live upstream target; extraction alone is not that classification.
 3. If any source is a **live database**, the migration cannot refresh/validate against data until a
-   credential is configured. **You (the agent) cannot supply it.** Prompt the user, then verify:
-   - **Local (Desktop, the iterative loop):** ask the user to open the `.pbip` in Power BI Desktop once
-     and authenticate the source (Sign in / paste PAT) so Desktop caches it on the machine. Then prove
-     data actually flows with `python .github/skills/pbip-model-refresh/scripts/probe_desktop_query.py
-     --pid <pid>` (queries one row from the loaded model via the Desktop local AS) ->
-     `PREFLIGHT: DATA_OK` before building the report. That probe ships inside the
+   credential is configured. **You (the agent) cannot supply it.** Do not assume it is missing:
+   use the existing procedure, and stop for a human on an actual credential/dialog refusal.
+   - **Local (Desktop, the iterative loop):** follow the
+     [`live-source-reachability`](../.github/skills/live-source-reachability/SKILL.md) skill before builders
+     start. It delegates to `pbip-model-refresh`'s existing automatic-source procedure: shipped working
+     artifact, trusted engine-emission identities, `--automatic-source-scope` and named live canaries.
+     Any sign-in or other dialog stops the run; a human resolves it before a new qualified attempt.
+     A structural refusal is not proof of missing credentials. For a quick read-only check of an
+     already loaded model, use
+     `python .github/skills/pbip-model-refresh/scripts/probe_desktop_query.py --pid <pid> --canaries <live-tables>`
+     (rows via Desktop local AS). Named positive canaries can establish `PREFLIGHT: DATA_OK`, not a
+     fresh persisted refresh or fidelity. Without named canaries it is only table-level evidence.
+     Both scripts ship inside the
      [`pbip-model-refresh`](../.github/skills/pbip-model-refresh/SKILL.md) skill; `scripts/probe_desktop_query.py`
      is a forwarding shim kept for existing callers.
    - **Cloud (service):** after publish, probe a refresh
      (`python scripts/preflight_source_credentials.py --model "<Workspace>" "<Model>"`); if it reports
      `ModelRefreshFailed_CredentialsNotSpecified`, have the user bind a credential (UI or a Fabric
-     connection). Do not proceed to data validation until the gate is green.
+     connection). This service refresh check is not the retired local credential gate and does not
+     replace Desktop shipped-artifact evidence or independent fidelity sign-off.
 
 ## Why the agent cannot just supply the credential
 
@@ -44,7 +53,11 @@ agent-writable API**:
   connection**, set via the UI (*Semantic model > Settings > Data source credentials*) or the
   Connections API. Publishing via `fab import` binds **no** credential, so a refresh fails immediately.
 
-## The two gates, proven first-hand (Databricks, `samples.nyctaxi.trips`, 1-row M probe)
+## Historical credential measurements (July 2026, Databricks one-row M probe)
+
+The measurements below explain past failures, not the current refresh route. Use the skill above
+for operation and its current structural-stop semantics; old modal-verdict names are historical.
+Only named-canary evidence on the shipped artifact can support a current data claim.
 
 The probe model uses a **pure-M** navigation (NOT a native SQL query), returning one row:
 
@@ -78,7 +91,7 @@ files — **but it is keyed by the full data-source path (host *and* `httpPath`/
 alone.** Verified 2026-07 first-hand: re-pointing the same model from one Databricks warehouse to a
 freshly-created warehouse on the *same host* re-triggered the sign-in modal, because the new
 `…/warehouses/<id>` path had no cached credential. So a prior sign-in only counts as "present" when the
-host **and** warehouse/`httpPath` match; changing the warehouse opens a new local credential gate even
+host **and** warehouse/`httpPath` match; changing the warehouse opens a new local credential prompt even
 on an already-authenticated host.
 
 **The one-row data probe is the AUTHORITATIVE local gate; the modal probe is a secondary signal.**
@@ -99,7 +112,7 @@ fixed `VERDICT: UNKNOWN`, exit 3; **no observation or Refresh is performed**.
 | Verdict | Exit | What it establishes, and what to do |
 |---|---|---|
 | `CREDENTIAL_MISSING` | 1 | Positive, authentication-specific evidence: a window's text matched the connector credential signature (this includes a modal that was **already open** at t=0). The credential-specific hard stop — a human signs in once at the Desktop screen. |
-| `READY` (observer) | not an operation exit | Complete observation found no unexplained candidate. A bounded observation only; never operation success, `DATA_OK`, or physical gate clearance. |
+| `READY` (observer) | not an operation exit | Complete observation found no unexplained candidate. A bounded observation only; never operation success or `DATA_OK`. |
 | `REFRESH_IN_PROGRESS` | 3 | A dialog whose whole content positively reads as refresh progress was already up: another refresh owns this instance. Wait for it, or cancel the stale one — **do not stack** a second refresh. |
 | `DIALOG_NEEDS_HUMAN` | 3 | A **known** human-blocking prompt matched — the native-database-query approval modal, an approval request, or an `Authentication required` notice. A human must act at the Desktop screen; the token does **not** establish which action, because that one signature spans an approval *and* an authentication notice. Read the prompt before assuming. |
 | `DIALOG_UNRECOGNIZED` | 3 | The window's text was read but matched no known signature, and the signature list is not exhaustive. Inspect Desktop: the credential state is **undetermined in both directions**. |
@@ -146,10 +159,6 @@ exit 3. Two consequences worth knowing:
   filed as #406, and **#406 is now closed** — the arbiter has no length amnesty either. Short unknown
   text (`Password:`) vetoes suppression on both paths, and the enumerated chrome allowlist is the only
   exemption.
-- `probe_live_source` recognises the dialog tokens **structurally** and maps them to **`ERROR`** —
-  "the probe itself could not run". The gate stays armed; nothing asserts a sign-in wall that was never
-  observed. Without that structural step the transcript fell through to an unanchored keyword scan, and
-  `DIALOG_NEEDS_HUMAN` quoting `Authentication required` came back out as `NO_CREDENTIAL`.
 
 Two gotchas learned building it: (a) use a **generous timeout (>=60s)** because a serverless warehouse
 (Databricks) can **cold-start** before the modal appears, so a short wait yields a false PRESENT; and
@@ -188,7 +197,7 @@ after the user resolves the visible prompt and the row probe is run; observer `R
 ⚠️ **`DATA_OK` is earned by a clean run, and an active dialog vetoes it.** The success line is not a
 substring you may harvest from a transcript: an authoritative non-success verdict anywhere in the child's
 output — any `DIALOG_*` token, `REFRESH_IN_PROGRESS`, or a non-zero exit — outranks a stale or late
-`DATA_OK`-looking line, and the gate stays armed. Settle the dialog, then re-probe for a clean
+`DATA_OK`-looking line, and the source is not proven. Settle the dialog, then re-probe for a clean
 `DATA_OK`.
 
 **Pass `--pid` whenever more than one Desktop instance is open** (a parallel batch): the probe binds
@@ -237,44 +246,56 @@ Power BI MCP `ExecuteQuery`):
 
 ## Detecting live vs flat sources (what the classifier keys on)
 
-The parser records `data_sources[].connection.{class,mode,server}` in `migration-spec.json`.
-`scripts/preflight_source_credentials.py` classifies:
-
-- `mode == "extract"`  -> **no creds** (packaged `.hyper` -> CSV + DataFolder).
-- `class` in a flat-file set (`textscan`, `excel-direct`, `json`, ...) -> **no creds** (path-based).
-- `class` in a live-DB set (`databricks`, `sqlserver`, `snowflake`, `azure-sql-dw`, `postgres`,
-  `oracle`, `bigquery`, `saphana`, ...) -> **needs-credential**.
-- anything else -> **review** manually.
+✅ [`classify_source()`](../scripts/preflight_source_credentials.py) uses the parser's
+`connection.powerbi_target`, or delegates legacy specs to the canonical
+[`connection_target.powerbi_target()`](../scripts/connection_target.py). File classes in its allowlist
+classify as `no-creds`; other resolved classes, including unlisted database classes, fail safe as
+`needs-credential`. An unresolved class/target requires `review`, not permission to skip proof.
+A live database remains live with `mode == "extract"`: the packaged `.hyper` is Tableau's cache,
+not a credential-free replacement for its upstream. Classification is offline; it establishes neither
+missing credentials nor source reachability.
 
 ## Preflight procedure for a live-source migration
 
-1. **Classify** (`--spec`). If no live sources: skip the rest.
-2. **Warn the user up front** that this workbook hits a live source, so a credential is required in Power
-   BI before the report can show data. Give them the host/database from the spec.
-3. **Local:** build the model, then ask the user to open the `.pbip` in Desktop and authenticate the
-   source once (the modal above). The Python query/refresh paths use the shared read-only observer to
-   explain positive prompts or non-clean observations. `READY` is a bounded observation, not a cached
-   credential or successful operation. The old PowerShell arbiter only refuses. The cache is per-Windows-user and
-   machine-wide but keyed by host **+ warehouse/`httpPath`**, so a prior sign-in to the *same host and
-   warehouse* counts (a different warehouse on the same host does not). Prompt for a sign-in on
-   `CREDENTIAL_MISSING`; on an exit-3 token, settle the window on screen (wait/cancel a running
-   refresh, act on the prompt a `DIALOG_NEEDS_HUMAN` shows, inspect an unreadable/unrecognized one)
-   and re-probe. Then
-   confirm data actually flows with the skill's `scripts/probe_desktop_query.py --pid <pid>` (one-row DAX probe
-   against the Desktop local AS -> `PREFLIGHT: DATA_OK`). This one-row query is the definitive local
-   gate: it proves creds + reachability + valid M together, without publishing anything.
-4. **Cloud (if publishing):** publish, then run the gate (`--model`). If
-   `ModelRefreshFailed_CredentialsNotSpecified`, have the user configure the credential (UI) or provide
-   the secret so a Fabric connection can be created + bound. Re-run the gate until `Completed`.
-5. Only after the gate is green does data-level validation (numbers matching the source) make sense.
+1. **Classify** (`--spec`, as above). Only an all-`no-creds` result skips this live-source procedure;
+   resolve any `review` result before deciding.
+2. **Explain the live-source requirement**, using the source identity from the spec. Do not infer a
+   missing credential from classification or ask for a secret.
+3. **Local:** before builders start, follow the canonical
+   [`live-source-reachability` run order](../.github/skills/live-source-reachability/SKILL.md#run-order),
+   including static checks and the shipped working artifact. It delegates refresh to
+   [`pbip-model-refresh`'s automatic-source procedure](../.github/skills/pbip-model-refresh/SKILL.md#automatic-callers---automatic-source-scope-780),
+   not an alternate probe/refresh route. Agent-directed refresh requires `--automatic-source-scope`
+   with independent trusted engine-emission identities, never identities derived from the current
+   model. No producer is bundled; unavailable trusted input is a stop, not permission to fabricate
+   it or drop qualification. Any credential or other dialog ends the attempt: ask the human once,
+   never acquire/type/store credentials or click through prompts, and wait for human resolution.
+   Structural refusal is not proof of missing credentials. `READY` is only a bounded observation.
+   These stops are existing refresh CLI behaviour plus human instruction, not ACL/hook enforcement.
+   An unnamed read earns at most `TABLE_OK`; even positive named-canary reads alone do not prove a
+   fresh persisted refresh. Keep the qualified refresh's output and named positive live canaries.
+4. **Cloud (only when separately authorized to publish):** the service check (`--model`, as above)
+   is separate. Local proof establishes neither service credentials nor service refresh success.
+   On `ModelRefreshFailed_CredentialsNotSpecified`, stop for the human to configure/bind credentials
+   through their service UI or connection-management flow; never ask them to give the agent a secret.
+   Do not retry an unchanged authentication/permission refusal. After human remediation, make one
+   new service check, not a loop until success. Bound unresponsive service work to about two minutes,
+   then stop and report; do not stack refreshes. Require an explicit `Completed` refresh status:
+   `Unknown` or a timeout is not proof, even if the command exits 0. Service success does not replace
+   local shipped-artifact evidence or independent fidelity validation.
+5. **Completion:** START_READY may admit `live_unproven`, not certify data access. COMPLETE still
+   needs a same-run PASS `data-evidence` row: full refresh, persist and positive named canaries,
+   plus independent shipped-artifact fidelity sign-off. Only a brief with
+   `fallback_authorization: model_only_unvalidated` permits model-only fallback; that result remains
+   **UNVALIDATED**, never `DATA_OK` or validated report data.
 
 ## Notes / gotchas
 
-- The 1-row probe is deliberately **M navigation, not `Value.NativeQuery`/`Databricks.Query`**, so it
+- Prefer **M navigation over `Value.NativeQuery`/`Databricks.Query`** for a reachability check, so it
   exercises the same connector + credential path the real model will use (and `Databricks.Query` isn't
   supported with DirectQuery anyway).
 - Since Feb 2026 new Power BI Databricks connections default to the **ADBC** driver; add
-  `Implementation="2.0"` in the options record to force it. Either driver hits the same credential gate.
+  `Implementation="2.0"` in the options record to force it. Either driver hits the same credential prompt.
 - A PAT is a **secret**: never commit it, never put it in TMDL. Store it only in the service-side
   connection (Option B) or the user's Desktop cache (local). This repo's throwaway test kept the PAT in
   a temp file that was deleted once the connection held it.

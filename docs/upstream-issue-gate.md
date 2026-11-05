@@ -46,7 +46,7 @@ against the engine's repo. The harm is in the combination above, and it is prese
 and it is worth doing — but it is guidance, not a gate.
 
 **The measured compliance rate for exactly this pattern in this repo is ~25 %.** From
-[`credential-gate.md`](credential-gate.md): across four blind migrations, every run *announced* the
+the credential gate this repo later retired: across four blind migrations, every run *announced* the
 credential stop correctly, and **three of four then talked themselves past it** a few turns later.
 One obeyed. Smaller models did worse — the wrong direction, since unattended runs are the ones that
 need the rule most.
@@ -62,11 +62,10 @@ Proposed wording, deliberately short:
 
 ### Layer 2 — a `preToolUse` / `permissionRequest` hook. **Interception, not enforcement.**
 
-The mechanism already exists and is proven in this repo: `.github/hooks/credential-gate.json` runs
-`scripts/hooks/credential_gate.py`, which reads the tool payload on stdin and prints a decision in
-both event vocabularies (`permissionDecision: "deny"` + `behavior: "deny"` + `interrupt: true`). A
-second hook file — `.github/hooks/upstream-issue-gate.json` → `scripts/hooks/upstream_issue_gate.py`
-— would follow the same shape and match, in the shell payload text:
+The mechanism was proven in this repo by the retired credential-gate hook: a hook file ran a Python
+script that read the tool payload on stdin and printed a decision in both event vocabularies
+(`permissionDecision: "deny"` + `behavior: "deny"` + `interrupt: true`). A hook file (`.github/hooks/upstream-issue-gate.json` running
+`scripts/hooks/upstream_issue_gate.py`) would use the same shape and match, in the shell payload text:
 
 ```
 gh issue create           gh issue comment          gh pr create
@@ -88,18 +87,18 @@ same applies here — `curl -X POST` against the REST API, or a Python one-liner
 outside any pattern list. Treat Layer 2 as *"the default path now stops and asks"*, which is worth a
 lot, and not as *"this cannot happen"*.
 
-Two operational rules inherited from the existing hook, both learned the hard way:
+Two operational rules learned from that hook, both the hard way:
 
 * **It must fail open on error.** Command `preToolUse` hooks fail **closed** on a crash, so a hook
-  that raises denies *every* tool call — including the edit that would repair it. The existing
-  `credential-gate.json` wraps its call so a missing or broken script degrades to `{}`; copy that
-  wrapper verbatim.
+  that raises denies *every* tool call, including the edit that would repair it. Wrap the call so a
+  missing or broken script degrades to `{}`. The PowerShell form the retired hook used:
+  `if (Test-Path <script>) { $o = python <script> 2>$null; if ($LASTEXITCODE -eq 0 -and $o) { $o } else { '{}' } } else { '{}' }`.
 * **Hooks load at CLI start**, so the file cannot be tested in the session that writes it.
 
 ### Layer 3 — credential scope. **The only real enforcement.**
 
-The credential gate works because the final answer comes from the **kernel** (an ACL), which does not
-care how the write was attempted. The equivalent here is the **GitHub API**: it does not care how the
+The retired credential gate held because its final answer came from the **kernel** (an ACL), which
+did not care how the write was attempted. The equivalent here is the **GitHub API**: it does not care how the
 POST was spelled either.
 
 Concretely: run migrations with `GH_TOKEN` set to a fine-grained PAT that has **no Issues: write** on

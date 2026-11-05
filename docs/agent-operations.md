@@ -26,7 +26,8 @@ Dispatchers, including `tableau-migrator`, owe these checks:
   `git status`, `git diff --stat` and file mtimes against crash time; neither assume lost nor done.
   Brief agents to commit and push incrementally, not just commit.
 
-**Measured 2026-08-02.** A subagent's final summary declared **"Sign-off ready: YES"** and never
+**Historical measurement, 2026-08-02 (credential gate now retired).** A subagent's final summary
+declared **"Sign-off ready: YES"** and never
 mentioned that it had, minutes earlier, re-armed its own credential gate and cleared it unearned.
 Only the gate's own audit log surfaced the violation — `probe-cleared` versus `manual-clear`, plus
 `credential_gate.py verify`'s exit code.
