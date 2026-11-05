@@ -246,36 +246,48 @@ Power BI MCP `ExecuteQuery`):
 
 ## Detecting live vs flat sources (what the classifier keys on)
 
-The parser records `data_sources[].connection.{class,mode,server}` in `migration-spec.json`.
-`scripts/preflight_source_credentials.py` classifies:
-
-- `mode == "extract"`  -> **no creds** (packaged `.hyper` -> CSV + DataFolder).
-- `class` in a flat-file set (`textscan`, `excel-direct`, `json`, ...) -> **no creds** (path-based).
-- `class` in a live-DB set (`databricks`, `sqlserver`, `snowflake`, `azure-sql-dw`, `postgres`,
-  `oracle`, `bigquery`, `saphana`, ...) -> **needs-credential**.
-- anything else -> **review** manually.
+✅ [`classify_source()`](../scripts/preflight_source_credentials.py) uses the parser's
+`connection.powerbi_target`, or delegates legacy specs to the canonical
+[`connection_target.powerbi_target()`](../scripts/connection_target.py). File classes in its allowlist
+classify as `no-creds`; other resolved classes, including unlisted database classes, fail safe as
+`needs-credential`. An unresolved class/target requires `review`, not permission to skip proof.
+A live database remains live with `mode == "extract"`: the packaged `.hyper` is Tableau's cache,
+not a credential-free replacement for its upstream. Classification is offline; it establishes neither
+missing credentials nor source reachability.
 
 ## Preflight procedure for a live-source migration
 
-1. **Classify** (`--spec`). If no live sources: skip the rest.
-2. **Warn the user up front** that this workbook hits a live source, so a credential is required in Power
-   BI before the report can show data. Give them the host/database from the spec.
-3. **Local:** build the model, then ask the user to open the `.pbip` in Desktop and authenticate the
-   source once (the modal above). The Python query/refresh paths use the shared read-only observer to
-   explain positive prompts or non-clean observations. `READY` is a bounded observation, not a cached
-   credential or successful operation. The old PowerShell arbiter only refuses. The cache is per-Windows-user and
-   machine-wide but keyed by host **+ warehouse/`httpPath`**, so a prior sign-in to the *same host and
-   warehouse* counts (a different warehouse on the same host does not). Prompt for a sign-in on
-   `CREDENTIAL_MISSING`; on an exit-3 token, settle the window on screen (wait/cancel a running
-   refresh, act on the prompt a `DIALOG_NEEDS_HUMAN` shows, inspect an unreadable/unrecognized one)
-   and re-probe. Then
-   confirm data actually flows with the skill's `scripts/probe_desktop_query.py --pid <pid>` (one-row DAX probe
-   against the Desktop local AS -> `PREFLIGHT: DATA_OK`). This one-row query is the definitive local
-   gate: it proves creds + reachability + valid M together, without publishing anything.
-4. **Cloud (if publishing):** publish, then run the gate (`--model`). If
-   `ModelRefreshFailed_CredentialsNotSpecified`, have the user configure the credential (UI) or provide
-   the secret so a Fabric connection can be created + bound. Re-run the gate until `Completed`.
-5. Only after the gate is green does data-level validation (numbers matching the source) make sense.
+1. **Classify** (`--spec`, as above). Only an all-`no-creds` result skips this live-source procedure;
+   resolve any `review` result before deciding.
+2. **Explain the live-source requirement**, using the source identity from the spec. Do not infer a
+   missing credential from classification or ask for a secret.
+3. **Local:** before builders start, follow the canonical
+   [`live-source-reachability` run order](../.github/skills/live-source-reachability/SKILL.md#run-order),
+   including static checks and the shipped working artifact. It delegates refresh to
+   [`pbip-model-refresh`'s automatic-source procedure](../.github/skills/pbip-model-refresh/SKILL.md#automatic-callers---automatic-source-scope-780),
+   not an alternate probe/refresh route. Agent-directed refresh requires `--automatic-source-scope`
+   with independent trusted engine-emission identities, never identities derived from the current
+   model. No producer is bundled; unavailable trusted input is a stop, not permission to fabricate
+   it or drop qualification. Any credential or other dialog ends the attempt: ask the human once,
+   never acquire/type/store credentials or click through prompts, and wait for human resolution.
+   Structural refusal is not proof of missing credentials. `READY` is only a bounded observation.
+   These stops are existing refresh CLI behaviour plus human instruction, not ACL/hook enforcement.
+   An unnamed read earns at most `TABLE_OK`; even positive named-canary reads alone do not prove a
+   fresh persisted refresh. Keep the qualified refresh's output and named positive live canaries.
+4. **Cloud (only when separately authorized to publish):** the service check (`--model`, as above)
+   is separate. Local proof establishes neither service credentials nor service refresh success.
+   On `ModelRefreshFailed_CredentialsNotSpecified`, stop for the human to configure/bind credentials
+   through their service UI or connection-management flow; never ask them to give the agent a secret.
+   Do not retry an unchanged authentication/permission refusal. After human remediation, make one
+   new service check, not a loop until success. Bound unresponsive service work to about two minutes,
+   then stop and report; do not stack refreshes. Require an explicit `Completed` refresh status:
+   `Unknown` or a timeout is not proof, even if the command exits 0. Service success does not replace
+   local shipped-artifact evidence or independent fidelity validation.
+5. **Completion:** START_READY may admit `live_unproven`, not certify data access. COMPLETE still
+   needs a same-run PASS `data-evidence` row: full refresh, persist and positive named canaries,
+   plus independent shipped-artifact fidelity sign-off. Only a brief with
+   `fallback_authorization: model_only_unvalidated` permits model-only fallback; that result remains
+   **UNVALIDATED**, never `DATA_OK` or validated report data.
 
 ## Notes / gotchas
 
