@@ -16,6 +16,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -180,6 +182,191 @@ def test_release_never_unlinks_companion(tmp_path: Path) -> None:
     assert companion.is_file(), "release must never unlink the persistent companion"
 
 
+def _transacts(root: Path) -> None:
+    with pda.gate_transaction(root, timeout=pda.TX_READER_TIMEOUT):
+        pass
+
+
+def test_peer_arriving_before_the_creator_locks_never_sees_a_half_made_companion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#801: a peer that opens the companion right after its exclusive creation must still transact."""
+    root = tmp_path / "unit"
+    root.mkdir()
+    companion = pda.coordination_root(root).companion
+    real_open, seen, peer = os.open, [], {}
+
+    def run_peer() -> None:
+        try:
+            with pda.gate_transaction(root):
+                peer["size"] = companion.stat().st_size
+        except OSError as exc:
+            peer["error"] = exc
+
+    def creating(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        # Deterministic interleaving: the peer runs to completion between creation and anything after it.
+        if flags & os.O_EXCL and Path(path) == companion and not seen:
+            seen.append(os.fstat(descriptor).st_size)
+            thread = threading.Thread(target=run_peer)
+            thread.start()
+            thread.join(timeout=30)
+            assert not thread.is_alive(), "peer must not wait on a creator that holds no lock"
+        return descriptor
+
+    monkeypatch.setattr(pda.os, "open", creating)
+    with pda.gate_transaction(root):
+        pass
+    assert seen == [0], "the seam must open the companion while it is still empty"
+    assert "error" not in peer, f"peer observed a partially initialized companion: {peer.get('error')!r}"
+    assert peer == {"size": 1}, "the lock holder must initialize the companion before its strict check"
+    assert companion.stat().st_size == 1
+
+
+def test_crash_left_empty_companion_is_initialized_by_its_holder(tmp_path: Path) -> None:
+    """A creator that died before locking leaves an empty companion; the next holder completes it, same inode."""
+    root = tmp_path / "unit"
+    root.mkdir()
+    companion = pda.coordination_root(root).companion
+    companion.write_bytes(b"")
+    before = pda._identity(companion.stat())
+    _transacts(root)
+    assert companion.read_bytes() == b"\0" and pda._identity(companion.stat()) == before
+
+
+@pytest.mark.parametrize("kind", ["directory", "extra-byte", "symlink", "hardlink"])
+def test_unsafe_companion_is_refused(tmp_path: Path, kind: str) -> None:
+    root = tmp_path / "unit"
+    root.mkdir()
+    companion = pda.coordination_root(root).companion
+    if kind == "directory":
+        companion.mkdir()
+    elif kind == "extra-byte":
+        companion.write_bytes(b"xx")
+    else:
+        other = tmp_path / "other"
+        other.write_bytes(b"\0")
+        try:
+            if kind == "symlink":
+                companion.symlink_to(other)
+            else:
+                os.link(other, companion)
+        except OSError:
+            pytest.skip("this platform/account cannot create symlinks without elevation")
+    # Windows refuses to open a directory as a file (PermissionError) before the entry check runs.
+    with pytest.raises(OSError):
+        _transacts(root)
+
+
+def test_unavailable_native_object_identity_is_not_a_clear(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "Unit"
+    root.mkdir()
+    _transacts(root)
+    safe, fstat = pda._safe_entry, os.fstat
+
+    def unknown(info):
+        return SimpleNamespace(st_dev=info.st_dev, st_ino=0, st_size=info.st_size)
+
+    monkeypatch.setattr(pda, "_safe_entry", lambda path, **kwargs: unknown(safe(path, **kwargs)))
+    monkeypatch.setattr(pda.os, "fstat", lambda descriptor: unknown(fstat(descriptor)))
+    with pytest.raises(pda.GateTransactionError, match="identity-unproved"):
+        _transacts(root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-specific path spelling")
+@pytest.mark.parametrize(("readable", "flags", "refusal"), [(False, 0, "case-unproved"), (True, 1, "case-sensitive")])
+def test_unproved_or_case_sensitive_parent_is_not_a_clear(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readable: bool, flags: int, refusal: str
+) -> None:
+    import ctypes  # pylint: disable=import-outside-toplevel
+    from ctypes import wintypes  # pylint: disable=import-outside-toplevel
+
+    root = tmp_path / "Unit"
+    root.mkdir()
+    _transacts(root)
+    library = ctypes.WinDLL
+    kernel = library("kernel32", use_last_error=True)
+
+    def query(_handle, _kind, output, _size):
+        ctypes.cast(output, ctypes.POINTER(wintypes.DWORD)).contents.value = flags
+        return readable
+
+    proxy = SimpleNamespace(
+        CreateFileW=kernel.CreateFileW,
+        GetDriveTypeW=kernel.GetDriveTypeW,
+        GetFinalPathNameByHandleW=kernel.GetFinalPathNameByHandleW,
+        GetFileInformationByHandleEx=query,
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: proxy)
+    with pytest.raises(pda.GateTransactionError, match=refusal):
+        _transacts(root)
+
+
+def test_dotdot_cannot_erase_an_unproved_parent_component(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    parent = tmp_path / "parent"
+    (parent / "ordinary").mkdir(parents=True)
+    root = parent / "Unit"
+    root.mkdir()
+    path = parent / "ordinary" / ".." / "Unit"
+    assert pda.coordination_root(path).canonical == pda.coordination_root(root).canonical
+    safe = pda._safe_entry
+
+    def unproved(location, **kwargs):
+        if location == parent / "ordinary":
+            raise pda.GateTransactionError("fixture reparse component")
+        return safe(location, **kwargs)
+
+    with pda.gate_transactions([root]):
+        monkeypatch.setattr(pda, "_safe_entry", unproved)
+        with pytest.raises(pda.GateTransactionError, match="reparse component"):
+            pda.coordination_root(path)
+        with pytest.raises(pda.GateTransactionError, match="reparse component"):
+            with pda.gate_transaction(path):
+                pytest.fail("an alias binding must not bypass validation of the original parent chain")
+
+
+def test_nested_transactions_join_without_reacquiring(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "unit"
+    root.mkdir()
+    count = []
+    acquire = pda._descriptor_lock
+
+    def counted(descriptor, lock):
+        count.append(lock)
+        return acquire(descriptor, lock)
+
+    monkeypatch.setattr(pda, "_descriptor_lock", counted)
+    with pda.gate_transaction(root):
+        with pda.gate_transaction(root):
+            pda._check_transaction(root)
+        with pda.gate_transactions([root]):
+            pda._check_transaction(root)
+    assert count == [True], "a nested transaction must not recursively reacquire the same byte"
+
+
+def test_changed_companion_identity_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "identity-control"
+    root.mkdir()
+    companion = pda.coordination_root(root).companion
+    entry = pda._safe_entry
+    with pda.gate_transaction(root):
+        with monkeypatch.context() as patch:
+
+            def changed(path, **kwargs):
+                info = entry(path, **kwargs)
+                if path == companion:
+                    return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino + 1, st_size=info.st_size)
+                return info
+
+            patch.setattr(pda, "_safe_entry", changed)
+            refusal = None
+            try:
+                pda._check_transaction(root)
+            except pda.GateTransactionError as exc:
+                refusal = str(exc)
+            assert refusal == "transaction-companion-changed", "replaced companion must not be credited as serialized"
+
+
 def _mutant(module, name: str, old: str, new: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """In-memory single-function mutations: never edit/rebaseline product files or score arbitrary errors."""
     source = inspect.getsource(getattr(module, name))
@@ -211,7 +398,9 @@ def test_projection_module_never_imports_the_credential_gate() -> None:
     assert probe.stdout.strip() == "False", "package_data_access must not import credential_gate"
 
 
-@pytest.mark.parametrize("mutation", ["in-root-lock", "transient-package-token", "unlink-on-release"])
+@pytest.mark.parametrize(
+    "mutation", ["in-root-lock", "transient-package-token", "unlink-on-release", "replacement-credited"]
+)
 def test_required_transaction_mutations_fail_their_intended_assertion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
@@ -235,7 +424,7 @@ def test_required_transaction_mutations_fail_their_intended_assertion(
         _mutant(pda, "_authority", "in _COORDINATION.get():", "in ():", monkeypatch)
         check = partial(test_first_package_generation_receives_final_token, control)
         message = "package generation must retain final token"
-    else:
+    elif mutation == "unlink-on-release":
         release = pda.GateTransaction.__exit__
 
         def unlink(transaction, *args):
@@ -245,5 +434,17 @@ def test_required_transaction_mutations_fail_their_intended_assertion(
         monkeypatch.setattr(pda.GateTransaction, "__exit__", unlink)
         check = partial(test_release_never_unlinks_companion, control)
         message = "release must never unlink"
+    else:
+        check_identity = pda.GateTransaction.check
+
+        def unchecked(transaction):
+            try:
+                check_identity(transaction)
+            except pda.GateTransactionError:
+                pass
+
+        monkeypatch.setattr(pda.GateTransaction, "check", unchecked)
+        check = partial(test_changed_companion_identity_is_refused, control, monkeypatch)
+        message = "replaced companion must not be credited"
     with pytest.raises((AssertionError, pytest.fail.Exception), match=message):
         check()
