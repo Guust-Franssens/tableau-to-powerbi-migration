@@ -1870,6 +1870,9 @@ def _synthetic_preflight_child(
     return child, calls
 
 
+@pytest.mark.skipif(
+    os.name != "nt" or _PS is None, reason="requires Windows PowerShell/PowerShell 7 on Windows and NTFS"
+)
 def test_preflight_accepts_repository_mcp_config(tmp_path: Path) -> None:
     """A project-level MCP config satisfies the check without a user-level copy."""
     child, _ = _synthetic_preflight_child(tmp_path, "ready", diagnostics=False, workspace_mcp=True)
