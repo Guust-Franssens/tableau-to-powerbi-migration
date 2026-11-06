@@ -481,12 +481,22 @@ else {
 #   * Power BI Desktop version drift: advisory re-verification trigger only; the exact bridge target
 #     is pinned by the recommended PBI_DESKTOP_PATH check below.
 # --- MCP servers ---
-$mcp = Read-CopilotJson 'mcp-config.json'
+$userMcp = Read-CopilotJson 'mcp-config.json'
+$workspaceMcp = $null
+$workspaceMcpPath = Join-Path $repoRoot '.mcp.json'
+if (Test-Path -LiteralPath $workspaceMcpPath -PathType Leaf) {
+    try {
+        $workspaceMcp = Get-Content -LiteralPath $workspaceMcpPath -Raw | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch { $workspaceMcp = $null }
+}
 foreach ($srv in @(@('powerbi-modeling-mcp', 'recommended'), @('powerbi-remote', 'optional'))) {
-    $has = $mcp -and $mcp.mcpServers.($srv[0])
-    Add-Check "mcp: $($srv[0])" $srv[1] ([bool]$has) `
-        $(if ($has) { 'configured' } else { "not in $copilot\mcp-config.json" }) `
-        "Add via /mcp, or copy from .vscode/mcp.json into $copilot\mcp-config.json (mcpServers)."
+    $workspaceHas = [bool]($workspaceMcp -and $workspaceMcp.mcpServers.($srv[0]))
+    $userHas = [bool]($userMcp -and $userMcp.mcpServers.($srv[0]))
+    $has = $workspaceHas -or $userHas
+    Add-Check "mcp: $($srv[0])" $srv[1] $has `
+        $(if ($workspaceHas) { 'configured in .mcp.json' } elseif ($userHas) { "configured in $copilot\mcp-config.json" } else { 'not configured' }) `
+        "Add via /mcp, or configure in .mcp.json (repository) or $copilot\mcp-config.json (user)."
 }
 
 Add-Cli 'npx' 'critical' 'Install Node.js; npx runs the powerbi-modeling MCP and the Desktop Bridge CLI.' `
