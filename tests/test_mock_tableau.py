@@ -794,6 +794,21 @@ def test_fake_engine_strips_only_a_canonical_uuid_prefix(tmp_path, filename: str
     assert namespace["LocalFilesSource"].asset_name(Path(filename)) == expected
 
 
+def test_fake_engine_emits_a_schema_valid_pbip_report_shortcut(tmp_path) -> None:
+    """The PBIP shortcut must identify the report artifact for first-party validation."""
+    engine = estate.install_fake_engine(tmp_path / "engine")
+    namespace = runpy.run_path(str(engine / "skills" / "tableau-migration" / "scripts" / "migrate_estate.py"))
+    output = tmp_path / "output"
+
+    assert namespace["emit"]({"worksheets": ["Sheet"]}, output, "Test") == 1
+
+    pbip = json.loads((output / "pbip" / "Test" / "Test.pbip").read_text(encoding="utf-8"))
+    assert (
+        pbip["$schema"] == "https://developer.microsoft.com/json-schemas/fabric/pbip/pbipProperties/1.0.0/schema.json"
+    )
+    assert pbip["artifacts"] == [{"report": {"path": "Test.Report"}}]
+
+
 @pytest.mark.parametrize("content_url", ["ProjectedSite", ""])
 def test_published_source_projection_uses_active_origin_and_site(content_url: str) -> None:
     """Only opt-in served bytes move; committed fixtures and unrelated archives stay unchanged."""
