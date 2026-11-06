@@ -734,6 +734,18 @@ def test_source_root_independent_syntax(argv: list[str], monkeypatch, capsys) ->
     assert "PRIVATE_ARGV_CANARY" not in captured.out
 
 
+def test_source_remote_origin_is_refused_before_path_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unsupported authority spellings must not reach version-dependent URL conversion."""
+    module = _source_module()
+
+    def forbidden(_path: str) -> str:
+        pytest.fail("remote file origin reached path conversion before lexical refusal")
+
+    monkeypatch.setattr(module, "url2pathname", forbidden)
+    origin = {"url": "file:////server/share/toolkit", "dir_info": {}}
+    assert module._toolkit_origin(origin) == (None, "install_form_unsupported", 1)  # pylint: disable=protected-access
+
+
 def test_source_physical_origin_and_direct_compatibility(source_control: SimpleNamespace) -> None:
     """Finite origin/path checks and direct -B help can be qualified without an installer."""
     lab = source_control

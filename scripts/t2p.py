@@ -173,10 +173,10 @@ def _toolkit_origin(origin: dict) -> tuple[Path | None, str, int]:
     ):
         return None, "install_form_unsupported", 1
     url = urlsplit(origin["url"])
-    if url.scheme != "file" or url.netloc or url.query or url.fragment:
+    if url.scheme != "file" or url.netloc or url.query or url.fragment or url.path.startswith("//"):
         return None, "install_form_unsupported", 1
     root = Path(url2pathname(url.path))
-    if not root.is_absolute() or root.drive.startswith("\\\\") or url.path.startswith("//"):
+    if not root.is_absolute() or root.drive.startswith("\\\\"):
         return None, "install_form_unsupported", 1
     if not root.is_dir():
         return None, "install_target_unavailable", 3

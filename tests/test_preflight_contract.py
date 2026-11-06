@@ -56,8 +56,9 @@ def test_copilot_home_selection_and_missing_directory_are_explicit() -> None:
         "    Add-Check 'Copilot home' 'CRITICAL' (Test-Path -LiteralPath $copilot -PathType Container)"
     ) in source
     _assert_add_check_tier(source, "Copilot home", "CRITICAL")
-    assert '"not in $copilot\\mcp-config.json"' in source
-    assert "into $copilot\\mcp-config.json (mcpServers)." in source
+    assert "$workspaceMcpPath = Join-Path $repoRoot '.mcp.json'" in source
+    assert "configured in .mcp.json" in source
+    assert "or configure in .mcp.json (repository) or $copilot\\mcp-config.json (user)." in source
     assert "~/.copilot" not in source
 
 
@@ -1650,7 +1651,13 @@ def _timeout_after_partial_trace(command: list[str], env: dict, root: Path) -> N
     raise subprocess.TimeoutExpired(command, 60, output="partial-out", stderr="partial-err")
 
 
-def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) -> tuple:
+def _synthetic_preflight_child(
+    tmp_path: Path,
+    mode: str,
+    *,
+    diagnostics: bool,
+    workspace_mcp: bool = False,
+) -> tuple:
     """Full script, synthetic profile/toolkit, command stubs only; not a real-host cache claim."""
     # Keep this one fixture's setup, invocation and monitored snapshot together.
     # pylint: disable=too-many-locals
@@ -1689,7 +1696,9 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
         ),
         encoding="utf-8",
     )
-    (copilot / "mcp-config.json").write_text(json.dumps({"mcpServers": {"powerbi-modeling-mcp": {}}}), encoding="utf-8")
+    (root / ".mcp.json" if workspace_mcp else copilot / "mcp-config.json").write_text(
+        json.dumps({"mcpServers": {"powerbi-modeling-mcp": {}}}), encoding="utf-8"
+    )
     nuget = profile / "nuget"
     for package, dll in (
         ("microsoft.analysisservices.netcore.retail.amd64", "Microsoft.AnalysisServices.Tabular.dll"),
@@ -1859,6 +1868,18 @@ def _synthetic_preflight_child(tmp_path: Path, mode: str, *, diagnostics: bool) 
     assert all(call[1:] in (["--version"], ["doctor"]) for call in calls if call[0] == "powerbi-report-author")
     _preflight_host_cache_observation(sidecar)
     return child, calls
+
+
+@pytest.mark.skipif(
+    os.name != "nt" or _PS is None, reason="requires Windows PowerShell/PowerShell 7 on Windows and NTFS"
+)
+def test_preflight_accepts_repository_mcp_config(tmp_path: Path) -> None:
+    """A project-level MCP config satisfies the check without a user-level copy."""
+    child, _ = _synthetic_preflight_child(tmp_path, "ready", diagnostics=False, workspace_mcp=True)
+
+    assert child.returncode == 0
+    assert "[OK  ] mcp: powerbi-modeling-mcp" in child.stdout
+    assert "configured in .mcp.json" in child.stdout
 
 
 def test_windows_preflight_host_cache_boundary(tmp_path: Path, monkeypatch) -> None:

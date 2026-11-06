@@ -295,7 +295,18 @@ def emit(spec, out, name):
             ),
             encoding="utf-8",
         )
-    (project / (name + ".pbip")).write_text(json.dumps({{"version": "1.0"}}), encoding="utf-8")
+    (project / (name + ".pbip")).write_text(
+        json.dumps(
+            {{
+                "$schema": "https://developer.microsoft.com/json-schemas/fabric/pbip/pbipProperties/1.0.0/schema.json",
+                "version": "1.0",
+                "artifacts": [{{"report": {{"path": name + ".Report"}}}}],
+                "settings": {{"enableAutoRecovery": True}},
+            }},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     return len(pages)
 
 

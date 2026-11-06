@@ -494,8 +494,7 @@ clone is self-configuring:
   intake, briefs, task-tool dispatch and independent Tableau comparison. **Read this first.**
   [Runbook §1.1](docs/operator-runbook.md#11-tooling) and `scripts/preflight.ps1` own plugin,
   skill and MCP setup and repair hints.
-- [`.vscode/mcp.json`](.vscode/mcp.json): MCP server definitions (auto-read by VS Code Copilot; CLI
-  users add the same with `/mcp`).
+- [`.mcp.json`](.mcp.json): portable MCP server definitions shared by VS Code Copilot and Copilot CLI.
 - Repo-local agents (`.github/agents/`) are committed and load automatically. So are repo-local
   skills under `.github/skills/` (an enabled skill location — see `.vscode/settings.json`), which
   currently ships four:

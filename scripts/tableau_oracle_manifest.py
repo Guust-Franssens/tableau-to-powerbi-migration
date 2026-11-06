@@ -141,7 +141,11 @@ def require_local_recovery_path(path: Path) -> None:
     text = str(path).replace("\\", "/")
     windows = PureWindowsPath(path)
     is_reserved = getattr(ntpath, "isreserved", None)
-    reserved = is_reserved(windows) if is_reserved is not None else windows.is_reserved()
+    if is_reserved is not None:
+        reserved = is_reserved(windows)
+    else:
+        # Python 3.11/3.12 lack ntpath.isreserved; their pathlib API is not deprecated.
+        reserved = windows.is_reserved()  # pylint: disable=deprecated-method
     if any(
         (
             "\0" in text,
