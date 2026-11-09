@@ -181,8 +181,7 @@ def test_documented_flag_requires_matching_add_argument_literal(text: str, expec
     assert _undocumented_flags(text, _documented_flags(text)) == expected
 
 
-@pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
-def test_every_documented_flag_is_actually_implemented(script: Path) -> None:
+def test_every_documented_flag_is_actually_implemented() -> None:
     """Every `--flag` a script's own `usage:` line advertises must appear somewhere in its code.
 
     `harvest_estate_assets.py` documented `--workbooks-only` in its usage line for a version that
@@ -193,20 +192,21 @@ def test_every_documented_flag_is_actually_implemented(script: Path) -> None:
     `tests/test_repo_layout.py`'s TREE_SCANNERS note on the same pattern) - their own file never
     mentions the flag at all, so the shim's declared target is read too before judging it missing.
     """
-    text = script.read_text(encoding="utf-8")
-    flags = _documented_flags(text)
-    if not flags:
-        return
+    for script in SCRIPTS:
+        text = script.read_text(encoding="utf-8")
+        flags = _documented_flags(text)
+        if not flags:
+            continue
 
-    shim_text = ""
-    shim_target = re.search(r"\.github/skills/\S+\.py", text)
-    if shim_target:
-        target_path = REPO_ROOT / shim_target.group(0)
-        if target_path.is_file():
-            shim_text = target_path.read_text(encoding="utf-8")
+        shim_text = ""
+        shim_target = re.search(r"\.github/skills/\S+\.py", text)
+        if shim_target:
+            target_path = REPO_ROOT / shim_target.group(0)
+            if target_path.is_file():
+                shim_text = target_path.read_text(encoding="utf-8")
 
-    undocumented = _undocumented_flags(text, flags, shim_text)
-    assert not undocumented, (
-        f"{script.name} documents {undocumented} in its usage: line, but the flag appears nowhere "
-        "else in the script (or its forwarding target) - implement it or remove it from the docstring."
-    )
+        undocumented = _undocumented_flags(text, flags, shim_text)
+        assert not undocumented, (
+            f"{script.name} documents {undocumented} in its usage: line, but the flag appears nowhere "
+            "else in the script (or its forwarding target) - implement it or remove it from the docstring."
+        )
