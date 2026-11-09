@@ -110,6 +110,7 @@ def _assessment_run(
         "INSERT INTO assessment_run VALUES ('2026-10-01T10:00:00Z', ?, ?, 1, ?)",
         (int(degraded), int(degraded), int(degraded)),
     )
+    connection.execute("INSERT INTO permission_collection VALUES (0)")
     if degraded:
         connection.execute("INSERT INTO listing_error (listing, severity, status) VALUES ('structure', 'primary', 503)")
     connection.commit()

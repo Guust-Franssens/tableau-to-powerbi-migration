@@ -219,6 +219,7 @@ def _write_assessment(
         "INSERT INTO assessment_run VALUES ('2026-01-01T00:00:00Z', ?, ?, ?, ?)",
         (int(primary_degradation), int(primary_degradation), total, len(listing_errors)),
     )
+    connection.execute("INSERT INTO permission_collection VALUES (0)")
     for error in listing_errors:
         connection.execute(
             "INSERT INTO listing_error (listing, severity, status) VALUES (?, ?, ?)",
