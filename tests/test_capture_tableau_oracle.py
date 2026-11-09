@@ -1269,7 +1269,7 @@ def test_loopback_exact_content_length_csv_counts_as_numeric_evidence(tmp_path):
             b"17\r\nRegion,Sales\r\nWest,10\r\n\r\n0\r\n\r\n",
             payload_facts.CSV_TRANSPORT_UNSUPPORTED_TRANSFER_ENCODING,
         ),
-        (
+        pytest.param(
             [
                 ("Content-Type", "text/csv"),
                 ("Content-Encoding", "gzip"),
@@ -1277,6 +1277,7 @@ def test_loopback_exact_content_length_csv_counts_as_numeric_evidence(tmp_path):
             ],
             gzip.compress(b"Region,Sales\r\nWest,10\r\n", mtime=0),
             payload_facts.CSV_TRANSPORT_UNSUPPORTED_CONTENT_ENCODING,
+            id="gzip-content-encoding",
         ),
         (
             [("Content-Type", "text/csv"), ("Content-Length", "abc")],
