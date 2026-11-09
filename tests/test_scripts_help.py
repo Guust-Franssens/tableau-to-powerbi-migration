@@ -47,27 +47,66 @@ def _tracked_scripts() -> list[Path]:
 SCRIPTS = _tracked_scripts()
 assert SCRIPTS, "no tracked scripts found under scripts/*.py - this guard now proves nothing"
 
+_HELP_SWEEP_RUNNER = """
+import os
+import runpy
+import sys
 
-@pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
-def test_help_exits_zero_on_a_cp1252_stdout(script: Path) -> None:
+base_argv = sys.argv[:]
+base_path = sys.path[:]
+base_env = os.environ.copy()
+base_cwd = os.getcwd()
+base_modules = sys.modules.copy()
+base_streams = (sys.stdin, sys.stdout, sys.stderr)
+base_stream_settings = tuple((stream.encoding, stream.errors) if stream is not None else (None, None) for stream in base_streams)
+for script in sys.argv[1:]:
+    try:
+        os.chdir(base_cwd)
+        os.environ.clear()
+        os.environ.update(base_env)
+        sys.argv = [script, "--help"]
+        sys.path = [os.path.dirname(script), *base_path[1:]]
+        runpy.run_path(script, run_name="__main__")
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            print(f"{script} --help exited {exc.code}", file=sys.stderr)
+            raise
+    except BaseException:
+        print(f"{script} --help failed", file=sys.stderr)
+        raise
+    finally:
+        os.chdir(base_cwd)
+        os.environ.clear()
+        os.environ.update(base_env)
+        sys.argv = base_argv
+        sys.path = base_path
+        sys.modules.clear()
+        sys.modules.update(base_modules)
+        sys.stdin, sys.stdout, sys.stderr = base_streams
+        for stream, (encoding, errors) in zip(base_streams, base_stream_settings):
+            if stream is not None and encoding and stream.encoding != encoding:
+                stream.reconfigure(encoding=encoding, errors=errors)
+"""
+
+
+def test_help_exits_zero_on_a_cp1252_stdout() -> None:
     """`--help` must not crash before it can print anything, on any platform.
 
     Windows' cp1252 default is reproduced here without a Windows runner by forcing
-    `PYTHONIOENCODING=cp1252` on a real subprocess - the same mechanism the issue's own repro used
-    (`$env:PYTHONUTF8` unset) to confirm the cause.
+    `PYTHONIOENCODING=cp1252` on one real subprocess that exercises every tracked script.
     """
     env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
     env.pop("PYTHONUTF8", None)
     result = subprocess.run(
-        [sys.executable, str(script), "--help"],
+        [sys.executable, "-c", _HELP_SWEEP_RUNNER, *(str(script) for script in SCRIPTS)],
         cwd=REPO_ROOT,
         capture_output=True,
-        text=True,
         env=env,
         timeout=60,
     )
+    stderr = result.stderr.decode("utf-8", errors="replace")
     assert result.returncode == 0, (
-        f"{script.name} --help exited {result.returncode} under a cp1252 stdout:\n{result.stderr[-2000:]}"
+        f"script help sweep exited {result.returncode} under a cp1252 stdout:\n{stderr[-2000:]}"
     )
 
 
