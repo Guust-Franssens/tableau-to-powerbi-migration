@@ -190,9 +190,11 @@ re-verification WARN with **no update/downgrade advice**.
 `discover_installed_plugin` in `scripts/engine_source.py` is the one resolver for the engine,
 `powerbi-authoring` and the skill bundles; preflight, `skill_plugin_source.py` and `t2p doctor` consume
 its evidence. It reads the Copilot CLI (`COPILOT_HOME`) and stable Windows VS Code
-(`%APPDATA%\Code\User\agent-plugins\installed.json`, schema version 1, pinned to
+(`~\.vscode\agent-plugins\installed.json`, schema version 1, pinned to
 [1.144.0, commit `2c33b50`](https://github.com/microsoft/vscode/blob/2c33b50b16c472efe58357d1d2a8a5414bc23fbf/src/vs/workbench/contrib/chat/common/plugins/fileBackedInstalledPluginsStore.ts)).
 An entry's `relativePath` wins over its `file:` `pluginUri`; a root outside that cache is ignored.
+The engine and authoring plugin match their registered `name`, or their plugin manifest when the
+optional name is absent.
 
 - **`T2P_PLUGIN_HOST` unset:** the one host holding a copy is used; a missing or unreadable registry counts as
   no copy, so a broken host never blocks the other. Distinct copies in **both** hosts refuse as `multiple`
@@ -201,8 +203,7 @@ An entry's `relativePath` wins over its `file:` `pluginUri`; a root outside that
 - **`$env:T2P_PLUGIN_HOST = 'vscode'` (or `'cli'`):** that host only, no fallback; a missing or broken engine or
   authoring copy there is a critical MISS (missing bundles stay recommended). Other values refuse.
   `Remove-Item Env:T2P_PLUGIN_HOST` restores automatic selection.
-- Two distinct copies in one host refuse as `multiple`. The engine and authoring plugins are identified by
-  their registered `name` (a VS Code entry without one is ignored), the skill bundles by content. VS Code copies
+- Two distinct copies in one host refuse as `multiple`. The skill bundles are identified by content. VS Code copies
   report **installed (enablement not verified)**: the registry holds no enablement state. Authoring still needs
   the manifest floor and `skills\powerbi-report-cli\SKILL.md`; without Python it is **not verified (Python
   unavailable)** and fails closed.

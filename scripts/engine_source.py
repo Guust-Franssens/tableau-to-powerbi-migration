@@ -33,13 +33,13 @@ preflight cannot warn about - and an unlisted tree is exactly how #107 happened.
 Installed plugin hosts (#727)
 -----------------------------
 The engine, `powerbi-authoring` and this repo's skill bundles install through the Copilot CLI
-(`COPILOT_HOME`) or VS Code agent plugins (`%APPDATA%/Code/User/agent-plugins/installed.json`).
+(`COPILOT_HOME`) or VS Code agent plugins. VS Code's registry is under the user's `.vscode` directory.
 `discover_installed_plugin` is the one resolver for all three. `T2P_PLUGIN_HOST=cli|vscode` selects a
 host with no fallback; an explicit installed-plugins root is an override that skips host selection.
-Unset, the one host holding a copy is used; distinct copies in both hosts refuse with a hint naming the
-selector, because equal versions do not prove equal bytes. A missing or unreadable registry is no copy.
-The engine and authoring plugins are identified by registered name, the skill bundles by content.
-VS Code records cannot prove enablement.
+Unset, the one host holding a copy is used; distinct copies in both hosts refuse with a hint naming
+the selector, because equal versions do not prove equal bytes. A missing or unreadable registry is no
+copy. The engine and authoring plugins are identified by registered name or, when absent, plugin
+manifest; the skill bundles by content. VS Code records cannot prove enablement.
 """
 
 from __future__ import annotations
@@ -248,29 +248,56 @@ def _vscode_root(entry: object, cache: Path) -> Path | None:
     return path if path.is_relative_to(cache) else None
 
 
+def _user_home(environment: dict[str, str]) -> Path:
+    return Path(environment.get("USERPROFILE") or environment.get("HOME") or Path.home()).expanduser()
+
+
+def _manifest_matches(root: Path, name: str) -> bool:
+    manifest = root / ".github" / "plugin" / "plugin.json"
+    try:
+        value = _read_json(manifest)
+    except (OSError, ValueError):
+        return False
+    return isinstance(value, dict) and value.get("name") == name
+
+
 def _vscode(kind: PluginKind, environment: dict[str, str]) -> InstalledPluginDiscovery:
-    if not environment.get("APPDATA"):
-        return InstalledPluginDiscovery(kind, "missing", "vscode", "APPDATA is not configured")
-    cache = Path(environment["APPDATA"]) / "Code" / "User" / "agent-plugins"
+    cache = _user_home(environment) / ".vscode" / "agent-plugins"
     registry = cache / "installed.json"
     if not registry.is_file():
-        return InstalledPluginDiscovery(kind, "missing", "vscode", f"registry is absent: {registry}")
+        return _select(kind, "vscode", [], f"registry is absent: {registry}")
     try:
         value = _read_json(registry)
     except (OSError, ValueError) as exc:
         return InstalledPluginDiscovery(kind, "invalid", "vscode", f"registry is unreadable: {registry} ({exc})")
     if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("installed"), list):
         return InstalledPluginDiscovery(kind, "invalid", "vscode", f"registry schema is not version 1: {registry}")
-    # Files alone are not identity: like the CLI registry, an entry names the engine or authoring plugin.
+
+    roots: list[Path] = []
+    entries: list[dict[str, object]] = []
     name = _PLUGINS[kind][0]
-    entries = [e for e in value["installed"] if kind == "bundles" or (isinstance(e, dict) and e.get("name") == name)]
-    located = [_vscode_root(entry, cache) for entry in entries]
-    return _select(
+    for entry in value["installed"]:
+        if not isinstance(entry, dict):
+            continue
+        root = _vscode_root(entry, cache)
+        registered_name = entry.get("name")
+        identity_matches = (
+            kind == "bundles"
+            or registered_name == name
+            or (registered_name is None and root is not None and _manifest_matches(root, name))
+        )
+        if identity_matches:
+            entries.append(entry)
+            if root is not None and _carries(kind, root):
+                roots.append(root)
+    selected = _select(
         kind,
         "vscode",
-        [root for root in located if root is not None and _carries(kind, root)],
-        f"no entry in {registry} carries the {kind} plugin",
+        roots,
+        f"no registry entry carries the {kind} plugin; checked registry: {registry}",
+        tuple(entries),
     )
+    return selected
 
 
 def discover_installed_plugin(
