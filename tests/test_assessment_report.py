@@ -604,33 +604,49 @@ def test_browser_file_render_and_interactions(tmp_path: Path) -> None:
     try:
         from playwright.sync_api import sync_playwright
 
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch()
+        playwright_context = sync_playwright()
+        playwright = playwright_context.start()
     except Exception as exc:  # noqa: BLE001 - optional local skip, mandatory CI failure.
+        if os.environ.get("T2P_REQUIRE_BROWSER_TESTS") == "1":
+            pytest.fail(f"Playwright required but unavailable: {type(exc).__name__}: {exc}")
+        pytest.skip("Chromium unavailable for optional browser test")
+    try:
+        browser = playwright.chromium.launch()
+    except Exception as exc:  # noqa: BLE001 - optional local skip, mandatory CI failure.
+        playwright.stop()
         if os.environ.get("T2P_REQUIRE_BROWSER_TESTS") == "1":
             pytest.fail(f"Chromium required but unavailable: {type(exc).__name__}: {exc}")
         pytest.skip("Chromium unavailable for optional browser test")
     requests: list[str] = []
     page_errors: list[str] = []
     console_errors: list[str] = []
-    page = browser.new_page()
-    page.on("request", lambda request: requests.append(request.url) if not request.url.startswith("file://") else None)
-    page.on("pageerror", lambda error: page_errors.append(str(error)))
-    page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
-    page.goto((root / "assessment-report.html").as_uri())
-    assert page.locator("section[data-section]").count() == 9
-    assert page.locator('[data-metric="event-total"]').inner_text() == EXPECTED_FULL["activity"]["events"]
-    assert page.locator('[data-metric="daily-days"]').inner_text() == EXPECTED_FULL["activity"]["daily_days"]
-    assert page.locator('[data-metric="unresolved-identities"]').inner_text() == EXPECTED_FULL["lineage"]["unresolved"]
-    assert page.locator("#inventory tbody tr").count() == EXPECTED_FULL["inventory"]["rows"]
-    page.locator("#sort-views").click()
-    assert (
-        page.locator("#inventory tbody tr").first.locator("td").nth(2).inner_text()
-        == EXPECTED_FULL["inventory"]["ascending_first"]
-    )
-    page.locator("#tier-filter").select_option("Low")
-    assert page.locator("#inventory tbody tr:not([hidden])").count() == EXPECTED_FULL["tiers"]["Low"]
-    assert not requests
-    assert not page_errors
-    assert not console_errors
-    browser.close()
+    try:
+        page = browser.new_page()
+        page.on(
+            "request", lambda request: requests.append(request.url) if not request.url.startswith("file://") else None
+        )
+        page.on("pageerror", lambda error: page_errors.append(str(error)))
+        page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
+        page.goto((root / "assessment-report.html").as_uri())
+        assert page.locator("section[data-section]").count() == 9
+        assert page.locator('[data-metric="event-total"]').inner_text() == EXPECTED_FULL["activity"]["events"]
+        assert page.locator('[data-metric="daily-days"]').inner_text() == EXPECTED_FULL["activity"]["daily_days"]
+        assert (
+            page.locator('[data-metric="unresolved-identities"]').inner_text() == EXPECTED_FULL["lineage"]["unresolved"]
+        )
+        assert page.locator("#inventory tbody tr").count() == EXPECTED_FULL["inventory"]["rows"]
+        page.locator("#sort-views").click()
+        assert (
+            page.locator("#inventory tbody tr").first.locator("td").nth(2).inner_text()
+            == EXPECTED_FULL["inventory"]["ascending_first"]
+        )
+        page.locator("#tier-filter").select_option("Low")
+        assert page.locator("#inventory tbody tr:not([hidden])").count() == EXPECTED_FULL["tiers"]["Low"]
+        assert not requests
+        assert not page_errors
+        assert not console_errors
+    finally:
+        try:
+            browser.close()
+        finally:
+            playwright.stop()
