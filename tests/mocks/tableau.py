@@ -221,6 +221,7 @@ class TableauSite:  # pylint: disable=too-many-instance-attributes
         rest_version: str = DEFAULT_REST_VERSION,
         page_size: int | None = None,
         single_row_as_object: bool = False,
+        vds: dict[str, Any] | None = None,
     ) -> None:
         self.site_id = site_id
         self.user_id = user_id
@@ -233,6 +234,9 @@ class TableauSite:  # pylint: disable=too-many-instance-attributes
         # Both clients defend against it, so the switch exists; it is off by default because we have
         # not measured it.
         self.single_row_as_object = single_row_as_object
+        # ASSUMED: this synthetic VDS shape is a regression contract, not live API qualification.
+        self.vds = vds
+        self.vds_requests: list[tuple[str, str, dict[str, Any]]] = []
 
         self.projects: list[Project] = []
         self.workbooks: list[Workbook] = []
@@ -366,12 +370,47 @@ class TableauSite:  # pylint: disable=too-many-instance-attributes
             return 204, {}, b""
         if path.endswith("/api/metadata/graphql"):
             return self._graphql(body)
+        if "/vizql-data-service/" in path:
+            return self._vds(method, path, body)
         marker = f"/api/{self.rest_version}/sites/{self.site_id}"
         if not path.startswith(marker + "/"):
             return self._fail(404, "404000", f"no route for {path}")
         if method != "GET":
             return self._fail(405, "405000", "site REST routes only support GET")
         return self._rest(path[len(marker) :], query)
+
+    def _vds(self, method: str, path: str, body: bytes) -> tuple[int, dict, bytes]:
+        """Serve the opt-in aggregate VDS contract; endpoint support is deliberately ASSUMED."""
+        if self.vds is None:
+            return self._fail(404, "404000", f"no route for {path}")
+        if method != "POST":
+            return self._fail(405, "405000", "VDS mock routes only support POST")
+        try:
+            request = json.loads(body or b"{}")
+        except json.JSONDecodeError:
+            return self._fail(400, "400000", "bad VDS request body")
+        if not isinstance(request, dict):
+            return self._fail(400, "400000", "bad VDS request body")
+        self.vds_requests.append((method, path, request))
+        if request.get("datasource_luid") != self.vds.get("datasource_luid"):
+            return self._fail(404, "404000", "datasource not found")
+        if path.endswith("/metadata"):
+            status = self.vds.get("metadata_status", 200)
+            if status != 200:
+                return self._fail(status, str(status), "synthetic VDS metadata refusal")
+            return self._json(
+                200,
+                self.vds.get(
+                    "metadata_response",
+                    {"fields": self.vds.get("fields", ["item_luid", "event_type", "event_name", "item_type", "day"])},
+                ),
+            )
+        if path.endswith("/query"):
+            status = self.vds.get("query_status", 200)
+            if status != 200:
+                return self._fail(status, str(status), "synthetic VDS query refusal")
+            return self._json(200, self.vds.get("query_response", {"rows": self.vds.get("rows", [])}))
+        return self._fail(404, "404000", f"no route for {path}")
 
     def call(self, path: str) -> dict[str, Any]:
         """The in-process seam the engine's ``survey_site(call, site_id)`` takes.

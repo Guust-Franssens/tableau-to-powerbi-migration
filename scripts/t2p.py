@@ -1,6 +1,6 @@
 """
 purpose: narrow doctor/start/status pilot delegating to existing configuration and run owners.
-usage:   python -B scripts/t2p.py {doctor,start,status} [args]
+usage:   python -B scripts/t2p.py {doctor,start,assess,status} [args]
 
 No readiness, liveness, fidelity, credential validity or completion certification.
 """
@@ -32,6 +32,11 @@ STAGE_OWNERS = {
     "reference": "capture_tableau_oracle.py",
     "bundle": "run_estate.py",
 }
+ASSESS_ONLY_OWNERS = {
+    "admin_insights": "admin_insights_collector.py",
+    "report": "assessment_report.py",
+}
+ALL_STAGE_OWNERS = STAGE_OWNERS | ASSESS_ONLY_OWNERS
 ENVELOPE_SCHEMA = {
     "type": "object",
     "required": [
@@ -53,7 +58,7 @@ ENVELOPE_SCHEMA = {
     ],
     "properties": {
         "schema_version": {"const": SCHEMA_VERSION},
-        "command": {"enum": ["doctor", "start", "status", None]},
+        "command": {"enum": ["doctor", "start", "assess", "status", None]},
         "status": {
             "enum": [
                 "ok",
@@ -75,7 +80,7 @@ ENVELOPE_SCHEMA = {
                 "type": "object",
                 "required": ["stage", "owner", "native_exit_code", "state", "artifact"],
                 "properties": {
-                    "stage": {"enum": list(STAGE_OWNERS)},
+                    "stage": {"enum": list(ALL_STAGE_OWNERS)},
                     "owner": {"type": "string"},
                     "native_exit_code": {"type": ["integer", "null"]},
                     "state": {"type": "string"},
@@ -135,17 +140,18 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
     parser = Parser(
         prog=prog,
         allow_abbrev=False,
-        description="Narrow pilot: diagnostic doctor, live project start, read-only status. Not readiness.",
+        description="Narrow pilot: diagnostic doctor, assessment-only survey, live project start, read-only status.",
     )
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
     for command, help_text in (
         ("doctor", "Read-only plain preflight and configuration presence; no login or run."),
         ("start", "Attempt one exact live Tableau project; assessment remains site-wide."),
+        ("assess", "Assess one Tableau site and write offline HTML; no harvest, capture, or conversion."),
         ("status", "Read-only inventory for one absolute run; no next action or readiness."),
     ):
         child = commands.add_parser(command, help=help_text, description=help_text, allow_abbrev=False)
         child.add_argument("--json", action="store_true", help="one t2p/v1 JSON envelope on stdout")
-        if command in {"doctor", "start"}:
+        if command in {"doctor", "start", "assess"}:
             child.add_argument("--env", type=Path, help="selected environment file (default: toolkit .env)")
         if command == "start":
             child.add_argument("--project", required=True, help="one nonempty exact project name or LUID")
@@ -154,6 +160,9 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
             child.add_argument("--session-id", help="existing Copilot session UUID attribution")
         if command == "status":
             child.add_argument("--run", required=True, help="absolute local physical run; never latest")
+        if command == "assess":
+            child.add_argument("--runs-parent", type=Path, help="explicit parent for _runs; no relocation")
+            child.add_argument("--session-id", help="existing Copilot session UUID attribution")
     return parser
 
 
@@ -311,7 +320,7 @@ def envelope(command: str | None) -> dict[str, Any]:
         "run_location": None,
         "runs_root": None,
         "run_location_reason": "not_applicable_no_run" if command == "doctor" else "not_allocated_path_withheld",
-        "path_report": None if command == "doctor" else path_report(command),
+        "path_report": None if command in {"doctor", "assess"} else path_report(command),
         "limitations": [],
         "proof_boundary": {
             "established": [],
@@ -359,7 +368,7 @@ def path_report(command: str) -> dict:
 def _stage(name: str, code: int | None, state: str, artifact: str | None = None) -> dict:
     return {
         "stage": name,
-        "owner": STAGE_OWNERS[name],
+        "owner": ALL_STAGE_OWNERS[name],
         "native_exit_code": code,
         "state": state,
         "artifact": artifact,
@@ -733,12 +742,16 @@ def start(args: argparse.Namespace, result: dict) -> int:
     import start_migration  # pylint: disable=import-outside-toplevel
 
     result["authority"] = "start_migration.py"
-    result["stages"] = [_stage(name, None, "not_launched") for name in STAGE_OWNERS]
-    delegated = ["--project", args.project]
+    assessing = args.command == "assess"
+    stage_names = (
+        ("preflight", "survey", "assessment", "admin_insights", "report") if assessing else tuple(STAGE_OWNERS)
+    )
+    result["stages"] = [_stage(name, None, "not_launched") for name in stage_names]
+    delegated = ["--assess-only"] if assessing else ["--project", args.project]
     for flag, value in (
         ("--env", args.env),
         ("--runs-parent", args.runs_parent),
-        ("--storage-decision", args.storage_decision),
+        ("--storage-decision", None if assessing else getattr(args, "storage_decision", None)),
         ("--session-id", args.session_id),
     ):
         if value is not None:
@@ -765,7 +778,7 @@ def start(args: argparse.Namespace, result: dict) -> int:
             _print_safe("RUNS_ROOT " + str(Path(run).parent))
         elif event == "stage":
             name = record["stage"]
-            result["stages"][list(STAGE_OWNERS).index(name)] = _stage(
+            result["stages"][stage_names.index(name)] = _stage(
                 name,
                 record["native_exit_code"],
                 record["state"],
@@ -773,13 +786,17 @@ def start(args: argparse.Namespace, result: dict) -> int:
             )
             if record["artifact"] is not None:
                 reference = {
-                    "owner": STAGE_OWNERS[name],
+                    "owner": ALL_STAGE_OWNERS[name],
                     "locator": record["artifact"],
                     "check": "owner_validated" if record["state"] == "ok" else "not_established",
                 }
                 result["evidence"].append(reference)
                 result["artifacts"].append(dict(reference))
-            if name == "bundle" and result["path_report"]["projection_verdict"] is None:
+            if (
+                name == "bundle"
+                and result["path_report"] is not None
+                and result["path_report"]["projection_verdict"] is None
+            ):
                 result["path_report"]["projection_reason"] = "not_recorded"
         elif event == "path_gate":
             report = result["path_report"]
@@ -808,6 +825,8 @@ def start(args: argparse.Namespace, result: dict) -> int:
             result["limitations"].append(record["reason"])
 
     _print_safe(_run_line(result, args))
+    if assessing:
+        result["path_report"] = None
     try:
         code = start_migration.main(delegated, observer=observe, diagnostic_env=True)
     except KeyboardInterrupt:
@@ -819,7 +838,9 @@ def start(args: argparse.Namespace, result: dict) -> int:
         "ok" if code == 0 else "interrupted" if code == 130 else "cannot_establish" if code == 3 else "error"
     )
     result["proof_boundary"]["established"] = ["delegated_wrapper_result"]
-    result["limitations"].append("capture_only_not_completion")
+    result["limitations"].append(
+        "assessment_only_not_migration_readiness" if assessing else "capture_only_not_completion"
+    )
     return code
 
 
@@ -877,7 +898,17 @@ def status(args: argparse.Namespace, result: dict) -> int:
             for row in observed.get("recorded_phases", [])
         ],
     }
+    if observed.get("intent") == "assessment":
+        result["observations"].update(
+            {
+                "intent": observed["intent"],
+                "not_requested": observed["not_requested"],
+                "assessment": observed["assessment"],
+            }
+        )
     result["limitations"] = ["last_observed_not_liveness", "customer_labels_withheld", "no_routing"]
+    if observed.get("intent") == "assessment":
+        result["limitations"].append("assessment_only_not_migration_readiness")
     result["proof_boundary"]["established"] = ["read_only_inventory"]
     return code
 
@@ -953,9 +984,14 @@ def _status_human(result: dict) -> None:
     now = "diagnostic observations unavailable (not assessed)."
     need = "inspect unavailable diagnostics; cause and required operator/lifecycle decision unknown."
     if observed is not None:
+        assessing = observed.get("intent") == "assessment"
         now = (
-            f"inventory scope={scalar(observed.get('inventory_scope'))}; "
-            f"{len(observed.get('units', []))} observed units (not the commissioned denominator)."
+            (
+                "assessment evidence observed; no migration readiness or handoff was checked."
+                if assessing
+                else f"inventory scope={scalar(observed.get('inventory_scope'))}; "
+                f"{len(observed.get('units', []))} observed units (not the commissioned denominator)."
+            )
             if result.get("run_location") is not None
             else "selected run identity was not established; no accepted run or child location is shown."
         )
@@ -973,9 +1009,17 @@ def _status_human(result: dict) -> None:
             )
         )
         need = (
-            "inspect missing/unassessable/finding observations; cause and required operator/lifecycle decision unknown."
+            (
+                "inspect unassessable assessment evidence before deciding next steps."
+                if assessing
+                else "inspect missing/unassessable/finding observations; cause and required operator/lifecycle decision unknown."
+            )
             if inspection
-            else "this diagnostic establishes no required operator/lifecycle decision."
+            else (
+                "review the HTML assessment and choose scope; this does not establish migration readiness."
+                if assessing
+                else "this diagnostic establishes no required operator/lifecycle decision."
+            )
         )
     lines = [
         f"STATUS {scalar(result.get('status'))} (exit {scalar(result.get('exit_code'))}) - observations only",
@@ -995,12 +1039,30 @@ def _status_human(result: dict) -> None:
         )
     if observed is not None:
         lines.extend(observation_lines(observed))
+        if observed.get("intent") == "assessment":
+            assessment = observed.get("assessment") or {}
+            lines.extend(
+                [
+                    "Intent: assessment",
+                    "Not requested: " + pairs(observed.get("not_requested")),
+                    f"Assessment: {scalar(assessment.get('assessment'))} ({scalar(assessment.get('assessment_reason'))})",
+                    f"Admin Insights: {scalar(assessment.get('admin_insights'))} "
+                    f"({scalar(assessment.get('admin_insights_reason'))})",
+                    f"Report: {scalar(assessment.get('report'))} ({scalar(assessment.get('report_reason'))})",
+                ]
+            )
     lines.extend(
         [
-            "Paths: NOT CHECKED; current longest/remaining budgets not recorded; "
-            "ceilings file=259, directory=247 UTF-16 code units.",
-            "Unavailable here: original intent/revision; named/openable artifact; full commissioned denominator; "
-            "recorded parent/root/repo/git/commit state; authoritative rerun; subst.",
+            *(
+                []
+                if observed is not None and observed.get("intent") == "assessment"
+                else [
+                    "Paths: NOT CHECKED; current longest/remaining budgets not recorded; "
+                    "ceilings file=259, directory=247 UTF-16 code units.",
+                    "Unavailable here: original intent/revision; named/openable artifact; full commissioned denominator; "
+                    "recorded parent/root/repo/git/commit state; authoritative rerun; subst.",
+                ]
+            ),
         ]
     )
     _print_safe("\n".join(lines))
@@ -1015,7 +1077,7 @@ def _delegate(args: argparse.Namespace, result: dict, *, json_mode: bool) -> int
     """Keep the same three owners and live descriptor transport, without a command registry."""
     if args.command == "doctor":
         code = doctor(args, result)
-    elif args.command == "start":
+    elif args.command in {"start", "assess"}:
         # The path marker is local progress, not part of the stdout JSON stream.
         if json_mode:
             with _native_to_stderr():
@@ -1032,7 +1094,7 @@ def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
     """Render one versioned result without reflecting exception text or invalid argv."""
     argv = list(sys.argv[1:] if argv is None else argv)
     json_mode = "--json" in argv
-    command = argv[0] if argv and argv[0] in {"doctor", "start", "status"} else None
+    command = argv[0] if argv and argv[0] in {"doctor", "start", "assess", "status"} else None
     result = envelope(command)
     args = None
     install_failure = False
@@ -1069,7 +1131,11 @@ def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
             _doctor_human(result, args)
     else:
         _print_safe(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2))
-    if args is not None and args.command == "start" and (not installed or result["authority"] == "start_migration.py"):
+    if (
+        args is not None
+        and args.command in {"start", "assess"}
+        and (not installed or result["authority"] == "start_migration.py")
+    ):
         line = _run_line(result, args)
         if json_mode:
             print(line, file=sys.stderr, flush=True)

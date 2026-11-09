@@ -42,3 +42,6 @@ jobs:
         # uv.lock is deliberately gitignored (it resolves to internal package-feed URLs), so this
         # resolves fresh rather than restoring a committed lockfile - same as checks.yml.
         run: uv sync --all-extras
+
+      - name: Install Chromium for offline HTML tests
+        run: uv run playwright install --with-deps chromium

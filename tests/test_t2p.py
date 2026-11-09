@@ -507,6 +507,8 @@ def test_doctor_child_cannot_create_pycache(monkeypatch, tmp_path, capsys):
         ["start", "--project", " "],
         ["start", "--proj", "name"],
         ["start", "--project", "name", "--workbook", "PRIVATE_ARGV_CANARY"],
+        ["assess", "--project", "name"],
+        ["assess", "--storage-decision", "policy.json"],
         ["doctor", "--show-values"],
         ["status"],
         ["status", "--run", "x", "--repair"],
@@ -520,7 +522,7 @@ def test_closed_surface_and_safe_syntax(argv, capsys):
     assert "PRIVATE_ARGV_CANARY" not in captured.out + captured.err
 
 
-@pytest.mark.parametrize("name", [None, "doctor", "start", "status"])
+@pytest.mark.parametrize("name", [None, "doctor", "start", "assess", "status"])
 def test_help_cp1252(name):
     result = subprocess.run(
         [sys.executable, "-B", str(REPO_ROOT / "scripts" / "t2p.py"), *([name] if name else []), "--help"],
@@ -592,6 +594,65 @@ def test_start_owner_parity_and_native_stages(monkeypatch, tmp_path, capsys, nat
     assert all(options["stdout"] is None and options["stderr"] is None for options in pipeline.options), (
         "stage output must stream without buffering"
     )
+
+
+def test_assess_facade_is_additive_and_projects_assessment_status(monkeypatch, tmp_path, capsys):
+    import start_migration
+
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, collector_outcome="available")
+    monkeypatch.setattr(
+        start_migration,
+        "diagnose_env",
+        lambda *a, **k: (
+            dict(ENV),
+            {"status": "READY_TO_ATTEMPT", "checks": [], "reason": "presence_only"},
+        ),
+    )
+
+    assert t2p.STAGE_OWNERS == {
+        "preflight": "preflight.ps1",
+        "survey": "run_engine_survey.py",
+        "assessment": "assess_estate.py",
+        "harvest": "harvest_estate_assets.py",
+        "reference": "capture_tableau_oracle.py",
+        "bundle": "run_estate.py",
+    }
+    assert t2p.ASSESS_ONLY_OWNERS == {
+        "admin_insights": "admin_insights_collector.py",
+        "report": "assessment_report.py",
+    }
+    assert t2p.main(["assess", "--json"]) == 0
+    result, captured = _json(capsys)
+    assert result["command"] == "assess"
+    assert result["path_report"] is None
+    assert "assessment_only_not_migration_readiness" in result["limitations"]
+    assert [row["stage"] for row in result["stages"]] == [
+        "preflight",
+        "survey",
+        "assessment",
+        "admin_insights",
+        "report",
+    ]
+    assert {row["stage"] for row in result["stages"]}.isdisjoint({"harvest", "reference", "bundle"})
+    assert captured.out.count("\n") == 1
+    progress = "".join(piece.err for piece in pipeline.before_exit) + captured.err
+    assert progress.splitlines()[0].startswith("RUN NOT_ALLOCATED; runs_root=")
+    assert progress.splitlines()[-1].startswith("RUN ")
+    assert [next(Path(part).name for part in command if part.endswith(".py")) for command in pipeline.commands] == [
+        "run_engine_survey.py",
+        "assess_estate.py",
+        "admin_insights_collector.py",
+        "assessment_report.py",
+    ]
+
+    run = result["run_location"]["physical_run"]
+    assert t2p.main(["status", "--run", run, "--json"]) == 0
+    status, _captured_status = _json(capsys)
+    assert status["command"] == "status"
+    assert status["observations"]["intent"] == "assessment"
+    assert status["observations"]["assessment"]["report"] == "current"
+    assert status["observations"]["not_requested"]["bundle"] == "not_requested"
+    assert "assessment_only_not_migration_readiness" in status["limitations"]
 
 
 def test_start_preallocation_block_has_no_path(monkeypatch, capsys):
@@ -701,7 +762,7 @@ def test_status_rejects_relative_without_scan(capsys):
     assert result["run_location"] is None
 
 
-@pytest.mark.parametrize("command", ["doctor", "start", "status"])
+@pytest.mark.parametrize("command", ["doctor", "start", "assess", "status"])
 def test_explicit_branch_reaches_owner(monkeypatch, capsys, command):
     calls = []
 
@@ -710,8 +771,13 @@ def test_explicit_branch_reaches_owner(monkeypatch, capsys, command):
         result["status"] = "error"
         return 1
 
-    monkeypatch.setattr(t2p, command, owner)
-    arguments = {"doctor": [], "start": ["--project", "Fixture"], "status": ["--run", "relative"]}
+    monkeypatch.setattr(t2p, "start" if command == "assess" else command, owner)
+    arguments = {
+        "doctor": [],
+        "start": ["--project", "Fixture"],
+        "assess": [],
+        "status": ["--run", "relative"],
+    }
     t2p.main([command, *arguments[command], "--json"])
     _json(capsys)
     assert calls == [command], "explicit command branch must reach its owning operation"
@@ -1612,7 +1678,7 @@ def test_offline_help_output_journey(monkeypatch, tmp_path, capsys):
         t2p.main(["--help"])
     assert help_result.value.code == 0
     help_text = capsys.readouterr().out
-    assert "{doctor,start,status}" in help_text
+    assert "{doctor,start,assess,status}" in help_text
     assert t2p.main(["doctor", "--json"]) == 0
     doctor_result, _ = _json(capsys)
     assert doctor_result["status"] == "READY_TO_ATTEMPT"

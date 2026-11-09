@@ -17,6 +17,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
+import assess_estate  # noqa: E402  # pylint: disable=wrong-import-position
+import assessment_report  # noqa: E402  # pylint: disable=wrong-import-position
+import run_status  # noqa: E402  # pylint: disable=wrong-import-position
 import start_migration as frontdoor  # noqa: E402  # pylint: disable=wrong-import-position
 import work_dirs  # noqa: E402  # pylint: disable=wrong-import-position
 
@@ -105,9 +108,14 @@ def test_bundle_child_private_path_gate_channel(tmp_path, capfd, state, verdict,
         assert records == [], "direct default must not introduce an observer channel"
 
 
-def _survey(*, project: bool = False, workbook: bool = False, unmatched=None, empty: bool = False) -> dict:
+def _survey(
+    *, project: bool = False, workbook: bool = False, unmatched=None, empty: bool = False, missing_luid: bool = False
+) -> dict:
     rows = [] if empty else [{"luid": WORKBOOK, "name": "Finance", "project": "Finance"}]
+    if missing_luid and rows:
+        rows[0].pop("luid")
     return {
+        "degraded": False,
         "workbooks": rows,
         "required_datasources": [{"luid": DATASOURCE, "datasource_name": "Ledger"}],
         "scope": {
@@ -119,35 +127,112 @@ def _survey(*, project: bool = False, workbook: bool = False, unmatched=None, em
             "unmatched": [] if unmatched is None else unmatched,
             "datasource_index": "site-wide",
         },
-        "summary": {"scoped": project or workbook, "workbooks_total": len(rows)},
+        "summary": {"scoped": project or workbook, "workbooks_total": len(rows), "degraded": False},
     }
 
 
-def _write_assessment(out: Path, *, duplicate_project: bool = False, extra_workbook_project: str | None = None) -> None:
+def _write_assessment(
+    out: Path,
+    *,
+    duplicate_project: bool = False,
+    extra_workbook_project: str | None = None,
+    primary_degradation: bool = False,
+    empty_project_luid: bool = False,
+) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    rows = [{"luid": WORKBOOK}]
+    rows = [
+        {
+            "luid": WORKBOOK,
+            "name": "Finance",
+            "rank": 1,
+            "cumulative_share": 1.0,
+            "tier": "migrate",
+            "tier_reason": "high usage",
+            "complexity": 1.0 if not primary_degradation else 0.0,
+            "views_lifetime": 1,
+        }
+    ]
     if extra_workbook_project:
-        rows.append({"luid": EXTRA_WORKBOOK})
-    (out / "assessment.json").write_text(json.dumps({"workbooks": rows}), encoding="utf-8")
+        rows.append(
+            {
+                **rows[0],
+                "luid": EXTRA_WORKBOOK,
+                "name": "Extra workbook",
+                "rank": 2,
+                "cumulative_share": 1.0,
+            }
+        )
+    listing_errors = [{"listing": "datasources", "severity": "primary", "status": 403}] if primary_degradation else []
+    total = len(rows)
+    assessment = {
+        "degraded": primary_degradation,
+        "degraded_primary": primary_degradation,
+        "listing_errors": listing_errors,
+        "iam_hard_cases": [],
+        "datasource_hazards": {},
+        "workbooks": rows,
+        "summary": {
+            "workbooks_total": total,
+            "degraded": primary_degradation,
+            "degraded_primary": primary_degradation,
+        },
+    }
+    (out / "assessment.json").write_text(json.dumps(assessment), encoding="utf-8")
     connection = sqlite3.connect(out / "estate.db")
-    connection.executescript(
-        f"""
-        CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT);
-        CREATE TABLE workbook (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE datasource (luid TEXT PRIMARY KEY, name TEXT, project_luid TEXT);
-        CREATE TABLE dependency (workbook_luid TEXT, datasource_luid TEXT, datasource_name TEXT);
-        INSERT INTO project VALUES ('{PROJECT}', 'Finance');
-        INSERT INTO workbook VALUES ('{WORKBOOK}', 'Finance', '{PROJECT}');
-        INSERT INTO datasource VALUES ('{DATASOURCE}', 'Ledger', 'project-other');
-        INSERT INTO dependency VALUES ('{WORKBOOK}', '{DATASOURCE}', 'Ledger');
-        """
+    connection.executescript(assess_estate.SCHEMA)
+    connection.execute(
+        "INSERT INTO project (luid, name, parent_luid, content_permissions) VALUES (?, ?, '', '')",
+        (PROJECT, "Finance"),
     )
-    if duplicate_project:
-        connection.execute("INSERT INTO project VALUES ('dddddddd-4444-4444-8444-dddddddddddd', 'Finance')")
-    if extra_workbook_project:
-        connection.execute("INSERT OR IGNORE INTO project VALUES (?, 'Other')", (OTHER_PROJECT,))
+    connection.execute(
+        "INSERT INTO datasource (luid, name, project, project_luid) VALUES (?, ?, ?, ?)",
+        (DATASOURCE, "Ledger", "Other", "project-other"),
+    )
+    for row in rows:
+        luid = row["luid"]
         connection.execute(
-            "INSERT INTO workbook VALUES (?, 'Extra workbook', ?)", (EXTRA_WORKBOOK, extra_workbook_project)
+            "INSERT INTO workbook (luid, name, project, project_luid, sheets, dashboards, calcs, lods, "
+            "table_calcs, complexity, complexity_understated, views_lifetime, view_count, rank, "
+            "cumulative_share, tier, tier_reason) VALUES (?, ?, ?, ?, 1, 0, 0, 0, 0, ?, 0, 1, 1, ?, ?, ?, ?)",
+            (
+                luid,
+                row["name"],
+                "Finance",
+                "" if empty_project_luid else PROJECT if luid == WORKBOOK else extra_workbook_project,
+                row["complexity"],
+                row["rank"],
+                row["cumulative_share"],
+                row["tier"],
+                row["tier_reason"],
+            ),
+        )
+        connection.execute(
+            "INSERT INTO view (luid, workbook_luid, name, content_url, views_lifetime) VALUES (?, ?, ?, ?, 1)",
+            (f"view-{luid}", luid, "Overview", "overview"),
+        )
+        connection.execute(
+            "INSERT INTO dependency (workbook_name, workbook_luid, datasource_name, datasource_luid, source) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (row["name"], luid, "Ledger", DATASOURCE, "survey"),
+        )
+    connection.execute(
+        "INSERT INTO assessment_run VALUES ('2026-01-01T00:00:00Z', ?, ?, ?, ?)",
+        (int(primary_degradation), int(primary_degradation), total, len(listing_errors)),
+    )
+    for error in listing_errors:
+        connection.execute(
+            "INSERT INTO listing_error (listing, severity, status) VALUES (?, ?, ?)",
+            (error["listing"], error["severity"], error["status"]),
+        )
+    if duplicate_project:
+        connection.execute(
+            "INSERT INTO project (luid, name, parent_luid, content_permissions) "
+            "VALUES ('dddddddd-4444-4444-8444-dddddddddddd', 'Finance', '', '')"
+        )
+    if extra_workbook_project:
+        connection.execute(
+            "INSERT OR IGNORE INTO project (luid, name, parent_luid, content_permissions) VALUES (?, 'Other', '', '')",
+            (extra_workbook_project,),
         )
     connection.commit()
     connection.close()
@@ -234,12 +319,18 @@ class _Pipeline:
         duplicate_project: bool = False,
         extra_workbook_project: str | None = None,
         harvest_outcome: str = "theirs_only",
+        primary_degradation: bool = False,
+        missing_survey_luid: bool = False,
+        collector_outcome: str = "unavailable",
+        empty_project_luid: bool = False,
+        env_values: dict[str, str] | None = None,
+        inconsistent_assessment: bool = False,
     ) -> None:
         self.root = tmp_path / "toolkit"
         self.root.mkdir()
         monkeypatch.setattr(frontdoor, "REPO_ROOT", self.root)
         monkeypatch.setattr(work_dirs, "REPO_ROOT", self.root)
-        monkeypatch.setattr(frontdoor, "resolve_env", lambda _path: dict(ENV))
+        monkeypatch.setattr(frontdoor, "resolve_env", lambda _path: dict(env_values or ENV))
         self.guard_calls = []
         monkeypatch.setattr(
             frontdoor.harvest,
@@ -256,6 +347,11 @@ class _Pipeline:
         self.duplicate_project = duplicate_project
         self.extra_workbook_project = extra_workbook_project
         self.harvest_outcome = harvest_outcome
+        self.primary_degradation = primary_degradation
+        self.missing_survey_luid = missing_survey_luid
+        self.collector_outcome = collector_outcome
+        self.empty_project_luid = empty_project_luid
+        self.inconsistent_assessment = inconsistent_assessment
         self.commands: list[list[str]] = []
         self.options: list[dict] = []
         self.before_exit = []
@@ -282,6 +378,8 @@ class _Pipeline:
                 print(f"producer-stderr:{_script_name(command)}", file=sys.stderr)
                 print("OK")
                 pipeline._emit_artifacts(self.command)
+                if _script_name(self.command) == "assessment_report.py":
+                    self.code = assessment_report.main(["--run", self.command[self.command.index("--run") + 1]])
 
             def __enter__(self):
                 return self
@@ -340,16 +438,40 @@ class _Pipeline:
             return Path(command[command.index(flag) + 1])
 
         if name == "run_engine_survey.py":
-            survey = self.survey or _survey(project="--project" in command, workbook="--workbook" in command)
+            survey = self.survey or _survey(
+                project="--project" in command,
+                workbook="--workbook" in command,
+                missing_luid=self.missing_survey_luid,
+            )
             target = arg("--json")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("not-json" if self.malformed_survey else json.dumps(survey), encoding="utf-8")
         elif name == "assess_estate.py":
+            output = arg("--out")
             _write_assessment(
-                arg("--out"),
+                output,
                 duplicate_project=self.duplicate_project,
                 extra_workbook_project=self.extra_workbook_project,
+                primary_degradation=self.primary_degradation,
+                empty_project_luid=self.empty_project_luid,
             )
+            if self.inconsistent_assessment:
+                document = json.loads((output / "assessment.json").read_text(encoding="utf-8"))
+                document["summary"]["workbooks_total"] = 0
+                (output / "assessment.json").write_text(json.dumps(document), encoding="utf-8")
+        elif name == "admin_insights_collector.py" and self.exit_codes.get(name, 0) in {0, 3}:
+            outcome = self.collector_outcome
+            reason = {"unavailable": "datasource_not_found", "cannot_establish": "transport_failure"}.get(outcome)
+            result = {
+                "schema": "admin-insights-aggregate/1",
+                "outcome": outcome,
+                "reason": None if outcome == "available" else reason,
+                "datasource_luid": DATASOURCE if outcome == "available" else None,
+                "window": {"first_day": None, "last_day": None},
+                "rows": [],
+                "unmapped_events": 0,
+            }
+            arg("--out").write_text(json.dumps(result), encoding="utf-8")
         elif name == "harvest_estate_assets.py":
             _write_harvest(arg("--out"), outcome=self.harvest_outcome)
         elif name == "capture_tableau_oracle.py":
@@ -368,6 +490,270 @@ def _captured(capsys, pipeline: _Pipeline) -> tuple[str, str]:
     out = "".join(piece.out for piece in pipeline.before_exit) + tail.out
     err = "".join(piece.err for piece in pipeline.before_exit) + tail.err
     return out, err
+
+
+def _assessment_run(pipeline: _Pipeline) -> Path:
+    return next((pipeline.root / "_runs").iterdir())
+
+
+def test_assess_only_runs_four_children_and_publishes_current_html(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, collector_outcome="available")
+
+    assert frontdoor.main(["--assess-only"]) == 0
+
+    run = _assessment_run(pipeline)
+    assert [Path(command[3]).name for command in pipeline.commands] == [
+        "run_engine_survey.py",
+        "assess_estate.py",
+        "admin_insights_collector.py",
+        "assessment_report.py",
+    ]
+    assert not any(
+        "harvest_estate_assets.py" in command or "capture_tableau_oracle.py" in command for command in pipeline.commands
+    )
+    assert json.loads((run / "run.json").read_text(encoding="utf-8"))["intent"] == "assessment"
+    assert (run / "assessment" / "assessment-report.html").is_file()
+    status, code = run_status.build_status(run)
+    assert code == 0
+    assert status["assessment"]["assessment"] == "established"
+    assert status["assessment"]["admin_insights"] == "available"
+    out, _err = _captured(capsys, pipeline)
+    assert "ASSESSMENT COMPLETE (not migration readiness)" in out
+    assert "t2p start --project <name>" in out
+    assert "NEXT STEPS" in out
+    html_report = (run / "assessment" / "assessment-report.html").read_text(encoding="utf-8")
+    assert 'data-section="3" data-state="ok"' in html_report
+
+
+def test_assess_only_guard_is_extended_without_changing_start_guard(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+    assert frontdoor.main(["--assess-only"]) == 0
+    assessment_artifacts = pipeline.guard_calls[0][2]["artifacts"]
+    assert assessment_artifacts[-2:] == (
+        "assessment/admin_insights.json",
+        "assessment/assessment-report.html",
+    )
+
+    start_root = tmp_path / "start"
+    start_root.mkdir()
+    start = _Pipeline(monkeypatch, start_root, capsys)
+    assert frontdoor.main([]) == 0
+    start_artifacts = start.guard_calls[0][2]["artifacts"]
+    assert "assessment/admin_insights.json" not in start_artifacts
+    assert "assessment/assessment-report.html" not in start_artifacts
+
+
+def test_assess_only_allocation_refusal_precedes_any_tableau_child(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+
+    def refuse_allocation(*_args, **_kwargs):
+        raise PermissionError("synthetic allocation failure")
+
+    monkeypatch.setattr(work_dirs, "allocate_run", refuse_allocation)
+
+    assert frontdoor.main(["--assess-only"]) == 1
+
+    assert pipeline.commands == []
+    assert pipeline.preflight == []
+    _out, err = _captured(capsys, pipeline)
+    assert "Run allocation refused: PermissionError: synthetic allocation failure" in err
+
+
+@pytest.mark.parametrize(
+    ("outcome", "exit_code", "section_state", "reason"),
+    [
+        ("unavailable", 0, "unavailable", "datasource_not_found"),
+        ("cannot_establish", 3, "cannot_establish", "transport_failure"),
+    ],
+)
+def test_assess_only_collector_outcomes_share_report_and_status(
+    monkeypatch, tmp_path, capsys, outcome, exit_code, section_state, reason
+):
+    pipeline = _Pipeline(
+        monkeypatch, tmp_path, capsys, collector_outcome=outcome, exit_codes={"admin_insights_collector.py": exit_code}
+    )
+
+    assert frontdoor.main(["--assess-only"]) == exit_code
+
+    run = _assessment_run(pipeline)
+    status, status_code = run_status.build_status(run)
+    assert status_code == (0 if outcome == "unavailable" else 1)
+    assert status["assessment"]["admin_insights"] == outcome
+    report = (run / "assessment" / "assessment-report.html").read_text(encoding="utf-8")
+    assert f'data-section="3" data-state="{section_state}" data-reason="{reason}"' in report
+    out, _err = _captured(capsys, pipeline)
+    assert ("ASSESSMENT COMPLETE (not migration readiness)" in out) == (exit_code == 0)
+    if exit_code == 3:
+        assert "ASSESSMENT INCOMPLETE (transport_failure)" in out
+
+
+def test_assess_only_collector_crash_renders_not_collected_and_status_missing(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, exit_codes={"admin_insights_collector.py": 1})
+
+    assert frontdoor.main(["--assess-only"]) == 1
+
+    run = _assessment_run(pipeline)
+    report = (run / "assessment" / "assessment-report.html").read_text(encoding="utf-8")
+    assert 'data-section="3" data-state="not_collected" data-reason="collector_no_result"' in report
+    status, code = run_status.build_status(run)
+    assert code == 1
+    assert status["assessment"]["admin_insights"] == "not_collected"
+    assert any(finding["reason"] == "evidence_missing" for finding in status["findings"])
+
+
+def test_assess_only_primary_degradation_skips_collector_and_renders_incomplete(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        primary_degradation=True,
+        exit_codes={"assess_estate.py": 3},
+    )
+
+    assert frontdoor.main(["--assess-only"]) == 3
+
+    run = _assessment_run(pipeline)
+    assert [Path(command[3]).name for command in pipeline.commands] == [
+        "run_engine_survey.py",
+        "assess_estate.py",
+        "assessment_report.py",
+    ]
+    report = (run / "assessment" / "assessment-report.html").read_text(encoding="utf-8")
+    assert "INCOMPLETE" in report
+    assert 'data-section="3" data-state="not_collected" data-reason="degraded_primary"' in report
+    status, code = run_status.build_status(run)
+    assert code == 1
+    assert [finding["reason"] for finding in status["findings"]] == ["assessment_degraded_primary"]
+
+
+def test_assess_only_missing_survey_luid_refuses_before_assessor_and_report(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, missing_survey_luid=True)
+
+    assert frontdoor.main(["--assess-only"]) == 3
+
+    run = _assessment_run(pipeline)
+    assert [Path(command[3]).name for command in pipeline.commands] == ["run_engine_survey.py"]
+    assert not (run / "assessment" / "assessment-report.html").exists()
+    status, code = run_status.build_status(run)
+    assert code == 1
+    assert status["assessment"]["assessment"] == "missing"
+
+
+@pytest.mark.parametrize(
+    "pipeline_options",
+    [
+        {"malformed_survey": True},
+        {"survey": _survey(empty=True)},
+    ],
+)
+def test_assess_only_invalid_or_empty_survey_stops_before_assessment_and_report(
+    monkeypatch, tmp_path, capsys, pipeline_options
+):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, **pipeline_options)
+
+    assert frontdoor.main(["--assess-only"]) == 3
+
+    run = _assessment_run(pipeline)
+    assert [Path(command[3]).name for command in pipeline.commands] == ["run_engine_survey.py"]
+    assert not (run / "assessment" / "assessment-report.html").exists()
+
+
+def test_assess_only_inconsistent_assessment_evidence_stops_before_collector_and_report(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, inconsistent_assessment=True)
+
+    assert frontdoor.main(["--assess-only"]) == 3
+
+    run = _assessment_run(pipeline)
+    assert [Path(command[3]).name for command in pipeline.commands] == [
+        "run_engine_survey.py",
+        "assess_estate.py",
+    ]
+    assert not (run / "assessment" / "assessment-report.html").exists()
+    status, code = run_status.build_status(run)
+    assert code == 1
+    assert any(row["reason"] == "evidence_unrecognized" for row in status["findings"])
+
+
+def test_assess_only_allows_empty_project_luid_and_start_still_rejects_it(monkeypatch, tmp_path, capsys):
+    assessment = _Pipeline(monkeypatch, tmp_path, capsys, empty_project_luid=True)
+    assert frontdoor.main(["--assess-only"]) == 0
+    assert (_assessment_run(assessment) / "assessment" / "assessment-report.html").is_file()
+
+    migration_root = tmp_path / "migration"
+    migration_root.mkdir()
+    migration = _Pipeline(monkeypatch, migration_root, capsys, empty_project_luid=True)
+    assert frontdoor.main([]) == 3
+    assert [Path(command[3]).name for command in migration.commands] == [
+        "run_engine_survey.py",
+        "assess_estate.py",
+    ]
+
+
+def test_assess_only_default_site_note_precedes_allocation(monkeypatch, tmp_path, capsys):
+    env = {**ENV, "TABLEAU_SITE": ""}
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys, env_values=env)
+
+    assert frontdoor.main(["--assess-only"]) == 0
+
+    _out, err = _captured(capsys, pipeline)
+    note = "NOTE: TABLEAU_SITE is empty, so the Default site of a Tableau Server is used."
+    assert note in err
+    assert err.index(note) < err.index("producer-stderr:run_engine_survey.py")
+    assert "synthetic-secret" not in err
+
+
+def test_assess_only_repeats_default_site_note_after_failed_survey(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        env_values={**ENV, "TABLEAU_SITE": ""},
+        exit_codes={"run_engine_survey.py": 7},
+    )
+
+    assert frontdoor.main(["--assess-only"]) == 1
+
+    out, err = _captured(capsys, pipeline)
+    note = "NOTE: TABLEAU_SITE is empty, so the Default site of a Tableau Server is used."
+    assert err.count(note) == 2
+    assert "ASSESSMENT FAILED (survey_failed)" in out
+
+
+def test_assess_only_repeats_default_site_note_after_degraded_assessment(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(
+        monkeypatch,
+        tmp_path,
+        capsys,
+        env_values={**ENV, "TABLEAU_SITE": ""},
+        primary_degradation=True,
+        exit_codes={"assess_estate.py": 3},
+    )
+
+    assert frontdoor.main(["--assess-only"]) == 3
+
+    _out, err = _captured(capsys, pipeline)
+    note = "NOTE: TABLEAU_SITE is empty, so the Default site of a Tableau Server is used."
+    assert err.count(note) == 2
+
+
+def test_assess_only_stage_four_parent_reporting_failure_keeps_current_status(monkeypatch, tmp_path, capsys):
+    pipeline = _Pipeline(monkeypatch, tmp_path, capsys)
+    original = frontdoor._finish_stage
+
+    def fail_report_output(result, index, state, detail="", *, total=5):
+        if result.name == "report":
+            raise BrokenPipeError("synthetic parent output failure")
+        original(result, index, state, detail, total=total)
+
+    monkeypatch.setattr(frontdoor, "_finish_stage", fail_report_output)
+
+    assert frontdoor.main(["--assess-only"]) == 1
+
+    run = _assessment_run(pipeline)
+    assert (run / "assessment" / "assessment-report.html").is_file()
+    status, code = run_status.build_status(run)
+    assert code == 0
+    assert status["assessment"]["report"] == "current"
 
 
 @pytest.fixture(name="guard_repo")
@@ -479,6 +865,7 @@ def test_site_run_streams_children_allocates_under_toolkit_and_has_honest_handof
     assert f"BUNDLE {run / 'bundle'} (present)" in out
     assert f"REFERENCES {run / 'oracle'} (present)" in out
     assert "fidelity NOT VERIFIED" in out
+    assert not (run / "assessment" / "assessment-report.html").exists()
 
 
 def test_intersection_scope_uses_resolved_workbook_id_and_session_precedence(monkeypatch, tmp_path, capsys):

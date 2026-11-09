@@ -114,6 +114,7 @@ EXPECTED_EXACT_SKIP_REASONS: frozenset[str] = frozenset(
         # tests/test_disarm_credential_gate.py: real junction and real ACL controls (Windows only).
         "junctions are a Windows reparse point",
         "the gate only ever set ACLs on Windows",
+        "Chromium unavailable for optional browser test",
     }
 )
 

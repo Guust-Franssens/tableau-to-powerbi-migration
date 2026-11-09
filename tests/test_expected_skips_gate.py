@@ -78,6 +78,10 @@ def _workflow_text() -> str:
     return (REPO_ROOT / ".github" / "workflows" / "checks.yml").read_text(encoding="utf-8")
 
 
+def _setup_workflow_text() -> str:
+    return (REPO_ROOT / ".github" / "workflows" / "copilot-setup-steps.yml").read_text(encoding="utf-8")
+
+
 def _workflow_job_block(workflow: str, job: str) -> str:
     lines = workflow.splitlines()
     start = next((index for index, line in enumerate(lines) if line == f"  {job}:"), None)
@@ -170,6 +174,22 @@ def _assert_engine_drift_job(workflow: str) -> None:
         _workflow_step_block(job, name="Tests (engine-dependent, latest engine drift signal)")
     )
     assert test_command == f"{conftest.REQUIRE_ENGINE_TESTS_ENV}=1 uv run pytest -q {ENGINE_TEST_TARGET_COMMAND}"
+
+
+def _assert_browser_test_setup(workflow: str, setup_workflow: str) -> None:
+    checks = _workflow_job_block(workflow, "checks")
+    install = _workflow_step_block(checks, name="Install Chromium for offline HTML tests")
+    tests = _workflow_step_block(checks, name="Tests")
+    assert "uv run playwright install --with-deps chromium" in install
+    assert checks.index(install) < checks.index(tests), "Chromium must be installed before Tests"
+    assert _literal_run_command(tests) == (
+        "T2P_REQUIRE_BROWSER_TESTS=1 "
+        "T2P_ENGINE_TESTS_NOT_CHECKED_REASON=covered-by-pinned-engine-integration-job uv run pytest -q"
+    )
+    setup = _workflow_job_block(setup_workflow, "copilot-setup-steps")
+    setup_install = _workflow_step_block(setup, name="Install Chromium for offline HTML tests")
+    assert "uv run playwright install --with-deps chromium" in setup_install
+    assert not _literal_env(setup), "browser requirement is a test command setting, not setup job-wide env"
 
 
 def test_expected_skip_reasons_contain_known_entries() -> None:
@@ -519,6 +539,21 @@ def test_workflow_runs_engine_dependent_tests_in_required_jobs() -> None:
     _assert_engine_integration_job(workflow)
     _assert_engine_drift_job(workflow)
     assert "covered-by-pinned-engine-integration-job uv run pytest -q" in workflow
+    _assert_browser_test_setup(workflow, _setup_workflow_text())
+
+
+def test_browser_workflow_contract_rejects_each_missing_gate() -> None:
+    workflow = _workflow_text()
+    setup = _setup_workflow_text()
+    _assert_browser_test_setup(workflow, setup)
+    with pytest.raises(AssertionError):
+        _assert_browser_test_setup(
+            workflow.replace("uv run playwright install --with-deps chromium", "uv run playwright install", 1), setup
+        )
+    with pytest.raises(AssertionError):
+        _assert_browser_test_setup(workflow.replace("T2P_REQUIRE_BROWSER_TESTS=1 ", "", 1), setup)
+    with pytest.raises(AssertionError):
+        _assert_browser_test_setup(workflow, setup.replace("uv run playwright install --with-deps chromium", "", 1))
 
 
 def test_workflow_check_fails_if_engine_integration_omits_a_node() -> None:

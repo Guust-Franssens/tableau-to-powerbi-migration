@@ -48,6 +48,8 @@ SYNTAX = [
     ["start", "--project", " "],
     ["start", "--proj", "fixture"],
     ["start", "--project", "fixture", "--workbook", "PRIVATE_ARGV_CANARY"],
+    ["assess", "--project", "fixture"],
+    ["assess", "--storage-decision", "relative.policy"],
     ["doctor", "--show-values"],
     ["status"],
     ["status", "--run", "relative", "--repair"],
@@ -599,24 +601,29 @@ def _source_module() -> ModuleType:
 
 def _assert_closed_help(stdout: bytes) -> None:
     choices = re.findall(rb"\{([^{}\r\n]+)\}", stdout)
-    assert choices == [b"doctor,start,status"] * 2, (
-        "closed help verb assertion: usage and positional choices must be exactly doctor/start/status"
+    assert choices == [b"doctor,start,assess,status"] * 2, (
+        "closed help verb assertion: usage and positional choices must be exactly doctor/start/assess/status"
     )
 
 
 def test_source_closed_help_oracle_distinguishes_prose_and_verbs() -> None:
     """The finite command choices, not the word 'next' in prose, close the surface."""
     literal = (
-        b"usage: t2p [-h] {doctor,start,status} ...\n"
-        b"positional arguments:\n  {doctor,start,status}\n"
+        b"usage: t2p [-h] {doctor,start,assess,status} ...\n"
+        b"positional arguments:\n  {doctor,start,assess,status}\n"
         b"    status  Read-only inventory; no next action or readiness.\n"
     )
     _assert_closed_help(literal)
     _assert_closed_help(_source_module().build_parser("t2p").format_help().encode("ascii"))
     _assert_closed_help(literal.replace(b"no next action", b"no continuation"))
-    for choices in (b"doctor,start,status,next", b"doctor,start,next", b"doctor,start"):
+    for choices in (
+        b"doctor,start,assess,status,next",
+        b"doctor,start,assess,next",
+        b"doctor,start,assess",
+        b"doctor,start,status",
+    ):
         with pytest.raises(AssertionError, match="closed help verb assertion"):
-            _assert_closed_help(literal.replace(b"doctor,start,status", choices, 1))
+            _assert_closed_help(literal.replace(b"doctor,start,assess,status", choices, 1))
     with pytest.raises(AssertionError, match="closed help verb assertion"):
         _assert_closed_help(b"doctor start status; no next action\n")
 
@@ -694,7 +701,7 @@ def test_source_qualified_installation_guidance(capsys) -> None:
         assert "Do not switch checkouts/environments to pass." in text
 
 
-@pytest.mark.parametrize("argv", [[], ["doctor"], ["start"], ["status"]])
+@pytest.mark.parametrize("argv", [[], ["doctor"], ["start"], ["assess"], ["status"]])
 def test_source_root_independent_help(argv: list[str], monkeypatch, capsys) -> None:
     """Offline source parsing controls; no installation is simulated."""
     module = _source_module()
@@ -757,7 +764,7 @@ def test_source_physical_origin_and_direct_compatibility(source_control: SimpleN
         "install_form_unsupported",
         1,
     )
-    for args in (["--help"], ["doctor", "--help"], ["start", "--help"], ["status", "--help"]):
+    for args in (["--help"], ["doctor", "--help"], ["start", "--help"], ["assess", "--help"], ["status", "--help"]):
         child = _invoke(lab, *args, direct=True)
         assert child.returncode == 0 and child.stderr == b""
         assert child.stdout.startswith(b"usage: python -B scripts/t2p.py ")
@@ -815,7 +822,7 @@ def test_installed_help_and_syntax_before_binding(
         lab.toolkit.rename(moved)
     try:
         _write_state(lab)
-        for argv in ([], ["doctor"], ["start"], ["status"]):
+        for argv in ([], ["doctor"], ["start"], ["assess"], ["status"]):
             env = {**lab.env, "PYTHONIOENCODING": "cp1252"}
             child = _invoke(lab, *argv, "--help", module=module, env=env)
             assert child.returncode == 0 and child.stderr == b""
@@ -824,10 +831,12 @@ def test_installed_help_and_syntax_before_binding(
             if not argv:
                 _assert_closed_help(child.stdout)
             flags = {b"--help", *([] if not argv else [b"--json"])}
-            if argv and argv[0] in {"doctor", "start"}:
+            if argv and argv[0] in {"doctor", "start", "assess"}:
                 flags.add(b"--env")
             if argv == ["start"]:
                 flags.update({b"--project", b"--runs-parent", b"--storage-decision", b"--session-id"})
+            if argv == ["assess"]:
+                flags.update({b"--runs-parent", b"--session-id"})
             if argv == ["status"]:
                 flags.add(b"--run")
             assert set(re.findall(rb"--[\w-]+", child.stdout)) == flags, "the installed surface is exactly three verbs"
