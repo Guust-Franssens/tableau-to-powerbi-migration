@@ -110,6 +110,27 @@ def test_help_exits_zero_on_a_cp1252_stdout() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("script", "shape"),
+    [
+        (REPO_ROOT / "scripts/assess_estate.py", "direct"),
+        (REPO_ROOT / "scripts/build_plugin.py", "forwarding-shim"),
+    ],
+)
+def test_process_help_smoke_for_each_entrypoint_shape(script: Path, shape: str) -> None:
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    env.pop("PYTHONUTF8", None)
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        env=env,
+        timeout=60,
+    )
+    stderr = result.stderr.decode("utf-8", errors="replace")
+    assert result.returncode == 0, f"{shape} {script.name} --help failed:\n{stderr[-2000:]}"
+
+
 def test_transpiler_missing_arguments_prints_usage() -> None:
     """The research transpiler must reject wrong arity without a traceback."""
     result = subprocess.run(
