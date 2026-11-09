@@ -1273,9 +1273,9 @@ def test_loopback_exact_content_length_csv_counts_as_numeric_evidence(tmp_path):
             [
                 ("Content-Type", "text/csv"),
                 ("Content-Encoding", "gzip"),
-                ("Content-Length", str(len(gzip.compress(b"Region,Sales\r\nWest,10\r\n")))),
+                ("Content-Length", str(len(gzip.compress(b"Region,Sales\r\nWest,10\r\n", mtime=0)))),
             ],
-            gzip.compress(b"Region,Sales\r\nWest,10\r\n"),
+            gzip.compress(b"Region,Sales\r\nWest,10\r\n", mtime=0),
             payload_facts.CSV_TRANSPORT_UNSUPPORTED_CONTENT_ENCODING,
         ),
         (
