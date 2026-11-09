@@ -164,7 +164,7 @@ def _db_read(path: Path) -> dict[str, Any]:
         raise EvidenceError("assessment_unrecognized") from None
 
 
-def _collector(raw: bytes | None, *, degraded_primary: bool) -> dict[str, Any]:
+def _collector(raw: bytes | None, *, degraded_primary: bool) -> dict[str, Any]:  # pylint: disable=too-many-branches
     if raw is None:
         reason = "degraded_primary" if degraded_primary else "collector_no_result"
         return {
@@ -240,7 +240,9 @@ def _collector(raw: bytes | None, *, degraded_primary: bool) -> dict[str, Any]:
     return {**value, "rows": rows}
 
 
-def load_evidence(directory: Path | str) -> dict[str, Any]:
+def load_evidence(  # pylint: disable=too-many-branches,too-many-locals,too-many-boolean-expressions
+    directory: Path | str,
+) -> dict[str, Any]:
     """Read only fixed evidence paths and return allowlisted, reconciled values."""
     root = Path(directory)
     survey_raw = _read_bytes(root / INPUTS[0])
@@ -398,7 +400,7 @@ def _metric(name: str, value: Any) -> str:
     return f'<div class="metric" data-metric="{_esc(name)}"><b>{_esc(value)}</b><span>{_esc(name)}</span></div>'
 
 
-def _section(number: int, title: str, state: str, reason: str | None, source: str, body: str) -> str:
+def _section(number: int, title: str, state: str, reason: str | None, source: str, body: str) -> str:  # pylint: disable=too-many-arguments,too-many-positional-arguments
     return (
         f'<section data-section="{number}" data-state="{_esc(state)}" data-reason="{_esc(reason or "")}">'
         f'<h2>{number}. {_esc(title)}</h2><p class="source">Source: {_esc(source)}</p>{body}</section>'
@@ -412,7 +414,7 @@ def _table(headers: tuple[str, ...], rows: list[tuple[Any, ...]], *, table_id: s
     return f"<table{ident}><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
 
 
-def _sections(evidence: dict[str, Any]) -> str:
+def _sections(evidence: dict[str, Any]) -> str:  # pylint: disable=too-many-locals,too-many-statements
     assessment = evidence["assessment"]
     db = evidence["database"]
     collector = evidence["collector"]
@@ -482,7 +484,8 @@ def _sections(evidence: dict[str, Any]) -> str:
     }[admin_state]
     section3 = (
         f'<div data-metric="event-total">{_esc(event_total) if admin_state == "available" else "unknown"}</div>'
-        f'<div data-metric="unmapped-events">{_esc(collector["unmapped_events"]) if admin_state == "available" else "unknown"}</div>'
+        f'<div data-metric="unmapped-events">'
+        f"{_esc(collector['unmapped_events']) if admin_state == 'available' else 'unknown'}</div>"
         f'<div data-metric="first-day">{_esc(collector["window"]["first_day"] or "unknown")}</div>'
         f'<div data-metric="last-day">{_esc(collector["window"]["last_day"] or "unknown")}</div>'
     )
@@ -497,7 +500,10 @@ def _sections(evidence: dict[str, Any]) -> str:
             f'<div data-metric="daily-days">{len(daily)}</div>'
             f'<div data-metric="daily-events-total">{sum(daily.values())}</div>'
         )
-        section3 += "<p>Events are event records, not human activity; view/consumption and authoring events are separate kinds.</p>"
+        section3 += (
+            "<p>Events are event records, not human activity; view/consumption and authoring events are "
+            "separate kinds.</p>"
+        )
         section3 += _table(("Event type", "Aggregate events"), sorted(grouped.items()))
         section3 += _table(("Day", "Aggregate events"), sorted(daily.items()))
         section3 += _table(
@@ -553,10 +559,13 @@ def _sections(evidence: dict[str, Any]) -> str:
     section4 = (
         f'<div data-metric="dependency-edges">{len(edges)}</div>'
         f'<div data-metric="datasource-denominator">{len(sources)}</div>'
-        f'<div data-metric="unresolved-identities">{sum(not row.get("workbook_luid") or not row.get("datasource_luid") for row in db["dependencies"])}</div>'
-        f'<div data-metric="embedded-dependencies">{sum(row.get("source") == "embedded" for row in db["dependencies"])}</div>'
+        f'<div data-metric="unresolved-identities">'
+        f"{sum(not row.get('workbook_luid') or not row.get('datasource_luid') for row in db['dependencies'])}</div>"
+        f'<div data-metric="embedded-dependencies">'
+        f"{sum(row.get('source') == 'embedded' for row in db['dependencies'])}</div>"
         + _table(("Datasource", "Consumer workbooks / classification", "Datasource LUID"), lineage_rows)
-        + f"<p>{_esc(lineage_note)} Empty identity fields are unresolved, never edges. Source system and connection type were not delivered.</p>"
+        + f"<p>{_esc(lineage_note)} Empty identity fields are unresolved, never edges. "
+        "Source system and connection type were not delivered.</p>"
     )
     scatter = [
         (
@@ -583,7 +592,9 @@ def _sections(evidence: dict[str, Any]) -> str:
     section5 = (
         f'<div data-metric="scatter-points">{len(plot_rows)}</div>'
         f'<div data-metric="understated-count">{sum(bool(r.get("complexity_understated")) for r in workbooks)}</div>'
-        f"<p>Complexity = sheets×{WEIGHTS['sheets']:g} + dashboards×{WEIGHTS['dashboards']:g} + calcs×{WEIGHTS['calcs']:g} + LODs×{WEIGHTS['lods']:g} + table calculations×{WEIGHTS['table_calcs']:g}.</p>"
+        f"<p>Complexity = sheets×{WEIGHTS['sheets']:g} + dashboards×{WEIGHTS['dashboards']:g} + "
+        f"calcs×{WEIGHTS['calcs']:g} + LODs×{WEIGHTS['lods']:g} + "
+        f"table calculations×{WEIGHTS['table_calcs']:g}.</p>"
         + scatter_svg
         + _table(("Workbook", "Lifetime views", "Complexity", "Understated"), scatter)
     )
@@ -624,9 +635,11 @@ def _sections(evidence: dict[str, Any]) -> str:
     section9 = (
         "<ul><li>Sources: estate_survey.json, assessment.json, estate.db, admin_insights.json.</li>"
         "<li>Survey lineage is partial evidence; unknown is not no-consumer.</li>"
-        "<li>Published views are not sheets; no recorded views does not mean never viewed; missing last access is unknown.</li>"
+        "<li>Published views are not sheets; no recorded views does not mean never viewed; missing last "
+        "access is unknown.</li>"
         "<li>Tiers are proposals, not automatic retirement advice.</li>"
-        "<li>Admin Insights endpoint, payload shape, captions, and status behavior are assumed from a synthetic mock contract, not live-qualified.</li></ul>"
+        "<li>Admin Insights endpoint, payload shape, captions, and status behavior are assumed from a "
+        "synthetic mock contract, not live-qualified.</li></ul>"
     )
     return "".join(
         (
@@ -658,7 +671,15 @@ def render_html(evidence: dict[str, Any]) -> bytes:
         if incomplete
         else ""
     )
-    script = """document.getElementById('sort-views').addEventListener('click',()=>{const t=document.querySelector('#inventory tbody');const rows=[...t.rows];rows.sort((a,b)=>Number(a.cells[2].textContent)-Number(b.cells[2].textContent));rows.forEach(r=>t.appendChild(r));});document.getElementById('tier-filter').addEventListener('change',e=>{for(const r of document.querySelectorAll('#inventory tbody tr'))r.hidden=!!e.target.value&&r.cells[4].textContent!==e.target.value;});"""
+    script = (
+        "document.getElementById('sort-views').addEventListener('click',()=>{"
+        "const t=document.querySelector('#inventory tbody');const rows=[...t.rows];"
+        "rows.sort((a,b)=>Number(a.cells[2].textContent)-Number(b.cells[2].textContent));"
+        "rows.forEach(r=>t.appendChild(r));});"
+        "document.getElementById('tier-filter').addEventListener('change',e=>{"
+        "for(const r of document.querySelectorAll('#inventory tbody tr'))"
+        "r.hidden=!!e.target.value&&r.cells[4].textContent!==e.target.value;});"
+    )
     page = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         f'<meta name="evidence-sha256" content="{evidence["evidence_sha256"]}">'

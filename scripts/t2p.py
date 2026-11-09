@@ -737,7 +737,7 @@ def _run_line(result: dict, args: argparse.Namespace) -> str:
     return f"RUN NOT_ALLOCATED; runs_root={runs_root(parent)}"
 
 
-def start(args: argparse.Namespace, result: dict) -> int:
+def start(args: argparse.Namespace, result: dict) -> int:  # pylint: disable=too-many-statements
     """One delegated front door; observer records outcomes, never parses child prose."""
     import start_migration  # pylint: disable=import-outside-toplevel
 
@@ -1012,7 +1012,10 @@ def _status_human(result: dict) -> None:
             (
                 "inspect unassessable assessment evidence before deciding next steps."
                 if assessing
-                else "inspect missing/unassessable/finding observations; cause and required operator/lifecycle decision unknown."
+                else (
+                    "inspect missing/unassessable/finding observations; cause and required operator/lifecycle "
+                    "decision unknown."
+                )
             )
             if inspection
             else (
@@ -1045,7 +1048,8 @@ def _status_human(result: dict) -> None:
                 [
                     "Intent: assessment",
                     "Not requested: " + pairs(observed.get("not_requested")),
-                    f"Assessment: {scalar(assessment.get('assessment'))} ({scalar(assessment.get('assessment_reason'))})",
+                    f"Assessment: {scalar(assessment.get('assessment'))} "
+                    f"({scalar(assessment.get('assessment_reason'))})",
                     f"Admin Insights: {scalar(assessment.get('admin_insights'))} "
                     f"({scalar(assessment.get('admin_insights_reason'))})",
                     f"Report: {scalar(assessment.get('report'))} ({scalar(assessment.get('report_reason'))})",
@@ -1059,8 +1063,8 @@ def _status_human(result: dict) -> None:
                 else [
                     "Paths: NOT CHECKED; current longest/remaining budgets not recorded; "
                     "ceilings file=259, directory=247 UTF-16 code units.",
-                    "Unavailable here: original intent/revision; named/openable artifact; full commissioned denominator; "
-                    "recorded parent/root/repo/git/commit state; authoritative rerun; subst.",
+                    "Unavailable here: original intent/revision; named/openable artifact; full commissioned "
+                    "denominator; recorded parent/root/repo/git/commit state; authoritative rerun; subst.",
                 ]
             ),
         ]

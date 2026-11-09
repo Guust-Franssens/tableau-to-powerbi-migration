@@ -586,7 +586,7 @@ def _engine_started(bundle: Path) -> bool | None:
     return any(isinstance(phase, dict) and phase.get("phase") == "engine_run" for phase in phases)
 
 
-def _summary(
+def _summary(  # pylint: disable=too-many-arguments,too-many-locals
     run: Path,
     bundle: Path,
     oracle: Path,

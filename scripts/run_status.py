@@ -955,7 +955,7 @@ def _assessment_observations(
     }, locations
 
 
-def build_status(run: Path | str) -> tuple[dict[str, Any], int]:
+def build_status(run: Path | str) -> tuple[dict[str, Any], int]:  # pylint: disable=too-many-statements
     raw = str(run)
     findings: list[Finding] = []
     status: dict[str, Any] = {

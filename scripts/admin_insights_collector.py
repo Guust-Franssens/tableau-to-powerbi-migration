@@ -148,13 +148,15 @@ def _query_rows(response: dict[str, Any], view_to_workbook: dict[str, str]) -> t
 
 
 def _request_once(session: oracle.TableauSession, path: str, body: dict[str, Any]) -> tuple[int, bytes]:
-    status, payload, _headers = session._request("POST", path, body=body, api="v1")
+    status, payload, _headers = session._request(  # pylint: disable=protected-access
+        "POST", path, body=body, api="v1"
+    )
     if session.reflected_credential(payload):
         raise ValueError("malformed_response")
     return status, payload
 
 
-def _collect(env_path: Path, database: Path) -> tuple[dict[str, Any], int]:
+def _collect(env_path: Path, database: Path) -> tuple[dict[str, Any], int]:  # pylint: disable=too-many-locals,too-many-return-statements
     outcome: dict[str, Any] = {
         "schema": SCHEMA,
         "outcome": "cannot_establish",
@@ -174,7 +176,7 @@ def _collect(env_path: Path, database: Path) -> tuple[dict[str, Any], int]:
         session = _session(env_path)
         try:
             session.sign_in()
-        except Exception:  # noqa: BLE001 - response text can contain credential material.
+        except Exception:  # noqa: BLE001 - response text can contain credential material. # pylint: disable=broad-exception-caught
             outcome["reason"] = "sign_in_failed"
             return outcome, 3
         outcome["datasource_luid"] = datasource_luid
@@ -212,12 +214,11 @@ def _collect(env_path: Path, database: Path) -> tuple[dict[str, Any], int]:
             result = _payload(raw)
             connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)
             try:
-                view_to_workbook = {
-                    luid: workbook
-                    for luid, workbook in connection.execute(
+                view_to_workbook = dict(
+                    connection.execute(
                         "SELECT luid, workbook_luid FROM view WHERE luid IS NOT NULL AND workbook_luid IS NOT NULL"
                     )
-                }
+                )
             finally:
                 connection.close()
             rows, unmapped = _query_rows(result, view_to_workbook)
@@ -235,7 +236,7 @@ def _collect(env_path: Path, database: Path) -> tuple[dict[str, Any], int]:
         except (ValueError, sqlite3.Error):
             outcome["reason"] = "malformed_response"
             return outcome, 3
-        except Exception:  # noqa: BLE001 - transport exception details are never persisted.
+        except Exception:  # noqa: BLE001 - transport exception details are never persisted. # pylint: disable=broad-exception-caught
             outcome["reason"] = "transport_failure"
             return outcome, 3
     except (OSError, sqlite3.Error, ValueError):
