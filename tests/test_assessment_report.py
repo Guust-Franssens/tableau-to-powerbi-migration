@@ -162,6 +162,7 @@ def _write_full(root: Path, *, degraded: bool = False, collector: dict | None = 
         CREATE TABLE project (luid TEXT PRIMARY KEY, name TEXT, parent_luid TEXT, content_permissions TEXT);
         CREATE TABLE grp (luid TEXT PRIMARY KEY, name TEXT, domain TEXT, members INTEGER);
         CREATE TABLE permission (object_type TEXT, object_luid TEXT, object_name TEXT, grantee_type TEXT, grantee_luid TEXT, capability TEXT, mode TEXT);
+        CREATE TABLE permission_collection (denied_listings INTEGER NOT NULL);
         CREATE TABLE flow (luid TEXT PRIMARY KEY, name TEXT, project TEXT);
         CREATE TABLE assessment_run (assessed_at TEXT, degraded INTEGER, degraded_primary INTEGER, workbooks_total INTEGER, listing_errors INTEGER);
         CREATE TABLE listing_error (listing TEXT, severity TEXT, status INTEGER, path TEXT, page INTEGER, attempts INTEGER, elapsed_sec REAL, transport INTEGER, error TEXT);
@@ -220,6 +221,8 @@ def _write_full(root: Path, *, degraded: bool = False, collector: dict | None = 
             ("Book C", WB[2], "Unknown", "", "embedded"),
         ],
     )
+    connection.executemany("INSERT INTO permission VALUES (NULL, NULL, NULL, NULL, NULL, NULL, NULL)", [(), (), ()])
+    connection.execute("INSERT INTO permission_collection VALUES (0)")
     connection.execute(
         "INSERT INTO assessment_run VALUES (?, ?, ?, ?, ?)",
         ("2026-10-01T10:00:00Z", int(degraded), int(degraded), 5, int(degraded)),
@@ -300,6 +303,7 @@ def _parser_assertions(payload: bytes) -> None:
     assert parsed.metrics["published views"] == "7"
     assert parsed.metrics["datasources"] == "3"
     assert parsed.metrics["projects"] == "2"
+    assert parsed.metrics["permission entries"] == "3"
     assert parsed.metrics["assessed_at"] == EXPECTED_FULL["assessed_at"]
     assert parsed.metrics["cut80"] == EXPECTED_FULL["pareto"]["cut80"]
     assert parsed.metrics["cut99"] == EXPECTED_FULL["pareto"]["cut99"]
@@ -418,6 +422,7 @@ def test_primary_degradation_is_partial_and_does_not_make_zero_complexity_a_meas
     text = (root / "assessment-report.html").read_text()
     assert "INCOMPLETE" in text
     assert 'data-state="partial" data-reason="degraded_primary"' in text
+    assert 'data-metric="permission entries" data-completeness="unknown"><b>unknown</b>' in text
     assert "500</td><td>unknown" in text
     assert report.evidence_state(root)["admin_insights_reason"] == "degraded_primary"
 
@@ -441,11 +446,76 @@ def test_secondary_degradation_is_disclosed_and_withholds_no_consumer_claim(tmp_
     assert report.main(["--run", str(root)]) == 0
     html = (root / "assessment-report.html").read_text(encoding="utf-8")
     assert "Secondary listing degradation was recorded" in html
+    assert 'data-metric="permission entries" data-completeness="ok"><b>3</b>' in html
     assert "No-consumer conclusion unknown" in html
     assert "No-consumer candidates:" not in html
     status, code = run_status.build_status(run.root)
     assert code == 0
     assert status["assessment"]["assessment"] == "established"
+
+
+def test_failed_grant_collection_marks_zero_permission_rows_as_partial(tmp_path: Path) -> None:
+    root = _write_full(tmp_path / "assessment", collector=_collector())
+    assessment_path = root / "assessment.json"
+    assessment = json.loads(assessment_path.read_text())
+    grant_error = {"listing": "workbook grants: PRIVATE-OBJECT", "severity": "secondary", "status": 503}
+    assessment["listing_errors"] = [grant_error]
+    assessment["degraded"] = True
+    assessment["summary"]["listing_errors"] = 1
+    assessment["summary"]["degraded"] = True
+    assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
+    with sqlite3.connect(root / "estate.db") as connection:
+        connection.execute("DELETE FROM permission")
+        connection.execute("UPDATE assessment_run SET degraded=1, listing_errors=1")
+        connection.execute(
+            "INSERT INTO listing_error (listing, severity, status) VALUES (?, ?, ?)",
+            (grant_error["listing"], grant_error["severity"], grant_error["status"]),
+        )
+
+    assert report.main(["--run", str(root)]) == 0
+    html = (root / "assessment-report.html").read_text(encoding="utf-8")
+    assert 'data-metric="permission entries" data-completeness="partial"><b>0 observed</b>' in html
+    assert "permission entries (partial)" in html
+
+
+def test_auth_denied_grant_listing_makes_permission_count_partial(tmp_path: Path) -> None:
+    root = _write_full(tmp_path / "assessment", collector=_collector())
+    with sqlite3.connect(root / "estate.db") as connection:
+        connection.execute("DELETE FROM permission")
+        connection.execute("UPDATE permission_collection SET denied_listings=1")
+
+    assert report.main(["--run", str(root)]) == 0
+    html = (root / "assessment-report.html").read_text(encoding="utf-8")
+    assert 'data-metric="permission entries" data-completeness="partial"><b>0 observed</b>' in html
+
+
+def test_missing_permission_collection_evidence_is_not_assumed_complete(tmp_path: Path) -> None:
+    root = _write_full(tmp_path / "assessment", collector=_collector())
+    with sqlite3.connect(root / "estate.db") as connection:
+        connection.execute("DROP TABLE permission_collection")
+
+    assert report.main(["--run", str(root)]) == 0
+    html = (root / "assessment-report.html").read_text(encoding="utf-8")
+    assert 'data-metric="permission entries" data-completeness="unknown"><b>unknown</b>' in html
+
+
+def test_primary_grant_listing_name_is_redacted_from_report(tmp_path: Path) -> None:
+    root = _write_full(tmp_path / "assessment", degraded=True, collector=_collector())
+    private_listing = "workbook grants: PRIVATE-OBJECT"
+    assessment_path = root / "assessment.json"
+    assessment = json.loads(assessment_path.read_text())
+    assessment["listing_errors"] = [{"listing": private_listing, "severity": "primary", "status": 403}]
+    assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
+    with sqlite3.connect(root / "estate.db") as connection:
+        connection.execute("DELETE FROM listing_error")
+        connection.execute(
+            "INSERT INTO listing_error (listing, severity, status) VALUES (?, 'primary', 403)", (private_listing,)
+        )
+
+    assert report.main(["--run", str(root)]) == 0
+    html = (root / "assessment-report.html").read_text(encoding="utf-8")
+    assert "PRIVATE-OBJECT" not in html
+    assert "permission grants" in html
 
 
 def test_survey_without_workbook_luid_is_unrecognized(tmp_path: Path) -> None:

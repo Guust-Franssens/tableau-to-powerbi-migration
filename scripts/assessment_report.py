@@ -111,8 +111,29 @@ def _db_read(path: Path) -> dict[str, Any]:
             )
             if len(run_rows) != 1:
                 raise EvidenceError("assessment_unrecognized")
+            permission_count_row = connection.execute("SELECT COUNT(*) FROM permission").fetchone()
+            if permission_count_row is None:
+                raise EvidenceError("assessment_unrecognized")
+            permission_count = permission_count_row[0]
+            if not isinstance(permission_count, int) or isinstance(permission_count, bool) or permission_count < 0:
+                raise EvidenceError("assessment_unrecognized")
+            permission_denied_listings = None
+            if "permission_collection" in tables:
+                denied_rows = list(connection.execute("SELECT denied_listings FROM permission_collection"))
+                if len(denied_rows) != 1 or (
+                    denied_rows[0][0] is not None
+                    and (
+                        not isinstance(denied_rows[0][0], int)
+                        or isinstance(denied_rows[0][0], bool)
+                        or denied_rows[0][0] < 0
+                    )
+                ):
+                    raise EvidenceError("assessment_unrecognized")
+                permission_denied_listings = denied_rows[0][0]
             return {
                 "run": dict(run_rows[0]),
+                "permission_count": permission_count,
+                "permission_denied_listings": permission_denied_listings,
                 "workbooks": [
                     dict(row)
                     for row in connection.execute(
@@ -400,6 +421,34 @@ def _metric(name: str, value: Any) -> str:
     return f'<div class="metric" data-metric="{_esc(name)}"><b>{_esc(value)}</b><span>{_esc(name)}</span></div>'
 
 
+def _permission_metric(db: dict[str, Any]) -> str:
+    """Render only an aggregate and fixed completeness state, never grant identities."""
+    permission_denied_listings = db.get("permission_denied_listings")
+    permission_errors = any(
+        row.get("severity") == "secondary"
+        and isinstance(row.get("listing"), str)
+        and row["listing"].startswith(("project grants:", "workbook grants:"))
+        for row in db["listing_errors"]
+    )
+    if db["run"].get("degraded_primary") or permission_denied_listings is None:
+        value, label, state = "unknown", "permission entries (unknown)", "unknown"
+    elif permission_errors or permission_denied_listings:
+        value, label, state = f"{db['permission_count']} observed", "permission entries (partial)", "partial"
+    else:
+        value, label, state = db["permission_count"], "permission entries", "ok"
+    return (
+        f'<div class="metric" data-metric="permission entries" data-completeness="{state}">'
+        f"<b>{_esc(value)}</b><span>{_esc(label)}</span></div>"
+    )
+
+
+def _permission_listing_label(value: Any) -> Any:
+    """Keep object names from grant-error listing labels out of the report."""
+    if isinstance(value, str) and value.startswith(("project grants:", "workbook grants:")):
+        return "permission grants"
+    return value
+
+
 def _section(number: int, title: str, state: str, reason: str | None, source: str, body: str) -> str:  # pylint: disable=too-many-arguments,too-many-positional-arguments
     return (
         f'<section data-section="{number}" data-state="{_esc(state)}" data-reason="{_esc(reason or "")}">'
@@ -434,6 +483,7 @@ def _sections(evidence: dict[str, Any]) -> str:  # pylint: disable=too-many-loca
         + _metric("published views", len(views))
         + _metric("datasources", len(sources))
         + _metric("projects", len(projects))
+        + _permission_metric(db)
         + _metric("assessed_at", assessed_at)
         + "</div>"
     )
@@ -441,7 +491,10 @@ def _sections(evidence: dict[str, Any]) -> str:  # pylint: disable=too-many-loca
         section1 += "<p>Incomplete primary listing evidence; unknown values are not zero.</p>"
         section1 += _table(
             ("Failed listing", "Severity", "HTTP status"),
-            [(row.get("listing"), row.get("severity"), row.get("status")) for row in db["listing_errors"]],
+            [
+                (_permission_listing_label(row.get("listing")), row.get("severity"), row.get("status"))
+                for row in db["listing_errors"]
+            ],
         )
     elif assessment["degraded"]:
         section1 += "<p>Secondary listing degradation was recorded; primary inventory is established.</p>"

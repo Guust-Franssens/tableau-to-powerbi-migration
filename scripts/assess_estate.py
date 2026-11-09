@@ -677,6 +677,10 @@ CREATE TABLE IF NOT EXISTS grp (luid TEXT PRIMARY KEY, name TEXT, domain TEXT, m
 CREATE TABLE IF NOT EXISTS permission (
   object_type TEXT, object_luid TEXT, object_name TEXT,
   grantee_type TEXT, grantee_luid TEXT, capability TEXT, mode TEXT);
+-- Aggregate-only evidence that one or more grant listings were inaccessible. Keep this separate
+-- from listing_error: an auth refusal is not an assessment failure, but it does limit the KPI.
+CREATE TABLE IF NOT EXISTS permission_collection (
+  denied_listings INTEGER);
 CREATE TABLE IF NOT EXISTS flow (luid TEXT PRIMARY KEY, name TEXT, project TEXT);
 -- Run-level completeness, added in #196. Before it, a survived-but-partial run (#193) wrote a DB
 -- INDISTINGUISHABLE from a clean run of a smaller estate: a consumer cannot tell "0 views because
@@ -696,8 +700,8 @@ CREATE TABLE IF NOT EXISTS listing_error (
 """
 
 
-def _collect_iam(site: Site, projects: list[dict], workbooks: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Export grants -> ``(rows, errors)``. Per-item grants are only collected where owners diverge.
+def _collect_iam(site: Site, projects: list[dict], workbooks: list[dict]) -> tuple[list[dict], list[dict], int]:
+    """Export grants -> ``(rows, errors, denied_listings)``; per-item grants follow owner divergence.
 
     This is the longest loop in the script - one call per project plus one per unlocked workbook -
     so it is also where a flaky connection is most likely to land. An unreadable object degrades the
@@ -705,31 +709,33 @@ def _collect_iam(site: Site, projects: list[dict], workbooks: list[dict]) -> tup
     """
     permissions: list[dict] = []
     errors: list[dict] = []
-    locked = 0
+    denied_listings = 0
     started = time.monotonic()
     for project in projects:
-        rows, error = _grants(site, "project", project["id"], project.get("name"), f"/projects/{project['id']}")
+        rows, error, denied = _grants(site, "project", project["id"], project.get("name"), f"/projects/{project['id']}")
         permissions.extend(rows)
         errors.extend(error)
-        if (project.get("contentPermissions") or "").startswith("LockedToProject"):
-            locked += 1
+        denied_listings += int(denied)
     unlocked = {p["id"] for p in projects if not (p.get("contentPermissions") or "").startswith("LockedToProject")}
     todo = [w for w in workbooks if (w.get("project") or {}).get("id") in unlocked]
     for index, workbook in enumerate(todo, 1):
-        rows, error = _grants(site, "workbook", workbook["id"], workbook.get("name"), f"/workbooks/{workbook['id']}")
+        rows, error, denied = _grants(
+            site, "workbook", workbook["id"], workbook.get("name"), f"/workbooks/{workbook['id']}"
+        )
         permissions.extend(rows)
         errors.extend(error)
+        denied_listings += int(denied)
         if index % 25 == 0 or index == len(todo):
             LOG.info(
                 "  [%d/%d] workbook grants, %d row(s) so far %s", index, len(todo), len(permissions), _took(started)
             )
     LOG.info(
         "  %d project(s) LockedToProject -> per-item grants skipped there; %d grant rows %s",
-        locked,
+        sum((p.get("contentPermissions") or "").startswith("LockedToProject") for p in projects),
         len(permissions),
         _took(started),
     )
-    return permissions, errors
+    return permissions, errors, denied_listings
 
 
 def _listing(site: Site, spec: Listing) -> tuple[list[dict], dict | None]:
@@ -839,7 +845,9 @@ def collect(site: Site, survey: dict | None, checkpoint=None) -> dict[str, Any]:
     errors += structure_errors
 
     LOG.info("pass 3: IAM (gated on contentPermissions)")
-    permissions, iam_errors = _collect_iam(site, inventory["projects"], inventory["workbooks"])
+    permissions, iam_errors, permission_denied_listings = _collect_iam(
+        site, inventory["projects"], inventory["workbooks"]
+    )
     errors += iam_errors
 
     return {
@@ -848,6 +856,7 @@ def collect(site: Site, survey: dict | None, checkpoint=None) -> dict[str, Any]:
         "structure": data,
         "structure_by_name": {w["name"]: w for w in data.get("workbooks") or []},
         "permissions": permissions,
+        "permission_denied_listings": permission_denied_listings,
         "survey": survey,
         # One unauthenticated call, and the only thing in this dict that describes the SERVER rather
         # than its content. Deliberately not part of any listing: it never degrades the assessment.
@@ -856,12 +865,14 @@ def collect(site: Site, survey: dict | None, checkpoint=None) -> dict[str, Any]:
     }
 
 
-def _grants(site: Site, object_type: str, luid: str, name: str | None, path: str) -> tuple[list[dict], list[dict]]:
+def _grants(
+    site: Site, object_type: str, luid: str, name: str | None, path: str
+) -> tuple[list[dict], list[dict], bool]:
     """Flatten one object's granteeCapabilities into rows. An auth refusal yields nothing, never an abort.
 
-    Returns ``(rows, errors)``: a 401/403 is a genuine answer ("you may not see this") and stays
-    silent, while any other failure is NO useful answer and is recorded, so an IAM export thinned by
-    a flaky connection or a bad permissions endpoint cannot be read as an estate with fewer grants.
+    Returns ``(rows, errors, access_denied)``: a 401/403 stays silent in assessment errors, but its
+    aggregate signal prevents downstream consumers from treating invisible grants as a complete
+    zero. Any other failure is recorded, so a flaky connection cannot read as fewer grants.
     """
     payload, error = site.get_checked(f"/sites/{site.site_id}{path}/permissions")
     rows = []
@@ -880,9 +891,11 @@ def _grants(site: Site, object_type: str, luid: str, name: str | None, path: str
                     "mode": capability.get("mode"),
                 }
             )
-    if error and error.get("status") not in AUTH_STATUSES:
-        return rows, [{"listing": f"{object_type} grants: {name}", "severity": SECONDARY, **error}]
-    return rows, []
+    if error and error.get("status") in AUTH_STATUSES:
+        return rows, [], True
+    if error:
+        return rows, [{"listing": f"{object_type} grants: {name}", "severity": SECONDARY, **error}], False
+    return rows, [], False
 
 
 def _aggregate_signals(raw: dict[str, Any]) -> tuple[dict[str, list], dict[str, dict[str, int]]]:
@@ -987,6 +1000,7 @@ def assemble(raw: dict[str, Any], target: float) -> dict[str, Any]:
         "dependencies": dep_rows,
         "survey_supplied": survey is not None,
         "iam_hard_cases": iam_hard_cases(raw["permissions"], raw["groups"]),
+        "permission_denied_listings": raw.get("permission_denied_listings"),
         # The site's render ceiling, carried through verbatim so a programmatic consumer reads the
         # same three numbers the report renders. `None` when the probe was not run at all.
         "server_ceiling": raw.get("server_ceiling"),
@@ -1193,6 +1207,10 @@ def write_store(out: Path, raw: dict[str, Any], assembled: dict[str, Any], redac
         "INSERT INTO permission VALUES (:object_type,:object_luid,:object_name,:grantee_type,"
         ":grantee_luid,:capability,:mode)",
         scrubbed_raw["permissions"],
+    )
+    conn.execute(
+        "INSERT INTO permission_collection VALUES (?)",
+        (scrubbed_assembled.get("permission_denied_listings"),),
     )
     conn.executemany(
         "INSERT OR REPLACE INTO flow VALUES (?,?,?)",
