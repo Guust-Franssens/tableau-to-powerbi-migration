@@ -332,7 +332,12 @@ def test_assessment_unsafe_evidence_is_not_read_and_unknown_intent_is_finding(
     target.write_text('{"private":"not read"}', encoding="utf-8")
     assessment = run / "assessment" / "assessment.json"
     assessment.unlink()
-    assessment.symlink_to(target)
+    try:
+        assessment.symlink_to(target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != 1314:
+            raise
+        pytest.skip("this platform/account cannot create symlinks without elevation")
     monkeypatch.setattr(
         assessment_report,
         "evidence_state",

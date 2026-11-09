@@ -494,7 +494,8 @@ def _captured(capsys, pipeline: _Pipeline) -> tuple[str, str]:
 
 
 def _assessment_run(pipeline: _Pipeline) -> Path:
-    return next((pipeline.root / "_runs").iterdir())
+    # NTFS lists the hidden ".run-number-reservations" allocator directory first; skip it.
+    return next(path for path in (pipeline.root / "_runs").iterdir() if not path.name.startswith("."))
 
 
 def test_assess_only_runs_four_children_and_publishes_current_html(monkeypatch, tmp_path, capsys):
