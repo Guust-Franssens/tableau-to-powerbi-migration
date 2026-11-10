@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -3729,6 +3730,36 @@ def _batch_main(tmp_path: Path, bundle: Path, oracle: Path, report: Path, *extra
     )
 
 
+def _run_with_line_interrupt(
+    function: Callable,
+    marker: str,
+    action: Callable[[], int],
+    *,
+    occurrence: int = 1,
+) -> int:
+    """Raise KeyboardInterrupt on one exact executable line in ``function``."""
+    source, start = inspect.getsourcelines(function)
+    matches = [start + index for index, line in enumerate(source) if line.rstrip() == marker]
+    assert len(matches) >= occurrence, (marker, occurrence, matches)
+    target_line = matches[occurrence - 1]
+    fired = False
+
+    def trace(frame, event, arg):  # pylint: disable=unused-argument
+        nonlocal fired
+        if frame.f_code is function.__code__ and event == "line" and frame.f_lineno == target_line:
+            fired = True
+            sys.settrace(None)
+            raise KeyboardInterrupt("line-trace interrupt")
+        return trace
+
+    sys.settrace(trace)
+    try:
+        return action()
+    finally:
+        sys.settrace(None)
+        assert fired, f"line trace never reached {function.__name__}:{target_line}"
+
+
 def test_eleven_of_fourteen_keeps_the_original_denominator_and_names_every_blocker(  # pylint: disable=too-many-locals
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -4210,6 +4241,70 @@ def test_an_operator_interrupt_before_publish_is_persisted_and_stops_the_run(
     assert BATCH_LATE in [row["unit"] for row in payload["unaccounted"]]
 
 
+def test_post_return_line_interrupt_uses_verified_final_package_state(tmp_path: Path) -> None:
+    """An interrupt after replace_dir returns still observes the just-published package."""
+    bundle, oracle = _many_unit_bundle(tmp_path, [UNIT, BATCH_LATE])
+    out = _out(tmp_path)
+    final = out / UNIT
+    report = tmp_path / "packaging.json"
+    report.write_text('{"stale": true}', encoding="utf-8")
+
+    code = _run_with_line_interrupt(
+        pkg.package_unit,
+        "        _complete_construction(attempt, error)",
+        lambda: _batch_main(tmp_path, bundle, oracle, report),
+    )
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    construction = payload["construction"]
+    assert code == pkg.EXIT_CANNOT_ASSESS
+    assert "stale" not in payload
+    assert payload["interruption"] == {
+        "unit": UNIT,
+        "reason_code": "assembly_interrupted_after_publish",
+        "published": True,
+        "rollback_failed": False,
+        "secondary_code": None,
+    }
+    assert [row["unit"] for row in payload["units"]] == [UNIT]
+    assert [row["unit"] for row in construction["assembled"]] == [UNIT]
+    assert UNIT not in [row["unit"] for row in construction["blocked"]]
+    assert [row["unit"] for row in construction["blocked"]] == [BATCH_LATE]
+    assert (final / pkg.MANIFEST_NAME).is_file()
+    assert list(out.rglob(pkg.MANIFEST_NAME)) == [final / pkg.MANIFEST_NAME]
+    assert cmp.discover_package_roots(bundle, out) == [final]
+
+
+def test_post_rename_line_interrupt_hides_retired_manifest_before_reporting_status(tmp_path: Path) -> None:
+    """The old package cannot remain discoverable beside the published replacement."""
+    bundle, oracle = _many_unit_bundle(tmp_path, [UNIT, BATCH_LATE])
+    out = _out(tmp_path)
+    final = out / UNIT
+    pkg.package_unit(bundle, UNIT, out, oracle_dir=oracle, assets_dir=bundle.parent / "assets")
+    report = tmp_path / "packaging.json"
+    report.write_text('{"stale": true}', encoding="utf-8")
+
+    code = _run_with_line_interrupt(
+        pkg._replace_dir_locked,
+        "            cleanup = _discard_scratch(retired)",
+        lambda: _batch_main(tmp_path, bundle, oracle, report),
+        occurrence=2,
+    )
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    construction = payload["construction"]
+    assert code == pkg.EXIT_CANNOT_ASSESS
+    assert payload["interruption"] == {
+        "unit": UNIT,
+        "reason_code": "assembly_interrupted_after_publish",
+        "published": True,
+        "rollback_failed": False,
+        "secondary_code": None,
+    }
+    assert [row["unit"] for row in construction["assembled"]] == [UNIT]
+    assert [row["unit"] for row in construction["blocked"]] == [BATCH_LATE]
+    assert list(out.rglob(pkg.MANIFEST_NAME)) == [final / pkg.MANIFEST_NAME]
+    assert cmp.discover_package_roots(bundle, out) == [final]
+
+
 def test_failed_rollback_cannot_mask_keyboard_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Rollback failure is attached as state while KeyboardInterrupt remains the raised class."""
     staged = tmp_path / "staged"
@@ -4237,6 +4332,74 @@ def test_failed_rollback_cannot_mask_keyboard_interrupt(tmp_path: Path, monkeypa
     assert caught.value.secondary_code == "rollback_failed"
     assert isinstance(caught.value.__cause__, KeyboardInterrupt)
     assert not final.exists() and retired.is_dir() and staged.is_dir()
+
+
+def test_a_single_unit_run_is_unchanged_by_the_batch_contract(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The negative control: nothing fails, so the report reads exactly as it did before (#478)."""
+    bundle, oracle = _bundle(tmp_path)
+    report = tmp_path / "packaging.json"
+
+    code = _batch_main(tmp_path, bundle, oracle, report)
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    summary = capsys.readouterr().out
+
+    assert code == pkg.EXIT_OK
+    assert payload["requested"] == [UNIT] and payload["construction"]["blocked"] == [] and payload["unaccounted"] == []
+    assert [item["unit"] for item in payload["construction"]["assembled"]] == [UNIT]
+    assert payload["totals"] == {
+        "requested": 1,
+        "units": 1,
+        "failed": 0,
+        "refused": 0,
+        "unaccounted": 0,
+        "assembled": 1,
+        "blocked": 0,
+    }
+    assert "ASSEMBLED: 1/1" in summary
+    assert "BLOCKED: 0/1" in summary
+    assert "1 requested = 1 ASSEMBLED + 0 BLOCKED" in summary
+    assert pkg.NOT_START_READY_NOTICE in summary
+
+
+@pytest.mark.parametrize("seam", ["completed-slot", "provider-bookkeeping"])
+def test_completed_slots_survive_caller_bookkeeping_interrupts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seam: str
+) -> None:
+    """The terminal occurrence lives inside construction, before provider/result bookkeeping."""
+    bundle, oracle = _many_unit_bundle(tmp_path, [UNIT, BATCH_LATE])
+    write_engine_report(bundle, workbooks=[BATCH_LATE], datasources=[UNIT])
+    report = tmp_path / "bookkeeping.json"
+    report.write_text('{"stale": true}', encoding="utf-8")
+    completed = pkg._ConstructionSlot.complete  # pylint: disable=protected-access
+    fired = []
+
+    def interrupt_after_slot(slot, outcome) -> None:
+        completed(slot, outcome)
+        if not fired and slot.unit == UNIT and outcome.result is not None:
+            fired.append(True)
+            raise KeyboardInterrupt("after terminal slot transition")
+
+    if seam == "completed-slot":
+        monkeypatch.setattr(pkg._ConstructionSlot, "complete", interrupt_after_slot)  # pylint: disable=protected-access
+        code = _batch_main(tmp_path, bundle, oracle, report)
+        assert fired == [True]
+    else:
+        code = _run_with_line_interrupt(
+            pkg._package_each,  # pylint: disable=protected-access
+            "                providers.append(out_root / unit)",
+            lambda: _batch_main(tmp_path, bundle, oracle, report),
+        )
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert code == pkg.EXIT_CANNOT_ASSESS and "stale" not in payload
+    assert payload["interruption"]["published"] is True
+    assert payload["interruption"]["reason_code"] == "assembly_interrupted_after_publish"
+    assert [row["unit"] for row in payload["units"]] == [UNIT]
+    assert payload["failed"] == [] and payload["refused"] == []
+    assert [row["unit"] for row in payload["unaccounted"]] == [BATCH_LATE]
+    assert payload["construction"]["totals"] == {"requested": 2, "assembled": 1, "blocked": 1}
+    assert cmp.discover_package_roots(bundle, _out(tmp_path)) == [_out(tmp_path) / UNIT]
 
 
 def test_path_budget_diagnostics_keep_independent_utf16_measurements_without_paths(
