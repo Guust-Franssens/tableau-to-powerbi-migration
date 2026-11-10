@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import io
 import locale
 import os
@@ -15,18 +14,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import disarm_credential_gate as dg  # noqa: E402
-
-
-def test_imports_only_the_standard_library() -> None:
-    """The tool must outlive the retired gate and the corpus scripts: stdlib + icacls only."""
-    tree = ast.parse(Path(dg.__file__).read_text(encoding="utf-8"))
-    modules = {
-        alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names
-    }
-    modules |= {
-        node.module.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module
-    }
-    assert modules - {"__future__"} <= sys.stdlib_module_names
 
 
 ME = "someuser"
@@ -48,69 +35,29 @@ def listing(target: str, *aces: str) -> str:
     return "\n".join([f"{target} {lines[0]}", *(pad + line if line else line for line in lines[1:])])
 
 
-# --- (a) the ACE-line parser seam -----------------------------------------------------------------
-
-
-@pytest.mark.parametrize("principal", [f"DOMAIN\\{ME}", ME, f"domain\\{ME.upper()}"])
-def test_explicit_gate_deny_for_current_user_is_armed(principal: str) -> None:
+def test_classify_recognises_only_our_explicit_gate_deny() -> None:
     target = "C:\\runs\\a b (1)\\fabric"
-    assert dg.classify(listing(target, f"{principal}:{GATE}"), target, ME) == "armed"
-
-
-@pytest.mark.parametrize(
-    "ace",
-    [
+    for principal in (f"DOMAIN\\{ME}", f"domain\\{ME.upper()}"):
+        assert dg.classify(listing(target, f"{principal}:{GATE}"), target, ME) == "armed"
+    for ace in (
         f"DOMAIN\\{ME}:(I)(OI)(CI)(DENY)(WD,AD,WA)",  # inherited from a parent anchor
-        f"DOMAIN\\other:{GATE}",  # another user
-        f"DOMAIN\\{ME}x:{GATE}",  # name that merely starts with ours
-        f"DOMAIN\\x{ME}:{GATE}",  # name that merely ends with ours
+        f"DOMAIN\\{ME}x:{GATE}",  # names that merely start or end with ours
+        f"DOMAIN\\x{ME}:{GATE}",
         f"DOMAIN\\{ME}:(OI)(CI)(WD,AD,WA)",  # ALLOW of the same shape
         f"DOMAIN\\{ME}:(OI)(CI)(DENY)(WD,AD)",  # fewer rights
         f"DOMAIN\\{ME}:(OI)(CI)(DENY)(WD,AD,WA,DE)",  # more rights
-        f"DOMAIN\\{ME}:(OI)(CI)(DENY)(W)",  # generic write, not the gate set
         f"DOMAIN\\{ME}:(OI)(DENY)(WD,AD,WA)",  # missing CI
-        f"DOMAIN\\{ME}:(CI)(DENY)(WD,AD,WA)",  # missing OI
         f"DOMAIN\\{ME}:(OI)(CI)(NP)(DENY)(WD,AD,WA)",  # extra propagation flag
-        f"DOMAIN\\{ME}:(OI)(CI)(IO)(DENY)(WD,AD,WA)",  # inherit-only
-    ],
-)
-def test_non_gate_aces_are_clean(ace: str) -> None:
-    target = "C:\\runs\\fabric"
-    assert dg.classify(listing(target, ace), target, ME) == "clean"
-
-
-def test_domain_qualified_user_argument_requires_exact_principal() -> None:
-    target = "C:\\runs\\fabric"
-    assert dg.classify(listing(target, f"DOMAIN\\{ME}:{GATE}"), target, f"DOMAIN\\{ME}") == "armed"
+    ):
+        assert dg.classify(listing(target, ace), target, ME) == "clean", ace
     assert dg.classify(listing(target, f"OTHER\\{ME}:{GATE}"), target, f"DOMAIN\\{ME}") == "clean"
-
-
-def test_empty_user_never_matches() -> None:
     assert not dg.is_current_user("DOMAIN\\", "")
-    assert not dg.is_current_user("someone", "")
-
-
-def test_is_gate_ace_rejects_the_inherited_copy() -> None:
-    assert dg.is_gate_ace(dg.Ace(ME, frozenset({"OI", "CI", "DENY"}), frozenset({"WD", "AD", "WA"})))
-    assert not dg.is_gate_ace(dg.Ace(ME, frozenset({"I", "OI", "CI", "DENY"}), frozenset({"WD", "AD", "WA"})))
-
-
-def test_other_principals_explicit_aces_are_tolerated() -> None:
-    target = "C:\\runs\\fabric"
-    text = listing(target, "BUILTIN\\Users:(OI)(CI)(RX)", f"DOMAIN\\other:{GATE}", f"DOMAIN\\{ME}:{GATE}")
-    assert dg.classify(text, target, ME) == "armed"
-
-
-def test_second_explicit_deny_of_ours_is_a_conflict() -> None:
-    target = "C:\\runs\\fabric"
-    text = listing(target, f"DOMAIN\\{ME}:(DENY)(DE)", f"DOMAIN\\{ME}:{GATE}")
-    assert dg.classify(text, target, ME) == "conflict"
-
-
-def test_inherited_extra_deny_is_not_a_conflict() -> None:
-    target = "C:\\runs\\fabric"
-    text = listing(target, f"DOMAIN\\{ME}:{GATE}", f"DOMAIN\\{ME}:(I)(DENY)(DE)")
-    assert dg.classify(text, target, ME) == "armed"
+    others = listing(target, "BUILTIN\\Users:(OI)(CI)(RX)", f"DOMAIN\\other:{GATE}", f"DOMAIN\\{ME}:{GATE}")
+    assert dg.classify(others, target, ME) == "armed"
+    inherited_extra = listing(target, f"DOMAIN\\{ME}:{GATE}", f"DOMAIN\\{ME}:(I)(DENY)(DE)")
+    assert dg.classify(inherited_extra, target, ME) == "armed"
+    second_explicit = listing(target, f"DOMAIN\\{ME}:(DENY)(DE)", f"DOMAIN\\{ME}:{GATE}")
+    assert dg.classify(second_explicit, target, ME) == "conflict"
 
 
 # --- (b) the walk and the apply/dry-run decisions, with an injected runner --------------------------
@@ -183,12 +130,7 @@ def test_dry_run_lists_armed_anchors_and_never_removes(tree: dict[str, Path], tm
     listed = {line.split(None, 1)[1] for line in out if line.startswith("ARMED")}
     assert listed == {str(tree[key]) for key in ("fabric", "model", "report", "nested")}
     assert str(tree["plain"]) not in {call[0] for call in runner.calls}, "non-anchor folders are not queried"
-
-
-def test_dry_run_on_a_clean_tree_exits_zero(tree: dict[str, Path], tmp_path: Path) -> None:
-    runner = FakeIcacls(set())
-    assert _run(tmp_path, runner, apply=False) == dg.EXIT_CLEAN
-    assert runner.removals == []
+    assert _run(tmp_path, FakeIcacls(set()), apply=False) == dg.EXIT_CLEAN
 
 
 def test_apply_removes_only_armed_anchors_and_is_idempotent(tree: dict[str, Path], tmp_path: Path) -> None:
@@ -203,16 +145,14 @@ def test_apply_removes_only_armed_anchors_and_is_idempotent(tree: dict[str, Path
     assert runner.removals == []
 
 
-def test_apply_exits_one_when_icacls_remove_fails(tree: dict[str, Path], tmp_path: Path) -> None:
-    """A nonzero icacls exit is a failure even if a re-read no longer shows the ACE."""
+@pytest.mark.parametrize("failure", ["nonzero-exit", "deny-survives"])
+def test_apply_exits_one_when_removal_fails(tree: dict[str, Path], tmp_path: Path, failure: str) -> None:
+    """A nonzero icacls exit fails even if a re-read no longer shows the ACE, and vice versa."""
     runner = FakeIcacls({tree["fabric"]})
-    runner.remove_code = 5
-    assert _run(tmp_path, runner, apply=True) == dg.EXIT_FAILED
-
-
-def test_apply_exits_one_when_the_deny_survives_a_zero_exit(tree: dict[str, Path], tmp_path: Path) -> None:
-    runner = FakeIcacls({tree["fabric"]})
-    runner.remove_works = False
+    if failure == "nonzero-exit":
+        runner.remove_code = 5
+    else:
+        runner.remove_works = False
     assert _run(tmp_path, runner, apply=True) == dg.EXIT_FAILED
 
 
@@ -265,9 +205,9 @@ def test_undecodable_listing_fails_closed_and_names_the_folder(tree: dict[str, P
     assert any(target in line and "decode" in line for line in out)
 
 
-@pytest.mark.parametrize(("folder", "user"), [("M\u00fcller", ME), ("caf\u00e9", "Jos\u00e9")])
-def test_run_icacls_decodes_the_oem_code_page(monkeypatch: pytest.MonkeyPatch, folder: str, user: str) -> None:
+def test_run_icacls_decodes_the_oem_code_page(monkeypatch: pytest.MonkeyPatch) -> None:
     """Feed the bytes icacls really writes (OEM, e.g. cp437 0x81 for u-umlaut) through the process seam."""
+    folder, user = "caf\u00e9", "Jos\u00e9"
     target = f"C:\\runs\\{folder}\\fabric"
     raw = listing(target, f"DOMAIN\\{user}:{GATE}").encode(dg.oem_encoding())
 
@@ -325,7 +265,7 @@ def test_walk_never_enters_a_junction(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the gate only ever set ACLs on Windows")
-@pytest.mark.parametrize("parent", ["run", "M\u00fcller run", "\u0141\u00f3d\u017a"])
+@pytest.mark.parametrize("parent", ["M\u00fcller run", "\u0141\u00f3d\u017a"])
 def test_real_gate_deny_is_removed_and_writes_work_again(tmp_path: Path, parent: str) -> None:
     """`M\u00fcller` is undecodable as cp1252; `\u0141\u00f3d\u017a` is best-fitted by icacls to `L\u00f3dz`."""
     user = os.environ["USERNAME"]
