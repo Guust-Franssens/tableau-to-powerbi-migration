@@ -98,20 +98,7 @@ def _survey_workbook(
     unknown: bool = False,
     candidates: dict[str, list[tuple[str, str]]] | None = None,
 ) -> dict[str, Any]:
-    """One workbook entry as `estate_survey.py --json` writes it.
-
-    A dependency row is `dict(dep)` updated with `resolve_dependency`'s return, so the three shapes
-    it can take are reproduced exactly:
-
-    * RESOLVED  -> `luid`/`project` filled, `candidates` holding the ONE match;
-    * AMBIGUOUS -> `luid: ""` AND `project: ""` (it "NEVER picks one"), `candidates` naming every
-      data source that shares the name;
-    * NOT_FOUND -> `luid: ""`, `project: ""`, `candidates: []`.
-
-    Blanking `project` alongside `luid` is the detail a fixture is most tempted to skip, and it is
-    load-bearing: on real output the ambiguity is visible ONLY in `candidates`, so a fixture that
-    leaves `project` populated tests a shape the engine cannot emit.
-    """
+    """One workbook entry as `estate_survey.py --json` writes it."""
     matches = candidates or {}
     deps: list[dict[str, Any]] = []
     for ds_name, luid in dependencies:
@@ -152,14 +139,7 @@ def _survey_workbook(
 
 
 def _survey_file(tmp_path: Path, workbooks: list[dict[str, Any]], **extra: Any) -> Path:
-    """Write an `estate_survey.json` and return its path.
-
-    The defaults mirror a run of `estate_survey.py::survey_site` field for field - including
-    `degraded`, `listing_errors` and the `summary` counters, and including the rule that only a
-    RESOLVED dependency reaches `required_datasources` while every other one is echoed in
-    `unresolved_dependencies`. Fixtures that omitted those are how the degraded-survey hole got
-    through review the first time: a gap check cannot be tested against a flag no fixture ever sets.
-    """
+    """Write an `estate_survey.json` and return its path."""
     deps = [(wb, dep) for wb in workbooks for dep in wb["published_dependencies"]]
     required: dict[str, dict[str, Any]] = {}
     unresolved: list[dict[str, Any]] = []
@@ -211,14 +191,7 @@ _OFFLINE_SUMMARY_KEYS = frozenset(
 
 
 def _offline_survey(tmp_path: Path, workbooks: list[dict[str, Any]], **extra: Any) -> Path:
-    """A survey as `build_survey()` writes it WITHOUT `survey_site()` - i.e. no error bookkeeping.
-
-    This is not a hypothetical: `build_survey` is the no-network assembly entry point, and every
-    survey written before engine 2.117.0 (2026-08-10) has this shape too. It is also the only shape
-    in which the per-workbook `dependencies_unknown` flag is the SOLE evidence that a workbook went
-    unread - which is exactly why a fixture must be able to produce it. A fixture that stamps
-    `summary.dependencies_unknown` supplies the very signal the test claims to be testing.
-    """
+    """A survey as `build_survey()` writes it WITHOUT `survey_site()` - i.e. no error bookkeeping."""
     payload = json.loads(_survey_file(tmp_path, workbooks, **extra).read_text("utf-8"))
     for key in ("degraded", "listing_errors", "connection_read_errors"):
         payload.pop(key, None)
@@ -334,11 +307,7 @@ def test_download_stem_requires_a_full_uuid() -> None:
 
 
 def test_survey_promotes_a_metadata_api_orphan_into_phase_1(tmp_path: Path) -> None:
-    """The defect itself: a hard dependency the Metadata API reports as having no consumers.
-
-    Both consumers come from the survey, so the plan must show 2 - not 0 - and the data source must
-    appear in phase 1, ahead of the workbooks that bind to it.
-    """
+    """The defect itself: a hard dependency the Metadata API reports as having no consumers."""
     datasources, survey_path = _sqlproxy_estate(tmp_path)
     plan = build_plan(datasources, "", load_survey(survey_path))
     sales = _by_name(plan)[SALES_DS]
@@ -360,11 +329,7 @@ def test_without_a_survey_the_same_estate_still_reports_the_orphans(tmp_path: Pa
 
 
 def test_survey_only_datasource_absent_from_the_metadata_api_is_still_planned(tmp_path: Path) -> None:
-    """A data source the Metadata API never listed must not fall out of the plan.
-
-    A required data source missing from the sequence is how its consumer gets rebuilt first - the
-    empty-report failure this script exists to prevent - so absence from one source cannot delete it.
-    """
+    """A data source the Metadata API never listed must not fall out of the plan."""
     survey_path = _survey_file(tmp_path, [_survey_workbook(REVENUE_WB, [(SALES_DS, None)])])
     plan = build_plan([_metadata(ADMIN_DS, downstream=[ADMIN_WB])], "", load_survey(survey_path))
 
@@ -375,12 +340,7 @@ def test_survey_only_datasource_absent_from_the_metadata_api_is_still_planned(tm
 
 
 def test_a_metadata_only_edge_is_kept_never_dropped(tmp_path: Path) -> None:
-    """Precedence settles the CLAIM; it does not license DELETING an edge.
-
-    The survey wins where the two disagree, but "wins" must not mean discarding a consumer only the
-    Metadata API saw - that is the same defect pointing the other way, and it would drop a real
-    dependency from the order.
-    """
+    """Precedence settles the CLAIM; it does not license DELETING an edge."""
     datasources = [_metadata(SALES_DS, downstream=[SEGMENTS_WB])]
     survey_path = _survey_file(tmp_path, [_survey_workbook(REVENUE_WB, [(SALES_DS, None)])])
     sales = _by_name(build_plan(datasources, "", load_survey(survey_path)))[SALES_DS]
@@ -456,11 +416,7 @@ def test_the_printed_plan_states_the_precedence_rule_and_attributes_each_edge(
 def test_the_precedence_rule_is_stated_even_when_the_two_sources_agree(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The rule is what tells a reader how to weigh the plan, so it cannot depend on a conflict.
-
-    An estate where nothing disagrees today still needs the rule printed, otherwise the only place
-    it appears is the disagreement block that this estate does not have.
-    """
+    """The rule is what tells a reader how to weigh the plan, so it cannot depend on a conflict."""
     datasources = [_metadata(ADMIN_DS, downstream=[ADMIN_WB])]
     survey = load_survey(_survey_file(tmp_path, [_survey_workbook(ADMIN_WB, [(ADMIN_DS, None)])]))
     output = _rendered(caplog, build_plan(datasources, "", survey), survey)
@@ -471,11 +427,7 @@ def test_the_precedence_rule_is_stated_even_when_the_two_sources_agree(
 
 
 def test_without_a_survey_the_output_never_says_abandoned(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """The wording guard. Without a survey the tool cannot support the word at all.
-
-    The Metadata API's silence about a data source is not a statement about usage, because it cannot
-    see sqlproxy connections in the first place. The claim it CAN support is the weaker one.
-    """
+    """The wording guard. Without a survey the tool cannot support the word at all."""
     datasources, _ = _sqlproxy_estate(tmp_path)
     output = _rendered(caplog, build_plan(datasources, ""))
 
@@ -486,11 +438,7 @@ def test_without_a_survey_the_output_never_says_abandoned(tmp_path: Path, caplog
 
 
 def test_an_incomplete_survey_withholds_the_stronger_claim(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """A survey that could not read every workbook cannot prove a data source is unused.
-
-    The workbook whose connections failed to read may be the very consumer, so "abandoned" is
-    withheld and the gap is named instead.
-    """
+    """A survey that could not read every workbook cannot prove a data source is unused."""
     datasources, _ = _sqlproxy_estate(tmp_path)
     survey_path = _survey_file(
         tmp_path,
@@ -507,12 +455,7 @@ def test_an_incomplete_survey_withholds_the_stronger_claim(tmp_path: Path, caplo
 
 
 def test_an_unresolved_dependency_also_counts_as_a_gap(tmp_path: Path) -> None:
-    """A dependency the survey could not resolve leaves a hole in the graph; say so.
-
-    This is the PARSED direction on its own: the declared list is emptied, so only the workbook row
-    carries the evidence. The declared direction has its own test below - the two must not be able
-    to cover for each other, because a listing failure is exactly when they disagree.
-    """
+    """A dependency the survey could not resolve leaves a hole in the graph; say so."""
     workbook = _survey_workbook(REVENUE_WB, [(SALES_DS, "")])
     survey = load_survey(
         _survey_file(
@@ -539,11 +482,7 @@ def test_an_unresolved_dependency_also_counts_as_a_gap(tmp_path: Path) -> None:
 def test_a_survey_that_reports_itself_degraded_cannot_support_the_abandoned_claim(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """`degraded` is the engine's own verdict on itself, and it is authoritative on its own.
-
-    It is honoured directly rather than re-derived from the error lists: a new failure class added
-    upstream would flip this flag while every list this script knows about stayed empty.
-    """
+    """`degraded` is the engine's own verdict on itself, and it is authoritative on its own."""
     datasources, _ = _sqlproxy_estate(tmp_path)
     survey_path = _survey_file(
         tmp_path,
@@ -562,12 +501,7 @@ def test_a_survey_that_reports_itself_degraded_cannot_support_the_abandoned_clai
 def test_a_failed_site_listing_means_workbooks_are_missing_from_the_survey_entirely(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """`listing_errors` is the worst gap of all: the consumer may never have been listed.
-
-    `paged_list` returns the rows it managed to read plus an error, so the survey is a PARTIAL
-    listing - a data source can look consumer-less purely because the page naming its consumer
-    never arrived.
-    """
+    """`listing_errors` is the worst gap of all: the consumer may never have been listed."""
     datasources, _ = _sqlproxy_estate(tmp_path)
     survey_path = _survey_file(
         tmp_path,
@@ -597,14 +531,7 @@ def test_a_survey_listing_no_workbooks_at_all_is_evidence_of_nothing(
 
 
 def test_a_workbook_with_unknown_dependencies_is_a_gap_with_no_error_list_present(tmp_path: Path) -> None:
-    """`build_survey` marks the row; only `survey_site` adds the error list. Read the row too.
-
-    The fixture here is `build_survey()`'s output with NONE of `survey_site`'s bookkeeping - no
-    `connection_read_errors`, no `summary.dependencies_unknown` - so the per-workbook flag is the
-    only evidence in the file. That matters: with the summary counter present the scan is never the
-    sole signal, and deleting it leaves the suite green (measured). "Unknown" is the opposite of
-    "none", which is the engine's own stated reason for the flag.
-    """
+    """`build_survey` marks the row; only `survey_site` adds the error list. Read the row too."""
     survey = load_survey(
         _offline_survey(
             tmp_path,
@@ -618,13 +545,7 @@ def test_a_workbook_with_unknown_dependencies_is_a_gap_with_no_error_list_presen
 
 
 def test_the_summary_counter_is_read_even_when_no_workbook_row_carries_the_flag(tmp_path: Path) -> None:
-    """The mirror of the test above: the SUMMARY on its own, with clean rows.
-
-    `survey_site` computes `summary.dependencies_unknown` from the LUIDs whose connections it could
-    not read, while the per-row flag is stamped by `build_survey` - so the two can disagree exactly
-    when it matters, e.g. when the listing that would have carried the row failed as well. Each
-    source needs a test in which it is the only evidence, or one of them can quietly stop counting.
-    """
+    """The mirror of the test above: the SUMMARY on its own, with clean rows."""
     survey = load_survey(
         _survey_file(
             tmp_path,
@@ -638,18 +559,7 @@ def test_the_summary_counter_is_read_even_when_no_workbook_row_carries_the_flag(
 
 
 def test_a_survey_carrying_no_degraded_flag_cannot_claim_it_saw_the_estate(tmp_path: Path) -> None:
-    """Completeness needs positive evidence; the absence of the flag is not it.
-
-    Every survey the canonical engine writes today carries `degraded` (`main()` dumps
-    `survey_site`'s dict whole). A JSON without it is either older than the flag or not the
-    engine's - and neither can license the strongest claim this tool makes.
-
-    Measured on the three survey artifacts on this machine: the 2026-08-13 operator run carries
-    `degraded: false`, empty error lists and 38/38 workbooks, and is classified COMPLETE - a
-    healthy survey is unaffected by this gate. The two older dry-run artifacts (2026-08-12 and
-    2026-08-11) carry no `degraded` and no `listing_errors` key at all, so the pre-fix code was
-    reading two fields out of files that could not have contained the others.
-    """
+    """Completeness needs positive evidence; the absence of the flag is not it."""
     payload = json.loads(_survey_file(tmp_path, [_survey_workbook(REVENUE_WB, [(SALES_DS, None)])]).read_text("utf-8"))
     del payload["degraded"]
     del payload["summary"]["degraded"]
@@ -662,15 +572,7 @@ def test_a_survey_carrying_no_degraded_flag_cannot_claim_it_saw_the_estate(tmp_p
 
 
 def test_an_otherwise_clean_survey_with_no_flag_is_told_the_likely_cause(tmp_path: Path) -> None:
-    """Name the cheap explanation instead of sending an operator after a phantom failure.
-
-    `degraded` and `listing_errors` arrived in engine 2.117.0 (upstream commit 72f983a8,
-    2026-08-10), so every survey this repo took before that date now reads INCOMPLETE. The gate
-    stays exactly as strict - a pre-2.117.0 survey that lost a listing call is genuinely
-    indistinguishable from a healthy one, which is why the flag was added - but the remedy it
-    prints ("re-run estate_survey.py") needs live Tableau credentials, so an operator who cannot
-    get them deserves to know the likely reason before spending the afternoon on it.
-    """
+    """Name the cheap explanation instead of sending an operator after a phantom failure."""
     survey = load_survey(_offline_survey(tmp_path, [_survey_workbook(REVENUE_WB, [(SALES_DS, None)])]))
     gaps = " ".join(survey.gaps)
 
@@ -725,13 +627,7 @@ def test_one_failure_recorded_three_ways_is_reported_once(tmp_path: Path) -> Non
 def test_an_incomplete_survey_says_so_even_when_there_is_nothing_to_warn_about(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The gaps have to REACH the operator, not merely exist on the object.
-
-    With no orphan data sources there is no UNCONFIRMED heading to soften, so the header's
-    'SURVEY IS INCOMPLETE' line is the only place the gaps are printed at all. Silencing it left
-    the whole suite green (measured), which means every other completeness test was asserting on
-    `survey.gaps` rather than on what an operator actually reads.
-    """
+    """The gaps have to REACH the operator, not merely exist on the object."""
     datasources = [_metadata(SALES_DS, downstream=[REVENUE_WB])]
     survey = load_survey(_survey_file(tmp_path, [_survey_workbook(REVENUE_WB, [(SALES_DS, None)])], degraded=True))
     output = _rendered(caplog, build_plan(datasources, "", survey), survey)
@@ -744,10 +640,7 @@ def test_an_incomplete_survey_still_contributes_every_edge_it_did_see(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Withholding the CLAIM must not mean discarding the EVIDENCE.
-
-    A degraded survey is still the only system that can see a sqlproxy edge, so it must keep
-    promoting a Metadata-API "orphan" into phase 1. Rejecting a degraded survey outright would fix
-    the wording by re-breaking the order - the more expensive half of issue #126.
+    Refs #126.
     """
     datasources, _ = _sqlproxy_estate(tmp_path)
     survey = load_survey(_survey_file(tmp_path, [_survey_workbook(REVENUE_WB, [(SALES_DS, None)])], degraded=True))
@@ -764,10 +657,7 @@ def test_an_incomplete_survey_still_contributes_every_edge_it_did_see(
 
 def test_a_dependency_the_survey_could_not_luid_resolve_is_matched_by_name(tmp_path: Path) -> None:
     """The name fallback is load-bearing, not decorative.
-
-    `resolve_dependency` returns `luid: ""` for every AMBIGUOUS or NOT_FOUND dependency, so on a
-    real site the survey's edges for those data sources carry no LUID at all. Without the fallback
-    they match nothing, the data source drops back to zero consumers, and issue #126 returns.
+    Refs #126.
     """
     survey = load_survey(_survey_file(tmp_path, [_survey_workbook(REVENUE_WB, [(SALES_DS, "")])]))
     assert survey.by_luid == {}
@@ -802,13 +692,7 @@ def test_a_luid_match_beats_a_name_match_and_says_so(tmp_path: Path) -> None:
 def test_two_projects_sharing_a_datasource_name_are_merged_and_flagged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The merge is kept - it over-migrates rather than orphans - but it is stated, not hidden.
-
-    `estate_survey.py::resolve_dependency` REFUSES this ambiguity because it is deciding an
-    identity. This script is deciding an order, where the safe direction is the opposite one: build
-    both data sources before the workbook. What it must not do is present the per-project
-    attribution as if it were known.
-    """
+    """The merge is kept - it over-migrates rather than orphans - but it is stated, not hidden."""
     datasources = [
         _metadata(SHARED_DS, luid="luid-finance", project="Finance"),
         _metadata(SHARED_DS, luid="luid-marketing", project="Marketing"),
@@ -841,14 +725,7 @@ def test_a_shared_name_still_sequences_both_data_sources_before_the_workbook(tmp
 
 
 def test_a_declared_unresolved_dependency_is_a_gap_even_when_every_row_resolved(tmp_path: Path) -> None:
-    """The top-level list is read on its own, not inferred from the workbook rows.
-
-    `survey_site` records an unresolvable dependency in `unresolved_dependencies` as well as on the
-    row, and the two can disagree - a row can be missing entirely when the listing that would have
-    carried it failed. Reading only the rows would then miss a hole the survey is explicitly
-    declaring. They are counted as ONE failure, not two: on a listing failure both carry the same
-    38 dependencies, and printing them under two different sentences reads as 76.
-    """
+    """The top-level list is read on its own, not inferred from the workbook rows."""
     survey = load_survey(
         _survey_file(
             tmp_path,
@@ -875,15 +752,7 @@ def test_one_unresolved_dependency_declared_and_parsed_is_reported_once(tmp_path
 
 
 def test_a_survey_listing_one_name_under_two_identities_is_flagged_too(tmp_path: Path) -> None:
-    """The collision can arrive from the SURVEY side, not just the Metadata API's.
-
-    This is the shape `resolve_dependency` ACTUALLY emits for a duplicated name: `status:
-    "ambiguous"`, `luid: ""`, `project: ""` and a `candidates` list naming both data sources. It
-    "NEVER picks one", so neither identity field carries the evidence - only `candidates` does, and
-    a fixture that hands over two populated LUIDs instead is testing a shape the engine cannot
-    produce. Here the Metadata API lists ONE row for the name, so `len(rows) >= 2` cannot fire
-    either: without reading `candidates` the merge happens with nothing printed.
-    """
+    """The collision can arrive from the SURVEY side, not just the Metadata API's."""
     both = {SHARED_DS: [("luid-finance", "Finance"), ("luid-marketing", "Marketing")]}
     survey = load_survey(
         _survey_file(
@@ -947,11 +816,7 @@ def test_a_collision_the_metadata_api_cannot_see_at_all_is_still_reported(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """The silent-merge hole: no Metadata API row for the name, ambiguous survey dependencies.
-
-    A `sqlproxy` data source can be invisible to the Metadata API entirely - that IS issue #126 -
-    so the row is survey-only and `len(rows) >= 2` never fires. The merge is still the right call
-    (it over-migrates rather than orphans), but it is the one decision that must never be made
-    quietly, so the survey-only row is checked for the collision too.
+    Refs #126.
     """
     both = {SHARED_DS: [("luid-finance", "Finance"), ("luid-marketing", "Marketing")]}
     survey = load_survey(
@@ -983,11 +848,7 @@ def test_a_unique_name_reports_no_collision(tmp_path: Path, caplog: pytest.LogCa
 
 
 def test_a_survey_whose_schema_moved_raises_instead_of_reporting_no_dependencies(tmp_path: Path) -> None:
-    """Silently parsing zero edges would re-create the defect under a green run.
-
-    "No edges parsed" and "this estate has no dependencies" are indistinguishable downstream, and
-    one of them sequences the migration wrong - so refuse rather than guess.
-    """
+    """Silently parsing zero edges would re-create the defect under a green run."""
     path = tmp_path / "estate_survey.json"
     path.write_text(
         json.dumps({"workbooks": [{"name": REVENUE_WB, "published_dependencies": [{"datasource": SALES_DS}]}]}),

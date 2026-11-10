@@ -44,13 +44,7 @@ def sleeper(seconds: float) -> list[str]:
 
 
 class Counter:
-    """A probe the test drives.
-
-    `moves` bytes-worth of movement happens on the first `moves` samples and then it FREEZES, which
-    is the observe-then-flatline shape of a real hung transfer. `moves=0` never moves at all, which
-    is the uv-trampoline shape. Movement has to happen DURING the run: a value bumped before the
-    first sample is indistinguishable from a constant, because progress is a change between samples.
-    """
+    """A probe the test drives."""
 
     def __init__(self, value: int | None = 0, moves: int = 0) -> None:
         self.value = value
@@ -124,12 +118,7 @@ def test_a_stalled_download_is_killed_once_progress_stops() -> None:
 
 
 def test_progress_must_be_OBSERVED_before_a_flatline_counts_as_a_stall() -> None:
-    """A probe that never moves is a probe we cannot trust — measured, not hypothetical.
-
-    Under a uv venv, `Popen.pid` is a TRAMPOLINE whose I/O counters never move (measured:
-    `Popen.pid = 35152` while the child's own `os.getpid()` was `20856`). If a never-moving probe
-    were allowed to arm the stall deadline, every download on such a venv would be killed as hung.
-    """
+    """A probe that never moves is a probe we cannot trust - measured, not hypothetical."""
     probe = Counter(1000)  # never advanced
     run = harvest.run_watched(
         sleeper(30),
@@ -206,14 +195,7 @@ def test_the_stall_default_is_never_stricter_than_the_fetchers_own_read_timeout(
 
 
 def test_a_bursty_but_healthy_transfer_survives_a_gap_the_fetcher_would_tolerate() -> None:
-    """Finding 1, as behaviour rather than as an inequality between two constants.
-
-    Everything is scaled from the REAL constants by the same factor, so the test asks one question:
-    *is our kill threshold generous enough for a gap the downloader itself allows?* A pause is
-    chosen that urllib would tolerate (below its read timeout) but that the old 120s default would
-    not (above its scaled equivalent). Lower `DEFAULT_STALL_TIMEOUT` back under the read timeout and
-    this goes red; the pause and the child's read timeout do not move with it.
-    """
+    """Finding 1, as behaviour rather than as an inequality between two constants."""
     read_timeout = 2.0  # stands in for the fetcher's 300s
     scale = read_timeout / harvest.ENGINE_READ_TIMEOUT_SECONDS
     pause = 0.9 * read_timeout  # urllib is happy: below its read timeout
@@ -235,13 +217,7 @@ def test_a_bursty_but_healthy_transfer_survives_a_gap_the_fetcher_would_tolerate
 
 
 def test_losing_the_probe_after_movement_does_not_kill_a_healthy_download() -> None:
-    """Finding 2, the reviewer's reproduction: probe returns 0, 1, then None forever.
-
-    `None` means "cannot read", never "no bytes moved". Access denial, a descendant exiting between
-    enumeration and counter read, or a PARTIAL subtree read all produce it — and the partial case is
-    the nasty one, because the readable trampoline flatlines while the unreadable descendant is the
-    process actually doing the work.
-    """
+    """Finding 2, the reviewer's reproduction: probe returns 0, 1, then None forever."""
     readings = [0, 1]
 
     def lost_probe(pid: int) -> int | None:  # pylint: disable=unused-argument
@@ -282,11 +258,7 @@ def test_a_lost_probe_still_ends_the_run_but_as_a_CEILING_not_a_stall() -> None:
 
 
 def test_the_wall_clock_restarts_from_the_MOMENT_the_signal_was_lost() -> None:
-    """A transfer that progressed for a while and then went blind gets a fresh window, not a kill.
-
-    Measured from process start, a download that progressed for 9 minutes and lost its probe would
-    be killed one minute later; measured from the loss, it gets the full ceiling to prove itself.
-    """
+    """A transfer that progressed for a while and then went blind gets a fresh window, not a kill."""
     moving_for = 0.5
     started = time.perf_counter()
 
@@ -334,11 +306,7 @@ def test_losing_the_signal_is_announced_once(caplog: pytest.LogCaptureFixture) -
 def test_a_partial_subtree_reading_is_reported_as_UNAVAILABLE_not_as_a_smaller_sum(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The sum of the processes we CAN read is not a smaller answer; it is a different question.
-
-    With the descendant unreadable, the readable trampoline's constant counters look exactly like a
-    stalled download.
-    """
+    """The sum of the processes we CAN read is not a smaller answer; it is a different question."""
     child = subprocess.Popen(  # pylint: disable=consider-using-with
         [sys.executable, "-c", "import time;time.sleep(5)"], stdout=subprocess.PIPE, text=True
     )
@@ -516,14 +484,7 @@ def test_a_watchdog_verdict_reaches_the_caller_as_the_failure_detail(
 def test_a_watchdog_verdict_cannot_carry_the_childs_reflected_pat(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, verdict: str
 ) -> None:
-    """⚠️ The PATH #482 ADDED, and the one the credential tests do not reach.
-
-    `download()` redacts on the `returncode != 0` branch, and that branch is what
-    `tests/test_tableau_env.py` exercises. A watchdog verdict returns EARLIER, from `run.detail`,
-    and drops the child's stderr entirely -- which is safe today and is one plausible "let's include
-    what the child said" edit away from not being. The killed child is the likeliest one to have
-    been mid-sign-in, so its stderr is exactly where a reflected PAT would sit.
-    """
+    """⚠️ The PATH #482 ADDED, and the one the credential tests do not reach."""
     secret = "SENTINEL_PAT_qrstuvwxyz012345"
     env = {
         "TABLEAU_SERVER_URL": "https://example.invalid",
@@ -551,12 +512,7 @@ def test_a_watchdog_verdict_cannot_carry_the_childs_reflected_pat(
 
 
 def test_the_real_probe_sums_a_process_SUBTREE_not_just_the_pid_handed_to_popen() -> None:
-    """Measured 2026-09-03: `.venv/Scripts/python.exe` is a uv TRAMPOLINE.
-
-    `Popen.pid` was 35152 while the child's own `os.getpid()` reported 20856, and the trampoline's
-    I/O counters never move. A probe that sampled only `Popen.pid` would report every download as
-    stalled. This asserts the subtree walk reaches the descendant that does the work.
-    """
+    """Measured 2026-09-03: `.venv/Scripts/python.exe` is a uv TRAMPOLINE."""
     child = subprocess.Popen(  # pylint: disable=consider-using-with
         [sys.executable, "-c", "import os,sys,time;print(os.getpid(),flush=True);time.sleep(5)"],
         stdout=subprocess.PIPE,
@@ -923,11 +879,7 @@ def landing_download(kind, luid, target, env, scripts, **kwargs):  # pylint: dis
 def test_main_forwards_the_operator_s_timeouts_to_every_download(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Parsing a flag and then ignoring it looks exactly like having no flag at all.
-
-    A mutation that replaced `args.download_timeout` with the module default at the call site
-    survived every other test in this file, because they all call `download()` directly.
-    """
+    """Parsing a flag and then ignoring it looks exactly like having no flag at all."""
     db = tmp_path / "estate.db"
     con = sqlite3.connect(db)
     con.executescript(
@@ -1361,11 +1313,7 @@ def test_an_estate_db_without_a_dependency_table_still_harvests(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """An older database cannot answer the orphan question; that is not a reason to fail the run.
-
-    ⚠️ This test used to make the download FAIL and then assert `main() == 0`, which proved nothing
-    about harvesting — it pinned the fail-open exit code instead (blind review of #482). The asset
-    now lands, so a green run means the sweep completed on a dependency-table-less database, which
-    is the claim in the title.
+    Refs #482.
     """
     db = tmp_path / "estate.db"
     con = sqlite3.connect(db)
@@ -1495,11 +1443,7 @@ def test_an_empty_sweep_is_nothing_assessed_rather_than_a_clean_run() -> None:
 
 
 def test_the_customers_41_ok_6_failed_shape_is_distinguishable_from_a_total_failure() -> None:
-    """The judgement call this contract turns on: partial and total must not share a code.
-
-    SES ran 47 assets and got 41/6. Exit 0 said "clean"; a single non-zero for both shapes would say
-    "something went wrong" and lose the difference between six retryable assets and a dead site.
-    """
+    """The judgement call this contract turns on: partial and total must not share a code."""
     partial = [assessed(f"ok-{i}") for i in range(41)] + [unassessed(f"bad-{i}") for i in range(6)]
     total = [unassessed(f"bad-{i}") for i in range(47)]
     clean = [assessed(f"ok-{i}") for i in range(47)]
@@ -1594,13 +1538,7 @@ def test_the_exit_contract_is_documented_where_an_operator_reads_it() -> None:
 
 
 def test_the_blind_ceiling_is_not_below_the_childs_own_bounded_retry_budget() -> None:
-    """AGENTS.md: do not kill a tool that IS the bounded timer.
-
-    The engine's `_http_download` makes up to `max_attempts` attempts, each of which may burn a full
-    per-read timeout, before it raises its own classified error. The historical 600s ceiling sat
-    below that product, so on any run where the progress probe is unreadable we killed the fetcher
-    mid-budget and recorded `timeout after 600s` in place of the real HTTP failure.
-    """
+    """AGENTS.md: do not kill a tool that IS the bounded timer."""
     assert harvest.DEFAULT_DOWNLOAD_TIMEOUT > harvest.ENGINE_DOWNLOAD_BUDGET_SECONDS, (
         f"a {harvest.DEFAULT_DOWNLOAD_TIMEOUT:.0f}s ceiling pre-empts the fetcher's own "
         f"{harvest.ENGINE_DOWNLOAD_BUDGET_SECONDS:.0f}s retry budget"
@@ -1612,12 +1550,7 @@ def test_the_blind_ceiling_is_not_below_the_childs_own_bounded_retry_budget() ->
 
 @pytest.mark.engine_dependency(expected_skip_reason="canonical engine not installed, so its constants cannot be read")
 def test_the_ceiling_constants_match_the_INSTALLED_engine() -> None:
-    """The arithmetic is only sound while the engine's own numbers are what we think they are.
-
-    Read off the installed canonical engine rather than restated: `max_attempts` and the default
-    `timeout` of `_http_download`, plus the `Retry-After` clamp. An engine bump that changes either
-    reddens this instead of silently invalidating the derivation.
-    """
+    """The arithmetic is only sound while the engine's own numbers are what we think they are."""
     import ast  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
     import re  # noqa: PLC0415  # pylint: disable=import-outside-toplevel
 
@@ -1704,13 +1637,7 @@ def test_the_cli_warns_when_the_ceiling_undercuts_the_fetchers_retry_budget(
 
 
 def test_a_blind_child_reaches_its_OWN_verdict_before_our_ceiling_fires() -> None:
-    """Finding 2 as behaviour, scaled from the real constants by one shared factor.
-
-    The child stands in for a fetcher that spends its ENTIRE retry budget and then reports; the
-    probe is unreadable throughout, which is the only situation where the ceiling is armed at all.
-    The control repeats it with the historical 600s ceiling scaled identically — that one IS killed,
-    which is what makes the first assertion evidence rather than a tautology.
-    """
+    """Finding 2 as behaviour, scaled from the real constants by one shared factor."""
     scale = 1 / 200.0  # 1380s budget -> 6.9s, 1530s ceiling -> 7.65s
     child_budget = harvest.ENGINE_DOWNLOAD_BUDGET_SECONDS * scale
     blind = Counter(None)  # never readable: the unsupported-platform / denied-handle shape

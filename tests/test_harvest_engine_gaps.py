@@ -151,11 +151,7 @@ def _declare(
     baseline_sha256: str | None = "recorded",
     expected_sha256: str | None = "current",
 ) -> None:
-    """Write ONE edit declaration in the exact shape the tamper gate accepts as proof.
-
-    The sentinel defaults resolve to the real hashes, so a test that wants a STALE or FORGED
-    declaration overrides just the field it is falsifying and nothing else changes.
-    """
+    """Write ONE edit declaration in the exact shape the tamper gate accepts as proof."""
     if baseline_sha256 == "recorded":
         baseline_sha256 = _recorded(bundle, target)
     if expected_sha256 == "current":
@@ -231,11 +227,7 @@ def test_baseline_with_no_working_copy_is_reported(tmp_path):
 
 
 def test_model_layer_pairs_on_model_name_not_unit_name(tmp_path):
-    """Regression: `pbip/WB/` holds `Sales.SemanticModel`, not `WB.SemanticModel`.
-
-    Pairing the model layer by UNIT name reported 21 of the estate's artifacts as having no engine
-    baseline when 20 of them do - a coverage figure wrong by a factor of three.
-    """
+    """Regression: `pbip/WB/` holds `Sales.SemanticModel`, not `WB.SemanticModel`."""
     report = heg.harvest(_bundle(tmp_path))
     entry = _pair(report, "model", "Sales")
     assert entry["unit"] == "WB"
@@ -461,17 +453,7 @@ def test_baseline_dataset_reference_resolution_is_measured(tmp_path):
 
 
 def test_git_readable_path_max_is_the_measured_constant():
-    """A silent edit to this number is the most damaging change anyone could make to the module.
-
-    Measured 2026-08-30 on `_runs/estate-2.339.0-20260829/`: of 44 report pairs, the 41 that
-    `git diff --no-index --stat` could read had a worst full path of exactly 259 characters, and the
-    3 it could not (261 / 285 / 287) each returned exit 1 with NO stat line. `worst_path > 259`
-    therefore predicted the failures 3/3 with no false positives on that corpus.
-
-    The behavioural tests around it drive a LOW ceiling over a short tree, because a stock Windows
-    runner cannot create a 260-character path - so without this pin the shipped value is unexercised.
-    Mutation-tested: raising it to 10,000,000 survived the entire suite until this test existed.
-    """
+    """A silent edit to this number is the most damaging change anyone could make to the module."""
     assert heg.GIT_READABLE_PATH_MAX == 259
 
 
@@ -725,14 +707,7 @@ def _moved_paths(report: dict) -> set[str]:
 
 @pytest.mark.parametrize("name", sorted(MUTATIONS))
 def test_every_drift_the_tamper_gate_finds_is_accounted_for(tmp_path, name):
-    """The property behind the whole redesign, over every mutation shape the review found.
-
-    Not "the harvest must also look unhappy" - a fully attributed tier edit is exactly the evidence
-    this module exists to produce, and `complete` is the right word for it. The contract is stricter
-    and more useful: **every path the gate says moved must appear in the harvest's own output.**
-    Measured on the first version (2026-08-30), five of these seven shapes returned `complete` while
-    `tamper_check()` returned `DRIFT` on the identical bundle, and four of them named nothing at all.
-    """
+    """The property behind the whole redesign, over every mutation shape the review found."""
     build, mutate = MUTATIONS[name]
     bundle = build(tmp_path)
     mutate(bundle)
@@ -897,13 +872,7 @@ def test_slice_only_backfill_is_unavailable_for_engine_attribution(tmp_path):
 
 
 def test_any_unattributed_difference_forces_incomplete(tmp_path):
-    """Existence of an attribution object is not coverage of the paths actually compared.
-
-    A `.pbi` sidecar is the honest example: the tamper gate deliberately excludes it (a refresh
-    rewrites it and must not read as tampering), so the engine inventory can say nothing about it -
-    yet the tree comparison still sees it. That difference is real and its authorship is unknown,
-    which is `unattributed`, which may not be reported as a `complete` harvest.
-    """
+    """Existence of an attribution object is not coverage of the paths actually compared."""
     bundle = _identical_bundle(tmp_path)
     _write(bundle / "pbip" / "WB" / "WB.Report" / ".pbi" / "localSettings.json", {"version": "1.0"})
 
@@ -978,18 +947,7 @@ def test_an_unusable_evidence_object_attributes_nothing():
 
 
 class _ScopedOs:  # pylint: disable=too-few-public-methods
-    """`harvest_gap_trees`' view of `os`, with ONE wrapped attribute and everything else real.
-
-    ⚠️ Patching `hgt.os.walk` instead patches the process-wide stdlib `os` module, because `hgt.os`
-    IS that module object. Measured on Windows CPython 3.13.2: the injected `PermissionError` fired a
-    second time during `TemporaryDirectory` cleanup - 3.13's unsafe `shutil._rmtree_unsafe()` walks
-    with `os.walk`, and Windows has no dir-fd APIs so it cannot take the fd-based branch - and
-    `harvest()`'s fail-closed `except OSError` replaced the already-correct `incomplete` report with
-    an empty `unstable` one. Linux CI never saw it: 3.12 recursed with `os.scandir` and Ubuntu takes
-    the fd branch anyway, so the same test passed for reasons unrelated to what it asserts.
-
-    Replacing the module's `os` NAME keeps the injection inside the code under test.
-    """
+    """`harvest_gap_trees`' view of `os`, with ONE wrapped attribute and everything else real."""
 
     def __init__(self, walk):
         self.walk = walk
@@ -1039,15 +997,7 @@ def test_unreadable_directory_does_not_fabricate_additions_beneath_it(tmp_path, 
 
 
 def test_a_traversal_failure_that_cannot_be_located_suppresses_unscoped_tree_delta_records(tmp_path, monkeypatch):
-    """An unlocatable failure cannot be withdrawn from a path set, so NO tree-delta record survives.
-
-    ⚠️ The suppression is narrower than the whole pair, and the earlier name overstated it. Only the
-    records DERIVED from the tree comparison are withheld (`_difference_records` emits nothing when
-    `TreeDelta.scoped` is false), which is why the pair's own `provenance` is empty while its raw
-    file COUNTS are still reported. Generated-artifact drift the module adjudicates independently
-    from the engine's hash inventory is not derived from that delta and stays eligible: here the
-    post-baseline `p2/page.json` is still reconciled as one `unpaired` top-level `tier_edit`.
-    """
+    """An unlocatable failure cannot be withdrawn from a path set, so NO tree-delta record survives."""
     bundle = _bundle_with_blocked_dir(tmp_path)
     _write(bundle / "pbip/WB/WB.Report/definition/pages/p2/page.json", {"name": "p2"})
     _block_directory(monkeypatch, "blocked", "reports", locatable=False)
@@ -1332,12 +1282,7 @@ def test_a_rebind_onto_a_dotted_table_is_not_reported_as_unexplained(tmp_path):
 
 
 def test_a_changed_pbip_project_file_is_reported_as_a_tier_edit(tmp_path):
-    """⚠️ The gate adjudicates the WHOLE inventory; the pair loop only sees `.Report`/`.SemanticModel`.
-
-    Measured (blind review round 3): editing an engine-recorded `pbip/WB/WB.pbip` was reported
-    `changed` by `adjudicate_generated_drift` while the harvest returned `complete` with **zero**
-    differences and zero tier edits. The real corpus holds 51 such files.
-    """
+    """⚠️ The gate adjudicates the WHOLE inventory; the pair loop only sees `.Report`/`.SemanticModel`."""
     bundle = _identical_bundle(tmp_path)
     _write(bundle / "pbip" / "WB" / "WB.pbip", {"version": "1.0", "artifacts": []})
     _record_baseline(bundle)
@@ -1369,12 +1314,7 @@ def test_deleting_a_whole_working_report_reports_every_lost_file(tmp_path):
 
 
 def test_an_adjudicated_path_that_cannot_be_placed_is_listed_and_forces_incomplete(tmp_path):
-    """A `.pbip` at the BUNDLE root is under neither a baseline root nor `pbip/`.
-
-    It must not be silently absorbed: it is named in `unreconciled_drift`, and while anything is
-    there the run cannot be `complete`. That guard is what makes "nothing disappears" structural
-    rather than a property of the cases we happened to enumerate.
-    """
+    """A `.pbip` at the BUNDLE root is under neither a baseline root nor `pbip/`."""
     bundle = _identical_bundle(tmp_path)
     _write(bundle / "Estate.pbip", {"version": "1.0"})
     _record_baseline(bundle)
@@ -1429,12 +1369,7 @@ def test_a_directory_that_cannot_be_enumerated_is_a_finding_not_a_traceback(tmp_
 
 
 def test_a_blocked_tree_root_withdraws_the_whole_tree_from_every_count(tmp_path, monkeypatch):
-    """⚠️ A failure at the tree ROOT relativises to `"."`, which no key is prefixed by.
-
-    Measured (blind review round 3): the round-2 prefix fix still let this through - `incomplete`,
-    but both working files were counted as additions AND attributed `engine_internal`, contradicting
-    this module's documented promise that unreadable content is excluded from every count.
-    """
+    """⚠️ A failure at the tree ROOT relativises to `"."`, which no key is prefixed by."""
     bundle = _identical_bundle(tmp_path)
     real_walk = os.walk
 
@@ -1486,13 +1421,7 @@ CLEAN_CLAIM = "**None.** Every differing byte in this bundle is still hash-ident
 
 
 def test_markdown_does_not_claim_cleanliness_when_attribution_is_unavailable(tmp_path):
-    """⚠️ An empty `tier_edits` list has two meanings; the prose used to print the reassuring one.
-
-    Measured (blind review round 4): deleting `input_manifest.json` from a differing fixture gave
-    `status=incomplete`, `attribution.usable=false` and TWO unattributed differences - and the
-    markdown still asserted that every differing byte matched the engine's own record. The JSON said
-    `incomplete`; the prose a human actually reads said the opposite.
-    """
+    """⚠️ An empty `tier_edits` list has two meanings; the prose used to print the reassuring one."""
     bundle = _bundle(tmp_path, entity_baseline="Extract", entity_working="Orders")
     (bundle / "input_manifest.json").unlink()
 
@@ -1509,17 +1438,7 @@ def test_markdown_does_not_claim_cleanliness_when_attribution_is_unavailable(tmp
 
 
 def test_the_clean_claim_asks_the_harvest_rather_than_re_deriving_trust(tmp_path):
-    """⚠️ FOUR rounds of review found four ways to re-derive this wrongly. Blind review round 5:
-
-    `unreconciled_drift` and a `pbip/` discovery failure both leave `status=incomplete` with ZERO
-    compared paths - so `engine_internal == differing_files` is **vacuously true** and all three of
-    the previous round's conditions passed. Each round added a clause that rebuilt "is this
-    trustworthy?" from parts and missed a different one.
-
-    The harvest already computes `status` and `incomplete_reasons`. A re-derivation can only ever
-    enumerate the reasons known on the day it was written, so this asks the authoritative field and
-    every future incompleteness reason flows through automatically.
-    """
+    """⚠️ FOUR rounds of review found four ways to re-derive this wrongly. Blind review round 5:"""
     complete = {
         "provenance": {"engine_internal": 0, "differing_files": 0},
         "attribution": {"usable": True},
@@ -1538,12 +1457,7 @@ def test_the_clean_claim_asks_the_harvest_rather_than_re_deriving_trust(tmp_path
 
 
 def test_an_empty_comparison_can_never_be_the_only_thing_permitting_the_claim(tmp_path):
-    """The vacuity itself, stated as a requirement rather than left implicit.
-
-    `engine_internal == differing_files` is TRUE over an empty set, and that is what produced two of
-    the four instances. It survives as belt-and-braces beneath the status check; it must never again
-    be the load-bearing clause.
-    """
+    """The vacuity itself, stated as a requirement rather than left implicit."""
     vacuous = {
         "provenance": {"engine_internal": 0, "differing_files": 0},
         "attribution": {"usable": True},
@@ -1605,12 +1519,7 @@ def test_markdown_does_not_claim_cleanliness_when_the_baseline_drifted(tmp_path)
 
 
 def test_adjudication_reads_the_inventory_from_the_snapshot_it_was_given(tmp_path):
-    """A snapshot handed to adjudication is the AUTHORITY, not a hint.
-
-    Without it the harvest would read the inventory a second time and still adjudicate from a moment
-    its comparison cannot see. With it, adjudication reports what that read saw - which is exactly
-    what `_observed_race` then checks the tree scan's own digests against.
-    """
+    """A snapshot handed to adjudication is the AUTHORITY, not a hint."""
     bundle = _identical_bundle(tmp_path)
     generated = cmp_mod.load_generated_artifact_baseline(bundle)
     before = cmp_mod.observe_generated_artifacts(bundle, generated["files"])
@@ -1643,17 +1552,7 @@ def test_the_report_never_claims_more_than_it_verified_about_concurrency(tmp_pat
 
 @pytest.mark.parametrize("branch", ["clean", "tier_edit", "undetermined"])
 def test_every_tier_edit_branch_carries_the_concurrency_caveat(tmp_path, branch):
-    """⚠️ The caveat was appended PER BRANCH, and `Undetermined` returned without it.
-
-    So the reports carrying it were the trustworthy ones, and the report that could not attribute
-    its own differences - the one whose reader most needs to know the bundle was never proven
-    still - printed no caveat at all. Round 10 of review measured it on the pristine estate:
-    `status: incomplete`, 500 engine_internal differences, `CAVEAT_PRESENT=False`.
-
-    Parametrised over every branch on purpose. A test that pinned only the third branch would be
-    satisfied by the same per-branch fix that created the hole, and would say nothing about the
-    fourth branch somebody adds next.
-    """
+    """⚠️ The caveat was appended PER BRANCH, and `Undetermined` returned without it."""
     report = heg.harvest(_bundle(tmp_path, entity_baseline="Extract", entity_working="Orders"))
     if branch == "tier_edit":
         report["tier_edits"] = [

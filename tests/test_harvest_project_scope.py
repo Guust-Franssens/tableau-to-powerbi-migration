@@ -137,11 +137,7 @@ def test_unresolved_edge_includes_all_same_named_datasource_candidates(database:
 
 
 def test_a_project_holding_only_datasources_is_still_selectable(database: sqlite3.Connection) -> None:
-    """The issue's own example: `--project "00 - Certified Sources"` is datasources and no workbooks.
-
-    Selecting only what workbook edges pull in leaves this empty, so the model-first phase-1
-    workflow -- migrate the certified sources first, then the reports -- cannot be scoped at all.
-    """
+    """The issue's own example: `--project "00 - Certified Sources"` is datasources and no workbooks."""
     todo, _, workbooks, in_project, pulled_in = harvest.scoped_todo(
         database, ["Certified Sources"], [], workbooks_only=False
     )
@@ -179,12 +175,7 @@ def test_local_asset_name_puts_the_luid_in_front_so_the_engine_strips_it(tmp_pat
 
 
 def test_a_twb_landing_where_a_twbx_was_requested_is_still_found(tmp_path: Path) -> None:
-    """The extension fallback. `fetch_tds.py::save_outputs` writes `.twb` for a non-zip download.
-
-    Measured across three real full harvests: `{'.tdsx': 17, '.twb': 18, '.twbx': 20}` -- 18 of 38
-    workbooks (47%) land as `.twb`. Matching only the requested extension drops them, and the sweep
-    still reports `ours failed 0, his failed 0` because they never reached a parser at all.
-    """
+    """The extension fallback. `fetch_tds.py::save_outputs` writes `.twb` for a non-zip download."""
     landed = tmp_path / "wb-finance_Monthly_Report.twb"
     landed.write_text("<workbook/>", encoding="utf-8")
     assert harvest.asset_path(tmp_path, "workbook", "Monthly Report", "wb-finance").suffix == ".twbx"
@@ -484,11 +475,7 @@ def test_the_cli_refuses_a_numeric_project_url_before_any_session_or_download(
     urls: list[str],
     refuse_all_work: None,  # pylint: disable=unused-argument
 ) -> None:
-    """The mutation control: drop the refusal from `main()` and this stops raising SystemExit at all.
-
-    Both cases matter -- the numeric URL alone, and a numeric URL BESIDE a usable one, which must
-    still select nothing rather than quietly harvest half the requested scope.
-    """
+    """The mutation control: drop the refusal from `main()` and this stops raising SystemExit at all."""
     argv = ["harvest_estate_assets.py", "--out", str(tmp_path / "_sweep"), "--db", str(tmp_path / "estate.db")]
     for url in urls:
         argv += ["--project-url", url]
@@ -652,11 +639,7 @@ def test_the_cli_refuses_a_malformed_or_control_bearing_url_as_a_usage_error(
 def test_the_cli_selects_the_real_project_from_an_uppercase_or_braced_url(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, url: str, offline_sweep: list[Path]
 ) -> None:
-    """The production control for canonicalisation: `estate.db` holds the LUID lowercase.
-
-    Without the `uuid.UUID` pass this selects nothing, `scoped_todo` raises `no projects matched`,
-    and the run exits 1 -- an invented "that project is empty" for a URL naming a real project.
-    """
+    """The production control for canonicalisation: `estate.db` holds the LUID lowercase."""
     out = tmp_path / "_sweep"
     (out / "assets").mkdir(parents=True)
     (out / "assets" / "wb-finance_Monthly_Report.twbx").write_bytes(b"PK\x03\x04")

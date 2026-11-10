@@ -109,13 +109,7 @@ class _Response:
 
 
 class RecordingTransport:
-    """One scripted, in-process stand-in for ``urllib.request.urlopen``.
-
-    Both clients are pointed at the SAME instance so the comparison is apples to apples: identical
-    scripted responses, one shared call log, no real network. ``metadata_status``/``metadata_body``
-    covers the ONE endpoint under investigation; sign-in always succeeds so a metadata-call failure
-    is never confused with an authentication failure.
-    """
+    """One scripted, in-process stand-in for ``urllib.request.urlopen``."""
 
     def __init__(
         self,

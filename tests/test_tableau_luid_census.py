@@ -44,17 +44,7 @@ def _payload(workbooks):
     ],
 )
 def test_emit_refuses_anything_that_could_carry_an_identifier(value):
-    """⚠️ The load-bearing safety property, and it must be a REFUSAL rather than a convention.
-
-    This module reads a credentialed, site-wide response. The promise that it reports "counts and
-    shapes only" is worth nothing if a later edit can quietly print a workbook name -- so `_emit`
-    raises instead, and a careless change fails loudly at the first call.
-
-    ⚠️ The label is a LEGITIMATE one on purpose. It used to be the literal "label", and when the
-    round-3 allowlist landed that stopped being an allowed label -- so this test kept passing while
-    the VALUE check it exists to cover was never reached. Fifth time on this PR that a new guard has
-    quietly made an older fixture vacuous; the fixture must reach its own subject.
-    """
+    """⚠️ The load-bearing safety property, and it must be a REFUSAL rather than a convention."""
     with pytest.raises(SystemExit):
         census_mod._emit("blank_luids", value)  # pylint: disable=protected-access
 
@@ -66,11 +56,7 @@ def test_emit_allows_counts_and_flags(value):
 
 
 def test_the_census_never_reads_a_luid_VALUE_only_its_shape():
-    """Two sites, identical shapes, completely different identifiers -> identical census.
-
-    That is the structural statement of "no identity is ever recorded". A census that varied with the
-    luid values would be carrying them, however indirectly.
-    """
+    """Two sites, identical shapes, completely different identifiers -> identical census."""
     one = census_mod.census(_payload([{"dashboards": [{"luid": LUID}], "sheets": [{"luid": ""}]}]))
     two = census_mod.census(_payload([{"dashboards": [{"luid": OTHER}], "sheets": [{"luid": "   "}]}]))
     assert one == two
@@ -80,11 +66,7 @@ def test_the_census_never_reads_a_luid_VALUE_only_its_shape():
 
 
 def test_a_blank_luid_is_counted_separately_from_a_malformed_one():
-    """⚠️ The distinction the whole #402 round-2 fix rests on, asserted at the census layer too.
-
-    If these ever landed in one bucket the census would report a healthy site as broken, or hide a
-    real malformed identifier among the expected hidden-sheet blanks.
-    """
+    """⚠️ The distinction the whole #402 round-2 fix rests on, asserted at the census layer too."""
     counts = census_mod.classify([{"luid": LUID}, {"luid": ""}, {"luid": "   "}, {"luid": "D-1"}, {"luid": None}])
     assert counts == {
         "total": 5,
@@ -120,11 +102,7 @@ def test_a_workbook_missing_a_declared_collection_is_reported_not_skipped_silent
 
 
 def test_the_census_and_the_parser_agree_on_what_counts_as_a_luid():
-    """Two implementations of the shape rule would drift; there is deliberately only one.
-
-    `classify` calls the same public `is_luid` the parser uses, so a change to the rule cannot leave
-    the census describing a site by a rule the parser no longer applies.
-    """
+    """Two implementations of the shape rule would drift; there is deliberately only one."""
     assert census_mod.classify([{"luid": LUID}])["uuid"] == 1
     assert view_types_mod.is_luid(LUID)
     assert not view_types_mod.is_luid("")
@@ -161,23 +139,13 @@ def test_the_json_output_carries_only_integer_counts(tmp_path):
     ],
 )
 def test_emit_refuses_a_label_this_module_did_not_author(label):
-    """⚠️ The second half of the safety argument, and the half that was missing.
-
-    A label is as much a print as a value is. The last three cases matter as much as the first
-    three: an allowlist that tolerated a trailing space or a case fold would be one `f"{...}"` away
-    from being no allowlist at all.
-    """
+    """⚠️ The second half of the safety argument, and the half that was missing."""
     with pytest.raises(SystemExit):
         census_mod._emit(label, 1)  # pylint: disable=protected-access
 
 
 def test_the_label_refusal_does_not_echo_the_label_it_rejected(capsys):
-    """⚠️ Quoting the rejected label back would reintroduce the leak ON THE ERROR PATH.
-
-    That is not hypothetical in this repo: the reflected-credential rounds that produced
-    `tableau_http` were all about a server-controlled string reaching a diagnostic, and an exception
-    message is a diagnostic.
-    """
+    """⚠️ Quoting the rejected label back would reintroduce the leak ON THE ERROR PATH."""
     with pytest.raises(SystemExit) as excinfo:
         census_mod._emit(LUID, 1)  # pylint: disable=protected-access
     assert LUID not in str(excinfo.value)
@@ -185,11 +153,7 @@ def test_the_label_refusal_does_not_echo_the_label_it_rejected(capsys):
 
 
 def test_every_label_the_script_actually_uses_is_allowed():
-    """The mirror assertion: an allowlist that refused a real label would be safe and broken.
-
-    Built from the census keys the script really produces, so adding a bucket without adding it to
-    `LABELS` fails here rather than at the end of a live run against a customer site.
-    """
+    """The mirror assertion: an allowlist that refused a real label would be safe and broken."""
     totals = census_mod.census(_payload([{"dashboards": [{"luid": LUID}], "sheets": [{"luid": ""}]}]))
     totals["assessable"] = 1
     for key in totals:
@@ -246,11 +210,7 @@ ONE_DASHBOARD = [{"dashboards": [{"luid": LUID}], "sheets": []}]
     ],
 )
 def test_a_refused_or_unreadable_response_never_yields_an_authoritative_verdict(payload, why, run_census, capsys):
-    """⚠️ The load-bearing property, and the one the script exists to make permanent.
-
-    Each of these once produced `NOT-PRESENT` (or an uncaught `TypeError`). A zero here does not
-    measure the site; it measures how little of it we could read.
-    """
+    """⚠️ The load-bearing property, and the one the script exists to make permanent."""
     code = run_census(payload)
     out = capsys.readouterr().out
     assert code == census_mod.EXIT_CANNOT_TELL, f"{why} must not exit as a completed measurement"
@@ -274,11 +234,7 @@ def test_the_exit_code_follows_the_verdict_even_with_nothing_to_assess(run_censu
 
 
 def test_the_json_of_an_unassessable_run_says_so(run_census, tmp_path):
-    """⚠️ The JSON outlives the terminal output, so it carries the flag rather than implying it.
-
-    A consumer must not be able to read `blank_luids: 0` without also seeing whether that zero is a
-    measurement of the site or of our own blindness.
-    """
+    """⚠️ The JSON outlives the terminal output, so it carries the flag rather than implying it."""
     out = tmp_path / "census.json"
     run_census({"errors": [{"message": "boom"}], "data": {"workbooks": ONE_DASHBOARD}}, json_out=out)
     loaded = json.loads(out.read_text(encoding="utf-8"))
@@ -304,18 +260,7 @@ def test_the_verdict_requires_having_actually_assessed_the_site(totals, refused,
 
 
 def test_the_recorded_live_measurement_replays_to_the_same_verdict(run_census, capsys, tmp_path):
-    """⚠️ Ties the measured citation to executable code, so it cannot rot into folklore.
-
-    Reconstructed from the counts recorded on 2026-09-01 against our Tableau Cloud trial: 48
-    workbooks, 60 dashboards all with real luids, 416 sheets of which 116 are blank, those blanks
-    spread across 5 workbooks. Nothing here is an identifier -- the shape is the whole measurement,
-    which is the same reason the census reports counts and never names anything.
-
-    This is a REPLAY, not a re-measurement: it proves the pipeline still turns that shape into
-    CONFIRMED and exit 0. If the recorded numbers in the fixture docstring are ever edited without
-    re-running the script, this stays green -- so it pins reproducibility, not truth. The truth is
-    re-established by running `scripts/tableau_luid_census.py`.
-    """
+    """⚠️ Ties the measured citation to executable code, so it cannot rot into folklore."""
     workbooks = []
     blanks_left, blank_workbooks_left = 116, 5
     for index in range(48):
@@ -374,12 +319,6 @@ def test_the_recorded_live_measurement_replays_to_the_same_verdict(run_census, c
 def test_a_malformed_envelope_cannot_bypass_the_guarantees(payload, why, guard, run_census, capsys, tmp_path):
     """⚠️ Each of these once escaped as an uncaught TypeError or AttributeError, BEFORE any verdict,
     exit code or assessability flag existed - so a server-controlled body bypassed every guarantee.
-
-    ⚠️ `guard` is not decoration. This code is SYSTEMATICALLY prone to vacuity because several
-    fail-closed guards all satisfy a broad "it refused" assertion, so the guard under test never has
-    to be the reason - five fixtures on this PR have already been made vacuous that way by a later
-    guard. Four new envelope guards in fail-closed-heavy code is four fresh chances, so each row
-    names the refusal it must provoke, measured rather than guessed.
     """
     out = tmp_path / "census.json"
     code = run_census(payload, json_out=out)
@@ -398,12 +337,7 @@ def test_a_malformed_envelope_cannot_bypass_the_guarantees(payload, why, guard, 
     [None, 3.5, {"data": []}, {"data": {"workbooks": None}}],
 )
 def test_census_is_total_over_arbitrary_decoded_json(payload):
-    """`census` is public and its whole job is to describe a POSSIBLY MALFORMED response.
-
-    ⚠️ An unreadable envelope must produce zeroes WITH `envelope_readable = 0`. A zero that means
-    "we could not look" being indistinguishable from one that means "we looked and found none" is
-    the defect class this whole script exists to avoid.
-    """
+    """`census` is public and its whole job is to describe a POSSIBLY MALFORMED response."""
     totals = census_mod.census(payload)
     assert totals["nodes"] == 0
     assert totals["blank_luids"] == 0
@@ -420,10 +354,7 @@ def test_a_readable_envelope_says_so():
 def test_each_unassessable_route_is_pinned_independently():
     """⚠️ Two of `assessable`'s three clauses are IMPLIED by the first, so nothing driven through
     `main()` can kill them - a clause no test can fail is worse than no clause.
-
-    They are pinned here directly, against a `totals` today's loader would not produce, exactly as an
-    arithmetically-implied clause was pinned in the #384 campaign. Each row removes ONE reason, so it
-    fails if that clause is dropped.
+    Refs #384.
     """
     healthy = {"envelope_readable": 1, "workbooks_with_an_unusable_collection": 0}
     assert census_mod.assessable(healthy, refused=False)
@@ -437,13 +368,7 @@ def test_each_unassessable_route_is_pinned_independently():
     [None, {"data": None}, {"data": {}}],
 )
 def test_an_unreadable_envelope_always_makes_the_parser_refuse(payload):
-    """⚠️ The IMPLICATION itself, asserted rather than assumed.
-
-    `assessable`'s envelope clause is redundant only for as long as this holds. Asserting it is what
-    lets the clause be kept as an independent requirement instead of quietly deleted - and if a
-    future parser change breaks the implication, this fails rather than the clause silently becoming
-    load-bearing without anyone noticing.
-    """
+    """⚠️ The IMPLICATION itself, asserted rather than assumed."""
     assert census_mod.census(payload)["envelope_readable"] == 0
     _mapping, unavailable = view_types_mod.parse_payload(payload)
     assert unavailable, "an envelope the census cannot read must also be one the parser refuses"
@@ -466,13 +391,7 @@ HEALTHY_BODY = b'{"data": {"workbooks": [{"dashboards": [{"luid": "' + DASH_LUID
 
 
 def _oversized_body():
-    """A body the shipped parser ACCEPTS in every respect except its size.
-
-    ⚠️ The padding sits beside a REAL dashboard on purpose. An earlier version padded
-    `{"workbooks": []}`, which `parse_payload` refuses via "no dashboards or sheets carrying a luid"
-    long before anything looks at the byte ceiling -- so the fixture could not reach the guard it
-    targets. Sixth time that has happened on this PR.
-    """
+    """A body the shipped parser ACCEPTS in every respect except its size."""
     return (
         b'{"data": {"workbooks": [{"dashboards": [{"luid": "'
         + DASH_LUID.encode()
@@ -508,12 +427,7 @@ TRANSPORT_REFUSALS = [
 
 @pytest.mark.parametrize("spec, why, guard", TRANSPORT_REFUSALS)
 def test_the_census_and_the_shipped_parser_agree_on_the_same_bytes(spec, why, guard, monkeypatch, capsys, tmp_path):
-    """⚠️ Identical bytes through BOTH entry points; any shipped refusal must reach the census.
-
-    `guard` is asserted for the same reason as everywhere else on this PR: several fail-closed
-    guards satisfy a bare "it refused", so without naming one the case need never reach its own
-    subject. Six new transport guards is six fresh chances.
-    """
+    """⚠️ Identical bytes through BOTH entry points; any shipped refusal must reach the census."""
     spec = dict(spec)
     if spec.get("body") is None and "raises" not in spec:
         spec["body"] = _oversized_body()
@@ -556,16 +470,7 @@ def test_a_healthy_body_still_produces_a_census_measurement(monkeypatch, capsys,
 
 
 def test_the_census_makes_exactly_one_request(monkeypatch, capsys):
-    """⚠️ Sharing the transport hop must not have turned one round trip into two.
-
-    The script's safety argument is "read-only, ONE query" against a credentialed, site-wide
-    endpoint; a shared seam called IN ADDITION to a leftover private one would double that silently.
-
-    ⚠️ It drives `census.main()`, not `fetch_payload` directly. Calling the seam by hand counts only
-    the requests the SEAM makes -- an extra request added anywhere else in `main()` would be
-    invisible to it. That is the same scope error that made the transport mutation move both arms of
-    the parity differential: measuring one level below the thing whose behaviour is in question.
-    """
+    """⚠️ Sharing the transport hop must not have turned one round trip into two."""
     calls = []
 
     class _Counting(_TransportStub):
@@ -621,9 +526,6 @@ raise SystemExit(census.main(["--env", "unused"]))
 def test_an_unassessable_run_survives_a_cp1252_console(status, body, why, tmp_path):
     """⚠️ MUST be a subprocess. An in-process `capsys` test writes to a Unicode-capable stream and
     cannot reproduce this at all, which is exactly why it survived seven rounds.
-
-    The requirement is not "it prints something sensible" -- it is that the EXIT CODE still arrives.
-    A run that reaches CANNOT-TELL and then dies delivering it is worse than one that never ran.
     """
     driver = tmp_path / "drive.py"
     driver.write_text(
@@ -715,24 +617,13 @@ def _scan_snippet(snippet: str, tmp_path: Path) -> list[str]:
 
 @pytest.mark.parametrize("snippet, branch", _BRANCH_CONTROLS)
 def test_the_console_gate_catches_every_shape_it_claims(snippet, branch, tmp_path):
-    """⚠️ One control per branch, and each fails if THAT branch alone is removed.
-
-    A single control that fires for the whole scan is the "broad assertion satisfied by any guard"
-    mode already fixed in the census mutation table -- this is the same shape in the gate's own
-    proof. Each case here exercises exactly one entry of `console_safety`'s constant sets, and the
-    campaign mutates those sets one at a time to prove it.
-    """
+    """⚠️ One control per branch, and each fails if THAT branch alone is removed."""
     assert _scan_snippet(snippet, tmp_path), f"the gate missed {branch}: {snippet}"
 
 
 @pytest.mark.parametrize("snippet", _PROSE)
 def test_the_console_gate_leaves_prose_alone(snippet, tmp_path):
-    """⚠️ The negative control, and it is not a formality.
-
-    A scanner that flagged comments and docstrings would be satisfied by banning glyphs everywhere,
-    which costs real readability for no safety -- the runtime stream never sees them. It would also
-    make every positive control above pass for the wrong reason.
-    """
+    """⚠️ The negative control, and it is not a formality."""
     assert not _scan_snippet(snippet, tmp_path)
 
 
@@ -740,12 +631,6 @@ def test_the_console_gate_leaves_prose_alone(snippet, tmp_path):
 def test_no_runtime_string_can_break_a_cp1252_console(module):
     """⚠️ The durable form of the round-7 fix. Repairing one line would have left the NEXT glyph
     on another refusal path as the same bug with a different line number.
-
-    Second CP1252 crash on this board in a day -- a sibling hit it when docstring glyphs became
-    argparse's `description` and crashed `--help`. Two independent occurrences makes it a repo-level
-    trap, so the rule is enforced rather than written down: **non-ASCII is fine in comments, in
-    docstrings that are never printed, and in test names; it is not safe in anything written to a
-    console at runtime.**
     """
     found = console_safety.runtime_non_ascii(Path(census_mod.__file__).parent / module)
     assert not found, (

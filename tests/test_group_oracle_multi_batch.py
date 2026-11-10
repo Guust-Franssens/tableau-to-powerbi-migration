@@ -52,21 +52,7 @@ def _view(  # pylint: disable=too-many-arguments
     luid: str, name: str, *, data: str, image: str | None, captured_at: str, updated_at: str | None = REVISION
 ) -> dict:
     """One view record, shaped exactly as `capture_tableau_oracle` writes it.
-
-    ⚠️ That claim used to be FALSE in a load-bearing way: the real writer stamps
-    `"updated_at": view.get("updatedAt")` (`capture_tableau_oracle.py`), and this fixture omitted it
-    entirely. Every scenario here therefore described views of unknown revision, which is the one shape
-    that cannot support a cross-batch promotion -- so the fixture could not distinguish "the same view,
-    captured twice" from "two different versions of a view", which is exactly the merge defect.
-
-    `updated_at=None` is still reachable on purpose, because a server that omits `updatedAt` really
-    does produce it, and the fail-closed handling of that case is pinned rather than assumed.
-
-    ⚠️ `certification` is the same claim again, for #480: the writer now stamps it, and a data leg
-    WITHOUT one is a pre-#480 capture whose `path` `load_manifest` withholds. Omitting it here would
-    make every scenario in this file a legacy-manifest scenario -- which is the shape
-    `test_group_oracle_by_workbook.py` exercises deliberately, not the cross-batch merge this file is
-    about.
+    Refs #480.
     """
     view: dict = {
         "view_luid": luid,
@@ -104,15 +90,7 @@ def _batch(  # pylint: disable=too-many-arguments
     server: str | None = "https://example.online.tableau.com",
     site: str | None = "acme",
 ) -> Path:
-    """Write one `_oracle/<batch>/` directory, materialising only the artifacts its views claim.
-
-    ``requested_renders`` defaults to ``["png"]`` and is settable to ``[]`` so a **data-only** batch
-    can be built -- the shape that erased another batch's render intent (review round 1, finding 2).
-
-    ``server``/``site`` default to ONE source, because that is what merging two batches presupposes.
-    They are settable so the cross-tenant refusal can be exercised, and settable to ``None`` so a
-    manifest that records no source at all -- an older capture -- can be built too.
-    """
+    """Write one `_oracle/<batch>/` directory, materialising only the artifacts its views claim."""
     directory = root / name
     (directory / "data").mkdir(parents=True, exist_ok=True)
     (directory / "images").mkdir(parents=True, exist_ok=True)
@@ -145,18 +123,7 @@ def _grouped(migrations: Path) -> dict:
 
 
 def _three_batches(tmp_path: Path) -> list[Path]:
-    """The customer's actual sequence, and the retries are PARTIAL because real retries are.
-
-    Batch 1 is the full sweep: *Daily Monitoring* failed both legs, *Availability Summary by Tail*
-    succeeded at both. Batches 2 and 3 re-run only the view that failed, and batch 3 is where it
-    finally produced 905,098 bytes of PNG.
-
-    ⚠️ The partial shape is load-bearing, not decoration (review round 1, finding 6). With all three
-    batches carrying every view and the last one carrying both successful legs, reading ONLY the last
-    batch produced an identical answer -- so the `merge-reads-only-the-last-batch` mutation SURVIVED
-    against this file's advertised anchor. A fixture whose final batch already contains the whole
-    answer cannot demonstrate that more than the last batch was read.
-    """
+    """The customer's actual sequence, and the retries are PARTIAL because real retries are."""
     oracle = tmp_path / "_oracle"
     sibling = _view(OTHER, "Availability Summary by Tail", data="ok", image="ok", captured_at="2026-08-17T20:17:00Z")
     return [
@@ -253,13 +220,7 @@ def _by_luid(grouped: dict) -> dict[str, dict]:
 
 
 def test_a_later_batch_that_finally_succeeded_is_promoted(tmp_path):
-    """⚠️ THE anchor of this file, and it now requires reading MORE than one batch to satisfy.
-
-    Two assertions, deliberately: the view that finally succeeded on batch 3 is promoted, AND the
-    sibling that only ever appeared in batch 1 -- because the retries were partial, as real retries
-    are -- is still there. Reading only the last batch satisfies the first and fails the second,
-    which is what makes `merge-reads-only-the-last-batch` fail here rather than SURVIVE.
-    """
+    """⚠️ THE anchor of this file, and it now requires reading MORE than one batch to satisfy."""
     batches = _three_batches(tmp_path)
     migrations = _migrations(tmp_path)
 
@@ -377,18 +338,7 @@ def test_a_partial_re_run_cannot_overwrite_a_view_it_never_captured(tmp_path):
 
 
 def test_a_later_DATA_ONLY_batch_does_not_erase_a_known_render_gap(tmp_path):
-    """⚠️ Review round 1, finding 2 -- reproduced exactly, then fixed.
-
-    An older batch that asked for `png` and got `image: transient`, followed by a newer **data-only**
-    batch, used to produce `requested_renders=[]`, NO merged `image` key, and
-    `render_unestablished == 0`. A known render gap silently became "nothing was ever requested" --
-    which is the `UNESTABLISHED != absent` regression this whole PR exists to prevent, re-created by
-    the merge one level up.
-
-    Two independent causes, both fixed and both asserted here: intent was copied from the newest
-    batch alone, and the per-leg fallback took the newest VIEW rather than the newest view that has
-    a record for that leg.
-    """
+    """⚠️ Review round 1, finding 2 -- reproduced exactly, then fixed."""
     oracle_dir = tmp_path / "_oracle"
     asked_and_failed = _batch(
         oracle_dir,
@@ -573,11 +523,6 @@ def test_a_view_no_batch_could_render_stays_visibly_unestablished(tmp_path):
 def test_argument_order_does_not_decide_the_winner_when_timestamps_do(tmp_path):
     """Passing the batches newest-first must give the same answer as oldest-first. Otherwise the
     result depends on an operator's typing habit, and two people "merge" differently.
-
-    ⚠️ BOTH batches must hold a promotable leg, or this asserts nothing. Measured: an earlier version
-    reused the three-batch fixture where only ONE batch has an `ok` image, so every ordering picked
-    the same winner by elimination and the mutation that sorts by argv order SURVIVED. Two winners in
-    contention is what makes the ordering rule observable.
     """
     oracle_dir = tmp_path / "_oracle"
     older = _batch(
@@ -662,11 +607,7 @@ def test_a_single_dated_capture_reports_captured_at_as_the_basis(tmp_path):
 
 
 def _tied_pair(tmp_path: Path, stamp: str = "2026-08-18T14:46:00Z") -> tuple[Path, Path]:
-    """Two batches with IDENTICAL timestamps, each holding a different failed image status.
-
-    Both fail, so neither is promotable and the winner comes from the per-leg fallback -- which is
-    where argument order silently takes over.
-    """
+    """Two batches with IDENTICAL timestamps, each holding a different failed image status."""
     oracle_dir = tmp_path / "_oracle"
     first = _batch(
         oracle_dir,
@@ -684,13 +625,7 @@ def _tied_pair(tmp_path: Path, stamp: str = "2026-08-18T14:46:00Z") -> tuple[Pat
 
 
 def test_equal_timestamps_are_reported_as_a_tie_not_as_captured_at(tmp_path):
-    """⚠️ Review round 1, finding 5 -- reproduced exactly, then fixed.
-
-    Two batches with identical stamps produced DIFFERENT winners when the arguments were reversed --
-    one keeping `image: failed`, the other `image: transient` -- while both claimed
-    `merge_order_basis == "captured_at"`. Timestamps that are equal separate nothing; saying they
-    decided it is the same class of false confidence as an absent leg reading as "not requested".
-    """
+    """⚠️ Review round 1, finding 5 -- reproduced exactly, then fixed."""
     first, second = _tied_pair(tmp_path)
     forwards = _migrations(tmp_path / "a")
     backwards = _migrations(tmp_path / "b")
@@ -1961,15 +1896,7 @@ def test_manual_carriers_are_all_admitted_before_any_grouping(tmp_path: Path, fa
 
 
 def test_two_captures_with_the_same_directory_NAME_stay_distinguishable(tmp_path):
-    """⚠️ Review round 2, finding 2 -- reproduced exactly, then fixed.
-
-    `run1\\oracle` and `run2\\oracle` are two captures. Labelled by `directory.name` they collapsed
-    into ONE `roots["oracle"]` pointing at whichever was read last, `batches` read
-    `["oracle", "oracle"]`, and both legs claimed indistinguishable `source_batch="oracle"` -- so an
-    older candidate could resolve its artifact against the WRONG directory, and one batch's render
-    intent could be erased. Same class as round 1's finding 2, arriving through provenance rather
-    than through merge order.
-    """
+    """⚠️ Review round 2, finding 2 -- reproduced exactly, then fixed."""
     first = _batch(
         tmp_path / "run1",
         "oracle",
@@ -2031,10 +1958,6 @@ def test_a_duplicate_capture_exits_2_rather_than_crashing(tmp_path):
 def test_a_single_path_still_works_unchanged(tmp_path):
     """Every existing caller passes one `Path`. Breaking that to add a list would be a migration this
     change does not need -- and `main()` always hands over a list, so both shapes are exercised.
-
-    ⚠️ The batch lives in a parent of its own now, deliberately. Passing `_three_batches()[2]` alone
-    is no longer "one capture": its two siblings are on disk, and merging without them is exactly the
-    silent under-merge finding 5 refuses. That the old form of this test broke is the guard working.
     """
     oracle = tmp_path / "_oracle"
     only = _batch(
@@ -2081,13 +2004,7 @@ def test_the_capture_manifests_are_never_mutated_by_merging(tmp_path):
 
 
 def test_batches_from_DIFFERENT_tenants_are_refused_rather_than_merged(tmp_path):
-    """⚠️ Cross-tenant evidence mixing -- the more serious of the two, and it needed no exotic setup.
-
-    Two sites sharing only a workbook CAPTION were folded into one manifest that declared tenant B's
-    `server` and `site` at the top level while its views carried artifacts from tenant A **and**
-    tenant B. `source_batch` named a directory, not a tenant, so nothing in the output said so.
-    Captions like "Sales Dashboard" collide across customers as a matter of course.
-    """
+    """⚠️ Cross-tenant evidence mixing -- the more serious of the two, and it needed no exotic setup."""
     tenant_a = _batch(
         tmp_path,
         "tenant-a",
@@ -2114,12 +2031,7 @@ def test_batches_from_DIFFERENT_tenants_are_refused_rather_than_merged(tmp_path)
 
 
 def test_the_same_tenant_spelled_differently_is_still_one_tenant(tmp_path):
-    """The positive control, and the reason the comparison normalizes at all.
-
-    ⚠️ Without it, "refuse anything that is not byte-identical" would pass the test above while making
-    the merge feature unusable: a trailing slash or a capitalised host is the same server, and
-    refusing those would be a regression dressed as a security fix.
-    """
+    """The positive control, and the reason the comparison normalizes at all."""
     first = _batch(
         tmp_path,
         "one",
@@ -2148,13 +2060,7 @@ def test_the_same_tenant_spelled_differently_is_still_one_tenant(tmp_path):
 
 
 def test_a_manifest_that_records_NO_source_cannot_be_merged_with_one_that_does(tmp_path):
-    """⚠️ Fail-closed on the ambiguous case, deliberately, because "unknown" is not "the same".
-
-    An absent server/site cannot establish sameness, so it blocks -- and it blocks under its OWN
-    exception type. `IncompatibleBatchSources` is a statement about the data ("these are two
-    tenants"); this is a statement about our knowledge ("we cannot tell"), and a test that could only
-    assert *something* refused would not notice the two being collapsed back together.
-    """
+    """⚠️ Fail-closed on the ambiguous case, deliberately, because "unknown" is not "the same"."""
     known = _batch(
         tmp_path,
         "known",
@@ -2185,16 +2091,7 @@ def test_a_manifest_that_records_NO_source_cannot_be_merged_with_one_that_does(t
 
 
 def test_TWO_anonymous_captures_do_not_merge_just_because_both_are_anonymous(tmp_path):
-    """⚠️ Blocker 1: two UNKNOWN sources were treated as ONE source.
-
-    `_source_identity` mapped a missing identity onto `("", "")` and the refusal counted DISTINCT
-    identities, so two manifests that each recorded nothing produced one identity, the cardinality
-    check saw no disagreement, and they merged. Measured before the fix: exit 0, `server`/`site` both
-    `null`, and `anonymous-b`'s image promoted beside `anonymous-a`'s data -- sameness assumed from a
-    shared absence, which is the single most common defect class in this repo's gates.
-
-    The assertion is on the GUARD, by name: `UnestablishedBatchSource`, not merely "it raised".
-    """
+    """⚠️ Blocker 1: two UNKNOWN sources were treated as ONE source."""
     first = _batch(
         tmp_path,
         "anonymous-a",
@@ -2217,11 +2114,7 @@ def test_TWO_anonymous_captures_do_not_merge_just_because_both_are_anonymous(tmp
 
 
 def test_an_unestablished_source_is_NOT_reported_as_a_tenant_disagreement(tmp_path):
-    """The two refusals must stay distinguishable, in both directions.
-
-    A single broad "sources incompatible" type would let the fail-open collapse return unnoticed: the
-    anonymous pair would raise the same thing the tenant pair does, and every test would still pass.
-    """
+    """The two refusals must stay distinguishable, in both directions."""
     anonymous = _batch(
         tmp_path,
         "anonymous",
@@ -2242,13 +2135,7 @@ def test_an_unestablished_source_is_NOT_reported_as_a_tenant_disagreement(tmp_pa
 
 
 def test_a_recorded_but_EMPTY_site_is_the_default_site_not_an_absence(tmp_path):
-    """⚠️ The fail-CLOSED half, and it is not hypothetical: `""` is Tableau Server's Default site.
-
-    `tableau_env` canonicalises `TABLEAU_SITE` to `""` precisely because "an empty site IS the
-    documented Default site", so a guard that tested truthiness rather than PRESENCE would refuse
-    every legitimate Default-site merge -- trading one fail-open for a fail-closed that makes the
-    tool unusable on Tableau Server.
-    """
+    """⚠️ The fail-CLOSED half, and it is not hypothetical: `""` is Tableau Server's Default site."""
     first = _batch(
         tmp_path,
         "default-a",
@@ -2282,14 +2169,7 @@ def test_a_single_anonymous_capture_still_groups(tmp_path):
 
 
 def test_an_older_render_of_a_DIFFERENT_revision_is_not_promoted_beside_newer_data(tmp_path):
-    """⚠️ The stale-evidence blocker, reproduced exactly as the review measured it.
-
-    Old batch: `image=ok`. Newer batch, a revision later: `data=ok, image=transient`. Before the fix
-    the merged record took `updated_at` from the NEW revision, data from the new batch and the image
-    from the OLD one, then reported `data_ok=1, image_ok=1, failed=0, render_unestablished=0` -- a
-    picture of a workbook that no longer exists, credited as current evidence, with a digest and a
-    timestamp asserting otherwise.
-    """
+    """⚠️ The stale-evidence blocker, reproduced exactly as the review measured it."""
     old = _batch(
         tmp_path,
         "old-revision",
@@ -2338,12 +2218,7 @@ def test_an_older_render_of_a_DIFFERENT_revision_is_not_promoted_beside_newer_da
 
 
 def test_a_refused_stale_render_is_RECORDED_rather_than_silently_dropped(tmp_path):
-    """Refusing to promote it must not also hide that it exists.
-
-    "An older revision has a render for this view" is the fact that decides whether to re-capture. A
-    silent absence turns a known gap into an unknown one, which is the same collapse this file's
-    round-1 findings were about, arriving from the other direction.
-    """
+    """Refusing to promote it must not also hide that it exists."""
     old = _batch(
         tmp_path,
         "old-revision",
@@ -2376,12 +2251,7 @@ def test_a_refused_stale_render_is_RECORDED_rather_than_silently_dropped(tmp_pat
 
 
 def test_a_view_whose_revision_is_UNKNOWN_does_not_promote_across_batches(tmp_path):
-    """⚠️ Fail-closed again: a server that omits `updatedAt` gives us nothing to prove sameness with.
-
-    This is a real shape -- `capture_tableau_oracle` writes `view.get("updatedAt")`, which is `None`
-    when the listing omits it -- so the behaviour is pinned rather than left to be discovered. The
-    cost is a promotion not made; the alternative cost is a stale render credited as current.
-    """
+    """⚠️ Fail-closed again: a server that omits `updatedAt` gives us nothing to prove sameness with."""
     old = _batch(
         tmp_path,
         "old",
@@ -2443,14 +2313,7 @@ def _one_view_batch(root: Path, name: str, *, image: str, stamp: str, revision: 
 
 
 def test_a_REFUSED_old_revision_artifact_does_not_stay_in_reference_images(tmp_path):
-    """⚠️ The measured blocker, reproduced exactly: manifest right, directory wrong.
-
-    Run 1 promotes an image. The workbook is then edited and run 2 sees `image: transient` for the new
-    revision, so the cross-revision gate correctly refuses the old render -- the merged manifest says
-    `transient` with no `path`. Measured before the fix: `file_after_refusal: true`. The old-revision
-    PNG was still sitting in `reference/images/`, so any consumer that reads the DIRECTORY rather than
-    the manifest got evidence the merge had explicitly rejected.
-    """
+    """⚠️ The measured blocker, reproduced exactly: manifest right, directory wrong."""
     oracle = tmp_path / "_oracle"
     old = _one_view_batch(oracle, "old-revision", image="ok", stamp="2026-08-17T20:17:00Z", revision="2026-07-01Z")
     migrations = _migrations(tmp_path)
@@ -2474,12 +2337,7 @@ def test_a_REFUSED_old_revision_artifact_does_not_stay_in_reference_images(tmp_p
 
 
 def test_reconciliation_removes_only_files_a_PREVIOUS_grouping_named(tmp_path):
-    """⚠️ Removal is by ATTRIBUTION. `reference/images/` is our tree, but not everything in it is ours.
-
-    A hand-dropped file no grouped manifest names must NOT be deleted -- silently removing somebody
-    else's reference would be a worse failure than the one being fixed -- and must not be accepted
-    either, because the folder then holds bytes the manifest does not account for.
-    """
+    """⚠️ Removal is by ATTRIBUTION. `reference/images/` is our tree, but not everything in it is ours."""
     oracle = tmp_path / "_oracle"
     old = _one_view_batch(oracle, "old-revision", image="ok", stamp="2026-08-17T20:17:00Z", revision="2026-07-01Z")
     migrations = _migrations(tmp_path)
@@ -2519,11 +2377,7 @@ def test_a_dry_run_reconciles_NOTHING(tmp_path):
 
 
 def test_an_UNCHANGED_re_run_removes_nothing(tmp_path):
-    """Reconciliation must be a no-op when the merge promotes what is already there.
-
-    The negative control for the removal: a rule that deleted on every run would still pass the
-    blocker test above while destroying a good reference folder on the next re-group.
-    """
+    """Reconciliation must be a no-op when the merge promotes what is already there."""
     oracle = tmp_path / "_oracle"
     only = _one_view_batch(oracle, "capture", image="ok", stamp="2026-08-17T20:17:00Z", revision="2026-07-01Z")
     migrations = _migrations(tmp_path)
@@ -2546,12 +2400,7 @@ RND_PLUS = "wb-rnd-plus"
 
 
 def _collision_batch(root: Path) -> Path:
-    """One capture holding two DISTINCT workbooks whose display names normalize onto one key.
-
-    Not invented: on the real 48-workbook reference estate, `Seed - R&D`, `Seed - R+D` and
-    `Seed - R/D` are three distinct workbook LUIDs and ONE normalized key -- which is why the estate
-    has 48 LUIDs and 46 name keys.
-    """
+    """One capture holding two DISTINCT workbooks whose display names normalize onto one key."""
     first = _view("aaaaaaaa-1111-2222-3333-444444444444", "Sheet A", data="ok", image="ok", captured_at=STAMP)
     second = _view("bbbbbbbb-1111-2222-3333-444444444444", "Sheet B", data="ok", image="ok", captured_at=STAMP)
     first["workbook_name"], first["workbook_luid"] = "Seed - R&D", RND_AMP
@@ -2560,13 +2409,7 @@ def _collision_batch(root: Path) -> Path:
 
 
 def test_two_DIFFERENT_workbooks_normalizing_onto_one_folder_are_both_refused(tmp_path):
-    """⚠️ The measured blocker: exit 0, one manifest, two workbooks' images, one view reported.
-
-    Destination AMBIGUITY (one name, two folders) was detected; the source side was not. `_group_all`
-    wrote them in sequence, the second manifest overwrote the first, and `seed-rd/reference/images/`
-    ended up holding two files while the surviving manifest named one -- one workbook's evidence
-    silently attributed to another, with nothing in the output saying so.
-    """
+    """⚠️ The measured blocker: exit 0, one manifest, two workbooks' images, one view reported."""
     capture = _collision_batch(tmp_path / "_oracle")
     migrations = tmp_path / "migrations" / "workbooks"
     (migrations / "seed-rd").mkdir(parents=True)
@@ -2626,11 +2469,7 @@ def test_a_view_with_NO_workbook_luid_is_refused_rather_than_bucketed_by_name(tm
 
 
 def test_two_workbooks_sharing_an_EXACT_name_are_kept_apart_by_luid(tmp_path):
-    """Normalization is not the only way names collide -- two workbooks can simply share one.
-
-    Bucketing by name merged them into a single manifest with no collision detectable at all; keying
-    by LUID turns the same input into a reported destination collision.
-    """
+    """Normalization is not the only way names collide -- two workbooks can simply share one."""
     first = _view("aaaaaaaa-1111-2222-3333-444444444444", "Sheet A", data="ok", image="ok", captured_at=STAMP)
     second = _view("bbbbbbbb-1111-2222-3333-444444444444", "Sheet B", data="ok", image="ok", captured_at=STAMP)
     first["workbook_luid"], second["workbook_luid"] = "wb-one", "wb-two"
@@ -2643,14 +2482,7 @@ def test_two_workbooks_sharing_an_EXACT_name_are_kept_apart_by_luid(tmp_path):
 
 
 def test_a_workbook_RENAMED_between_batches_is_reported_not_guessed(tmp_path):
-    """One LUID, two normalized names: which folder is the destination is unanswerable.
-
-    ⚠️ It takes two DIFFERENT views to reach this, and that is not a fixture convenience -- it is what
-    the shape actually is. A merged record for ONE view takes its identity from the newest batch, so a
-    rename seen twice for the same view leaves no disagreement behind. The disagreement survives only
-    across views, which is exactly the partial-retry pattern: batch 1 captured `Daily Monitoring`
-    while the workbook was called one thing, batch 2 captured a different view after the rename.
-    """
+    """One LUID, two normalized names: which folder is the destination is unanswerable."""
     early = _view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at="2026-08-01T00:00:00Z")
     late = _view(OTHER, "Availability Summary", data="ok", image="ok", captured_at="2026-08-02T00:00:00Z")
     early["workbook_name"], late["workbook_name"] = "airborne services", "airborne services EMEA"
@@ -2672,11 +2504,7 @@ def test_a_workbook_RENAMED_between_batches_is_reported_not_guessed(tmp_path):
 
 
 def test_a_batch_on_disk_that_was_not_passed_is_REFUSED_not_skipped(tmp_path):
-    """⚠️ The measured shape: `retry2` present, not listed, and its good render never read.
-
-    Before: exit 0, `image: transient` from `airborne-services-retry`, `batches` listing the two that
-    were given -- and the PNG that would have answered the question sitting unopened on disk.
-    """
+    """⚠️ The measured shape: `retry2` present, not listed, and its good render never read."""
     batches = _three_batches(tmp_path)
     with pytest.raises(grp.UnlistedBatchOnDisk) as excinfo:
         grp.run(batches[:2], _migrations(tmp_path), dry_run=False)
@@ -2684,11 +2512,7 @@ def test_a_batch_on_disk_that_was_not_passed_is_REFUSED_not_skipped(tmp_path):
 
 
 def test_oracle_root_DISCOVERS_the_batch_nobody_listed(tmp_path):
-    """AC#3 as implemented: a defined root, a defined batch shape, and an UNLISTED batch found there.
-
-    Nothing is passed at all -- the root is the only argument -- and the promoted image comes from the
-    third retry, which is the batch the listing mode could not see.
-    """
+    """AC#3 as implemented: a defined root, a defined batch shape, and an UNLISTED batch found there."""
     _three_batches(tmp_path)
     migrations = _migrations(tmp_path)
 
@@ -2811,11 +2635,7 @@ def test_exclude_is_the_ONE_auditable_escape_and_is_recorded(tmp_path):
 
 
 def test_a_non_batch_sibling_does_not_block_the_LISTED_mode(tmp_path):
-    """Naming a batch does not declare its parent a tree of captures.
-
-    `_runs/<run>/oracle` sits beside `assessment/`, `bundle/`, `scratch/` -- none of them captures.
-    Refusing those would make the listed mode unusable on the layout this repo actually writes.
-    """
+    """Naming a batch does not declare its parent a tree of captures."""
     oracle = tmp_path / "_oracle"
     only = _batch(oracle, "capture", [_view(LUID, "Daily Monitoring", data="ok", image="ok", captured_at=STAMP)])
     (oracle / "bundle").mkdir()
@@ -2860,13 +2680,7 @@ def test_every_refusal_reaches_exit_2_through_main(tmp_path, monkeypatch, capsys
 
 
 def _raw_capture(root: Path, name: str, payload: str) -> Path:
-    """A capture directory whose manifest is written VERBATIM, so a malformed one can be built.
-
-    `_batch` cannot express these cases: it always writes a well-formed manifest, which is exactly the
-    reason the shape hole survived a full suite. The directory owns its own parent in every caller
-    below, because a bare `tmp_path` is shared with every other test's tmpdir and the unlisted-sibling
-    guard would fire on whatever else pytest's per-run root happens to hold.
-    """
+    """A capture directory whose manifest is written VERBATIM, so a malformed one can be built."""
     directory = root / name
     directory.mkdir(parents=True)
     (directory / grp.MANIFEST_NAME).write_text(payload, encoding="utf-8")
@@ -2883,11 +2697,7 @@ def _cli(oracle: Path, migrations: Path, monkeypatch) -> int:
 
 
 def test_an_empty_json_object_is_refused_rather_than_grouped_as_zero_workbooks(tmp_path, monkeypatch):
-    """Measured before the fix: `{}` exited **0** reporting `0 workbook(s) ... 0 grouped`.
-
-    That is a clean-merge verdict on a file nothing was read from, which is the worst available
-    answer -- a gate reading the exit code is told the capture landed.
-    """
+    """Measured before the fix: `{}` exited **0** reporting `0 workbook(s) ... 0 grouped`."""
     capture = _raw_capture(tmp_path / "run", "cap", "{}")
     migrations = _migrations(tmp_path)
     with pytest.raises(grp.MalformedCaptureManifest):
@@ -2910,13 +2720,7 @@ def test_a_manifest_with_no_views_key_is_refused_even_when_its_schema_is_right(t
 
 
 def test_a_JSON_LIST_manifest_exits_2_rather_than_CRASHING_at_1(tmp_path, monkeypatch):
-    """⚠️ Exit code, and it was the WRONG one. `[]` reached `merge_batches` and died on `.get`:
-
-        AttributeError: 'list' object has no attribute 'get'   -> exit 1
-
-    Exit 1 means "grouped what it could"; this input was never grouped at all. The documented
-    input-refusal code is 2, and an unhandled traceback is not a refusal.
-    """
+    """⚠️ Exit code, and it was the WRONG one. `[]` reached `merge_batches` and died on `.get`:"""
     capture = _raw_capture(tmp_path / "run", "cap", "[]")
     assert _cli(capture, _migrations(tmp_path), monkeypatch) == 2
 
@@ -2947,12 +2751,7 @@ def test_this_scripts_OWN_grouped_manifest_is_refused_as_an_input(tmp_path, monk
 
 
 def test_an_EMPTY_views_list_is_a_true_statement_about_the_data_and_is_NOT_refused(tmp_path):
-    """⚠️ Absent is not empty, and refusing both would be the over-correction.
-
-    A capture whose `--workbook` filter selected nothing really does write `"views": []`, and
-    `capture_tableau_oracle.py` exits 0 for it. Refusing it here would turn an honest empty capture
-    into a blocking error, while the damaged file this guard exists for is the one with no key.
-    """
+    """⚠️ Absent is not empty, and refusing both would be the over-correction."""
     payload = json.dumps({"schema": "tableau-oracle/1", "captured_at": STAMP, "views": []})
     capture = _raw_capture(tmp_path / "run", "cap", payload)
     assert grp.load_manifest(capture)["views"] == []
@@ -2994,14 +2793,7 @@ def _anonymous_views_capture(tmp_path: Path) -> Path:
 
 
 def test_TWO_views_with_no_view_luid_are_refused_rather_than_COLLAPSED_into_one(tmp_path, monkeypatch):
-    """⚠️ Silent data loss, and the measured numbers are the whole finding::
-
-        exit: 0    input_views: 2    grouped_views: 1    names: ["A"]
-
-    `merge_batches` bucketed on `view.get("view_luid") or ""`, so every identity-less record in the
-    estate landed in ONE bucket and newest-wins discarded all but one. View B was reported nowhere --
-    not failed, not unidentified, not in any count -- on a customer's capture.
-    """
+    """⚠️ Silent data loss, and the measured numbers are the whole finding::"""
     capture = _anonymous_views_capture(tmp_path)
     migrations = _migrations(tmp_path)
     with pytest.raises(grp.UnidentifiedCaptureView) as excinfo:
@@ -3122,12 +2914,7 @@ def _view_luid_capture(root: Path, luid) -> Path:
     ],
 )
 def test_a_view_luid_that_is_not_a_NON_EMPTY_STRING_is_refused_at_2(tmp_path, monkeypatch, luid):
-    """⚠️ ``123`` is the one that matters: truthy, hashable, merged, and reported as a clean run.
-
-    The other shapes crashed at 1 instead, which is a different wrong answer to the same missing
-    question. A LUID is a string (`capture_tableau_oracle.py` stamps `view_luid = view["id"]`), so
-    every value here is damaged input and every one of them is an input refusal.
-    """
+    """⚠️ ``123`` is the one that matters: truthy, hashable, merged, and reported as a clean run."""
     capture = _view_luid_capture(tmp_path / "run", luid)
     migrations = _migrations(tmp_path)
     with pytest.raises(grp.UnidentifiedCaptureView):
@@ -3158,12 +2945,7 @@ def _legged_capture(root: Path, leg: str, value) -> Path:
 
 @pytest.mark.parametrize("kind", [kind for kind, _sub in grp.RENDER_LEGS])
 def test_a_render_leg_that_is_a_SCALAR_is_refused_rather_than_crashing(tmp_path, monkeypatch, kind):
-    """`image: "junk"` died on `.get` inside `_leg_is_promotable` at exit 1.
-
-    ⚠️ Parametrized over `RENDER_LEGS` rather than over the two legs that were reported, so a render
-    tier added to the capture is covered the day it is added -- the previous rounds each fixed the one
-    field that had just been found.
-    """
+    """`image: "junk"` died on `.get` inside `_leg_is_promotable` at exit 1."""
     capture = _legged_capture(tmp_path / "run", kind, "junk")
     migrations = _migrations(tmp_path)
     with pytest.raises(grp.MalformedCaptureManifest):
@@ -3216,11 +2998,7 @@ def _typed_capture(root: Path, scope: str, field: str, value) -> Path:
     ids=lambda item: item.name if isinstance(item, grp._Typed) else item,
 )
 def test_EVERY_field_in_the_type_table_is_actually_enforced(tmp_path, monkeypatch, scope, spec):
-    """⚠️ The table is the fix, so a table entry nothing enforces would be the fix failing silently.
-
-    Parametrized over the declared tuples themselves: adding a field gets a rejection test for free,
-    and an entry the validator forgets to apply fails here rather than in a fourth review round.
-    """
+    """⚠️ The table is the fix, so a table entry nothing enforces would be the fix failing silently."""
     wrong = {"a": 1} if spec.kind is not dict else "junk"
     capture = _typed_capture(tmp_path / "run", scope, spec.name, wrong)
     migrations = _migrations(tmp_path)
@@ -3281,16 +3059,7 @@ UNTYPED_ON_PURPOSE = {
 
 
 def test_the_type_table_covers_EVERY_manifest_field_this_module_reads(tmp_path):
-    """⚠️ THE stop rule, and the reason there should not be a fourth round of this finding.
-
-    Rounds 6, 7 and 8 each added a guard for the one field that had just been reported, and each left
-    the next one to be discovered by a crash. This closes the surface instead of chasing it: every
-    `.get("literal")` in the module must be typed by the table, or exempted above WITH a reason.
-
-    It is a source census, which is machinery, and it earns that under the repo's escalation rule
-    because the ordinary tests cannot observe the defect it exists for -- a field added tomorrow has
-    no test today, and its absence from the table is invisible to every other assertion here.
-    """
+    """⚠️ THE stop rule, and the reason there should not be a fourth round of this finding."""
     source = Path(grp.__file__).read_text(encoding="utf-8")
     read = set(re.findall(r'\.get\(\s*"([a-z_0-9]+)"', source))
     typed = {spec.name for spec in grp._MANIFEST_TYPES + grp._VIEW_TYPES + grp._LEG_TYPES}
@@ -3310,11 +3079,7 @@ def test_the_type_table_covers_EVERY_manifest_field_this_module_reads(tmp_path):
 
 
 def test_a_REAL_capture_manifest_still_merges_completely(tmp_path):
-    """The positive control that matters: a genuine UUID-string `view_luid`, three batches, no change.
-
-    `capture_tableau_oracle.py:637` stamps `view_luid = view["id"]` -- a REST LUID string -- so this
-    is the shape every real capture has, and the validator must be invisible to it.
-    """
+    """The positive control that matters: a genuine UUID-string `view_luid`, three batches, no change."""
     batches = _three_batches(tmp_path)
     migrations = _migrations(tmp_path)
 
@@ -3327,13 +3092,7 @@ def test_a_REAL_capture_manifest_still_merges_completely(tmp_path):
 
 
 def test_the_writers_OWN_nulls_are_not_type_errors(tmp_path):
-    """⚠️ The most likely over-correction, and it would break every real capture.
-
-    `capture_tableau_oracle.py` writes `"workbook_luid": workbook.get("id")` and
-    `"view_name": view.get("name")`, so JSON `null` is what a REST response that omitted them
-    produces. Absent and null are the SAME statement -- "not recorded" -- and both are already
-    handled by every consumer. Typing what is present must not make anything required.
-    """
+    """⚠️ The most likely over-correction, and it would break every real capture."""
     view = _view(LUID, "Daily Monitoring", data="ok", image=None, captured_at=STAMP, updated_at=None)
     del view["data"]["path"]
     view["workbook_luid"] = None

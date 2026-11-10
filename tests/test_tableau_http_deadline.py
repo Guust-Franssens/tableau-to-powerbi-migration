@@ -77,12 +77,7 @@ def test_response_framing_requires_an_unambiguous_usable_content_length():
 
 
 class _Trickle(BaseHTTPRequestHandler):
-    """A slow but never-IDLE body: every gap is under the socket timeout, so no read ever times out.
-
-    This is the shape that matters. A stalled connection is already handled -- the socket timeout
-    fires. What was unhandled is a connection making steady, tiny progress forever, which is exactly
-    what a struggling VizQL render or a throttling proxy produces.
-    """
+    """A slow but never-IDLE body: every gap is under the socket timeout, so no read ever times out."""
 
     protocol_version = "HTTP/1.1"
     status = 200
@@ -111,17 +106,7 @@ class _TrickleError(_Trickle):
 
 
 def _serve_slow_headers(listener: socket.socket) -> None:
-    """Answer one request byte-by-byte from the STATUS LINE onward, never idling past the timeout.
-
-    Deliberately a raw socket rather than ``BaseHTTPRequestHandler``: the handler writes its status
-    line and headers as whole buffered writes, which is exactly why every earlier fixture in this file
-    sends headers instantly and could not reach the phase that was unbounded.
-
-    ⚠️ ``HEADER_GAP_SEC`` is its own constant, well under the socket timeout rather than merely under
-    it. At the body fixture's 0.08s against a 0.1s timeout the margin is 25%, and a loaded box
-    overshoots that -- the unbounded control flaked with a spurious ``status 0``, which would have
-    read as "the timeout caught it" and hidden the very thing the control exists to show.
-    """
+    """Answer one request byte-by-byte from the STATUS LINE onward, never idling past the timeout."""
     conn, _addr = listener.accept()
     try:
         conn.recv(4096)
@@ -148,19 +133,7 @@ def _slow_header_url():
 
 
 def test_slow_HEADERS_are_bounded_by_the_deadline_too(slow_header_url):
-    """⚠️ Review round 3, finding 1 -- reproduced, then fixed. And the reason it was reachable at all.
-
-    The deadline used to be enforced only AFTER ``urlopen()`` returned, so connection, status line,
-    headers and redirects ran under the per-socket-operation timeout alone. A server trickling its
-    HEADERS one byte at a time never trips that. Measured on the production ``_request``: a 0.15s
-    deadline with a 0.05s socket timeout returned after **1.378s**, 6.9x the claimed ceiling.
-
-    ⚠️ **The eight tests above could not catch it**, and the reason is worth more than the fix: every
-    one of them sends headers immediately and trickles only the BODY, so their deadline-removed
-    control proves the body is bounded and is structurally blind to the pre-body phase. The control
-    was real; the claim it was read as supporting was larger than the fixture could reach. Same shape
-    as the virtual clock two rounds earlier -- **ask what the control cannot see**.
-    """
+    """⚠️ Review round 3, finding 1 -- reproduced, then fixed. And the reason it was reachable at all."""
     started = time.monotonic()
     status, _body, _headers = _request(
         urllib.request.Request(slow_header_url),
@@ -177,22 +150,7 @@ def test_slow_HEADERS_are_bounded_by_the_deadline_too(slow_header_url):
 
 
 def test_the_https_twin_resolves_connect_to_the_watchdog():
-    """⚠️ No fixture here can complete a TLS handshake, so the HTTPS path is pinned STATICALLY.
-
-    Base order decides this, and the natural order is the wrong one: with
-    ``(HTTPSConnection, _DeadlineHTTPConnection)`` the MRO finds ``HTTPSConnection.connect`` first, the
-    watchdog never arms, and **every real Tableau request** -- all of which are HTTPS -- is silently
-    unbounded while every loopback test in this file passes. That is the same shape as the finding
-    this file exists for: the fixture cannot reach the case that fails.
-
-    ⚠️ The assertion used to be ``_DeadlineHTTPSConnection.connect is _DeadlineHTTPConnection.connect``
-    -- identity, which was true only while the HTTPS twin defined no ``connect`` of its own. It now
-    defines one (the handshake had to move inside the deadline), so identity would fail for a change
-    that keeps the property perfectly intact. What actually matters is the MRO POSITION: whichever
-    ``connect`` runs first, ``super()`` from it must reach `_DeadlineHTTPConnection.connect` -- the one
-    that arms the watchdog -- BEFORE it reaches ``HTTPSConnection.connect``. That is asserted directly,
-    plus that the HTTPS twin's own ``connect`` really does delegate rather than re-implement.
-    """
+    """⚠️ No fixture here can complete a TLS handshake, so the HTTPS path is pinned STATICALLY."""
     mro = th._DeadlineHTTPSConnection.__mro__
     assert mro.index(th._DeadlineHTTPConnection) < mro.index(http.client.HTTPSConnection), (
         "HTTPS resolves `connect` to the stdlib implementation first, so the deadline watchdog never arms"
@@ -285,22 +243,6 @@ def test_an_abandoned_body_is_a_transient_failure_never_a_partial_success(trickl
     """⚠️ A truncated CSV reported as a 200 would manufacture exactly the false evidence this whole
     capture exists to prevent -- worse than the unbounded read, because it is silent. The abandoned
     read must surface as `NETWORK_ERROR_STATUS`, which the retry classifier treats as transient.
-
-    ⚠️ **THREE mechanisms can abandon, and asserting on any one specifically is how this test has now
-    broken twice.** Which one wins is a race between the deadline instant, the next chunk, and how the
-    platform reports an aborted socket -- so the marker list is a UNION and the property under test is
-    the outcome, never the mechanism:
-
-    * the body clock check raises `TimeoutError`;
-    * the lifecycle watchdog aborts the socket, arriving as `ConnectionAbortedError`/`OSError`;
-    * the abort lands as a clean EOF with bytes still outstanding under `Content-Length`, which is
-      now refused as `IncompleteRead`.
-
-    The third is new, and CI found it on Linux where local Windows runs could not: `shutdown(SHUT_RDWR)`
-    raises on Windows but yields a clean EOF on Linux -- the platform divergence `tableau_http`'s own
-    EOF branch records -- so on Linux the outstanding-length check fires first. All three are correct
-    refusals; `IncompleteRead` is the most precise of them, because it names the byte count the peer
-    still owed.
     """
     status, body, _elapsed = _fetch(trickling_url, deadline_in=DEADLINE_SEC)
 
@@ -350,11 +292,7 @@ def test_a_deadline_already_passed_refuses_before_reading(trickling_url):
 
 
 class _FakeTrickleStream:
-    """A stream that yields one byte per `read1`, slowly, and blocks for the whole body on `read`.
-
-    Models the property that made `read1` necessary: `HTTPResponse.read(n)` waits for n bytes, so a
-    chunked loop written with `read` consults its clock exactly once.
-    """
+    """A stream that yields one byte per `read1`, slowly, and blocks for the whole body on `read`."""
 
     def __init__(self, total: int = BODY_BYTES, gap: float = GAP_SEC) -> None:
         self.remaining, self.gap, self.reads = total, gap, 0
@@ -399,18 +337,7 @@ def test_read_bounded_without_a_deadline_reads_the_whole_stream():
 
 
 class _EofOnAbortStream:
-    """A stream whose read BLOCKS ACROSS the deadline and then returns a clean EOF -- Linux behaviour.
-
-    ⚠️ Written from a CI failure, not from imagination. ``_abort_socket`` uses
-    ``shutdown(SHUT_RDWR)``; on Windows an in-flight read raises ``ConnectionAbortedError``, on Linux
-    it returns ``b""``. The transport read that as a complete body and reported **HTTP 200** for an
-    aborted trickle -- silent corruption, green on the machine it was written on, red on the machine
-    that gates the merge.
-
-    ⚠️ The read must CROSS the deadline rather than start after it, or the loop's top-of-iteration
-    check fires first and the EOF branch is never reached -- which is what the first version of this
-    fixture did, passing for the wrong reason.
-    """
+    """A stream whose read BLOCKS ACROSS the deadline and then returns a clean EOF -- Linux behaviour."""
 
     def __init__(self, deadline: float) -> None:
         self._deadline = deadline
@@ -425,12 +352,7 @@ class _EofOnAbortStream:
 
 
 def test_an_eof_at_the_deadline_is_not_treated_as_a_complete_body():
-    """⚠️ The platform-divergence case, pinned so it cannot depend on which OS ran the suite.
-
-    Reporting a truncated CSV as a 200 is worse than the unbounded read this mechanism replaced,
-    because it is silent -- and it is precisely what an abandoned read looks like where ``shutdown``
-    yields EOF rather than an error.
-    """
+    """⚠️ The platform-divergence case, pinned so it cannot depend on which OS ran the suite."""
     deadline = time.monotonic() + DEADLINE_SEC
     stream = _EofOnAbortStream(deadline)
     with pytest.raises(TimeoutError) as excinfo:
@@ -488,11 +410,7 @@ def test_the_error_body_path_is_bounded_without_any_socket(monkeypatch):
 
 
 class _FastFailDataThenTrickle(BaseHTTPRequestHandler):
-    """A view whose ``/data`` fails immediately and whose renders trickle forever.
-
-    Exactly the shape the salvage path exists for -- and exactly the shape a virtual clock cannot
-    model, because the render's duration is a property of the socket rather than of a script.
-    """
+    """A view whose ``/data`` fails immediately and whose renders trickle forever."""
 
     protocol_version = "HTTP/1.1"
 
@@ -520,19 +438,7 @@ class _FastFailDataThenTrickle(BaseHTTPRequestHandler):
 
 
 def test_a_trickling_salvage_sequence_is_bounded_end_to_end(tmp_path):
-    """⚠️ The claim the whole decoupling rests on, proved over a REAL socket.
-
-    Three render tiers are requested and every one of them trickles. Unbounded, that is three bodies
-    of ``BODY_BYTES * GAP_SEC`` each. The bound that must hold is the ADMISSION budget
-    (``SALVAGE_BUDGET_MULTIPLIER x timeout``) plus at most one socket timeout for the in-flight chunk
-    -- and the ``+ one socket timeout`` is honest, not hedging: a read already in progress cannot be
-    interrupted.
-
-    ⚠️ This test is the reason the file exists. The virtual-clock version of it passed while the code
-    was unbounded, because the clock advances only by the duration each scripted response declares --
-    it modelled every request as bounded by its nominal timeout, which is the very assumption that
-    turned out to be false. An instrument that shares a defect with the thing it measures cannot fail.
-    """
+    """⚠️ The claim the whole decoupling rests on, proved over a REAL socket."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FastFailDataThenTrickle)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_address[1]
@@ -598,11 +504,7 @@ def test_a_trickling_salvage_sequence_is_bounded_end_to_end(tmp_path):
 
 
 class _TruncatedRender(BaseHTTPRequestHandler):
-    """`/data` fails generically, then every render declares 1 KiB and sends only its magic bytes.
-
-    A generic 400 on `/data` is what routes this into the salvage path -- the same route the field
-    evidence takes -- so the render legs are reached exactly as they are in production.
-    """
+    """`/data` fails generically, then every render declares 1 KiB and sends only its magic bytes."""
 
     protocol_version = "HTTP/1.1"
     DECLARED = 1024
@@ -657,11 +559,7 @@ def _capture_against(handler, tmp_path):
 
 
 def test_a_render_the_peer_TRUNCATED_is_never_recorded_as_evidence(tmp_path):
-    """⚠️ The blocker: 8 bytes with a valid magic number were persisted as a complete render.
-
-    Every assertion here failed on the unfixed code -- the record read `status: ok` with a `sha256`
-    and a `path`, and `render_unestablished` was 0 for a view with no usable reference at all.
-    """
+    """⚠️ The blocker: 8 bytes with a valid magic number were persisted as a complete render."""
     record = _capture_against(_TruncatedRender, tmp_path)
 
     assert record["data"]["status"] != "ok", "the fixture must reach the SALVAGE path"
@@ -685,17 +583,7 @@ def test_a_render_the_peer_TRUNCATED_is_never_recorded_as_evidence(tmp_path):
 
 
 def test_the_truncation_is_caught_by_the_TRANSPORT_not_only_by_the_format_check(tmp_path):
-    """Which layer refuses it matters, so the two are separated rather than assumed to agree.
-
-    ⚠️ Positive-and-negative control on the `Content-Length` check specifically. The transport must
-    refuse the body outright -- returning `NETWORK_ERROR_STATUS`, retry-eligible -- rather than handing
-    up 8 bytes for a later completeness check to reject. If only the completeness check fired, the
-    truncation would be invisible to every OTHER caller of `_request`, including the data leg, whose
-    CSV has no structure to check at all.
-
-    The control is the same server read WITHOUT a deadline: both paths must classify it identically.
-    Before the fix they did not, and the deadline path was the weaker one.
-    """
+    """Which layer refuses it matters, so the two are separated rather than assumed to agree."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _TruncatedRender)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     port = server.server_address[1]
@@ -726,21 +614,7 @@ def test_the_truncation_is_caught_by_the_TRANSPORT_not_only_by_the_format_check(
 
 
 class _CloseDelimitedTruncatedRender(_TruncatedRender):
-    """The same truncation, framed so the TRANSPORT cannot possibly detect it.
-
-    ⚠️ This fixture exists because a mutation SURVIVED. Removing the completeness check from
-    `_capture_render` entirely left `test_a_render_the_peer_TRUNCATED_is_never_recorded_as_evidence`
-    green -- the transport's `Content-Length` check had already refused the body, so the capture-layer
-    guard was never reached and was, in this repository's words, "a guard implied by a stronger
-    sibling", which is unkillable and therefore untested.
-
-    The two layers are NOT redundant, and this is the case that proves it. With no `Content-Length`
-    the body is delimited by the close itself, so `HTTPResponse.length` is `None` and EOF is the
-    legitimate, correct end of a complete response. The transport must accept it; only structure can
-    say the PNG is 8 bytes of signature and nothing else. Chunked framing that ends early is caught by
-    `http.client` itself, but close-delimited framing has no terminator at all -- and HTTP/1.0 clients,
-    proxies and error paths still produce it.
-    """
+    """The same truncation, framed so the TRANSPORT cannot possibly detect it."""
 
     protocol_version = "HTTP/1.0"
 
@@ -760,13 +634,7 @@ class _CloseDelimitedTruncatedRender(_TruncatedRender):
 
 
 def test_a_STRUCTURALLY_incomplete_render_is_refused_even_when_the_transport_is_satisfied(tmp_path):
-    """⚠️ The independent half of blocker 1, on the surface where the transport is blind.
-
-    The transport is CORRECT to accept this body -- close-delimited framing has no declared length, so
-    EOF is the end of a complete response. `payload_is_complete` is the only thing that can say the
-    PNG carries no IHDR, no IDAT and no IEND. Both assertions below fail if the capture-layer check is
-    removed, which is what makes it a guard rather than decoration.
-    """
+    """⚠️ The independent half of blocker 1, on the surface where the transport is blind."""
     record = _capture_against(_CloseDelimitedTruncatedRender, tmp_path)
 
     for leg in ("image", "svg", "pdf"):
@@ -794,11 +662,7 @@ PROXY_ESTABLISHED = "HTTP/1.1 200 Connection established\r\n\r\n"
 
 
 def _serve_trickling_proxy(listener: socket.socket) -> None:
-    """A proxy that answers CONNECT one byte at a time, each byte inside the socket timeout.
-
-    This is the reviewer''s measured reproduction: `_tunnel()` reads the proxy''s response through
-    `makefile()`, so the per-operation timeout never fires and the exchange runs unbounded.
-    """
+    """A proxy that answers CONNECT one byte at a time, each byte inside the socket timeout."""
     conn, _addr = listener.accept()
     try:
         conn.recv(4096)  # the CONNECT request line and its headers
@@ -848,12 +712,7 @@ def _tunnel_through(proxy: tuple[str, int], deadline: float | None) -> float:
 
 
 def test_a_proxy_that_trickles_its_CONNECT_response_is_bounded(trickling_proxy):
-    """⚠️ Round 4, finding 1 -- reproduced and fixed. Measured 1.241s against a 0.20s ceiling.
-
-    `connect()` armed the watchdog only after `super().connect()` returned, and with the corrected
-    HTTPS MRO that `super()` is `HTTPSConnection.connect`: TCP setup, the proxy CONNECT exchange and
-    the entire TLS handshake ran outside it, with `timer_armed = False` throughout.
-    """
+    """⚠️ Round 4, finding 1 -- reproduced and fixed. Measured 1.241s against a 0.20s ceiling."""
     elapsed = _tunnel_through(trickling_proxy, time.monotonic() + DEADLINE_SEC)
 
     assert elapsed < DEADLINE_SEC + SOCKET_TIMEOUT_SEC + GAP_SEC * 4, (
@@ -879,13 +738,7 @@ def _serve_idle(listener: socket.socket) -> None:
 
 
 class _FakeSSLSocket(socket.socket):
-    """A socket that answers ``do_handshake()``, which a plain ``socket`` does not.
-
-    ⚠️ Needed because the production path now calls ``do_handshake()`` explicitly -- that IS the fix.
-    Recording the call is what makes the fixture prove the handshake still happens: deferring must MOVE
-    ``do_handshake()``, never drop it, and a stub silently lacking the method would let "no handshake
-    at all" pass as "deferred handshake".
-    """
+    """A socket that answers ``do_handshake()``, which a plain ``socket`` does not."""
 
     handshakes = 0
     timeout_at_handshake = None
@@ -907,22 +760,7 @@ TLS_SOCKET_TIMEOUT_SEC = 5.0
 
 
 class _RecordingContext:
-    """Stands in for the SSL context, so the TLS phase is reachable without a certificate.
-
-    ⚠️ It records whether the watchdog was ALREADY armed when TLS negotiation began -- which is the
-    claim under test, and the one thing `test_the_https_twin_resolves_connect_to_the_watchdog` cannot
-    show. That test proves WHICH `connect` runs; this proves WHEN its watchdog is armed.
-
-    ⚠️ **And this fake is exactly why that was not enough.** Its `wrap_socket` returns immediately, so
-    the test samples the timer either side of the blocking phase rather than DURING it. A fixture that
-    cannot block cannot show a missing bound -- which is how the handshake stayed unbounded through the
-    round that added this test. `test_a_trickling_TLS_handshake_is_bounded_by_the_deadline` is the
-    counterpart that does block; keep both, and do not let this one stand alone again.
-
-    `do_handshake_on_connect` is accepted because the production path now passes it: the handshake is
-    deferred so the `SSLSocket` exists, and is abortable, before it starts. Recording the value is the
-    point -- a future edit that stops deferring would silently restore the unbounded phase.
-    """
+    """Stands in for the SSL context, so the TLS phase is reachable without a certificate."""
 
     def __init__(self, replacement: socket.socket) -> None:
         self.connection = None
@@ -990,13 +828,7 @@ def test_the_watchdog_is_armed_before_TLS_negotiation():
 
 
 def test_the_handshake_timeout_is_narrowed_to_the_REMAINING_budget():
-    """The other half of that arithmetic, and the half the defect was made of.
-
-    ⚠️ The test above shows a tighter per-operation timeout is honoured. This shows the opposite case,
-    which is the one that was broken: when the budget left is SMALLER than the connection's nominal
-    timeout, the handshake must get the budget -- not a fresh full-length per-phase timeout. Leaving
-    the per-phase value is exactly how a 0.16s deadline came to fail at 0.327s.
-    """
+    """The other half of that arithmetic, and the half the defect was made of."""
     listener = _listening(_serve_idle)
     replacement = _FakeSSLSocket()
     replacement.settimeout(5.0)  # a generous per-operation timeout, as `_open` would leave it
@@ -1021,15 +853,7 @@ def test_the_handshake_timeout_is_narrowed_to_the_REMAINING_budget():
 
 
 def test_the_deferred_context_forwards_verification_settings_untouched():
-    """Deferring the handshake must not weaken it. This is a STRUCTURAL control, and says so.
-
-    ⚠️ Honest scope: no fixture in this file completes a real handshake, so this cannot demonstrate
-    that a bad certificate is rejected. What it CAN establish is that nothing about verification was
-    changed on the way past -- `check_hostname` and `verify_mode` are read straight off the real
-    context through `__getattr__`, and the only argument the wrapper adds is
-    `do_handshake_on_connect=False`, which moves `do_handshake()` a few lines later rather than
-    skipping it. Verification lives inside that call, so moving it cannot disable it.
-    """
+    """Deferring the handshake must not weaken it. This is a STRUCTURAL control, and says so."""
     real = ssl.create_default_context()
     proxy = th._DeferredHandshakeContext(real)
 
@@ -1043,14 +867,7 @@ def test_the_deferred_context_forwards_verification_settings_untouched():
 
 
 def _serve_delayed_proxy_then_trickling_tls(listener: socket.socket) -> None:
-    """Delay the CONNECT, then answer the ClientHello with a WELL-FORMED, endlessly trickling record.
-
-    ⚠️ This is the fixture `_RecordingContext` could not be, and both halves are load-bearing. The
-    DELAY spends real budget before TLS starts -- which is the whole defect, a per-phase socket timeout
-    RESTARTING at the handshake rather than counting down what is left. The TRICKLE then keeps every
-    handshake byte inside the socket timeout, and a well-formed record header means OpenSSL waits for
-    the payload it was promised rather than erroring out.
-    """
+    """Delay the CONNECT, then answer the ClientHello with a WELL-FORMED, endlessly trickling record."""
     conn, _addr = listener.accept()
     try:
         conn.recv(4096)  # the CONNECT request line and its headers
@@ -1069,11 +886,7 @@ def _serve_delayed_proxy_then_trickling_tls(listener: socket.socket) -> None:
 
 
 def _handshake_through(port: int, deadline: float | None) -> float:
-    """Tunnel then negotiate TLS against `port`, returning how long it took before giving up.
-
-    The socket timeout is narrowed exactly as `_open` does it, so this measures the production
-    arithmetic rather than a friendlier version of it.
-    """
+    """Tunnel then negotiate TLS against `port`, returning how long it took before giving up."""
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -1096,20 +909,7 @@ def _handshake_through(port: int, deadline: float | None) -> float:
 
 
 def test_a_trickling_TLS_handshake_is_bounded_by_the_deadline():
-    """⚠️ The last unbounded blocking phase, reproduced and fixed.
-
-    Before this, `wrap_socket` handshook INSIDE `HTTPSConnection.connect`, while the raw socket the
-    watchdog pointed at had already been detached (`fileno() == -1`, so every abort call was swallowed)
-    and the `SSLSocket` did not yet exist. The only bound left was the socket timeout, which restarts
-    at the handshake instead of counting down the remaining budget. Measured through a proxy delaying
-    `CONNECT` by 0.10s, with `_open`'s own narrowing applied: a 0.16s deadline failed at **0.327s,
-    0.167s over**, the watchdog firing on `fileno=-1` throughout. After: **0.165s, 0.005s over**.
-
-    ⚠️ The ceiling below is deliberately tighter than this file's usual slack, and that is what makes
-    the test discriminating rather than decorative. The unfixed code costs
-    `TLS_PROXY_DELAY_SEC + TLS_DEADLINE_SEC` = 0.9s, so anything looser than ~0.8s would pass on it.
-    Loosening this ceiling silently removes the test's ability to fail for its own reason.
-    """
+    """⚠️ The last unbounded blocking phase, reproduced and fixed."""
     listener = _listening(_serve_delayed_proxy_then_trickling_tls)
     try:
         elapsed = _handshake_through(listener.getsockname()[1], time.monotonic() + TLS_DEADLINE_SEC)
@@ -1124,13 +924,7 @@ def test_a_trickling_TLS_handshake_is_bounded_by_the_deadline():
 
 
 def test_a_trickling_TLS_handshake_is_UNBOUNDED_without_the_deadline():
-    """The discriminating control: the same fixture, no deadline, runs to the server's own limit.
-
-    Without it the bound above could be the fixture giving up rather than the deadline biting -- which
-    is precisely the mistake the previous TLS test made by using a `wrap_socket` that never blocked.
-    The socket timeout is generous here on purpose: a timeout tighter than the deadline would do the
-    bounding in BOTH arms, and the deadline's contribution would be unobservable.
-    """
+    """The discriminating control: the same fixture, no deadline, runs to the server's own limit."""
     listener = _listening(_serve_delayed_proxy_then_trickling_tls)
     try:
         elapsed = _handshake_through(listener.getsockname()[1], None)
@@ -1144,16 +938,7 @@ def test_a_trickling_TLS_handshake_is_UNBOUNDED_without_the_deadline():
 
 @pytest.mark.timing
 def test_the_abort_covers_a_bare_recv_not_only_a_makefile_stream():
-    """⚠️ Both calls in `_abort_socket` are load-bearing, in phases that do not overlap.
-
-    Measured on Windows, one abort at 0.25s: against a peer trickling a byte per 0.02s read through
-    `makefile()` -- how `http.client` takes the status line and headers -- `shutdown` alone aborts in
-    0.257s and `close` alone does **not** abort at all. Against a bare `recv` -- which is what the TLS
-    handshake does -- it is exactly the reverse: `close` aborts in 0.254s, `shutdown` alone does not.
-
-    Every other socket test in this file reads through `makefile()`, so dropping `close` would be
-    invisible to all of them. This is the one that keeps it killable.
-    """
+    """⚠️ Both calls in `_abort_socket` are load-bearing, in phases that do not overlap."""
     listener = _listening(_serve_idle)
     try:
         client = socket.create_connection(("127.0.0.1", listener.getsockname()[1]), timeout=2.0)
@@ -1178,20 +963,7 @@ UNROUTABLE = ("203.0.113.1", "203.0.113.2", "203.0.113.3")
 
 
 def test_multiple_addresses_are_a_known_unbounded_phase(monkeypatch):
-    """⚠️ A PIN ON A RESIDUAL, deliberately, not a bound. Review round 5, and it is NOT DNS.
-
-    `socket.create_connection` walks every `getaddrinfo` result and applies the timeout to EACH
-    candidate, so N unreachable A/AAAA records cost N timeouts before any socket -- and therefore any
-    watchdog -- exists. `getaddrinfo` has already returned by then, so this is not the resolver
-    residual that was documented; it was hidden behind it for three corrections of that prose.
-
-    ⚠️ Every other fixture in this file connects successfully to ONE localhost address and so cannot
-    observe an all-address failure. That is the fifth consecutive round in which the finding was the
-    phase immediately before wherever the watchdog was armed, and the fifth in which no control could
-    reach it. So the residual is written as an executable fact rather than a sentence: a sentence has
-    been wrong four times, and **if someone bounds this phase, this test fails and makes them correct
-    the claim** instead of leaving a stale one behind.
-    """
+    """⚠️ A PIN ON A RESIDUAL, deliberately, not a bound. Review round 5, and it is NOT DNS."""
     resolved = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (addr, 9)) for addr in UNROUTABLE]
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: resolved)
 

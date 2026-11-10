@@ -292,11 +292,7 @@ def test_network_failure_becomes_status_zero_rather_than_an_exception(monkeypatc
 
 
 def test_reflected_session_token_is_redacted_from_exceptions_and_manifest(tmp_path):
-    """A WAF/proxy/debug endpoint can echo ``X-Tableau-Auth`` after sign-in.
-
-    That token is not the PAT secret, but it authorizes the same Tableau session. The status and
-    response shape must survive for diagnosis; only the credential value is removed.
-    """
+    """A WAF/proxy/debug endpoint can echo ``X-Tableau-Auth`` after sign-in."""
 
     token = "SENTINEL_SESSION_TOKEN_FULL_PERMISSION"
 
@@ -393,11 +389,7 @@ def test_empty_csv_reports_zero_rows_rather_than_failing():
 
 def test_artifact_paths_are_built_only_from_a_verified_luid(tmp_path):
     """Replaces `test_slug_is_filesystem_safe`, because `safe_slug` is gone rather than fixed.
-
-    A view NAME is response data. Slugging one into a filename truncated a reflected session token
-    into a prefix no redactor could then match (#405 round 6), so the name no longer reaches a path at
-    all: the only input is a LUID, whose UUID shape is verifiable in full. An identifier that is not a
-    LUID is refused rather than sanitised -- sanitising is the screen this replaces.
+    Refs #405.
     """
     assert oracle.artifact_stem("EB00995D-1FF1-4A42-9AC9-28846F861D31") == "eb00995d-1ff1-4a42-9ac9-28846f861d31"
     for bad in ("view-id-12345678", "", "../../etc/passwd", "eb00995d-1ff1-4a42-9ac9-28846f861d3"):
@@ -413,13 +405,7 @@ def test_a_view_whose_identifier_is_not_a_luid_is_refused_not_named(tmp_path):
 
 
 def test_a_luid_that_IS_one_of_our_credentials_is_refused_too(tmp_path):
-    """Closes the one residual the LUID allowlist leaves on its own.
-
-    The shape check alone says "this is a UUID", not "this is not a credential". Measured against the
-    live site, none of ours could pass it -- PAT secret, PAT name and session token are 57/20/92
-    characters and none is hex-and-dash-only -- so this is belt and braces. It is what makes the claim
-    unconditional rather than true-of-today's-credentials.
-    """
+    """Closes the one residual the LUID allowlist leaves on its own."""
     luid = "eb00995d-1ff1-4a42-9ac9-28846f861d31"
     session = FakeSession([(200, "a\n1\n", {})])
     session.token = luid
@@ -457,29 +443,7 @@ def test_export_and_raw_get_forward_the_api_override(api):
 
 
 def test_every_scripted_session_double_in_this_suite_accepts_every_pass_through_keyword():
-    """The gate that would have caught the red CI without running the file.
-
-    ``TimedSession`` in ``test_capture_tableau_oracle_retry_budget.py`` overrides ``_request`` with
-    the PREVIOUS signature, so five ordinary-export tests died on ``unexpected keyword argument
-    'api'`` -- invisible to a test selection made from the changed *source* files, because that
-    double exercises the same class through a subclass in a differently-named module. The adapter set
-    is closed (all under ``tests/``), so updating them is right; this keeps it closed.
-
-    ⚠️ The keyword list is DERIVED from the real method, not hand-maintained. It was hand-maintained
-    and named only ``api``; ``deadline`` was then added to the production signature and thirteen
-    doubles went stale at once, which this gate could not see because nobody remembered to widen it.
-
-    ⚠️ And the comparison is by EXACT keyword-only NAME, parsed with ``ast`` -- not by substring, and
-    not by regex over the parameter text. Measured: a double declaring ``api_version=None`` and
-    ``deadline_seconds=None`` SATISFIED the substring form for both ``api`` and ``deadline``,
-    reporting nothing stale, while calling it with the production arguments raised
-    ``TypeError: unexpected keyword argument 'api'`` immediately. Deriving the right names and then
-    comparing them wrongly is the same shape as the defect it was written to catch: the guard names
-    the keyword and matches a prefix of it.
-
-    A double that takes ``**kwargs`` genuinely accepts everything, so it is exempt -- but only if it
-    really declares one, which the AST can tell and a regex cannot.
-    """
+    """The gate that would have caught the red CI without running the file."""
     real = inspect.signature(oracle.TableauSession._request)  # pylint: disable=protected-access
     expected = {
         name
@@ -510,13 +474,7 @@ def test_every_scripted_session_double_in_this_suite_accepts_every_pass_through_
 
 
 def test_the_double_gate_rejects_a_merely_similar_keyword():
-    """Positive control for the exactness above, built from the reproduction that broke it.
-
-    ``api_version`` contains ``api``; ``deadline_seconds`` contains ``deadline``. Under the substring
-    comparison this double was reported clean. It must now be reported stale, and a ``**kwargs`` double
-    must still be accepted -- otherwise "exact" would just mean "stricter", and the exemption that
-    makes the gate usable would be gone.
-    """
+    """Positive control for the exactness above, built from the reproduction that broke it."""
     similar = (
         "class D:\n"
         "    def _request(self, method, path, *, body=None, api_version=None, deadline_seconds=None):\n"
@@ -710,13 +668,7 @@ def _manifest(tmp_path, records) -> tuple[int, dict]:
 
 
 def _named_manifest(tmp_path, records) -> tuple[int, dict]:
-    """As above, but through a session whose credentials cannot collide with a manifest field NAME.
-
-    ⚠️ Not fussiness. The shared `_creds()` sets ``pat_name="name"``, and the sink redacts dict KEYS
-    as well as values -- so with that session every ``view_name`` key comes back as
-    ``view_[REDACTED]`` and any assertion about a NAMED view silently tests the redactor instead of
-    the feature. Measured while writing these tests, on the first assertion that read a name back.
-    """
+    """As above, but through a session whose credentials cannot collide with a manifest field NAME."""
     session = oracle.TableauSession(
         oracle.SiteCredentials(
             base="https://example.online.tableau.com",
@@ -734,11 +686,7 @@ def _named_manifest(tmp_path, records) -> tuple[int, dict]:
 
 
 def test_an_empty_capture_is_named_not_merely_counted(tmp_path):
-    """The defect itself. `data_empty: 12` is unactionable; a reviewer needs the twelve NAMES.
-
-    Same shape as `render_unestablished_views`, and for the same stated reason: the count answers
-    "how much of my oracle is empty", the list answers "on which views can I not make a finding".
-    """
+    """The defect itself. `data_empty: 12` is unactionable; a reviewer needs the twelve NAMES."""
     empty = _record("ok", rows=0, columns=["Region", "Sales"])
     empty["view_name"] = "Real Time Availability"
     empty["workbook_name"] = "Network Ops"
@@ -760,11 +708,7 @@ def test_the_named_list_and_the_count_describe_the_same_views(tmp_path):
 
 
 def test_the_byte_count_is_not_consulted_as_the_discriminator(tmp_path):
-    """The forbidden heuristic, pinned: 0 bytes and 2 bytes must reach the SAME verdict.
-
-    Both are `row_count=0, columns=[]` in a real capture. A fix that separated them by `bytes` would
-    look right against the reporting site and be wrong at the first site with a different export.
-    """
+    """The forbidden heuristic, pinned: 0 bytes and 2 bytes must reach the SAME verdict."""
     glossary = _record("ok", rows=0, columns=[])
     glossary["data"]["bytes"] = 0
     blank = _record("ok", rows=0, columns=[])
@@ -775,12 +719,7 @@ def test_the_byte_count_is_not_consulted_as_the_discriminator(tmp_path):
 
 
 def test_an_empty_capture_keeps_status_ok_and_does_not_move_the_exit_code(tmp_path):
-    """⚠️ The regression risk. `status` drives the exit code AND the blocked/failed partitions.
-
-    The HTTP call succeeded, so an empty capture is a DIAGNOSTIC. A run that is otherwise clean must
-    still exit 0 -- overloading `status` would make an operator debug the transport for a view whose
-    filter is simply pointed at a day with no data.
-    """
+    """⚠️ The regression risk. `status` drives the exit code AND the blocked/failed partitions."""
     code, manifest = _manifest(tmp_path, [_record("ok", rows=0, columns=[]), _record("ok", rows=0, columns=["c"])])
     assert code == 0
     assert [view["data"]["status"] for view in manifest["views"]] == ["ok", "ok"]
@@ -795,23 +734,14 @@ def test_an_empty_capture_keeps_status_ok_and_does_not_move_the_exit_code(tmp_pa
     [("source_credential", 2), ("failed", 1)],
 )
 def test_an_empty_capture_never_changes_the_code_a_run_would_otherwise_exit(tmp_path, sibling, expected):
-    """Before/after, across every code an empty view could plausibly disturb.
-
-    Each pair is the SAME run with and without an empty view beside it, so the assertion is about the
-    empty view's contribution rather than about the codes themselves.
-    """
+    """Before/after, across every code an empty view could plausibly disturb."""
     others = [_record("ok")] + ([_record(sibling)] if sibling else [])
     assert _write(tmp_path, others) == expected, "the baseline moved -- this test proves nothing"
     assert _write(tmp_path, [*others, _record("ok", rows=0, columns=[])]) == expected
 
 
 def test_the_empty_fact_rides_on_the_view_record_as_a_flag(tmp_path):
-    """A per-view flag, so every downstream SLICE of the capture carries it, not just the manifest.
-
-    Deliberately not a new `status` value and not a mutation of the leg record: a consumer asking
-    "did this view's export succeed" and one asking "does this view carry evidence" are two
-    questions, and this answers the second without corrupting the first.
-    """
+    """A per-view flag, so every downstream SLICE of the capture carries it, not just the manifest."""
     _code, manifest = _manifest(tmp_path, [_record("ok", rows=0, columns=["c"]), _record("ok", rows=4)])
     empty_view, full_view = manifest["views"]
     assert empty_view["flags"] == [verdict.FLAG_DATA_EMPTY, verdict.EMPTY_QUERY_NO_ROWS]
@@ -879,11 +809,7 @@ def test_an_unassessable_capture_makes_an_otherwise_clean_exit_partial(tmp_path)
 
 
 def test_the_per_view_line_for_an_unassessable_capture_is_a_WARNING_and_does_not_raise(caplog):
-    """⚠️ The ordinary line interpolates `data["row_count"]`, which this record does not have.
-
-    So this is two claims at once: the line must be a WARNING naming the reason, and printing it
-    must not raise the `KeyError` that would take the whole run down at the console.
-    """
+    """⚠️ The ordinary line interpolates `data["row_count"]`, which this record does not have."""
     caplog.set_level(logging.INFO, logger="tableau-oracle")
     verdict.log_progress(3, 94, dict(REVIEW_RECORD))
     (line,) = caplog.records
@@ -985,13 +911,7 @@ def test_the_run_end_block_is_silent_when_nothing_is_empty(tmp_path, caplog):
 )
 def test_a_REAL_empty_export_travels_the_whole_path_from_capture_to_manifest(tmp_path, payload, expected):
     """End to end over the PRODUCTION path, not a hand-built record.
-
-    ⚠️ Every other test in this section constructs the record itself, which proves the verdict layer
-    and says nothing about whether a real capture can produce its input. This one starts at
-    `capture_view` with a scripted HTTP response, so `_capture_data` -> `summarise_csv` ->
-    `empty_classification` is exercised as a chain. The original fixtures are shapes the reporting
-    site actually returned: a 2-byte CRLF body, and a header with no rows. Additional physical blank
-    lines must not change their row counts or empty classifications (#669).
+    Refs #669.
     """
     session = FakeSession([(200, payload, {"Content-Type": "text/csv"})])
     view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
@@ -1270,14 +1190,7 @@ def test_an_early_eof_csv_capture_is_a_failed_manifest_not_unassessable_evidence
 
 
 def test_a_200_with_no_Content_Type_is_kept_but_reported_UNASSESSABLE(tmp_path):
-    """The seam between the two findings, and the honest answer to "we cannot certify this".
-
-    A CSV carries no signature -- there is no byte sequence that PROVES a body is CSV the way
-    `%PDF-` proves a PDF -- so with nothing declared, nothing establishes these bytes as data. The
-    transport did succeed, so the bytes are kept and the status stays `ok`; what is refused is the
-    EVIDENCE, so no row count is recorded, the verdict layer reports it rather than counting it, and
-    the bytes are named `retained_path` OUTSIDE `data/` so no consumer can read them as numbers.
-    """
+    """The seam between the two findings, and the honest answer to "we cannot certify this"."""
     session = FakeSession([(200, "Region,Sales\r\nWest,10\r\n", {})])
     view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
     record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
@@ -1301,11 +1214,7 @@ def test_a_200_with_no_Content_Type_is_kept_but_reported_UNASSESSABLE(tmp_path):
 
 
 def test_an_error_page_with_the_Content_Type_STRIPPED_is_still_refused(tmp_path):
-    """The header-stripping proxy, which is the one case Content-Type alone cannot answer.
-
-    A body opening a tag is a document, not a table -- and `<html>` otherwise parses as a one-column
-    CSV with two rows, which is exactly how the reviewer's first row was recorded as data.
-    """
+    """The header-stripping proxy, which is the one case Content-Type alone cannot answer."""
     session = FakeSession([(200, "<html>\n<body>Error</body>\n</html>\n", {})])
     view = {"id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "name": "Real Time Availability", "workbook": {"id": "wb"}}
     record = oracle.capture_view(session, view, tmp_path, frozenset(), None)
@@ -1347,12 +1256,7 @@ def test_certify_csv_verdicts(body, expected):
     ],
 )
 def test_certify_csv_reads_the_declaration_over_a_well_formed_body(declared, expected):
-    """The declaration half, isolated: the SAME well-formed CSV body under every declaration.
-
-    ⚠️ This is the opposite ordering from `format_matches`, deliberately. There the payload is
-    decisive because a PNG/PDF/SVG carries a signature; here it cannot be, so a server saying
-    `text/html` is the strongest evidence available and is believed.
-    """
+    """The declaration half, isolated: the SAME well-formed CSV body under every declaration."""
     assert payload_facts.certify_csv(b"Region,Sales\r\nWest,10\r\n", declared) == expected
 
 
@@ -1366,11 +1270,7 @@ def test_certify_csv_never_echoes_the_payload_or_the_header():
 
 
 def test_a_view_name_is_redacted_before_the_empty_diagnostic_prints_it(tmp_path, caplog):
-    """⚠️ A view NAME is response data -- a reflected session token has arrived as one.
-
-    Both new console surfaces are covered: the per-view WARN and the run-end block. The manifest sink
-    scrubs the file; the console is the third artifact and CI keeps its logs.
-    """
+    """⚠️ A view NAME is response data -- a reflected session token has arrived as one."""
     token = "tableau-session-token-value-that-must-not-print"
     session = oracle.TableauSession(
         oracle.SiteCredentials(
@@ -1413,15 +1313,7 @@ def test_a_view_name_is_redacted_before_the_empty_diagnostic_prints_it(tmp_path,
 
 
 def _naive_numeric_consumer(oracle_dir: Path) -> list[dict]:
-    """A consumer written the way the FIFTH one will be, and deliberately not import-coupled to us.
-
-    ⚠️ This is the test that makes the fix durable rather than a fourth patch. It reads the manifest
-    raw, keeps every leg that says `status: ok` and names a `path`, and reads that file as numbers --
-    exactly what `build_reconcile_items.build()`, `check_unit._oracle_capture_oracles`,
-    `package_unit._copy_leg` and `group_oracle_by_workbook.copy_view_files` all do, and exactly what
-    someone writing a new one tomorrow will do. It knows nothing about `certification`, `flags`,
-    `row_count` or `data_unassessable`, and it must STILL find no evidence in an uncertified capture.
-    """
+    """A consumer written the way the FIFTH one will be, and deliberately not import-coupled to us."""
     manifest = json.loads((oracle_dir / "oracle-manifest.json").read_text(encoding="utf-8"))
     found = []
     for view in manifest.get("views", []):
@@ -1630,12 +1522,7 @@ def test_an_uncertified_capture_is_unreadable_by_a_consumer_that_never_heard_of_
 
 
 def test_a_record_assembled_ELSEWHERE_cannot_reach_the_manifest_with_uncertified_evidence(tmp_path):
-    """`_capture_data` is not the only thing that builds a data leg, so the writer enforces it too.
-
-    A re-scoped, hand-repaired or older record reaches `write_manifest` without ever passing through
-    the capture path, and the structural rule has to hold for those as well -- otherwise the
-    invariant is "whatever `_capture_data` happened to do", which is a convention, not a guarantee.
-    """
+    """`_capture_data` is not the only thing that builds a data leg, so the writer enforces it too."""
     record = _record("ok")
     record["data"] = {"status": "ok", "path": "data/hand-built.csv"}
     _code, manifest = _named_manifest(tmp_path, [record])
@@ -1661,12 +1548,7 @@ def test_a_certified_capture_is_still_readable_by_that_same_consumer(tmp_path):
 
 
 def test_the_reconcile_items_builder_emits_no_tableau_value_from_an_uncertified_capture(tmp_path):
-    """The review's own reproduction of finding 1, at the consumer it was reported against.
-
-    Before: `item_count 1, skipped_views [], tableau_value 10.0` from a record whose own flags said
-    `data_unassessable`. The builder is unchanged in how it GATES -- `status == ok and path` -- and
-    that is the point: the record no longer has a path to offer it.
-    """
+    """The review's own reproduction of finding 1, at the consumer it was reported against."""
     _capture_one(tmp_path, "Region,Sales\r\nWest,10\r\n", {})
     roles = {"Network Ops": {"Region": "DIMENSION", "Sales": "MEASURE"}}
 
@@ -1683,13 +1565,7 @@ def test_the_reconcile_items_builder_emits_no_tableau_value_from_an_uncertified_
 
 
 def test_a_LEGACY_manifest_naming_uncertified_bytes_under_path_is_demoted_when_it_is_READ(tmp_path):
-    """The review's second reproduction: a record from BEFORE any of this existed.
-
-    `flags=[data_unassessable, row_count_unrecorded]`, no `row_count`, no `certification`, and
-    `data/view.csv` sitting in `path` with real bytes beside it. Such a file cannot be rewritten
-    retroactively, so the boundary that LOADS it restores the invariant -- and the naive consumer
-    above, reading the same file raw, is what shows the residual honestly.
-    """
+    """The review's second reproduction: a record from BEFORE any of this existed."""
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "view.csv").write_text("Region,Sales\r\nWest,10\r\n", encoding="utf-8")
     (tmp_path / "oracle-manifest.json").write_text(
@@ -1722,17 +1598,7 @@ def test_a_LEGACY_manifest_naming_uncertified_bytes_under_path_is_demoted_when_i
 
 
 def test_a_LEGACY_RECORD_WITH_A_ROW_COUNT_and_no_certification_is_not_evidence(tmp_path):
-    """#480 round 3, finding 1 -- and the ONLY shape that exists on a customer's disk today.
-
-    ⚠️ Round 2's gate returned early on any non-bool integer `row_count`, so it never fired on real
-    data. `git show origin/master:scripts/capture_tableau_oracle.py` called `summarise_csv(payload)`
-    on the body of EVERY HTTP 200 and wrote its `row_count`, recording no certification at all --
-    so a pre-#480 manifest carries a number and no certificate, and a gate that reads the number as
-    proof of measurement is a gate that has never once run.
-
-    The number is not merely unbacked, it is misleading: `summarise_csv` counts LINES, so an HTML
-    error page is one row and a plain-text outage banner is a header with no rows.
-    """
+    """#480 round 3, finding 1 -- and the ONLY shape that exists on a customer's disk today."""
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "view.csv").write_text("Region,Sales\r\nWest,10\r\n", encoding="utf-8")
     (tmp_path / "oracle-manifest.json").write_text(
@@ -1786,12 +1652,7 @@ def test_a_LEGACY_RECORD_WITH_A_ROW_COUNT_and_no_certification_is_not_evidence(t
 
 
 def test_a_record_that_contradicts_itself_is_believed_on_its_REFUSAL_not_on_its_count(tmp_path):
-    """#480 round 3, finding 1's second half: `content_type_absent` WITH a `row_count`.
-
-    A record cannot be both uncertified and measured. Round 2 resolved the contradiction toward the
-    number, which is the fail-open direction -- the count would then have come from the very body
-    the certification says nothing established.
-    """
+    """#480 round 3, finding 1's second half: `content_type_absent` WITH a `row_count`."""
     record = {
         "view_name": "V",
         "workbook_name": "W",
@@ -1822,11 +1683,7 @@ def test_a_record_that_contradicts_itself_is_believed_on_its_REFUSAL_not_on_its_
 
 
 def test_a_certification_this_module_does_not_recognise_is_unassessable_not_assessable(tmp_path):
-    """A verdict from a NEWER capture, or a corrupted field. Either way nothing here established it.
-
-    The fail-open reading is "unknown string, so fall through to whatever else the record says". A
-    closed vocabulary only protects anything if a value outside it is refused rather than ignored.
-    """
+    """A verdict from a NEWER capture, or a corrupted field. Either way nothing here established it."""
     record = {
         "view_name": "V",
         "workbook_name": "W",
@@ -1841,14 +1698,7 @@ def test_a_certification_this_module_does_not_recognise_is_unassessable_not_asse
 
 
 def test_a_zero_row_count_on_an_uncertified_body_is_never_reported_as_an_empty_QUERY(tmp_path):
-    """#471's failure 2 with the number kept -- the shape the round-3 review found still surviving.
-
-    `Service temporarily unavailable` exports HTTP 200, parses as one header and no data rows, and
-    `origin/master` recorded `row_count: 0, columns: ["Service temporarily unavailable"]`. Read as
-    `empty_query_no_rows` that sends an operator to look at a Tableau filter for a view whose server
-    returned an error page, so `empty_classification` defers to `unassessable_reason` and the two
-    predicates are mutually exclusive by construction.
-    """
+    """#471's failure 2 with the number kept -- the shape the round-3 review found still surviving."""
     record = {
         "view_name": "V",
         "workbook_name": "W",
@@ -1871,10 +1721,7 @@ def test_a_zero_row_count_on_an_uncertified_body_is_never_reported_as_an_empty_Q
 
 def test_a_CERTIFIED_zero_row_capture_is_still_reported_as_an_empty_query(tmp_path):
     """⚠️ The matched control for the test above, and it is load-bearing.
-
-    Deferring to `unassessable_reason` could have been implemented as "never classify anything as
-    empty", which passes every assertion above and silently deletes #471's whole feature. A capture
-    that was certified AND measured zero rows is a real measurement and must still be named.
+    Refs #471.
     """
     record = {
         "view_name": "V",
@@ -1937,11 +1784,7 @@ def test_withholding_evidence_leaves_a_measured_capture_untouched_and_is_idempot
 )
 def test_text_plain_error_text_is_never_certified_as_CSV(tmp_path, body, misdiagnosis):
     """Finding 2, both measured variants, through the production export path.
-
-    The two-line body was recorded `certified`, `columns: ["Service unavailable"]`, `row_count: 1`.
-    The single-line variant is the worse one: `row_count: 0` and then the SPECIFIC diagnosis
-    `empty_query_no_rows` -- "the query ran and returned nothing" about a maintenance banner, which
-    is precisely the confidently-wrong claim #471 was filed for.
+    Refs #471.
     """
     manifest = _capture_one(tmp_path, body, {"Content-Type": "text/plain"})
     data = manifest["views"][0]["data"]
@@ -2019,11 +1862,7 @@ def test_view_types_joins_dashboards_and_worksheets_by_luid():
 
 
 def test_view_types_asks_the_metadata_api_through_the_hardened_path():
-    """`api='metadata'` + `/graphql` composes the unversioned endpoint via the ONE HTTP round trip.
-
-    If this ever regresses to a second HTTP client, the credential-reflection rounds that produced
-    `tableau_http` start again from scratch on a new surface.
-    """
+    """`api='metadata'` + `/graphql` composes the unversioned endpoint via the ONE HTTP round trip."""
     session = _graphql({"data": {"workbooks": []}})
     view_types_mod.view_types(session)
     assert session.calls == ["/graphql"]
@@ -2243,25 +2082,7 @@ def test_view_types_asks_the_metadata_api_through_the_hardened_path():
     ],
 )
 def test_view_types_fails_closed_and_never_guesses(responses, why, guard):
-    """⚠️ The load-bearing property. EVERY failure yields an empty map plus a stated reason.
-
-    There is deliberately no name-based fallback: matching on the view NAME is the exact join this
-    replaces, and it is what let a worksheet stand in as evidence for a dashboard page.
-
-    ⚠️ Three properties, not one. A malformed answer must be refused **whole** -- an earlier revision
-    skipped bad nodes and trusted their valid siblings, producing a mapping that typed some views and
-    left others `unknown`, which downstream is indistinguishable from a run where those views
-    genuinely had no type. It must never RAISE: a top-level `null`, list or string each escaped as an
-    uncaught `AttributeError`, `errors` as a dict escaped as a `KeyError`, and a 5000-digit integer
-    escaped as a `ValueError` from CPython's int-conversion limit.
-
-    ⚠️ And it must refuse for **the reason this fixture was written to provoke**. That third
-    assertion is not decoration -- it is the structural fix for a vacuity that has now occurred TWICE
-    on this file. Adding `_LUID_RE` made every fails-closed fixture refuse on luid SHAPE before
-    reaching its own branch; adding the `dashboards`/`sheets` presence guard did it again to three
-    more. Both times the suite stayed green while covering strictly less, because "it refused" was
-    the whole assertion. `guard` makes a fixture that stops reaching its subject fail loudly.
-    """
+    """⚠️ The load-bearing property. EVERY failure yields an empty map plus a stated reason."""
     mapping, unavailable = view_types_mod.view_types(FakeSession(responses))
     assert mapping == {}, f"{why} must not produce a mapping"
     assert unavailable, f"{why} must state why the type is unknown"
@@ -2312,43 +2133,14 @@ def test_view_types_fails_closed_and_never_guesses(responses, why, guard):
     ],
 )
 def test_a_hidden_sheet_does_not_switch_typing_off_for_the_whole_site(workbooks, expected, why):
-    """⚠️ Measured: before this, ONE hidden sheet made every captured view on the site `unknown`.
-
-    Hidden sheets are ordinary in a real estate, so the feature would have been inert exactly where
-    it was built to be used -- and inert SILENTLY, reported as a clean fail-closed run.
-
-    ⚠️ **MEASURED, not merely documented.** Tableau's docs say ``Sheet.luid: String!`` is *"Blank if
-    worksheet is hidden in Workbook"*, but nobody had confirmed a real site emits one. Measured
-    against our Tableau Cloud trial on **2026-09-01**, REST **3.29** requested, one read-only
-    Metadata API query (``scripts/tableau_luid_census.py``, re-runnable):
-
-    ==========================================  =========
-    workbooks returned                          48
-    dashboard nodes / blank                     60 / **0**
-    sheet nodes / blank                         416 / **116**
-    workbooks holding at least one blank luid   **5**
-    non-empty non-uuid luids                    0
-    views typed by the SHIPPED parser           **360**
-    views typed by the PRE-FIX rule             **0** (refused the whole response)
-    ==========================================  =========
-
-    So this is not "would break a site that has hidden sheets" -- **27.9% of sheets on the site this
-    feature was built against carry a blank luid**, and the pre-fix rule typed nothing at all there.
-    Re-measure with ``python scripts/tableau_luid_census.py``; the three verdicts are CONFIRMED,
-    NOT-PRESENT and CANNOT-TELL, and it does not push toward any of them.
-    """
+    """⚠️ Measured: before this, ONE hidden sheet made every captured view on the site `unknown`."""
     mapping, unavailable = view_types_mod.view_types(_graphql({"data": {"workbooks": workbooks}}))
     assert unavailable is None, f"{why} must not refuse the response"
     assert mapping == expected, f"{why} must leave every OTHER view typed"
 
 
 def test_a_blank_luid_is_skipped_but_a_garbage_one_still_refuses_everything():
-    """⚠️ The distinction IS the rule, so it is asserted as one fact rather than as two tests.
-
-    Same workbook, same position, one character different: `""` is documented and non-joinable, and
-    `"x"` is an identity we could not read. If these two ever collapse onto the same behaviour the
-    feature is either inert (both refuse) or fail-open (both skip).
-    """
+    """⚠️ The distinction IS the rule, so it is asserted as one fact rather than as two tests."""
     blank = _graphql({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}], "sheets": [{"luid": ""}]}]}})
     garbage = _graphql({"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}], "sheets": [{"luid": "x"}]}]}})
 
@@ -2370,14 +2162,7 @@ def test_a_site_of_only_hidden_sheets_reports_that_it_typed_nothing():
 
 @pytest.mark.parametrize("errors", [None, []])
 def test_the_two_UNAMBIGUOUS_spellings_of_no_errors_are_accepted(errors):
-    """⚠️ A deliberate deviation from "validate `errors` by presence and exact shape".
-
-    The GraphQL spec forbids both spellings, so refusing them is defensible on paper. But neither is
-    AMBIGUOUS -- there is no server for which `"errors": []` means errors occurred -- so refusing
-    buys nothing on the safety axis and costs on the inertness axis, which is the very failure mode
-    the hidden-sheet finding was about. `0`, `""`, `{}` and a string all still refuse, because none
-    of those can be interpreted at all; `errors: 0` is in the fails-closed table above.
-    """
+    """⚠️ A deliberate deviation from "validate `errors` by presence and exact shape"."""
     session = _graphql({"errors": errors, "data": {"workbooks": [_wb(dashboards=[DASH_LUID])]}})
     mapping, unavailable = view_types_mod.view_types(session)
     assert unavailable is None
@@ -2385,11 +2170,7 @@ def test_the_two_UNAMBIGUOUS_spellings_of_no_errors_are_accepted(errors):
 
 
 def test_an_oversized_body_is_refused_before_it_is_decoded(monkeypatch):
-    """The ceiling is the SOLE reason here: the body is a perfectly valid mapping payload.
-
-    Patched down rather than sending 32 MiB, because a fixture that costs seconds gets deleted. What
-    is pinned is that the check exists and fires before `decode`, not the constant's value.
-    """
+    """The ceiling is the SOLE reason here: the body is a perfectly valid mapping payload."""
     monkeypatch.setattr(view_types_mod, "_MAX_BODY_BYTES", 10)
     session = _graphql({"data": {"workbooks": [_wb(dashboards=[DASH_LUID])]}})
     mapping, unavailable = view_types_mod.view_types(session)
@@ -2406,13 +2187,7 @@ def test_the_body_ceiling_is_large_enough_for_a_real_estate():
 
 
 def test_a_repeated_luid_of_the_SAME_kind_is_tolerated_deliberately():
-    """⚠️ A judgement call, pinned so it is a decision rather than an accident.
-
-    Everything else malformed refuses the whole answer. A node repeated under the *same* kind is the
-    one exception: it cannot produce a wrong type, and refusing would blank an entire estate's typing
-    over a duplicate that changes nothing. The CONTRADICTORY case -- one luid under both kinds -- is
-    refused, and is covered above.
-    """
+    """⚠️ A judgement call, pinned so it is a decision rather than an accident."""
     session = _graphql(
         {"data": {"workbooks": [{"dashboards": [{"luid": DASH_LUID}, {"luid": DASH_LUID}], "sheets": []}]}}
     )
@@ -2456,13 +2231,7 @@ class _Recorder:
 
 
 def test_a_reflected_session_token_never_reaches_the_view_type_warning():
-    """⚠️ The regression test for the leak, driven by a REAL one-request server.
-
-    A `FakeSession` cannot prove this: the leak is about a body that travelled the real transport,
-    and `tableau_http` passes response bodies through RAW **by design** (classification has to see
-    the unmodified text). So the token is genuinely present in the bytes this module parses, and the
-    only thing standing between it and the log is this module declining to quote the server.
-    """
+    """⚠️ The regression test for the leak, driven by a REAL one-request server."""
 
     class Reflector(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
@@ -2533,12 +2302,7 @@ def test_a_reflected_session_token_never_reaches_the_view_type_warning():
     ],
 )
 def test_no_branch_quotes_the_server_back_into_its_reason(responses):
-    """⚠️ The GENERAL property, not just the one branch that leaked.
-
-    A sentinel is planted in every server-controlled position the parser touches -- error messages,
-    a bad luid, a bad node, a bad container, an unparseable body, an error-status body. No reason
-    string may contain it. Reporting a *type name* or a *count* is fine; those are ours.
-    """
+    """⚠️ The GENERAL property, not just the one branch that leaked."""
     mapping, unavailable = view_types_mod.view_types(FakeSession(responses))
     assert mapping == {}
     assert unavailable
@@ -2556,13 +2320,7 @@ def test_no_branch_quotes_the_server_back_into_its_reason(responses):
     ],
 )
 def test_parse_payload_accepts_arbitrary_decoded_json(payload, guard):
-    """⚠️ The shared seam is TOTAL, and that is a correctness requirement rather than politeness.
-
-    It was written for a `dict`, which was true only because its one caller pre-validated in
-    `_fetch_payload`. The moment a second caller appeared - `tableau_luid_census`, holding a body it
-    had decoded itself - a top-level `null` escaped as `TypeError` and a list or string as
-    `AttributeError`. A precondition living in one caller's path is not a precondition.
-    """
+    """⚠️ The shared seam is TOTAL, and that is a correctness requirement rather than politeness."""
     mapping, unavailable = view_types_mod.parse_payload(payload)
     assert mapping == {}
     assert unavailable
@@ -2600,11 +2358,6 @@ def test_the_run_warns_when_it_cannot_discriminate_at_all():
 def test_stamp_joins_on_the_view_ID_not_on_its_NAME():
     """⚠️ The whole point of #402, and a hole the review found: keying `stamp` on `view["name"]`
     instead of `view["id"]` SURVIVED all 53 tests.
-
-    Nothing else in the suite could see it, because every fixture's `name` was absent from the
-    mapping, so a name-keyed lookup fell through to `unknown` and merely looked conservative. Here
-    the name IS a key -- of the OTHER kind -- so the two joins give different, both-plausible answers
-    and only the identity join gives the right one.
     """
     view = {"id": DASH_LUID, "name": SHEET_LUID}
     view_types_mod.stamp([view], {DASH_LUID: "dashboard", SHEET_LUID: "worksheet"})

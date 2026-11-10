@@ -303,11 +303,7 @@ TOKEN = "SYNTHETIC_SeSSion_TOKEN_123"
 
 
 def _redactor(text: str) -> str:
-    """The repo redactor's defining property, in miniature: literal match, NO case folding.
-
-    ``scripts/tableau_env.py`` says so explicitly -- case-changed forms are "deliberately NOT
-    covered" -- so a diagnostic that lowercases before redacting is not merely untidy, it is a leak.
-    """
+    """The repo redactor's defining property, in miniature: literal match, NO case folding."""
     return text.replace(TOKEN, "[REDACTED]")
 
 
