@@ -33,7 +33,7 @@ must appear below unless the script docstring marks it `internal: true` with an 
 
 | Script | Status | Reason |
 |---|---|---|
-| `scripts/t2p.py` | `agent-facing` | Opt-in narrow doctor/start/status pilot; documented in `scripts/README.md`, not a replacement for direct scripts or gates. |
+| `scripts/t2p.py` | `agent-facing` | Opt-in narrow doctor/start/status pilot with read-only `units` lookup; documented in `scripts/README.md`, not a replacement for direct scripts or gates. |
 | `scripts/assess_estate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/build_plugin.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/build_reconcile_items.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
@@ -135,6 +135,7 @@ must appear below unless the script docstring marks it `internal: true` with an 
 | `scripts/tableau_view_types.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/trace_customer_text.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/transpile_tableau_calc.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
+| `scripts/unit_ids.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/validate_spec.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/verify_bindings.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
 | `scripts/work_dirs.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |

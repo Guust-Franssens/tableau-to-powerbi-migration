@@ -162,6 +162,10 @@ LAZY_SUBDIRS: frozenset[str] = frozenset({"deliverables"})
 
 _RUN_DIR_RE = re.compile(r"^(\d+)(?:-.*)?$")
 _RESERVATIONS_DIR_NAME = ".run-number-reservations"
+#: Runs-root metadata owned by `unit_ids.py` (#836): one never-reset unit-ID counter per root.
+UNIT_ID_RESERVATIONS_DIR_NAME = ".unit-id-reservations"
+#: Runs-root children that are allocator metadata, never runs; discovery skips exactly these.
+_METADATA_DIR_NAMES = frozenset({_RESERVATIONS_DIR_NAME, UNIT_ID_RESERVATIONS_DIR_NAME})
 # Run numbers are the permanent identity; slugs are decorative. Keep new slugs short enough that
 # the canonical run layout leaves room for the PBIR paths below it. Existing run directories are
 # never renamed, so this cap applies only when allocating a new run.
@@ -864,8 +868,8 @@ def allocate_run(
 def _discover_run_dirs(root: Path) -> tuple[list[Path], str | None]:
     """`(candidates, root_problem)` - the module's one discovery site. Never raises.
 
-    Every child directory of an existing `_runs/` root except this module's private
-    `_RESERVATIONS_DIR_NAME` metadata directory is a candidate run. There is no name pattern and no
+    Every child directory of an existing `_runs/` root except the allocator metadata directories in
+    `_METADATA_DIR_NAMES` is a candidate run. There is no name pattern and no
     "has a `run.json`" precondition, because both were fail-open filters and both
     are finding 2 of PR #477's second review round: a real allocated run whose directory was
     renamed to `acme-without-number` and whose manifest was deleted matched neither test, so the
@@ -906,7 +910,7 @@ def _discover_run_dirs(root: Path) -> tuple[list[Path], str | None]:
 
     found: list[Path] = []
     for child in children:
-        if child.name == _RESERVATIONS_DIR_NAME:
+        if child.name in _METADATA_DIR_NAMES:
             continue
         try:
             child_mode = os.stat(child).st_mode

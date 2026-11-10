@@ -1,6 +1,6 @@
 """
-purpose: narrow doctor/start/status pilot delegating to existing configuration and run owners.
-usage:   python -B scripts/t2p.py {doctor,start,assess,status} [args]
+purpose: narrow doctor/start/status/units pilot delegating to existing configuration and run owners.
+usage:   python -B scripts/t2p.py {doctor,start,assess,status,units} [args]
 
 No readiness, liveness, fidelity, credential validity or completion certification.
 """
@@ -58,7 +58,7 @@ ENVELOPE_SCHEMA = {
     ],
     "properties": {
         "schema_version": {"const": SCHEMA_VERSION},
-        "command": {"enum": ["doctor", "start", "assess", "status", None]},
+        "command": {"enum": ["doctor", "start", "assess", "status", "units", None]},
         "status": {
             "enum": [
                 "ok",
@@ -111,6 +111,17 @@ ENVELOPE_SCHEMA = {
         "runs_root": {"type": "null"},
         "path_report": {"type": ["object", "null"]},
         "limitations": {"type": "array", "items": {"type": "string"}},
+        "unit_lookup": {
+            "type": "object",
+            "required": ["schema_version", "action", "result", "reason", "query", "runs_root", "candidates", "runs"],
+            "properties": {
+                "schema_version": {"const": "unit-lookup/v1"},
+                "action": {"enum": ["list", "show", "find"]},
+                "result": {"enum": ["found", "missing", "ambiguous", "unassessable", "legacy"]},
+                "candidates": {"type": "array", "items": {"type": "object", "required": ["id", "state", "run"]}},
+                "runs": {"type": "array", "items": {"type": "object", "required": ["run", "state"]}},
+            },
+        },
         "proof_boundary": {
             "type": "object",
             "required": ["established", "not_established"],
@@ -140,7 +151,10 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
     parser = Parser(
         prog=prog,
         allow_abbrev=False,
-        description="Narrow pilot: diagnostic doctor, assessment-only survey, live project start, read-only status.",
+        description=(
+            "Narrow pilot: diagnostic doctor, assessment-only survey, live project start, read-only status, "
+            "read-only unit lookup."
+        ),
     )
     commands = parser.add_subparsers(dest="command", required=True, parser_class=Parser)
     for command, help_text in (
@@ -148,8 +162,12 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
         ("start", "Attempt one exact live Tableau project; assessment remains site-wide."),
         ("assess", "Assess one Tableau site and write offline HTML; no harvest, capture, or conversion."),
         ("status", "Read-only inventory for one absolute run; no next action or readiness."),
+        ("units", "Read-only unit-ID lookup across one runs root; no allocation, rename or refresh."),
     ):
         child = commands.add_parser(command, help=help_text, description=help_text, allow_abbrev=False)
+        if command == "units":
+            _add_units_actions(child)
+            continue
         child.add_argument("--json", action="store_true", help="one t2p/v1 JSON envelope on stdout")
         if command in {"doctor", "start", "assess"}:
             child.add_argument("--env", type=Path, help="selected environment file (default: toolkit .env)")
@@ -164,6 +182,23 @@ def build_parser(prog: str = "python -B scripts/t2p.py") -> argparse.ArgumentPar
             child.add_argument("--runs-parent", type=Path, help="explicit parent for _runs; no relocation")
             child.add_argument("--session-id", help="existing Copilot session UUID attribution")
     return parser
+
+
+def _add_units_actions(parser: argparse.ArgumentParser) -> None:
+    actions = parser.add_subparsers(dest="units_action", required=True, parser_class=Parser)
+    for action, help_text in (
+        ("list", "Every allocated unit under the runs root, plus legacy runs without an index."),
+        ("show", "Resolve one unit ID to its owning run without naming the run."),
+        ("find", "All units whose original name contains TEXT and/or whose source LUID matches."),
+    ):
+        child = actions.add_parser(action, help=help_text, description=help_text, allow_abbrev=False)
+        child.add_argument("--json", action="store_true", help="one t2p/v1 JSON envelope on stdout")
+        child.add_argument("--runs-parent", type=Path, help="explicit parent for _runs (default: toolkit)")
+        if action == "show":
+            child.add_argument("unit_id", metavar="ID", help="one unit ID, for example u0001")
+        if action == "find":
+            child.add_argument("--name", help="case-insensitive substring of the original name")
+            child.add_argument("--luid", help="exact source LUID")
 
 
 def _project_name(name: str) -> str:
@@ -319,8 +354,10 @@ def envelope(command: str | None) -> dict[str, Any]:
         "artifacts": [],
         "run_location": None,
         "runs_root": None,
-        "run_location_reason": "not_applicable_no_run" if command == "doctor" else "not_allocated_path_withheld",
-        "path_report": None if command in {"doctor", "assess"} else path_report(command),
+        "run_location_reason": (
+            "not_applicable_no_run" if command in {"doctor", "units"} else "not_allocated_path_withheld"
+        ),
+        "path_report": None if command in {"doctor", "assess", "units"} else path_report(command),
         "limitations": [],
         "proof_boundary": {
             "established": [],
@@ -913,6 +950,67 @@ def status(args: argparse.Namespace, result: dict) -> int:
     return code
 
 
+def units(args: argparse.Namespace, result: dict) -> int:
+    """Project the read-only unit lookup; never allocate, rename, refresh or touch credentials."""
+    import unit_ids  # pylint: disable=import-outside-toplevel
+    from work_dirs import runs_root  # pylint: disable=import-outside-toplevel
+
+    if args.units_action == "find" and args.name is None and args.luid is None:
+        raise ArgumentError("units_find_needs_name_or_luid")
+    root = runs_root(args.runs_parent.expanduser().resolve() if args.runs_parent is not None else None)
+    result["authority"] = "unit_ids.py"
+    if args.units_action == "show":
+        lookup = unit_ids.show_unit(root, args.unit_id)
+    elif args.units_action == "find":
+        lookup = unit_ids.find_units(root, name=args.name, luid=args.luid)
+    else:
+        lookup = unit_ids.list_units(root)
+    code = unit_ids.lookup_exit_code(lookup)
+    result["delegated_exit_code"] = code
+    result["status"] = {0: "ok", 1: "findings"}.get(code, "cannot_establish")
+    result["unit_lookup"] = lookup
+    result["limitations"] = ["read_only_lookup", "id_is_lookup_key_not_identity_proof", "customer_labels_local_only"]
+    if any(row["state"] == "legacy" for row in lookup["runs"]):
+        result["limitations"].append("legacy_runs_not_searched")
+    result["proof_boundary"]["established"] = ["read_only_unit_lookup"]
+    return code
+
+
+def _units_human(result: dict) -> None:
+    """One line per candidate; customer labels are local operator output, ASCII-escaped."""
+    lookup = result.get("unit_lookup")
+    if lookup is None:
+        _print_safe(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2))
+        return
+    lines = [
+        f"UNITS {lookup['action']} {lookup['result']}"
+        + (f" ({lookup['reason']})" if lookup["reason"] else "")
+        + f" (exit {result['exit_code']}) - read-only lookup; an ID is not identity proof",
+        f"Runs root: {lookup['runs_root']}",
+    ]
+    for row in lookup["candidates"]:
+        source = row["source"] or {}
+        identity = [f"project={source.get('project_name') or 'unknown'}"] + [
+            f"{field}={source[field]}" for field in ("luid", "project_luid", "site_luid") if source.get(field)
+        ]
+        artifacts = [
+            f"{role}={view['relative_path']}" for role, view in (row["artifacts"] or {}).items() if view is not None
+        ]
+        lines.append(
+            f"  {row['id']} {row['state']}"
+            + (f" ({row['reason']})" if row["reason"] else "")
+            + f"; run={row['run'] or 'unknown'}; kind={source.get('kind', 'unknown')}; "
+            f"name={source.get('name', 'unknown')}"
+        )
+        if source:
+            lines.append("    source: " + "; ".join(identity))
+            lines.append("    artifacts: " + ("; ".join(artifacts) or "not emitted"))
+    for row in lookup["runs"]:
+        if row["state"] != "indexed":
+            lines.append(f"  run {row['run']}: {row['state']} ({row['reason']})")
+    _print_safe("\n".join(lines))
+
+
 def _status_human(result: dict) -> None:
     """Explain only the final safe projection, without acquiring or certifying evidence."""
 
@@ -1088,6 +1186,8 @@ def _delegate(args: argparse.Namespace, result: dict, *, json_mode: bool) -> int
                 code = start(args, result)
         else:
             code = start(args, result)
+    elif args.command == "units":
+        code = units(args, result)
     else:
         code = status(args, result)
     return code
@@ -1098,7 +1198,7 @@ def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
     """Render one versioned result without reflecting exception text or invalid argv."""
     argv = list(sys.argv[1:] if argv is None else argv)
     json_mode = "--json" in argv
-    command = argv[0] if argv and argv[0] in {"doctor", "start", "assess", "status"} else None
+    command = argv[0] if argv and argv[0] in {"doctor", "start", "assess", "status", "units"} else None
     result = envelope(command)
     args = None
     install_failure = False
@@ -1128,6 +1228,8 @@ def main(argv: list[str] | None = None, *, installed: bool = False) -> int:
         _install_human(result)
     elif command == "status":
         _status_human(result)
+    elif command == "units":
+        _units_human(result)
     elif command == "doctor":
         if installed:
             _doctor_human(result, args, installed=True)

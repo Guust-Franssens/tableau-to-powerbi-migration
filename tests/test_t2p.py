@@ -1678,7 +1678,7 @@ def test_offline_help_output_journey(monkeypatch, tmp_path, capsys):
         t2p.main(["--help"])
     assert help_result.value.code == 0
     help_text = capsys.readouterr().out
-    assert "{doctor,start,assess,status}" in help_text
+    assert "{doctor,start,assess,status,units}" in help_text
     assert t2p.main(["doctor", "--json"]) == 0
     doctor_result, _ = _json(capsys)
     assert doctor_result["status"] == "READY_TO_ATTEMPT"
