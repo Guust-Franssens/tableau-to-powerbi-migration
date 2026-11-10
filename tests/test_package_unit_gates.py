@@ -1814,7 +1814,7 @@ def test_a_scoped_estate_report_still_earns_a_datasource_unit_its_not_applicable
 
 
 # --------------------------------------------------------------------------------------------
-# The ceilings themselves. Pinned HERE, in a suite `tests/mutate_package_unit.py` scores, because
+# The ceilings themselves. Pinned HERE, in a suite the package-unit mutation harness scored (retired in #830), because
 # that was the gap: mutating `DIR_CEILING` 247 -> 260 and running the two suites the mutation
 # harness uses reported `148 passed, exit 0`. The full documented gate command DOES catch it
 # (`tests/test_check_path_ceiling.py` pins both, and the same mutation gives `4 failed, exit 1`),
