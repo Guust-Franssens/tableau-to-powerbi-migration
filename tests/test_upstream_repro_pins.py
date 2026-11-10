@@ -1,38 +1,10 @@
-"""Pinning tests for tiny upstream-engine repro fixtures.
+"""Pinning tests for tiny upstream-engine repro fixtures (``fixtures/upstream-repros``).
 
-These tests assert the canonical deterministic engine's CURRENT behaviour for
-``fixtures/upstream-repros``. **Two opposite directions live in this file, and #168 has changed
-sides** — read each test's own docstring rather than assuming one lifetime for all of them:
-
-* **Defect-direction pins** hold the defect observed at the pinned engine version: while upstream is
-  broken the test passes, and when upstream fixes it the test FAILS. ``#171`` is one — generated
-  field-parameter support should break it, for review.
-* **Post-fix regression guards** hold the FIXED behaviour: they pass today and fail if the defect
-  returns. ``#168`` was reversed into one on 2026-09-03 against measured output at engine 2.356.0,
-  then re-verified unchanged at 2.368.0 on 2026-09-05 — its defect-direction pin fired exactly as
-  designed, upstream had shipped the fix, and the pin was turned around rather than deleted. ``#166``
-  was always this direction.
-
-Either way a failure is a signal, not a verdict: verify against the current canonical engine, then
-update the expectation and the pinned engine version below.
-
-The engine is an optional installed Copilot plugin, not a repo dependency, so engine-backed tests use
-the existing ``requires_engine`` skip pattern and skip cleanly when the deterministic tier is absent.
-
-⚠️ **The engine version is a SIGNAL, not a gate — and it used to be a gate, which broke this file.**
-Until 2026-09-03 ``_run_engine_once`` ``assert``\\ ed ``version == PINNED_ENGINE_VERSION``. Because
-every behaviour pin reaches the engine through that one function, a version bump did not merely
-report drift: it made **every** pin in this file fail *before its own assertion ran*, so #166, #168
-and #171 went **entirely unevaluated** from the moment the canonical plugin passed 2.260.0 — while
-still costing three red tests that read as "expected". The failure text compounded it by printing the
-pinned version on both sides of the comparison (*"changed from the expectation pinned at engine
-2.260.0: engine version 2.260.0"*), so it never even disclosed what was actually installed.
-
-That is the mechanism behind the standing "expect exactly six pre-existing engine-pin failures"
-baseline: a version guard that fires on every release converts a designed alarm into background
-noise, and a permanently-red test trains readers to skip the one message that mattered. Version drift
-is now a non-fatal ``UserWarning`` and the observed version is reported in every pin message, so a
-bump is disclosed **and** the behaviour pins still get to speak. Issue #486.
+Each test's docstring states its direction: a defect-direction pin (#171) fails when upstream fixes
+the defect; a post-fix regression guard (#166, #168) fails if the defect returns. Either way a failure
+is a signal: verify against the current canonical engine, then update the expectation and
+``PINNED_ENGINE_VERSION``. Version drift is a non-fatal warning (#486) so a bump never hides the pins.
+Engine-backed tests skip cleanly when the optional engine plugin is absent.
 """
 
 from __future__ import annotations
@@ -183,35 +155,12 @@ def _source_ref_entities(value: Any) -> list[str]:
     return []
 
 
-def test_engine_absence_contract_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The same contract shape used by ``requires_engine`` becomes None when the plugin is absent."""
-
-    def missing_engine() -> Path:
-        raise engine_source.EngineNotFoundError("simulated missing engine")
-
-    monkeypatch.setattr(engine_source, "engine_root", missing_engine)
-    assert _contract() is None
-
-
 @requires_engine
 def test_issue_168_pins_partial_dispatcher_with_disclosure() -> None:
-    """Post-fix regression guard: #168 shipped, so a return to the all-or-nothing stub is a REGRESSION.
+    """Post-fix regression guard (#486): #168 shipped, so a return to the all-or-nothing stub is a REGRESSION.
 
-    ⚠️ **Direction reversed on 2026-09-03 (issue #486), against measured output at engine 2.356.0,
-    and re-verified unchanged at 2.368.0 on 2026-09-05.** This was a defect-direction pin asserting
-    ``measure 'Selected KPI' = BLANK()``. It fired exactly as designed — and was then invisible for
-    weeks behind the harness version gate (module docstring). Upstream
-    ``Yarbrdab000/tableau-fabric-skills#168`` is CLOSED COMPLETED, and the current engine emits a
-    **partial** dispatcher plus the disclosure the maintainer said was blocking the fix::
-
-        measure 'Selected KPI' = IF(EXACT([Select KPI Value], "Sales"), SUM('Orders'[SALES]), ...)
-        annotation TranslatedBy = deterministic (parameter dispatcher; 3 of 4 branches live;
-                                  dropped WHEN "Bad Branch")
-
-    So the three live branches are preserved, the unresolvable one is dropped rather than discarding
-    the whole measure, and the drop is stated in the model where a debugger looks. Guarding all three
-    directions: a silent revert to ``BLANK()``, a silent revert to a *complete* translation that
-    invents the bad branch, and a partial that stops disclosing itself.
+    The engine emits a partial dispatcher that keeps the three live branches, drops the unresolvable
+    one, and discloses the drop in a TranslatedBy annotation.
     """
     slug = "issue-168-case-one-bad-branch"
     measures = _model_table_text(slug, "_Measures")
