@@ -67,7 +67,10 @@ def _csv_m(filename: str) -> str:
 
 
 def _snowflake_stub_m() -> str:
-    """The engine's deferred-custom-SQL scaffold: names its intended live source, loads nothing."""
+    """The engine's deferred-custom-SQL scaffold: names its intended live source, loads nothing.
+
+    Real engine emission, issue #326.
+    """
     return (
         "\t\tmode: import\n"
         "\t\tsource =\n"

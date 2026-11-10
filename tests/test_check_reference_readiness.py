@@ -228,7 +228,10 @@ def write_reference(  # pylint: disable=too-many-arguments,too-many-locals
     entry_luid: str | None = None,
     state_luid: str | None = None,
 ) -> Path:
-    """A `reference/manifest.json`. Each entry is ``(name, provider, capabilities)``."""
+    """A `reference/manifest.json`. Each entry is ``(name, provider, capabilities)``.
+
+    Multi-scope LUID keys: round 2 of PR #454.
+    """
     reference = root / "reference"
     reference.mkdir(parents=True, exist_ok=True)
     dashboards = []
@@ -1329,7 +1332,10 @@ def test_the_attribution_census_survives_a_multi_path_scan(tmp_path: Path) -> No
 
 
 def test_every_integer_counter_survives_a_merge_by_construction(tmp_path: Path) -> None:
-    """B-C, fixed as a CLASS: the merge must not carry a hand-written list of keys to sum."""
+    """B-C, fixed as a CLASS: the merge must not carry a hand-written list of keys to sum.
+
+    Third instance of the merge-counter shape in PR #454.
+    """
     first, second = tmp_path / "one", tmp_path / "two"
     for root, unit in ((first, "One"), (second, "Two")):
         (root / "bundle").mkdir(parents=True)
@@ -2758,7 +2764,7 @@ def test_provider_consumer_command_returns_two_own_local_sources(
         assert str(path).replace("\\", "\\\\") not in json.dumps(report)
 
 
-# One fault per distinct guard in _binding_roots (state, exact-int ordinal, range, self, verdict).
+# One fault per distinct guard in _binding_roots (state, exact-int ordinal type, range, self, verdict).
 @pytest.mark.parametrize(
     "fault",
     [
@@ -2777,10 +2783,13 @@ def test_provider_consumer_command_returns_two_own_local_sources(
         "untyped-dependency",
         "list-dependencies",
         "ambiguous",
+        "mismatch",
         "bool-ordinal",
         "negative-ordinal",
         "out-of-range",
         "self",
+        "string-ordinal",
+        "float-ordinal",
         "wrong-provider-kind",
         "wrong-provider-topology",
         "blocked-provider",
@@ -3224,6 +3233,7 @@ def test_start_ready_rejects_copied_or_changed_issued_data_authority(
         ("roles", True),
         ("source", True),
         ("data", False),
+        ("reference", False),
         ("reference", True),
         ("reference-unit", False),
         ("binding", False),

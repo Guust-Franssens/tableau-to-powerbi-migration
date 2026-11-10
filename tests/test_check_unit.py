@@ -2658,6 +2658,8 @@ def test_path_ceiling_over_ceiling_is_a_finding_not_a_pass(tmp_path: Path, monke
     assert check["status"] == cu.STATUS_FINDINGS
     assert check["native_status"] == "over_ceiling"
     assert check["native_exit"] == 1
+    # Install-root length and engine-side naming: no builder persona can fix a breach.
+    assert cu.OWNER_HINTS["path-ceiling"].startswith("orchestrator")
 
 
 def test_path_ceiling_clean_scan_is_a_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4029,7 +4031,10 @@ def test_an_unassessable_root_refuses_rather_than_succeeding_exception_shaped(
 def test_run_all_classifies_its_own_argument_and_accepts_no_injected_verdict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Kills: a caller-supplied `classification`, and classifying the RESOLVED target."""
+    """Kills: a caller-supplied `classification`, and classifying the RESOLVED target.
+
+    Refs issue #562 and PR #593 round-1 review.
+    """
     assert "classification" not in inspect.signature(cu.run_all).parameters
 
     package = _package(tmp_path / "run" / "packages" / "Unit")
@@ -4189,7 +4194,10 @@ _DIRECT_REFUSALS = {
 def test_a_direct_helper_refuses_an_unsafe_root_before_following_or_reading_anything(
     tmp_path: Path, helper: str, shape: str
 ) -> None:
-    """Kills: classifying after `_unit_dir()`/`shipping_reports`/`resolve()` on the DIRECT surface."""
+    """Kills: classifying after `_unit_dir()`/`shipping_reports`/`resolve()` on the DIRECT surface.
+
+    Residual left open by PR #593.
+    """
     root, _evidence = _unsafe_root(tmp_path, shape)
     call, expect_refused, delegates = _DIRECT_REFUSALS[helper]
 
@@ -4240,7 +4248,10 @@ def test_a_refusal_leaks_no_supplied_component_through_any_channel(tmp_path: Pat
 
 
 def test_no_direct_helper_accepts_a_caller_supplied_boundary_verdict(tmp_path: Path) -> None:
-    """Kills: adding a `classification`/`_CheckedTarget`/clearance parameter to any of the five."""
+    """Kills: adding a `classification`/`_CheckedTarget`/clearance parameter to any of the five.
+
+    PR #593 round-1 review.
+    """
     forbidden = {"classification", "clearance", "checked", "context", "target_classification"}
     entries = [getattr(cu, name) for name in _DIRECT_ENTRIES] + [cu._oracle_capture_oracles]  # pylint: disable=protected-access
     for entry in entries:
@@ -4284,7 +4295,10 @@ def test_a_safe_package_and_an_ordinary_unit_keep_their_existing_verdicts(tmp_pa
 
 
 def test_the_cli_refuses_an_aliased_target_without_printing_any_supplied_component(tmp_path: Path) -> None:
-    """Exit state and every output channel: no supplied path, **no supplied path COMPONENT**, no traceback."""
+    """Exit state and every output channel: no supplied path, **no supplied path COMPONENT**, no traceback.
+
+    PR #593 round-1 review.
+    """
     package = _package(tmp_path / "run" / "packages" / "Contoso-Secret")
     alias = tmp_path / "Fabrikam-Confidential"
     _link_directory(alias, package)
