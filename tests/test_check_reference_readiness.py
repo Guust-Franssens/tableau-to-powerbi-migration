@@ -6,8 +6,8 @@ unattributable evidence is worse than no gate, because it launches an agent to b
 against nothing.
 
 Round-1 review of PR #428 found eight ways it exited 0 on evidence it should refuse. Each has a test
-below naming its finding number, and each is mutation-proved by
-`tests/mutation_reference_readiness.py`.
+below naming its finding number, and each was mutation-proved by
+the reference-readiness mutation harness (retired in #830).
 
 ⚠️ Two fixture rules exist because round 1 measured the fixtures themselves encoding the defect:
 

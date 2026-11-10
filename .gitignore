@@ -267,7 +267,7 @@ tests/fixtures/live/
 /fixtures/large-refresh/data/
 /fixtures/large-refresh/fabric/LargeRefresh.SemanticModel/definition/expressions.tmdl
 
-# The retired mutation harness (mutation testing is now done at review time) wrote these into
+# The mutation harness (retired in #830) wrote these into
 # tests/ for the duration of one mutation and unlinked them afterwards. A run that is INTERRUPTED - a killed
 # campaign, a host crash, a reviewer's Ctrl-C - leaves them behind, and they carry absolute
 # host paths (`sys.path.insert(0, r"C:\...\scripts")`). Untracked and un-ignored is one

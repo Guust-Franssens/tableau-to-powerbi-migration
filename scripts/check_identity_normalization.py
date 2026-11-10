@@ -36,8 +36,8 @@ Two consequences of that narrowness, both deliberate:
   `object_identity.normalize(...)` and a bare `normalize(...)` after `from object_identity import
   normalize` are all caught, while `grp.normalize(...)` is not.
 * Occurrences inside string literals are invisible to the AST and so are not reported. That is
-  correct: a mutation harness may carry `oid.normalize` inside mutation source
-  strings on purpose, to REINTRODUCE the defect and prove the suite catches it.
+  correct: the reference-readiness mutation harness (retired in #830) carried `oid.normalize` inside
+  mutation source strings on purpose, to REINTRODUCE the defect and prove the suite catches it.
 
 Enumeration, not reasoning
 --------------------------

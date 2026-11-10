@@ -444,7 +444,7 @@ its evidence missing is the quietest failure this gate has. Blocks are now conca
 ordinal rewritten to the target's position, and both the single-target and merged shapes are
 deterministic.
 
-Direct tests are `tests/test_package_filesystem.py`, mutation-tested at review time to prove
+Direct tests are `tests/test_package_filesystem.py`; a mutation harness (retired in #830) proved
 each anchor asserts the **named** guard rather than any fail-closed refusal — several mutations leave
 the package non-clean for a different reason, which is exactly what a "not clean" assertion would
 have missed.
@@ -821,8 +821,8 @@ stops and ordinary compatibility.
 - `tests/test_check_reference_readiness.py` — one test per review finding, each naming its round and
   number, and each paired with a **discriminating twin** so "correctly refused" cannot be confused
   with "broken".
-- Mutation-tested at review time; the committed reference-readiness mutation harness (which added an
-  *expected verdict* per mutation) was retired.
+- The reference-readiness mutation harness (retired in #830) added an *expected verdict* per
+  mutation, so it was a gate rather than a report.
 
 ⚠️ **Every mutation named its ANCHOR, and that was the point of the harness.** It originally ran each
 mutation against the whole test file under `-x` and credited whichever test failed first, so two

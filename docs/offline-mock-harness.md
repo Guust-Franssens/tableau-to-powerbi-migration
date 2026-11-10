@@ -303,7 +303,7 @@ Two consequences worth knowing:
 ## Mutation testing — proof the tests can fail
 
 A test that passes regardless of the code is worthless, so the suite was attacked with 22 deliberate
-mutations at review time (the committed harness that ran them has been retired). Each patched the
+mutations by a committed harness (retired in #830). Each patched the
 real deployer or the mock in a subprocess and re-ran the suite. **All 22 were caught; there were no survivors.**
 
 | mutation | caught by |

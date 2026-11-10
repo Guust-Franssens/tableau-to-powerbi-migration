@@ -239,7 +239,7 @@ def test_evidence_attribution_uses_the_exact_workbook_name(bundle: Path) -> None
     published workbook name genuinely differs from the unit name, the LUID route is the answer.
 
     ⚠️ **Asserting `blind` alone could not kill the mutant this test exists for**, and
-    `mutation_reference_readiness.py` measured it SURVIVING. Since round 3 a matched display name is
+    the reference-readiness mutation harness (retired in #830) measured it SURVIVING. Since round 3 a matched display name is
     a refusal too, so both the exact comparison (`foreign` - the names differ) and the lossy one
     (`name` - they collapse to equal) end in `blind` and exit 1. The census names WHICH guard
     refused, which is the only assertion that can tell them apart.
