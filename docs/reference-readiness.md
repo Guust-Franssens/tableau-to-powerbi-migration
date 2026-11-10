@@ -444,7 +444,7 @@ its evidence missing is the quietest failure this gate has. Blocks are now conca
 ordinal rewritten to the target's position, and both the single-target and merged shapes are
 deterministic.
 
-Direct tests are `tests/test_package_filesystem.py`; `tests/mutation_package_filesystem.py` proves
+Direct tests are `tests/test_package_filesystem.py`, mutation-tested at review time to prove
 each anchor asserts the **named** guard rather than any fail-closed refusal — several mutations leave
 the package non-clean for a different reason, which is exactly what a "not clean" assertion would
 have missed.
@@ -821,10 +821,10 @@ stops and ordinary compatibility.
 - `tests/test_check_reference_readiness.py` — one test per review finding, each naming its round and
   number, and each paired with a **discriminating twin** so "correctly refused" cannot be confused
   with "broken".
-- `tests/mutation_reference_readiness.py` — imports the shared `tests/mutation_harness.py` scoring and
-  adds an *expected verdict* per mutation, so it is a gate rather than a report.
+- Mutation-tested at review time; the committed reference-readiness mutation harness (which added an
+  *expected verdict* per mutation) was retired.
 
-⚠️ **Every mutation names its ANCHOR, and that is the point of the file.** It previously ran each
+⚠️ **Every mutation named its ANCHOR, and that was the point of the harness.** It originally ran each
 mutation against the whole test file under `-x` and credited whichever test failed first, so two
 unrelated mutations were both credited to `test_colliding_page_ids_cannot_be_attributed` simply
 because it ran early — and the harness would have stayed green if their real anchors regressed while

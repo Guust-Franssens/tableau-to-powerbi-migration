@@ -267,8 +267,8 @@ tests/fixtures/live/
 /fixtures/large-refresh/data/
 /fixtures/large-refresh/fabric/LargeRefresh.SemanticModel/definition/expressions.tmdl
 
-# The mutation harness writes these into tests/ for the duration of one mutation and unlinks
-# them afterwards (tests/mutation_harness.py:409-418). A run that is INTERRUPTED - a killed
+# The retired mutation harness (mutation testing is now done at review time) wrote these into
+# tests/ for the duration of one mutation and unlinked them afterwards. A run that is INTERRUPTED - a killed
 # campaign, a host crash, a reviewer's Ctrl-C - leaves them behind, and they carry absolute
 # host paths (`sys.path.insert(0, r"C:\...\scripts")`). Untracked and un-ignored is one
 # `git add -A` away from committing a machine path to a PUBLIC repo, which is the near-miss

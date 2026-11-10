@@ -16,7 +16,6 @@ python -m pytest tests/test_mock_fabric.py tests/test_mock_tableau.py tests/test
 | [`tests/test_mock_fabric.py`](../tests/test_mock_fabric.py) | 51 fidelity self-tests for the Fabric fake |
 | [`tests/test_mock_tableau.py`](../tests/test_mock_tableau.py) | fidelity self-tests for the Tableau fake, including its narrow REST authority subset |
 | [`tests/test_e2e_offline.py`](../tests/test_e2e_offline.py) | 18 joined end-to-end tests (marked `slow`) |
-| [`tests/mutation_harness.py`](../tests/mutation_harness.py) | 22 deliberate mutations that prove those tests can fail |
 
 ---
 
@@ -304,9 +303,8 @@ Two consequences worth knowing:
 ## Mutation testing — proof the tests can fail
 
 A test that passes regardless of the code is worthless, so the suite was attacked with 22 deliberate
-mutations (`tests/mutation_harness.py` — run it with
-`python tests/mutation_harness.py`). Each patches the real deployer or the mock in a subprocess and
-re-runs the suite. **All 22 were caught; there were no survivors.**
+mutations at review time (the committed harness that ran them has been retired). Each patched the
+real deployer or the mock in a subprocess and re-ran the suite. **All 22 were caught; there were no survivors.**
 
 | mutation | caught by |
 |---|---|
@@ -349,7 +347,7 @@ produced:
 A third finding was in the harness itself and is worth recording: the first mutation run reported
 **22/22 caught**, and every one of those was a **false positive** - the injected plugin was not on
 `sys.path`, so pytest exited non-zero on an `ImportError` before running a single test. The harness
-now fails loudly if the mutation did not apply. *A mutation run that catches everything on the first
+was changed to fail loudly if the mutation did not apply. *A mutation run that catches everything on the first
 try deserves suspicion, not celebration.*
 
 ### The same false-green returns whenever a mutation goes STALE
@@ -362,7 +360,7 @@ deletion silently converts a real check into one of two useless outcomes:
 | patches a symbol that no longer exists as a plain attribute set | **SURVIVED** against its own anchor | nothing — the mutation was a no-op |
 | references a deleted symbol and raises | **CAUGHT** against its own *control* | nothing — a `NameError`/`AttributeError`, not a detection |
 
-Measured on `tests/mutation_reference_readiness.py` (issue #421) when the test suite was split to
+Measured on the reference-readiness mutation harness (issue #421, since retired) when the test suite was split to
 match a module split: an anchor-resolution guard — resolve each anchor's file across the suites, and
 **raise when a name is found in zero suites or in more than one** — flagged four entries on its first
 run, and **all four were stale rather than wrong**. One patched a method since renamed; one
