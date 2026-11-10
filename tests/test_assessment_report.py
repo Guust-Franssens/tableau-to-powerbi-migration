@@ -7,6 +7,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import sqlite3
 import sys
 
@@ -45,7 +46,7 @@ EXPECTED_FULL = {
     },
     "lineage": {"edges": "2", "denominator": "3", "unresolved": "1", "embedded": "1"},
     "complexity": {"points": "5", "understated": "1"},
-    "inventory": {"rows": 5, "first_views": "500", "ascending_first": "40"},
+    "inventory": {"rows": 5, "first_views": "500", "sorted_first": "500"},
     "states": {
         4: ("partial", "lineage_is_partial"),
         6: ("not_delivered", "wave_analysis_deferred"),
@@ -598,6 +599,122 @@ def test_postreplace_print_and_log_failure_does_not_change_renderer_return(tmp_p
     monkeypatch.setattr(sys, "stderr", old_stderr)
 
 
+class _Tables(HTMLParser):
+    """Collect every table's rows, and each data-metric's visible label."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tables: list[list[list[str]]] = []
+        self.labels: dict[str, str] = {}
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+        self._metric: str | None = None
+        self._label: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if tag == "table":
+            self.tables.append([])
+        elif tag == "tr":
+            self._row = []
+        elif tag in {"td", "th"}:
+            self._cell = []
+        elif tag == "div" and values.get("data-metric"):
+            self._metric = values["data-metric"]
+        elif tag == "span" and self._metric is not None:
+            self._label = []
+
+    def handle_data(self, data: str) -> None:
+        if self._cell is not None:
+            self._cell.append(data)
+        if self._label is not None:
+            self._label.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"td", "th"} and self._row is not None and self._cell is not None:
+            self._row.append("".join(self._cell))
+            self._cell = None
+        elif tag == "tr" and self._row is not None:
+            self.tables[-1].append(self._row)
+            self._row = None
+        elif tag == "span" and self._label is not None and self._metric is not None:
+            self.labels[self._metric] = "".join(self._label)
+            self._label = None
+        elif tag == "div":
+            self._metric = None
+
+
+def _render_tables(root: Path) -> tuple[str, _Tables]:
+    assert report.main(["--run", str(root)]) == 0
+    text = (root / "assessment-report.html").read_text(encoding="utf-8")
+    parsed = _Tables()
+    parsed.feed(text)
+    return text, parsed
+
+
+def _table_with_header(parsed: _Tables, header: list[str]) -> list[list[str]]:
+    return next(table for table in parsed.tables if table and table[0] == header)
+
+
+def test_tables_align_headers_show_percent_shares_and_label_every_kpi(tmp_path: Path) -> None:
+    text, parsed = _render_tables(_write_full(tmp_path / "assessment", collector=_collector()))
+    complexity = _table_with_header(parsed, ["Workbook", "Lifetime views", "Complexity", "Understated"])
+    assert complexity[1] == ["Book A", "500", "2.0", "yes"]
+    pareto = _table_with_header(parsed, ["Rank", "Workbook", "Lifetime views", "Cumulative share", "Tier"])
+    assert [row[3] for row in pareto[1:]] == ["50.0%", "80.0%", "90.0%", "96.0%", "100.0%"]
+    metric_keys = set(re.findall(r'data-metric="([^"]+)"', text))
+    assert metric_keys == set(parsed.labels)
+    assert all(label.strip() for label in parsed.labels.values())
+    assert parsed.labels["cut80"] != "cut80"
+    assert parsed.labels["dependency-edges"] != "dependency-edges"
+    scatter = re.search(r'<svg[^>]*aria-label="Lifetime views versus complexity".*?</svg>', text).group(0)
+    for axis_text in (">Lifetime views</text>", ">Complexity</text>", ">500</text>", ">10</text>"):
+        assert axis_text in scatter
+
+
+def test_long_lists_are_top_n_with_pointer_and_empty_tables_say_so(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(report, "TOP_N", 2)
+    root = _write_full(tmp_path / "assessment", collector=_collector())
+    with sqlite3.connect(root / "estate.db") as connection:
+        connection.execute("UPDATE project SET content_permissions='ManagedByOwner'")
+    text, parsed = _render_tables(root)
+    assert len(_table_with_header(parsed, ["Rank", "Workbook", "Lifetime views", "Cumulative share", "Tier"])) == 3
+    assert len(_table_with_header(parsed, ["Workbook", "Lifetime views", "Complexity", "Understated"])) == 3
+    assert text.count("Top 2 of 5 workbooks") == 2
+    assert text.count("<rect") == 2
+    inventory = _table_with_header(
+        parsed, ["Workbook", "Project", "Lifetime views", "Complexity", "Tier", "Tier reason"]
+    )
+    assert len(inventory) == 6
+    assert "Locked project: none recorded." in text
+    assert "<th>Locked project</th>" not in text
+
+
+def test_unknown_permission_kpi_states_reason_without_repeating_unknown(tmp_path: Path) -> None:
+    root = _write_full(tmp_path / "assessment", collector=_collector())
+    with sqlite3.connect(root / "estate.db") as connection:
+        connection.execute("DROP TABLE permission_collection")
+    _, parsed = _render_tables(root)
+    assert parsed.labels["permission entries"] == "permission entries (collection not recorded)"
+
+
+def test_pareto_bars_are_lifetime_views_inside_a_fitted_viewbox() -> None:
+    rows = [{"name": f"Workbook number {index} with a long name", "views_lifetime": 40 - index} for index in range(40)]
+    svg = report._pareto_svg(rows)  # pylint: disable=protected-access
+    _, _, width, height = (float(value) for value in re.search(r'viewBox="([^"]+)"', svg).group(1).split())
+    rects = [
+        tuple(float(value) for value in match)
+        for match in re.findall(r'<rect x="([\d.]+)" y="([\d.]+)" width="([\d.]+)" height="([\d.]+)"', svg)
+    ]
+    assert len(rects) == 40
+    assert all(x + w <= width and y + h <= height for x, y, w, h in rects)
+    assert rects[0][2] / rects[20][2] == pytest.approx(40 / 20, rel=0.05)
+    # Labels are truncated to about 30 characters at 12px, so bars must start right of that column.
+    assert all(x >= 200 for x, *_ in rects)
+    assert "<title>Workbook number 0 with a long name: 40 lifetime views</title>" in svg
+    assert ">Workbook number 0 with a lo...</text>" in svg
+
+
 def test_browser_file_render_and_interactions(tmp_path: Path) -> None:
     root = _write_full(tmp_path / "assessment", collector=_collector())
     assert report.main(["--run", str(root)]) == 0
@@ -629,16 +746,20 @@ def test_browser_file_render_and_interactions(tmp_path: Path) -> None:
         page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
         page.goto((root / "assessment-report.html").as_uri())
         assert page.locator("section[data-section]").count() == 9
-        assert page.locator('[data-metric="event-total"]').inner_text() == EXPECTED_FULL["activity"]["events"]
-        assert page.locator('[data-metric="daily-days"]').inner_text() == EXPECTED_FULL["activity"]["daily_days"]
+        assert page.locator('[data-metric="event-total"] b').inner_text() == EXPECTED_FULL["activity"]["events"]
+        assert page.locator('[data-metric="daily-days"] b').inner_text() == EXPECTED_FULL["activity"]["daily_days"]
         assert (
-            page.locator('[data-metric="unresolved-identities"]').inner_text() == EXPECTED_FULL["lineage"]["unresolved"]
+            page.locator('[data-metric="unresolved-identities"] b').inner_text()
+            == EXPECTED_FULL["lineage"]["unresolved"]
         )
         assert page.locator("#inventory tbody tr").count() == EXPECTED_FULL["inventory"]["rows"]
+        page.evaluate(
+            "(()=>{const t=document.querySelector('#inventory tbody');[...t.rows].reverse().forEach(r=>t.appendChild(r));})()"
+        )
         page.locator("#sort-views").click()
         assert (
             page.locator("#inventory tbody tr").first.locator("td").nth(2).inner_text()
-            == EXPECTED_FULL["inventory"]["ascending_first"]
+            == EXPECTED_FULL["inventory"]["sorted_first"]
         )
         page.locator("#tier-filter").select_option("Low")
         assert page.locator("#inventory tbody tr:not([hidden])").count() == EXPECTED_FULL["tiers"]["Low"]

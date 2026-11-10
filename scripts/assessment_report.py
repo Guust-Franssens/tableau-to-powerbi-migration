@@ -417,8 +417,54 @@ def _esc(value: Any) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
-def _metric(name: str, value: Any) -> str:
-    return f'<div class="metric" data-metric="{_esc(name)}"><b>{_esc(value)}</b><span>{_esc(name)}</span></div>'
+TOP_N = 20
+LABEL_CHARS = 30
+
+
+def _metric(name: str, value: Any, label: str | None = None) -> str:
+    return (
+        f'<div class="metric" data-metric="{_esc(name)}"><b>{_esc(value)}</b><span>{_esc(label or name)}</span></div>'
+    )
+
+
+def _percent(share: Any) -> str:
+    return "" if share is None else f"{float(share) * 100:.1f}%"
+
+
+def _truncate(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return text if len(text) <= LABEL_CHARS else text[: LABEL_CHARS - 3] + "..."
+
+
+def _top_note(shown: int, total: int) -> str:
+    if shown >= total:
+        return ""
+    return (
+        f'<p class="note">Top {shown} of {total} workbooks by rank; the full list is in section 8, '
+        "Workbook inventory.</p>"
+    )
+
+
+def _pareto_svg(rows: list[dict[str, Any]]) -> str:
+    """Draw one bar per workbook, sized by lifetime views, inside a viewBox fitted to the bars drawn."""
+    row_height, label_width, bar_width = 26, 220, 300
+    width, height = label_width + bar_width + 80, 10 + row_height * len(rows)
+    peak = max((row.get("views_lifetime") or 0 for row in rows), default=0) or 1
+    bars = []
+    for index, row in enumerate(rows):
+        views = row.get("views_lifetime") or 0
+        y = 6 + index * row_height
+        size = max(1, int(bar_width * views / peak))
+        bars.append(
+            f"<g><title>{_esc(row.get('name'))}: {_esc(views)} lifetime views</title>"
+            f'<text x="8" y="{y + 15}">{_esc(_truncate(row.get("name")))}</text>'
+            f'<rect x="{label_width}" y="{y}" width="{size}" height="20" fill="#4a78a8"></rect>'
+            f'<text x="{label_width + size + 6}" y="{y + 15}">{_esc(views)}</text></g>'
+        )
+    return (
+        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" '
+        f'aria-label="Lifetime views by workbook">{"".join(bars)}</svg>'
+    )
 
 
 def _permission_metric(db: dict[str, Any]) -> str:
@@ -431,7 +477,8 @@ def _permission_metric(db: dict[str, Any]) -> str:
         for row in db["listing_errors"]
     )
     if db["run"].get("degraded_primary") or permission_denied_listings is None:
-        value, label, state = "unknown", "permission entries (unknown)", "unknown"
+        why = "primary listing degraded" if db["run"].get("degraded_primary") else "collection not recorded"
+        value, label, state = "unknown", f"permission entries ({why})", "unknown"
     elif permission_errors or permission_denied_listings:
         value, label, state = f"{db['permission_count']} observed", "permission entries (partial)", "partial"
     else:
@@ -457,6 +504,8 @@ def _section(number: int, title: str, state: str, reason: str | None, source: st
 
 
 def _table(headers: tuple[str, ...], rows: list[tuple[Any, ...]], *, table_id: str | None = None) -> str:
+    if not rows and not table_id:
+        return f'<p class="empty">{_esc(headers[0])}: none recorded.</p>'
     ident = f' id="{_esc(table_id)}"' if table_id else ""
     head = "".join(f"<th>{_esc(cell)}</th>" for cell in headers)
     body = "".join("<tr>" + "".join(f"<td>{_esc(cell)}</td>" for cell in row) + "</tr>" for row in rows)
@@ -504,23 +553,25 @@ def _sections(evidence: dict[str, Any]) -> str:  # pylint: disable=too-many-loca
     tiers: dict[str, int] = {}
     for row in workbooks:
         tiers[str(row.get("tier") or "unknown")] = tiers.get(str(row.get("tier") or "unknown"), 0) + 1
+    top = workbooks[:TOP_N]
     pareto_rows = [
-        (row.get("rank"), row.get("name"), row.get("views_lifetime"), row.get("cumulative_share"), row.get("tier"))
-        for row in workbooks
-    ]
-    pareto_svg = (
-        '<svg viewBox="0 0 640 220" role="img" aria-label="Lifetime views by workbook">'
-        + "".join(
-            f'<rect x="150" y="{20 + index * 36}" width="{max(1, int(400 * float(row["cumulative_share"])))}" '
-            f'height="22" fill="#4a78a8"></rect><text x="8" y="{37 + index * 36}">{_esc(row["name"])}</text>'
-            for index, row in enumerate(workbooks)
+        (
+            row.get("rank"),
+            row.get("name"),
+            row.get("views_lifetime"),
+            _percent(row.get("cumulative_share")),
+            row.get("tier"),
         )
-        + "</svg>"
-    )
+        for row in top
+    ]
     section2 = (
-        f'<div data-metric="cut80">{_esc(cut80)}</div><div data-metric="cut99">{_esc(cut99)}</div>'
-        f'<div data-metric="pareto-points">{len(workbooks)}</div><p>Lifetime views, not a time-windowed measure.</p>'
-        + pareto_svg
+        '<div class="metrics">'
+        + _metric("cut80", cut80, "workbooks reaching 80% of lifetime views")
+        + _metric("cut99", cut99, "workbooks reaching 99% of lifetime views")
+        + _metric("pareto-points", len(workbooks), "ranked workbooks")
+        + "</div><p>Lifetime views, not a time-windowed measure.</p>"
+        + _top_note(len(top), len(workbooks))
+        + _pareto_svg(top)
         + _table(("Rank", "Workbook", "Lifetime views", "Cumulative share", "Tier"), pareto_rows)
         + "<ul>"
         + "".join(f'<li data-tier="{_esc(tier)}">{_esc(tier)}: {count}</li>' for tier, count in sorted(tiers.items()))
@@ -535,26 +586,30 @@ def _sections(evidence: dict[str, Any]) -> str:  # pylint: disable=too-many-loca
         "cannot_establish": "cannot_establish",
         "not_collected": "not_collected",
     }[admin_state]
+    available = admin_state == "available"
     section3 = (
-        f'<div data-metric="event-total">{_esc(event_total) if admin_state == "available" else "unknown"}</div>'
-        f'<div data-metric="unmapped-events">'
-        f"{_esc(collector['unmapped_events']) if admin_state == 'available' else 'unknown'}</div>"
-        f'<div data-metric="first-day">{_esc(collector["window"]["first_day"] or "unknown")}</div>'
-        f'<div data-metric="last-day">{_esc(collector["window"]["last_day"] or "unknown")}</div>'
+        '<div class="metrics">'
+        + _metric("event-total", event_total if available else "unknown", "Admin Insights event records")
+        + _metric(
+            "unmapped-events",
+            collector["unmapped_events"] if available else "unknown",
+            "events not mapped to a workbook",
+        )
+        + _metric("first-day", collector["window"]["first_day"] or "unknown", "first event day")
+        + _metric("last-day", collector["window"]["last_day"] or "unknown", "last event day")
     )
-    if admin_state == "available":
+    if available:
         grouped: dict[str, int] = {}
         for row in collector["rows"]:
             grouped[row["event_type"]] = grouped.get(row["event_type"], 0) + row["events"]
         daily: dict[str, int] = {}
         for row in collector["rows"]:
             daily[row["day"]] = daily.get(row["day"], 0) + row["events"]
-        section3 += (
-            f'<div data-metric="daily-days">{len(daily)}</div>'
-            f'<div data-metric="daily-events-total">{sum(daily.values())}</div>'
+        section3 += _metric("daily-days", len(daily), "days with events") + _metric(
+            "daily-events-total", sum(daily.values()), "events across those days"
         )
         section3 += (
-            "<p>Events are event records, not human activity; view/consumption and authoring events are "
+            "</div><p>Events are event records, not human activity; view/consumption and authoring events are "
             "separate kinds.</p>"
         )
         section3 += _table(("Event type", "Aggregate events"), sorted(grouped.items()))
@@ -564,7 +619,7 @@ def _sections(evidence: dict[str, Any]) -> str:  # pylint: disable=too-many-loca
             [(r["event_name"], r["item_type"], r["day"], r["events"]) for r in collector["rows"]],
         )
     else:
-        section3 += f"<p>Admin Insights {_esc(admin_state)}: {_esc(admin_reason)}.</p>"
+        section3 += f"</div><p>Admin Insights {_esc(admin_state)}: {_esc(admin_reason)}.</p>"
 
     wb_ids = {row["luid"] for row in workbooks}
     ds_ids = {row["luid"] for row in sources}
@@ -610,32 +665,49 @@ def _sections(evidence: dict[str, Any]) -> str:  # pylint: disable=too-many-loca
         else "No-consumer conclusion unknown because primary assessment or survey completeness is degraded."
     )
     section4 = (
-        f'<div data-metric="dependency-edges">{len(edges)}</div>'
-        f'<div data-metric="datasource-denominator">{len(sources)}</div>'
-        f'<div data-metric="unresolved-identities">'
-        f"{sum(not row.get('workbook_luid') or not row.get('datasource_luid') for row in db['dependencies'])}</div>"
-        f'<div data-metric="embedded-dependencies">'
-        f"{sum(row.get('source') == 'embedded' for row in db['dependencies'])}</div>"
+        '<div class="metrics">'
+        + _metric("dependency-edges", len(edges), "resolved workbook-datasource edges")
+        + _metric("datasource-denominator", len(sources), "published datasources")
+        + _metric(
+            "unresolved-identities",
+            sum(not row.get("workbook_luid") or not row.get("datasource_luid") for row in db["dependencies"]),
+            "dependency rows with an unresolved identity",
+        )
+        + _metric(
+            "embedded-dependencies",
+            sum(row.get("source") == "embedded" for row in db["dependencies"]),
+            "embedded dependency rows",
+        )
+        + "</div>"
         + _table(("Datasource", "Consumer workbooks / classification", "Datasource LUID"), lineage_rows)
         + f"<p>{_esc(lineage_note)} Empty identity fields are unresolved, never edges. "
         "Source system and connection type were not delivered.</p>"
     )
     scatter = [
         (
+            row.get("name"),
             row.get("views_lifetime"),
             "unknown" if degraded and row.get("complexity") == 0 else row.get("complexity"),
-            row.get("name"),
             "yes" if row.get("complexity_understated") else "no",
         )
-        for row in workbooks
+        for row in top
     ]
     plot_rows = [row for row in workbooks if not (degraded and row.get("complexity") == 0)]
     max_views = max((row.get("views_lifetime") or 0 for row in plot_rows), default=1) or 1
     max_complexity = max((float(row.get("complexity") or 0) for row in plot_rows), default=1) or 1
     scatter_svg = (
-        '<svg viewBox="0 0 640 260" role="img" aria-label="Lifetime views versus complexity">'
+        '<svg viewBox="0 0 640 280" width="640" height="280" role="img" '
+        'aria-label="Lifetime views versus complexity">'
+        '<line x1="60" y1="220" x2="600" y2="220" stroke="#4b5b69"></line>'
+        '<line x1="60" y1="30" x2="60" y2="220" stroke="#4b5b69"></line>'
+        '<text x="60" y="238" text-anchor="middle">0</text>'
+        f'<text x="600" y="238" text-anchor="middle">{_esc(max_views)}</text>'
+        '<text x="54" y="224" text-anchor="end">0</text>'
+        f'<text x="54" y="34" text-anchor="end">{max_complexity:g}</text>'
+        '<text x="330" y="266" text-anchor="middle">Lifetime views</text>'
+        '<text x="16" y="125" text-anchor="middle" transform="rotate(-90 16 125)">Complexity</text>'
         + "".join(
-            f'<circle cx="{40 + int(560 * (row.get("views_lifetime") or 0) / max_views)}" '
+            f'<circle cx="{60 + int(540 * (row.get("views_lifetime") or 0) / max_views)}" '
             f'cy="{220 - int(190 * float(row.get("complexity") or 0) / max_complexity)}" r="5" fill="#4a78a8">'
             f"<title>{_esc(row.get('name'))}</title></circle>"
             for row in plot_rows
@@ -643,12 +715,19 @@ def _sections(evidence: dict[str, Any]) -> str:  # pylint: disable=too-many-loca
         + "</svg>"
     )
     section5 = (
-        f'<div data-metric="scatter-points">{len(plot_rows)}</div>'
-        f'<div data-metric="understated-count">{sum(bool(r.get("complexity_understated")) for r in workbooks)}</div>'
+        '<div class="metrics">'
+        + _metric("scatter-points", len(plot_rows), "workbooks plotted")
+        + _metric(
+            "understated-count",
+            sum(bool(r.get("complexity_understated")) for r in workbooks),
+            "workbooks with understated complexity",
+        )
+        + "</div>"
         f"<p>Complexity = sheets×{WEIGHTS['sheets']:g} + dashboards×{WEIGHTS['dashboards']:g} + "
         f"calcs×{WEIGHTS['calcs']:g} + LODs×{WEIGHTS['lods']:g} + "
         f"table calculations×{WEIGHTS['table_calcs']:g}.</p>"
         + scatter_svg
+        + _top_note(len(top), len(workbooks))
         + _table(("Workbook", "Lifetime views", "Complexity", "Understated"), scatter)
     )
     section6 = "<p>Proposed migration waves are not delivered. No grouping or wave rules are inferred.</p>"
@@ -727,7 +806,7 @@ def render_html(evidence: dict[str, Any]) -> bytes:
     script = (
         "document.getElementById('sort-views').addEventListener('click',()=>{"
         "const t=document.querySelector('#inventory tbody');const rows=[...t.rows];"
-        "rows.sort((a,b)=>Number(a.cells[2].textContent)-Number(b.cells[2].textContent));"
+        "rows.sort((a,b)=>Number(b.cells[2].textContent)-Number(a.cells[2].textContent));"
         "rows.forEach(r=>t.appendChild(r));});"
         "document.getElementById('tier-filter').addEventListener('change',e=>{"
         "for(const r of document.querySelectorAll('#inventory tbody tr'))"
@@ -744,6 +823,8 @@ def render_html(evidence: dict[str, Any]) -> bytes:
         ".metric{padding:.8rem;background:#eef3f8;min-width:8rem}.metric b,.metric span{display:block}"
         ".source{font-size:.9rem;color:#4b5b69}table{border-collapse:collapse;width:100%;margin:1rem 0}"
         "td,th{border:1px solid #ccd4dc;padding:.4rem;text-align:left}th{background:#eef3f8}"
+        "svg{display:block;max-width:100%;height:auto;margin:1rem 0}svg text{font-size:12px;fill:#17212b}"
+        ".note,.empty{color:#4b5b69;font-style:italic}"
         "</style></head><body><h1>Tableau estate assessment (not migration readiness)</h1>"
         + banner
         + _sections(evidence)
