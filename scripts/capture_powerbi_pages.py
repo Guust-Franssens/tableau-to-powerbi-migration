@@ -42,8 +42,8 @@ SKILL_SCRIPTS = Path(__file__).resolve().parents[1] / ".github" / "skills" / "pb
 sys.path.insert(0, str(SKILL_SCRIPTS))
 # The root CLI lint pass cannot resolve this runtime-added sibling path; copy/import tests cover it.
 from _desktop_observer import (  # noqa: E402  # pylint: disable=wrong-import-position,import-error
+    describe_open_dialog,
     observe,
-    print_dialog_diagnostic,
 )
 from probe_desktop_query import (  # noqa: E402  # pylint: disable=wrong-import-position,no-name-in-module
     BoundDesktop,
@@ -92,9 +92,8 @@ def _report_dialog(pid: str | int, *, expected_process_start: str | None = None)
         return
     try:
         state = observe(pid, expected_process_start=expected_process_start)
-        finding = state.modal or state.dialog
-        if finding is not None:
-            print_dialog_diagnostic(pid, finding.window, stream=sys.stderr)
+        if state.dialog is not None:
+            _emit(f"{describe_open_dialog(state.dialog.title)}; a human must act in Desktop.", stream=sys.stderr)
     except Exception:  # pylint: disable=broad-exception-caught
         _emit("Dialog text could not be read safely; inspect this Desktop locally.", stream=sys.stderr)
 

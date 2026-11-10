@@ -1230,7 +1230,7 @@ def test_a_locked_out_persist_cannot_touch_compat_or_cache(tmp_path: Path) -> No
 
 
 def test_refresh_refuses_ui_save_after_model_lock_timeout(tmp_path: Path, monkeypatch, capsys) -> None:
-    """A live peer holding the persist lock must report NOT_PERSISTED, not fall back outside the lock."""
+    """A live peer holding the persist lock must report NOT_PERSISTED; there is no UI fallback (#831)."""
     cache = _model(tmp_path, compat=1604)
     args = refresh_pbip_model._build_arg_parser().parse_args([])
     calls: list[str] = []
@@ -1239,13 +1239,8 @@ def test_refresh_refuses_ui_save_after_model_lock_timeout(tmp_path: Path, monkey
         calls.append(f"image:{model_dir}")
         raise refresh_pbip_model.ModelLockTimeout("held by pid 123 on host buildbox")
 
-    def unlocked_ui_save(_pid: int) -> tuple[bool, str]:
-        calls.append("ui-save")
-        return True, "ui save should not run"
-
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda *_args: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "image_save", locked_image_save)
-    monkeypatch.setattr(refresh_pbip_model, "save", unlocked_ui_save)
 
     assert refresh_pbip_model._refresh_and_save(456, 789, cache, args) == 1
     out = capsys.readouterr().out
@@ -1374,7 +1369,7 @@ def test_imagesave_with_an_unwritable_lock_writes_nothing(monkeypatch, tmp_path,
 
 
 def test_refresh_refuses_ui_save_when_the_model_lock_is_not_writable(tmp_path, monkeypatch, capsys) -> None:
-    """An unwritable lock is not a concurrent persist and must not fall back to an unlocked UI Save."""
+    """An unwritable lock is not a concurrent persist; it refuses before any write, with no UI fallback."""
     cache = _model(tmp_path, compat=1604)
     args = refresh_pbip_model._build_arg_parser().parse_args([])
     calls: list[str] = []
@@ -1385,7 +1380,6 @@ def test_refresh_refuses_ui_save_when_the_model_lock_is_not_writable(tmp_path, m
 
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda *_args: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "image_save", unwritable_image_save)
-    monkeypatch.setattr(refresh_pbip_model, "save", lambda _pid: calls.append("ui-save") or (True, "unlocked"))
 
     assert refresh_pbip_model._refresh_and_save(456, 789, cache, args) == 1
     out = capsys.readouterr().out
@@ -1399,7 +1393,7 @@ def test_refresh_refuses_ui_save_when_the_cache_folder_cannot_be_created(tmp_pat
     """`.pbi` absent and its creation denied (a model-folder ACL deny) is the same refusal as an unwritable lock.
 
     The folder is created before the lock is taken, so a raw `PermissionError` there used to reach the
-    generic ImageSave handler and fall back to the unlocked UI Save.
+    generic ImageSave handler; it must stay the typed pre-write lock refusal.
     """
     cache = _model(tmp_path, compat=1604)
     database_tmdl = cache.parent.parent / "definition" / "database.tmdl"
@@ -1420,13 +1414,12 @@ def test_refresh_refuses_ui_save_when_the_cache_folder_cannot_be_created(tmp_pat
     monkeypatch.setattr(Path, "mkdir", denied_mkdir)
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda *_args: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "image_save", persisting_image_save)
-    monkeypatch.setattr(refresh_pbip_model, "save", lambda _pid: calls.append("ui-save") or (True, "unlocked"))
 
     assert refresh_pbip_model._refresh_and_save(456, 789, cache, args) == 1
     out = capsys.readouterr().out
     assert "REFRESH: NOT_PERSISTED (model lock not writable: PermissionError [Errno 13]; data is in memory only)" in out
     assert str(tmp_path) not in out
-    assert calls == ["image"], "no ImageSave write and no unlocked UI Save without the model lock"
+    assert calls == ["image"], "no ImageSave write without the model lock"
     assert database_tmdl.read_bytes() == before and not cache.parent.exists()
 
 
@@ -1453,7 +1446,6 @@ def test_ui_route_refuses_before_any_desktop_action_when_the_model_lock_is_not_w
     bound = SimpleNamespace(identity=SimpleNamespace(process_start="456"))
     monkeypatch.setattr(refresh_pbip_model, "_ui_root", lambda *_args: 789)
     monkeypatch.setattr(refresh_pbip_model, "bind_desktop", lambda *_args, **_kwargs: bound)
-    monkeypatch.setattr(refresh_pbip_model, "source_hint_from_model", lambda _path: None)
     monkeypatch.setattr(refresh_pbip_model, "_ui_refresh_locked", spy_locked)
     monkeypatch.setattr(refresh_pbip_model, "_ui_observer_state", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(refresh_pbip_model, "_identity_gate", lambda *_args: True)
@@ -1486,25 +1478,28 @@ def _frontmatter(text: str) -> str:
 def test_o23_structural_stop_withholds_canaries_and_save(monkeypatch, capsys) -> None:
     """A prompt after Invoke must not reach either data verification or persistence."""
     # pylint: disable=import-outside-toplevel
-    from _desktop_observer import DesktopWindow, Observation, classify_dialog
+    from _desktop_observer import DesktopWindow, DialogFinding, Observation
     from test_desktop_actions import _wire_ui_route
 
     observer = refresh_pbip_model._ui_observer_state
     wait = refresh_pbip_model._wait_for_engine_completion
     context, args, calls = _wire_ui_route(monkeypatch)
     frame = DesktopWindow("", "", 1280, 800, hwnd=789)
-    prompt = DesktopWindow("", "", 500, 300, hwnd=888, owner_hwnd=789, owner_enabled=False, ie_hosted=True)
+    prompt = DesktopWindow("", "", 500, 300, hwnd=888, owner_hwnd=789, owner_enabled=False)
     ready = Observation(pid="123", process_started_at="456", target_window=frame)
-    stopped = Observation(pid="123", process_started_at="456", target_window=frame, dialog=classify_dialog(prompt))
+    stopped = Observation(
+        pid="123", process_started_at="456", target_window=frame, dialog=DialogFinding(prompt, "Sign in")
+    )
     monkeypatch.setattr(refresh_pbip_model, "_ui_observer_state", observer)
     monkeypatch.setattr(refresh_pbip_model, "_wait_for_engine_completion", wait)
     monkeypatch.setattr(
         refresh_pbip_model, "_in_flight_credential_state", lambda *_a, **_k: stopped if calls else ready
     )
-    monkeypatch.setattr(refresh_pbip_model.ModalVisualEvidence, "hold_refusal", lambda *_a, **_k: None)
     assert refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args) == 3
     assert calls == ["Refresh"]
-    assert "REFRESH: DIALOG_NEEDS_HUMAN" in capsys.readouterr().out
+    assert (
+        'REFRESH: DIALOG_NEEDS_HUMAN pid=123; a Power BI Desktop dialog is open: "Sign in"' in capsys.readouterr().out
+    )
 
 
 def test_documented_persist_default_matches_the_argparse_default() -> None:
@@ -2345,11 +2340,12 @@ def test_persistence_cleanup_interrupts_cannot_publish(monkeypatch, tmp_path, ph
     assert native.events[-1] == "amo-disconnect"
 
 
-@pytest.mark.parametrize("observe", [False, True], ids=["legacy-fallback", "observation-refusal"])
+@pytest.mark.parametrize("observe", [False, True], ids=["legacy", "observation-refusal"])
 def test_observation_refusal_cannot_fall_through_to_ui_save(monkeypatch, tmp_path, capsys, observe):
+    """A failed ImageSave write ends NOT_PERSISTED exit 1 in both modes; there is no UI fallback (#831 R1)."""
     cache = _model(tmp_path, compat=1604)
     native = _native_imagesave(monkeypatch, cache)
-    entered, ui_saves = [], []
+    entered = []
     image_save = refresh_pbip_model.image_save
 
     def failed_write(*_args):
@@ -2362,12 +2358,53 @@ def test_observation_refusal_cannot_fall_through_to_ui_save(monkeypatch, tmp_pat
     native.server.ImageSave = failed_write
     monkeypatch.setattr(refresh_pbip_model, "image_save", selected_mode)
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda *_a, **_k: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "save", lambda pid: ui_saves.append(pid) or (True, "UI save"))
     args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "111"])
     result = refresh_pbip_model._refresh_and_save(111, 52001, cache, args)
     assert entered == ["native-write"] and native.events[-1] == "amo-disconnect"
+    assert result == 1, "a failed ImageSave must stop at NOT_PERSISTED, never reach a UI path"
+    out = capsys.readouterr().out
+    assert "UI save" not in out and "falling back" not in out
     if observe:
-        assert result == 1 and ui_saves == [], "typed observation refusal must stop, never invoke the fallback"
-        assert "PRIVATE_WRITE_FAILURE" not in str(capsys.readouterr())
+        assert "PRIVATE_WRITE_FAILURE" not in out
     else:
-        assert result is None and ui_saves == [111], "ordinary legacy unavailability still permits the UI path"
+        assert "persistence UNESTABLISHED" in out
+
+
+def test_post_commit_disconnect_failure_reports_persistence_unestablished(monkeypatch, tmp_path, capsys):
+    """T15b: ImageSave commits the cache and aligns database.tmdl, then Disconnect raises.
+
+    The untyped exception reaches the caller AFTER the commit, so the verdict may claim neither
+    "nothing was written" nor "in memory only": persistence is UNESTABLISHED, exit 1, no UI call.
+    """
+    cache = _model(tmp_path, compat=1604)
+    cache.parent.mkdir()
+    old = _abf_bytes(seed=1)
+    cache.write_bytes(old)
+    native = _native_imagesave(monkeypatch, cache)
+    image_save = refresh_pbip_model.image_save
+
+    def disconnect():
+        native.events.append("amo-disconnect")
+        raise RuntimeError("PRIVATE_DISCONNECT_FAILURE")
+
+    native.server.Disconnect = disconnect
+    monkeypatch.setattr(
+        refresh_pbip_model,
+        "image_save",
+        lambda port, path, model_dir: image_save(port, path, model_dir, bound=native.bound, return_observation=False),
+    )
+    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda *_a, **_k: (True, "refreshed"))
+    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda *_a, **_k: ([("Orders", 42)], False))
+    args = refresh_pbip_model._build_arg_parser().parse_args(["--pid", "111"])
+
+    assert refresh_pbip_model._refresh_and_save(111, 52001, cache, args) == 1
+    assert native.calls == [native.bound.catalogue] and native.events[-1] == "amo-disconnect"
+    assert cache.read_bytes() == native.content, "the reviewer's sequence: the cache WAS committed"
+    assert refresh_pbip_model.read_declared_compatibility(cache.parent.parent)[0] == 1606
+    out = capsys.readouterr().out
+    verdicts = [line for line in out.splitlines() if line.startswith("REFRESH:")]
+    assert verdicts == [
+        "REFRESH: NOT_PERSISTED (ImageSave raised RuntimeError; persistence UNESTABLISHED: the cache and "
+        "database.tmdl may or may not have been committed; no UI fallback. Check .pbi/cache.abf before relying on it.)"
+    ]
+    assert "in memory only" not in out and "nothing was written" not in out and "UI save" not in out

@@ -1,5 +1,9 @@
 # Desktop observer simplification — Refs #741
 
+**Superseded in part by #831:** the `_desktop_uia.ps1` backend, text classification, image leases
+and the GUI test tier described below were retired. Any blocking dialog is now a human stop named by
+its sanitized title; see the `pbip-model-refresh` skill. This record is kept as history.
+
 **Implementation note:** sections 1–11 preserve the pre-implementation investigation and estimates.
 The approved amendments and implemented slice-1 contract in §12 supersede the proposed identity types,
 timestamps and API examples below. The historical census is not rewritten to look like the new tree.

@@ -162,7 +162,7 @@ def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[di
 
     # The root CLI lint pass cannot resolve the runtime-added skill path.
     # pylint: disable-next=import-outside-toplevel,import-error
-    from _desktop_observer import legacy_token, print_dialog_diagnostic
+    from _desktop_observer import dialog_stop_detail, legacy_token
 
     connection = None
     held_identity = None
@@ -181,11 +181,9 @@ def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[di
             expected_process_start=held_identity.process_start,
         )
         token = legacy_token(state)
-        finding = state.modal or state.dialog
-        window = finding.window if finding else None
         if token is not None:
-            if window is not None:
-                print_dialog_diagnostic(pid, window, stream=sys.stderr)
+            if state.dialog is not None:
+                raise RuntimeError(f"Desktop query refused ({token}); {dialog_stop_detail(state.dialog)}")
             raise RuntimeError(f"Desktop query refused ({token}); inspect this Desktop locally")
 
     def execute(dax: str) -> list[dict]:

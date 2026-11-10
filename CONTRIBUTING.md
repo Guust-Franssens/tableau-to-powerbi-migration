@@ -230,7 +230,7 @@ reason when absent rather than fail.
 Two tiers. Iterate on the fast one; **quote the slow one**:
 
 ```bash
-uv run pytest -q -n auto --dist loadfile -m "not (serial or timing)"   # tier 1, ~4 min
+uv run pytest -q -n auto --dist loadfile -m "not timing"   # tier 1, ~4 min
 uv run pytest -q                                                       # tier 2, the gate of record
 ```
 

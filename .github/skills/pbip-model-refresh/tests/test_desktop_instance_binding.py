@@ -39,7 +39,6 @@ from probe_desktop_query import discover_port, table_names
 from refresh_pbip_model import _instance, _resolve_pid, same_model, tmdl_tables
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
-CREDENTIAL_PROBE_PS1 = SKILL_ROOT / "scripts" / "_desktop_uia.ps1"
 REF_TABLE_RE = re.compile(r"^ref table\s+(?:'([^']+)'|(\S+))", re.MULTILINE)
 OBSERVED_IDENTITY = probe_desktop_query.DesktopIdentity(111, "100", 222, "101", 52001)
 OBSERVED_CATALOGUE = "11111111-2222-3333-4444-555555555555"
@@ -1153,7 +1152,7 @@ def test_main_aborts_before_refreshing_a_wrong_bound_instance(monkeypatch, tmp_p
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Turbine"})
-    for never in ("refresh", "image_save", "save", "row_counts"):
+    for never in ("refresh", "image_save", "row_counts"):
         monkeypatch.setattr(refresh_pbip_model, never, _explode(never))
 
     assert refresh_pbip_model.main(["--pid", "111"]) == 2
@@ -1176,8 +1175,7 @@ def test_main_still_refreshes_and_persists_the_right_instance(monkeypatch, tmp_p
 
     def fake_image_save(port: int, cache_path: Path, model_dir=None):
         # Signature mirrors the real image_save EXACTLY. A stub that lags it raises TypeError, which
-        # main() swallows into the UI-save fallback - so a drifted stub would go green against a
-        # broken call.
+        # main() reports as NOT_PERSISTED - so a drifted stub would fail rather than pass.
         del port, model_dir
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_bytes(b"cache")
@@ -1211,7 +1209,6 @@ def test_no_save_leaves_the_project_byte_identical(monkeypatch, tmp_path: Path, 
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
     monkeypatch.setattr(refresh_pbip_model, "image_save", _explode("image_save must not run"))
-    monkeypatch.setattr(refresh_pbip_model, "save", _explode("save must not run"))
 
     assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--no-save"]) == 0
     out = capsys.readouterr().out
@@ -1242,7 +1239,6 @@ def test_persisting_is_the_default(monkeypatch, tmp_path: Path, capsys) -> None:
         return True, "persisted"
 
     monkeypatch.setattr(refresh_pbip_model, "image_save", fake_image_save)
-    monkeypatch.setattr(refresh_pbip_model, "save", _explode("the UI fallback must not run"))
 
     assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"]) == 0
     out = capsys.readouterr().out
@@ -1255,8 +1251,8 @@ def test_a_compat_rollback_failure_is_fatal_and_does_not_fall_back_to_ui_save(mo
 
     When the cache write fails AND the compatibility alignment cannot be rolled back, database.tmdl
     declares a level no cache was written at. Saving over that inconsistent state would persist the
-    mismatch, so `main` must exit with an error and never reach the UI-save fallback (round-3 blocker
-    2). Round-2 converted every ImageSave exception into a UI-save fallback, so this case saved anyway.
+    mismatch, so `main` must exit with an error (round-3 blocker 2). There is no UI-save fallback at all
+    since #831; this pins that a rollback failure is still the fatal exit 2, not a NOT_PERSISTED exit 1.
     """
     cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
@@ -1270,7 +1266,6 @@ def test_a_compat_rollback_failure_is_fatal_and_does_not_fall_back_to_ui_save(mo
         raise refresh_pbip_model.CompatRollbackError("compatibility rollback FAILED for database.tmdl")
 
     monkeypatch.setattr(refresh_pbip_model, "image_save", raise_rollback_error)
-    monkeypatch.setattr(refresh_pbip_model, "save", _explode("the UI fallback must not run after a rollback failure"))
 
     exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"])
     out = capsys.readouterr().out
@@ -1374,7 +1369,6 @@ def test_an_unresolved_destination_fails_closed_not_into_a_blind_write(monkeypat
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
     monkeypatch.setattr(refresh_pbip_model, "_live_tables", lambda port: {"Turbine"})
     monkeypatch.setattr(refresh_pbip_model, "refresh", _explode("refresh must not run on an unverified destination"))
-    monkeypatch.setattr(refresh_pbip_model, "save", _explode("save must not run"))
     monkeypatch.setattr(refresh_pbip_model, "image_save", _record)
 
     exit_code = refresh_pbip_model.main(["--pid", "111"])
@@ -1526,7 +1520,7 @@ def test_a_mismatched_port_aborts_before_any_read_or_write(monkeypatch, tmp_path
     _model_folder(tmp_path, "MyMigration", ["Orders"])
     _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
     monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
-    for never in ("same_model", "refresh", "image_save", "save", "row_counts"):
+    for never in ("same_model", "refresh", "image_save", "row_counts"):
         monkeypatch.setattr(refresh_pbip_model, never, _explode(never))
 
     exit_code = refresh_pbip_model.main(["--pid", "111", "--port", "59999"])
@@ -1693,23 +1687,6 @@ def test_canaries_verify_the_whole_model_without_narrowing_the_refresh(monkeypat
     assert seen["probed"] == ["Orders"], "--canaries must be the probed set"
 
 
-def test_the_bundled_backend_has_no_classifier_or_refresh_arbiter() -> None:
-    """Only Python may interpret facts; native harvesting has no successful operation verdict."""
-    body = CREDENTIAL_PROBE_PS1.read_text(encoding="utf-8")
-    for forbidden in (
-        "signature.regex",
-        "CREDENTIAL_PRESENT",
-        "Get-DialogClassification",
-        "InvokePattern",
-        "Start-Sleep",
-    ):
-        assert forbidden not in body, f"parallel policy/arbiter returned: {forbidden}"
-    loops = re.findall(r"\bwhile\s*\(([^)]*)\)", body)
-    assert not loops, f"unexpected native polling loop: {loops}"
-    assert "Get-IdentitySnapshot" not in body and "Get-AutomationHarvest" not in body
-    assert "desktop.harvest.v1" in body and "EnumWindows" in body
-
-
 @pytest.mark.parametrize(
     "arguments",
     [
@@ -1778,168 +1755,6 @@ def test_timeout_recovery_command_quotes_a_path_with_spaces(monkeypatch, tmp_pat
     assert f'python "{spaced}" --pid 111' in out, "the portable query recovery path must stay quoted"
 
 
-def test_backend_exact_target_rechecks_and_structural_facts_are_retained() -> None:
-    """Keep native identity guards and structural facts, without retaining UIA text harvesting."""
-    body = CREDENTIAL_PROBE_PS1.read_text(encoding="utf-8")
-    for required in (
-        "EnumWindows",
-        "GetWindowThreadProcessId",
-        "if (!Target(hwnd, expected) || GetWindow(hwnd, 4) != owner",
-        "IsWindowEnabled(hwnd) != window.Enabled",
-        "process_started_at_before",
-        "process_started_at_after",
-        "owner_same_pid=$window.OwnerSamePid",
-        "ie_hosted=$window.IEHosted",
-        "EnumChildWindows",
-        "Internet Explorer_Server",
-    ):
-        assert required in body, f"native safeguard missing: {required}"
-    for retired in ("ValuePattern", "TextPattern", "IsPassword", "ControlType.Edit", "Get-AutomationHarvest"):
-        assert retired not in body
-
-
-def test_ui_save_fallback_when_cache_does_not_update_reports_not_persisted_without_contradiction(
-    monkeypatch, tmp_path: Path, capsys
-) -> None:
-    """A UI Automation save that reports success but does not update cache.abf must NOT emit
-    a success-shaped saved verdict alongside NOT_PERSISTED (#230, half B).
-
-    The legacy timestamp check controls compatibility output, not durability. Intermediate output
-    reports an attempt pending verification; the single final verdict is NOT_PERSISTED with exit 1.
-    """
-    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
-    _stub_live_to_match_disk(monkeypatch, cache)
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
-
-    def fail_image_save(port: int, cache_path: Path, model_dir=None):
-        del port, cache_path, model_dir
-        raise RuntimeError("AMO Server.ImageSave assembly unavailable")
-
-    def uia_save_without_file_update(pid: int) -> tuple[bool, str]:
-        del pid
-        # Simulate UI Automation completing and hasUnsavedChanges going false,
-        # but cache.abf is never created or updated on disk.
-        return True, "UI Automation save attempted (hasUnsavedChanges went false; verification pending)"
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", fail_image_save)
-    monkeypatch.setattr(refresh_pbip_model, "save", uia_save_without_file_update)
-
-    exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"])
-    out = capsys.readouterr().out
-
-    assert exit_code == 1
-    assert "UI Automation save attempted" in out
-    assert "saved via UI Automation" not in out
-    assert [line for line in out.splitlines() if line.startswith("REFRESH:")] == [
-        "REFRESH: NOT_PERSISTED (legacy timestamp check did not observe a newer cache.abf; write outcome unconfirmed)"
-    ]
-    assert "REFRESH: DATA_OK" not in out
-    assert "+ PERSISTED" not in out
-    assert "cache  : legacy timestamp check did not observe a newer cache (write outcome unconfirmed)" in out
-
-
-def test_ui_save_fallback_when_cache_genuinely_persists_reports_persisted_and_exits_0(
-    monkeypatch, tmp_path: Path, capsys
-) -> None:
-    """A newer cache retains the legacy DATA_OK + PERSISTED display, without cold-reopen proof."""
-    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
-    _stub_live_to_match_disk(monkeypatch, cache)
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
-
-    def fail_image_save(port: int, cache_path: Path, model_dir=None):
-        del port, cache_path, model_dir
-        raise RuntimeError("AMO Server.ImageSave assembly unavailable")
-
-    def uia_save_with_file_update(pid: int) -> tuple[bool, str]:
-        del pid
-        # Simulate UI Automation triggering Desktop to write cache.abf
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_bytes(b"persisted-by-desktop")
-        return True, "UI Automation save attempted (hasUnsavedChanges went false; verification pending)"
-
-    monkeypatch.setattr(refresh_pbip_model, "image_save", fail_image_save)
-    monkeypatch.setattr(refresh_pbip_model, "save", uia_save_with_file_update)
-
-    exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"])
-    out = capsys.readouterr().out
-
-    assert exit_code == 0
-    assert "UI Automation save attempted" in out
-    assert f"cache  : legacy timestamp check observed a newer cache -> {cache} (cold reopen not tested)" in out
-    assert [line for line in out.splitlines() if line.startswith("REFRESH:")] == ["REFRESH: DATA_OK + PERSISTED"]
-    assert "REFRESH: NOT_PERSISTED" not in out
-    assert cache.read_bytes() == b"persisted-by-desktop"
-
-
-def test_ui_save_flag_bypasses_imagesave_and_attempts_ui_save(monkeypatch, tmp_path: Path, capsys) -> None:
-    """--ui-save explicitly bypasses AMO ImageSave and drives UI save."""
-    cache = _model_folder(tmp_path, "MyMigration", ["Orders"])
-    _stub_bridge(monkeypatch, [{"pid": 111, "currentFilePath": str(tmp_path / "MyMigration.pbip")}])
-    monkeypatch.setattr(refresh_pbip_model, "discover_port", lambda pid: 52001)
-    _stub_live_to_match_disk(monkeypatch, cache)
-    monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
-    monkeypatch.setattr(refresh_pbip_model, "image_save", _explode("image_save must not run under --ui-save"))
-
-    def uia_save_with_file_update(pid: int) -> tuple[bool, str]:
-        del pid
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_bytes(b"persisted-via-ui")
-        return True, "UI Automation save attempted (hasUnsavedChanges went false; verification pending)"
-
-    monkeypatch.setattr(refresh_pbip_model, "save", uia_save_with_file_update)
-
-    exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders", "--ui-save"])
-    out = capsys.readouterr().out
-
-    assert exit_code == 0
-    assert "ImageSave skipped (--ui-save requested); falling back to UI" in out
-    assert "UI Automation save attempted" in out
-    assert [line for line in out.splitlines() if line.startswith("REFRESH:")] == ["REFRESH: DATA_OK + PERSISTED"]
-
-
-def test_save_function_unit_cases(monkeypatch) -> None:
-    """Unit tests for the save() function under different hasUnsavedChanges states."""
-    # 1. No instance found
-    monkeypatch.setattr(refresh_pbip_model, "_instance", lambda pid: None)
-    ok, msg = refresh_pbip_model.save(999)
-    assert ok is False
-    assert "no Desktop Bridge instance" in msg
-
-    # 2. hasUnsavedChanges already False
-    monkeypatch.setattr(refresh_pbip_model, "_instance", lambda pid: {"hasUnsavedChanges": False})
-    ok, msg = refresh_pbip_model.save(111)
-    assert ok is True
-    assert msg == "UI Automation save attempted (hasUnsavedChanges already false; verification pending)"
-
-    # 3. hasUnsavedChanges transitions to False
-    states = [{"hasUnsavedChanges": True}, {"hasUnsavedChanges": False}]
-    monkeypatch.setattr(
-        refresh_pbip_model, "_instance", lambda pid: states.pop(0) if states else {"hasUnsavedChanges": False}
-    )
-    monkeypatch.setattr(refresh_pbip_model.subprocess, "run", lambda *args, **kwargs: None)
-    monkeypatch.setattr(refresh_pbip_model.time, "sleep", lambda s: None)
-    ok, msg = refresh_pbip_model.save(111)
-    assert ok is True
-    assert msg == "UI Automation save attempted (hasUnsavedChanges went false; verification pending)"
-
-    # 4. hasUnsavedChanges stays True -> timeout
-    monkeypatch.setattr(refresh_pbip_model, "_instance", lambda pid: {"hasUnsavedChanges": True})
-    monkeypatch.setattr(refresh_pbip_model, "SAVE_TIMEOUT_SECONDS", 0.001)
-    ok, msg = refresh_pbip_model.save(111)
-    assert ok is False
-    assert "still dirty after" in msg
-    assert "--verify-only checks in-memory data only" in msg
-    assert "does not verify persistence or a cold reopen" in msg
-    assert "then re-run with --verify-only" not in msg
-
-
 def _reporting_instance(monkeypatch: pytest.MonkeyPatch, root: Path) -> Path:
     """Use real identity/reporting logic with a bound model and an independently timed old cache."""
     cache = _model_folder(root, "MyMigration", ["Orders"])
@@ -1976,15 +1791,12 @@ def test_amo_legacy_attempt_is_not_the_terminal_persistence_verdict(
         return result
 
     monkeypatch.setattr(refresh_pbip_model, "image_save", legacy_image_save)
-    ui_save = Mock()
-    monkeypatch.setattr(refresh_pbip_model, "save", ui_save)
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
     monkeypatch.setattr(refresh_pbip_model, "row_counts", lambda port, tables: ([("Orders", 42)], False))
 
     exit_code = refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"])
     out = capsys.readouterr().out
     assert len(attempts) == 1 and attempts[0][0] is True
-    ui_save.assert_not_called()
     assert cache.read_bytes() == image
     assert (cache.stat().st_mtime > before_stamp) is advanced
     assert "save   : AMO ImageSave attempt completed; legacy cache-update verification pending" in out
@@ -2036,10 +1848,8 @@ def test_unrequested_persistence_never_attributes_external_cache_changes(
     before_stamp = cache.stat().st_mtime
     refresh = Mock(return_value=(True, "refreshed"))
     image_save = Mock()
-    ui_save = Mock()
     monkeypatch.setattr(refresh_pbip_model, "refresh", refresh)
     monkeypatch.setattr(refresh_pbip_model, "image_save", image_save)
-    monkeypatch.setattr(refresh_pbip_model, "save", ui_save)
 
     def row_counts(port: int, tables: list[str]) -> tuple[list[tuple[str, int]], bool]:
         assert port == 52001 and tables == ["Orders"]
@@ -2053,7 +1863,6 @@ def test_unrequested_persistence_never_attributes_external_cache_changes(
     out = capsys.readouterr().out
     assert refresh.call_count == refresh_count
     image_save.assert_not_called()
-    ui_save.assert_not_called()
     assert (cache.stat().st_mtime > before_stamp) is advanced
     assert cache.read_bytes() == (b"external-cache" if advanced else b"old-cache")
     assert [line.strip() for line in out.splitlines() if line.strip().startswith("cache  :")] == [cache_message]
@@ -2061,34 +1870,54 @@ def test_unrequested_persistence_never_attributes_external_cache_changes(
     assert "PERSISTED" not in out and "byte-identical" not in out
 
 
-@pytest.mark.parametrize("instance", [None, {"hasUnsavedChanges": True}], ids=["no-instance", "still-dirty"])
+@pytest.mark.parametrize("cause", ["no-cache-path", "rolled-back", "untyped-exception"])
 def test_failed_save_reports_only_the_observed_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], instance: dict | None
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], cause: str
 ) -> None:
-    """The real UIA failure helper must not predict the next open or certify a manual save."""
+    """T15: every non-success ImageSave ends NOT_PERSISTED exit 1, no UI action, worded by what is proven."""
     cache = _reporting_instance(monkeypatch, tmp_path)
+    tmdl = cache.parent.parent / "definition" / "database.tmdl"
+    before = tmdl.read_bytes() if tmdl.is_file() else None
     monkeypatch.setattr(refresh_pbip_model, "refresh", lambda port, tables, timeout: (True, "refreshed"))
-    monkeypatch.setattr(
-        refresh_pbip_model, "image_save", lambda port, cache_path, model_dir: (False, "ImageSave unavailable")
-    )
-    monkeypatch.setattr(refresh_pbip_model, "_instance", lambda pid: instance)
-    monkeypatch.setattr(refresh_pbip_model.subprocess, "run", lambda *args, **kwargs: None)
-    monkeypatch.setattr(refresh_pbip_model, "SAVE_TIMEOUT_SECONDS", 0)
+    image_save = Mock(return_value=(False, "ImageSave unavailable"))
+    if cause == "untyped-exception":
+        image_save.side_effect = RuntimeError("Disconnect failed")
+    monkeypatch.setattr(refresh_pbip_model, "image_save", image_save)
     row_counts = Mock()
     monkeypatch.setattr(refresh_pbip_model, "row_counts", row_counts)
 
-    assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"]) == 1
+    if cause == "no-cache-path":
+        # main() now refuses an unresolved destination earlier (WRONG_MODEL); the persist helper keeps
+        # its own honest wording for any caller that reaches it without a cache path.
+        assert refresh_pbip_model._persist_after_refresh(52001, None) == 1
+    else:
+        assert refresh_pbip_model.main(["--pid", "111", "--canaries", "Orders"]) == 1
     out = capsys.readouterr().out
     row_counts.assert_not_called()
+    verdicts = [line for line in out.splitlines() if line.startswith("REFRESH:")]
+    assert len(verdicts) == 1 and verdicts[0].startswith("REFRESH: NOT_PERSISTED (")
+    assert "UI Automation" not in out and "falling back to UI" not in out
+    assert "next open" not in out and "then re-run with --verify-only" not in out
+    if cause == "untyped-exception":
+        # The write may have committed before Disconnect raised: never claim nothing was written.
+        assert "persistence UNESTABLISHED" in verdicts[0] and "RuntimeError" in verdicts[0]
+        assert "in memory only" not in out and "nothing was written" not in out and "rolled back" not in out
+        return
     assert cache.read_bytes() == b"old-cache"
-    assert [line for line in out.splitlines() if line.startswith("REFRESH:")] == [
-        "REFRESH: NOT_PERSISTED (save helper failed; write outcome unconfirmed)"
-    ]
-    assert "next open" not in out and "old cache" not in out
-    assert "then re-run with --verify-only" not in out
-    if instance is None:
-        assert "no Desktop Bridge instance for pid 111" in out
+    assert (tmdl.read_bytes() if tmdl.is_file() else None) == before
+    if cause == "no-cache-path":
+        image_save.assert_not_called()
+        assert "nothing was written" in verdicts[0] and "UNESTABLISHED" not in verdicts[0]
     else:
-        assert "still dirty after" in out
-        assert "--verify-only checks in-memory data only" in out
-        assert "does not verify persistence or a cold reopen" in out
+        image_save.assert_called_once()
+        assert "ImageSave unavailable; rolled back" in verdicts[0] and "UNESTABLISHED" not in verdicts[0]
+
+
+def test_ui_save_flag_is_rejected_before_any_desktop_contact(monkeypatch, capsys) -> None:
+    """T16: the retired --ui-save flag is an argparse error (exit 2) before any bridge, port or XMLA call."""
+    for never in ("_instance", "discover_port", "refresh", "image_save", "row_counts", "cache_file"):
+        monkeypatch.setattr(refresh_pbip_model, never, _explode(never))
+    with pytest.raises(SystemExit) as stop:
+        refresh_pbip_model.main(["--pid", "111", "--ui-save"])
+    assert stop.value.code == 2
+    assert "unrecognized arguments: --ui-save" in capsys.readouterr().err

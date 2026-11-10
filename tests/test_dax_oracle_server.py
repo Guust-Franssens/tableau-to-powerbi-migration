@@ -296,6 +296,12 @@ def test_certify_without_the_engine_refuses_rather_than_passing_vacuously():
         module.engine_scripts_dir = original
 
 
+# A hostile caption (#831): an escape, a closing quote, a bidi override, a zero-width space, a line
+# separator and 300 trailing characters. Only the sanitized, capped form may reach the human.
+HOSTILE_TITLE = 'Sign in\x1b[2J to "X"\u202eevil\u200b\u2028' + "A" * 300
+SAFE_TITLE = "Sign in[2J to 'X'evil" + "A" * 59 + "..."
+
+
 @pytest.fixture(name="desktop_executor")
 def desktop_executor_fixture(monkeypatch: pytest.MonkeyPatch) -> tuple:
     """ADOMD and detector seams with separate open/read observations; no Desktop is contacted."""
@@ -305,8 +311,7 @@ def desktop_executor_fixture(monkeypatch: pytest.MonkeyPatch) -> tuple:
 
     events = []
     state = SimpleNamespace(current=modal.Observation())
-    window = modal.DesktopWindow("PRIVATE_TEST_VALUE", "", 400, 300, hwnd=222)
-    finding = modal.DialogFinding("unrecognized", "DIALOG_UNRECOGNIZED", window, "PRIVATE_TEST_VALUE")
+    finding = modal.DialogFinding(modal.DesktopWindow("", "", 400, 300, hwnd=222), HOSTILE_TITLE)
     blocked = modal.Observation(dialog=finding)
 
     def inspect_pid(pid: int, *, expected_process_start: str):
@@ -352,10 +357,11 @@ def test_desktop_refusal_precedes_open_and_keeps_startup_silent(desktop_executor
     result = dos.make_oracle(execute)('EVALUATE ROW("v", 1)')
     output = capsys.readouterr()
     assert set(result) == {"error"}, "a detected modal must return an error, never fabricated rows or zero"
-    assert "DIALOG_UNRECOGNIZED" in result["error"]
+    assert "DIALOG_NEEDS_HUMAN" in result["error"]
+    assert f'a Power BI Desktop dialog is open: "{SAFE_TITLE}". A human must act in Desktop.' in result["error"]
+    assert not any(char in result["error"] for char in "\x1b\u202e\u200b\u2028")
     assert events == ["check"], "Open must not run behind a detected modal"
-    assert output.out == "" and output.err == "LOCAL_IMAGE: unavailable (not_captured)\n"
-    assert "PRIVATE_TEST_VALUE" not in output.err + json.dumps(result)
+    assert output == ("", ""), "the refusal travels in the error reply only"
 
 
 def test_desktop_refusal_rechecks_after_open_before_execute_reader(desktop_executor: tuple) -> None:
@@ -390,21 +396,16 @@ def test_desktop_persistent_requests_are_each_checked(desktop_executor: tuple, c
     assert replies[0] == replies[2] == {"rows": [{"v": 7}]}
     assert set(replies[1]) == {"error"}, "each persistent request must refuse a newly detected modal"
     assert events.count("open") == 1 and events.count("read") == 2
-    assert capsys.readouterr().err == "LOCAL_IMAGE: unavailable (not_captured)\n"
+    assert capsys.readouterr().err == ""
     execute.close()
     assert events[-1] == "close"
 
 
-@pytest.mark.parametrize("condition", ["modal", "unknown_reason", "desktop_unready", "process_gone"])
+@pytest.mark.parametrize("condition", ["unknown_reason", "desktop_unready", "process_gone"])
 def test_desktop_nonclean_states_never_reach_open(desktop_executor: tuple, condition: str) -> None:
     """Diagnostic success is not required to refuse the detector's existing non-clean states."""
-    events, state, blocked, _, modal = desktop_executor
-    value = (
-        modal.CredentialModal("PRIVATE_TEST_VALUE", blocked.dialog.window)
-        if condition == "modal"
-        else "PRIVATE_TEST_VALUE"
-    )
-    state.current = modal.Observation(**{condition: value})
+    events, state, _, _, modal = desktop_executor
+    state.current = modal.Observation(**{condition: "PRIVATE_TEST_VALUE"})
     result = dos.make_oracle(dos.adomd_executor(55001, 111))('EVALUATE ROW("v", 1)')
     assert events == ["check"] and set(result) == {"error"}
     assert "PRIVATE_TEST_VALUE" not in json.dumps(result)
@@ -418,7 +419,7 @@ def test_desktop_one_shot_keeps_error_json_and_exit_zero(desktop_executor: tuple
     output = capsys.readouterr()
     assert code == 0, "oracle one-shot errors retain the existing exit-zero JSON contract"
     assert set(json.loads(output.out)) == {"error"}
-    assert "LOCAL_IMAGE:" not in output.out and output.err == "LOCAL_IMAGE: unavailable (not_captured)\n"
+    assert SAFE_TITLE in json.loads(output.out)["error"] and output.err == ""
 
 
 def test_desktop_port_only_and_offline_never_infer_a_pid(desktop_executor: tuple, monkeypatch, capsys) -> None:

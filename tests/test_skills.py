@@ -38,7 +38,7 @@ MD_LINK_RE = re.compile(r"\[[^\]]*\]\((?!https?:|mailto:|#)([^)\s]+)\)")
 # now owns the file and a flag that only the bundled script's own argument parser knows about.
 FORWARDING_SHIMS = {
     "probe_desktop_query": ("pbip-model-refresh", "--table"),
-    "refresh_pbip_model": ("pbip-model-refresh", "--ui-save"),
+    "refresh_pbip_model": ("pbip-model-refresh", "--ui-refresh"),
     "set_ai_instructions": ("powerbi-ai-readiness", "--strict"),
     "check_ai_readiness": ("powerbi-ai-readiness", "--all"),
 }
@@ -61,19 +61,28 @@ PBIP_REFRESH_SKILL = SKILLS_DIR / "pbip-model-refresh" / "SKILL.md"
 LIVE_SOURCE_SKILL = SKILLS_DIR / "live-source-reachability" / "SKILL.md"
 CREDENTIAL_DOC = REPO_ROOT / "docs" / "data-source-credentials.md"
 SCRIPTS_README = REPO_ROOT / "scripts" / "README.md"
-DESKTOP_VERDICT_TOKENS = (
+# Issue #831: any blocking dialog is a human stop, so a verdict table carries only these live tokens.
+LIVE_VERDICT_TOKENS = (
+    "READY",
+    "HUMAN_ACTION_REQUIRED",
+    "UNKNOWN",
+    "NO_WINDOW",
+    "DIALOG_NEEDS_HUMAN",
+    "CREDENTIAL_UNKNOWN",
+    "DESKTOP_UNREADY",
+)
+# Text-classification tokens #831 retired. Receipts still accept them; a current table must not list them.
+RETIRED_VERDICT_TOKENS = (
     "CREDENTIAL_MISSING",
     "CREDENTIAL_PRESENT",
     "REFRESH_IN_PROGRESS",
-    "DIALOG_NEEDS_HUMAN",
-    "DIALOG_UNRECOGNIZED",
     "DIALOG_UNREADABLE",
-    "READY",
+    "DIALOG_UNRECOGNIZED",
     "CREDENTIAL_REQUIRED",
-    "HUMAN_ACTION_REQUIRED",
     "UNKNOWN_DIALOG",
     "UNREADABLE_DIALOG",
 )
+DESKTOP_VERDICT_TOKENS = LIVE_VERDICT_TOKENS + RETIRED_VERDICT_TOKENS
 AMNESTY_BLOCK_LEAD = "### One read-only Desktop observer"
 PREFLIGHT_STEP_LEAD = "3. **Local:**"
 # The canonical clean-run paragraph: `DATA_OK` is earned, and an active dialog or any authoritative
@@ -206,12 +215,6 @@ def _repo_free_env() -> dict[str, str]:
     env.pop("PYTHONPATH", None)
     env.pop("PYTEST_CURRENT_TEST", None)
     env.pop("PYTEST_ADDOPTS", None)
-    # `T2P_RUN_GUI` is the PORTABLE opt-in the copied bundle's own conftest reads (issue #447), and
-    # inheriting it here would make a PORTABILITY check spawn ten real top-level windows as a side
-    # effect. Whoever exported it asked to run the gui tests, not to have a `test_skills.py` run
-    # hijack their desktop; CI's `--run-gui -m gui` leg is where those tests are actually executed.
-    # Dropping it also makes this nested run deterministic rather than ambient-environment-dependent.
-    env.pop("T2P_RUN_GUI", None)
     return env
 
 
@@ -221,7 +224,7 @@ def _nested_marker_filter() -> list[str]:
     This nested pytest is serial, but its PROCESS competes with every other xdist worker, and the
     bundle contains assertions on a ~0.03s operation finishing inside 0.5s. Measured (issue #387):
     that test failed at 0.519s inside this nested run during a parallel campaign, while the outer
-    suite's own copy of it - deselected by `-m "not (serial or timing)"` - never ran. The outer
+    suite's own copy of it - deselected by `-m "not timing"` - never ran. The outer
     exclusion structurally cannot reach here: the bundle is copied to a temp directory, so the repo
     root `conftest.py` and `pyproject.toml` are both absent by construction.
 
@@ -229,7 +232,7 @@ def _nested_marker_filter() -> list[str]:
     executes every test the bundle ships. Tier 1 trades those six for a loop that does not flake;
     tier 2 gives them back.
     """
-    return ["-m", "not (serial or timing)"] if os.environ.get("PYTEST_XDIST_WORKER") else []
+    return ["-m", "not timing"] if os.environ.get("PYTEST_XDIST_WORKER") else []
 
 
 @pytest.mark.parametrize("skill_dir", BUNDLED_SKILLS, ids=lambda p: p.name)
@@ -255,10 +258,10 @@ def test_a_bundled_skill_passes_its_own_tests_after_being_copied_out_of_this_rep
         for name in (
             "_desktop_actions.py",
             "_desktop_observer.py",
-            "_desktop_uia.ps1",
             "_desktop_actions.ps1",
         ):
             assert (copied / "scripts" / name).is_file(), f"portable observer dependency missing: {name}"
+        assert not (copied / "scripts" / "_desktop_uia.ps1").exists()
         assert not (copied / "scripts" / "_credential_modal.py").exists()
         assert not (copied / "scripts" / "probe_desktop_credential.ps1").exists()
     result = subprocess.run(
@@ -636,12 +639,10 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
             assert claim not in block, f"{name} still carries the retired claim {claim!r}"
 
     for name, needle in [
-        ("pbip-model-refresh verdict table", "do not stack"),
         ("pbip-model-refresh verdict table", "Act on the prompt visible in Desktop"),
         ("pbip-model-refresh verdict table", "the remedy is **not** established either"),
         ("pbip-model-refresh verdict table", "A bounded observation"),
         ("pbip-model-refresh length-amnesty status", "#406 remains closed"),
-        ("data-source-credentials verdict table", "do not stack"),
         ("data-source-credentials verdict table", "does **not** establish which action"),
         ("data-source-credentials verdict table", "A bounded observation only"),
         ("data-source-credentials preflight step", "bounded observation"),
@@ -650,14 +651,15 @@ def test_credential_guidance_states_only_what_the_desktop_arbiter_establishes() 
     ]:
         assert needle in guidance[name], f"{name} no longer states {needle!r}"
 
-    # Both ambiguous tokens must say it, not just one: a half-corrected table is the shape that let
-    # `DIALOG_UNREADABLE` inherit `DIALOG_UNRECOGNIZED`'s (stronger) claim in the first place.
+    # Issue #831: any blocking dialog is a human stop named by its title, and neither table may
+    # bring back a retired text-classification token as a row of current guidance.
     for name in ("pbip-model-refresh verdict table", "data-source-credentials verdict table"):
-        undetermined = guidance[name].count("undetermined in both directions")
-        assert undetermined >= 2, (
-            f"{name} states 'undetermined in both directions' {undetermined} time(s); "
-            "DIALOG_UNREADABLE and DIALOG_UNRECOGNIZED must each say it"
-        )
+        table = guidance[name]
+        assert "any blocking dialog is a human stop" in table.lower(), f"{name} lost the structural human stop"
+        assert 'dialog is open: "<title>"' in table, f"{name} no longer names the dialog title"
+        row_tokens = {row.split("`")[1] for row in table.splitlines()}
+        retired = sorted(row_tokens & set(RETIRED_VERDICT_TOKENS))
+        assert not retired, f"{name} still lists retired verdict token(s) {retired}"
 
     # A clean run is what earns DATA_OK: an active dialog, any authoritative non-success token, or a
     # non-zero exit outranks a stale or late DATA_OK-looking line. The refresh's own terminal

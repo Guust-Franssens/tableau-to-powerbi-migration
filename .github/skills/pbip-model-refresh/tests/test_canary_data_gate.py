@@ -425,31 +425,19 @@ def test_query_result_is_not_returned_after_bound_identity_changes(monkeypatch, 
 @pytest.mark.parametrize(
     "field,code",
     [
-        ("modal", "CREDENTIAL_MISSING"),
         ("dialog", "DIALOG_NEEDS_HUMAN"),
-        ("dialog", "DIALOG_UNREADABLE"),
-        ("dialog", "DIALOG_UNRECOGNIZED"),
-        ("dialog", "REFRESH_IN_PROGRESS"),
         ("process_gone", "DESKTOP_GONE"),
         ("desktop_unready", "DESKTOP_UNREADY"),
-        ("unknown_reason", "DIALOG_UNREADABLE"),
+        ("unknown_reason", "CREDENTIAL_UNKNOWN"),
     ],
 )
 def test_observation_refusals_are_one_attempt_and_do_not_query(monkeypatch, field, code):
     from _desktop_observer import DesktopWindow  # pylint: disable=import-outside-toplevel
 
     target = DesktopWindow("", "", 100, 100, hwnd=222)
-    value = code
-    if field == "modal":
-        value = probe_desktop_query.CredentialModal("", target)
-    elif field == "dialog":
-        kind = {
-            "DIALOG_NEEDS_HUMAN": "needs-human",
-            "DIALOG_UNREADABLE": "unreadable",
-            "DIALOG_UNRECOGNIZED": "unrecognized",
-            "REFRESH_IN_PROGRESS": "benign",
-        }[code]
-        value = probe_desktop_query.DialogFinding(kind, code, target)
+    value = {"unknown_reason": "timeout", "desktop_unready": "no_main_window", "process_gone": "exited"}.get(field)
+    if field == "dialog":
+        value = probe_desktop_query.DialogFinding(target, "Sign in")
     state = probe_desktop_query.Observation(**{field: value})
     calls = []
     monkeypatch.setattr(probe_desktop_query, "_credential_state", lambda pid, **_: calls.append(pid) or state)
@@ -459,11 +447,11 @@ def test_observation_refusals_are_one_attempt_and_do_not_query(monkeypatch, fiel
 
 
 def test_o23_completion_reader_never_runs_a_query_behind_a_structural_popup(monkeypatch):
-    """A stateless reader cannot adopt the UI watcher's popup or read through it."""
+    """A stateless reader never reads behind any dialog, Desktop's own Refresh popup included (#831 D1)."""
     from _desktop_observer import DesktopWindow, inspect_desktop_observer  # pylint: disable=import-outside-toplevel
 
     frame = DesktopWindow("", "", 1280, 800, hwnd=1111, enabled=False)
-    popup = DesktopWindow("Refresh", "", 500, 300, ("Evaluating...",), hwnd=2222, owner_hwnd=1111, owner_enabled=False)
+    popup = DesktopWindow("Refresh", "", 500, 300, hwnd=2222, owner_hwnd=1111, owner_enabled=False)
     calls = []
 
     def observe(pid, **_kwargs):
@@ -480,13 +468,17 @@ def test_late_credential_refusal_interrupts_the_bounded_read(monkeypatch):
     release = threading.Event()
     calls = []
 
+    from _desktop_observer import DesktopWindow  # pylint: disable=import-outside-toplevel
+
+    dialog = probe_desktop_query.DialogFinding(DesktopWindow("", "", 500, 300, hwnd=222), "Sign in")
+
     def inspect_state(_pid, *, in_flight=False, **_kwargs):
         calls.append(in_flight)
-        return probe_desktop_query.Observation(modal=object() if in_flight else None)
+        return probe_desktop_query.Observation(dialog=dialog if in_flight else None)
 
     monkeypatch.setattr(probe_desktop_query, "_credential_state", inspect_state)
     try:
-        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^CREDENTIAL_MISSING$"):
+        with pytest.raises(probe_desktop_query.ObservationUnavailable, match="^DIALOG_NEEDS_HUMAN$"):
             probe_desktop_query._observation_call(111, lambda: release.wait(5), 1)
         assert calls == [False, True]
     finally:
@@ -686,7 +678,7 @@ def test_read_result_waits_for_worker_termination_not_queue_publication(monkeypa
     assert published == [] and all(not worker.is_alive() for worker in workers)
 
 
-@pytest.mark.parametrize("failure", ["CREDENTIAL_MISSING", "DIALOG_UNREADABLE", "PID_REUSED"])
+@pytest.mark.parametrize("failure", ["DIALOG_NEEDS_HUMAN", "CREDENTIAL_UNKNOWN", "PID_REUSED"])
 def test_inspection_failure_after_queued_read_still_refuses(monkeypatch, failure):
     inspecting, release, queued, returned = (threading.Event() for _ in range(4))
     published, failures = [], []
@@ -759,7 +751,7 @@ def test_monitor_handoff_keeps_fresh_final_check_without_postfinal_admission(mon
         else:
             events.append("final" if in_flight else "initial")
             if in_flight and final_failure:
-                raise getattr(probe_desktop_query, "ObservationUnavailable")("DIALOG_UNRECOGNIZED")
+                raise getattr(probe_desktop_query, "ObservationUnavailable")("DIALOG_NEEDS_HUMAN")
         return getattr(probe_desktop_query, "Observation")()
 
     def read():
@@ -788,23 +780,15 @@ def test_monitor_handoff_keeps_fresh_final_check_without_postfinal_admission(mon
         caller.join(5)
     assert not caller.is_alive()
     assert events == (["initial", "monitor", "read", "final"] if monitor_wins else ["initial", "read", "final"])
-    assert results == ([("DIALOG_UNRECOGNIZED",)] if final_failure else ["private facts"])
+    assert results == ([("DIALOG_NEEDS_HUMAN",)] if final_failure else ["private facts"])
 
 
-def test_hung_admitted_monitor_withholds_final_and_result_and_settles_owned_helpers(monkeypatch):
+def test_hung_admitted_monitor_withholds_final_and_result(monkeypatch):
     """An admitted hung monitor cannot earn final-check/result publication or a new deadline."""
     entered, release = threading.Event(), threading.Event()
     events, workers = [], []
     supervisor = getattr(probe_desktop_query, "watch")(
         111, deadline=time.monotonic() + 1, operation_id="00000000-0000-0000-0000-000000000001"
-    )
-    helper_events = []
-    getattr(supervisor, "_children").append(
-        SimpleNamespace(
-            poll=lambda: None,
-            kill=lambda: helper_events.append("kill"),
-            wait=lambda: helper_events.append("wait"),
-        )
     )
 
     def inspect_state(_pid, *, in_flight=False, **_kwargs):
@@ -826,46 +810,9 @@ def test_hung_admitted_monitor_withholds_final_and_result_and_settles_owned_help
     try:
         with pytest.raises(getattr(probe_desktop_query, "ObservationUnavailable"), match="^TIMEOUT$"):
             getattr(probe_desktop_query, "_observation_call")(111, read, 0.1)
-        assert events == ["read"] and supervisor.closed and helper_events == ["kill", "wait"]
+        assert events == ["read"] and supervisor.closed
     finally:
         release.set()
         for worker in workers:
             worker.join(3)
     assert all(not worker.is_alive() for worker in workers)
-
-
-def test_handoff_result_is_private_until_owned_helper_teardown_finishes(monkeypatch):
-    """Successful final checks still cannot publish ahead of owned native-helper settlement."""
-    entered, release = threading.Event(), threading.Event()
-    events, results = [], []
-    supervisor = getattr(probe_desktop_query, "watch")(
-        111, deadline=time.monotonic() + 4, operation_id="00000000-0000-0000-0000-000000000001"
-    )
-
-    def wait():
-        events.append("wait")
-        entered.set()
-        assert release.wait(3)
-
-    getattr(supervisor, "_children").append(
-        SimpleNamespace(poll=lambda: None, kill=lambda: events.append("kill"), wait=wait)
-    )
-    monkeypatch.setattr(probe_desktop_query, "watch", lambda *_args, **_kwargs: supervisor)
-    monkeypatch.setattr(
-        probe_desktop_query,
-        "_credential_state",
-        lambda *_args, **_kwargs: getattr(probe_desktop_query, "Observation")(),
-    )
-    caller = threading.Thread(
-        target=lambda: results.append(
-            getattr(probe_desktop_query, "_observation_call")(111, lambda: "private facts", 4)
-        )
-    )
-    caller.start()
-    try:
-        assert entered.wait(3), "must settle the native helper before publishing"
-        assert caller.is_alive() and not results and events == ["kill", "wait"]
-    finally:
-        release.set()
-        caller.join(5)
-    assert not caller.is_alive() and results == ["private facts"]
