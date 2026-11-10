@@ -18,18 +18,21 @@ from collections.abc import Callable
 from ctypes import wintypes
 from dataclasses import dataclass
 
-from _desktop_observer import main_frame, observe
+from _desktop_observer import (
+    PROCESS_QUERY_LIMITED_INFORMATION_SYNCHRONIZE,
+    configure_kernel32,
+    held_process_start,
+    main_frame,
+    observe,
+)
 
-# .NET ticks (100 ns) at 1970-01-01 UTC, and at 1601-01-01 UTC (the FILETIME epoch).
+# .NET ticks (100 ns) at 1970-01-01 UTC.
 TICKS_AT_UNIX_EPOCH = 621355968000000000
-TICKS_AT_FILETIME_EPOCH = 504911232000000000
 TICKS_PER_MS = 10000
 # Windows PowerShell 5.1 ConvertTo-Json of Win32_Process.CreationDate, as check_desktop_orphans stores it.
 _LAUNCH_RECORD = re.compile(r"/Date\(([0-9]{1,19})\)/")
 
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE = -3
-PROCESS_QUERY_LIMITED_INFORMATION_SYNCHRONIZE = 0x101000
-WAIT_TIMEOUT = 258
 GW_OWNER = 4
 MONITOR_DEFAULTTONEAREST = 2
 SWP_NOZORDER = 0x0004
@@ -158,8 +161,7 @@ class Win32Api:
     def __init__(self) -> None:
         self.user32 = user32 = ctypes.WinDLL("user32", use_last_error=True)
         self.kernel32 = kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        hwnd, handle, rect = wintypes.HWND, wintypes.HANDLE, ctypes.POINTER(wintypes.RECT)
-        u64 = ctypes.POINTER(ctypes.c_ulonglong)
+        hwnd, rect = wintypes.HWND, ctypes.POINTER(wintypes.RECT)
         signatures = (
             (user32.SetThreadDpiAwarenessContext, [ctypes.c_void_p], ctypes.c_void_p),
             (user32.IsWindow, [hwnd], wintypes.BOOL),
@@ -173,14 +175,10 @@ class Win32Api:
             (user32.MonitorFromWindow, [hwnd, wintypes.DWORD], wintypes.HMONITOR),
             (user32.GetMonitorInfoW, [wintypes.HMONITOR, ctypes.POINTER(_MonitorInfo)], wintypes.BOOL),
             (user32.SetWindowPos, [hwnd, hwnd] + [ctypes.c_int] * 4 + [wintypes.UINT], wintypes.BOOL),
-            (kernel32.OpenProcess, [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], handle),
-            (kernel32.GetProcessId, [handle], wintypes.DWORD),
-            (kernel32.WaitForSingleObject, [handle, wintypes.DWORD], wintypes.DWORD),
-            (kernel32.GetProcessTimes, [handle, u64, u64, u64, u64], wintypes.BOOL),
-            (kernel32.CloseHandle, [handle], wintypes.BOOL),
         )
         for function, argtypes, restype in signatures:
             function.argtypes, function.restype = argtypes, restype
+        configure_kernel32(kernel32)
 
     def set_thread_dpi_awareness_context(self, context: int) -> int:
         """Previous context, or 0 when the call failed."""
@@ -191,17 +189,11 @@ class Win32Api:
         return self.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION_SYNCHRONIZE, False, pid) or 0
 
     def process_start_ticks(self, handle: int, pid: int) -> str | None:
-        """UTC .NET ticks truncated to 10, the observer's token; None when exited or aliased."""
-        # OpenProcess ignores a PID's low two bits, so pid+1..+3 would open pid.
-        if self.kernel32.GetProcessId(handle) != pid or self.kernel32.WaitForSingleObject(handle, 0) != WAIT_TIMEOUT:
+        """The observer's start token for a held handle; None when exited, aliased or unreadable."""
+        try:
+            return held_process_start(self.kernel32, handle, pid)
+        except OSError:
             return None
-        times = [ctypes.c_ulonglong() for _ in range(4)]
-        if not self.kernel32.GetProcessTimes(handle, *(ctypes.byref(value) for value in times)):
-            return None
-        if self.kernel32.WaitForSingleObject(handle, 0) != WAIT_TIMEOUT:
-            return None
-        ticks = times[0].value + TICKS_AT_FILETIME_EPOCH
-        return str(ticks - ticks % 10)
 
     def close_handle(self, handle: int) -> None:
         """Release the process handle."""

@@ -89,7 +89,7 @@ Eligible files: tracked Markdown knowledge/navigation files, `.github/pbi.kb/**/
 | Find migration guidance | [`docs/migration-spec.md`](../docs/migration-spec.md) | `migration-spec.json` contract. |
 | Find migration guidance | [`docs/operator-runbook.md`](../docs/operator-runbook.md) | Manual pipeline operation, the failure playbook, and §4.12 **Windows/PowerShell misreads** — `NativeCommandError` on a command that exited 0, long-path `Remove-Item`, `Start-Process -ArgumentList` mangling a multi-word `--workbook`, and `requests`+certifi failing TLS where the toolkit's `urllib` + Windows certificate store succeeds. |
 | Test the offline deployment rehearsal | [`docs/offline-mock-harness.md`](offline-mock-harness.md) | Offline Tableau-to-Fabric mock harness and fidelity boundary. |
-| Run the test suite | [`docs/parallel-test-loop.md`](parallel-test-loop.md) | Fast parallel loop vs the serial pre-PR gate, and the `serial` marker. |
+| Run the test suite | [`docs/parallel-test-loop.md`](parallel-test-loop.md) | Fast parallel loop vs the serial pre-PR gate. |
 | Find migration guidance | [`docs/reference-capture.md`](../docs/reference-capture.md) | Tableau reference capture and evidence grading. |
 | Find migration guidance | [`docs/reference-readiness.md`](../docs/reference-readiness.md) | Post-emission reference prerequisite for agentic work: completeness, evidence and grade; conversion/dispatch/fidelity boundaries. |
 | Migrate ONE workbook by hand | [`docs/start-with-one-workbook.md`](../docs/start-with-one-workbook.md) | Bring-your-own `.twb` + screenshots, no Tableau Server: the verified command sequence, the `tableau-<exact name>.png` naming contract, and the Desktop-connection prerequisite. |

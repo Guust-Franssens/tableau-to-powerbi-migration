@@ -8,9 +8,7 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -29,12 +27,9 @@ import _source_scope as scope
 import probe_desktop_query as query_probe
 import refresh_pbip_model
 from _desktop_observer import (
-    CredentialModal,
     DesktopWindow,
     DialogFinding,
     Observation,
-    inspect_desktop_observer,
-    legacy_token,
 )
 from _desktop_actions import (
     ActionResult,
@@ -207,7 +202,7 @@ def test_ui_main_readiness_gate_precedes_cache_and_never_uses_legacy_bridge(
     context, _args, calls = _wire_ui_route(monkeypatch, no_save=True)
     instance = _ready_bridge()["instances"][0]
     sequence = []
-    for name in ("_resolve_pid", "_instance", "_bridge_status", "_refresh_and_save", "save"):
+    for name in ("_resolve_pid", "_instance", "_bridge_status", "_refresh_and_save"):
         monkeypatch.setattr(refresh_pbip_model, name, lambda *_args: pytest.fail("legacy UI path"))
 
     def wait(pid, deadline):
@@ -232,7 +227,6 @@ def test_ui_main_readiness_gate_precedes_cache_and_never_uses_legacy_bridge(
         lambda *_args: _ready_bridge(),
     )
     monkeypatch.setattr(refresh_pbip_model, "cache_file", cache)
-    monkeypatch.setattr(refresh_pbip_model, "source_hint_from_model", lambda _path: None)
     root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
     monkeypatch.setattr(
         refresh_pbip_model,
@@ -358,7 +352,7 @@ def _ui_refresh_route(  # pylint: disable=too-many-locals
         phase("baseline")
         return original_snapshot(*args, **kwargs)
 
-    for name in ("_resolve_pid", "_instance", "_bridge_status", "_refresh_and_save", "save"):
+    for name in ("_resolve_pid", "_instance", "_bridge_status", "_refresh_and_save"):
         monkeypatch.setattr(refresh_pbip_model, name, lambda *_args: pytest.fail("legacy UI path"))
     monkeypatch.setattr(refresh_pbip_model, "_wait_ui_bridge", wait)
     monkeypatch.setattr(refresh_pbip_model, "_credential_state", observe)
@@ -368,7 +362,6 @@ def _ui_refresh_route(  # pylint: disable=too-many-locals
     monkeypatch.setattr(refresh_pbip_model, "bind_desktop", bind)
     monkeypatch.setattr(refresh_pbip_model, "_identity_gate", identity)
     monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", snapshot)
-    monkeypatch.setattr(refresh_pbip_model, "source_hint_from_model", lambda _path: None)
     return controls, events, actions_seen, bridge_operations
 
 
@@ -443,11 +436,9 @@ def test_ui_refresh_refuses_unestablished_initial_absolute_path(ui_refresh_route
 @pytest.mark.parametrize(
     "bad",
     [
-        "credential",
         "prompt",
-        "unknown",
+        "untitled",
         "incomplete",
-        "progress",
         "pid",
         "start",
         "missing_start",
@@ -460,17 +451,9 @@ def test_ui_refresh_observer_refuses_prompts_uncertainty_and_identity_changes(
 ) -> None:
     controls, events, actions_seen, bridge_operations = ui_refresh_route
     state = controls["observer"]
-    if bad in {"credential", "prompt", "unknown", "progress"}:
+    if bad in {"prompt", "untitled"}:
         window = DesktopWindow("PRIVATE UI TEXT", "", 100, 100, hwnd=790, owner_hwnd=789)
-        if bad == "credential":
-            state = replace(state, modal=CredentialModal("PRIVATE CREDENTIAL", window))
-        else:
-            kind, verdict = {
-                "prompt": ("needs-human", "DIALOG_NEEDS_HUMAN"),
-                "unknown": ("unrecognized", "DIALOG_UNRECOGNIZED"),
-                "progress": ("benign", "REFRESH_IN_PROGRESS"),
-            }[bad]
-            state = replace(state, dialog=DialogFinding(kind, verdict, window))
+        state = replace(state, dialog=DialogFinding(window, "Sign in" if bad == "prompt" else ""))
     elif bad == "incomplete":
         state = replace(state, complete=False)
     elif bad == "pid":
@@ -487,10 +470,15 @@ def test_ui_refresh_observer_refuses_prompts_uncertainty_and_identity_changes(
     assert not actions_seen, "observer refusal must withhold Refresh/Save"
     output = capsys.readouterr().out
     assert "PRIVATE" not in output
-    if bad == "prompt":
-        assert "DIALOG_NEEDS_HUMAN" in output
-    elif bad == "credential":
-        assert result == 1 and "CREDENTIAL_MISSING" in output
+    if bad in {"prompt", "untitled"}:
+        # Any dialog is a human stop at exit 3, named by its sanitized title (#831 D1).
+        assert result == 3
+        named = '"Sign in"' if bad == "prompt" else "(no title)"
+        assert (
+            f"REFRESH: DIALOG_NEEDS_HUMAN pid=123; a Power BI Desktop dialog is open{':' if bad == 'prompt' else ''}"
+            in output
+        )
+        assert named in output
 
 
 @pytest.mark.parametrize("stage", ["initial", "observer"])
@@ -1036,19 +1024,18 @@ def test_explicit_ui_refresh_executes_current_m_including_custom_sql(
     assert calls == ["Refresh", "canaries"] + ([] if no_save else ["Save"])
 
 
-@pytest.mark.parametrize("final_state", ["READY", "REFRESH_IN_PROGRESS", "UNKNOWN", "PROMPT"])
+@pytest.mark.parametrize("final_state", ["READY", "DIALOG", "UNKNOWN"])
 def test_completion_awaits_real_bound_reader_progress_without_suppressing_refusals(
     monkeypatch: pytest.MonkeyPatch, final_state: str
 ) -> None:
+    """T9: a dialog during the wait never stops it; completion comes only from typed RefreshedTime (#831 D2)."""
     identity = query_probe.DesktopIdentity(123, "456", 124, "457", 49157)
     bound = query_probe.BoundDesktop(identity, "00000000-0000-0000-0000-000000000001")
     root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
+    popup = DesktopWindow("Refresh", "", 100, 100, hwnd=790, owner_hwnd=789, pid="123")
     ready = Observation(pid="123", process_started_at="456", target_window=root)
-    progress = Observation(
-        pid="123",
-        process_started_at="456",
-        target_window=root,
-        dialog=DialogFinding("needs-human", "DIALOG_NEEDS_HUMAN", root),
+    blocked = Observation(
+        pid="123", process_started_at="456", target_window=root, dialog=DialogFinding(popup, "Refresh")
     )
     reads = []
     connection = _Connection([(10, "Orders", 0)], [_partition()])
@@ -1063,107 +1050,58 @@ def test_completion_awaits_real_bound_reader_progress_without_suppressing_refusa
 
     def observe(*_args, **_kwargs):
         observed.append("poll")
-        if len(observed) == 1 or final_state == "REFRESH_IN_PROGRESS":
-            return progress
+        if len(observed) == 1 or final_state == "DIALOG":
+            return blocked
         if final_state == "UNKNOWN":
             return Observation(complete=False, unknown_reason="incomplete")
-        if final_state == "PROMPT":
-            return Observation(dialog=DialogFinding("needs-human", "DIALOG_NEEDS_HUMAN", root))
         return ready
 
+    outer = []
+
+    def outer_observe(*_args, **_kwargs):
+        outer.append("watch")
+        return blocked if final_state == "DIALOG" or not observed else ready
+
     monkeypatch.setattr(query_probe, "_credential_state", observe)
-    monkeypatch.setattr(
-        refresh_pbip_model,
-        "_credential_state",
-        lambda *_args, **_kwargs: progress if final_state == "PROMPT" and observed else ready,
-    )
+    monkeypatch.setattr(refresh_pbip_model, "_credential_state", outer_observe)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.01)
-    context = UIRefreshContext(123, 49157, bound, 789, None)
+    context = UIRefreshContext(123, 49157, bound, 789)
     baseline = _snapshot_from_connection(connection, bound.catalogue)
     connection.partitions = [_partition(refreshed=datetime(2026, 10, 28, 12, 1, tzinfo=timezone.utc))]
-    if final_state == "PROMPT":
+    started = baseline.partitions[0].refreshed_ticks + 1
+    if final_state == "DIALOG":
+        begun = time.monotonic()
         with pytest.raises(refresh_pbip_model.DialogFoundError) as failure:
-            refresh_pbip_model._wait_for_engine_completion(
-                context, baseline, baseline.partitions[0].refreshed_ticks + 1, time.monotonic() + 2.5
-            )
-        assert failure.value.finding.verdict == "DIALOG_NEEDS_HUMAN"
+            refresh_pbip_model._wait_for_engine_completion(context, baseline, started, begun + 0.6)
+        # The dialog was relayed, not obeyed: the wait ran to its backstop before judging it.
+        assert time.monotonic() - begun >= 0.6
+        assert failure.value.finding.title == "Refresh"
+        assert len(outer) >= 2
         assert not reads
     elif final_state == "UNKNOWN":
-        with pytest.raises(query_probe.ObservationUnavailable, match="DIALOG_UNREADABLE"):
-            refresh_pbip_model._wait_for_engine_completion(
-                context, baseline, baseline.partitions[0].refreshed_ticks + 1, time.monotonic() + 2.5
-            )
+        with pytest.raises(query_probe.ObservationUnavailable, match="CREDENTIAL_UNKNOWN"):
+            refresh_pbip_model._wait_for_engine_completion(context, baseline, started, time.monotonic() + 2.5)
         assert not reads
     else:
-        # Only the tracker-free reader's structural stop retries; it never runs the query behind it.
-        complete, _ = refresh_pbip_model._wait_for_engine_completion(
-            context, baseline, baseline.partitions[0].refreshed_ticks + 1, time.monotonic() + 2.5
-        )
-        assert complete is (final_state == "READY")
-        assert bool(reads) is complete
-    assert observed
-
-
-@pytest.mark.parametrize(
-    "token,tolerated",
-    [
-        ("DIALOG_UNREADABLE", False),
-        ("DIALOG_UNRECOGNIZED", False),
-        ("REFRESH_IN_PROGRESS", False),
-        ("CREDENTIAL_MISSING", False),
-        ("DIALOG_NEEDS_HUMAN", True),
-        ("DESKTOP_UNREADY", False),
-        ("TIMEOUT", False),
-    ],
-)
-def test_completion_worker_retries_only_desktop_popup_read_refusals(
-    monkeypatch: pytest.MonkeyPatch, token: str, tolerated: bool
-) -> None:
-    reads: list[str] = []
-
-    def read(*_args, **_kwargs) -> PartitionSnapshot:
-        reads.append("read")
-        if len(reads) == 1:
-            raise query_probe.ObservationUnavailable(token)
-        return _snapshot(ticks=300)
-
-    monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", read)
-    monkeypatch.setattr(
-        refresh_pbip_model, "_ui_observer_state", lambda *_args, **_kwargs: SimpleNamespace(state="READY")
-    )
-    context = UIRefreshContext(123, 49157, SimpleNamespace(identity=None), 789, None)
-    wait = refresh_pbip_model._wait_for_engine_completion
-    if tolerated:
-        complete, result = wait(context, _snapshot(ticks=100), 200, time.monotonic() + 4)
-        assert complete and result is not None and result.complete
-        assert reads == ["read", "read"]
-    else:
-        with pytest.raises(query_probe.ObservationUnavailable) as failure:
-            wait(context, _snapshot(ticks=100), 200, time.monotonic() + 4)
-        assert str(failure.value) == token
-        assert reads == ["read"]
+        # The reader's DIALOG_NEEDS_HUMAN refusal retried; it never ran the query behind the dialog.
+        complete, _ = refresh_pbip_model._wait_for_engine_completion(context, baseline, started, time.monotonic() + 2.5)
+        assert complete
+        assert reads and len(observed) >= 2
 
 
 def _held_ui_context() -> UIRefreshContext:
-    return UIRefreshContext(123, 49157, SimpleNamespace(identity=SimpleNamespace(process_start="456")), 789, None)
+    return UIRefreshContext(123, 49157, SimpleNamespace(identity=SimpleNamespace(process_start="456")), 789)
 
 
 def _settle_observation(left: str) -> Observation:
     root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
     window = DesktopWindow("", "", 100, 100, hwnd=888, owner_hwnd=789, complete=False, reason="patterns_incomplete")
-    if left == "progress":
-        return Observation(
-            pid="123",
-            process_started_at="456",
-            target_window=root,
-            dialog=DialogFinding("benign", "REFRESH_IN_PROGRESS", root),
-        )
     if left == "dialog":
         return Observation(
             pid="123",
             process_started_at="456",
             target_window=root,
-            dialog=DialogFinding("unreadable", "DIALOG_UNREADABLE", window),
+            dialog=DialogFinding(window, "Refresh"),
         )
     if left == "unready":
         return Observation(pid="123", process_started_at="456", desktop_unready="no_main_window")
@@ -1174,15 +1112,14 @@ def _settle_observation(left: str) -> Observation:
     return Observation(pid="123", process_started_at="456", target_window=root)
 
 
-@pytest.mark.parametrize("left", ["progress", "dialog"])
+@pytest.mark.parametrize("left", ["ready", "dialog"])
 def test_completion_wait_judges_leftover_popup_inside_the_original_deadline(
     monkeypatch: pytest.MonkeyPatch, left: str
 ) -> None:
-    """Desktop's popup never ends the engine wait early, never extends it, and is judged at its end."""
+    """A dialog never ends the engine wait early, never extends it, and is judged at its end (#831 D2)."""
     leftover = _settle_observation(left)
     observer_budgets: list[float] = []
     read_budgets: list[float] = []
-    holds: list[Observation] = []
 
     def observe(*_args, timeout_s, **_kwargs) -> Observation:
         observer_budgets.append(timeout_s)
@@ -1195,7 +1132,6 @@ def test_completion_wait_judges_leftover_popup_inside_the_original_deadline(
     monkeypatch.setattr(refresh_pbip_model, "_in_flight_credential_state", observe)
     monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", read)
     monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(refresh_pbip_model, "_hold_ui_refusal_evidence", lambda _pid, state, _dir: holds.append(state))
     started = time.monotonic()
     deadline = started + 0.3
     # Production budgets are `deadline - now` with now >= started, so this represented span is
@@ -1209,17 +1145,16 @@ def test_completion_wait_judges_leftover_popup_inside_the_original_deadline(
         outcome = exc
     ended = time.monotonic()
 
-    if left == "progress":
-        # Only Desktop's own progress popup remained: an honest TIMEOUT, not a dialog finding.
+    if left == "ready":
+        # The reader refused throughout but nothing is open now: an honest TIMEOUT.
         assert outcome == (False, None)
-        assert not holds
     else:
-        # An unknown dialog still up at the deadline is judged and reported, never folded into TIMEOUT.
+        # A dialog still up at the deadline is judged and named, never folded into TIMEOUT.
         assert isinstance(outcome, refresh_pbip_model.DialogFoundError), outcome
-        assert outcome.finding.verdict == "DIALOG_UNREADABLE"
-        assert not holds, "terminal capture belongs to the caller's refusal emitter"
-    assert len(observer_budgets) >= (2 if left == "progress" else 1)
-    assert bool(read_budgets) is (left == "progress"), "a terminal first watcher poll withholds the reader"
+        assert outcome.finding.title == "Refresh"
+    assert ended >= deadline, "the wait ended before its backstop"
+    assert len(observer_budgets) >= 2
+    assert read_budgets, "a dialog must not withhold the completion reader"
     assert max(observer_budgets + read_budgets) <= budget
     assert ended < deadline + 1.0
 
@@ -1228,9 +1163,8 @@ def test_completion_wait_judges_leftover_popup_inside_the_original_deadline(
     "left,deadline_seconds,expected",
     [
         ("ready", 1000.0, "READY"),
-        ("progress", 0.5, None),
-        ("progress", 1000.0, None),
-        ("dialog", 1000.0, "DialogFoundError:DIALOG_UNREADABLE"),
+        ("dialog", 0.5, "DialogFoundError:DIALOG_NEEDS_HUMAN"),
+        ("dialog", 1000.0, "DialogFoundError:DIALOG_NEEDS_HUMAN"),
         ("unready", 1000.0, "DesktopUnreadyError:no_main_window"),
         ("incomplete", 1000.0, "CredentialUnknownError:backend_failed"),
         ("other_root", 1000.0, "DesktopUnreadyError:window_identity_changed"),
@@ -1241,7 +1175,6 @@ def test_ui_settle_wait_is_capped_by_the_held_deadline_and_judges_what_remains(
 ) -> None:
     clock = [1000.0]
     budgets: list[float] = []
-    holds: list[Observation] = []
     leftover = _settle_observation(left)
 
     def observe(*_args, timeout_s, **_kwargs) -> Observation:
@@ -1251,7 +1184,6 @@ def test_ui_settle_wait_is_capped_by_the_held_deadline_and_judges_what_remains(
     monkeypatch.setattr(refresh_pbip_model.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(refresh_pbip_model.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     monkeypatch.setattr(refresh_pbip_model, "_in_flight_credential_state", observe)
-    monkeypatch.setattr(refresh_pbip_model, "_hold_ui_refusal_evidence", lambda _pid, state, _dir: holds.append(state))
     deadline = clock[0] + deadline_seconds
     limit = min(deadline, clock[0] + refresh_pbip_model.UI_SETTLE_SECONDS)
     try:
@@ -1262,165 +1194,16 @@ def test_ui_settle_wait_is_capped_by_the_held_deadline_and_judges_what_remains(
         refresh_pbip_model.DesktopUnreadyError,
         refresh_pbip_model.CredentialUnknownError,
     ) as exc:
-        detail = exc.finding.verdict if isinstance(exc, refresh_pbip_model.DialogFoundError) else exc.reason
+        detail = "DIALOG_NEEDS_HUMAN" if isinstance(exc, refresh_pbip_model.DialogFoundError) else exc.reason
         outcome = f"{type(exc).__name__}:{detail}"
 
     assert outcome == expected
-    assert not holds
     # The settle never reaches past the original deadline, nor past its own window.
     assert clock[0] <= limit
     assert max(budgets) <= limit - 1000.0
-    if expected is None:
+    if left in {"dialog", "incomplete"}:
+        # A dialog gets the whole settle window to be closed before it is judged.
         assert clock[0] == limit
-
-
-@pytest.mark.parametrize("phase", ["initial", "poll"])
-@pytest.mark.parametrize(
-    "finding_kind", ["unreadable", "unrecognized", "needs-human", "no_finding", "progress", "transient"]
-)
-@pytest.mark.parametrize("capture_failure", [False, True])
-def test_ui_completion_reports_held_finding_through_real_bound_reader(  # pylint: disable=too-many-locals,too-many-statements
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    phase: str,
-    finding_kind: str,
-    capture_failure: bool,
-) -> None:
-    """Keep the caller, completion wait and supervised bound reads; replace only external I/O."""
-    identity = query_probe.DesktopIdentity(123, "456", 124, "457", 49157)
-    bound = query_probe.BoundDesktop(identity, "00000000-0000-0000-0000-000000000001")
-    root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
-    ready = Observation(pid="123", process_started_at="456", target_window=root)
-    window = DesktopWindow("", "", 100, 100, hwnd=888, owner_hwnd=789, complete=False, reason="patterns_incomplete")
-    tokens = {
-        "unreadable": "DIALOG_UNREADABLE",
-        "transient": "DIALOG_NEEDS_HUMAN",
-        "unrecognized": "DIALOG_UNRECOGNIZED",
-        "needs-human": "DIALOG_NEEDS_HUMAN",
-    }
-    kind = "needs-human" if finding_kind == "transient" else finding_kind
-    finding = DialogFinding(kind, tokens.get(finding_kind, "REFRESH_IN_PROGRESS"), window)
-    blocked = Observation(
-        pid="123",
-        process_started_at="456",
-        target_window=root,
-        dialog=None if finding_kind == "no_finding" else finding,
-        complete=False,
-        unknown_reason="backend_failed" if finding_kind == "no_finding" else None,
-    )
-    progress = Observation(
-        pid="123",
-        process_started_at="456",
-        target_window=root,
-        dialog=DialogFinding("benign", "REFRESH_IN_PROGRESS", root),
-    )
-    calls = []
-    completion_polls = []
-    reader_refusals = []
-    read_released = threading.Event()
-    diagnostics = []
-    image_handoffs = []
-    connection = _Connection([(10, "Orders", 0)], [_partition()])
-
-    def popup_open() -> bool:
-        """Desktop's own Refresh popup: visible for the first completion polls, then gone."""
-        return finding_kind == "transient" and "Refresh" in calls and len(completion_polls) < 3
-
-    def open_connection() -> None:
-        if "Refresh" in calls and phase == "poll":
-            assert read_released.wait(2), "completion observer never released the controlled engine read"
-
-    def observe(*_args, **_kwargs):
-        if "Refresh" not in calls:
-            return ready
-        completion_polls.append("poll")
-        if phase == "poll" and len(completion_polls) == 1:
-            return ready
-        read_released.set()
-        if finding_kind == "progress":
-            return progress if len(completion_polls) == 1 else ready
-        if finding_kind == "transient":
-            return progress if popup_open() else ready
-        return blocked
-
-    def reader_state(*_args, **_kwargs):
-        if popup_open():
-            reader_refusals.append("popup")
-            return blocked
-        return ready
-
-    def invoke(action, **_kwargs):
-        calls.append(action)
-        # Every partition really advances on the mock engine, even in the refusal cases.
-        connection.partitions = [_partition(refreshed=datetime(2026, 10, 28, 12, 1, tzinfo=timezone.utc))]
-        return ActionResult(action, True, "invoke_returned", baseline_ticks + 1)
-
-    baseline_ticks = actions._typed_utc_ticks(BASELINE)
-    monkeypatch.setattr(connection, "Open", open_connection, raising=False)
-    monkeypatch.setattr(connection, "Close", lambda: None, raising=False)
-    monkeypatch.setattr(query_probe, "desktop_identity", lambda *_args: identity)
-    monkeypatch.setattr(query_probe, "catalogue_id", lambda *_args, **_kwargs: bound.catalogue)
-    monkeypatch.setattr(query_probe, "_load_adomd", lambda: lambda *_args: connection)
-    monkeypatch.setattr(query_probe, "_credential_state", reader_state)
-    monkeypatch.setattr(refresh_pbip_model, "_credential_state", observe)
-    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(refresh_pbip_model, "UI_SETTLE_SECONDS", 0.3)
-    monkeypatch.setattr(refresh_pbip_model, "_identity_gate", lambda *_args: True)
-    monkeypatch.setattr(refresh_pbip_model, "invoke_desktop_action", invoke)
-
-    def hold_refusal(_self: object, pid: int, state: Observation) -> bool:
-        """Exercise a diagnostic failure without replacing the original refusal."""
-        image_handoffs.append((pid, state))
-        if phase == "poll":
-            assert read_released.is_set(), "capture preceded completion-reader release"
-        if capture_failure:
-            raise OSError("controlled capture failed")
-        return True
-
-    monkeypatch.setattr("refresh_pbip_model.ModalVisualEvidence.hold_refusal", hold_refusal)
-    monkeypatch.setattr(
-        refresh_pbip_model,
-        "probe_observations",
-        lambda *_args, **_kwargs: calls.append("canaries") or [SimpleNamespace(table="Orders", returned_rows=1)],
-    )
-    monkeypatch.setattr(refresh_pbip_model, "_emit_data_verdict", lambda *_args: 0)
-    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_command", lambda: ["controlled-bridge"])
-    monkeypatch.setattr(refresh_pbip_model, "_ui_bridge_status", lambda *_args: _ready_bridge())
-    monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda *_args, **_kwargs: Path("missing-cache.abf"))
-    monkeypatch.setattr(
-        sys.modules["_desktop_observer"],
-        "print_dialog_diagnostic",
-        lambda pid, target, **_kwargs: diagnostics.append((pid, target)),
-    )
-    args = SimpleNamespace(refresh_absolute_timeout_seconds=4, no_save=False, canaries=["Orders"], tables=None)
-    result = refresh_pbip_model._ui_refresh_locked(
-        UIRefreshContext(123, 49157, bound, 789, None), Path("missing-cache.abf"), args
-    )
-    output = capsys.readouterr().out
-    assert len(image_handoffs) == int(finding_kind == "needs-human")
-    if image_handoffs:
-        assert image_handoffs[0][0] == 123 and image_handoffs[0][1].dialog is finding
-    if finding_kind in {"progress", "transient"}:
-        assert result == 0, output
-        assert calls == ["Refresh", "canaries", "Save"], output
-        assert "engine completion: all source partitions READY" in output
-        assert not diagnostics
-        # The bound reader really refused while the popup was up, and the wait retried past it.
-        assert bool(reader_refusals) is (finding_kind == "transient")
-    else:
-        assert result == 3, output
-        assert calls == ["Refresh"], output
-        token = tokens.get(finding_kind, "CREDENTIAL_UNKNOWN")
-        assert f"REFRESH: {token} pid=123;" in output
-        expected_diagnostic = finding_kind in {"unreadable", "unrecognized"} or (
-            finding_kind == "needs-human" and capture_failure
-        )
-        assert diagnostics == ([(123, window)] if expected_diagnostic else [])
-        assert "to the deadline" not in output
-        if finding_kind == "no_finding":
-            assert "Completion observation unavailable" in output
-            assert "credential state unestablished" in output
-        assert "engine completion:" not in output
 
 
 @pytest.mark.parametrize("change", ["identity", "ownership", "none"])
@@ -1523,7 +1306,6 @@ def test_cli_preflight_consumes_original_ui_deadline_before_any_action(
         lambda *_args: _ready_bridge(),
     )
     monkeypatch.setattr(refresh_pbip_model, "cache_file", lambda _pid, **_kwargs: Path("missing-cache.abf"))
-    monkeypatch.setattr(refresh_pbip_model, "source_hint_from_model", lambda _path: None)
     root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
     ready = Observation(pid="123", process_started_at="456", target_window=root)
 
@@ -2481,6 +2263,46 @@ def test_completion_from_a_never_processed_baseline_still_demands_ready_and_fres
         assert (result.complete, result.reason) == (False, reason)
 
 
+_COUNT_FIXTURES = [
+    (_snapshot(ticks=100), _snapshot(ticks=200), 150),
+    (_snapshot(ticks=100), _snapshot(ticks=100), 100),
+    (_snapshot(ticks=100), _snapshot(ticks=100), 99),
+    (_snapshot(ticks=100), _snapshot(ticks=200, state=0), 150),
+    (_snapshot(ticks=100), _snapshot(ticks=149), 150),
+    (_snapshot(ticks=100), _snapshot(partition_id=60, ticks=200), 150),
+    (_snapshot(ticks=100), _snapshot(table_id=11, ticks=200), 150),
+    (_snapshot(ticks=100), _snapshot(ticks=200), 0),
+    (
+        PartitionSnapshot((*_snapshot(ticks=100).partitions, *_snapshot(partition_id=60, ticks=100).partitions)),
+        PartitionSnapshot((*_snapshot(ticks=200).partitions, *_snapshot(partition_id=60, ticks=100).partitions)),
+        150,
+    ),
+]
+
+
+@pytest.mark.parametrize("before,after,action_start", _COUNT_FIXTURES)
+def test_count_refreshed_agrees_with_check_completion(
+    before: PartitionSnapshot, after: PartitionSnapshot, action_start: int
+) -> None:
+    """T14: the streamed count uses the completion predicate; complete iff every partition is counted."""
+    count = actions.count_refreshed(before, after, action_start)
+    complete = check_completion(before, after, action_start).complete
+    assert (count == len(after.partitions)) is complete
+    if count is not None:
+        assert 0 <= count <= len(after.partitions)
+
+
+def test_count_refreshed_counts_partial_progress_and_never_processed_baselines() -> None:
+    """T14: one of two advanced is 1; a never-processed baseline counts only READY, fresh partitions."""
+    before = PartitionSnapshot((*_snapshot(ticks=100).partitions, *_snapshot(partition_id=60, ticks=100).partitions))
+    after = PartitionSnapshot((*_snapshot(ticks=200).partitions, *_snapshot(partition_id=60, ticks=100).partitions))
+    assert actions.count_refreshed(before, after, 150) == 1
+    start = _NEVER_PROCESSED_TICKS + 1_000
+    assert actions.count_refreshed(_mixed(3, 1), _mixed(3, 1, ticks=start), start) == 1
+    assert actions.count_refreshed(_mixed(3, 1), _mixed(1, 1, ticks=start), start) == 2
+    assert actions.count_refreshed(_snapshot(ticks=100), _snapshot(partition_id=60, ticks=200), 150) is None
+
+
 @pytest.mark.parametrize("states", [(3, 3, 3, 3), (3, 6, 3, 4)])
 def test_never_processed_out_of_scope_model_refuses_on_scope_before_any_action(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str], states: tuple[int, ...]
@@ -2700,7 +2522,7 @@ def test_ui_refresh_help_warns_about_operator_source_execution_and_no_clearance(
 def _wire_ui_route(monkeypatch: pytest.MonkeyPatch, *, no_save: bool = False, rows: int = 1):
     baseline = _snapshot(ticks=100)
     identity = SimpleNamespace(pid=123, port=49157, process_start="456")
-    context = UIRefreshContext(123, 49157, SimpleNamespace(identity=identity), 789, None)
+    context = UIRefreshContext(123, 49157, SimpleNamespace(identity=identity), 789)
     calls: list[str] = []
     refresh_action = ActionResult("Refresh", True, "invoke_returned", 200)
     save_action = ActionResult("Save", True, "invoke_returned", 300)
@@ -2766,95 +2588,6 @@ def test_positive_bound_canaries_invoke_one_ui_save_without_a_dirty_flag_gate(
     assert calls == ["Refresh", "canaries", "Save"]
 
 
-@pytest.mark.parametrize("invoked", [False, True])
-def test_o23_tracker_is_activated_only_after_our_successful_invoke(
-    monkeypatch: pytest.MonkeyPatch, invoked: bool
-) -> None:
-    """Even the Invoke callback must still see an inactive tracker."""
-    context, args, calls = _wire_ui_route(monkeypatch, no_save=True)
-
-    def invoke(action, **_kwargs):
-        assert not context.popup.expect_popup, "tracker was activated before Invoke"
-        calls.append(action)
-        return ActionResult(
-            action, invoked, "invoke_returned" if invoked else "named_control_missing", 200 if invoked else None
-        )
-
-    def completion(held, *_args, **_kwargs):
-        assert held.popup.expect_popup, "successful Invoke did not activate the watcher"
-        return True, CompletionResult(True, "all partitions advanced")
-
-    monkeypatch.setattr(refresh_pbip_model, "invoke_desktop_action", invoke)
-    monkeypatch.setattr(refresh_pbip_model, "_wait_for_engine_completion", completion)
-    code = refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args)
-    assert code == (0 if invoked else 2)
-    assert context.popup.expect_popup is invoked
-    assert calls == (["Refresh", "canaries"] if invoked else ["Refresh"])
-
-
-@pytest.mark.parametrize("left", ["dialog", "incomplete", "unready"])
-def test_o23_lenient_watcher_does_not_tolerate_any_other_token(monkeypatch: pytest.MonkeyPatch, left: str) -> None:
-    """Only our REFRESH_IN_PROGRESS state is a lenient return, never arbitrary uncertainty."""
-    state = _settle_observation(left)
-    monkeypatch.setattr(refresh_pbip_model, "_in_flight_credential_state", lambda *_args, **_kwargs: state)
-    with pytest.raises(
-        (
-            refresh_pbip_model.DialogFoundError,
-            refresh_pbip_model.CredentialUnknownError,
-            refresh_pbip_model.DesktopUnreadyError,
-        )
-    ):
-        refresh_pbip_model._ui_observer_state(_held_ui_context(), allow_progress=True, lenient=True)
-
-
-def test_o23_minimized_watcher_waits_but_tracker_free_reader_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A minimized watcher waits to its deadline; its reader retains the unreadable refusal."""
-    context = _held_ui_context()
-    context.popup.expect_popup = True
-    frame = DesktopWindow("", "", 100, 100, hwnd=789, minimized=True, pid="123", process_started_at="456")
-    clock = [1000.0]
-    polls = []
-    queries = []
-
-    def watcher(pid: int, *, popup, **kwargs) -> Observation:
-        assert pid == context.pid and kwargs["expected_process_start"] == "456"
-        polls.append(clock[0])
-        state = inspect_desktop_observer(pid, lambda _: [frame], popup=popup)
-        assert state.state == "REFRESH_IN_PROGRESS" and not state.complete
-        return state
-
-    def reader(pid: int, **kwargs) -> Observation:
-        assert pid == context.pid and kwargs["expected_process_start"] == "456"
-        assert "popup" not in kwargs, "the completion reader must never receive the watcher tracker"
-        state = inspect_desktop_observer(pid, lambda _: [frame])
-        assert state.state == "UNREADABLE_DIALOG" and not state.complete
-        assert legacy_token(state) == "DIALOG_UNREADABLE"
-        return state
-
-    def read(_bound, *, timeout_seconds: float) -> None:
-        return query_probe._observation_call(
-            context.pid,
-            lambda: queries.append("query"),
-            timeout_seconds,
-            expected_process_start="456",
-        )
-
-    monkeypatch.setattr(
-        refresh_pbip_model,
-        "time",
-        SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)),
-    )
-    monkeypatch.setattr(refresh_pbip_model, "_in_flight_credential_state", watcher)
-    monkeypatch.setattr(query_probe, "_credential_state", reader)
-    monkeypatch.setattr(refresh_pbip_model, "read_partition_snapshot", read)
-    assert refresh_pbip_model._ui_wait_ready(context, 1010.0) is None
-    assert clock[0] == 1010.0 and polls == [1000.0, 1005.0]
-    assert not context.popup.hwnd
-    with pytest.raises(query_probe.ObservationUnavailable, match="^DIALOG_UNREADABLE$"):
-        refresh_pbip_model._read_completion_snapshot(context, 1020.0)
-    assert not queries, "the unreadable reader must refuse before executing any query"
-
-
 def test_o23_preflight_prints_the_specific_action_refusal(capsys) -> None:
     """The operator sees the failed clean-state prerequisite, not a generic startup failure."""
     code = refresh_pbip_model._ui_refresh_preflight(123, {"hasUnsavedChanges": True}, time.monotonic() + 10)
@@ -2865,31 +2598,8 @@ def test_o23_preflight_prints_the_specific_action_refusal(capsys) -> None:
     )
 
 
-@pytest.mark.parametrize("pinned", [False, True])
-@pytest.mark.parametrize("capture_failure", [False, True])
-def test_o23_timeout_captures_only_the_present_pinned_popup(monkeypatch, pinned, capture_failure, capsys) -> None:
-    """Grace polls remain TIMEOUT; an image attempt cannot change the operation verdict."""
-    context = _held_ui_context()
-    state = replace(_settle_observation("progress"), complete=False)
-    context.popup.hwnd = state.dialog.window.hwnd if pinned else 0
-    captured = []
-
-    def capture(pid, snapshot, directory):
-        captured.append((pid, snapshot, directory))
-        if capture_failure:
-            raise OSError("private capture detail")
-
-    monkeypatch.setattr(refresh_pbip_model, "_hold_ui_refusal_evidence", capture)
-    assert refresh_pbip_model._refuse_unsettled_ui(context, state, None) is None
-    assert len(captured) == int(pinned)
-    if captured:
-        assert captured[0][1].reason == "timeout"
-        assert captured[0][1].dialog.window.hwnd == context.popup.hwnd
-    assert "private capture detail" not in capsys.readouterr().out
-
-
 def test_o23_completion_wait_reports_elapsed_every_thirty_seconds(monkeypatch, capsys) -> None:
-    """A deterministic clock measures cadence without sleeping or launching a reader."""
+    """A deterministic clock measures the status heartbeat without sleeping or launching a reader."""
     clock = [1000.0]
 
     class Worker:
@@ -2912,7 +2622,41 @@ def test_o23_completion_wait_reports_elapsed_every_thirty_seconds(monkeypatch, c
         False,
         None,
     )
-    assert capsys.readouterr().out.splitlines() == ["still refreshing, 30s / 61s", "still refreshing, 60s / 61s"]
+    assert capsys.readouterr().out.splitlines() == [
+        f"REFRESH_STATUS started tool_pid={os.getpid()}",
+        "REFRESH_STATUS elapsed=0s partitions=?/1 dialog=none",
+        "REFRESH_STATUS elapsed=30s partitions=?/1 dialog=none",
+        "REFRESH_STATUS elapsed=60s partitions=?/1 dialog=none",
+    ]
+
+
+def test_completion_wait_streams_status_and_waits_out_a_dialog_until_the_backstop(monkeypatch, capsys) -> None:
+    """T13: the --ui-refresh wait relays count and dialog changes, never stops early, and the deadline is a backstop."""
+    reads = iter([None])
+    observations = iter([_settle_observation("ready")])
+
+    def read(*_args, **_kwargs):
+        return next(reads, _snapshot(ticks=100))
+
+    def observe(*_args, **_kwargs):
+        return next(observations, _settle_observation("dialog"))
+
+    monkeypatch.setattr(refresh_pbip_model, "_read_completion_snapshot", read)
+    monkeypatch.setattr(refresh_pbip_model, "_ui_observer_state", observe)
+    monkeypatch.setattr(refresh_pbip_model, "REFRESH_CREDENTIAL_POLL_SECONDS", 0.02)
+    started = time.monotonic()
+    with pytest.raises(refresh_pbip_model.DialogFoundError) as stop:
+        refresh_pbip_model._wait_for_engine_completion(_held_ui_context(), _snapshot(ticks=100), 200, started + 1.5)
+    assert time.monotonic() - started >= 1.5, "a dialog must not end the --ui-refresh wait before the backstop"
+    assert stop.value.title == "Refresh"
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == f"REFRESH_STATUS started tool_pid={os.getpid()}"
+    status = [line.split(" partitions=", 1)[1] for line in lines[1:]]
+    assert status[0] == "?/1 dialog=none"
+    assert '0/1 dialog="Refresh"' in status or '?/1 dialog="Refresh"' in status
+    assert status[-1] == '0/1 dialog="Refresh"'
+    assert all(a != b for a, b in zip(status, status[1:])), "lines repeat only on change or heartbeat"
+    assert len(status) <= 3, status
 
 
 def test_no_save_and_failed_completion_never_invoke_ui_save(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2991,9 +2735,8 @@ def test_ui_read_allowances_shrink_and_completion_uses_same_deadline(monkeypatch
         clock[0] += 7
         return original_snapshot(context.bound)
 
-    def completion(_context, _baseline, _started, deadline, *, evidence_dir=None):
+    def completion(_context, _baseline, _started, deadline):
         assert deadline == 150.0
-        assert evidence_dir is None
         clock[0] += 7
         return True, CompletionResult(True, "all advanced")
 
@@ -3067,47 +2810,46 @@ def test_identity_recheck_refuses_save(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls == ["Refresh", "canaries"]
 
 
-@pytest.mark.parametrize("left", ["busy", "dialog"])
+@pytest.mark.parametrize("left", ["unknown", "dialog"])
 @pytest.mark.parametrize("phase", ["Refresh", "Save"])
 def test_settle_refuses_when_desktop_never_returns_to_ready(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], phase: str, left: str
 ) -> None:
+    """T9: whatever is left once the settle window ends refuses; canaries and Save stay withheld."""
     context, args, calls = _wire_ui_route(monkeypatch)
     monkeypatch.setattr(refresh_pbip_model, "UI_SETTLE_SECONDS", 0.3)
     root = DesktopWindow("", "", 100, 100, hwnd=789, pid="123", process_started_at="456")
     window = DesktopWindow("", "", 100, 100, hwnd=888, owner_hwnd=789, complete=False, reason="patterns_incomplete")
-    kind, token = ("benign", "REFRESH_IN_PROGRESS") if left == "busy" else ("unreadable", "DIALOG_UNREADABLE")
-    after_action = Observation(
-        pid="123", process_started_at="456", target_window=root, dialog=DialogFinding(kind, token, window)
+    after_action = (
+        Observation(pid="123", process_started_at="456", target_window=root, complete=False, unknown_reason="ambiguous")
+        if left == "unknown"
+        else Observation(
+            pid="123",
+            process_started_at="456",
+            target_window=root,
+            dialog=DialogFinding(window, "Microsoft Power BI Desktop"),
+        )
     )
-    holds: list[Observation] = []
     monkeypatch.setattr(
         refresh_pbip_model,
         "_ui_observer_state",
         lambda *_args, **_kwargs: after_action if calls[-1:] == [phase] else SimpleNamespace(state="READY"),
     )
-    monkeypatch.setattr(refresh_pbip_model, "_hold_ui_refusal_evidence", lambda _pid, state, _dir: holds.append(state))
-    monkeypatch.setattr(sys.modules["_desktop_observer"], "print_dialog_diagnostic", lambda *_args: None)
 
     result = refresh_pbip_model._ui_refresh_locked(context, Path("missing-cache.abf"), args)
 
     output = capsys.readouterr().out
     assert calls == (["Refresh"] if phase == "Refresh" else ["Refresh", "canaries", "Save"])
     assert "DATA_OK" not in output
-    if left == "busy" and phase == "Refresh":
-        assert result == 3, output
-        assert (
-            "REFRESH: COMPLETION_UNKNOWN (Desktop observer did not return to READY within the settle window)" in output
-        )
-        assert not holds
-    elif left == "busy":
-        assert result == 1, output
-        assert "REFRESH: NOT_PERSISTED (Desktop did not return to READY within the settle window after Save)" in output
-        assert not holds
+    assert result == 3, output
+    if left == "unknown":
+        stage = "Completion" if phase == "Refresh" else "Post-Save"
+        assert f"REFRESH: CREDENTIAL_UNKNOWN pid=123; {stage} observation unavailable" in output
     else:
-        assert result == 3, output
-        assert "DIALOG_UNREADABLE" in output
-        assert holds == [after_action]
+        assert (
+            'REFRESH: DIALOG_NEEDS_HUMAN pid=123; a Power BI Desktop dialog is open: "Microsoft Power BI Desktop"'
+            in output
+        )
 
 
 def test_safe_save_runs_after_ordered_safety_checks_and_persists_verified_cache(
@@ -3213,207 +2955,6 @@ def test_real_save_failures_are_not_cleared(
     output = capsys.readouterr().out
     assert ("REFRESH: CREDENTIAL_UNKNOWN" if failure == "observer" else "REFRESH: NOT_PERSISTED") in output
     assert "REFRESH: DATA_OK" not in output
-
-
-# Startup budget for the synthetic WPF child to print READY (#807). Twenty local hidden starts reached the
-# pre-render READY work in 1.6-3.0 s (median 1.9 s); the hosted windows-bundle runner missed the old 10 s
-# budget on the session's first GUI case, so keep about 10x the local worst case.
-SYNTHETIC_WINDOW_STARTUP_BUDGET_S = 30.0
-
-
-def _await_ready_line(child: subprocess.Popen[str], *, started: float, budget_s: float) -> str:
-    """Return the child's READY| line, or fail with elapsed time, last phase, poll() and stderr."""
-    ready: queue.Queue[str | None] = queue.Queue()
-    received: list[tuple[float, str]] = []
-
-    def read_stdout() -> None:
-        for line in child.stdout:
-            text = line.strip()
-            received.append((time.monotonic() - started, text))
-            if text.startswith("READY|"):
-                ready.put(text)
-                return
-        ready.put(None)
-
-    threading.Thread(target=read_stdout, daemon=True).start()
-    try:
-        line = ready.get(timeout=max(0.0, started + budget_s - time.monotonic()))
-    except queue.Empty:
-        line = ""
-    if not line:
-        elapsed = time.monotonic() - started
-        if line is None:
-            # stdout closed before READY: give the exiting child a bounded moment to report its code.
-            try:
-                child.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
-        state = child.poll()
-        if state is None:
-            child.terminate()
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
-        errors: list[str] = []
-        if child.stderr is not None:
-            # Read only after termination, and never wait unboundedly on a pipe a survivor may hold open.
-            stderr_reader = threading.Thread(target=lambda: errors.append(child.stderr.read()), daemon=True)
-            stderr_reader.start()
-            stderr_reader.join(timeout=5)
-            if stderr_reader.is_alive():
-                errors.append("<stderr read timed out>")
-        phases = [(at, text.removeprefix("PHASE|")) for at, text in list(received) if text.startswith("PHASE|")]
-        last_phase = f"{phases[-1][1]} at {phases[-1][0]:.2f} s" if phases else "none"
-        pytest.fail(
-            f"synthetic window did not publish its identity: elapsed {elapsed:.2f} s of {budget_s:.2f} s budget; "
-            f"last phase: {last_phase}; poll(): {'None (still running)' if state is None else state}; "
-            f"stdout: {[f'{at:.2f}s {text}' for at, text in list(received)]}; stderr: {''.join(errors).strip()!r}"
-        )
-    print(f"synthetic window READY after {time.monotonic() - started:.2f} s of {budget_s:.2f} s budget")
-    return line
-
-
-@pytest.mark.parametrize("exits", [False, True])
-def test_synthetic_window_startup_failure_is_self_explaining(exits: bool) -> None:
-    script = (
-        "import sys, time\n"
-        "print('PHASE|assemblies', flush=True)\n"
-        "print('PHASE|compiled', flush=True)\n"
-        "sys.stderr.write('startup detail\\n'); sys.stderr.flush()\n"
-        f"sys.exit(7) if {exits} else time.sleep(60)\n"
-    )
-    started = time.monotonic()
-    child = subprocess.Popen(  # pylint: disable=consider-using-with
-        [sys.executable, "-c", script],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        with pytest.raises(pytest.fail.Exception) as failure:
-            _await_ready_line(child, started=started, budget_s=1.5)
-    finally:
-        if child.poll() is None:
-            child.kill()
-            child.wait(timeout=5)
-        child.stdout.close()
-        child.stderr.close()
-    message = str(failure.value)
-    elapsed = float(message.split("elapsed ", 1)[1].split(" s", 1)[0])
-    assert (elapsed < 1.5) if exits else (1.5 <= elapsed < 3.0), message
-    assert "of 1.50 s budget" in message
-    assert "last phase: compiled at " in message
-    assert ("poll(): 7;" if exits else "poll(): None (still running);") in message
-    assert "'startup detail'" in message
-    assert "s PHASE|assemblies" in message
-
-
-@pytest.mark.gui
-@pytest.mark.serial
-@pytest.mark.parametrize(
-    ("control_type", "duplicate"),
-    [("Button", False), ("SplitButton", False), ("Button", True)],
-)
-def test_synthetic_control_is_invoked_once_and_ambiguity_refused(control_type: str, duplicate: bool) -> None:  # pylint: disable=too-many-locals
-    powershell = shutil.which("powershell.exe")
-    assert os.name == "nt" and powershell, "the native action qualification requires Windows PowerShell"
-    script = (
-        "function Write-Phase([string]$name) { [Console]::Out.WriteLine('PHASE|' + $name); [Console]::Out.Flush() }; "
-        "Write-Phase 'started'; "
-        "Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, "
-        "UIAutomationProvider, System.Xaml; "
-        "Write-Phase 'assemblies'; "
-        "$references = @([System.Windows.Window].Assembly.Location, "
-        "[System.Windows.UIElement].Assembly.Location, "
-        "[System.Windows.Threading.DispatcherObject].Assembly.Location, "
-        "[System.Windows.Automation.Peers.ButtonAutomationPeer].Assembly.Location, "
-        "[System.Windows.Automation.Provider.IInvokeProvider].Assembly.Location, "
-        "[System.Windows.Markup.IQueryAmbient].Assembly.Location); "
-        "$peerCode = @'\n"
-        "using System.Windows.Automation.Peers;\n"
-        "using System.Windows.Controls;\n"
-        "public sealed class SyntheticSplitButtonPeer : ButtonAutomationPeer {\n"
-        "  public SyntheticSplitButtonPeer(Button owner) : base(owner) { }\n"
-        "  protected override AutomationControlType GetAutomationControlTypeCore() "
-        "{ return AutomationControlType.SplitButton; }\n"
-        "}\n"
-        "public sealed class SyntheticSplitButton : Button {\n"
-        "  protected override AutomationPeer OnCreateAutomationPeer() "
-        "{ return new SyntheticSplitButtonPeer(this); }\n"
-        "}\n"
-        "'@\n"
-        "Add-Type -TypeDefinition $peerCode -ReferencedAssemblies $references; "
-        "Write-Phase 'compiled'; "
-        "$form = [System.Windows.Window]::new(); $form.Title = 'Synthetic UIA'; "
-        "$form.Width = 360; $form.Height = 180; "
-        f"$button = if ('{control_type}' -eq 'SplitButton') "
-        "{ [SyntheticSplitButton]::new() } else { [System.Windows.Controls.Button]::new() }; "
-        "$button.Content = 'Refresh'; "
-        "$button.Name = 'Refresh'; "
-        "[System.Windows.Automation.AutomationProperties]::SetName($button, 'Refresh'); "
-        "$button.Add_Click({ $form.Title = 'Synthetic invoked' }); "
-        "$panel = [System.Windows.Controls.StackPanel]::new(); $null = $panel.Children.Add($button); "
-        f"if ({'$true' if duplicate else '$false'}) {{ "
-        "$second = [System.Windows.Controls.Button]::new(); $second.Content = 'Refresh'; "
-        "$second.Name = 'Refresh'; "
-        "[System.Windows.Automation.AutomationProperties]::SetName($second, 'Refresh'); "
-        "$second.Add_Click({ $form.Title = 'Synthetic invoked' }); $null = $panel.Children.Add($second) "
-        "}; $form.Content = $panel; "
-        "$form.Add_ContentRendered({ "
-        "Write-Phase 'rendered'; "
-        "$process = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID); "
-        "$handle = [System.Windows.Interop.WindowInteropHelper]::new($form).Handle; "
-        "[Console]::Out.WriteLine(('READY|{0}|{1}' -f $handle.ToInt64(), "
-        "$process.CreationDate.ToUniversalTime().Ticks)); [Console]::Out.Flush() "
-        "}); Write-Phase 'showing'; $null = $form.ShowDialog()"
-    )
-    started = time.monotonic()
-    child = subprocess.Popen(  # pylint: disable=consider-using-with
-        [powershell, "-NoProfile", "-STA", "-Command", script],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-    )
-    try:
-        ready_line = _await_ready_line(child, started=started, budget_s=SYNTHETIC_WINDOW_STARTUP_BUDGET_S)
-        ready = ready_line.split("|")
-        assert len(ready) == 3 and ready[0] == "READY", "synthetic window did not publish its identity"
-        root_hwnd, process_start = int(ready[1]), ready[2]
-        time.sleep(0.25)
-        foreground = ctypes.windll.user32.GetForegroundWindow()
-        result = invoke_desktop_action(
-            "Refresh",
-            pid=child.pid,
-            expected_process_start=process_start,
-            root_hwnd=root_hwnd,
-        )
-        assert ctypes.windll.user32.GetForegroundWindow() == foreground, "the helper changed the foreground"
-        title = ctypes.create_unicode_buffer(256)
-        deadline = time.monotonic() + 3
-        if duplicate:
-            assert not result.invoked and result.reason == "ambiguous_named_control"
-            ctypes.windll.user32.GetWindowTextW(root_hwnd, title, len(title))
-            assert title.value == "Synthetic UIA", "ambiguous controls must not be activated"
-        else:
-            assert result.invoked and result.action_started_ticks is not None
-            while time.monotonic() < deadline:
-                ctypes.windll.user32.GetWindowTextW(root_hwnd, title, len(title))
-                if title.value == "Synthetic invoked":
-                    break
-                time.sleep(0.05)
-            assert title.value == "Synthetic invoked", "the named action control was not activated"
-    finally:
-        if child.poll() is None:
-            child.terminate()
-            child.wait(timeout=5)
-        if child.stdout is not None:
-            child.stdout.close()
 
 
 # --- #780 automatic source scope -----------------------------------------------------------------

@@ -2,8 +2,9 @@
 
 **#741 naming update:** the portable observer suite is now
 `.github/skills/pbip-model-refresh/tests/test_desktop_observer.py`. Measurements below predate the
-consolidation; renaming a suite does not remeasure it. Native test-owned Win32 windows, as well as
-the retained WinForms/UIA fixtures, are discovered for `serial`; GUI execution remains opt-in.
+consolidation; renaming a suite does not remeasure it. **#831 update:** the live WPF/UIA and native
+window tests, and with them the `serial` and `gui` markers, were retired; `timing` is the one
+contended marker left. The measurements below are kept as history.
 
 The full suite is the dominant cost in every agent iteration, and agents run it repeatedly. This page
 is the measured answer to "how do I run it fast without making it lie to me?".
@@ -12,7 +13,7 @@ is the measured answer to "how do I run it fast without making it lie to me?".
 
 ```bash
 # Tier 1 - fast loop, run this while you iterate
-uv run pytest -q -n auto --dist loadfile -m "not (serial or timing)"
+uv run pytest -q -n auto --dist loadfile -m "not timing"
 
 # Tier 2 - pre-PR gate, run this once before you open the PR
 uv run pytest -q
@@ -99,16 +100,15 @@ a saturated box. Excluding it from the contended tier is the honest answer.
 
 ## The `timing` marker, and where it has to live
 
-`pyproject.toml` registers three markers with deliberately narrow, different meanings:
+`pyproject.toml` registers two markers with deliberately narrow, different meanings:
 
 | marker | means | applied |
 |---|---|---|
 | `slow` | takes a long time | by hand |
-| `serial` | must not run beside another test wanting the same singleton external resource | by hand, in the test's own source |
 | `timing` | asserts a **wall-clock budget**, so a saturated box fails it | by hand, in the test's own source |
 
-Seven tests carry `serial` and seven carry `timing`. Tier 1 deselects both; **tier 2 still runs
-them**, and the deselection is visible in tier 1's own summary (`... 14 deselected`).
+46 collected test ids carry `timing` (measured on the #831 branch). Tier 1 deselects them; **tier 2
+still runs them**, and the deselection is visible in tier 1's own summary (`... N deselected`).
 
 `timing`'s automatic floor is **sub-second**: every test asserting a budget under 2 s must carry it,
 gated from the suite's AST. A larger budget earns the marker on measured evidence instead - the 10 s
@@ -148,54 +148,14 @@ door. The fix moves the failure boundary unless the nested run inherits the filt
 conditional on `PYTEST_XDIST_WORKER`, which is set only inside an xdist worker (verified: `None`
 serially, `'gw0'` under `-n 2`). Tier 2 therefore still executes every test the bundle ships.
 
-## The live Power BI Desktop / UI-Automation tests: measured, and they DO need `serial`
+## The retired live Power BI Desktop / UI-Automation tests (history)
 
-`.github/skills/pbip-model-refresh/tests/` carries **seven live tests** that launch a real WPF
-application and drive it through UI Automation, including a wedged-UI-thread regression whose whole
-point is a `< 25 s` wall-clock bound. Two independent reports had them degrading under contention -
-one live harvest returning `DIALOG_UNREADABLE`, and one live test skipping when run beside the full
-skills suite.
-
-**The first verdict here was that they were stable, and it was wrong.** Across seven parallel runs -
-three sequential, plus two concurrent pairs - not one of them failed or skipped, and this page said
-so. Three *more* concurrent pairs found the failure:
-
-| condition | runs | live-test failures |
-|---|---|---|
-| tier 1, sequential | 3 | 0 |
-| tier 1, concurrent pairs (44 workers on 22 cores) | 8 | **3** |
-
-`test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it` failed in **3 of 6**
-runs of the later rounds - twice in the *same pair*, both sides at once - every time like this:
-
-```
-a dialog was up during the refresh: ... size=650x400 harvest=INCOMPLETE
-  it matched no credential-prompt signature, so this is NOT a credential wall
-  but a window we could not account for was open
-VERDICT: DIALOG_UNREADABLE
-```
-
-That is the documented hazard verbatim: the UIA harvest could not finish, the probe **degraded
-safely**, and the test's stricter assertion correctly refused the degraded verdict. The test took
-**30.6 s against 8.08 s serially**. Three sequential runs would have shipped this as "stable" - the
-condition it needs is *two live suites at once*, which is exactly what two agents on one machine do.
-
-So all seven now carry **`@pytest.mark.serial`**. Marking only the one that was observed would move
-the boundary rather than remove it - they share one mechanism and one singleton resource. Run them
-deliberately, on their own:
-
-```bash
-uv run pytest -q --run-gui -m serial
-```
-
-⚠️ `--run-gui` is not optional here, and `-m serial` alone will report *fewer* tests than you expect.
-All seven also carry **`gui`** (issue #447: they open a real top-level window and steal focus), and
-the root `conftest.py` deselects `gui` in every tier unless asked. Leave the flag off and you get the
-`serial` tests that are not `gui` - a green run that ran none of the live UI regressions.
-
-⚠️ `--dist loadfile` is what keeps them from racing *inside* one run (all seven live in one file, so
-one worker owns them). It cannot help *across* runs, and neither can any scheduler flag. The marker
-is the only lever.
+`.github/skills/pbip-model-refresh/tests/` used to carry seven live tests that launched a real WPF
+application and drove it through UI Automation. Under two concurrent tier-1 runs (44 workers on 22
+cores) one of them failed in 3 of 6 later rounds while it passed every sequential run, so they were
+marked `serial` (and `gui`, issue #447). Issue #831 removed the UI Automation harvest those tests
+exercised, so the tests and both markers are gone. The lesson stays: **absence of failure in a short
+campaign proves nothing**; contention failures need many concurrent pairs to show.
 
 A second, unrelated test was caught in the same rounds and is marked `timing`:
 `test_declare_wrapper_concurrent_writers_keep_both_declarations` gives two child processes **10 s**
@@ -207,8 +167,7 @@ automatic gate.
 
 Plain `-n auto` means `--dist load`, which distributes **individual tests**, so two tests from one
 file can run on different workers at the same time. `--dist loadfile` keeps every test in one file on
-one worker - which is exactly what keeps the seven live UI tests above from running beside each
-other. Every measurement here was taken **with** `loadfile`; `--dist load` has never been measured.
+one worker, so file-scoped fixtures and shared scratch state do not race. Every measurement here was taken **with** `loadfile`; `--dist load` has never been measured.
 
 `-n auto` is shorter to type than `-n auto --dist loadfile`, so the root `conftest.py` refuses it:
 
@@ -229,17 +188,11 @@ To use a different scheduler, edit the guard deliberately and re-measure. That i
 ## The markers are enforced by a MECHANISM, not by remembering to type them
 
 A marker on its own is a convention. It only protects anything if the caller supplies
-`-m "not (serial or timing)"` - and the guard above validates `--dist loadfile`, not the filter. Drop
-half of it, and every live UI test is collected again:
+`-m "not timing"` - and the guard above validates `--dist loadfile`, not the filter. Drop it, and
+every budget test is collected into the contended run again.
 
-```
-$ pytest --collect-only -n 2 --dist loadfile -m "not timing" <the bundle's credential tests>
-94/100 tests collected (6 deselected)     # <- all seven live WPF/UIA tests SELECTED
-```
-
-So the root `conftest.py` now **deselects every `serial` and `timing` test whenever xdist is active**,
-whatever `-m` says. The same command today reports `87/100 tests collected (13 deselected)`, and the
-documented tier-1 filter is belt-and-braces rather than the only line of defence.
+So the root `conftest.py` **deselects every `timing` test whenever xdist is active**, whatever `-m`
+says, and the documented tier-1 filter is belt-and-braces rather than the only line of defence.
 
 Deliberately stress-testing those tests under parallelism is still possible, explicitly:
 
@@ -256,16 +209,17 @@ Two details make the mechanism hold up, and both are gated:
   check on `numprocesses` alone would deselect nothing in a real run while still looking correct
   under `--collect-only`, which the controller can answer.
 - **The documentation gate parses the marker expression** with pytest's own compiler and asks whether
-  it excludes each marker. A substring check could not tell `not (serial or timing)` from
-  `not timing`: the earlier draft of that gate returned `3 passed` for the mutated command.
+  it excludes the marker. When there were two markers, a substring check could not tell
+  `not (serial or timing)` from `not timing`: the earlier draft of that gate returned `3 passed` for
+  the mutated command.
 
 ## Why tier 2 exists
 
 **One green parallel run is not proof of isolation.** A test that quietly changed behaviour under
 concurrency - took a different branch, skipped instead of running, degraded to a safer verdict - can
 still report at the summary level as though nothing happened. And tier 1 deliberately deselects the
-`serial` and `timing` tests, so it is a strictly smaller suite by construction: 2688 node ids against
-tier 2's 2702, plus fourteen more inside the nested bundle run.
+`timing` tests, so it is a strictly smaller suite by construction, plus the bundle's own `timing`
+tests inside the nested bundle run.
 
 So the plain serial `pytest -q` stays the gate of record before a PR. It is slower and it is the one
 whose result you quote. Tier 1 buys iteration speed; tier 2 buys the claim.
@@ -273,8 +227,8 @@ whose result you quote. Tier 1 buys iteration speed; tier 2 buys the claim.
 When comparing two runs yourself, compare **per test**, not per total:
 
 ```bash
-uv run pytest -q -m "not (serial or timing)" --junitxml=serial.xml
-uv run pytest -q -n auto --dist loadfile -m "not (serial or timing)" --junitxml=parallel.xml
+uv run pytest -q -m "not timing" --junitxml=serial.xml
+uv run pytest -q -n auto --dist loadfile -m "not timing" --junitxml=parallel.xml
 ```
 
 then diff the `classname`/`name`/outcome triples. A skip that replaced a pass is invisible in the
@@ -296,36 +250,6 @@ with their own `.venv`, and that fixture path is then not shared. It is recorded
 person who reproduces it does not spend an afternoon blaming xdist. If you deliberately run two
 suites in one checkout, expect it.
 
-## The `serial` marker
-
-`serial` means a test contends for a **singleton external resource** - a real Power BI Desktop
-instance, its UI-Automation tree, a live credential dialog - such that two of them running at once
-degrade each other. A test opts in with `@pytest.mark.serial`. Seven tests carry it today, all of
-them the live WPF/UIA regressions measured above. Run them deliberately, on their own, when you have
-touched the credential probe:
-
-```bash
-uv run pytest -q --run-gui -m serial
-```
-
-That is not part of either tier. Tier 1 excludes them because two agents running tier 1 at once
-raced them; **tier 2 no longer includes them either.** All seven also carry `gui` (issue #447), and
-the root `conftest.py` deselects `gui` unless `--run-gui` / `T2P_RUN_GUI=1` asks for it - so a plain
-`pytest -q` never opens a window on the machine you are working on, and the command above (or CI's
-Windows leg) is now the only thing that runs them. That is a deliberate trade: the live regressions
-were never observed to fail in a serial whole-suite run, but a serial whole-suite run is also what an
-agent types twenty times a day beside a human who is using the desktop.
-
-⚠️ **Absence of failure in a short campaign proves nothing here.** Seven runs - including two
-concurrent pairs - found none of it. It took eight concurrent pairs to see three failures. The
-instability is **real but rare**, so "I ran it three times and it was fine" is not evidence that the
-markers can come off. If you want to challenge them, use `--include-contended` and run *many*
-concurrent pairs.
-
-The exclusion no longer depends on anyone typing the right filter - the root `conftest.py` deselects
-`serial` and `timing` whenever xdist is active (see above). A hand-typed
-`pytest -n auto --dist loadfile` is therefore safe too.
-
 ## CI stays serial, deliberately
 
 `.github/workflows/checks.yml` keeps `uv run pytest -q`. Both jobs - `ubuntu-latest` and the
@@ -346,43 +270,5 @@ If CI time does become the complaint, the change is one line per job plus a meas
 runners themselves - and the root-`conftest.py` guard already makes it impossible to add `-n` there
 without `--dist loadfile`.
 
-## The `gui` marker — a THIRD exclusion, and it is not part of either tier
-
-`serial` and `timing` are about the **parallel** tier: they are excluded from tier 1 and were
-restored by tier 2. `gui` is different in kind, so it is a different marker and a different
-mechanism. A `gui` test spawns a **real top-level window**, which steals focus on whatever machine
-runs it. Issue #447 is an operator watching the `Fake Desktop` WinForms app "opening and closing for
-the last 2 days" mid-demo, because `testpaths` includes `.github/skills` and a bare `pytest`
-collected it.
-
-Ten tests carry it: the seven live WPF/UIA regressions above, plus three that create native
-`WS_VISIBLE` windows with `CreateWindowExW`. They must keep opening a window - UI Automation cannot
-be exercised against a mock - so the fix is opt-in, not weaker tests:
-
-```bash
-uv run pytest -q --run-gui -m gui     # or T2P_RUN_GUI=1, which a nested pytest can inherit
-```
-
-⚠️ **It is a collection hook, NOT `addopts = "-m 'not gui'"`, and the difference is measured.** A
-command-line `-m` **replaces** an ini marker expression instead of composing with it. Under `addopts`,
-on the bundle's 309 tests:
-
-| command | selected |
-|---|---|
-| default | 302/309 |
-| `-m gui` | 7/309 |
-| `-m "not slow"` | **309/309 — every window back** |
-| `-m "not something_else"` | **309/309** |
-
-`-m "not slow"` is documented in `docs/offline-mock-harness.md`, so following the repo's own
-instructions re-opened the windows. `pytest_collection_modifyitems` runs *after* pytest has applied
-the caller's `-m`, so nothing a caller types can re-enable them; only the opt-in can.
-
-The same hook is duplicated in `.github/skills/pbip-model-refresh/tests/conftest.py`, because
-`tests/test_skills.py` copies that bundle out of the repo and runs a nested pytest where neither the
-root `conftest.py` nor `pyproject.toml` exists. Measured with every spawn site instrumented to raise:
-that nested run reached **all ten** of them, and the outer summary reported **zero** deselections.
-
-CI's `windows-latest` leg runs `uv run pytest -q --run-gui -m gui` with **no path argument**, so
-`testpaths` applies and it covers the whole repository. `tests/test_gui_marker_gate.py` executes that
-very command under `--collect-only` and fails if it does not reach every `gui` test in the repo.
+The `gui` marker (issue #447: tests that opened a real top-level window) was retired with those tests
+in #831; no test in this repository spawns a window, so there is no opt-in tier left.

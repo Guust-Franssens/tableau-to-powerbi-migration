@@ -33,13 +33,18 @@ from test_iteration_receipt import (
     receipt,
 )
 
+# A hostile caption (#831): an escape, a closing quote, a bidi override, a zero-width space, a line
+# separator and 300 trailing characters. Only the sanitized, capped form may reach the human.
+HOSTILE_TITLE = 'Sign in\x1b[2J to "X"\u202eevil\u200b\u2028' + "A" * 300
+SAFE_TITLE = "Sign in[2J to 'X'evil" + "A" * 59 + "..."
+DIALOG_LINE = f'a Power BI Desktop dialog is open: "{SAFE_TITLE}"; a human must act in Desktop.\n'
+
 
 @pytest.fixture(name="dialog_capture", autouse=True)
 def dialog_capture_fixture(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """Supply only a synthetic detector result, with the real fixed diagnostic renderer."""
+    """Supply only a synthetic detector result carrying a hostile title, with the real renderer."""
     calls = []
-    window = modal.DesktopWindow("PRIVATE_TEST_VALUE", "", 400, 300, hwnd=222)
-    finding = modal.DialogFinding("unrecognized", "DIALOG_UNRECOGNIZED", window, "PRIVATE_TEST_VALUE")
+    finding = modal.DialogFinding(modal.DesktopWindow("", "", 400, 300, hwnd=222), HOSTILE_TITLE)
 
     def inspect_pid(pid: int, **_kwargs):
         calls.append(pid)
@@ -65,9 +70,9 @@ def test_capture_dialog_report_is_once_after_standalone_failure(
     output = capsys.readouterr()
     assert code == capture.EXIT_CAPTURE_FAILED
     assert dialog_capture == [111]
-    assert output.err == "LOCAL_IMAGE: unavailable (not_captured)\n"
-    assert "PRIVATE_TEST_VALUE" not in output.err
-    assert "LOCAL_IMAGE:" not in output.out
+    assert output.err == DIALOG_LINE, "the dialog is named once, sanitized and capped"
+    assert len(SAFE_TITLE) == 83 and not any(char in output.err for char in "\x1b\u202e\u200b\u2028")
+    assert SAFE_TITLE not in output.out
 
 
 @pytest.mark.parametrize("phase", ["reload", "capture", "bind", "observation", "missing-observation"])
@@ -105,10 +110,11 @@ def test_capture_dialog_report_preserves_package_refusals_and_receipts(
             pending["generated"]["data_evidence"][key]["status"] == expected
             for key in ("refresh", "canaries", "persistence")
         )
-        assert "LOCAL_IMAGE:" not in json.dumps(pending)
-        assert "LOCAL_IMAGE:" not in _path(package).read_text(encoding="utf-8")
-    assert dialog_capture == [PID], "one terminal report must not repeat UIA reads for each failed measurement"
-    assert capsys.readouterr().err == "LOCAL_IMAGE: unavailable (not_captured)\n"
+        # The title is shown to the human once and never persisted: receipts keep only tokens.
+        assert "Sign in" not in json.dumps(pending)
+        assert "Sign in" not in _path(package).read_text(encoding="utf-8")
+    assert dialog_capture == [PID], "one terminal report must not repeat Desktop reads for each failed measurement"
+    assert capsys.readouterr().err == DIALOG_LINE
 
 
 def test_capture_dialog_diagnostic_never_inspects_success_or_an_unheld_pid(

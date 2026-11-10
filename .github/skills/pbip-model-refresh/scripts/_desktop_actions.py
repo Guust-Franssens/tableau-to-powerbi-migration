@@ -335,32 +335,57 @@ def check_baseline(snapshot: PartitionSnapshot) -> None:
         raise DesktopActionError(f"initial source partition state is not READY or never-processed (state {states})")
 
 
+def _comparable_refusal(baseline: PartitionSnapshot, current: PartitionSnapshot, action_started_ticks: int) -> str:
+    """Why two snapshots cannot be compared partition by partition, or "" when they can."""
+    if not isinstance(action_started_ticks, int) or isinstance(action_started_ticks, bool) or action_started_ticks <= 0:
+        return "invalid action start timestamp"
+    if baseline.identities != current.identities or len(current.partitions) != len(baseline.partitions):
+        return "source partition identity set changed"
+    return ""
+
+
+def _partition_refusal(before, partition, action_started_ticks: int) -> str:
+    """The one per-partition predicate: "" when ``partition`` advanced into READY after the action began."""
+    if partition.source_kind != before.source_kind or partition.effective_mode != before.effective_mode:
+        return "source partition kind or mode changed"
+    if partition.state != 1:
+        return "source partition is not READY"
+    if partition.refreshed_ticks <= before.refreshed_ticks:
+        return "source partition timestamp did not advance"
+    if partition.refreshed_ticks < action_started_ticks:
+        return "source partition timestamp predates the action"
+    return ""
+
+
 def check_completion(
     baseline: PartitionSnapshot,
     current: PartitionSnapshot,
     action_started_ticks: int,
 ) -> CompletionResult:
     """Require every exact source partition to advance into READY after this action began."""
-    reason = ""
-    if not isinstance(action_started_ticks, int) or isinstance(action_started_ticks, bool) or action_started_ticks <= 0:
-        reason = "invalid action start timestamp"
-    elif baseline.identities != current.identities or len(current.partitions) != len(baseline.partitions):
-        reason = "source partition identity set changed"
-    else:
+    reason = _comparable_refusal(baseline, current, action_started_ticks)
+    if not reason:
         previous = {partition.identity: partition for partition in baseline.partitions}
         for partition in current.partitions:
-            before = previous[partition.identity]
-            if partition.source_kind != before.source_kind or partition.effective_mode != before.effective_mode:
-                reason = "source partition kind or mode changed"
-            elif partition.state != 1:
-                reason = "source partition is not READY"
-            elif partition.refreshed_ticks <= before.refreshed_ticks:
-                reason = "source partition timestamp did not advance"
-            elif partition.refreshed_ticks < action_started_ticks:
-                reason = "source partition timestamp predates the action"
+            reason = _partition_refusal(previous[partition.identity], partition, action_started_ticks)
             if reason:
                 break
     return CompletionResult(not reason, reason or "all source partitions READY and refreshed after action start")
+
+
+def count_refreshed(
+    baseline: PartitionSnapshot,
+    current: PartitionSnapshot,
+    action_started_ticks: int,
+) -> int | None:
+    """How many source partitions already satisfy the completion predicate; None when not comparable."""
+    if _comparable_refusal(baseline, current, action_started_ticks):
+        return None
+    previous = {partition.identity: partition for partition in baseline.partitions}
+    return sum(
+        not _partition_refusal(previous[partition.identity], partition, action_started_ticks)
+        for partition in current.partitions
+    )
 
 
 def _action_result(payload: dict[str, object], action: Literal["Refresh", "Save"]) -> ActionResult:

@@ -104,86 +104,35 @@ UIA re-dump confirmed the modal was open. So: **treat `probe_desktop_query.py` (
 modal arbiter in #741. The shared read-only observer explains prompts, never cached credentials.
 `READY`, images and a completed refresh are not source proof — always confirm with real row evidence.
 
-`probe_desktop_query.py` / `refresh_pbip_model.py` share `_desktop_observer.py`, with one bounded
-harvest-only `_desktop_uia.ps1` backend. They hold the exact process-start identity across observations.
-The root `scripts/probe_desktop_credential.ps1` is a retirement shim: every old parameter set returns
-fixed `VERDICT: UNKNOWN`, exit 3; **no observation or Refresh is performed**.
+`probe_desktop_query.py` / `refresh_pbip_model.py` share `_desktop_observer.py`, which reads windows
+in-process through Win32 (no helper child, no UI Automation harvest) and holds the exact process-start
+identity across observations. The root `scripts/probe_desktop_credential.ps1` is a retirement shim:
+every old parameter set returns fixed `VERDICT: UNKNOWN`, exit 3; **no observation or Refresh is
+performed**.
+
+**Any blocking dialog is a human stop.** Blocking is decided from modality alone (a modal disables its
+owner); no window text decides anything. The only text read is the blocking window's title, sanitized
+and capped, to name it: `a Power BI Desktop dialog is open: "<title>". A human must act in Desktop.`
+The title is untrusted data and is never persisted.
 
 | Verdict | Exit | What it establishes, and what to do |
 |---|---|---|
-| `CREDENTIAL_MISSING` | 1 | Positive, authentication-specific evidence: a window's text matched the connector credential signature (this includes a modal that was **already open** at t=0). The credential-specific hard stop — a human signs in once at the Desktop screen. |
-| `READY` (observer) | not an operation exit | Complete observation found no unexplained candidate. A bounded observation only; never operation success or `DATA_OK`. |
-| `REFRESH_IN_PROGRESS` | 3 | A dialog whose whole content positively reads as refresh progress was already up: another refresh owns this instance. Wait for it, or cancel the stale one — **do not stack** a second refresh. |
-| `DIALOG_NEEDS_HUMAN` | 3 | A **known** human-blocking prompt matched — the native-database-query approval modal, an approval request, or an `Authentication required` notice. A human must act at the Desktop screen; the token does **not** establish which action, because that one signature spans an approval *and* an authentication notice. Read the prompt before assuming. |
-| `DIALOG_UNRECOGNIZED` | 3 | The window's text was read but matched no known signature, and the signature list is not exhaustive. Inspect Desktop: the credential state is **undetermined in both directions**. |
-| `DIALOG_UNREADABLE` | 3 | The window's **content** could not be established at all (no text, only a caption, or an incomplete harvest). Inspect Desktop: the credential state is **undetermined in both directions**. |
+| `READY` (observer) | not an operation exit | Complete observation found no blocking dialog. A bounded observation only; never operation success or `DATA_OK`. |
+| `DIALOG_NEEDS_HUMAN` | 3 | Any blocking dialog is a human stop; the message names its title (`a Power BI Desktop dialog is open: "<title>"`). A human must act at the Desktop screen; the token does **not** establish which action (sign-in, approval, progress or something else). Read the prompt before assuming. |
+| `CREDENTIAL_UNKNOWN` | 3 | A bounded observation could not complete (timeout, minimized frame, changed target), or a refresh deadline retained uncertainty. Inspect Desktop. |
 | `DESKTOP_UNREADY` / `DESKTOP_GONE` | 2 | Local Desktop session/window/process failure, not a source diagnosis. |
-| `CREDENTIAL_UNKNOWN` | 3 | A refresh deadline retained uncertainty; later quiet polls cannot erase it. |
 
-Only `CREDENTIAL_MISSING` is a credential verdict. The exit-3 band means *"could not probe"*, which
-is neither *"a human must sign in"* nor *"no sign-in is needed"* — settle the window on screen, then
-re-probe.
+No token is a credential verdict. The exit-3 band means *"could not probe"*, which is neither *"a
+human must sign in"* nor *"no sign-in is needed"*: settle the window on screen, then re-probe.
 
-⚠️ **Do not read a non-`CREDENTIAL_MISSING` verdict as a credential wall — and do not read it as the
-absence of one either.** Until issue #367 the probe
-returned `BLOCKED_BY_DIALOG` at **exit 1** for *any* visible non-main window >= 100x100 — a Power BI
-Refresh progress dialog trips that trivially, and a field report on 2026-08-28 caught it doing so under
-three concurrent refreshes against a cold Snowflake warehouse. The probe now classifies a dialog by its
-text and reports what it actually saw; the size test only decides which windows are worth reading.
-
-✅ **The Python fast check (`probe_desktop_query.py` / `refresh_pbip_model.py`) was fixed the same way
-in issue #376, and `BLOCKED_BY_DIALOG` is retired from it.** It carried the identical size-only rule on
-a worse path — it feeds the one-row data probe, the *gate of record* — so a progress dialog produced
-`BLOCKED_BY_DIALOG` at exit 1, which this repo's own classifier maps to `NO_CREDENTIAL`. It now speaks
-the same operation tokens through one shared adapter, with only `CREDENTIAL_MISSING` at exit 1 and every dialog verdict at
-exit 3. Two consequences worth knowing:
-
-- The same fix closed a **silent false negative** nobody had noticed: the 100x100 filter was gating the
-  credential scan too, so a credential prompt in a *smaller* window produced **no finding at all**. No
-  geometry, class or name test decides anything any more — see the next bullet.
-- **Blocking is decided from MODALITY: a modal disables its owner.** `GetWindow(GW_OWNER)` and
-  `IsWindowEnabled(owner)` are harvested, and only three things are excluded from classification: the
-  frame (identified by following ownership **transitively to the unowned root**, falling back to the
-  `MainWindowHandle` convention only when nothing is owned), a window whose **owner is enabled**
-  (positive one-way proof it blocks nothing), and one that is **unowned AND zero-area**. Where frame
-  identity is ambiguous the rule **fails closed** and excludes nothing. Native Win32 experiments
-  defeated every shortcut this replaced — a class prefix (an owner and its owned `FixedDialog` share
-  the exact class), a name allowlist (the AAD host), zero area alone (a real `WS_VISIBLE` owned 0x0
-  window with a disabled owner), and "first owner" (a `tooltip → credential dialog → frame` chain made
-  the credential dialog the frame).
-- Dismissal needs a **positive** claim. A dialog is only dismissed when every content element is
-  recognised progress status or enumerated chrome (`benign_chrome_signature.regex`). There is **no
-  length amnesty**: blind review measured `Refresh` + `Evaluating...` + *"Please enter your password"*
-  classifying `benign` and being suppressed outright under the old five-word rule.
-  ✅ `probe_desktop_credential.ps1` carried the same rule and reproduced the same suppression; it was
-  filed as #406, and **#406 is now closed** — the arbiter has no length amnesty either. Short unknown
-  text (`Password:`) vetoes suppression on both paths, and the enumerated chrome allowlist is the only
-  exemption.
-
-Two gotchas learned building it: (a) use a **generous timeout (>=60s)** because a serverless warehouse
-(Databricks) can **cold-start** before the modal appears, so a short wait yields a false PRESENT; and
-(b) check for an **already-open** window before triggering the refresh — but classify it, do not label
-it. An already-open window is `CREDENTIAL_MISSING` **only when it matches the credential signature**;
-any other active dialog keeps its own exit-3 token (`REFRESH_IN_PROGRESS` / `DIALOG_NEEDS_HUMAN` /
-`DIALOG_UNRECOGNIZED` / `DIALOG_UNREADABLE`) and must be settled on screen first.
-
-⚠️ **A third, found in blind review 2026-08-29: Win32 child-HWND text cannot see inside a WPF dialog,
-and no proxy for "we read the content" survives contact.** WPF renders its whole visual tree into one
-HWND, so only the window *caption* survives child enumeration. A real owned WPF modal captioned
-`Refresh`, whose content read `Enter your credentials`, was classified as a progress dialog and the
-probe exited **0 with `CREDENTIAL_PRESENT`** — a silent false negative on a hard stop. A second attempt
-that also required "we harvested some text" fell to a `Cancel` button. The probe now merges **UI
-Automation** text (`Name`, `ValuePattern`, `TextPattern`) before matching any signature, runs that
-harvest in a **killable child process** (a hung provider held a 1 s probe for 15 s+ producing no verdict
-at all), and — the load-bearing part — **suppresses a dialog only when it positively reads benign
-CONTENT**, never because a caption looked reassuring. If you extend this probe, or write another dialog
-detector: **a caption is not content, and "we read something" is not "we read the thing that matters".**
-A third round found the same shape twice more: the **first** benign element used to classify the whole
-window (so `Evaluating` beside *"Permission is required to run this native database query"* cleared it),
-and a **missing JSON property** in the harvest child's payload computed to "complete" because
-`-not $null` is `$true`. The probe now scans all content, recognises known human-blocking prompts by
-name (`DIALOG_NEEDS_HUMAN`, exit 3), and validates the child's schema and exit code. The one-line
-lesson across all three rounds: **missing evidence must never read as good evidence.**
+History: until #367/#376 a size-only rule reported Desktop's own Refresh progress dialog as a sign-in
+wall (`BLOCKED_BY_DIALOG`, exit 1). Three blind-review rounds (2026-08-29) then showed that reading
+dialog *content* could not be made safe (WPF content hidden behind a caption, a first benign element
+clearing a native-query prompt, a missing harvest field reading as complete), and #406 closed the
+length amnesty. Issue #831 retired text classification entirely: `CREDENTIAL_MISSING`,
+`REFRESH_IN_PROGRESS`, `DIALOG_UNRECOGNIZED` and `DIALOG_UNREADABLE` are no longer produced, and
+receipts still accept them so older runs stay readable. The lesson that survives: **missing evidence
+must never read as good evidence.**
 
 **The robust positive check: query one row from the Desktop model (verified 2026-07).** Modal-absence is
 a *negative* signal; the *positive* proof that data actually flows is to query the loaded model. Power BI
@@ -196,7 +145,7 @@ after the user resolves the visible prompt and the row probe is run; observer `R
 
 ⚠️ **`DATA_OK` is earned by a clean run, and an active dialog vetoes it.** The success line is not a
 substring you may harvest from a transcript: an authoritative non-success verdict anywhere in the child's
-output — any `DIALOG_*` token, `REFRESH_IN_PROGRESS`, or a non-zero exit — outranks a stale or late
+output (any `DIALOG_*` or `CREDENTIAL_*` token, or a non-zero exit) outranks a stale or late
 `DATA_OK`-looking line, and the source is not proven. Settle the dialog, then re-probe for a clean
 `DATA_OK`.
 

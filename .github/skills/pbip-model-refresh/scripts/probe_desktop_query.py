@@ -49,9 +49,8 @@ from typing import Callable, Iterator, NoReturn, TypeVar
 from _verdict import derive_data_verdict
 
 from _desktop_observer import (
+    DIALOG_NEEDS_HUMAN,
     Observation,
-    CredentialMissingError,
-    CredentialModal,
     CredentialUnknownError,
     DesktopGoneError,
     DesktopUnreadyError,
@@ -101,14 +100,10 @@ _OBSERVATION_CODES = frozenset(
         "CATALOGUE_UNESTABLISHED",
         "CATALOGUE_CHANGED",
         "CANARIES_REQUIRED",
-        "CREDENTIAL_MISSING",
         "CREDENTIAL_UNKNOWN",
         "DESKTOP_GONE",
         "DESKTOP_UNREADY",
         "DIALOG_NEEDS_HUMAN",
-        "DIALOG_UNREADABLE",
-        "DIALOG_UNRECOGNIZED",
-        "REFRESH_IN_PROGRESS",
         "TIMEOUT",
         "TOOL_UNAVAILABLE",
     }
@@ -123,10 +118,9 @@ def _fresh_observation_error(error: BaseException) -> BaseException:
     if type(error) is ObservationUnavailable and len(error.args) == 1:  # pylint: disable=unidiomatic-typecheck
         code = error.args[0]
     elif type(error) is DialogFoundError and type(error.finding) is DialogFinding:  # pylint: disable=unidiomatic-typecheck
-        code = error.finding.verdict
+        code = DIALOG_NEEDS_HUMAN
     else:
         code = {
-            CredentialMissingError: "CREDENTIAL_MISSING",
             CredentialUnknownError: "CREDENTIAL_UNKNOWN",
             DesktopGoneError: "DESKTOP_GONE",
             DesktopUnreadyError: "DESKTOP_UNREADY",
@@ -302,7 +296,7 @@ def _observation_credential_check(
         supervisor=supervisor,
     )
     code = legacy_token(state)
-    if code is not None and not (in_flight and code == "REFRESH_IN_PROGRESS"):
+    if code is not None:
         raise ObservationUnavailable(code)
 
 
@@ -845,15 +839,9 @@ def _credential_state(
     return state
 
 
-def _emit_credential_missing(pid: int, modal: CredentialModal) -> None:
-    """Emit a closed positive-prompt operation refusal, never private provider/source text."""
-    # pylint: disable=unused-argument
-    print_operation_refusal("PREFLIGHT", pid, "CREDENTIAL_MISSING")
-
-
 def _emit_dialog_finding(pid: int, finding: DialogFinding) -> None:
-    """Keep legacy verdict grammar; structural stops offer only a private LOCAL_IMAGE pointer."""
-    print_operation_refusal("PREFLIGHT", pid, finding.verdict, finding=finding)
+    """Any blocking dialog is a human stop; the line names its sanitized title (#831 D1)."""
+    print_operation_refusal("PREFLIGHT", pid, DIALOG_NEEDS_HUMAN, finding=finding)
 
 
 def _emit_desktop_gone(pid: int, reason: str) -> None:
@@ -863,33 +851,29 @@ def _emit_desktop_gone(pid: int, reason: str) -> None:
 
 
 def _emit_desktop_unready(pid: int, reason: str) -> None:
-    """Use the shared local window/session diagnostic, retaining the caller's exit band."""
-    print_operation_refusal("PREFLIGHT", pid, "DESKTOP_UNREADY", reason=reason)
+    """Use the shared local window diagnostic, retaining the caller's exit band."""
+    # pylint: disable=unused-argument
+    print_operation_refusal("PREFLIGHT", pid, "DESKTOP_UNREADY")
 
 
 def _credential_verdict(pid: int, state: Observation, *, in_flight: bool = False) -> int | None:
     """Emit and return a terminal inspection verdict, or None when probing may continue.
 
-    Exit-code bands, and why a dialog finding is no longer in the first one (issue #376):
-      1  ``CREDENTIAL_MISSING`` - the credential signature matched. The ONLY hard stop.
+    Exit-code bands:
       2  ``DESKTOP_GONE`` / ``DESKTOP_UNREADY`` - local Desktop failure; the source was never tested.
-      3  a dialog finding, or ``UNKNOWN`` - we could not probe. Loud, recoverable, and no claim about
-         the data source. It is not a clearance: a known blocking prompt and a running refresh both
-         land here, and an unreadable or unrecognized window settles the credential question in
-         neither direction.
+      3  ``DIALOG_NEEDS_HUMAN`` (any blocking dialog, named by its title) or ``CREDENTIAL_UNKNOWN`` -
+         we could not probe. Loud, recoverable, and no claim about the data source: a dialog is a
+         stop for a human, never a credential verdict (#831).
     """
+    # pylint: disable=unused-argument
     token = legacy_token(state)
-    if token is None or (in_flight and token == "REFRESH_IN_PROGRESS"):
+    if token is None:
         return None
-    if token == "CREDENTIAL_MISSING":
-        modal = state.modal or CredentialModal("", state.dialog.window)
-        _emit_credential_missing(pid, modal)
-        return 1
     if token == "DESKTOP_GONE":
         _emit_desktop_gone(pid, state.process_gone or "process_gone")
         return 2
     if token == "DESKTOP_UNREADY":
-        _emit_desktop_unready(pid, state.desktop_unready or "session_error")
+        _emit_desktop_unready(pid, state.desktop_unready or "desktop_unready")
         return 2
     if state.dialog is not None:
         _emit_dialog_finding(pid, state.dialog)
@@ -936,10 +920,8 @@ def _probe_with_credential_poll(
             print("PREFLIGHT: UNKNOWN; bounded query deadline elapsed")
             return 3
         worker.join(min(PREFLIGHT_CREDENTIAL_POLL_SECONDS, remaining))
-        # ACT on a finding here rather than latching it the way `join_with_credential_poll` does: this
-        # loop has NO deadline of its own (it runs until the probe thread returns), so a latched dialog
-        # behind a wedged query would wait for ever. The in-flight detector already ignores a
-        # positively-read progress dialog, so what reaches this point is something we could not read.
+        # ACT on a finding here rather than latching it the way `join_with_credential_poll` does: a
+        # latched dialog behind a wedged query would only wait out the deadline. Any dialog is a human stop.
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             print("PREFLIGHT: UNKNOWN; bounded query deadline elapsed")

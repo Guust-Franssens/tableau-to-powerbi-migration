@@ -162,10 +162,13 @@ def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[di
 
     # The root CLI lint pass cannot resolve the runtime-added skill path.
     # pylint: disable-next=import-outside-toplevel,import-error
-    from _desktop_observer import legacy_token, print_dialog_diagnostic
+    from _desktop_observer import dialog_stop_detail, legacy_token
 
     connection = None
     held_identity = None
+    # The engine's persistent mode never drains our stderr, so a line per refusal fills the pipe
+    # and hangs both processes (#842): each distinct title is printed once per session.
+    printed_titles: set[str] = set()
 
     def refuse_nonclean_desktop() -> None:
         nonlocal held_identity
@@ -181,11 +184,13 @@ def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[di
             expected_process_start=held_identity.process_start,
         )
         token = legacy_token(state)
-        finding = state.modal or state.dialog
-        window = finding.window if finding else None
         if token is not None:
-            if window is not None:
-                print_dialog_diagnostic(pid, window, stream=sys.stderr)
+            if state.dialog is not None:
+                # The title is for the human only; the error reply is persisted, so it keeps the token.
+                detail = dialog_stop_detail(state.dialog)
+                if detail not in printed_titles:
+                    printed_titles.add(detail)
+                    print(detail, file=sys.stderr, flush=True)
             raise RuntimeError(f"Desktop query refused ({token}); inspect this Desktop locally")
 
     def execute(dax: str) -> list[dict]:

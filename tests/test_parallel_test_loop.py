@@ -83,6 +83,9 @@ def _run_pytest(cwd: Path, args: list[str]) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env.pop("PYTEST_ADDOPTS", None)
     env.pop("PYTEST_CURRENT_TEST", None)
+    # Under an outer xdist run a worker's env would make the nested run look distributed too.
+    for key in [k for k in env if k.startswith("PYTEST_XDIST_")]:
+        env.pop(key)
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *args],
         cwd=cwd,
@@ -99,15 +102,6 @@ def test_pytest_xdist_is_a_declared_dev_dependency() -> None:
     assert any(req.replace("_", "-").startswith("pytest-xdist") for req in dev), (
         f"pytest-xdist is not in the dev extra ({dev}) - `uv sync --all-extras` would not install it, "
         "and the documented fast loop would fail with 'unrecognized arguments: -n'"
-    )
-
-
-def test_the_serial_marker_is_registered() -> None:
-    """`serial` is the hook the live Desktop/UIA tests hang off; an unregistered marker is a warning."""
-    markers = _pyproject()["tool"]["pytest"]["ini_options"]["markers"]
-    assert any(marker.startswith("serial:") for marker in markers), (
-        f"no `serial` marker registered in [tool.pytest.ini_options].markers ({markers}); "
-        'the documented fast loop filters on -m "not (serial or timing)"'
     )
 
 
@@ -148,38 +142,6 @@ def _marked_timing(func: ast.FunctionDef) -> bool:
     return _marked(func, "timing")
 
 
-def _launches_the_live_desktop(func: ast.FunctionDef) -> bool:
-    """Whether a test drives a real WPF window through UI Automation.
-
-    Two spellings exist and both are stable: calling the module's `_run_probe_against_wpf_modal`
-    helper, or launching the fixture app directly, which is identifiable by the `-ReadyFile` argument
-    the app uses to announce that its window is up. Deriving it beats a name list - a new live
-    regression added next to these gets caught rather than silently joining the parallel tier.
-    """
-    for node in ast.walk(func):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id in {"_run_probe_against_wpf_modal", "_NativeWindowProbe"}:
-                return True
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "CreateWindowExW":
-            return True
-        if isinstance(node, ast.Constant) and node.value in {"-ReadyFile", "-STA"}:
-            return True
-    return False
-
-
-def _live_desktop_tests_with_marks() -> dict[str, bool]:
-    """Every live WPF/UI-Automation test, mapped to whether it is marked `serial`."""
-    found: dict[str, bool] = {}
-    for path, tree in _parsed_test_files():
-        rel = path.relative_to(REPO_ROOT).as_posix()
-        for func in ast.walk(tree):
-            if not isinstance(func, ast.FunctionDef) or not func.name.startswith("test_"):
-                continue
-            if _launches_the_live_desktop(func):
-                found[f"{rel}::{func.name}"] = _marked(func, "serial")
-    return found
-
-
 def _marked_tests(marker: str) -> set[str]:
     """Every test in the suite carrying `@pytest.mark.<marker>`, by node id."""
     found: set[str] = set()
@@ -205,34 +167,6 @@ def test_no_timing_marker_outlives_the_budget_it_was_added_for() -> None:
         "these tests carry @pytest.mark.timing but assert no sub-second wall-clock budget, so they "
         "are excluded from the parallel tier for no reason - remove the marker, or add it to "
         f"MEASURED_LARGER_BUDGETS with the measurement that earned it: {stale}"
-    )
-
-
-def test_no_serial_marker_outlives_the_live_fixture_it_was_added_for() -> None:
-    """Same both-ways rule for `serial`: it must still drive the live desktop it was marked for."""
-    live = set(_live_desktop_tests_with_marks())
-    stale = sorted(_marked_tests("serial") - live)
-    assert not stale, (
-        "these tests carry @pytest.mark.serial but no longer launch the live WPF fixture, so they "
-        f"are excluded from the parallel tier for no reason: {stale}"
-    )
-
-
-def test_every_live_ui_test_declares_itself_serial() -> None:
-    """The interactive desktop and its UIA provider are a singleton; two live tests degrade each other.
-
-    Measured (issue #387) across three rounds of two whole-suite parallel runs started concurrently:
-    `test_credential_text_beyond_the_element_cap_convicts_when_the_cap_allows_it` failed in 3 of 6,
-    every time with `harvest=INCOMPLETE` / `VERDICT: DIALOG_UNREADABLE` - the probe degrading safely
-    and the test's stricter assertion correctly refusing it. Marking only the one that was observed
-    would move the boundary rather than remove it: all of them share the mechanism.
-    """
-    live = _live_desktop_tests_with_marks()
-    assert len(live) >= 5, f"expected the retained native/UIA GUI regressions to be found, got {sorted(live)}"
-    unmarked = sorted(node for node, marked in live.items() if not marked)
-    assert not unmarked, (
-        "these tests drive a real WPF window through UI Automation but do not carry "
-        f"@pytest.mark.serial, so two concurrent parallel runs would race them: {unmarked}"
     )
 
 
@@ -304,15 +238,11 @@ def test_every_sub_second_wall_clock_test_declares_itself_timing() -> None:
 
 def test_the_markers_actually_deselect_those_tests() -> None:
     """The markers are inert unless `-m` really removes those node ids from a collected run."""
-    excluded = _sub_second_budget_tests() | set(_live_desktop_tests_with_marks()) | MEASURED_LARGER_BUDGETS
+    excluded = _sub_second_budget_tests() | MEASURED_LARGER_BUDGETS
     assert excluded, "nothing derived - this test would pass vacuously"
     target = sorted(excluded)[0].split("::")[0]
     in_target = sorted(node for node in excluded if node.startswith(target + "::"))
-    # `--run-gui` ISOLATES the mechanism this test names. The root conftest also deselects `gui`
-    # unconditionally (issue #447), and three of those tests carry no contended marker, so without
-    # the opt-in the count here measures two mechanisms at once and drifts whenever either changes.
-    # Opting in leaves `-m "not (serial or timing)"` as the only filter, which is the claim.
-    result = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "--run-gui", "-m", "not (serial or timing)", target])
+    result = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "-m", "not timing", target])
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     assert f"{len(in_target)} deselected" in output, (
@@ -323,14 +253,18 @@ def test_the_markers_actually_deselect_those_tests() -> None:
 
 
 def test_the_timing_marker_travels_with_the_bundle_that_uses_it() -> None:
-    """`-m "not (serial or timing)"` has to work in the COPIED bundle, where this repo's pyproject is absent."""
+    """`-m "not timing"` has to work in the COPIED bundle, where this repo's pyproject is absent."""
     bundle_conftest = REPO_ROOT / ".github/skills/pbip-model-refresh/tests/conftest.py"
     body = bundle_conftest.read_text(encoding="utf-8")
-    for marker in ("timing:", "serial:"):
+    for marker in ("timing:",):
         assert "addinivalue_line" in body and f'"{marker}' in body, (
             f"{bundle_conftest.relative_to(REPO_ROOT).as_posix()} does not register `{marker[:-1]}`; "
             "copied out of this repo the marker is unregistered and the filter silently stops meaning anything"
         )
+    # `serial` was retired (#831); a half-removed registration would revive a marker nothing gates.
+    assert '"serial:' not in body, f"{bundle_conftest.relative_to(REPO_ROOT).as_posix()} still registers `serial`"
+    markers = _pyproject()["tool"]["pytest"]["ini_options"]["markers"]
+    assert not any(marker.startswith("serial:") for marker in markers), f"`serial` is still registered: {markers}"
 
 
 def test_the_nested_bundle_run_inherits_the_parallel_tier_exclusion(monkeypatch: object) -> None:
@@ -353,9 +287,9 @@ def test_the_nested_bundle_run_inherits_the_parallel_tier_exclusion(monkeypatch:
     monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
     assert module._nested_marker_filter() == [], "a serial outer run must still execute every bundled test"
     monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
-    assert module._nested_marker_filter() == ["-m", "not (serial or timing)"], (
+    assert module._nested_marker_filter() == ["-m", "not timing"], (
         "the nested bundle run does not inherit the parallel-tier exclusion, so a wall-clock-budget "
-        "or live UI test still runs under 22 workers"
+        "test still runs under 22 workers"
     )
 
     tree = ast.parse(skills.read_text(encoding="utf-8"))
@@ -382,7 +316,7 @@ def test_a_parallel_run_without_loadfile_is_refused(tmp_path: Path) -> None:
 def test_the_guard_also_covers_the_skills_testpath_root(tmp_path: Path) -> None:
     """The reason the guard is at the repo ROOT and not in `tests/conftest.py`.
 
-    `testpaths` names two roots, and the live Power BI Desktop / UI-Automation tests live under the
+    `testpaths` names two roots, and the wall-clock-sensitive Power BI Desktop tests live under the
     second one. A guard scoped to `tests/` would leave the single most dangerous parallel run -
     `pytest .github/skills/<bundle>/tests -n 4` - completely ungated.
     """
@@ -458,11 +392,9 @@ def _marker_expression(command: str) -> str | None:
 def test_the_loop_doc_never_documents_a_parallel_run_that_keeps_contended_tests() -> None:
     """Judged by pytest's own expression semantics, not by substring.
 
-    A first draft asserted that the documented command *contained* "timing". Mutating
-    `not (serial or timing)` to `not timing` kept the substring, so all three documentation gates
-    returned `3 passed`, exit 0 - while the mutated command collects every live UI test under xdist.
-    Compiling the expression and asking whether it excludes each marker is the only check that can
-    tell those two commands apart.
+    A substring check for "timing" would accept `-m "timing or not timing"` or `-m "not slow and
+    timing"`. Compiling the expression and asking whether it excludes the marker is the only check
+    that tells those commands apart from the correct one.
     """
     offenders: list[str] = []
     for command in _documented_pytest_commands():
@@ -473,7 +405,7 @@ def test_the_loop_doc_never_documents_a_parallel_run_that_keeps_contended_tests(
             offenders.append(f"{command!r}: no -m filter at all")
             continue
         compiled = Expression.compile(expression)
-        for marker in ("serial", "timing"):
+        for marker in ("timing",):
             if compiled.evaluate(functools.partial(operator.eq, marker)):
                 offenders.append(f"{command!r}: -m {expression!r} does not exclude `{marker}`")
     assert not offenders, "documented parallel commands that would still run contended tests: " + "; ".join(offenders)
@@ -482,21 +414,16 @@ def test_the_loop_doc_never_documents_a_parallel_run_that_keeps_contended_tests(
 def test_xdist_deselects_contended_tests_without_being_asked() -> None:
     """The mechanism, not the convention: the exclusion must not depend on the caller's `-m`.
 
-    Reproduces the reviewer's case exactly - a parallel run whose filter drops the `serial` half.
-    Before the root conftest deselected them, this collected all seven live WPF/UI-Automation tests,
-    which is the configuration measured to fail 3 times in 8 concurrent-pair runs.
+    Models the caller who forgot the filter entirely: a parallel run with no `-m` at all.
     """
-    collection = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "--run-gui", "-m", "serial or timing", BUNDLE_TESTS])
+    collection = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "-m", "timing", BUNDLE_TESTS])
     assert collection.returncode == 0, collection.stdout + collection.stderr
     contended = {line for line in collection.stdout.splitlines() if line.startswith(BUNDLE_TESTS + "::")}
-    # O23 (#799) retains four native/UIA GUI controls and six timing controls in this renamed suite.
-    assert len(contended) >= 10, f"expected the bundle's contended tests to be found, got {sorted(contended)}"
-    # `--run-gui` for the same reason as in `test_the_markers_actually_deselect_those_tests`: the
-    # `gui` exclusion is orthogonal and always on, and three gui tests carry no contended marker, so
-    # leaving it engaged would fold two mechanisms into one count. This test is about the xdist one.
+    # The observer file keeps three wall-clock controls (#831 retired the GUI tier and three t0 tests).
+    assert len(contended) >= 3, f"expected the bundle's contended tests to be found, got {sorted(contended)}"
     result = _run_pytest(
         REPO_ROOT,
-        ["-q", "--collect-only", "--run-gui", "-n", "2", "--dist", "loadfile", "-m", "not timing", BUNDLE_TESTS],
+        ["-q", "--collect-only", "-n", "2", "--dist", "loadfile", BUNDLE_TESTS],
     )
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
@@ -540,42 +467,15 @@ def test_the_opt_out_flag_puts_the_contended_tests_back() -> None:
     )
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    # ⚠️ This used to assert `"deselected" not in output`, which was a PROXY for "the contended tests
-    # came back" and became wrong the moment a second, orthogonal deselection existed: `gui` tests
-    # spawn a real top-level window and are deselected by default on purpose (issue #447), and
-    # `--include-contended` is about `serial`/`timing`, not about hijacking someone's desktop. The
-    # per-node loop below is the real check; keep the count assertion so this stays falsifiable
-    # rather than merely relaxed - a NEW unexplained deselection must still fail here.
-    collection = _run_pytest(REPO_ROOT, ["-q", "--collect-only", "--run-gui", "-m", "gui", BUNDLE_TESTS])
-    assert collection.returncode == 0, collection.stdout + collection.stderr
-    gui_nodes = {line for line in collection.stdout.splitlines() if line.startswith(BUNDLE_TESTS + "::")}
-    assert gui_nodes, "the GUI collection must not be empty"
-    deselected = re.search(r"\((\d+) deselected\)", output)
-    remaining = int(deselected.group(1)) if deselected else 0
-    assert remaining == len(gui_nodes), (
-        f"--include-contended left {remaining} test(s) deselected but {len(gui_nodes)} carry "
-        f"@pytest.mark.gui; an unexplained deselection means the opt-out no longer restores "
-        f"everything it claims to:\n{output[-1500:]}"
-    )
-    gui_functions = {node.split("[", 1)[0] for node in gui_nodes}
-    for node in sorted(node for node in _contended_nodes() - gui_functions if node.startswith(BUNDLE_TESTS + "::")):
+    # With the `gui` exclusion retired (#831) nothing else deselects, so the original strict check holds.
+    assert "deselected" not in output, f"--include-contended left tests deselected:\n{output[-1500:]}"
+    for node in sorted(node for node in _contended_nodes() if node.startswith(BUNDLE_TESTS + "::")):
         assert node in output, f"{node} missing even with --include-contended"
 
 
 def _contended_nodes() -> set[str]:
     """Every node id that carries a marker the parallel tier excludes."""
-    return _marked_tests("serial") | _marked_tests("timing")
-
-
-def _gui_nodes() -> set[str]:
-    """Every node id that spawns a real top-level window, so is deselected by default (issue #447).
-
-    Deliberately NOT folded into `_contended_nodes()`. `serial`/`timing` are excluded from the
-    PARALLEL tier and restored by `--include-contended` for deliberate stress-testing; `gui` is
-    excluded from EVERY tier because it hijacks the operator's desktop, and `--include-contended`
-    must not put it back. Two reasons, two sets.
-    """
-    return _marked_tests("gui")
+    return _marked_tests("timing")
 
 
 def test_the_loop_doc_documents_both_tiers() -> None:
