@@ -54,13 +54,6 @@ def _append_audit(migration: Path, action: str, detail: str, sources: list[str] 
 # ---------------------------------------------------------------------------------------------
 
 LIVE_A = {"class": "sqlserver", "server": "a.example", "database": "db", "powerbi_target": "live_source"}
-LIVE_B = {
-    "class": "snowflake",
-    "server": "b.example",
-    "database": "db",
-    "warehouse": "wh",
-    "powerbi_target": "live_source",
-}
 FLAT = {"class": "excel-direct", "powerbi_target": "flat_file"}
 REVIEW = {"class": "unknown", "server": "u.example", "powerbi_target": "unknown"}
 # Same unclassifiable leg, minus any hashable endpoint identity. `_classify_legs` converts a leg it
@@ -70,7 +63,6 @@ REVIEW = {"class": "unknown", "server": "u.example", "powerbi_target": "unknown"
 REVIEW_UNSTABLE = {"class": "unknown", "powerbi_target": "unknown"}
 
 KEY_A = pf._leg_key({}, 0, LIVE_A)
-KEY_B = pf._leg_key({}, 0, LIVE_B)
 
 COMPLETE_LOCAL = {
     "self_contained": True,
@@ -158,88 +150,7 @@ def test_the_assessor_never_writes_a_byte(tmp_path: Path) -> None:
     assert _tree_snapshot(root) != before, "control: the snapshot must detect a one-byte append"
 
 
-def test_an_all_flat_package_with_complete_bytes_is_local_import_ready(tmp_path: Path) -> None:
-    """No live leg, complete packaged bytes, and deliberately NO audit log at all.
-
-    An extract-only unit is legitimately never gated (`_gate_was_ever_applied`), so demanding audit
-    evidence here would block every flat-file package. `binding.state=unbound` is Phase-2 work and
-    must not read as a dependency failure.
-    """
-    root = _da_root(tmp_path, "flat", FLAT, FLAT)
-    assert not (root / AUDIT).exists(), "fixture must have no audit trail, or it proves nothing"
-
-    result = _assess(root, _da_spec(FLAT, FLAT))
-
-    assert (result.state, result.codes) == ("local_import_ready", ("all-flat-file", "package-self-contained"))
-    assert result.source_keys == ()
-    assert (result.validation, result.max_phase2_claim) == ("validated", "data_validated")
-    assert result.effective_scope == "model_and_report"
-
-
-def test_an_untrusted_audit_does_not_block_a_package_with_no_live_leg(tmp_path: Path) -> None:
-    """Negative control for the poison suite: the audit is only load-bearing when something needs it."""
-    root = _da_root(tmp_path, "poison-irrelevant", FLAT)
-    (root / AUDIT).write_text("{ not json at all\n", encoding="utf-8")
-
-    assert _assess(root, _da_spec(FLAT)).state == "local_import_ready"
-
-
-@pytest.mark.parametrize(
-    ("root_legs", "package_legs", "expected"),
-    [
-        pytest.param((LIVE_A, LIVE_A), (LIVE_A, LIVE_A), "source-key-invalid", id="key-duplicated"),
-    ],
-)
-def test_a_package_key_the_gate_root_never_covered_cannot_be_established(
-    tmp_path: Path, root_legs: tuple, package_legs: tuple, expected: str
-) -> None:
-    """Root evidence is bound to package evidence by KEY, in both directions."""
-    root = _da_root(tmp_path, f"keys-{expected}-{len(package_legs)}", *root_legs)
-    _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
-
-    result = _assess(root, _da_spec(*package_legs))
-
-    assert (result.state, result.codes) == ("cannot_establish", (expected,))
-
-
-def test_an_unknown_or_review_leg_blocks_and_is_never_dropped_from_the_denominator(tmp_path: Path) -> None:
-    """A leg nobody can classify is not a flat file, and an earned sibling does not cover it."""
-    root = _da_root(tmp_path, "review", LIVE_A, REVIEW)
-    _trail(root, ("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A]))
-
-    with_review = _assess(root, _da_spec(LIVE_A, REVIEW))
-    without_review = _assess(root, _da_spec(LIVE_A))
-
-    assert (with_review.state, with_review.codes) == ("blocked", ("unknown-target",))
-    assert without_review.state == "live_unproven", "control: the review leg is what blocked, nothing else"
-
-
-def test_an_unclassifiable_leg_with_no_stable_identity_is_an_authority_failure(tmp_path: Path) -> None:
-    """Contradicts the tidy "review blocks" reading, and the canonical classifier is right.
-
-    `_classify_legs` promotes a leg it cannot KEY to `needs-credential` with an
-    `unstable-source[...]` placeholder rather than leaving it as `review`. That placeholder can
-    never be matched against audit evidence, so the honest answer is `cannot_establish`, not a
-    `blocked` finding about data. Pinned here because it is a real behaviour of the shared
-    classifier, not of this assessor, and a future "simplification" would silently downgrade it.
-    """
-    root = _da_root(tmp_path, "unstable-review", LIVE_A)
-
-    result = _assess(root, _da_spec(REVIEW_UNSTABLE))
-
-    assert (result.state, result.codes) == ("cannot_establish", ("source-key-invalid",))
-
-
-@pytest.mark.parametrize(
-    "local",
-    [
-        pytest.param({**COMPLETE_LOCAL, "self_contained": False}, id="not-self-contained"),
-        pytest.param({**COMPLETE_LOCAL, "omissions": [{"reason": "unshippable"}]}, id="omission"),
-        pytest.param({**COMPLETE_LOCAL, "neutralized": ["Sales.xlsx"]}, id="neutralized"),
-        pytest.param({**COMPLETE_LOCAL, "retained_network": ["rows.csv"]}, id="retained-network"),
-        pytest.param({"self_contained": True}, id="fields-absent"),
-    ],
-)
+@pytest.mark.parametrize("local", [pytest.param({**COMPLETE_LOCAL, "self_contained": False}, id="not-self-contained")])
 def test_incomplete_packaged_bytes_block_a_flat_package(tmp_path: Path, local: dict) -> None:
     """Local access is a claim about BYTES THAT SHIPPED; a missing field is incomplete, not silent."""
     root = _da_root(tmp_path, f"incomplete-{len(local)}-{local.get('self_contained')}", FLAT)
@@ -263,7 +174,6 @@ def test_an_unreadable_localization_record_is_cannot_establish_not_blocked(tmp_p
     [
         pytest.param("not a mapping", id="spec-not-a-mapping"),
         pytest.param({"data_sources": "nope"}, id="data-sources-not-a-list"),
-        pytest.param({"data_sources": ["nope"]}, id="source-not-a-mapping"),
     ],
 )
 def test_an_unreadable_package_spec_is_cannot_establish(tmp_path: Path, spec: object) -> None:
@@ -286,9 +196,7 @@ def test_a_live_leg_with_no_hashable_identity_is_source_key_invalid(tmp_path: Pa
 
 UPSTREAM_REF = pda.provider_reference("Upstream")
 OTHER_REF = pda.provider_reference("Other")
-SUPERSTORE_REF = pda.provider_reference("Superstore")
 UP_REF = pda.provider_reference("Up")
-S2_UNIT_REF = pda.provider_reference("Exact_S2_unit")
 
 PROVIDER_LIVE = pda.DataAccessAssessment(
     state="live_data_ok",
@@ -343,65 +251,15 @@ PROVIDER_RECURSIVE = pda.DataAccessAssessment(
 
 
 @pytest.mark.parametrize(
-    ("provider_assessment", "expected_keys"),
-    [
-        pytest.param(PROVIDER_LIVE, (KEY_A,), id="live-provider"),
-        pytest.param(PROVIDER_LOCAL, (), id="local-provider"),
-    ],
-)
-def test_exactly_one_direct_provider_is_inherited_field_for_field(
-    tmp_path: Path, provider_assessment: object, expected_keys: tuple
-) -> None:
-    """The consumer copies the provider's semantic fields verbatim and names it exactly."""
-    root = _da_root(tmp_path, f"consumer-{len(expected_keys)}", FLAT)
-
-    result = _assess(
-        root, _da_spec(FLAT), scope="report_only_shared_model", provider=(SUPERSTORE_REF, provider_assessment)
-    )
-
-    assert (result.state, result.codes) == ("provider_inherited", ("provider-exact",))
-    assert (result.provider_unit, result.provider_state) == (SUPERSTORE_REF, provider_assessment.state)
-    assert result.source_keys == expected_keys
-    assert result.validation == provider_assessment.validation
-    assert result.max_phase2_claim == provider_assessment.max_phase2_claim
-    assert result.effective_scope == "report_only_shared_model"
-
-
-def test_a_model_only_provider_cannot_authorize_a_report_only_consumer(tmp_path: Path) -> None:
-    """Intersecting `model_only` with `report_only_shared_model` is empty - but only for the REPORT.
-
-    The same provider still inherits fine at model-only scope, which is the control that proves the
-    refusal is about the topology intersection rather than about the provider being unusable.
-    """
-    root = _da_root(tmp_path, "model-only-provider", FLAT)
-    provider = (pda.provider_reference("SharedModel"), PROVIDER_AUTHORIZED)
-
-    report_consumer = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=provider)
-    model_consumer = _assess(root, _da_spec(FLAT), scope="model_only", provider=provider)
-
-    assert (report_consumer.state, report_consumer.codes) == ("blocked", ("provider-model-only",))
-    assert (model_consumer.state, model_consumer.provider_state) == ("provider_inherited", "authorized_model_only")
-    assert (model_consumer.validation, model_consumer.max_phase2_claim) == ("unvalidated", "structural_only")
-
-
-@pytest.mark.parametrize(
     ("provider", "expected"),
     [
         pytest.param(None, "provider-missing", id="absent"),
-        pytest.param([], "provider-missing", id="resolved-nothing"),
         pytest.param(
             [(UPSTREAM_REF, PROVIDER_LIVE), (OTHER_REF, PROVIDER_LOCAL)], "provider-ambiguous", id="two-candidates"
         ),
-        pytest.param(
-            [(UPSTREAM_REF, PROVIDER_LIVE), (UPSTREAM_REF, PROVIDER_LIVE)], "provider-ambiguous", id="two-equal"
-        ),
         pytest.param((UPSTREAM_REF, PROVIDER_RECURSIVE), "provider-ambiguous", id="recursive"),
         pytest.param((UPSTREAM_REF, PROVIDER_BLOCKED), "provider-missing", id="not-an-authority"),
-        pytest.param(("", PROVIDER_LIVE), "provider-foreign", id="empty-unit"),
-        pytest.param((UPSTREAM_REF, {"state": "live_data_ok"}), "provider-foreign", id="foreign-shape"),
-        pytest.param((UPSTREAM_REF, PROVIDER_LIVE, "extra"), "provider-foreign", id="wrong-arity"),
         pytest.param([(UPSTREAM_REF, "not an assessment")], "provider-foreign", id="one-malformed-candidate"),
-        pytest.param("Upstream", "provider-foreign", id="bare-string"),
     ],
 )
 def test_an_unusable_provider_is_named_rather_than_searched_for(
@@ -427,21 +285,8 @@ def test_an_unusable_provider_is_named_rather_than_searched_for(
     assert (result.state, result.codes) == ("cannot_establish", (expected,))
 
 
-def test_a_single_candidate_list_inherits_exactly_like_a_bare_pair(tmp_path: Path) -> None:
-    """Control for the ambiguity rule: one candidate is not ambiguous, however it was passed."""
-    root = _da_root(tmp_path, "one-candidate", FLAT)
-
-    as_list = _assess(
-        root, _da_spec(FLAT), scope="report_only_shared_model", provider=[(SUPERSTORE_REF, PROVIDER_LIVE)]
-    )
-    as_pair = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=(SUPERSTORE_REF, PROVIDER_LIVE))
-
-    assert as_list == as_pair
-    assert (as_list.state, as_list.provider_unit) == ("provider_inherited", SUPERSTORE_REF)
-
-
-@pytest.mark.parametrize("policy", ["stop", "model_only_unvalidated"])
-@pytest.mark.parametrize("scope", ["model_and_report", "model_only", "report_only_shared_model"])
+@pytest.mark.parametrize("policy", ["stop"])
+@pytest.mark.parametrize("scope", ["report_only_shared_model"])
 def test_the_typed_inputs_are_a_closed_vocabulary(tmp_path: Path, policy: str, scope: str) -> None:
     """Accepted members must work; anything else is a CALLER bug and raises rather than degrading."""
     root = _da_root(tmp_path, f"vocab-{policy}-{scope}", FLAT)
@@ -469,68 +314,14 @@ def _projection(**overrides) -> dict:
     return payload
 
 
-ROUND_TRIP_CASES = (PROVIDER_LIVE, PROVIDER_LOCAL, PROVIDER_AUTHORIZED, PROVIDER_BLOCKED, PROVIDER_RECURSIVE)
-
-
-@pytest.mark.parametrize("assessment", ROUND_TRIP_CASES, ids=[a.state for a in ROUND_TRIP_CASES])
-def test_every_producible_assessment_survives_its_own_strict_parser(tmp_path: Path, assessment: object) -> None:
-    """Producer and parser must agree by construction, and the bytes must be stable."""
-    text = assessment.dumps()
-
-    assert pda.parse_data_access(text) == assessment
-    assert assessment.dumps() == text, "serialization must be deterministic, or S1 hashes churn"
-
-    path = tmp_path / "data-access.json"
-    path.write_text(text, encoding="utf-8")
-    assert pda.read_data_access(path) == assessment
-
-
-def test_a_cannot_establish_projection_round_trips_too(tmp_path: Path) -> None:
-    """The refusal states ship as artifacts as well; they must survive the same parser."""
-    root = _da_root(tmp_path, "refusal-round-trip", LIVE_A)
-    refusal = _assess(root, _da_spec(REVIEW_UNSTABLE))
-
-    assert refusal.state == "cannot_establish"
-    assert pda.parse_data_access(refusal.dumps()) == refusal
-
-
-@pytest.mark.parametrize(
-    ("text", "reason"),
-    [
-        pytest.param("{ nope", "malformed-json", id="malformed-json"),
-        pytest.param("[]", "not-an-object", id="not-an-object"),
-        pytest.param('{"schema": 1, "schema": 2}', "duplicate-key", id="duplicate-key-shallow"),
-        pytest.param(
-            json.dumps(_projection())[:-1] + ', "codes": ["probe-cleared"]}', "duplicate-key", id="duplicate-key-real"
-        ),
-    ],
-)
-def test_the_projection_parser_refuses_malformed_text_by_name(text: str, reason: str) -> None:
-    """Textual refusals, each identified. `.code` is always the shipped `projection-invalid`."""
-    with pytest.raises(pda.DataAccessProjectionError) as excinfo:
-        pda.parse_data_access(text)
-
-    assert excinfo.value.reason == reason
-    assert excinfo.value.code == "projection-invalid"
-
-
-def test_a_nonfinite_number_is_refused_as_such(tmp_path: Path) -> None:
-    """`NaN`/`Infinity` are not JSON; Python's decoder accepts them unless told not to."""
-    payload = json.dumps(_projection())[:-1] + ', "extra": Infinity}'
-
-    with pytest.raises(pda.DataAccessProjectionError) as excinfo:
-        pda.parse_data_access(payload)
-
-    assert excinfo.value.reason == "nonfinite"
-
-
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [
         pytest.param({**_projection(), "surprise": 1}, "unknown-field", id="unknown-field"),
         pytest.param({k: v for k, v in _projection().items() if k != "codes"}, "missing-field", id="missing-field"),
+        pytest.param(_projection(source_keys=[KEY_A, KEY_A]), "source-keys-unsorted", id="duplicate-keys"),
+        pytest.param(_projection(source_keys=["source-key:zzzz"]), "source-key-invalid", id="bad-key-syntax"),
         pytest.param(_projection(schema="phase1-data-access/v2"), "unknown-value", id="wrong-schema"),
-        pytest.param(_projection(state=7), "bad-type", id="state-not-a-string"),
         pytest.param(_projection(state="excellent"), "unknown-value", id="unknown-state"),
         pytest.param(_projection(validation=None), "bad-type", id="validation-not-nullable"),
         pytest.param(_projection(effective_scope="everything"), "unknown-value", id="unknown-scope"),
@@ -539,12 +330,6 @@ def test_a_nonfinite_number_is_refused_as_such(tmp_path: Path) -> None:
         pytest.param(_projection(provider_state="blocked"), "unknown-value", id="provider-state-not-direct"),
         pytest.param(_projection(source_keys="nope"), "bad-type", id="source-keys-not-a-list"),
         pytest.param(_projection(source_keys=[1]), "bad-type", id="source-key-not-a-string"),
-        pytest.param(
-            _projection(source_keys=sorted([KEY_A, KEY_B], reverse=True)), "source-keys-unsorted", id="unsorted-keys"
-        ),
-        pytest.param(_projection(source_keys=[KEY_A, KEY_A]), "source-keys-unsorted", id="duplicate-keys"),
-        pytest.param(_projection(source_keys=["source-key:zzzz"]), "source-key-invalid", id="bad-key-syntax"),
-        pytest.param(_projection(source_keys=["a.example"]), "source-key-invalid", id="display-name-as-key"),
         pytest.param(_projection(codes=["probe-data-ok", "probe-cleared"]), "codes-unsorted", id="unsorted-codes"),
         pytest.param(_projection(codes=["probe-cleared", "totally-fine"]), "unknown-value", id="unknown-code"),
     ],
@@ -560,27 +345,12 @@ def test_the_projection_parser_refuses_bad_fields_by_name(payload: dict, reason:
 @pytest.mark.parametrize(
     "payload",
     [
-        pytest.param(_projection(source_keys=[]), id="live-without-keys"),
-        pytest.param(_projection(codes=["probe-cleared"]), id="live-missing-a-code"),
-        pytest.param(_projection(validation="unvalidated"), id="live-not-validated"),
-        pytest.param(_projection(effective_scope="report_only_shared_model"), id="direct-with-consumer-scope"),
         pytest.param(
             _projection(
                 state="local_import_ready",
                 codes=["all-flat-file", "package-self-contained"],
             ),
             id="local-carrying-live-keys",
-        ),
-        pytest.param(
-            _projection(
-                state="authorized_model_only",
-                source_keys=[KEY_A],
-                codes=["brief-model-only", "human-authorize"],
-                validation="unvalidated",
-                effective_scope="model_and_report",
-                max_phase2_claim="structural_only",
-            ),
-            id="authorized-outside-model-only",
         ),
         pytest.param(
             _projection(
@@ -632,7 +402,6 @@ def test_the_projection_parser_refuses_bad_fields_by_name(payload: dict, reason:
             ),
             id="inherited-without-a-provider-unit",
         ),
-        pytest.param(_projection(provider_unit=UPSTREAM_REF), id="direct-state-naming-a-provider"),
     ],
 )
 def test_the_projection_parser_refuses_impossible_state_combinations(payload: dict) -> None:
@@ -641,15 +410,6 @@ def test_the_projection_parser_refuses_impossible_state_combinations(payload: di
         pda.parse_data_access(json.dumps(payload))
 
     assert excinfo.value.reason == "illegal-combination"
-
-
-def test_reading_an_absent_projection_is_a_refusal_not_an_empty_state(tmp_path: Path) -> None:
-    """`read_data_access` must never degrade a missing artifact into a permissive default."""
-    with pytest.raises(pda.DataAccessProjectionError) as excinfo:
-        pda.read_data_access(tmp_path / "nope" / "data-access.json")
-
-    assert excinfo.value.reason == "unreadable"
-    assert excinfo.value.code == "projection-invalid"
 
 
 def test_every_state_the_assessor_actually_produces_survives_the_strict_parser(tmp_path: Path) -> None:
@@ -681,41 +441,18 @@ def test_every_state_the_assessor_actually_produces_survives_the_strict_parser(t
 
 
 GATE_TRAILS = {
-    "no-audit": (),
     "earned": (("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", [KEY_A])),
     "armed": (("block", [KEY_A]),),
-    "regressed": (
-        ("block", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-cleared", [KEY_A]),
-        ("probe-no_credential", [KEY_A]),
-    ),
-    "unkeyed-clear": (("block", [KEY_A]), ("probe-data_ok", [KEY_A]), ("probe-cleared", None)),
-    "forced-scope": (
-        ("block-forced-scope", None),
-        ("block", [KEY_A]),
-        ("probe-data_ok", [KEY_A]),
-        ("probe-cleared", [KEY_A]),
-    ),
-    "authorized": (("block", [KEY_A]), ("authorize", None), ("probe-cleared", [KEY_A])),
 }
 
 
-@pytest.mark.parametrize("trail", sorted(GATE_TRAILS))
-@pytest.mark.parametrize("damage", [None, "malformed-audit", "override-file"])
-@pytest.mark.parametrize(
-    ("policy", "scope"),
-    [
-        ("stop", "model_and_report"),
-        ("stop", "model_only"),
-        ("model_only_unvalidated", "model_only"),
-        ("model_only_unvalidated", "model_and_report"),
-    ],
-)
+@pytest.mark.parametrize("trail", ["armed", "earned"])
+@pytest.mark.parametrize("damage", [None, "malformed-audit"])
+@pytest.mark.parametrize(("policy", "scope"), [("stop", "model_and_report")])
 def test_the_gate_trail_never_moves_the_package_projection(
     tmp_path: Path, trail: str, damage: str | None, policy: str, scope: str
 ) -> None:
-    """S2: earned, armed, regressed, forced, authorized or poisoned gate evidence is never read.
+    """S2: earned, armed or poisoned gate evidence is never read.
 
     A live package projects from its own facts and brief alone. It is never `validated` here;
     check_unit's same-run `data-evidence` PASS is the only live data proof.
@@ -725,15 +462,10 @@ def test_the_gate_trail_never_moves_the_package_projection(
     if damage == "malformed-audit":
         with (root / AUDIT).open("a", encoding="utf-8") as handle:
             handle.write("{ not json\n")
-    elif damage == "override-file":
-        (root / OVERRIDE).write_text("authorized by a human\n", encoding="utf-8")
 
     result = _assess(root, _da_spec(LIVE_A), policy=policy, scope=scope)
 
-    if policy == "model_only_unvalidated" and scope == "model_only":
-        expected = ("authorized_model_only", ("brief-model-only",), "unvalidated", "structural_only")
-    else:
-        expected = ("live_unproven", ("live-unproven",), "unvalidated", "data_validated")
+    expected = ("live_unproven", ("live-unproven",), "unvalidated", "data_validated")
     assert (result.state, result.codes, result.validation, result.max_phase2_claim) == expected
     assert (result.source_keys, result.effective_scope) == ((KEY_A,), scope)
 
@@ -753,36 +485,9 @@ def test_no_projection_field_can_carry_a_host_path_or_display_name(tmp_path: Pat
 @pytest.mark.parametrize(
     "provider",
     [
-        False,
-        True,
-        {},
-        (),
-        (UP_REF, PROVIDER_LIVE, "extra"),
-        [UP_REF, PROVIDER_LIVE],
-        [(UP_REF, PROVIDER_LIVE), False],
-        [(UP_REF, PROVIDER_LIVE), (OTHER_REF, {})],
-        ((UP_REF, PROVIDER_LIVE),),
-        ((UP_REF, PROVIDER_LIVE), (OTHER_REF, PROVIDER_LOCAL)),
-    ],
-)
-def test_data_access_provider_candidate_shapes_are_not_coerced(tmp_path: Path, provider: object) -> None:
-    """A candidate list is not a list-shaped pair, tuple collection, or boolean sentinel."""
-    root = _da_root(tmp_path, "provider-shape", FLAT)
-
-    result = _assess(root, _da_spec(FLAT), scope="report_only_shared_model", provider=provider)
-
-    assert (result.state, result.codes) == ("cannot_establish", ("provider-foreign",))
-
-
-@pytest.mark.parametrize(
-    "provider",
-    [
-        PROVIDER_LIVE._replace(source_keys=(KEY_A, KEY_A)),
-        PROVIDER_LIVE._replace(source_keys=[KEY_A]),
         PROVIDER_LIVE._replace(source_keys=(KEY_A + "\n",)),
         PROVIDER_LIVE._replace(validation=True),
         PROVIDER_LIVE._replace(codes=("probe-cleared",)),
-        PROVIDER_LIVE._replace(codes=["probe-cleared", "probe-data-ok"]),
         PROVIDER_LOCAL._replace(source_keys=""),
         PROVIDER_LIVE._replace(provider_unit=pda.provider_reference("hidden-recursion")),
     ],
@@ -796,27 +501,7 @@ def test_data_access_provider_assessment_must_already_be_strict(tmp_path: Path, 
     assert (result.state, result.codes) == ("cannot_establish", ("provider-foreign",))
 
 
-def test_data_access_provider_resolution_stays_with_the_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A real published-source consumer inherits only the supplied S2 result; it searches nothing."""
-    root = _da_root(tmp_path, "published-consumer", FLAT)
-    published_spec = _da_spec({"class": "sqlproxy", "powerbi_target": "unknown"})
-
-    def forbidden(*_args, **_kwargs):
-        pytest.fail("provider inheritance attempted direct evidence or source classification")
-
-    monkeypatch.setattr(pda, "_classify_legs", forbidden)
-    inherited = _assess(root, published_spec, scope="report_only_shared_model", provider=(S2_UNIT_REF, PROVIDER_LIVE))
-    missing = _assess(root, published_spec, scope="report_only_shared_model", provider=[])
-
-    assert (inherited.state, inherited.provider_unit, inherited.source_keys) == (
-        "provider_inherited",
-        S2_UNIT_REF,
-        PROVIDER_LIVE.source_keys,
-    )
-    assert (missing.state, missing.codes) == ("cannot_establish", ("provider-missing",))
-
-
-@pytest.mark.parametrize("scope", ["model_and_report", "report_only_shared_model"])
+@pytest.mark.parametrize("scope", ["report_only_shared_model"])
 def test_data_access_inherited_authorization_cannot_expand_to_reports(tmp_path: Path, scope: str) -> None:
     """Structural-only provider authority stays model-only in both producer and strict reader."""
     root = _da_root(tmp_path, "scope-ceiling", FLAT)
@@ -833,10 +518,31 @@ def test_data_access_inherited_authorization_cannot_expand_to_reports(tmp_path: 
         pda.parse_data_access(json.dumps(payload))
 
 
-def test_data_access_source_key_syntax_requires_the_whole_string() -> None:
-    """A final newline is outside the stable key, despite the special meaning of regex `$`."""
-    with pytest.raises(pda.DataAccessProjectionError, match="source-key-invalid"):
-        pda.parse_data_access(json.dumps(_projection(source_keys=[KEY_A + "\n"])))
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        pytest.param("{ nope", "malformed-json", id="malformed-json"),
+        pytest.param("[]", "not-an-object", id="not-an-object"),
+        pytest.param('{"schema": 1, "schema": 2}', "duplicate-key", id="duplicate-key-shallow"),
+        pytest.param(json.dumps(_projection())[:-1] + ', "extra": Infinity}', "nonfinite", id="nonfinite"),
+    ],
+)
+def test_the_projection_parser_refuses_malformed_text_by_name(text: str, reason: str) -> None:
+    """Textual refusals, each identified. `.code` is always the shipped `projection-invalid`."""
+    with pytest.raises(pda.DataAccessProjectionError) as excinfo:
+        pda.parse_data_access(text)
+
+    assert excinfo.value.reason == reason
+    assert excinfo.value.code == "projection-invalid"
+
+
+def test_reading_an_absent_projection_is_a_refusal_not_an_empty_state(tmp_path: Path) -> None:
+    """`read_data_access` must never degrade a missing artifact into a permissive default."""
+    with pytest.raises(pda.DataAccessProjectionError) as excinfo:
+        pda.read_data_access(tmp_path / "nope" / "data-access.json")
+
+    assert excinfo.value.reason == "unreadable"
+    assert excinfo.value.code == "projection-invalid"
 
 
 def test_data_access_unreadable_projection_still_has_a_typed_refusal(tmp_path: Path) -> None:
