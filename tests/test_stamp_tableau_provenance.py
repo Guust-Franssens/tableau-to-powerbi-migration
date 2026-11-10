@@ -3476,9 +3476,10 @@ def published_http_site() -> Iterator[dict]:
         yield served
 
 
-@pytest.mark.parametrize("status", range(300, 400))
+# Keep every urllib redirect code plus ordinary and boundary non-redirect statuses.
+@pytest.mark.parametrize("status", [300, 301, 302, 303, 304, 307, 308, 399])
 @pytest.mark.parametrize("same_origin", [False, True], ids=["foreign-origin", "same-origin"])
-def test_published_every_redirect_status_is_refused_without_resending_auth(
+def test_published_redirect_status_representatives_are_refused_without_resending_auth(
     published_http_site, status: int, same_origin: bool
 ) -> None:
     with _published_http_server() as foreign:

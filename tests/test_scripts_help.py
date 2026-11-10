@@ -47,28 +47,36 @@ def _tracked_scripts() -> list[Path]:
 SCRIPTS = _tracked_scripts()
 assert SCRIPTS, "no tracked scripts found under scripts/*.py - this guard now proves nothing"
 
+# Every script runs in its own real subprocess, as on master: an in-process `runpy` sweep was measured
+# no faster (40 s for 113 scripts vs 39 s per-process) and let one script's stream reconfiguration
+# mask another script's crash. Chunking only trims test IDs; each subprocess keeps its own budget.
+HELP_CHUNKS = 8
+_CHUNKS = [SCRIPTS[i::HELP_CHUNKS] for i in range(HELP_CHUNKS)]
 
-@pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
-def test_help_exits_zero_on_a_cp1252_stdout(script: Path) -> None:
+
+@pytest.mark.parametrize("chunk", _CHUNKS, ids=[f"chunk{i + 1}of{HELP_CHUNKS}" for i in range(HELP_CHUNKS)])
+def test_help_exits_zero_on_a_cp1252_stdout(chunk: list[Path]) -> None:
     """`--help` must not crash before it can print anything, on any platform.
 
     Windows' cp1252 default is reproduced here without a Windows runner by forcing
-    `PYTHONIOENCODING=cp1252` on a real subprocess - the same mechanism the issue's own repro used
-    (`$env:PYTHONUTF8` unset) to confirm the cause.
+    `PYTHONIOENCODING=cp1252` on a real subprocess per script - the same mechanism the issue's own
+    repro used (`$env:PYTHONUTF8` unset) to confirm the cause.
     """
     env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
     env.pop("PYTHONUTF8", None)
-    result = subprocess.run(
-        [sys.executable, str(script), "--help"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=60,
-    )
-    assert result.returncode == 0, (
-        f"{script.name} --help exited {result.returncode} under a cp1252 stdout:\n{result.stderr[-2000:]}"
-    )
+    failures = []
+    for script in chunk:
+        result = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            env=env,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace")
+            failures.append(f"{script.name} --help exited {result.returncode}:\n{stderr[-2000:]}")
+    assert not failures, "under a cp1252 stdout:\n" + "\n\n".join(failures)
 
 
 def test_transpiler_missing_arguments_prints_usage() -> None:
@@ -142,8 +150,7 @@ def test_documented_flag_requires_matching_add_argument_literal(text: str, expec
     assert _undocumented_flags(text, _documented_flags(text)) == expected
 
 
-@pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
-def test_every_documented_flag_is_actually_implemented(script: Path) -> None:
+def test_every_documented_flag_is_actually_implemented() -> None:
     """Every `--flag` a script's own `usage:` line advertises must appear somewhere in its code.
 
     `harvest_estate_assets.py` documented `--workbooks-only` in its usage line for a version that
@@ -154,20 +161,21 @@ def test_every_documented_flag_is_actually_implemented(script: Path) -> None:
     `tests/test_repo_layout.py`'s TREE_SCANNERS note on the same pattern) - their own file never
     mentions the flag at all, so the shim's declared target is read too before judging it missing.
     """
-    text = script.read_text(encoding="utf-8")
-    flags = _documented_flags(text)
-    if not flags:
-        return
+    for script in SCRIPTS:
+        text = script.read_text(encoding="utf-8")
+        flags = _documented_flags(text)
+        if not flags:
+            continue
 
-    shim_text = ""
-    shim_target = re.search(r"\.github/skills/\S+\.py", text)
-    if shim_target:
-        target_path = REPO_ROOT / shim_target.group(0)
-        if target_path.is_file():
-            shim_text = target_path.read_text(encoding="utf-8")
+        shim_text = ""
+        shim_target = re.search(r"\.github/skills/\S+\.py", text)
+        if shim_target:
+            target_path = REPO_ROOT / shim_target.group(0)
+            if target_path.is_file():
+                shim_text = target_path.read_text(encoding="utf-8")
 
-    undocumented = _undocumented_flags(text, flags, shim_text)
-    assert not undocumented, (
-        f"{script.name} documents {undocumented} in its usage: line, but the flag appears nowhere "
-        "else in the script (or its forwarding target) - implement it or remove it from the docstring."
-    )
+        undocumented = _undocumented_flags(text, flags, shim_text)
+        assert not undocumented, (
+            f"{script.name} documents {undocumented} in its usage: line, but the flag appears nowhere "
+            "else in the script (or its forwarding target) - implement it or remove it from the docstring."
+        )
