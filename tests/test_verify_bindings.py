@@ -178,15 +178,19 @@ def test_the_202_envelope_is_never_read_as_the_answer(fabric):
     assert ("GET", f"https://api.fabric.microsoft.com/v1/operations/op-{REPORT_ID}/result") in fabric.calls
 
 
-def test_an_empty_definition_is_never_reported_as_bypath():
-    """MUTATION KILLED: collapsing 'no parts' into a binding verdict.
-
-    A read that produced nothing must say so. Calling it `byPath` is how the false defect gets its
-    convincing wording.
-    """
-    check = vb.classify({"displayName": "R", "id": REPORT_ID}, vb.Definition(parts=[]), {})
-    assert check.status == vb.UNREADABLE
-    assert check.status != vb.BY_PATH
+@pytest.mark.parametrize(
+    ("parts", "expected"),
+    [
+        # MUTATION KILLED: collapsing 'no parts' into a byPath verdict, the false defect's wording.
+        ([], vb.UNREADABLE),
+        ([{"path": "x", "payload": ""}], vb.UNREADABLE),
+        (_parts(_pbir({"bySomethingNew": {"id": MODEL_ID}})), vb.UNRESOLVED),
+    ],
+    ids=["no-parts", "no-definition-pbir", "unknown-reference-shape"],
+)
+def test_a_definition_without_a_readable_binding_is_never_passed(parts, expected):
+    check = vb.classify({"displayName": "R", "id": REPORT_ID}, vb.Definition(parts=parts), {})
+    assert check.status == expected
 
 
 def test_a_failed_operation_is_unreadable_not_a_binding_defect(fabric):
@@ -275,40 +279,24 @@ def test_a_genuine_bypath_is_reported_as_bypath_with_the_fix(fabric):
     assert "deploy_estate.py" in vb.ACTIONS[vb.BY_PATH]
 
 
-def test_a_guid_that_is_not_a_model_here_is_a_finding(fabric):
-    """MUTATION KILLED: accepting any byConnection guid without checking it resolves HERE.
-
-    A report carrying a guid from another workspace looks perfectly healthy field-by-field.
-    """
-    fabric.definitions[REPORT_ID] = byconnection_parts(OTHER_MODEL_ID)
+@pytest.mark.parametrize(
+    ("guid", "expected"),
+    [
+        # MUTATION KILLED: accepting any byConnection guid without checking it resolves HERE.
+        (OTHER_MODEL_ID, vb.UNRESOLVED),
+        # Only a SemanticModel resolves a semantic-model binding; any item id is not enough.
+        (REPORT_ID, vb.UNRESOLVED),
+        # Fabric is not consistent about guid case; a case difference is not a defect.
+        (MODEL_ID.upper(), vb.RESOLVED),
+    ],
+    ids=["other-workspace", "report-id", "upper-case"],
+)
+def test_a_byconnection_guid_must_resolve_to_a_model_here(fabric, guid, expected):
+    fabric.definitions[REPORT_ID] = byconnection_parts(guid)
     checks, _ = vb.verify(WS, "tok")
-    assert checks[0].status == vb.UNRESOLVED
-    assert OTHER_MODEL_ID in checks[0].detail
-
-
-def test_a_guid_pointing_at_a_REPORT_id_does_not_count_as_resolved(fabric):
-    """Only a SemanticModel resolves a semantic-model binding - any item id is not enough."""
-    fabric.definitions[REPORT_ID] = byconnection_parts(REPORT_ID)
-    checks, _ = vb.verify(WS, "tok")
-    assert checks[0].status == vb.UNRESOLVED
-
-
-def test_guid_comparison_is_case_insensitive(fabric):
-    """Fabric is not consistent about guid case; a case difference is not a defect."""
-    fabric.definitions[REPORT_ID] = byconnection_parts(MODEL_ID.upper())
-    checks, _ = vb.verify(WS, "tok")
-    assert checks[0].status == vb.RESOLVED
-
-
-def test_a_report_with_no_definition_pbir_is_unreadable():
-    check = vb.classify({"displayName": "R", "id": REPORT_ID}, vb.Definition(parts=[{"path": "x", "payload": ""}]), {})
-    assert check.status == vb.UNREADABLE
-
-
-def test_a_dataset_reference_of_an_unknown_shape_is_not_silently_passed():
-    parts = _parts(_pbir({"bySomethingNew": {"id": MODEL_ID}}))
-    check = vb.classify({"displayName": "R", "id": REPORT_ID}, vb.Definition(parts=parts), {})
-    assert check.status == vb.UNRESOLVED
+    assert checks[0].status == expected
+    if expected == vb.UNRESOLVED:
+        assert guid in checks[0].detail
 
 
 @pytest.mark.parametrize(
@@ -381,11 +369,15 @@ def test_exit_zero_when_every_report_resolves(fabric, caplog):
     assert "does not prove any visual RENDERS" in caplog.text
 
 
-def test_exit_non_zero_when_anything_fails(fabric):
+def test_findings_exit_non_zero_and_name_the_report_and_fix(fabric, caplog):
     """MUTATION KILLED: a gate that reports findings but still exits 0."""
     fabric.definitions[REPORT_ID] = bypath_parts()
-    checks, facts = vb.verify(WS, "tok")
-    assert vb.print_summary(checks, facts) == vb.EXIT_FINDINGS
+    with caplog.at_level(logging.INFO):
+        checks, facts = vb.verify(WS, "tok")
+        assert vb.print_summary(checks, facts) == vb.EXIT_FINDINGS
+    assert "Sales Overview" in caplog.text
+    assert REPORT_ID in caplog.text
+    assert "deploy_estate.py" in caplog.text
 
 
 def test_a_workspace_with_no_reports_does_not_pass_vacuously(monkeypatch, caplog):
@@ -398,16 +390,6 @@ def test_a_workspace_with_no_reports_does_not_pass_vacuously(monkeypatch, caplog
     assert "proves nothing" in caplog.text
 
 
-def test_the_findings_name_the_report_and_what_to_do(fabric, caplog):
-    fabric.definitions[REPORT_ID] = bypath_parts()
-    with caplog.at_level(logging.INFO):
-        checks, facts = vb.verify(WS, "tok")
-        vb.print_summary(checks, facts)
-    assert "Sales Overview" in caplog.text
-    assert REPORT_ID in caplog.text
-    assert "deploy_estate.py" in caplog.text
-
-
 def test_an_unreadable_report_is_flagged_as_a_failed_READ_in_the_summary(fabric, caplog):
     """The summary must not let an unreadable report be quoted as a broken binding."""
     fabric.operation_reports(REPORT_ID, [{"status": "Failed"}])
@@ -416,16 +398,6 @@ def test_an_unreadable_report_is_flagged_as_a_failed_READ_in_the_summary(fabric,
         assert vb.print_summary(checks, facts) == vb.EXIT_FINDINGS
     assert "not evidence" in caplog.text.lower() or "not evidence" in vb.ACTIONS[vb.UNREADABLE]
     assert "could not be READ" in caplog.text
-
-
-def test_the_json_artifact_records_every_report(fabric, tmp_path):
-    checks, facts = vb.verify(WS, "tok")
-    out = tmp_path / "bindings.json"
-    vb.write_json(out, checks, facts)
-    payload = json.loads(out.read_text(encoding="utf-8"))
-    assert payload["resolved"] == 1
-    assert payload["results"][0]["semantic_model_id"] == MODEL_ID
-    assert payload["workspace"] == WS
 
 
 # --------------------------------------------------------------------------- the tenant trap
@@ -542,4 +514,7 @@ def test_main_returns_zero_on_a_clean_estate(monkeypatch, tmp_path):
 
     out = tmp_path / "bindings.json"
     assert vb.main(["--workspace", WS, "--json", str(out)]) == vb.EXIT_OK
-    assert json.loads(out.read_text(encoding="utf-8"))["resolved"] == 3
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["resolved"] == 3
+    assert payload["workspace"] == WS
+    assert {row["semantic_model_id"] for row in payload["results"]} == {MODEL_ID}

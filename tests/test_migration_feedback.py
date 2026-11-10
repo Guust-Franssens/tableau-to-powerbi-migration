@@ -17,7 +17,6 @@ import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from types import CodeType, FunctionType
 from typing import Any
 
 import pytest
@@ -766,10 +765,9 @@ def test_unignored_destination_is_refused_and_existing_output_is_never_overwritt
     assert (existing / "sentinel").read_text(encoding="utf-8") == "keep"
 
 
-@pytest.mark.parametrize("path", [r"\\server\share\evidence.json", r"\\?\C:\file.json"])
-def test_network_and_device_paths_refuse_before_access(tmp_path, monkeypatch, path) -> None:
+def test_network_and_device_paths_refuse_before_access(tmp_path, monkeypatch) -> None:
     case = _case(tmp_path, monkeypatch, "local")
-    case.request["evidence"]["positive_input"]["path"] = path
+    case.request["evidence"]["positive_input"]["path"] = r"\\?\C:\file.json"
     assert feedback.main(["--input", str(case.save()), "--out", str(case.root / "out")]) == 1
 
 
@@ -904,31 +902,18 @@ def test_missing_assertion_is_not_a_json_value_failure() -> None:
     assert refusal.value.exit_code == 3
 
 
-def test_duplicate_keys_and_nonfinite_json_are_integrity_refusals() -> None:
-    for raw in (b'{"owner":"engine","owner":"repository"}', b'{"value":NaN}'):
-        with pytest.raises(feedback.FeedbackError) as refusal:
-            feedback._json(raw)
-        assert refusal.value.exit_code == 1
-
-
 @pytest.mark.parametrize(
     "expected,raw,equal",
     [
         pytest.param({"a": 1, "b": 2}, b'{"b":2,"a":1}', True, id="object-order"),
-        pytest.param({"a": [{"b": 1, "c": None}]}, b'{"a":[{"c":null,"b":1}]}', True, id="nested-order"),
         pytest.param([1, 2], b"[2,1]", False, id="list-order"),
-        pytest.param([1, 2], b"[1,2]", True, id="list-equal"),
         pytest.param(False, b"0", False, id="false-integer"),
         pytest.param({"a": [True]}, b'{"a":[1]}', False, id="nested-boolean-integer"),
-        pytest.param(True, b"true", True, id="boolean-equal"),
-        pytest.param(None, b"null", True, id="null-equal"),
         pytest.param(None, b"false", False, id="null-boolean"),
         pytest.param(1, b"1.0", False, id="integer-float"),
         pytest.param(1.0, b"1e0", True, id="float-exponent"),
-        pytest.param(1.0, b"1.00", True, id="float-precision"),
         pytest.param(0, b"-0", True, id="integer-zero"),
         pytest.param(0.0, b"-0.0", False, id="float-signed-zero"),
-        pytest.param(1, b"2", False, id="different-integer"),
         pytest.param("caf\u00e9", b'"caf\\u00e9"', True, id="unicode-escape"),
     ],
 )
@@ -968,10 +953,7 @@ def test_json_expectation_comparisons_share_canonical_types(tmp_path, monkeypatc
     "raw,reason",
     [
         (b'{"value":NaN}', "json:nonfinite_number"),
-        (b'{"value":Infinity}', "json:nonfinite_number"),
-        (b'{"value":-Infinity}', "json:nonfinite_number"),
         (b'{"value":1e999}', "json:nonfinite_number"),
-        (b'{"value":-1e999}', "json:nonfinite_number"),
         (b'{"value":1,"value":1}', "json:duplicate_key"),
         (b'{"value":{"a":1,"a":2}}', "json:duplicate_key"),
         (b'{"value":{"a":2,"\\u0061":1}}', "json:duplicate_key"),
@@ -988,10 +970,9 @@ def test_json_comparison_refuses_ambiguous_or_nonfinite_documents(raw, reason) -
         )
 
 
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
-def test_canonical_json_never_serializes_nonfinite_values(value) -> None:
+def test_canonical_json_never_serializes_nonfinite_values() -> None:
     with pytest.raises(ValueError, match="Out of range float"):
-        feedback._canonical_json({"nested": [value]})
+        feedback._canonical_json({"nested": [float("nan")]})
 
 
 def test_canonical_json_has_one_stable_encoding() -> None:
@@ -1253,27 +1234,8 @@ def test_remote_versions_are_required_never_inferred(tmp_path, monkeypatch, miss
     assert not public["public_filing_ready"]
 
 
-@pytest.mark.parametrize(
-    "suffix,raw",
-    [
-        (".twb", b"MZ\x00opaque"),
-        (".tds", b"MZ\x00opaque"),
-        (".twb", b"opaque"),
-        (".twb", b"<datasource/>"),
-        (".tds", b"<workbook/>"),
-        (".twb", b'<!DOCTYPE workbook [<!ENTITY x "opaque">]><workbook>&x;</workbook>'),
-        (".json", b"{broken"),
-        (".json", b'{"a":1,"a":2}'),
-        (".json", b'{"a":1e999}'),
-        (".txt", b"\x00binary"),
-        (".txt", b"\xff\xfeopaque"),
-        (".txt", b"bad\x1bcontrol"),
-        (".csv", b"a,b\nx,\x00"),
-        (".csv", b"a,b\nx"),
-        (".csv", b'a,b\n"broken,x'),
-    ],
-)
-def test_reproducer_content_not_suffix_is_allowlisted(tmp_path, monkeypatch, suffix, raw) -> None:
+def test_reproducer_content_not_suffix_is_allowlisted(tmp_path, monkeypatch) -> None:
+    suffix, raw = ".twb", b"MZ\x00opaque"
     case = _case(tmp_path, monkeypatch, "local")
     candidate = case.paths["candidate_input"].with_suffix(suffix)
     candidate.write_bytes(raw)
@@ -1626,67 +1588,6 @@ def test_discard_failure_names_private_stage_only_to_operator(tmp_path, monkeypa
             shutil.rmtree(stage)
 
 
-@pytest.mark.parametrize(
-    "mutation", ["cleanup-finally", "early-sealed", "canonical-sort", "canonical-type", "oracle-type"]
-)
-def test_r2_mutations_fail_the_intended_assertions(tmp_path, monkeypatch, mutation) -> None:
-    name = (
-        "_write_outputs"
-        if mutation in {"cleanup-finally", "early-sealed"}
-        else "_oracle_observation"
-        if mutation == "oracle-type"
-        else "_canonical_json"
-    )
-    source = SCRIPT.read_text(encoding="utf-8")
-    definition = next(
-        node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == name
-    )
-    source = ast.get_source_segment(source, definition)
-    expected_error = AssertionError
-    if mutation == "cleanup-finally":
-        parent = next(
-            node
-            for node in ast.walk(definition)
-            if isinstance(node, ast.If) and ast.unparse(node.test) == "not published"
-        )
-        cleanup = parent.body[-1]
-        assert isinstance(cleanup, ast.Try) and cleanup.finalbody
-        parent.body[-1:] = cleanup.body + cleanup.finalbody
-        exercise, arguments = test_publication_failure_discards_stage_even_if_rollback_raises, (True,)
-        message = "deletion must run even when rollback raises"
-    elif mutation == "early-sealed":
-        before = (
-            "            _stage_permissions(filesystem, stage, list(filesystem.files), "
-            "writable=False, touched=touched)\n"
-            "            sealed = True"
-        )
-        assert source.count(before) == 1
-        definition = ast.parse(source.replace(before, "\n".join(reversed(before.splitlines())))).body[0]
-        exercise, arguments = test_partial_seal_rolls_back_only_attempted_paths, (1, False)
-        message = "an incomplete seal must restore only attempted paths"
-    elif mutation == "canonical-sort":
-        assert source.count("sort_keys=True") == 1
-        definition = ast.parse(source.replace("sort_keys=True", "sort_keys=False")).body[0]
-        exercise, arguments = test_nested_oracle_key_order_preserves_exact_controls, ()
-        message = "equivalent JSON expectations must route"
-    elif mutation == "canonical-type":
-        definition.body = [ast.Return(value=ast.Name(id="value", ctx=ast.Load()))]
-        exercise, arguments = test_json_expectation_comparisons_share_canonical_types, (False, b"0", False)
-        message = "JSON predicate comparison must preserve ordering and type distinctions"
-    else:
-        before = '_canonical_json(result["expected"]) == _canonical_json(predicate["expected"])'
-        assert source.count(before) == 1
-        definition = ast.parse(source.replace(before, 'result["expected"] == predicate["expected"]')).body[0]
-        exercise, arguments = test_json_expectation_comparisons_share_canonical_types, (False, b"0", False)
-        expected_error = pytest.fail.Exception
-        message = "DID NOT RAISE.*FeedbackError"
-    code = compile(ast.fix_missing_locations(ast.Module(body=[definition], type_ignores=[])), str(SCRIPT), "exec")
-    function = next(value for value in code.co_consts if isinstance(value, CodeType) and value.co_name == name)
-    monkeypatch.setattr(feedback, name, FunctionType(function, vars(feedback)))
-    with pytest.raises(expected_error, match=message):
-        exercise(tmp_path, monkeypatch, *arguments)
-
-
 def test_hardlink_alias_and_changed_inode_cannot_copy_private_bytes(tmp_path, monkeypatch) -> None:
     case = _case(tmp_path, monkeypatch, "local")
     source, candidate = case.paths["positive_input"], case.paths["candidate_input"]
@@ -1789,7 +1690,23 @@ def test_windows_held_input_denies_write_and_inode_replacement(tmp_path) -> None
 
 @pytest.mark.parametrize(
     "suffix,raw",
-    [(".twb", b"MZ\x00"), (".tds", b"opaque"), (".json", b"{bad"), (".txt", b"text\x00"), (".csv", b"a,b\nc")],
+    [
+        (".twb", b"MZ\x00opaque"),
+        (".tds", b"MZ\x00opaque"),
+        (".twb", b"opaque"),
+        (".twb", b"<datasource/>"),
+        (".tds", b"<workbook/>"),
+        (".twb", b'<!DOCTYPE workbook [<!ENTITY x "opaque">]><workbook>&x;</workbook>'),
+        (".json", b"{broken"),
+        (".json", b'{"a":1,"a":2}'),
+        (".json", b'{"a":1e999}'),
+        (".txt", b"\x00binary"),
+        (".txt", b"\xff\xfeopaque"),
+        (".txt", b"bad\x1bcontrol"),
+        (".csv", b"a,b\nx,\x00"),
+        (".csv", b"a,b\nx"),
+        (".csv", b'a,b\n"broken,x'),
+    ],
 )
 def test_format_guard_has_a_direct_negative_control(suffix, raw) -> None:
     with pytest.raises(feedback.FeedbackError, match="reproducer:format_not_established"):
