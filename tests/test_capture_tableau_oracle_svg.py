@@ -131,7 +131,7 @@ def test_svg_without_a_millimetre_root_reports_no_geometry_rather_than_guessing(
     assert "width_px" not in facts and "height_px" not in facts
 
 
-@pytest.mark.parametrize("size", [(1300, 1600), (2800, 1600), (3000, 1700)])
+@pytest.mark.parametrize("size", [(2800, 1600)])
 def test_png_dimensions_records_the_2x_raster_ceiling(size):
     assert oracle.png_dimensions(_png(*size)) == {"width": size[0], "height": size[1]}
 

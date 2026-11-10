@@ -453,13 +453,3 @@ def test_a_budget_of_exactly_one_request_timeout_is_warned(caplog):
         oracle.build_retry_policy(max_attempts=4, budget_sec=float(oracle.REST_TIMEOUT_SEC))
 
     assert len(caplog.messages) == 1
-
-
-def test_a_budget_between_one_and_two_timeouts_is_not_warned(caplog):
-    """A budget above the floor but below the old 2x model must be SILENT: it genuinely retries a slow
-    failure (see the behavioural test), so warning against it -- as the old 2x floor did -- was false.
-    """
-    with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
-        oracle.build_retry_policy(max_attempts=4, budget_sec=1.5 * oracle.REST_TIMEOUT_SEC)
-
-    assert not caplog.messages

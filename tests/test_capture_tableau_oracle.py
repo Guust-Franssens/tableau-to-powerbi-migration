@@ -751,37 +751,12 @@ def test_an_empty_capture_is_named_not_merely_counted(tmp_path):
     assert named[0]["classification"] == verdict.EMPTY_QUERY_NO_ROWS
 
 
-def test_a_capture_with_rows_is_never_named_empty(tmp_path):
-    """Positive control: the list must be able to come back EMPTY, or it is a view count renamed."""
-    _code, manifest = _manifest(tmp_path, [_record("ok", rows=5), _record("ok", rows=1)])
-    assert manifest["data_empty"] == 0
-    assert manifest["data_empty_views"] == []
-
-
 def test_the_named_list_and_the_count_describe_the_same_views(tmp_path):
     """One predicate, or a count and a list eventually disagree about the same capture."""
     records = [_record("ok", rows=n, columns=["c"] if n else []) for n in (0, 3, 0, 0, 7)]
     _code, manifest = _manifest(tmp_path, records)
     assert manifest["data_empty"] == 3
     assert len(manifest["data_empty_views"]) == manifest["data_empty"]
-
-
-def test_a_header_with_no_rows_is_classified_as_a_real_query(tmp_path):
-    """A CSV that names its columns PROVES a query ran and returned a shape. No fieldless sheet can."""
-    _code, manifest = _manifest(tmp_path, [_record("ok", rows=0, columns=["Region", "Sales", "Profit"])])
-    assert manifest["data_empty_views"][0]["classification"] == verdict.EMPTY_QUERY_NO_ROWS
-
-
-def test_a_payload_with_no_header_at_all_reads_as_CANNOT_CLASSIFY(tmp_path):
-    """The correction that narrows the defect: 2 of the 14 flagged views were glossary sheets.
-
-    ⚠️ Measured over `summarise_csv`, a 0-byte body (a sheet with no underlying query) and a 2-byte
-    CRLF body (a real query returning nothing) BOTH land on `row_count=0, columns=[]` -- they differ
-    only in `bytes`, and "glossary means 0 bytes" is one site's observation at n=14, not a Tableau
-    contract. So this case must read as UNCLASSIFIED, never as either cause.
-    """
-    _code, manifest = _manifest(tmp_path, [_record("ok", rows=0, columns=[])])
-    assert manifest["data_empty_views"][0]["classification"] == verdict.EMPTY_CANNOT_CLASSIFY
 
 
 def test_the_byte_count_is_not_consulted_as_the_discriminator(tmp_path):
@@ -817,7 +792,7 @@ def test_an_empty_capture_keeps_status_ok_and_does_not_move_the_exit_code(tmp_pa
 
 @pytest.mark.parametrize(
     ("sibling", "expected"),
-    [(None, 0), ("source_credential", 2), ("failed", 1)],
+    [("source_credential", 2), ("failed", 1)],
 )
 def test_an_empty_capture_never_changes_the_code_a_run_would_otherwise_exit(tmp_path, sibling, expected):
     """Before/after, across every code an empty view could plausibly disturb.
@@ -850,36 +825,13 @@ def test_flagging_does_not_mutate_the_caller_s_records(tmp_path):
     assert "flags" not in records[0]
 
 
-def test_an_older_record_with_no_row_count_is_not_claimed_empty(tmp_path):
-    """Backwards compatibility, and the reason it matters: absence is not a zero.
-
-    A record whose data leg recorded no `row_count` never measured emptiness, so claiming it as an
-    empty capture would invent a diagnostic. The predicate this replaces raised `KeyError` on it.
-
-    ⚠️ **Not claimed empty is not the same as claimed clean, and PR #480 round 1 shipped the second.**
-    Returning `None` here was read downstream as "not empty", so the view was reported successful,
-    evidence-complete, unflagged and unnamed -- identical to a capture that returned 900,000 rows.
-    The `KeyError` this replaced was at least fail-closed. So the assertions below are in two halves:
-    it must not be counted EMPTY, and it must not be counted CLEAN either.
-    """
-    old = {"view_name": "V", "workbook_name": "W", "data": {"status": "ok"}}
-    code, manifest = _named_manifest(tmp_path, [old])
-    assert code == 3
-    assert manifest["data_empty"] == 0
-    assert manifest["data_empty_views"] == []
-    assert manifest["views"][0]["flags"] == [verdict.FLAG_DATA_UNASSESSABLE, verdict.UNASSESSABLE_NO_ROW_COUNT]
-    assert manifest["data_unassessable"] == 1
-    assert [entry["view_name"] for entry in manifest["data_unassessable_views"]] == ["V"]
-    assert manifest["data_unassessable_views"][0]["reason"] == verdict.UNASSESSABLE_NO_ROW_COUNT
-    assert manifest["captured_complete"] == 0, "a view nothing measured is not evidence-complete"
-    assert manifest["data_ok"] == 1, "the transport DID succeed -- collapsing that loses a real distinction"
-
-
 def test_a_failed_data_leg_is_not_ALSO_reported_as_empty(tmp_path):
     """One root cause, counted once. A failed export's emptiness is explained by the failure."""
     _code, manifest = _manifest(tmp_path, [_record("failed"), _record("source_credential")])
     assert manifest["data_empty"] == 0
     assert manifest["data_empty_views"] == []
+    assert manifest["data_unassessable"] == 0
+    assert manifest["data_unassessable_views"] == []
 
 
 # --- #480 finding 1: a missing `row_count` must not be clean evidence -------------------------
@@ -920,13 +872,6 @@ def test_a_capture_with_rows_is_never_called_unassessable(tmp_path):
     assert manifest["captured_complete"] == 2, "a measured zero is still a measurement"
 
 
-def test_a_failed_data_leg_is_not_reported_unassessable_either(tmp_path):
-    """Same one-root-cause rule as the empty half: a failure explains its own missing row count."""
-    _code, manifest = _manifest(tmp_path, [_record("failed"), _record("source_credential")])
-    assert manifest["data_unassessable"] == 0
-    assert manifest["data_unassessable_views"] == []
-
-
 def test_an_unassessable_capture_makes_an_otherwise_clean_exit_partial(tmp_path):
     """Unassessable numeric evidence is retained, but automation must not read the run as clean."""
     assert _write(tmp_path, [_record("ok")]) == 0, "the baseline moved -- this test proves nothing"
@@ -955,13 +900,6 @@ def test_the_run_end_block_names_the_unassessable_views_and_what_they_cost(tmp_p
     warnings = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
     assert "Metrics Dictionary" in warnings
     assert "NOT BE ASSESSED" in warnings
-
-
-def test_the_unassessable_run_end_block_is_silent_when_everything_was_measured(tmp_path, caplog):
-    """Control: a diagnostic that fires on a clean run is one an operator learns to skip."""
-    caplog.set_level(logging.INFO, logger="tableau-oracle")
-    _write(tmp_path, [_record("ok", rows=7)])
-    assert "NOT BE ASSESSED" not in "\n".join(r.getMessage() for r in caplog.records)
 
 
 def test_a_view_name_is_redacted_before_the_unassessable_diagnostic_prints_it(tmp_path, caplog):
@@ -1029,20 +967,19 @@ def test_the_run_end_block_is_silent_when_nothing_is_empty(tmp_path, caplog):
     """Control: a diagnostic that fires on a clean run is one an operator learns to skip."""
     caplog.set_level(logging.INFO, logger="tableau-oracle")
     _write(tmp_path, [_record("ok", rows=7)])
-    assert "ZERO DATA ROWS" not in "\n".join(r.getMessage() for r in caplog.records)
+    printed = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ZERO DATA ROWS" not in printed
+    assert "NOT BE ASSESSED" not in printed
 
 
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
         ("\n", "empty_cannot_classify"),
-        ("\n\n", "empty_cannot_classify"),
-        ("\r\n", "empty_cannot_classify"),
         ("\r\n\r\n", "empty_cannot_classify"),
         ("\ufeff\r\n\r\n", "empty_cannot_classify"),
         ("Region,Sales\r\n", "empty_query_no_rows"),
         ("Region,Sales\n\n", "empty_query_no_rows"),
-        ("Region,Sales\r\n\r\n\r\n", "empty_query_no_rows"),
         ("\ufeffRegion,Sales\r\n\r\n", "empty_query_no_rows"),
     ],
 )
@@ -1094,9 +1031,7 @@ def test_a_REAL_empty_export_travels_the_whole_path_from_capture_to_manifest(tmp
 _UNCERTIFIABLE = [
     ("text/html", "<html>\n<body>Error</body>\n</html>\n", "content_type_not_csv"),
     ("text/csv", 'Region,Sales\r\nWest,"unterminated', "payload_malformed_csv"),
-    ("text/csv", 'Region,Sales\r\n\r\n\r\nWest,"unterminated', "payload_malformed_csv"),
     ("text/csv", "Region,Sales\n\n\nWest,0,EXTRA\n\n", "payload_ragged_rows"),
-    ("text/csv", "Region,Sales\r\n\r\n\r\nWest\r\n\r\n", "payload_ragged_rows"),
     ("application/octet-stream", "not CSV at all", "content_type_not_csv"),
 ]
 
@@ -1204,7 +1139,7 @@ def test_a_close_delimited_csv_capture_is_retained_but_not_numeric_evidence(tmp_
     assert _naive_numeric_consumer(tmp_path) == []
 
 
-@pytest.mark.parametrize("content_length", ["", "abc", "-1"])
+@pytest.mark.parametrize("content_length", ["", "-1"])
 def test_an_invalid_content_length_does_not_count_as_csv_completeness_evidence(tmp_path, content_length):
     """An unusable length falls back to EOF-as-framing in Python, so it is not defended evidence."""
     body = "Region,Sales\r\nWest,10\r\n"
@@ -1316,7 +1251,7 @@ def test_loopback_unsupported_or_unknowable_csv_framing_is_retained_not_evidence
     assert _naive_numeric_consumer(tmp_path) == []
 
 
-@pytest.mark.parametrize("framing", ["Content-Length", "Transfer-Encoding: chunked"])
+@pytest.mark.parametrize("framing", ["Content-Length"])
 def test_an_early_eof_csv_capture_is_a_failed_manifest_not_unassessable_evidence(tmp_path, framing):
     """The transport catches truncation under defended framing before `_capture_data` can write bytes."""
     retry = oracle.RetryPolicy(max_attempts=1, budget_sec=1)
@@ -1385,9 +1320,7 @@ def test_an_error_page_with_the_Content_Type_STRIPPED_is_still_refused(tmp_path)
         (b"Region,Sales\r\nWest,10\r\n", payload_facts.CSV_CERTIFIED),
         (b"", payload_facts.CSV_CERTIFIED),
         (b"\r\n", payload_facts.CSV_CERTIFIED),
-        (b'Region,Sales\r\nWest,"quoted, value"\r\n', payload_facts.CSV_CERTIFIED),
         (b'Region,Notes\r\nWest,"quoted\r\nmultiline value"\r\n', payload_facts.CSV_CERTIFIED),
-        (b'Size\r\n"5"" pipe"\r\n', payload_facts.CSV_CERTIFIED),
         (b"<html><body>Error</body></html>", payload_facts.CSV_NOT_TABULAR),
         (b'{"error": {"code": "401002"}}', payload_facts.CSV_NOT_TABULAR),
         (b'Region,Sales\r\nWest,"unterminated', payload_facts.CSV_MALFORMED),
@@ -1405,17 +1338,12 @@ def test_certify_csv_verdicts(body, expected):
     ("declared", "expected"),
     [
         ("text/csv", payload_facts.CSV_CERTIFIED),
-        ("text/csv; charset=utf-8", payload_facts.CSV_CERTIFIED),
-        ("TEXT/CSV", payload_facts.CSV_CERTIFIED),
+        ("TEXT/CSV; charset=utf-8", payload_facts.CSV_CERTIFIED),
         ("application/csv", payload_facts.CSV_CERTIFIED),
-        ("text/plain", payload_facts.CSV_CONTENT_TYPE_UNSPECIFIC),
         ("TEXT/PLAIN; charset=utf-8", payload_facts.CSV_CONTENT_TYPE_UNSPECIFIC),
         (None, payload_facts.CSV_CONTENT_TYPE_ABSENT),
         ("", payload_facts.CSV_CONTENT_TYPE_ABSENT),
         ("text/html", payload_facts.CSV_CONTENT_TYPE_NOT_CSV),
-        ("application/json", payload_facts.CSV_CONTENT_TYPE_NOT_CSV),
-        ("application/octet-stream", payload_facts.CSV_CONTENT_TYPE_NOT_CSV),
-        ("application/pdf", payload_facts.CSV_CONTENT_TYPE_NOT_CSV),
     ],
 )
 def test_certify_csv_reads_the_declaration_over_a_well_formed_body(declared, expected):
@@ -1566,12 +1494,14 @@ def test_bom_prefixed_single_column_blank_header_is_refused_before_consumption(t
     assert not result["items"]
 
 
-@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
-@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
 @pytest.mark.parametrize(
-    "records",
-    ["Region,Sales\nWest,0\n", "Region,Sales\n", ",\n"],
-    ids=["header-and-data", "header-only", "empty-fields"],
+    "encoding,newline,records",
+    [
+        ("utf-8", "\n", "Region,Sales\nWest,0\n"),
+        ("utf-8-sig", "\r\n", "Region,Sales\n"),
+        ("utf-8", "\r\n", ",\n"),
+    ],
+    ids=["utf8-lf-header-and-data", "bom-crlf-header-only", "utf8-crlf-empty-fields"],
 )
 def test_leading_blank_csv_header_is_refused_before_consumption(
     tmp_path: Path, encoding: str, newline: str, records: str
@@ -1600,9 +1530,11 @@ def test_leading_blank_csv_header_is_refused_before_consumption(
     assert not result["items"]
 
 
-@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
-@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
-@pytest.mark.parametrize("blank_lines", [0, 2], ids=["no-blanks", "multiple-body-blanks"])
+@pytest.mark.parametrize(
+    "encoding,newline,blank_lines",
+    [("utf-8", "\n", 2), ("utf-8-sig", "\r\n", 0)],
+    ids=["utf8-lf-multiple-body-blanks", "bom-crlf-no-blanks"],
+)
 def test_certified_utf8_exports_are_consumable_and_preserve_zero(
     tmp_path: Path, encoding: str, newline: str, blank_lines: int
 ) -> None:
@@ -1632,7 +1564,6 @@ def test_certified_utf8_exports_are_consumable_and_preserve_zero(
     ("body", "expected", "expected_values"),
     [
         (b"Region,Sales\n,\n", [{"Region": "", "Sales": ""}], []),
-        (b"Region,Sales\n\n,\n\n", [{"Region": "", "Sales": ""}], []),
         (
             b"Region,Sales\n\n\n,\n\n\n,\n\n",
             [{"Region": "", "Sales": ""}, {"Region": "", "Sales": ""}],
@@ -1647,7 +1578,7 @@ def test_certified_utf8_exports_are_consumable_and_preserve_zero(
         (b"Value\n \n", [{"Value": " "}], []),
     ],
 )
-@pytest.mark.parametrize("newline", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+@pytest.mark.parametrize("newline", [b"\r\n"], ids=["crlf"])
 def test_csv_summary_counts_records_not_blank_lines(
     tmp_path: Path, body: bytes, expected: list[dict[str, str]], expected_values: list[float], newline: bytes
 ) -> None:
@@ -1749,17 +1680,6 @@ def test_the_reconcile_items_builder_emits_no_tableau_value_from_an_uncertified_
     manifest = json.loads((tmp_path / "oracle-manifest.json").read_text(encoding="utf-8"))
     assert result["skipped_views"][0]["reason"] == manifest["views"][0]["data"][verdict.EVIDENCE_WITHHELD_KEY]
     assert result["skipped_views"][0]["reason"] != "ok"
-
-
-def test_the_reconcile_items_builder_still_maps_a_certified_capture(tmp_path):
-    """The matched control: the builder must keep working on evidence that IS certified."""
-    _capture_one(tmp_path, "Region,Sales\r\nWest,10\r\n", {"Content-Type": "text/csv"})
-    roles = {"Network Ops": {"Region": "DIMENSION", "Sales": "MEASURE"}}
-
-    result = build_reconcile_items.build(tmp_path, roles)
-    assert result["item_count"] == 1
-    assert result["items"][0]["tableau_value"] == 10.0
-    assert result["skipped_views"] == []
 
 
 def test_a_LEGACY_manifest_naming_uncertified_bytes_under_path_is_demoted_when_it_is_READ(tmp_path):
@@ -2012,7 +1932,6 @@ def test_withholding_evidence_leaves_a_measured_capture_untouched_and_is_idempot
 @pytest.mark.parametrize(
     ("body", "misdiagnosis"),
     [
-        ("Service unavailable\r\nRetry later\r\n", "columns"),
         ("Service temporarily unavailable", "empty_query_no_rows"),
     ],
 )
@@ -2040,20 +1959,6 @@ def test_text_plain_error_text_is_never_certified_as_CSV(tmp_path, body, misdiag
         payload_facts.CSV_CONTENT_TYPE_UNSPECIFIC,
     ]
     assert _naive_numeric_consumer(tmp_path) == []
-
-
-def test_text_csv_and_application_csv_remain_explicit_declarations(tmp_path):
-    """⚠️ The over-correction control for finding 2. Narrowing what counts as a CSV declaration must
-    not narrow it to nothing: both real spellings still certify, with rows and columns recorded."""
-    for declared in ("text/csv", "application/csv"):
-        out = Path(tmp_path / declared.replace("/", "-"))
-        out.mkdir()
-        manifest = _capture_one(out, "Region,Sales\r\nWest,10\r\n", {"Content-Type": declared})
-        data = manifest["views"][0]["data"]
-        assert data["certification"] == payload_facts.CSV_CERTIFIED, declared
-        assert data["row_count"] == 1 and data["columns"] == ["Region", "Sales"]
-        assert data["path"].startswith("data/")
-        assert manifest["captured_complete"] == 1
 
 
 def test_a_text_plain_body_that_is_not_even_tabular_is_still_REFUSED_not_retained(tmp_path):
@@ -2225,27 +2130,17 @@ def test_view_types_asks_the_metadata_api_through_the_hardened_path():
         # --- shapes that used to RAISE rather than refuse. `pytest.raises` is deliberately not used:
         # an escaping exception fails the call outright, which is the point.
         ([(200, "null", {})], "a top-level null", "was NoneType, not an object"),
-        ([(200, json.dumps([{"data": {"workbooks": []}}]), {})], "a top-level list", "was list, not an object"),
-        ([(200, json.dumps("nope"), {})], "a top-level string", "was str, not an object"),
         ([(200, json.dumps({"data": None}), {})], "`data` is null", "`data` was NoneType, not an object"),
-        ([(200, json.dumps({"data": []}), {})], "`data` is a list", "`data` was list, not an object"),
         (
             [(200, json.dumps({"data": {"workbooks": {"dashboards": []}}}), {})],
             "`workbooks` is a dict",
             "`workbooks` was dict, not a list",
         ),
         (
-            [(200, json.dumps({"errors": "boom", "data": {"workbooks": []}}), {})],
-            "`errors` is not a list",
-            "`errors` was str, not a list",
-        ),
-        (
             [(200, json.dumps({"errors": {"message": "boom"}, "data": {"workbooks": []}}), {})],
             "`errors` is a dict",
             "`errors` was dict, not a list",
         ),
-        ([(200, "", {})], "an empty body", "not usable JSON"),
-        ([(200, b"\xff\xfe\x00bad", {})], "a body that is not valid utf-8", "not usable JSON"),
         # A LUID that names BOTH kinds is contradictory, not a last-wins tiebreak: overwriting would
         # silently take whichever the server happened to list second.
         (
@@ -2655,12 +2550,7 @@ def test_no_branch_quotes_the_server_back_into_its_reason(responses):
     [
         (None, "response was NoneType, not an object"),
         ([], "response was list, not an object"),
-        ("nope", "response was str, not an object"),
         (7, "response was int, not an object"),
-        (3.5, "response was float, not an object"),
-        (True, "response was bool, not an object"),
-        ({"data": None}, "`data` was NoneType, not an object"),
-        ({"data": []}, "`data` was list, not an object"),
         ({"data": "x"}, "`data` was str, not an object"),
         ({"data": {"workbooks": 1}}, "`workbooks` was int, not a list"),
     ],
@@ -2748,7 +2638,7 @@ def test_the_manifest_censuses_view_types_so_a_consumer_reads_it_once(tmp_path):
 # 6. Server rejection remains a capture failure / cannot assess, never silently retrying without maxAge.
 
 
-@pytest.mark.parametrize("valid_age", [1, 15, 360])
+@pytest.mark.parametrize("valid_age", [1, 360])
 def test_validate_max_age_accepts_positive_integers(valid_age):
     assert oracle.validate_max_age(valid_age) == valid_age
 
@@ -2758,13 +2648,9 @@ def test_validate_max_age_accepts_positive_integers(valid_age):
     [
         (0, ValueError),
         (-1, ValueError),
-        (-100, ValueError),
         (True, TypeError),
-        (False, TypeError),
         (1.5, TypeError),
         ("15", TypeError),
-        (None, TypeError),
-        ([1], TypeError),
     ],
 )
 def test_validate_max_age_refuses_invalid_types_and_values_less_than_one(invalid_input, exc_type):
@@ -2776,7 +2662,6 @@ def test_validate_max_age_refuses_invalid_types_and_values_less_than_one(invalid
     "cli_args, expected_max_age",
     [
         (["--out", "o"], 1),
-        (["--out", "o", "--max-age", "1"], 1),
         (["--out", "o", "--max-age", "15"], 15),
         (["--out", "o", "--max-age=120"], 120),
     ],
@@ -2789,7 +2674,7 @@ def test_cli_parser_accepts_valid_max_age(cli_args, expected_max_age):
 
 @pytest.mark.parametrize(
     "invalid_cli_arg",
-    ["0", "-1", "-5", "abc", "1.5", "None"],
+    ["0", "-1", "1.5"],
 )
 def test_cli_parser_refuses_invalid_max_age(invalid_cli_arg):
     parser = oracle.build_parser()

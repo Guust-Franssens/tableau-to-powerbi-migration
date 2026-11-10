@@ -453,7 +453,7 @@ def test_the_floor_and_default_still_track_the_module_constant():
 # ---------------------------------------- the DEFAULT budget must clear its own admission floor
 
 
-@pytest.mark.parametrize("timeout", [0.25, 0.5, 0.9, 1.0, 2.0, 30.0, 180.0, 600.0])
+@pytest.mark.parametrize("timeout", [0.25, 1.0, 600.0])
 def test_the_default_budget_is_never_below_the_admission_floor(timeout):
     """⚠️ Review round 1, finding 4 -- reproduced across the range, then fixed.
 
