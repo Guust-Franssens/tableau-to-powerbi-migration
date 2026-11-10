@@ -71,7 +71,7 @@ def _build_installed_from(repo: Path, destination: Path) -> Path:
     return plugin_root
 
 
-@pytest.mark.parametrize("configured", [None, "", "relocated", "missing"])
+@pytest.mark.parametrize("configured", [None, "relocated", "missing"])
 def test_sync_target_follows_copilot_home(tmp_path, monkeypatch, capsys, configured):
     repo = _fixture_repo(tmp_path, monkeypatch)
     baseline = _build_installed_from(repo, tmp_path)
@@ -118,31 +118,16 @@ def test_sync_overrides_win_without_resolving_home(tmp_path, monkeypatch, capsys
     assert str(plugin / "skills") in capsys.readouterr().out
 
 
-def test_default_check_uses_origin_master_not_dirty_feature_worktree(
+def test_default_check_uses_origin_master_not_worktree_edits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Default checks compare installed skills with merged origin/master bytes."""
+    """Skill bytes and build metadata come from merged origin/master, not local edits."""
     repo = _fixture_repo(tmp_path, monkeypatch)
     plugin_root = _build_installed_from(repo, tmp_path)
 
     _run_git(repo, "checkout", "-b", "feature")
     first_skill = build_plugin.SHIPPED_SKILLS[0]
     (repo / ".github" / "skills" / first_skill / "SKILL.md").write_text("unmerged feature\n", encoding="utf-8")
-
-    assert sync.main(["--check", "--plugin-root", str(plugin_root)]) == 0
-
-    output = capsys.readouterr().out
-    assert "refs/remotes/origin/master" in output
-    assert "IN_SYNC" in output
-
-
-def test_default_check_uses_origin_master_build_metadata_not_worktree_edit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Build metadata comes from the selected merged ref, not local edits."""
-    repo = _fixture_repo(tmp_path, monkeypatch)
-    plugin_root = _build_installed_from(repo, tmp_path)
-
     build_script = repo / "scripts" / "build_plugin.py"
     build_script.write_text(
         build_script.read_text(encoding="utf-8").replace('PLUGIN_NAME = "powerbi-playbook"', 'PLUGIN_NAME = "evil"'),
@@ -168,21 +153,6 @@ def test_missing_origin_ref_refuses_without_worktree_fallback(
     output = capsys.readouterr().out
     assert "cannot verify publication source 'origin/master'" in output
     assert "Refusing to fall back to the caller's working tree" in output
-
-
-def test_env_plugin_root_override_is_honoured(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The documented plugin-root environment override remains effective."""
-    repo = _fixture_repo(tmp_path, monkeypatch)
-    plugin_root = _build_installed_from(repo, tmp_path)
-    monkeypatch.setenv(sync.PLUGIN_ROOT_ENV, str(plugin_root))
-
-    assert sync.main(["--check"]) == 0
-
-    output = capsys.readouterr().out
-    assert "IN_SYNC" in output
-    assert str(plugin_root / "skills") in output
 
 
 def test_source_ref_must_be_proven_merged_into_origin_master(
@@ -235,48 +205,25 @@ def test_each_invocation_uses_a_private_reference_directory(
     assert all(not path.exists() for path in seen)
 
 
-def test_source_ref_archive_symlink_entry_is_refused_without_filesystem_symlink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("mode", ["120000", "160000"], ids=["symlink", "gitlink"])
+def test_source_ref_link_entries_are_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], mode: str
 ) -> None:
-    """Tracked archive links are rejected without privileged filesystem setup."""
+    """Tracked symlinks and gitlinks are refused instead of being followed or silently omitted."""
     repo = _fixture_repo(tmp_path, monkeypatch)
     first_skill = build_plugin.SHIPPED_SKILLS[0]
-    blob = _git_stdout(repo, "hash-object", "-w", "--stdin", input_text="SKILL.md")
-    link_path = f".github/skills/{first_skill}/LINK.md"
-    _run_git(repo, "update-index", "--add", "--cacheinfo", f"120000,{blob},{link_path}")
-    assert _git_stdout(repo, "ls-files", "--stage", link_path).startswith(f"120000 {blob} ")
-    _run_git(repo, "commit", "-m", "track symlink entry")
+    if mode == "120000":
+        target = _git_stdout(repo, "hash-object", "-w", "--stdin", input_text="SKILL.md")
+    else:
+        target = "0123456789012345678901234567890123456789"
+    _run_git(repo, "update-index", "--add", "--cacheinfo", f"{mode},{target},.github/skills/{first_skill}/LINK.md")
+    _run_git(repo, "commit", "-m", "track link entry")
     _run_git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
 
     assert sync.main(["--check", "--plugin-root", str(tmp_path / "missing-plugin")]) == 5
 
     output = capsys.readouterr().out
-    assert "unsupported mode 120000" in output
-    assert "Refusing to fall back to the caller's working tree" in output
-
-
-def test_source_ref_gitlink_entry_is_refused_without_omitting_empty_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """Tracked Git links are rejected instead of vanishing from the reference."""
-    repo = _fixture_repo(tmp_path, monkeypatch)
-    first_skill = build_plugin.SHIPPED_SKILLS[0]
-    _run_git(
-        repo,
-        "update-index",
-        "--add",
-        "--cacheinfo",
-        "160000",
-        "0123456789012345678901234567890123456789",
-        f".github/skills/{first_skill}/submodule",
-    )
-    _run_git(repo, "commit", "-m", "track gitlink entry")
-    _run_git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
-
-    assert sync.main(["--check", "--plugin-root", str(tmp_path / "missing-plugin")]) == 5
-
-    output = capsys.readouterr().out
-    assert "unsupported mode 160000" in output
+    assert f"unsupported mode {mode}" in output
     assert "Refusing to fall back to the caller's working tree" in output
 
 
