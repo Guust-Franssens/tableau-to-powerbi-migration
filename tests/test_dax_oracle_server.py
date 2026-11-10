@@ -400,6 +400,27 @@ def test_desktop_persistent_requests_are_each_checked(desktop_executor: tuple, c
     assert events[-1] == "close"
 
 
+def test_desktop_repeated_refusals_print_each_title_once(desktop_executor: tuple, capsys) -> None:
+    """The engine never drains our stderr (#842), so N refusals must not grow it by N lines."""
+    _, state, blocked, _, modal = desktop_executor
+    other = modal.Observation(dialog=modal.DialogFinding(modal.DesktopWindow("", "", 400, 300, hwnd=223), "Other"))
+    execute = dos.adomd_executor(55001, 111)
+
+    def requests():
+        for current in [blocked] * 50 + [other] * 50:
+            state.current = current
+            yield '{"dax":"EVALUATE ROW(\\"v\\", 1)"}\n'
+
+    output = StringIO()
+    assert dos.serve(dos.make_oracle(execute), requests(), output) == 0
+    token_only = {"error": "RuntimeError: Desktop query refused (DIALOG_NEEDS_HUMAN); inspect this Desktop locally"}
+    assert [json.loads(line) for line in output.getvalue().splitlines()] == [token_only] * 100
+    assert capsys.readouterr().err.splitlines() == [
+        f'a Power BI Desktop dialog is open: "{SAFE_TITLE}". A human must act in Desktop.',
+        'a Power BI Desktop dialog is open: "Other". A human must act in Desktop.',
+    ]
+
+
 @pytest.mark.parametrize("condition", ["unknown_reason", "desktop_unready", "process_gone"])
 def test_desktop_nonclean_states_never_reach_open(desktop_executor: tuple, condition: str) -> None:
     """Diagnostic success is not required to refuse the detector's existing non-clean states."""

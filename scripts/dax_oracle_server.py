@@ -166,6 +166,9 @@ def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[di
 
     connection = None
     held_identity = None
+    # The engine's persistent mode never drains our stderr, so a line per refusal fills the pipe
+    # and hangs both processes (#842): each distinct title is printed once per session.
+    printed_titles: set[str] = set()
 
     def refuse_nonclean_desktop() -> None:
         nonlocal held_identity
@@ -184,7 +187,10 @@ def adomd_executor(port: int, pid: int | None = None) -> Callable[[str], list[di
         if token is not None:
             if state.dialog is not None:
                 # The title is for the human only; the error reply is persisted, so it keeps the token.
-                print(dialog_stop_detail(state.dialog), file=sys.stderr, flush=True)
+                detail = dialog_stop_detail(state.dialog)
+                if detail not in printed_titles:
+                    printed_titles.add(detail)
+                    print(detail, file=sys.stderr, flush=True)
             raise RuntimeError(f"Desktop query refused ({token}); inspect this Desktop locally")
 
     def execute(dax: str) -> list[dict]:
