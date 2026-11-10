@@ -3835,6 +3835,9 @@ def _unit_id_selection(
         print(f"ESTATE: UNIT_IDS - {reason}", file=sys.stderr)
         return EXIT_UNIT_IDS, run_dir, entries, None
     print(f"UNIT LAYOUT: {layout} ({reason})")
+    if args.slice_only:
+        # No engine and no conversion: the post-output path gate measures the existing bundle.
+        return EXIT_OK, run_dir, entries, records
     if args.input:
         path_ok, path_detail = preflight_estate_path_ceiling(
             args.input, args.output, engine, _provisional_unit_names(run_dir, entries, records)

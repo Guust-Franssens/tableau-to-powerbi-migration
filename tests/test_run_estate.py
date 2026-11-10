@@ -1988,6 +1988,25 @@ def test_slice_only_needs_no_engine_at_all(tmp_path: Path, monkeypatch) -> None:
     assert (out / "handover" / "Alpha.json").is_file()
 
 
+def test_slice_only_with_input_skips_the_pre_conversion_projection(tmp_path: Path, monkeypatch) -> None:
+    """``--slice-only --input`` has no engine, so only the post-output gate may judge the path ceiling."""
+    out = tmp_path / "bundle"
+    source = tmp_path / "in"
+    source.mkdir()
+    _write(out / "report.json", json.dumps(_report(workbooks=[_workbook("Alpha", "AlphaModel")])))
+    stamped: list[Path] = []
+    monkeypatch.setattr(
+        run_estate,
+        "stamp_inputs",
+        lambda _input, out_dir, *_timeout: (
+            stamped.append(out_dir) or run_estate.ProvenanceStampResult(True, "local_only", "fixture")
+        ),
+    )
+    assert run_estate.main(["--slice-only", "--input", str(source), "--output", str(out)]) == run_estate.EXIT_OK
+    assert stamped == [out]
+    assert json.loads((out / run_estate.PATH_CEILING_REPORT).read_text(encoding="utf-8"))["status"] == "ok"
+
+
 # ---------------------------------------------------------------------------
 # issue #230: --slice-only skipped the generated-artifact baseline entirely
 # ---------------------------------------------------------------------------
