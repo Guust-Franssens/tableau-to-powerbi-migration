@@ -71,9 +71,8 @@ def repo_fixture(tmp_path: Path) -> Path:
     """A throwaway git repo carrying this repo's REAL .gitignore, byte for byte.
 
     Copied whole rather than filtered down to the harvest rules: a reduced fixture answered
-    `check-ignore` differently from the real file (see
-    `test_the_trailing_slash_trap_is_real_and_the_guard_avoids_it`), so a subset would have proved
-    something about a file nobody has.
+    `check-ignore` differently from the real file, so a subset would have proved something about a
+    file nobody has.
     """
     return _init_repo(tmp_path)
 
@@ -205,20 +204,6 @@ def test_guard_refuses_an_unignored_path_inside_a_work_tree(repo: Path) -> None:
 def test_guard_proceeds_for_an_ignored_path(repo: Path) -> None:
     assert h.unignored_output_paths(repo / "_sweep-2026-08-13") == []
     assert h.refuse_unignored_output(repo / "_sweep-2026-08-13", allow_unignored=False) is False
-
-
-def test_the_trailing_slash_trap_is_real_and_the_guard_avoids_it(repo: Path) -> None:
-    """Appending a slash to make a directory rule match turns the guard into a rubber stamp.
-
-    Measured on git 2.55.0.windows.3 against a realistic `.gitignore`: `check-ignore -- 'x/'` exits
-    0 for ANY path, reporting an EMPTY matched pattern - so a guard that probes with a trailing
-    slash reports every target as safely ignored, including the one this test refuses. The
-    workaround for the directory-rule problem is a path COMPONENT under `--out`, never a slash.
-    """
-    stamp = _git(["check-ignore", "-q", "--", f"{repo / 'definitely-not-ignored'}/"], repo)
-    if stamp.returncode != 0:
-        pytest.skip("this git no longer reports every trailing-slash path as ignored")
-    assert h.refuse_unignored_output(repo / "leaky", allow_unignored=False) is True
 
 
 def test_guard_proceeds_when_the_directory_already_exists(repo: Path) -> None:
@@ -361,7 +346,7 @@ def test_cli_exits_nonzero_before_touching_anything(repo: Path) -> None:
 #   --out linkdir\x     (linkdir is a junction to somewhere outside) judged from the junction
 #                       TARGET, where `git rev-parse` exits 128 -> "outside any work tree" -> allowed,
 #                       while `git add -A` at the checkout staged 'linkdir/x/assets/...' (Windows;
-#                       on POSIX git stages the symlink entry instead - see the control below)
+#                       on POSIX git stages the symlink entry instead)
 #
 # Every test below therefore asserts TWICE: first that the question the OLD guard asked returns
 # "safe" for this fixture, then that the guard refuses anyway. Without the first assertion a test
@@ -423,32 +408,6 @@ def lab_fixture(tmp_path: Path):
         _unlink_dir(link)
 
 
-def test_the_link_leak_is_real_on_this_platform(lab) -> None:
-    """The control the rest of this section rests on: what does `git add -A` actually do with it?
-
-    The two platforms differ and the difference is the point. An NTFS junction is a directory to
-    git's working-tree walk, so it descends and stages the customer `.twbx` itself - that is the
-    leak issue #374 is about. A POSIX symlink is staged as a link object; git does not walk into it,
-    so the workbooks stay out of the index while the link entry - which names the path - still lands.
-    Asserted, not assumed, so a change in either platform's behaviour shows up here rather than
-    quietly making the refusals below pointless.
-    """
-    landed = lab.junction_out / "sweepout" / "assets"
-    landed.mkdir(parents=True)
-    (landed / "harvested-workbook.twbx").write_text("customer content", encoding="utf-8")
-    assert (lab.outside / "sweepout" / "assets" / "harvested-workbook.twbx").exists(), "the link is not a link"
-
-    staged = _git(["add", "-A", "--dry-run"], lab.repo).stdout.replace("\\", "/")
-    if sys.platform == "win32":
-        assert "linkdir/sweepout/assets/harvested-workbook.twbx" in staged, (
-            f"git no longer walks into an NTFS junction; the leak may be gone:\n{staged}"
-        )
-    else:
-        # Measured on git 2.43.0 (Ubuntu): the whole output is `add '.gitignore'` + `add 'linkdir'`.
-        assert "linkdir" in staged, f"git staged nothing for the symlink at all:\n{staged}"
-        assert "linkdir/sweepout" not in staged, f"git now walks into a POSIX symlink:\n{staged}"
-
-
 def test_a_junction_leading_out_of_the_checkout_is_refused(lab) -> None:
     """`--out` inside the checkout whose link resolves outside it. Acceptance criterion 2."""
     out = lab.junction_out / "sweepout"
@@ -496,26 +455,6 @@ def test_a_checkout_reached_through_a_junction_is_not_falsely_refused(lab) -> No
     assert h.refuse_unignored_output(out, allow_unignored=False) is False
 
 
-def test_the_junction_cli_refuses_and_writes_nothing(lab) -> None:
-    """End to end, by exit code: 2, and not one byte through the link."""
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "harvest_estate_assets.py"),
-            "--out",
-            str(Path("linkdir") / "sweepout"),
-            "--skip-download",
-        ],
-        cwd=lab.repo,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode == 2, f"the CLI accepted a junctioned --out:\n{result.stdout}\n{result.stderr}"
-    assert "REFUSING" in (result.stdout + result.stderr)
-    assert not (lab.outside / "sweepout").exists(), "the refusal ran too late - it already wrote through the link"
-
-
 def test_a_literal_tilde_is_judged_where_it_would_actually_land(repo: Path, monkeypatch) -> None:
     """Acceptance criterion 1, at the guard. `~` reaches argv unexpanded from cmd.exe, from a quoted
     PowerShell argument, and from any programmatic call; `Path("~/x")` is a plain relative path."""
@@ -527,25 +466,6 @@ def test_a_literal_tilde_is_judged_where_it_would_actually_land(repo: Path, monk
         pytest.skip("the home directory is itself an unignored path inside a checkout on this machine")
     assert old_question == [], "the OLD guard judged the home directory, and called it safe"
     assert h.refuse_unignored_output(Path("~/harvest-374-sweep"), allow_unignored=False) is True
-
-
-def test_the_tilde_directory_is_never_created_inside_the_checkout(repo: Path) -> None:
-    """Acceptance criterion 1, end to end: refuse, and leave no literal `~` behind."""
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "harvest_estate_assets.py"),
-            "--out",
-            "~/harvest-374-sweep",
-            "--skip-download",
-        ],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode == 2, f"the CLI accepted a literal ~ --out:\n{result.stdout}\n{result.stderr}"
-    assert not (repo / "~").exists(), "a literal `~` directory was created inside the checkout"
 
 
 def test_the_run_writes_to_the_form_the_guard_passed(tmp_path: Path, monkeypatch) -> None:

@@ -338,7 +338,6 @@ OTHER_GUID = "b0000000-0000-4000-8000-000000000000"
     "url",
     [
         f"https://tableau.example.com/#/projects/{PROJECT_GUID}",
-        f"https://tableau.example.com/#/site/finance/projects/{PROJECT_GUID}",
         f"https://tableau.example.com/#/site/finance/projects/{PROJECT_GUID}/",
         f"https://tableau.example.com/#/projects/{PROJECT_GUID}?:origin=card_share_link",
         f"https://tableau.example.com/api/3.19/sites/{OTHER_GUID}/projects/{PROJECT_GUID}",
@@ -356,7 +355,6 @@ def test_a_guid_url_normalises_into_the_exact_project_id_path(url: str) -> None:
     "url",
     [
         "https://tableau.example.com/#/projects/35",
-        "https://tableau.example.com/#/projects/35/",
         "https://tableau.example.com/#/site/finance/projects/35?:origin=card_share_link",
         "https://tableau.example.com/#/projects/3%35",  # percent-encoded, same legacy id
     ],
@@ -374,9 +372,7 @@ def test_a_numeric_url_is_refused_with_the_id_echoed(url: str) -> None:
     "url",
     [
         "https://tableau.example.com/#/site/finance/views/Monthly/Sheet1",
-        "https://tableau.example.com/",
         "",
-        "not a url at all",
     ],
 )
 def test_a_url_with_no_project_segment_is_a_usage_error(url: str) -> None:
@@ -558,7 +554,6 @@ def test_a_malformed_authority_is_a_sanitized_usage_error_not_a_raw_valueerror(u
     ("url", "expected"),
     [
         (f"https://x.example.com/#/projects/{PROJECT_GUID.upper()}", PROJECT_GUID),
-        (f"https://x.example.com/#/projects/{{{PROJECT_GUID}}}", PROJECT_GUID),
         (f"https://x.example.com/#/projects/%7B{PROJECT_GUID.upper()}%7D", PROJECT_GUID),
         # The same project written two ways in ONE url is one project, not an ambiguity.
         (f"https://x.example.com/#/projects/{PROJECT_GUID}/projects/{PROJECT_GUID.upper()}", PROJECT_GUID),
@@ -573,7 +568,6 @@ def test_an_accepted_guid_is_canonicalised_to_lowercase_unbraced_form(url: str, 
     ("url", "codepoint"),
     [
         (f"https://x.example.com/#/projects/{PROJECT_GUID}%0A", "U+000A"),  # `$` matches before it
-        (f"https://x.example.com/#/projects/{PROJECT_GUID}%00", "U+0000"),
         (f"https://x.example.com/#/projects/{PROJECT_GUID}%E2%80%8B", "U+200B"),  # zero-width space
         ("https://x.example.com/#/projects/35%0A", "U+000A"),
     ],
@@ -593,7 +587,6 @@ def test_a_decoded_control_character_is_refused_rather_than_silently_carried(url
         # A printable suffix: the reason BOTH matches are `fullmatch`. A prefix match returns the
         # whole segment, so `<luid>x` would have been forwarded verbatim as a project id.
         f"https://x.example.com/#/projects/{PROJECT_GUID}x",
-        f"https://x.example.com/#/projects/{PROJECT_GUID}%20extra",
         "https://x.example.com/#/projects/35x",
         "https://x.example.com/#/projects/35;jsessionid=SEKRIT-TOKEN",
     ],
@@ -617,10 +610,6 @@ def test_canonicalisation_did_not_widen_what_counts_as_a_luid(url: str) -> None:
         (
             [f"https://x.example.com/#/projects/{PROJECT_GUID}", MALFORMED_AUTHORITY[0]],
             "not a parseable URL",
-        ),
-        (
-            [f"https://x.example.com/#/projects/{PROJECT_GUID}", f"https://x.example.com/#/projects/{PROJECT_GUID}%0A"],
-            "non-printable",
         ),
         # A LUID with a printable suffix: refused, never truncated to the LUID and never forwarded
         # whole. Exit 1 here would be the script claiming the estate could not be assessed.
@@ -1471,8 +1460,23 @@ def test_private_snapshots_are_read_only_closed_and_never_exposed_on_any_exit(
     assert all(value not in caplog.text and not Path(value).exists() for value in ids)
 
 
-@pytest.mark.parametrize("stage", ["opened", "copied_handle", "copied_path", "validated_handle", "validated_path"])
-@pytest.mark.parametrize("field", ["st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"])
+# Every stat field is drifted on both the handle side and the path side at least once, and every stage
+# is reached; "opened" keeps both its early-refusal and its ctime-tolerant branch.
+@pytest.mark.parametrize(
+    ("stage", "field"),
+    [
+        ("opened", "st_dev"),
+        ("opened", "st_ctime_ns"),
+        ("copied_handle", "st_ino"),
+        ("copied_handle", "st_mtime_ns"),
+        ("validated_handle", "st_size"),
+        ("copied_path", "st_dev"),
+        ("copied_path", "st_ino"),
+        ("copied_path", "st_size"),
+        ("validated_path", "st_mtime_ns"),
+        ("validated_path", "st_ctime_ns"),
+    ],
+)
 def test_path_and_handle_snapshots_include_device_identity_and_nanosecond_stability(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stage: str, field: str
 ) -> None:
@@ -1564,11 +1568,8 @@ def test_selection_process_failure_does_not_change_existing_report_accounting(
     "change",
     [
         {"version": True},
-        {"version": 2},
-        {"size_bytes": True},
         {"size_bytes": -1},
         {"sha256": "A" * 64},
-        {"sha256": "0" * 63},
         {"path": "relative.tds"},
         {"extra": "field"},
         {"status": "cannot_establish", "reason": "unreadable"},

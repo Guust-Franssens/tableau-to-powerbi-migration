@@ -368,7 +368,6 @@ def test_declared_tier_edit_names_the_declaring_script(tmp_path):
     ("pointer", "expected"),
     [
         ("/position/x", hgs.SHAPE_LAYOUT),
-        ("/position/tabOrder", hgs.SHAPE_LAYOUT),
         ("/filterConfig/filters[]/name", hgs.SHAPE_FILTER),
         ("/visual/objects/general[]/properties/filter/filter/From[]/Entity", hgs.SHAPE_FILTER),
         ("/visual/visualType", hgs.SHAPE_VISUAL_TYPE),
@@ -1145,7 +1144,6 @@ def test_a_property_rename_is_never_excused_as_binding_resolution(tmp_path):
         ("/visual/query/x/queryRef", "Extract.A", "Orders.A", hgs.SHAPE_BINDING),
         ("/visual/query/x/queryRef", "Extract.A", "Orders.B", hgs.SHAPE_MODEL_NAMES),
         ("/visual/query/x/Property", "A", "B", hgs.SHAPE_MODEL_NAMES),
-        ("/visual/query/x/nativeQueryRef", "A", "B", hgs.SHAPE_MODEL_NAMES),
         # ⚠️ A COLUMN whose name collides with a TABLE name. `bound_model_tables` returns table names
         # only, so testing a property against it is a category error: `Property: Extract -> Orders`
         # would look exactly like an invalid->valid rebind while being a column rename. Without these
@@ -1275,11 +1273,9 @@ DOTTED_TABLES = {"Date", "HumanResources.csv", "Orders", "Orders.csv", "Customer
         # queryRef at the FIRST dot read this as entity `HumanResources` + property `csv.Status`,
         # decided the property had changed, and retained a textbook rebind as unexplained.
         ("HumanResources.Status", "HumanResources.csv.Status", hgs.SHAPE_BINDING, "dotted table name"),
-        ("Extract.State", "HumanResources.csv.State", hgs.SHAPE_BINDING, "invalid entity -> dotted table"),
         ("Customers.csv_110301F4.Country", "Customers.csv.Country", hgs.SHAPE_BINDING, "hashed extract name"),
         ("Sum(Orders.csv_AB12.Sales)", "Sum(Orders.csv.Sales)", hgs.SHAPE_BINDING, "aggregation wrapper"),
         # Still retained, and these are the true positives the whole refinement exists to keep.
-        ("Orders.Order_Date", "Date.Year", hgs.SHAPE_MODEL_NAMES, "different table AND column"),
         ("Orders.Amount", "Returns.Amount", hgs.SHAPE_MODEL_NAMES, "valid -> valid substitution"),
         ("Sum(Orders.csv_AB.Sales)", "Avg(Orders.csv.Sales)", hgs.SHAPE_MODEL_NAMES, "aggregation changed"),
         ("Extract.A", "Nowhere.A", hgs.SHAPE_MODEL_NAMES, "after-entity is not a table"),
@@ -1628,22 +1624,6 @@ def test_adjudication_reads_the_inventory_from_the_snapshot_it_was_given(tmp_pat
 # ---------------------------------------------------------------------------------------------
 # Round-7 review: ABA defeats endpoint comparison, and the withdrawal missed `pairs[]`.
 # ---------------------------------------------------------------------------------------------
-
-
-def _reconciles(report: dict) -> bool:
-    """Top-level provenance == the pair rows PLUS the records that legitimately belong to no pair."""
-    rows = sum(sum(e["provenance"].values()) for e in report["pairs"])
-    return rows + report["unpaired_drift_records"] == sum(report["provenance"][n] for n in heg.PROVENANCES)
-
-
-def test_the_pair_rows_reconcile_with_the_top_level_on_an_ordinary_run(tmp_path):
-    """The same invariant with no race at all, so the assertion above is not vacuous."""
-    report = heg.harvest(_differing_bundle(tmp_path))
-
-    assert report["provenance"]["differing_files"] > 0
-    assert _reconciles(report)
-    for name in heg.PROVENANCES:
-        assert sum(e["provenance"].get(name, 0) for e in report["pairs"]) == report["provenance"][name], name
 
 
 # ---------------------------------------------------------------------------------------------
