@@ -43,40 +43,24 @@ def spec_fixture(tmp_path_factory: pytest.TempPathFactory) -> dict:
     return json.loads(out.read_text(encoding="utf-8"))
 
 
-def test_every_federated_leg_is_reported(spec: dict) -> None:
-    """The parser must report EVERY named connection, not just the first.
-
-    Under-reporting live sources is the one direction the source classification must never fail in:
-    a federated datasource that collapses to its first connection classifies one system and reports
-    the others nowhere.
-    """
+def test_every_federated_leg_keeps_its_own_endpoint_and_details(spec: dict) -> None:
+    """Every named connection is reported with its OWN server and connector-specific details."""
     sources = spec["data_sources"]
     assert sources, "no data sources parsed"
-
     legs = sources[0]["connection"].get("connections") or []
     classes = [leg.get("class") for leg in legs]
-
     assert len(legs) >= 2, f"expected a federated datasource with several legs, got {classes}"
     assert len(set(classes)) == len(classes), f"legs should be distinct systems, got {classes}"
 
-
-def test_each_leg_keeps_its_own_endpoint(spec: dict) -> None:
-    """Each leg must carry its OWN server - a shared one is the upstream bug this guards against."""
-    legs = spec["data_sources"][0]["connection"]["connections"]
     servers = [leg.get("server") for leg in legs if leg.get("server")]
-
     assert len(servers) == len(legs), f"a leg is missing its server: {legs}"
     assert len(set(servers)) == len(servers), f"legs share a server, which is the defect: {servers}"
 
-
-def test_connector_specific_details_survive_per_leg(spec: dict) -> None:
-    """Databricks needs its http path and Snowflake its warehouse; neither may be dropped."""
-    legs = {leg.get("class"): leg for leg in spec["data_sources"][0]["connection"]["connections"]}
-
-    if "databricks" in legs:
-        assert legs["databricks"].get("http_path"), f"databricks leg lost its http path: {legs['databricks']}"
-    if "snowflake" in legs:
-        assert legs["snowflake"].get("warehouse"), f"snowflake leg lost its warehouse: {legs['snowflake']}"
+    by_class = {leg.get("class"): leg for leg in legs}
+    if "databricks" in by_class:
+        assert by_class["databricks"].get("http_path"), f"databricks leg lost its http path: {by_class['databricks']}"
+    if "snowflake" in by_class:
+        assert by_class["snowflake"].get("warehouse"), f"snowflake leg lost its warehouse: {by_class['snowflake']}"
 
 
 def test_the_preflight_classifies_every_live_leg(spec: dict, tmp_path: Path) -> None:
