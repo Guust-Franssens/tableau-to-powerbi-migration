@@ -1,5 +1,4 @@
-"""Tests for `scripts/check_bundle_sources.py`, the static source checks lifted from the retired
-probe builder's `--check-only` mode (`M_PARAM_UNDEFINED`, `M_PARAM_EMPTY`, `SOURCE_COLLAPSED`)."""
+"""check_bundle_sources: M_PARAM_UNDEFINED, M_PARAM_EMPTY and SOURCE_COLLAPSED (#91)."""
 
 from __future__ import annotations
 
@@ -10,90 +9,17 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "check_bundle_sources.py"
-sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-import check_bundle_sources  # noqa: E402  # pylint: disable=wrong-import-position
-
-PARTITION_TMDL = """\
-table 'Sales'
-\tcolumn 'Amount'
-\t\tdataType: double
-\t\tsourceColumn: Amount
-
-\tpartition 'Sales' = m
-\t\tmode: directQuery
-\t\tsource =
-\t\t\tlet
-\t\t\t\tSource = Sql.Database(#"Server", #"Database"),
-\t\t\t\tData = Source{[Schema="dbo",Item="Sales"]}[Data]
-\t\t\tin
-\t\t\t\tData
-"""
-
-EXPRESSIONS_TMDL = """\
-expression 'Server' = "myserver.database.windows.net" meta [IsParameterQuery=true]
-expression 'Database' = "sales" meta [IsParameterQuery=true]
-"""
+import check_bundle_sources as cbs  # noqa: E402  # pylint: disable=wrong-import-position
 
 
-@pytest.fixture(name="bundle")
-def bundle_fixture(tmp_path: Path) -> Path:
-    """A minimal emitted bundle: one DirectQuery table plus its two M parameters."""
-    model = tmp_path / "bundle" / "Demo.SemanticModel" / "definition"
-    (model / "tables").mkdir(parents=True)
-    (model / "tables" / "Sales.tmdl").write_text(PARTITION_TMDL, encoding="utf-8")
-    (model / "expressions.tmdl").write_text(EXPRESSIONS_TMDL, encoding="utf-8")
-    return tmp_path / "bundle"
+def _param(name: str, value: str) -> str:
+    return f'expression {name} = "{value}" meta [IsParameterQuery=true]\n'
 
 
-def test_empty_m_parameter_is_detected(bundle: Path) -> None:
-    """A parameter that is DEFINED but blank is exactly as fatal as a missing one.
-
-    Measured 2026-08-05 on a real Snowflake `.tdsx` whose `<connection warehouse=''>` was blank.
-    The emitter honestly wrote `expression Warehouse = ""` with a TODO; our check looked only for
-    the NAME and reported "all referenced parameters are defined", exit 0 - a false green on a
-    bundle that provably cannot refresh.
-    """
-    expressions = bundle / "Demo.SemanticModel" / "definition" / "expressions.tmdl"
-    expressions.write_text(
-        "expression 'Server' = \"s\" meta [IsParameterQuery=true]\n"
-        "expression 'Database' = \"\" meta [IsParameterQuery=true, IsParameterQueryRequired=true]\n",
-        encoding="utf-8",
-    )
-
-    params = check_bundle_sources.check_m_parameters(check_bundle_sources.find_model_dir(bundle))
-
-    assert params["undefined"] == [], "the name IS defined - that is the trap"
-    assert params["empty"] == ["Database"]
-
-
-def test_a_populated_parameter_is_not_flagged_empty(bundle: Path) -> None:
-    """Guard the other direction, so a normal bundle is not blocked."""
-    params = check_bundle_sources.check_m_parameters(check_bundle_sources.find_model_dir(bundle))
-
-    assert params["empty"] == []
-    assert params["undefined"] == []
-
-
-def test_undefined_m_parameter_is_detected(bundle: Path) -> None:
-    """The static check that neither `validate` nor the emitter's own self-check performs."""
-    expressions = bundle / "Demo.SemanticModel" / "definition" / "expressions.tmdl"
-    expressions.write_text("expression 'Server' = \"x\" meta [IsParameterQuery=true]\n", encoding="utf-8")
-
-    params = check_bundle_sources.check_m_parameters(check_bundle_sources.find_model_dir(bundle))
-
-    assert params["undefined"] == ["Database"]
-
-
-# ---------------------------------------------------------------------------
-# SOURCE_COLLAPSED - the silent sibling of M_PARAM_UNDEFINED (upstream issue #91)
-# ---------------------------------------------------------------------------
-
-
-def _coverage_model(tmp_path: Path, expressions: str, partitions: dict[str, str]) -> Path:
-    """Write a minimal semantic model with the given parameters and table partitions."""
+def _model(tmp_path: Path, expressions: str, partitions: dict[str, str]) -> Path:
+    """Write a minimal bundle with the given parameters and one M partition per table."""
     model = tmp_path / "b" / "M.SemanticModel" / "definition"
     (model / "tables").mkdir(parents=True, exist_ok=True)
     (model / "expressions.tmdl").write_text(expressions, encoding="utf-8")
@@ -106,192 +32,104 @@ def _coverage_model(tmp_path: Path, expressions: str, partitions: dict[str, str]
     return tmp_path / "b"
 
 
-def _spec(tmp_path: Path, servers: list[tuple[str, str]]) -> Path:
-    """Write a migration-spec.json declaring one live datasource with the given connection legs."""
+def _spec(tmp_path: Path, connection: dict) -> Path:
     path = tmp_path / "migration-spec.json"
-    path.write_text(
-        json.dumps(
-            {
-                "data_sources": [
-                    {
-                        "name": "ds",
-                        "connection": {
-                            "powerbi_target": "live_source",
-                            "connections": [
-                                {"server": s, "database": d, "powerbi_target": "live_source"} for s, d in servers
-                            ],
-                        },
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps({"data_sources": [{"name": "ds", "connection": connection}]}), encoding="utf-8")
     return path
 
 
-def _collapsed_model(tmp_path: Path) -> tuple[Path, Path]:
-    """The measured upstream defect: a cross-database join over two SQL servers, emitted as one."""
-    model = _coverage_model(
-        tmp_path,
-        'expression Server = "sales-sql.example.net" meta [IsParameterQuery=true]\n'
-        'expression Database = "salesdb" meta [IsParameterQuery=true]\n',
-        {
-            "Orders": 'Sql.Database(#"Server", #"Database"),',
-            "Employees": 'Sql.Database(#"Server", #"Database"),',
-        },
-    )
-    spec = _spec(tmp_path, [("sales-sql.example.net", "salesdb"), ("hr-sql.example.net", "hrdb")])
-    return model, spec
+def _legs(*servers: tuple[str, str]) -> dict:
+    legs = [{"server": s, "database": d, "powerbi_target": "live_source"} for s, d in servers]
+    return {"powerbi_target": "live_source", "connections": legs}
 
 
-def test_two_declared_servers_collapsed_to_one_is_caught(tmp_path: Path) -> None:
-    """Both parameters ARE defined, so `check_m_parameters` is clean and the model refreshes without
-    error - it just silently reads the wrong server. Only endpoint counting catches it.
-    """
-    model, spec = _collapsed_model(tmp_path)
-
-    params = check_bundle_sources.check_m_parameters(check_bundle_sources.find_model_dir(model))
-    assert not params["undefined"], "precondition: the parameter check must NOT catch this"
-    assert not params["empty"]
-
-    result = check_bundle_sources.check_source_coverage(check_bundle_sources.find_model_dir(model), spec)
-    assert result["status"] == "SOURCE_COLLAPSED"
-    assert result["missing"] == ["hr-sql.example.net"]
+SQL = 'Sql.Database(#"Server", #"Database"),'
+TWO_LEGS = (("sales-sql.example.net", "salesdb"), ("hr-sql.example.net", "hrdb"))
 
 
-def test_per_connector_parameters_pass(tmp_path: Path) -> None:
-    """The shape the fix should produce - one parameter set per connector - must pass."""
-    model = _coverage_model(
-        tmp_path,
-        'expression SalesServer = "sales-sql.example.net" meta [IsParameterQuery=true]\n'
-        'expression SalesDb = "salesdb" meta [IsParameterQuery=true]\n'
-        'expression HrServer = "hr-sql.example.net" meta [IsParameterQuery=true]\n'
-        'expression HrDb = "hrdb" meta [IsParameterQuery=true]\n',
-        {
-            "Orders": 'Sql.Database(#"SalesServer", #"SalesDb"),',
-            "Employees": 'Sql.Database(#"HrServer", #"HrDb"),',
-        },
-    )
-    spec = _spec(tmp_path, [("sales-sql.example.net", "salesdb"), ("hr-sql.example.net", "hrdb")])
-    result = check_bundle_sources.check_source_coverage(check_bundle_sources.find_model_dir(model), spec)
-    assert result["status"] == "OK"
-
-
-def test_a_missing_spec_is_unknown_never_ok(tmp_path: Path) -> None:
-    """Absence of evidence must not print as coverage: claiming a property was checked when the
-    input needed to check it was never supplied is a false green.
-    """
-    model = _coverage_model(
-        tmp_path,
-        'expression Server = "a.example.net" meta [IsParameterQuery=true]\n',
-        {"T": 'Sql.Database(#"Server", "db"),'},
-    )
-    for spec in (None, tmp_path / "does-not-exist.json"):
-        result = check_bundle_sources.check_source_coverage(check_bundle_sources.find_model_dir(model), spec)
-        assert result["status"] == "UNKNOWN"
-
-
-def test_an_extract_only_spec_is_unknown_not_a_false_pass(tmp_path: Path) -> None:
-    """Extracts reference no Server parameter, so there is nothing to compare - say so."""
-    spec = tmp_path / "migration-spec.json"
-    spec.write_text(
-        json.dumps({"data_sources": [{"connection": {"powerbi_target": "flat_file", "server": None}}]}),
-        encoding="utf-8",
-    )
-    model = _coverage_model(tmp_path, "", {"T": 'Csv.Document(File.Contents("x.csv")),'})
-    result = check_bundle_sources.check_source_coverage(check_bundle_sources.find_model_dir(model), spec)
-    assert result["status"] == "UNKNOWN"
-
-
-def test_a_single_connection_spec_without_the_plural_array_still_works(tmp_path: Path) -> None:
-    """Older specs carry only the scalar server/database - they must still get a real answer."""
-    spec = tmp_path / "migration-spec.json"
-    spec.write_text(
-        json.dumps(
-            {
-                "data_sources": [
-                    {
-                        "connection": {
-                            "powerbi_target": "live_source",
-                            "server": "only.example.net",
-                            "database": "db",
-                        }
-                    }
-                ]
-            }
+@pytest.mark.parametrize(
+    ("expressions", "undefined", "empty", "token"),
+    [
+        pytest.param(_param("'Server'", "s") + _param("'Database'", "d"), [], [], None, id="populated"),
+        pytest.param(_param("'Server'", "x"), ["Database"], [], "M_PARAM_UNDEFINED: Database", id="undefined"),
+        # Defined-but-blank is as fatal as missing (measured on a Snowflake `.tdsx` with warehouse='').
+        pytest.param(
+            _param("'Server'", "s") + _param("'Database'", ""), [], ["Database"], "M_PARAM_EMPTY: Database", id="empty"
         ),
-        encoding="utf-8",
+    ],
+)
+def test_m_parameters_and_cli_tokens(tmp_path, capsys, expressions, undefined, empty, token) -> None:
+    """Every referenced parameter must be defined AND non-blank; the CLI exits 1 with the token."""
+    bundle = _model(tmp_path, expressions, {"Sales": SQL})
+    params = cbs.check_m_parameters(cbs.find_model_dir(bundle))
+    assert (params["undefined"], params["empty"]) == (undefined, empty)
+    assert cbs.main([str(bundle)]) == (1 if token else 0)
+    out = capsys.readouterr().out
+    if token:
+        assert token in out
+    else:  # No spec is not a finding, but coverage must print UNKNOWN, never OK.
+        assert "SOURCE_COVERAGE: UNKNOWN - no --spec given" in out
+        assert "declared endpoint(s) are reachable" not in out
+
+
+def test_two_declared_servers_collapsed_to_one_is_caught(tmp_path: Path, capsys) -> None:
+    """Parameters are clean and the model refreshes; only endpoint counting sees the wrong server."""
+    model = _model(
+        tmp_path, _param("Server", TWO_LEGS[0][0]) + _param("Database", "salesdb"), {"Orders": SQL, "Employees": SQL}
     )
-    model = _coverage_model(
-        tmp_path,
-        'expression Server = "only.example.net" meta [IsParameterQuery=true]\n',
-        {"T": 'Sql.Database(#"Server", "db"),'},
+    spec = _spec(tmp_path, _legs(*TWO_LEGS))
+    params = cbs.check_m_parameters(cbs.find_model_dir(model))
+    assert params["undefined"] == params["empty"] == []
+    result = cbs.check_source_coverage(cbs.find_model_dir(model), spec)
+    assert (result["status"], result["missing"]) == ("SOURCE_COLLAPSED", ["hr-sql.example.net"])
+    assert cbs.main([str(model), "--spec", str(spec)]) == 1
+    out = capsys.readouterr().out
+    assert "SOURCE_COLLAPSED: declared 2 endpoint(s), model reaches 1" in out
+    assert "MISSING : hr-sql.example.net" in out
+
+
+def test_source_coverage_verdicts(tmp_path: Path) -> None:
+    """Per-connector and scalar-only specs pass; no, missing or extract-only spec is UNKNOWN, never OK."""
+    per_connector = _model(
+        tmp_path / "a",
+        "".join(
+            _param(n, v)
+            for n, v in [
+                ("SalesServer", TWO_LEGS[0][0]),
+                ("SalesDb", "salesdb"),
+                ("HrServer", TWO_LEGS[1][0]),
+                ("HrDb", "hrdb"),
+            ]
+        ),
+        {"Orders": 'Sql.Database(#"SalesServer", #"SalesDb"),', "Employees": 'Sql.Database(#"HrServer", #"HrDb"),'},
     )
-    result = check_bundle_sources.check_source_coverage(check_bundle_sources.find_model_dir(model), spec)
-    assert result["status"] == "OK"
+    spec = _spec(tmp_path / "a", _legs(*TWO_LEGS))
+    assert cbs.check_source_coverage(cbs.find_model_dir(per_connector), spec)["status"] == "OK"
+
+    single = _model(tmp_path / "s", _param("Server", "only.example.net"), {"T": 'Sql.Database(#"Server", "db"),'})
+    scalar = _spec(tmp_path / "s", {"powerbi_target": "live_source", "server": "only.example.net", "database": "db"})
+    assert cbs.check_source_coverage(cbs.find_model_dir(single), scalar)["status"] == "OK"
+    for unknown in (None, tmp_path / "does-not-exist.json"):
+        assert cbs.check_source_coverage(cbs.find_model_dir(single), unknown)["status"] == "UNKNOWN"
+
+    extract = _model(tmp_path / "e", "", {"T": 'Csv.Document(File.Contents("x.csv")),'})
+    flat = _spec(tmp_path / "e", {"powerbi_target": "flat_file", "server": None})
+    assert cbs.check_source_coverage(cbs.find_model_dir(extract), flat)["status"] == "UNKNOWN"
 
 
-# ---------------------------------------------------------------------------
-# The CLI: exit codes and output tokens are the contract callers branch on
-# ---------------------------------------------------------------------------
-
-
-def _cli(*args: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [sys.executable, str(SCRIPT), *(str(arg) for arg in args)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=60,
-    )
-
-
-def test_cli_reports_an_undefined_parameter_with_exit_1(bundle: Path) -> None:
-    """An undefined parameter is a finding: exit 1 and the `M_PARAM_UNDEFINED` token."""
-    expressions = bundle / "Demo.SemanticModel" / "definition" / "expressions.tmdl"
-    expressions.write_text("expression 'Server' = \"x\" meta [IsParameterQuery=true]\n", encoding="utf-8")
-    proc = _cli(bundle)
-    assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "M_PARAM_UNDEFINED: Database" in proc.stdout
-
-
-def test_cli_reports_an_empty_parameter_with_exit_1(bundle: Path) -> None:
-    """A defined-but-blank parameter is a finding: exit 1 and the `M_PARAM_EMPTY` token."""
-    expressions = bundle / "Demo.SemanticModel" / "definition" / "expressions.tmdl"
-    expressions.write_text(
-        "expression 'Server' = \"s\" meta [IsParameterQuery=true]\nexpression 'Database' = \"\"\n",
-        encoding="utf-8",
-    )
-    proc = _cli(bundle)
-    assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "M_PARAM_EMPTY: Database" in proc.stdout
-
-
-def test_cli_reports_a_collapsed_source_with_exit_1(tmp_path: Path) -> None:
-    """A collapsed endpoint set is a finding: exit 1, the counts and the missing host."""
-    model, spec = _collapsed_model(tmp_path)
-    proc = _cli(model, "--spec", spec)
-    assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "SOURCE_COLLAPSED: declared 2 endpoint(s), model reaches 1" in proc.stdout
-    assert "MISSING : hr-sql.example.net" in proc.stdout
-
-
-def test_cli_without_a_spec_passes_but_never_claims_coverage(bundle: Path) -> None:
-    """No spec is not a finding (exit 0), but coverage must print UNKNOWN, never OK."""
-    proc = _cli(bundle)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "SOURCE_COVERAGE: UNKNOWN - no --spec given" in proc.stdout
-    assert "declared endpoint(s) are reachable" not in proc.stdout
-
-
-def test_cli_missing_bundle_exits_2_and_no_model_exits_1(tmp_path: Path) -> None:
+def test_cli_missing_bundle_exits_2_and_no_model_exits_1(tmp_path: Path, capsys) -> None:
     """A bad path is a usage error (2); a bundle without a model is a finding (1)."""
-    missing = _cli(tmp_path / "absent")
-    assert missing.returncode == 2
-    assert "does not exist" in missing.stderr
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    no_model = _cli(empty)
-    assert no_model.returncode == 1
-    assert "no *.SemanticModel/definition" in no_model.stderr
+    assert cbs.main([str(tmp_path / "absent")]) == 2
+    assert "does not exist" in capsys.readouterr().err
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(SystemExit, match=r"no \*\.SemanticModel/definition"):  # exits 1 via stderr
+        cbs.main([str(tmp_path / "empty")])
+
+
+def test_script_entry_point_smoke(tmp_path: Path) -> None:
+    """One real `python check_bundle_sources.py` run keeps the `__main__` exit path honest."""
+    script = Path(cbs.__file__)
+    proc = subprocess.run(
+        [sys.executable, str(script), str(tmp_path / "absent")], capture_output=True, text=True, check=False, timeout=60
+    )
+    assert proc.returncode == 2, proc.stdout + proc.stderr
