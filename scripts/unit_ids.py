@@ -7,7 +7,7 @@ usage:   library only - unit_ids.allocate_unit_ids(run_dir, [unit_ids.UnitReques
 Layout under one runs root (`<repo>/_runs/` by default, `<runs-parent>/_runs/` otherwise):
 
   .unit-id-reservations/<digits>/owner.json  permanent reservation plus owner pointer (run, key)
-  <run>/unit-index.json                       canonical per-run dictionary (schema_version 1)
+  <run>/unit-index.json                       canonical per-run dictionary (schema_version 2)
   <run>/UNITS.md                              projection of the index; regenerated, never edited
   <run>/unit-index.lock                       O_EXCL lock held only while one allocator writes
 
@@ -43,7 +43,8 @@ INDEX_FILE_NAME = "unit-index.json"
 README_FILE_NAME = "UNITS.md"
 LOCK_FILE_NAME = "unit-index.lock"
 OWNER_FILE_NAME = "owner.json"
-INDEX_SCHEMA_VERSION = 1
+INDEX_SCHEMA_VERSION = 2
+SUPPORTED_INDEX_SCHEMA_VERSIONS = frozenset({1, 2})
 OWNER_SCHEMA_VERSION = 1
 LOOKUP_SCHEMA_VERSION = "unit-lookup/v1"
 UNIT_KINDS = ("workbook", "datasource")
@@ -82,7 +83,7 @@ class UnitIndexInvalid(UnitIdError):
 
 
 @dataclass(frozen=True)
-class UnitRequest:
+class UnitRequest:  # pylint: disable=too-many-instance-attributes
     """One unit to allocate. `key` is the exact run-local key (for example the run-relative input
     asset path); it is compared byte-for-byte, never by display-name similarity."""
 
@@ -93,6 +94,7 @@ class UnitRequest:
     site_luid: str | None = None
     project_luid: str | None = None
     project_name: str | None = None
+    legacy_folder: str | None = None
 
 
 def format_unit_id(number: int) -> str:
@@ -230,8 +232,14 @@ def _valid_source(source: object) -> bool:
 
 
 def _validate_entry(entry: object, run_dir: Path) -> dict[str, Any]:
-    if not isinstance(entry, dict) or set(entry) != _UNIT_KEYS or parse_unit_id(entry["id"]) is None:
-        raise UnitIndexInvalid("index_invalid", "a unit entry is not {id, key, source, artifacts}")
+    if (
+        not isinstance(entry, dict)
+        or frozenset(entry) not in {_UNIT_KEYS, _UNIT_KEYS | {"legacy_folder"}}
+        or parse_unit_id(entry["id"]) is None
+    ):
+        raise UnitIndexInvalid("index_invalid", "a unit entry is not {id, key, source, artifacts[, legacy_folder]}")
+    if "legacy_folder" in entry and _invalid_text(entry["legacy_folder"]):
+        raise UnitIndexInvalid("index_invalid", f"unit {entry['id']} has a malformed legacy_folder")
     artifacts = entry["artifacts"]
     if not _valid_key(entry["key"]) or not _valid_source(entry["source"]):
         raise UnitIndexInvalid("index_invalid", f"unit {entry['id']} has a malformed key or source")
@@ -261,8 +269,10 @@ def read_unit_index(run_dir: Path) -> list[dict[str, Any]] | None:
         raise UnitIndexInvalid("index_unreadable", exc.__class__.__name__) from exc
     except (ValueError, RecursionError) as exc:
         raise UnitIndexInvalid("index_invalid", "not strict JSON") from exc
-    if not isinstance(data, dict) or not _is_version(data.get("schema_version"), INDEX_SCHEMA_VERSION):
-        raise UnitIndexInvalid("index_invalid", "schema_version is not the supported integer 1")
+    if not isinstance(data, dict) or not any(
+        _is_version(data.get("schema_version"), version) for version in SUPPORTED_INDEX_SCHEMA_VERSIONS
+    ):
+        raise UnitIndexInvalid("index_invalid", "schema_version is not a supported integer 1 or 2")
     if set(data) != {"schema_version", "run", "units"} or not isinstance(data["units"], list):
         raise UnitIndexInvalid("index_invalid", "the index is not {schema_version, run, units}")
     if data["run"] != run_dir.name:
@@ -301,7 +311,12 @@ def _require_run(run_dir: Path) -> Path:
 
 
 def _checked_request(request: object) -> UnitRequest:
-    if not isinstance(request, UnitRequest) or not _valid_key(request.key) or not _valid_source(_source(request)):
+    if (
+        not isinstance(request, UnitRequest)
+        or not _valid_key(request.key)
+        or not _valid_source(_source(request))
+        or (request.legacy_folder is not None and _invalid_text(request.legacy_folder))
+    ):
         raise UnitIdError("each request needs a key, a kind in {workbook, datasource}, a name and text identities")
     return request
 
@@ -329,11 +344,18 @@ def _read_owned_index(run_dir: Path) -> list[dict[str, Any]]:
 
 
 def _publish(run_dir: Path, units: list[dict[str, Any]]) -> None:
-    """Validate, then atomically replace the index and regenerate its README projection."""
+    """Validate and publish changed index bytes; always regenerate the README projection."""
     for entry in units:
         _validate_entry(entry, run_dir)
     payload = {"schema_version": INDEX_SCHEMA_VERSION, "run": run_dir.name, "units": units}
-    _atomic_write_text(run_dir / INDEX_FILE_NAME, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    serialized = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    index_path = run_dir / INDEX_FILE_NAME
+    try:
+        unchanged = index_path.read_text(encoding="utf-8") == serialized
+    except FileNotFoundError:
+        unchanged = False
+    if not unchanged:
+        _atomic_write_text(index_path, serialized)
     _atomic_write_text(run_dir / README_FILE_NAME, render_units_readme(run_dir.name, units))
 
 
@@ -377,10 +399,14 @@ def allocate_unit_ids(run_dir: Path, requests: Sequence[UnitRequest]) -> list[di
                     "source": _source(request),
                     "artifacts": dict.fromkeys(ARTIFACT_ROLES),
                 }
+                if request.legacy_folder is not None:
+                    entry["legacy_folder"] = request.legacy_folder
                 units.append(entry)
                 by_key[request.key] = entry
             else:
                 entry["source"] = _source(request)
+                if request.legacy_folder is not None:
+                    entry["legacy_folder"] = request.legacy_folder
         if units:
             _publish(run_dir, units)
         return [copy.deepcopy(by_key[key]) for key in keys]
