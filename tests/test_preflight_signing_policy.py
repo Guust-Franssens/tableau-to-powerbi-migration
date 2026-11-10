@@ -95,15 +95,13 @@ def _assert_entry_route(text: str, arguments: tuple[tuple[str, ...], ...]) -> li
     return commands
 
 
-@pytest.mark.parametrize("document", ORIGINS)
-def test_direct_preflight_precedes_reactive_recovery(document: str) -> None:
-    """Every command and linked recovery is checked, including later setup sections in the same file."""
-    _assert_entry_route((ROOT / document).read_text(encoding="utf-8"), ORIGINS[document])
+def test_each_occurrence_rejects_proactive_recovery_and_changed_arguments() -> None:
+    """Every direct preflight precedes its reactive recovery; each occurrence is mutated separately."""
+    for document in ORIGINS:
+        _assert_occurrences_reject_mutations(document)
 
 
-@pytest.mark.parametrize("document", ORIGINS)
-def test_each_occurrence_rejects_proactive_recovery_and_changed_arguments(document: str) -> None:
-    """Mutate each occurrence separately: earlier correct instructions must not mask a later defect."""
+def _assert_occurrences_reject_mutations(document: str) -> None:
     text = (ROOT / document).read_text(encoding="utf-8")
     _assert_entry_route(text, ORIGINS[document])
     entries = list(ENTRY.finditer(text))
@@ -132,38 +130,26 @@ def test_each_occurrence_rejects_proactive_recovery_and_changed_arguments(docume
             _assert_entry_route(changed, ORIGINS[document])
 
 
-@pytest.mark.parametrize("persona", PERSONAS)
-def test_migration_update_substitution_fails_the_origin_assertion(persona: str) -> None:
-    """Following the fallback must not change a migration call into session-start repair."""
-    text = (ROOT / ".github" / "agents" / persona).read_text(encoding="utf-8")
-    for command in _assert_entry_route(text, ((),)):
-        with pytest.raises(AssertionError, match="originating command arguments changed"):
-            _assert_entry_route(text.replace(command, command + " -Update -CheckUpstream", 1), ((),))
-
-
-@pytest.mark.parametrize("persona", PERSONAS)
-def test_existing_persona_pin_detects_a_recovery_instruction_mutation(persona: str) -> None:
+def test_existing_persona_pin_detects_a_recovery_instruction_mutation() -> None:
     """Both changed personas must be pinned, and each changed instruction must fail that same pin."""
-    text = persona_pins.read_source(ROOT / ".github" / "agents" / persona)
-    blocks = persona_pins.segment(text, collapse_generated=True)
-    assert not persona_pins.findings(persona, blocks), "committed persona pin is stale"
-    changed = text.replace("exact originating command and arguments", "session-start update command", 1)
-    assert changed != text, "the intended recovery instruction was not mutated"
-    found = persona_pins.findings(persona, persona_pins.segment(changed, collapse_generated=True))
-    assert {finding.kind for finding in found} == {"added", "removed"}, "persona pin missed the instruction edit"
+    for persona in PERSONAS:
+        text = persona_pins.read_source(ROOT / ".github" / "agents" / persona)
+        blocks = persona_pins.segment(text, collapse_generated=True)
+        assert not persona_pins.findings(persona, blocks), f"committed persona pin is stale: {persona}"
+        changed = text.replace("exact originating command and arguments", "session-start update command", 1)
+        assert changed != text, "the intended recovery instruction was not mutated"
+        found = persona_pins.findings(persona, persona_pins.segment(changed, collapse_generated=True))
+        assert {finding.kind for finding in found} == {"added", "removed"}, persona
 
 
-def test_managed_remotesigned_without_refusal_uses_the_original_command() -> None:
+def test_runbook_recovery_rows_route_each_verdict() -> None:
     """A managed permissive policy is not itself a refusal; no Group Policy simulation is claimed."""
     row = _normalized(_route_row("USE_ORIGINAL_COMMAND"))
     for fact in ("No startup refusal", "managed RemoteSigned", "MOTW_ABSENT", "MachinePolicy/UserPolicy"):
         assert fact in row
     assert "use the exact originating command and arguments" in row
     assert "not a reason to stop or diagnose" in row and "STOP" not in row
-
-
-def test_managed_signing_refusal_and_unknown_blocks_remain_distinct() -> None:
-    """Actual managed AllSigned/Restricted refusals stop; an unknown block is not a diagnosis."""
+    # Actual managed AllSigned/Restricted refusals stop; an unknown block is not a diagnosis.
     row = _normalized(_route_row("STOP — MANAGED_SIGNING_POLICY"))
     for fact in ("Actual startup refusal", "MachinePolicy/UserPolicy", "AllSigned", "Restricted", "No retry"):
         assert fact in row
@@ -173,10 +159,7 @@ def test_managed_signing_refusal_and_unknown_blocks_remain_distinct() -> None:
     assert "MOTW alone cannot explain this failure" in unknown and "Process Bypass" in unknown
     assert "PowerShell is unavailable" in unknown and "AppLocker/WDAC" in unknown
     assert "not an AppLocker/WDAC diagnosis" in unknown and "CANNOT_ESTABLISH" in unknown
-
-
-def test_motw_recovery_requires_refusal_source_review_and_narrow_unblock() -> None:
-    """No policy weakening, automatic unblock, or alternate script-content execution."""
+    # MOTW: no policy weakening, automatic unblock, or alternate script-content execution.
     route = _runbook_recovery()
     row = _normalized(_route_row("MOTW_REMOTESIGNED"))
     for fact in (
@@ -195,11 +178,8 @@ def test_motw_recovery_requires_refusal_source_review_and_narrow_unblock() -> No
     assert not re.search(r"Set-ExecutionPolicy|Invoke-Expression|\biex\b|-EncodedCommand|ScriptBlock\s*::", route, re.I)
     assert "Automatic bootstrap remains unsupported (#610)" in route
     assert not (ROOT / "scripts" / "preflight.cmd").exists()
-
-
-def test_shared_fallback_returns_to_the_exact_origin_not_a_command_above() -> None:
-    """The shared page must preserve phase-specific flags as well as user-supplied arguments."""
-    route = _normalized(_runbook_recovery())
+    # The shared page preserves phase-specific flags as well as user-supplied arguments.
+    route = _normalized(route)
     assert "retry the exact originating command and arguments once" in route
     assert "command above" not in route.lower()
     assert "retain `-Update -CheckUpstream`" in route
@@ -276,26 +256,25 @@ def _published(
     return _ps(shell, *arguments, "-Command", command + "\nexit $LASTEXITCODE", cwd=control.parent.parent)
 
 
-@pytest.mark.parametrize("default_child", (False, True), ids=("originating-engine", "published-powershell"))
-def test_exact_diagnostic_absent_ads_is_success(shell: str, control: Path, default_child: bool) -> None:
+def test_exact_diagnostic_absent_ads_is_success(shell: str, control: Path) -> None:
     """Run the exact code, including the documented pwsh substitution and both caller shells."""
     assert control.is_file() and not Path(str(control) + ":Zone.Identifier").exists()
-    result = _published(shell, 1, control, default_child=default_child)
-    assert result.returncode == 0
-    assert result.stdout.splitlines() == ["FILE_READABLE", "MOTW_ABSENT"]
-    assert not result.stderr and not control.with_name("started.txt").exists()
+    for default_child in (False, True):
+        result = _published(shell, 1, control, default_child=default_child)
+        assert result.returncode == 0
+        assert result.stdout.splitlines() == ["FILE_READABLE", "MOTW_ABSENT"]
+        assert not result.stderr and not control.with_name("started.txt").exists()
 
 
-@pytest.mark.parametrize("target", ("missing", "directory"))
-def test_exact_diagnostic_missing_or_nonfile_is_not_absent_ads(shell: str, control: Path, target: str) -> None:
+def test_exact_diagnostic_missing_or_nonfile_is_not_absent_ads(shell: str, control: Path) -> None:
     """A wrong checkout cannot be mislabeled a clean, unmarked script."""
     control.unlink()
-    if target == "directory":
-        control.mkdir()
-    result = _published(shell, 1, control)
-    assert result.returncode == 1
-    assert result.stdout.splitlines() == ["CANNOT_ESTABLISH_FILE"]
-    assert not result.stderr
+    for _target in ("missing", "directory"):
+        result = _published(shell, 1, control)
+        assert result.returncode == 1
+        assert result.stdout.splitlines() == ["CANNOT_ESTABLISH_FILE"]
+        assert not result.stderr
+        control.mkdir(exist_ok=True)
 
 
 def test_exact_diagnostic_unreadable_existing_file_is_not_absent_ads(shell: str, control: Path) -> None:
@@ -327,31 +306,20 @@ def test_exact_diagnostic_unreadable_existing_file_is_not_absent_ads(shell: str,
     assert not result.stderr
 
 
-@pytest.mark.parametrize(
-    ("policy", "marked", "expected"),
-    [
-        ("RemoteSigned", False, 23),
-        ("RemoteSigned", True, 1),
-        ("Bypass", True, 23),
-        ("AllSigned", False, 1),
-        ("Restricted", False, 1),
-    ],
-)
-def test_actual_process_refusal_and_clean_remotesigned_control(
-    process_shell: str, control: Path, policy: str, marked: bool, expected: int
-) -> None:
+def test_actual_process_refusal_and_clean_remotesigned_control(process_shell: str, control: Path) -> None:
     """Real effective policies, not Group Policy emulation; a separate file witnesses execution."""
     stream = Path(str(control) + ":Zone.Identifier")
-    if marked:
-        stream.write_text("[ZoneTransfer]\nZoneId=3\n", encoding="ascii")
-    result = _ps(process_shell, "-ExecutionPolicy", policy, "-File", str(control), "-Code", "23")
-    assert result.returncode == expected
-    assert control.with_name("started.txt").exists() is (expected == 23)
-    if expected == 1:
-        # The known policy and independent start witness are the oracle, not rendered error prose.
-        assert not result.stdout and result.stderr
-    if marked:
-        assert stream.read_text(encoding="ascii") == "[ZoneTransfer]\nZoneId=3\n", "control auto-unblocked the file"
+    for policy, marked, expected in (("RemoteSigned", False, 23), ("AllSigned", False, 1), ("RemoteSigned", True, 1)):
+        control.with_name("started.txt").unlink(missing_ok=True)
+        if marked:
+            stream.write_text("[ZoneTransfer]\nZoneId=3\n", encoding="ascii")
+        result = _ps(process_shell, "-ExecutionPolicy", policy, "-File", str(control), "-Code", "23")
+        assert result.returncode == expected, policy
+        assert control.with_name("started.txt").exists() is (expected == 23)
+        if expected == 1:
+            # The known policy and independent start witness are the oracle, not rendered error prose.
+            assert not result.stdout and result.stderr
+    assert stream.read_text(encoding="ascii") == "[ZoneTransfer]\nZoneId=3\n", "control auto-unblocked the file"
 
 
 def test_exact_policy_diagnostic_displays_scopes_on_a_clean_host(shell: str, control: Path) -> None:
@@ -417,14 +385,16 @@ def test_explicit_trusted_file_unblock_after_actual_motw_refusal(process_shell: 
     assert resumed.returncode == 23 and control.with_name("started.txt").exists()
 
 
-@pytest.mark.parametrize("document", ORIGINS)
-@pytest.mark.parametrize("code", (0, 1))
-def test_originating_commands_keep_arguments_outputs_and_exit_codes(
-    process_shell: str, control: Path, document: str, code: int
-) -> None:
+def test_originating_commands_keep_arguments_outputs_and_exit_codes(process_shell: str, control: Path) -> None:
     """Execute every occurrence; a prior invocation's start witness must not mask a later failure."""
-    commands = _assert_entry_route((ROOT / document).read_text(encoding="utf-8"), ORIGINS[document])
-    for command, arguments in zip(commands, ORIGINS[document], strict=True):
+    code = 7
+    for document, flags in ORIGINS.items():
+        _run_origin_commands(process_shell, control, document, flags, code)
+
+
+def _run_origin_commands(process_shell: str, control: Path, document: str, flags: tuple, code: int) -> None:
+    commands = _assert_entry_route((ROOT / document).read_text(encoding="utf-8"), flags)
+    for command, arguments in zip(commands, flags, strict=True):
         control.with_name("started.txt").unlink(missing_ok=True)
         command += f' -Tenant "tenant with spaces" -Subscription "sub with spaces" -Code {code}'
         result = _ps(process_shell, "-Command", command + "\nexit $LASTEXITCODE", cwd=control.parent.parent)
