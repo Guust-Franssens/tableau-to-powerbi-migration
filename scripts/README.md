@@ -1232,6 +1232,7 @@ dialog and can make a healthy bridge look broken.
 | `sync_installed_skills.py` | Brings the **installed** plugin's bundles up to date **in place, mid-session** — the fix when `copilot plugin update` returns `Access is denied. (os error 5)`. The reference is built from the locally available merged/default-branch ref (`origin/master` by default), never from the caller's feature worktree; use the loud `--from-worktree` opt-in only to test unmerged skill content deliberately. That lock only blocks renaming the top two plugin directories; files inside stay writable, and `plugin update` fails solely because it swaps the directory. Content only: a manifest/version/MCP change still needs a real `plugin update` between sessions. `--check` reports drift and exits 1. |
 | `update_playbook_plugin.ps1` | The between-sessions path: kills every Copilot CLI process (and its children) so the plugin directory unlocks, then runs `marketplace update` + `plugin update` and verifies with `preflight.ps1`. **Run from a plain PowerShell window, not from inside Copilot** — it kills the session you would be typing into. Prefer `sync_installed_skills.py` when only bundle content changed. |
 | `work_dirs.py` | **The single run-path authority and CLI setup step.** `python -B scripts/work_dirs.py <slug> --json` allocates the canonical `_runs/<NNN>-<slug>/` tree and automatically attempts to write the ignored, checkout-local `_MIGRATION.md` navigation snapshot. Allocation can succeed with a navigation warning; do not reallocate for it. `--select-run ABSOLUTE-EXISTING-RUN` validates one explicit local/no-reparse existing run and refreshes that note without allocation or migration. Paths derive from `RunPaths`, not caller CWD; display controls are visibly escaped without changing filesystem identities or JSON paths. The note lists expected bundle/oracle/package destinations and the portable `<package>\fabric` convention; it is not status, readiness, liveness or current-run authority. Library allocation/listing and `--verify` do not write it. Unmarked collisions, including an empty/partial note with a lost generator marker, are preserved: inspect and preserve the file, then explicitly clear the collision before setup reselects the existing run. `--runs-parent PATH` and `--repo-root PATH` are mutually exclusive aliases for an external run parent. Repo-local runs are covered by this checkout's `/_*` rule; an external run does not inherit that protection. `deliverables/` remains lazy and separate from disposable `scratch/`. | any script needing a run-scoped path |
+| `unit_ids.py` | **Cross-run unit IDs (Refs #836, groundwork only).** One never-reset counter per runs root (`_runs/` or `--runs-parent`): permanent atomic-`mkdir` reservations under `_runs/.unit-id-reservations/<digits>/`, each with an `owner.json` pointer (run + exact run-local key), so `u0001`... resolves without naming a run. The next ID is highest-ever-reserved + 1, never a gap; a reservation without a pointer is `reservation_interrupted` and is never reused. Each allocating run gets a canonical `unit-index.json` (schema 1: id, key, source kind/name/LUIDs/project, run-relative artifact paths contained in the run) and a generated `UNITS.md` table (ID, Kind, Original name, Project, Local artifact or `not emitted`); both are replaced atomically, and one writer per run holds an O_EXCL `unit-index.lock` (an existing lock is a refusal; delete it only after confirming no allocator is running). A re-run in the same run reuses the ID for the same key. Runs without an index are **legacy** and are never backfilled. Library only for now: `run_estate.py` does not allocate yet. Read-only lookup is `t2p units list|show|find`. Customer names in both files are private; repo-local `_runs/` is ignored, an external or nested `--runs-parent` is not protected. |
 | `probe_lab.py` | Agent-behaviour test harness. `make` generates **minimal** Tableau fixtures (one live source, two columns, no calculations) so the "probe the source before building" decision is reached in ~2 min instead of ~20; `watch` polls a running migration and returns PASS/FAIL/TIMEOUT so a deviation can be killed on sight. Writes to the gitignored `_probe-lab/`. Use when changing any instruction whose effect is only visible in agent behaviour. |
 | `disarm_credential_gate.py` | **Removes the retired credential gate's write-deny from old trees.** `python scripts/disarm_credential_gate.py <root> [--apply]` walks `<root>` without following reparse points and lists every `fabric`, `pbip`, `*.SemanticModel` or `*.Report` folder that carries the gate's explicit `(OI)(CI)(DENY)(WD,AD,WA)` ACE for the current user. `--apply` runs `icacls <dir> /remove:d %USERNAME%` on each one and re-reads the ACL. Stdlib + `icacls` only; it does not import `credential_gate.py`. Other principals' ACEs and allows are untouched; a folder where you hold another explicit deny is skipped, because `/remove:d` would strip it too. Marker files are left as evidence. Exit 0 nothing left, 1 a failure or skip, 3 dry run found armed folders. Non-Windows: nothing to do. Recipe and manual fallback: [runbook §4.14](../docs/operator-runbook.md#414-an-old-run-folder-refuses-writes-after-the-credential-gate-was-retired). |
 
@@ -1272,6 +1273,7 @@ are not packaged or selected from caller cwd. Use that environment's absolute ge
 t2p doctor [--env <path>] [--json]
 t2p start --project <exact-name|LUID> [--env <path>] [--runs-parent <path>] [--storage-decision <path>] [--session-id <UUID>] [--json]
 t2p status --run <absolute-local-run> [--json]
+t2p units {list | show <id> | find [--name <text>] [--luid <luid>]} [--runs-parent <path>] [--json]
 ```
 
 `uv sync --all-extras --no-editable` is the operator setup in the selected checkout. No-sync alone
@@ -1306,6 +1308,7 @@ The unchanged direct `-B` expert forms remain:
 python -B scripts/t2p.py doctor [--env <path>] [--json]
 python -B scripts/t2p.py start --project <exact-name|LUID> [--env <path>] [--runs-parent <path>] [--storage-decision <path>] [--session-id <UUID>] [--json]
 python -B scripts/t2p.py status --run <absolute-local-run> [--json]
+python -B scripts/t2p.py units {list | show <id> | find [--name <text>] [--luid <luid>]} [--runs-parent <path>] [--json]
 ```
 
 Ordinary `doctor` prints a short human verdict, every configuration/failed-critical blocker, safe
@@ -1375,6 +1378,17 @@ reads, git/process/network calls, scans, cache/result writes, repairs, allocatio
 **Refs #734 / #469 / #663, not Fixes**: named/private-location enrichment is separate, unplanned work;
 this view does not close those issues or establish a legal next execution command.
 
+`units` (Refs #836) is a **read-only lookup** over `unit_ids.py` dictionaries in one runs root (default
+toolkit `_runs/`, or `--runs-parent`). `show <id>` follows the reservation's owner pointer, so no run is
+named; `find` matches a case-insensitive name substring and/or an exact source LUID and never picks one
+of several matches. Results are `found`, `missing`, `ambiguous` (every candidate listed), `legacy` (runs
+without `unit-index.json`, not searched) or `unassessable` (corrupt index, interrupted reservation,
+missing owner run, owner/index mismatch, escaping artifact path). Exit 0 found or listed, 1 missing/
+ambiguous/legacy, 3 unassessable, 2 syntax (including `find` without `--name`/`--luid`). JSON adds
+`unit_lookup` (`unit-lookup/v1`) with local paths and customer labels: local-only output, not
+publication-safe. An ID is a lookup key, not identity proof. No allocation, rename, refresh, credential,
+Desktop or path-gate call.
+
 JSON stdout is one `t2p/v1` envelope, also for syntax/launch/interrupt failures. Common fields:
 `command`, `status`, `exit_code`, `authority`, `delegated_exit_code`, `stages`, `checks`, `evidence`,
 `artifacts`, `run_location`, `runs_root`, `path_report`, `limitations`, `proof_boundary`.
@@ -1394,7 +1408,8 @@ Schema shape is pinned inline in `scripts/t2p.py`; additive fields are compatibl
 require a new version. General statuses are `ok|findings|cannot_establish|error|interrupted`;
 doctor uses `READY_TO_ATTEMPT|BLOCKED_CONFIG|CANNOT_ESTABLISH`.
 
-Only these three explicit verbs exist: no file/folder/datasource/site/server selectors, `next`,
+Only these explicit verbs exist (`doctor`, `start`, `assess`, `status`, read-only `units`): no
+file/folder/datasource/site/server selectors, `next`,
 router, state DB, credential, build, package, validation, promotion, deployment or dispatch command.
 Synthetic tests validate mechanics, not blind-run benefit. Installation adds the bounded onboarding
 form only; live blind run 2 remains deferred as an independent same-project/same-oracle acceptance step.
