@@ -14,8 +14,9 @@ if: >-
 permissions:
   contents: read
   issues: read
+# Concurrency is evaluated before the workflow-level filter, so ignored label events get isolated groups.
 concurrency:
-  group: issue-intake-${{ github.event.issue.number }}
+  group: issue-intake-${{ github.event.issue.number }}-${{ (github.event.action != 'labeled' || github.event.label.name == 'status:ready-for-implementation') && 'accepted' || github.run_id }}
   cancel-in-progress: true
 engine:
   id: copilot
