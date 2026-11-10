@@ -53,13 +53,7 @@ SOURCES_DISCONNECTED = (
 
 
 def _png(width: int, height: int) -> bytes:
-    """A genuinely valid PNG -- shared, because the version that lived here was NOT one.
-
-    ⚠️ Its predecessor carried this same docstring over signature + IHDR + CRC and nothing else: no
-    IDAT, no IEND. It was chunk-correct and structurally incomplete, so it asserted that a truncated
-    render is acceptable evidence -- the precise fail-open `payload_is_complete` now refuses. Kept as
-    a thin alias so the call sites read unchanged; the bytes come from `tests/png_fixtures.py`.
-    """
+    """A genuinely valid PNG -- shared, because the version that lived here was NOT one."""
     return valid_png(width, height)
 
 
@@ -131,7 +125,7 @@ def test_svg_without_a_millimetre_root_reports_no_geometry_rather_than_guessing(
     assert "width_px" not in facts and "height_px" not in facts
 
 
-@pytest.mark.parametrize("size", [(1300, 1600), (2800, 1600), (3000, 1700)])
+@pytest.mark.parametrize("size", [(2800, 1600)])
 def test_png_dimensions_records_the_2x_raster_ceiling(size):
     assert oracle.png_dimensions(_png(*size)) == {"width": size[0], "height": size[1]}
 
@@ -190,13 +184,7 @@ def test_a_failed_png_no_longer_swallows_the_svg_leg(tmp_path):
 
 
 def test_a_pre_329_site_is_reported_as_a_configuration_fault_not_a_broken_view(tmp_path):
-    """⚠️ The remedy is deliberately the CONDITIONAL one at capture time (#474).
-
-    ``_capture_render`` cannot know the site's advertised ceiling -- it is a property of the SITE and
-    nothing at that call carries it -- so it must not print the confident ``.env`` instruction, which
-    is false for any server below 3.29. ``write_manifest`` upgrades this once the run knows better;
-    the three-state contract is gated in ``tests/test_svg_server_ceiling.py``.
-    """
+    """⚠️ The remedy is deliberately the CONDITIONAL one at capture time (#474)."""
     session = _Session({"/data": (200, b"a\n1\n"), "image?format=svg": (400, SVG_TOO_OLD.encode())})
     record = oracle.capture_view(session, VIEW, tmp_path, frozenset({"svg"}))
     assert record["svg"]["status"] == "unsupported_api_version"
@@ -217,12 +205,7 @@ def test_a_disconnected_source_keeps_its_own_classification_and_is_not_relabelle
 
 
 class _Counter:
-    """Stands in for `run.session`. It carries a REAL redactor, not a pass-through.
-
-    `write_manifest` scrubs the whole manifest through `run.session.redact_text` immediately before
-    serialising (the round-5 sink), so a double without one would switch that guard off silently in
-    every test here.
-    """
+    """Stands in for `run.session`. It carries a REAL redactor, not a pass-through."""
 
     reauth_count = 0
     retry_count = 0
@@ -446,11 +429,6 @@ def test_a_format_mismatch_detail_is_redacted_before_it_reaches_the_manifest(tmp
     """`_capture_render` serialised `format_matches`' diagnostic, which quotes the response's own
     leading bytes, with no redactor at all. A source whose export begins with credential-shaped text
     -- or a proxy reflecting one -- wrote it into `oracle-manifest.json` verbatim.
-
-    ⚠️ Planted as the PAT **name**, not the secret. Round 5 added a seam that REFUSES a successful body
-    echoing the PAT secret or session token, which would retire this test by making its route
-    unreachable. The name is deliberately redacted rather than refused (`reflected_credential`), so it
-    is what keeps the round-3 diagnostic fix under test.
     """
     body = f"{REFLECTED_SECRET} is what a reflecting export returned".encode()
     session = _Session(

@@ -24,12 +24,7 @@ from test_check_reference_readiness import write_png, write_workbook  # noqa: E4
 
 
 def _png(path: Path, width: int = 1440, height: int = 900, payload: int = 900) -> Path:
-    """A structurally valid PNG of a chosen pixel size and a chosen (small) byte size.
-
-    ``payload`` defaults FAR below the 20,000-byte floor `collect_manual` used to apply, because that
-    is the case under test: PNG is lossless, so a legible flat-fill dashboard really is this small
-    (measured 7,154 bytes for a plain 1440x900 single-page mock).
-    """
+    """A structurally valid PNG of a chosen pixel size and a chosen (small) byte size."""
     header = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", width, height)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(header + b"\x00" * payload)
@@ -170,11 +165,7 @@ def test_structural_only_is_an_explicit_escape_from_requested_server_capture(tmp
 
 
 def test_a_small_but_valid_screenshot_is_adopted_and_never_silently_dropped(tmp_path: Path) -> None:
-    """The headline regression: a legible dashboard PNG under the old 20 KB byte floor.
-
-    Before the fix this produced NOTHING - no manifest, no log line - and the tool then told the
-    operator to drop `tableau-<name>.png` into the very directory holding the file it had discarded.
-    """
+    """The headline regression: a legible dashboard PNG under the old 20 KB byte floor."""
     slug_dir = tmp_path / "workbook"
     _spec(slug_dir)
     dropped = _png(slug_dir / "reference" / "tableau-Detail.png")
@@ -281,11 +272,7 @@ def test_the_fail_closed_error_names_the_files_it_rejected(tmp_path: Path, caplo
 
 
 def test_a_manual_screenshot_is_not_preempted_by_an_embedded_thumbnail(tmp_path: Path) -> None:
-    """An automatic fallback may not silently outrank an explicit operator act.
-
-    Embedded thumbnails were found in 17/17 workbooks of one estate, so this was the normal case for
-    anything saved out of Tableau Desktop: the dropped dashboard PNG was never even looked at.
-    """
+    """An automatic fallback may not silently outrank an explicit operator act."""
     slug_dir = tmp_path / "workbook"
     _write_embedded_thumbnail(slug_dir)
     _png(slug_dir / "reference" / "tableau-Detail.png")

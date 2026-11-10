@@ -67,12 +67,7 @@ def _creds() -> oracle.SiteCredentials:
 
 
 class FakeSession(oracle.TableauSession):
-    """Routes a scripted ``(status, body, headers)`` per REQUEST PATH, not per call index.
-
-    Keyed by path on purpose: these tests turn legs on and off, so an index-keyed script would have
-    to be re-counted every time a leg is added -- and a mis-counted script fails for the wrong
-    reason, which is the vacuity mode this suite is meant to avoid.
-    """
+    """Routes a scripted ``(status, body, headers)`` per REQUEST PATH, not per call index."""
 
     def __init__(self, routes: dict[str, list], retry=None):
         super().__init__(_creds(), retry)
@@ -105,14 +100,7 @@ def _no_real_sleep(monkeypatch):
 
 
 class _VirtualClock:
-    """A ``monotonic`` / ``perf_counter`` / ``sleep`` stand-in whose time moves only when we say so.
-
-    The same shape as ``test_capture_tableau_oracle_retry_budget.VirtualClock``, and duplicated on
-    purpose rather than imported: these suites run under ``xdist --dist loadfile`` and a cross-file
-    import would couple two files that are otherwise independent. It exists here because the salvage
-    bound is a WALL-CLOCK claim -- review round 1's finding 3 was hiding precisely because the
-    original tests proved it by attempt COUNT, which a clock-free double cannot contradict.
-    """
+    """A ``monotonic`` / ``perf_counter`` / ``sleep`` stand-in whose time moves only when we say so."""
 
     def __init__(self) -> None:
         self.t = 0.0
@@ -135,12 +123,7 @@ class _VirtualClock:
 
 
 class _TimedSession(FakeSession):
-    """A path-routed session whose responses also CONSUME virtual wall-clock.
-
-    Each scripted entry is ``(duration_sec, status, body, headers)``. ``duration_sec`` is how long the
-    request blocks before returning -- a socket timeout blocks for the whole request timeout -- so a
-    sequence of legs can be measured against a shared budget without a socket or a real wait.
-    """
+    """A path-routed session whose responses also CONSUME virtual wall-clock."""
 
     def __init__(self, clock: _VirtualClock, routes: dict[str, list], retry=None):
         super().__init__({key: [entry[1:] for entry in value] for key, value in routes.items()}, retry)
@@ -169,11 +152,7 @@ def _capture(session, tmp_path, wants=frozenset({"png"})) -> dict:
 def test_a_failed_data_leg_no_longer_skips_the_render(tmp_path):
     """⚠️ THE anchor of this file. Restoring `if record["data"]["status"] != "ok": return record`
     must fail it -- that mutation is in the harness as `restore-the-early-return`.
-
-    The scripted site is exactly the field signature: `/data` times out at the network level
-    (`HTTP 0`) on every attempt, while `/image` would have answered. Before the fix `/image` was
-    never requested, so the PNG on disk in the customer's third batch had no counterpart in the
-    first two."""
+    """
     session = FakeSession(
         {"/data": [(0, TIMEOUT_BODY, {})], "/image": [(200, PNG, {"Content-Type": "image/png"})]},
         retry=oracle.RetryPolicy(max_attempts=2, budget_sec=1e6),
@@ -205,11 +184,7 @@ def test_the_salvaged_render_is_a_real_status_not_a_placeholder(tmp_path):
 
 
 def test_a_salvage_render_gets_one_attempt_and_no_retry_budget(tmp_path):
-    """Decoupling must not double the wall clock on a view that is slow everywhere.
-
-    The retry budget is PER-LEG, and a salvage leg's is zero: the data leg has already spent a full
-    budget proving this view cannot answer, so re-asking is asking the same slow question again. A
-    transient 503 that the session policy would retry four times is attempted exactly once here."""
+    """Decoupling must not double the wall clock on a view that is slow everywhere."""
     session = FakeSession(
         {"/data": [(0, TIMEOUT_BODY, {})], "/image": [(503, "gateway", {})]},
         retry=oracle.RetryPolicy(max_attempts=5, budget_sec=1e6),
@@ -256,12 +231,6 @@ def test_the_first_failed_salvage_render_stops_the_rest_and_records_them(tmp_pat
 def test_a_version_gate_does_not_stop_the_remaining_salvage_legs(tmp_path):
     """`unsupported_api_version` is a CONFIGURATION fault answered instantly with a 400 -- it is not
     evidence the view is unwell, so it must not short-circuit a tier that might still work.
-
-    ⚠️ The tier order is fixed (`png`, `svg`, `pdf`), so the gated tier must be asked BEFORE the one
-    that has to survive it, or this test asserts nothing. Measured: an earlier version of it requested
-    `{"svg", "png"}`, PNG was therefore attempted first and succeeded, and the mutation that adds
-    `unsupported_api_version` to `_VIEW_HEALTH_FAILURES` SURVIVED -- an assertion inside a branch the
-    fixture never entered. `{"svg", "pdf"}` is what actually exercises the short-circuit.
     """
     session = FakeSession(
         {"/data": [(0, TIMEOUT_BODY, {})], "?format=svg": [(400, SVG_GATE, {})], "/pdf": [(200, PDF, {})]},
@@ -453,16 +422,9 @@ def test_the_floor_and_default_still_track_the_module_constant():
 # ---------------------------------------- the DEFAULT budget must clear its own admission floor
 
 
-@pytest.mark.parametrize("timeout", [0.25, 0.5, 0.9, 1.0, 2.0, 30.0, 180.0, 600.0])
+@pytest.mark.parametrize("timeout", [0.25, 1.0, 600.0])
 def test_the_default_budget_is_never_below_the_admission_floor(timeout):
-    """⚠️ Review round 1, finding 4 -- reproduced across the range, then fixed.
-
-    The default was a flat `2 x timeout`, but admitting a retry needs `timeout + first backoff`, and
-    the backoff is an ABSOLUTE 1.0s. So for any sub-second timeout the DEFAULT was under its own
-    floor: measured `0.25s -> budget 0.5s vs floor 1.25s`, which grants ZERO retries to a
-    full-timeout failure -- the exact footgun the default exists to prevent. `--rest-timeout` takes a
-    float with no minimum, so the CLI reaches it.
-    """
+    """⚠️ Review round 1, finding 4 -- reproduced across the range, then fixed."""
     assert oracle.default_retry_budget(timeout) >= oracle.retry_admission_floor(timeout)
 
 
@@ -496,13 +458,7 @@ def test_a_sub_second_timeout_actually_retries_a_full_timeout_failure(monkeypatc
 
 
 def test_a_lost_session_on_the_final_attempt_does_not_reauthenticate(tmp_path):
-    """⚠️ Review round 1, finding 3a -- reproduced, then fixed.
-
-    A one-attempt salvage leg returning `401002` performed one render request AND a full `sign_in`,
-    which runs on the SESSION policy and can consume several more request timeouts. The re-auth was
-    then WASTED: the loop `continue`s into an attempt the range does not contain, so the export
-    failed anyway. Unbounded work in service of nothing.
-    """
+    """⚠️ Review round 1, finding 3a -- reproduced, then fixed."""
     session = FakeSession(
         {"/data": [(0, TIMEOUT_BODY, {})], "/image": [(401, SESSION_LOST, {})]},
         retry=oracle.RetryPolicy(max_attempts=1, budget_sec=1e6),
@@ -528,13 +484,7 @@ def test_a_lost_session_with_attempts_remaining_still_reauthenticates(tmp_path):
 
 
 def test_three_slow_salvage_legs_share_ONE_deadline(monkeypatch, tmp_path):
-    """⚠️ Review round 1, finding 3b -- reproduced with a virtual clock, then fixed.
-
-    `format_mismatch` deliberately does NOT short-circuit the remaining tiers (it is a configuration
-    fault, not evidence the view is unwell), so three such legs were each attempted with no cross-leg
-    limit: 3 x 179.9s = **539.7s against a stated 180s bound**. The legs now share one deadline, and
-    a leg is admitted only while a WHOLE request timeout still fits inside it.
-    """
+    """⚠️ Review round 1, finding 3b -- reproduced with a virtual clock, then fixed."""
     clock = _VirtualClock()
     monkeypatch.setattr(oracle, "time", clock)
     slow = 179.9

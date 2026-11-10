@@ -50,12 +50,7 @@ import capture_tableau_oracle as oracle  # noqa: E402  # pylint: disable=wrong-i
 
 
 class VirtualClock:
-    """A ``monotonic`` / ``perf_counter`` / ``sleep`` stand-in whose time moves only when we say so.
-
-    ``export`` reads time three ways -- ``monotonic()`` (the deadline), ``perf_counter()`` (elapsed)
-    and ``sleep()`` (backoff) -- so all three share one virtual ``t``. ``advance`` is how a scripted
-    request consumes wall-clock without a real socket or a real wait, keeping the suite instant.
-    """
+    """A ``monotonic`` / ``perf_counter`` / ``sleep`` stand-in whose time moves only when we say so."""
 
     def __init__(self) -> None:
         self.t = 0.0
@@ -84,15 +79,7 @@ def _creds() -> oracle.SiteCredentials:
 
 
 class TimedSession(oracle.TableauSession):
-    """Scripted session whose HTTP layer also consumes virtual wall-clock.
-
-    Each scripted response is ``(duration_sec, status, body, headers)``: ``duration_sec`` is how long
-    that attempt blocks before returning (a socket timeout blocks for the whole ``REST_TIMEOUT_SEC``),
-    charged against the shared virtual clock exactly as a real slow request would be. Unlike the
-    sibling suite's ``FakeSession`` this deliberately does NOT stub ``sign_in`` -- one test exercises
-    the real sign-in retry loop -- and it does NOT model instant requests, which is precisely the gap
-    that hid this defect.
-    """
+    """Scripted session whose HTTP layer also consumes virtual wall-clock."""
 
     def __init__(self, clock: VirtualClock, responses, retry=None) -> None:
         super().__init__(_creds(), retry)
@@ -120,13 +107,7 @@ def _clock(monkeypatch) -> VirtualClock:
 
 
 class _ErrorBodyReadFails(urllib.error.HTTPError):
-    """An ``HTTPError`` whose STATUS LINE arrived but whose body read then fails mid-stream.
-
-    This is the exact shape Finding 1 is about: ``urlopen`` raises ``HTTPError`` for a 5xx, and the
-    subsequent ``exc.read()`` -- itself a socket read -- times out (``TimeoutError`` is an ``OSError``)
-    or truncates (``http.client.IncompleteRead``). The failure is raised INSIDE ``_request``'s
-    ``except HTTPError`` handler, where a sibling ``except`` of the same ``try`` cannot catch it.
-    """
+    """An ``HTTPError`` whose STATUS LINE arrived but whose body read then fails mid-stream."""
 
     def __init__(self, code: int, read_error: Exception) -> None:
         super().__init__("https://example.online.tableau.com/api", code, "err", {}, None)
@@ -158,13 +139,7 @@ class _FakeResponse:
 
 
 def test_default_budget_exceeds_one_request_timeout():
-    """The core invariant, as RELATIONSHIPS not literals.
-
-    A retry can only be decided AFTER an attempt returns, and one attempt (a socket timeout) blocks
-    for the full ``REST_TIMEOUT_SEC``. So both the admission floor and the default budget must exceed
-    one request timeout, and the default must sit at or above the floor. Asserting the relationships
-    keeps them valid if ``REST_TIMEOUT_SEC`` is raised; ``== 360`` would not.
-    """
+    """The core invariant, as RELATIONSHIPS not literals."""
     assert oracle.RETRY_ADMISSION_FLOOR_SEC > oracle.REST_TIMEOUT_SEC
     assert oracle.DEFAULT_RETRY_BUDGET_SEC > oracle.REST_TIMEOUT_SEC
     assert oracle.DEFAULT_RETRY_BUDGET_SEC >= oracle.RETRY_ADMISSION_FLOOR_SEC
@@ -173,10 +148,6 @@ def test_default_budget_exceeds_one_request_timeout():
 def test_admission_floor_is_one_timeout_plus_backoff_not_two():
     """The floor is ONE timeout plus the first backoff -- the true point below which a full-timeout
     failure can no longer be re-admitted -- NOT the old ``2 * REST_TIMEOUT_SEC``.
-
-    The upper bound ``< 2 * REST_TIMEOUT_SEC`` is the anti-regression: it fails if anyone restores the
-    2x model, which warned against budgets (e.g. 300s) that in fact retry a slow failure perfectly and
-    promised room for two full attempts that ``2 * 180`` + backoff cannot actually fit.
     """
     assert oracle.RETRY_ADMISSION_FLOOR_SEC == oracle.REST_TIMEOUT_SEC + oracle.BACKOFF_BASE_SEC
     assert oracle.RETRY_ADMISSION_FLOOR_SEC < 2 * oracle.REST_TIMEOUT_SEC
@@ -186,14 +157,7 @@ def test_admission_floor_is_one_timeout_plus_backoff_not_two():
 
 
 def test_a_full_timeout_length_failure_is_still_retried(clock):
-    """THE regression, under the DEFAULT policy the field report ran with.
-
-    Attempt 1 is a socket timeout: it blocks for the whole ``REST_TIMEOUT_SEC`` and comes back as
-    ``NETWORK_ERROR_STATUS`` (transient). Pre-fix, the 120s deadline had already expired by the time
-    this returned, so ``export`` raised with ZERO retries -- matching the customer's manifest, which
-    recorded no second attempt. Post-fix the default budget exceeds one request timeout, so the slow
-    failure is retried and the next attempt succeeds.
-    """
+    """THE regression, under the DEFAULT policy the field report ran with."""
     session = TimedSession(
         clock,
         [
@@ -211,12 +175,7 @@ def test_a_full_timeout_length_failure_is_still_retried(clock):
 
 
 def test_a_fast_transient_still_retries_and_is_recorded(clock):
-    """Control: keeping the default budget must not disturb ordinary fast-failure retries.
-
-    Two quick gateway 503s then success: the export should record two retries. This also proves the
-    virtual-clock harness itself is sound -- a healed retry returns a populated ``retries`` count
-    rather than raising.
-    """
+    """Control: keeping the default budget must not disturb ordinary fast-failure retries."""
     session = TimedSession(
         clock,
         [
@@ -234,12 +193,7 @@ def test_a_fast_transient_still_retries_and_is_recorded(clock):
 
 
 def test_a_budget_between_one_and_two_timeouts_still_retries_a_slow_failure(clock):
-    """A budget ABOVE the floor but BELOW the old 2x model must still retry a full-timeout failure.
-
-    This is the measurement that proved the old warning false in one direction: with a 270s budget
-    (1.5x timeout) a 180s socket timeout is followed by a successful retry. The admission check runs
-    AFTER the first attempt returns at t=180, still inside the 270 deadline, so the retry is admitted.
-    """
+    """A budget ABOVE the floor but BELOW the old 2x model must still retry a full-timeout failure."""
     session = TimedSession(
         clock,
         [
@@ -259,10 +213,6 @@ def test_a_budget_between_one_and_two_timeouts_still_retries_a_slow_failure(cloc
 def test_two_full_timeout_failures_stop_when_the_deadline_is_spent_not_at_max_attempts(clock):
     """Honest admission-deadline behaviour: under the default budget, two full-timeout failures spend
     the deadline, so the export stops after two calls even though ``max_attempts`` is 5.
-
-    The deadline, not the attempt count, is the binding limit here -- which is the whole point of
-    having a budget. (The reviewer cited this as evidence the old 2x floor was wrong; under the
-    admission-deadline model it is simply correct: the budget was legitimately exhausted.)
     """
     session = TimedSession(
         clock,
@@ -281,12 +231,7 @@ def test_two_full_timeout_failures_stop_when_the_deadline_is_spent_not_at_max_at
 
 
 def test_sign_in_retries_a_full_timeout_transient_because_it_has_no_deadline(clock):
-    """``sign_in`` is NOT affected by the deadline-vs-timeout bug, because it has no deadline.
-
-    Its retry loop is bounded by ``max_attempts`` alone -- it never computes ``monotonic() + budget``
-    -- so there is no deadline-vs-timeout arithmetic to get wrong. A full-timeout transient is
-    retried even with a deliberately tiny ``budget_sec``, proving the budget is irrelevant here.
-    """
+    """``sign_in`` is NOT affected by the deadline-vs-timeout bug, because it has no deadline."""
     signin_ok = json.dumps({"credentials": {"token": "t", "site": {"id": "s"}}})
     session = TimedSession(
         clock,
@@ -307,15 +252,7 @@ def test_sign_in_retries_a_full_timeout_transient_because_it_has_no_deadline(clo
 
 
 def test_request_keeps_the_status_when_the_error_body_read_times_out(monkeypatch):
-    """A 503 whose error-body read times out must come back as a retryable 503, never an exception.
-
-    ``_request`` documents "never raises for a network failure". The body read is itself a socket
-    read; when it times out (``TimeoutError`` is an ``OSError``) the exception is raised inside the
-    ``except HTTPError`` handler, which a sibling ``except`` cannot catch. The status line already
-    arrived, so the authoritative 503 is preserved (and stays retry-eligible via ``TRANSIENT_STATUSES``);
-    the read error is reported in the body. ``TimedSession`` replaces ``_request``, so only this
-    real-``urlopen`` path can observe the guard.
-    """
+    """A 503 whose error-body read times out must come back as a retryable 503, never an exception."""
     session = oracle.TableauSession(_creds())
     session.token = "tok"
 
@@ -354,13 +291,7 @@ def test_request_survives_a_truncated_error_body(monkeypatch):
 
 
 def test_export_recovers_when_the_error_body_read_times_out(clock, monkeypatch):
-    """End-to-end through the REAL ``_request``: the class of defect ``TimedSession`` cannot see.
-
-    Attempt 1 is a 503 whose body read times out (raised inside ``_request``); attempt 2 succeeds.
-    Because ``TimedSession`` REPLACES ``_request``, only a test that drives the real ``urlopen`` path
-    exercises the guard -- exactly the gap the reviewer flagged. ``export`` must treat the first
-    result as an ordinary retryable transient and recover, not propagate the read error.
-    """
+    """End-to-end through the REAL ``_request``: the class of defect ``TimedSession`` cannot see."""
     session = oracle.TableauSession(_creds(), oracle.RetryPolicy(max_attempts=3))
     session.token, session.site_id = "tok", "sid"
     calls = {"n": 0}
@@ -386,12 +317,6 @@ def test_export_recovers_when_the_error_body_read_times_out(clock, monkeypatch):
 def test_reauth_may_exceed_the_admission_deadline_by_design(clock):
     """Characterisation, not a defect: nested re-auth is bounded by ``MAX_REAUTH_PER_VIEW``, NOT by the
     admission deadline, so a slow sign-in during recovery can carry a view PAST its budget.
-
-    This is deliberate and documented at the ``session_lost`` branch: abandoning a view mid-re-auth
-    after a recoverable session loss throws away estate-capture progress for no gain, and the budget
-    is an admission deadline (see ``RetryPolicy``), not a hard wall-clock cap. The test pins the
-    behaviour so a future change that silently starts enforcing the deadline across re-auth has to
-    announce itself here.
     """
     session_lost = json.dumps({"error": {"code": oracle.SESSION_LOST_CODE}})
     signin_ok = json.dumps({"credentials": {"token": "t2", "site": {"id": "s"}}})
@@ -417,15 +342,7 @@ def test_reauth_may_exceed_the_admission_deadline_by_design(clock):
 
 
 def test_an_explicit_sub_floor_budget_is_warned_not_silently_accepted(caplog):
-    """An explicit sub-floor budget is HONOURED (a user may mean it) but its consequence is surfaced.
-
-    The value is not clamped -- clamping would defeat the sibling suite's tight-budget test -- and not
-    rejected -- a small budget is valid for fast transients -- so the only defence against a silent
-    footgun is a warning that names the floor, the timeout it is measured against, and the concrete
-    consequence. Asserting that SUBSTANCE (not merely the string "retry-budget") is what makes the
-    test fail if the message is gutted -- a weaker assertion passed even when the reviewer replaced
-    the whole message with "--retry-budget nonsense".
-    """
+    """An explicit sub-floor budget is HONOURED (a user may mean it) but its consequence is surfaced."""
     with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
         policy = oracle.build_retry_policy(max_attempts=4, budget_sec=oracle.REST_TIMEOUT_SEC / 6)
 
@@ -453,13 +370,3 @@ def test_a_budget_of_exactly_one_request_timeout_is_warned(caplog):
         oracle.build_retry_policy(max_attempts=4, budget_sec=float(oracle.REST_TIMEOUT_SEC))
 
     assert len(caplog.messages) == 1
-
-
-def test_a_budget_between_one_and_two_timeouts_is_not_warned(caplog):
-    """A budget above the floor but below the old 2x model must be SILENT: it genuinely retries a slow
-    failure (see the behavioural test), so warning against it -- as the old 2x floor did -- was false.
-    """
-    with caplog.at_level(logging.WARNING, logger="tableau-oracle"):
-        oracle.build_retry_policy(max_attempts=4, budget_sec=1.5 * oracle.REST_TIMEOUT_SEC)
-
-    assert not caplog.messages

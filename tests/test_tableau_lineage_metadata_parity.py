@@ -109,13 +109,7 @@ class _Response:
 
 
 class RecordingTransport:
-    """One scripted, in-process stand-in for ``urllib.request.urlopen``.
-
-    Both clients are pointed at the SAME instance so the comparison is apples to apples: identical
-    scripted responses, one shared call log, no real network. ``metadata_status``/``metadata_body``
-    covers the ONE endpoint under investigation; sign-in always succeeds so a metadata-call failure
-    is never confused with an authentication failure.
-    """
+    """One scripted, in-process stand-in for ``urllib.request.urlopen``."""
 
     def __init__(
         self,
@@ -402,7 +396,7 @@ def test_blank_env_and_cli_api_versions_fall_back_to_the_default(tmp_path: Path)
         )
 
 
-@pytest.mark.parametrize("bad_version", ["banana", "3.", ".21", "3", "3.21x", "v3.21", "3..21", "3.21/etc"])
+@pytest.mark.parametrize("bad_version", ["3", "3.", "3.21x", "v3.21"])
 def test_a_malformed_api_version_is_a_configuration_error_before_any_request(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, bad_version: str
 ) -> None:

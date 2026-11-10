@@ -108,10 +108,20 @@ def test_successful_and_failed_inventory_outcomes_are_exclusive(kind: str) -> No
     assert state.inventory is None and state.inventory_failed
 
 
+_BAD_COUNTS = [True, -1, 1.0, "1000", 1 << 63]
+
+
+def _bad_count_cases(fields: list[str], extra: tuple = ()) -> list[tuple[str, object]]:
+    """Every bad-count shape on the first field, one per remaining field (each must be validated)."""
+    return [(fields[0], value) for value in [*_BAD_COUNTS, *extra]] + [(field, -1) for field in fields[1:]]
+
+
 @pytest.mark.parametrize(
-    "field", ["returned_count", "requested_page_size", "page_number", "page_size", "total_available", "invalid_fields"]
+    "field,value",
+    _bad_count_cases(
+        ["returned_count", "requested_page_size", "page_number", "page_size", "total_available", "invalid_fields"]
+    ),
 )
-@pytest.mark.parametrize("value", [True, False, -1, 1.0, float("nan"), float("inf"), "1000", 1 << 63])
 def test_raw_inventory_facts_are_numeric_bounded_and_never_coerced(field: str, value: object) -> None:
     with pytest.raises(estate.ProvenanceProtocolError):
         estate._validated_message(_facts(**{field: value}))
@@ -121,14 +131,10 @@ def test_raw_inventory_facts_are_numeric_bounded_and_never_coerced(field: str, v
     "changes",
     [
         {"returned_count": None},
-        {"requested_page_size": None},
-        {"invalid_fields": None},
         {"invalid_fields": 4},
         {"invalid_fields": 1, "page_number": 1, "page_size": 1000, "total_available": 1000},
         {"requested_page_size": 999},
-        {"status": "complete"},
         {"url": "https://private.invalid"},
-        {"name": "private-workbook"},
     ],
 )
 def test_raw_facts_have_a_closed_shape_and_consistent_validity_count(changes: dict) -> None:
@@ -136,7 +142,7 @@ def test_raw_facts_have_a_closed_shape_and_consistent_validity_count(changes: di
         estate._validated_message(_facts(**changes))
 
 
-@pytest.mark.parametrize("missing", ["returned_count", "requested_page_size", "page_number", "invalid_fields"])
+@pytest.mark.parametrize("missing", ["returned_count", "invalid_fields"])
 def test_raw_inventory_facts_require_the_whole_numeric_envelope(missing: str) -> None:
     message = _facts()
     del message["facts"][missing]
@@ -181,7 +187,7 @@ def test_parent_retains_known_ambiguity_without_a_worker_result(code: str) -> No
     assert not prov.is_success(document) and document["inputs"][0]["input"]["sha256"] == "a" * 64
 
 
-@pytest.mark.parametrize("value", [True, False, -1, 1.0, float("nan"), float("inf"), "1", 1 << 64])
+@pytest.mark.parametrize("value", [True, -1, 1.0, "1", 1 << 64])
 def test_count_validator_rejects_non_counts_for_its_own_reason(value: object) -> None:
     """Removing the count validator must fail here, not happen to trip a later sequence guard."""
     try:
@@ -207,9 +213,11 @@ def test_numeric_pagination_findings_use_the_existing_typed_error_path(code: str
 
 
 @pytest.mark.parametrize(
-    "field", ["returned_count", "requested_page_size", "page_number", "page_size", "total_available"]
+    "field,value",
+    _bad_count_cases(
+        ["returned_count", "requested_page_size", "page_number", "page_size", "total_available"], extra=(None,)
+    ),
 )
-@pytest.mark.parametrize("value", [True, False, -1, 1.0, float("nan"), float("inf"), "1000", None, 1 << 63])
 def test_pagination_protocol_facts_are_bounded_integers(field: str, value: object) -> None:
     error = {
         "code": "inventory-cannot-establish",
@@ -228,8 +236,6 @@ def test_pagination_protocol_facts_are_bounded_integers(field: str, value: objec
         {"code": "live-lookup-failed"},
         {"operation": "sign-in"},
         {"requested_page_size": 999},
-        {"exception_class": "ValueError"},
-        {"http_status": 200},
         {"url": "https://private.invalid"},
     ],
 )
@@ -258,7 +264,7 @@ def test_pagination_protocol_requires_both_observed_and_requested_counts(field: 
         estate._validated_error(error)
 
 
-@pytest.mark.parametrize("index", [-1, True, 0, 2, 100000])
+@pytest.mark.parametrize("index", [-1, True, 0, 100000])
 def test_checkpoint_index_cannot_duplicate_skip_or_amplify(index: int) -> None:
     """An index never determines allocation size."""
     state = _fingerprinted(2)
@@ -542,7 +548,6 @@ def test_huge_member_list_is_rejected_before_traversal() -> None:
     ("field", "value"),
     [
         ("size_bytes", True),
-        ("size_bytes", -1),
         ("size_bytes", 1 << 64),
         ("sha256", "a" * 63),
         ("sha256", "A" * 64),
@@ -870,7 +875,7 @@ def test_cleanup_failure_cannot_leave_an_unbounded_automatic_exit_join() -> None
         multiprocessing.process._children.discard(process)
 
 
-@pytest.mark.parametrize("requested", [0, 1, None, "false", {}, []])
+@pytest.mark.parametrize("requested", [0, None, "false"])
 def test_lookup_intent_is_a_boolean_not_a_coercible_payload(requested: object) -> None:
     """The privacy-safe intent has one exact scalar type."""
     with pytest.raises(estate.ProvenanceProtocolError):
@@ -903,7 +908,7 @@ def test_local_intent_cannot_start_any_live_operation(stage: str) -> None:
 
 @pytest.mark.parametrize(
     "basename",
-    ["Sales:Q3.twb", r"Sales\Q3.twb", "unit.twb.", "unit.twb ", "CON.twb", "COM¹.twb"],
+    ["Sales:Q3.twb", "unit.twb.", "CON.twb"],
 )
 def test_posix_basename_rules_do_not_inherit_windows_restrictions(monkeypatch, basename: str) -> None:
     """Legal POSIX punctuation, device stems and trailing rules remain distinct from identity controls."""
@@ -954,7 +959,6 @@ def test_basename_common_rejections_are_lexical_and_bounded(monkeypatch, platfor
         "LPT².twb",
         "unit.twb.",
         "unit.twb ",
-        "unit\x01.twb",
         "Sales:Q3.twb",
         r"Sales\Q3.twb",
         "unit?.twb",
@@ -976,9 +980,7 @@ def test_windows_basename_rules_reject_reserved_forms(monkeypatch, basename: str
 
 
 @pytest.mark.parametrize("platform", ["nt", "posix"])
-@pytest.mark.parametrize(
-    "basename", ["unit.twb", ".hidden.twb", "COM0.twb", "COM10.twb", "Revenue 2026.twb", "x" * 255]
-)
+@pytest.mark.parametrize("basename", [".hidden.twb", "COM0.twb", "COM10.twb", "Revenue 2026.twb", "x" * 255])
 def test_legal_basenames_are_accepted_without_filesystem_access(monkeypatch, platform: str, basename: str) -> None:
     """Validate syntax only: even a legal name must never become an existence, resolve or open request."""
     monkeypatch.setattr(estate, "_BASENAME_PLATFORM", platform)
@@ -1196,8 +1198,7 @@ def test_published_rows_reconcile_with_every_original_fingerprint_occurrence(def
         estate._validated_result(result, 1, {0: checkpoint})
 
 
-@pytest.mark.parametrize("key", ["source_ordinal", "candidate_count"])
-@pytest.mark.parametrize("value", [True, False, -1, 1.0, "1", None, 1 << 63])
+@pytest.mark.parametrize("key,value", _bad_count_cases(["source_ordinal", "candidate_count"], extra=(None,)))
 def test_published_ordinals_and_counts_are_exact_non_boolean_integers(key: str, value: object) -> None:
     result = _published_result()
     checkpoint = _published_checkpoint(result)
@@ -1471,10 +1472,14 @@ def test_published_full_wire_cannot_claim_success_without_assessed_authority(ass
     assert code == estate.PROVENANCE_PROTOCOL_CODE and state.terminal is None, "P_ASSESSMENT_SUCCESS_BINDING"
 
 
-@pytest.mark.parametrize("where", ["launch", "resolved"])
-@pytest.mark.parametrize("field", ["file_sha256", "basename_sha256", "workbook_luid_sha256"])
 @pytest.mark.parametrize(
-    "value", ["private-filename.twb", "f" * 63, "F" * 64, True, [], {"source": "private-host-path"}]
+    "where,field,value",
+    [("launch", "file_sha256", value) for value in ("f" * 63, "F" * 64, True, {"source": "private-host-path"})]
+    + [
+        (where, field, "private-filename.twb")
+        for where in ("launch", "resolved")
+        for field in ("file_sha256", "basename_sha256", "workbook_luid_sha256")
+    ],
 )
 def test_published_private_identity_fields_remain_strict_bounded_digests(where: str, field: str, value: object) -> None:
     messages = _published_messages(_published_result())

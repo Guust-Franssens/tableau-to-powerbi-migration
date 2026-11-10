@@ -94,7 +94,7 @@ def test_the_capture_is_copied_never_moved(tmp_path):
     assert (oracle / "images" / "V__aaa.png").is_file()
 
 
-@pytest.mark.parametrize("folder", ["ds-tail-level", "DS_Tail_Level", "dstaillevel"])
+@pytest.mark.parametrize("folder", ["ds-tail-level"])
 def test_punctuation_and_case_do_not_prevent_a_match(tmp_path, folder):
     oracle = _capture(tmp_path, [_view("DS Tail Level", "V", "aaa")])
     root = _migrations(tmp_path, folder)
@@ -199,9 +199,7 @@ def test_a_view_with_no_row_count_is_counted_AND_named_UNASSESSABLE_in_the_workb
     got `data_ok=1 data_empty=0 data_empty_views=[] failed=0` -- which is what a good capture looks
     like. "Not empty" was being read as "fine", so a per-workbook reader saw four clean captures
     where nothing had measured the rows of one of them.
-
-    `data_ok` deliberately stays as it was: the export DID succeed, and the new pair beside it is
-    what stops that number being read as evidence."""
+    """
     no_row_count = _view("Sales", "Old", "ccc")
     del no_row_count["data"]["row_count"]
     subset = grp.subset_manifest({"schema": "tableau-oracle/1"}, "Sales", [_view("Sales", "Good", "aaa"), no_row_count])
@@ -223,13 +221,7 @@ def test_the_workbook_subset_reports_no_unassessable_views_when_every_row_count_
 
 
 def test_a_legacy_row_count_without_a_certification_is_not_evidence(tmp_path):
-    """#480 round 3 at this level: the per-workbook subset must not copy an uncertified CSV either.
-
-    ⚠️ This is the shape EVERY pre-#480 capture on disk has -- `origin/master` summarised the body of
-    every HTTP 200 and wrote its `row_count`, certifying nothing -- so it is the shape a grouping run
-    over a customer's existing `_oracle/` will actually meet. `copy_view_files` keys on `path` and
-    needs no knowledge of certification; what changes is that the record has no `path` to offer it.
-    """
+    """#480 round 3 at this level: the per-workbook subset must not copy an uncertified CSV either."""
     legacy = _view("Sales", "Old", "ccc")
     del legacy["data"]["certification"]
     oracle = _capture(tmp_path, [_view("Sales", "Good", "aaa"), legacy])

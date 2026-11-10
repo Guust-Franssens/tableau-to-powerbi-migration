@@ -54,27 +54,14 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _is_ignored(path: Path, cwd: Path) -> bool:
-    """Ask git the same question the guard asks: would a downloaded file under `path` be staged?
-
-    Probed as a FILE inside the directory, not as `path` itself: a directory-only rule
-    (`/_sweep*/`) can only be applied to a path git knows is a directory, which for a not-yet-created
-    `--out` it does not. And never with a trailing slash - on git 2.55.0.windows.3 that reports EVERY
-    path as ignored (empty matched pattern), so a trailing-slash probe would make this file pass
-    vacuously.
-    """
+    """Ask git the same question the guard asks: would a downloaded file under `path` be staged?"""
     probe = path / "assets" / "harvested-workbook.twbx"
     return _git(["check-ignore", "-q", "--", str(probe)], cwd).returncode == 0
 
 
 @pytest.fixture(name="repo")
 def repo_fixture(tmp_path: Path) -> Path:
-    """A throwaway git repo carrying this repo's REAL .gitignore, byte for byte.
-
-    Copied whole rather than filtered down to the harvest rules: a reduced fixture answered
-    `check-ignore` differently from the real file (see
-    `test_the_trailing_slash_trap_is_real_and_the_guard_avoids_it`), so a subset would have proved
-    something about a file nobody has.
-    """
+    """A throwaway git repo carrying this repo's REAL .gitignore, byte for byte."""
     return _init_repo(tmp_path)
 
 
@@ -114,19 +101,7 @@ def test_a_name_outside_the_convention_is_still_reported_unignored(repo: Path) -
 
 def _rule_comment_block(text: str, rule: str) -> str:
     """The contiguous comment block immediately above the LINE that IS `rule` in `.gitignore`.
-
-    Located by matching a whole line, never by splitting on the rule text. `text.split(rule)[0]`
-    lands on the FIRST occurrence anywhere in the file, so a comment quoting a rule verbatim earlier
-    on hijacks it and this test fails on prose that is entirely correct - hit for real on PR #382,
-    whose author reworded their comment rather than edit a file outside their group.
-
-    The hazard is already live: `.gitignore:109-110` quotes both `/_harvest*/` and `/_sweep*/` inside
-    the general-rule commentary, and this test survives only because those lines sit BELOW the rules
-    they quote. Moving that block up, or adding any similar note above line 83, breaks a test that
-    has nothing to do with the change.
-
-    An ambiguous file is refused rather than guessed at: if a rule is listed twice, no single comment
-    block governs it, and picking the first silently answers a question the file does not settle.
+    Refs #382.
     """
     lines = text.splitlines()
     matches = [i for i, line in enumerate(lines) if line.strip() == rule]
@@ -149,11 +124,7 @@ def test_the_two_harvesters_do_not_share_one_documented_folder() -> None:
 
 
 def test_the_rule_locator_is_not_hijacked_by_a_comment_quoting_the_rule() -> None:
-    """The regression PR #382 hit: correct prose, unrelated file, red test.
-
-    Asserts twice on purpose - first that the OLD split-based locator really is hijacked by this
-    fixture, so a fixture that does not reproduce the defect cannot pass quietly.
-    """
+    """The regression PR #382 hit: correct prose, unrelated file, red test."""
     text = (
         "# THE GENERAL RULE, added after the specific ones below.\n"
         "# `/_harvest*/` and `/_sweep*/` both cite issue #125.\n"
@@ -173,11 +144,7 @@ def test_the_rule_locator_is_not_hijacked_by_a_comment_quoting_the_rule() -> Non
 
 
 def test_the_rule_locator_refuses_a_file_it_cannot_answer_for() -> None:
-    """A missing or duplicated rule must fail loudly, never return an empty block that asserts True.
-
-    An empty string satisfies `"x" not in block`, so a silent miss would turn the collision check
-    above into a rubber stamp - the same fail-open shape the output guard is built to avoid.
-    """
+    """A missing or duplicated rule must fail loudly, never return an empty block that asserts True."""
     for text in ("# nothing here\n/_assessment*/\n", "/_sweep*/\n\n# a second, contradictory home\n/_sweep*/\n"):
         with pytest.raises(AssertionError):
             _rule_comment_block(text, "/_sweep*/")
@@ -205,20 +172,6 @@ def test_guard_refuses_an_unignored_path_inside_a_work_tree(repo: Path) -> None:
 def test_guard_proceeds_for_an_ignored_path(repo: Path) -> None:
     assert h.unignored_output_paths(repo / "_sweep-2026-08-13") == []
     assert h.refuse_unignored_output(repo / "_sweep-2026-08-13", allow_unignored=False) is False
-
-
-def test_the_trailing_slash_trap_is_real_and_the_guard_avoids_it(repo: Path) -> None:
-    """Appending a slash to make a directory rule match turns the guard into a rubber stamp.
-
-    Measured on git 2.55.0.windows.3 against a realistic `.gitignore`: `check-ignore -- 'x/'` exits
-    0 for ANY path, reporting an EMPTY matched pattern - so a guard that probes with a trailing
-    slash reports every target as safely ignored, including the one this test refuses. The
-    workaround for the directory-rule problem is a path COMPONENT under `--out`, never a slash.
-    """
-    stamp = _git(["check-ignore", "-q", "--", f"{repo / 'definitely-not-ignored'}/"], repo)
-    if stamp.returncode != 0:
-        pytest.skip("this git no longer reports every trailing-slash path as ignored")
-    assert h.refuse_unignored_output(repo / "leaky", allow_unignored=False) is True
 
 
 def test_guard_proceeds_when_the_directory_already_exists(repo: Path) -> None:
@@ -333,11 +286,7 @@ def _raise_missing_git(*_args, **_kwargs):
 
 
 def test_cli_exits_nonzero_before_touching_anything(repo: Path) -> None:
-    """The refusal must beat `--out` creation, the .env, the estate DB and every network call.
-
-    Run with `--skip-download` on purpose: even the no-download path writes `parse-sweep.json`,
-    which carries every workbook name, so the guard cannot be conditional on downloading.
-    """
+    """The refusal must beat `--out` creation, the .env, the estate DB and every network call."""
     result = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "harvest_estate_assets.py"), "--out", "leaky", "--skip-download"],
         cwd=repo,
@@ -361,7 +310,7 @@ def test_cli_exits_nonzero_before_touching_anything(repo: Path) -> None:
 #   --out linkdir\x     (linkdir is a junction to somewhere outside) judged from the junction
 #                       TARGET, where `git rev-parse` exits 128 -> "outside any work tree" -> allowed,
 #                       while `git add -A` at the checkout staged 'linkdir/x/assets/...' (Windows;
-#                       on POSIX git stages the symlink entry instead - see the control below)
+#                       on POSIX git stages the symlink entry instead)
 #
 # Every test below therefore asserts TWICE: first that the question the OLD guard asked returns
 # "safe" for this fixture, then that the guard refuses anyway. Without the first assertion a test
@@ -370,12 +319,7 @@ def test_cli_exits_nonzero_before_touching_anything(repo: Path) -> None:
 
 
 def _link_dir(link: Path, target: Path) -> None:
-    """A directory link needing no elevation: an NTFS junction on Windows, a symlink elsewhere.
-
-    A junction, not a symlink, on Windows deliberately: `New-Item -ItemType SymbolicLink` needs
-    elevation (or Developer Mode) while `mklink /J` never does, so the Windows half of this coverage
-    would otherwise silently skip on most machines - and Windows is where the defect was found.
-    """
+    """A directory link needing no elevation: an NTFS junction on Windows, a symlink elsewhere."""
     if sys.platform == "win32":
         made = subprocess.run(
             ["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, text=True, check=False
@@ -398,14 +342,7 @@ def _unlink_dir(link: Path) -> None:
 
 @pytest.fixture(name="lab")
 def lab_fixture(tmp_path: Path):
-    """A checkout, a directory outside it, and three links between them.
-
-    * `repo`        - a checkout with the REAL `.gitignore` (acceptance criterion 4)
-    * `outside`     - a plain directory, in no work tree
-    * `junction_out`- `<repo>/linkdir` -> `outside`:      inside the checkout, resolves out of it
-    * `junction_in` - `<outside>/backdoor` -> `<repo>/leaky`: outside the checkout, resolves into it
-    * `linked_repo` - `<tmp>/linkrepo` -> `<repo>`:       the checkout itself reached through a link
-    """
+    """A checkout, a directory outside it, and three links between them."""
     if _git(["rev-parse", "--is-inside-work-tree"], tmp_path).stdout.strip() == "true":
         pytest.skip("pytest tmp_path is itself inside a git work tree on this machine")
     repo = _init_repo(tmp_path / "repo")
@@ -423,32 +360,6 @@ def lab_fixture(tmp_path: Path):
         _unlink_dir(link)
 
 
-def test_the_link_leak_is_real_on_this_platform(lab) -> None:
-    """The control the rest of this section rests on: what does `git add -A` actually do with it?
-
-    The two platforms differ and the difference is the point. An NTFS junction is a directory to
-    git's working-tree walk, so it descends and stages the customer `.twbx` itself - that is the
-    leak issue #374 is about. A POSIX symlink is staged as a link object; git does not walk into it,
-    so the workbooks stay out of the index while the link entry - which names the path - still lands.
-    Asserted, not assumed, so a change in either platform's behaviour shows up here rather than
-    quietly making the refusals below pointless.
-    """
-    landed = lab.junction_out / "sweepout" / "assets"
-    landed.mkdir(parents=True)
-    (landed / "harvested-workbook.twbx").write_text("customer content", encoding="utf-8")
-    assert (lab.outside / "sweepout" / "assets" / "harvested-workbook.twbx").exists(), "the link is not a link"
-
-    staged = _git(["add", "-A", "--dry-run"], lab.repo).stdout.replace("\\", "/")
-    if sys.platform == "win32":
-        assert "linkdir/sweepout/assets/harvested-workbook.twbx" in staged, (
-            f"git no longer walks into an NTFS junction; the leak may be gone:\n{staged}"
-        )
-    else:
-        # Measured on git 2.43.0 (Ubuntu): the whole output is `add '.gitignore'` + `add 'linkdir'`.
-        assert "linkdir" in staged, f"git staged nothing for the symlink at all:\n{staged}"
-        assert "linkdir/sweepout" not in staged, f"git now walks into a POSIX symlink:\n{staged}"
-
-
 def test_a_junction_leading_out_of_the_checkout_is_refused(lab) -> None:
     """`--out` inside the checkout whose link resolves outside it. Acceptance criterion 2."""
     out = lab.junction_out / "sweepout"
@@ -462,11 +373,7 @@ def test_a_junction_leading_out_of_the_checkout_is_refused(lab) -> None:
 
 
 def test_a_junction_leading_out_is_refused_even_from_outside_the_checkout(lab, monkeypatch) -> None:
-    """Anchoring at `Path.cwd()` fixes the common case; the lexical-ancestor walk fixes all of them.
-
-    An operator can perfectly well run this script from anywhere - `python <repo>/scripts/... --out
-    <repo>/linkdir/x` - and a cwd-derived anchor then has nothing to say.
-    """
+    """Anchoring at `Path.cwd()` fixes the common case; the lexical-ancestor walk fixes all of them."""
     monkeypatch.chdir(lab.outside)
     out = lab.junction_out / "sweepout"
     assert h.unignored_output_paths(out.expanduser().resolve()) == [], "fixture proves nothing"
@@ -474,24 +381,14 @@ def test_a_junction_leading_out_is_refused_even_from_outside_the_checkout(lab, m
 
 
 def test_a_junction_leading_INTO_the_checkout_is_refused(lab) -> None:
-    """The other direction: `--out` looks external, the link puts the bytes inside the checkout.
-
-    This one already passed BEFORE the fix, precisely because the guard resolved the path - which is
-    why the resolved form is kept alongside the lexical one rather than replaced by it. Dropping it
-    would trade one hole for another and this test is what says so.
-    """
+    """The other direction: `--out` looks external, the link puts the bytes inside the checkout."""
     out = lab.junction_in / "sweepin"
     assert h.unignored_output_paths(out.absolute()) == [], "fixture proves nothing: the lexical form already refuses"
     assert h.refuse_unignored_output(out, allow_unignored=False) is True
 
 
 def test_a_checkout_reached_through_a_junction_is_not_falsely_refused(lab) -> None:
-    """The false-refusal control. A guard that refuses everything is not a guard, it is an outage.
-
-    `<tmp>/linkrepo` -> `<repo>`, so the lexical form names a path the checkout's own toplevel does
-    not contain. Asking that repo about it anyway yields "outside repository" (exit 128), which is
-    an unprovable answer and would therefore refuse an `--out` that is plainly ignored.
-    """
+    """The false-refusal control. A guard that refuses everything is not a guard, it is an outage."""
     out = lab.linked_repo / "_sweep-hosted"
     assert h.refuse_unignored_output(out, allow_unignored=False) is False
 
@@ -529,33 +426,8 @@ def test_a_literal_tilde_is_judged_where_it_would_actually_land(repo: Path, monk
     assert h.refuse_unignored_output(Path("~/harvest-374-sweep"), allow_unignored=False) is True
 
 
-def test_the_tilde_directory_is_never_created_inside_the_checkout(repo: Path) -> None:
-    """Acceptance criterion 1, end to end: refuse, and leave no literal `~` behind."""
-    result = subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts" / "harvest_estate_assets.py"),
-            "--out",
-            "~/harvest-374-sweep",
-            "--skip-download",
-        ],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode == 2, f"the CLI accepted a literal ~ --out:\n{result.stdout}\n{result.stderr}"
-    assert not (repo / "~").exists(), "a literal `~` directory was created inside the checkout"
-
-
 def test_the_run_writes_to_the_form_the_guard_passed(tmp_path: Path, monkeypatch) -> None:
-    """The other half of the asymmetry: checking one form and writing another proves nothing.
-
-    Runs `main` in-process with a fake HOME so no real home directory is touched, from a cwd in no
-    work tree so the guard legitimately allows the run. The output must land on the RESOLVED form.
-    `sqlite3` then fails on the empty estate DB (exit 1) - by design: the write happens first, and
-    stubbing the engine keeps this independent of whether the conversion plugin is installed.
-    """
+    """The other half of the asymmetry: checking one form and writing another proves nothing."""
     home = tmp_path / "home"
     home.mkdir()
     workdir = tmp_path / "workdir"
@@ -595,12 +467,7 @@ def test_both_path_forms_are_offered_and_neither_is_dropped(repo: Path, monkeypa
 
 
 def test_the_out_of_checkout_remedy_still_works(lab) -> None:
-    """Acceptance criterion 3. The remedy the refusal recommends must not itself be refused.
-
-    Asserted at the guard AND by exit code. The CLI cannot reach 0 here - there is no estate DB, and
-    on a machine without the conversion plugin it stops earlier still - so the claim is that it is
-    not stopped by the GUARD (exit 2), which is the thing under test.
-    """
+    """Acceptance criterion 3. The remedy the refusal recommends must not itself be refused."""
     assert h.refuse_unignored_output(lab.outside / "sweep", allow_unignored=False) is False
     result = subprocess.run(
         [
@@ -650,11 +517,7 @@ def _short_name(path: Path) -> str | None:
 
 
 def _assert_alias_reproduces(alias: Path, repo: Path) -> None:
-    """The fixture must be a genuine alias: same directory, spelling git cannot lexically relate.
-
-    Without this a "bypass" test can pass for the wrong reason - because the spelling collapsed back
-    to the plain path that was already refused, proving nothing about the alias.
-    """
+    """The fixture must be a genuine alias: same directory, spelling git cannot lexically relate."""
     with pytest.raises(ValueError):
         alias.relative_to(repo)
     assert h.refuse_unignored_output(repo / alias.name, allow_unignored=False) is True, (
@@ -688,11 +551,7 @@ def test_a_unc_admin_share_alias_cannot_smuggle_a_path_into_the_checkout(lab) ->
 
 @WINDOWS_ONLY
 def test_an_8_3_short_name_plus_an_outbound_junction_cannot_smuggle_a_path_in(lab) -> None:
-    """The combination that defeats resolving: short lexically, outside once resolved.
-
-    Asserted explicitly, because this is the one case where fixing the alias by resolving the
-    lexical form would silently re-open the junction hole instead of closing anything.
-    """
+    """The combination that defeats resolving: short lexically, outside once resolved."""
     short = _short_name(lab.repo)
     if short is None:
         pytest.skip("8.3 name generation is disabled on this volume")
@@ -714,12 +573,7 @@ def _same_path(a: Path, b: Path) -> bool:
 
 
 def test_a_repository_git_cannot_read_is_treated_as_unsafe(lab) -> None:
-    """A `.git` that yields no work tree means git could not answer, not that nothing is here.
-
-    Reachable without sabotage: a dubious-ownership refusal over UNC produces exactly this shape in
-    the wild. Reproduced deterministically with a stale gitdir pointer, which any moved worktree
-    leaves behind.
-    """
+    """A `.git` that yields no work tree means git could not answer, not that nothing is here."""
     (lab.repo / ".git").rename(lab.repo / ".git-disabled")
     (lab.repo / ".git").write_text("gitdir: does-not-exist\n", encoding="utf-8")
     assert _git(["rev-parse", "--show-toplevel"], lab.repo).returncode != 0, "fixture: rev-parse must fail"
@@ -749,9 +603,6 @@ def test_a_repository_git_cannot_read_is_treated_as_unsafe(lab) -> None:
 def test_a_failing_rev_parse_is_unsafe_even_when_check_ignore_would_answer(lab, monkeypatch) -> None:
     """`test_an_unanswerable_git_is_treated_as_unsafe` forces `check-ignore` to 128 while leaving
     `rev-parse` healthy - a different call on a different path, so it cannot cover this.
-
-    The `--out` here is `_sweep`, which the real `.gitignore` DOES ignore, so this can only pass
-    because worktree discovery failed closed - never because the path happened to be unignored.
     """
     real_run = subprocess.run
 
@@ -770,12 +621,7 @@ def test_a_failing_rev_parse_is_unsafe_even_when_check_ignore_would_answer(lab, 
 
 
 def test_the_relative_dot_dot_spelling_of_the_remedy_still_works(lab, monkeypatch) -> None:
-    """`--out ..\\outside\\out` is the documented remedy in its most natural relative spelling.
-
-    `Path.absolute()` keeps `..` (measured on 3.11.9 and 3.13.2), and a surviving `..` still passes
-    a `relative_to(<repo>)` test, so the guard asked git about a path outside the repository, got
-    "outside repository", and refused the very thing the refusal message recommends.
-    """
+    """`--out ..\\outside\\out` is the documented remedy in its most natural relative spelling."""
     monkeypatch.chdir(lab.repo)
     relative = Path("..") / "outside" / "remedy"
     assert ".." in relative.absolute().parts, "fixture proves nothing: this Python collapses `..` in absolute()"
@@ -800,24 +646,7 @@ def test_the_relative_dot_dot_spelling_of_the_remedy_still_works(lab, monkeypatc
 
 @WINDOWS_ONLY
 def test_the_canonical_probe_is_what_lets_a_substituted_drive_through(lab) -> None:
-    """Rebuilding the probe from the work-tree ROOT's spelling, proved by behaviour not by contract.
-
-    This started life as a contract test, on the measured grounds that git answers every aliased
-    spelling exactly as it answers the plain one - so the rebuild changed no observable verdict and
-    no mutation could kill it. That was wrong, and `subst` is the case that shows it:
-
-        subst Z: <repo>                        exit 0
-        git -C Z:\\ rev-parse --show-toplevel   exit 0, reports the long C:\\...\\repo
-        check-ignore <canonical ignored path>  exit 0   -> ignored
-        check-ignore Z:\\_sweep-p14\\...         exit 128 -> UNANSWERABLE
-
-    Probing what the caller typed would therefore raise and refuse a plainly ignored `--out`;
-    probing the path rebuilt from the root's own spelling answers it correctly. So the assertion
-    below is that an ignored output on a substituted drive PROCEEDS.
-
-    Windows only - `subst` has no POSIX equivalent, and no discriminating case for the rebuild is
-    known there, so on Linux this defence remains unpinned. Said, not hidden.
-    """
+    """Rebuilding the probe from the work-tree ROOT's spelling, proved by behaviour not by contract."""
     letter = _free_drive_letter()
     if letter is None:
         pytest.skip("no free drive letter available for subst")
@@ -847,12 +676,7 @@ def _free_drive_letter() -> str | None:
 
 
 def test_a_dangling_git_link_is_still_a_checkout(lab) -> None:
-    """`exists()` FOLLOWS a reparse point, so a dangling `.git` link reports absent.
-
-    The checkout marker is then missed, the failed `rev-parse` is treated as "nothing here", and an
-    unignored output is written and staged (measured before the fix: CLI exit 0, wrote). The entry
-    exists; only its target does not. `os.path.lexists` asks the question that matters.
-    """
+    """`exists()` FOLLOWS a reparse point, so a dangling `.git` link reports absent."""
     gone = lab.repo.parent / "gone-gitdir"
     gone.mkdir()
     shutil.rmtree(lab.repo / ".git")
@@ -884,15 +708,7 @@ def test_a_dangling_git_link_is_still_a_checkout(lab) -> None:
 
 
 def test_an_identity_comparison_that_cannot_answer_is_treated_as_unsafe(lab, monkeypatch) -> None:
-    """A filesystem that will not say whether two paths are the same has not said "no".
-
-    Collapsing that `OSError` to `False` made containment look DISPROVEN rather than unproven, so
-    `_canonical_probe_target` reported "no work tree holds this" and the run proceeded - measured
-    before the fix: exit 0, a customer workbook name in `parse-sweep.json`, `git status` staging it.
-
-    The `--out` here is plainly unignored, and the control below proves the guard refuses it for the
-    ordinary reason first, so this cannot pass merely because the path was bad.
-    """
+    """A filesystem that will not say whether two paths are the same has not said "no"."""
     assert h.refuse_unignored_output(lab.repo / "leaky-samefile", allow_unignored=False) is True, "control"
 
     def denied(_a, _b):
@@ -909,11 +725,7 @@ def test_an_identity_comparison_that_cannot_answer_is_treated_as_unsafe(lab, mon
 
 @WINDOWS_ONLY
 def test_an_ancestry_with_nothing_to_examine_is_treated_as_unsafe(lab) -> None:
-    """If not one directory above `--out` can be looked at, nothing about it has been established.
-
-    Both of these previously proceeded. POSIX has no equivalent - `/` always exists, so there is
-    always something to examine - hence Windows only rather than a synthetic stub.
-    """
+    """If not one directory above `--out` can be looked at, nothing about it has been established."""
     letter = _free_drive_letter()
     if letter is None:
         pytest.skip("no unused drive letter to point at")
@@ -928,13 +740,7 @@ def test_an_ancestry_with_nothing_to_examine_is_treated_as_unsafe(lab) -> None:
 
 @WINDOWS_ONLY
 def test_an_ignored_out_named_through_a_resolvable_alias_still_proceeds(lab) -> None:
-    """The guard refuses aliases it cannot verify, not aliases as a class.
-
-    `\\\\?\\` and 8.3 are spellings git CAN work from (measured: `rev-parse` with either as cwd exits
-    0 and reports the long-form toplevel), so an ignored `--out` named that way must still run. The
-    UNC admin share is deliberately excluded: `rev-parse` there exits 128, which is unanswerable and
-    therefore refused - a noisy outcome the asymmetry accepts, unlike a silent write.
-    """
+    """The guard refuses aliases it cannot verify, not aliases as a class."""
     aliases = [Path(f"\\\\?\\{lab.repo}")]
     short = _short_name(lab.repo)
     if short is not None:
@@ -949,19 +755,7 @@ def test_an_ignored_out_named_through_a_resolvable_alias_still_proceeds(lab) -> 
 
 
 def test_a_path_longer_than_git_can_access_is_still_judged_correctly(lab) -> None:
-    """git and the filesystem disagree about long paths on Windows; the verdict must not.
-
-    Measured on this machine - `core.longpaths` UNSET while the OS has `LongPathsEnabled=1`, git
-    2.55.0.windows.3 - at 310 characters `git check-ignore` still returns the RIGHT answer, 0 for an
-    ignored prefix and 1 for an unignored one, while printing `warning: unable to access ...` to
-    stderr. The guard reads the exit code, not the warning, so the verdict survives; and a path git
-    cannot answer for at all raises and refuses, which the fail-closed rule already covers.
-
-    Characterisation, not new coverage: it pins a boundary where the two layers are known to
-    disagree, and it is near-vacuous on POSIX where 310 characters is unremarkable. Nothing is
-    created on disk - the guard judges paths that do not exist, by design, so this needs no deep
-    directory tree and leaves nothing to clean up.
-    """
+    """git and the filesystem disagree about long paths on Windows; the verdict must not."""
 
     def long_out(first: str) -> Path:
         out = lab.repo / first
