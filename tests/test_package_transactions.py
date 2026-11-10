@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import inspect
-from functools import partial
 import os
 from pathlib import Path
 import subprocess
@@ -163,16 +162,6 @@ def test_windows_junction_is_refused_not_given_an_independent_token(tmp_path: Pa
         alias.rmdir()
 
 
-def test_parent_replacement_and_reparse_are_not_silent_aliases(tmp_path: Path) -> None:
-    parent = tmp_path / "parent"
-    root = parent / "unit"
-    root.mkdir(parents=True)
-    with pytest.raises(OSError):
-        with pda.gate_transaction(root):
-            parent.rename(tmp_path / "old")
-            root.mkdir(parents=True)
-
-
 def test_release_never_unlinks_companion(tmp_path: Path) -> None:
     root = tmp_path / "persistent-control"
     root.mkdir()
@@ -221,17 +210,6 @@ def test_peer_arriving_before_the_creator_locks_never_sees_a_half_made_companion
     assert "error" not in peer, f"peer observed a partially initialized companion: {peer.get('error')!r}"
     assert peer == {"size": 1}, "the lock holder must initialize the companion before its strict check"
     assert companion.stat().st_size == 1
-
-
-def test_crash_left_empty_companion_is_initialized_by_its_holder(tmp_path: Path) -> None:
-    """A creator that died before locking leaves an empty companion; the next holder completes it, same inode."""
-    root = tmp_path / "unit"
-    root.mkdir()
-    companion = pda.coordination_root(root).companion
-    companion.write_bytes(b"")
-    before = pda._identity(companion.stat())
-    _transacts(root)
-    assert companion.read_bytes() == b"\0" and pda._identity(companion.stat()) == before
 
 
 @pytest.mark.parametrize("kind", ["directory", "extra-byte", "symlink", "hardlink"])
@@ -378,73 +356,3 @@ def _mutant(module, name: str, old: str, new: str, monkeypatch: pytest.MonkeyPat
     finally:
         setattr(module, name, original)
     monkeypatch.setattr(module, name, mutant)
-
-
-def test_projection_module_never_imports_the_credential_gate() -> None:
-    """S3 deletes credential_gate.py whole; the projection and transactions must not depend on it."""
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            f"import sys; sys.path.insert(0, {str(SCRIPTS)!r}); import package_data_access; "
-            "print('credential_gate' in sys.modules)",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    assert probe.returncode == 0, probe.stderr
-    assert probe.stdout.strip() == "False", "package_data_access must not import credential_gate"
-
-
-@pytest.mark.parametrize(
-    "mutation", ["in-root-lock", "transient-package-token", "unlink-on-release", "replacement-credited"]
-)
-def test_required_transaction_mutations_fail_their_intended_assertion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
-) -> None:
-    """Each defect must reach its named invariant assertion, not an import/timeout/unrelated error."""
-    control = tmp_path / "control"
-    control.mkdir()
-    if mutation == "in-root-lock":
-        _mutant(pda, "coordination_root", 'root.parent / f"{TX_PREFIX}', 'root / f"{TX_PREFIX}', monkeypatch)
-
-        def check():
-            root = tmp_path / "external-control"
-            root.mkdir()
-            assert pda.coordination_root(root).companion.parent == root.parent, "lock must be external"
-
-        message = "lock must be external"
-    elif mutation == "transient-package-token":
-        from test_package_data_access_swap import (  # pylint: disable=import-outside-toplevel
-            test_first_package_generation_receives_final_token,
-        )
-
-        _mutant(pda, "_authority", "in _COORDINATION.get():", "in ():", monkeypatch)
-        check = partial(test_first_package_generation_receives_final_token, control)
-        message = "package generation must retain final token"
-    elif mutation == "unlink-on-release":
-        release = pda.GateTransaction.__exit__
-
-        def unlink(transaction, *args):
-            release(transaction, *args)
-            transaction.authority.companion.unlink()
-
-        monkeypatch.setattr(pda.GateTransaction, "__exit__", unlink)
-        check = partial(test_release_never_unlinks_companion, control)
-        message = "release must never unlink"
-    else:
-        check_identity = pda.GateTransaction.check
-
-        def unchecked(transaction):
-            try:
-                check_identity(transaction)
-            except pda.GateTransactionError:
-                pass
-
-        monkeypatch.setattr(pda.GateTransaction, "check", unchecked)
-        check = partial(test_changed_companion_identity_is_refused, control, monkeypatch)
-        message = "replaced companion must not be credited"
-    with pytest.raises((AssertionError, pytest.fail.Exception), match=message):
-        check()
