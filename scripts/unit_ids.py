@@ -314,6 +314,20 @@ def _source(request: UnitRequest) -> dict[str, Any]:
     }
 
 
+def _read_owned_index(run_dir: Path) -> list[dict[str, Any]]:
+    """The run's entries for a writer: every ID must be reserved for exactly this run and key, so a
+    hand-edited or copied index can never re-publish an ID another unit owns."""
+    units = read_unit_index(run_dir) or []
+    for entry in units:
+        owner, reason = _read_owner(run_dir.parent, parse_unit_id(entry["id"]))
+        if owner is None or owner["run"] != run_dir.name or owner["key"] != entry["key"]:
+            raise UnitIdError(
+                f"unit {entry['id']} in run {run_dir.name} is not reserved for this run and key "
+                f"({reason or 'owner_index_mismatch'}); nothing was written"
+            )
+    return units
+
+
 def _publish(run_dir: Path, units: list[dict[str, Any]]) -> None:
     """Validate, then atomically replace the index and regenerate its README projection."""
     for entry in units:
@@ -329,7 +343,9 @@ def allocate_unit_ids(run_dir: Path, requests: Sequence[UnitRequest]) -> list[di
     A key already in this run's index keeps its ID (its source descriptors are refreshed, so a
     source rename updates display metadata); every other key reserves a fresh runs-root number,
     writes that reservation's owner pointer, and only then is the index published once. The same key
-    with a different kind is refused before anything is reserved.
+    with a different kind, or an existing entry whose ID is not reserved for this run and key, is
+    refused before anything is reserved. Every successful call regenerates the README from the
+    index, so an identical retry repairs an interrupted publication.
     """
     run_dir = _require_run(run_dir)
     wanted = [_checked_request(request) for request in requests]
@@ -337,12 +353,11 @@ def allocate_unit_ids(run_dir: Path, requests: Sequence[UnitRequest]) -> list[di
     if len(set(keys)) != len(keys):
         raise UnitIdError("one allocation names the same unit key twice")
     with _index_lock(run_dir):
-        units = read_unit_index(run_dir) or []
+        units = _read_owned_index(run_dir)
         by_key = {entry["key"]: entry for entry in units}
         for request in wanted:
             if request.key in by_key and by_key[request.key]["source"]["kind"] != request.kind:
                 raise UnitIdError(f"unit {by_key[request.key]['id']} already holds this key as another kind")
-        changed = False
         for request in wanted:
             entry = by_key.get(request.key)
             if entry is None:
@@ -364,11 +379,9 @@ def allocate_unit_ids(run_dir: Path, requests: Sequence[UnitRequest]) -> list[di
                 }
                 units.append(entry)
                 by_key[request.key] = entry
-                changed = True
-            elif entry["source"] != _source(request):
+            else:
                 entry["source"] = _source(request)
-                changed = True
-        if changed:
+        if units:
             _publish(run_dir, units)
         return [copy.deepcopy(by_key[key]) for key in keys]
 
@@ -385,8 +398,8 @@ def set_unit_artifacts(run_dir: Path, unit_id: str, artifacts: Mapping[str, str 
             except ValueError as exc:
                 raise UnitIdError(f"{role}: {exc}") from exc
     with _index_lock(run_dir):
-        units = read_unit_index(run_dir)
-        entry = next((item for item in units or [] if item["id"] == unit_id), None)
+        units = _read_owned_index(run_dir)
+        entry = next((item for item in units if item["id"] == unit_id), None)
         if entry is None:
             raise UnitIdError("that unit ID is not allocated in this run")
         entry["artifacts"].update(artifacts)

@@ -990,16 +990,21 @@ def _units_human(result: dict) -> None:
     ]
     for row in lookup["candidates"]:
         source = row["source"] or {}
-        artifact = next(
-            (view["relative_path"] for view in (row["artifacts"] or {}).values() if view is not None),
-            "not emitted",
-        )
+        identity = [f"project={source.get('project_name') or 'unknown'}"] + [
+            f"{field}={source[field]}" for field in ("luid", "project_luid", "site_luid") if source.get(field)
+        ]
+        artifacts = [
+            f"{role}={view['relative_path']}" for role, view in (row["artifacts"] or {}).items() if view is not None
+        ]
         lines.append(
             f"  {row['id']} {row['state']}"
             + (f" ({row['reason']})" if row["reason"] else "")
             + f"; run={row['run'] or 'unknown'}; kind={source.get('kind', 'unknown')}; "
-            f"name={source.get('name', 'unknown')}; artifact={artifact}"
+            f"name={source.get('name', 'unknown')}"
         )
+        if source:
+            lines.append("    source: " + "; ".join(identity))
+            lines.append("    artifacts: " + ("; ".join(artifacts) or "not emitted"))
     for row in lookup["runs"]:
         if row["state"] != "indexed":
             lines.append(f"  run {row['run']}: {row['state']} ({row['reason']})")
