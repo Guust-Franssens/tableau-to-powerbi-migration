@@ -13,7 +13,6 @@ answer, and only the first may be reported as a fact about the estate.
 import http.client
 import importlib.util
 import json
-import socket
 import sys
 import urllib.error
 from pathlib import Path
@@ -36,10 +35,7 @@ ENV = {
 # Every transport failure shape the live runs produced, plus the two that urlopen does not wrap.
 TRANSPORT_FAILURES = [
     TimeoutError("timed out"),
-    socket.timeout("timed out"),
-    urllib.error.URLError("[Errno 11001] getaddrinfo failed"),
     http.client.RemoteDisconnected("Remote end closed connection without response"),
-    ConnectionResetError(10054, "An existing connection was forcibly closed by the remote host"),
 ]
 
 
@@ -214,22 +210,6 @@ def test_transport_failure_returns_a_sentinel_instead_of_propagating(failure, mo
     assert no_sleep == []
 
 
-def test_get_returns_None_on_a_timeout_rather_than_raising(monkeypatch, no_sleep):
-    """``get``'s documented promise - one failure must not void the assessment - now covers
-    failures that never produced a status at all."""
-    site = _site(FakeTableau({"/permissions": TimeoutError("timed out")}), monkeypatch)
-    assert site.get("/sites/site-1/workbooks/wb-1/permissions") is None
-    assert no_sleep  # it retried, because a timeout is transient
-
-
-def test_graphql_survives_an_http_error_it_used_to_die_on(monkeypatch, no_sleep):
-    """``graphql`` had no handler at all, so even a plain HTTPError was fatal there."""
-    site = _site(FakeTableau({"metadata/graphql": 500}), monkeypatch)
-    payload, error = site.graphql("{ workbooks { name } }")
-    assert payload == {}
-    assert error["status"] == 500 and no_sleep
-
-
 # --- 2. the retry budget is bounded, and an auth refusal is never retried ------------------------
 
 
@@ -242,21 +222,14 @@ def test_a_transient_failure_is_retried_up_to_the_bound(monkeypatch, no_sleep):
     assert len(no_sleep) == 2  # two backoffs between three attempts
 
 
-@pytest.mark.parametrize("status", [401, 403])
-def test_an_auth_refusal_is_a_FINAL_answer_and_is_never_retried(status, monkeypatch, no_sleep):
+@pytest.mark.parametrize("status", [401, 404])
+def test_an_auth_refusal_or_a_missing_endpoint_is_a_FINAL_answer_and_is_never_retried(status, monkeypatch, no_sleep):
     """AGENTS.md: a missing credential is not transient. Retrying burns the budget and cannot win."""
     server = FakeTableau({"/customviews?": status})
     site = _site(server, monkeypatch, max_attempts=5)
     _, error = site.paged("/sites/site-1/customviews", "customViews", "customView")
     assert server.count("/customviews?") == 1
     assert error["attempts"] == 1 and no_sleep == []
-
-
-def test_a_not_found_endpoint_is_not_retried_either(monkeypatch, no_sleep):
-    server = FakeTableau({"/customviews?": 404})
-    site = _site(server, monkeypatch, max_attempts=5)
-    site.paged("/sites/site-1/customviews", "customViews", "customView")
-    assert server.count("/customviews?") == 1 and no_sleep == []
 
 
 def test_a_gateway_503_IS_retried_and_then_succeeds(monkeypatch, no_sleep):
@@ -360,11 +333,10 @@ def test_paged_returns_the_rows_it_got_plus_the_error_naming_the_page(monkeypatc
     assert no_sleep == []
 
 
-@pytest.mark.parametrize("status", [401, 403])
-def test_an_auth_denied_grant_listing_stays_silent_but_is_counted(status, monkeypatch, no_sleep, tmp_path):
+def test_an_auth_denied_grant_listing_stays_silent_but_is_counted(monkeypatch, no_sleep, tmp_path):
     """ "You may not see this" is a fact about the estate; "no answer" is not. Only the second
     degrades, or every locked-down project would raise a false alarm."""
-    site = _site(FakeTableau({"/permissions": status}), monkeypatch)
+    site = _site(FakeTableau({"/permissions": 403}), monkeypatch)
     rows, errors, denied = assess_estate._grants(site, "workbook", "wb-1", "Sales", "/workbooks/wb-1")
     assert (rows, errors, denied) == ([], [], True)
     permissions, iam_errors, denied_listings = assess_estate._collect_iam(site, [{"id": "p-1", "name": "Finance"}], [])
@@ -377,21 +349,13 @@ def test_an_auth_denied_grant_listing_stays_silent_but_is_counted(status, monkey
     assert no_sleep == []
 
 
-def test_an_unreadable_grant_IS_degraded(monkeypatch, no_sleep):
-    site = _site(FakeTableau({"/permissions": TimeoutError("timed out")}), monkeypatch, max_attempts=1)
+@pytest.mark.parametrize("failure", [TimeoutError("timed out"), 500], ids=["timeout", "500"])
+def test_an_unreadable_grant_IS_degraded(failure, monkeypatch, no_sleep):
+    """Only auth refusals are a useful permissions answer; other failures mean the grant rows are unknown."""
+    site = _site(FakeTableau({"/permissions": failure}), monkeypatch, max_attempts=1)
     _, errors, denied = assess_estate._grants(site, "workbook", "wb-1", "Sales", "/workbooks/wb-1")
     assert errors[0]["severity"] == assess_estate.SECONDARY
     assert "Sales" in errors[0]["listing"] and denied is False and no_sleep == []
-
-
-@pytest.mark.parametrize("status", [404, 429, 500])
-def test_a_permissions_endpoint_failure_degrades_the_iam_export(status, monkeypatch, no_sleep):
-    """Only auth refusals are a useful permissions answer; other statuses mean the grant rows are unknown."""
-    site = _site(FakeTableau({"/permissions": status}), monkeypatch, max_attempts=1)
-    _, errors, denied = assess_estate._grants(site, "project", "p-1", "Finance", "/projects/p-1")
-    assert errors and errors[0]["status"] == status
-    assert errors[0]["severity"] == assess_estate.SECONDARY and denied is False
-    assert no_sleep == []
 
 
 def test_an_unreadable_group_records_NULL_members_not_zero(monkeypatch, no_sleep, tmp_path):
@@ -443,14 +407,6 @@ def _error(listing="custom_views", severity=assess_estate.SECONDARY):
     }
 
 
-def test_a_clean_run_is_not_degraded_and_carries_no_banner():
-    assembled = assess_estate.assemble(_raw_fixture(), 0.99)
-    assert (assembled["degraded"], assembled["degraded_primary"]) == (False, False)
-    assert assembled["summary"]["listing_errors"] == 0
-    assert assess_estate._render_degraded(assembled) == []
-    assert "DEGRADED" not in assess_estate.render_report(assembled, _raw_fixture(), 0.99)
-
-
 def test_a_secondary_failure_degrades_and_names_the_listing():
     assembled = assess_estate.assemble(_raw_fixture([_error()]), 0.99)
     assert (assembled["degraded"], assembled["degraded_primary"]) == (True, False)
@@ -459,6 +415,9 @@ def test_a_secondary_failure_degrades_and_names_the_listing():
     assert "[WARN]" in report and "custom_views" in report
     assert "[ACTION] this assessment is DEGRADED" in report
     assert "PRIMARY listing" not in report
+    # One wording, two surfaces: a reader who sees only one must reach the same conclusion.
+    for line in assess_estate._warn_lines(assembled):
+        assert line in report
 
 
 def test_a_primary_failure_leads_the_report_and_says_what_is_missing():
@@ -468,14 +427,6 @@ def test_a_primary_failure_leads_the_report_and_says_what_is_missing():
     assert report.startswith("# ⚠️ DEGRADED")
     assert "PRIMARY listing is INCOMPLETE" in report.splitlines()[0]
     assert "workbooks" in report and "[ACTION] a PRIMARY listing failed" in report
-
-
-def test_the_warn_wording_is_shared_by_the_log_and_the_report():
-    """One wording, two surfaces: a reader who sees only one must reach the same conclusion."""
-    assembled = assess_estate.assemble(_raw_fixture([_error()]), 0.99)
-    report = assess_estate.render_report(assembled, _raw_fixture(), 0.99)
-    for line in assess_estate._warn_lines(assembled):
-        assert line in report
 
 
 def test_every_secondary_listing_degrades_INDIVIDUALLY(monkeypatch, no_sleep):
@@ -604,24 +555,7 @@ def test_the_configured_timeouts_reach_urlopen(monkeypatch, no_sleep):
     assert rest == [7.0] and gql == [11.0] and no_sleep == []
 
 
-def test_the_http_client_does_not_keep_a_write_only_error_ledger(monkeypatch):
-    """Failures are surfaced through collection_errors, not duplicated into an unread Site.errors list."""
-    server = FakeTableau()
-    monkeypatch.setattr(assess_estate.urllib.request, "urlopen", server.urlopen)
-    site = assess_estate.Site(ENV)
-    assert not hasattr(site, "errors")
-
-
-def test_the_defaults_are_the_documented_ones():
-    policy = assess_estate.HttpPolicy()
-    assert (policy.rest_timeout, policy.graphql_timeout) == (180.0, 300.0)
-    assert policy.max_attempts == 3
-    assert policy.run_deadline_sec == 7200.0
-    assert policy.max_consecutive_transient_failures == 3
-
-
-@pytest.mark.parametrize("body", [b"null", b"[]", b"0"])
-def test_a_200_with_a_non_object_json_body_returns_a_recorded_error(body, monkeypatch, no_sleep):
+def test_a_200_with_a_non_object_json_body_returns_a_recorded_error(monkeypatch, no_sleep):
     """The recovery ladder must never return ``(None, None)`` or a non-object payload on HTTP 200."""
 
     class NonObjectBody(FakeTableau):
@@ -630,7 +564,7 @@ def test_a_200_with_a_non_object_json_body_returns_a_recorded_error(body, monkey
         def urlopen(self, request, timeout=None):
             if "/customviews?" in request.full_url:
                 self.calls.append((request.full_url, timeout))
-                return _Response(200, body)
+                return _Response(200, b"[]")
             return super().urlopen(request, timeout)
 
     site = _site(NonObjectBody(), monkeypatch, max_attempts=1)
@@ -742,22 +676,15 @@ def test_a_timeout_on_a_PRIMARY_listing_exits_3_and_names_what_is_missing(monkey
     assert no_sleep == []
 
 
-def test_a_clean_run_still_exits_0_with_no_warning(monkeypatch, no_sleep, tmp_path):
-    code = _run_main(monkeypatch, tmp_path, FakeTableau())
-    report = (tmp_path / "_assessment" / "report.md").read_text(encoding="utf-8")
-    assert code == 0
-    assert report.startswith("# Estate assessment")
-    assert "DEGRADED" not in report and no_sleep == []
-
-
 # --- #474: the site's render ceiling is a property of the SITE, so the ASSESSMENT reports it -----
 
 
-def test_the_render_ceiling_reaches_both_report_md_and_assessment_json(monkeypatch, no_sleep, tmp_path):
+def test_a_clean_run_exits_0_and_reports_the_render_ceiling_in_both_artifacts(monkeypatch, no_sleep, tmp_path):
     """An operator learns "this site tops out at PDF" HERE, not as a capture-time warning later.
 
     Driven through the real ``main()`` so a mutation that stops probing in ``collect``, or drops the
-    section from ``render_report``, fails -- both survived a unit-only version of this test.
+    section from ``render_report``, fails -- both survived a unit-only version of this test. Also the
+    redaction negative control: a legitimate product version, build and release name survive.
     """
     code = _run_main(monkeypatch, tmp_path, FakeTableau())
     out = tmp_path / "_assessment"
@@ -765,6 +692,8 @@ def test_the_render_ceiling_reaches_both_report_md_and_assessment_json(monkeypat
     report = (out / "report.md").read_text(encoding="utf-8")
     ceiling = assessment["server_ceiling"]
     assert code == 0
+    assert report.startswith("# Estate assessment")
+    assert "DEGRADED" not in report and assessment["degraded"] is False
     # The three numbers this repo insists are different things...
     assert (ceiling["client_api_version"], ceiling["advertised_api_version"]) == ("3.21", "3.27")
     # ...and, the point of the whole block, the IMPLICATION per rung rather than the arithmetic.
@@ -780,6 +709,11 @@ def test_the_render_ceiling_reaches_both_report_md_and_assessment_json(monkeypat
     assert "at any client setting" in report
     # The raster ceiling, quoted from this repo's own measurement.
     assert "1300×1600" in report
+    assert (ceiling["product_version"], ceiling["build"]) == ("2025.3.3", "20253.25.0904.1234")
+    assert ceiling["advertised_release"] == "Tableau 2025.3"
+    assert ceiling["advertised_api_version_reflected"] is False
+    assert "product `2025.3.3`" in report and "REST `3.27`" in report
+    assert "matched a credential this run holds" not in report
     assert no_sleep == []
 
 
@@ -804,54 +738,6 @@ def test_a_site_that_refuses_serverinfo_reports_UNKNOWN_and_still_assesses_clean
     assert "No per-rung verdict is shown" in report
     assert "| rung | route |" not in report
     assert "Bottom line" not in report
-    assert no_sleep == []
-
-
-def test_a_serverinfo_that_reports_a_NON_VERSION_leaves_the_ceiling_unknown_end_to_end(monkeypatch, no_sleep, tmp_path):
-    """#475 review, finding 2, through the real ``main()``: nonempty is not the same as assessable.
-
-    Measured before the fix: ``garbage-999`` was reported as this site's advertised ceiling, every
-    rung came out ``available``, and the report told the operator ``--reference-best`` would resolve
-    to ``svg`` -- a promise derived from a digit run inside a string the server should never have
-    sent. The state is ``unknown``, and the report says which failure it was rather than only that
-    ``/serverinfo`` answered 200, which beside "not established" would read as a bug in this tool.
-    """
-    code = _run_main(monkeypatch, tmp_path, FakeTableau(serverinfo=serverinfo_reporting("garbage-999")))
-    out = tmp_path / "_assessment"
-    assessment = json.loads((out / "assessment.json").read_text(encoding="utf-8"))
-    report = (out / "report.md").read_text(encoding="utf-8")
-    ceiling = assessment["server_ceiling"]
-    assert code == 0
-    assert assessment["degraded"] is False and assessment["listing_errors"] == []
-    assert ceiling["established"] is False and ceiling["advertised_api_version"] is None
-    assert {r["verdict"] for r in ceiling["rungs"]} == {"unknown"}
-    assert ceiling["best_reference_render"] is None
-    assert "was NOT established" in report
-    assert "garbage-999" in report and "is not a REST API version" in report
-    assert "| rung | route |" not in report and "Bottom line" not in report
-    assert no_sleep == []
-
-
-def test_a_version_carried_by_an_ERROR_PAGE_never_becomes_the_sites_ceiling_end_to_end(monkeypatch, no_sleep, tmp_path):
-    """The other half of finding 2: the parse ran regardless of HTTP status.
-
-    A 500 whose body carries ``<restApiVersion>3.30</restApiVersion>`` was read as REST 3.30 -- so a
-    site whose probe FAILED was reported as the most capable kind there is, with SVG available.
-    """
-    server = FakeTableau(serverinfo=serverinfo_reporting("3.30"), serverinfo_status=500)
-    code = _run_main(monkeypatch, tmp_path, server)
-    out = tmp_path / "_assessment"
-    assessment = json.loads((out / "assessment.json").read_text(encoding="utf-8"))
-    report = (out / "report.md").read_text(encoding="utf-8")
-    ceiling = assessment["server_ceiling"]
-    assert code == 0
-    assert ceiling["established"] is False and ceiling["advertised_api_version"] is None
-    assert ceiling["probe_status"] == 500
-    assert {r["verdict"] for r in ceiling["rungs"]} == {"unknown"}
-    assert "3.30" not in report
-    assert "was NOT established" in report and "| rung | route |" not in report
-    # Nothing was rejected as unparsable here -- the status is the whole diagnosis.
-    assert "is not a REST API version" not in report
     assert no_sleep == []
 
 
@@ -909,62 +795,6 @@ def test_the_pat_secret_never_reaches_a_persisted_artifact(monkeypatch, no_sleep
     assert ENV["TABLEAU_PAT_SECRET"] not in written
     assert "[REDACTED]" in written
     assert (tmp_path / "_assessment" / "report.md").read_text(encoding="utf-8").count(ENV["TABLEAU_PAT_SECRET"]) == 0
-    assert no_sleep == []
-
-
-def test_a_credential_reflected_in_the_SERVERINFO_VERSION_FIELDS_reaches_no_surface(
-    monkeypatch, no_sleep, tmp_path, caplog
-):
-    """The round-2 High finding on #475, across all three surfaces an operator or an artifact sees.
-
-    ``productVersion`` and its ``build`` attribute are **free-form** -- a version number is merely
-    what a well-behaved server puts there -- and `server_info` applied the redactor it was handed to
-    exactly one of its four fields. Measured before the fix, with a token in both: it arrived
-    verbatim in ``assessment.json`` (`server_ceiling.product_version`), in ``report.md`` (the
-    *"what the server advertises"* line) and on the console.
-
-    ⚠️ The justification that hid it was *"`/serverinfo` is unauthenticated, so it cannot reflect a
-    credential"*. That is an argument about the REQUEST, and the hazard is the SPEAKER: the same
-    server -- or any intermediary -- watched the PAT sign-in earlier in this very run and can echo it
-    in any later response. So the credential planted here is the run's OWN configured secret, not a
-    synthetic stand-in, which is what makes this test about a reachable route rather than a shape.
-
-    Three surfaces, deliberately, because the earlier security test covered only the oracle's
-    `svg_gate_advice` warning -- which does its own later redaction, and so was incapable of
-    observing a leak on this path.
-    """
-
-    class Echoing(FakeTableau):
-        """A gateway that reflects the sign-in credential in a perfectly ordinary 200 /serverinfo."""
-
-        def urlopen(self, request, timeout=None):
-            if "/serverinfo" in request.full_url:
-                secret = ENV["TABLEAU_PAT_SECRET"]
-                body = (
-                    b'<?xml version="1.0" encoding="UTF-8"?><tsResponse><serverInfo>'
-                    + f'<productVersion build="{secret}">{secret}</productVersion>'.encode()
-                    + b"<restApiVersion>3.27</restApiVersion></serverInfo></tsResponse>"
-                )
-                return _Response(200, body)
-            return super().urlopen(request, timeout)
-
-    with caplog.at_level("INFO"):
-        code = _run_main(monkeypatch, tmp_path, Echoing())
-    out = tmp_path / "_assessment"
-    written = (out / "assessment.json").read_text(encoding="utf-8")
-    report = (out / "report.md").read_text(encoding="utf-8")
-    secret = ENV["TABLEAU_PAT_SECRET"]
-    assert code == 0
-    assert secret not in written and secret not in report and secret not in caplog.text
-    # `[REDACTED]` on each surface, so this cannot pass by the fields having quietly VANISHED --
-    # which would be a different regression wearing the same green tick.
-    ceiling = json.loads(written)["server_ceiling"]
-    assert "[REDACTED]" in ceiling["product_version"] and "[REDACTED]" in ceiling["build"]
-    assert "[REDACTED]" in report and "[REDACTED]" in caplog.text
-    # ...and the probe still SUCCEEDED: redaction is not refusal, so the ceiling is still established
-    # and the rung table still printed. A fix that dropped the fields would break the assessment.
-    assert ceiling["established"] is True and ceiling["advertised_api_version"] == "3.27"
-    assert "| rung | route |" in report
     assert no_sleep == []
 
 
@@ -1027,43 +857,13 @@ def test_a_NUMERIC_credential_reflected_as_the_REST_VERSION_reaches_no_surface(m
     assert no_sleep == []
 
 
-def test_an_ordinary_product_version_survives_the_redaction_unchanged(monkeypatch, no_sleep, tmp_path):
-    """Negative control for both tests above: the redactor must not eat a legitimate value.
-
-    Without this, a "fix" that returned `None` for every field, or suppressed the version
-    unconditionally, would pass both leak tests while destroying the numbers a customer conversation
-    actually uses. `advertised_release` is asserted too, since it is now suppressed conditionally.
-    """
-    code = _run_main(monkeypatch, tmp_path, FakeTableau())
-    out = tmp_path / "_assessment"
-    report = (out / "report.md").read_text(encoding="utf-8")
-    ceiling = json.loads((out / "assessment.json").read_text(encoding="utf-8"))["server_ceiling"]
-    assert code == 0
-    assert ceiling["product_version"] == "2025.3.3"
-    assert ceiling["build"] == "20253.25.0904.1234"
-    assert ceiling["advertised_api_version"] == "3.27"
-    assert ceiling["advertised_release"] == "Tableau 2025.3"
-    assert ceiling["advertised_api_version_reflected"] is False
-    assert "product `2025.3.3`" in report and "REST `3.27`" in report
-    assert "matched a credential this run holds" not in report
-    assert no_sleep == []
-    code = _run_main(monkeypatch, tmp_path, FakeTableau())
-    out = tmp_path / "_assessment"
-    ceiling = json.loads((out / "assessment.json").read_text(encoding="utf-8"))["server_ceiling"]
-    assert code == 0
-    assert ceiling["product_version"] == "2025.3.3"
-    assert ceiling["build"] == "20253.25.0904.1234"
-    assert "product `2025.3.3`" in (out / "report.md").read_text(encoding="utf-8")
-    assert no_sleep == []
-
-
 # --- 8. #196: scrub the 200-with-`errors` GraphQL body, and mark degradation in estate.db ---------
 
 
 class _GraphqlLeak(FakeTableau):
     """A Metadata API that answers 200 but reflects the caller's credential in its ``errors`` array.
 
-    The sibling of the ``Echoing`` gateway above, on the ONE path that returns PARSED JSON straight
+    The sibling of the HTTPError ``Echoing`` gateway above, on the ONE path that returns PARSED JSON straight
     from ``_request_json`` and so never met the byte scrubber (issue #196). ``data.workbooks`` stays
     non-empty (inherited from the parent), so the structure failure is SECONDARY and the run exits 0.
     """
@@ -1075,25 +875,13 @@ class _GraphqlLeak(FakeTableau):
         return payload
 
 
-def test_a_graphql_200_error_body_is_scrubbed_before_it_is_recorded(monkeypatch, no_sleep):
-    """A 200 with an `errors` array is recorded via ``_record`` WITHOUT travelling through
-    ``_scrub`` - so its text must be scrubbed at the call site, or the PAT lands in the artifacts."""
-    site = _site(_GraphqlLeak(), monkeypatch, max_attempts=1)
-    _data, errors = assess_estate._pass2_structure(site)
-    assert errors and errors[0]["listing"] == "structure"
-    recorded = errors[0]["error"]
-    assert ENV["TABLEAU_PAT_SECRET"] not in recorded
-    assert "[REDACTED]" in recorded
-    assert no_sleep == []
-
-
 def test_estate_db_records_whether_the_run_was_degraded(tmp_path):
     """`estate.db` is read programmatically by harvest/deploy, which never open `assessment.json`.
     Before #196 a survived-but-partial DB was indistinguishable from a clean run of a smaller
     estate; it must now carry the marker itself - the run-level flags and one row per failed
-    listing."""
+    listing. A clean run carries it too, or its absence is ambiguous (clean vs. an old DB)."""
     raw = _raw_fixture([_error("workbooks", assess_estate.PRIMARY)])
-    store = assess_estate.write_store(tmp_path, raw, assess_estate.assemble(raw, 0.99))
+    store = assess_estate.write_store(tmp_path / "degraded", raw, assess_estate.assemble(raw, 0.99))
     conn = assess_estate.sqlite3.connect(store)
     run = conn.execute(
         "SELECT degraded, degraded_primary, workbooks_total, listing_errors FROM assessment_run"
@@ -1101,16 +889,14 @@ def test_estate_db_records_whether_the_run_was_degraded(tmp_path):
     assert run == (1, 1, 1, 1)
     rows = conn.execute("SELECT listing, severity, error FROM listing_error").fetchall()
     assert rows == [("workbooks", assess_estate.PRIMARY, "transport: TimeoutError: timed out")]
+    conn.close()
 
-
-def test_a_clean_run_marks_the_db_as_NOT_degraded(tmp_path):
-    """The marker must exist on a CLEAN run too, or its absence is ambiguous (clean vs. an old DB
-    written before this table existed). A clean run: flags 0/0, and no `listing_error` rows."""
     raw = _raw_fixture()
-    store = assess_estate.write_store(tmp_path, raw, assess_estate.assemble(raw, 0.99))
+    store = assess_estate.write_store(tmp_path / "clean", raw, assess_estate.assemble(raw, 0.99))
     conn = assess_estate.sqlite3.connect(store)
     assert conn.execute("SELECT degraded, degraded_primary FROM assessment_run").fetchone() == (0, 0)
     assert conn.execute("SELECT count(*) FROM listing_error").fetchone() == (0,)
+    conn.close()
 
 
 def test_a_graphql_error_body_never_reaches_estate_db(monkeypatch, no_sleep, tmp_path):

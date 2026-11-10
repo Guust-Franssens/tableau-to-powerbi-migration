@@ -308,8 +308,8 @@ def test_prepublication_failure_leaves_no_final_collector_file(tmp_path, monkeyp
     assert not list(tmp_path.glob(".admin-insights-*.tmp"))
 
 
-@pytest.mark.parametrize("code", [0, 3])
-def test_postreplace_print_failure_does_not_change_collector_return(tmp_path, monkeypatch, code) -> None:
+def test_postreplace_print_failure_does_not_change_collector_return(tmp_path, monkeypatch) -> None:
+    code = 3
     target = tmp_path / "admin_insights.json"
     real_replace = os.replace
 

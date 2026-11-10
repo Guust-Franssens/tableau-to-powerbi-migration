@@ -343,6 +343,10 @@ def test_full_evidence_html_is_deterministic_and_matches_expected(tmp_path: Path
     assert f'content="{report.evidence_state(root)["evidence_sha256"]}"'.encode() in first
     assert report.evidence_state(root)["report"] == "current"
     _parser_assertions(first)
+    # Status reads only: changed evidence makes the report stale without re-rendering it.
+    (root / "admin_insights.json").write_text(json.dumps(_collector(outcome="unavailable", reason="vds_unavailable")))
+    assert report.evidence_state(root)["report"] == "stale"
+    assert (root / "assessment-report.html").read_bytes() == first
 
 
 def test_local_constants_are_pinned_to_existing_producers() -> None:
@@ -457,49 +461,29 @@ def test_secondary_degradation_is_disclosed_and_withholds_no_consumer_claim(tmp_
     assert status["assessment"]["assessment"] == "established"
 
 
-def test_failed_grant_collection_marks_zero_permission_rows_as_partial(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cause", ["failed_grant_listing", "auth_denied_grant_listing"])
+def test_a_failed_or_denied_grant_listing_marks_zero_permission_rows_as_partial(tmp_path: Path, cause: str) -> None:
     root = _write_full(tmp_path / "assessment", collector=_collector())
-    assessment_path = root / "assessment.json"
-    assessment = json.loads(assessment_path.read_text())
-    grant_error = {"listing": "workbook grants: PRIVATE-OBJECT", "severity": "secondary", "status": 503}
-    assessment["listing_errors"] = [grant_error]
-    assessment["degraded"] = True
-    assessment["summary"]["listing_errors"] = 1
-    assessment["summary"]["degraded"] = True
-    assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
     with sqlite3.connect(root / "estate.db") as connection:
         connection.execute("DELETE FROM permission")
-        connection.execute("UPDATE assessment_run SET degraded=1, listing_errors=1")
-        connection.execute(
-            "INSERT INTO listing_error (listing, severity, status) VALUES (?, ?, ?)",
-            (grant_error["listing"], grant_error["severity"], grant_error["status"]),
-        )
+        if cause == "auth_denied_grant_listing":
+            connection.execute("UPDATE permission_collection SET denied_listings=1")
+        else:
+            grant_error = ("workbook grants: PRIVATE-OBJECT", "secondary", 503)
+            connection.execute("UPDATE assessment_run SET degraded=1, listing_errors=1")
+            connection.execute("INSERT INTO listing_error (listing, severity, status) VALUES (?, ?, ?)", grant_error)
+    if cause == "failed_grant_listing":
+        assessment_path = root / "assessment.json"
+        assessment = json.loads(assessment_path.read_text())
+        assessment["listing_errors"] = [dict(zip(("listing", "severity", "status"), grant_error, strict=True))]
+        assessment["degraded"] = assessment["summary"]["degraded"] = True
+        assessment["summary"]["listing_errors"] = 1
+        assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
 
     assert report.main(["--run", str(root)]) == 0
     html = (root / "assessment-report.html").read_text(encoding="utf-8")
     assert 'data-metric="permission entries" data-completeness="partial"><b>0 observed</b>' in html
     assert "permission entries (partial)" in html
-
-
-def test_auth_denied_grant_listing_makes_permission_count_partial(tmp_path: Path) -> None:
-    root = _write_full(tmp_path / "assessment", collector=_collector())
-    with sqlite3.connect(root / "estate.db") as connection:
-        connection.execute("DELETE FROM permission")
-        connection.execute("UPDATE permission_collection SET denied_listings=1")
-
-    assert report.main(["--run", str(root)]) == 0
-    html = (root / "assessment-report.html").read_text(encoding="utf-8")
-    assert 'data-metric="permission entries" data-completeness="partial"><b>0 observed</b>' in html
-
-
-def test_missing_permission_collection_evidence_is_not_assumed_complete(tmp_path: Path) -> None:
-    root = _write_full(tmp_path / "assessment", collector=_collector())
-    with sqlite3.connect(root / "estate.db") as connection:
-        connection.execute("DROP TABLE permission_collection")
-
-    assert report.main(["--run", str(root)]) == 0
-    html = (root / "assessment-report.html").read_text(encoding="utf-8")
-    assert 'data-metric="permission entries" data-completeness="unknown"><b>unknown</b>' in html
 
 
 def test_primary_grant_listing_name_is_redacted_from_report(tmp_path: Path) -> None:
@@ -544,15 +528,6 @@ def test_script_shaped_source_text_is_escaped_and_html_is_current(tmp_path: Path
     assert "<script>alert" not in rendered
     assert "&lt;script&gt;" in rendered and "&lt;!--" in rendered
     assert report.evidence_state(root)["report"] == "current"
-
-
-def test_report_digest_detects_stale_bytes_and_status_reads_only(tmp_path: Path) -> None:
-    root = _write_full(tmp_path / "assessment", collector=_collector())
-    assert report.main(["--run", str(root)]) == 0
-    before = (root / "assessment-report.html").read_bytes()
-    (root / "admin_insights.json").write_text(json.dumps(_collector(outcome="unavailable", reason="vds_unavailable")))
-    assert report.evidence_state(root)["report"] == "stale"
-    assert (root / "assessment-report.html").read_bytes() == before
 
 
 def test_prepublication_failure_leaves_no_final_report_or_temporary_file(tmp_path: Path, monkeypatch) -> None:
@@ -693,11 +668,12 @@ def test_long_lists_are_top_n_with_pointer_and_empty_tables_say_so(tmp_path: Pat
     assert "<th>Locked project</th>" not in text
 
 
-def test_unknown_permission_kpi_states_reason_without_repeating_unknown(tmp_path: Path) -> None:
+def test_missing_permission_collection_evidence_is_unknown_and_states_why(tmp_path: Path) -> None:
     root = _write_full(tmp_path / "assessment", collector=_collector())
     with sqlite3.connect(root / "estate.db") as connection:
         connection.execute("DROP TABLE permission_collection")
-    _, parsed = _render_tables(root)
+    text, parsed = _render_tables(root)
+    assert 'data-metric="permission entries" data-completeness="unknown"><b>unknown</b>' in text
     assert parsed.labels["permission entries"] == "permission entries (collection not recorded)"
 
 
