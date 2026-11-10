@@ -1,8 +1,6 @@
 """
 purpose: collect an allowlisted Admin Insights event aggregate for assessment-only runs.
 usage:   python -B scripts/admin_insights_collector.py --env <env> --db <estate.db> --out <json>
-internal: true
-internal-reason: invoked only as the third child of the assessment-only front door.
 """
 
 from __future__ import annotations

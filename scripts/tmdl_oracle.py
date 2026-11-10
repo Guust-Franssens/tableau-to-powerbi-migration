@@ -2,9 +2,6 @@
 purpose: TMDL oracle driver - ask the real parser (AMO TmdlSerializer) whether a semantic model
          loads at all, which is the failure issue #254 actually reported.
 usage:   imported by scripts/check_datamodel.py; run that, not this.
-internal: true
-internal-reason: a library with no CLI of its own. `python scripts/check_datamodel.py` is the
-                 agent-facing entry point and already carries this gate.
 
 Why an oracle instead of a scanner
 ----------------------------------

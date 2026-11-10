@@ -1,7 +1,5 @@
 """
 purpose: select the Copilot configuration home without checking or substituting paths.
-internal: true
-internal-reason: shared path-only library for toolkit consumers, not an agent-facing CLI.
 """
 
 import os

@@ -19,7 +19,7 @@ Migration-start preflight is **plain**; no tooling upgrades mid-migration.
 
 ## Starting a migration — the DISPATCHER's job
 
-1. **Start** `python scripts\start_migration.py` for the requested scope ([arguments](scripts/README.md)).
+1. **Start** `python scripts\start_migration.py` for the requested scope ([arguments](scripts/README.md#run-setup)).
    It allocates and prints the **absolute run folder**: repo-local `_runs` by default, `--runs-parent` opt-in.
    Do not pre-allocate another run or silently widen scope.
 2. **Ask once**, reusing answers: plan/order/destination; autonomy (`standard`); fidelity bar including
@@ -63,7 +63,7 @@ Credentials belong in ignored `.env`/environment, not CLI secrets. Never commit 
 sources, rows, captures, identifiable briefs or diagnostics; verify in-repo output paths are ignored.
 [SECURITY.md](SECURITY.md) owns privacy; route defects privately before sanitized public reporting.
 
-Use `scripts/engine_source.py` for the canonical engine; its plugin remains read-only. Never partly rerun
+The front door resolves the canonical engine; its plugin remains read-only. Never partly rerun
 an existing bundle or overwrite hand-authoring ([rerun rules](docs/operator-runbook.md#engine-model-baseline-availability)).
 Capture while authenticated: imagery is not an emission prerequisite; agentic work requires reference readiness.
 Oracle default-state images remain layout/text only. The entry authority owns reference limits.
@@ -72,7 +72,7 @@ parallel work/crash recovery; PID-scoped cleanup remains below.
 
 **Expert/manual fallback:** local folders, `.twb/.twbx`, `.tds/.tdsx` or explicit manual operation use the
 [runbook](docs/operator-runbook.md) / [one-workbook guide](docs/start-with-one-workbook.md).
-Only experts call `scripts/work_dirs.py` directly; use its paths, not legacy examples.
+Only experts call [advanced scripts](docs/agent-capability-wiring.md#script-capability-inventory) directly; use their paths, not legacy examples.
 [Path limits](docs/windows-path-limits.md) owns recovery.
 
 Navigate: [docs/INDEX.md](docs/INDEX.md). Contributor policy: [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -4,13 +4,11 @@ This registry is the durable prompt to wire shipped capabilities into agent-reac
 
 The gate does **not** count this registry as wiring. It scans only agent-reachable files, strips fenced code blocks and HTML comments, and requires the token below in visible prose in the named file. The suggested wording is guidance for failures, not a verbatim string to match.
 
-It also derives the runnable script capability inventory from tracked `scripts/*.py` files whose module
-docstring declares a `usage:` line. Every such script must either be named in agent-reachable script
-guidance (`AGENTS.md`, `docs/INDEX.md`, `scripts/README.md`, or an agent persona) or explicitly mark
-itself as internal with both `internal: true` and an `internal-reason:` line in that docstring. This
-keeps three states distinct: if the script scan section below is absent the scan was **not evaluated**;
-if it is present and no script is missing wiring, the discovered missing set is present-but-empty; if
-it is present and scripts are missing, the gate names them.
+It also gives every tracked `scripts/*.py` and `scripts/*.ps1` file exactly one tier below. **Core**
+scripts are the ordinary migration route and must be named in `AGENTS.md` or `docs/INDEX.md`.
+**Advanced** scripts must not be named in `AGENTS.md`, `.github/copilot-instructions.md` or
+`docs/INDEX.md`; personas and skills may name them. **Internal** scripts are also kept out of personas.
+These script rules ignore HTML comments but read fenced code, because agents read fences.
 
 ## Capability registry
 
@@ -26,119 +24,129 @@ it is present and scripts are missing, the gate names them.
 
 ## Script capability inventory
 
-The gate owns this inventory mechanically rather than as another hand-maintained table. This heading is
-the "script scan was evaluated" marker. Delete it and the gate fails closed instead of treating an
-absent scan as an empty result. Every tracked `scripts/*.py` file with a module-docstring `usage:` line
-must appear below unless the script docstring marks it `internal: true` with an `internal-reason:`.
+This heading is the "script scan was evaluated" marker: delete it and the gate fails closed. Reasons
+appear only where the tier is not obvious. `scripts/README.md` remains the advanced reference.
 
-| Script | Status | Reason |
+| Script | Tier | Reason |
 |---|---|---|
-| `scripts/t2p.py` | `agent-facing` | Opt-in narrow doctor/start/status pilot with read-only `units` lookup; documented in `scripts/README.md`, not a replacement for direct scripts or gates. |
-| `scripts/assess_estate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/build_plugin.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/build_reconcile_items.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/build_synthetic_reference.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/bundle_corpus.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/capture_powerbi_pages.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/capture_tableau_oracle.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/capture_tableau_reference.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_agent_capabilities.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_ai_readiness.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_blank_placeholders.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_bundle_sources.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_connection_fidelity.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_datamodel.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_desktop_orphans.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_empty_model.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_engine_receipts.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_field_bindings.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_identity_normalization.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_m_syntax.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_migration_progress.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_navigation_index.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_path_ceiling.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_pbir_layout.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_pbir_valid.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_reference_readiness.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_relationship_health.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_sqlproxy_connections.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_stub_measures.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/check_unit.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/classify_harvest_hardness.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/connection_target.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/connections_manifest.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/current_artifact_revision.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/dax_oracle_server.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/declare_generated_edit.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/deploy_estate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/derive_connection_templates.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/detect_occlusion.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/disarm_credential_gate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/engine_source.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/extract_hyper_data.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/extract_twb_thumbnails.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/extract_twbx_result_cache.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/generated_edit_declarations.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/group_oracle_by_workbook.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/harvest_engine_gaps.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/harvest_gap_report.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/harvest_gap_shapes.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/harvest_gap_trees.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/harvest_estate_assets.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/harvest_tableau_public.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/host_paths.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/iteration_receipt.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/make_carousel.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/make_live_source_fixture.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/make_refresh_fixture.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/make_seed_workbook.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/make_showcase.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/manifest_scope.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/migration_bundle.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/migration_cost_report.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/object_identity.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/package_filesystem.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/package_role_identity.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/package_unit.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/parse_tableau.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/path_flavour.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/preflight_source_credentials.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/prompt_injection.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/probe_desktop_query.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/promote_unit.py` | `agent-facing` | Named in `scripts/README.md` and routed from `docs/INDEX.md` as the last step for a migration unit. |
-| `scripts/provision_tableau_estate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/published_datasource_registry.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/read_handover.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/reference_evidence.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/refresh_pbip_model.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/render_excalidraw.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/resolve_datasource_target.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/run_engine_survey.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/run_estate.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/run_status.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/start_migration.py` | `agent-facing` | Named in `scripts/README.md` as the recommended live-site pre-bundle entry point. |
-| `scripts/set_ai_instructions.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/set_data_folder.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/skill_plugin_source.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/stamp_tableau_provenance.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/sync_agent_conventions.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/sync_engine_plugin.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/sync_installed_skills.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/tableau_capture_policy.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/tableau_env.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/tableau_http.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/tableau_lineage.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/tableau_oracle_manifest.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/tableau_payload_facts.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/tableau_render_capability.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/tableau_luid_census.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/tableau_view_types.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/trace_customer_text.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/transpile_tableau_calc.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/unit_ids.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/validate_spec.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/verify_bindings.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
-| `scripts/work_dirs.py` | `agent-facing` | Named in `scripts/README.md`, which `docs/INDEX.md` routes agents to for script selection. |
+| `scripts/preflight.ps1` | `core` | |
+| `scripts/t2p.py` | `core` | Opt-in pilot (`docs/t2p-pilot-plan.md`); direct calls stay authoritative. |
+| `scripts/start_migration.py` | `core` | |
+| `scripts/package_unit.py` | `core` | |
+| `scripts/set_data_folder.py` | `core` | |
+| `scripts/check_reference_readiness.py` | `core` | |
+| `scripts/read_handover.py` | `core` | |
+| `scripts/declare_generated_edit.py` | `core` | |
+| `scripts/check_unit.py` | `core` | |
+| `scripts/promote_unit.py` | `core` | |
+| `scripts/assess_estate.py` | `advanced` | |
+| `scripts/build_migration_feedback.py` | `advanced` | Run by the migration-feedback skill. |
+| `scripts/build_plugin.py` | `advanced` | |
+| `scripts/build_reconcile_items.py` | `advanced` | |
+| `scripts/build_synthetic_reference.py` | `advanced` | |
+| `scripts/capture_powerbi_pages.py` | `advanced` | |
+| `scripts/capture_tableau_oracle.py` | `advanced` | |
+| `scripts/capture_tableau_reference.py` | `advanced` | |
+| `scripts/check_agent_capabilities.py` | `advanced` | CI gate for this registry. |
+| `scripts/check_ai_readiness.py` | `advanced` | |
+| `scripts/check_blank_placeholders.py` | `advanced` | |
+| `scripts/check_bundle_sources.py` | `advanced` | |
+| `scripts/check_connection_fidelity.py` | `advanced` | |
+| `scripts/check_datamodel.py` | `advanced` | |
+| `scripts/check_desktop_orphans.py` | `advanced` | |
+| `scripts/check_empty_model.py` | `advanced` | |
+| `scripts/check_engine_receipts.py` | `advanced` | |
+| `scripts/check_field_bindings.py` | `advanced` | |
+| `scripts/check_identity_normalization.py` | `advanced` | |
+| `scripts/check_m_syntax.py` | `advanced` | Compatibility alias. |
+| `scripts/check_migration_progress.py` | `advanced` | Orchestrator diagnostic that personas name. |
+| `scripts/check_navigation_index.py` | `advanced` | CI gate for `docs/INDEX.md`. |
+| `scripts/check_path_ceiling.py` | `advanced` | |
+| `scripts/check_pbir_layout.py` | `advanced` | |
+| `scripts/check_pbir_valid.py` | `advanced` | |
+| `scripts/check_relationship_health.py` | `advanced` | |
+| `scripts/check_sqlproxy_connections.py` | `advanced` | |
+| `scripts/check_stub_measures.py` | `advanced` | |
+| `scripts/classify_harvest_hardness.py` | `advanced` | |
+| `scripts/connections_manifest.py` | `advanced` | |
+| `scripts/dax_oracle_server.py` | `advanced` | |
+| `scripts/deploy_estate.py` | `advanced` | Deploy only by separate, explicit agreement. |
+| `scripts/derive_connection_templates.py` | `advanced` | |
+| `scripts/detect_occlusion.py` | `advanced` | |
+| `scripts/disarm_credential_gate.py` | `advanced` | |
+| `scripts/engine_source.py` | `advanced` | |
+| `scripts/extract_hyper_data.py` | `advanced` | |
+| `scripts/extract_twb_thumbnails.py` | `advanced` | |
+| `scripts/extract_twbx_result_cache.py` | `advanced` | |
+| `scripts/group_oracle_by_workbook.py` | `advanced` | |
+| `scripts/harvest_engine_gaps.py` | `advanced` | |
+| `scripts/harvest_estate_assets.py` | `advanced` | |
+| `scripts/harvest_tableau_public.py` | `advanced` | |
+| `scripts/make_carousel.py` | `advanced` | |
+| `scripts/make_live_source_fixture.py` | `advanced` | |
+| `scripts/make_refresh_fixture.py` | `advanced` | |
+| `scripts/make_seed_workbook.py` | `advanced` | |
+| `scripts/make_showcase.py` | `advanced` | |
+| `scripts/migration_cost_report.py` | `advanced` | |
+| `scripts/parse_tableau.py` | `advanced` | |
+| `scripts/preflight_source_credentials.py` | `advanced` | |
+| `scripts/probe_desktop_query.py` | `advanced` | Skill shim. |
+| `scripts/provision_tableau_estate.py` | `advanced` | |
+| `scripts/published_datasource_registry.py` | `advanced` | |
+| `scripts/refresh_pbip_model.py` | `advanced` | |
+| `scripts/render_excalidraw.py` | `advanced` | |
+| `scripts/resolve_datasource_target.py` | `advanced` | |
+| `scripts/run_engine_survey.py` | `advanced` | |
+| `scripts/run_estate.py` | `advanced` | |
+| `scripts/run_status.py` | `advanced` | Reached through `t2p status`. |
+| `scripts/set_ai_instructions.py` | `advanced` | |
+| `scripts/skill_plugin_source.py` | `advanced` | |
+| `scripts/stamp_tableau_provenance.py` | `advanced` | |
+| `scripts/sync_agent_conventions.py` | `advanced` | |
+| `scripts/sync_engine_plugin.py` | `advanced` | |
+| `scripts/sync_installed_skills.py` | `advanced` | |
+| `scripts/tableau_lineage.py` | `advanced` | |
+| `scripts/tableau_luid_census.py` | `advanced` | |
+| `scripts/tableau_render_capability.py` | `advanced` | |
+| `scripts/trace_customer_text.py` | `advanced` | |
+| `scripts/transpile_tableau_calc.py` | `advanced` | |
+| `scripts/update_playbook_plugin.ps1` | `advanced` | |
+| `scripts/validate_spec.py` | `advanced` | |
+| `scripts/verify_bindings.py` | `advanced` | |
+| `scripts/work_dirs.py` | `advanced` | |
+| `scripts/admin_insights_collector.py` | `internal` | Invoked only as the third child of the assessment-only front door. |
+| `scripts/assessment_report.py` | `internal` | Invoked only as the fourth child of the assessment-only front door. |
+| `scripts/bundle_corpus.py` | `internal` | |
+| `scripts/connection_target.py` | `internal` | |
+| `scripts/copilot_home.py` | `internal` | Shared path-only library for toolkit consumers. |
+| `scripts/current_artifact_revision.py` | `internal` | |
+| `scripts/generated_edit_declarations.py` | `internal` | |
+| `scripts/harvest_gap_report.py` | `internal` | |
+| `scripts/harvest_gap_shapes.py` | `internal` | |
+| `scripts/harvest_gap_trees.py` | `internal` | |
+| `scripts/host_paths.py` | `internal` | |
+| `scripts/issue_intake_guard.py` | `internal` | Actions-only helper for `.github/workflows/issue-intake.md`, not a migration command. |
+| `scripts/iteration_receipt.py` | `internal` | |
+| `scripts/manifest_scope.py` | `internal` | |
+| `scripts/migration_bundle.py` | `internal` | |
+| `scripts/object_identity.py` | `internal` | |
+| `scripts/package_data_access.py` | `internal` | |
+| `scripts/package_filesystem.py` | `internal` | |
+| `scripts/package_role_identity.py` | `internal` | |
+| `scripts/package_source.py` | `internal` | Library; only the readiness check consumes this projection. |
+| `scripts/path_flavour.py` | `internal` | |
+| `scripts/probe_desktop_credential.ps1` | `internal` | Retired; always refuses. |
+| `scripts/prompt_injection.py` | `internal` | |
+| `scripts/reference_evidence.py` | `internal` | |
+| `scripts/tableau_capture_policy.py` | `internal` | |
+| `scripts/tableau_env.py` | `internal` | |
+| `scripts/tableau_http.py` | `internal` | |
+| `scripts/tableau_oracle_manifest.py` | `internal` | |
+| `scripts/tableau_payload_facts.py` | `internal` | |
+| `scripts/tableau_view_types.py` | `internal` | |
+| `scripts/tmdl_checks.py` | `internal` | Library; agents run `check_datamodel.py`, which re-exports it. |
+| `scripts/tmdl_oracle.py` | `internal` | Library; agents run `check_datamodel.py`, which carries this gate. |
+| `scripts/unit_ids.py` | `internal` | Library behind `t2p units`. |
 
 ## Follow-up: generated flag inventory
 

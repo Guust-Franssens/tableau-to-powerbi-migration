@@ -1,8 +1,6 @@
 """
 purpose: project the exact package-local Tableau source from a root-bound S1/S2 handoff, without I/O.
 usage:   resolve_verified_package_source(role_result.source_handoff())
-internal: true
-internal-reason: only check_reference_readiness consumes this projection; S2 supplies the authority.
 """
 
 from __future__ import annotations

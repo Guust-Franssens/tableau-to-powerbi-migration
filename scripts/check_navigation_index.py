@@ -50,15 +50,13 @@ def _git_files() -> set[str]:
 def _is_candidate(path: str) -> bool:
     """Whether a file is in the index's promised coverage universe.
 
-    Inclusion rule: all Markdown knowledge/navigation files, all Power BI visual-cookbook JSON fixtures,
-    and every `scripts/check_*.py` gate are eligible. Candidates must be either indexed exactly once or
+    Inclusion rule: all Markdown knowledge/navigation files and all Power BI visual-cookbook JSON fixtures
+    are eligible. Candidates must be either indexed exactly once or
     explicitly excluded exactly once with a reason in docs/INDEX.md.
     """
     if path.endswith(".md"):
         return True
-    if path.startswith(".github/pbi.kb/") and path.endswith(".json"):
-        return True
-    return path.startswith("scripts/check_") and path.endswith(".py")
+    return path.startswith(".github/pbi.kb/") and path.endswith(".json")
 
 
 def eligible_files() -> set[str]:

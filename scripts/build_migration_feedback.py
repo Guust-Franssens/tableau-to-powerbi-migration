@@ -2,8 +2,6 @@
 purpose: Validate recorded migration feedback and build a private, offline evidence bundle.
 usage:   python -B scripts/build_migration_feedback.py --input <request.json>
          [--run <absolute-run>] [--out <absolute-dir>]
-internal: true
-internal-reason: implementation helper for the migration-feedback skill, not a diagnostics or readiness exporter.
 
 The request is authored by the session, not extracted from source text. Evidence is pinned by
 size, digest and filesystem identity, held through assembly, and never executed.
