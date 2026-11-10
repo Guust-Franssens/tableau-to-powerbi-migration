@@ -29,6 +29,7 @@ PROJECT_CUSTOMER = "project-customer"
 DS = ["ds-events", "ds-shared", "ds-other"]
 NAMES = ["Book A", "Book B", "Book C", "Book D", "Book E"]
 VIEWS_LIFETIME = [500, 300, 100, 60, 40]
+WIDE_LABEL = "日本語のワークブック名前が長いのですがどうなるでしょうか"
 
 EXPECTED_FULL = {
     "counts": {"workbooks": 5, "views": 7, "datasources": 3, "projects": 2},
@@ -424,6 +425,7 @@ def test_primary_degradation_is_partial_and_does_not_make_zero_complexity_a_meas
     assert "INCOMPLETE" in text
     assert 'data-state="partial" data-reason="degraded_primary"' in text
     assert 'data-metric="permission entries" data-completeness="unknown"><b>unknown</b>' in text
+    assert "<span>permission entries (primary listing degraded)</span>" in text
     assert "500</td><td>unknown" in text
     assert report.evidence_state(root)["admin_insights_reason"] == "degraded_primary"
 
@@ -667,6 +669,7 @@ def test_tables_align_headers_show_percent_shares_and_label_every_kpi(tmp_path: 
     assert all(label.strip() for label in parsed.labels.values())
     assert parsed.labels["cut80"] != "cut80"
     assert parsed.labels["dependency-edges"] != "dependency-edges"
+    assert "full list is in section 8" not in text
     scatter = re.search(r'<svg[^>]*aria-label="Lifetime views versus complexity".*?</svg>', text).group(0)
     for axis_text in (">Lifetime views</text>", ">Complexity</text>", ">500</text>", ">10</text>"):
         assert axis_text in scatter
@@ -713,6 +716,9 @@ def test_pareto_bars_are_lifetime_views_inside_a_fitted_viewbox() -> None:
     assert all(x >= 200 for x, *_ in rects)
     assert "<title>Workbook number 0 with a long name: 40 lifetime views</title>" in svg
     assert ">Workbook number 0 with a lo...</text>" in svg
+    assert ">日本語のワークブック名前が...</text>" in report._pareto_svg(  # pylint: disable=protected-access
+        [{"name": WIDE_LABEL, "views_lifetime": 1}]
+    )
 
 
 def test_browser_file_render_and_interactions(tmp_path: Path) -> None:
@@ -763,6 +769,25 @@ def test_browser_file_render_and_interactions(tmp_path: Path) -> None:
         )
         page.locator("#tier-filter").select_option("Low")
         assert page.locator("#inventory tbody tr:not([hidden])").count() == EXPECTED_FULL["tiers"]["Low"]
+        rows = [{"name": name, "views_lifetime": 10} for name in (WIDE_LABEL, "W" * 40)]
+        page.set_content(
+            "<style>svg text{font:12px system-ui,sans-serif}</style>" + report._pareto_svg(rows)  # pylint: disable=protected-access
+        )
+        # Visible right edge of each label: its box, cut at the clip region when a clip is applied.
+        label_edges, bar_start = page.evaluate(
+            """() => {
+                const svg = document.querySelector('svg');
+                const edges = [...svg.querySelectorAll('text[x="8"]')].map(t => {
+                    const box = t.getBBox();
+                    const ref = getComputedStyle(t).clipPath.match(/#([^"')]+)/);
+                    const clip = ref ? svg.getElementById(ref[1]).firstElementChild.getBBox() : null;
+                    return Math.min(box.x + box.width, clip ? clip.x + clip.width : Infinity);
+                });
+                return [edges, Math.min(...[...svg.querySelectorAll('rect')].map(r => r.x.baseVal.value))];
+            }"""
+        )
+        assert len(label_edges) == 2
+        assert all(edge <= bar_start for edge in label_edges), (label_edges, bar_start)
         assert not requests
         assert not page_errors
         assert not console_errors

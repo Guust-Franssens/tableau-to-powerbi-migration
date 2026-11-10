@@ -19,6 +19,7 @@ import sqlite3
 import sys
 import tempfile
 from typing import Any
+import unicodedata
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tableau_lineage import load_survey  # noqa: E402  # pylint: disable=wrong-import-position
@@ -431,9 +432,22 @@ def _percent(share: Any) -> str:
     return "" if share is None else f"{float(share) * 100:.1f}%"
 
 
+def _label_units(char: str) -> int:
+    return 2 if unicodedata.east_asian_width(char) in ("W", "F") else 1
+
+
 def _truncate(value: Any) -> str:
+    """Shorten by display width (wide/fullwidth characters count double); the SVG clip still bounds glyph width."""
     text = "" if value is None else str(value)
-    return text if len(text) <= LABEL_CHARS else text[: LABEL_CHARS - 3] + "..."
+    if sum(_label_units(char) for char in text) <= LABEL_CHARS:
+        return text
+    kept, used = [], 3
+    for char in text:
+        used += _label_units(char)
+        if used > LABEL_CHARS:
+            break
+        kept.append(char)
+    return "".join(kept) + "..."
 
 
 def _top_note(shown: int, total: int) -> str:
@@ -457,13 +471,15 @@ def _pareto_svg(rows: list[dict[str, Any]]) -> str:
         size = max(1, int(bar_width * views / peak))
         bars.append(
             f"<g><title>{_esc(row.get('name'))}: {_esc(views)} lifetime views</title>"
-            f'<text x="8" y="{y + 15}">{_esc(_truncate(row.get("name")))}</text>'
+            f'<text x="8" y="{y + 15}" clip-path="url(#pareto-label-clip)">{_esc(_truncate(row.get("name")))}</text>'
             f'<rect x="{label_width}" y="{y}" width="{size}" height="20" fill="#4a78a8"></rect>'
             f'<text x="{label_width + size + 6}" y="{y + 15}">{_esc(views)}</text></g>'
         )
     return (
         f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" role="img" '
-        f'aria-label="Lifetime views by workbook">{"".join(bars)}</svg>'
+        f'aria-label="Lifetime views by workbook"><defs><clipPath id="pareto-label-clip">'
+        f'<path d="M0 0H{label_width - 6}V{height}H0Z"></path></clipPath></defs>'
+        f"{''.join(bars)}</svg>"
     )
 
 
