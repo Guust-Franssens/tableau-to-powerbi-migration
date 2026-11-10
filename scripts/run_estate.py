@@ -548,10 +548,10 @@ def _unit_layout(args: argparse.Namespace) -> tuple[str, str, Path | None, list[
     return "workbook-ids", "fresh_run_bundle", run_dir, []
 
 
-def _provisional_unit_names(args: argparse.Namespace, engine: Path) -> list[str] | None:
+def _provisional_unit_names(
+    run_dir: Path | None, entries: list[dict[str, Any]] | None, records: list[dict[str, Any]] | None
+) -> list[str] | None:
     """Project IDs for the path gate without reserving them; None keeps the legacy projection."""
-    layout, _reason, run_dir, entries = _unit_layout(args)
-    records = _engine_unit_records(engine, args.input) if layout == "workbook-ids" else None
     if records is None or run_dir is None or entries is None:
         return None
     indexed = {entry["key"]: entry["id"] for entry in entries}
@@ -3757,13 +3757,6 @@ def resolve_run_engine(args: argparse.Namespace) -> tuple[Path | None, int]:
         provenance["version"] or "unknown",
         "canonical plugin" if provenance["canonical"] else "NON-CANONICAL OVERRIDE",
     )
-    if args.input:
-        path_ok, path_detail = preflight_estate_path_ceiling(
-            args.input, args.output, engine, _provisional_unit_names(args, engine)
-        )
-        print(path_detail)
-        if not path_ok:
-            return None, EXIT_PATH_CEILING
     return engine, EXIT_OK
 
 
@@ -3821,22 +3814,14 @@ def run_engine_phase(
     return EXIT_OK
 
 
-class StagedUnitIds(NamedTuple):
-    """The hard-link staging one compact-ID run hands to the engine and to its post-conversion checks."""
-
-    engine_input: Path
-    entries: list[dict[str, Any]]
-    records: list[dict[str, Any]]
-    source_hashes: dict[str, str]
-
-
 def _unit_id_selection(
     args: argparse.Namespace, engine: Path | None
 ) -> tuple[int, Path | None, list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
-    """Decide the unit layout after the barrier: ``(exit code, run dir, index entries, engine records)``.
+    """Decide the unit layout once, then run the provisional path gate: ``(exit code, run dir, entries, records)``.
 
     Records stay None for a legacy run. Datasource folders stay legacy in this slice, so a selection
-    without a workbook has nothing to stage or reserve.
+    without a workbook has nothing to stage or reserve. The engine's selection is listed here only,
+    and the same records feed both the provisional projection and staging.
     """
     layout, reason, run_dir, entries = _unit_layout(args)
     records = None
@@ -3850,6 +3835,13 @@ def _unit_id_selection(
         print(f"ESTATE: UNIT_IDS - {reason}", file=sys.stderr)
         return EXIT_UNIT_IDS, run_dir, entries, None
     print(f"UNIT LAYOUT: {layout} ({reason})")
+    if args.input:
+        path_ok, path_detail = preflight_estate_path_ceiling(
+            args.input, args.output, engine, _provisional_unit_names(run_dir, entries, records)
+        )
+        print(path_detail)
+        if not path_ok:
+            return EXIT_PATH_CEILING, run_dir, entries, None
     return EXIT_OK, run_dir, entries, records
 
 
@@ -3858,17 +3850,17 @@ def stage_engine_input(
     engine: Path | None,
     run_dir: Path | None,
     records: list[dict[str, Any]] | None,
-) -> tuple[StagedUnitIds | None, int]:
+) -> tuple[tuple[Path, list, list, dict] | None, int]:
     """Reserve IDs, stage hard links, prove the engine selects them, then project the exact names.
 
-    A legacy run (no records) stages nothing and returns ``(None, EXIT_OK)``.
+    Returns ``engine_input_staging.stage_unit_ids``' tuple; a legacy run (no records) stages nothing
+    and returns ``(None, EXIT_OK)``.
     """
     if records is None or run_dir is None:
         return None, EXIT_OK
     try:
-        engine_input, entries, staged_records, source_hashes = engine_input_staging.stage_unit_ids(
-            Path(args.input), run_dir, records
-        )
+        staged = engine_input_staging.stage_unit_ids(Path(args.input), run_dir, records)
+        engine_input, _entries, staged_records, _source_hashes = staged
         staged_engine_records = _engine_unit_records(engine, engine_input)
         if staged_engine_records is None or not engine_input_staging.verify_engine_selection(
             staged_engine_records, staged_records
@@ -3883,7 +3875,7 @@ def stage_engine_input(
     print(path_detail)
     if not path_ok:
         return None, EXIT_PATH_CEILING
-    return StagedUnitIds(engine_input, entries, staged_records, source_hashes), EXIT_OK
+    return staged, EXIT_OK
 
 
 def _verify_staged_output(
@@ -3931,7 +3923,7 @@ def produce_and_gate_output(
     args: argparse.Namespace,
     engine: Path | None,
     phases: list[dict],
-    staged: StagedUnitIds | None = None,
+    staged: tuple[Path, list, list, dict] | None = None,
 ) -> tuple[dict | None, int]:
     """Run the engine, baseline what it wrote, and refuse a tree nothing downstream may consume.
 
@@ -3947,7 +3939,7 @@ def produce_and_gate_output(
     Returns ``(report, exit code)``; the report is None only when there was no output to read.
     """
     scope_inputs = None
-    engine_input = staged.engine_input if staged is not None else None
+    engine_input, entries, staged_records, source_hashes = staged if staged is not None else (None, [], [], {})
     if not args.slice_only:
         if getattr(args, "scope_survey", None) is not None:
             scope_inputs = capture_scope_inputs(args.scope_survey, args.input)
@@ -3963,12 +3955,12 @@ def produce_and_gate_output(
             write_scope_bridge(args.output, report, scope_inputs, engine_input)
         record_engine_output(args.output, report, phases, engine)
         if staged is not None:
-            if not _verify_staged_output(report, staged.records, staged.source_hashes):
+            if not _verify_staged_output(report, staged_records, source_hashes):
                 print("ESTATE: UNIT_IDS - staged inputs or engine report disagree; bundle retained", file=sys.stderr)
                 return report, EXIT_UNIT_IDS
             try:
-                engine_input_staging.restore_display_names(Path(args.output), report, staged.entries, engine)
-                _record_unit_artifacts(Path(args.output), staged.entries)
+                engine_input_staging.restore_display_names(Path(args.output), report, entries, engine)
+                _record_unit_artifacts(Path(args.output), entries)
             except (EngineInputStagingError, unit_ids.UnitIdError, OSError, ValueError) as exc:
                 print(f"ESTATE: UNIT_IDS - {exc}", file=sys.stderr)
                 return report, EXIT_UNIT_IDS
@@ -4073,7 +4065,9 @@ def final_verdict(gates: GateResults, out_dir: Path) -> int:
 def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-locals,too-many-return-statements
     """CLI entry point."""
     args = build_parser().parse_args(argv)
-
+    # Absolute once, here: the run-local unit index refuses a relative run path (#849 F1).
+    args.output = Path(os.path.abspath(args.output))
+    args.input = Path(os.path.abspath(args.input)) if args.input else args.input
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     phases: list[dict] = []
 
@@ -4097,6 +4091,10 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     if engine_code != EXIT_OK:
         return engine_code
 
+    unit_code, run_dir, index_entries, records = _unit_id_selection(args, engine)
+    if unit_code != EXIT_OK:
+        return unit_code
+
     # --- phase 0: the barrier ------------------------------------------------------------------
     # BEFORE the engine, because every other gate in this file reads output the engine has already
     # written - which for a landing re-run means reading it out of the crater (issue #250).
@@ -4104,10 +4102,6 @@ def main(argv: list[str] | None = None) -> int:  # pylint: disable=too-many-loca
     print_bundle_rewrite(rewrite)
     if rewrite.blocking:
         return EXIT_BUNDLE_REWRITE
-
-    unit_code, run_dir, index_entries, records = _unit_id_selection(args, engine)
-    if unit_code != EXIT_OK:
-        return unit_code
 
     if args.dry_run:
         print_dry_run(args, engine, _unit_id_plan(records, run_dir, index_entries))

@@ -27,15 +27,6 @@ class EngineInputStagingError(RuntimeError):
     """The host cannot establish or safely reconcile the engine's staged input."""
 
 
-def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
-    temp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-    try:
-        temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        os.replace(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
-
-
 def _safe_regular_file(path: Path, root: Path) -> bool:
     try:
         info = path.lstat()
@@ -293,7 +284,7 @@ def _restore_one(
     if current_name != unit_id:
         raise EngineInputStagingError(f"unexpected displayName in {relative}; refusing to overwrite it")
     platform["metadata"]["displayName"] = display_name
-    _atomic_json(path, platform)
+    unit_ids._atomic_write_text(path, json.dumps(platform, indent=2))  # pylint: disable=protected-access
     declarations.append_generated_edit_declaration(
         bundle,
         {

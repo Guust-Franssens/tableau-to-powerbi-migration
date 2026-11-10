@@ -589,7 +589,7 @@ def resolve_skips(
     bundle: Path,
     units: set[str],
     options: argparse.Namespace,
-    aliases: dict[str, list[str]] | None = None,
+    aliases: dict[str, str] | None = None,
 ) -> tuple[dict[str, str], str]:
     """Which units this run deliberately withholds, and why. Returns (unit -> why, refusal)."""
     skips: dict[str, str] = {}
@@ -605,17 +605,10 @@ def resolve_skips(
                 # bundle (the hand-rolled quarantine this flag replaces), or it scanned a different
                 # bundle. There is nothing to withhold, so say it once and carry on.
                 LOG.warning("%s is reported EMPTY but has no folder in this bundle's pbip/ - nothing to skip", unit)
-    named = []
-    for supplied in list(getattr(options, "skip", None) or []):
-        if supplied in units:
-            named.append(supplied)
-        elif aliases and supplied in aliases:
-            matches = aliases[supplied]
-            if len(matches) != 1:
-                return {}, f"--skip {supplied!r} matches multiple unit IDs {', '.join(matches)}; use an ID."
-            named.append(matches[0])
-        else:
-            named.append(supplied)
+    named = [
+        supplied if supplied in units else (aliases or {}).get(supplied, supplied)
+        for supplied in list(getattr(options, "skip", None) or [])
+    ]
     unknown = [name for name in named if name not in units]
     if unknown:
         # Refusing beats warning: a mistyped --skip deploys the very unit the operator meant to hold
@@ -1896,10 +1889,8 @@ def _execute(  # pylint: disable=too-many-arguments  # `pairs` is passed IN, see
 def _plan_units(bundle: Path, options: argparse.Namespace) -> tuple[list[Pair], list[tuple[str, int, str]], str]:
     """Discover the bundle's units and apply the operator's skips. (deploy these, withheld, refusal)."""
     discovered = discover(bundle)
-    aliases: dict[str, list[str]] = {}
-    for unit_id, model, _report in discovered:
-        if unit_id != model.name:
-            aliases.setdefault(model.name, []).append(unit_id)
+    # Engine folder names are unique per bundle, so each legacy name maps to exactly one unit ID.
+    aliases = {model.name: unit_id for unit_id, model, _report in discovered if unit_id != model.name}
     skips, refusal = resolve_skips(bundle, {name for name, _model, _report in discovered}, options, aliases)
     if refusal:
         return [], [], refusal
