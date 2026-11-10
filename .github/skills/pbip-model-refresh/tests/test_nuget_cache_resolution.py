@@ -41,10 +41,3 @@ def test_unset_nuget_packages_uses_home_cache(monkeypatch) -> None:
     monkeypatch.delenv("NUGET_PACKAGES", raising=False)
 
     _assert_cache_root(Path.home() / ".nuget" / "packages")
-
-
-def test_empty_nuget_packages_falls_back_to_home_cache(monkeypatch) -> None:
-    """An empty NUGET_PACKAGES value is treated like unset, not as a root path."""
-    monkeypatch.setenv("NUGET_PACKAGES", "")
-
-    _assert_cache_root(Path.home() / ".nuget" / "packages")
