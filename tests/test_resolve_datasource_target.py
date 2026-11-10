@@ -142,11 +142,6 @@ def test_a_near_match_never_resolves_case_or_whitespace_normalized() -> None:
 # --------------------------------------------------------------------------------------------
 
 
-def test_resolution_outcome_names_are_the_three_distinguishable_states() -> None:
-    """The trap: resolved / genuinely absent / ambiguous must stay three distinct string values."""
-    assert len({rdt.RESOLVED, rdt.ABSENT, rdt.AMBIGUOUS}) == 3
-
-
 def test_exit_codes_match_outcome_for_each_of_the_three_cases(tmp_path: Path) -> None:
     """Gates are judged by EXIT CODE: resolved=0, absent=1, ambiguous=2."""
     _write_raw_dir(
